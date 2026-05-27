@@ -2,17 +2,17 @@
 
 **Cynic passes 84.14 % of its 45096-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
-- **34852 pass** at the engine-true level (engine% = 99.93 % — see Legend).
+- **34854 pass** at the engine-true level (engine% = 99.94 % — see Legend).
 - **3092 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
-- **24 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
+- **22 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
 - **7128 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (Temporal, `explicit-resource-management`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
 
 ## Current scores
 
 | posture | pass% | engine% | passes / corpus | divergent |
 |---|---:|---:|---:|---:|
-| **hardened** (default — `cynic run`) | 84.14 % | 99.93 % | 37944 / 45096 | 3092 |
-| **unhardened** (`cynic --unhardened`) | 84.14 % | 99.94 % | 37944 / 45096 | — |
+| **hardened** (default — `cynic run`) | 84.14 % | 99.94 % | 37946 / 45096 | 3092 |
+| **unhardened** (`cynic --unhardened`) | 84.14 % | 99.94 % | 37946 / 45096 | — |
 
 > **pass%** is the headline — `pass / corpus` (a fixture
 > Cynic doesn't ship counts as a `skip`, lowering this).
@@ -162,7 +162,6 @@ first two path components (`built-ins/Set`,
 | **_10–99 fails — engine-work tier_** | | | | | | |
 | `language/statements` | 8502 | 13 | 485 | 89 | 95 % | 100 % |
 | **_1–9 fails — engine-work tier (libregexp Annex B carve-outs today)_** | | | | | | |
-| `built-ins/AsyncDisposableStack` | 78 | 2 | 1 | 23 | 97 % | 98 % |
 | `built-ins/RegExp` | 1504 | 9 | 269 | 89 | 85 % | 99 % |
 | **_0 fails — passing / wholly OOS (sorted by divergent ↓)_** | | | | | | |
 | `built-ins/Array` | 2477 | 0 | 41 | 558 | 99 % | 100 % |
@@ -185,6 +184,7 @@ first two path components (`built-ins/Set`,
 | `built-ins/Function` | 227 | 0 | 18 | 29 | 93 % | 100 % |
 | `built-ins/JSON` | 136 | 0 | 0 | 28 | 100 % | 100 % |
 | `built-ins/WeakMap` | 113 | 0 | 1 | 27 | 99 % | 100 % |
+| `built-ins/AsyncDisposableStack` | 80 | 0 | 1 | 23 | 99 % | 100 % |
 | `built-ins/DisposableStack` | 69 | 0 | 1 | 23 | 99 % | 100 % |
 | `built-ins/Symbol` | 57 | 0 | 19 | 22 | 81 % | 100 % |
 | `built-ins/WeakSet` | 64 | 0 | 1 | 20 | 99 % | 100 % |
@@ -276,12 +276,12 @@ until its features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-27 — cynic `19019c7`, test262 `d0c1b455`
+### 2026-05-27 — cynic `7e7c056`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 84.14 % | 99.94 % | 37944 / 45096 | 37944 / 37968 | — | +11 | 40.5 s |
-| **runtime_hardened** | 84.14 % | 99.93 % | 37944 / 45096 | 34852 / 34876 | 3092 | +11 | 40.7 s |
+| **runtime** | 84.14 % | 99.94 % | 37946 / 45096 | 37946 / 37968 | — | +13 | 35.5 s |
+| **runtime_hardened** | 84.14 % | 99.94 % | 37946 / 45096 | 34854 / 34876 | 3092 | +13 | 35.5 s |
 
 ### 2026-05-26 — cynic `14c1e01`, test262 `d0c1b455`
 

@@ -415,10 +415,27 @@ fn makeSuppressedError(realm: *Realm, err_v: Value, suppressed_v: Value) !Value 
 // Public so the `register_using` opcode (§13.2.4 `using`-decl
 // initialisation) shares the GetDisposeMethod walk.
 pub fn addDisposableResource(realm: *Realm, stack: *JSObject, value: Value, hint: DisposableHint) NativeError!void {
-    // §9.5.3 step 1 — if V is null / undefined, no record is
-    // appended (the spec's "method is empty" branch). `.use(null)`
-    // / `using x = null;` return / proceed without a record.
-    if (value.isUndefined() or value.isNull()) return;
+    // §9.5.3 step 1 — sync-dispose with null / undefined value
+    // appends NO record (a no-op `.use(null)` / `using x = null;`
+    // is a literal pass-through). Async-dispose, by contrast,
+    // appends a "ghost" record with `dispose_method = undefined`:
+    // §9.5.4 DisposeResources step 3.f then sets `needsAwait = true`
+    // so the disposeAsync Promise crosses at least one microtask
+    // boundary, matching the spec's semantics of `await null` /
+    // `await undefined`. test262
+    // `built-ins/AsyncDisposableStack/prototype/disposeAsync/
+    // explicit-await-for-{null,undefined}.js` are the witnesses.
+    if (value.isUndefined() or value.isNull()) {
+        if (hint == .async_dispose) {
+            const ext_list = try stack.disposableResourcesPtr(realm.allocator);
+            ext_list.append(realm.allocator, .{
+                .resource = Value.undefined_,
+                .hint = .async_dispose,
+                .dispose_method = Value.undefined_,
+            }) catch return error.OutOfMemory;
+        }
+        return;
+    }
 
     // §9.5.3 step 2 — GetDisposeMethod(V, hint). For sync, look up
     // `Symbol.dispose` on V. The method must be callable, or the

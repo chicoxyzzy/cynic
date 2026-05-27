@@ -471,10 +471,26 @@ fn startAsyncDisposeWalk(realm: *Realm, stack: *JSObject) NativeError!Value {
         else => return error.NativeThrew,
     };
 
-    // Build one .then(step_f, step_r) per snapshotted resource.
-    // Each step's inner impl advances the cursor and invokes the
-    // disposer at index cursor-1 (LIFO).
-    var remaining: u32 = walk.cursor;
+    // Build one .then(step_f, step_r) per snapshotted resource —
+    // but ONLY for records with a real `dispose_method`. Ghost
+    // records (`method == undefined`, appended for `await using x
+    // = null` / `await using x = undefined` per §9.5.3 step 1.b)
+    // contribute nothing to the chain except a needsAwait
+    // marker. §9.5.4 step 4 requires a SINGLE `Await(undefined)`
+    // at the end iff `needsAwait` is true and `hasAwaited` is
+    // false; the seed `.then(finalize)` reaction below is that
+    // single await. Adding a per-ghost step would settle the
+    // outer Promise one microtask too late and break the spec-
+    // mandated ordering (`built-ins/AsyncDisposableStack/
+    // prototype/disposeAsync/explicit-await-for-{null,undefined}
+    // .js`).
+    var real_steps: u32 = 0;
+    var cursor: u32 = walk.cursor;
+    while (cursor > 0) : (cursor -= 1) {
+        const rec = walk.resources.items[cursor - 1];
+        if (!rec.dispose_method.isUndefined()) real_steps += 1;
+    }
+    var remaining: u32 = real_steps;
     while (remaining > 0) : (remaining -= 1) {
         const then_args = [_]Value{ heap_mod.taggedFunction(step_f), heap_mod.taggedFunction(step_r) };
         current = promise_mod.promiseThenExported(realm, current, &then_args) catch |err| switch (err) {
@@ -485,7 +501,11 @@ fn startAsyncDisposeWalk(realm: *Realm, stack: *JSObject) NativeError!Value {
     // Terminal reaction: settle the outer Promise. Both branches
     // (fulfilled / rejected from the last step) go to finalize —
     // the inner impl reads `pending_error` to decide which way
-    // outer settles.
+    // outer settles. The seed → finalize hop is also what
+    // implements §9.5.4 step 4's `Await(undefined)` when ALL
+    // records are ghosts: the chain has zero step .thens, so the
+    // seed.then(finalize) reaction is the single mandated
+    // microtask hop.
     const final_then_args = [_]Value{ heap_mod.taggedFunction(finalize_f), heap_mod.taggedFunction(finalize_r) };
     _ = promise_mod.promiseThenExported(realm, current, &final_then_args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -564,26 +584,34 @@ fn asyncStepRejectedImpl(realm: *Realm, this_value: Value, args: []const Value) 
 fn runNextDisposer(realm: *Realm, stack: *JSObject) NativeError!Value {
     const ext = stack.extension orelse return Value.undefined_;
     const walk = ext.async_dispose_walk orelse return Value.undefined_;
-    if (walk.cursor == 0) return Value.undefined_;
-    walk.cursor -= 1;
-    const rec = walk.resources.items[walk.cursor];
-    // §9.5.3 step 1 — method may be undefined when the resource
-    // was null/undefined at .use() time (no record gets appended
-    // in that branch today, so this is defensive).
-    if (rec.dispose_method.isUndefined()) return Value.undefined_;
-    const method_fn = heap_mod.valueAsFunction(rec.dispose_method) orelse return Value.undefined_;
-    const lantern = @import("../lantern/interpreter.zig");
-    const outcome = lantern.callJSFunction(realm.allocator, realm, method_fn, rec.resource, &.{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.NativeThrew,
-    };
-    return switch (outcome) {
-        .value, .yielded => |v| v,
-        .thrown => |ex| {
-            realm.pending_exception = ex;
-            return error.NativeThrew;
-        },
-    };
+    // The chain only emits one .then(step) per REAL (non-ghost)
+    // resource. Each step here must therefore advance past any
+    // intervening ghost records (the LIFO-walk equivalent of
+    // skipping null/undefined slots) until it lands on the next
+    // real one. Ghost records are appended for `await using x =
+    // null/undefined` per §9.5.3 step 1.b; they contribute only
+    // to the `needsAwait = true` semantics §9.5.4 step 3.f, which
+    // the chain's terminal `.then(finalize)` reaction already
+    // satisfies as a single microtask hop.
+    while (walk.cursor > 0) {
+        walk.cursor -= 1;
+        const rec = walk.resources.items[walk.cursor];
+        if (rec.dispose_method.isUndefined()) continue;
+        const method_fn = heap_mod.valueAsFunction(rec.dispose_method) orelse continue;
+        const lantern = @import("../lantern/interpreter.zig");
+        const outcome = lantern.callJSFunction(realm.allocator, realm, method_fn, rec.resource, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        return switch (outcome) {
+            .value, .yielded => |v| v,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+    }
+    return Value.undefined_;
 }
 
 /// Terminal-fulfilled reaction — invoked when the last step
@@ -692,10 +720,22 @@ fn makeTypeError(realm: *Realm, msg: []const u8) NativeError!Value {
 //   bookkeeping. The bare form below is the §27.4.3.7 .use()
 //   path: derive `method` from `GetDisposeMethod(V, async-dispose)`.
 fn addAsyncDisposableResource(realm: *Realm, stack: *JSObject, value: Value) NativeError!void {
-    // §9.5.3 step 1 — if V is null / undefined, no record is
-    // appended (the spec's "method is empty" branch). `.use(null)`
-    // / `.use(undefined)` return the input verbatim.
-    if (value.isUndefined() or value.isNull()) return;
+    // §9.5.3 step 1 — `.use(null)` / `.use(undefined)` on an
+    // ASYNC stack appends a "ghost" record with empty method.
+    // §9.5.4 step 3.f then sets `needsAwait = true` so the
+    // disposeAsync Promise crosses at least one microtask
+    // boundary (matches `await null` / `await undefined`).
+    // test262 `built-ins/AsyncDisposableStack/prototype/
+    // disposeAsync/explicit-await-for-{null,undefined}.js`.
+    if (value.isUndefined() or value.isNull()) {
+        const ext_list = try stack.disposableResourcesPtr(realm.allocator);
+        ext_list.append(realm.allocator, .{
+            .resource = Value.undefined_,
+            .hint = .async_dispose,
+            .dispose_method = Value.undefined_,
+        }) catch return error.OutOfMemory;
+        return;
+    }
 
     // §9.5.2 GetDisposeMethod(V, async-dispose):
     //   1.a. Let method be ? GetMethod(V, @@asyncDispose).
