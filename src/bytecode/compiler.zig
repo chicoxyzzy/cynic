@@ -261,6 +261,12 @@ pub const Compiler = struct {
     /// block exit by `compileBlock`. See §13.2.4.6 BlockStatement
     /// Runtime Semantics + §14.7.5 ForOfStatement.
     current_dispose_stack: ?u8 = null,
+    /// `compileForWithUsing` recurses into `compileFor` to share
+    /// the regular for-statement compile path after setting up
+    /// the dispose-stack wrapper. The recursion would otherwise
+    /// re-detect the using-init and infinitely recurse. Set true
+    /// in the wrap, restored on exit.
+    skip_for_using_wrap: bool = false,
     /// §14.13 LabelledStatement — accumulator of labels that
     /// `compileLabeled` has pushed for the *next* iteration /
     /// switch statement encountered. When a loop's compile
@@ -10966,7 +10972,120 @@ pub const Compiler = struct {
         }
     }
 
+    /// §13.2.4.6 + §14.3.x ES2026 explicit-resource-management —
+    /// compile a C-style for-statement whose head declares a
+    /// `using` / `await using` binding. Wraps the existing
+    /// `compileFor` body in `alloc_dispose_stack` + try/finally so
+    /// the bindings (registered via `register_using` from the
+    /// normal lexical-decl emit path) dispose at every exit edge.
+    ///
+    /// The inner `compileFor` recurses but takes the
+    /// non-using-init branch (the wrap set
+    /// `self.skip_for_using_wrap` so the using-detection at the
+    /// top of `compileFor` doesn't re-enter the wrap).
+    fn compileForWithUsing(
+        self: *Compiler,
+        s: ast.statement.ForStmt,
+        kind: ast.statement.LexicalDecl.Kind,
+    ) CompileError!void {
+        const has_await = kind == .await_using_;
+        const dispose_op: Op = if (has_await) .dispose_stack_async else .dispose_stack;
+
+        const r_stack = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.alloc_dispose_stack, s.span);
+        try self.builder.emitU8(r_stack);
+
+        const saved_dispose = self.current_dispose_stack;
+        self.current_dispose_stack = r_stack;
+        defer self.current_dispose_stack = saved_dispose;
+
+        var fctx_storage: FinallyContext = .{
+            .tag = .dispose_stack,
+            .span = s.span,
+            .parent = self.finally_chain,
+            .dispose_stack_register = r_stack,
+        };
+        self.finally_chain = &fctx_storage;
+        const saved_finally = fctx_storage.parent;
+
+        // Re-enter compileFor with the using-detection short-
+        // circuited so we don't infinitely recurse.
+        const saved_skip = self.skip_for_using_wrap;
+        self.skip_for_using_wrap = true;
+        defer self.skip_for_using_wrap = saved_skip;
+
+        const start_pc = self.builder.here();
+        self.try_with_handler_depth += 1;
+        try self.compileFor(s);
+        self.try_with_handler_depth -= 1;
+        const end_pc = self.builder.here();
+
+        // Normal-completion arm — pop the finally context, emit
+        // the dispose op, jump past the handler.
+        self.finally_chain = saved_finally;
+        try self.builder.emitOp(dispose_op, s.span);
+        try self.builder.emitU8(r_stack);
+        try self.builder.emitU8(0); // mode 0 — normal completion
+        if (has_await) try self.builder.emitOp(.await_, s.span);
+        try self.builder.emitOp(.jmp, s.span);
+        const skip_handler_patch = self.builder.here();
+        try self.builder.emitI16(0);
+
+        // Synthetic handler — runs on throw. Reload caught throw,
+        // dispose in throw-mode (wraps via SuppressedError per
+        // §9.5.4 step 2.b.iv-vi), then rethrow.
+        const handler_pc = self.builder.here();
+        const r_caught = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitOp(.star, s.span);
+        try self.builder.emitU8(r_caught);
+        try self.builder.emitOp(.ldar, s.span);
+        try self.builder.emitU8(r_caught);
+        try self.builder.emitOp(dispose_op, s.span);
+        try self.builder.emitU8(r_stack);
+        try self.builder.emitU8(1); // mode 1 — throw completion
+        if (has_await) {
+            try self.builder.emitOp(.await_, s.span);
+            try self.builder.emitOp(.ldar, s.span);
+            try self.builder.emitU8(r_caught);
+        }
+        try self.builder.emitOp(.throw_, s.span);
+
+        const after_handler_pc = self.builder.here();
+        try self.builder.patchI16(skip_handler_patch, after_handler_pc);
+
+        try self.builder.addHandler(.{
+            .start_pc = start_pc,
+            .end_pc = end_pc,
+            .handler_pc = handler_pc,
+            .catch_register = null,
+            .is_finally = true,
+        });
+    }
+
     fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
+        // §13.2.4.6 / §14.3.x — when the C-style for head declares
+        // a `using` / `await using` binding, the entire for-
+        // statement counts as one block-scope for disposal:
+        // bindings register on a fresh dispose stack allocated
+        // at for-entry; the LIFO walk fires at every exit edge of
+        // the WHOLE statement (normal completion, throw, break,
+        // continue, return). `compileForWithUsing` wraps the
+        // existing compile path with alloc_dispose_stack +
+        // try/finally; `skip_for_using_wrap` short-circuits the
+        // re-detection when the wrap recurses into here.
+        if (!self.skip_for_using_wrap) {
+            const init_using_kind: ?ast.statement.LexicalDecl.Kind = if (s.init) |head| switch (head) {
+                .lexical => |ld| switch (ld.kind) {
+                    .using_, .await_using_ => ld.kind,
+                    else => null,
+                },
+                else => null,
+            } else null;
+            if (init_using_kind) |kind| return self.compileForWithUsing(s, kind);
+        }
+
         // Fast path — fused counter loop. Falls through to the
         // general path on any pattern mismatch.
         if (try self.tryCompileFusedCounterLoop(s)) return;

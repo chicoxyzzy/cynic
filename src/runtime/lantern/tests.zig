@@ -2930,6 +2930,40 @@ test "later: for-of using disposes on throw inside body" {
     , "body-a,d-a,caught:stop");
 }
 
+test "later: C-style for-using disposes at end of whole loop" {
+    // §14.3.x — `for (using x = init; cond; step) body` allocates a
+    // single dispose stack at for-entry; the binding registers
+    // once, the disposer fires ONCE at for-exit (NOT per
+    // iteration). Two iterations should observe the resource
+    // still-alive in both, and disposed only after the loop ends.
+    // Step variable lives outside the using-decl (the spec lets
+    // you mix but a sibling let-binding inside a using-decl
+    // would be const-protected and `i++` would throw).
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\const r = { [Symbol.dispose]() { log.push("disposed"); } };
+        \\let i = 0;
+        \\for (using _ = r; i < 2; i++) { log.push("iter" + i); }
+        \\log.join(",");
+    , "iter0,iter1,disposed");
+}
+
+test "later: C-style for-using fires on subsequent-init throw" {
+    // §9.5.4 step 2.b — when a SECOND init throws, the FIRST
+    // init's disposer must still fire (the throw becomes the
+    // in-flight completion that the dispose walk wraps via
+    // SuppressedError if a disposer also throws).
+    try expectScriptStringWithBuiltins(
+        \\const log = [];
+        \\const r1 = { [Symbol.dispose]() { log.push("d1"); } };
+        \\function init2() { throw new Error("init2-fail"); }
+        \\try {
+        \\  for (using _1 = r1, _2 = init2(); false;) {}
+        \\} catch (e) { log.push("caught:" + e.message); }
+        \\log.join(",");
+    , "d1,caught:init2-fail");
+}
+
 // §14.3.x AwaitUsingDeclaration — ES2026 explicit-resource-management.
 // `await using x = expr;` registers with hint = async-dispose; the
 // scope-exit walk awaits each disposer (whether the disposer is sync
