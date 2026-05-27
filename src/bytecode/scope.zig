@@ -95,6 +95,20 @@ pub const Binding = struct {
     /// `make_named_function_expr` time. User-visible writes lower
     /// to `throw_assign_const` (TypeError) per §8.1.1.1.4 step 9.b.
     is_fn_expr_name: bool = false,
+    /// §9.5.3 / §14.3.x ES2026 explicit-resource-management — true
+    /// when the binding was declared by `using` / `await using`.
+    /// Stored at `BindingKind.const_` so the lexical-env shape and
+    /// TDZ machinery work unchanged, but reassignment must surface
+    /// as a *runtime* TypeError (§8.1.1.1.4 SetMutableBinding step
+    /// 9.b on an immutable record) rather than the compile-time
+    /// SyntaxError Cynic upgrades plain `const` reassignment to.
+    /// `compileAssignment` exempts `is_using` from that upgrade and
+    /// `emitStoreBindingMode` lowers the write to
+    /// `throw_assign_const` (TypeError) instead of `sta_env` /
+    /// `sta_global_slot`. Matches the spec's "assert.throws(
+    /// TypeError, () => { u = 1; })" expectation from inside the
+    /// declaring function body.
+    is_using: bool = false,
     /// §9.1.1.4.19 CreateGlobalFunctionBinding — true when this
     /// binding was created by a top-level `function` / generator
     /// / async-function declaration (NOT by `var`). The store-

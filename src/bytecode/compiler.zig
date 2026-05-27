@@ -618,6 +618,17 @@ pub const Compiler = struct {
             try self.builder.emitOp(.throw_assign_const, span);
             return;
         }
+        if (!is_init and binding.is_using) {
+            // §14.3.x ES2026 ERM — a `using` / `await using` binding
+            // is immutable like a named-function-expression self-
+            // binding. `is_init` writes (the declarator initialiser)
+            // stay on the regular store path; reassignment lowers to
+            // `throw_assign_const` (TypeError) per §8.1.1.1.4 step
+            // 9.b so `assert.throws(TypeError, () => { u = 1; })`
+            // from inside the declaring function body round-trips.
+            try self.builder.emitOp(.throw_assign_const, span);
+            return;
+        }
         // §9.1.1.1.4 SetMutableBinding step 9.b — assignment to a
         // const captured from an outer function-like scope is the
         // spec's *runtime* TypeError, not an early error. The
@@ -4335,10 +4346,18 @@ pub const Compiler = struct {
         // is the right shape and lets `assert.throws(TypeError, ()
         // => { c = 1; })` round-trip — matches V8 / JSC / SM.
         const cross_fn_capture = binding.env_depth < self.env_depth;
-        if (binding.kind == .const_ and !binding.is_import and !binding.is_global and !binding.is_fn_expr_name and !cross_fn_capture) {
+        if (binding.kind == .const_ and !binding.is_import and !binding.is_global and !binding.is_fn_expr_name and !binding.is_using and !cross_fn_capture) {
             try self.report(.assignment_to_const, a.span);
             return error.AssignmentToConst;
         }
+        // `using` / `await using` bindings carry `.kind = .const_`
+        // for env-shape purposes but the spec demands a *runtime*
+        // TypeError on reassignment, not a compile-time SyntaxError
+        // (test262 fixtures wrap the reassignment in
+        // `assert.throws(TypeError, () => { u = 1; })` from inside
+        // the declaring function). `emitStoreBindingMode` handles
+        // the runtime throw via `throw_assign_const`; here we just
+        // fall through to the regular store-emission path.
         // Import bindings carry kind=.const_ for shape reasons,
         // but per §8.1.1.5.5 the early-error is supposed to be
         // SyntaxError, not a `const` reassignment. Real engines
@@ -5655,6 +5674,11 @@ pub const Compiler = struct {
                 try self.declarePatternBindings(pt, bind_kind);
             } else {
                 _ = try self.declareBinding(bind_name, bind_kind, bind_span);
+                // §14.3.x — for-of `using` / `await using` binds
+                // immutably; reassignment surfaces at runtime as
+                // TypeError, not compile-time SyntaxError. Mirror
+                // the `hoistLetConst` propagation path.
+                if (is_using) self.markBindingUsingByName(bind_name);
             }
             self.builder.code.items[head_size_patch] = self.env_slot_count;
         }
@@ -5735,6 +5759,10 @@ pub const Compiler = struct {
             try self.builder.emitU8(0); // placeholder; patched below
             self.env_depth = saved_env_depth + 1;
             _ = try self.declareBinding(bind_name, bind_kind, bind_span);
+            // §14.3.x — for-of `using` / `await using` (the hoisted
+            // single-binding head) needs the runtime-TypeError
+            // path on reassignment.
+            if (is_using) self.markBindingUsingByName(bind_name);
         }
 
         const loop_start = self.builder.here();
@@ -5817,6 +5845,10 @@ pub const Compiler = struct {
                 // Use the regular slot allocator so the body's
                 // inner lexicals know where to land.
                 _ = try self.declareBinding(bind_name, bind_kind, bind_span);
+                // §14.3.x — the per-iteration `using` binding is
+                // immutable; reassignment throws TypeError at run
+                // time, not SyntaxError at compile.
+                if (is_using) self.markBindingUsingByName(bind_name);
             }
         } else if (hoist_binding_env) {
             // The loop variable was already declared in the hoisted
@@ -7853,10 +7885,51 @@ pub const Compiler = struct {
             const ld = target.lexical;
             if (ld.kind == .var_) continue;
             const kind: BindingKind = if (ld.kind == .let_) .let_ else .const_;
+            // §14.3.x — `using` / `await using` map to `.const_` for
+            // env-shape purposes but reassignment must surface as a
+            // runtime TypeError, not Cynic's compile-time
+            // upgrade-of-`const`-reassign. Flag the bindings so
+            // `compileAssignment` skips the upgrade and
+            // `emitStoreBindingMode` lowers writes to
+            // `throw_assign_const`.
+            const is_using = ld.kind == .using_ or ld.kind == .await_using_;
             for (ld.declarators) |d| {
                 try self.declarePatternBindings(d.name, kind);
+                if (is_using) self.markLastBindingUsing(d.name);
             }
         }
+    }
+
+    /// Walk back into the most-recently-declared bindings and set
+    /// `is_using` on the one matching `name`. Used by
+    /// `hoistLetConst` and the for-of `using` head where the
+    /// binding was created by `declarePatternBindings` /
+    /// `declareBinding` without a way to thread the flag through
+    /// the existing API. Linear scan — declaration counts per
+    /// statement are tiny.
+    fn markBindingUsingByName(self: *Compiler, name: []const u8) void {
+        const scope = self.scope orelse return;
+        var bindings = &scope.bindings;
+        var i: usize = bindings.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, bindings.items[i].name, name)) {
+                bindings.items[i].is_using = true;
+                return;
+            }
+        }
+    }
+
+    /// `BindingTarget`-shaped wrapper around `markBindingUsingByName`.
+    /// `using` rejects array/object patterns at parse time so only
+    /// the `.identifier` arm fires in practice; the switch stays
+    /// shape-symmetric with `declarePatternBindings` to match.
+    fn markLastBindingUsing(self: *Compiler, target: ast.statement.BindingTarget) void {
+        const name = switch (target) {
+            .identifier => |bid| self.bindingName(bid.span) catch return,
+            else => return,
+        };
+        self.markBindingUsingByName(name);
     }
 
     /// §13.3.2 — pre-declare every `var` binding (and the names of
@@ -11259,6 +11332,11 @@ pub const Compiler = struct {
             .lexical => |ld| {
                 if (ld.kind != .var_) {
                     const kind: BindingKind = if (ld.kind == .let_) .let_ else .const_;
+                    // §14.3.x — C-style for `(using i = …; …; …)` head
+                    // declares the using binding here. Mirror the
+                    // `hoistLetConst` propagation so reassignment in
+                    // the update slot lowers to `throw_assign_const`.
+                    const head_is_using = ld.kind == .using_ or ld.kind == .await_using_;
                     for (ld.declarators) |d| {
                         // §13.3.1 — declare every leaf binding (or
                         // the single ident) for `let`/`const`. Patterns
@@ -11266,6 +11344,7 @@ pub const Compiler = struct {
                         // assignment / destructure happens later via
                         // `compileLexicalDecl`.
                         try self.declarePatternBindings(d.name, kind);
+                        if (head_is_using) self.markLastBindingUsing(d.name);
                     }
                 }
                 try self.compileLexicalDecl(ld);
