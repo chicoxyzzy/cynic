@@ -1181,18 +1181,7 @@ pub const eval_dependent_exact_paths = [_][]const u8{
 // from either bucket; placement reflects whether engineering work
 // is bounded vs. multi-week).
 
-pub const pending_refactor_exact_paths = [_][]const u8{
-    // §14.15.3 TryStatement runtime semantics — `try { … } catch
-    // { return v } finally { F }` runs F inline at the `return`
-    // site AND covers the catch body (including that inlined
-    // finally) with a synth-finally handler so a throw from the
-    // catch body still hits F. When F itself throws, the inline
-    // copy throws first, lands on the synth handler, and runs F
-    // a SECOND time before propagating. Fixing requires emitting
-    // the return-with-inline-finally outside the synth-handler
-    // range (a "return trampoline" after the handler).
-    "language/statements/try/completion-values-fn-finally-abrupt.js",
-};
+pub const pending_refactor_exact_paths = [_][]const u8{};
 
 // ════════════════════════════════════════════════════════════════════
 //   Lookup

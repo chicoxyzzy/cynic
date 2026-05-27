@@ -5960,6 +5960,7 @@ pub const Compiler = struct {
         }
         defer if (pushed_dispose_finally) {
             self.current_dispose_stack = saved_current_dispose;
+            dispose_fctx.deinit(self.allocator);
             self.releaseTemp(); // release r_dispose_stack
         };
 
@@ -6065,12 +6066,22 @@ pub const Compiler = struct {
             try self.builder.emitOp(.throw_, s.span);
             const after_handler_pc = self.builder.here();
             try self.builder.patchI16(skip_handler_patch, after_handler_pc);
-            try self.builder.addHandler(.{
+            // §14.15.3 step 4 — if there's a per-iter dispose
+            // FinallyContext, an in-body `return` / `break` /
+            // `continue` may have inlined the dispose walk. The
+            // surrounding iter-close handler must skip those PC
+            // ranges or a throw from the inlined dispose would be
+            // re-caught here and run the dispose a second time.
+            const iter_exclude: []const InlineFinallyRange = if (pushed_dispose_finally)
+                dispose_fctx.try_body_ranges.items
+            else
+                &.{};
+            try self.addSegmentedHandler(.{
                 .start_pc = body_start_pc,
                 .end_pc = body_end_pc,
                 .handler_pc = handler_pc,
                 .catch_register = null,
-            });
+            }, iter_exclude);
         }
 
         // `continue` jumps to the per-iter env teardown.
@@ -6417,6 +6428,12 @@ pub const Compiler = struct {
         // inside it doesn't re-inline `f` (per §14.15.3 step 4 an
         // abrupt completion in finally replaces the outer one).
         if (self.finally_chain != null) {
+            // §14.15.3 step 4 — record the PC range covering the
+            // inline-finally emission so the surrounding handler
+            // (catch / synth-finally) emitted by `compileTry`
+            // excludes it. Otherwise a throw from the inlined
+            // finally is re-caught here and the finally runs again.
+            const inline_start = self.builder.here();
             const r_save = try self.reserveTemp();
             defer self.releaseTemp();
             try self.builder.emitOp(.star, s.span);
@@ -6424,6 +6441,8 @@ pub const Compiler = struct {
             try self.emitFinalliesUntil(null, s.span);
             try self.builder.emitOp(.ldar, s.span);
             try self.builder.emitU8(r_save);
+            const inline_end = self.builder.here();
+            try self.recordInlineFinallyRange(null, inline_start, inline_end);
         }
         try self.builder.emitOp(.return_, s.span);
     }
@@ -7764,6 +7783,7 @@ pub const Compiler = struct {
             .parent = self.finally_chain,
             .dispose_stack_register = r_stack,
         };
+        defer fctx_storage.deinit(self.allocator);
         self.finally_chain = &fctx_storage;
         const saved_finally = fctx_storage.parent;
 
@@ -7835,13 +7855,16 @@ pub const Compiler = struct {
         const after_handler_pc = self.builder.here();
         try self.builder.patchI16(skip_handler_patch, after_handler_pc);
 
-        try self.builder.addHandler(.{
+        // §14.15.3 step 4 — exclude any inline-dispose ranges
+        // emitted from inside the body so a throw raised by the
+        // dispose walk doesn't get re-caught here.
+        try self.addSegmentedHandler(.{
             .start_pc = start_pc,
             .end_pc = end_pc,
             .handler_pc = handler_pc,
             .catch_register = null,
             .is_finally = true,
-        });
+        }, fctx_storage.try_body_ranges.items);
     }
 
     /// Walk `body` and pre-allocate env slots for every `let` /
@@ -9803,6 +9826,17 @@ pub const Compiler = struct {
     ///    every block carrying one or more `using` declarations.
     ///    Replay emits `dispose_stack r_stack` against the temp
     ///    register that holds the synthetic DisposableStack.
+    /// PC range emitted by `compileReturn` / `compileBreak` /
+    /// `compileContinue` when it inlined the active finally walk.
+    /// §14.15.3 step 4 — an abrupt completion from inside the
+    /// finally replaces the outer completion outright; this means
+    /// a throw FROM the inlined finally must NOT be re-caught by
+    /// any handler whose protected range surrounds the enclosing
+    /// try / catch body (or the same finally would re-run). The
+    /// surrounding handlers are emitted by `compileTry` with their
+    /// covered range *segmented* to exclude these ranges.
+    const InlineFinallyRange = struct { start: u32, end: u32 };
+
     const FinallyContext = struct {
         tag: enum { ast_block, dispose_stack } = .ast_block,
         body: []ast.statement.Statement = &.{},
@@ -9811,6 +9845,26 @@ pub const Compiler = struct {
         /// Set when `tag == .dispose_stack`: register holding the
         /// engine-internal disposable stack to walk.
         dispose_stack_register: u8 = 0,
+        /// PC ranges where `compileReturn` / `compileBreak` /
+        /// `compileContinue` inlined this context's finally walk
+        /// while emitting code inside the *try body*. Used by
+        /// `compileTry` to segment the synth-finally + catch
+        /// handlers around them — §14.15.3 step 4 keeps a
+        /// finally-thrown completion from being re-caught.
+        try_body_ranges: std.ArrayListUnmanaged(InlineFinallyRange) = .empty,
+        /// PC ranges where the inline-finally walk was emitted
+        /// while compiling the *catch body*. Used to segment the
+        /// synth-finally handler covering the catch body.
+        catch_body_ranges: std.ArrayListUnmanaged(InlineFinallyRange) = .empty,
+        /// True while `compileTry` is emitting code inside the
+        /// catch body — switches recording from `try_body_ranges`
+        /// to `catch_body_ranges`.
+        recording_catch: bool = false,
+
+        fn deinit(self: *FinallyContext, allocator: std.mem.Allocator) void {
+            self.try_body_ranges.deinit(allocator);
+            self.catch_body_ranges.deinit(allocator);
+        }
     };
 
     const LoopContext = struct {
@@ -11079,6 +11133,7 @@ pub const Compiler = struct {
             .parent = self.finally_chain,
             .dispose_stack_register = r_stack,
         };
+        defer fctx_storage.deinit(self.allocator);
         self.finally_chain = &fctx_storage;
         const saved_finally = fctx_storage.parent;
 
@@ -11128,13 +11183,16 @@ pub const Compiler = struct {
         const after_handler_pc = self.builder.here();
         try self.builder.patchI16(skip_handler_patch, after_handler_pc);
 
-        try self.builder.addHandler(.{
+        // §14.15.3 step 4 — exclude any inline-dispose ranges
+        // emitted from inside the body so a throw raised by the
+        // dispose walk doesn't get re-caught here.
+        try self.addSegmentedHandler(.{
             .start_pc = start_pc,
             .end_pc = end_pc,
             .handler_pc = handler_pc,
             .catch_register = null,
             .is_finally = true,
-        });
+        }, fctx_storage.try_body_ranges.items);
     }
 
     fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
@@ -11520,6 +11578,81 @@ pub const Compiler = struct {
         }
     }
 
+    /// §14.15.3 step 4 — record a `[start, end)` PC range where
+    /// `compileReturn` / `compileBreak` / `compileContinue` emitted
+    /// an inline finally walk. Each *innermost-to-anchor* active
+    /// `FinallyContext` whose body contains the range gets the
+    /// entry, so the matching `compileTry` (or `compileBlockWithUsing`
+    /// / `compileForWithUsing`) can later segment its surrounding
+    /// handler around the inlined region. A throw FROM the inlined
+    /// finally must propagate to the outer handler, not be re-
+    /// caught by the same try/catch that re-runs the finally.
+    fn recordInlineFinallyRange(
+        self: *Compiler,
+        anchor: ?*FinallyContext,
+        start: u32,
+        end: u32,
+    ) CompileError!void {
+        if (start == end) return;
+        var fctx = self.finally_chain;
+        while (fctx) |f| : (fctx = f.parent) {
+            if (f == anchor) break;
+            const target = if (f.recording_catch)
+                &f.catch_body_ranges
+            else
+                &f.try_body_ranges;
+            try target.append(self.allocator, .{ .start = start, .end = end });
+        }
+    }
+
+    /// §14.15 — emit an exception-handler entry for `[base.start_pc,
+    /// base.end_pc)` MINUS each excluded range. Excluded ranges are
+    /// where `return` / `break` / `continue` inlined a finally walk
+    /// inside this try's body; surrounding handlers (catch +
+    /// synth-finally) must skip them so a throw raised by the
+    /// inlined finally isn't re-caught here (which would re-run the
+    /// finally). Excluded ranges are sorted and merged before
+    /// emission so we emit at most `n+1` segments for `n` ranges.
+    fn addSegmentedHandler(
+        self: *Compiler,
+        base: Handler,
+        exclude: []const InlineFinallyRange,
+    ) CompileError!void {
+        if (exclude.len == 0) {
+            try self.builder.addHandler(base);
+            return;
+        }
+        // Copy + sort by start.
+        const ranges = try self.allocator.alloc(InlineFinallyRange, exclude.len);
+        defer self.allocator.free(ranges);
+        @memcpy(ranges, exclude);
+        std.mem.sort(InlineFinallyRange, ranges, {}, struct {
+            fn lessThan(_: void, a: InlineFinallyRange, b: InlineFinallyRange) bool {
+                return a.start < b.start;
+            }
+        }.lessThan);
+        var cursor = base.start_pc;
+        for (ranges) |r| {
+            // Clip the range to the base interval.
+            const r_start = if (r.start < base.start_pc) base.start_pc else r.start;
+            const r_end = if (r.end > base.end_pc) base.end_pc else r.end;
+            if (r_end <= cursor or r_start >= base.end_pc) continue;
+            if (r_start > cursor) {
+                var seg = base;
+                seg.start_pc = cursor;
+                seg.end_pc = r_start;
+                try self.builder.addHandler(seg);
+            }
+            if (r_end > cursor) cursor = r_end;
+        }
+        if (cursor < base.end_pc) {
+            var seg = base;
+            seg.start_pc = cursor;
+            seg.end_pc = base.end_pc;
+            try self.builder.addHandler(seg);
+        }
+    }
+
     /// §14.13 LabelledStatement — `IDENTIFIER : Statement`. Push the
     /// label onto `pending_labels` so the *first* iteration statement
     /// encountered while compiling the body claims it as one of its
@@ -11659,6 +11792,11 @@ pub const Compiler = struct {
         // per §13.2.4.6 — they act on the bound resource, not on
         // the iterator, so ordering vs IteratorClose is
         // independent for `for (using x of …)`.)
+        //
+        // §14.15.3 step 4 — record the inline-finally emission's
+        // PC range against any FinallyContext we walked, so the
+        // surrounding handler segmentation skips it.
+        const inline_start = self.builder.here();
         try self.emitFinalliesUntil(target.entry_finally_chain, s.span);
         // `break` jumps past the natural `pop_env` site; emit one
         // `pop_env` for every per-iter-env loop we skip out of
@@ -11671,6 +11809,8 @@ pub const Compiler = struct {
         try self.builder.emitOp(.jmp, s.span);
         const patch = self.builder.here();
         try self.builder.emitI16(0);
+        const inline_end = self.builder.here();
+        try self.recordInlineFinallyRange(target.entry_finally_chain, inline_start, inline_end);
         try target.break_patches.append(self.allocator, patch);
     }
 
@@ -11700,6 +11840,11 @@ pub const Compiler = struct {
         // §14.15 — run every finally block opened between this
         // `continue` and the target loop entry before transferring
         // control.
+        //
+        // §14.15.3 step 4 — record the inline-finally emission's
+        // PC range against any FinallyContext we walked, so the
+        // surrounding handler segmentation skips it.
+        const inline_start = self.builder.here();
         try self.emitFinalliesUntil(target.entry_finally_chain, s.span);
         // For every loop we skip OUTWARDS through (i.e. strictly
         // inner to `target`), pop its per-iter env if it had one.
@@ -11714,6 +11859,8 @@ pub const Compiler = struct {
         try self.builder.emitOp(.jmp, s.span);
         const patch = self.builder.here();
         try self.builder.emitI16(0);
+        const inline_end = self.builder.here();
+        try self.recordInlineFinallyRange(target.entry_finally_chain, inline_start, inline_end);
         try target.continue_patches.append(self.allocator, patch);
     }
 
@@ -11754,6 +11901,11 @@ pub const Compiler = struct {
             self.finally_chain = &fctx_storage;
             pushed_finally = true;
         }
+        // Always free the inline-finally range lists when we exit
+        // — they're only consulted by handler emission inside this
+        // function, never by anything outside. (Skip if we didn't
+        // push: `fctx_storage` is `undefined` in that case.)
+        defer if (pushed_finally) fctx_storage.deinit(self.allocator);
 
         const start_pc = self.builder.here();
         // §15.10.1 — calls inside the try BLOCK are NOT in tail
@@ -11817,15 +11969,30 @@ pub const Compiler = struct {
                     },
                 }
             }
+            // §14.15.3 step 4 — flip recording so any inline-
+            // finally emitted by `compileReturn` / `compileBreak`
+            // / `compileContinue` inside the catch body lands in
+            // `catch_body_ranges`, not `try_body_ranges`.
+            if (pushed_finally) fctx_storage.recording_catch = true;
             try self.compileBlock(h.body.body, h.body.span);
+            if (pushed_finally) fctx_storage.recording_catch = false;
             catch_body_end = self.builder.here();
 
-            try self.builder.addHandler(.{
+            // §14.15.3 step 4 — segment the catch handler around
+            // any inline-finally ranges emitted inside the try
+            // body. A throw FROM the inlined finally (which
+            // started inside the try body) must propagate out, not
+            // be re-caught by the catch and run the finally again.
+            const try_ranges: []const InlineFinallyRange = if (pushed_finally)
+                fctx_storage.try_body_ranges.items
+            else
+                &.{};
+            try self.addSegmentedHandler(.{
                 .start_pc = start_pc,
                 .end_pc = end_pc,
                 .handler_pc = handler_pc,
                 .catch_register = catch_register,
-            });
+            }, try_ranges);
         }
 
         // Pop the finally context — the merge / synthetic-handler
@@ -11875,22 +12042,31 @@ pub const Compiler = struct {
 
             // No-catch case: cover the try body with the synthetic
             // handler. With-catch case: cover the catch body too.
+            //
+            // §14.15.3 step 4 — both covers must EXCLUDE any
+            // inline-finally PC ranges emitted from inside their
+            // respective bodies (try body OR catch body), so a
+            // throw raised by the inlined finally propagates
+            // outward instead of being re-caught and re-running
+            // the finally.
+            const try_ranges_synth: []const InlineFinallyRange = fctx_storage.try_body_ranges.items;
+            const catch_ranges_synth: []const InlineFinallyRange = fctx_storage.catch_body_ranges.items;
             if (s.handler == null) {
-                try self.builder.addHandler(.{
+                try self.addSegmentedHandler(.{
                     .start_pc = start_pc,
                     .end_pc = end_pc,
                     .handler_pc = synth_pc,
                     .catch_register = slot,
                     .is_finally = true,
-                });
+                }, try_ranges_synth);
             } else if (catch_body_start != null and catch_body_end != null) {
-                try self.builder.addHandler(.{
+                try self.addSegmentedHandler(.{
                     .start_pc = catch_body_start.?,
                     .end_pc = catch_body_end.?,
                     .handler_pc = synth_pc,
                     .catch_register = slot,
                     .is_finally = true,
-                });
+                }, catch_ranges_synth);
             }
         } else {
             // No finally — control just merges past the catch landing.
