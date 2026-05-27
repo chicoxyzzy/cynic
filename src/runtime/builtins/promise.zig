@@ -100,6 +100,7 @@ pub fn install(realm: *Realm) !void {
     const species_getter = try realm.heap.allocateFunctionNative(promiseSpeciesGetter, 0, "get [Symbol.species]");
     species_getter.proto = realm.intrinsics.function_prototype;
     species_getter.has_construct = false;
+    species_getter.realm = realm;
     const sp_entry = try fn_obj.accessors.getOrPut(realm.allocator, "@@species");
     sp_entry.value_ptr.* = .{ .getter = species_getter };
     try fn_obj.property_flags.put(realm.allocator, "@@species", .{

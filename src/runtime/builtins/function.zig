@@ -466,6 +466,10 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // `Array.of.call(Math.cos.bind(Math))` would take the constructor
     // path and observe a non-Array receiver (return-a-new-array-object.js).
     bound.has_construct = target.has_construct;
+    // §10.4.1.3 BoundFunctionCreate step 5 — `F.[[Realm]] = Target.
+    // [[Realm]]`. We use the active realm as a fallback if the
+    // target has no realm tagged (legacy / native trampolines).
+    bound.realm = target.realm orelse realm;
 
     // Override the §17 default `length` / `name` slots stamped
     // by `installFunctionLengthAndName` with the spec-computed

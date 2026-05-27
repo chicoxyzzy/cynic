@@ -1510,6 +1510,17 @@ pub fn runFrames(
                 // call-site dispatch saves and restores
                 // `realm.current_module` accordingly.
                 fn_obj.owning_module = realm.current_module;
+                // §10.2.5 GetFunctionRealm — every user function is
+                // created in the realm whose interpreter is
+                // currently running. Crucial for the cross-realm
+                // species carve-outs (e.g. ArraySpeciesCreate
+                // §23.1.3.34 step 4.a): a `class C extends Array`
+                // declared inside `$262.createRealm()` must report
+                // itself as belonging to the child realm so the
+                // caller-realm's `Array.prototype.map` falls back
+                // to `%Array%` instead of forwarding to the child
+                // constructor.
+                fn_obj.realm = realm;
                 if (op_tag == .make_named_function_expr) {
                     // Routed through `storeEnvSlot` so the
                     // generational write barrier sees the

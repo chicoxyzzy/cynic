@@ -317,6 +317,7 @@ pub fn install(realm: *Realm) !void {
         const t = try realm.heap.allocateFunctionNative(throwTypeErrorThrower, 0, "");
         t.proto = realm.intrinsics.function_prototype;
         t.has_construct = false;
+        t.realm = realm;
         // §10.2.4 — non-extensible. `length` and `name` are
         // already non-writable / non-configurable per §17 (set in
         // `installFunctionLengthAndName`); but the spec requires
@@ -445,6 +446,7 @@ pub fn install(realm: *Realm) !void {
     // typeof eval === "function".
     const eval_fn = try realm.heap.allocateFunctionNative(globalEvalNotSupported, 1, "eval");
     eval_fn.has_construct = false;
+    eval_fn.realm = realm;
     try realm.globals.put(realm.allocator, "eval", heap_mod.taggedFunction(eval_fn));
 
     // §19.1 — `undefined`, `NaN`, `Infinity` are frozen data
@@ -749,10 +751,12 @@ fn installSyntheticAccessorPair(
     get_fn.synth_accessor = get_cell;
     get_fn.has_construct = false;
     get_fn.extensible = false;
+    get_fn.realm = realm;
     const set_fn = try realm.heap.allocateFunctionNative(synthAccessorPlaceholder, 1, "");
     set_fn.synth_accessor = set_cell;
     set_fn.has_construct = false;
     set_fn.extensible = false;
+    set_fn.realm = realm;
 
     // The shape system only models data properties; an accessor
     // install MUST demote first or the IC's shape lookup would
@@ -804,6 +808,7 @@ fn installStubConstructor(
     // §17 — every spec'd stub built-in (Array, String, Number,
     // Boolean, Function) has `length === 1`.
     const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 1, name);
+    fn_obj.realm = realm;
     const proto = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(proto, parent_proto);
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
@@ -832,6 +837,7 @@ fn installStubConstructor(
 fn installCtorReusingProto(realm: *Realm, name: []const u8, proto: *JSObject) !void {
     // §20.1.1 — `Object` constructor's `length` is 1.
     const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 1, name);
+    fn_obj.realm = realm;
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
     realm.heap.setFunctionPrototype(fn_obj, proto);
     // §17 — same non-writable-prototype default as the stub path above.
@@ -863,6 +869,10 @@ pub fn installNativeMethod(realm: *Realm, target: *JSFunction, name: []const u8,
     // `Promise.all`); spec says they don't have `[[Construct]]`
     // unless explicitly identified as constructors.
     fn_obj.has_construct = false;
+    // §10.2.5 — the function's realm is the one whose intrinsics
+    // it was installed into. ArraySpeciesCreate and the rest of
+    // the cross-realm carve-outs read this back.
+    fn_obj.realm = realm;
     // §17 — built-in own data property descriptors are non-
     // enumerable by default. Enumerable methods cause the
     // test262 `prop-desc.js` and `not-a-constructor.js` checks
@@ -943,6 +953,10 @@ pub fn installConstructor(realm: *Realm, spec: ConstructorSpec) !struct { ctor: 
     const fn_obj = try realm.heap.allocateFunctionNative(spec.ctor, spec.arity, spec.name);
     fn_obj.is_class_constructor = spec.is_class;
     fn_obj.proto = realm.intrinsics.function_prototype;
+    // §10.2.5 — built-in constructors carry their installing realm
+    // so cross-realm species checks (§23.1.3.34 et al.) can detect
+    // when the constructor's `realm` differs from the caller's.
+    fn_obj.realm = realm;
     const proto = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(proto, realm.intrinsics.object_prototype);
     if (spec.install_constructor_property) {
@@ -992,6 +1006,8 @@ pub fn installNativeGetter(realm: *Realm, proto: *JSObject, name: []const u8, ge
         std.fmt.allocPrint(realm.classAllocator(), "get {s}", .{name}) catch return error.OutOfMemory;
     const getter = try realm.heap.allocateFunctionNative(getter_fn, 0, getter_name);
     getter.proto = realm.intrinsics.function_prototype;
+    // §10.2.5 — accessor closures carry their installing realm.
+    getter.realm = realm;
     const entry = try proto.getOrPutAccessor(realm.allocator, name);
     entry.value_ptr.* = .{ .getter = getter };
     // §17 — built-in accessor properties are { enumerable: false,
@@ -1025,6 +1041,10 @@ pub fn installNativeMethodOnProto(realm: *Realm, proto: *JSObject, name: []const
     const fn_obj = try realm.heap.allocateFunctionNative(native, params, fn_name);
     // §17 — built-in prototype methods are not constructors.
     fn_obj.has_construct = false;
+    // §10.2.5 — proto methods carry the realm they were installed
+    // into (e.g. `Array.prototype.map` installed on Realm A always
+    // returns Realm A's `%Array%` from ArraySpeciesCreate).
+    fn_obj.realm = realm;
     // §17 — built-in methods install with `enumerable: false`
     // so they don't surface in `for-in` over user objects that
     // inherit from these prototypes. `writable` and
@@ -1486,6 +1506,7 @@ fn replaceGlobalNative(realm: *Realm, name: []const u8, native: NativeFn) !void 
     const old_v = realm.globals.get(name) orelse return;
     const old_fn = heap_mod.valueAsFunction(old_v) orelse return;
     const fresh = try realm.heap.allocateFunctionNative(native, 1, name);
+    fresh.realm = realm;
     realm.heap.setFunctionPrototype(fresh, old_fn.prototype);
     if (fresh.prototype) |p| {
         try p.set(realm.allocator, "constructor", heap_mod.taggedFunction(fresh));

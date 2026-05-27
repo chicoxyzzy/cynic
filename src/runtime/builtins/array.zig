@@ -147,6 +147,7 @@ pub fn install(realm: *Realm) !void {
         // (Array, Symbol.species).get.name === "get [Symbol.species]"`.
         const species_getter = try realm.heap.allocateFunctionNative(arraySpeciesGetter, 0, "get [Symbol.species]");
         species_getter.proto = realm.intrinsics.function_prototype;
+        species_getter.realm = realm;
         const entry = try arr_ctor.accessors.getOrPut(realm.allocator, "@@species");
         entry.value_ptr.* = .{ .getter = species_getter };
         try arr_ctor.property_flags.put(realm.allocator, "@@species", .{
@@ -212,10 +213,33 @@ pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) Nativ
     // Step 3 — Get(originalArray, "constructor"). Use the Proxy-
     // and accessor-aware path so a poisoned getter or proxy `get`
     // trap propagates per spec (create-proxy.js et al.).
-    const ctor_v = try getPropertyAny(realm, heap_mod.taggedObject(original), "constructor");
-    // Step 4 — if IsConstructor(C) true and cross-realm %Array%, set
-    // to undefined. Cynic is single-realm by default, so the
-    // cross-realm carve-out is currently a no-op.
+    var ctor_v = try getPropertyAny(realm, heap_mod.taggedObject(original), "constructor");
+    // Step 4 — if IsConstructor(C) is true:
+    //   a. Let realmC be ? GetFunctionRealm(C).
+    //   b. If thisRealm and realmC are not the same Realm Record:
+    //      i. If SameValue(C, realmC.[[Intrinsics]].[[%Array%]])
+    //         is true, set C to undefined.
+    // Without this carve-out a `class Sub extends Array` created in
+    // a child realm via `$262.createRealm()` would never produce a
+    // child-realm Array — every `Array.prototype.map` call on a
+    // cross-realm Array would funnel back through the child Sub
+    // and yield the wrong species. The fixture pattern is
+    // `built-ins/Array/prototype/<method>/create-species-non-extensible.js`.
+    if (heap_mod.valueAsFunction(ctor_v)) |ctor_fn| {
+        if (ctor_fn.has_construct and !ctor_fn.is_arrow) {
+            if (ctor_fn.getFunctionRealm()) |realm_c| {
+                if (realm_c != realm) {
+                    if (realm_c.globals.get("Array")) |arr_ctor_v| {
+                        if (heap_mod.valueAsFunction(arr_ctor_v)) |realm_c_array| {
+                            if (realm_c_array == ctor_fn) {
+                                ctor_v = Value.undefined_;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Step 5 — if C is an Object, set C to ? Get(C, @@species); if
     // null, set C to undefined.
     var c_v: Value = ctor_v;

@@ -100,6 +100,7 @@ pub fn install(realm: *Realm) !void {
         {
             const species_getter = try realm.heap.allocateFunctionNative(arrayBufferSpeciesGetter, 0, "get [Symbol.species]");
             species_getter.proto = realm.intrinsics.function_prototype;
+            species_getter.realm = realm;
             const entry = try ctor.accessors.getOrPut(realm.allocator, "@@species");
             entry.value_ptr.* = .{ .getter = species_getter };
             try ctor.property_flags.put(realm.allocator, "@@species", .{
@@ -273,6 +274,7 @@ pub fn install(realm: *Realm) !void {
         // §10.2.9 step 7 — getter names carry the `"get "` prefix.
         const species_getter = try realm.heap.allocateFunctionNative(typedArraySpeciesGetter, 0, "get [Symbol.species]");
         species_getter.proto = realm.intrinsics.function_prototype;
+        species_getter.realm = realm;
         const entry = try ta_ctor.accessors.getOrPut(realm.allocator, "@@species");
         entry.value_ptr.* = .{ .getter = species_getter };
         try ta_ctor.property_flags.put(realm.allocator, "@@species", .{
@@ -329,6 +331,7 @@ pub fn install(realm: *Realm) !void {
         // byteOffset, length) or one of the other 3-arg forms).
         const ctor = try realm.heap.allocateFunctionNative(typedArrayConstructorBuilder(variant.kind, variant.name), 3, variant.name);
         ctor.is_class_constructor = true;
+        ctor.realm = realm;
         // §23.2.5.1 — argument processing (ToIndex on a length arg,
         // the typed-array / buffer brand checks, the detached-buffer
         // TypeError) all precede AllocateTypedArray, which is the

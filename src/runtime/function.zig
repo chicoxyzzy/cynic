@@ -155,6 +155,26 @@ pub const JSFunction = struct {
     /// The interpreter saves the caller's `current_module`
     /// before invoking a function and restores it on return.
     owning_module: ?*@import("module.zig").ModuleRecord = null,
+    /// §10.2.5 GetFunctionRealm — the realm this function was
+    /// created in. Stamped at allocation time:
+    ///  - native installers (`installNativeMethod`,
+    ///    `installConstructor`, …) pass the realm they're
+    ///    installing into;
+    ///  - user functions get the active realm at `make_function`
+    ///    time;
+    ///  - bound functions inherit `bound_target`'s realm.
+    /// Used by the cross-realm species carve-out
+    /// (`ArraySpeciesCreate` §23.1.3.34 step 4.a etc.) and by
+    /// `GetPrototypeFromConstructor` (§10.1.14) when the
+    /// constructor's `prototype` isn't an Object — fall back to
+    /// the constructor's realm's intrinsic instead of the
+    /// caller's. `null` keeps backward-compat for callers that
+    /// haven't been threaded through yet; consumers treat `null`
+    /// as "same realm as the caller". Note: `realm.heap` is
+    /// shared across child realms (single-heap multi-realm
+    /// model), so storing the pointer doesn't pin the realm —
+    /// it's just a tag for intrinsics resolution.
+    realm: ?*@import("realm.zig").Realm = null,
     /// Lexical `this` capture for arrow functions (§15.3). Set
     /// at MakeFunction time to the creator frame's `this_value`,
     /// then plumbed through as the arrow's `this` at call time.
@@ -432,6 +452,37 @@ pub const JSFunction = struct {
         self.key_anchors.deinit(allocator);
         if (self.bound_args) |a| allocator.free(a);
         allocator.destroy(self);
+    }
+
+    /// §10.2.5 GetFunctionRealm.
+    ///   1. If F.[[Realm]] is set, return it.
+    ///   2. If F is a bound function, return GetFunctionRealm of
+    ///      F.[[BoundTargetFunction]] (walk the chain).
+    ///   3. (Proxy support — when JSObject-shaped proxies route here,
+    ///      they'd walk to the proxy target. JSObject-typed proxies
+    ///      aren't reachable through this method, so they short-
+    ///      circuit at the call site.)
+    ///   4. Return null — caller falls back to the running realm.
+    ///
+    /// Returns `null` only when no realm tag is reachable through
+    /// the bound chain. Callers treat `null` as "same realm as the
+    /// caller", which matches the pre-multirealm behaviour and
+    /// makes the install-path / make_function back-stamps that
+    /// haven't been wired yet harmless.
+    pub fn getFunctionRealm(self: *JSFunction) ?*@import("realm.zig").Realm {
+        var cur: *JSFunction = self;
+        // Bound chain — `Function.prototype.bind` produces a chain
+        // of JSFunctions threaded through `bound_target`. The spec
+        // unwraps to the innermost target, whose [[Realm]] is the
+        // authoritative answer.
+        while (true) {
+            if (cur.realm) |r| return r;
+            if (cur.bound_target) |inner| {
+                cur = inner;
+            } else {
+                return null;
+            }
+        }
     }
 
     /// §10.1.11 — see `JSObject.recordKey`. Same contract.

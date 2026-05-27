@@ -158,8 +158,10 @@ pub fn install(realm: *Realm) !void {
 fn installIteratorPrototypeConstructorAccessor(realm: *Realm, proto: *JSObject) !void {
     const getter = try realm.heap.allocateFunctionNative(iteratorPrototypeConstructorGet, 0, "get constructor");
     getter.proto = realm.intrinsics.function_prototype;
+    getter.realm = realm;
     const setter = try realm.heap.allocateFunctionNative(iteratorPrototypeConstructorSet, 1, "set constructor");
     setter.proto = realm.intrinsics.function_prototype;
+    setter.realm = realm;
     // §17 — built-in accessor properties: { enumerable: false,
     // configurable: true }.
     const entry = try proto.getOrPutAccessor(realm.allocator, "constructor");
@@ -188,8 +190,10 @@ fn installIteratorPrototypeConstructorAccessor(realm: *Realm, proto: *JSObject) 
 fn installIteratorPrototypeToStringTagAccessor(realm: *Realm, proto: *JSObject) !void {
     const getter = try realm.heap.allocateFunctionNative(iteratorPrototypeToStringTagGet, 0, "get [Symbol.toStringTag]");
     getter.proto = realm.intrinsics.function_prototype;
+    getter.realm = realm;
     const setter = try realm.heap.allocateFunctionNative(iteratorPrototypeToStringTagSet, 1, "set [Symbol.toStringTag]");
     setter.proto = realm.intrinsics.function_prototype;
+    setter.realm = realm;
     const entry = try proto.getOrPutAccessor(realm.allocator, "@@toStringTag");
     entry.value_ptr.* = .{ .getter = getter, .setter = setter };
     try proto.property_flags.put(realm.allocator, "@@toStringTag", .{
