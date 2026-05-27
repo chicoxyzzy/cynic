@@ -602,3 +602,37 @@ reads louder than a missing feature.
 (See also the memory rule: never edit `gh-pages` without
 explicit user approval; surface the proposed diff as a
 separate question first.)
+
+## Local shell command policy
+
+RTK (the Rust Token Killer shell proxy) may be used as a
+token-saving wrapper for commands that produce large or noisy
+output — long `grep` sweeps over the corpus, `find` walks of
+`vendor/`, verbose test-runner spew. It is **optional, not
+mandatory**.
+
+Prefer raw shell commands when any of the following matters:
+
+- **Exact output.** Diff parsing, byte-for-byte comparisons,
+  reproducing a failure log verbatim — RTK's filtering can drop
+  whitespace, truncate, or reformat lines that look noisy but
+  carry signal.
+- **Long-running processes.** Test sweeps, benches, CI emulation
+  — anything that streams progress over minutes wants the raw
+  channel.
+- **Dev servers / interactive behaviour.** TUIs, REPLs, shells,
+  watchers, anything that expects a real PTY.
+- **Unsupported command forms.** Pipelines RTK doesn't recognise,
+  unusual flag combinations, custom invocations.
+- **Unfiltered diagnostics.** A panic stack, a `samply` report,
+  raw `time -v` output, a `--gc-stats` line per cycle — the
+  *point* is the firehose.
+
+If RTK limits, changes, blocks, or hides useful command output,
+either rerun the command without RTK or use `rtk proxy <command>`
+to bypass the filtering for that one invocation.
+
+Do not add Claude Code hooks (or similar agent-runtime hooks)
+that force shell commands through RTK. The proxy is a per-call
+choice; making it mandatory removes the escape hatch when the
+firehose is the point.
