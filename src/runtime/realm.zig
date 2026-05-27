@@ -1445,6 +1445,37 @@ pub const Realm = struct {
         // direct access. Lives on `globalThis.__drainMicrotasks`.
         const drain_fn = try self.heap.allocateFunctionNative(@import("builtins/promise.zig").microtaskDrainNative, 0, "__drainMicrotasks");
         try self.globals.put(self.allocator, "__drainMicrotasks", heap_mod.taggedFunction(drain_fn));
+
+        // Re-stamp the freeze contract over the just-installed
+        // debug globals when the realm is hardened. `globals.put`
+        // adds new keys with `{writable: true, configurable: true}`
+        // — the defaults for §17 host-installed bindings — which
+        // would leave `globalThis` non-frozen by spec
+        // (`Object.isFrozen(globalThis)` would return false because
+        // the three new entries are configurable). Inline tests
+        // that probe `Object.isFrozen(globalThis)` against the
+        // hardened default would then see a false negative driven
+        // by the test harness itself, not the engine policy. The
+        // freeze pass during `installBuiltins` ran before these
+        // installs, so we either need to re-walk globalThis or
+        // stamp the three new keys directly. Stamp the three keys —
+        // cheaper than re-walking the full intrinsic graph.
+        if (self.hardened) {
+            if (self.globals.target) |gt| {
+                const debug_keys = [_][]const u8{
+                    "__collectGarbage",
+                    "__clearKeptObjects",
+                    "__drainMicrotasks",
+                };
+                inline for (debug_keys) |k| {
+                    try gt.property_flags.put(self.allocator, k, .{
+                        .writable = false,
+                        .enumerable = false,
+                        .configurable = false,
+                    });
+                }
+            }
+        }
     }
 };
 

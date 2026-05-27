@@ -1091,6 +1091,41 @@ scope:
    it. Net effect on hardened-mode sweep: +11 divergent
    reclassifications (fixtures that previously got away with
    monkey-patching the prototypes now correctly throw).
+3. **`hardenWalk` recursed into accessor closures but didn't
+   stamp the accessor descriptors themselves (2026-05-27).**
+   Both branches (JSObject + JSFunction) walked into the getter
+   / setter functions through `accessorIterator()` so the
+   closures got frozen, but never wrote into `property_flags`
+   for the accessor key. Every constructor's `@@species`
+   getter (`Array`, `Map`, `Set`, `Promise`, `RegExp`,
+   the typed-array constructors, …) is installed with
+   `configurable: true` per §22.x — so after the freeze pass
+   `Object.isFrozen(Array)` returned **false** even though
+   the constructor's data properties + extensible bit were
+   correctly locked. `Function.prototype[@@hasInstance]` and
+   any accessor pair created on a plain prototype object hit
+   the same path. Fix: in both branches, after the data-key
+   loop, walk the accessor iterator and stamp
+   `{writable: false, configurable: false}` into
+   `property_flags` — mirrors `Object.freeze` (§7.3.20
+   SetIntegrityLevel), which `objectFreeze` already does for
+   accessor keys. The inline unit test `ses phase 1:
+   hardened-default — Object.isFrozen(Array.prototype) is
+   true` (which also asserts `Object.isFrozen(Array)` and
+   `Object.isFrozen(globalThis)`) is the regression guard.
+   `tests/ses/primordials_constructors_frozen.js` only checked
+   `Object.isExtensible(C)` and was blind to the accessor
+   flag — the unit test is what surfaced the gap.
+
+   Companion fix: `Realm.installTestGlobals` re-stamps
+   `{w:false, e:false, c:false}` on `__collectGarbage` /
+   `__clearKeptObjects` / `__drainMicrotasks` when
+   `realm.hardened`. Without this, `globals.put`'s default
+   `{w:true, c:true}` for new keys left those three host
+   bindings configurable on the otherwise-frozen `globalThis`,
+   so the same `Object.isFrozen(globalThis)` assertion failed
+   inside the unit-test harness only (production
+   `installBuiltins` doesn't install them).
 
 Deferred (out of scope for Phase 4b):
 - Routing through the test262 harness as `--phase=ses-positive`

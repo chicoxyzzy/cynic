@@ -110,6 +110,39 @@ fn expectScriptStringWithBuiltins(source: []const u8, expected: []const u8) !voi
     try testing.expectEqualStrings(expected, s.flatBytes());
 }
 
+/// Unhardened-realm variant of `expectScriptIntWithBuiltins`. Use
+/// when the test monkey-patches a primordial (e.g. installs an
+/// indexed accessor on `Object.prototype`) or probes a descriptor
+/// whose §17 spec attributes (`configurable: true`) the SES freeze
+/// pass locks down. Skipping the freeze pass via
+/// `installBuiltinsUnhardened` lets the test exercise the spec
+/// shape directly.
+fn expectScriptIntUnhardened(source: []const u8, expected: i32) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsUnhardened(&realm);
+    const v = switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    if (v.isInt32()) try testing.expectEqual(expected, v.asInt32()) else if (v.isDouble()) try testing.expectEqual(@as(f64, @floatFromInt(expected)), v.asDouble()) else return error.NotANumber;
+}
+
+/// Unhardened-realm variant of `expectScriptStringWithBuiltins`.
+/// See `expectScriptIntUnhardened` for when to use this.
+fn expectScriptStringUnhardened(source: []const u8, expected: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsUnhardened(&realm);
+    const v = switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isString());
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings(expected, s.flatBytes());
+}
+
 /// Test helper: run a script, returning the final accumulator
 /// value. Throws surface as `error.UncaughtException`. The
 /// public `evaluateScript` (top of file) is used directly by
@@ -1592,9 +1625,12 @@ test "later: ReferenceError on unresolved global is a real object" {
 // §13.15.2 step 1.a — Evaluation of the LHS Reference happens
 // *before* the RHS, so a side-effecting RHS that creates a
 // matching global must not mask the unresolvable LHS Reference.
-// Cynic is strict-only; §6.2.5.5 step 6 then throws.
+// Cynic is strict-only; §6.2.5.5 step 6 then throws. Runs
+// unhardened because `this.undeclaredA = 5` would otherwise
+// trip the SES freeze of `globalThis` and throw TypeError from
+// the RHS before the snapshot replay fires.
 test "strict: assignment LHS resolvability snapshot precedes RHS" {
-    try expectScriptStringWithBuiltins(
+    try expectScriptStringUnhardened(
         \\let kind = "none";
         \\try {
         \\  undeclaredA = (this.undeclaredA = 5);
@@ -4321,45 +4357,31 @@ test "later: delete on non-Reference operand evaluates and yields true" {
 }
 
 test "later: built-in fn 'name' descriptor matches §10.2.9" {
-    var realm = Realm.init(testing.allocator);
-    defer realm.deinit();
-    try installBuiltinsAllFeatures(&realm);
-
-    const r = try evaluateScript(testing.allocator, &realm,
-        \\(function () {
-        \\    var d = Object.getOwnPropertyDescriptor(decodeURIComponent, "name");
-        \\    return d.value === "decodeURIComponent" &&
-        \\        d.writable === false &&
-        \\        d.enumerable === false &&
-        \\        d.configurable === true;
-        \\})()
-    );
-    const v = switch (r) {
-        .value, .yielded => |val| val,
-        .thrown => return error.UnexpectedThrow,
-    };
-    try testing.expect(v.asBool());
+    // §10.2.9 SetFunctionName — every built-in's `name` own
+    // property is `{w:false, e:false, c:true}`. Cynic's SES freeze
+    // pass flips `c:true` → `c:false` on the intrinsic graph
+    // (matching @endo/ses post-`lockdown()`); the spec shape is
+    // observable in the unhardened realm.
+    try expectScriptIntUnhardened(
+        \\const d = Object.getOwnPropertyDescriptor(decodeURIComponent, "name");
+        \\(d.value === "decodeURIComponent" &&
+        \\ d.writable === false &&
+        \\ d.enumerable === false &&
+        \\ d.configurable === true) ? 1 : 0;
+    , 1);
 }
 
 test "later: built-in fn 'length' descriptor matches §10.2.4" {
-    var realm = Realm.init(testing.allocator);
-    defer realm.deinit();
-    try installBuiltinsAllFeatures(&realm);
-
-    const r = try evaluateScript(testing.allocator, &realm,
-        \\(function () {
-        \\    var d = Object.getOwnPropertyDescriptor(parseInt, "length");
-        \\    return typeof d.value === "number" &&
-        \\        d.writable === false &&
-        \\        d.enumerable === false &&
-        \\        d.configurable === true;
-        \\})()
-    );
-    const v = switch (r) {
-        .value, .yielded => |val| val,
-        .thrown => return error.UnexpectedThrow,
-    };
-    try testing.expect(v.asBool());
+    // §10.2.4 — `length` own property descriptor on any built-in
+    // function is `{w:false, e:false, c:true}`. Same SES caveat as
+    // the `name` test above.
+    try expectScriptIntUnhardened(
+        \\const d = Object.getOwnPropertyDescriptor(parseInt, "length");
+        \\(typeof d.value === "number" &&
+        \\ d.writable === false &&
+        \\ d.enumerable === false &&
+        \\ d.configurable === true) ? 1 : 0;
+    , 1);
 }
 
 test "later/later: writable=false on built-in fn name throws TypeError in strict" {
@@ -5475,7 +5497,10 @@ test "Array.prototype.reduceRight: walks prototype chain for indexed reads" {
     // Install an indexed accessor on Object.prototype — the
     // sparse slot in the array must surface it (spec uses
     // `HasProperty` + `Get`, both of which descend the chain).
-    try expectScriptIntWithBuiltins(
+    // Requires unhardened mode: hardened freezes Object.prototype
+    // so `defineProperty` would throw before we can probe the
+    // chain-walk.
+    try expectScriptIntUnhardened(
         \\Object.defineProperty(Object.prototype, "0", { get() { return 10; }, configurable: true });
         \\const a = [];
         \\a.length = 1;
@@ -5486,7 +5511,9 @@ test "Array.prototype.reduceRight: walks prototype chain for indexed reads" {
 }
 
 test "Array.prototype.findLastIndex: walks prototype chain" {
-    try expectScriptIntWithBuiltins(
+    // Same SES caveat as the reduceRight test above — needs to
+    // mutate Object.prototype, which hardened mode forbids.
+    try expectScriptIntUnhardened(
         \\Object.defineProperty(Object.prototype, "0", { get() { return 42; }, configurable: true });
         \\const a = [];
         \\a.length = 1;
@@ -5949,14 +5976,21 @@ test "later: GetPrototypeFromConstructor propagates abrupt getter throw" {
 // is `length` then `name`.
 
 test "later: Function.prototype.length is 0 with §17 flags" {
-    try expectScriptStringWithBuiltins(
+    // §20.2.3 + §17 — `Function.prototype.length` is `0` with
+    // `{w:false, e:false, c:true}`. The `c:true` spec attribute
+    // is observable in the unhardened realm; SES `harden()` flips
+    // it to `c:false` (matching @endo/ses post-`lockdown()`).
+    try expectScriptStringUnhardened(
         \\const d = Object.getOwnPropertyDescriptor(Function.prototype, "length");
         \\d.value + ":" + d.writable + ":" + d.enumerable + ":" + d.configurable;
     , "0:false:false:true");
 }
 
 test "later: Function.prototype.name is '' with §17 flags" {
-    try expectScriptStringWithBuiltins(
+    // §20.2.3 + §10.2.9 SetFunctionName — `Function.prototype.name`
+    // is `""` with `{w:false, e:false, c:true}`. Same SES freeze
+    // caveat as the `length` test above.
+    try expectScriptStringUnhardened(
         \\const d = Object.getOwnPropertyDescriptor(Function.prototype, "name");
         \\"<" + d.value + ">:" + d.writable + ":" + d.enumerable + ":" + d.configurable;
     , "<>:false:false:true");
@@ -6025,7 +6059,13 @@ test "later: %Function.prototype% typeof is 'function'" {
 }
 
 test "later: Function.prototype[@@hasInstance] descriptor non-writable, non-configurable" {
-    try expectScriptStringWithBuiltins(
+    // §20.2.3.6 — the `[Symbol.hasInstance]` property is a DATA
+    // descriptor with `{w:false, e:false, c:false}`. In hardened
+    // mode the SES override-mistake fix replaces it with a
+    // synthetic accessor pair, so `Object.getOwnPropertyDescriptor`
+    // returns an accessor descriptor (no `writable` slot). The
+    // unhardened realm exposes the spec-data shape directly.
+    try expectScriptStringUnhardened(
         \\const d = Object.getOwnPropertyDescriptor(Function.prototype, Symbol.hasInstance);
         \\d.writable + ":" + d.enumerable + ":" + d.configurable;
     , "false:false:false");
@@ -6166,8 +6206,9 @@ test "later: arr.length = N truncates elements past N" {
 test "later: holes fall through to prototype-chain accessors" {
     // §10.4.2.1 step 2 — sparse holes are NOT own properties;
     // reads delegate to the prototype chain, where Array.prototype's
-    // accessor at "1" fires.
-    try expectScriptStringWithBuiltins(
+    // accessor at "1" fires. Needs unhardened mode to install
+    // the accessor on Array.prototype (hardened freezes it).
+    try expectScriptStringUnhardened(
         \\var got;
         \\Object.defineProperty(Array.prototype, "1", {
         \\  get: function() { return 42; },
@@ -7005,8 +7046,10 @@ test "Object.prototype.toString: @@toStringTag getter throw propagates" {
 
 test "Object.prototype.toString: @@toStringTag on Boolean.prototype overrides primitive" {
     // §20.1.3.6 step 15 — user tag string on Boolean.prototype
-    // wins over the builtin "Boolean" tag.
-    try expectScriptStringWithBuiltins(
+    // wins over the builtin "Boolean" tag. Needs unhardened
+    // mode: hardened freezes Boolean.prototype so the assignment
+    // would throw before we could probe the override.
+    try expectScriptStringUnhardened(
         \\Boolean.prototype[Symbol.toStringTag] = 'test262';
         \\Object.prototype.toString.call(true);
     , "[object test262]");
@@ -7022,7 +7065,9 @@ test "Object.prototype.toLocaleString invokes the receiver's toString" {
 test "Object.prototype.toLocaleString: primitive 'this' reaches Boolean.prototype.toString" {
     // §20.1.3.5 GetV(true, "toString") finds the toString on
     // Boolean.prototype and invokes it with `true` as receiver.
-    try expectScriptStringWithBuiltins(
+    // Same SES caveat as the @@toStringTag test above —
+    // hardened freezes Boolean.prototype.
+    try expectScriptStringUnhardened(
         \\Boolean.prototype.toString = function() { return typeof this; };
         \\true.toLocaleString();
     , "boolean");

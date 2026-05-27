@@ -149,7 +149,14 @@ These are project rules — they apply to everyone.
   production-shaped surface by default. If you add a new
   Cynic-only debug global (e.g. `__forceCompact`, a future
   `__profileFn`), wire it through `installTestGlobals` too — not
-  `installBuiltins`.
+  `installBuiltins`. **Then add the key to the trailing
+  `debug_keys` array** inside `installTestGlobals` so the
+  hardened-realm freeze contract still holds: `globals.put`
+  defaults new keys to `{w:true, c:true}` per §17, which would
+  otherwise leave `globalThis` non-frozen for the test harness
+  only (the freeze pass during `installBuiltins` ran before the
+  install). The post-install re-stamp keeps
+  `Object.isFrozen(globalThis)` truthful.
 - **Unicode tracks `latest`.** §3 normatively references
   [`unicode.org/versions/latest`](https://unicode.org/versions/latest)
   (undated) and §12.7 says identifier-category code points "in

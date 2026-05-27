@@ -142,6 +142,26 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
                 .configurable = false,
             }) catch return error.OutOfMemory;
         }
+        // Accessor descriptors need their own flag stamp — the
+        // data-property loop above only touches keys in
+        // `iterOwnNamedKeys()` (data half). Without this, a freshly
+        // installed accessor like `Array.prototype[Symbol.iterator]`
+        // keeps its install-time `configurable: true` and
+        // `Object.isFrozen(obj)` returns false. Mirrors
+        // `Object.freeze` (§7.3.20 SetIntegrityLevel) which stamps
+        // both halves.
+        if (obj.accessorIterator()) |ait_outer_pre| {
+            var ait_pre = ait_outer_pre;
+            while (ait_pre.next()) |e| {
+                const k = e.key_ptr.*;
+                const cur = obj.flagsFor(k);
+                obj.property_flags.put(realm.allocator, k, .{
+                    .writable = false, // N/A on accessors; spec says omitted.
+                    .enumerable = cur.enumerable,
+                    .configurable = false,
+                }) catch return error.OutOfMemory;
+            }
+        }
         // Recurse into own data values.
         var rit = obj.iterOwnNamedKeys();
         while (rit.next()) |e| try hardenWalk(realm, e.value_ptr.*, visited);
@@ -181,6 +201,24 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
             const cur = fn_obj.flagsForOwn(k);
             fn_obj.property_flags.put(realm.allocator, k, .{
                 .writable = false,
+                .enumerable = cur.enumerable,
+                .configurable = false,
+            }) catch return error.OutOfMemory;
+        }
+        // Accessor descriptors — every constructor with an
+        // `@@species` getter (`Array`, `Map`, `Set`, `Promise`,
+        // `RegExp`, the typed-array constructors, …) installs it
+        // with `configurable: true` per §22.x. Without stamping
+        // `configurable: false` here, `Object.isFrozen(Array)`
+        // returns false because the species accessor still reports
+        // `configurable`. Mirrors the JSObject branch above and
+        // `Object.freeze`'s accessor sweep.
+        var fait_pre = fn_obj.accessors.iterator();
+        while (fait_pre.next()) |e| {
+            const k = e.key_ptr.*;
+            const cur = fn_obj.flagsForOwn(k);
+            fn_obj.property_flags.put(realm.allocator, k, .{
+                .writable = false, // N/A on accessors; spec says omitted.
                 .enumerable = cur.enumerable,
                 .configurable = false,
             }) catch return error.OutOfMemory;

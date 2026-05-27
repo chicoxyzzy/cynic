@@ -451,7 +451,17 @@ pub fn evaluateScript(
     defer arena.deinit();
     const aa = arena.allocator();
 
-    const program = parser_mod.parseScript(aa, source, null) catch return error.ParseError;
+    // Collect parser diagnostics so a recoverable-but-error-severity
+    // condition (e.g. §B.1.1 LegacyOctalIntegerLiteral in strict
+    // mode, an early SyntaxError the parser detects after building
+    // a usable AST) surfaces as `error.ParseError` instead of
+    // silently running the (semantically broken) program. The
+    // test262 harness applies the same `hasErrorSeverity` check
+    // at its own parse site.
+    const diag_mod = @import("../../diagnostic.zig");
+    var diags: diag_mod.Diagnostics = .empty;
+    const program = parser_mod.parseScript(aa, source, &diags) catch return error.ParseError;
+    for (diags.items) |d| if (d.severity == .err) return error.ParseError;
     // The chunk is owned by the realm so that any `JSFunction`
     // declared by this script (which keeps a pointer into the
     // chunk's `function_templates`) outlives the call and stays
