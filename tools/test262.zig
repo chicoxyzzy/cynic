@@ -2600,11 +2600,23 @@ fn currentRssMb() ?usize {
     }
     if (builtin.os.tag == .linux) {
         // statm: <size> <resident> <shared> <text> <lib> <data> <dt>
-        // — values in pages.
+        // — values in pages. Raw syscalls so `currentRssMb` stays
+        // synchronous and doesn't need an `std.Io` threaded through
+        // every call site (the harness allocates this on hot paths
+        // where the I/O context isn't in scope).
+        const linux = std.os.linux;
         var buf: [128]u8 = undefined;
-        const file = std.fs.cwd().openFile("/proc/self/statm", .{}) catch return null;
-        defer file.close();
-        const n = file.read(&buf) catch return null;
+        const open_rc = linux.openat(linux.AT.FDCWD, "/proc/self/statm", .{}, 0);
+        // A Linux syscall returns a non-negative result on success
+        // and a negated errno (encoded as a very large unsigned)
+        // on failure — anything past `(usize)-4096` is an error.
+        const err_threshold = @as(usize, @bitCast(@as(isize, -4096)));
+        if (open_rc > err_threshold) return null;
+        const fd: linux.fd_t = @intCast(open_rc);
+        defer _ = linux.close(fd);
+        const read_rc = linux.read(fd, &buf, buf.len);
+        if (read_rc > err_threshold) return null;
+        const n: usize = @intCast(read_rc);
         const slice = buf[0..n];
         var it = std.mem.tokenizeAny(u8, slice, " \t\n");
         _ = it.next() orelse return null;
