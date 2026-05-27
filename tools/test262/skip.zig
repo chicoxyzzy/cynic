@@ -1182,17 +1182,6 @@ pub const eval_dependent_exact_paths = [_][]const u8{
 // is bounded vs. multi-week).
 
 pub const pending_refactor_exact_paths = [_][]const u8{
-    // §27.2.3.1 Promise(executor) step order — spec checks
-    // IsCallable(executor) BEFORE OrdinaryCreateFromConstructor
-    // (which Get's the new.target's "prototype"). Cynic's native-
-    // construct dispatch path runs `GetPrototypeFromConstructor`
-    // upfront — before invoking the native callback that validates
-    // the executor — so a bound function whose `prototype` getter
-    // throws surfaces THAT throw instead of the expected TypeError.
-    // Closing this gap requires deferring the proto-lookup for
-    // native constructors that perform their own argument
-    // pre-validation; a focused construct-dispatch refactor.
-    "built-ins/Promise/get-prototype-abrupt-executor-not-callable.js",
     // §14.15.3 TryStatement runtime semantics — `try { … } catch
     // { return v } finally { F }` runs F inline at the `return`
     // site AND covers the catch body (including that inlined

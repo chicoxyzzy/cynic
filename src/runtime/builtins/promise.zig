@@ -65,6 +65,14 @@ pub fn install(realm: *Realm) !void {
     });
     const fn_obj = r.ctor;
     const proto = r.proto;
+    // §27.2.3.1 step 2-3 — IsCallable(executor) fires BEFORE
+    // OrdinaryCreateFromConstructor (which would trigger a user
+    // `prototype` getter on newTarget). Defer the proto lookup
+    // so the constructor can validate the executor first; the
+    // native callback runs `GetPrototypeFromConstructor` itself
+    // after the IsCallable check. Matches the ArrayBuffer /
+    // DataView pattern.
+    fn_obj.defers_proto_lookup = true;
 
     try installNativeMethodOnProto(realm, proto, "then", promiseThen, 2);
     try installNativeMethodOnProto(realm, proto, "catch", promiseCatch, 1);
@@ -320,15 +328,39 @@ fn promiseValueOf(v: Value) Value {
 }
 
 fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Promise constructor requires 'new'");
-    // §27.2.3.1 step 1 — `Promise.call(p, fn)` re-initialises an
-    // existing Promise via plain-call. Cynic doesn't model
-    // NewTarget directly; the typed `[[PromiseState]]` slot
-    // (`!= .none`) tells us this object is already a Promise.
-    if (inst.isPromise()) {
-        return throwTypeError(realm, "Promise constructor requires 'new' (receiver already initialized)");
+    _ = this_value; // §27.2.3.1 — OCFC is deferred (see install:
+    // `defers_proto_lookup`). The construct path stashes newTarget
+    // on `realm.pending_native_new_target`; absence means we were
+    // called without `new`.
+    const new_target = realm.pending_native_new_target;
+    if (new_target.isUndefined()) {
+        return throwTypeError(realm, "Promise constructor requires 'new'");
     }
+    // §27.2.3.1 step 2 — IsCallable(executor) FIRST. This must
+    // throw BEFORE OrdinaryCreateFromConstructor would observe a
+    // user-installed `prototype` getter on newTarget. The
+    // `get-prototype-abrupt-executor-not-callable` fixture pins
+    // this order.
     const executor = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Promise executor must be a function");
+
+    // §27.2.3.1 step 3 — OrdinaryCreateFromConstructor. Read the
+    // prototype off newTarget (may throw from a user getter) and
+    // allocate the instance.
+    const interp = @import("../lantern/interpreter.zig");
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.promise_prototype) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const proto: ?*@import("../object.zig").JSObject = switch (proto_lookup) {
+        .proto => |p| p,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(inst, proto);
+    const inst_v = heap_mod.taggedObject(inst);
 
     // Initial state: pending.
     realm.heap.settlePromise(inst, .pending, Value.undefined_);
@@ -350,7 +382,7 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     resolve_fn.proto = realm.intrinsics.function_prototype;
     resolve_fn.has_construct = false;
     realm.heap.setBoundTarget(resolve_fn, resolve_impl);
-    realm.heap.setBoundThis(resolve_fn, this_value);
+    realm.heap.setBoundThis(resolve_fn, inst_v);
 
     const reject_impl = realm.heap.allocateFunctionNative(promiseRejectImpl, 1, "") catch return error.OutOfMemory;
     reject_impl.proto = realm.intrinsics.function_prototype;
@@ -359,7 +391,7 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     reject_fn.proto = realm.intrinsics.function_prototype;
     reject_fn.has_construct = false;
     realm.heap.setBoundTarget(reject_fn, reject_impl);
-    realm.heap.setBoundThis(reject_fn, this_value);
+    realm.heap.setBoundThis(reject_fn, inst_v);
 
     // Run the executor synchronously with (resolve, reject).
     const lantern = @import("../lantern/interpreter.zig");
@@ -382,7 +414,7 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
             }
         },
     }
-    return this_value;
+    return inst_v;
 }
 
 fn settlePromise(realm: *Realm, inst: *@import("../object.zig").JSObject, state: enum { fulfilled, rejected }, value: Value) !void {
