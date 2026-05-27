@@ -137,13 +137,30 @@ first two path components (`built-ins/Set`,
 **Reading guide:**
 
 - The **top tier** (`1+ fails`) is the engine-work list.
-  Today the only entry is `built-ins/RegExp` with 9
-  libregexp Annex B / `/v` grammar gaps — fixtures that
-  compile patterns the vendored libregexp matcher
-  (QuickJS-NG) doesn't accept. All 9 are documented
-  carve-outs in AGENTS.md ("Acknowledged exception —
-  regex Annex B §B.1.4"). Closing them means patching
-  vendored libregexp or switching matchers.
+  Today: `built-ins/RegExp` (9 vendor-libregexp gaps) and
+  `language/statements` (6 ERM edge cases).
+  - The 9 `built-ins/RegExp` fails are all in
+    `property-escapes/generated/` — 7 are `/v`-flag
+    property-of-strings escapes (`\p{RGI_Emoji}`,
+    `\p{Basic_Emoji}`, etc., normative §22.2.1 ES2024)
+    and 2 are `Script=Unknown` / `Script_Extensions=
+    Unknown` (Unicode `Zzzz` alias, normative). None of
+    them are Annex B — they're ES2024 normative spec
+    gaps in the vendored libregexp (QuickJS-NG). The
+    Annex B regex carve-out in AGENTS.md (§B.1.4 — `\1`
+    outside a capturing group, `{,n}` quantifier) is a
+    *separate* policy about libregexp being too
+    permissive; it's not what fails here. Closing these
+    9 means patching vendored libregexp or switching
+    matchers.
+  - The 6 `language/statements` fails are from the ERM
+    proposal landing this week (`using` / `await using`):
+    4 are negative parse tests we false-reject (`using`
+    reassignment inside for-update should TypeError at
+    runtime, not parse), 2 are
+    `for (using x of arr)` failing to create a fresh
+    per-iteration env. Both clusters are fixable Cynic-
+    side; tracked.
 - The **0-fails tier** is sorted by `divergent ↓` so
   SES-hot buckets cluster at the top of the tail — that's
   where Cynic's frozen primordials / locked descriptors /
