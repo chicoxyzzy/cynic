@@ -525,44 +525,8 @@ pub const ses_substrings = [_][]const u8{
 /// OOS per AGENTS.md (SES carve-out). Identified by exhaustive scan
 /// against the failing set; listed as exact paths because they cross
 /// too many directories for a clean prefix or suffix.
-///
-/// Two entries — `Promise/get-prototype-abrupt-executor-not-callable.js`
-/// and `try/completion-values-fn-finally-abrupt.js` — aren't SES per
-/// se; they're pending *engine refactors* (construct-dispatch order,
-/// try/finally completion ordering). Listed here so the corpus
-/// denominator stays exact; their inline comments name the refactor
-/// they're waiting on. The originally-deferred pending-refactor
-/// stragglers live in `pending_refactor_exact_paths` under CURRENTLY
-/// SKIPPED.
 pub const ses_exact_paths = [_][]const u8{
     "built-ins/Boolean/S9.2_A1_T1.js",
-    // §27.2.3.1 Promise(executor) step order — spec checks
-    // IsCallable(executor) BEFORE OrdinaryCreateFromConstructor
-    // (which Get's the new.target's "prototype"). Cynic's native-
-    // construct dispatch path runs `GetPrototypeFromConstructor`
-    // upfront — before invoking the native callback that validates
-    // the executor — so a bound function whose `prototype` getter
-    // throws surfaces THAT throw instead of the expected TypeError.
-    // Closing this gap requires deferring the proto-lookup for
-    // native constructors that perform their own argument
-    // pre-validation; a focused construct-dispatch refactor that
-    // isn't worth pulling into a mixed-cluster batch. 1 fixture.
-    // Pending engine refactor; listed here under PERMANENT so the
-    // corpus denominator stays exact.
-    "built-ins/Promise/get-prototype-abrupt-executor-not-callable.js",
-    // §14.15.3 TryStatement runtime semantics — `try { … } catch
-    // { return v } finally { F }` runs F inline at the `return`
-    // site AND covers the catch body (including that inlined
-    // finally) with a synth-finally handler so a throw from the
-    // catch body still hits F. When F itself throws, the inline
-    // copy throws first, lands on the synth handler, and runs F
-    // a SECOND time before propagating. Fixing requires emitting
-    // the return-with-inline-finally outside the synth-handler
-    // range (a "return trampoline" after the handler) — a
-    // focused try/finally refactor that's been deferred. 1 fixture.
-    // Pending engine refactor; listed here under PERMANENT so the
-    // corpus denominator stays exact.
-    "language/statements/try/completion-values-fn-finally-abrupt.js",
     // §15.3.2 `new Function()` / §19.2.1 `eval(string)` — five
     // long-tail fixtures across scattered buckets that each build
     // a Function-shape via the zero-arg `new Function()` form or
@@ -1163,37 +1127,31 @@ pub const deferred_path_prefixes = [_][]const u8{
     "built-ins/Date/prototype/toTemporalInstant/",
 };
 
-// ── Focused refactor pending ────────────────────────────────────────
+// ── --allow=eval-dependent ──────────────────────────────────────────
 //
-// Single fixtures blocked on a small targeted engine refactor.
-// Each entry documents the exact engine surface that needs to
-// change. Lifts once the refactor lands.
-//
-// NOTE: 4 other pending-refactor stragglers (Promise(executor)
-// step-order, try/finally completion-with-throw, the two
-// `S13.2.2_A1_T*` function-as-prototype fixtures) sit in
-// `ses_exact_paths` / `ses_substrings` under PERMANENT — they
-// were originally encoded there and the harness's corpus
-// denominator already excludes them. The per-entry comments in
-// SES name the refactor they're waiting on; this section
-// collects the ones that lived in the *deferred* bucket
-// originally (SES-eval / `--allow=eval` stragglers).
+// Single fixtures that exercise `eval` / `new Function(string)` and
+// stay skipped until `--allow=eval` ships (see
+// [docs/ses-alignment.md] §Phase 4). Distinct from the SES carve-
+// out *paths* and *substrings* under PERMANENT — those are bulk
+// matched and never run; these are individual fixtures whose
+// shape is "wrap the actual assertion in `eval(…)` so the
+// assertion is only reachable via eval." If `--allow=eval` ships
+// as a default-off flag, these graduate to the attempted column
+// once the harness routes through the eval-allowed realm.
 
-pub const pending_refactor_exact_paths = [_][]const u8{
+pub const eval_dependent_exact_paths = [_][]const u8{
     // `built-ins/Function/prototype/S15.3.5.2_A1_T2.js` — uses
-    // `Function(void 0, "")` (string-body Function constructor),
-    // the SES `--allow=eval` carve-out per AGENTS.md. The fixture
-    // verifies the `prototype` slot's `DontDelete` on a function
-    // built from a source string; without the eval-policy opt-in
-    // there's no way to construct the function in the first place.
-    // Stays skipped until `--allow=eval` ships.
+    // `Function(void 0, "")` (string-body Function constructor).
+    // The fixture verifies the `prototype` slot's `DontDelete` on
+    // a function built from a source string; without the eval-
+    // policy opt-in there's no way to construct the function in
+    // the first place.
     "built-ins/Function/prototype/S15.3.5.2_A1_T2.js",
     // Sputnik `language/types/string/S8.4_A7.*.js` (4 fixtures) —
     // every one wraps an `eval("var x = asdf<LineTerminator>ghjk")`
     // expecting ReferenceError because the line terminator
     // terminates the var declaration. Without `eval()` the
-    // assertion can't reach the parse error. SES eval carve-out
-    // tracked as deferred against a hypothetical `--allow=eval`.
+    // assertion can't reach the parse error.
     "language/types/string/S8.4_A7.1.js",
     "language/types/string/S8.4_A7.2.js",
     "language/types/string/S8.4_A7.3.js",
@@ -1205,12 +1163,46 @@ pub const pending_refactor_exact_paths = [_][]const u8{
     // of `eval` / `arguments` don't throw in strict mode. Without
     // `eval()` the indirect-call line itself throws TypeError
     // ("eval is not a function" — Cynic doesn't expose `eval` as
-    // a global). SES eval carve-out tracked as deferred against
-    // a hypothetical `--allow=eval`.
+    // a global).
     "language/statements/variable/12.2.1-9-s.js",
     "language/statements/variable/12.2.1-10-s.js",
     "language/statements/variable/12.2.1-20-s.js",
     "language/statements/variable/12.2.1-21-s.js",
+};
+
+// ── Focused refactor pending ────────────────────────────────────────
+//
+// Fixtures blocked on a small targeted engine refactor. Each
+// entry documents the exact engine surface that needs to change;
+// lifts once the refactor lands. The function-as-prototype pair
+// (`S13.2.2_A1_T{1,2}`) requires architectural unification of
+// JSObject / JSFunction heap types and stays under PERMANENT in
+// `ses_exact_paths` (the corpus denominator math is identical
+// from either bucket; placement reflects whether engineering work
+// is bounded vs. multi-week).
+
+pub const pending_refactor_exact_paths = [_][]const u8{
+    // §27.2.3.1 Promise(executor) step order — spec checks
+    // IsCallable(executor) BEFORE OrdinaryCreateFromConstructor
+    // (which Get's the new.target's "prototype"). Cynic's native-
+    // construct dispatch path runs `GetPrototypeFromConstructor`
+    // upfront — before invoking the native callback that validates
+    // the executor — so a bound function whose `prototype` getter
+    // throws surfaces THAT throw instead of the expected TypeError.
+    // Closing this gap requires deferring the proto-lookup for
+    // native constructors that perform their own argument
+    // pre-validation; a focused construct-dispatch refactor.
+    "built-ins/Promise/get-prototype-abrupt-executor-not-callable.js",
+    // §14.15.3 TryStatement runtime semantics — `try { … } catch
+    // { return v } finally { F }` runs F inline at the `return`
+    // site AND covers the catch body (including that inlined
+    // finally) with a synth-finally handler so a throw from the
+    // catch body still hits F. When F itself throws, the inline
+    // copy throws first, lands on the synth handler, and runs F
+    // a SECOND time before propagating. Fixing requires emitting
+    // the return-with-inline-finally outside the synth-handler
+    // range (a "return trampoline" after the handler).
+    "language/statements/try/completion-values-fn-finally-abrupt.js",
 };
 
 // ════════════════════════════════════════════════════════════════════
@@ -1279,8 +1271,10 @@ pub fn pathIsCurrentlySkipped(rel_path: []const u8) bool {
     for (single_realm_path_contains) |needle| {
         if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
     }
-    for (pending_refactor_exact_paths) |exact| {
-        if (std.mem.eql(u8, rel_path, exact)) return true;
+    inline for (.{ pending_refactor_exact_paths, eval_dependent_exact_paths }) |group| {
+        for (group) |exact| {
+            if (std.mem.eql(u8, rel_path, exact)) return true;
+        }
     }
     return false;
 }
