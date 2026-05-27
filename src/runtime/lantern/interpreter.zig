@@ -1758,6 +1758,29 @@ pub fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
 
+            // §3.8.3.6 WrappedFunction — cross-realm callable
+            // boundary. The inline call fast-path can't marshal
+            // args/return through the §3.8.3.4 filter; delegate
+            // to `callJSFunction` which routes into the boundary
+            // handler in `shadow_realm.zig`.
+            if (callee_fn.wrapped_target_function != null) {
+                const args_start = @as(usize, r_callee) + 1;
+                const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
+                switch (result) {
+                    .value, .yielded => |v| acc = v,
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                }
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+
             // §10.4.1 — bound functions unwrap and re-enter
             // through `callJSFunction` (which builds a fresh
             // frame stack with the concatenated args). Plain
@@ -2315,6 +2338,28 @@ pub fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
 
+            // §3.8.3.6 WrappedFunction — see the matching branch
+            // in `.call`. Cross-realm callable boundary needs the
+            // arg/return marshalling that the inline fast-path
+            // can't do; delegate to `callJSFunction`.
+            if (callee_fn.wrapped_target_function != null) {
+                const args_start = @as(usize, r_callee) + 1;
+                const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
+                switch (result) {
+                    .value, .yielded => |v| acc = v,
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                }
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+
             // §10.4.1 — bound function: fall back through
             // `callJSFunction` (handles the concatenated args
             // and `this` rebinding). Doesn't preserve PTC
@@ -2550,6 +2595,25 @@ pub fn runFrames(
                 rp.proxy_revoked = true;
                 callee_fn.revocable_proxy = null;
                 acc = Value.undefined_;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+
+            // §3.8.3.6 WrappedFunction — see the `.call` branch.
+            if (callee_fn.wrapped_target_function != null) {
+                const args_start = @as(usize, r_callee) + 1;
+                const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
+                switch (result) {
+                    .value, .yielded => |v| acc = v,
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                }
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
 

@@ -35,8 +35,8 @@ const Chunk = @import("../../bytecode/chunk.zig").Chunk;
 // loop entry + a handful of helpers that bracket call/construct.
 const lantern = @import("interpreter.zig");
 const CallFrame = lantern.CallFrame;
-const RunError = lantern.RunError;
-const RunResult = lantern.RunResult;
+pub const RunError = lantern.RunError;
+pub const RunResult = lantern.RunResult;
 const runFrames = lantern.runFrames;
 const unwindThrow = lantern.unwindThrow;
 const consumePendingException = lantern.consumePendingException;
@@ -618,6 +618,18 @@ pub fn callJSFunction(
         const unwrapped = try unwrapBoundCall(allocator, callee, this_value, args, false);
         defer if (unwrapped.owns_args) allocator.free(unwrapped.args);
         return callJSFunction(allocator, realm, unwrapped.target, unwrapped.this_value, unwrapped.args);
+    }
+
+    // §3.8.3.6 WrappedFunctionCall — a function returned by
+    // `ShadowRealm.prototype.evaluate` (or any cross-boundary
+    // crossing) carries its target in `wrapped_target_function`
+    // and its caller realm in `realm`. Each arg/return value
+    // crosses the §3.8.3.4 GetWrappedValue filter; abrupt
+    // completions are remapped to a TypeError in the caller realm.
+    // `this_value` is intentionally ignored per the spec —
+    // wrapped calls dispatch with `thisArgument = undefined`.
+    if (callee.wrapped_target_function != null) {
+        return try @import("../builtins/shadow_realm.zig").callWrappedFunction(allocator, realm, callee, args);
     }
 
     // Phase 3 SES override-mistake fix — synthetic accessors

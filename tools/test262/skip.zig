@@ -1001,10 +1001,11 @@ pub const stage_maturity_features = [_][]const u8{
 /// proposal hasn't reached a published edition yet, so shipping
 /// conformance against it isn't the point.
 pub const stage_maturity_path_prefixes = [_][]const u8{
-    // Stage 2.7 — Cynic doesn't install the `ShadowRealm` global.
-    // Re-evaluate once the proposal advances or SES integration
-    // lands. ~64 fixtures.
-    "built-ins/ShadowRealm/",
+    // (Stage 2.7 ShadowRealm graduated out of skip-on-stage-maturity
+    // — Phase 3 shipped the constructor + `.evaluate()` callable
+    // boundary. `.importValue()` still throws "not yet implemented",
+    // so the importValue/* subtree is path-skipped one level below
+    // via `pending_refactor_path_prefixes`.)
 };
 
 // ── Vendor gaps ─────────────────────────────────────────────────────

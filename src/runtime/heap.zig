@@ -1120,6 +1120,9 @@ pub const Heap = struct {
                 if (f.bound_args) |ba| {
                     for (ba) |a| self.markValue(a);
                 }
+                // §3.8.3.5 WrappedFunction — see
+                // `markFunctionInternalSlots`.
+                if (f.wrapped_target_function) |wt| self.markValue(taggedFunction(wt));
                 // Phase 3 synthetic accessor — see
                 // `markFunctionInternalSlots` for the rationale.
                 if (f.synth_accessor) |sa| self.markValue(sa.value);
@@ -2451,6 +2454,11 @@ pub const Heap = struct {
         if (f.bound_args) |ba| {
             for (ba) |a| self.markValue(a);
         }
+        // §3.8.3.5 WrappedFunction — the target lives in another
+        // realm but on the same shared heap; without this edge a
+        // major sweep would reclaim it while the wrapper is still
+        // reachable from the caller realm.
+        if (f.wrapped_target_function) |wt| self.markValue(taggedFunction(wt));
         if (f.name_string) |s| self.markString(s);
         // Phase 3 synthetic accessor — getter holds a captured
         // Value that must stay rooted across cycles. The cell

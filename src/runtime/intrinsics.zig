@@ -547,6 +547,14 @@ pub fn install(realm: *Realm) !void {
     // prerequisites; the order doesn't matter beyond that, but
     // mirrors the sync-first wiring in the spec ordering).
     try @import("builtins/async_disposable_stack.zig").install(realm);
+    // §3.8 ShadowRealm — synchronous cross-realm boundary. Installed
+    // last among the user-visible constructors because its `.evaluate`
+    // hook needs every intrinsic to already be in place on child
+    // realms (the constructor calls `Realm.installBuiltins` on the
+    // child, which is THIS install pass running again on a fresh
+    // Realm). Order matters only against the recursive install
+    // re-entry, not against any inter-builtin dep.
+    try @import("builtins/shadow_realm.zig").install(realm);
     // Iterator.prototype is now live — wire
     // %GeneratorFunction.prototype.prototype% and %AsyncGeneratorFunction.prototype.prototype%
     // so `Object.getPrototypeOf(function*(){}).prototype` lands

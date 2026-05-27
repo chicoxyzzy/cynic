@@ -983,6 +983,14 @@ pub const JSObject = struct {
     /// a TypeError per §26.1.3.2 even when the slot is empty, so
     /// the brand is checked separately from the target slot.
     is_weak_ref: bool = false,
+    /// §3.8 ShadowRealm brand — the prototype methods walk this
+    /// flag (and the `host_data` slot which carries the child
+    /// `*Realm` pointer) to identify a ShadowRealm receiver and
+    /// reject mismatched `this` values per §3.8.3.1 step 2 /
+    /// §3.8.3.2 step 2 (`RequireInternalSlot(O, [[ShadowRealm]])`
+    /// throws TypeError on any non-ShadowRealm receiver — like
+    /// `evaluate.call({}, "1")`).
+    is_shadow_realm: bool = false,
     /// §10.4.2 Array exotic — packed indexed elements storage.
     /// Array instances set `is_array_exotic = true` and use
     /// `elements` as the source of truth for integer-indexed

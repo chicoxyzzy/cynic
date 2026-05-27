@@ -268,6 +268,17 @@ pub const JSFunction = struct {
     bound_target: ?*JSFunction = null,
     bound_this: Value = Value.undefined_,
     bound_args: ?[]const Value = null,
+    /// §3.8.3.5 WrappedFunctionCreate — set on a function that
+    /// crosses a ShadowRealm callable boundary. Holds the original
+    /// target from the OTHER realm; the call dispatch reads it,
+    /// runs `GetWrappedValue(targetRealm, arg)` on each argument
+    /// (rejecting any non-primitive non-function), calls the
+    /// target, then runs `GetWrappedValue(callerRealm, result)`
+    /// on the return value. `realm` (the back-pointer added in
+    /// the cross-realm species work) carries the CALLER realm so
+    /// the boundary knows which intrinsics to use when throwing
+    /// the §3.8.3.6 TypeError remapping abrupt completions.
+    wrapped_target_function: ?*JSFunction = null,
     /// For `class B extends A { … }`, this points at `A` (the
     /// parent constructor) so `B.someStaticOfA()` resolves.
     /// `null` for non-derived classes / non-class functions.
