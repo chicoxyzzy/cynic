@@ -199,6 +199,25 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
     try buf.append(allocator, '\n');
     try buf.append(allocator, ')');
 
+    // Recurse into nested function templates. `MakeFunction t<N>`
+    // references `chunk.function_templates[N]`; dumping them inline
+    // lets a `--dump-bytecode` reader see the body of every
+    // declared function in a single pass instead of having to
+    // re-run the engine to introspect.
+    for (chunk.function_templates, 0..) |*tpl, idx| {
+        try buf.print(allocator, "\n\n; --- function template t{d}", .{idx});
+        if (tpl.name) |n| try buf.print(allocator, " ({s})", .{n});
+        try buf.print(allocator, " — {d} params, spec_length {d}", .{ tpl.param_count, tpl.spec_length });
+        if (tpl.is_arrow) try buf.appendSlice(allocator, ", arrow");
+        if (tpl.is_method) try buf.appendSlice(allocator, ", method");
+        if (tpl.is_generator) try buf.appendSlice(allocator, ", generator");
+        if (tpl.is_async) try buf.appendSlice(allocator, ", async");
+        try buf.append(allocator, '\n');
+        const inner = try dump(allocator, &tpl.chunk);
+        defer allocator.free(inner);
+        try buf.appendSlice(allocator, inner);
+    }
+
     return buf.toOwnedSlice(allocator);
 }
 

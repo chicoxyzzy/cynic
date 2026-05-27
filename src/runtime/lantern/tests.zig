@@ -7680,12 +7680,16 @@ test "PTC: conditional consequent / alternate propagate tail position" {
 test "PTC: logical && / || rhs propagates tail position" {
     // §13.13 — the rhs of `&&` / `||` is evaluated only when
     // short-circuit doesn't fire; §15.10.1 says it's in tail
-    // position when the operator is. lhs is NOT.
+    // position when the operator is. lhs is NOT. N=3000 matches
+    // the rest of the PTC tests — comfortably above the
+    // 1024-frame cap so a missing PTC would RangeError, but
+    // small enough that the Debug-mode interpreter completes in
+    // ~4 s instead of the ~63 s an N=50000 fixture took.
     try expectScriptIntWithBuiltins(
         \\function f(n) {
         \\  return n === 0 || f(n - 1);
         \\}
-        \\f(50000) === true ? 1 : 0;
+        \\f(3000) === true ? 1 : 0;
     , 1);
 }
 
