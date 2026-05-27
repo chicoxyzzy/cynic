@@ -193,9 +193,13 @@ These are project rules — they apply to everyone.
   WTF-8 string the helpers can build.
 
   Methods that don't dereference positions — `concat`,
-  `toLowerCase`, `toUpperCase`, `trim*`, `repeat`,
-  `normalize` (passthrough today) — pass WTF-8 bytes through
-  unchanged. Symbol-dispatched methods (`split`, `replace`,
+  `toLowerCase`, `toUpperCase`, `trim*`, `repeat` — pass WTF-8
+  bytes through unchanged (case-conversion still walks code
+  points, but doesn't need positional helpers). `normalize`
+  decodes through `lib_unicode.unicode_normalize` (vendored
+  QuickJS-NG) into a u32 code-point buffer and re-encodes to
+  WTF-8; `localeCompare` shares that pipeline for its NFD
+  fast path. Symbol-dispatched methods (`split`, `replace`,
   `replaceAll`, `match`, `matchAll`, `search`) route into
   libregexp via the bridge, which has its own UTF-16 view
   built in — don't reinvent code-unit arithmetic there.

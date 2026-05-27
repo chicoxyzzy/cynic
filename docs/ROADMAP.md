@@ -545,30 +545,25 @@ automatically on the next full sweep.
 
 **Caveats / planned.**
 
-- `Date` is UTC-only — `getTimezoneOffset` returns 0; locale
-  formatting falls back to ISO. Real timezone handling needs a
-  tz-data source.
-- `String.prototype.normalize` is a passthrough — needs UCD
-  normalization tables for real NFC/NFD/NFKC/NFKD.
-- `Function.prototype.toString` — returns the original source slice
-  for declared functions; callable Proxy returns the spec sentinel
-  `function () { [native code] }`. Remaining edge: CR vs LF
-  normalization (test262 `line-terminator-normalisation-CR.js`).
-- `Number.prototype.{toFixed, toExponential, toPrecision}` — the
-  digit string comes from a libc `printf`-style conversion, which
-  rounds via the shortest-round-trip path. §21.1.3.3 / §21.1.3.2 /
-  §21.1.3.5 instead specify the *exact* mathematical value of
-  `n ÷ 10^f` (ties-to-larger), so `(1000000000000000128).toFixed(0)`
-  must keep the full mantissa rather than collapse to
-  `1000000000000000100`. Closing this needs a Ryū / Grisu-style
-  exact dtoa with a controllable rounding mode — own work item,
-  3 test262 fixtures honest-fail until then.
-- `String.prototype.localeCompare` — compares by UTF-16 code unit.
-  §22.1.3.12 permits a locale-sensitive collation; without `Intl`
-  there is no canonical-equivalence folding, so `"ö"` (o +
-  combining diaeresis) and `"ö"` (precomposed ö) compare
-  unequal. Real NFC folding shares the UCD-normalization-table gap
-  with `String.prototype.normalize` above.
+- `Date` is UTC-only — `getTimezoneOffset` always returns 0,
+  every `getXxx` method behaves like its `getUTCXxx` peer, and
+  `toString` / `toLocaleString` render
+  `... GMT+0000 (Coordinated Universal Time)`. Spec-conformant
+  per §21.4 (the implementation picks the local time zone;
+  `"UTC"` is a permitted choice) — every `built-ins/Date`
+  fixture passes. Practical for edge / server JS where the host
+  owns scheduling; not a polished story for a UI that needs to
+  render local time. Real timezone handling would need a
+  vendored tz-data source (IANA `tzdata`) plus the per-method
+  local-time conversions; deferred until a user actually asks.
+- `Intl` is not implemented — `Intl.NumberFormat`,
+  `Intl.DateTimeFormat`, `Intl.Collator`, `Intl.Segmenter`, etc.
+  are absent. The whole `intl402/` test262 tree is path-skipped
+  (out-of-scope per [AGENTS.md](../AGENTS.md)). Cynic's
+  `localeCompare` returns a canonical-equivalence-aware
+  compare via NFD-then-ordinal (note in §22.1.3.12);
+  case-sensitive Turkish-style collation is what's missing,
+  not basic NFC folding.
 
 **Deferred.** `Temporal` (ES2025) is not implemented yet —
 ~4500 test262 fixtures depend on it. It's a complete date/time
