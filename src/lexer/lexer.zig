@@ -81,7 +81,11 @@ pub const Lexer = struct {
         self.saw_line_terminator = false;
         // §12.5 HashbangComment: `#!` followed by SingleLineCommentChars, only
         // at the very start of the source. Treated like a single-line comment
-        // so the parser never sees a token for it.
+        // so the parser never sees a token for it. SingleLineCommentChars is
+        // "SourceCharacter but not LineTerminator" — and §11.3 LineTerminator
+        // is one of LF, CR, U+2028 LINE SEPARATOR, or U+2029 PARAGRAPH
+        // SEPARATOR. So the hashbang must also terminate at the multi-byte
+        // separators, not just the ASCII pair.
         if (self.pos == 0 and self.source.len >= 2 and
             self.source[0] == '#' and self.source[1] == '!')
         {
@@ -89,6 +93,12 @@ pub const Lexer = struct {
             while (self.pos < self.source.len) {
                 const c = self.source[self.pos];
                 if (c == '\n' or c == '\r') break;
+                if (c >= 0x80) {
+                    const decoded = self.peekUtf8() catch break;
+                    if (isUnicodeLineTerminator(decoded.cp)) break;
+                    self.pos += decoded.len;
+                    continue;
+                }
                 self.pos += 1;
             }
         }

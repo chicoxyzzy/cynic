@@ -528,6 +528,12 @@ const Options = struct {
     /// finding leaks or oversized roots; pair with `--filter`
     /// to keep the output sane.
     gc_stats: bool = false,
+    /// When true, the end-of-sweep tally includes a per-reason
+    /// histogram of the `skip` count (by_path / no_strict /
+    /// unsupported_feature / …). Useful for sizing roadmap work
+    /// — `by_path` is policy-set, `unsupported_feature` is
+    /// feature-flag-set, the rest are corpus-shape skips.
+    skip_breakdown: bool = false,
     /// When >0, print the top-N slowest fixtures after the
     /// final tally. V8 (`--trace-test-runtime`) and JSC's
     /// run-jsc-tests both surface this — long-tail outliers
@@ -660,6 +666,13 @@ const Stats = struct {
     /// `docs/handbook/ses-test262-policy.md`.
     witness_pass: u32 = 0,
     witness_fail: u32 = 0,
+    /// Per-reason histogram of the `skip` count. Indexed by the
+    /// underlying `SkipReason` enum value so callers can sum any
+    /// subset (e.g. "what's the by_path total alone?") without
+    /// re-categorising. Sums to `skip`. Useful when sizing
+    /// roadmap work — `by_path` is policy-set, `unsupported_feature`
+    /// is feature-flag-set, the rest are corpus-shape skips.
+    skip_by_reason: [skip_reason_count]u32 = std.mem.zeroes([skip_reason_count]u32),
 
     fn pass(self: *const Stats) u32 {
         return self.pass_pos + self.pass_neg;
@@ -668,6 +681,8 @@ const Stats = struct {
         return self.fail_reject + self.fail_accept;
     }
 };
+
+const skip_reason_count: usize = @typeInfo(SkipReason).@"enum".fields.len;
 
 /// What kind of outcome to record for a bucket. Mirrors the
 /// three-way grouping the rolled-up `Stats` already uses.
@@ -1517,6 +1532,9 @@ fn runSweep(
         try std.Io.File.stdout().writeStreamingAll(io, banner);
     }
     try printTally(io, &stats, elapsed);
+    if (opts.skip_breakdown) {
+        try printSkipBreakdown(io, &stats);
+    }
     // Diagnostic-flag output is only meaningful for the main phase
     // — pre-Stage-4 sweeps walk a handful of tagged fixtures so
     // slow / heavy / alloc rankings would be noise.
@@ -1735,7 +1753,12 @@ fn recordOutcome(
                 .kind = .fail_false_accept,
             });
         },
-        .skip => stats.skip += 1,
+        .skip => {
+            stats.skip += 1;
+            if (outcome.skip_reason) |reason| {
+                stats.skip_by_reason[@intFromEnum(reason)] += 1;
+            }
+        },
         .fail_divergent => stats.divergent += 1,
     }
     // SES witness side-channel — curated paths that MUST
@@ -1945,6 +1968,9 @@ fn mergeStats(dst: *Stats, src: *const Stats) void {
     dst.divergent += src.divergent;
     dst.witness_pass += src.witness_pass;
     dst.witness_fail += src.witness_fail;
+    inline for (0..skip_reason_count) |i| {
+        dst.skip_by_reason[i] += src.skip_by_reason[i];
+    }
 }
 
 fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
@@ -2057,7 +2083,20 @@ fn classifyAndRun(
     }
 
     if (fm.flags.no_strict) return .{ .kind = .skip, .skip_reason = .no_strict };
-    if (fm.flags.raw) return .{ .kind = .skip, .skip_reason = .raw_flag };
+    // §test262 `flags: [raw]` — the harness MUST NOT prepend any
+    // preamble (sta.js + assert.js + includes). The fixture either
+    // wants byte 0 to start with its own source (hashbang
+    // detection, directive-prologue position-sensitive tests) or
+    // is testing parse-time behavior where a preamble would
+    // confound the result. We skip the preamble downstream by
+    // forcing `harness_pair = null` for this fixture, then proceed
+    // with the regular parse + run path. Every raw fixture in the
+    // corpus today carries `negative: phase: parse` (or
+    // `phase: resolution`) so the test passes when the parser /
+    // linker correctly rejects; the `throw "..."` body in each
+    // fixture is a string-throw fallback that doesn't need
+    // `Test262Error` to register as a failure.
+    const raw = fm.flags.raw;
     // Parser mode used to also skip every fixture with a
     // non-empty `includes:` list (~11k fixtures using
     // `compareArray.js` / `propertyHelper.js` / etc.) on the
@@ -2215,7 +2254,12 @@ fn classifyAndRun(
     // preload happens for both, because modules and scripts share
     // a global env and module bodies reference `assert.*` / $DONE
     // globally.
-    if (harness_pair) |hp| {
+    // `flags: [raw]` (hashbang / directive-prologue / a few module
+    // edge fixtures) demands the source run standalone — no preamble,
+    // no includes. Force `harness_pair` to null for those fixtures
+    // so the loop below short-circuits.
+    const eff_harness: ?harness_mod.HarnessSources = if (raw) null else harness_pair;
+    if (eff_harness) |hp| {
         const r1 = cynic.runtime.evaluateScript(arena, &realm, hp.sta) catch {
             return .{ .kind = .fail_false_reject };
         };
@@ -2782,6 +2826,27 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
             \\
         , .{ stats.witness_pass, witness_total, witness_pct });
         try std.Io.File.stdout().writeStreamingAll(io, wm);
+    }
+}
+
+/// `--skip-breakdown` output: a one-block histogram of the
+/// `skip` count by `SkipReason`. Each row is the reason label,
+/// count, and percent-of-skip. Sums to `stats.skip`. Useful for
+/// sizing roadmap work — `by_path` reflects the policy skiplist,
+/// `unsupported_feature` reflects per-realm feature flags, the
+/// rest are corpus-shape skips that won't move with more
+/// engineering.
+fn printSkipBreakdown(io: std.Io, stats: *const Stats) !void {
+    if (stats.skip == 0) return;
+    var buf: [1024]u8 = undefined;
+    try std.Io.File.stdout().writeStreamingAll(io, "\nskip breakdown:\n");
+    inline for (@typeInfo(SkipReason).@"enum".fields) |f| {
+        const count = stats.skip_by_reason[f.value];
+        if (count > 0) {
+            const pct: f64 = 100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(stats.skip));
+            const line = try std.fmt.bufPrint(&buf, "  {s:<24} {d:>6}  ({d:>5.2}%)\n", .{ f.name, count, pct });
+            try std.Io.File.stdout().writeStreamingAll(io, line);
+        }
     }
 }
 
@@ -4293,6 +4358,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.gc_threshold = std.fmt.parseInt(u32, arg["--gc-threshold=".len..], 10) catch 32768;
         } else if (std.mem.eql(u8, arg, "--gc-stats")) {
             opts.gc_stats = true;
+        } else if (std.mem.eql(u8, arg, "--skip-breakdown")) {
+            opts.skip_breakdown = true;
         } else if (std.mem.startsWith(u8, arg, "--top-slow=")) {
             opts.top_slow = std.fmt.parseInt(u32, arg["--top-slow=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--top-rss=")) {

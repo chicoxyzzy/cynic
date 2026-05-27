@@ -861,6 +861,15 @@ pub const skip_ses_exact_paths = [_][]const u8{
     "language/white-space/string-nbsp.js",
     "language/white-space/string-space.js",
     "language/white-space/string-vertical-tab.js",
+    // `language/comments/hashbang/use-strict.js` — fixture body is
+    // `#!"use strict"` (a hashbang comment) followed by `with ({}) {}`,
+    // asserting that `#!"use strict"` is NOT a directive prologue and
+    // therefore `with` runs in sloppy mode. Cynic is strict-only per
+    // AGENTS.md "Strict-only, non-browser-host target", so the parser
+    // refuses `with` regardless of mode. The fixture carries
+    // `flags: [raw]` (not `[noStrict]`) so the harness's `no_strict`
+    // gate doesn't catch it. Permanent strict-only carve-out.
+    "language/comments/hashbang/use-strict.js",
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
