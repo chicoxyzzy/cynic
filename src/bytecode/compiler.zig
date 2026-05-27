@@ -12091,6 +12091,21 @@ fn compileFunctionTemplateExtNamed(
     // function's first loop claim the outer label.
     const saved_pending_labels = self.pending_labels;
     self.pending_labels = .empty;
+    // §9.5.4 / §14.3.x — `finally_chain` and `current_dispose_
+    // stack` track the enclosing block / for-of's
+    // alloc_dispose_stack register and the synthetic dispose-
+    // finally context. Both belong to the OUTER scope; an inner
+    // function compiled while we're inside a `using` block has
+    // its own scope chain and must NOT inherit them. Without the
+    // reset, `compileReturn` inside the inner function walks the
+    // outer chain and emits a `dispose_stack <r_stack>` op that
+    // references a register the inner function's frame doesn't
+    // have, panicking the interpreter on call. Mirrors the
+    // pending_labels / try_with_handler_depth resets above.
+    const saved_finally_chain = self.finally_chain;
+    self.finally_chain = null;
+    const saved_dispose_stack = self.current_dispose_stack;
+    self.current_dispose_stack = null;
 
     // Reset to a fresh inner state.
     self.builder = self.freshSubBuilder();
@@ -12146,6 +12161,8 @@ fn compileFunctionTemplateExtNamed(
             self.in_tail_position = saved_in_tail_position;
             self.try_with_handler_depth = saved_try_with_handler_depth;
             self.pending_labels = saved_pending_labels;
+            self.finally_chain = saved_finally_chain;
+            self.current_dispose_stack = saved_dispose_stack;
         }
     }
 
@@ -12270,6 +12287,8 @@ fn compileFunctionTemplateExtNamed(
     self.in_tail_position = saved_in_tail_position;
     self.try_with_handler_depth = saved_try_with_handler_depth;
     self.pending_labels = saved_pending_labels;
+    self.finally_chain = saved_finally_chain;
+    self.current_dispose_stack = saved_dispose_stack;
 
     const sp_len = computeSpecLength(params);
     return self.builder.addFunctionTemplate(.{
