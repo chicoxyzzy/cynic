@@ -13,6 +13,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
+const temporal_builtin = @import("temporal.zig");
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
@@ -115,6 +116,9 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "toLocaleString", dateToString, 0);
     try installNativeMethodOnProto(realm, proto, "toLocaleDateString", dateToDateString, 0);
     try installNativeMethodOnProto(realm, proto, "toLocaleTimeString", dateToTimeString, 0);
+    // Temporal proposal — `Date.prototype.toTemporalInstant` bridges a
+    // legacy Date to a Temporal.Instant (epoch ms → epoch ns).
+    try installNativeMethodOnProto(realm, proto, "toTemporalInstant", dateToTemporalInstant, 0);
 
     // §21.4.4.45 Date.prototype[@@toPrimitive] — OrdinaryToPrimitive
     // on the receiver with `tryFirst` determined by the hint. Spec
@@ -1196,4 +1200,19 @@ fn dateGetTzOffset(realm: *Realm, this_value: Value, args: []const Value) Native
     // otherwise returns +0 (no local offset to report).
     if (std.math.isNan(ms)) return Value.fromDouble(std.math.nan(f64));
     return Value.fromInt32(0);
+}
+
+/// Date.prototype.toTemporalInstant ( ) — the Temporal proposal's
+/// bridge from a legacy Date: `ns = NumberToBigInt([[DateValue]]) ×
+/// 10^6`. An invalid (NaN) Date throws RangeError. A finite Date value
+/// is always integral and within ±8.64×10^15 ms, so the resulting
+/// epoch ns is always inside the representable Instant range.
+fn dateToTemporalInstant(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const ms = try requireDateMs(realm, this_value);
+    if (std.math.isNan(ms)) {
+        return throwRangeError(realm, "Cannot convert an invalid Date to a Temporal.Instant");
+    }
+    const ns: i128 = @as(i128, @intFromFloat(ms)) * 1_000_000;
+    return temporal_builtin.createTemporalInstant(realm, ns);
 }
