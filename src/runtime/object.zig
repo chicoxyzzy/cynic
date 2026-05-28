@@ -1672,17 +1672,23 @@ pub const JSObject = struct {
     /// keys (those have their own ordering rule in
     /// `ownPropertyKeysOrdered`), and re-insertions of an existing
     /// key (chronological order is anchored at first insertion).
+    /// Returns `true` when `key` was newly appended to the order
+    /// list, `false` when it was skipped (internal slot, integer
+    /// index, or already present). Callers that anchor the key's
+    /// backing JSString (`setComputedOwned`) use this to anchor
+    /// exactly once — on first insertion.
     pub fn recordKey(
         self: *JSObject,
         allocator: std.mem.Allocator,
         key: []const u8,
-    ) !void {
-        if (std.mem.startsWith(u8, key, "__cynic_")) return;
-        if (canonicalIntegerIndex(key) != null) return;
+    ) !bool {
+        if (std.mem.startsWith(u8, key, "__cynic_")) return false;
+        if (canonicalIntegerIndex(key) != null) return false;
         for (self.own_key_order.items) |existing| {
-            if (std.mem.eql(u8, existing, key)) return;
+            if (std.mem.eql(u8, existing, key)) return false;
         }
         try self.own_key_order.append(allocator, key);
+        return true;
     }
 
     /// §10.1.11 OrdinaryOwnPropertyKeys — drop `key` from the
@@ -1722,15 +1728,22 @@ pub const JSObject = struct {
         }
         const key = key_str.flatBytes();
         const absorbed = try self.shadowSet(allocator, key, v, PropertyFlags.default);
-        try self.recordKey(allocator, key);
-        if (absorbed) {
-            // Shape's transition arena owns its own copy of the
-            // key — `Shape.transition` dupes the bytes. No JSString
-            // anchor needed for the shape-only path.
-            return;
-        }
+        const newly_ordered = try self.recordKey(allocator, key);
+        // `own_key_order` borrows `key_str.bytes` for enumeration
+        // order, so the JSString must be anchored — even when the
+        // write is shape-absorbed. The shape's transition arena dupes
+        // the key only for *value lookup*; `own_key_order` still
+        // points at the JSString, and nothing else pins it in the
+        // absorbed path (the `properties` entry is skipped). Anchor
+        // once, on first insertion only, so repeated writes to the
+        // same key (`for (...) o[k] = i`) don't grow `key_anchors`.
+        // Skipping the anchor let gc-threshold=1 sweep the key out
+        // from under the order slice, observably reordering
+        // Object.keys/values (repro: Iterator.zipKeyed/basic-* under
+        // --enable=joint-iteration).
+        if (newly_ordered) try self.key_anchors.append(allocator, key_str);
+        if (absorbed) return;
         try self.properties.put(allocator, key, v);
-        try self.key_anchors.append(allocator, key_str);
     }
 
     /// Read the (possibly defaulted) descriptor flags for
@@ -1817,7 +1830,7 @@ pub const JSObject = struct {
         // headline Phase 3 perf win (see
         // [docs/lazy-property-bag.md]).
         const absorbed = try self.shadowSet(allocator, key, v, flags);
-        try self.recordKey(allocator, key);
+        _ = try self.recordKey(allocator, key);
         if (absorbed) {
             // Shape encodes the attrs on the transition node —
             // no `property_flags` entry needed. Clear any stale
@@ -1899,7 +1912,7 @@ pub const JSObject = struct {
         // Try the shape-first path. On absorption the slot is the
         // source of truth and the bag write is skipped.
         const absorbed = try self.shadowSet(allocator, key, v, PropertyFlags.default);
-        try self.recordKey(allocator, key);
+        _ = try self.recordKey(allocator, key);
         if (absorbed) return;
         try self.properties.put(allocator, key, v);
     }
@@ -2077,7 +2090,7 @@ pub const JSObject = struct {
         }
         const cur_flags = self.flagsFor(key);
         const absorbed = try self.shadowSet(allocator, key, v, cur_flags);
-        try self.recordKey(allocator, key);
+        _ = try self.recordKey(allocator, key);
         if (absorbed) return true;
         try self.properties.put(allocator, key, v);
         return true;

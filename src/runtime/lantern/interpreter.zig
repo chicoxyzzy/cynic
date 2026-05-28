@@ -6111,7 +6111,7 @@ pub fn runFrames(
             }
             // §10.1.11 OrdinaryOwnPropertyKeys — accessor counts as
             // an own key for enumeration order.
-            obj.recordKey(allocator, key_s.flatBytes()) catch return error.OutOfMemory;
+            _ = obj.recordKey(allocator, key_s.flatBytes()) catch return error.OutOfMemory;
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
 
@@ -6154,7 +6154,7 @@ pub fn runFrames(
             } else {
                 realm.heap.setAccessorGetter(.{ .object = obj }, entry.value_ptr, fn_obj);
             }
-            obj.recordKey(allocator, owned.flatBytes()) catch return error.OutOfMemory;
+            _ = obj.recordKey(allocator, owned.flatBytes()) catch return error.OutOfMemory;
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
 

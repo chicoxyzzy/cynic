@@ -1762,7 +1762,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // order. The matching `properties.swapRemove(key)` above
             // does NOT call `forgetKey` because data→accessor
             // conversion preserves the original insertion slot.
-            target.recordKey(realm.allocator, key) catch return error.OutOfMemory;
+            _ = target.recordKey(realm.allocator, key) catch return error.OutOfMemory;
             // The accessors map borrows the `key` slice; anchor the
             // heap-allocated key JSString so a GC sweep can't free
             // it. Symbol keys (null anchor) are stable on their own.
@@ -1873,7 +1873,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                 target_fn.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
             }
             // §10.1.11 — track function objects' own keys too.
-            target_fn.recordKey(realm.allocator, key) catch return error.OutOfMemory;
+            _ = target_fn.recordKey(realm.allocator, key) catch return error.OutOfMemory;
             // Anchor the borrowed heap key string on the function.
             if (dk.anchor) |ks| target_fn.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
             return target_v;
