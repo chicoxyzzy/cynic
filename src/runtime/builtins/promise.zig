@@ -982,6 +982,16 @@ fn promiseResolve(realm: *Realm, this_value: Value, args: []const Value) NativeE
         if (heap_mod.valueAsPlainObject(v)) |_| {
             const pending = allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
             const target = heap_mod.valueAsPlainObject(pending).?;
+            // `promiseResolveImpl` re-enters JS — `Get(v, "then")`
+            // runs a user accessor / the thenable job — and can GC.
+            // `pending` is a native local the GC can't see; root it
+            // across the call so it isn't swept out from under the
+            // `return`. gc-threshold=1 repro: `Promise.resolve(
+            // poisonedThen)` returned a freed Promise, and the
+            // subsequent `.then` segfaulted deref'ing its shape.
+            const scope = realm.heap.openScope() catch return error.OutOfMemory;
+            defer scope.close();
+            scope.push(pending) catch return error.OutOfMemory;
             const resolve_args = [_]Value{v};
             _ = try promiseResolveImpl(realm, heap_mod.taggedObject(target), &resolve_args);
             return pending;

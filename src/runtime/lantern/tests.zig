@@ -4764,6 +4764,35 @@ test "GC: Promise microtask chain survives gc_threshold=1" {
     , 111);
 }
 
+test "GC: Promise.resolve(thenable) survives gc_threshold=1" {
+    // §27.2.4.7 fast path allocates a pending Promise, then calls
+    // the resolve function which runs Get(resolution, "then") — a
+    // user accessor that re-enters JS and GCs. `pending` is a native
+    // local the GC can't see; without rooting it across that call,
+    // gc_threshold=1 swept it and `Promise.resolve(t)` returned a
+    // freed Promise whose `.then` segfaulted on the dangling shape.
+    try expectScriptIntUnderGcPressure(
+        \\var t = Object.defineProperty({}, 'then', { get: function() { throw 7; } });
+        \\var acc = -1;
+        \\Promise.resolve(t).then(function() { acc = 0; }, function(e) { acc = e; });
+        \\globalThis.__drainMicrotasks();
+        \\acc;
+    , 7);
+}
+
+test "GC: computed-key enumeration order survives gc_threshold=1" {
+    // `o["k" + i] = i` allocates a fresh JSString key each iter and
+    // borrows its bytes for `own_key_order`. Without anchoring the
+    // JSString (the shape-absorbed `setComputedOwned` path), a sweep
+    // freed the key out from under the order slice and Object.keys
+    // came back reordered / corrupted under gc_threshold=1.
+    try expectScriptStringUnderGcPressure(
+        \\var o = {};
+        \\for (var i = 0; i < 12; i++) o["k" + i] = i;
+        \\Object.keys(o).join(",");
+    , "k0,k1,k2,k3,k4,k5,k6,k7,k8,k9,k10,k11");
+}
+
 test "GC: long Promise microtask chain survives alternating GC pressure" {
     // The 3-deep chain above doesn't surface two interacting
     // hazards: (1) the colour-flip cross-cycle stale-mark hazard
