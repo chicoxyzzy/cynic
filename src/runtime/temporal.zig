@@ -1564,6 +1564,18 @@ pub fn nanosecondsToTimeRecord(ns_in_day: i128) PlainTimeRecord {
     };
 }
 
+/// Whether a duration carries calendar units (years/months/weeks),
+/// which need a relativeTo reference to interpret.
+pub fn hasCalendarUnits(d: DurationRecord) bool {
+    return d.years != 0 or d.months != 0 or d.weeks != 0;
+}
+
+/// Total nanoseconds of a calendar-unit-free duration, each day a fixed
+/// 24 h. Callers must verify `hasCalendarUnits(d)` is false first.
+pub fn dayTimeDurationNanoseconds(d: DurationRecord) i128 {
+    return f64ToI128(d.days) * 86_400_000_000_000 + timeDurationNanoseconds(d);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1698,6 +1710,14 @@ test "time record <-> nanoseconds round trip" {
     try testing.expectEqual(@as(u32, 789), back.nanosecond);
     try testing.expectEqual(@as(i128, 0), timeRecordToNanoseconds(.{}));
     try testing.expectEqual(@as(u32, 23), nanosecondsToTimeRecord(86_399_999_999_999).hour);
+}
+
+test "dayTimeDurationNanoseconds + hasCalendarUnits" {
+    try testing.expect(!hasCalendarUnits(.{ .days = 5, .hours = 1 }));
+    try testing.expect(hasCalendarUnits(.{ .years = 1 }));
+    try testing.expect(hasCalendarUnits(.{ .weeks = 1 }));
+    try testing.expectEqual(@as(i128, 90_000_000_000_000), dayTimeDurationNanoseconds(.{ .days = 1, .hours = 1 }));
+    try testing.expectEqual(@as(i128, -86_400_000_000_000), dayTimeDurationNanoseconds(.{ .days = -1 }));
 }
 
 test "durationSign: first non-zero field decides" {

@@ -452,37 +452,108 @@ fn durationFrom(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     return createTemporalDuration(realm, d);
 }
 
-/// §7.2.3 Temporal.Duration.compare — without a relativeTo, only
-/// durations whose largest unit is days-or-smaller can be compared
-/// (calendar units need a reference point). Deferred: the full
-/// TimeDuration normalisation. Throws for now.
-fn durationCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value;
-    _ = args;
-    return throwTypeError(realm, "Temporal.Duration.compare is not yet implemented");
+/// Whether an options bag carries a present `relativeTo` — the
+/// calendar / zoned-anchored path, which Cynic defers.
+fn relativeToPresent(realm: *Realm, opts: ?*JSObject) NativeError!bool {
+    const obj = opts orelse return false;
+    const v = try getPropertyChain(realm, obj, "relativeTo");
+    return !v.isUndefined();
 }
 
-// Deferred arithmetic — present for shape, throw until the
-// TimeDuration machinery lands.
+/// The larger-magnitude of two largest units (smaller enum index wins).
+fn largerLargestUnit(a: temporal.LargestUnit, b: temporal.LargestUnit) temporal.LargestUnit {
+    return if (@intFromEnum(a) < @intFromEnum(b)) a else b;
+}
+
+/// §7.3.x Temporal.Duration.compare ( one, two [, options] ). Without a
+/// relativeTo, calendar units (years/months/weeks) can't be ordered and
+/// throw; day-and-smaller durations compare by total nanoseconds (each
+/// day a fixed 24 h). The relativeTo path is deferred.
+fn durationCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const one = try toTemporalDuration(realm, argOr(args, 0, Value.undefined_));
+    if (!temporal.isValidDuration(one)) return throwRangeError(realm, "Duration values are out of range");
+    const two = try toTemporalDuration(realm, argOr(args, 1, Value.undefined_));
+    if (!temporal.isValidDuration(two)) return throwRangeError(realm, "Duration values are out of range");
+    const opts = try getOptionsObject(realm, argOr(args, 2, Value.undefined_));
+    if (try relativeToPresent(realm, opts)) {
+        return throwTypeError(realm, "Temporal.Duration.compare with relativeTo is not yet implemented");
+    }
+    if (temporal.hasCalendarUnits(one) or temporal.hasCalendarUnits(two)) {
+        return throwRangeError(realm, "a relativeTo is required to compare durations with calendar units");
+    }
+    const ns_one = temporal.dayTimeDurationNanoseconds(one);
+    const ns_two = temporal.dayTimeDurationNanoseconds(two);
+    const cmp: i32 = if (ns_one < ns_two) -1 else if (ns_one > ns_two) 1 else 0;
+    return Value.fromInt32(cmp);
+}
+
+/// §7.3.x AddDurations — `add` (sign +1) / `subtract` (−1). These take
+/// no relativeTo, so calendar units (years/months/weeks) are
+/// unorderable and throw; day-and-smaller durations combine by total
+/// nanoseconds and re-balance to the larger of the two largest units.
+fn durationAddSubtract(realm: *Realm, this_value: Value, other_v: Value, sign: i128) NativeError!Value {
+    const a = try requireDuration(realm, this_value);
+    const b = try toTemporalDuration(realm, other_v);
+    if (!temporal.isValidDuration(b)) return throwRangeError(realm, "Duration values are out of range");
+    if (temporal.hasCalendarUnits(a) or temporal.hasCalendarUnits(b)) {
+        return throwRangeError(realm, "a relativeTo is required to add durations with calendar units");
+    }
+    const total = temporal.dayTimeDurationNanoseconds(a) + temporal.dayTimeDurationNanoseconds(b) * sign;
+    const largest = largerLargestUnit(temporal.defaultTemporalLargestUnit(a), temporal.defaultTemporalLargestUnit(b));
+    return createTemporalDuration(realm, temporal.balanceTimeDuration(total, largest));
+}
+
 fn durationAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requireDuration(realm, this_value);
-    return throwTypeError(realm, "Temporal.Duration.prototype.add is not yet implemented");
+    return durationAddSubtract(realm, this_value, argOr(args, 0, Value.undefined_), 1);
 }
+
 fn durationSubtract(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requireDuration(realm, this_value);
-    return throwTypeError(realm, "Temporal.Duration.prototype.subtract is not yet implemented");
+    return durationAddSubtract(realm, this_value, argOr(args, 0, Value.undefined_), -1);
 }
+
+/// Deferred — rounding/balancing calendar units against a relativeTo
+/// reference still needs the calendar path.
 fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     _ = try requireDuration(realm, this_value);
     return throwTypeError(realm, "Temporal.Duration.prototype.round is not yet implemented");
 }
+
+/// §7.3.x Temporal.Duration.prototype.total ( totalOf ). A string
+/// selects the unit; an options bag may also carry relativeTo
+/// (deferred). For a day-or-smaller unit and a calendar-unit-free
+/// duration, returns the ratio as a Number.
 fn durationTotal(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requireDuration(realm, this_value);
-    return throwTypeError(realm, "Temporal.Duration.prototype.total is not yet implemented");
+    const d = try requireDuration(realm, this_value);
+    const total_of = argOr(args, 0, Value.undefined_);
+    if (total_of.isUndefined()) {
+        return throwTypeError(realm, "Temporal.Duration.prototype.total requires a unit");
+    }
+    var unit_opt: ?temporal.LargestUnit = null;
+    if (total_of.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(total_of.asString()));
+        unit_opt = temporal.parseTemporalUnit(s.flatBytes());
+    } else {
+        const opts = try getOptionsObject(realm, total_of);
+        if (try relativeToPresent(realm, opts)) {
+            return throwTypeError(realm, "Temporal.Duration.prototype.total with relativeTo is not yet implemented");
+        }
+        unit_opt = try getTemporalUnitOption(realm, opts, "unit");
+    }
+    const unit = unit_opt orelse return throwRangeError(realm, "a unit is required");
+    if (@intFromEnum(unit) < @intFromEnum(temporal.LargestUnit.day)) {
+        return throwTypeError(realm, "totalling a calendar unit requires relativeTo (not yet implemented)");
+    }
+    if (temporal.hasCalendarUnits(d)) {
+        return throwRangeError(realm, "a relativeTo is required to total a duration with calendar units");
+    }
+    const total_ns = temporal.dayTimeDurationNanoseconds(d);
+    const unit_ns = temporal.unitNanoseconds(unit);
+    const q = @divTrunc(total_ns, unit_ns);
+    const r = @rem(total_ns, unit_ns);
+    const result: f64 = @as(f64, @floatFromInt(q)) + @as(f64, @floatFromInt(r)) / @as(f64, @floatFromInt(unit_ns));
+    return Value.fromDouble(result);
 }
 
 // ── §4 Temporal.PlainTime ────────────────────────────────────────────────
