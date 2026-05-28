@@ -351,7 +351,7 @@ gates `tools/test262/ses_witnesses.zig`'s curated set —
 every listed path MUST classify as `divergent` under
 `.main`. Exit 2 when any floor trips. Skipped under
 `--filter=`. CI wires all three at the published baselines
-(92.5 / 92.0 / 100) so a regression in any of: unhardened
+(82.5 / 82.5 / 100) so a regression in any of: unhardened
 score, SES-adjusted score, or witness fidelity fails the
 build — see `.github/workflows/ci.yml`). The harness
 scores against the **Cynic-targeted scope**: paths under

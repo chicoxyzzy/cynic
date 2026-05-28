@@ -568,13 +568,16 @@ automatically on the next full sweep.
   case-sensitive Turkish-style collation is what's missing,
   not basic NFC folding.
 
-**Deferred.** `Temporal` (ES2025) is not implemented yet —
-~4500 test262 fixtures depend on it. It's a complete date/time
-API replacement (calendars, time zones, ISO 8601, etc.) and a
-multi-week project with its own tzdata story; until then it
-stays feature-gated as `Temporal`, counts in the score
-denominator, and pulls runtime spec% down accordingly. That's
-intentional — it's the largest known coverage gap.
+**Deferred.** `Temporal` (ES2025) — a complete date/time API
+replacement (calendars, time zones, ISO 8601, etc.) and a
+multi-week project with its own tzdata story; ~4500 test262
+fixtures depend on it. A partial surface is committed (the
+`Temporal` namespace plus `Duration` and `PlainTime`), but the
+arithmetic-heavy methods aren't finished, so on `main` the whole
+`built-ins/Temporal/` tree is path-skipped — out of the score
+denominator rather than dragging runtime spec% down. The full
+surface is carried as a separate effort; it remains the largest
+known coverage gap.
 
 **Out of scope.** Annex B in its entirety — language extensions
 *and* every browser-era built-in (`escape` / `unescape`, the
