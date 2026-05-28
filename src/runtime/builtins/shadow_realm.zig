@@ -520,6 +520,20 @@ fn wrappedTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nati
 ///   5. Let result be ? Call(target, undefined, wrappedArgs).
 ///   6. If result is abrupt, throw a TypeError in callerRealm.
 ///   7. Else return ? GetWrappedValue(callerRealm, result).
+/// §10.2.5 GetFunctionRealm for a Value: a JSFunction reports its
+/// own realm (walking the bound chain); a callable Proxy reports
+/// its target's realm (step 3.b, recursing through nested
+/// proxies). `null` when no realm is reachable (caller falls back
+/// to the running realm).
+fn targetRealmOf(target_v: Value) ?*Realm {
+    if (heap_mod.valueAsFunction(target_v)) |f| return f.getFunctionRealm();
+    if (heap_mod.valueAsPlainObject(target_v)) |obj| {
+        if (obj.proxy_target_fn) |tfn| return tfn.getFunctionRealm();
+        if (obj.proxy_target) |t| return targetRealmOf(heap_mod.taggedObject(t));
+    }
+    return null;
+}
+
 pub fn callWrappedFunction(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -539,14 +553,14 @@ pub fn callWrappedFunction(
             return .{ .thrown = ex };
         }
     }
-    // For JSFunction targets, ask the function for its realm.
-    // For callable-proxy targets, default to caller realm — the
-    // proxy's [[Call]] trap runs in whichever realm the underlying
-    // target was defined in anyway.
-    const target_realm: *Realm = if (heap_mod.valueAsFunction(target_v)) |tf|
-        tf.getFunctionRealm() orelse realm
-    else
-        realm;
+    // Step 3 — §10.2.5 GetFunctionRealm. For a JSFunction, ask the
+    // function. For a callable Proxy, recurse to its target
+    // (§10.2.5 step 3.b) — the proxy's realm is its target's realm.
+    // Critical: a proxy's `apply` trap is a closure of the realm
+    // the proxy was created in, so it must run with THAT realm as
+    // the interpreter's `realm` (else a global the trap references
+    // resolves against the wrong globals and throws).
+    const target_realm: *Realm = targetRealmOf(target_v) orelse realm;
 
     // Step 4 — marshal each arg from callerRealm into targetRealm.
     // §3.8.3.6 step 5 NOTE: "Any exception objects produced
