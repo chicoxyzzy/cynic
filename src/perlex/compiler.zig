@@ -15,6 +15,12 @@ const Node = parser.Node;
 /// with more groups fall back to the vendored matcher.
 pub const max_groups = 64;
 
+/// Bounded quantifiers are lowered by inlining the body, so a huge
+/// bound (`a{0,4294967295}`) would emit billions of instructions.
+/// Patterns whose mandatory or optional iteration count exceeds this
+/// fall back to the vendored matcher's counted-loop lowering.
+pub const max_repeat_expand = 1024;
+
 pub const Flags = packed struct {
     global: bool = false,
     ignore_case: bool = false,
@@ -50,6 +56,12 @@ pub const Inst = union(enum) {
     /// whichever listed group participated (§22.2.2 with duplicate
     /// group names). At most one can be set, per the early error.
     backref_dup: []const usize,
+    /// Match one code unit against a class (`.`, `[…]`, `\d`/`\w`/`\s`
+    /// and negated forms), advancing on success. `ranges` is owned by
+    /// the program.
+    class: parser.Node.Class,
+    /// `\b` (false) / `\B` (true) word-boundary assertion.
+    word_boundary: bool,
 
     pub const Split = struct { a: usize, b: usize };
     pub const Range = struct { from: usize, to: usize };
@@ -73,7 +85,11 @@ pub const Program = struct {
 
     pub fn deinit(self: *Program) void {
         for (self.insts) |inst| {
-            if (inst == .backref_dup) self.gpa.free(inst.backref_dup);
+            switch (inst) {
+                .backref_dup => |idxs| self.gpa.free(idxs),
+                .class => |cls| self.gpa.free(cls.ranges),
+                else => {},
+            }
         }
         self.gpa.free(self.insts);
         for (self.names) |maybe| {
@@ -142,7 +158,11 @@ const Compiler = struct {
 
     fn deinitPartial(self: *Compiler) void {
         for (self.insts.items) |inst| {
-            if (inst == .backref_dup) self.gpa.free(inst.backref_dup);
+            switch (inst) {
+                .backref_dup => |idxs| self.gpa.free(idxs),
+                .class => |cls| self.gpa.free(cls.ranges),
+                else => {},
+            }
         }
         self.insts.deinit(self.gpa);
     }
@@ -161,6 +181,16 @@ const Compiler = struct {
             .char => |ch| try self.emit(.{ .char = ch }),
             .anchor_start => try self.emit(.assert_start),
             .anchor_end => try self.emit(.assert_end),
+            .word_boundary => |neg| try self.emit(.{ .word_boundary = neg }),
+            .class => |cls| {
+                // Copy the ranges into program-owned memory (the AST is
+                // arena/const and freed after compilation).
+                const ranges = try self.gpa.dupe(parser.Node.ClassRange, cls.ranges);
+                self.emit(.{ .class = .{ .negated = cls.negated, .ranges = ranges } }) catch |e| {
+                    self.gpa.free(ranges);
+                    return e;
+                };
+            },
             .concat => |parts| for (parts) |part| try self.compileNode(part),
             .noncapture => |body| try self.compileNode(body),
             .capture => |g| {
@@ -195,18 +225,61 @@ const Compiler = struct {
     }
 
     fn compileRepeat(self: *Compiler, r: Node.Repeat) CompileError!void {
-        // v1 lowers only the exact `{n}` form (min == max), as `n`
-        // inline copies. Each copy clears the body's capture slots
-        // first so a later iteration that doesn't re-capture a group
-        // leaves it undefined (§22.2.2.3 step 4) — the behaviour the
-        // duplicate-named-group "last iteration wins" fixtures probe.
-        std.debug.assert(r.min == r.max);
-        const range = groupSlotRange(r.body);
+        // A quantified body that can match the empty string risks a
+        // zero-width infinite loop; the §22.2.2.3 progress guard for
+        // that case isn't built yet, so defer such patterns to the
+        // fallback. With a non-nullable body every iteration consumes
+        // at least one code unit, so the loops below terminate.
+        if (nullable(r.body)) return error.Unsupported;
+
+        // Inline expansion would blow up for huge bounds; defer those.
+        if (r.min > max_repeat_expand) return error.Unsupported;
+        if (r.max != parser.unbounded_max and r.max - r.min > max_repeat_expand) return error.Unsupported;
+
+        // `min` mandatory iterations.
         var i: usize = 0;
-        while (i < r.min) : (i += 1) {
-            if (range) |rng| try self.emit(.{ .clear = rng });
-            try self.compileNode(r.body);
+        while (i < r.min) : (i += 1) try self.compileIteration(r.body);
+
+        if (r.max == parser.unbounded_max) {
+            // Greedy/lazy star over the body.
+            const loop = self.here();
+            const split_idx = self.here();
+            try self.emit(.{ .split = .{ .a = 0, .b = 0 } });
+            const body_start = self.here();
+            try self.compileIteration(r.body);
+            try self.emit(.{ .jmp = loop });
+            const exit = self.here();
+            self.insts.items[split_idx].split = if (r.greedy)
+                .{ .a = body_start, .b = exit }
+            else
+                .{ .a = exit, .b = body_start };
+        } else {
+            // `max - min` optional, each-skippable iterations.
+            var splits: std.ArrayListUnmanaged(usize) = .empty;
+            defer splits.deinit(self.gpa);
+            var k = r.min;
+            while (k < r.max) : (k += 1) {
+                try splits.append(self.gpa, self.here());
+                try self.emit(.{ .split = .{ .a = 0, .b = 0 } });
+                try self.compileIteration(r.body);
+            }
+            const exit = self.here();
+            for (splits.items) |s| {
+                const body_start = s + 1;
+                self.insts.items[s].split = if (r.greedy)
+                    .{ .a = body_start, .b = exit }
+                else
+                    .{ .a = exit, .b = body_start };
+            }
         }
+    }
+
+    /// One quantifier iteration: clear the body's captures (§22.2.2.3
+    /// step 4, so a later iteration that doesn't re-capture a group
+    /// leaves it undefined) then match the body.
+    fn compileIteration(self: *Compiler, body: *const Node) CompileError!void {
+        if (groupSlotRange(body)) |rng| try self.emit(.{ .clear = rng });
+        try self.compileNode(body);
     }
 
     fn compileBackref(self: *Compiler, name: []const u8) CompileError!void {
@@ -228,12 +301,37 @@ const Compiler = struct {
     }
 };
 
+/// Whether a subtree can match the empty string. A quantifier over a
+/// nullable body needs the §22.2.2.3 zero-width progress guard, which
+/// isn't built yet — such bodies are declined to the fallback.
+fn nullable(node: *const Node) bool {
+    return switch (node.*) {
+        .empty, .anchor_start, .anchor_end, .word_boundary, .backref_name => true,
+        .char, .class => false,
+        .noncapture => |b| nullable(b),
+        .capture => |g| nullable(g.body),
+        .repeat => |r| r.min == 0 or nullable(r.body),
+        .concat => |parts| {
+            for (parts) |p| {
+                if (!nullable(p)) return false;
+            }
+            return true;
+        },
+        .alternate => |alts| {
+            for (alts) |a| {
+                if (nullable(a)) return true;
+            }
+            return false;
+        },
+    };
+}
+
 /// Inclusive capture-slot range covered by a subtree, or null if it
 /// contains no capturing groups. Used to clear a quantified body's
 /// captures between iterations.
 fn groupSlotRange(node: *const Node) ?Inst.Range {
     return switch (node.*) {
-        .empty, .char, .anchor_start, .anchor_end, .backref_name => null,
+        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .class, .backref_name => null,
         .noncapture => |body| groupSlotRange(body),
         .repeat => |r| groupSlotRange(r.body),
         .capture => |g| blk: {

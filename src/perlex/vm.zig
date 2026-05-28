@@ -24,6 +24,15 @@ const std = @import("std");
 const compiler = @import("compiler.zig");
 const Program = compiler.Program;
 
+/// §22.2.1 word character: `[A-Za-z0-9_]`. Accepts either code-unit
+/// width; non-ASCII units are never word characters in this set.
+fn isWordChar(c: anytype) bool {
+    return (c >= 'a' and c <= 'z') or
+        (c >= 'A' and c <= 'Z') or
+        (c >= '0' and c <= '9') or
+        c == '_';
+}
+
 /// Sentinel for a capture slot that did not participate. Real offsets
 /// are bounded by the input length, well below `maxInt`.
 pub const none: usize = std.math.maxInt(usize);
@@ -162,6 +171,31 @@ fn Matcher(comptime Unit: type) type {
                     .assert_end => {
                         // Non-multiline `$`: input end only.
                         if (sp == self.input.len) {
+                            pc += 1;
+                            continue;
+                        }
+                    },
+                    .class => |cls| {
+                        if (sp < self.input.len) {
+                            const cu: u21 = self.input[sp];
+                            var inside = false;
+                            for (cls.ranges) |r| {
+                                if (cu >= r.lo and cu <= r.hi) {
+                                    inside = true;
+                                    break;
+                                }
+                            }
+                            if (inside != cls.negated) {
+                                sp += 1;
+                                pc += 1;
+                                continue;
+                            }
+                        }
+                    },
+                    .word_boundary => |negated| {
+                        const before = sp > 0 and isWordChar(self.input[sp - 1]);
+                        const after = sp < self.input.len and isWordChar(self.input[sp]);
+                        if ((before != after) != negated) {
                             pc += 1;
                             continue;
                         }
