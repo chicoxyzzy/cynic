@@ -1040,7 +1040,10 @@ pub const stage_maturity_path_prefixes = [_][]const u8{
 // Reviewed each libregexp / Unicode bump.
 
 pub const vendor_features = [_][]const u8{
-    "regexp-duplicate-named-groups", // ES2025 — libregexp gap.
+    // (regexp-duplicate-named-groups graduated out: the native Perlex
+    //  engine — src/perlex/ — handles duplicate named capture groups
+    //  and resolves `\k<name>` to whichever same-named group
+    //  participated, which the vendored matcher rejects outright.)
     "regexp-modifiers", // ES2024 inline `(?i:…)` / `(?-i:…)`.
     // (Stage 4 explicit-resource-management used to skip here. The
     // full surface shipped: `Symbol.dispose` / `Symbol.asyncDispose`
@@ -1539,7 +1542,6 @@ test "skip: unsupported features — stage maturity + planned" {
     try testing.expect(featureIsUnsupported("source-phase-imports"));
     // Planned — libregexp.
     try testing.expect(featureIsUnsupported("regexp-modifiers"));
-    try testing.expect(featureIsUnsupported("regexp-duplicate-named-groups"));
     // explicit-resource-management is supported (full surface
     // shipped); it must NOT be flagged unsupported.
     try testing.expect(!featureIsUnsupported("explicit-resource-management"));
@@ -1579,6 +1581,8 @@ test "skip: runtime-only gaps are NOT hidden" {
 test "skip: shipping features not flagged unsupported" {
     try testing.expect(!featureIsUnsupported("regexp-v-flag")); // libregexp partial; positive forms ship
     try testing.expect(!featureIsUnsupported("regexp-named-groups"));
+    try testing.expect(!featureIsUnsupported("regexp-duplicate-named-groups")); // native Perlex engine
+
     try testing.expect(!featureIsUnsupported("class"));
     try testing.expect(!featureIsUnsupported("optional-chaining"));
     try testing.expect(!featureIsUnsupported("async-functions"));
