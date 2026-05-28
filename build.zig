@@ -247,7 +247,10 @@ pub fn build(b: *std.Build) void {
     });
     const run_bench = b.addRunArtifact(bench_exe);
     run_bench.step.dependOn(&install_cynic_fast.step);
-    const bench_step = b.step("bench", "Run the micro-bench suite (medians of 5)");
+    // Forward args after `--` so `zig build bench -- --runs=40`
+    // reaches the driver (tail-percentile sample-budget knob).
+    if (b.args) |args| run_bench.addArgs(args);
+    const bench_step = b.step("bench", "Run the micro-bench suite (p50 + spread + outliers; --runs=N for tail percentiles)");
     bench_step.dependOn(&run_bench.step);
 
     // -----------------------------------------------------------------

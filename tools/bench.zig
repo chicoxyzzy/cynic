@@ -1,8 +1,20 @@
 //! Micro-bench driver — spawns `zig-out/bin/cynic run` per fixture
 //! in `bench/micros/`, captures wall time + peak RSS via rusage on
-//! the child, runs each fixture 10× after a discarded warmup,
-//! reports the median (avg of the two middle samples for the
-//! even count).
+//! the child, runs each fixture N× (default 10) after a discarded
+//! warmup, and reports p50 (true median), min, max, relative spread,
+//! and a Tukey-fence outlier count.
+//!
+//! Tail percentiles (p95 / p99) are mitata-inspired but honest about
+//! sample size: with only 10 samples the 95th/99th percentile
+//! collapses onto `max` (nearest-rank index N-1), so those columns
+//! stay hidden until the budget supports them — p95 at N ≥ 20,
+//! p99 at N ≥ 100. Raise the budget with `--runs=<N>` (which then
+//! lights up the columns automatically).
+//!
+//! Outliers are *reported, never deleted*: p50 / min / max are
+//! computed over the full sample set. The count is how many samples
+//! sit above the Tukey fence Q3 + 1.5·IQR — a quick "is this
+//! fixture's median trustworthy this run" signal.
 //!
 //! Phase 1 of docs/benchmarking.md — single-engine perf telemetry
 //! to surface regressions per commit. Cross-engine (jsvu /
@@ -10,6 +22,8 @@
 //!
 //! Usage:
 //!   zig build bench
+//!   zig build bench -- --runs=40    # wider budget; lights up p95
+//!   zig build bench -- --runs=200   # lights up p95 + p99
 //!
 //! Bench host expectations (see docs/benchmarking.md §Stability):
 //!   - Quiet machine; CPU affinity helps on Linux (`taskset -c 0`)
@@ -19,18 +33,30 @@
 
 const std = @import("std");
 
-// 10 timed runs + 1 discarded warmup. Matched with the cross-
-// engine harness in `tools/bench-cross.sh` so single-engine
+// Default 10 timed runs + 1 discarded warmup. Matched with the
+// cross-engine harness in `tools/bench-cross.sh` so single-engine
 // and cross-engine numbers come out of the same sample budget.
-// 5-run medians were too sensitive to one-off OS scheduling
-// jitter on a shared machine (parallel agent's bench / GC pulse
-// landing during one iteration); 10 samples halve the
-// per-fixture variance without doubling the wall-time. Even
-// count means `medianStats` returns the average of the two
-// middle samples — a true statistical median, not the upper-
-// middle pick used by simpler implementations.
-const RUNS_PER_FIXTURE = 10;
+// 5-run medians were too sensitive to one-off OS scheduling jitter
+// on a shared machine (parallel agent's bench / GC pulse landing
+// during one iteration); 10 samples halve the per-fixture variance
+// without doubling the wall-time. Even count means the p50 path
+// returns the average of the two middle samples — a true
+// statistical median, not the upper-middle pick used by simpler
+// implementations.
+//
+// `--runs=<N>` overrides the default at runtime (clamped to
+// MAX_RUNS). The samples live in a fixed stack buffer, so no
+// allocation — MAX_RUNS just caps it.
+const DEFAULT_RUNS = 10;
+const MAX_RUNS = 1024;
 const WARMUP_RUNS = 1;
+
+// Percentile gating: a percentile is only worth printing when its
+// nearest-rank index lands strictly below `max` (index N-1).
+//   p95 distinct when ceil(0.95·N) < N  ⇒  N ≥ 20
+//   p99 distinct when ceil(0.99·N) < N  ⇒  N ≥ 100
+const P95_MIN_SAMPLES = 20;
+const P99_MIN_SAMPLES = 100;
 
 const Bench = struct {
     name: []const u8,
@@ -59,10 +85,20 @@ const Sample = struct {
 };
 
 const Stats = struct {
-    median_wall_ms: f64,
-    median_rss_kb: usize,
+    p50_wall_ms: f64,
+    /// Present only when the sample count supports it (N ≥ 20 / 100);
+    /// otherwise null and the column is hidden so it can't masquerade
+    /// as a distinct value when it's really just `max`.
+    p95_wall_ms: ?f64,
+    p99_wall_ms: ?f64,
     min_wall_ms: f64,
     max_wall_ms: f64,
+    /// (max − min) / p50 × 100. Dispersion at a glance; works at any N.
+    spread_pct: f64,
+    /// Count of samples above the Tukey fence Q3 + 1.5·IQR. Reported,
+    /// not deleted — every sample still feeds p50 / min / max.
+    outliers: usize,
+    median_rss_kb: usize,
 };
 
 /// Run `cynic run <fixture>` once. Capture wall time across the
@@ -106,35 +142,96 @@ fn runOnce(
     };
 }
 
-fn medianStats(samples: []Sample) Stats {
+/// Nearest-rank percentile over a wall-time-sorted slice. `p` in
+/// 1..100. rank = ceil(p/100 · N); index = rank − 1, clamped.
+fn percentileUs(sorted: []const Sample, p: u8) i64 {
+    const n = sorted.len;
+    var rank = (@as(usize, p) * n + 99) / 100; // ceil(p·n/100)
+    if (rank < 1) rank = 1;
+    if (rank > n) rank = n;
+    return sorted[rank - 1].wall_us;
+}
+
+fn usToMs(us: i64) f64 {
+    return @as(f64, @floatFromInt(us)) / 1000.0;
+}
+
+/// Sort `samples` by wall time, then derive the full Stats. p50 uses
+/// the interpolated true-median (avg of the two middles on even N)
+/// for headline stability; the tail percentiles and quartiles use
+/// nearest-rank, which is plenty for gated columns and an outlier
+/// count.
+fn computeStats(samples: []Sample) Stats {
     std.mem.sort(Sample, samples, {}, struct {
         fn lt(_: void, a: Sample, b: Sample) bool {
             return a.wall_us < b.wall_us;
         }
     }.lt);
-    // True median: for odd N return the middle sample, for even
-    // N return the average of the two middle samples. Avoids the
-    // upward bias of the simpler `samples[len/2]` shortcut when
-    // the sample count is even (the shortcut picks the higher of
-    // the two middles).
-    const wall_us_median: i64 = if (samples.len & 1 == 1)
-        samples[samples.len / 2].wall_us
+    const n = samples.len;
+
+    // True median: odd N → middle sample; even N → average of the two
+    // middles. Avoids the upward bias of the `samples[len/2]` shortcut.
+    const p50_us: i64 = if (n & 1 == 1)
+        samples[n / 2].wall_us
     else
-        @divTrunc(samples[samples.len / 2 - 1].wall_us + samples[samples.len / 2].wall_us, 2);
-    const rss_bytes_median: usize = if (samples.len & 1 == 1)
-        samples[samples.len / 2].rss_bytes
+        @divTrunc(samples[n / 2 - 1].wall_us + samples[n / 2].wall_us, 2);
+    const rss_median: usize = if (n & 1 == 1)
+        samples[n / 2].rss_bytes
     else
-        (samples[samples.len / 2 - 1].rss_bytes + samples[samples.len / 2].rss_bytes) / 2;
+        (samples[n / 2 - 1].rss_bytes + samples[n / 2].rss_bytes) / 2;
+
+    const min_us = samples[0].wall_us;
+    const max_us = samples[n - 1].wall_us;
+
+    const p50_ms = usToMs(p50_us);
+    const min_ms = usToMs(min_us);
+    const max_ms = usToMs(max_us);
+    const spread_pct: f64 = if (p50_ms > 0)
+        (max_ms - min_ms) / p50_ms * 100.0
+    else
+        0.0;
+
+    // Tukey fence: count samples above Q3 + 1.5·IQR. Never removed.
+    const q1 = percentileUs(samples, 25);
+    const q3 = percentileUs(samples, 75);
+    const iqr = q3 - q1;
+    const fence = q3 + @divTrunc(iqr * 3, 2);
+    var outliers: usize = 0;
+    for (samples) |s| {
+        if (s.wall_us > fence) outliers += 1;
+    }
+
     return .{
-        .median_wall_ms = @as(f64, @floatFromInt(wall_us_median)) / 1000.0,
-        .median_rss_kb = rss_bytes_median / 1024,
-        .min_wall_ms = @as(f64, @floatFromInt(samples[0].wall_us)) / 1000.0,
-        .max_wall_ms = @as(f64, @floatFromInt(samples[samples.len - 1].wall_us)) / 1000.0,
+        .p50_wall_ms = p50_ms,
+        .p95_wall_ms = if (n >= P95_MIN_SAMPLES) usToMs(percentileUs(samples, 95)) else null,
+        .p99_wall_ms = if (n >= P99_MIN_SAMPLES) usToMs(percentileUs(samples, 99)) else null,
+        .min_wall_ms = min_ms,
+        .max_wall_ms = max_ms,
+        .spread_pct = spread_pct,
+        .outliers = outliers,
+        .median_rss_kb = rss_median / 1024,
     };
 }
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+
+    // Parse `--runs=<N>` (default DEFAULT_RUNS, clamped to MAX_RUNS).
+    // Anything else on the line is ignored — this driver has one knob.
+    var runs: usize = DEFAULT_RUNS;
+    {
+        var args_iter = init.minimal.args.iterate();
+        _ = args_iter.next(); // skip the binary path
+        while (args_iter.next()) |a| {
+            if (std.mem.startsWith(u8, a, "--runs=")) {
+                runs = std.fmt.parseInt(usize, a["--runs=".len..], 10) catch DEFAULT_RUNS;
+                if (runs < 1) runs = 1;
+                if (runs > MAX_RUNS) runs = MAX_RUNS;
+            }
+        }
+    }
+    const show_p95 = runs >= P95_MIN_SAMPLES;
+    const show_p99 = runs >= P99_MIN_SAMPLES;
 
     // ReleaseFast cynic, installed by build.zig's bench step.
     // Don't fall back to the default `cynic` install since that's
@@ -147,37 +244,45 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
-    var line: [256]u8 = undefined;
-    const header = try std.fmt.bufPrint(
-        &line,
-        "{s:<16} {s:>10} {s:>10} {s:>10} {s:>10}\n",
-        .{ "bench", "median_ms", "min_ms", "max_ms", "rss_kb" },
-    );
-    try std.Io.File.stdout().writeStreamingAll(io, header);
-    const sep = try std.fmt.bufPrint(
-        &line,
-        "{s:<16} {s:>10} {s:>10} {s:>10} {s:>10}\n",
-        .{ "-----", "---------", "------", "------", "------" },
-    );
-    try std.Io.File.stdout().writeStreamingAll(io, sep);
+    // Header + separator. Tail-percentile columns are inserted only
+    // when the sample budget supports them.
+    var buf: [512]u8 = undefined;
+    {
+        var n: usize = 0;
+        n += (try std.fmt.bufPrint(buf[n..], "{s:<16} {s:>10}", .{ "bench", "p50_ms" })).len;
+        if (show_p95) n += (try std.fmt.bufPrint(buf[n..], " {s:>10}", .{"p95_ms"})).len;
+        if (show_p99) n += (try std.fmt.bufPrint(buf[n..], " {s:>10}", .{"p99_ms"})).len;
+        n += (try std.fmt.bufPrint(buf[n..], " {s:>10} {s:>10} {s:>9} {s:>8} {s:>10}\n", .{ "min_ms", "max_ms", "spread%", "outliers", "rss_kb" })).len;
+        try std.Io.File.stdout().writeStreamingAll(io, buf[0..n]);
+    }
+    {
+        var n: usize = 0;
+        n += (try std.fmt.bufPrint(buf[n..], "{s:<16} {s:>10}", .{ "-----", "------" })).len;
+        if (show_p95) n += (try std.fmt.bufPrint(buf[n..], " {s:>10}", .{"------"})).len;
+        if (show_p99) n += (try std.fmt.bufPrint(buf[n..], " {s:>10}", .{"------"})).len;
+        n += (try std.fmt.bufPrint(buf[n..], " {s:>10} {s:>10} {s:>9} {s:>8} {s:>10}\n", .{ "------", "------", "-------", "--------", "------" })).len;
+        try std.Io.File.stdout().writeStreamingAll(io, buf[0..n]);
+    }
+
+    var samples_buf: [MAX_RUNS]Sample = undefined;
 
     for (BENCHES) |b| {
-        // Warmup — discarded so cold-start cache effects don't
-        // skew the first recorded sample.
+        // Warmup — discarded so cold-start cache effects don't skew
+        // the first recorded sample.
         var w: usize = 0;
         while (w < WARMUP_RUNS) : (w += 1) {
             _ = runOnce(io, cynic_bin, b.path) catch |err| {
-                const fail = try std.fmt.bufPrint(&line, "{s:<16}  warmup failed: {s}\n", .{ b.name, @errorName(err) });
+                const fail = try std.fmt.bufPrint(&buf, "{s:<16}  warmup failed: {s}\n", .{ b.name, @errorName(err) });
                 try std.Io.File.stderr().writeStreamingAll(io, fail);
             };
         }
 
-        var samples: [RUNS_PER_FIXTURE]Sample = undefined;
+        const samples = samples_buf[0..runs];
         var any_failed = false;
         var i: usize = 0;
-        while (i < RUNS_PER_FIXTURE) : (i += 1) {
+        while (i < runs) : (i += 1) {
             samples[i] = runOnce(io, cynic_bin, b.path) catch |err| {
-                const fail = try std.fmt.bufPrint(&line, "{s:<16}  run {d} failed: {s}\n", .{ b.name, i, @errorName(err) });
+                const fail = try std.fmt.bufPrint(&buf, "{s:<16}  run {d} failed: {s}\n", .{ b.name, i, @errorName(err) });
                 try std.Io.File.stderr().writeStreamingAll(io, fail);
                 any_failed = true;
                 samples[i] = .{ .wall_us = std.math.maxInt(i64), .rss_bytes = 0 };
@@ -186,18 +291,23 @@ pub fn main(init: std.process.Init) !void {
         }
         if (any_failed) continue;
 
-        const stats = medianStats(&samples);
-        const row = try std.fmt.bufPrint(
-            &line,
-            "{s:<16} {d:>10.2} {d:>10.2} {d:>10.2} {d:>10}\n",
-            .{
-                b.name,
-                stats.median_wall_ms,
-                stats.min_wall_ms,
-                stats.max_wall_ms,
-                stats.median_rss_kb,
-            },
-        );
-        try std.Io.File.stdout().writeStreamingAll(io, row);
+        const stats = computeStats(samples);
+        var n: usize = 0;
+        n += (try std.fmt.bufPrint(buf[n..], "{s:<16} {d:>10.2}", .{ b.name, stats.p50_wall_ms })).len;
+        if (show_p95) {
+            // p95 is non-null whenever show_p95 is true (same gate).
+            n += (try std.fmt.bufPrint(buf[n..], " {d:>10.2}", .{stats.p95_wall_ms.?})).len;
+        }
+        if (show_p99) {
+            n += (try std.fmt.bufPrint(buf[n..], " {d:>10.2}", .{stats.p99_wall_ms.?})).len;
+        }
+        n += (try std.fmt.bufPrint(buf[n..], " {d:>10.2} {d:>10.2} {d:>9.1} {d:>8} {d:>10}\n", .{
+            stats.min_wall_ms,
+            stats.max_wall_ms,
+            stats.spread_pct,
+            stats.outliers,
+            stats.median_rss_kb,
+        })).len;
+        try std.Io.File.stdout().writeStreamingAll(io, buf[0..n]);
     }
 }

@@ -108,19 +108,45 @@ For every (suite, subtest, engine) cell:
    and cross-engine (`tools/bench-cross.sh`) use the same sample
    budget so deltas in one artifact are directly relatable to
    deltas in the other.
-3. **Report median** — the average of the two middle samples for
-   the even sample count. Flag if max-min spread > 10%. (The
-   shell median in `bench-cross.sh` picks the upper of the two
-   middles — a ≤1-sample bias accepted to keep the script
-   pure-shell; well within the 10% noise floor.)
+3. **Report p50** — the average of the two middle samples for the
+   even sample count. (The shell median in `bench-cross.sh` picks
+   the upper of the two middles — a ≤1-sample bias accepted to
+   keep the script pure-shell; well within the 10% noise floor.)
 4. **Subprocess isolation** — each run is a fresh shell invocation,
    so cold-start cost is included but doesn't leak across runs.
 
 The 10-sample budget replaced an earlier 5-sample policy after
 parallel-agent runs on the dev hardware showed too much
 sensitivity to one-off OS-scheduling jitter at N=5 — see the
-comment in `tools/bench.zig` at `RUNS_PER_FIXTURE` for the
-rationale.
+comment in `tools/bench.zig` at `DEFAULT_RUNS` for the rationale.
+
+### `tools/bench.zig` columns + percentile gating
+
+The single-engine driver reports, per fixture:
+
+- **`p50_ms`** — true median (interpolated on even N).
+- **`min_ms` / `max_ms`** — sample extremes.
+- **`spread%`** — `(max − min) / p50 × 100`. Dispersion at a
+  glance; works at any sample count. A high spread% means the
+  fixture's median is noisy this run — investigate before trusting
+  a delta.
+- **`outliers`** — count of samples above the Tukey fence
+  `Q3 + 1.5·IQR`. **Reported, never deleted** — every sample still
+  feeds `p50` / `min` / `max`. A non-zero count is a "this run was
+  jittery" flag, not a correction.
+
+**Tail percentiles are gated on sample size.** With the default 10
+samples, the 95th/99th percentile collapses onto `max` (nearest-
+rank index N−1), so printing them would be noise dressed as rigor.
+The driver hides them until the budget supports a distinct value:
+
+- **`p95_ms`** appears at **N ≥ 20** (`zig build bench -- --runs=20`).
+- **`p99_ms`** appears at **N ≥ 100** (`zig build bench -- --runs=100`).
+
+Raising `--runs` lights up the columns automatically. The default
+stays 10 so single-engine and cross-engine numbers share a sample
+budget (see above); use a wider budget only when you specifically
+want tail-latency resolution.
 
 ## Cadence — when to update each results file
 
