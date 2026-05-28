@@ -96,6 +96,17 @@ pub const strict_only_exact_paths = [_][]const u8{
     // `flags: [raw]` (not `[noStrict]`) so the harness's `no_strict`
     // gate doesn't catch it. Permanent strict-only carve-out.
     "language/comments/hashbang/use-strict.js",
+    // `built-ins/ShadowRealm/prototype/evaluate/no-conditional-strict-mode.js`
+    // — asserts that `ShadowRealm.prototype.evaluate` runs the
+    // child realm's code in SLOPPY mode (the body is
+    // `function lol() { arguments = 42; … }`, which is a
+    // SyntaxError only under strict mode). §3.8.3.7 PerformShadowRealmEval
+    // evaluates the source as a non-strict Script. Cynic is
+    // strict-only per AGENTS.md, so `arguments = 42` is always an
+    // early SyntaxError — the fixture can never pass regardless of
+    // the boundary plumbing. Permanent strict-only carve-out, same
+    // class as the hashbang fixture above.
+    "built-ins/ShadowRealm/prototype/evaluate/no-conditional-strict-mode.js",
 };
 
 // ── SES surface ─────────────────────────────────────────────────────

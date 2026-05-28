@@ -410,14 +410,6 @@ fn wrappedFunctionCreate(caller_realm: *Realm, target: Value) NativeError!*JSFun
 /// prefix) and `wrapped.length === target.length` (mod the
 /// special cases above).
 fn copyNameAndLength(realm: *Realm, wrapped: *JSFunction, target_v: Value) NativeError!void {
-    // For a JSFunction target we use the typed accessor / data-bag
-    // path (mirrors `Function.prototype.bind`'s bound_length /
-    // bound_name logic). For a callable JSObject target (Proxy on
-    // a callable), we punt to L=0 / name="" today — refining
-    // would need the proxy `get` trap fired with "length" /
-    // "name", which the boundary doesn't yet plumb through.
-    const target_fn = heap_mod.valueAsFunction(target_v);
-
     // §17 — function `length` and `name` descriptors are
     // `{w:false, e:false, c:true}`.
     const fn_flags: PropertyFlags = .{
@@ -426,50 +418,65 @@ fn copyNameAndLength(realm: *Realm, wrapped: *JSFunction, target_v: Value) Nativ
         .configurable = true,
     };
 
-    var length_value: Value = Value.fromInt32(0);
-    var name_value: Value = blk: {
-        const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
-        break :blk Value.fromString(empty);
-    };
+    // Step 3-4 / 6 — read the raw `length` and `name` off the
+    // target. Two target shapes cross the boundary:
+    //   - JSFunction: typed accessor / data-bag path (mirrors
+    //     `Function.prototype.bind`).
+    //   - callable JSObject (a Proxy on a callable): the spec's
+    //     `Get(Target, …)` fires the proxy's `get` / underlying
+    //     `[[GetOwnProperty]]` traps. A REVOKED proxy or a
+    //     throwing trap makes that `Get` abrupt — which is the
+    //     §3.8.3.5 step 8 abrupt completion the
+    //     `WrappedFunction/throws-typeerror-{wrap-throwing,
+    //     on-revoked-proxy}` fixtures pin. `getPropertyChain` is
+    //     the generic proxy- and accessor-aware Get; abrupt
+    //     completions propagate as `error.NativeThrew` and
+    //     `wrappedFunctionCreate` remaps them to a fresh owner-
+    //     realm TypeError.
+    var raw_len: Value = Value.undefined_;
+    var raw_name: Value = Value.undefined_;
+    if (heap_mod.valueAsFunction(target_v)) |target| {
+        // §10.2.4 ordinary functions always have a `length` slot;
+        // only Get it when present (an arrow with a redefined
+        // accessor counts via the accessor map).
+        if (target.accessors.contains("length") or target.properties.contains("length")) {
+            raw_len = try getAccessorAware(realm, target, "length");
+        }
+        raw_name = try getAccessorAware(realm, target, "name");
+    } else if (heap_mod.valueAsPlainObject(target_v)) |obj| {
+        raw_len = try intrinsics.getPropertyChain(realm, obj, "length");
+        raw_name = try intrinsics.getPropertyChain(realm, obj, "name");
+    }
 
-    if (target_fn) |target| {
-        // Step 3-4 — length. `HasOwnProperty` checks both the
-        // data bag AND the accessor map. §10.2.4 ordinary
-        // functions always have a `length` slot.
-        const has_own_length = target.accessors.contains("length") or target.properties.contains("length");
-        if (has_own_length) {
-            const len_v = try getAccessorAware(realm, target, "length");
-            // Step 4.b — `Number` filter. Non-Number → L stays
-            // at 0.
-            if (len_v.isInt32()) {
-                const li: i64 = len_v.asInt32();
-                const l = if (li > 0) li else 0;
-                length_value = Value.fromInt32(@intCast(l));
-            } else if (len_v.isDouble()) {
-                const d = len_v.asDouble();
-                if (std.math.isNan(d)) {
-                    length_value = Value.fromInt32(0);
-                } else if (std.math.isInf(d)) {
-                    length_value = if (d > 0) Value.fromDouble(std.math.inf(f64)) else Value.fromInt32(0);
-                } else {
-                    const ti: f64 = @trunc(d);
-                    const clamped: f64 = if (ti > 0) ti else 0;
-                    if (clamped == @as(f64, @floatFromInt(@as(i64, @intFromFloat(clamped)))) and clamped < 2147483647.0) {
-                        length_value = Value.fromInt32(@intFromFloat(clamped));
-                    } else {
-                        length_value = Value.fromDouble(clamped);
-                    }
-                }
+    // Step 4.b — `length`: Number filter, then +∞ → +∞, -∞/NaN/
+    // non-Number → 0, else max(trunc(n), 0).
+    var length_value: Value = Value.fromInt32(0);
+    if (raw_len.isInt32()) {
+        const li: i64 = raw_len.asInt32();
+        length_value = Value.fromInt32(@intCast(if (li > 0) li else 0));
+    } else if (raw_len.isDouble()) {
+        const d = raw_len.asDouble();
+        if (std.math.isNan(d)) {
+            length_value = Value.fromInt32(0);
+        } else if (std.math.isInf(d)) {
+            length_value = if (d > 0) Value.fromDouble(std.math.inf(f64)) else Value.fromInt32(0);
+        } else {
+            const ti: f64 = @trunc(d);
+            const clamped: f64 = if (ti > 0) ti else 0;
+            if (clamped == @as(f64, @floatFromInt(@as(i64, @intFromFloat(clamped)))) and clamped < 2147483647.0) {
+                length_value = Value.fromInt32(@intFromFloat(clamped));
+            } else {
+                length_value = Value.fromDouble(clamped);
             }
         }
+    }
 
-        // Step 6-7 — name. Non-String → "". Spec calls
-        // SetFunctionName(F, targetName) with no prefix, so name
-        // is installed verbatim.
-        const name_v = try getAccessorAware(realm, target, "name");
-        if (name_v.isString()) {
-            name_value = name_v;
-        }
+    // Step 6-7 — `name`: non-String → "". No prefix (WrappedFunction
+    // installs the target's name verbatim).
+    var name_value: Value = raw_name;
+    if (!raw_name.isString()) {
+        const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
+        name_value = Value.fromString(empty);
     }
 
     try wrapped.setWithFlags(realm.allocator, "length", length_value, fn_flags);
