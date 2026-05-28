@@ -47,8 +47,12 @@ pub const Node = union(enum) {
     backref_name: []const u8,
     /// `\1`..`\99…` — a numeric backreference, resolved at compile.
     backref_index: usize,
+    /// `(?=…)` (negative == false) / `(?!…)` (negative == true)
+    /// lookahead assertion.
+    lookahead: Lookahead,
 
     pub const Capture = struct { index: usize, name: ?[]const u8, body: *Node };
+    pub const Lookahead = struct { negative: bool, body: *Node };
     pub const Repeat = struct { body: *Node, min: usize, max: usize, greedy: bool };
     pub const ClassRange = struct { lo: u21, hi: u21 };
     pub const Class = struct { negated: bool, ranges: []const ClassRange };
@@ -315,8 +319,9 @@ const Parser = struct {
                     if (k3 == '=' or k3 == '!') return error.Unsupported;
                     return self.parseNamedCapture();
                 },
-                // `(?=` / `(?!` lookahead and `(?flags:…)` modifiers
-                // are future grammar.
+                '=' => return self.parseLookahead(false),
+                '!' => return self.parseLookahead(true),
+                // `(?flags:…)` modifiers are future grammar.
                 else => return error.Unsupported,
             }
         }
@@ -327,6 +332,15 @@ const Parser = struct {
         const body = try self.parseDisjunction();
         try self.expect(')');
         return self.makeNode(.{ .capture = .{ .index = index, .name = null, .body = body } });
+    }
+
+    /// `(?=Disjunction)` / `(?!Disjunction)` — at `(?` with the `=`/`!`
+    /// already identified.
+    fn parseLookahead(self: *Parser, negative: bool) ParseError!*Node {
+        self.pos += 3; // consume `(?=` or `(?!`
+        const body = try self.parseDisjunction();
+        try self.expect(')');
+        return self.makeNode(.{ .lookahead = .{ .negative = negative, .body = body } });
     }
 
     fn parseNamedCapture(self: *Parser) ParseError!*Node {
@@ -602,6 +616,13 @@ fn collectNames(a: std.mem.Allocator, node: *const Node) error{ SyntaxError, Out
         .noncapture => |body| {
             set.deinit(a);
             return try collectNames(a, body);
+        },
+        .lookahead => |la| {
+            // A lookahead's groups participate alongside the rest of
+            // the enclosing alternative, so they count for the
+            // duplicate-name early error.
+            set.deinit(a);
+            return try collectNames(a, la.body);
         },
         .repeat => |r| {
             set.deinit(a);

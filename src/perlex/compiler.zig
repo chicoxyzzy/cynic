@@ -62,10 +62,32 @@ pub const Inst = union(enum) {
     class: parser.Node.Class,
     /// `\b` (false) / `\B` (true) word-boundary assertion.
     word_boundary: bool,
+    /// `(?=…)` / `(?!…)` — run `sub` (a self-contained program ending
+    /// in `match`) at the current position without consuming input;
+    /// `negative` inverts success.
+    lookahead: LookInst,
 
     pub const Split = struct { a: usize, b: usize };
     pub const Range = struct { from: usize, to: usize };
+    pub const LookInst = struct { negative: bool, sub: []const Inst };
 };
+
+/// Free the owned allocations inside each instruction (class ranges,
+/// dup-backref index lists, nested lookahead sub-programs).
+fn freeInstContents(gpa: std.mem.Allocator, insts: []const Inst) void {
+    for (insts) |inst| switch (inst) {
+        .backref_dup => |idxs| gpa.free(idxs),
+        .class => |cls| gpa.free(cls.ranges),
+        .lookahead => |la| freeInsts(gpa, la.sub),
+        else => {},
+    };
+}
+
+/// `freeInstContents` plus the instruction slice itself.
+fn freeInsts(gpa: std.mem.Allocator, insts: []const Inst) void {
+    freeInstContents(gpa, insts);
+    gpa.free(insts);
+}
 
 pub const Program = struct {
     insts: []Inst,
@@ -84,14 +106,7 @@ pub const Program = struct {
     gpa: std.mem.Allocator,
 
     pub fn deinit(self: *Program) void {
-        for (self.insts) |inst| {
-            switch (inst) {
-                .backref_dup => |idxs| self.gpa.free(idxs),
-                .class => |cls| self.gpa.free(cls.ranges),
-                else => {},
-            }
-        }
-        self.gpa.free(self.insts);
+        freeInsts(self.gpa, self.insts);
         for (self.names) |maybe| {
             if (maybe) |name| self.gpa.free(name);
         }
@@ -160,13 +175,7 @@ const Compiler = struct {
     regular: bool = true,
 
     fn deinitPartial(self: *Compiler) void {
-        for (self.insts.items) |inst| {
-            switch (inst) {
-                .backref_dup => |idxs| self.gpa.free(idxs),
-                .class => |cls| self.gpa.free(cls.ranges),
-                else => {},
-            }
-        }
+        freeInstContents(self.gpa, self.insts.items);
         self.insts.deinit(self.gpa);
     }
 
@@ -215,6 +224,13 @@ const Compiler = struct {
             },
             .alternate => |alts| try self.compileAlternation(alts),
             .repeat => |r| try self.compileRepeat(r),
+            .lookahead => |la| {
+                const sub = try self.compileSubProgram(la.body);
+                self.emit(.{ .lookahead = .{ .negative = la.negative, .sub = sub } }) catch |e| {
+                    freeInsts(self.gpa, sub);
+                    return e;
+                };
+            },
             .backref_name => |name| try self.compileBackref(name),
             .backref_index => |n| {
                 // In range → a backreference; out of range is an Annex B
@@ -305,6 +321,23 @@ const Compiler = struct {
         try self.compileNode(body);
     }
 
+    /// Compile `body` into a fresh, self-contained sub-program ending
+    /// in `match`, for a lookahead. Returns an owned instruction slice.
+    fn compileSubProgram(self: *Compiler, body: *const Node) CompileError![]Inst {
+        const saved = self.insts;
+        self.insts = .empty;
+        errdefer {
+            freeInstContents(self.gpa, self.insts.items);
+            self.insts.deinit(self.gpa);
+            self.insts = saved;
+        }
+        try self.compileNode(body);
+        try self.emit(.match);
+        const sub = try self.insts.toOwnedSlice(self.gpa);
+        self.insts = saved;
+        return sub;
+    }
+
     fn compileBackref(self: *Compiler, name: []const u8) CompileError!void {
         var indices: std.ArrayListUnmanaged(usize) = .empty;
         defer indices.deinit(self.gpa);
@@ -329,7 +362,7 @@ const Compiler = struct {
 /// isn't built yet — such bodies are declined to the fallback.
 fn nullable(node: *const Node) bool {
     return switch (node.*) {
-        .empty, .anchor_start, .anchor_end, .word_boundary, .backref_name, .backref_index => true,
+        .empty, .anchor_start, .anchor_end, .word_boundary, .backref_name, .backref_index, .lookahead => true,
         .char, .class, .dot => false,
         .noncapture => |b| nullable(b),
         .capture => |g| nullable(g.body),
@@ -356,6 +389,7 @@ fn groupSlotRange(node: *const Node) ?Inst.Range {
     return switch (node.*) {
         .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .backref_name, .backref_index => null,
         .noncapture => |body| groupSlotRange(body),
+        .lookahead => |la| groupSlotRange(la.body),
         .repeat => |r| groupSlotRange(r.body),
         .capture => |g| blk: {
             var lo = g.index;
