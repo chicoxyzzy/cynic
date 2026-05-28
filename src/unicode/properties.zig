@@ -37,6 +37,20 @@ pub fn binaryProperty(name: []const u8) ?[]const Range {
     return tables.binaryProperty(name);
 }
 
+/// Resolve a Script value — by long name (`Greek`), short code (`Grek`),
+/// or alias — to the code points whose General Script is that script.
+/// `null` if `name` is not a script ECMA-262 §22.2.1.1 recognises.
+pub fn script(name: []const u8) ?[]const Range {
+    return tables.script(name);
+}
+
+/// Resolve a Script_Extensions value to the code points whose script set
+/// includes that script (with the UCD default-to-Script rule for code
+/// points absent from ScriptExtensions.txt). `null` if unrecognised.
+pub fn scriptExtensions(name: []const u8) ?[]const Range {
+    return tables.scriptExtensions(name);
+}
+
 /// True iff `cp` lies within any range of `ranges`, which must be sorted by
 /// `start` and non-overlapping (the generator guarantees this).
 pub fn rangeContains(ranges: []const Range, cp: u21) bool {
@@ -287,4 +301,48 @@ test "Assigned is exactly the complement of Cn over a sample" {
             return error.NotComplement;
         }
     }
+}
+
+fn scIn(name: []const u8, cp: u21) !bool {
+    return rangeContains(script(name) orelse return error.UnknownScript, cp);
+}
+
+fn scxIn(name: []const u8, cp: u21) !bool {
+    return rangeContains(scriptExtensions(name) orelse return error.UnknownScript, cp);
+}
+
+test "Script values by long name and short code" {
+    try testing.expect(try scIn("Latin", 'A'));
+    try testing.expect(try scIn("Latn", 'A')); // short code
+    try testing.expect(!try scIn("Latin", 0x03B1)); // Greek alpha
+    try testing.expect(try scIn("Greek", 0x03B1));
+    try testing.expect(try scIn("Han", 0x4E2D));
+    try testing.expect(try scIn("Hani", 0x4E2D)); // short code
+    try testing.expect(try scIn("Common", '0')); // digits are Common
+    try testing.expect(try scIn("Common", 0x00B7)); // MIDDLE DOT base script
+    try testing.expect(!try scIn("Latin", 0x00B7));
+}
+
+test "Script Unknown is the @missing complement" {
+    try testing.expect(try scIn("Unknown", 0x0378)); // unassigned
+    try testing.expect(try scIn("Zzzz", 0x0378)); // short code
+    try testing.expect(!try scIn("Unknown", 'A')); // assigned (Latin)
+}
+
+test "Script_Extensions: explicit overrides and default-to-Script" {
+    // U+00B7 is Common by Script, but its scx set lists Latin, Greek, …
+    try testing.expect(try scxIn("Latin", 0x00B7));
+    try testing.expect(try scxIn("Greek", 0x00B7));
+    try testing.expect(!try scxIn("Common", 0x00B7)); // overridden away from Common
+    // 'A' is absent from ScriptExtensions → defaults to its Script (Latin).
+    try testing.expect(try scxIn("Latin", 'A'));
+    try testing.expect(try scxIn("Greek", 0x03B1)); // default for a plain Greek letter
+}
+
+test "script and scx names are disjoint from gc and binary" {
+    try testing.expectEqual(@as(?[]const Range, null), script("Lu")); // gc value
+    try testing.expectEqual(@as(?[]const Range, null), script("White_Space")); // binary
+    try testing.expectEqual(@as(?[]const Range, null), generalCategory("Latin"));
+    try testing.expectEqual(@as(?[]const Range, null), binaryProperty("Latin"));
+    try testing.expectEqual(@as(?[]const Range, null), script("NotAScript"));
 }

@@ -1618,22 +1618,25 @@ fn perlexFlags(s: []const u8) perlex.Flags {
 /// Throws SyntaxError for a pattern Perlex is authoritative about
 /// (e.g. a group name reused within one Alternative, §22.2.1.1).
 /// `\p{…}` resolver for Perlex (§22.2.1.1), backed by Cynic's generated
-/// Unicode tables. Resolves binary properties and General_Category values:
-/// a lone `\p{NameOrValue}` is a binary property or a gc value (disjoint
-/// name spaces), and `\p{gc=Value}` / `\p{General_Category=Value}` selects
-/// a gc value. Other kinds (Script / Script_Extensions) and unknown names
-/// return null so the whole pattern defers to the libregexp fallback,
-/// which stays authoritative for those and for the SyntaxError verdict.
+/// Unicode tables. A lone `\p{NameOrValue}` is a binary property or a
+/// General_Category value (disjoint name spaces); `\p{gc=…}`,
+/// `\p{Script=…}` / `\p{sc=…}`, and `\p{Script_Extensions=…}` /
+/// `\p{scx=…}` select the keyed property. Unknown names and the
+/// `/v`-only string properties return null so the pattern defers to the
+/// libregexp fallback, which stays authoritative for the SyntaxError
+/// verdict.
 fn perlexPropertyResolver(
     gpa: std.mem.Allocator,
     key: ?[]const u8,
     value: []const u8,
 ) std.mem.Allocator.Error!?[]const perlex.parser.Node.ClassRange {
     const ranges: []const unicode_properties.Range = if (key) |k| blk: {
-        // Key=Value form: only General_Category (binary properties are
-        // lone-only; Script / Script_Extensions are not handled yet).
         if (std.mem.eql(u8, k, "gc") or std.mem.eql(u8, k, "General_Category"))
             break :blk (unicode_properties.generalCategory(value) orelse return null);
+        if (std.mem.eql(u8, k, "sc") or std.mem.eql(u8, k, "Script"))
+            break :blk (unicode_properties.script(value) orelse return null);
+        if (std.mem.eql(u8, k, "scx") or std.mem.eql(u8, k, "Script_Extensions"))
+            break :blk (unicode_properties.scriptExtensions(value) orelse return null);
         return null;
     } else
         // Lone form: a binary property, else a gc value.
