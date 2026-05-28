@@ -88,6 +88,11 @@ pub const ParseResult = struct {
     /// Group name per capture index; length `capture_count + 1`.
     /// Index 0 (the whole match) is always `null`.
     names: []const ?[]const u8,
+    /// True if the pattern contains an explicit non-ASCII code unit
+    /// (a `\u`/`\x` escape ≥ 0x80). Under the `i` flag such a unit can
+    /// case-fold to another non-ASCII unit, which the ASCII-only fold
+    /// doesn't model — the caller declines `i` patterns with this set.
+    non_ascii: bool,
 };
 
 pub const ParseError = error{ Unsupported, SyntaxError, OutOfMemory };
@@ -115,6 +120,7 @@ pub fn parse(a: std.mem.Allocator, src: []const u8) ParseError!ParseResult {
         .root = root,
         .capture_count = p.names.items.len - 1,
         .names = p.names.items,
+        .non_ascii = p.non_ascii,
     };
 }
 
@@ -123,6 +129,7 @@ const Parser = struct {
     src: []const u8,
     pos: usize,
     names: std.ArrayListUnmanaged(?[]const u8),
+    non_ascii: bool = false,
 
     fn peek(self: *Parser) ?u8 {
         return if (self.pos < self.src.len) self.src[self.pos] else null;
@@ -406,7 +413,9 @@ const Parser = struct {
             'x' => {
                 const hi = hexVal(self.at(2) orelse return error.Unsupported) orelse return error.Unsupported;
                 const lo = hexVal(self.at(3) orelse return error.Unsupported) orelse return error.Unsupported;
-                return self.takeEscaped(4, @as(u16, hi) * 16 + lo);
+                const v = @as(u16, hi) * 16 + lo;
+                if (v >= 0x80) self.non_ascii = true;
+                return self.takeEscaped(4, v);
             },
             'u' => {
                 // `\u{…}` is UnicodeMode-only; Perlex declines `u`/`v`.
@@ -417,6 +426,7 @@ const Parser = struct {
                     const d = hexVal(self.at(i) orelse return error.Unsupported) orelse return error.Unsupported;
                     v = v *% 16 +% @as(u16, d);
                 }
+                if (v >= 0x80) self.non_ascii = true;
                 return self.takeEscaped(6, v);
             },
             else => {
