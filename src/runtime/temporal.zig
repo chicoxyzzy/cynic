@@ -29,6 +29,7 @@ pub const TemporalKind = enum {
     duration,
     plain_time,
     instant,
+    plain_date,
 };
 
 /// §7.5 Temporal.Duration internal slots. Each field is the ℝ
@@ -69,6 +70,15 @@ pub const InstantRecord = struct {
     epoch_ns: i128 = 0,
 };
 
+/// §3.5 Temporal.PlainDate internal slots ([[ISOYear]], [[ISOMonth]],
+/// [[ISODay]]). The calendar is always the ISO 8601 calendar, so no
+/// calendar pointer is stored; the record carries no heap reference.
+pub const PlainDateRecord = struct {
+    iso_year: i32 = 0,
+    iso_month: u8 = 1,
+    iso_day: u8 = 1,
+};
+
 /// The side allocation a Temporal instance's `JSObject` points to
 /// through `JSObjectExtension.temporal_record`. A tagged union so
 /// the single slot serves every plain Temporal type.
@@ -76,6 +86,7 @@ pub const TemporalRecord = union(TemporalKind) {
     duration: DurationRecord,
     plain_time: PlainTimeRecord,
     instant: InstantRecord,
+    plain_date: PlainDateRecord,
 
     pub fn deinit(self: *TemporalRecord, allocator: std.mem.Allocator) void {
         // No owned heap memory inside any variant today; the record
@@ -1007,11 +1018,11 @@ pub fn civilFromDays(z_in: i64) Ymd {
     return .{ .year = y + (if (m <= 2) @as(i64, 1) else 0), .month = @intCast(m), .day = @intCast(d) };
 }
 
-fn isLeapYear(y: i64) bool {
+pub fn isLeapYear(y: i64) bool {
     return (@mod(y, 4) == 0 and @mod(y, 100) != 0) or @mod(y, 400) == 0;
 }
 
-fn daysInIsoMonth(y: i64, m: u32) u32 {
+pub fn daysInIsoMonth(y: i64, m: u32) u32 {
     return switch (m) {
         1, 3, 5, 7, 8, 10, 12 => 31,
         4, 6, 9, 11 => 30,
@@ -1117,8 +1128,11 @@ pub fn parseInstantString(input: []const u8) error{Invalid}!i128 {
         } else return error.Invalid;
     } else return error.Invalid;
 
-    // Optional annotations, then the string must end.
-    try consumeAnnotations(&c);
+    // Optional annotations, then the string must end. Instant is
+    // calendar-free, so the `u-ca` value (if any) is discarded — an
+    // unknown calendar like `[u-ca=discord]` is still a valid Instant
+    // string per the grammar.
+    _ = try consumeAnnotations(&c);
     if (!c.done()) return error.Invalid;
 
     // Fold the offset in: epoch = wall-clock-as-UTC − offset.
@@ -1287,17 +1301,22 @@ fn parseFractionNs(c: *Cursor) error{Invalid}!u32 {
     return fractionToNanos(c.s[start..c.i]);
 }
 
-/// Validate and discard the trailing `[...]` annotation blocks per the
-/// RFC 9557 grammar: an optional leading time-zone annotation (an
-/// identifier, no `=`), then zero or more `key=value` annotations. At
-/// most one time-zone and at most one `u-ca` calendar annotation; a
-/// `[!key=…]` critical flag on an unknown key is rejected. Leaves the
-/// cursor at the first non-`[` byte (the caller requires end-of-input).
-fn consumeAnnotations(c: *Cursor) error{Invalid}!void {
+/// Validate the trailing `[...]` annotation blocks per the RFC 9557
+/// grammar: an optional leading time-zone annotation (an identifier, no
+/// `=`), then zero or more `key=value` annotations. At most one
+/// time-zone and at most one `u-ca` calendar annotation; a `[!key=…]`
+/// critical flag on an unknown key is rejected. Leaves the cursor at the
+/// first non-`[` byte (the caller requires end-of-input). Returns the
+/// first `u-ca` calendar value (a slice into the input) or null when no
+/// calendar annotation is present — the calendar-aware callers (e.g.
+/// PlainDate) validate it against the supported calendars, while
+/// calendar-free callers (e.g. Instant) discard it.
+fn consumeAnnotations(c: *Cursor) error{Invalid}!?[]const u8 {
     var saw_tz = false;
     var calendars: usize = 0;
     var critical_calendar = false;
     var first = true;
+    var calendar: ?[]const u8 = null;
     while (c.peek()) |ch| {
         if (ch != '[') break;
         c.i += 1; // consume '['
@@ -1320,6 +1339,7 @@ fn consumeAnnotations(c: *Cursor) error{Invalid}!void {
             if (!isValidAnnotationKey(key) or value.len == 0) return error.Invalid;
             if (std.mem.eql(u8, key, "u-ca")) {
                 calendars += 1;
+                if (calendars == 1) calendar = value;
                 if (critical) critical_calendar = true;
                 // Two or more calendar annotations are only syntactical
                 // if none carries the critical flag.
@@ -1338,6 +1358,7 @@ fn consumeAnnotations(c: *Cursor) error{Invalid}!void {
         }
         first = false;
     }
+    return calendar;
 }
 
 /// AnnotationKey :: AKeyLeadingChar (AKeyChar)*, where AKeyLeadingChar
@@ -1576,6 +1597,147 @@ pub fn dayTimeDurationNanoseconds(d: DurationRecord) i128 {
     return f64ToI128(d.days) * 86_400_000_000_000 + timeDurationNanoseconds(d);
 }
 
+// ── §3.5 PlainDate (ISO calendar) abstract operations ─────────────────────
+
+/// Inclusive day-number bounds of a representable PlainDate
+/// (-271821-04-19 .. +275760-09-13) — one ISO day beyond the
+/// representable instant range on each side.
+const iso_date_min_days: i64 = daysFromCivil(-271821, 4, 19);
+const iso_date_max_days: i64 = daysFromCivil(275760, 9, 13);
+
+/// §3.5.x IsValidISODate — structural validity: month 1..12, day within
+/// that month (leap-aware). Independent of the representable-range limit.
+pub fn isValidISODate(year: i64, month: i64, day: i64) bool {
+    if (month < 1 or month > 12) return false;
+    return day >= 1 and day <= daysInIsoMonth(year, @intCast(month));
+}
+
+/// §3.5.x ISODateWithinLimits — the date is representable.
+pub fn isoDateWithinLimits(year: i64, month: u32, day: u32) bool {
+    const d = daysFromCivil(year, month, day);
+    return d >= iso_date_min_days and d <= iso_date_max_days;
+}
+
+/// §12.x ISO weekday, 1 = Monday … 7 = Sunday (1970-01-01 was Thursday).
+pub fn isoDayOfWeek(year: i64, month: u32, day: u32) u8 {
+    return @intCast(@mod(daysFromCivil(year, month, day) + 3, 7) + 1);
+}
+
+/// §12.x Day of the year, 1-based.
+pub fn isoDayOfYear(year: i64, month: u32, day: u32) u16 {
+    return @intCast(daysFromCivil(year, month, day) - daysFromCivil(year, 1, 1) + 1);
+}
+
+pub fn isoDaysInYear(year: i64) u16 {
+    return if (isLeapYear(year)) 366 else 365;
+}
+
+fn isoYearStartShift(y: i64) i64 {
+    return @mod(y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400), 7);
+}
+
+/// ISO weeks in a given week-year — 53 when the year starts on a
+/// Thursday (or a leap year starting Wednesday), otherwise 52.
+fn isoWeeksInYear(year: i64) i64 {
+    return if (isoYearStartShift(year) == 4 or isoYearStartShift(year - 1) == 3) 53 else 52;
+}
+
+pub const IsoWeek = struct { week: u16, year: i32 };
+
+/// §12.x ISO 8601 week-of-year + week-year. Week 1 holds the year's
+/// first Thursday; the first/last days of a calendar year can fall in
+/// the adjacent week-year.
+pub fn isoWeekOfYear(year: i64, month: u32, day: u32) IsoWeek {
+    const dow: i64 = isoDayOfWeek(year, month, day);
+    const doy: i64 = isoDayOfYear(year, month, day);
+    var week: i64 = @divFloor(doy - dow + 10, 7);
+    var wyear: i64 = year;
+    if (week < 1) {
+        wyear = year - 1;
+        week = isoWeeksInYear(wyear);
+    } else if (week > isoWeeksInYear(year)) {
+        wyear = year + 1;
+        week = 1;
+    }
+    return .{ .week = @intCast(week), .year = @intCast(wyear) };
+}
+
+/// How the ISO calendar is rendered in a date string.
+pub const CalendarDisplay = enum { auto, always, never, critical };
+
+/// §3.5.x TemporalDateToString — `YYYY-MM-DD` (expanded year when out of
+/// 0000..9999), with the ISO calendar annotation appended per
+/// `calendar` (auto/never omit it for the ISO calendar).
+pub fn isoDateToString(rec: PlainDateRecord, buf: []u8, calendar: CalendarDisplay) []const u8 {
+    var w = Writer{ .buf = buf, .len = 0 };
+    writeIsoYear(&w, rec.iso_year);
+    w.byte('-');
+    w.pad2(rec.iso_month);
+    w.byte('-');
+    w.pad2(rec.iso_day);
+    switch (calendar) {
+        .auto, .never => {},
+        .always => w.bytes("[u-ca=iso8601]"),
+        .critical => w.bytes("[!u-ca=iso8601]"),
+    }
+    return w.buf[0..w.len];
+}
+
+/// §3.5.x ParseTemporalDateString — parse the date portion of an ISO /
+/// RFC 9557 string (`YYYY-MM-DD`, expanded `±YYYYYY`, or basic),
+/// discarding (but validating) any time / offset / annotation tail.
+pub fn parseTemporalDateString(input: []const u8) error{Invalid}!PlainDateRecord {
+    var c = Cursor{ .s = input };
+    const date = try parseIsoDate(&c);
+    if (c.eatAny("Tt ")) {
+        _ = try parseIsoTime(&c);
+        // A `Z`/`z` UTC designator is rejected: a PlainDate has no time
+        // zone, so a UTC point-in-time string is ambiguous as a date
+        // (§3.5.x — ToTemporalDate throws when [[Z]] is present).
+        if (c.eatAny("Zz")) {
+            return error.Invalid;
+        } else if (c.peek()) |ch| {
+            if (ch == '+' or ch == '-') _ = try parseUtcOffsetNs(&c);
+        }
+    }
+    const calendar = try consumeAnnotations(&c);
+    if (!c.done()) return error.Invalid;
+    // PlainDate is calendar-aware: a `[u-ca=…]` annotation must name a
+    // supported calendar. Cynic ships only the ISO 8601 calendar, so an
+    // unknown calendar (`[u-ca=notexist]`) is a parse error.
+    if (calendar) |cal| {
+        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
+    }
+    if (!isoDateWithinLimits(date.year, date.month, date.day)) return error.Invalid;
+    return .{
+        .iso_year = @intCast(date.year),
+        .iso_month = @intCast(date.month),
+        .iso_day = @intCast(date.day),
+    };
+}
+
+/// §3.5.x RegulateISODate — apply an overflow option to raw (possibly
+/// out-of-range) fields. `reject` returns null on any out-of-range
+/// field; otherwise `constrain` clamps only the *upper* bound (month to
+/// ≤12, day to ≤ that month's length). A non-positive month or day is a
+/// RangeError even under constrain (the test262 `with/overflow.js` and
+/// `from/negative-month-or-day.js` fixtures), so those return null too.
+/// Returns null when the result leaves the representable range — which
+/// also guards the i32 year cast against a huge input year.
+pub fn regulateISODate(year: i64, month: i64, day: i64, reject: bool) ?PlainDateRecord {
+    var m = month;
+    var d = day;
+    if (reject) {
+        if (!isValidISODate(year, month, day)) return null;
+    } else {
+        if (month < 1 or day < 1) return null;
+        m = @min(month, 12);
+        d = @min(day, daysInIsoMonth(year, @intCast(m)));
+    }
+    if (!isoDateWithinLimits(year, @intCast(m), @intCast(d))) return null;
+    return .{ .iso_year = @intCast(year), .iso_month = @intCast(m), .iso_day = @intCast(d) };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1718,6 +1880,80 @@ test "dayTimeDurationNanoseconds + hasCalendarUnits" {
     try testing.expect(hasCalendarUnits(.{ .weeks = 1 }));
     try testing.expectEqual(@as(i128, 90_000_000_000_000), dayTimeDurationNanoseconds(.{ .days = 1, .hours = 1 }));
     try testing.expectEqual(@as(i128, -86_400_000_000_000), dayTimeDurationNanoseconds(.{ .days = -1 }));
+}
+
+test "isValidISODate + isoDateWithinLimits" {
+    try testing.expect(isValidISODate(2021, 2, 28));
+    try testing.expect(!isValidISODate(2021, 2, 29)); // not a leap year
+    try testing.expect(isValidISODate(2004, 2, 29)); // leap
+    try testing.expect(!isValidISODate(2021, 13, 1));
+    try testing.expect(!isValidISODate(2021, 4, 31));
+    try testing.expect(isoDateWithinLimits(-271821, 4, 19));
+    try testing.expect(!isoDateWithinLimits(-271821, 4, 18));
+    try testing.expect(isoDateWithinLimits(275760, 9, 13));
+    try testing.expect(!isoDateWithinLimits(275760, 9, 14));
+}
+
+test "isoDayOfWeek + isoDayOfYear + daysInYear" {
+    try testing.expectEqual(@as(u8, 4), isoDayOfWeek(1970, 1, 1)); // Thursday
+    try testing.expectEqual(@as(u8, 3), isoDayOfWeek(1969, 12, 31)); // Wednesday
+    try testing.expectEqual(@as(u16, 1), isoDayOfYear(2020, 1, 1));
+    try testing.expectEqual(@as(u16, 366), isoDayOfYear(2020, 12, 31)); // leap
+    try testing.expectEqual(@as(u16, 365), isoDayOfYear(2021, 12, 31));
+    try testing.expectEqual(@as(u16, 366), isoDaysInYear(2020));
+    try testing.expectEqual(@as(u16, 365), isoDaysInYear(2021));
+}
+
+test "isoWeekOfYear: boundary weeks (matches weekOfYear/basic.js)" {
+    {
+        const w = isoWeekOfYear(1975, 12, 29);
+        try testing.expectEqual(@as(u16, 1), w.week);
+        try testing.expectEqual(@as(i32, 1976), w.year);
+    }
+    try testing.expectEqual(@as(u16, 1), isoWeekOfYear(1976, 1, 1).week);
+    try testing.expectEqual(@as(u16, 2), isoWeekOfYear(1976, 1, 5).week);
+    try testing.expectEqual(@as(u16, 52), isoWeekOfYear(1976, 12, 26).week);
+    try testing.expectEqual(@as(u16, 53), isoWeekOfYear(1976, 12, 27).week);
+    {
+        const w = isoWeekOfYear(1977, 1, 2);
+        try testing.expectEqual(@as(u16, 53), w.week);
+        try testing.expectEqual(@as(i32, 1976), w.year);
+    }
+}
+
+test "isoDateToString" {
+    var buf: [40]u8 = undefined;
+    try testing.expectEqualStrings("2000-05-02", isoDateToString(.{ .iso_year = 2000, .iso_month = 5, .iso_day = 2 }, &buf, .auto));
+    try testing.expectEqualStrings("2000-05-02[u-ca=iso8601]", isoDateToString(.{ .iso_year = 2000, .iso_month = 5, .iso_day = 2 }, &buf, .always));
+    try testing.expectEqualStrings("-009999-01-01", isoDateToString(.{ .iso_year = -9999, .iso_month = 1, .iso_day = 1 }, &buf, .never));
+}
+
+test "parseTemporalDateString + regulateISODate" {
+    {
+        const d = try parseTemporalDateString("2020-12-24");
+        try testing.expectEqual(@as(i32, 2020), d.iso_year);
+        try testing.expectEqual(@as(u8, 12), d.iso_month);
+        try testing.expectEqual(@as(u8, 24), d.iso_day);
+    }
+    // A bare time component is fine; a UTC designator (`Z`) is not — a
+    // PlainDate is time-zone-free, so a UTC point-in-time is ambiguous.
+    try testing.expectEqual(@as(u8, 18), (try parseTemporalDateString("1976-11-18T14:23:30")).iso_day);
+    try testing.expectError(error.Invalid, parseTemporalDateString("1976-11-18T14:23:30Z"));
+    try testing.expectError(error.Invalid, parseTemporalDateString("1976-11-18T14:23:30Z[UTC]"));
+    // A `u-ca` calendar annotation must name the ISO calendar.
+    try testing.expectEqual(@as(u8, 1), (try parseTemporalDateString("2020-01-01[u-ca=iso8601]")).iso_day);
+    try testing.expectError(error.Invalid, parseTemporalDateString("2020-01-01[u-ca=notexist]"));
+    try testing.expectError(error.Invalid, parseTemporalDateString("2021-02-29"));
+    try testing.expectError(error.Invalid, parseTemporalDateString("2020-13-01"));
+    try testing.expect(regulateISODate(2021, 2, 29, true) == null);
+    try testing.expectEqual(@as(u8, 28), regulateISODate(2021, 2, 29, false).?.iso_day);
+    try testing.expectEqual(@as(u8, 12), regulateISODate(2021, 20, 1, false).?.iso_month);
+    // Non-positive month/day reject even under constrain.
+    try testing.expect(regulateISODate(2000, -1, 1, false) == null);
+    try testing.expect(regulateISODate(2000, 0, 1, false) == null);
+    try testing.expect(regulateISODate(2000, 1, -1, false) == null);
+    try testing.expect(regulateISODate(2000, 1, 0, false) == null);
+    try testing.expect(regulateISODate(1_000_000_000, 1, 1, true) == null);
 }
 
 test "durationSign: first non-zero field decides" {
