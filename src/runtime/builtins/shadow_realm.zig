@@ -40,6 +40,7 @@ const intrinsics = @import("../intrinsics.zig");
 const interpreter = @import("../lantern/interpreter.zig");
 const call_mod = @import("../lantern/call.zig");
 const lantern_helpers = @import("../lantern/helpers.zig");
+const promise_mod = @import("promise.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
@@ -586,22 +587,138 @@ pub fn callWrappedFunction(
     }
 }
 
-/// §3.8.3.2 ShadowRealm.prototype.importValue ( specifier,
-/// exportName )
+/// §3.8.3.2 ShadowRealm.prototype.importValue ( specifier, exportName )
+///   1. RequireInternalSlot(O, [[ShadowRealm]]).
+///   2. specifierString = ? ToString(specifier).  (synchronous throw)
+///   3. If exportName is not a String, throw TypeError. (synchronous)
+///   4-5. Return ? ShadowRealmImportValue(specifierString,
+///        exportName, callerRealm, evalRealm).
 ///
-/// Not yet wired through the child realm's module loader — the
-/// brand check runs, then the call throws. Keeping the method
-/// installed (rather than absent) lets fixtures that only probe
-/// its existence (descriptor checks, IsCallable on the method)
-/// classify as engine-true.
+/// §3.8.3.6 ShadowRealmImportValue builds a callerRealm Promise
+/// capability, loads the module in evalRealm, and on completion
+/// reads the named export, filters it through GetWrappedValue,
+/// and resolves the Promise; any failure (load error, missing
+/// export, non-wrappable value) rejects with a TypeError in
+/// callerRealm.
+///
+/// Cynic's loader is synchronous, so the load runs inline and the
+/// capability settles before this returns — `.then` on the
+/// returned (callerRealm) Promise still defers via the caller
+/// realm's microtask queue, so the async observation is correct
+/// and we avoid draining the child realm's queue from here.
 fn shadowRealmImportValue(
     realm: *Realm,
     this_value: Value,
     args: []const Value,
 ) NativeError!Value {
-    _ = args;
     const refs = try shadowRealmOf(realm, this_value, "importValue");
-    const ex = intrinsics.newTypeError(refs.owner, "ShadowRealm.prototype.importValue is not yet implemented") catch return error.OutOfMemory;
-    realm.pending_exception = ex;
-    return error.NativeThrew;
+    const owner = refs.owner;
+    const eval_realm = refs.child;
+
+    // Step 2 — ToString(specifier). Abrupt → synchronous throw
+    // (NOT a rejected Promise), per the `?`.
+    const spec_arg = argOr(args, 0, Value.undefined_);
+    const spec_str = intrinsics.stringifyArg(realm, spec_arg) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => return error.NativeThrew, // pending_exception already set
+    };
+
+    // Step 3 — exportName must be a String; else synchronous TypeError.
+    const export_arg = argOr(args, 1, Value.undefined_);
+    if (!export_arg.isString()) {
+        const ex = intrinsics.newTypeError(owner, "ShadowRealm.prototype.importValue: exportName must be a string") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+    const export_str: *JSString = @ptrCast(@alignCast(export_arg.asString()));
+
+    // §3.8.3.6 — build the callerRealm (owner) Promise capability.
+    const owner_promise_v = owner.globals.get("Promise") orelse {
+        const ex = intrinsics.newTypeError(owner, "ShadowRealm.prototype.importValue: Promise is missing in caller realm") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    };
+    const owner_promise_ctor = heap_mod.valueAsFunction(owner_promise_v) orelse {
+        const ex = intrinsics.newTypeError(owner, "ShadowRealm.prototype.importValue: caller realm Promise is not callable") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    };
+    const cap = try promise_mod.newPromiseCapability(realm, owner_promise_ctor);
+
+    // Pin the capability across the synchronous module load (the
+    // module body re-enters JS and can allocate / GC).
+    const scope = eval_realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(cap.promise) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedFunction(cap.resolve)) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedFunction(cap.reject)) catch return error.OutOfMemory;
+
+    // Settle the capability and return its Promise. `settle`
+    // rejects with a fresh owner-realm TypeError on any failure
+    // (§3.8 information-hiding — the child's error object never
+    // crosses the boundary).
+    settleImportValue(realm, owner, eval_realm, spec_str.flatBytes(), export_str.flatBytes(), cap) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // A boundary failure surfaced as NativeThrew while we were
+        // settling — the capability was already rejected by
+        // `settle`, so swallow and return the (rejected) Promise.
+        error.NativeThrew => {},
+    };
+    return cap.promise;
+}
+
+/// Loads `specifier` in `eval_realm`, reads `export_name` off the
+/// resulting namespace, wraps it through the §3.8.3.4 boundary,
+/// and resolves `cap`; on any abrupt step rejects `cap` with a
+/// fresh owner-realm TypeError.
+fn settleImportValue(
+    realm: *Realm,
+    owner: *Realm,
+    eval_realm: *Realm,
+    specifier: []const u8,
+    export_name: []const u8,
+    cap: promise_mod.PromiseCapability,
+) NativeError!void {
+    const outcome = interpreter.loadModule(eval_realm.allocator, eval_realm, specifier, null, null) catch {
+        return rejectImport(realm, owner, cap, "ShadowRealm.prototype.importValue: module load failed");
+    };
+    if (outcome.threw) {
+        // §3.8 information-hiding — don't leak the child realm's
+        // error object; reject with a fresh owner-realm TypeError.
+        return rejectImport(realm, owner, cap, "ShadowRealm.prototype.importValue: module evaluation threw");
+    }
+    const ns_obj = heap_mod.valueAsPlainObject(outcome.value) orelse {
+        return rejectImport(realm, owner, cap, "ShadowRealm.prototype.importValue: module has no namespace");
+    };
+    // §3.8.3.6 — the export must exist as an own binding of the
+    // namespace; a missing name rejects with TypeError.
+    if (!ns_obj.hasOwn(export_name)) {
+        return rejectImport(realm, owner, cap, "ShadowRealm.prototype.importValue: export not found");
+    }
+    const export_val = try intrinsics.getPropertyChain(eval_realm, ns_obj, export_name);
+    // §3.8.3.4 GetWrappedValue — primitives cross, callables wrap,
+    // other objects reject (in the owner realm).
+    const wrapped = getWrappedValue(owner, export_val) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => {
+            owner.pending_exception = null;
+            return rejectImport(realm, owner, cap, "ShadowRealm.prototype.importValue: exported value is not wrappable");
+        },
+    };
+    // Resolve the caller-realm Promise with the wrapped value.
+    const outcome_r = call_mod.callJSFunction(realm.allocator, realm, cap.resolve, Value.undefined_, &[_]Value{wrapped}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    _ = outcome_r;
+}
+
+/// Reject `cap` with a fresh owner-realm TypeError carrying `msg`.
+fn rejectImport(realm: *Realm, owner: *Realm, cap: promise_mod.PromiseCapability, msg: []const u8) NativeError!void {
+    const ex = intrinsics.newTypeError(owner, msg) catch return error.OutOfMemory;
+    const outcome = call_mod.callJSFunction(realm.allocator, realm, cap.reject, Value.undefined_, &[_]Value{ex}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    _ = outcome;
 }

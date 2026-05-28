@@ -940,6 +940,13 @@ pub const Realm = struct {
             // mutable-primordials surface to `$262.createRealm()`
             // and vice versa.
             .hardened = parent.hardened,
+            // Children inherit the host module loader so a child
+            // realm can resolve module specifiers — required by
+            // `ShadowRealm.prototype.importValue`, which loads a
+            // module in the child realm. Without this the child's
+            // loader is null and every import fails
+            // `error.ModuleNotFound`.
+            .module_loader = parent.module_loader,
         };
         r.globals.heap = parent.heap;
         return r;
