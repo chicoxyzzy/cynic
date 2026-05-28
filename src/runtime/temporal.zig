@@ -597,48 +597,88 @@ pub fn parseTemporalTimeString(input: []const u8) TimeParseError!PlainTimeRecord
     // A date-time string starts with a date (`YYYY-MM-DD` or the
     // compact `YYYYMMDD` / `±YYYYYY-MM-DD`). Detect a date prefix
     // followed by a `T`/`t`/space separator and skip to the time.
+    // `had_designator` tracks whether a `T` (or date+separator)
+    // preceded the time — that disambiguates the colon-free compact
+    // forms (`1214`), which are otherwise ambiguous with a calendar
+    // date (MMDD) and rejected for a bare PlainTime string.
+    var had_designator = false;
     switch (classifyDatePrefix(s)) {
-        .time_after_date => |rest| s = rest,
+        .time_after_date => |rest| {
+            s = rest;
+            had_designator = true;
+        },
         // A date with no time separator (`2022-09-15`,
         // `2022-09-15+00:00`) carries no time component — invalid
         // for a PlainTime.
         .date_only => return error.Invalid,
         .no_date => if (s.len > 0 and (s[0] == 'T' or s[0] == 't')) {
             s = s[1..];
+            had_designator = true;
         },
     }
 
-    // Split off a trailing UTC offset or `Z` designator.
+    // Split off a trailing UTC offset or `Z` designator. The
+    // offset (when present) MUST consume the rest of the string —
+    // trailing junk (`00:00:00+00:00junk`) is invalid.
     var time_part = s;
-    if (splitOffset(s)) |split| {
-        if (split.is_z) return error.UTCDesignator;
-        time_part = split.time;
+    // `Z` / `z` UTC designator: only valid as the final character.
+    if (s.len > 0 and (s[s.len - 1] == 'Z' or s[s.len - 1] == 'z')) {
+        return error.UTCDesignator;
+    }
+    // A `+`/`-` begins a UTC offset suffix; validate it to end.
+    var sign_idx: ?usize = null;
+    for (s, 0..) |c, k| {
+        if (c == '+' or c == '-') {
+            sign_idx = k;
+            break;
+        }
+        // A stray `Z` mid-string (e.g. `00:00Zjunk`) is rejected by
+        // parseBareTime below; we only special-case the offset sign
+        // here.
+    }
+    if (sign_idx) |idx| {
+        if (!isValidUtcOffset(s[idx..])) return error.Invalid;
+        time_part = s[0..idx];
     }
 
-    return parseBareTime(time_part) catch error.Invalid;
+    return parseBareTime(time_part, had_designator) catch error.Invalid;
 }
 
-const OffsetSplit = struct { time: []const u8, is_z: bool };
-
-/// Detect and remove a trailing UTC offset / `Z` from a time string.
-/// Returns the bare-time prefix and whether a `Z` was seen. Returns
-/// null when there's no offset suffix.
-fn splitOffset(s: []const u8) ?OffsetSplit {
-    if (s.len == 0) return null;
-    const last = s[s.len - 1];
-    if (last == 'Z' or last == 'z') return .{ .time = s[0 .. s.len - 1], .is_z = true };
-    // Find the offset sign that begins the offset suffix. The time
-    // itself never contains `+`; a `-` only appears in a date prefix
-    // (already stripped). Scan from the start past the time digits /
-    // colons / fraction to the first `+` or `-`.
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        const c = s[i];
-        if (c == '+' or c == '-') {
-            return .{ .time = s[0..i], .is_z = false };
-        }
+/// Validate a UTC offset suffix `[+-]HH`, `[+-]HH:MM`,
+/// `[+-]HH:MM:SS`, `[+-]HH:MM:SS(.|,)fff`, or the compact colon-free
+/// forms — and require it to consume the whole slice. Hours ≤ 23,
+/// minutes/seconds ≤ 59. Colon-consistency must hold (either every
+/// separator present or none). The numeric value is discarded; only
+/// well-formedness matters for a PlainTime.
+fn isValidUtcOffset(s: []const u8) bool {
+    if (s.len < 3) return false; // at least sign + HH
+    if (s[0] != '+' and s[0] != '-') return false;
+    var i: usize = 1;
+    const hour = read2(s, &i) orelse return false;
+    if (hour > 23) return false;
+    if (i == s.len) return true; // [+-]HH
+    const extended = s[i] == ':';
+    if (extended) {
+        i += 1;
+        const minute = read2(s, &i) orelse return false;
+        if (minute > 59) return false;
+        if (i == s.len) return true; // [+-]HH:MM
+        if (s[i] != ':') return false; // separator must be consistent
+        i += 1;
+        const second = read2(s, &i) orelse return false;
+        if (second > 59) return false;
+    } else {
+        // Compact: HHMM or HHMMSS.
+        const minute = read2(s, &i) orelse return false;
+        if (minute > 59) return false;
+        if (i == s.len) return true; // [+-]HHMM
+        const second = read2(s, &i) orelse return false;
+        if (second > 59) return false;
     }
-    return null;
+    // Optional sub-second fraction on the offset seconds.
+    const sub = readFraction(s, &i) catch return false;
+    _ = sub;
+    return i == s.len;
 }
 
 /// Strip one or more trailing `[...]` annotation blocks. Errors if a
@@ -672,14 +712,32 @@ const DatePrefix = union(enum) {
 /// `T`/`t`/space separator.
 fn classifyDatePrefix(s: []const u8) DatePrefix {
     var i: usize = 0;
+    var neg_zero_year = false;
     // Optional expanded-year sign.
     if (i < s.len and (s[i] == '+' or s[i] == '-')) {
-        // Expanded year is ±YYYYYY (six digits).
+        // Expanded year is ±YYYYYY (six digits). A `-000000` (minus
+        // zero) expanded year is forbidden (§ISO 8601 / year-zero.js).
+        const sign_minus = s[i] == '-';
         i += 1;
+        const year_start = i;
         if (!skipDigits(s, &i, 6)) return .no_date;
+        if (sign_minus) {
+            var all_zero = true;
+            for (s[year_start..i]) |c| {
+                if (c != '0') {
+                    all_zero = false;
+                    break;
+                }
+            }
+            if (all_zero) neg_zero_year = true;
+        }
     } else {
         if (!skipDigits(s, &i, 4)) return .no_date;
     }
+    // A forbidden negative-zero expanded year makes the whole string
+    // invalid — surface as `.date_only` (PlainTime maps both to
+    // RangeError).
+    if (neg_zero_year) return .date_only;
     // `-MM-DD` extended or `MMDD` compact.
     if (i < s.len and s[i] == '-') {
         i += 1;
@@ -709,10 +767,38 @@ fn skipDigits(s: []const u8, i: *usize, n: usize) bool {
     return true;
 }
 
+/// Whether `m` is a valid ISO month (1..12). Used by the compact
+/// time/date disambiguation.
+fn isValidMonth(m: u32) bool {
+    return m >= 1 and m <= 12;
+}
+
+/// Whether `(month, day)` could be a valid ISO calendar date in some
+/// year (the disambiguation uses the most-permissive year, so Feb
+/// allows 29). A compact `MMDD` that satisfies this is ambiguous
+/// with a date and rejected as a bare PlainTime string.
+fn isValidMonthDay(month: u32, day: u32) bool {
+    if (!isValidMonth(month)) return false;
+    const max_day: u32 = switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => 29, // leap-permissive
+        else => 0,
+    };
+    return day >= 1 and day <= max_day;
+}
+
 /// Parse the bare time portion: `HH`, `HH:MM`, `HH:MM:SS`,
 /// `HH:MM:SS(.|,)fff`, or the compact colon-free forms. Clamps a
 /// `60` seconds value (leap second) to 59.
-fn parseBareTime(s: []const u8) error{Invalid}!PlainTimeRecord {
+///
+/// `had_designator` — whether a `T` (or date + separator) preceded
+/// this time. A colon-free compact form (`1214`, `202112`) that
+/// follows no designator is ambiguous with a calendar date and is
+/// rejected when the same digits could spell a valid date
+/// (`1214` = Dec 14; `202112` = 2021-12) per §ISO 8601 disambiguation
+/// — only a `T` prefix disambiguates it as a time.
+fn parseBareTime(s: []const u8, had_designator: bool) error{Invalid}!PlainTimeRecord {
     if (s.len < 2) return error.Invalid;
     var i: usize = 0;
     const hour = read2(s, &i) orelse return error.Invalid;
@@ -720,6 +806,7 @@ fn parseBareTime(s: []const u8) error{Invalid}!PlainTimeRecord {
     var second: u32 = 0;
     var sub_ns: u32 = 0;
     const extended = i < s.len and s[i] == ':';
+    var compact_digits: usize = 2; // count of bare HH..SS digits
 
     if (i < s.len) {
         if (extended) {
@@ -733,8 +820,10 @@ fn parseBareTime(s: []const u8) error{Invalid}!PlainTimeRecord {
         } else if (s[i] >= '0' and s[i] <= '9') {
             // Compact `HHMM` / `HHMMSS`.
             minute = read2(s, &i) orelse return error.Invalid;
+            compact_digits = 4;
             if (i < s.len and s[i] >= '0' and s[i] <= '9') {
                 second = read2(s, &i) orelse return error.Invalid;
+                compact_digits = 6;
             }
             sub_ns = try readFraction(s, &i);
         } else if (s[i] == '.' or s[i] == ',') {
@@ -744,6 +833,16 @@ fn parseBareTime(s: []const u8) error{Invalid}!PlainTimeRecord {
         }
     }
     if (i != s.len) return error.Invalid;
+
+    // §ISO 8601 date/time disambiguation — a colon-free compact time
+    // with no `T` designator and no fraction that could equally spell
+    // a valid calendar date is rejected as ambiguous (the caller must
+    // add a `T`). Only the no-fraction case is ambiguous; a fraction
+    // forces the time reading.
+    if (!had_designator and !extended and sub_ns == 0) {
+        if (compact_digits == 4 and isValidMonthDay(hour, minute)) return error.Invalid;
+        if (compact_digits == 6 and isValidMonth(second)) return error.Invalid;
+    }
 
     // Leap second: clamp 60 → 59.
     if (second == 60) second = 59;
@@ -997,4 +1096,66 @@ test "parseTemporalTimeString: invalid" {
     try testing.expectError(error.Invalid, parseTemporalTimeString("24:00:00"));
     try testing.expectError(error.Invalid, parseTemporalTimeString("12:60:00"));
     try testing.expectError(error.Invalid, parseTemporalTimeString("garbage"));
+    // Date-only (no time component) is invalid for a PlainTime.
+    try testing.expectError(error.Invalid, parseTemporalTimeString("2022-09-15"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("2022-09-15+00:00"));
+}
+
+test "parseTemporalTimeString: malformed offset / trailing junk rejected" {
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00:00+00:00junk"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00-24:00"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00+24:00"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00:00+00:0000"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("0000:00"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:0000"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00:00+0000:00"));
+    // Valid offsets still parse (offset discarded).
+    const a = try parseTemporalTimeString("12:34:56+00");
+    try testing.expectEqual(@as(u32, 56), a.second);
+    const b = try parseTemporalTimeString("12:34:56-0230");
+    try testing.expectEqual(@as(u32, 34), b.minute);
+    const c = try parseTemporalTimeString("12:34:56+00:00:00.000000000");
+    try testing.expectEqual(@as(u32, 12), c.hour);
+}
+
+test "parseTemporalTimeString: compact-form date/time disambiguation" {
+    // Ambiguous (could be a valid MMDD / YYYYMM) — rejected without T.
+    try testing.expectError(error.Invalid, parseTemporalTimeString("1214")); // Dec 14
+    try testing.expectError(error.Invalid, parseTemporalTimeString("0229")); // Feb 29
+    try testing.expectError(error.Invalid, parseTemporalTimeString("1130")); // Nov 30
+    try testing.expectError(error.Invalid, parseTemporalTimeString("202112")); // 2021-12
+    // Unambiguous (cannot be a valid date) — accepted as a time.
+    const a = try parseTemporalTimeString("1314"); // 13 is not a month
+    try testing.expectEqual(@as(u32, 13), a.hour);
+    try testing.expectEqual(@as(u32, 14), a.minute);
+    const b = try parseTemporalTimeString("1232"); // 32 not a day
+    try testing.expectEqual(@as(u32, 12), b.hour);
+    try testing.expectEqual(@as(u32, 32), b.minute); // wait: 32 > 59? no, minute=32 ok
+    const c = try parseTemporalTimeString("0230"); // Feb 30 invalid date
+    try testing.expectEqual(@as(u32, 2), c.hour);
+    try testing.expectEqual(@as(u32, 30), c.minute);
+    const d = try parseTemporalTimeString("202113"); // month 13 invalid
+    try testing.expectEqual(@as(u32, 20), d.hour);
+    try testing.expectEqual(@as(u32, 21), d.minute);
+    try testing.expectEqual(@as(u32, 13), d.second);
+    // A `T` designator disambiguates a compact form as a time.
+    const e = try parseTemporalTimeString("T1214");
+    try testing.expectEqual(@as(u32, 12), e.hour);
+    try testing.expectEqual(@as(u32, 14), e.minute);
+}
+
+test "parseTemporalTimeString: negative-zero expanded year rejected" {
+    try testing.expectError(error.Invalid, parseTemporalTimeString("-000000-12-07T03:24:30"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("-000000-12-07T03:24:30+01:00"));
+    // A positive expanded year date-time is fine.
+    const a = try parseTemporalTimeString("+000000-12-07T03:24:30");
+    try testing.expectEqual(@as(u32, 3), a.hour);
+}
+
+test "parseTemporalTimeString: Z designator (trailing) rejected as UTC" {
+    // Pure-Z forms map to UTCDesignator; mid-string Z (junk) is
+    // plain Invalid.
+    try testing.expectError(error.UTCDesignator, parseTemporalTimeString("00:00:00Z"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00:00Zjunk"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00Zjunk"));
 }

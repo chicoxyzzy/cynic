@@ -684,6 +684,25 @@ fn plainTimeNanosecond(realm: *Realm, t: Value, a: []const Value) NativeError!Va
     return Value.fromInt32(@intCast((try requirePlainTime(realm, t)).nanosecond));
 }
 
+/// §13.x RejectTemporalLikeObject — throw TypeError if `obj` carries
+/// a `calendar` or `timeZone` own property (reading `calendar` then
+/// `timeZone` in that order, per the order-of-operations fixture) or
+/// is itself a branded Temporal value. Used by `PlainTime.prototype.
+/// with` to reject a date-ish / Temporal bag.
+fn rejectTemporalLikeObject(realm: *Realm, obj: *JSObject) NativeError!void {
+    if (obj.getTemporalRecord() != null) {
+        return throwTypeError(realm, "a Temporal object is not a valid PlainTime-like property bag");
+    }
+    const cal = try getPropertyChain(realm, obj, "calendar");
+    if (!cal.isUndefined()) {
+        return throwTypeError(realm, "PlainTime-like must not have a calendar property");
+    }
+    const tz = try getPropertyChain(realm, obj, "timeZone");
+    if (!tz.isUndefined()) {
+        return throwTypeError(realm, "PlainTime-like must not have a timeZone property");
+    }
+}
+
 /// §4.5.x ToTemporalTimeRecord(bag, 'partial') — read present time
 /// fields off `like` (ToIntegerWithTruncation each), require at
 /// least one. Singular spec keys only (hour, microsecond,
@@ -693,6 +712,12 @@ fn plainTimeWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const like = argOr(args, 0, Value.undefined_);
     const obj = heap_mod.valueAsPlainObject(like) orelse
         return throwTypeError(realm, "PlainTime-like must be an object");
+
+    // §4.5.x RejectTemporalLikeObject — a property bag carrying a
+    // `calendar` or `timeZone` own property (or a branded Temporal
+    // value) is not a plain time-like and is rejected. The two
+    // reads happen first per the order-of-operations fixture.
+    try rejectTemporalLikeObject(realm, obj);
 
     // Start from the receiver's fields (as f64 so a present partial
     // value can override).
