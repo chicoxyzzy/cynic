@@ -69,7 +69,7 @@ pub const Inst = union(enum) {
 
     pub const Split = struct { a: usize, b: usize };
     pub const Range = struct { from: usize, to: usize };
-    pub const LookInst = struct { negative: bool, sub: []const Inst };
+    pub const LookInst = struct { negative: bool, behind: bool, sub: []const Inst };
 };
 
 /// Free the owned allocations inside each instruction (class ranges,
@@ -170,6 +170,9 @@ const Compiler = struct {
     insts: std.ArrayListUnmanaged(Inst),
     /// The `s` (dotall) flag — `.` matches line terminators too.
     dot_all: bool,
+    /// True while compiling a lookbehind body — concatenations are
+    /// emitted in reverse so the VM matches them right-to-left.
+    backward: bool = false,
     /// Cleared to false the moment a backreference is emitted — the
     /// pattern is then no longer in the regular subset.
     regular: bool = true,
@@ -215,7 +218,19 @@ const Compiler = struct {
                     return e;
                 };
             },
-            .concat => |parts| for (parts) |part| try self.compileNode(part),
+            .concat => |parts| {
+                if (self.backward) {
+                    // Reverse the sequence so right-to-left execution in
+                    // a lookbehind matches the body in source order.
+                    var i = parts.len;
+                    while (i > 0) {
+                        i -= 1;
+                        try self.compileNode(parts[i]);
+                    }
+                } else {
+                    for (parts) |part| try self.compileNode(part);
+                }
+            },
             .noncapture => |body| try self.compileNode(body),
             .capture => |g| {
                 try self.emit(.{ .save = 2 * g.index });
@@ -225,8 +240,12 @@ const Compiler = struct {
             .alternate => |alts| try self.compileAlternation(alts),
             .repeat => |r| try self.compileRepeat(r),
             .lookahead => |la| {
-                const sub = try self.compileSubProgram(la.body);
-                self.emit(.{ .lookahead = .{ .negative = la.negative, .sub = sub } }) catch |e| {
+                // Lookbehind matches backward and (v1) only supports
+                // capture-free, assertion-free bodies; richer bodies
+                // defer to the fallback. Lookahead has no restriction.
+                if (la.behind and !lookbehindBodyOk(la.body)) return error.Unsupported;
+                const sub = try self.compileSubProgram(la.body, la.behind);
+                self.emit(.{ .lookahead = .{ .negative = la.negative, .behind = la.behind, .sub = sub } }) catch |e| {
                     freeInsts(self.gpa, sub);
                     return e;
                 };
@@ -322,19 +341,24 @@ const Compiler = struct {
     }
 
     /// Compile `body` into a fresh, self-contained sub-program ending
-    /// in `match`, for a lookahead. Returns an owned instruction slice.
-    fn compileSubProgram(self: *Compiler, body: *const Node) CompileError![]Inst {
+    /// in `match`, for a lookaround. `backward` reverses concatenations
+    /// (for lookbehind). Returns an owned instruction slice.
+    fn compileSubProgram(self: *Compiler, body: *const Node, backward: bool) CompileError![]Inst {
         const saved = self.insts;
+        const saved_dir = self.backward;
         self.insts = .empty;
+        self.backward = backward;
         errdefer {
             freeInstContents(self.gpa, self.insts.items);
             self.insts.deinit(self.gpa);
             self.insts = saved;
+            self.backward = saved_dir;
         }
         try self.compileNode(body);
         try self.emit(.match);
         const sub = try self.insts.toOwnedSlice(self.gpa);
         self.insts = saved;
+        self.backward = saved_dir;
         return sub;
     }
 
@@ -356,6 +380,31 @@ const Compiler = struct {
         }
     }
 };
+
+/// A lookbehind body the v1 backward matcher handles: no capturing
+/// groups (which would need reversed capture saves), no
+/// backreferences, and no nested assertions. Richer bodies defer to
+/// the fallback.
+fn lookbehindBodyOk(node: *const Node) bool {
+    return switch (node.*) {
+        .capture, .backref_name, .backref_index, .lookahead => false,
+        .empty, .char, .class, .dot, .anchor_start, .anchor_end, .word_boundary => true,
+        .noncapture => |b| lookbehindBodyOk(b),
+        .repeat => |r| lookbehindBodyOk(r.body),
+        .concat => |parts| {
+            for (parts) |p| {
+                if (!lookbehindBodyOk(p)) return false;
+            }
+            return true;
+        },
+        .alternate => |alts| {
+            for (alts) |a| {
+                if (!lookbehindBodyOk(a)) return false;
+            }
+            return true;
+        },
+    };
+}
 
 /// Whether a subtree can match the empty string. A quantifier over a
 /// nullable body needs the §22.2.2.3 zero-width progress guard, which

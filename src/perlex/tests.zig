@@ -158,7 +158,6 @@ test "perlex: iterated duplicate group clears captures each iteration" {
 // ── Fallback routing — constructs outside the v1 grammar ─────────────
 
 test "perlex: unsupported constructs fall back" {
-    try expectCompile("(?<=a)", .unsupported); // lookbehind
     try expectCompile("[\\D]", .unsupported); // negated class escape in class
     try expectCompile("\\1", .unsupported); // numeric backreference (no groups)
     try expectCompile("\\p{L}", .unsupported); // property escape
@@ -192,6 +191,31 @@ test "perlex: duplicate name across a lookahead and the sequence errors" {
     try expectCompile("(?=(?<x>a))(?<x>b)", .syntax_error);
     // …but the same name across mutually exclusive alternatives is fine.
     try expectCompile("(?=(?<x>a))|(?<x>b)", .match);
+}
+
+// ── §22.2.2.4 lookbehind (backward matching) ────────────────────────
+
+test "perlex: positive lookbehind" {
+    try expectMatch("(?<=a)b", "ab", "b");
+    try expectNoMatch("(?<=a)b", "cb");
+    try expectMatch("(?<=ab)c", "abc", "c");
+    try expectMatch("(?<=[0-9])x", "5x", "x");
+}
+
+test "perlex: negative lookbehind" {
+    try expectMatch("(?<!a)b", "cb", "b");
+    try expectNoMatch("(?<!a)b", "ab");
+    try expectMatch("(?<!a)b", "b", "b"); // nothing before → not preceded by 'a'
+}
+
+test "perlex: variable-length lookbehind" {
+    try expectMatch("(?<=a+)b", "aaab", "b");
+    try expectMatch("(?<=ab|cd)x", "cdx", "x");
+}
+
+test "perlex: lookbehind with captures or assertions falls back" {
+    try expectCompile("(?<=(a))b", .unsupported); // capture in lookbehind
+    try expectCompile("(?<=(?=a))b", .unsupported); // nested assertion
 }
 
 // ── §22.2.1 quantifiers (greedy / lazy / bounded) ───────────────────
