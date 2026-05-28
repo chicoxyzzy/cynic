@@ -202,6 +202,15 @@ pub fn newPromiseCapability(realm: *Realm, ctor: *JSFunction) NativeError!Promis
     // `this_value` without needing closures.
     const state = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(state, realm.intrinsics.object_prototype);
+    // Root `state` (and the executor below) across the executor
+    // allocations and the user-constructor `constructValue` call —
+    // the latter runs arbitrary JS and can GC repeatedly. `state`'s
+    // `capability_record` is where the executor stashes resolve/reject,
+    // so a swept `state` mid-construct loses the capability and the
+    // executor's `bound_this` dangles.
+    const cap_sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer cap_sc.close();
+    cap_sc.push(heap_mod.taggedObject(state)) catch return error.OutOfMemory;
     const rec = realm.allocator.create(@import("../object.zig").PromiseCapabilityRecord) catch return error.OutOfMemory;
     rec.* = .{};
     state.capability_record = rec;
@@ -212,9 +221,11 @@ pub fn newPromiseCapability(realm: *Realm, ctor: *JSFunction) NativeError!Promis
     const executor_impl = realm.heap.allocateFunctionNative(capabilityExecutorImpl, 2, "") catch return error.OutOfMemory;
     executor_impl.proto = realm.intrinsics.function_prototype;
     executor_impl.has_construct = false;
+    cap_sc.push(heap_mod.taggedFunction(executor_impl)) catch return error.OutOfMemory;
     const executor = realm.heap.allocateFunctionNative(boundResolveTrampoline, 2, "") catch return error.OutOfMemory;
     executor.proto = realm.intrinsics.function_prototype;
     executor.has_construct = false;
+    cap_sc.push(heap_mod.taggedFunction(executor)) catch return error.OutOfMemory;
     realm.heap.setBoundTarget(executor, executor_impl);
     realm.heap.setBoundThis(executor, heap_mod.taggedObject(state));
 
@@ -711,20 +722,32 @@ fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // onFinally is callable; otherwise pass through.
     var then_arg: Value = on_finally;
     var catch_arg: Value = on_finally;
+    // Root the reaction context + both wrappers across the
+    // allocations below AND the `.then` call further down (which
+    // allocates a capability before enqueuing the reactions). Until
+    // a wrapper lands in a microtask's reaction_handler it is
+    // reachable only through unrooted native locals; a mid-`.then`
+    // sweep would otherwise enqueue a dangling handler. Opened at
+    // function scope so it outlives the `.then` invocation.
+    const fin_sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer fin_sc.close();
     if (on_finally_fn != null) {
         const ctx = realm.heap.allocateObject() catch return error.OutOfMemory;
         realm.heap.setObjectPrototype(ctx, realm.intrinsics.object_prototype);
+        fin_sc.push(heap_mod.taggedObject(ctx)) catch return error.OutOfMemory;
         realm.heap.setFinallyCallback(ctx, on_finally_fn);
         realm.heap.setFinallyConstructor(ctx, C);
 
         const then_fn = realm.heap.allocateFunctionNative(finallyThenReaction, 1, "") catch return error.OutOfMemory;
         then_fn.proto = realm.intrinsics.function_prototype;
         then_fn.is_arrow = true;
+        fin_sc.push(heap_mod.taggedFunction(then_fn)) catch return error.OutOfMemory;
         realm.heap.setCapturedThis(then_fn, heap_mod.taggedObject(ctx));
 
         const catch_fn = realm.heap.allocateFunctionNative(finallyCatchReaction, 1, "") catch return error.OutOfMemory;
         catch_fn.proto = realm.intrinsics.function_prototype;
         catch_fn.is_arrow = true;
+        fin_sc.push(heap_mod.taggedFunction(catch_fn)) catch return error.OutOfMemory;
         realm.heap.setCapturedThis(catch_fn, heap_mod.taggedObject(ctx));
 
         then_arg = heap_mod.taggedFunction(then_fn);
@@ -1156,6 +1179,15 @@ fn collectIterable(realm: *Realm, source_v: Value) NativeError!std.ArrayList(Val
 
     if (try iteratorOpen(realm, source_v)) |rec_in| {
         var rec = rec_in;
+        // Root the iterator object + `next` method, and every value
+        // collected so far, across each `iteratorStep` re-entry —
+        // `list` is a native ArrayList the GC does not scan, so a
+        // young value already appended would be swept by the next
+        // step's allocations under aggressive GC.
+        const it_sc = realm.heap.openScope() catch return error.OutOfMemory;
+        defer it_sc.close();
+        it_sc.push(rec.iter_v) catch return error.OutOfMemory;
+        it_sc.push(heap_mod.taggedFunction(rec.next_fn)) catch return error.OutOfMemory;
         const max_iter: usize = 1 << 24;
         var step: usize = 0;
         while (step < max_iter) : (step += 1) {
@@ -1165,6 +1197,7 @@ fn collectIterable(realm: *Realm, source_v: Value) NativeError!std.ArrayList(Val
                 return err;
             } orelse break;
             try list.append(realm.allocator, v);
+            it_sc.push(v) catch return error.OutOfMemory;
         }
         return list;
     }
@@ -1242,6 +1275,16 @@ fn iterateAggregator(
     // array-like fallback (spec §7.4.2 only allows GetIterator).
     const rec_in = (try iteratorOpen(realm, source_v)) orelse unreachable;
     var rec = rec_in;
+    // Root the iterator object + its `next` method for the whole
+    // walk. `iteratorStep`, the per-item `resolve` call, and
+    // `process` all re-enter JS and can GC; the user-created
+    // iterator is reachable only through this native record, so
+    // without rooting it a collection sweeps it and `iteratorClose`
+    // (or the next `iteratorStep`) dereferences freed memory.
+    const it_sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer it_sc.close();
+    it_sc.push(rec.iter_v) catch return error.OutOfMemory;
+    it_sc.push(heap_mod.taggedFunction(rec.next_fn)) catch return error.OutOfMemory;
     const max_iter: usize = 1 << 24;
     var idx: usize = 0;
     while (idx < max_iter) : (idx += 1) {
@@ -1250,6 +1293,16 @@ fn iterateAggregator(
             // here (rec.done is true).
             return err;
         } orelse return;
+
+        // Root the yielded value and (below) the resolved Promise
+        // across the `resolve` call and `process` — both re-enter
+        // JS and allocate (`process` builds the per-element resolve/
+        // reject closures), and these are bare natives the GC can't
+        // otherwise see. Per-iteration scope so the roots don't
+        // accumulate across a long iterable.
+        const step_sc = realm.heap.openScope() catch return error.OutOfMemory;
+        defer step_sc.close();
+        step_sc.push(next_v) catch return error.OutOfMemory;
 
         const r_outcome = interp.callJSFunction(realm.allocator, realm, resolve_fn, heap_mod.taggedFunction(ctor), &.{next_v}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1266,6 +1319,7 @@ fn iterateAggregator(
                 return error.NativeThrew;
             },
         };
+        step_sc.push(resolved) catch return error.OutOfMemory;
 
         const action = process(ctx, realm, ctor, idx, resolved) catch |err| {
             iteratorClose(realm, &rec);
@@ -1403,9 +1457,17 @@ fn allocAggState(realm: *Realm, kind: AggKind, cap: PromiseCapability, values: *
 /// bound function whose `bound_this` is a fresh wrapper carrying
 /// `(state, index, alreadyCalled)` so the shared element impl
 /// can read the wrapper out of `this_value`.
-fn allocElementClosures(realm: *Realm, state: *JSObject, idx: u32) NativeError!struct { resolve: *JSFunction, reject: *JSFunction } {
+fn allocElementClosures(realm: *Realm, sc: *heap_mod.HandleScope, state: *JSObject, idx: u32) NativeError!struct { resolve: *JSFunction, reject: *JSFunction } {
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(wrapper, realm.intrinsics.object_prototype);
+    // Root the wrapper + each closure as it is allocated. Every
+    // `allocateFunctionNative` below is a GC point, and until a
+    // closure lands in a microtask's reaction_handler (via the
+    // caller's `.then`) it is reachable only through unrooted native
+    // locals — without `sc` a mid-allocation sweep frees an earlier
+    // one and the later `.then` enqueues a dangling handler. The
+    // caller keeps `sc` open across `invokeThenWithClosures`.
+    sc.push(heap_mod.taggedObject(wrapper)) catch return error.OutOfMemory;
     wrapper.set(realm.allocator, k_elem_state, heap_mod.taggedObject(state)) catch return error.OutOfMemory;
     wrapper.set(realm.allocator, k_elem_index, Value.fromInt32(@intCast(idx))) catch return error.OutOfMemory;
     wrapper.set(realm.allocator, k_elem_called, Value.false_) catch return error.OutOfMemory;
@@ -1415,18 +1477,22 @@ fn allocElementClosures(realm: *Realm, state: *JSObject, idx: u32) NativeError!s
     const resolve_impl = realm.heap.allocateFunctionNative(aggResolveElement, 1, "") catch return error.OutOfMemory;
     resolve_impl.proto = realm.intrinsics.function_prototype;
     resolve_impl.has_construct = false;
+    sc.push(heap_mod.taggedFunction(resolve_impl)) catch return error.OutOfMemory;
     const resolve_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
     resolve_fn.proto = realm.intrinsics.function_prototype;
     resolve_fn.has_construct = false;
+    sc.push(heap_mod.taggedFunction(resolve_fn)) catch return error.OutOfMemory;
     realm.heap.setBoundTarget(resolve_fn, resolve_impl);
     realm.heap.setBoundThis(resolve_fn, heap_mod.taggedObject(wrapper));
 
     const reject_impl = realm.heap.allocateFunctionNative(aggRejectElement, 1, "") catch return error.OutOfMemory;
     reject_impl.proto = realm.intrinsics.function_prototype;
     reject_impl.has_construct = false;
+    sc.push(heap_mod.taggedFunction(reject_impl)) catch return error.OutOfMemory;
     const reject_fn = realm.heap.allocateFunctionNative(boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
     reject_fn.proto = realm.intrinsics.function_prototype;
     reject_fn.has_construct = false;
+    sc.push(heap_mod.taggedFunction(reject_fn)) catch return error.OutOfMemory;
     realm.heap.setBoundTarget(reject_fn, reject_impl);
     realm.heap.setBoundThis(reject_fn, heap_mod.taggedObject(wrapper));
 
@@ -1573,9 +1639,23 @@ fn invokeCapReject(realm: *Realm, state: *JSObject, reason: Value) NativeError!V
 }
 
 fn setIndexedOnArray(realm: *Realm, arr: *JSObject, idx: u32, v: Value) NativeError!void {
+    // `arr` is an aggregator results array (`Promise.all` values,
+    // `allSettled` entries, `any` errors) that survives across the
+    // whole walk and is promoted to mature. Two GC hazards under
+    // aggressive collection:
+    //   (1) the index-string allocation below is a GC point that
+    //       would sweep a young `v` before it lands — root it;
+    //   (2) storing a young `v` into the mature `arr` via the raw
+    //       `JSObject.set` (no barrier) is an un-remembered
+    //       mature→young edge the next minor GC sweeps (the gc1
+    //       remembered-set verifier trips on exactly this).
+    const sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer sc.close();
+    sc.push(v) catch return error.OutOfMemory;
     var ibuf: [24]u8 = undefined;
     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+    realm.heap.writeBarrier(.{ .object = arr }, v);
     arr.set(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
 }
 
@@ -1608,7 +1688,12 @@ fn aggregatorAllProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, i
     setLength(realm, values, @intCast(@as(u32, @intCast(idx + 1)))) catch return error.OutOfMemory;
     const cur = ctx.state.get(k_remaining).asInt32();
     ctx.state.set(realm.allocator, k_remaining, Value.fromInt32(cur + 1)) catch return error.OutOfMemory;
-    const closures = try allocElementClosures(realm, ctx.state, @intCast(idx));
+    // Keep the element closures rooted across `.then` (which allocates
+    // a capability before enqueuing the reaction); markRoots adopts
+    // them once the reaction lands in the microtask queue.
+    const closures_sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer closures_sc.close();
+    const closures = try allocElementClosures(realm, closures_sc, ctx.state, @intCast(idx));
     return invokeThenWithClosures(realm, resolved, closures.resolve, ctx.cap.reject);
 }
 
@@ -1625,7 +1710,9 @@ fn aggregatorAllSettledProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunc
     setLength(realm, values, @intCast(@as(u32, @intCast(idx + 1)))) catch return error.OutOfMemory;
     const cur = ctx.state.get(k_remaining).asInt32();
     ctx.state.set(realm.allocator, k_remaining, Value.fromInt32(cur + 1)) catch return error.OutOfMemory;
-    const closures = try allocElementClosures(realm, ctx.state, @intCast(idx));
+    const closures_sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer closures_sc.close();
+    const closures = try allocElementClosures(realm, closures_sc, ctx.state, @intCast(idx));
     return invokeThenWithClosures(realm, resolved, closures.resolve, closures.reject);
 }
 
@@ -1637,7 +1724,9 @@ fn aggregatorAnyProcess(ctx_ptr: *anyopaque, realm: *Realm, ctor: *JSFunction, i
     setLength(realm, errors, @intCast(@as(u32, @intCast(idx + 1)))) catch return error.OutOfMemory;
     const cur = ctx.state.get(k_remaining).asInt32();
     ctx.state.set(realm.allocator, k_remaining, Value.fromInt32(cur + 1)) catch return error.OutOfMemory;
-    const closures = try allocElementClosures(realm, ctx.state, @intCast(idx));
+    const closures_sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer closures_sc.close();
+    const closures = try allocElementClosures(realm, closures_sc, ctx.state, @intCast(idx));
     // §27.2.4.3.1 PerformPromiseAny step 8.j —
     //   Perform ? Invoke(nextPromise, "then",
     //     « resultCapability.[[Resolve]], onRejected »).
@@ -1865,6 +1954,16 @@ fn promiseRace(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     // each `.then` call, so we need them populated even for the
     // built-in Promise constructor.
     const cap = try newPromiseCapability(realm, ctor);
+    // Root the capability closures + result promise across the
+    // walk. Unlike all / allSettled / any, race keeps no `state`
+    // object — `cap` lives only in the native `RaceCtx`, which the
+    // GC can't scan, so `iterateAggregator`'s re-entries would sweep
+    // `cap.resolve` / `cap.reject` / `cap.promise` mid-iteration.
+    const agg_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer agg_scope.close();
+    agg_scope.push(heap_mod.taggedFunction(cap.resolve)) catch return error.OutOfMemory;
+    agg_scope.push(heap_mod.taggedFunction(cap.reject)) catch return error.OutOfMemory;
+    agg_scope.push(cap.promise) catch return error.OutOfMemory;
     var ctx = RaceCtx{ .cap = cap };
     iterateAggregator(realm, ctor, argOr(args, 0, Value.undefined_), &ctx, raceProcess) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

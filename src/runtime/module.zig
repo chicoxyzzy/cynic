@@ -172,7 +172,14 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
     // Idempotent — the `hasOwn` guard keeps repeated calls cheap.
     if (!ns.hasOwn("@@toStringTag")) {
         const tag = try realm.heap.allocateString("Module");
-        try ns.setWithFlags(realm.allocator, "@@toStringTag", Value.fromString(tag), .{
+        const tag_v = Value.fromString(tag);
+        // `ns` (`mr.exports`) is promoted to mature across the
+        // module's evaluation; storing the freshly-allocated young
+        // tag string via the raw setter is an un-remembered
+        // mature→young edge that the next minor GC sweeps (the gc1
+        // remembered-set verifier trips on exactly this). Barrier it.
+        realm.heap.writeBarrier(.{ .object = ns }, tag_v);
+        try ns.setWithFlags(realm.allocator, "@@toStringTag", tag_v, .{
             .writable = false,
             .enumerable = false,
             .configurable = false,

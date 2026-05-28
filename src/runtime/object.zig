@@ -2033,6 +2033,12 @@ pub const JSObject = struct {
                     e.attrs.configurable == flags.configurable)
                 {
                     self.slots.items[e.slot] = v;
+                    // Generational write barrier — a mature object
+                    // gaining a young referent in a shape slot must
+                    // join the remembered set, or the minor sweep
+                    // collects the still-reachable young value
+                    // (`verifyRememberedSet` slot-edge assert).
+                    heap.writeBarrier(.{ .object = self }, v);
                     return true;
                 }
                 try self.demoteFromShape(allocator);
@@ -2059,6 +2065,9 @@ pub const JSObject = struct {
             return err;
         };
         self.slots.items[child.slot] = v;
+        // Generational write barrier for the freshly transitioned
+        // slot — same hazard as the same-descriptor update above.
+        heap.writeBarrier(.{ .object = self }, v);
         self.shape = child;
         return true;
     }

@@ -3614,13 +3614,13 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // registered a `state`-bound continuation.
     const fa_sc = try faRootState(realm, state);
     defer fa_sc.close();
-    state.set(realm.allocator, k_fa_cap_resolve, heap_mod.taggedFunction(cap.resolve)) catch return error.OutOfMemory;
-    state.set(realm.allocator, k_fa_cap_reject, heap_mod.taggedFunction(cap.reject)) catch return error.OutOfMemory;
-    state.set(realm.allocator, k_fa_array, heap_mod.taggedObject(out)) catch return error.OutOfMemory;
-    state.set(realm.allocator, k_fa_index, Value.fromInt32(0)) catch return error.OutOfMemory;
-    state.set(realm.allocator, k_fa_mapfn, mapfn_v) catch return error.OutOfMemory;
-    state.set(realm.allocator, k_fa_this_arg, this_arg) catch return error.OutOfMemory;
-    state.set(realm.allocator, k_fa_items, items) catch return error.OutOfMemory;
+    try faStateSet(realm, state, k_fa_cap_resolve, heap_mod.taggedFunction(cap.resolve));
+    try faStateSet(realm, state, k_fa_cap_reject, heap_mod.taggedFunction(cap.reject));
+    try faStateSet(realm, state, k_fa_array, heap_mod.taggedObject(out));
+    try faStateSet(realm, state, k_fa_index, Value.fromInt32(0));
+    try faStateSet(realm, state, k_fa_mapfn, mapfn_v);
+    try faStateSet(realm, state, k_fa_this_arg, this_arg);
+    try faStateSet(realm, state, k_fa_items, items);
 
     // step 3 — GetMethod(asyncItems, @@asyncIterator). Per §7.3.10
     // GetMethod, if the property is null/undefined return undefined
@@ -3656,7 +3656,7 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
             const ctor_v = constructForFromAsync(realm, c, &.{}) catch {
                 return rejectPendingException(realm, cap);
             };
-            state.set(realm.allocator, k_fa_array, ctor_v) catch return error.OutOfMemory;
+            try faStateSet(realm, state, k_fa_array, ctor_v);
         }
         const iter_outcome = lantern.callJSFunction(realm.allocator, realm, async_iter_fn, items, &.{}) catch {
             return rejectPendingException(realm, cap);
@@ -3674,10 +3674,10 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const next_fn = heap_mod.valueAsFunction(next_v) orelse {
             return rejectWithTypeError(realm, cap, "Array.fromAsync: async iterator missing callable 'next'");
         };
-        state.set(realm.allocator, k_fa_iter, iter_v) catch return error.OutOfMemory;
-        state.set(realm.allocator, k_fa_next_fn, heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
-        state.set(realm.allocator, k_fa_mode, Value.fromInt32(1)) catch return error.OutOfMemory;
-        state.set(realm.allocator, k_fa_is_async, Value.true_) catch return error.OutOfMemory;
+        try faStateSet(realm, state, k_fa_iter, iter_v);
+        try faStateSet(realm, state, k_fa_next_fn, heap_mod.taggedFunction(next_fn));
+        try faStateSet(realm, state, k_fa_mode, Value.fromInt32(1));
+        try faStateSet(realm, state, k_fa_is_async, Value.true_);
         fromAsyncIterStep(realm, state) catch {
             return rejectPendingException(realm, cap);
         };
@@ -3689,7 +3689,7 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
             const ctor_v = constructForFromAsync(realm, c, &.{}) catch {
                 return rejectPendingException(realm, cap);
             };
-            state.set(realm.allocator, k_fa_array, ctor_v) catch return error.OutOfMemory;
+            try faStateSet(realm, state, k_fa_array, ctor_v);
         }
         // step 3.h — sync `@@iterator` fallback. Per spec, wrap in
         // %AsyncFromSyncIteratorPrototype%. Cynic shortcut: drive the
@@ -3713,10 +3713,10 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const next_fn = heap_mod.valueAsFunction(next_v) orelse {
             return rejectWithTypeError(realm, cap, "Array.fromAsync: iterator missing callable 'next'");
         };
-        state.set(realm.allocator, k_fa_iter, iter_v) catch return error.OutOfMemory;
-        state.set(realm.allocator, k_fa_next_fn, heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
-        state.set(realm.allocator, k_fa_mode, Value.fromInt32(1)) catch return error.OutOfMemory;
-        state.set(realm.allocator, k_fa_is_async, Value.false_) catch return error.OutOfMemory;
+        try faStateSet(realm, state, k_fa_iter, iter_v);
+        try faStateSet(realm, state, k_fa_next_fn, heap_mod.taggedFunction(next_fn));
+        try faStateSet(realm, state, k_fa_mode, Value.fromInt32(1));
+        try faStateSet(realm, state, k_fa_is_async, Value.false_);
         fromAsyncIterStep(realm, state) catch {
             return rejectPendingException(realm, cap);
         };
@@ -3739,7 +3739,7 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
             return rejectPendingException(realm, cap);
         };
     };
-    state.set(realm.allocator, k_fa_items, heap_mod.taggedObject(items_obj)) catch return error.OutOfMemory;
+    try faStateSet(realm, state, k_fa_items, heap_mod.taggedObject(items_obj));
 
     const raw_len = toLengthOf(realm, items_obj) catch {
         return rejectPendingException(realm, cap);
@@ -3747,8 +3747,8 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const len = intrinsics.clampArrayLengthR(realm, raw_len) catch {
         return rejectPendingException(realm, cap);
     };
-    state.set(realm.allocator, k_fa_length, numberFromI64(len)) catch return error.OutOfMemory;
-    state.set(realm.allocator, k_fa_mode, Value.fromInt32(0)) catch return error.OutOfMemory;
+    try faStateSet(realm, state, k_fa_length, numberFromI64(len));
+    try faStateSet(realm, state, k_fa_mode, Value.fromInt32(0));
 
     // §23.1.2.1.1 step 3.k.iv — `IsConstructor(C)` → `Construct(C, « 𝔽(len) »)`.
     if (this_ctor) |c| {
@@ -3756,7 +3756,7 @@ fn arrayFromAsync(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const ctor_v = constructForFromAsync(realm, c, &ctor_args) catch {
             return rejectPendingException(realm, cap);
         };
-        state.set(realm.allocator, k_fa_array, ctor_v) catch return error.OutOfMemory;
+        try faStateSet(realm, state, k_fa_array, ctor_v);
     }
 
     fromAsyncArrayLikeStep(realm, state) catch {
@@ -3819,6 +3819,14 @@ fn awaitAndThen(
     on_resolve: *JSFunction,
     on_reject: *JSFunction,
 ) NativeError!void {
+    // Root `source` (possibly a freshly-wrapped promise) and the
+    // result promise across the allocations that follow — the
+    // `result_promise` allocation and `promiseReactionsPtr` /
+    // reaction-list growth would otherwise sweep an un-anchored
+    // `source` under aggressive GC.
+    const sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer sc.close();
+
     var source: *JSObject = undefined;
     if (heap_mod.valueAsPlainObject(value)) |obj| {
         if (obj.isPromise()) {
@@ -3829,8 +3837,10 @@ fn awaitAndThen(
     } else {
         source = try wrapValueInPromise(realm, value);
     }
+    sc.push(heap_mod.taggedObject(source)) catch return error.OutOfMemory;
 
     const result_promise = promise_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_) catch return error.OutOfMemory;
+    sc.push(result_promise) catch return error.OutOfMemory;
     const on_resolve_v = heap_mod.taggedFunction(on_resolve);
     const on_reject_v = heap_mod.taggedFunction(on_reject);
     switch (source.promise_state) {
@@ -3850,6 +3860,13 @@ fn awaitAndThen(
 fn wrapValueInPromise(realm: *Realm, value: Value) NativeError!*JSObject {
     const wrap_v = promise_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_) catch return error.OutOfMemory;
     const wrap = heap_mod.valueAsPlainObject(wrap_v).?;
+    // Root `wrap` across `promiseResolveImplExported` — it re-enters
+    // JS (runs the resolve machinery) and can GC, which would
+    // otherwise sweep the freshly-allocated, not-yet-referenced
+    // `wrap` and return a dangling promise to `awaitAndThen`.
+    const sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer sc.close();
+    sc.push(wrap_v) catch return error.OutOfMemory;
     const args = [_]Value{value};
     _ = promise_mod.promiseResolveImplExported(realm, heap_mod.taggedObject(wrap), &args) catch return error.OutOfMemory;
     return wrap;
@@ -3857,16 +3874,63 @@ fn wrapValueInPromise(realm: *Realm, value: Value) NativeError!*JSObject {
 
 // ── Bound-callback helpers ──────────────────────────────────────────────────
 
-fn makeBoundCb(realm: *Realm, impl: *const fn (*Realm, Value, []const Value) NativeError!Value, state: *JSObject) NativeError!*JSFunction {
+fn makeBoundCb(
+    realm: *Realm,
+    impl: *const fn (*Realm, Value, []const Value) NativeError!Value,
+    state: *JSObject,
+    sc: *heap_mod.HandleScope,
+) NativeError!*JSFunction {
     const impl_fn = realm.heap.allocateFunctionNative(impl, 1, "") catch return error.OutOfMemory;
     impl_fn.proto = realm.intrinsics.function_prototype;
     impl_fn.has_construct = false;
+    // Root `impl_fn` across the `bound` allocation below — otherwise
+    // a GC there (deterministic at `gc-threshold=1`) sweeps the
+    // un-anchored `impl_fn`, leaving `setBoundTarget` to store a
+    // dangling pointer that surfaces as "value is not callable" when
+    // the trampoline later dereferences `bound_target`.
+    sc.push(heap_mod.taggedFunction(impl_fn)) catch return error.OutOfMemory;
     const bound = realm.heap.allocateFunctionNative(promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
     bound.proto = realm.intrinsics.function_prototype;
     bound.has_construct = false;
     realm.heap.setBoundTarget(bound, impl_fn);
     realm.heap.setBoundThis(bound, heap_mod.taggedObject(state));
+    // Keep `bound` rooted until the caller registers it in a promise
+    // reaction — a sibling `makeBoundCb` call (the reject twin)
+    // allocates again before `awaitAndThen` runs.
+    sc.push(heap_mod.taggedFunction(bound)) catch return error.OutOfMemory;
     return bound;
+}
+
+/// Allocate the resolve / reject bound continuations for one
+/// `Array.fromAsync` await and schedule them. Roots the awaited
+/// `value` and every intermediate function on `sc` so the cascade
+/// of allocations under aggressive GC can't sweep a callable before
+/// it lands in a (rooted) promise reaction.
+fn awaitWithCbs(
+    realm: *Realm,
+    sc: *heap_mod.HandleScope,
+    state: *JSObject,
+    value: Value,
+    on_res_impl: *const fn (*Realm, Value, []const Value) NativeError!Value,
+    on_rej_impl: *const fn (*Realm, Value, []const Value) NativeError!Value,
+) NativeError!void {
+    sc.push(value) catch return error.OutOfMemory;
+    const on_res = try makeBoundCb(realm, on_res_impl, state, sc);
+    const on_rej = try makeBoundCb(realm, on_rej_impl, state, sc);
+    try awaitAndThen(realm, value, on_res, on_rej);
+}
+
+/// Store into the engine-internal `Array.fromAsync` driver `state`
+/// object with the generational write barrier. `state` lives across
+/// every `await` suspension and is therefore promoted to mature; a
+/// later young value stored into a `__cynic_fa_*` slot via the raw
+/// `JSObject.set` (which doesn't barrier) is an un-remembered
+/// mature→young edge that the next minor GC sweeps — a
+/// use-after-free on the next driver step. The barrier no-ops for
+/// the primitive slots (index / mode / length flags).
+fn faStateSet(realm: *Realm, state: *JSObject, key: []const u8, value: Value) NativeError!void {
+    realm.heap.writeBarrier(.{ .object = state }, value);
+    state.set(realm.allocator, key, value) catch return error.OutOfMemory;
 }
 
 // ── Iterator-path driver ────────────────────────────────────────────────────
@@ -3907,9 +3971,7 @@ fn fromAsyncIterStep(realm: *Realm, state: *JSObject) NativeError!void {
             return;
         },
     };
-    const on_res = try makeBoundCb(realm, fromAsyncIterOnNextResult, state);
-    const on_rej = try makeBoundCb(realm, fromAsyncIterOnNextReject, state);
-    try awaitAndThen(realm, next_v, on_res, on_rej);
+    try awaitWithCbs(realm, fa_sc, state, next_v, fromAsyncIterOnNextResult, fromAsyncIterOnNextReject);
 }
 
 fn fromAsyncIterOnNextResult(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -3956,9 +4018,7 @@ fn fromAsyncIterOnNextResult(realm: *Realm, this_value: Value, args: []const Val
     // (e.g. a thenable yielded by the generator calls `reject`), the
     // sync iterator MUST be closed (IfAbruptCloseAsyncIterator).
     // `sync-iterable-with-rejecting-thenable-closes.js`.
-    const on_res = try makeBoundCb(realm, fromAsyncIterOnValueAwaited, state);
-    const on_rej = try makeBoundCb(realm, fromAsyncIterOnValueReject, state);
-    try awaitAndThen(realm, value_v, on_res, on_rej);
+    try awaitWithCbs(realm, fa_sc, state, value_v, fromAsyncIterOnValueAwaited, fromAsyncIterOnValueReject);
     return Value.undefined_;
 }
 
@@ -3991,9 +4051,7 @@ fn fromAsyncIterOnValueAwaited(realm: *Realm, this_value: Value, args: []const V
                 return closeIterAndReject(realm, state);
             },
         };
-        const on_res = try makeBoundCb(realm, fromAsyncIterOnMappedAwaited, state);
-        const on_rej = try makeBoundCb(realm, fromAsyncIterOnMappedReject, state);
-        try awaitAndThen(realm, mapped, on_res, on_rej);
+        try awaitWithCbs(realm, fa_sc, state, mapped, fromAsyncIterOnMappedAwaited, fromAsyncIterOnMappedReject);
         return Value.undefined_;
     }
 
@@ -4094,13 +4152,20 @@ fn appendAndStepIter(realm: *Realm, state: *JSObject, value: Value) NativeError!
     var ibuf: [24]u8 = undefined;
     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+    // Root the key string and the element value across
+    // `createDataPropertyOrThrow` — for a Proxy `A` it fires the
+    // `defineProperty` trap (user JS, can GC), and the borrowed
+    // `key` slice into `owned.bytes` would dangle if `owned` were
+    // swept mid-trap.
+    fa_sc.push(Value.fromString(owned)) catch return error.OutOfMemory;
+    fa_sc.push(value) catch return error.OutOfMemory;
     // §23.1.2.1.1 step 3.j.ii.8 — `CreateDataPropertyOrThrow(A, Pk,
     // mappedValue)`. Abrupt completion routes through
     // `closeIterAndReject` (step 9 — `AsyncIteratorClose`).
     createDataPropertyOrThrow(realm, out, owned, value) catch {
         return closeIterAndReject(realm, state);
     };
-    state.set(realm.allocator, k_fa_index, Value.fromInt32(k + 1)) catch return error.OutOfMemory;
+    try faStateSet(realm, state, k_fa_index, Value.fromInt32(k + 1));
     fromAsyncIterStep(realm, state) catch {
         return rejectFromState(realm, state);
     };
@@ -4159,9 +4224,7 @@ fn fromAsyncArrayLikeStep(realm: *Realm, state: *JSObject) NativeError!void {
         return;
     };
 
-    const on_res = try makeBoundCb(realm, fromAsyncArrayLikeOnAwaited, state);
-    const on_rej = try makeBoundCb(realm, fromAsyncArrayLikeOnReject, state);
-    try awaitAndThen(realm, raw, on_res, on_rej);
+    try awaitWithCbs(realm, fa_sc, state, raw, fromAsyncArrayLikeOnAwaited, fromAsyncArrayLikeOnReject);
 }
 
 fn fromAsyncArrayLikeOnAwaited(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -4182,9 +4245,7 @@ fn fromAsyncArrayLikeOnAwaited(realm: *Realm, this_value: Value, args: []const V
             .value, .yielded => |v| v,
             .thrown => |ex| return rejectFromStateWithReason(realm, state, ex),
         };
-        const on_res = try makeBoundCb(realm, fromAsyncArrayLikeOnMapped, state);
-        const on_rej = try makeBoundCb(realm, fromAsyncArrayLikeOnReject, state);
-        try awaitAndThen(realm, mapped, on_res, on_rej);
+        try awaitWithCbs(realm, fa_sc, state, mapped, fromAsyncArrayLikeOnMapped, fromAsyncArrayLikeOnReject);
         return Value.undefined_;
     }
 
@@ -4211,13 +4272,17 @@ fn appendAndStepArrayLike(realm: *Realm, state: *JSObject, value: Value) NativeE
     var ibuf: [24]u8 = undefined;
     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{k}) catch unreachable;
     const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+    // Root key + value across the (proxy-capable) define — see
+    // `appendAndStepIter`.
+    fa_sc.push(Value.fromString(owned)) catch return error.OutOfMemory;
+    fa_sc.push(value) catch return error.OutOfMemory;
     // §23.1.2.1.1 step 3.l.iii — `CreateDataPropertyOrThrow(A, Pk,
     // mappedValue)`. There's no iterator to close on the array-like
     // path; an abrupt completion just rejects the outer promise.
     createDataPropertyOrThrow(realm, out, owned, value) catch {
         return rejectFromState(realm, state);
     };
-    state.set(realm.allocator, k_fa_index, Value.fromInt32(k + 1)) catch return error.OutOfMemory;
+    try faStateSet(realm, state, k_fa_index, Value.fromInt32(k + 1));
     fromAsyncArrayLikeStep(realm, state) catch {
         return rejectFromState(realm, state);
     };

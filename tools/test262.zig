@@ -2398,6 +2398,21 @@ fn classifyAndRun(
 
     var test_threw = run_result == .thrown;
 
+    // Root a synchronously-thrown error across the microtask drain
+    // below. `run_result.thrown` lives only in this native local —
+    // `evaluateScript` hands the exception back and clears
+    // `realm.pending_exception`, so the realm root walk can't see
+    // it. Under `--gc-threshold=1` the drain's allocations would
+    // otherwise sweep the error object before the failure-message
+    // read further down dereferences it. Held open for the rest of
+    // `classifyAndRun` via the deferred close.
+    const thrown_scope: ?*cynic.runtime.heap.HandleScope = if (run_result == .thrown)
+        (realm.heap.openScope() catch null)
+    else
+        null;
+    defer if (thrown_scope) |s| s.close();
+    if (thrown_scope) |s| s.push(run_result.thrown) catch {};
+
     // Drain any microtasks queued during the test body. This
     // matches §9.4 — every host completes the current Job before
     // returning to the runner. Microtask exceptions go to the

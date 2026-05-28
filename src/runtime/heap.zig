@@ -1712,6 +1712,16 @@ pub const Heap = struct {
         self.markValue(gen.this_value);
         if (gen.env) |e| self.markEnvironment(e);
         if (gen.home_object) |ho| self.markValue(taggedObject(ho));
+        if (gen.home_function) |hf| self.markValue(taggedFunction(hf));
+        // The Promise a suspended async function must still settle:
+        // once the caller has attached its reactions and unwound, it
+        // is reachable only through this generator. Likewise the
+        // `.return(v)` / `.throw(v)` completion values pending at the
+        // next resume. Omitting these sweeps live heap referenced
+        // solely by a suspended frame — a use-after-free on resume.
+        if (gen.result_promise) |rp| self.markValue(rp);
+        if (gen.pending_return) |v| self.markValue(v);
+        if (gen.pending_throw) |v| self.markValue(v);
         // §27.6.3.4 — every buffered AsyncGeneratorRequest holds
         // both a completion value (the `.next(v)` / `.return(v)` /
         // `.throw(v)` arg) and the capability Promise we'll later
@@ -2477,6 +2487,13 @@ pub const Heap = struct {
         self.markValue(g.this_value);
         if (g.env) |e| self.markEnvironment(e);
         if (g.home_object) |ho| self.markValue(taggedObject(ho));
+        if (g.home_function) |hf| self.markValue(taggedFunction(hf));
+        // See `markGenerator` — these suspended-frame roots must be
+        // marked on the minor path too, or a young generator's
+        // result Promise / pending completion is swept on resume.
+        if (g.result_promise) |rp| self.markValue(rp);
+        if (g.pending_return) |v| self.markValue(v);
+        if (g.pending_throw) |v| self.markValue(v);
         for (g.queue.items) |req| {
             switch (req.completion) {
                 .normal => |v| self.markValue(v),

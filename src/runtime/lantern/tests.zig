@@ -4815,6 +4815,59 @@ test "GC: integer-index keys on an array-like survive gc_threshold=1" {
     , 30);
 }
 
+test "GC: suspended async fn result Promise survives gc_threshold=1" {
+    // A fire-and-forget async function suspends on `await`; its
+    // [[Promise]] (the value returned to the caller) is reachable
+    // ONLY through the suspended JSGenerator's `result_promise`
+    // slot once `.then` has registered its reaction and the caller
+    // frame unwound. `markGenerator` did not mark `result_promise`
+    // (nor `home_function` / `pending_return` / `pending_throw`),
+    // so under gc_threshold=1 the awaited continuation's allocations
+    // swept the result Promise — `.then`'s reaction was lost and
+    // `acc` never updated (or the resume settled freed memory).
+    try expectScriptIntUnderGcPressure(
+        \\var acc = -1;
+        \\async function f() { var x = await 1; var y = await (x + 2); return y + 4; }
+        \\f().then(function(v) { acc = v; });
+        \\globalThis.__drainMicrotasks();
+        \\acc;
+    , 7);
+}
+
+test "GC: Array.fromAsync over a sync iterable survives gc_threshold=1" {
+    // The fromAsync driver keeps its cursor in an engine-internal
+    // `state` object reached through each continuation's `bound_this`.
+    // Three roots had to hold under gc_threshold=1: the bound
+    // resolve/reject callables (`makeBoundCb` allocated the inner fn
+    // then the bound wrapper — a GC between freed the inner fn →
+    // "value is not callable"); the generational write barrier on
+    // `state` (promoted to mature across awaits, then a young
+    // iterator stored into `__cynic_fa_iter__` was an un-remembered
+    // edge); and `wrapValueInPromise`'s freshly-allocated Promise
+    // across the resolve re-entry.
+    try expectScriptIntUnderGcPressure(
+        \\var acc = -1;
+        \\Array.fromAsync([10, 20, 30]).then(function(a) { acc = a[0] + a[1] + a[2]; });
+        \\globalThis.__drainMicrotasks();
+        \\acc;
+    , 60);
+}
+
+test "GC: Array.fromAsync with a mapfn survives gc_threshold=1" {
+    // Exercises the mapped-value branch: each element is mapped then
+    // re-awaited via `awaitWithCbs` → `awaitAndThen` →
+    // `wrapValueInPromise`. Before rooting the wrapper Promise across
+    // the resolve re-entry, the awaited `source` was a dangling
+    // pointer and `switch (source.promise_state)` paniced on a
+    // corrupt enum value under gc_threshold=1.
+    try expectScriptIntUnderGcPressure(
+        \\var acc = -1;
+        \\Array.fromAsync([1, 2, 3], function(x) { return x * 10; }).then(function(a) { acc = a[0] + a[1] + a[2]; });
+        \\globalThis.__drainMicrotasks();
+        \\acc;
+    , 60);
+}
+
 test "GC: long Promise microtask chain survives alternating GC pressure" {
     // The 3-deep chain above doesn't surface two interacting
     // hazards: (1) the colour-flip cross-cycle stale-mark hazard
@@ -5136,6 +5189,61 @@ test "GC: destructuring iterator record survives gc_threshold=1" {
         \\let [a, b, c] = g;
         \\a + b + c;
     , 6);
+}
+
+test "GC: object-rest target survives gc_threshold=1" {
+    // §7.3.27 CopyDataProperties (`const {a, ...rest} = src`). The
+    // `object_rest_from` opcode allocates `rest` up front, then walks
+    // the source's own keys reading each through `[[Get]]` — and an
+    // accessor getter (`get c`) re-enters JS, so with threshold=1 a
+    // full sweep fires mid-walk. `rest` is reachable only through a
+    // native local until it lands in the accumulator at the end, so
+    // without rooting it the sweep freed it and the next
+    // `storeProperty(rest, …)` dereferenced poisoned memory (the
+    // for-await-of segfault). Reads back the copied props to prove
+    // the target stayed live across the getter.
+    try expectScriptIntUnderGcPressure(
+        \\const src = { a: 1, b: 2, get c() { return 3; }, d: 4 };
+        \\const { a, ...rest } = src;
+        \\rest.b + rest.c + rest.d;
+    , 9);
+}
+
+test "GC: object-rest over a primitive source survives gc_threshold=1" {
+    // Same opcode, ToObject(source) branch: a String primitive boxes
+    // into a fresh wrapper held across the same getter re-entries as
+    // the target. `{...rest} = "wxyz"` copies the indexed chars; the
+    // coerced wrapper must be rooted too, or it's swept mid-walk.
+    try expectScriptStringUnderGcPressure(
+        \\const { 0: first, ...rest } = "wxyz";
+        \\rest[1] + rest[2] + rest[3];
+    , "xyz");
+}
+
+test "GC: young fn assigned to a promise's .then survives gc_threshold=1" {
+    // §27.2.4 Promise aggregators forward each item via
+    // `Invoke(item, "then", « resolve, reject »)`, calling the
+    // per-item user `.then`. This fixture (mirrors test262
+    // built-ins/Promise/any/invoke-then-on-promises-every-iteration)
+    // overwrites each promise's `.then` with a fresh (young) closure
+    // inside `forEach`. The aggregator's native write path stamped
+    // that young function into the mature promise's shape slot
+    // without the generational write barrier, so the next minor
+    // sweep collected the still-reachable closure (`verifyRememberedSet`
+    // slot[0]->young). `calls` only reaches 3 if every overridden
+    // `.then` survived to be invoked.
+    try expectScriptIntUnderGcPressure(
+        \\let calls = 0;
+        \\const ps = [Promise.resolve(1), Promise.resolve(2), Promise.resolve(3)];
+        \\ps.forEach(p => {
+        \\  const bound = p.then.bind(p);
+        \\  p.then = function(onF, onR) { calls++; return bound(onF, onR); };
+        \\});
+        \\let done = 0;
+        \\Promise.any(ps).then(() => { done = calls; });
+        \\globalThis.__drainMicrotasks();
+        \\done;
+    , 3);
 }
 
 test "debug globals: installBuiltins is debug-clean — production realms ship without test hooks" {

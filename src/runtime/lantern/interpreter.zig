@@ -3326,6 +3326,18 @@ pub fn runFrames(
             const excl_v = registers[r_excl];
             const out_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
             realm.heap.setObjectPrototype(out_obj, realm.intrinsics.object_prototype);
+            // §7.3.27 — `out_obj` is held as a raw pointer across
+            // every source read below (ToObject coercion, the Proxy
+            // ownKeys / get traps, accessor getters via
+            // getPropertyChain), each a JS re-entry that can GC. It
+            // doesn't become reachable from a rooted graph until it
+            // lands in `acc` at the end, so a sweep mid-walk frees it
+            // and the `storeProperty(out_obj, …)` below dereferences
+            // poisoned memory. Root it (and the coerced source
+            // wrapper) for the whole opcode.
+            const out_scope = realm.heap.openScope() catch return error.OutOfMemory;
+            defer out_scope.close();
+            out_scope.push(heap_mod.taggedObject(out_obj)) catch return error.OutOfMemory;
             // §7.3.27 CopyDataProperties step 2 — `ToObject(source)`.
             // Primitive sources (Strings, Numbers, Booleans, Symbols,
             // BigInts) wrap into the matching boxed object — a String
@@ -3354,6 +3366,11 @@ pub fn runFrames(
                 break :blk_coerce heap_mod.taggedObject(w);
             };
             if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            // For a primitive source (`{...r} = "ab"`) this is a
+            // fresh boxed wrapper held across the same getter
+            // re-entries as `out_obj`; for an object source it's a
+            // register-backed value (rooting is a harmless no-op).
+            out_scope.push(src_coerced) catch return error.OutOfMemory;
             if (heap_mod.valueAsPlainObject(src_coerced)) |src_obj| {
                 // §14.3.3.4 RestBindingInitialization →
                 // §7.3.27 CopyDataProperties: build the
