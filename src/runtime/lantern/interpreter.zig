@@ -1859,6 +1859,13 @@ pub fn runFrames(
             // creation site (captured at MakeFunction time),
             // not the call site.
             if (callee_fn.native_callback) |native| {
+                // §10.2.5 — see callJSFunction: record the callee's
+                // realm so a cross-realm-shared native (ShadowRealm
+                // methods) reads its own function realm. Save /
+                // restore for nested native calls.
+                const prior_fn_realm = realm.active_native_fn_realm;
+                realm.active_native_fn_realm = callee_fn.realm;
+                defer realm.active_native_fn_realm = prior_fn_realm;
                 const args_start = @as(usize, r_callee) + 1;
                 const args = registers[args_start .. args_start + argc];
                 const native_this: Value = if (callee_fn.is_arrow)
@@ -2136,6 +2143,13 @@ pub fn runFrames(
             // arrows ignore the call-site receiver and use
             // `captured_this` from their creation site.
             if (callee_fn.native_callback) |native| {
+                // §10.2.5 — see callJSFunction: record the callee's
+                // realm so a cross-realm-shared native (ShadowRealm
+                // methods) reads its own function realm. Save /
+                // restore for nested native calls.
+                const prior_fn_realm = realm.active_native_fn_realm;
+                realm.active_native_fn_realm = callee_fn.realm;
+                defer realm.active_native_fn_realm = prior_fn_realm;
                 const args_start = @as(usize, r_callee) + 1;
                 const args = registers[args_start .. args_start + argc];
                 const native_this: Value = if (callee_fn.is_arrow)
@@ -2422,6 +2436,13 @@ pub fn runFrames(
 
             // Native fallback — runs inline.
             if (callee_fn.native_callback) |native| {
+                // §10.2.5 — see callJSFunction: record the callee's
+                // realm so a cross-realm-shared native (ShadowRealm
+                // methods) reads its own function realm. Save /
+                // restore for nested native calls.
+                const prior_fn_realm = realm.active_native_fn_realm;
+                realm.active_native_fn_realm = callee_fn.realm;
+                defer realm.active_native_fn_realm = prior_fn_realm;
                 const args_start = @as(usize, r_callee) + 1;
                 const args = registers[args_start .. args_start + argc];
                 const native_this: Value = if (callee_fn.is_arrow)
@@ -2658,6 +2679,13 @@ pub fn runFrames(
             }
 
             if (callee_fn.native_callback) |native| {
+                // §10.2.5 — see callJSFunction: record the callee's
+                // realm so a cross-realm-shared native (ShadowRealm
+                // methods) reads its own function realm. Save /
+                // restore for nested native calls.
+                const prior_fn_realm = realm.active_native_fn_realm;
+                realm.active_native_fn_realm = callee_fn.realm;
+                defer realm.active_native_fn_realm = prior_fn_realm;
                 const args_start = @as(usize, r_callee) + 1;
                 const args = registers[args_start .. args_start + argc];
                 const native_this: Value = if (callee_fn.is_arrow)
@@ -2967,6 +2995,13 @@ pub fn runFrames(
             // later, treat native callees as plain calls
             // and ignore the construct path.
             if (callee_fn.native_callback) |native| {
+                // §10.2.5 — see callJSFunction: record the callee's
+                // realm so a cross-realm-shared native (ShadowRealm
+                // methods) reads its own function realm. Save /
+                // restore for nested native calls.
+                const prior_fn_realm = realm.active_native_fn_realm;
+                realm.active_native_fn_realm = callee_fn.realm;
+                defer realm.active_native_fn_realm = prior_fn_realm;
                 const args_start = @as(usize, r_callee) + 1;
                 const args = registers[args_start .. args_start + argc];
                 // For native constructors, `this` is the freshly

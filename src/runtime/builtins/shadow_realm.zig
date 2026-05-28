@@ -205,22 +205,35 @@ fn shadowRealmOf(realm: *Realm, this_value: Value, method_name: []const u8) Nati
     if (!inst.is_shadow_realm) return throwBrandError(realm, method_name);
     const raw = inst.getHostData() orelse return throwBrandError(realm, method_name);
     const child: *Realm = @ptrCast(@alignCast(raw));
-    // Fall back to the running realm if the owner slot wasn't
-    // stamped (shouldn't happen for `new ShadowRealm()` post-
-    // refactor, but defensive — keeps same-realm semantics if a
-    // future construct path forgets the brand).
-    const owner = inst.shadowRealmOwner() orelse realm;
+    // §10.2.5 / §3.8 — the "caller realm" is the realm of the
+    // method FUNCTION currently executing (the dispatcher recorded
+    // it in `active_native_fn_realm` just before invoking us). This
+    // is what makes `YetAnotherShadowRealm.prototype.evaluate.call(
+    // otherInstance, …)` tag its boundary errors / WrappedFunctions
+    // with YetAnotherRealm rather than the instance's owner. Falls
+    // back to the instance's construct-time owner, then the running
+    // realm. Read it FIRST — any later native dispatch inside the
+    // method overwrites the slot.
+    const owner = realm.active_native_fn_realm orelse inst.shadowRealmOwner() orelse realm;
     return .{ .child = child, .owner = owner };
 }
 
 fn throwBrandError(realm: *Realm, method_name: []const u8) NativeError {
+    // §3.8.3 RequireInternalSlot — the TypeError is created in the
+    // realm of the METHOD function (active_native_fn_realm), not
+    // the running realm, so `OtherShadowRealm.prototype.evaluate
+    // .call(bogus, …)` throws `OtherTypeError`. Pin it on the
+    // running realm's pending_exception for the dispatcher.
+    const err_realm = realm.active_native_fn_realm orelse realm;
     var buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &buf,
         "ShadowRealm.prototype.{s} called on non-ShadowRealm receiver",
         .{method_name},
-    ) catch return throwTypeError(realm, "ShadowRealm.prototype called on non-ShadowRealm receiver");
-    return throwTypeError(realm, msg);
+    ) catch "ShadowRealm.prototype called on non-ShadowRealm receiver";
+    const ex = intrinsics.newTypeError(err_realm, msg) catch return error.OutOfMemory;
+    realm.pending_exception = ex;
+    return error.NativeThrew;
 }
 
 /// §3.8.3.1 ShadowRealm.prototype.evaluate ( sourceText )

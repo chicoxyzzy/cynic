@@ -699,6 +699,22 @@ pub const Realm = struct {
     /// for calling `getPrototypeFromConstructor` itself before
     /// allocating its instance.
     pending_native_new_target: Value = Value.undefined_,
+    /// §10.2.5 — the realm of the native function currently
+    /// executing, as recorded by the call dispatcher just before
+    /// it invokes a `native_callback`. Multiple realms share the
+    /// same native body (e.g. every realm's
+    /// `ShadowRealm.prototype.evaluate` points at the same Zig
+    /// function), so a native can't otherwise tell which realm's
+    /// copy of itself was called. The §3.8 ShadowRealm methods
+    /// read this as their "caller realm" — for
+    /// `YetAnotherShadowRealm.prototype.evaluate.call(otherInstance,
+    /// …)` the boundary errors / WrappedFunctions must be tagged
+    /// with YetAnotherRealm (the function's realm), not the
+    /// instance's owner realm. `null` outside a native call. The
+    /// dispatcher saves / restores it around every native
+    /// invocation, so nested native calls don't clobber an outer
+    /// frame's value.
+    active_native_fn_realm: ?*Realm = null,
     /// Sticky flag set when [[DefineOwnProperty]] rejected a typed-
     /// array index (per §10.4.5.3 — returns false, not throws).
     /// Object.defineProperty translates the reject to TypeError;

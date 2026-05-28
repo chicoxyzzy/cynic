@@ -649,6 +649,13 @@ pub fn callJSFunction(
 
     if (callee.native_callback) |native| {
         const native_this: Value = if (callee.is_arrow) callee.captured_this else this_value;
+        // §10.2.5 — record the callee's realm so a native shared
+        // across realms (ShadowRealm.prototype.{evaluate,importValue})
+        // can read its own function realm. Save / restore for
+        // nested native calls.
+        const prior_fn_realm = realm.active_native_fn_realm;
+        realm.active_native_fn_realm = callee.realm;
+        defer realm.active_native_fn_realm = prior_fn_realm;
         const result = native(realm, native_this, args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NativeThrew => {
