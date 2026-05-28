@@ -117,10 +117,12 @@ pub fn build(b: *std.Build) void {
     const ses_step = b.step("test-ses", "Run the Cynic-authored SES positive-coverage tests");
     ses_step.dependOn(&ses_runner.step);
 
-    // `zig build gen-unicode` regenerates src/unicode/ident_tables.zig from
-    // vendor/unicode/DerivedCoreProperties.txt. Run manually when bumping the
-    // Unicode target — the generated file is committed and is what the lexer
-    // compiles against, so the default build does NOT depend on this step.
+    // `zig build gen-unicode` regenerates the committed Unicode tables from
+    // the vendored UCD files: src/unicode/ident_tables.zig (lexer identifier
+    // predicates) and src/unicode/property_tables.zig (RegExp `\p{…}`). Run
+    // manually when bumping the Unicode target — the generated files are
+    // committed and are what the engine compiles against, so the default
+    // build does NOT depend on this step.
     const gen_mod = b.createModule(.{
         .root_source_file = b.path("tools/gen_unicode_idents.zig"),
         .target = b.graph.host,
@@ -133,8 +135,22 @@ pub fn build(b: *std.Build) void {
     const run_gen = b.addRunArtifact(gen_exe);
     run_gen.addFileArg(b.path("vendor/unicode/DerivedCoreProperties.txt"));
     run_gen.addArg(b.pathFromRoot("src/unicode/ident_tables.zig"));
-    const gen_step = b.step("gen-unicode", "Regenerate src/unicode/ident_tables.zig from UCD");
+    const gen_step = b.step("gen-unicode", "Regenerate src/unicode/{ident,property}_tables.zig from UCD");
     gen_step.dependOn(&run_gen.step);
+
+    const gen_props_mod = b.createModule(.{
+        .root_source_file = b.path("tools/gen_unicode_props.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const gen_props_exe = b.addExecutable(.{
+        .name = "gen_unicode_props",
+        .root_module = gen_props_mod,
+    });
+    const run_gen_props = b.addRunArtifact(gen_props_exe);
+    run_gen_props.addArg(b.pathFromRoot("src/unicode/property_tables.zig"));
+    run_gen_props.addFileArg(b.path("vendor/unicode/DerivedGeneralCategory.txt"));
+    gen_step.dependOn(&run_gen_props.step);
 
     // `zig build fmt-check` runs `zig fmt --check` over `src/` and
     // `tools/`. Advisory in CI (non-gating) — flags drift on PR
