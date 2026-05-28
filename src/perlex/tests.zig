@@ -148,13 +148,118 @@ test "perlex: iterated duplicate group clears captures each iteration" {
 // ── Fallback routing — constructs outside the v1 grammar ─────────────
 
 test "perlex: unsupported constructs fall back" {
-    try expectCompile("[a-z]", .unsupported); // character class
-    try expectCompile("a.c", .unsupported); // dot
-    try expectCompile("a*", .unsupported); // star quantifier
-    try expectCompile("a+", .unsupported); // plus quantifier
     try expectCompile("(?=a)", .unsupported); // lookahead
     try expectCompile("(?<=a)", .unsupported); // lookbehind
-    try expectCompile("\\d", .unsupported); // class escape
+    try expectCompile("[\\D]", .unsupported); // negated class escape in class
+    try expectCompile("\\1", .unsupported); // numeric backreference
+    try expectCompile("\\p{L}", .unsupported); // property escape
+    try expectCompile("(a?)*", .unsupported); // nullable quantifier body
+    try expectCompile("(?:)*", .unsupported); // nullable quantifier body
+    try expectCompile("a{0,5000}", .unsupported); // bound exceeds inline-expansion cap
+    try expectCompile("a{99999}", .unsupported); // huge exact bound
+}
+
+// ── §22.2.1 quantifiers (greedy / lazy / bounded) ───────────────────
+
+test "perlex: greedy quantifiers" {
+    try expectMatch("a*", "aaa", "aaa");
+    try expectMatch("a*", "", "");
+    try expectMatch("a*", "b", ""); // matches empty before 'b'
+    try expectMatch("a+", "aaa", "aaa");
+    try expectNoMatch("a+", "b");
+    try expectMatch("a?", "a", "a");
+    try expectMatch("a?", "b", "");
+}
+
+test "perlex: bounded quantifiers" {
+    try expectMatch("a{2,4}", "aaaaa", "aaaa"); // greedy caps at 4
+    try expectMatch("a{2,4}", "aa", "aa");
+    try expectNoMatch("a{2,4}", "a"); // needs >= 2
+    try expectMatch("a{2,}", "aaaa", "aaaa");
+    try expectNoMatch("a{2,}", "a");
+    try expectMatch("a{3}", "aaaa", "aaa"); // exact
+}
+
+test "perlex: lazy quantifiers" {
+    try expectMatch("a*?", "aaa", ""); // as few as possible → empty
+    try expectMatch("a+?", "aaa", "a"); // minimum one
+    try expectMatch("a+?b", "aaab", "aaab"); // forced to extend to reach 'b'
+}
+
+test "perlex: greedy vs lazy capture distribution" {
+    try expectMatch("(a+)(a+)", "aaa", "aaa,aa,a"); // greedy first grabs more
+    try expectMatch("(a+?)(a+)", "aaa", "aaa,a,aa"); // lazy first grabs less
+}
+
+test "perlex: quantified class" {
+    try expectMatch("[0-9]+", "123", "123");
+    try expectMatch("\\d+", "42", "42");
+    try expectMatch("[a-z]*", "abc", "abc");
+    try expectMatch("a.*c", "abXYc", "abXYc");
+}
+
+test "perlex: quantifier clears captures each iteration" {
+    // §22.2.2.3 step 4 — the last iteration takes the `b` branch, so
+    // the group captured in an earlier iteration is left undefined.
+    try expectMatch("(?:(a)|b)+", "ab", "ab,");
+}
+
+// ── §22.2.1 character classes, `.`, class escapes, boundaries ───────
+
+test "perlex: dot matches any non-line-terminator" {
+    try expectMatch("a.c", "axc", "axc");
+    try expectMatch("a.c", "a c", "a c");
+    try expectNoMatch("a.c", "a\nc");
+}
+
+test "perlex: character class membership" {
+    try expectMatch("[abc]", "b", "b");
+    try expectNoMatch("[abc]", "d");
+    try expectMatch("[a-z]", "m", "m");
+    try expectMatch("[0-9]", "5", "5");
+    try expectNoMatch("[a-z]", "Q");
+}
+
+test "perlex: negated character class" {
+    try expectMatch("[^abc]", "d", "d");
+    try expectNoMatch("[^abc]", "a");
+    try expectMatch("[^0-9]", "x", "x");
+}
+
+test "perlex: class escapes" {
+    try expectMatch("\\d", "7", "7");
+    try expectNoMatch("\\d", "a");
+    try expectMatch("\\D", "a", "a");
+    try expectNoMatch("\\D", "7");
+    try expectMatch("\\w", "_", "_");
+    try expectMatch("\\s", " ", " ");
+    try expectNoMatch("\\s", "x");
+}
+
+test "perlex: class escapes inside a class" {
+    try expectMatch("[\\d]", "3", "3");
+    try expectMatch("[a\\d]", "5", "5");
+    try expectMatch("[a\\d]", "a", "a");
+    try expectNoMatch("[\\d]", "z");
+}
+
+test "perlex: escaped literals and hex/unicode escapes" {
+    try expectMatch("a\\.c", "a.c", "a.c");
+    try expectNoMatch("a\\.c", "axc");
+    try expectMatch("\\(", "(", "(");
+    try expectMatch("\\x41", "A", "A");
+    try expectMatch("\\u0041", "A", "A");
+}
+
+test "perlex: word boundaries" {
+    try expectMatch("\\bab", "ab", "ab"); // boundary before 'a'
+    try expectNoMatch("a\\bb", "ab"); // no boundary between word chars
+    try expectMatch("a\\Bb", "ab", "ab"); // \B matches the non-boundary
+    try expectNoMatch("\\Bab", "ab"); // \B fails at the leading boundary
+}
+
+test "perlex: class participates in captures and groups" {
+    try expectMatch("(?<d>[0-9])(?<l>[a-z])", "3q", "3q,3,q");
 }
 
 test "perlex: u8 fast path matches like the u16 path" {
