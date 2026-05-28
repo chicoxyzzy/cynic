@@ -22,7 +22,7 @@ const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
 const c_alloc = @import("../c_alloc.zig");
 const perlex = @import("../../perlex/perlex.zig");
-const unicode_properties = @import("../../unicode/properties.zig");
+const perlex_props = @import("../../unicode/perlex_props.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -1616,44 +1616,16 @@ fn perlexFlags(s: []const u8) perlex.Flags {
 /// is within its grammar, otherwise the vendored libregexp. Returns
 /// false when the object has no source (caller treats as no match).
 /// Throws SyntaxError for a pattern Perlex is authoritative about
-/// (e.g. a group name reused within one Alternative, §22.2.1.1).
-/// `\p{…}` resolver for Perlex (§22.2.1.1), backed by Cynic's generated
-/// Unicode tables. A lone `\p{NameOrValue}` is a binary property or a
-/// General_Category value (disjoint name spaces); `\p{gc=…}`,
-/// `\p{Script=…}` / `\p{sc=…}`, and `\p{Script_Extensions=…}` /
-/// `\p{scx=…}` select the keyed property. Unknown names and the
-/// `/v`-only string properties return null so the pattern defers to the
-/// libregexp fallback, which stays authoritative for the SyntaxError
-/// verdict.
-fn perlexPropertyResolver(
-    gpa: std.mem.Allocator,
-    key: ?[]const u8,
-    value: []const u8,
-) std.mem.Allocator.Error!?[]const perlex.parser.Node.ClassRange {
-    const ranges: []const unicode_properties.Range = if (key) |k| blk: {
-        if (std.mem.eql(u8, k, "gc") or std.mem.eql(u8, k, "General_Category"))
-            break :blk (unicode_properties.generalCategory(value) orelse return null);
-        if (std.mem.eql(u8, k, "sc") or std.mem.eql(u8, k, "Script"))
-            break :blk (unicode_properties.script(value) orelse return null);
-        if (std.mem.eql(u8, k, "scx") or std.mem.eql(u8, k, "Script_Extensions"))
-            break :blk (unicode_properties.scriptExtensions(value) orelse return null);
-        return null;
-    } else
-        // Lone form: a binary property, else a gc value.
-        unicode_properties.binaryProperty(value) orelse
-            unicode_properties.generalCategory(value) orelse return null;
-
-    const out = try gpa.alloc(perlex.parser.Node.ClassRange, ranges.len);
-    for (ranges, out) |r, *o| o.* = .{ .lo = r.start, .hi = r.end };
-    return out;
-}
-
+/// (e.g. a group name reused within one Alternative, §22.2.1.1). The
+/// `\p{…}` property escapes (§22.2.1.1) resolve through the shared
+/// `unicode/perlex_props.zig` seam — the same resolver the parse-time
+/// validator injects, so both paths agree on which escapes are valid.
 fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
     if (regex_obj.regex_perlex != null or regex_obj.regex_bytecode != null) return true;
     const src_s = regex_obj.regexp_source orelse return false;
     const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.flatBytes() else "";
 
-    const result = perlex.compileWithResolver(realm.allocator, src_s.flatBytes(), perlexFlags(flag_str), perlexPropertyResolver) catch return error.OutOfMemory;
+    const result = perlex.compileWithResolver(realm.allocator, src_s.flatBytes(), perlexFlags(flag_str), perlex_props.resolve) catch return error.OutOfMemory;
     switch (result) {
         .ok => |program| {
             const boxed = realm.allocator.create(perlex.Program) catch {

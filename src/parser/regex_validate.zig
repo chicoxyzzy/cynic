@@ -22,6 +22,7 @@ const std = @import("std");
 const c = @import("c");
 
 const perlex = @import("../perlex/perlex.zig");
+const perlex_props = @import("../unicode/perlex_props.zig");
 
 /// Map a flag string to Perlex's flag set for the parse-time check.
 fn perlexFlagsFromText(flags: []const u8) perlex.Flags {
@@ -106,7 +107,15 @@ pub fn validateRegexLiteralToken(
     // early SyntaxError; anything it doesn't model falls through to
     // the libregexp syntax check below. (`OutOfMemory` is treated as
     // "unsupported" so validation still proceeds.)
-    var perlex_result = perlex.compile(allocator, pattern, perlexFlagsFromText(flags_text)) catch perlex.CompileResult.unsupported;
+    //
+    // Inject the same `\p{…}` resolver the runtime bridge uses
+    // (`runtime/builtins/regexp.zig ensureCompiled`) so the two
+    // compilation paths agree on which property escapes are valid. A
+    // null resolver here would defer every `\p{…}` to libregexp, which
+    // rejects values Cynic's tables recognise (e.g. `Script=Unknown`,
+    // the §22.2.1.1 @missing complement) — a parse-time false reject of
+    // a pattern the runtime then accepts.
+    var perlex_result = perlex.compileWithResolver(allocator, pattern, perlexFlagsFromText(flags_text), perlex_props.resolve) catch perlex.CompileResult.unsupported;
     switch (perlex_result) {
         .ok => |*program| {
             program.deinit();
