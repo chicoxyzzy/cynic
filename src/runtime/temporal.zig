@@ -113,6 +113,24 @@ pub fn durationSign(d: DurationRecord) i32 {
     return 0;
 }
 
+/// §7.5.x CreateNegatedTemporalDuration — flip the sign of every field.
+/// Used by the `subtract` methods, which negate the operand duration
+/// and reuse the `add` path.
+pub fn negateDuration(d: DurationRecord) DurationRecord {
+    return .{
+        .years = -d.years,
+        .months = -d.months,
+        .weeks = -d.weeks,
+        .days = -d.days,
+        .hours = -d.hours,
+        .minutes = -d.minutes,
+        .seconds = -d.seconds,
+        .milliseconds = -d.milliseconds,
+        .microseconds = -d.microseconds,
+        .nanoseconds = -d.nanoseconds,
+    };
+}
+
 /// §7.5.x IsValidDuration — the validity predicate `CreateTemporal
 /// Duration` (and the `RejectDuration` polyfill helper) enforce.
 ///
@@ -1738,6 +1756,37 @@ pub fn regulateISODate(year: i64, month: i64, day: i64, reject: bool) ?PlainDate
     return .{ .iso_year = @intCast(year), .iso_month = @intCast(m), .iso_day = @intCast(d) };
 }
 
+/// §3.5.x BalanceISOYearMonth — fold an out-of-range month into the
+/// year so the month lands in 1..12 (carrying whole years; works for
+/// negative months too via floored division).
+pub fn balanceISOYearMonth(year: i64, month: i64) struct { year: i64, month: i64 } {
+    return .{
+        .year = year + @divFloor(month - 1, 12),
+        .month = @mod(month - 1, 12) + 1,
+    };
+}
+
+/// §3.5.x AddISODate — add a date duration (years, months, weeks, days)
+/// to an ISO date under `overflow`. Years/months shift the year-month
+/// first, with the original day constrained into (or rejected against)
+/// the target month; then weeks·7 + days are folded in through the
+/// civil-day calendar. Returns null when the result leaves the
+/// representable range (→ the caller raises RangeError). Components are
+/// the already-validated integer parts of a duration; the valid
+/// duration range keeps every intermediate inside i64.
+pub fn addISODate(rec: PlainDateRecord, years: i64, months: i64, weeks: i64, days: i64, reject: bool) ?PlainDateRecord {
+    const bym = balanceISOYearMonth(@as(i64, rec.iso_year) + years, @as(i64, rec.iso_month) + months);
+    const anchored = regulateISODate(bym.year, bym.month, rec.iso_day, reject) orelse return null;
+    const epoch = daysFromCivil(anchored.iso_year, anchored.iso_month, anchored.iso_day) + days + weeks * 7;
+    if (epoch < iso_date_min_days or epoch > iso_date_max_days) return null;
+    const ymd = civilFromDays(epoch);
+    return .{
+        .iso_year = @intCast(ymd.year),
+        .iso_month = @intCast(ymd.month),
+        .iso_day = @intCast(ymd.day),
+    };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1954,6 +2003,62 @@ test "parseTemporalDateString + regulateISODate" {
     try testing.expect(regulateISODate(2000, 1, -1, false) == null);
     try testing.expect(regulateISODate(2000, 1, 0, false) == null);
     try testing.expect(regulateISODate(1_000_000_000, 1, 1, true) == null);
+}
+
+test "balanceISOYearMonth" {
+    try testing.expectEqual(@as(i64, 1977), balanceISOYearMonth(1976, 14).year);
+    try testing.expectEqual(@as(i64, 2), balanceISOYearMonth(1976, 14).month);
+    try testing.expectEqual(@as(i64, 1975), balanceISOYearMonth(1976, 0).year);
+    try testing.expectEqual(@as(i64, 12), balanceISOYearMonth(1976, 0).month);
+    try testing.expectEqual(@as(i64, 1976), balanceISOYearMonth(1976, 6).year);
+    try testing.expectEqual(@as(i64, 6), balanceISOYearMonth(1976, 6).month);
+}
+
+test "addISODate" {
+    const base: PlainDateRecord = .{ .iso_year = 1976, .iso_month = 11, .iso_day = 18 };
+    // +43 years: only the year moves (basic.js).
+    {
+        const r = addISODate(base, 43, 0, 0, 0, false).?;
+        try testing.expectEqual(@as(i32, 2019), r.iso_year);
+        try testing.expectEqual(@as(u8, 11), r.iso_month);
+        try testing.expectEqual(@as(u8, 18), r.iso_day);
+    }
+    // +3 months wraps the year (Nov → Feb next year).
+    {
+        const r = addISODate(base, 0, 3, 0, 0, false).?;
+        try testing.expectEqual(@as(i32, 1977), r.iso_year);
+        try testing.expectEqual(@as(u8, 2), r.iso_month);
+    }
+    // +20 days balances into the next month.
+    {
+        const r = addISODate(base, 0, 0, 0, 20, false).?;
+        try testing.expectEqual(@as(u8, 12), r.iso_month);
+        try testing.expectEqual(@as(u8, 8), r.iso_day);
+    }
+    // +1 week.
+    try testing.expectEqual(@as(u8, 25), addISODate(base, 0, 0, 1, 0, false).?.iso_day);
+    // Jan 31 + 1 month: constrain clamps the day to Feb 28; reject → null.
+    {
+        const jan31: PlainDateRecord = .{ .iso_year = 2019, .iso_month = 1, .iso_day = 31 };
+        try testing.expectEqual(@as(u8, 28), addISODate(jan31, 0, 1, 0, 0, false).?.iso_day);
+        try testing.expect(addISODate(jan31, 0, 1, 0, 0, true) == null);
+    }
+    // Negative months symmetric (Feb 28 − 1 month → Jan 28).
+    {
+        const feb: PlainDateRecord = .{ .iso_year = 2019, .iso_month = 2, .iso_day = 28 };
+        const r = addISODate(feb, 0, -1, 0, 0, false).?;
+        try testing.expectEqual(@as(u8, 1), r.iso_month);
+        try testing.expectEqual(@as(u8, 28), r.iso_day);
+    }
+    // Leap-day clamp: 2020-02-29 + 1 year → 2021-02-28.
+    {
+        const leap: PlainDateRecord = .{ .iso_year = 2020, .iso_month = 2, .iso_day = 29 };
+        const r = addISODate(leap, 1, 0, 0, 0, false).?;
+        try testing.expectEqual(@as(i32, 2021), r.iso_year);
+        try testing.expectEqual(@as(u8, 28), r.iso_day);
+    }
+    // Out of range → null.
+    try testing.expect(addISODate(base, 1_000_000, 0, 0, 0, false) == null);
 }
 
 test "durationSign: first non-zero field decides" {

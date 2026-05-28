@@ -1912,15 +1912,34 @@ fn plainDateValueOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 // Deferred PlainDate methods — date arithmetic and conversions to types
 // Cynic doesn't ship yet.
+/// §3.3.x AddDurationToDate — shared by add (negate=false) and subtract
+/// (negate=true). The duration's time components truncate toward zero
+/// into whole days (a PlainDate has no time), then AddISODate folds in
+/// years/months/weeks/days under the overflow option.
+fn plainDateAddSubtract(realm: *Realm, this_value: Value, args: []const Value, negate: bool) NativeError!Value {
+    const base = try requirePlainDate(realm, this_value);
+    var dur = try toTemporalDuration(realm, argOr(args, 0, Value.undefined_));
+    if (!temporal.isValidDuration(dur)) return throwRangeError(realm, "Duration values are out of range");
+    const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
+    if (negate) dur = temporal.negateDuration(dur);
+    // §7.5.x ToDateDurationRecordWithoutTime — time units collapse to
+    // whole days (truncated toward zero); 86_400_000_000_000 ns = 1 day.
+    const time_days: i64 = @intCast(@divTrunc(temporal.timeDurationNanoseconds(dur), 86_400_000_000_000));
+    const rec = temporal.addISODate(
+        base,
+        @intFromFloat(dur.years),
+        @intFromFloat(dur.months),
+        @intFromFloat(dur.weeks),
+        @as(i64, @intFromFloat(dur.days)) + time_days,
+        overflow == .reject,
+    ) orelse return throwRangeError(realm, "PlainDate is out of range");
+    return createTemporalDate(realm, rec);
+}
 fn plainDateAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainDate(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainDate.prototype.add is not yet implemented");
+    return plainDateAddSubtract(realm, this_value, args, false);
 }
 fn plainDateSubtract(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainDate(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainDate.prototype.subtract is not yet implemented");
+    return plainDateAddSubtract(realm, this_value, args, true);
 }
 fn plainDateUntil(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
