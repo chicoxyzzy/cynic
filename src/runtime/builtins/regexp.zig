@@ -22,6 +22,7 @@ const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
 const c_alloc = @import("../c_alloc.zig");
 const perlex = @import("../../perlex/perlex.zig");
+const unicode_properties = @import("../../unicode/properties.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -1616,12 +1617,31 @@ fn perlexFlags(s: []const u8) perlex.Flags {
 /// false when the object has no source (caller treats as no match).
 /// Throws SyntaxError for a pattern Perlex is authoritative about
 /// (e.g. a group name reused within one Alternative, §22.2.1.1).
+/// `\p{…}` resolver for Perlex (§22.2.1.1), backed by Cynic's generated
+/// Unicode tables. Resolves General_Category values (lone, or `gc=` /
+/// `General_Category=`); other property kinds and unknown names return
+/// null so the whole pattern defers to the libregexp fallback, which
+/// stays authoritative for those and for the SyntaxError verdict.
+fn perlexPropertyResolver(
+    gpa: std.mem.Allocator,
+    key: ?[]const u8,
+    value: []const u8,
+) std.mem.Allocator.Error!?[]const perlex.parser.Node.ClassRange {
+    if (key) |k| {
+        if (!std.mem.eql(u8, k, "gc") and !std.mem.eql(u8, k, "General_Category")) return null;
+    }
+    const ranges = unicode_properties.generalCategory(value) orelse return null;
+    const out = try gpa.alloc(perlex.parser.Node.ClassRange, ranges.len);
+    for (ranges, out) |r, *o| o.* = .{ .lo = r.start, .hi = r.end };
+    return out;
+}
+
 fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
     if (regex_obj.regex_perlex != null or regex_obj.regex_bytecode != null) return true;
     const src_s = regex_obj.regexp_source orelse return false;
     const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.flatBytes() else "";
 
-    const result = perlex.compile(realm.allocator, src_s.flatBytes(), perlexFlags(flag_str)) catch return error.OutOfMemory;
+    const result = perlex.compileWithResolver(realm.allocator, src_s.flatBytes(), perlexFlags(flag_str), perlexPropertyResolver) catch return error.OutOfMemory;
     switch (result) {
         .ok => |program| {
             const boxed = realm.allocator.create(perlex.Program) catch {
