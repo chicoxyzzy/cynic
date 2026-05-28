@@ -274,10 +274,10 @@ pub const JSFunction = struct {
     /// runs `GetWrappedValue(targetRealm, arg)` on each argument
     /// (rejecting any non-primitive non-function), calls the
     /// target, then runs `GetWrappedValue(callerRealm, result)`
-    /// on the return value. `realm` (the back-pointer added in
-    /// the cross-realm species work) carries the CALLER realm so
-    /// the boundary knows which intrinsics to use when throwing
-    /// the §3.8.3.6 TypeError remapping abrupt completions.
+    /// on the return value. The `realm` field (§10.2.5
+    /// `[[Realm]]`) carries the CALLER realm so the boundary
+    /// knows which intrinsics to use when throwing the §3.8.3.6
+    /// TypeError remapping abrupt completions.
     ///
     /// Value-typed (not `?*JSFunction`) because a callable Proxy
     /// (`new Proxy(fn, handler)`) is `IsCallable: true` per §10.5

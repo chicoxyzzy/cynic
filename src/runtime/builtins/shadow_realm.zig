@@ -18,12 +18,14 @@
 //! `ShadowRealm(...)` without `new` throws TypeError per §17. The
 //! brand check on the prototype methods is the `is_shadow_realm`
 //! flag on `JSObject`; the child realm pointer rides the
-//! `host_data` slot (same trick `$262.createRealm()` uses).
+//! `host_data` slot (same trick `$262.createRealm()` uses), and
+//! the instance's owner realm rides `shadow_realm_owner` in the
+//! cold-field extension.
 //!
-//! Phase 3.1 — scaffolding only. `.evaluate` evaluates and
-//! returns the raw value (no boundary filter yet); `.importValue`
-//! throws "not yet implemented". Boundary filtering + module
-//! loader integration land in 3.3-3.5.
+//! `.evaluate` is fully wired (callable boundary + owner-realm
+//! error tagging). `.importValue` still throws "not yet
+//! implemented" — it needs the child realm's module loader, which
+//! isn't wired here yet.
 
 const std = @import("std");
 
@@ -580,10 +582,11 @@ pub fn callWrappedFunction(
 /// §3.8.3.2 ShadowRealm.prototype.importValue ( specifier,
 /// exportName )
 ///
-/// Phase 3.5 will wire this through the child realm's module
-/// loader. Stubbed for now so fixtures that probe the method's
-/// existence (descriptor checks, IsCallable on the method, etc.)
-/// classify as engine-true even though calls throw.
+/// Not yet wired through the child realm's module loader — the
+/// brand check runs, then the call throws. Keeping the method
+/// installed (rather than absent) lets fixtures that only probe
+/// its existence (descriptor checks, IsCallable on the method)
+/// classify as engine-true.
 fn shadowRealmImportValue(
     realm: *Realm,
     this_value: Value,
