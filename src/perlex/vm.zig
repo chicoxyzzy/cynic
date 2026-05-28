@@ -56,6 +56,11 @@ fn classContains(ranges: []const parser.Node.ClassRange, c: u21) bool {
     return false;
 }
 
+/// §11.3 LineTerminator: LF, CR, LS, PS. Used by the `m` flag.
+fn isLineTerminator(c: anytype) bool {
+    return c == 0x0A or c == 0x0D or c == 0x2028 or c == 0x2029;
+}
+
 /// Sentinel for a capture slot that did not participate. Real offsets
 /// are bounded by the input length, well below `maxInt`.
 pub const none: usize = std.math.maxInt(usize);
@@ -97,6 +102,7 @@ pub fn exec(
         .slots = slots,
         .gpa = gpa,
         .fold = program.flags.ignore_case,
+        .multiline = program.flags.multiline,
     };
     defer m.deinit();
 
@@ -128,6 +134,8 @@ fn Matcher(comptime Unit: type) type {
         gpa: std.mem.Allocator,
         /// `i` flag — fold ASCII case in char/class/backref matching.
         fold: bool,
+        /// `m` flag — `^`/`$` also match at line-terminator boundaries.
+        multiline: bool,
         undo: std.ArrayListUnmanaged(Undo) = .empty,
         backtrack: std.ArrayListUnmanaged(Frame) = .empty,
         steps: u64 = 0,
@@ -193,15 +201,17 @@ fn Matcher(comptime Unit: type) type {
                         continue;
                     },
                     .assert_start => {
-                        // Non-multiline `^`: input start only.
-                        if (sp == 0) {
+                        // `^`: input start, or (multiline) just after a
+                        // line terminator.
+                        if (sp == 0 or (self.multiline and isLineTerminator(self.input[sp - 1]))) {
                             pc += 1;
                             continue;
                         }
                     },
                     .assert_end => {
-                        // Non-multiline `$`: input end only.
-                        if (sp == self.input.len) {
+                        // `$`: input end, or (multiline) just before a
+                        // line terminator.
+                        if (sp == self.input.len or (self.multiline and isLineTerminator(self.input[sp]))) {
                             pc += 1;
                             continue;
                         }
