@@ -45,6 +45,8 @@ pub const Node = union(enum) {
     class: Class,
     /// `\k<name>` — resolved to capture indices by the compiler.
     backref_name: []const u8,
+    /// `\1`..`\99…` — a numeric backreference, resolved at compile.
+    backref_index: usize,
 
     pub const Capture = struct { index: usize, name: ?[]const u8, body: *Node };
     pub const Repeat = struct { body: *Node, min: usize, max: usize, greedy: bool };
@@ -382,6 +384,17 @@ const Parser = struct {
                 self.pos += 2;
                 return self.makeNode(.{ .word_boundary = true });
             },
+            '1'...'9' => {
+                // §22.2.1 DecimalEscape — a numeric backreference. Parse
+                // all digits greedily; the compiler decides whether the
+                // index is in range (else it's an Annex B octal escape,
+                // deferred to the fallback).
+                var i = self.pos + 1;
+                while (i < self.src.len and self.src[i] >= '0' and self.src[i] <= '9') i += 1;
+                const n = std.fmt.parseInt(usize, self.src[self.pos + 1 .. i], 10) catch return error.Unsupported;
+                self.pos = i;
+                return self.makeNode(.{ .backref_index = n });
+            },
             else => return self.makeNode(.{ .char = try self.parseEscapedChar() }),
         }
     }
@@ -585,7 +598,7 @@ fn collectNames(a: std.mem.Allocator, node: *const Node) error{ SyntaxError, Out
     var set: NameSet = .empty;
     errdefer set.deinit(a);
     switch (node.*) {
-        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .backref_name => {},
+        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .backref_name, .backref_index => {},
         .noncapture => |body| {
             set.deinit(a);
             return try collectNames(a, body);

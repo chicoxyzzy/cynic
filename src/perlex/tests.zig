@@ -272,6 +272,21 @@ test "perlex: class participates in captures and groups" {
     try expectMatch("(?<d>[0-9])(?<l>[a-z])", "3q", "3q,3,q");
 }
 
+// ── §22.2.1 numeric backreferences ──────────────────────────────────
+
+test "perlex: numeric backreference" {
+    try expectMatch("(a)\\1", "aa", "aa,a");
+    try expectNoMatch("(a)\\1", "ab");
+    try expectMatch("(ab)\\1", "abab", "abab,ab");
+    try expectMatch("(?<x>a)(b)\\2", "abb", "abb,a,b");
+}
+
+test "perlex: out-of-range numeric escape falls back" {
+    // `\2` with one group is an Annex B octal escape, not a backref.
+    try expectCompile("(a)\\2", .unsupported);
+    try expectCompile("\\1", .unsupported);
+}
+
 // ── §22.2.2.7.1 `i` flag (ASCII case folding) ───────────────────────
 
 const ci: perlex.Flags = .{ .ignore_case = true };

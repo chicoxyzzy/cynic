@@ -216,6 +216,14 @@ const Compiler = struct {
             .alternate => |alts| try self.compileAlternation(alts),
             .repeat => |r| try self.compileRepeat(r),
             .backref_name => |name| try self.compileBackref(name),
+            .backref_index => |n| {
+                // In range → a backreference; out of range is an Annex B
+                // octal/identity escape the v1 grammar doesn't model.
+                const total = self.names.len - 1; // capturing groups, excl group 0
+                if (n == 0 or n > total) return error.Unsupported;
+                self.regular = false;
+                try self.emit(.{ .backref = n });
+            },
         }
     }
 
@@ -321,7 +329,7 @@ const Compiler = struct {
 /// isn't built yet — such bodies are declined to the fallback.
 fn nullable(node: *const Node) bool {
     return switch (node.*) {
-        .empty, .anchor_start, .anchor_end, .word_boundary, .backref_name => true,
+        .empty, .anchor_start, .anchor_end, .word_boundary, .backref_name, .backref_index => true,
         .char, .class, .dot => false,
         .noncapture => |b| nullable(b),
         .capture => |g| nullable(g.body),
@@ -346,7 +354,7 @@ fn nullable(node: *const Node) bool {
 /// captures between iterations.
 fn groupSlotRange(node: *const Node) ?Inst.Range {
     return switch (node.*) {
-        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .backref_name => null,
+        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .backref_name, .backref_index => null,
         .noncapture => |body| groupSlotRange(body),
         .repeat => |r| groupSlotRange(r.body),
         .capture => |g| blk: {
