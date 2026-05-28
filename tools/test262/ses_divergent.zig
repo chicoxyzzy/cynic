@@ -230,6 +230,49 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
         .path = "built-ins/Iterator/prototype/constructor/prop-desc.js",
         .category = .descriptor_assertion,
     },
+    // §3.8 ShadowRealm — five fixtures that pass under the
+    // unhardened row but fail hardened purely because the SES
+    // posture freezes the child realm's primordials / globalThis.
+    // Each writes to a frozen globalThis (`globalThis.x = …`) or
+    // reads a frozen primordial's extensibility, so the hardened
+    // throw / `false` is the SES-correct behavior and the
+    // fixture's expectation is the non-SES one. The thrown message
+    // is generic (`ShadowRealm.prototype.evaluate: evaluation
+    // threw` / `Expected SameValue(«false», «true»)`), so they're
+    // listed by path. NOT included:
+    // `globalthis-config-only-properties.js`, which also fails the
+    // unhardened row (Cynic installs globals non-configurable —
+    // a real divergence, tracked separately).
+    .{
+        // `Object.isExtensible(ShadowRealm)` — SES freezes the
+        // constructor primordial; fixture wants extensible.
+        .path = "built-ins/ShadowRealm/extensibility.js",
+        .category = .frozen_intrinsic_typeerror,
+    },
+    .{
+        // `new ShadowRealm(); r.evaluate('globalThis.x = 0')` —
+        // write to frozen child globalThis throws.
+        .path = "built-ins/ShadowRealm/prototype/evaluate/not-constructor.js",
+        .category = .frozen_intrinsic_typeerror,
+    },
+    .{
+        // Setup writes `globalThis.revocable = …` into the frozen
+        // child globalThis before revoking — write throws.
+        .path = "built-ins/ShadowRealm/WrappedFunction/throws-typeerror-on-revoked-proxy.js",
+        .category = .frozen_intrinsic_typeerror,
+    },
+    .{
+        // Setup writes `globalThis.arrow = …` / `globalThis.pFn =
+        // …` into the frozen child globalThis — write throws.
+        .path = "built-ins/ShadowRealm/prototype/evaluate/wrapped-function-from-return-values-share-no-identity.js",
+        .category = .frozen_intrinsic_typeerror,
+    },
+    .{
+        // Same frozen-globalThis setup writes as the
+        // share-no-identity sibling above.
+        .path = "built-ins/ShadowRealm/prototype/evaluate/wrapped-functions-share-no-properties-extended.js",
+        .category = .frozen_intrinsic_typeerror,
+    },
 };
 
 /// Path-based divergence lookup — the escape hatch for
