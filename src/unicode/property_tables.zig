@@ -19525,6 +19525,4866 @@ pub const bp_XID_Start = [_]Range{
     .{ .start = 0x31350, .end = 0x33479 },
 };
 
+pub const script_Adlm = [_]Range{
+    .{ .start = 0x1E900, .end = 0x1E94B },
+    .{ .start = 0x1E950, .end = 0x1E959 },
+    .{ .start = 0x1E95E, .end = 0x1E95F },
+};
+
+pub const scx_Adlm = [_]Range{
+    .{ .start = 0x061F, .end = 0x061F },
+    .{ .start = 0x0640, .end = 0x0640 },
+    .{ .start = 0x204F, .end = 0x204F },
+    .{ .start = 0x2E41, .end = 0x2E41 },
+    .{ .start = 0x1E900, .end = 0x1E94B },
+    .{ .start = 0x1E950, .end = 0x1E959 },
+    .{ .start = 0x1E95E, .end = 0x1E95F },
+};
+
+pub const script_Aghb = [_]Range{
+    .{ .start = 0x10530, .end = 0x10563 },
+    .{ .start = 0x1056F, .end = 0x1056F },
+};
+
+pub const scx_Aghb = [_]Range{
+    .{ .start = 0x0304, .end = 0x0304 },
+    .{ .start = 0x0331, .end = 0x0331 },
+    .{ .start = 0x035E, .end = 0x035E },
+    .{ .start = 0x10530, .end = 0x10563 },
+    .{ .start = 0x1056F, .end = 0x1056F },
+};
+
+pub const script_Ahom = [_]Range{
+    .{ .start = 0x11700, .end = 0x1171A },
+    .{ .start = 0x1171D, .end = 0x1172B },
+    .{ .start = 0x11730, .end = 0x11746 },
+};
+
+pub const scx_Ahom = [_]Range{
+    .{ .start = 0x11700, .end = 0x1171A },
+    .{ .start = 0x1171D, .end = 0x1172B },
+    .{ .start = 0x11730, .end = 0x11746 },
+};
+
+pub const script_Arab = [_]Range{
+    .{ .start = 0x0600, .end = 0x0604 },
+    .{ .start = 0x0606, .end = 0x060B },
+    .{ .start = 0x060D, .end = 0x061A },
+    .{ .start = 0x061C, .end = 0x061E },
+    .{ .start = 0x0620, .end = 0x063F },
+    .{ .start = 0x0641, .end = 0x064A },
+    .{ .start = 0x0656, .end = 0x066F },
+    .{ .start = 0x0671, .end = 0x06DC },
+    .{ .start = 0x06DE, .end = 0x06FF },
+    .{ .start = 0x0750, .end = 0x077F },
+    .{ .start = 0x0870, .end = 0x0891 },
+    .{ .start = 0x0897, .end = 0x08E1 },
+    .{ .start = 0x08E3, .end = 0x08FF },
+    .{ .start = 0xFB50, .end = 0xFD3D },
+    .{ .start = 0xFD40, .end = 0xFDCF },
+    .{ .start = 0xFDF0, .end = 0xFDFF },
+    .{ .start = 0xFE70, .end = 0xFE74 },
+    .{ .start = 0xFE76, .end = 0xFEFC },
+    .{ .start = 0x10E60, .end = 0x10E7E },
+    .{ .start = 0x10EC2, .end = 0x10EC7 },
+    .{ .start = 0x10ED0, .end = 0x10ED8 },
+    .{ .start = 0x10EFA, .end = 0x10EFF },
+    .{ .start = 0x1EE00, .end = 0x1EE03 },
+    .{ .start = 0x1EE05, .end = 0x1EE1F },
+    .{ .start = 0x1EE21, .end = 0x1EE22 },
+    .{ .start = 0x1EE24, .end = 0x1EE24 },
+    .{ .start = 0x1EE27, .end = 0x1EE27 },
+    .{ .start = 0x1EE29, .end = 0x1EE32 },
+    .{ .start = 0x1EE34, .end = 0x1EE37 },
+    .{ .start = 0x1EE39, .end = 0x1EE39 },
+    .{ .start = 0x1EE3B, .end = 0x1EE3B },
+    .{ .start = 0x1EE42, .end = 0x1EE42 },
+    .{ .start = 0x1EE47, .end = 0x1EE47 },
+    .{ .start = 0x1EE49, .end = 0x1EE49 },
+    .{ .start = 0x1EE4B, .end = 0x1EE4B },
+    .{ .start = 0x1EE4D, .end = 0x1EE4F },
+    .{ .start = 0x1EE51, .end = 0x1EE52 },
+    .{ .start = 0x1EE54, .end = 0x1EE54 },
+    .{ .start = 0x1EE57, .end = 0x1EE57 },
+    .{ .start = 0x1EE59, .end = 0x1EE59 },
+    .{ .start = 0x1EE5B, .end = 0x1EE5B },
+    .{ .start = 0x1EE5D, .end = 0x1EE5D },
+    .{ .start = 0x1EE5F, .end = 0x1EE5F },
+    .{ .start = 0x1EE61, .end = 0x1EE62 },
+    .{ .start = 0x1EE64, .end = 0x1EE64 },
+    .{ .start = 0x1EE67, .end = 0x1EE6A },
+    .{ .start = 0x1EE6C, .end = 0x1EE72 },
+    .{ .start = 0x1EE74, .end = 0x1EE77 },
+    .{ .start = 0x1EE79, .end = 0x1EE7C },
+    .{ .start = 0x1EE7E, .end = 0x1EE7E },
+    .{ .start = 0x1EE80, .end = 0x1EE89 },
+    .{ .start = 0x1EE8B, .end = 0x1EE9B },
+    .{ .start = 0x1EEA1, .end = 0x1EEA3 },
+    .{ .start = 0x1EEA5, .end = 0x1EEA9 },
+    .{ .start = 0x1EEAB, .end = 0x1EEBB },
+    .{ .start = 0x1EEF0, .end = 0x1EEF1 },
+};
+
+pub const scx_Arab = [_]Range{
+    .{ .start = 0x0600, .end = 0x0604 },
+    .{ .start = 0x0606, .end = 0x06DC },
+    .{ .start = 0x06DE, .end = 0x06FF },
+    .{ .start = 0x0750, .end = 0x077F },
+    .{ .start = 0x0870, .end = 0x0891 },
+    .{ .start = 0x0897, .end = 0x08E1 },
+    .{ .start = 0x08E3, .end = 0x08FF },
+    .{ .start = 0x204F, .end = 0x204F },
+    .{ .start = 0x2E41, .end = 0x2E41 },
+    .{ .start = 0xFB50, .end = 0xFDCF },
+    .{ .start = 0xFDF0, .end = 0xFDFF },
+    .{ .start = 0xFE70, .end = 0xFE74 },
+    .{ .start = 0xFE76, .end = 0xFEFC },
+    .{ .start = 0x102E0, .end = 0x102FB },
+    .{ .start = 0x10E60, .end = 0x10E7E },
+    .{ .start = 0x10EC2, .end = 0x10EC7 },
+    .{ .start = 0x10ED0, .end = 0x10ED8 },
+    .{ .start = 0x10EFA, .end = 0x10EFF },
+    .{ .start = 0x1EE00, .end = 0x1EE03 },
+    .{ .start = 0x1EE05, .end = 0x1EE1F },
+    .{ .start = 0x1EE21, .end = 0x1EE22 },
+    .{ .start = 0x1EE24, .end = 0x1EE24 },
+    .{ .start = 0x1EE27, .end = 0x1EE27 },
+    .{ .start = 0x1EE29, .end = 0x1EE32 },
+    .{ .start = 0x1EE34, .end = 0x1EE37 },
+    .{ .start = 0x1EE39, .end = 0x1EE39 },
+    .{ .start = 0x1EE3B, .end = 0x1EE3B },
+    .{ .start = 0x1EE42, .end = 0x1EE42 },
+    .{ .start = 0x1EE47, .end = 0x1EE47 },
+    .{ .start = 0x1EE49, .end = 0x1EE49 },
+    .{ .start = 0x1EE4B, .end = 0x1EE4B },
+    .{ .start = 0x1EE4D, .end = 0x1EE4F },
+    .{ .start = 0x1EE51, .end = 0x1EE52 },
+    .{ .start = 0x1EE54, .end = 0x1EE54 },
+    .{ .start = 0x1EE57, .end = 0x1EE57 },
+    .{ .start = 0x1EE59, .end = 0x1EE59 },
+    .{ .start = 0x1EE5B, .end = 0x1EE5B },
+    .{ .start = 0x1EE5D, .end = 0x1EE5D },
+    .{ .start = 0x1EE5F, .end = 0x1EE5F },
+    .{ .start = 0x1EE61, .end = 0x1EE62 },
+    .{ .start = 0x1EE64, .end = 0x1EE64 },
+    .{ .start = 0x1EE67, .end = 0x1EE6A },
+    .{ .start = 0x1EE6C, .end = 0x1EE72 },
+    .{ .start = 0x1EE74, .end = 0x1EE77 },
+    .{ .start = 0x1EE79, .end = 0x1EE7C },
+    .{ .start = 0x1EE7E, .end = 0x1EE7E },
+    .{ .start = 0x1EE80, .end = 0x1EE89 },
+    .{ .start = 0x1EE8B, .end = 0x1EE9B },
+    .{ .start = 0x1EEA1, .end = 0x1EEA3 },
+    .{ .start = 0x1EEA5, .end = 0x1EEA9 },
+    .{ .start = 0x1EEAB, .end = 0x1EEBB },
+    .{ .start = 0x1EEF0, .end = 0x1EEF1 },
+};
+
+pub const script_Armi = [_]Range{
+    .{ .start = 0x10840, .end = 0x10855 },
+    .{ .start = 0x10857, .end = 0x1085F },
+};
+
+pub const scx_Armi = [_]Range{
+    .{ .start = 0x10840, .end = 0x10855 },
+    .{ .start = 0x10857, .end = 0x1085F },
+};
+
+pub const script_Armn = [_]Range{
+    .{ .start = 0x0531, .end = 0x0556 },
+    .{ .start = 0x0559, .end = 0x058A },
+    .{ .start = 0x058D, .end = 0x058F },
+    .{ .start = 0xFB13, .end = 0xFB17 },
+};
+
+pub const scx_Armn = [_]Range{
+    .{ .start = 0x0308, .end = 0x0308 },
+    .{ .start = 0x0531, .end = 0x0556 },
+    .{ .start = 0x0559, .end = 0x058A },
+    .{ .start = 0x058D, .end = 0x058F },
+    .{ .start = 0xFB13, .end = 0xFB17 },
+};
+
+pub const script_Avst = [_]Range{
+    .{ .start = 0x10B00, .end = 0x10B35 },
+    .{ .start = 0x10B39, .end = 0x10B3F },
+};
+
+pub const scx_Avst = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x2E30, .end = 0x2E31 },
+    .{ .start = 0x10B00, .end = 0x10B35 },
+    .{ .start = 0x10B39, .end = 0x10B3F },
+};
+
+pub const script_Bali = [_]Range{
+    .{ .start = 0x1B00, .end = 0x1B4C },
+    .{ .start = 0x1B4E, .end = 0x1B7F },
+};
+
+pub const scx_Bali = [_]Range{
+    .{ .start = 0x1B00, .end = 0x1B4C },
+    .{ .start = 0x1B4E, .end = 0x1B7F },
+};
+
+pub const script_Bamu = [_]Range{
+    .{ .start = 0xA6A0, .end = 0xA6F7 },
+    .{ .start = 0x16800, .end = 0x16A38 },
+};
+
+pub const scx_Bamu = [_]Range{
+    .{ .start = 0xA6A0, .end = 0xA6F7 },
+    .{ .start = 0x16800, .end = 0x16A38 },
+};
+
+pub const script_Bass = [_]Range{
+    .{ .start = 0x16AD0, .end = 0x16AED },
+    .{ .start = 0x16AF0, .end = 0x16AF5 },
+};
+
+pub const scx_Bass = [_]Range{
+    .{ .start = 0x16AD0, .end = 0x16AED },
+    .{ .start = 0x16AF0, .end = 0x16AF5 },
+};
+
+pub const script_Batk = [_]Range{
+    .{ .start = 0x1BC0, .end = 0x1BF3 },
+    .{ .start = 0x1BFC, .end = 0x1BFF },
+};
+
+pub const scx_Batk = [_]Range{
+    .{ .start = 0x1BC0, .end = 0x1BF3 },
+    .{ .start = 0x1BFC, .end = 0x1BFF },
+};
+
+pub const script_Beng = [_]Range{
+    .{ .start = 0x0980, .end = 0x0983 },
+    .{ .start = 0x0985, .end = 0x098C },
+    .{ .start = 0x098F, .end = 0x0990 },
+    .{ .start = 0x0993, .end = 0x09A8 },
+    .{ .start = 0x09AA, .end = 0x09B0 },
+    .{ .start = 0x09B2, .end = 0x09B2 },
+    .{ .start = 0x09B6, .end = 0x09B9 },
+    .{ .start = 0x09BC, .end = 0x09C4 },
+    .{ .start = 0x09C7, .end = 0x09C8 },
+    .{ .start = 0x09CB, .end = 0x09CE },
+    .{ .start = 0x09D7, .end = 0x09D7 },
+    .{ .start = 0x09DC, .end = 0x09DD },
+    .{ .start = 0x09DF, .end = 0x09E3 },
+    .{ .start = 0x09E6, .end = 0x09FE },
+};
+
+pub const scx_Beng = [_]Range{
+    .{ .start = 0x02BC, .end = 0x02BC },
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0980, .end = 0x0983 },
+    .{ .start = 0x0985, .end = 0x098C },
+    .{ .start = 0x098F, .end = 0x0990 },
+    .{ .start = 0x0993, .end = 0x09A8 },
+    .{ .start = 0x09AA, .end = 0x09B0 },
+    .{ .start = 0x09B2, .end = 0x09B2 },
+    .{ .start = 0x09B6, .end = 0x09B9 },
+    .{ .start = 0x09BC, .end = 0x09C4 },
+    .{ .start = 0x09C7, .end = 0x09C8 },
+    .{ .start = 0x09CB, .end = 0x09CE },
+    .{ .start = 0x09D7, .end = 0x09D7 },
+    .{ .start = 0x09DC, .end = 0x09DD },
+    .{ .start = 0x09DF, .end = 0x09E3 },
+    .{ .start = 0x09E6, .end = 0x09FE },
+    .{ .start = 0x1CD0, .end = 0x1CD0 },
+    .{ .start = 0x1CD2, .end = 0x1CD2 },
+    .{ .start = 0x1CD5, .end = 0x1CD6 },
+    .{ .start = 0x1CD8, .end = 0x1CD8 },
+    .{ .start = 0x1CE1, .end = 0x1CE1 },
+    .{ .start = 0x1CEA, .end = 0x1CEA },
+    .{ .start = 0x1CED, .end = 0x1CED },
+    .{ .start = 0x1CF2, .end = 0x1CF2 },
+    .{ .start = 0x1CF5, .end = 0x1CF7 },
+    .{ .start = 0xA8F1, .end = 0xA8F1 },
+};
+
+pub const script_Berf = [_]Range{
+    .{ .start = 0x16EA0, .end = 0x16EB8 },
+    .{ .start = 0x16EBB, .end = 0x16ED3 },
+};
+
+pub const scx_Berf = [_]Range{
+    .{ .start = 0x16EA0, .end = 0x16EB8 },
+    .{ .start = 0x16EBB, .end = 0x16ED3 },
+};
+
+pub const script_Bhks = [_]Range{
+    .{ .start = 0x11C00, .end = 0x11C08 },
+    .{ .start = 0x11C0A, .end = 0x11C36 },
+    .{ .start = 0x11C38, .end = 0x11C45 },
+    .{ .start = 0x11C50, .end = 0x11C6C },
+};
+
+pub const scx_Bhks = [_]Range{
+    .{ .start = 0x11C00, .end = 0x11C08 },
+    .{ .start = 0x11C0A, .end = 0x11C36 },
+    .{ .start = 0x11C38, .end = 0x11C45 },
+    .{ .start = 0x11C50, .end = 0x11C6C },
+};
+
+pub const script_Bopo = [_]Range{
+    .{ .start = 0x02EA, .end = 0x02EB },
+    .{ .start = 0x3105, .end = 0x312F },
+    .{ .start = 0x31A0, .end = 0x31BF },
+};
+
+pub const scx_Bopo = [_]Range{
+    .{ .start = 0x02C7, .end = 0x02C7 },
+    .{ .start = 0x02C9, .end = 0x02CB },
+    .{ .start = 0x02D9, .end = 0x02D9 },
+    .{ .start = 0x02EA, .end = 0x02EB },
+    .{ .start = 0x3001, .end = 0x3003 },
+    .{ .start = 0x3008, .end = 0x3011 },
+    .{ .start = 0x3013, .end = 0x301F },
+    .{ .start = 0x302A, .end = 0x302D },
+    .{ .start = 0x3030, .end = 0x3030 },
+    .{ .start = 0x3037, .end = 0x3037 },
+    .{ .start = 0x30FB, .end = 0x30FB },
+    .{ .start = 0x3105, .end = 0x312F },
+    .{ .start = 0x31A0, .end = 0x31BF },
+    .{ .start = 0xFE45, .end = 0xFE46 },
+    .{ .start = 0xFF61, .end = 0xFF65 },
+};
+
+pub const script_Brah = [_]Range{
+    .{ .start = 0x11000, .end = 0x1104D },
+    .{ .start = 0x11052, .end = 0x11075 },
+    .{ .start = 0x1107F, .end = 0x1107F },
+};
+
+pub const scx_Brah = [_]Range{
+    .{ .start = 0x11000, .end = 0x1104D },
+    .{ .start = 0x11052, .end = 0x11075 },
+    .{ .start = 0x1107F, .end = 0x1107F },
+};
+
+pub const script_Brai = [_]Range{
+    .{ .start = 0x2800, .end = 0x28FF },
+};
+
+pub const scx_Brai = [_]Range{
+    .{ .start = 0x2800, .end = 0x28FF },
+};
+
+pub const script_Bugi = [_]Range{
+    .{ .start = 0x1A00, .end = 0x1A1B },
+    .{ .start = 0x1A1E, .end = 0x1A1F },
+};
+
+pub const scx_Bugi = [_]Range{
+    .{ .start = 0x1A00, .end = 0x1A1B },
+    .{ .start = 0x1A1E, .end = 0x1A1F },
+    .{ .start = 0xA9CF, .end = 0xA9CF },
+};
+
+pub const script_Buhd = [_]Range{
+    .{ .start = 0x1740, .end = 0x1753 },
+};
+
+pub const scx_Buhd = [_]Range{
+    .{ .start = 0x1735, .end = 0x1736 },
+    .{ .start = 0x1740, .end = 0x1753 },
+};
+
+pub const script_Cakm = [_]Range{
+    .{ .start = 0x11100, .end = 0x11134 },
+    .{ .start = 0x11136, .end = 0x11147 },
+};
+
+pub const scx_Cakm = [_]Range{
+    .{ .start = 0x09E6, .end = 0x09EF },
+    .{ .start = 0x1040, .end = 0x1049 },
+    .{ .start = 0x11100, .end = 0x11134 },
+    .{ .start = 0x11136, .end = 0x11147 },
+};
+
+pub const script_Cans = [_]Range{
+    .{ .start = 0x1400, .end = 0x167F },
+    .{ .start = 0x18B0, .end = 0x18F5 },
+    .{ .start = 0x11AB0, .end = 0x11ABF },
+};
+
+pub const scx_Cans = [_]Range{
+    .{ .start = 0x1400, .end = 0x167F },
+    .{ .start = 0x18B0, .end = 0x18F5 },
+    .{ .start = 0x11AB0, .end = 0x11ABF },
+};
+
+pub const script_Cari = [_]Range{
+    .{ .start = 0x102A0, .end = 0x102D0 },
+};
+
+pub const scx_Cari = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x205A, .end = 0x205A },
+    .{ .start = 0x205D, .end = 0x205D },
+    .{ .start = 0x2E31, .end = 0x2E31 },
+    .{ .start = 0x102A0, .end = 0x102D0 },
+};
+
+pub const script_Cham = [_]Range{
+    .{ .start = 0xAA00, .end = 0xAA36 },
+    .{ .start = 0xAA40, .end = 0xAA4D },
+    .{ .start = 0xAA50, .end = 0xAA59 },
+    .{ .start = 0xAA5C, .end = 0xAA5F },
+};
+
+pub const scx_Cham = [_]Range{
+    .{ .start = 0xAA00, .end = 0xAA36 },
+    .{ .start = 0xAA40, .end = 0xAA4D },
+    .{ .start = 0xAA50, .end = 0xAA59 },
+    .{ .start = 0xAA5C, .end = 0xAA5F },
+};
+
+pub const script_Cher = [_]Range{
+    .{ .start = 0x13A0, .end = 0x13F5 },
+    .{ .start = 0x13F8, .end = 0x13FD },
+    .{ .start = 0xAB70, .end = 0xABBF },
+};
+
+pub const scx_Cher = [_]Range{
+    .{ .start = 0x0300, .end = 0x0302 },
+    .{ .start = 0x0304, .end = 0x0304 },
+    .{ .start = 0x030B, .end = 0x030C },
+    .{ .start = 0x0323, .end = 0x0324 },
+    .{ .start = 0x0330, .end = 0x0331 },
+    .{ .start = 0x13A0, .end = 0x13F5 },
+    .{ .start = 0x13F8, .end = 0x13FD },
+    .{ .start = 0xAB70, .end = 0xABBF },
+};
+
+pub const script_Chrs = [_]Range{
+    .{ .start = 0x10FB0, .end = 0x10FCB },
+};
+
+pub const scx_Chrs = [_]Range{
+    .{ .start = 0x10FB0, .end = 0x10FCB },
+};
+
+pub const script_Copt = [_]Range{
+    .{ .start = 0x03E2, .end = 0x03EF },
+    .{ .start = 0x2C80, .end = 0x2CF3 },
+    .{ .start = 0x2CF9, .end = 0x2CFF },
+};
+
+pub const scx_Copt = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x0300, .end = 0x0300 },
+    .{ .start = 0x0304, .end = 0x0305 },
+    .{ .start = 0x0307, .end = 0x0307 },
+    .{ .start = 0x0374, .end = 0x0375 },
+    .{ .start = 0x03E2, .end = 0x03EF },
+    .{ .start = 0x2C80, .end = 0x2CF3 },
+    .{ .start = 0x2CF9, .end = 0x2CFF },
+    .{ .start = 0x2E17, .end = 0x2E17 },
+    .{ .start = 0x102E0, .end = 0x102FB },
+};
+
+pub const script_Cpmn = [_]Range{
+    .{ .start = 0x12F90, .end = 0x12FF2 },
+};
+
+pub const scx_Cpmn = [_]Range{
+    .{ .start = 0x10100, .end = 0x10101 },
+    .{ .start = 0x12F90, .end = 0x12FF2 },
+};
+
+pub const script_Cprt = [_]Range{
+    .{ .start = 0x10800, .end = 0x10805 },
+    .{ .start = 0x10808, .end = 0x10808 },
+    .{ .start = 0x1080A, .end = 0x10835 },
+    .{ .start = 0x10837, .end = 0x10838 },
+    .{ .start = 0x1083C, .end = 0x1083C },
+    .{ .start = 0x1083F, .end = 0x1083F },
+};
+
+pub const scx_Cprt = [_]Range{
+    .{ .start = 0x10100, .end = 0x10102 },
+    .{ .start = 0x10107, .end = 0x10133 },
+    .{ .start = 0x10137, .end = 0x1013F },
+    .{ .start = 0x10800, .end = 0x10805 },
+    .{ .start = 0x10808, .end = 0x10808 },
+    .{ .start = 0x1080A, .end = 0x10835 },
+    .{ .start = 0x10837, .end = 0x10838 },
+    .{ .start = 0x1083C, .end = 0x1083C },
+    .{ .start = 0x1083F, .end = 0x1083F },
+};
+
+pub const script_Cyrl = [_]Range{
+    .{ .start = 0x0400, .end = 0x0484 },
+    .{ .start = 0x0487, .end = 0x052F },
+    .{ .start = 0x1C80, .end = 0x1C8A },
+    .{ .start = 0x1D2B, .end = 0x1D2B },
+    .{ .start = 0x1D78, .end = 0x1D78 },
+    .{ .start = 0x2DE0, .end = 0x2DFF },
+    .{ .start = 0xA640, .end = 0xA69F },
+    .{ .start = 0xFE2E, .end = 0xFE2F },
+    .{ .start = 0x1E030, .end = 0x1E06D },
+    .{ .start = 0x1E08F, .end = 0x1E08F },
+};
+
+pub const scx_Cyrl = [_]Range{
+    .{ .start = 0x02BC, .end = 0x02BC },
+    .{ .start = 0x0300, .end = 0x0302 },
+    .{ .start = 0x0304, .end = 0x0304 },
+    .{ .start = 0x0306, .end = 0x0306 },
+    .{ .start = 0x0308, .end = 0x0308 },
+    .{ .start = 0x030B, .end = 0x030B },
+    .{ .start = 0x0311, .end = 0x0311 },
+    .{ .start = 0x0400, .end = 0x052F },
+    .{ .start = 0x1C80, .end = 0x1C8A },
+    .{ .start = 0x1D2B, .end = 0x1D2B },
+    .{ .start = 0x1D78, .end = 0x1D78 },
+    .{ .start = 0x1DF8, .end = 0x1DF8 },
+    .{ .start = 0x2DE0, .end = 0x2DFF },
+    .{ .start = 0x2E43, .end = 0x2E43 },
+    .{ .start = 0xA640, .end = 0xA69F },
+    .{ .start = 0xFE2E, .end = 0xFE2F },
+    .{ .start = 0x1E030, .end = 0x1E06D },
+    .{ .start = 0x1E08F, .end = 0x1E08F },
+};
+
+pub const script_Deva = [_]Range{
+    .{ .start = 0x0900, .end = 0x0950 },
+    .{ .start = 0x0955, .end = 0x0963 },
+    .{ .start = 0x0966, .end = 0x097F },
+    .{ .start = 0xA8E0, .end = 0xA8FF },
+    .{ .start = 0x11B00, .end = 0x11B09 },
+};
+
+pub const scx_Deva = [_]Range{
+    .{ .start = 0x02BC, .end = 0x02BC },
+    .{ .start = 0x0900, .end = 0x0952 },
+    .{ .start = 0x0955, .end = 0x097F },
+    .{ .start = 0x1CD0, .end = 0x1CF6 },
+    .{ .start = 0x1CF8, .end = 0x1CF9 },
+    .{ .start = 0x20F0, .end = 0x20F0 },
+    .{ .start = 0xA830, .end = 0xA839 },
+    .{ .start = 0xA8E0, .end = 0xA8FF },
+    .{ .start = 0x11B00, .end = 0x11B09 },
+};
+
+pub const script_Diak = [_]Range{
+    .{ .start = 0x11900, .end = 0x11906 },
+    .{ .start = 0x11909, .end = 0x11909 },
+    .{ .start = 0x1190C, .end = 0x11913 },
+    .{ .start = 0x11915, .end = 0x11916 },
+    .{ .start = 0x11918, .end = 0x11935 },
+    .{ .start = 0x11937, .end = 0x11938 },
+    .{ .start = 0x1193B, .end = 0x11946 },
+    .{ .start = 0x11950, .end = 0x11959 },
+};
+
+pub const scx_Diak = [_]Range{
+    .{ .start = 0x11900, .end = 0x11906 },
+    .{ .start = 0x11909, .end = 0x11909 },
+    .{ .start = 0x1190C, .end = 0x11913 },
+    .{ .start = 0x11915, .end = 0x11916 },
+    .{ .start = 0x11918, .end = 0x11935 },
+    .{ .start = 0x11937, .end = 0x11938 },
+    .{ .start = 0x1193B, .end = 0x11946 },
+    .{ .start = 0x11950, .end = 0x11959 },
+};
+
+pub const script_Dogr = [_]Range{
+    .{ .start = 0x11800, .end = 0x1183B },
+};
+
+pub const scx_Dogr = [_]Range{
+    .{ .start = 0x0964, .end = 0x096F },
+    .{ .start = 0xA830, .end = 0xA839 },
+    .{ .start = 0x11800, .end = 0x1183B },
+};
+
+pub const script_Dsrt = [_]Range{
+    .{ .start = 0x10400, .end = 0x1044F },
+};
+
+pub const scx_Dsrt = [_]Range{
+    .{ .start = 0x10400, .end = 0x1044F },
+};
+
+pub const script_Dupl = [_]Range{
+    .{ .start = 0x1BC00, .end = 0x1BC6A },
+    .{ .start = 0x1BC70, .end = 0x1BC7C },
+    .{ .start = 0x1BC80, .end = 0x1BC88 },
+    .{ .start = 0x1BC90, .end = 0x1BC99 },
+    .{ .start = 0x1BC9C, .end = 0x1BC9F },
+};
+
+pub const scx_Dupl = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x0307, .end = 0x0308 },
+    .{ .start = 0x030A, .end = 0x030A },
+    .{ .start = 0x0323, .end = 0x0324 },
+    .{ .start = 0x2E3C, .end = 0x2E3C },
+    .{ .start = 0x1BC00, .end = 0x1BC6A },
+    .{ .start = 0x1BC70, .end = 0x1BC7C },
+    .{ .start = 0x1BC80, .end = 0x1BC88 },
+    .{ .start = 0x1BC90, .end = 0x1BC99 },
+    .{ .start = 0x1BC9C, .end = 0x1BCA3 },
+};
+
+pub const script_Egyp = [_]Range{
+    .{ .start = 0x13000, .end = 0x13455 },
+    .{ .start = 0x13460, .end = 0x143FA },
+};
+
+pub const scx_Egyp = [_]Range{
+    .{ .start = 0x13000, .end = 0x13455 },
+    .{ .start = 0x13460, .end = 0x143FA },
+};
+
+pub const script_Elba = [_]Range{
+    .{ .start = 0x10500, .end = 0x10527 },
+};
+
+pub const scx_Elba = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x0305, .end = 0x0305 },
+    .{ .start = 0x10500, .end = 0x10527 },
+};
+
+pub const script_Elym = [_]Range{
+    .{ .start = 0x10FE0, .end = 0x10FF6 },
+};
+
+pub const scx_Elym = [_]Range{
+    .{ .start = 0x10FE0, .end = 0x10FF6 },
+};
+
+pub const script_Ethi = [_]Range{
+    .{ .start = 0x1200, .end = 0x1248 },
+    .{ .start = 0x124A, .end = 0x124D },
+    .{ .start = 0x1250, .end = 0x1256 },
+    .{ .start = 0x1258, .end = 0x1258 },
+    .{ .start = 0x125A, .end = 0x125D },
+    .{ .start = 0x1260, .end = 0x1288 },
+    .{ .start = 0x128A, .end = 0x128D },
+    .{ .start = 0x1290, .end = 0x12B0 },
+    .{ .start = 0x12B2, .end = 0x12B5 },
+    .{ .start = 0x12B8, .end = 0x12BE },
+    .{ .start = 0x12C0, .end = 0x12C0 },
+    .{ .start = 0x12C2, .end = 0x12C5 },
+    .{ .start = 0x12C8, .end = 0x12D6 },
+    .{ .start = 0x12D8, .end = 0x1310 },
+    .{ .start = 0x1312, .end = 0x1315 },
+    .{ .start = 0x1318, .end = 0x135A },
+    .{ .start = 0x135D, .end = 0x137C },
+    .{ .start = 0x1380, .end = 0x1399 },
+    .{ .start = 0x2D80, .end = 0x2D96 },
+    .{ .start = 0x2DA0, .end = 0x2DA6 },
+    .{ .start = 0x2DA8, .end = 0x2DAE },
+    .{ .start = 0x2DB0, .end = 0x2DB6 },
+    .{ .start = 0x2DB8, .end = 0x2DBE },
+    .{ .start = 0x2DC0, .end = 0x2DC6 },
+    .{ .start = 0x2DC8, .end = 0x2DCE },
+    .{ .start = 0x2DD0, .end = 0x2DD6 },
+    .{ .start = 0x2DD8, .end = 0x2DDE },
+    .{ .start = 0xAB01, .end = 0xAB06 },
+    .{ .start = 0xAB09, .end = 0xAB0E },
+    .{ .start = 0xAB11, .end = 0xAB16 },
+    .{ .start = 0xAB20, .end = 0xAB26 },
+    .{ .start = 0xAB28, .end = 0xAB2E },
+    .{ .start = 0x1E7E0, .end = 0x1E7E6 },
+    .{ .start = 0x1E7E8, .end = 0x1E7EB },
+    .{ .start = 0x1E7ED, .end = 0x1E7EE },
+    .{ .start = 0x1E7F0, .end = 0x1E7FE },
+};
+
+pub const scx_Ethi = [_]Range{
+    .{ .start = 0x030E, .end = 0x030E },
+    .{ .start = 0x1200, .end = 0x1248 },
+    .{ .start = 0x124A, .end = 0x124D },
+    .{ .start = 0x1250, .end = 0x1256 },
+    .{ .start = 0x1258, .end = 0x1258 },
+    .{ .start = 0x125A, .end = 0x125D },
+    .{ .start = 0x1260, .end = 0x1288 },
+    .{ .start = 0x128A, .end = 0x128D },
+    .{ .start = 0x1290, .end = 0x12B0 },
+    .{ .start = 0x12B2, .end = 0x12B5 },
+    .{ .start = 0x12B8, .end = 0x12BE },
+    .{ .start = 0x12C0, .end = 0x12C0 },
+    .{ .start = 0x12C2, .end = 0x12C5 },
+    .{ .start = 0x12C8, .end = 0x12D6 },
+    .{ .start = 0x12D8, .end = 0x1310 },
+    .{ .start = 0x1312, .end = 0x1315 },
+    .{ .start = 0x1318, .end = 0x135A },
+    .{ .start = 0x135D, .end = 0x137C },
+    .{ .start = 0x1380, .end = 0x1399 },
+    .{ .start = 0x2D80, .end = 0x2D96 },
+    .{ .start = 0x2DA0, .end = 0x2DA6 },
+    .{ .start = 0x2DA8, .end = 0x2DAE },
+    .{ .start = 0x2DB0, .end = 0x2DB6 },
+    .{ .start = 0x2DB8, .end = 0x2DBE },
+    .{ .start = 0x2DC0, .end = 0x2DC6 },
+    .{ .start = 0x2DC8, .end = 0x2DCE },
+    .{ .start = 0x2DD0, .end = 0x2DD6 },
+    .{ .start = 0x2DD8, .end = 0x2DDE },
+    .{ .start = 0xAB01, .end = 0xAB06 },
+    .{ .start = 0xAB09, .end = 0xAB0E },
+    .{ .start = 0xAB11, .end = 0xAB16 },
+    .{ .start = 0xAB20, .end = 0xAB26 },
+    .{ .start = 0xAB28, .end = 0xAB2E },
+    .{ .start = 0x1E7E0, .end = 0x1E7E6 },
+    .{ .start = 0x1E7E8, .end = 0x1E7EB },
+    .{ .start = 0x1E7ED, .end = 0x1E7EE },
+    .{ .start = 0x1E7F0, .end = 0x1E7FE },
+};
+
+pub const script_Gara = [_]Range{
+    .{ .start = 0x10D40, .end = 0x10D65 },
+    .{ .start = 0x10D69, .end = 0x10D85 },
+    .{ .start = 0x10D8E, .end = 0x10D8F },
+};
+
+pub const scx_Gara = [_]Range{
+    .{ .start = 0x060C, .end = 0x060C },
+    .{ .start = 0x061B, .end = 0x061B },
+    .{ .start = 0x061F, .end = 0x061F },
+    .{ .start = 0x10D40, .end = 0x10D65 },
+    .{ .start = 0x10D69, .end = 0x10D85 },
+    .{ .start = 0x10D8E, .end = 0x10D8F },
+};
+
+pub const script_Geor = [_]Range{
+    .{ .start = 0x10A0, .end = 0x10C5 },
+    .{ .start = 0x10C7, .end = 0x10C7 },
+    .{ .start = 0x10CD, .end = 0x10CD },
+    .{ .start = 0x10D0, .end = 0x10FA },
+    .{ .start = 0x10FC, .end = 0x10FF },
+    .{ .start = 0x1C90, .end = 0x1CBA },
+    .{ .start = 0x1CBD, .end = 0x1CBF },
+    .{ .start = 0x2D00, .end = 0x2D25 },
+    .{ .start = 0x2D27, .end = 0x2D27 },
+    .{ .start = 0x2D2D, .end = 0x2D2D },
+};
+
+pub const scx_Geor = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x0589, .end = 0x0589 },
+    .{ .start = 0x10A0, .end = 0x10C5 },
+    .{ .start = 0x10C7, .end = 0x10C7 },
+    .{ .start = 0x10CD, .end = 0x10CD },
+    .{ .start = 0x10D0, .end = 0x10FF },
+    .{ .start = 0x1C90, .end = 0x1CBA },
+    .{ .start = 0x1CBD, .end = 0x1CBF },
+    .{ .start = 0x205A, .end = 0x205A },
+    .{ .start = 0x2D00, .end = 0x2D25 },
+    .{ .start = 0x2D27, .end = 0x2D27 },
+    .{ .start = 0x2D2D, .end = 0x2D2D },
+    .{ .start = 0x2E31, .end = 0x2E31 },
+};
+
+pub const script_Glag = [_]Range{
+    .{ .start = 0x2C00, .end = 0x2C5F },
+    .{ .start = 0x1E000, .end = 0x1E006 },
+    .{ .start = 0x1E008, .end = 0x1E018 },
+    .{ .start = 0x1E01B, .end = 0x1E021 },
+    .{ .start = 0x1E023, .end = 0x1E024 },
+    .{ .start = 0x1E026, .end = 0x1E02A },
+};
+
+pub const scx_Glag = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x0303, .end = 0x0303 },
+    .{ .start = 0x0305, .end = 0x0305 },
+    .{ .start = 0x0484, .end = 0x0484 },
+    .{ .start = 0x0487, .end = 0x0487 },
+    .{ .start = 0x0589, .end = 0x0589 },
+    .{ .start = 0x10FB, .end = 0x10FB },
+    .{ .start = 0x205A, .end = 0x205A },
+    .{ .start = 0x2C00, .end = 0x2C5F },
+    .{ .start = 0x2E43, .end = 0x2E43 },
+    .{ .start = 0xA66F, .end = 0xA66F },
+    .{ .start = 0x1E000, .end = 0x1E006 },
+    .{ .start = 0x1E008, .end = 0x1E018 },
+    .{ .start = 0x1E01B, .end = 0x1E021 },
+    .{ .start = 0x1E023, .end = 0x1E024 },
+    .{ .start = 0x1E026, .end = 0x1E02A },
+};
+
+pub const script_Gong = [_]Range{
+    .{ .start = 0x11D60, .end = 0x11D65 },
+    .{ .start = 0x11D67, .end = 0x11D68 },
+    .{ .start = 0x11D6A, .end = 0x11D8E },
+    .{ .start = 0x11D90, .end = 0x11D91 },
+    .{ .start = 0x11D93, .end = 0x11D98 },
+    .{ .start = 0x11DA0, .end = 0x11DA9 },
+};
+
+pub const scx_Gong = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x11D60, .end = 0x11D65 },
+    .{ .start = 0x11D67, .end = 0x11D68 },
+    .{ .start = 0x11D6A, .end = 0x11D8E },
+    .{ .start = 0x11D90, .end = 0x11D91 },
+    .{ .start = 0x11D93, .end = 0x11D98 },
+    .{ .start = 0x11DA0, .end = 0x11DA9 },
+};
+
+pub const script_Gonm = [_]Range{
+    .{ .start = 0x11D00, .end = 0x11D06 },
+    .{ .start = 0x11D08, .end = 0x11D09 },
+    .{ .start = 0x11D0B, .end = 0x11D36 },
+    .{ .start = 0x11D3A, .end = 0x11D3A },
+    .{ .start = 0x11D3C, .end = 0x11D3D },
+    .{ .start = 0x11D3F, .end = 0x11D47 },
+    .{ .start = 0x11D50, .end = 0x11D59 },
+};
+
+pub const scx_Gonm = [_]Range{
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x11D00, .end = 0x11D06 },
+    .{ .start = 0x11D08, .end = 0x11D09 },
+    .{ .start = 0x11D0B, .end = 0x11D36 },
+    .{ .start = 0x11D3A, .end = 0x11D3A },
+    .{ .start = 0x11D3C, .end = 0x11D3D },
+    .{ .start = 0x11D3F, .end = 0x11D47 },
+    .{ .start = 0x11D50, .end = 0x11D59 },
+};
+
+pub const script_Goth = [_]Range{
+    .{ .start = 0x10330, .end = 0x1034A },
+};
+
+pub const scx_Goth = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x0304, .end = 0x0305 },
+    .{ .start = 0x0308, .end = 0x0308 },
+    .{ .start = 0x0331, .end = 0x0331 },
+    .{ .start = 0x10330, .end = 0x1034A },
+};
+
+pub const script_Gran = [_]Range{
+    .{ .start = 0x11300, .end = 0x11303 },
+    .{ .start = 0x11305, .end = 0x1130C },
+    .{ .start = 0x1130F, .end = 0x11310 },
+    .{ .start = 0x11313, .end = 0x11328 },
+    .{ .start = 0x1132A, .end = 0x11330 },
+    .{ .start = 0x11332, .end = 0x11333 },
+    .{ .start = 0x11335, .end = 0x11339 },
+    .{ .start = 0x1133C, .end = 0x11344 },
+    .{ .start = 0x11347, .end = 0x11348 },
+    .{ .start = 0x1134B, .end = 0x1134D },
+    .{ .start = 0x11350, .end = 0x11350 },
+    .{ .start = 0x11357, .end = 0x11357 },
+    .{ .start = 0x1135D, .end = 0x11363 },
+    .{ .start = 0x11366, .end = 0x1136C },
+    .{ .start = 0x11370, .end = 0x11374 },
+};
+
+pub const scx_Gran = [_]Range{
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0BE6, .end = 0x0BF3 },
+    .{ .start = 0x1CD0, .end = 0x1CD0 },
+    .{ .start = 0x1CD2, .end = 0x1CD3 },
+    .{ .start = 0x1CF2, .end = 0x1CF4 },
+    .{ .start = 0x1CF8, .end = 0x1CF9 },
+    .{ .start = 0x20F0, .end = 0x20F0 },
+    .{ .start = 0x11300, .end = 0x11303 },
+    .{ .start = 0x11305, .end = 0x1130C },
+    .{ .start = 0x1130F, .end = 0x11310 },
+    .{ .start = 0x11313, .end = 0x11328 },
+    .{ .start = 0x1132A, .end = 0x11330 },
+    .{ .start = 0x11332, .end = 0x11333 },
+    .{ .start = 0x11335, .end = 0x11339 },
+    .{ .start = 0x1133B, .end = 0x11344 },
+    .{ .start = 0x11347, .end = 0x11348 },
+    .{ .start = 0x1134B, .end = 0x1134D },
+    .{ .start = 0x11350, .end = 0x11350 },
+    .{ .start = 0x11357, .end = 0x11357 },
+    .{ .start = 0x1135D, .end = 0x11363 },
+    .{ .start = 0x11366, .end = 0x1136C },
+    .{ .start = 0x11370, .end = 0x11374 },
+    .{ .start = 0x11FD0, .end = 0x11FD1 },
+    .{ .start = 0x11FD3, .end = 0x11FD3 },
+};
+
+pub const script_Grek = [_]Range{
+    .{ .start = 0x0370, .end = 0x0373 },
+    .{ .start = 0x0375, .end = 0x0377 },
+    .{ .start = 0x037A, .end = 0x037D },
+    .{ .start = 0x037F, .end = 0x037F },
+    .{ .start = 0x0384, .end = 0x0384 },
+    .{ .start = 0x0386, .end = 0x0386 },
+    .{ .start = 0x0388, .end = 0x038A },
+    .{ .start = 0x038C, .end = 0x038C },
+    .{ .start = 0x038E, .end = 0x03A1 },
+    .{ .start = 0x03A3, .end = 0x03E1 },
+    .{ .start = 0x03F0, .end = 0x03FF },
+    .{ .start = 0x1D26, .end = 0x1D2A },
+    .{ .start = 0x1D5D, .end = 0x1D61 },
+    .{ .start = 0x1D66, .end = 0x1D6A },
+    .{ .start = 0x1DBF, .end = 0x1DBF },
+    .{ .start = 0x1F00, .end = 0x1F15 },
+    .{ .start = 0x1F18, .end = 0x1F1D },
+    .{ .start = 0x1F20, .end = 0x1F45 },
+    .{ .start = 0x1F48, .end = 0x1F4D },
+    .{ .start = 0x1F50, .end = 0x1F57 },
+    .{ .start = 0x1F59, .end = 0x1F59 },
+    .{ .start = 0x1F5B, .end = 0x1F5B },
+    .{ .start = 0x1F5D, .end = 0x1F5D },
+    .{ .start = 0x1F5F, .end = 0x1F7D },
+    .{ .start = 0x1F80, .end = 0x1FB4 },
+    .{ .start = 0x1FB6, .end = 0x1FC4 },
+    .{ .start = 0x1FC6, .end = 0x1FD3 },
+    .{ .start = 0x1FD6, .end = 0x1FDB },
+    .{ .start = 0x1FDD, .end = 0x1FEF },
+    .{ .start = 0x1FF2, .end = 0x1FF4 },
+    .{ .start = 0x1FF6, .end = 0x1FFE },
+    .{ .start = 0x2126, .end = 0x2126 },
+    .{ .start = 0xAB65, .end = 0xAB65 },
+    .{ .start = 0x10140, .end = 0x1018E },
+    .{ .start = 0x101A0, .end = 0x101A0 },
+    .{ .start = 0x1D200, .end = 0x1D245 },
+};
+
+pub const scx_Grek = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x0300, .end = 0x0301 },
+    .{ .start = 0x0304, .end = 0x0304 },
+    .{ .start = 0x0306, .end = 0x0306 },
+    .{ .start = 0x0308, .end = 0x0308 },
+    .{ .start = 0x0313, .end = 0x0313 },
+    .{ .start = 0x0342, .end = 0x0342 },
+    .{ .start = 0x0345, .end = 0x0345 },
+    .{ .start = 0x0370, .end = 0x0377 },
+    .{ .start = 0x037A, .end = 0x037D },
+    .{ .start = 0x037F, .end = 0x037F },
+    .{ .start = 0x0384, .end = 0x0384 },
+    .{ .start = 0x0386, .end = 0x0386 },
+    .{ .start = 0x0388, .end = 0x038A },
+    .{ .start = 0x038C, .end = 0x038C },
+    .{ .start = 0x038E, .end = 0x03A1 },
+    .{ .start = 0x03A3, .end = 0x03E1 },
+    .{ .start = 0x03F0, .end = 0x03FF },
+    .{ .start = 0x1D26, .end = 0x1D2A },
+    .{ .start = 0x1D5D, .end = 0x1D61 },
+    .{ .start = 0x1D66, .end = 0x1D6A },
+    .{ .start = 0x1DBF, .end = 0x1DC1 },
+    .{ .start = 0x1F00, .end = 0x1F15 },
+    .{ .start = 0x1F18, .end = 0x1F1D },
+    .{ .start = 0x1F20, .end = 0x1F45 },
+    .{ .start = 0x1F48, .end = 0x1F4D },
+    .{ .start = 0x1F50, .end = 0x1F57 },
+    .{ .start = 0x1F59, .end = 0x1F59 },
+    .{ .start = 0x1F5B, .end = 0x1F5B },
+    .{ .start = 0x1F5D, .end = 0x1F5D },
+    .{ .start = 0x1F5F, .end = 0x1F7D },
+    .{ .start = 0x1F80, .end = 0x1FB4 },
+    .{ .start = 0x1FB6, .end = 0x1FC4 },
+    .{ .start = 0x1FC6, .end = 0x1FD3 },
+    .{ .start = 0x1FD6, .end = 0x1FDB },
+    .{ .start = 0x1FDD, .end = 0x1FEF },
+    .{ .start = 0x1FF2, .end = 0x1FF4 },
+    .{ .start = 0x1FF6, .end = 0x1FFE },
+    .{ .start = 0x205D, .end = 0x205D },
+    .{ .start = 0x2126, .end = 0x2126 },
+    .{ .start = 0xAB65, .end = 0xAB65 },
+    .{ .start = 0x10140, .end = 0x1018E },
+    .{ .start = 0x101A0, .end = 0x101A0 },
+    .{ .start = 0x1D200, .end = 0x1D245 },
+};
+
+pub const script_Gujr = [_]Range{
+    .{ .start = 0x0A81, .end = 0x0A83 },
+    .{ .start = 0x0A85, .end = 0x0A8D },
+    .{ .start = 0x0A8F, .end = 0x0A91 },
+    .{ .start = 0x0A93, .end = 0x0AA8 },
+    .{ .start = 0x0AAA, .end = 0x0AB0 },
+    .{ .start = 0x0AB2, .end = 0x0AB3 },
+    .{ .start = 0x0AB5, .end = 0x0AB9 },
+    .{ .start = 0x0ABC, .end = 0x0AC5 },
+    .{ .start = 0x0AC7, .end = 0x0AC9 },
+    .{ .start = 0x0ACB, .end = 0x0ACD },
+    .{ .start = 0x0AD0, .end = 0x0AD0 },
+    .{ .start = 0x0AE0, .end = 0x0AE3 },
+    .{ .start = 0x0AE6, .end = 0x0AF1 },
+    .{ .start = 0x0AF9, .end = 0x0AFF },
+};
+
+pub const scx_Gujr = [_]Range{
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0A81, .end = 0x0A83 },
+    .{ .start = 0x0A85, .end = 0x0A8D },
+    .{ .start = 0x0A8F, .end = 0x0A91 },
+    .{ .start = 0x0A93, .end = 0x0AA8 },
+    .{ .start = 0x0AAA, .end = 0x0AB0 },
+    .{ .start = 0x0AB2, .end = 0x0AB3 },
+    .{ .start = 0x0AB5, .end = 0x0AB9 },
+    .{ .start = 0x0ABC, .end = 0x0AC5 },
+    .{ .start = 0x0AC7, .end = 0x0AC9 },
+    .{ .start = 0x0ACB, .end = 0x0ACD },
+    .{ .start = 0x0AD0, .end = 0x0AD0 },
+    .{ .start = 0x0AE0, .end = 0x0AE3 },
+    .{ .start = 0x0AE6, .end = 0x0AF1 },
+    .{ .start = 0x0AF9, .end = 0x0AFF },
+    .{ .start = 0xA830, .end = 0xA839 },
+};
+
+pub const script_Gukh = [_]Range{
+    .{ .start = 0x16100, .end = 0x16139 },
+};
+
+pub const scx_Gukh = [_]Range{
+    .{ .start = 0x0965, .end = 0x0965 },
+    .{ .start = 0x16100, .end = 0x16139 },
+};
+
+pub const script_Guru = [_]Range{
+    .{ .start = 0x0A01, .end = 0x0A03 },
+    .{ .start = 0x0A05, .end = 0x0A0A },
+    .{ .start = 0x0A0F, .end = 0x0A10 },
+    .{ .start = 0x0A13, .end = 0x0A28 },
+    .{ .start = 0x0A2A, .end = 0x0A30 },
+    .{ .start = 0x0A32, .end = 0x0A33 },
+    .{ .start = 0x0A35, .end = 0x0A36 },
+    .{ .start = 0x0A38, .end = 0x0A39 },
+    .{ .start = 0x0A3C, .end = 0x0A3C },
+    .{ .start = 0x0A3E, .end = 0x0A42 },
+    .{ .start = 0x0A47, .end = 0x0A48 },
+    .{ .start = 0x0A4B, .end = 0x0A4D },
+    .{ .start = 0x0A51, .end = 0x0A51 },
+    .{ .start = 0x0A59, .end = 0x0A5C },
+    .{ .start = 0x0A5E, .end = 0x0A5E },
+    .{ .start = 0x0A66, .end = 0x0A76 },
+};
+
+pub const scx_Guru = [_]Range{
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0A01, .end = 0x0A03 },
+    .{ .start = 0x0A05, .end = 0x0A0A },
+    .{ .start = 0x0A0F, .end = 0x0A10 },
+    .{ .start = 0x0A13, .end = 0x0A28 },
+    .{ .start = 0x0A2A, .end = 0x0A30 },
+    .{ .start = 0x0A32, .end = 0x0A33 },
+    .{ .start = 0x0A35, .end = 0x0A36 },
+    .{ .start = 0x0A38, .end = 0x0A39 },
+    .{ .start = 0x0A3C, .end = 0x0A3C },
+    .{ .start = 0x0A3E, .end = 0x0A42 },
+    .{ .start = 0x0A47, .end = 0x0A48 },
+    .{ .start = 0x0A4B, .end = 0x0A4D },
+    .{ .start = 0x0A51, .end = 0x0A51 },
+    .{ .start = 0x0A59, .end = 0x0A5C },
+    .{ .start = 0x0A5E, .end = 0x0A5E },
+    .{ .start = 0x0A66, .end = 0x0A76 },
+    .{ .start = 0xA830, .end = 0xA839 },
+};
+
+pub const script_Hang = [_]Range{
+    .{ .start = 0x1100, .end = 0x11FF },
+    .{ .start = 0x302E, .end = 0x302F },
+    .{ .start = 0x3131, .end = 0x318E },
+    .{ .start = 0x3200, .end = 0x321E },
+    .{ .start = 0x3260, .end = 0x327E },
+    .{ .start = 0xA960, .end = 0xA97C },
+    .{ .start = 0xAC00, .end = 0xD7A3 },
+    .{ .start = 0xD7B0, .end = 0xD7C6 },
+    .{ .start = 0xD7CB, .end = 0xD7FB },
+    .{ .start = 0xFFA0, .end = 0xFFBE },
+    .{ .start = 0xFFC2, .end = 0xFFC7 },
+    .{ .start = 0xFFCA, .end = 0xFFCF },
+    .{ .start = 0xFFD2, .end = 0xFFD7 },
+    .{ .start = 0xFFDA, .end = 0xFFDC },
+};
+
+pub const scx_Hang = [_]Range{
+    .{ .start = 0x1100, .end = 0x11FF },
+    .{ .start = 0x3001, .end = 0x3003 },
+    .{ .start = 0x3008, .end = 0x3011 },
+    .{ .start = 0x3013, .end = 0x301F },
+    .{ .start = 0x302E, .end = 0x3030 },
+    .{ .start = 0x3037, .end = 0x3037 },
+    .{ .start = 0x30FB, .end = 0x30FB },
+    .{ .start = 0x3131, .end = 0x318E },
+    .{ .start = 0x3200, .end = 0x321E },
+    .{ .start = 0x3260, .end = 0x327E },
+    .{ .start = 0xA960, .end = 0xA97C },
+    .{ .start = 0xAC00, .end = 0xD7A3 },
+    .{ .start = 0xD7B0, .end = 0xD7C6 },
+    .{ .start = 0xD7CB, .end = 0xD7FB },
+    .{ .start = 0xFE45, .end = 0xFE46 },
+    .{ .start = 0xFF61, .end = 0xFF65 },
+    .{ .start = 0xFFA0, .end = 0xFFBE },
+    .{ .start = 0xFFC2, .end = 0xFFC7 },
+    .{ .start = 0xFFCA, .end = 0xFFCF },
+    .{ .start = 0xFFD2, .end = 0xFFD7 },
+    .{ .start = 0xFFDA, .end = 0xFFDC },
+};
+
+pub const script_Hani = [_]Range{
+    .{ .start = 0x2E80, .end = 0x2E99 },
+    .{ .start = 0x2E9B, .end = 0x2EF3 },
+    .{ .start = 0x2F00, .end = 0x2FD5 },
+    .{ .start = 0x3005, .end = 0x3005 },
+    .{ .start = 0x3007, .end = 0x3007 },
+    .{ .start = 0x3021, .end = 0x3029 },
+    .{ .start = 0x3038, .end = 0x303B },
+    .{ .start = 0x3400, .end = 0x4DBF },
+    .{ .start = 0x4E00, .end = 0x9FFF },
+    .{ .start = 0xF900, .end = 0xFA6D },
+    .{ .start = 0xFA70, .end = 0xFAD9 },
+    .{ .start = 0x16FE2, .end = 0x16FE3 },
+    .{ .start = 0x16FF0, .end = 0x16FF6 },
+    .{ .start = 0x20000, .end = 0x2A6DF },
+    .{ .start = 0x2A700, .end = 0x2B81D },
+    .{ .start = 0x2B820, .end = 0x2CEAD },
+    .{ .start = 0x2CEB0, .end = 0x2EBE0 },
+    .{ .start = 0x2EBF0, .end = 0x2EE5D },
+    .{ .start = 0x2F800, .end = 0x2FA1D },
+    .{ .start = 0x30000, .end = 0x3134A },
+    .{ .start = 0x31350, .end = 0x33479 },
+};
+
+pub const scx_Hani = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x2E80, .end = 0x2E99 },
+    .{ .start = 0x2E9B, .end = 0x2EF3 },
+    .{ .start = 0x2F00, .end = 0x2FD5 },
+    .{ .start = 0x2FF0, .end = 0x2FFF },
+    .{ .start = 0x3001, .end = 0x3003 },
+    .{ .start = 0x3005, .end = 0x3011 },
+    .{ .start = 0x3013, .end = 0x301F },
+    .{ .start = 0x3021, .end = 0x302D },
+    .{ .start = 0x3030, .end = 0x3030 },
+    .{ .start = 0x3037, .end = 0x303F },
+    .{ .start = 0x30FB, .end = 0x30FB },
+    .{ .start = 0x3190, .end = 0x319F },
+    .{ .start = 0x31C0, .end = 0x31E5 },
+    .{ .start = 0x31EF, .end = 0x31EF },
+    .{ .start = 0x3220, .end = 0x3247 },
+    .{ .start = 0x3280, .end = 0x32B0 },
+    .{ .start = 0x32C0, .end = 0x32CB },
+    .{ .start = 0x32FF, .end = 0x32FF },
+    .{ .start = 0x3358, .end = 0x3370 },
+    .{ .start = 0x337B, .end = 0x337F },
+    .{ .start = 0x33E0, .end = 0x33FE },
+    .{ .start = 0x3400, .end = 0x4DBF },
+    .{ .start = 0x4E00, .end = 0x9FFF },
+    .{ .start = 0xA700, .end = 0xA707 },
+    .{ .start = 0xF900, .end = 0xFA6D },
+    .{ .start = 0xFA70, .end = 0xFAD9 },
+    .{ .start = 0xFE45, .end = 0xFE46 },
+    .{ .start = 0xFF61, .end = 0xFF65 },
+    .{ .start = 0x16FE2, .end = 0x16FE3 },
+    .{ .start = 0x16FF0, .end = 0x16FF6 },
+    .{ .start = 0x1D360, .end = 0x1D371 },
+    .{ .start = 0x1F250, .end = 0x1F251 },
+    .{ .start = 0x20000, .end = 0x2A6DF },
+    .{ .start = 0x2A700, .end = 0x2B81D },
+    .{ .start = 0x2B820, .end = 0x2CEAD },
+    .{ .start = 0x2CEB0, .end = 0x2EBE0 },
+    .{ .start = 0x2EBF0, .end = 0x2EE5D },
+    .{ .start = 0x2F800, .end = 0x2FA1D },
+    .{ .start = 0x30000, .end = 0x3134A },
+    .{ .start = 0x31350, .end = 0x33479 },
+};
+
+pub const script_Hano = [_]Range{
+    .{ .start = 0x1720, .end = 0x1734 },
+};
+
+pub const scx_Hano = [_]Range{
+    .{ .start = 0x1720, .end = 0x1736 },
+};
+
+pub const script_Hatr = [_]Range{
+    .{ .start = 0x108E0, .end = 0x108F2 },
+    .{ .start = 0x108F4, .end = 0x108F5 },
+    .{ .start = 0x108FB, .end = 0x108FF },
+};
+
+pub const scx_Hatr = [_]Range{
+    .{ .start = 0x108E0, .end = 0x108F2 },
+    .{ .start = 0x108F4, .end = 0x108F5 },
+    .{ .start = 0x108FB, .end = 0x108FF },
+};
+
+pub const script_Hebr = [_]Range{
+    .{ .start = 0x0591, .end = 0x05C7 },
+    .{ .start = 0x05D0, .end = 0x05EA },
+    .{ .start = 0x05EF, .end = 0x05F4 },
+    .{ .start = 0xFB1D, .end = 0xFB36 },
+    .{ .start = 0xFB38, .end = 0xFB3C },
+    .{ .start = 0xFB3E, .end = 0xFB3E },
+    .{ .start = 0xFB40, .end = 0xFB41 },
+    .{ .start = 0xFB43, .end = 0xFB44 },
+    .{ .start = 0xFB46, .end = 0xFB4F },
+};
+
+pub const scx_Hebr = [_]Range{
+    .{ .start = 0x0307, .end = 0x0308 },
+    .{ .start = 0x0591, .end = 0x05C7 },
+    .{ .start = 0x05D0, .end = 0x05EA },
+    .{ .start = 0x05EF, .end = 0x05F4 },
+    .{ .start = 0xFB1D, .end = 0xFB36 },
+    .{ .start = 0xFB38, .end = 0xFB3C },
+    .{ .start = 0xFB3E, .end = 0xFB3E },
+    .{ .start = 0xFB40, .end = 0xFB41 },
+    .{ .start = 0xFB43, .end = 0xFB44 },
+    .{ .start = 0xFB46, .end = 0xFB4F },
+};
+
+pub const script_Hira = [_]Range{
+    .{ .start = 0x3041, .end = 0x3096 },
+    .{ .start = 0x309D, .end = 0x309F },
+    .{ .start = 0x1B001, .end = 0x1B11F },
+    .{ .start = 0x1B132, .end = 0x1B132 },
+    .{ .start = 0x1B150, .end = 0x1B152 },
+    .{ .start = 0x1F200, .end = 0x1F200 },
+};
+
+pub const scx_Hira = [_]Range{
+    .{ .start = 0x3001, .end = 0x3003 },
+    .{ .start = 0x3008, .end = 0x3011 },
+    .{ .start = 0x3013, .end = 0x301F },
+    .{ .start = 0x3030, .end = 0x3035 },
+    .{ .start = 0x3037, .end = 0x3037 },
+    .{ .start = 0x303C, .end = 0x303D },
+    .{ .start = 0x3041, .end = 0x3096 },
+    .{ .start = 0x3099, .end = 0x30A0 },
+    .{ .start = 0x30FB, .end = 0x30FC },
+    .{ .start = 0xFE45, .end = 0xFE46 },
+    .{ .start = 0xFF61, .end = 0xFF65 },
+    .{ .start = 0xFF70, .end = 0xFF70 },
+    .{ .start = 0xFF9E, .end = 0xFF9F },
+    .{ .start = 0x1B001, .end = 0x1B11F },
+    .{ .start = 0x1B132, .end = 0x1B132 },
+    .{ .start = 0x1B150, .end = 0x1B152 },
+    .{ .start = 0x1F200, .end = 0x1F200 },
+};
+
+pub const script_Hluw = [_]Range{
+    .{ .start = 0x14400, .end = 0x14646 },
+};
+
+pub const scx_Hluw = [_]Range{
+    .{ .start = 0x14400, .end = 0x14646 },
+};
+
+pub const script_Hmng = [_]Range{
+    .{ .start = 0x16B00, .end = 0x16B45 },
+    .{ .start = 0x16B50, .end = 0x16B59 },
+    .{ .start = 0x16B5B, .end = 0x16B61 },
+    .{ .start = 0x16B63, .end = 0x16B77 },
+    .{ .start = 0x16B7D, .end = 0x16B8F },
+};
+
+pub const scx_Hmng = [_]Range{
+    .{ .start = 0x16B00, .end = 0x16B45 },
+    .{ .start = 0x16B50, .end = 0x16B59 },
+    .{ .start = 0x16B5B, .end = 0x16B61 },
+    .{ .start = 0x16B63, .end = 0x16B77 },
+    .{ .start = 0x16B7D, .end = 0x16B8F },
+};
+
+pub const script_Hmnp = [_]Range{
+    .{ .start = 0x1E100, .end = 0x1E12C },
+    .{ .start = 0x1E130, .end = 0x1E13D },
+    .{ .start = 0x1E140, .end = 0x1E149 },
+    .{ .start = 0x1E14E, .end = 0x1E14F },
+};
+
+pub const scx_Hmnp = [_]Range{
+    .{ .start = 0x1E100, .end = 0x1E12C },
+    .{ .start = 0x1E130, .end = 0x1E13D },
+    .{ .start = 0x1E140, .end = 0x1E149 },
+    .{ .start = 0x1E14E, .end = 0x1E14F },
+};
+
+pub const script_Hrkt = [_]Range{
+};
+
+pub const scx_Hrkt = [_]Range{
+};
+
+pub const script_Hung = [_]Range{
+    .{ .start = 0x10C80, .end = 0x10CB2 },
+    .{ .start = 0x10CC0, .end = 0x10CF2 },
+    .{ .start = 0x10CFA, .end = 0x10CFF },
+};
+
+pub const scx_Hung = [_]Range{
+    .{ .start = 0x205A, .end = 0x205A },
+    .{ .start = 0x205D, .end = 0x205D },
+    .{ .start = 0x2E31, .end = 0x2E31 },
+    .{ .start = 0x2E41, .end = 0x2E41 },
+    .{ .start = 0x10C80, .end = 0x10CB2 },
+    .{ .start = 0x10CC0, .end = 0x10CF2 },
+    .{ .start = 0x10CFA, .end = 0x10CFF },
+};
+
+pub const script_Ital = [_]Range{
+    .{ .start = 0x10300, .end = 0x10323 },
+    .{ .start = 0x1032D, .end = 0x1032F },
+};
+
+pub const scx_Ital = [_]Range{
+    .{ .start = 0x10300, .end = 0x10323 },
+    .{ .start = 0x1032D, .end = 0x1032F },
+};
+
+pub const script_Java = [_]Range{
+    .{ .start = 0xA980, .end = 0xA9CD },
+    .{ .start = 0xA9D0, .end = 0xA9D9 },
+    .{ .start = 0xA9DE, .end = 0xA9DF },
+};
+
+pub const scx_Java = [_]Range{
+    .{ .start = 0xA980, .end = 0xA9CD },
+    .{ .start = 0xA9CF, .end = 0xA9D9 },
+    .{ .start = 0xA9DE, .end = 0xA9DF },
+};
+
+pub const script_Kali = [_]Range{
+    .{ .start = 0xA900, .end = 0xA92D },
+    .{ .start = 0xA92F, .end = 0xA92F },
+};
+
+pub const scx_Kali = [_]Range{
+    .{ .start = 0xA900, .end = 0xA92F },
+};
+
+pub const script_Kana = [_]Range{
+    .{ .start = 0x30A1, .end = 0x30FA },
+    .{ .start = 0x30FD, .end = 0x30FF },
+    .{ .start = 0x31F0, .end = 0x31FF },
+    .{ .start = 0x32D0, .end = 0x32FE },
+    .{ .start = 0x3300, .end = 0x3357 },
+    .{ .start = 0xFF66, .end = 0xFF6F },
+    .{ .start = 0xFF71, .end = 0xFF9D },
+    .{ .start = 0x1AFF0, .end = 0x1AFF3 },
+    .{ .start = 0x1AFF5, .end = 0x1AFFB },
+    .{ .start = 0x1AFFD, .end = 0x1AFFE },
+    .{ .start = 0x1B000, .end = 0x1B000 },
+    .{ .start = 0x1B120, .end = 0x1B122 },
+    .{ .start = 0x1B155, .end = 0x1B155 },
+    .{ .start = 0x1B164, .end = 0x1B167 },
+};
+
+pub const scx_Kana = [_]Range{
+    .{ .start = 0x0305, .end = 0x0305 },
+    .{ .start = 0x0323, .end = 0x0323 },
+    .{ .start = 0x3001, .end = 0x3003 },
+    .{ .start = 0x3008, .end = 0x3011 },
+    .{ .start = 0x3013, .end = 0x301F },
+    .{ .start = 0x3030, .end = 0x3035 },
+    .{ .start = 0x3037, .end = 0x3037 },
+    .{ .start = 0x303C, .end = 0x303D },
+    .{ .start = 0x3099, .end = 0x309C },
+    .{ .start = 0x30A0, .end = 0x30FF },
+    .{ .start = 0x31F0, .end = 0x31FF },
+    .{ .start = 0x32D0, .end = 0x32FE },
+    .{ .start = 0x3300, .end = 0x3357 },
+    .{ .start = 0xFE45, .end = 0xFE46 },
+    .{ .start = 0xFF61, .end = 0xFF9F },
+    .{ .start = 0x1AFF0, .end = 0x1AFF3 },
+    .{ .start = 0x1AFF5, .end = 0x1AFFB },
+    .{ .start = 0x1AFFD, .end = 0x1AFFE },
+    .{ .start = 0x1B000, .end = 0x1B000 },
+    .{ .start = 0x1B120, .end = 0x1B122 },
+    .{ .start = 0x1B155, .end = 0x1B155 },
+    .{ .start = 0x1B164, .end = 0x1B167 },
+};
+
+pub const script_Kawi = [_]Range{
+    .{ .start = 0x11F00, .end = 0x11F10 },
+    .{ .start = 0x11F12, .end = 0x11F3A },
+    .{ .start = 0x11F3E, .end = 0x11F5A },
+};
+
+pub const scx_Kawi = [_]Range{
+    .{ .start = 0x11F00, .end = 0x11F10 },
+    .{ .start = 0x11F12, .end = 0x11F3A },
+    .{ .start = 0x11F3E, .end = 0x11F5A },
+};
+
+pub const script_Khar = [_]Range{
+    .{ .start = 0x10A00, .end = 0x10A03 },
+    .{ .start = 0x10A05, .end = 0x10A06 },
+    .{ .start = 0x10A0C, .end = 0x10A13 },
+    .{ .start = 0x10A15, .end = 0x10A17 },
+    .{ .start = 0x10A19, .end = 0x10A35 },
+    .{ .start = 0x10A38, .end = 0x10A3A },
+    .{ .start = 0x10A3F, .end = 0x10A48 },
+    .{ .start = 0x10A50, .end = 0x10A58 },
+};
+
+pub const scx_Khar = [_]Range{
+    .{ .start = 0x10A00, .end = 0x10A03 },
+    .{ .start = 0x10A05, .end = 0x10A06 },
+    .{ .start = 0x10A0C, .end = 0x10A13 },
+    .{ .start = 0x10A15, .end = 0x10A17 },
+    .{ .start = 0x10A19, .end = 0x10A35 },
+    .{ .start = 0x10A38, .end = 0x10A3A },
+    .{ .start = 0x10A3F, .end = 0x10A48 },
+    .{ .start = 0x10A50, .end = 0x10A58 },
+};
+
+pub const script_Khmr = [_]Range{
+    .{ .start = 0x1780, .end = 0x17DD },
+    .{ .start = 0x17E0, .end = 0x17E9 },
+    .{ .start = 0x17F0, .end = 0x17F9 },
+    .{ .start = 0x19E0, .end = 0x19FF },
+};
+
+pub const scx_Khmr = [_]Range{
+    .{ .start = 0x1780, .end = 0x17DD },
+    .{ .start = 0x17E0, .end = 0x17E9 },
+    .{ .start = 0x17F0, .end = 0x17F9 },
+    .{ .start = 0x19E0, .end = 0x19FF },
+};
+
+pub const script_Khoj = [_]Range{
+    .{ .start = 0x11200, .end = 0x11211 },
+    .{ .start = 0x11213, .end = 0x11241 },
+};
+
+pub const scx_Khoj = [_]Range{
+    .{ .start = 0x0AE6, .end = 0x0AEF },
+    .{ .start = 0xA830, .end = 0xA839 },
+    .{ .start = 0x11200, .end = 0x11211 },
+    .{ .start = 0x11213, .end = 0x11241 },
+};
+
+pub const script_Kits = [_]Range{
+    .{ .start = 0x16FE4, .end = 0x16FE4 },
+    .{ .start = 0x18B00, .end = 0x18CD5 },
+    .{ .start = 0x18CFF, .end = 0x18CFF },
+};
+
+pub const scx_Kits = [_]Range{
+    .{ .start = 0x16FE4, .end = 0x16FE4 },
+    .{ .start = 0x18B00, .end = 0x18CD5 },
+    .{ .start = 0x18CFF, .end = 0x18CFF },
+};
+
+pub const script_Knda = [_]Range{
+    .{ .start = 0x0C80, .end = 0x0C8C },
+    .{ .start = 0x0C8E, .end = 0x0C90 },
+    .{ .start = 0x0C92, .end = 0x0CA8 },
+    .{ .start = 0x0CAA, .end = 0x0CB3 },
+    .{ .start = 0x0CB5, .end = 0x0CB9 },
+    .{ .start = 0x0CBC, .end = 0x0CC4 },
+    .{ .start = 0x0CC6, .end = 0x0CC8 },
+    .{ .start = 0x0CCA, .end = 0x0CCD },
+    .{ .start = 0x0CD5, .end = 0x0CD6 },
+    .{ .start = 0x0CDC, .end = 0x0CDE },
+    .{ .start = 0x0CE0, .end = 0x0CE3 },
+    .{ .start = 0x0CE6, .end = 0x0CEF },
+    .{ .start = 0x0CF1, .end = 0x0CF3 },
+};
+
+pub const scx_Knda = [_]Range{
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0C80, .end = 0x0C8C },
+    .{ .start = 0x0C8E, .end = 0x0C90 },
+    .{ .start = 0x0C92, .end = 0x0CA8 },
+    .{ .start = 0x0CAA, .end = 0x0CB3 },
+    .{ .start = 0x0CB5, .end = 0x0CB9 },
+    .{ .start = 0x0CBC, .end = 0x0CC4 },
+    .{ .start = 0x0CC6, .end = 0x0CC8 },
+    .{ .start = 0x0CCA, .end = 0x0CCD },
+    .{ .start = 0x0CD5, .end = 0x0CD6 },
+    .{ .start = 0x0CDC, .end = 0x0CDE },
+    .{ .start = 0x0CE0, .end = 0x0CE3 },
+    .{ .start = 0x0CE6, .end = 0x0CEF },
+    .{ .start = 0x0CF1, .end = 0x0CF3 },
+    .{ .start = 0x1CD0, .end = 0x1CD0 },
+    .{ .start = 0x1CD2, .end = 0x1CD3 },
+    .{ .start = 0x1CDA, .end = 0x1CDA },
+    .{ .start = 0x1CF2, .end = 0x1CF2 },
+    .{ .start = 0x1CF4, .end = 0x1CF4 },
+    .{ .start = 0xA830, .end = 0xA835 },
+};
+
+pub const script_Krai = [_]Range{
+    .{ .start = 0x16D40, .end = 0x16D79 },
+};
+
+pub const scx_Krai = [_]Range{
+    .{ .start = 0x16D40, .end = 0x16D79 },
+};
+
+pub const script_Kthi = [_]Range{
+    .{ .start = 0x11080, .end = 0x110C2 },
+    .{ .start = 0x110CD, .end = 0x110CD },
+};
+
+pub const scx_Kthi = [_]Range{
+    .{ .start = 0x0966, .end = 0x096F },
+    .{ .start = 0x2E31, .end = 0x2E31 },
+    .{ .start = 0xA830, .end = 0xA839 },
+    .{ .start = 0x11080, .end = 0x110C2 },
+    .{ .start = 0x110CD, .end = 0x110CD },
+};
+
+pub const script_Lana = [_]Range{
+    .{ .start = 0x1A20, .end = 0x1A5E },
+    .{ .start = 0x1A60, .end = 0x1A7C },
+    .{ .start = 0x1A7F, .end = 0x1A89 },
+    .{ .start = 0x1A90, .end = 0x1A99 },
+    .{ .start = 0x1AA0, .end = 0x1AAD },
+};
+
+pub const scx_Lana = [_]Range{
+    .{ .start = 0x1A20, .end = 0x1A5E },
+    .{ .start = 0x1A60, .end = 0x1A7C },
+    .{ .start = 0x1A7F, .end = 0x1A89 },
+    .{ .start = 0x1A90, .end = 0x1A99 },
+    .{ .start = 0x1AA0, .end = 0x1AAD },
+};
+
+pub const script_Laoo = [_]Range{
+    .{ .start = 0x0E81, .end = 0x0E82 },
+    .{ .start = 0x0E84, .end = 0x0E84 },
+    .{ .start = 0x0E86, .end = 0x0E8A },
+    .{ .start = 0x0E8C, .end = 0x0EA3 },
+    .{ .start = 0x0EA5, .end = 0x0EA5 },
+    .{ .start = 0x0EA7, .end = 0x0EBD },
+    .{ .start = 0x0EC0, .end = 0x0EC4 },
+    .{ .start = 0x0EC6, .end = 0x0EC6 },
+    .{ .start = 0x0EC8, .end = 0x0ECE },
+    .{ .start = 0x0ED0, .end = 0x0ED9 },
+    .{ .start = 0x0EDC, .end = 0x0EDF },
+};
+
+pub const scx_Laoo = [_]Range{
+    .{ .start = 0x0E81, .end = 0x0E82 },
+    .{ .start = 0x0E84, .end = 0x0E84 },
+    .{ .start = 0x0E86, .end = 0x0E8A },
+    .{ .start = 0x0E8C, .end = 0x0EA3 },
+    .{ .start = 0x0EA5, .end = 0x0EA5 },
+    .{ .start = 0x0EA7, .end = 0x0EBD },
+    .{ .start = 0x0EC0, .end = 0x0EC4 },
+    .{ .start = 0x0EC6, .end = 0x0EC6 },
+    .{ .start = 0x0EC8, .end = 0x0ECE },
+    .{ .start = 0x0ED0, .end = 0x0ED9 },
+    .{ .start = 0x0EDC, .end = 0x0EDF },
+};
+
+pub const script_Latn = [_]Range{
+    .{ .start = 0x0041, .end = 0x005A },
+    .{ .start = 0x0061, .end = 0x007A },
+    .{ .start = 0x00AA, .end = 0x00AA },
+    .{ .start = 0x00BA, .end = 0x00BA },
+    .{ .start = 0x00C0, .end = 0x00D6 },
+    .{ .start = 0x00D8, .end = 0x00F6 },
+    .{ .start = 0x00F8, .end = 0x02B8 },
+    .{ .start = 0x02E0, .end = 0x02E4 },
+    .{ .start = 0x1D00, .end = 0x1D25 },
+    .{ .start = 0x1D2C, .end = 0x1D5C },
+    .{ .start = 0x1D62, .end = 0x1D65 },
+    .{ .start = 0x1D6B, .end = 0x1D77 },
+    .{ .start = 0x1D79, .end = 0x1DBE },
+    .{ .start = 0x1E00, .end = 0x1EFF },
+    .{ .start = 0x2071, .end = 0x2071 },
+    .{ .start = 0x207F, .end = 0x207F },
+    .{ .start = 0x2090, .end = 0x209C },
+    .{ .start = 0x212A, .end = 0x212B },
+    .{ .start = 0x2132, .end = 0x2132 },
+    .{ .start = 0x214E, .end = 0x214E },
+    .{ .start = 0x2160, .end = 0x2188 },
+    .{ .start = 0x2C60, .end = 0x2C7F },
+    .{ .start = 0xA722, .end = 0xA787 },
+    .{ .start = 0xA78B, .end = 0xA7DC },
+    .{ .start = 0xA7F1, .end = 0xA7FF },
+    .{ .start = 0xAB30, .end = 0xAB5A },
+    .{ .start = 0xAB5C, .end = 0xAB64 },
+    .{ .start = 0xAB66, .end = 0xAB69 },
+    .{ .start = 0xFB00, .end = 0xFB06 },
+    .{ .start = 0xFF21, .end = 0xFF3A },
+    .{ .start = 0xFF41, .end = 0xFF5A },
+    .{ .start = 0x10780, .end = 0x10785 },
+    .{ .start = 0x10787, .end = 0x107B0 },
+    .{ .start = 0x107B2, .end = 0x107BA },
+    .{ .start = 0x1DF00, .end = 0x1DF1E },
+    .{ .start = 0x1DF25, .end = 0x1DF2A },
+};
+
+pub const scx_Latn = [_]Range{
+    .{ .start = 0x0041, .end = 0x005A },
+    .{ .start = 0x0061, .end = 0x007A },
+    .{ .start = 0x00AA, .end = 0x00AA },
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x00BA, .end = 0x00BA },
+    .{ .start = 0x00C0, .end = 0x00D6 },
+    .{ .start = 0x00D8, .end = 0x00F6 },
+    .{ .start = 0x00F8, .end = 0x02B8 },
+    .{ .start = 0x02BC, .end = 0x02BC },
+    .{ .start = 0x02C7, .end = 0x02C7 },
+    .{ .start = 0x02C9, .end = 0x02CB },
+    .{ .start = 0x02CD, .end = 0x02CD },
+    .{ .start = 0x02D7, .end = 0x02D7 },
+    .{ .start = 0x02D9, .end = 0x02D9 },
+    .{ .start = 0x02E0, .end = 0x02E4 },
+    .{ .start = 0x0300, .end = 0x030E },
+    .{ .start = 0x0310, .end = 0x0311 },
+    .{ .start = 0x0313, .end = 0x0313 },
+    .{ .start = 0x0323, .end = 0x0325 },
+    .{ .start = 0x032D, .end = 0x032E },
+    .{ .start = 0x0330, .end = 0x0331 },
+    .{ .start = 0x0358, .end = 0x0358 },
+    .{ .start = 0x035E, .end = 0x035E },
+    .{ .start = 0x0363, .end = 0x036F },
+    .{ .start = 0x0485, .end = 0x0486 },
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x10FB, .end = 0x10FB },
+    .{ .start = 0x1D00, .end = 0x1D25 },
+    .{ .start = 0x1D2C, .end = 0x1D5C },
+    .{ .start = 0x1D62, .end = 0x1D65 },
+    .{ .start = 0x1D6B, .end = 0x1D77 },
+    .{ .start = 0x1D79, .end = 0x1DBE },
+    .{ .start = 0x1DF8, .end = 0x1DF8 },
+    .{ .start = 0x1E00, .end = 0x1EFF },
+    .{ .start = 0x202F, .end = 0x202F },
+    .{ .start = 0x2071, .end = 0x2071 },
+    .{ .start = 0x207F, .end = 0x207F },
+    .{ .start = 0x2090, .end = 0x209C },
+    .{ .start = 0x20F0, .end = 0x20F0 },
+    .{ .start = 0x212A, .end = 0x212B },
+    .{ .start = 0x2132, .end = 0x2132 },
+    .{ .start = 0x214E, .end = 0x214E },
+    .{ .start = 0x2160, .end = 0x2188 },
+    .{ .start = 0x2C60, .end = 0x2C7F },
+    .{ .start = 0x2E17, .end = 0x2E17 },
+    .{ .start = 0xA700, .end = 0xA707 },
+    .{ .start = 0xA722, .end = 0xA787 },
+    .{ .start = 0xA78B, .end = 0xA7DC },
+    .{ .start = 0xA7F1, .end = 0xA7FF },
+    .{ .start = 0xA92E, .end = 0xA92E },
+    .{ .start = 0xAB30, .end = 0xAB5A },
+    .{ .start = 0xAB5C, .end = 0xAB64 },
+    .{ .start = 0xAB66, .end = 0xAB69 },
+    .{ .start = 0xFB00, .end = 0xFB06 },
+    .{ .start = 0xFF21, .end = 0xFF3A },
+    .{ .start = 0xFF41, .end = 0xFF5A },
+    .{ .start = 0x10780, .end = 0x10785 },
+    .{ .start = 0x10787, .end = 0x107B0 },
+    .{ .start = 0x107B2, .end = 0x107BA },
+    .{ .start = 0x1DF00, .end = 0x1DF1E },
+    .{ .start = 0x1DF25, .end = 0x1DF2A },
+};
+
+pub const script_Lepc = [_]Range{
+    .{ .start = 0x1C00, .end = 0x1C37 },
+    .{ .start = 0x1C3B, .end = 0x1C49 },
+    .{ .start = 0x1C4D, .end = 0x1C4F },
+};
+
+pub const scx_Lepc = [_]Range{
+    .{ .start = 0x1C00, .end = 0x1C37 },
+    .{ .start = 0x1C3B, .end = 0x1C49 },
+    .{ .start = 0x1C4D, .end = 0x1C4F },
+};
+
+pub const script_Limb = [_]Range{
+    .{ .start = 0x1900, .end = 0x191E },
+    .{ .start = 0x1920, .end = 0x192B },
+    .{ .start = 0x1930, .end = 0x193B },
+    .{ .start = 0x1940, .end = 0x1940 },
+    .{ .start = 0x1944, .end = 0x194F },
+};
+
+pub const scx_Limb = [_]Range{
+    .{ .start = 0x0965, .end = 0x0965 },
+    .{ .start = 0x1900, .end = 0x191E },
+    .{ .start = 0x1920, .end = 0x192B },
+    .{ .start = 0x1930, .end = 0x193B },
+    .{ .start = 0x1940, .end = 0x1940 },
+    .{ .start = 0x1944, .end = 0x194F },
+};
+
+pub const script_Lina = [_]Range{
+    .{ .start = 0x10600, .end = 0x10736 },
+    .{ .start = 0x10740, .end = 0x10755 },
+    .{ .start = 0x10760, .end = 0x10767 },
+};
+
+pub const scx_Lina = [_]Range{
+    .{ .start = 0x10107, .end = 0x10133 },
+    .{ .start = 0x10600, .end = 0x10736 },
+    .{ .start = 0x10740, .end = 0x10755 },
+    .{ .start = 0x10760, .end = 0x10767 },
+};
+
+pub const script_Linb = [_]Range{
+    .{ .start = 0x10000, .end = 0x1000B },
+    .{ .start = 0x1000D, .end = 0x10026 },
+    .{ .start = 0x10028, .end = 0x1003A },
+    .{ .start = 0x1003C, .end = 0x1003D },
+    .{ .start = 0x1003F, .end = 0x1004D },
+    .{ .start = 0x10050, .end = 0x1005D },
+    .{ .start = 0x10080, .end = 0x100FA },
+};
+
+pub const scx_Linb = [_]Range{
+    .{ .start = 0x10000, .end = 0x1000B },
+    .{ .start = 0x1000D, .end = 0x10026 },
+    .{ .start = 0x10028, .end = 0x1003A },
+    .{ .start = 0x1003C, .end = 0x1003D },
+    .{ .start = 0x1003F, .end = 0x1004D },
+    .{ .start = 0x10050, .end = 0x1005D },
+    .{ .start = 0x10080, .end = 0x100FA },
+    .{ .start = 0x10100, .end = 0x10102 },
+    .{ .start = 0x10107, .end = 0x10133 },
+    .{ .start = 0x10137, .end = 0x1013F },
+};
+
+pub const script_Lisu = [_]Range{
+    .{ .start = 0xA4D0, .end = 0xA4FF },
+    .{ .start = 0x11FB0, .end = 0x11FB0 },
+};
+
+pub const scx_Lisu = [_]Range{
+    .{ .start = 0x02BC, .end = 0x02BC },
+    .{ .start = 0x02CD, .end = 0x02CD },
+    .{ .start = 0x300A, .end = 0x300B },
+    .{ .start = 0xA4D0, .end = 0xA4FF },
+    .{ .start = 0x11FB0, .end = 0x11FB0 },
+};
+
+pub const script_Lyci = [_]Range{
+    .{ .start = 0x10280, .end = 0x1029C },
+};
+
+pub const scx_Lyci = [_]Range{
+    .{ .start = 0x205A, .end = 0x205A },
+    .{ .start = 0x10280, .end = 0x1029C },
+};
+
+pub const script_Lydi = [_]Range{
+    .{ .start = 0x10920, .end = 0x10939 },
+    .{ .start = 0x1093F, .end = 0x1093F },
+};
+
+pub const scx_Lydi = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x2E31, .end = 0x2E31 },
+    .{ .start = 0x10920, .end = 0x10939 },
+    .{ .start = 0x1093F, .end = 0x1093F },
+};
+
+pub const script_Mahj = [_]Range{
+    .{ .start = 0x11150, .end = 0x11176 },
+};
+
+pub const scx_Mahj = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x0964, .end = 0x096F },
+    .{ .start = 0xA830, .end = 0xA839 },
+    .{ .start = 0x11150, .end = 0x11176 },
+};
+
+pub const script_Maka = [_]Range{
+    .{ .start = 0x11EE0, .end = 0x11EF8 },
+};
+
+pub const scx_Maka = [_]Range{
+    .{ .start = 0x11EE0, .end = 0x11EF8 },
+};
+
+pub const script_Mand = [_]Range{
+    .{ .start = 0x0840, .end = 0x085B },
+    .{ .start = 0x085E, .end = 0x085E },
+};
+
+pub const scx_Mand = [_]Range{
+    .{ .start = 0x0640, .end = 0x0640 },
+    .{ .start = 0x0840, .end = 0x085B },
+    .{ .start = 0x085E, .end = 0x085E },
+};
+
+pub const script_Mani = [_]Range{
+    .{ .start = 0x10AC0, .end = 0x10AE6 },
+    .{ .start = 0x10AEB, .end = 0x10AF6 },
+};
+
+pub const scx_Mani = [_]Range{
+    .{ .start = 0x0640, .end = 0x0640 },
+    .{ .start = 0x10AC0, .end = 0x10AE6 },
+    .{ .start = 0x10AEB, .end = 0x10AF6 },
+};
+
+pub const script_Marc = [_]Range{
+    .{ .start = 0x11C70, .end = 0x11C8F },
+    .{ .start = 0x11C92, .end = 0x11CA7 },
+    .{ .start = 0x11CA9, .end = 0x11CB6 },
+};
+
+pub const scx_Marc = [_]Range{
+    .{ .start = 0x11C70, .end = 0x11C8F },
+    .{ .start = 0x11C92, .end = 0x11CA7 },
+    .{ .start = 0x11CA9, .end = 0x11CB6 },
+};
+
+pub const script_Medf = [_]Range{
+    .{ .start = 0x16E40, .end = 0x16E9A },
+};
+
+pub const scx_Medf = [_]Range{
+    .{ .start = 0x16E40, .end = 0x16E9A },
+};
+
+pub const script_Mend = [_]Range{
+    .{ .start = 0x1E800, .end = 0x1E8C4 },
+    .{ .start = 0x1E8C7, .end = 0x1E8D6 },
+};
+
+pub const scx_Mend = [_]Range{
+    .{ .start = 0x1E800, .end = 0x1E8C4 },
+    .{ .start = 0x1E8C7, .end = 0x1E8D6 },
+};
+
+pub const script_Merc = [_]Range{
+    .{ .start = 0x109A0, .end = 0x109B7 },
+    .{ .start = 0x109BC, .end = 0x109CF },
+    .{ .start = 0x109D2, .end = 0x109FF },
+};
+
+pub const scx_Merc = [_]Range{
+    .{ .start = 0x109A0, .end = 0x109B7 },
+    .{ .start = 0x109BC, .end = 0x109CF },
+    .{ .start = 0x109D2, .end = 0x109FF },
+};
+
+pub const script_Mero = [_]Range{
+    .{ .start = 0x10980, .end = 0x1099F },
+};
+
+pub const scx_Mero = [_]Range{
+    .{ .start = 0x205D, .end = 0x205D },
+    .{ .start = 0x10980, .end = 0x1099F },
+};
+
+pub const script_Mlym = [_]Range{
+    .{ .start = 0x0D00, .end = 0x0D0C },
+    .{ .start = 0x0D0E, .end = 0x0D10 },
+    .{ .start = 0x0D12, .end = 0x0D44 },
+    .{ .start = 0x0D46, .end = 0x0D48 },
+    .{ .start = 0x0D4A, .end = 0x0D4F },
+    .{ .start = 0x0D54, .end = 0x0D63 },
+    .{ .start = 0x0D66, .end = 0x0D7F },
+};
+
+pub const scx_Mlym = [_]Range{
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0D00, .end = 0x0D0C },
+    .{ .start = 0x0D0E, .end = 0x0D10 },
+    .{ .start = 0x0D12, .end = 0x0D44 },
+    .{ .start = 0x0D46, .end = 0x0D48 },
+    .{ .start = 0x0D4A, .end = 0x0D4F },
+    .{ .start = 0x0D54, .end = 0x0D63 },
+    .{ .start = 0x0D66, .end = 0x0D7F },
+    .{ .start = 0x1CDA, .end = 0x1CDA },
+    .{ .start = 0x1CF2, .end = 0x1CF2 },
+    .{ .start = 0xA830, .end = 0xA832 },
+};
+
+pub const script_Modi = [_]Range{
+    .{ .start = 0x11600, .end = 0x11644 },
+    .{ .start = 0x11650, .end = 0x11659 },
+};
+
+pub const scx_Modi = [_]Range{
+    .{ .start = 0xA830, .end = 0xA839 },
+    .{ .start = 0x11600, .end = 0x11644 },
+    .{ .start = 0x11650, .end = 0x11659 },
+};
+
+pub const script_Mong = [_]Range{
+    .{ .start = 0x1800, .end = 0x1801 },
+    .{ .start = 0x1804, .end = 0x1804 },
+    .{ .start = 0x1806, .end = 0x1819 },
+    .{ .start = 0x1820, .end = 0x1878 },
+    .{ .start = 0x1880, .end = 0x18AA },
+    .{ .start = 0x11660, .end = 0x1166C },
+};
+
+pub const scx_Mong = [_]Range{
+    .{ .start = 0x1800, .end = 0x1819 },
+    .{ .start = 0x1820, .end = 0x1878 },
+    .{ .start = 0x1880, .end = 0x18AA },
+    .{ .start = 0x202F, .end = 0x202F },
+    .{ .start = 0x3001, .end = 0x3002 },
+    .{ .start = 0x3008, .end = 0x300B },
+    .{ .start = 0x11660, .end = 0x1166C },
+};
+
+pub const script_Mroo = [_]Range{
+    .{ .start = 0x16A40, .end = 0x16A5E },
+    .{ .start = 0x16A60, .end = 0x16A69 },
+    .{ .start = 0x16A6E, .end = 0x16A6F },
+};
+
+pub const scx_Mroo = [_]Range{
+    .{ .start = 0x16A40, .end = 0x16A5E },
+    .{ .start = 0x16A60, .end = 0x16A69 },
+    .{ .start = 0x16A6E, .end = 0x16A6F },
+};
+
+pub const script_Mtei = [_]Range{
+    .{ .start = 0xAAE0, .end = 0xAAF6 },
+    .{ .start = 0xABC0, .end = 0xABED },
+    .{ .start = 0xABF0, .end = 0xABF9 },
+};
+
+pub const scx_Mtei = [_]Range{
+    .{ .start = 0xAAE0, .end = 0xAAF6 },
+    .{ .start = 0xABC0, .end = 0xABED },
+    .{ .start = 0xABF0, .end = 0xABF9 },
+};
+
+pub const script_Mult = [_]Range{
+    .{ .start = 0x11280, .end = 0x11286 },
+    .{ .start = 0x11288, .end = 0x11288 },
+    .{ .start = 0x1128A, .end = 0x1128D },
+    .{ .start = 0x1128F, .end = 0x1129D },
+    .{ .start = 0x1129F, .end = 0x112A9 },
+};
+
+pub const scx_Mult = [_]Range{
+    .{ .start = 0x0A66, .end = 0x0A6F },
+    .{ .start = 0x11280, .end = 0x11286 },
+    .{ .start = 0x11288, .end = 0x11288 },
+    .{ .start = 0x1128A, .end = 0x1128D },
+    .{ .start = 0x1128F, .end = 0x1129D },
+    .{ .start = 0x1129F, .end = 0x112A9 },
+};
+
+pub const script_Mymr = [_]Range{
+    .{ .start = 0x1000, .end = 0x109F },
+    .{ .start = 0xA9E0, .end = 0xA9FE },
+    .{ .start = 0xAA60, .end = 0xAA7F },
+    .{ .start = 0x116D0, .end = 0x116E3 },
+};
+
+pub const scx_Mymr = [_]Range{
+    .{ .start = 0x1000, .end = 0x109F },
+    .{ .start = 0xA92E, .end = 0xA92E },
+    .{ .start = 0xA9E0, .end = 0xA9FE },
+    .{ .start = 0xAA60, .end = 0xAA7F },
+    .{ .start = 0x116D0, .end = 0x116E3 },
+};
+
+pub const script_Nagm = [_]Range{
+    .{ .start = 0x1E4D0, .end = 0x1E4F9 },
+};
+
+pub const scx_Nagm = [_]Range{
+    .{ .start = 0x1E4D0, .end = 0x1E4F9 },
+};
+
+pub const script_Nand = [_]Range{
+    .{ .start = 0x119A0, .end = 0x119A7 },
+    .{ .start = 0x119AA, .end = 0x119D7 },
+    .{ .start = 0x119DA, .end = 0x119E4 },
+};
+
+pub const scx_Nand = [_]Range{
+    .{ .start = 0x0951, .end = 0x0951 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0CE6, .end = 0x0CEF },
+    .{ .start = 0x1CE9, .end = 0x1CE9 },
+    .{ .start = 0x1CF2, .end = 0x1CF2 },
+    .{ .start = 0x1CFA, .end = 0x1CFA },
+    .{ .start = 0xA830, .end = 0xA835 },
+    .{ .start = 0x119A0, .end = 0x119A7 },
+    .{ .start = 0x119AA, .end = 0x119D7 },
+    .{ .start = 0x119DA, .end = 0x119E4 },
+};
+
+pub const script_Narb = [_]Range{
+    .{ .start = 0x10A80, .end = 0x10A9F },
+};
+
+pub const scx_Narb = [_]Range{
+    .{ .start = 0x10A80, .end = 0x10A9F },
+};
+
+pub const script_Nbat = [_]Range{
+    .{ .start = 0x10880, .end = 0x1089E },
+    .{ .start = 0x108A7, .end = 0x108AF },
+};
+
+pub const scx_Nbat = [_]Range{
+    .{ .start = 0x10880, .end = 0x1089E },
+    .{ .start = 0x108A7, .end = 0x108AF },
+};
+
+pub const script_Newa = [_]Range{
+    .{ .start = 0x11400, .end = 0x1145B },
+    .{ .start = 0x1145D, .end = 0x11461 },
+};
+
+pub const scx_Newa = [_]Range{
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x1CD5, .end = 0x1CD5 },
+    .{ .start = 0x1CD7, .end = 0x1CD8 },
+    .{ .start = 0x1CE2, .end = 0x1CE2 },
+    .{ .start = 0x1CE9, .end = 0x1CE9 },
+    .{ .start = 0x1CEB, .end = 0x1CEB },
+    .{ .start = 0x1CED, .end = 0x1CED },
+    .{ .start = 0x11400, .end = 0x1145B },
+    .{ .start = 0x1145D, .end = 0x11461 },
+};
+
+pub const script_Nkoo = [_]Range{
+    .{ .start = 0x07C0, .end = 0x07FA },
+    .{ .start = 0x07FD, .end = 0x07FF },
+};
+
+pub const scx_Nkoo = [_]Range{
+    .{ .start = 0x060C, .end = 0x060C },
+    .{ .start = 0x061B, .end = 0x061B },
+    .{ .start = 0x061F, .end = 0x061F },
+    .{ .start = 0x07C0, .end = 0x07FA },
+    .{ .start = 0x07FD, .end = 0x07FF },
+    .{ .start = 0xFD3E, .end = 0xFD3F },
+};
+
+pub const script_Nshu = [_]Range{
+    .{ .start = 0x16FE1, .end = 0x16FE1 },
+    .{ .start = 0x1B170, .end = 0x1B2FB },
+};
+
+pub const scx_Nshu = [_]Range{
+    .{ .start = 0x16FE1, .end = 0x16FE1 },
+    .{ .start = 0x1B170, .end = 0x1B2FB },
+};
+
+pub const script_Ogam = [_]Range{
+    .{ .start = 0x1680, .end = 0x169C },
+};
+
+pub const scx_Ogam = [_]Range{
+    .{ .start = 0x1680, .end = 0x169C },
+};
+
+pub const script_Olck = [_]Range{
+    .{ .start = 0x1C50, .end = 0x1C7F },
+};
+
+pub const scx_Olck = [_]Range{
+    .{ .start = 0x1C50, .end = 0x1C7F },
+};
+
+pub const script_Onao = [_]Range{
+    .{ .start = 0x1E5D0, .end = 0x1E5FA },
+    .{ .start = 0x1E5FF, .end = 0x1E5FF },
+};
+
+pub const scx_Onao = [_]Range{
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x1E5D0, .end = 0x1E5FA },
+    .{ .start = 0x1E5FF, .end = 0x1E5FF },
+};
+
+pub const script_Orkh = [_]Range{
+    .{ .start = 0x10C00, .end = 0x10C48 },
+};
+
+pub const scx_Orkh = [_]Range{
+    .{ .start = 0x205A, .end = 0x205A },
+    .{ .start = 0x2E30, .end = 0x2E30 },
+    .{ .start = 0x10C00, .end = 0x10C48 },
+};
+
+pub const script_Orya = [_]Range{
+    .{ .start = 0x0B01, .end = 0x0B03 },
+    .{ .start = 0x0B05, .end = 0x0B0C },
+    .{ .start = 0x0B0F, .end = 0x0B10 },
+    .{ .start = 0x0B13, .end = 0x0B28 },
+    .{ .start = 0x0B2A, .end = 0x0B30 },
+    .{ .start = 0x0B32, .end = 0x0B33 },
+    .{ .start = 0x0B35, .end = 0x0B39 },
+    .{ .start = 0x0B3C, .end = 0x0B44 },
+    .{ .start = 0x0B47, .end = 0x0B48 },
+    .{ .start = 0x0B4B, .end = 0x0B4D },
+    .{ .start = 0x0B55, .end = 0x0B57 },
+    .{ .start = 0x0B5C, .end = 0x0B5D },
+    .{ .start = 0x0B5F, .end = 0x0B63 },
+    .{ .start = 0x0B66, .end = 0x0B77 },
+};
+
+pub const scx_Orya = [_]Range{
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0B01, .end = 0x0B03 },
+    .{ .start = 0x0B05, .end = 0x0B0C },
+    .{ .start = 0x0B0F, .end = 0x0B10 },
+    .{ .start = 0x0B13, .end = 0x0B28 },
+    .{ .start = 0x0B2A, .end = 0x0B30 },
+    .{ .start = 0x0B32, .end = 0x0B33 },
+    .{ .start = 0x0B35, .end = 0x0B39 },
+    .{ .start = 0x0B3C, .end = 0x0B44 },
+    .{ .start = 0x0B47, .end = 0x0B48 },
+    .{ .start = 0x0B4B, .end = 0x0B4D },
+    .{ .start = 0x0B55, .end = 0x0B57 },
+    .{ .start = 0x0B5C, .end = 0x0B5D },
+    .{ .start = 0x0B5F, .end = 0x0B63 },
+    .{ .start = 0x0B66, .end = 0x0B77 },
+    .{ .start = 0x1CDA, .end = 0x1CDA },
+    .{ .start = 0x1CF2, .end = 0x1CF2 },
+};
+
+pub const script_Osge = [_]Range{
+    .{ .start = 0x104B0, .end = 0x104D3 },
+    .{ .start = 0x104D8, .end = 0x104FB },
+};
+
+pub const scx_Osge = [_]Range{
+    .{ .start = 0x0301, .end = 0x0301 },
+    .{ .start = 0x0304, .end = 0x0304 },
+    .{ .start = 0x030B, .end = 0x030B },
+    .{ .start = 0x0358, .end = 0x0358 },
+    .{ .start = 0x104B0, .end = 0x104D3 },
+    .{ .start = 0x104D8, .end = 0x104FB },
+};
+
+pub const script_Osma = [_]Range{
+    .{ .start = 0x10480, .end = 0x1049D },
+    .{ .start = 0x104A0, .end = 0x104A9 },
+};
+
+pub const scx_Osma = [_]Range{
+    .{ .start = 0x10480, .end = 0x1049D },
+    .{ .start = 0x104A0, .end = 0x104A9 },
+};
+
+pub const script_Ougr = [_]Range{
+    .{ .start = 0x10F70, .end = 0x10F89 },
+};
+
+pub const scx_Ougr = [_]Range{
+    .{ .start = 0x0640, .end = 0x0640 },
+    .{ .start = 0x10AF2, .end = 0x10AF2 },
+    .{ .start = 0x10F70, .end = 0x10F89 },
+};
+
+pub const script_Palm = [_]Range{
+    .{ .start = 0x10860, .end = 0x1087F },
+};
+
+pub const scx_Palm = [_]Range{
+    .{ .start = 0x10860, .end = 0x1087F },
+};
+
+pub const script_Pauc = [_]Range{
+    .{ .start = 0x11AC0, .end = 0x11AF8 },
+};
+
+pub const scx_Pauc = [_]Range{
+    .{ .start = 0x11AC0, .end = 0x11AF8 },
+};
+
+pub const script_Perm = [_]Range{
+    .{ .start = 0x10350, .end = 0x1037A },
+};
+
+pub const scx_Perm = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x0300, .end = 0x0300 },
+    .{ .start = 0x0306, .end = 0x0308 },
+    .{ .start = 0x0313, .end = 0x0313 },
+    .{ .start = 0x0483, .end = 0x0483 },
+    .{ .start = 0x10350, .end = 0x1037A },
+};
+
+pub const script_Phag = [_]Range{
+    .{ .start = 0xA840, .end = 0xA877 },
+};
+
+pub const scx_Phag = [_]Range{
+    .{ .start = 0x1802, .end = 0x1803 },
+    .{ .start = 0x1805, .end = 0x1805 },
+    .{ .start = 0x202F, .end = 0x202F },
+    .{ .start = 0x3002, .end = 0x3002 },
+    .{ .start = 0xA840, .end = 0xA877 },
+};
+
+pub const script_Phli = [_]Range{
+    .{ .start = 0x10B60, .end = 0x10B72 },
+    .{ .start = 0x10B78, .end = 0x10B7F },
+};
+
+pub const scx_Phli = [_]Range{
+    .{ .start = 0x10B60, .end = 0x10B72 },
+    .{ .start = 0x10B78, .end = 0x10B7F },
+};
+
+pub const script_Phlp = [_]Range{
+    .{ .start = 0x10B80, .end = 0x10B91 },
+    .{ .start = 0x10B99, .end = 0x10B9C },
+    .{ .start = 0x10BA9, .end = 0x10BAF },
+};
+
+pub const scx_Phlp = [_]Range{
+    .{ .start = 0x0640, .end = 0x0640 },
+    .{ .start = 0x10B80, .end = 0x10B91 },
+    .{ .start = 0x10B99, .end = 0x10B9C },
+    .{ .start = 0x10BA9, .end = 0x10BAF },
+};
+
+pub const script_Phnx = [_]Range{
+    .{ .start = 0x10900, .end = 0x1091B },
+    .{ .start = 0x1091F, .end = 0x1091F },
+};
+
+pub const scx_Phnx = [_]Range{
+    .{ .start = 0x10900, .end = 0x1091B },
+    .{ .start = 0x1091F, .end = 0x1091F },
+};
+
+pub const script_Plrd = [_]Range{
+    .{ .start = 0x16F00, .end = 0x16F4A },
+    .{ .start = 0x16F4F, .end = 0x16F87 },
+    .{ .start = 0x16F8F, .end = 0x16F9F },
+};
+
+pub const scx_Plrd = [_]Range{
+    .{ .start = 0x16F00, .end = 0x16F4A },
+    .{ .start = 0x16F4F, .end = 0x16F87 },
+    .{ .start = 0x16F8F, .end = 0x16F9F },
+};
+
+pub const script_Prti = [_]Range{
+    .{ .start = 0x10B40, .end = 0x10B55 },
+    .{ .start = 0x10B58, .end = 0x10B5F },
+};
+
+pub const scx_Prti = [_]Range{
+    .{ .start = 0x10B40, .end = 0x10B55 },
+    .{ .start = 0x10B58, .end = 0x10B5F },
+};
+
+pub const script_Rjng = [_]Range{
+    .{ .start = 0xA930, .end = 0xA953 },
+    .{ .start = 0xA95F, .end = 0xA95F },
+};
+
+pub const scx_Rjng = [_]Range{
+    .{ .start = 0xA930, .end = 0xA953 },
+    .{ .start = 0xA95F, .end = 0xA95F },
+};
+
+pub const script_Rohg = [_]Range{
+    .{ .start = 0x10D00, .end = 0x10D27 },
+    .{ .start = 0x10D30, .end = 0x10D39 },
+};
+
+pub const scx_Rohg = [_]Range{
+    .{ .start = 0x060C, .end = 0x060C },
+    .{ .start = 0x061B, .end = 0x061B },
+    .{ .start = 0x061F, .end = 0x061F },
+    .{ .start = 0x0640, .end = 0x0640 },
+    .{ .start = 0x06D4, .end = 0x06D4 },
+    .{ .start = 0x10D00, .end = 0x10D27 },
+    .{ .start = 0x10D30, .end = 0x10D39 },
+};
+
+pub const script_Runr = [_]Range{
+    .{ .start = 0x16A0, .end = 0x16EA },
+    .{ .start = 0x16EE, .end = 0x16F8 },
+};
+
+pub const scx_Runr = [_]Range{
+    .{ .start = 0x16A0, .end = 0x16F8 },
+};
+
+pub const script_Samr = [_]Range{
+    .{ .start = 0x0800, .end = 0x082D },
+    .{ .start = 0x0830, .end = 0x083E },
+};
+
+pub const scx_Samr = [_]Range{
+    .{ .start = 0x0800, .end = 0x082D },
+    .{ .start = 0x0830, .end = 0x083E },
+    .{ .start = 0x2E31, .end = 0x2E31 },
+};
+
+pub const script_Sarb = [_]Range{
+    .{ .start = 0x10A60, .end = 0x10A7F },
+};
+
+pub const scx_Sarb = [_]Range{
+    .{ .start = 0x10A60, .end = 0x10A7F },
+};
+
+pub const script_Saur = [_]Range{
+    .{ .start = 0xA880, .end = 0xA8C5 },
+    .{ .start = 0xA8CE, .end = 0xA8D9 },
+};
+
+pub const scx_Saur = [_]Range{
+    .{ .start = 0xA880, .end = 0xA8C5 },
+    .{ .start = 0xA8CE, .end = 0xA8D9 },
+};
+
+pub const script_Sgnw = [_]Range{
+    .{ .start = 0x1D800, .end = 0x1DA8B },
+    .{ .start = 0x1DA9B, .end = 0x1DA9F },
+    .{ .start = 0x1DAA1, .end = 0x1DAAF },
+};
+
+pub const scx_Sgnw = [_]Range{
+    .{ .start = 0x1D800, .end = 0x1DA8B },
+    .{ .start = 0x1DA9B, .end = 0x1DA9F },
+    .{ .start = 0x1DAA1, .end = 0x1DAAF },
+};
+
+pub const script_Shaw = [_]Range{
+    .{ .start = 0x10450, .end = 0x1047F },
+};
+
+pub const scx_Shaw = [_]Range{
+    .{ .start = 0x00B7, .end = 0x00B7 },
+    .{ .start = 0x10450, .end = 0x1047F },
+};
+
+pub const script_Shrd = [_]Range{
+    .{ .start = 0x11180, .end = 0x111DF },
+    .{ .start = 0x11B60, .end = 0x11B67 },
+};
+
+pub const scx_Shrd = [_]Range{
+    .{ .start = 0x0951, .end = 0x0951 },
+    .{ .start = 0x1CD7, .end = 0x1CD7 },
+    .{ .start = 0x1CD9, .end = 0x1CD9 },
+    .{ .start = 0x1CDC, .end = 0x1CDD },
+    .{ .start = 0x1CE0, .end = 0x1CE0 },
+    .{ .start = 0x1CEA, .end = 0x1CEA },
+    .{ .start = 0x1CED, .end = 0x1CED },
+    .{ .start = 0xA830, .end = 0xA835 },
+    .{ .start = 0xA838, .end = 0xA838 },
+    .{ .start = 0x11180, .end = 0x111DF },
+    .{ .start = 0x11B60, .end = 0x11B67 },
+};
+
+pub const script_Sidd = [_]Range{
+    .{ .start = 0x11580, .end = 0x115B5 },
+    .{ .start = 0x115B8, .end = 0x115DD },
+};
+
+pub const scx_Sidd = [_]Range{
+    .{ .start = 0x11580, .end = 0x115B5 },
+    .{ .start = 0x115B8, .end = 0x115DD },
+};
+
+pub const script_Sidt = [_]Range{
+    .{ .start = 0x10940, .end = 0x10959 },
+};
+
+pub const scx_Sidt = [_]Range{
+    .{ .start = 0x10940, .end = 0x10959 },
+};
+
+pub const script_Sind = [_]Range{
+    .{ .start = 0x112B0, .end = 0x112EA },
+    .{ .start = 0x112F0, .end = 0x112F9 },
+};
+
+pub const scx_Sind = [_]Range{
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0xA830, .end = 0xA839 },
+    .{ .start = 0x112B0, .end = 0x112EA },
+    .{ .start = 0x112F0, .end = 0x112F9 },
+};
+
+pub const script_Sinh = [_]Range{
+    .{ .start = 0x0D81, .end = 0x0D83 },
+    .{ .start = 0x0D85, .end = 0x0D96 },
+    .{ .start = 0x0D9A, .end = 0x0DB1 },
+    .{ .start = 0x0DB3, .end = 0x0DBB },
+    .{ .start = 0x0DBD, .end = 0x0DBD },
+    .{ .start = 0x0DC0, .end = 0x0DC6 },
+    .{ .start = 0x0DCA, .end = 0x0DCA },
+    .{ .start = 0x0DCF, .end = 0x0DD4 },
+    .{ .start = 0x0DD6, .end = 0x0DD6 },
+    .{ .start = 0x0DD8, .end = 0x0DDF },
+    .{ .start = 0x0DE6, .end = 0x0DEF },
+    .{ .start = 0x0DF2, .end = 0x0DF4 },
+    .{ .start = 0x111E1, .end = 0x111F4 },
+};
+
+pub const scx_Sinh = [_]Range{
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0D81, .end = 0x0D83 },
+    .{ .start = 0x0D85, .end = 0x0D96 },
+    .{ .start = 0x0D9A, .end = 0x0DB1 },
+    .{ .start = 0x0DB3, .end = 0x0DBB },
+    .{ .start = 0x0DBD, .end = 0x0DBD },
+    .{ .start = 0x0DC0, .end = 0x0DC6 },
+    .{ .start = 0x0DCA, .end = 0x0DCA },
+    .{ .start = 0x0DCF, .end = 0x0DD4 },
+    .{ .start = 0x0DD6, .end = 0x0DD6 },
+    .{ .start = 0x0DD8, .end = 0x0DDF },
+    .{ .start = 0x0DE6, .end = 0x0DEF },
+    .{ .start = 0x0DF2, .end = 0x0DF4 },
+    .{ .start = 0x1CF2, .end = 0x1CF2 },
+    .{ .start = 0x111E1, .end = 0x111F4 },
+};
+
+pub const script_Sogd = [_]Range{
+    .{ .start = 0x10F30, .end = 0x10F59 },
+};
+
+pub const scx_Sogd = [_]Range{
+    .{ .start = 0x0640, .end = 0x0640 },
+    .{ .start = 0x10F30, .end = 0x10F59 },
+};
+
+pub const script_Sogo = [_]Range{
+    .{ .start = 0x10F00, .end = 0x10F27 },
+};
+
+pub const scx_Sogo = [_]Range{
+    .{ .start = 0x10F00, .end = 0x10F27 },
+};
+
+pub const script_Sora = [_]Range{
+    .{ .start = 0x110D0, .end = 0x110E8 },
+    .{ .start = 0x110F0, .end = 0x110F9 },
+};
+
+pub const scx_Sora = [_]Range{
+    .{ .start = 0x110D0, .end = 0x110E8 },
+    .{ .start = 0x110F0, .end = 0x110F9 },
+};
+
+pub const script_Soyo = [_]Range{
+    .{ .start = 0x11A50, .end = 0x11AA2 },
+};
+
+pub const scx_Soyo = [_]Range{
+    .{ .start = 0x11A50, .end = 0x11AA2 },
+};
+
+pub const script_Sund = [_]Range{
+    .{ .start = 0x1B80, .end = 0x1BBF },
+    .{ .start = 0x1CC0, .end = 0x1CC7 },
+};
+
+pub const scx_Sund = [_]Range{
+    .{ .start = 0x1B80, .end = 0x1BBF },
+    .{ .start = 0x1CC0, .end = 0x1CC7 },
+};
+
+pub const script_Sunu = [_]Range{
+    .{ .start = 0x11BC0, .end = 0x11BE1 },
+    .{ .start = 0x11BF0, .end = 0x11BF9 },
+};
+
+pub const scx_Sunu = [_]Range{
+    .{ .start = 0x0300, .end = 0x0301 },
+    .{ .start = 0x0303, .end = 0x0303 },
+    .{ .start = 0x030D, .end = 0x030D },
+    .{ .start = 0x0310, .end = 0x0310 },
+    .{ .start = 0x032D, .end = 0x032D },
+    .{ .start = 0x0331, .end = 0x0331 },
+    .{ .start = 0x11BC0, .end = 0x11BE1 },
+    .{ .start = 0x11BF0, .end = 0x11BF9 },
+};
+
+pub const script_Sylo = [_]Range{
+    .{ .start = 0xA800, .end = 0xA82C },
+};
+
+pub const scx_Sylo = [_]Range{
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x09E6, .end = 0x09EF },
+    .{ .start = 0xA800, .end = 0xA82C },
+};
+
+pub const script_Syrc = [_]Range{
+    .{ .start = 0x0700, .end = 0x070D },
+    .{ .start = 0x070F, .end = 0x074A },
+    .{ .start = 0x074D, .end = 0x074F },
+    .{ .start = 0x0860, .end = 0x086A },
+};
+
+pub const scx_Syrc = [_]Range{
+    .{ .start = 0x0303, .end = 0x0304 },
+    .{ .start = 0x0307, .end = 0x0308 },
+    .{ .start = 0x030A, .end = 0x030A },
+    .{ .start = 0x0323, .end = 0x0325 },
+    .{ .start = 0x032D, .end = 0x032E },
+    .{ .start = 0x0330, .end = 0x0331 },
+    .{ .start = 0x060C, .end = 0x060C },
+    .{ .start = 0x061B, .end = 0x061C },
+    .{ .start = 0x061F, .end = 0x061F },
+    .{ .start = 0x0640, .end = 0x0640 },
+    .{ .start = 0x064B, .end = 0x0655 },
+    .{ .start = 0x0670, .end = 0x0670 },
+    .{ .start = 0x0700, .end = 0x070D },
+    .{ .start = 0x070F, .end = 0x074A },
+    .{ .start = 0x074D, .end = 0x074F },
+    .{ .start = 0x0860, .end = 0x086A },
+    .{ .start = 0x1DF8, .end = 0x1DF8 },
+    .{ .start = 0x1DFA, .end = 0x1DFA },
+};
+
+pub const script_Tagb = [_]Range{
+    .{ .start = 0x1760, .end = 0x176C },
+    .{ .start = 0x176E, .end = 0x1770 },
+    .{ .start = 0x1772, .end = 0x1773 },
+};
+
+pub const scx_Tagb = [_]Range{
+    .{ .start = 0x1735, .end = 0x1736 },
+    .{ .start = 0x1760, .end = 0x176C },
+    .{ .start = 0x176E, .end = 0x1770 },
+    .{ .start = 0x1772, .end = 0x1773 },
+};
+
+pub const script_Takr = [_]Range{
+    .{ .start = 0x11680, .end = 0x116B9 },
+    .{ .start = 0x116C0, .end = 0x116C9 },
+};
+
+pub const scx_Takr = [_]Range{
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0xA830, .end = 0xA839 },
+    .{ .start = 0x11680, .end = 0x116B9 },
+    .{ .start = 0x116C0, .end = 0x116C9 },
+};
+
+pub const script_Tale = [_]Range{
+    .{ .start = 0x1950, .end = 0x196D },
+    .{ .start = 0x1970, .end = 0x1974 },
+};
+
+pub const scx_Tale = [_]Range{
+    .{ .start = 0x0300, .end = 0x0301 },
+    .{ .start = 0x0307, .end = 0x0308 },
+    .{ .start = 0x030C, .end = 0x030C },
+    .{ .start = 0x1040, .end = 0x1049 },
+    .{ .start = 0x1950, .end = 0x196D },
+    .{ .start = 0x1970, .end = 0x1974 },
+};
+
+pub const script_Talu = [_]Range{
+    .{ .start = 0x1980, .end = 0x19AB },
+    .{ .start = 0x19B0, .end = 0x19C9 },
+    .{ .start = 0x19D0, .end = 0x19DA },
+    .{ .start = 0x19DE, .end = 0x19DF },
+};
+
+pub const scx_Talu = [_]Range{
+    .{ .start = 0x1980, .end = 0x19AB },
+    .{ .start = 0x19B0, .end = 0x19C9 },
+    .{ .start = 0x19D0, .end = 0x19DA },
+    .{ .start = 0x19DE, .end = 0x19DF },
+};
+
+pub const script_Taml = [_]Range{
+    .{ .start = 0x0B82, .end = 0x0B83 },
+    .{ .start = 0x0B85, .end = 0x0B8A },
+    .{ .start = 0x0B8E, .end = 0x0B90 },
+    .{ .start = 0x0B92, .end = 0x0B95 },
+    .{ .start = 0x0B99, .end = 0x0B9A },
+    .{ .start = 0x0B9C, .end = 0x0B9C },
+    .{ .start = 0x0B9E, .end = 0x0B9F },
+    .{ .start = 0x0BA3, .end = 0x0BA4 },
+    .{ .start = 0x0BA8, .end = 0x0BAA },
+    .{ .start = 0x0BAE, .end = 0x0BB9 },
+    .{ .start = 0x0BBE, .end = 0x0BC2 },
+    .{ .start = 0x0BC6, .end = 0x0BC8 },
+    .{ .start = 0x0BCA, .end = 0x0BCD },
+    .{ .start = 0x0BD0, .end = 0x0BD0 },
+    .{ .start = 0x0BD7, .end = 0x0BD7 },
+    .{ .start = 0x0BE6, .end = 0x0BFA },
+    .{ .start = 0x11FC0, .end = 0x11FF1 },
+    .{ .start = 0x11FFF, .end = 0x11FFF },
+};
+
+pub const scx_Taml = [_]Range{
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0B82, .end = 0x0B83 },
+    .{ .start = 0x0B85, .end = 0x0B8A },
+    .{ .start = 0x0B8E, .end = 0x0B90 },
+    .{ .start = 0x0B92, .end = 0x0B95 },
+    .{ .start = 0x0B99, .end = 0x0B9A },
+    .{ .start = 0x0B9C, .end = 0x0B9C },
+    .{ .start = 0x0B9E, .end = 0x0B9F },
+    .{ .start = 0x0BA3, .end = 0x0BA4 },
+    .{ .start = 0x0BA8, .end = 0x0BAA },
+    .{ .start = 0x0BAE, .end = 0x0BB9 },
+    .{ .start = 0x0BBE, .end = 0x0BC2 },
+    .{ .start = 0x0BC6, .end = 0x0BC8 },
+    .{ .start = 0x0BCA, .end = 0x0BCD },
+    .{ .start = 0x0BD0, .end = 0x0BD0 },
+    .{ .start = 0x0BD7, .end = 0x0BD7 },
+    .{ .start = 0x0BE6, .end = 0x0BFA },
+    .{ .start = 0x1CDA, .end = 0x1CDA },
+    .{ .start = 0xA8F3, .end = 0xA8F3 },
+    .{ .start = 0x11301, .end = 0x11301 },
+    .{ .start = 0x11303, .end = 0x11303 },
+    .{ .start = 0x1133B, .end = 0x1133C },
+    .{ .start = 0x11FC0, .end = 0x11FF1 },
+    .{ .start = 0x11FFF, .end = 0x11FFF },
+};
+
+pub const script_Tang = [_]Range{
+    .{ .start = 0x16FE0, .end = 0x16FE0 },
+    .{ .start = 0x17000, .end = 0x18AFF },
+    .{ .start = 0x18D00, .end = 0x18D1E },
+    .{ .start = 0x18D80, .end = 0x18DF2 },
+};
+
+pub const scx_Tang = [_]Range{
+    .{ .start = 0x2FF0, .end = 0x2FFF },
+    .{ .start = 0x31EF, .end = 0x31EF },
+    .{ .start = 0x16FE0, .end = 0x16FE0 },
+    .{ .start = 0x17000, .end = 0x18AFF },
+    .{ .start = 0x18D00, .end = 0x18D1E },
+    .{ .start = 0x18D80, .end = 0x18DF2 },
+};
+
+pub const script_Tavt = [_]Range{
+    .{ .start = 0xAA80, .end = 0xAAC2 },
+    .{ .start = 0xAADB, .end = 0xAADF },
+};
+
+pub const scx_Tavt = [_]Range{
+    .{ .start = 0xAA80, .end = 0xAAC2 },
+    .{ .start = 0xAADB, .end = 0xAADF },
+};
+
+pub const script_Tayo = [_]Range{
+    .{ .start = 0x1E6C0, .end = 0x1E6DE },
+    .{ .start = 0x1E6E0, .end = 0x1E6F5 },
+    .{ .start = 0x1E6FE, .end = 0x1E6FF },
+};
+
+pub const scx_Tayo = [_]Range{
+    .{ .start = 0x1E6C0, .end = 0x1E6DE },
+    .{ .start = 0x1E6E0, .end = 0x1E6F5 },
+    .{ .start = 0x1E6FE, .end = 0x1E6FF },
+};
+
+pub const script_Telu = [_]Range{
+    .{ .start = 0x0C00, .end = 0x0C0C },
+    .{ .start = 0x0C0E, .end = 0x0C10 },
+    .{ .start = 0x0C12, .end = 0x0C28 },
+    .{ .start = 0x0C2A, .end = 0x0C39 },
+    .{ .start = 0x0C3C, .end = 0x0C44 },
+    .{ .start = 0x0C46, .end = 0x0C48 },
+    .{ .start = 0x0C4A, .end = 0x0C4D },
+    .{ .start = 0x0C55, .end = 0x0C56 },
+    .{ .start = 0x0C58, .end = 0x0C5A },
+    .{ .start = 0x0C5C, .end = 0x0C5D },
+    .{ .start = 0x0C60, .end = 0x0C63 },
+    .{ .start = 0x0C66, .end = 0x0C6F },
+    .{ .start = 0x0C77, .end = 0x0C7F },
+};
+
+pub const scx_Telu = [_]Range{
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0C00, .end = 0x0C0C },
+    .{ .start = 0x0C0E, .end = 0x0C10 },
+    .{ .start = 0x0C12, .end = 0x0C28 },
+    .{ .start = 0x0C2A, .end = 0x0C39 },
+    .{ .start = 0x0C3C, .end = 0x0C44 },
+    .{ .start = 0x0C46, .end = 0x0C48 },
+    .{ .start = 0x0C4A, .end = 0x0C4D },
+    .{ .start = 0x0C55, .end = 0x0C56 },
+    .{ .start = 0x0C58, .end = 0x0C5A },
+    .{ .start = 0x0C5C, .end = 0x0C5D },
+    .{ .start = 0x0C60, .end = 0x0C63 },
+    .{ .start = 0x0C66, .end = 0x0C6F },
+    .{ .start = 0x0C77, .end = 0x0C7F },
+    .{ .start = 0x1CD5, .end = 0x1CD6 },
+    .{ .start = 0x1CD8, .end = 0x1CD8 },
+    .{ .start = 0x1CDA, .end = 0x1CDA },
+    .{ .start = 0x1CF2, .end = 0x1CF2 },
+};
+
+pub const script_Tfng = [_]Range{
+    .{ .start = 0x2D30, .end = 0x2D67 },
+    .{ .start = 0x2D6F, .end = 0x2D70 },
+    .{ .start = 0x2D7F, .end = 0x2D7F },
+};
+
+pub const scx_Tfng = [_]Range{
+    .{ .start = 0x0302, .end = 0x0302 },
+    .{ .start = 0x0304, .end = 0x0304 },
+    .{ .start = 0x0306, .end = 0x0309 },
+    .{ .start = 0x0323, .end = 0x0323 },
+    .{ .start = 0x2D30, .end = 0x2D67 },
+    .{ .start = 0x2D6F, .end = 0x2D70 },
+    .{ .start = 0x2D7F, .end = 0x2D7F },
+};
+
+pub const script_Tglg = [_]Range{
+    .{ .start = 0x1700, .end = 0x1715 },
+    .{ .start = 0x171F, .end = 0x171F },
+};
+
+pub const scx_Tglg = [_]Range{
+    .{ .start = 0x1700, .end = 0x1715 },
+    .{ .start = 0x171F, .end = 0x171F },
+    .{ .start = 0x1735, .end = 0x1736 },
+};
+
+pub const script_Thaa = [_]Range{
+    .{ .start = 0x0780, .end = 0x07B1 },
+};
+
+pub const scx_Thaa = [_]Range{
+    .{ .start = 0x060C, .end = 0x060C },
+    .{ .start = 0x061B, .end = 0x061C },
+    .{ .start = 0x061F, .end = 0x061F },
+    .{ .start = 0x0660, .end = 0x0669 },
+    .{ .start = 0x0780, .end = 0x07B1 },
+    .{ .start = 0xFDF2, .end = 0xFDF2 },
+    .{ .start = 0xFDFD, .end = 0xFDFD },
+};
+
+pub const script_Thai = [_]Range{
+    .{ .start = 0x0E01, .end = 0x0E3A },
+    .{ .start = 0x0E40, .end = 0x0E5B },
+};
+
+pub const scx_Thai = [_]Range{
+    .{ .start = 0x02BC, .end = 0x02BC },
+    .{ .start = 0x02D7, .end = 0x02D7 },
+    .{ .start = 0x0303, .end = 0x0303 },
+    .{ .start = 0x0331, .end = 0x0331 },
+    .{ .start = 0x0E01, .end = 0x0E3A },
+    .{ .start = 0x0E40, .end = 0x0E5B },
+};
+
+pub const script_Tibt = [_]Range{
+    .{ .start = 0x0F00, .end = 0x0F47 },
+    .{ .start = 0x0F49, .end = 0x0F6C },
+    .{ .start = 0x0F71, .end = 0x0F97 },
+    .{ .start = 0x0F99, .end = 0x0FBC },
+    .{ .start = 0x0FBE, .end = 0x0FCC },
+    .{ .start = 0x0FCE, .end = 0x0FD4 },
+    .{ .start = 0x0FD9, .end = 0x0FDA },
+};
+
+pub const scx_Tibt = [_]Range{
+    .{ .start = 0x0F00, .end = 0x0F47 },
+    .{ .start = 0x0F49, .end = 0x0F6C },
+    .{ .start = 0x0F71, .end = 0x0F97 },
+    .{ .start = 0x0F99, .end = 0x0FBC },
+    .{ .start = 0x0FBE, .end = 0x0FCC },
+    .{ .start = 0x0FCE, .end = 0x0FD4 },
+    .{ .start = 0x0FD9, .end = 0x0FDA },
+    .{ .start = 0x3008, .end = 0x300B },
+};
+
+pub const script_Tirh = [_]Range{
+    .{ .start = 0x11480, .end = 0x114C7 },
+    .{ .start = 0x114D0, .end = 0x114D9 },
+};
+
+pub const scx_Tirh = [_]Range{
+    .{ .start = 0x0951, .end = 0x0952 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x1CD5, .end = 0x1CD5 },
+    .{ .start = 0x1CE2, .end = 0x1CE2 },
+    .{ .start = 0x1CF2, .end = 0x1CF2 },
+    .{ .start = 0xA830, .end = 0xA839 },
+    .{ .start = 0x11480, .end = 0x114C7 },
+    .{ .start = 0x114D0, .end = 0x114D9 },
+};
+
+pub const script_Tnsa = [_]Range{
+    .{ .start = 0x16A70, .end = 0x16ABE },
+    .{ .start = 0x16AC0, .end = 0x16AC9 },
+};
+
+pub const scx_Tnsa = [_]Range{
+    .{ .start = 0x16A70, .end = 0x16ABE },
+    .{ .start = 0x16AC0, .end = 0x16AC9 },
+};
+
+pub const script_Todr = [_]Range{
+    .{ .start = 0x105C0, .end = 0x105F3 },
+};
+
+pub const scx_Todr = [_]Range{
+    .{ .start = 0x0301, .end = 0x0301 },
+    .{ .start = 0x0304, .end = 0x0304 },
+    .{ .start = 0x0307, .end = 0x0307 },
+    .{ .start = 0x0311, .end = 0x0311 },
+    .{ .start = 0x0313, .end = 0x0313 },
+    .{ .start = 0x035E, .end = 0x035E },
+    .{ .start = 0x105C0, .end = 0x105F3 },
+};
+
+pub const script_Tols = [_]Range{
+    .{ .start = 0x11DB0, .end = 0x11DDB },
+    .{ .start = 0x11DE0, .end = 0x11DE9 },
+};
+
+pub const scx_Tols = [_]Range{
+    .{ .start = 0x11DB0, .end = 0x11DDB },
+    .{ .start = 0x11DE0, .end = 0x11DE9 },
+};
+
+pub const script_Toto = [_]Range{
+    .{ .start = 0x1E290, .end = 0x1E2AE },
+};
+
+pub const scx_Toto = [_]Range{
+    .{ .start = 0x02BC, .end = 0x02BC },
+    .{ .start = 0x1E290, .end = 0x1E2AE },
+};
+
+pub const script_Tutg = [_]Range{
+    .{ .start = 0x11380, .end = 0x11389 },
+    .{ .start = 0x1138B, .end = 0x1138B },
+    .{ .start = 0x1138E, .end = 0x1138E },
+    .{ .start = 0x11390, .end = 0x113B5 },
+    .{ .start = 0x113B7, .end = 0x113C0 },
+    .{ .start = 0x113C2, .end = 0x113C2 },
+    .{ .start = 0x113C5, .end = 0x113C5 },
+    .{ .start = 0x113C7, .end = 0x113CA },
+    .{ .start = 0x113CC, .end = 0x113D5 },
+    .{ .start = 0x113D7, .end = 0x113D8 },
+    .{ .start = 0x113E1, .end = 0x113E2 },
+};
+
+pub const scx_Tutg = [_]Range{
+    .{ .start = 0x0CE6, .end = 0x0CEF },
+    .{ .start = 0x1CF2, .end = 0x1CF2 },
+    .{ .start = 0x1CF4, .end = 0x1CF4 },
+    .{ .start = 0xA830, .end = 0xA835 },
+    .{ .start = 0xA8F1, .end = 0xA8F1 },
+    .{ .start = 0x11380, .end = 0x11389 },
+    .{ .start = 0x1138B, .end = 0x1138B },
+    .{ .start = 0x1138E, .end = 0x1138E },
+    .{ .start = 0x11390, .end = 0x113B5 },
+    .{ .start = 0x113B7, .end = 0x113C0 },
+    .{ .start = 0x113C2, .end = 0x113C2 },
+    .{ .start = 0x113C5, .end = 0x113C5 },
+    .{ .start = 0x113C7, .end = 0x113CA },
+    .{ .start = 0x113CC, .end = 0x113D5 },
+    .{ .start = 0x113D7, .end = 0x113D8 },
+    .{ .start = 0x113E1, .end = 0x113E2 },
+};
+
+pub const script_Ugar = [_]Range{
+    .{ .start = 0x10380, .end = 0x1039D },
+    .{ .start = 0x1039F, .end = 0x1039F },
+};
+
+pub const scx_Ugar = [_]Range{
+    .{ .start = 0x10380, .end = 0x1039D },
+    .{ .start = 0x1039F, .end = 0x1039F },
+};
+
+pub const script_Vaii = [_]Range{
+    .{ .start = 0xA500, .end = 0xA62B },
+};
+
+pub const scx_Vaii = [_]Range{
+    .{ .start = 0xA500, .end = 0xA62B },
+};
+
+pub const script_Vith = [_]Range{
+    .{ .start = 0x10570, .end = 0x1057A },
+    .{ .start = 0x1057C, .end = 0x1058A },
+    .{ .start = 0x1058C, .end = 0x10592 },
+    .{ .start = 0x10594, .end = 0x10595 },
+    .{ .start = 0x10597, .end = 0x105A1 },
+    .{ .start = 0x105A3, .end = 0x105B1 },
+    .{ .start = 0x105B3, .end = 0x105B9 },
+    .{ .start = 0x105BB, .end = 0x105BC },
+};
+
+pub const scx_Vith = [_]Range{
+    .{ .start = 0x10570, .end = 0x1057A },
+    .{ .start = 0x1057C, .end = 0x1058A },
+    .{ .start = 0x1058C, .end = 0x10592 },
+    .{ .start = 0x10594, .end = 0x10595 },
+    .{ .start = 0x10597, .end = 0x105A1 },
+    .{ .start = 0x105A3, .end = 0x105B1 },
+    .{ .start = 0x105B3, .end = 0x105B9 },
+    .{ .start = 0x105BB, .end = 0x105BC },
+};
+
+pub const script_Wara = [_]Range{
+    .{ .start = 0x118A0, .end = 0x118F2 },
+    .{ .start = 0x118FF, .end = 0x118FF },
+};
+
+pub const scx_Wara = [_]Range{
+    .{ .start = 0x118A0, .end = 0x118F2 },
+    .{ .start = 0x118FF, .end = 0x118FF },
+};
+
+pub const script_Wcho = [_]Range{
+    .{ .start = 0x1E2C0, .end = 0x1E2F9 },
+    .{ .start = 0x1E2FF, .end = 0x1E2FF },
+};
+
+pub const scx_Wcho = [_]Range{
+    .{ .start = 0x1E2C0, .end = 0x1E2F9 },
+    .{ .start = 0x1E2FF, .end = 0x1E2FF },
+};
+
+pub const script_Xpeo = [_]Range{
+    .{ .start = 0x103A0, .end = 0x103C3 },
+    .{ .start = 0x103C8, .end = 0x103D5 },
+};
+
+pub const scx_Xpeo = [_]Range{
+    .{ .start = 0x103A0, .end = 0x103C3 },
+    .{ .start = 0x103C8, .end = 0x103D5 },
+};
+
+pub const script_Xsux = [_]Range{
+    .{ .start = 0x12000, .end = 0x12399 },
+    .{ .start = 0x12400, .end = 0x1246E },
+    .{ .start = 0x12470, .end = 0x12474 },
+    .{ .start = 0x12480, .end = 0x12543 },
+};
+
+pub const scx_Xsux = [_]Range{
+    .{ .start = 0x12000, .end = 0x12399 },
+    .{ .start = 0x12400, .end = 0x1246E },
+    .{ .start = 0x12470, .end = 0x12474 },
+    .{ .start = 0x12480, .end = 0x12543 },
+};
+
+pub const script_Yezi = [_]Range{
+    .{ .start = 0x10E80, .end = 0x10EA9 },
+    .{ .start = 0x10EAB, .end = 0x10EAD },
+    .{ .start = 0x10EB0, .end = 0x10EB1 },
+};
+
+pub const scx_Yezi = [_]Range{
+    .{ .start = 0x060C, .end = 0x060C },
+    .{ .start = 0x061B, .end = 0x061B },
+    .{ .start = 0x061F, .end = 0x061F },
+    .{ .start = 0x0660, .end = 0x0669 },
+    .{ .start = 0x10E80, .end = 0x10EA9 },
+    .{ .start = 0x10EAB, .end = 0x10EAD },
+    .{ .start = 0x10EB0, .end = 0x10EB1 },
+};
+
+pub const script_Yiii = [_]Range{
+    .{ .start = 0xA000, .end = 0xA48C },
+    .{ .start = 0xA490, .end = 0xA4C6 },
+};
+
+pub const scx_Yiii = [_]Range{
+    .{ .start = 0x3001, .end = 0x3002 },
+    .{ .start = 0x3008, .end = 0x3011 },
+    .{ .start = 0x3014, .end = 0x301B },
+    .{ .start = 0x30FB, .end = 0x30FB },
+    .{ .start = 0xA000, .end = 0xA48C },
+    .{ .start = 0xA490, .end = 0xA4C6 },
+    .{ .start = 0xFF61, .end = 0xFF65 },
+};
+
+pub const script_Zanb = [_]Range{
+    .{ .start = 0x11A00, .end = 0x11A47 },
+};
+
+pub const scx_Zanb = [_]Range{
+    .{ .start = 0x11A00, .end = 0x11A47 },
+};
+
+pub const script_Zinh = [_]Range{
+    .{ .start = 0x0300, .end = 0x036F },
+    .{ .start = 0x0485, .end = 0x0486 },
+    .{ .start = 0x064B, .end = 0x0655 },
+    .{ .start = 0x0670, .end = 0x0670 },
+    .{ .start = 0x0951, .end = 0x0954 },
+    .{ .start = 0x1AB0, .end = 0x1ADD },
+    .{ .start = 0x1AE0, .end = 0x1AEB },
+    .{ .start = 0x1CD0, .end = 0x1CD2 },
+    .{ .start = 0x1CD4, .end = 0x1CE0 },
+    .{ .start = 0x1CE2, .end = 0x1CE8 },
+    .{ .start = 0x1CED, .end = 0x1CED },
+    .{ .start = 0x1CF4, .end = 0x1CF4 },
+    .{ .start = 0x1CF8, .end = 0x1CF9 },
+    .{ .start = 0x1DC0, .end = 0x1DFF },
+    .{ .start = 0x200C, .end = 0x200D },
+    .{ .start = 0x20D0, .end = 0x20F0 },
+    .{ .start = 0x302A, .end = 0x302D },
+    .{ .start = 0x3099, .end = 0x309A },
+    .{ .start = 0xFE00, .end = 0xFE0F },
+    .{ .start = 0xFE20, .end = 0xFE2D },
+    .{ .start = 0x101FD, .end = 0x101FD },
+    .{ .start = 0x102E0, .end = 0x102E0 },
+    .{ .start = 0x1133B, .end = 0x1133B },
+    .{ .start = 0x1CF00, .end = 0x1CF2D },
+    .{ .start = 0x1CF30, .end = 0x1CF46 },
+    .{ .start = 0x1D167, .end = 0x1D169 },
+    .{ .start = 0x1D17B, .end = 0x1D182 },
+    .{ .start = 0x1D185, .end = 0x1D18B },
+    .{ .start = 0x1D1AA, .end = 0x1D1AD },
+    .{ .start = 0xE0100, .end = 0xE01EF },
+};
+
+pub const scx_Zinh = [_]Range{
+    .{ .start = 0x030F, .end = 0x030F },
+    .{ .start = 0x0312, .end = 0x0312 },
+    .{ .start = 0x0314, .end = 0x0322 },
+    .{ .start = 0x0326, .end = 0x032C },
+    .{ .start = 0x032F, .end = 0x032F },
+    .{ .start = 0x0332, .end = 0x0341 },
+    .{ .start = 0x0343, .end = 0x0344 },
+    .{ .start = 0x0346, .end = 0x0357 },
+    .{ .start = 0x0359, .end = 0x035D },
+    .{ .start = 0x035F, .end = 0x0362 },
+    .{ .start = 0x0953, .end = 0x0954 },
+    .{ .start = 0x1AB0, .end = 0x1ADD },
+    .{ .start = 0x1AE0, .end = 0x1AEB },
+    .{ .start = 0x1DC2, .end = 0x1DF7 },
+    .{ .start = 0x1DF9, .end = 0x1DF9 },
+    .{ .start = 0x1DFB, .end = 0x1DFF },
+    .{ .start = 0x200C, .end = 0x200D },
+    .{ .start = 0x20D0, .end = 0x20EF },
+    .{ .start = 0xFE00, .end = 0xFE0F },
+    .{ .start = 0xFE20, .end = 0xFE2D },
+    .{ .start = 0x101FD, .end = 0x101FD },
+    .{ .start = 0x1CF00, .end = 0x1CF2D },
+    .{ .start = 0x1CF30, .end = 0x1CF46 },
+    .{ .start = 0x1D167, .end = 0x1D169 },
+    .{ .start = 0x1D17B, .end = 0x1D182 },
+    .{ .start = 0x1D185, .end = 0x1D18B },
+    .{ .start = 0x1D1AA, .end = 0x1D1AD },
+    .{ .start = 0xE0100, .end = 0xE01EF },
+};
+
+pub const script_Zyyy = [_]Range{
+    .{ .start = 0x0000, .end = 0x0040 },
+    .{ .start = 0x005B, .end = 0x0060 },
+    .{ .start = 0x007B, .end = 0x00A9 },
+    .{ .start = 0x00AB, .end = 0x00B9 },
+    .{ .start = 0x00BB, .end = 0x00BF },
+    .{ .start = 0x00D7, .end = 0x00D7 },
+    .{ .start = 0x00F7, .end = 0x00F7 },
+    .{ .start = 0x02B9, .end = 0x02DF },
+    .{ .start = 0x02E5, .end = 0x02E9 },
+    .{ .start = 0x02EC, .end = 0x02FF },
+    .{ .start = 0x0374, .end = 0x0374 },
+    .{ .start = 0x037E, .end = 0x037E },
+    .{ .start = 0x0385, .end = 0x0385 },
+    .{ .start = 0x0387, .end = 0x0387 },
+    .{ .start = 0x0605, .end = 0x0605 },
+    .{ .start = 0x060C, .end = 0x060C },
+    .{ .start = 0x061B, .end = 0x061B },
+    .{ .start = 0x061F, .end = 0x061F },
+    .{ .start = 0x0640, .end = 0x0640 },
+    .{ .start = 0x06DD, .end = 0x06DD },
+    .{ .start = 0x08E2, .end = 0x08E2 },
+    .{ .start = 0x0964, .end = 0x0965 },
+    .{ .start = 0x0E3F, .end = 0x0E3F },
+    .{ .start = 0x0FD5, .end = 0x0FD8 },
+    .{ .start = 0x10FB, .end = 0x10FB },
+    .{ .start = 0x16EB, .end = 0x16ED },
+    .{ .start = 0x1735, .end = 0x1736 },
+    .{ .start = 0x1802, .end = 0x1803 },
+    .{ .start = 0x1805, .end = 0x1805 },
+    .{ .start = 0x1CD3, .end = 0x1CD3 },
+    .{ .start = 0x1CE1, .end = 0x1CE1 },
+    .{ .start = 0x1CE9, .end = 0x1CEC },
+    .{ .start = 0x1CEE, .end = 0x1CF3 },
+    .{ .start = 0x1CF5, .end = 0x1CF7 },
+    .{ .start = 0x1CFA, .end = 0x1CFA },
+    .{ .start = 0x2000, .end = 0x200B },
+    .{ .start = 0x200E, .end = 0x2064 },
+    .{ .start = 0x2066, .end = 0x2070 },
+    .{ .start = 0x2074, .end = 0x207E },
+    .{ .start = 0x2080, .end = 0x208E },
+    .{ .start = 0x20A0, .end = 0x20C1 },
+    .{ .start = 0x2100, .end = 0x2125 },
+    .{ .start = 0x2127, .end = 0x2129 },
+    .{ .start = 0x212C, .end = 0x2131 },
+    .{ .start = 0x2133, .end = 0x214D },
+    .{ .start = 0x214F, .end = 0x215F },
+    .{ .start = 0x2189, .end = 0x218B },
+    .{ .start = 0x2190, .end = 0x2429 },
+    .{ .start = 0x2440, .end = 0x244A },
+    .{ .start = 0x2460, .end = 0x27FF },
+    .{ .start = 0x2900, .end = 0x2B73 },
+    .{ .start = 0x2B76, .end = 0x2BFF },
+    .{ .start = 0x2E00, .end = 0x2E5D },
+    .{ .start = 0x2FF0, .end = 0x3004 },
+    .{ .start = 0x3006, .end = 0x3006 },
+    .{ .start = 0x3008, .end = 0x3020 },
+    .{ .start = 0x3030, .end = 0x3037 },
+    .{ .start = 0x303C, .end = 0x303F },
+    .{ .start = 0x309B, .end = 0x309C },
+    .{ .start = 0x30A0, .end = 0x30A0 },
+    .{ .start = 0x30FB, .end = 0x30FC },
+    .{ .start = 0x3190, .end = 0x319F },
+    .{ .start = 0x31C0, .end = 0x31E5 },
+    .{ .start = 0x31EF, .end = 0x31EF },
+    .{ .start = 0x3220, .end = 0x325F },
+    .{ .start = 0x327F, .end = 0x32CF },
+    .{ .start = 0x32FF, .end = 0x32FF },
+    .{ .start = 0x3358, .end = 0x33FF },
+    .{ .start = 0x4DC0, .end = 0x4DFF },
+    .{ .start = 0xA700, .end = 0xA721 },
+    .{ .start = 0xA788, .end = 0xA78A },
+    .{ .start = 0xA830, .end = 0xA839 },
+    .{ .start = 0xA92E, .end = 0xA92E },
+    .{ .start = 0xA9CF, .end = 0xA9CF },
+    .{ .start = 0xAB5B, .end = 0xAB5B },
+    .{ .start = 0xAB6A, .end = 0xAB6B },
+    .{ .start = 0xFD3E, .end = 0xFD3F },
+    .{ .start = 0xFE10, .end = 0xFE19 },
+    .{ .start = 0xFE30, .end = 0xFE52 },
+    .{ .start = 0xFE54, .end = 0xFE66 },
+    .{ .start = 0xFE68, .end = 0xFE6B },
+    .{ .start = 0xFEFF, .end = 0xFEFF },
+    .{ .start = 0xFF01, .end = 0xFF20 },
+    .{ .start = 0xFF3B, .end = 0xFF40 },
+    .{ .start = 0xFF5B, .end = 0xFF65 },
+    .{ .start = 0xFF70, .end = 0xFF70 },
+    .{ .start = 0xFF9E, .end = 0xFF9F },
+    .{ .start = 0xFFE0, .end = 0xFFE6 },
+    .{ .start = 0xFFE8, .end = 0xFFEE },
+    .{ .start = 0xFFF9, .end = 0xFFFD },
+    .{ .start = 0x10100, .end = 0x10102 },
+    .{ .start = 0x10107, .end = 0x10133 },
+    .{ .start = 0x10137, .end = 0x1013F },
+    .{ .start = 0x10190, .end = 0x1019C },
+    .{ .start = 0x101D0, .end = 0x101FC },
+    .{ .start = 0x102E1, .end = 0x102FB },
+    .{ .start = 0x1BCA0, .end = 0x1BCA3 },
+    .{ .start = 0x1CC00, .end = 0x1CCFC },
+    .{ .start = 0x1CD00, .end = 0x1CEB3 },
+    .{ .start = 0x1CEBA, .end = 0x1CED0 },
+    .{ .start = 0x1CEE0, .end = 0x1CEF0 },
+    .{ .start = 0x1CF50, .end = 0x1CFC3 },
+    .{ .start = 0x1D000, .end = 0x1D0F5 },
+    .{ .start = 0x1D100, .end = 0x1D126 },
+    .{ .start = 0x1D129, .end = 0x1D166 },
+    .{ .start = 0x1D16A, .end = 0x1D17A },
+    .{ .start = 0x1D183, .end = 0x1D184 },
+    .{ .start = 0x1D18C, .end = 0x1D1A9 },
+    .{ .start = 0x1D1AE, .end = 0x1D1EA },
+    .{ .start = 0x1D2C0, .end = 0x1D2D3 },
+    .{ .start = 0x1D2E0, .end = 0x1D2F3 },
+    .{ .start = 0x1D300, .end = 0x1D356 },
+    .{ .start = 0x1D360, .end = 0x1D378 },
+    .{ .start = 0x1D400, .end = 0x1D454 },
+    .{ .start = 0x1D456, .end = 0x1D49C },
+    .{ .start = 0x1D49E, .end = 0x1D49F },
+    .{ .start = 0x1D4A2, .end = 0x1D4A2 },
+    .{ .start = 0x1D4A5, .end = 0x1D4A6 },
+    .{ .start = 0x1D4A9, .end = 0x1D4AC },
+    .{ .start = 0x1D4AE, .end = 0x1D4B9 },
+    .{ .start = 0x1D4BB, .end = 0x1D4BB },
+    .{ .start = 0x1D4BD, .end = 0x1D4C3 },
+    .{ .start = 0x1D4C5, .end = 0x1D505 },
+    .{ .start = 0x1D507, .end = 0x1D50A },
+    .{ .start = 0x1D50D, .end = 0x1D514 },
+    .{ .start = 0x1D516, .end = 0x1D51C },
+    .{ .start = 0x1D51E, .end = 0x1D539 },
+    .{ .start = 0x1D53B, .end = 0x1D53E },
+    .{ .start = 0x1D540, .end = 0x1D544 },
+    .{ .start = 0x1D546, .end = 0x1D546 },
+    .{ .start = 0x1D54A, .end = 0x1D550 },
+    .{ .start = 0x1D552, .end = 0x1D6A5 },
+    .{ .start = 0x1D6A8, .end = 0x1D7CB },
+    .{ .start = 0x1D7CE, .end = 0x1D7FF },
+    .{ .start = 0x1EC71, .end = 0x1ECB4 },
+    .{ .start = 0x1ED01, .end = 0x1ED3D },
+    .{ .start = 0x1F000, .end = 0x1F02B },
+    .{ .start = 0x1F030, .end = 0x1F093 },
+    .{ .start = 0x1F0A0, .end = 0x1F0AE },
+    .{ .start = 0x1F0B1, .end = 0x1F0BF },
+    .{ .start = 0x1F0C1, .end = 0x1F0CF },
+    .{ .start = 0x1F0D1, .end = 0x1F0F5 },
+    .{ .start = 0x1F100, .end = 0x1F1AD },
+    .{ .start = 0x1F1E6, .end = 0x1F1FF },
+    .{ .start = 0x1F201, .end = 0x1F202 },
+    .{ .start = 0x1F210, .end = 0x1F23B },
+    .{ .start = 0x1F240, .end = 0x1F248 },
+    .{ .start = 0x1F250, .end = 0x1F251 },
+    .{ .start = 0x1F260, .end = 0x1F265 },
+    .{ .start = 0x1F300, .end = 0x1F6D8 },
+    .{ .start = 0x1F6DC, .end = 0x1F6EC },
+    .{ .start = 0x1F6F0, .end = 0x1F6FC },
+    .{ .start = 0x1F700, .end = 0x1F7D9 },
+    .{ .start = 0x1F7E0, .end = 0x1F7EB },
+    .{ .start = 0x1F7F0, .end = 0x1F7F0 },
+    .{ .start = 0x1F800, .end = 0x1F80B },
+    .{ .start = 0x1F810, .end = 0x1F847 },
+    .{ .start = 0x1F850, .end = 0x1F859 },
+    .{ .start = 0x1F860, .end = 0x1F887 },
+    .{ .start = 0x1F890, .end = 0x1F8AD },
+    .{ .start = 0x1F8B0, .end = 0x1F8BB },
+    .{ .start = 0x1F8C0, .end = 0x1F8C1 },
+    .{ .start = 0x1F8D0, .end = 0x1F8D8 },
+    .{ .start = 0x1F900, .end = 0x1FA57 },
+    .{ .start = 0x1FA60, .end = 0x1FA6D },
+    .{ .start = 0x1FA70, .end = 0x1FA7C },
+    .{ .start = 0x1FA80, .end = 0x1FA8A },
+    .{ .start = 0x1FA8E, .end = 0x1FAC6 },
+    .{ .start = 0x1FAC8, .end = 0x1FAC8 },
+    .{ .start = 0x1FACD, .end = 0x1FADC },
+    .{ .start = 0x1FADF, .end = 0x1FAEA },
+    .{ .start = 0x1FAEF, .end = 0x1FAF8 },
+    .{ .start = 0x1FB00, .end = 0x1FB92 },
+    .{ .start = 0x1FB94, .end = 0x1FBFA },
+    .{ .start = 0xE0001, .end = 0xE0001 },
+    .{ .start = 0xE0020, .end = 0xE007F },
+};
+
+pub const scx_Zyyy = [_]Range{
+    .{ .start = 0x0000, .end = 0x0040 },
+    .{ .start = 0x005B, .end = 0x0060 },
+    .{ .start = 0x007B, .end = 0x00A9 },
+    .{ .start = 0x00AB, .end = 0x00B6 },
+    .{ .start = 0x00B8, .end = 0x00B9 },
+    .{ .start = 0x00BB, .end = 0x00BF },
+    .{ .start = 0x00D7, .end = 0x00D7 },
+    .{ .start = 0x00F7, .end = 0x00F7 },
+    .{ .start = 0x02B9, .end = 0x02BB },
+    .{ .start = 0x02BD, .end = 0x02C6 },
+    .{ .start = 0x02C8, .end = 0x02C8 },
+    .{ .start = 0x02CC, .end = 0x02CC },
+    .{ .start = 0x02CE, .end = 0x02D6 },
+    .{ .start = 0x02D8, .end = 0x02D8 },
+    .{ .start = 0x02DA, .end = 0x02DF },
+    .{ .start = 0x02E5, .end = 0x02E9 },
+    .{ .start = 0x02EC, .end = 0x02FF },
+    .{ .start = 0x037E, .end = 0x037E },
+    .{ .start = 0x0385, .end = 0x0385 },
+    .{ .start = 0x0387, .end = 0x0387 },
+    .{ .start = 0x0605, .end = 0x0605 },
+    .{ .start = 0x06DD, .end = 0x06DD },
+    .{ .start = 0x08E2, .end = 0x08E2 },
+    .{ .start = 0x0E3F, .end = 0x0E3F },
+    .{ .start = 0x0FD5, .end = 0x0FD8 },
+    .{ .start = 0x2000, .end = 0x200B },
+    .{ .start = 0x200E, .end = 0x202E },
+    .{ .start = 0x2030, .end = 0x204E },
+    .{ .start = 0x2050, .end = 0x2059 },
+    .{ .start = 0x205B, .end = 0x205C },
+    .{ .start = 0x205E, .end = 0x2064 },
+    .{ .start = 0x2066, .end = 0x2070 },
+    .{ .start = 0x2074, .end = 0x207E },
+    .{ .start = 0x2080, .end = 0x208E },
+    .{ .start = 0x20A0, .end = 0x20C1 },
+    .{ .start = 0x2100, .end = 0x2125 },
+    .{ .start = 0x2127, .end = 0x2129 },
+    .{ .start = 0x212C, .end = 0x2131 },
+    .{ .start = 0x2133, .end = 0x214D },
+    .{ .start = 0x214F, .end = 0x215F },
+    .{ .start = 0x2189, .end = 0x218B },
+    .{ .start = 0x2190, .end = 0x2429 },
+    .{ .start = 0x2440, .end = 0x244A },
+    .{ .start = 0x2460, .end = 0x27FF },
+    .{ .start = 0x2900, .end = 0x2B73 },
+    .{ .start = 0x2B76, .end = 0x2BFF },
+    .{ .start = 0x2E00, .end = 0x2E16 },
+    .{ .start = 0x2E18, .end = 0x2E2F },
+    .{ .start = 0x2E32, .end = 0x2E3B },
+    .{ .start = 0x2E3D, .end = 0x2E40 },
+    .{ .start = 0x2E42, .end = 0x2E42 },
+    .{ .start = 0x2E44, .end = 0x2E5D },
+    .{ .start = 0x3000, .end = 0x3000 },
+    .{ .start = 0x3004, .end = 0x3004 },
+    .{ .start = 0x3012, .end = 0x3012 },
+    .{ .start = 0x3020, .end = 0x3020 },
+    .{ .start = 0x3036, .end = 0x3036 },
+    .{ .start = 0x3248, .end = 0x325F },
+    .{ .start = 0x327F, .end = 0x327F },
+    .{ .start = 0x32B1, .end = 0x32BF },
+    .{ .start = 0x32CC, .end = 0x32CF },
+    .{ .start = 0x3371, .end = 0x337A },
+    .{ .start = 0x3380, .end = 0x33DF },
+    .{ .start = 0x33FF, .end = 0x33FF },
+    .{ .start = 0x4DC0, .end = 0x4DFF },
+    .{ .start = 0xA708, .end = 0xA721 },
+    .{ .start = 0xA788, .end = 0xA78A },
+    .{ .start = 0xAB5B, .end = 0xAB5B },
+    .{ .start = 0xAB6A, .end = 0xAB6B },
+    .{ .start = 0xFE10, .end = 0xFE19 },
+    .{ .start = 0xFE30, .end = 0xFE44 },
+    .{ .start = 0xFE47, .end = 0xFE52 },
+    .{ .start = 0xFE54, .end = 0xFE66 },
+    .{ .start = 0xFE68, .end = 0xFE6B },
+    .{ .start = 0xFEFF, .end = 0xFEFF },
+    .{ .start = 0xFF01, .end = 0xFF20 },
+    .{ .start = 0xFF3B, .end = 0xFF40 },
+    .{ .start = 0xFF5B, .end = 0xFF60 },
+    .{ .start = 0xFFE0, .end = 0xFFE6 },
+    .{ .start = 0xFFE8, .end = 0xFFEE },
+    .{ .start = 0xFFF9, .end = 0xFFFD },
+    .{ .start = 0x10190, .end = 0x1019C },
+    .{ .start = 0x101D0, .end = 0x101FC },
+    .{ .start = 0x1CC00, .end = 0x1CCFC },
+    .{ .start = 0x1CD00, .end = 0x1CEB3 },
+    .{ .start = 0x1CEBA, .end = 0x1CED0 },
+    .{ .start = 0x1CEE0, .end = 0x1CEF0 },
+    .{ .start = 0x1CF50, .end = 0x1CFC3 },
+    .{ .start = 0x1D000, .end = 0x1D0F5 },
+    .{ .start = 0x1D100, .end = 0x1D126 },
+    .{ .start = 0x1D129, .end = 0x1D166 },
+    .{ .start = 0x1D16A, .end = 0x1D17A },
+    .{ .start = 0x1D183, .end = 0x1D184 },
+    .{ .start = 0x1D18C, .end = 0x1D1A9 },
+    .{ .start = 0x1D1AE, .end = 0x1D1EA },
+    .{ .start = 0x1D2C0, .end = 0x1D2D3 },
+    .{ .start = 0x1D2E0, .end = 0x1D2F3 },
+    .{ .start = 0x1D300, .end = 0x1D356 },
+    .{ .start = 0x1D372, .end = 0x1D378 },
+    .{ .start = 0x1D400, .end = 0x1D454 },
+    .{ .start = 0x1D456, .end = 0x1D49C },
+    .{ .start = 0x1D49E, .end = 0x1D49F },
+    .{ .start = 0x1D4A2, .end = 0x1D4A2 },
+    .{ .start = 0x1D4A5, .end = 0x1D4A6 },
+    .{ .start = 0x1D4A9, .end = 0x1D4AC },
+    .{ .start = 0x1D4AE, .end = 0x1D4B9 },
+    .{ .start = 0x1D4BB, .end = 0x1D4BB },
+    .{ .start = 0x1D4BD, .end = 0x1D4C3 },
+    .{ .start = 0x1D4C5, .end = 0x1D505 },
+    .{ .start = 0x1D507, .end = 0x1D50A },
+    .{ .start = 0x1D50D, .end = 0x1D514 },
+    .{ .start = 0x1D516, .end = 0x1D51C },
+    .{ .start = 0x1D51E, .end = 0x1D539 },
+    .{ .start = 0x1D53B, .end = 0x1D53E },
+    .{ .start = 0x1D540, .end = 0x1D544 },
+    .{ .start = 0x1D546, .end = 0x1D546 },
+    .{ .start = 0x1D54A, .end = 0x1D550 },
+    .{ .start = 0x1D552, .end = 0x1D6A5 },
+    .{ .start = 0x1D6A8, .end = 0x1D7CB },
+    .{ .start = 0x1D7CE, .end = 0x1D7FF },
+    .{ .start = 0x1EC71, .end = 0x1ECB4 },
+    .{ .start = 0x1ED01, .end = 0x1ED3D },
+    .{ .start = 0x1F000, .end = 0x1F02B },
+    .{ .start = 0x1F030, .end = 0x1F093 },
+    .{ .start = 0x1F0A0, .end = 0x1F0AE },
+    .{ .start = 0x1F0B1, .end = 0x1F0BF },
+    .{ .start = 0x1F0C1, .end = 0x1F0CF },
+    .{ .start = 0x1F0D1, .end = 0x1F0F5 },
+    .{ .start = 0x1F100, .end = 0x1F1AD },
+    .{ .start = 0x1F1E6, .end = 0x1F1FF },
+    .{ .start = 0x1F201, .end = 0x1F202 },
+    .{ .start = 0x1F210, .end = 0x1F23B },
+    .{ .start = 0x1F240, .end = 0x1F248 },
+    .{ .start = 0x1F260, .end = 0x1F265 },
+    .{ .start = 0x1F300, .end = 0x1F6D8 },
+    .{ .start = 0x1F6DC, .end = 0x1F6EC },
+    .{ .start = 0x1F6F0, .end = 0x1F6FC },
+    .{ .start = 0x1F700, .end = 0x1F7D9 },
+    .{ .start = 0x1F7E0, .end = 0x1F7EB },
+    .{ .start = 0x1F7F0, .end = 0x1F7F0 },
+    .{ .start = 0x1F800, .end = 0x1F80B },
+    .{ .start = 0x1F810, .end = 0x1F847 },
+    .{ .start = 0x1F850, .end = 0x1F859 },
+    .{ .start = 0x1F860, .end = 0x1F887 },
+    .{ .start = 0x1F890, .end = 0x1F8AD },
+    .{ .start = 0x1F8B0, .end = 0x1F8BB },
+    .{ .start = 0x1F8C0, .end = 0x1F8C1 },
+    .{ .start = 0x1F8D0, .end = 0x1F8D8 },
+    .{ .start = 0x1F900, .end = 0x1FA57 },
+    .{ .start = 0x1FA60, .end = 0x1FA6D },
+    .{ .start = 0x1FA70, .end = 0x1FA7C },
+    .{ .start = 0x1FA80, .end = 0x1FA8A },
+    .{ .start = 0x1FA8E, .end = 0x1FAC6 },
+    .{ .start = 0x1FAC8, .end = 0x1FAC8 },
+    .{ .start = 0x1FACD, .end = 0x1FADC },
+    .{ .start = 0x1FADF, .end = 0x1FAEA },
+    .{ .start = 0x1FAEF, .end = 0x1FAF8 },
+    .{ .start = 0x1FB00, .end = 0x1FB92 },
+    .{ .start = 0x1FB94, .end = 0x1FBFA },
+    .{ .start = 0xE0001, .end = 0xE0001 },
+    .{ .start = 0xE0020, .end = 0xE007F },
+};
+
+pub const script_Zzzz = [_]Range{
+    .{ .start = 0x0378, .end = 0x0379 },
+    .{ .start = 0x0380, .end = 0x0383 },
+    .{ .start = 0x038B, .end = 0x038B },
+    .{ .start = 0x038D, .end = 0x038D },
+    .{ .start = 0x03A2, .end = 0x03A2 },
+    .{ .start = 0x0530, .end = 0x0530 },
+    .{ .start = 0x0557, .end = 0x0558 },
+    .{ .start = 0x058B, .end = 0x058C },
+    .{ .start = 0x0590, .end = 0x0590 },
+    .{ .start = 0x05C8, .end = 0x05CF },
+    .{ .start = 0x05EB, .end = 0x05EE },
+    .{ .start = 0x05F5, .end = 0x05FF },
+    .{ .start = 0x070E, .end = 0x070E },
+    .{ .start = 0x074B, .end = 0x074C },
+    .{ .start = 0x07B2, .end = 0x07BF },
+    .{ .start = 0x07FB, .end = 0x07FC },
+    .{ .start = 0x082E, .end = 0x082F },
+    .{ .start = 0x083F, .end = 0x083F },
+    .{ .start = 0x085C, .end = 0x085D },
+    .{ .start = 0x085F, .end = 0x085F },
+    .{ .start = 0x086B, .end = 0x086F },
+    .{ .start = 0x0892, .end = 0x0896 },
+    .{ .start = 0x0984, .end = 0x0984 },
+    .{ .start = 0x098D, .end = 0x098E },
+    .{ .start = 0x0991, .end = 0x0992 },
+    .{ .start = 0x09A9, .end = 0x09A9 },
+    .{ .start = 0x09B1, .end = 0x09B1 },
+    .{ .start = 0x09B3, .end = 0x09B5 },
+    .{ .start = 0x09BA, .end = 0x09BB },
+    .{ .start = 0x09C5, .end = 0x09C6 },
+    .{ .start = 0x09C9, .end = 0x09CA },
+    .{ .start = 0x09CF, .end = 0x09D6 },
+    .{ .start = 0x09D8, .end = 0x09DB },
+    .{ .start = 0x09DE, .end = 0x09DE },
+    .{ .start = 0x09E4, .end = 0x09E5 },
+    .{ .start = 0x09FF, .end = 0x0A00 },
+    .{ .start = 0x0A04, .end = 0x0A04 },
+    .{ .start = 0x0A0B, .end = 0x0A0E },
+    .{ .start = 0x0A11, .end = 0x0A12 },
+    .{ .start = 0x0A29, .end = 0x0A29 },
+    .{ .start = 0x0A31, .end = 0x0A31 },
+    .{ .start = 0x0A34, .end = 0x0A34 },
+    .{ .start = 0x0A37, .end = 0x0A37 },
+    .{ .start = 0x0A3A, .end = 0x0A3B },
+    .{ .start = 0x0A3D, .end = 0x0A3D },
+    .{ .start = 0x0A43, .end = 0x0A46 },
+    .{ .start = 0x0A49, .end = 0x0A4A },
+    .{ .start = 0x0A4E, .end = 0x0A50 },
+    .{ .start = 0x0A52, .end = 0x0A58 },
+    .{ .start = 0x0A5D, .end = 0x0A5D },
+    .{ .start = 0x0A5F, .end = 0x0A65 },
+    .{ .start = 0x0A77, .end = 0x0A80 },
+    .{ .start = 0x0A84, .end = 0x0A84 },
+    .{ .start = 0x0A8E, .end = 0x0A8E },
+    .{ .start = 0x0A92, .end = 0x0A92 },
+    .{ .start = 0x0AA9, .end = 0x0AA9 },
+    .{ .start = 0x0AB1, .end = 0x0AB1 },
+    .{ .start = 0x0AB4, .end = 0x0AB4 },
+    .{ .start = 0x0ABA, .end = 0x0ABB },
+    .{ .start = 0x0AC6, .end = 0x0AC6 },
+    .{ .start = 0x0ACA, .end = 0x0ACA },
+    .{ .start = 0x0ACE, .end = 0x0ACF },
+    .{ .start = 0x0AD1, .end = 0x0ADF },
+    .{ .start = 0x0AE4, .end = 0x0AE5 },
+    .{ .start = 0x0AF2, .end = 0x0AF8 },
+    .{ .start = 0x0B00, .end = 0x0B00 },
+    .{ .start = 0x0B04, .end = 0x0B04 },
+    .{ .start = 0x0B0D, .end = 0x0B0E },
+    .{ .start = 0x0B11, .end = 0x0B12 },
+    .{ .start = 0x0B29, .end = 0x0B29 },
+    .{ .start = 0x0B31, .end = 0x0B31 },
+    .{ .start = 0x0B34, .end = 0x0B34 },
+    .{ .start = 0x0B3A, .end = 0x0B3B },
+    .{ .start = 0x0B45, .end = 0x0B46 },
+    .{ .start = 0x0B49, .end = 0x0B4A },
+    .{ .start = 0x0B4E, .end = 0x0B54 },
+    .{ .start = 0x0B58, .end = 0x0B5B },
+    .{ .start = 0x0B5E, .end = 0x0B5E },
+    .{ .start = 0x0B64, .end = 0x0B65 },
+    .{ .start = 0x0B78, .end = 0x0B81 },
+    .{ .start = 0x0B84, .end = 0x0B84 },
+    .{ .start = 0x0B8B, .end = 0x0B8D },
+    .{ .start = 0x0B91, .end = 0x0B91 },
+    .{ .start = 0x0B96, .end = 0x0B98 },
+    .{ .start = 0x0B9B, .end = 0x0B9B },
+    .{ .start = 0x0B9D, .end = 0x0B9D },
+    .{ .start = 0x0BA0, .end = 0x0BA2 },
+    .{ .start = 0x0BA5, .end = 0x0BA7 },
+    .{ .start = 0x0BAB, .end = 0x0BAD },
+    .{ .start = 0x0BBA, .end = 0x0BBD },
+    .{ .start = 0x0BC3, .end = 0x0BC5 },
+    .{ .start = 0x0BC9, .end = 0x0BC9 },
+    .{ .start = 0x0BCE, .end = 0x0BCF },
+    .{ .start = 0x0BD1, .end = 0x0BD6 },
+    .{ .start = 0x0BD8, .end = 0x0BE5 },
+    .{ .start = 0x0BFB, .end = 0x0BFF },
+    .{ .start = 0x0C0D, .end = 0x0C0D },
+    .{ .start = 0x0C11, .end = 0x0C11 },
+    .{ .start = 0x0C29, .end = 0x0C29 },
+    .{ .start = 0x0C3A, .end = 0x0C3B },
+    .{ .start = 0x0C45, .end = 0x0C45 },
+    .{ .start = 0x0C49, .end = 0x0C49 },
+    .{ .start = 0x0C4E, .end = 0x0C54 },
+    .{ .start = 0x0C57, .end = 0x0C57 },
+    .{ .start = 0x0C5B, .end = 0x0C5B },
+    .{ .start = 0x0C5E, .end = 0x0C5F },
+    .{ .start = 0x0C64, .end = 0x0C65 },
+    .{ .start = 0x0C70, .end = 0x0C76 },
+    .{ .start = 0x0C8D, .end = 0x0C8D },
+    .{ .start = 0x0C91, .end = 0x0C91 },
+    .{ .start = 0x0CA9, .end = 0x0CA9 },
+    .{ .start = 0x0CB4, .end = 0x0CB4 },
+    .{ .start = 0x0CBA, .end = 0x0CBB },
+    .{ .start = 0x0CC5, .end = 0x0CC5 },
+    .{ .start = 0x0CC9, .end = 0x0CC9 },
+    .{ .start = 0x0CCE, .end = 0x0CD4 },
+    .{ .start = 0x0CD7, .end = 0x0CDB },
+    .{ .start = 0x0CDF, .end = 0x0CDF },
+    .{ .start = 0x0CE4, .end = 0x0CE5 },
+    .{ .start = 0x0CF0, .end = 0x0CF0 },
+    .{ .start = 0x0CF4, .end = 0x0CFF },
+    .{ .start = 0x0D0D, .end = 0x0D0D },
+    .{ .start = 0x0D11, .end = 0x0D11 },
+    .{ .start = 0x0D45, .end = 0x0D45 },
+    .{ .start = 0x0D49, .end = 0x0D49 },
+    .{ .start = 0x0D50, .end = 0x0D53 },
+    .{ .start = 0x0D64, .end = 0x0D65 },
+    .{ .start = 0x0D80, .end = 0x0D80 },
+    .{ .start = 0x0D84, .end = 0x0D84 },
+    .{ .start = 0x0D97, .end = 0x0D99 },
+    .{ .start = 0x0DB2, .end = 0x0DB2 },
+    .{ .start = 0x0DBC, .end = 0x0DBC },
+    .{ .start = 0x0DBE, .end = 0x0DBF },
+    .{ .start = 0x0DC7, .end = 0x0DC9 },
+    .{ .start = 0x0DCB, .end = 0x0DCE },
+    .{ .start = 0x0DD5, .end = 0x0DD5 },
+    .{ .start = 0x0DD7, .end = 0x0DD7 },
+    .{ .start = 0x0DE0, .end = 0x0DE5 },
+    .{ .start = 0x0DF0, .end = 0x0DF1 },
+    .{ .start = 0x0DF5, .end = 0x0E00 },
+    .{ .start = 0x0E3B, .end = 0x0E3E },
+    .{ .start = 0x0E5C, .end = 0x0E80 },
+    .{ .start = 0x0E83, .end = 0x0E83 },
+    .{ .start = 0x0E85, .end = 0x0E85 },
+    .{ .start = 0x0E8B, .end = 0x0E8B },
+    .{ .start = 0x0EA4, .end = 0x0EA4 },
+    .{ .start = 0x0EA6, .end = 0x0EA6 },
+    .{ .start = 0x0EBE, .end = 0x0EBF },
+    .{ .start = 0x0EC5, .end = 0x0EC5 },
+    .{ .start = 0x0EC7, .end = 0x0EC7 },
+    .{ .start = 0x0ECF, .end = 0x0ECF },
+    .{ .start = 0x0EDA, .end = 0x0EDB },
+    .{ .start = 0x0EE0, .end = 0x0EFF },
+    .{ .start = 0x0F48, .end = 0x0F48 },
+    .{ .start = 0x0F6D, .end = 0x0F70 },
+    .{ .start = 0x0F98, .end = 0x0F98 },
+    .{ .start = 0x0FBD, .end = 0x0FBD },
+    .{ .start = 0x0FCD, .end = 0x0FCD },
+    .{ .start = 0x0FDB, .end = 0x0FFF },
+    .{ .start = 0x10C6, .end = 0x10C6 },
+    .{ .start = 0x10C8, .end = 0x10CC },
+    .{ .start = 0x10CE, .end = 0x10CF },
+    .{ .start = 0x1249, .end = 0x1249 },
+    .{ .start = 0x124E, .end = 0x124F },
+    .{ .start = 0x1257, .end = 0x1257 },
+    .{ .start = 0x1259, .end = 0x1259 },
+    .{ .start = 0x125E, .end = 0x125F },
+    .{ .start = 0x1289, .end = 0x1289 },
+    .{ .start = 0x128E, .end = 0x128F },
+    .{ .start = 0x12B1, .end = 0x12B1 },
+    .{ .start = 0x12B6, .end = 0x12B7 },
+    .{ .start = 0x12BF, .end = 0x12BF },
+    .{ .start = 0x12C1, .end = 0x12C1 },
+    .{ .start = 0x12C6, .end = 0x12C7 },
+    .{ .start = 0x12D7, .end = 0x12D7 },
+    .{ .start = 0x1311, .end = 0x1311 },
+    .{ .start = 0x1316, .end = 0x1317 },
+    .{ .start = 0x135B, .end = 0x135C },
+    .{ .start = 0x137D, .end = 0x137F },
+    .{ .start = 0x139A, .end = 0x139F },
+    .{ .start = 0x13F6, .end = 0x13F7 },
+    .{ .start = 0x13FE, .end = 0x13FF },
+    .{ .start = 0x169D, .end = 0x169F },
+    .{ .start = 0x16F9, .end = 0x16FF },
+    .{ .start = 0x1716, .end = 0x171E },
+    .{ .start = 0x1737, .end = 0x173F },
+    .{ .start = 0x1754, .end = 0x175F },
+    .{ .start = 0x176D, .end = 0x176D },
+    .{ .start = 0x1771, .end = 0x1771 },
+    .{ .start = 0x1774, .end = 0x177F },
+    .{ .start = 0x17DE, .end = 0x17DF },
+    .{ .start = 0x17EA, .end = 0x17EF },
+    .{ .start = 0x17FA, .end = 0x17FF },
+    .{ .start = 0x181A, .end = 0x181F },
+    .{ .start = 0x1879, .end = 0x187F },
+    .{ .start = 0x18AB, .end = 0x18AF },
+    .{ .start = 0x18F6, .end = 0x18FF },
+    .{ .start = 0x191F, .end = 0x191F },
+    .{ .start = 0x192C, .end = 0x192F },
+    .{ .start = 0x193C, .end = 0x193F },
+    .{ .start = 0x1941, .end = 0x1943 },
+    .{ .start = 0x196E, .end = 0x196F },
+    .{ .start = 0x1975, .end = 0x197F },
+    .{ .start = 0x19AC, .end = 0x19AF },
+    .{ .start = 0x19CA, .end = 0x19CF },
+    .{ .start = 0x19DB, .end = 0x19DD },
+    .{ .start = 0x1A1C, .end = 0x1A1D },
+    .{ .start = 0x1A5F, .end = 0x1A5F },
+    .{ .start = 0x1A7D, .end = 0x1A7E },
+    .{ .start = 0x1A8A, .end = 0x1A8F },
+    .{ .start = 0x1A9A, .end = 0x1A9F },
+    .{ .start = 0x1AAE, .end = 0x1AAF },
+    .{ .start = 0x1ADE, .end = 0x1ADF },
+    .{ .start = 0x1AEC, .end = 0x1AFF },
+    .{ .start = 0x1B4D, .end = 0x1B4D },
+    .{ .start = 0x1BF4, .end = 0x1BFB },
+    .{ .start = 0x1C38, .end = 0x1C3A },
+    .{ .start = 0x1C4A, .end = 0x1C4C },
+    .{ .start = 0x1C8B, .end = 0x1C8F },
+    .{ .start = 0x1CBB, .end = 0x1CBC },
+    .{ .start = 0x1CC8, .end = 0x1CCF },
+    .{ .start = 0x1CFB, .end = 0x1CFF },
+    .{ .start = 0x1F16, .end = 0x1F17 },
+    .{ .start = 0x1F1E, .end = 0x1F1F },
+    .{ .start = 0x1F46, .end = 0x1F47 },
+    .{ .start = 0x1F4E, .end = 0x1F4F },
+    .{ .start = 0x1F58, .end = 0x1F58 },
+    .{ .start = 0x1F5A, .end = 0x1F5A },
+    .{ .start = 0x1F5C, .end = 0x1F5C },
+    .{ .start = 0x1F5E, .end = 0x1F5E },
+    .{ .start = 0x1F7E, .end = 0x1F7F },
+    .{ .start = 0x1FB5, .end = 0x1FB5 },
+    .{ .start = 0x1FC5, .end = 0x1FC5 },
+    .{ .start = 0x1FD4, .end = 0x1FD5 },
+    .{ .start = 0x1FDC, .end = 0x1FDC },
+    .{ .start = 0x1FF0, .end = 0x1FF1 },
+    .{ .start = 0x1FF5, .end = 0x1FF5 },
+    .{ .start = 0x1FFF, .end = 0x1FFF },
+    .{ .start = 0x2065, .end = 0x2065 },
+    .{ .start = 0x2072, .end = 0x2073 },
+    .{ .start = 0x208F, .end = 0x208F },
+    .{ .start = 0x209D, .end = 0x209F },
+    .{ .start = 0x20C2, .end = 0x20CF },
+    .{ .start = 0x20F1, .end = 0x20FF },
+    .{ .start = 0x218C, .end = 0x218F },
+    .{ .start = 0x242A, .end = 0x243F },
+    .{ .start = 0x244B, .end = 0x245F },
+    .{ .start = 0x2B74, .end = 0x2B75 },
+    .{ .start = 0x2CF4, .end = 0x2CF8 },
+    .{ .start = 0x2D26, .end = 0x2D26 },
+    .{ .start = 0x2D28, .end = 0x2D2C },
+    .{ .start = 0x2D2E, .end = 0x2D2F },
+    .{ .start = 0x2D68, .end = 0x2D6E },
+    .{ .start = 0x2D71, .end = 0x2D7E },
+    .{ .start = 0x2D97, .end = 0x2D9F },
+    .{ .start = 0x2DA7, .end = 0x2DA7 },
+    .{ .start = 0x2DAF, .end = 0x2DAF },
+    .{ .start = 0x2DB7, .end = 0x2DB7 },
+    .{ .start = 0x2DBF, .end = 0x2DBF },
+    .{ .start = 0x2DC7, .end = 0x2DC7 },
+    .{ .start = 0x2DCF, .end = 0x2DCF },
+    .{ .start = 0x2DD7, .end = 0x2DD7 },
+    .{ .start = 0x2DDF, .end = 0x2DDF },
+    .{ .start = 0x2E5E, .end = 0x2E7F },
+    .{ .start = 0x2E9A, .end = 0x2E9A },
+    .{ .start = 0x2EF4, .end = 0x2EFF },
+    .{ .start = 0x2FD6, .end = 0x2FEF },
+    .{ .start = 0x3040, .end = 0x3040 },
+    .{ .start = 0x3097, .end = 0x3098 },
+    .{ .start = 0x3100, .end = 0x3104 },
+    .{ .start = 0x3130, .end = 0x3130 },
+    .{ .start = 0x318F, .end = 0x318F },
+    .{ .start = 0x31E6, .end = 0x31EE },
+    .{ .start = 0x321F, .end = 0x321F },
+    .{ .start = 0xA48D, .end = 0xA48F },
+    .{ .start = 0xA4C7, .end = 0xA4CF },
+    .{ .start = 0xA62C, .end = 0xA63F },
+    .{ .start = 0xA6F8, .end = 0xA6FF },
+    .{ .start = 0xA7DD, .end = 0xA7F0 },
+    .{ .start = 0xA82D, .end = 0xA82F },
+    .{ .start = 0xA83A, .end = 0xA83F },
+    .{ .start = 0xA878, .end = 0xA87F },
+    .{ .start = 0xA8C6, .end = 0xA8CD },
+    .{ .start = 0xA8DA, .end = 0xA8DF },
+    .{ .start = 0xA954, .end = 0xA95E },
+    .{ .start = 0xA97D, .end = 0xA97F },
+    .{ .start = 0xA9CE, .end = 0xA9CE },
+    .{ .start = 0xA9DA, .end = 0xA9DD },
+    .{ .start = 0xA9FF, .end = 0xA9FF },
+    .{ .start = 0xAA37, .end = 0xAA3F },
+    .{ .start = 0xAA4E, .end = 0xAA4F },
+    .{ .start = 0xAA5A, .end = 0xAA5B },
+    .{ .start = 0xAAC3, .end = 0xAADA },
+    .{ .start = 0xAAF7, .end = 0xAB00 },
+    .{ .start = 0xAB07, .end = 0xAB08 },
+    .{ .start = 0xAB0F, .end = 0xAB10 },
+    .{ .start = 0xAB17, .end = 0xAB1F },
+    .{ .start = 0xAB27, .end = 0xAB27 },
+    .{ .start = 0xAB2F, .end = 0xAB2F },
+    .{ .start = 0xAB6C, .end = 0xAB6F },
+    .{ .start = 0xABEE, .end = 0xABEF },
+    .{ .start = 0xABFA, .end = 0xABFF },
+    .{ .start = 0xD7A4, .end = 0xD7AF },
+    .{ .start = 0xD7C7, .end = 0xD7CA },
+    .{ .start = 0xD7FC, .end = 0xF8FF },
+    .{ .start = 0xFA6E, .end = 0xFA6F },
+    .{ .start = 0xFADA, .end = 0xFAFF },
+    .{ .start = 0xFB07, .end = 0xFB12 },
+    .{ .start = 0xFB18, .end = 0xFB1C },
+    .{ .start = 0xFB37, .end = 0xFB37 },
+    .{ .start = 0xFB3D, .end = 0xFB3D },
+    .{ .start = 0xFB3F, .end = 0xFB3F },
+    .{ .start = 0xFB42, .end = 0xFB42 },
+    .{ .start = 0xFB45, .end = 0xFB45 },
+    .{ .start = 0xFDD0, .end = 0xFDEF },
+    .{ .start = 0xFE1A, .end = 0xFE1F },
+    .{ .start = 0xFE53, .end = 0xFE53 },
+    .{ .start = 0xFE67, .end = 0xFE67 },
+    .{ .start = 0xFE6C, .end = 0xFE6F },
+    .{ .start = 0xFE75, .end = 0xFE75 },
+    .{ .start = 0xFEFD, .end = 0xFEFE },
+    .{ .start = 0xFF00, .end = 0xFF00 },
+    .{ .start = 0xFFBF, .end = 0xFFC1 },
+    .{ .start = 0xFFC8, .end = 0xFFC9 },
+    .{ .start = 0xFFD0, .end = 0xFFD1 },
+    .{ .start = 0xFFD8, .end = 0xFFD9 },
+    .{ .start = 0xFFDD, .end = 0xFFDF },
+    .{ .start = 0xFFE7, .end = 0xFFE7 },
+    .{ .start = 0xFFEF, .end = 0xFFF8 },
+    .{ .start = 0xFFFE, .end = 0xFFFF },
+    .{ .start = 0x1000C, .end = 0x1000C },
+    .{ .start = 0x10027, .end = 0x10027 },
+    .{ .start = 0x1003B, .end = 0x1003B },
+    .{ .start = 0x1003E, .end = 0x1003E },
+    .{ .start = 0x1004E, .end = 0x1004F },
+    .{ .start = 0x1005E, .end = 0x1007F },
+    .{ .start = 0x100FB, .end = 0x100FF },
+    .{ .start = 0x10103, .end = 0x10106 },
+    .{ .start = 0x10134, .end = 0x10136 },
+    .{ .start = 0x1018F, .end = 0x1018F },
+    .{ .start = 0x1019D, .end = 0x1019F },
+    .{ .start = 0x101A1, .end = 0x101CF },
+    .{ .start = 0x101FE, .end = 0x1027F },
+    .{ .start = 0x1029D, .end = 0x1029F },
+    .{ .start = 0x102D1, .end = 0x102DF },
+    .{ .start = 0x102FC, .end = 0x102FF },
+    .{ .start = 0x10324, .end = 0x1032C },
+    .{ .start = 0x1034B, .end = 0x1034F },
+    .{ .start = 0x1037B, .end = 0x1037F },
+    .{ .start = 0x1039E, .end = 0x1039E },
+    .{ .start = 0x103C4, .end = 0x103C7 },
+    .{ .start = 0x103D6, .end = 0x103FF },
+    .{ .start = 0x1049E, .end = 0x1049F },
+    .{ .start = 0x104AA, .end = 0x104AF },
+    .{ .start = 0x104D4, .end = 0x104D7 },
+    .{ .start = 0x104FC, .end = 0x104FF },
+    .{ .start = 0x10528, .end = 0x1052F },
+    .{ .start = 0x10564, .end = 0x1056E },
+    .{ .start = 0x1057B, .end = 0x1057B },
+    .{ .start = 0x1058B, .end = 0x1058B },
+    .{ .start = 0x10593, .end = 0x10593 },
+    .{ .start = 0x10596, .end = 0x10596 },
+    .{ .start = 0x105A2, .end = 0x105A2 },
+    .{ .start = 0x105B2, .end = 0x105B2 },
+    .{ .start = 0x105BA, .end = 0x105BA },
+    .{ .start = 0x105BD, .end = 0x105BF },
+    .{ .start = 0x105F4, .end = 0x105FF },
+    .{ .start = 0x10737, .end = 0x1073F },
+    .{ .start = 0x10756, .end = 0x1075F },
+    .{ .start = 0x10768, .end = 0x1077F },
+    .{ .start = 0x10786, .end = 0x10786 },
+    .{ .start = 0x107B1, .end = 0x107B1 },
+    .{ .start = 0x107BB, .end = 0x107FF },
+    .{ .start = 0x10806, .end = 0x10807 },
+    .{ .start = 0x10809, .end = 0x10809 },
+    .{ .start = 0x10836, .end = 0x10836 },
+    .{ .start = 0x10839, .end = 0x1083B },
+    .{ .start = 0x1083D, .end = 0x1083E },
+    .{ .start = 0x10856, .end = 0x10856 },
+    .{ .start = 0x1089F, .end = 0x108A6 },
+    .{ .start = 0x108B0, .end = 0x108DF },
+    .{ .start = 0x108F3, .end = 0x108F3 },
+    .{ .start = 0x108F6, .end = 0x108FA },
+    .{ .start = 0x1091C, .end = 0x1091E },
+    .{ .start = 0x1093A, .end = 0x1093E },
+    .{ .start = 0x1095A, .end = 0x1097F },
+    .{ .start = 0x109B8, .end = 0x109BB },
+    .{ .start = 0x109D0, .end = 0x109D1 },
+    .{ .start = 0x10A04, .end = 0x10A04 },
+    .{ .start = 0x10A07, .end = 0x10A0B },
+    .{ .start = 0x10A14, .end = 0x10A14 },
+    .{ .start = 0x10A18, .end = 0x10A18 },
+    .{ .start = 0x10A36, .end = 0x10A37 },
+    .{ .start = 0x10A3B, .end = 0x10A3E },
+    .{ .start = 0x10A49, .end = 0x10A4F },
+    .{ .start = 0x10A59, .end = 0x10A5F },
+    .{ .start = 0x10AA0, .end = 0x10ABF },
+    .{ .start = 0x10AE7, .end = 0x10AEA },
+    .{ .start = 0x10AF7, .end = 0x10AFF },
+    .{ .start = 0x10B36, .end = 0x10B38 },
+    .{ .start = 0x10B56, .end = 0x10B57 },
+    .{ .start = 0x10B73, .end = 0x10B77 },
+    .{ .start = 0x10B92, .end = 0x10B98 },
+    .{ .start = 0x10B9D, .end = 0x10BA8 },
+    .{ .start = 0x10BB0, .end = 0x10BFF },
+    .{ .start = 0x10C49, .end = 0x10C7F },
+    .{ .start = 0x10CB3, .end = 0x10CBF },
+    .{ .start = 0x10CF3, .end = 0x10CF9 },
+    .{ .start = 0x10D28, .end = 0x10D2F },
+    .{ .start = 0x10D3A, .end = 0x10D3F },
+    .{ .start = 0x10D66, .end = 0x10D68 },
+    .{ .start = 0x10D86, .end = 0x10D8D },
+    .{ .start = 0x10D90, .end = 0x10E5F },
+    .{ .start = 0x10E7F, .end = 0x10E7F },
+    .{ .start = 0x10EAA, .end = 0x10EAA },
+    .{ .start = 0x10EAE, .end = 0x10EAF },
+    .{ .start = 0x10EB2, .end = 0x10EC1 },
+    .{ .start = 0x10EC8, .end = 0x10ECF },
+    .{ .start = 0x10ED9, .end = 0x10EF9 },
+    .{ .start = 0x10F28, .end = 0x10F2F },
+    .{ .start = 0x10F5A, .end = 0x10F6F },
+    .{ .start = 0x10F8A, .end = 0x10FAF },
+    .{ .start = 0x10FCC, .end = 0x10FDF },
+    .{ .start = 0x10FF7, .end = 0x10FFF },
+    .{ .start = 0x1104E, .end = 0x11051 },
+    .{ .start = 0x11076, .end = 0x1107E },
+    .{ .start = 0x110C3, .end = 0x110CC },
+    .{ .start = 0x110CE, .end = 0x110CF },
+    .{ .start = 0x110E9, .end = 0x110EF },
+    .{ .start = 0x110FA, .end = 0x110FF },
+    .{ .start = 0x11135, .end = 0x11135 },
+    .{ .start = 0x11148, .end = 0x1114F },
+    .{ .start = 0x11177, .end = 0x1117F },
+    .{ .start = 0x111E0, .end = 0x111E0 },
+    .{ .start = 0x111F5, .end = 0x111FF },
+    .{ .start = 0x11212, .end = 0x11212 },
+    .{ .start = 0x11242, .end = 0x1127F },
+    .{ .start = 0x11287, .end = 0x11287 },
+    .{ .start = 0x11289, .end = 0x11289 },
+    .{ .start = 0x1128E, .end = 0x1128E },
+    .{ .start = 0x1129E, .end = 0x1129E },
+    .{ .start = 0x112AA, .end = 0x112AF },
+    .{ .start = 0x112EB, .end = 0x112EF },
+    .{ .start = 0x112FA, .end = 0x112FF },
+    .{ .start = 0x11304, .end = 0x11304 },
+    .{ .start = 0x1130D, .end = 0x1130E },
+    .{ .start = 0x11311, .end = 0x11312 },
+    .{ .start = 0x11329, .end = 0x11329 },
+    .{ .start = 0x11331, .end = 0x11331 },
+    .{ .start = 0x11334, .end = 0x11334 },
+    .{ .start = 0x1133A, .end = 0x1133A },
+    .{ .start = 0x11345, .end = 0x11346 },
+    .{ .start = 0x11349, .end = 0x1134A },
+    .{ .start = 0x1134E, .end = 0x1134F },
+    .{ .start = 0x11351, .end = 0x11356 },
+    .{ .start = 0x11358, .end = 0x1135C },
+    .{ .start = 0x11364, .end = 0x11365 },
+    .{ .start = 0x1136D, .end = 0x1136F },
+    .{ .start = 0x11375, .end = 0x1137F },
+    .{ .start = 0x1138A, .end = 0x1138A },
+    .{ .start = 0x1138C, .end = 0x1138D },
+    .{ .start = 0x1138F, .end = 0x1138F },
+    .{ .start = 0x113B6, .end = 0x113B6 },
+    .{ .start = 0x113C1, .end = 0x113C1 },
+    .{ .start = 0x113C3, .end = 0x113C4 },
+    .{ .start = 0x113C6, .end = 0x113C6 },
+    .{ .start = 0x113CB, .end = 0x113CB },
+    .{ .start = 0x113D6, .end = 0x113D6 },
+    .{ .start = 0x113D9, .end = 0x113E0 },
+    .{ .start = 0x113E3, .end = 0x113FF },
+    .{ .start = 0x1145C, .end = 0x1145C },
+    .{ .start = 0x11462, .end = 0x1147F },
+    .{ .start = 0x114C8, .end = 0x114CF },
+    .{ .start = 0x114DA, .end = 0x1157F },
+    .{ .start = 0x115B6, .end = 0x115B7 },
+    .{ .start = 0x115DE, .end = 0x115FF },
+    .{ .start = 0x11645, .end = 0x1164F },
+    .{ .start = 0x1165A, .end = 0x1165F },
+    .{ .start = 0x1166D, .end = 0x1167F },
+    .{ .start = 0x116BA, .end = 0x116BF },
+    .{ .start = 0x116CA, .end = 0x116CF },
+    .{ .start = 0x116E4, .end = 0x116FF },
+    .{ .start = 0x1171B, .end = 0x1171C },
+    .{ .start = 0x1172C, .end = 0x1172F },
+    .{ .start = 0x11747, .end = 0x117FF },
+    .{ .start = 0x1183C, .end = 0x1189F },
+    .{ .start = 0x118F3, .end = 0x118FE },
+    .{ .start = 0x11907, .end = 0x11908 },
+    .{ .start = 0x1190A, .end = 0x1190B },
+    .{ .start = 0x11914, .end = 0x11914 },
+    .{ .start = 0x11917, .end = 0x11917 },
+    .{ .start = 0x11936, .end = 0x11936 },
+    .{ .start = 0x11939, .end = 0x1193A },
+    .{ .start = 0x11947, .end = 0x1194F },
+    .{ .start = 0x1195A, .end = 0x1199F },
+    .{ .start = 0x119A8, .end = 0x119A9 },
+    .{ .start = 0x119D8, .end = 0x119D9 },
+    .{ .start = 0x119E5, .end = 0x119FF },
+    .{ .start = 0x11A48, .end = 0x11A4F },
+    .{ .start = 0x11AA3, .end = 0x11AAF },
+    .{ .start = 0x11AF9, .end = 0x11AFF },
+    .{ .start = 0x11B0A, .end = 0x11B5F },
+    .{ .start = 0x11B68, .end = 0x11BBF },
+    .{ .start = 0x11BE2, .end = 0x11BEF },
+    .{ .start = 0x11BFA, .end = 0x11BFF },
+    .{ .start = 0x11C09, .end = 0x11C09 },
+    .{ .start = 0x11C37, .end = 0x11C37 },
+    .{ .start = 0x11C46, .end = 0x11C4F },
+    .{ .start = 0x11C6D, .end = 0x11C6F },
+    .{ .start = 0x11C90, .end = 0x11C91 },
+    .{ .start = 0x11CA8, .end = 0x11CA8 },
+    .{ .start = 0x11CB7, .end = 0x11CFF },
+    .{ .start = 0x11D07, .end = 0x11D07 },
+    .{ .start = 0x11D0A, .end = 0x11D0A },
+    .{ .start = 0x11D37, .end = 0x11D39 },
+    .{ .start = 0x11D3B, .end = 0x11D3B },
+    .{ .start = 0x11D3E, .end = 0x11D3E },
+    .{ .start = 0x11D48, .end = 0x11D4F },
+    .{ .start = 0x11D5A, .end = 0x11D5F },
+    .{ .start = 0x11D66, .end = 0x11D66 },
+    .{ .start = 0x11D69, .end = 0x11D69 },
+    .{ .start = 0x11D8F, .end = 0x11D8F },
+    .{ .start = 0x11D92, .end = 0x11D92 },
+    .{ .start = 0x11D99, .end = 0x11D9F },
+    .{ .start = 0x11DAA, .end = 0x11DAF },
+    .{ .start = 0x11DDC, .end = 0x11DDF },
+    .{ .start = 0x11DEA, .end = 0x11EDF },
+    .{ .start = 0x11EF9, .end = 0x11EFF },
+    .{ .start = 0x11F11, .end = 0x11F11 },
+    .{ .start = 0x11F3B, .end = 0x11F3D },
+    .{ .start = 0x11F5B, .end = 0x11FAF },
+    .{ .start = 0x11FB1, .end = 0x11FBF },
+    .{ .start = 0x11FF2, .end = 0x11FFE },
+    .{ .start = 0x1239A, .end = 0x123FF },
+    .{ .start = 0x1246F, .end = 0x1246F },
+    .{ .start = 0x12475, .end = 0x1247F },
+    .{ .start = 0x12544, .end = 0x12F8F },
+    .{ .start = 0x12FF3, .end = 0x12FFF },
+    .{ .start = 0x13456, .end = 0x1345F },
+    .{ .start = 0x143FB, .end = 0x143FF },
+    .{ .start = 0x14647, .end = 0x160FF },
+    .{ .start = 0x1613A, .end = 0x167FF },
+    .{ .start = 0x16A39, .end = 0x16A3F },
+    .{ .start = 0x16A5F, .end = 0x16A5F },
+    .{ .start = 0x16A6A, .end = 0x16A6D },
+    .{ .start = 0x16ABF, .end = 0x16ABF },
+    .{ .start = 0x16ACA, .end = 0x16ACF },
+    .{ .start = 0x16AEE, .end = 0x16AEF },
+    .{ .start = 0x16AF6, .end = 0x16AFF },
+    .{ .start = 0x16B46, .end = 0x16B4F },
+    .{ .start = 0x16B5A, .end = 0x16B5A },
+    .{ .start = 0x16B62, .end = 0x16B62 },
+    .{ .start = 0x16B78, .end = 0x16B7C },
+    .{ .start = 0x16B90, .end = 0x16D3F },
+    .{ .start = 0x16D7A, .end = 0x16E3F },
+    .{ .start = 0x16E9B, .end = 0x16E9F },
+    .{ .start = 0x16EB9, .end = 0x16EBA },
+    .{ .start = 0x16ED4, .end = 0x16EFF },
+    .{ .start = 0x16F4B, .end = 0x16F4E },
+    .{ .start = 0x16F88, .end = 0x16F8E },
+    .{ .start = 0x16FA0, .end = 0x16FDF },
+    .{ .start = 0x16FE5, .end = 0x16FEF },
+    .{ .start = 0x16FF7, .end = 0x16FFF },
+    .{ .start = 0x18CD6, .end = 0x18CFE },
+    .{ .start = 0x18D1F, .end = 0x18D7F },
+    .{ .start = 0x18DF3, .end = 0x1AFEF },
+    .{ .start = 0x1AFF4, .end = 0x1AFF4 },
+    .{ .start = 0x1AFFC, .end = 0x1AFFC },
+    .{ .start = 0x1AFFF, .end = 0x1AFFF },
+    .{ .start = 0x1B123, .end = 0x1B131 },
+    .{ .start = 0x1B133, .end = 0x1B14F },
+    .{ .start = 0x1B153, .end = 0x1B154 },
+    .{ .start = 0x1B156, .end = 0x1B163 },
+    .{ .start = 0x1B168, .end = 0x1B16F },
+    .{ .start = 0x1B2FC, .end = 0x1BBFF },
+    .{ .start = 0x1BC6B, .end = 0x1BC6F },
+    .{ .start = 0x1BC7D, .end = 0x1BC7F },
+    .{ .start = 0x1BC89, .end = 0x1BC8F },
+    .{ .start = 0x1BC9A, .end = 0x1BC9B },
+    .{ .start = 0x1BCA4, .end = 0x1CBFF },
+    .{ .start = 0x1CCFD, .end = 0x1CCFF },
+    .{ .start = 0x1CEB4, .end = 0x1CEB9 },
+    .{ .start = 0x1CED1, .end = 0x1CEDF },
+    .{ .start = 0x1CEF1, .end = 0x1CEFF },
+    .{ .start = 0x1CF2E, .end = 0x1CF2F },
+    .{ .start = 0x1CF47, .end = 0x1CF4F },
+    .{ .start = 0x1CFC4, .end = 0x1CFFF },
+    .{ .start = 0x1D0F6, .end = 0x1D0FF },
+    .{ .start = 0x1D127, .end = 0x1D128 },
+    .{ .start = 0x1D1EB, .end = 0x1D1FF },
+    .{ .start = 0x1D246, .end = 0x1D2BF },
+    .{ .start = 0x1D2D4, .end = 0x1D2DF },
+    .{ .start = 0x1D2F4, .end = 0x1D2FF },
+    .{ .start = 0x1D357, .end = 0x1D35F },
+    .{ .start = 0x1D379, .end = 0x1D3FF },
+    .{ .start = 0x1D455, .end = 0x1D455 },
+    .{ .start = 0x1D49D, .end = 0x1D49D },
+    .{ .start = 0x1D4A0, .end = 0x1D4A1 },
+    .{ .start = 0x1D4A3, .end = 0x1D4A4 },
+    .{ .start = 0x1D4A7, .end = 0x1D4A8 },
+    .{ .start = 0x1D4AD, .end = 0x1D4AD },
+    .{ .start = 0x1D4BA, .end = 0x1D4BA },
+    .{ .start = 0x1D4BC, .end = 0x1D4BC },
+    .{ .start = 0x1D4C4, .end = 0x1D4C4 },
+    .{ .start = 0x1D506, .end = 0x1D506 },
+    .{ .start = 0x1D50B, .end = 0x1D50C },
+    .{ .start = 0x1D515, .end = 0x1D515 },
+    .{ .start = 0x1D51D, .end = 0x1D51D },
+    .{ .start = 0x1D53A, .end = 0x1D53A },
+    .{ .start = 0x1D53F, .end = 0x1D53F },
+    .{ .start = 0x1D545, .end = 0x1D545 },
+    .{ .start = 0x1D547, .end = 0x1D549 },
+    .{ .start = 0x1D551, .end = 0x1D551 },
+    .{ .start = 0x1D6A6, .end = 0x1D6A7 },
+    .{ .start = 0x1D7CC, .end = 0x1D7CD },
+    .{ .start = 0x1DA8C, .end = 0x1DA9A },
+    .{ .start = 0x1DAA0, .end = 0x1DAA0 },
+    .{ .start = 0x1DAB0, .end = 0x1DEFF },
+    .{ .start = 0x1DF1F, .end = 0x1DF24 },
+    .{ .start = 0x1DF2B, .end = 0x1DFFF },
+    .{ .start = 0x1E007, .end = 0x1E007 },
+    .{ .start = 0x1E019, .end = 0x1E01A },
+    .{ .start = 0x1E022, .end = 0x1E022 },
+    .{ .start = 0x1E025, .end = 0x1E025 },
+    .{ .start = 0x1E02B, .end = 0x1E02F },
+    .{ .start = 0x1E06E, .end = 0x1E08E },
+    .{ .start = 0x1E090, .end = 0x1E0FF },
+    .{ .start = 0x1E12D, .end = 0x1E12F },
+    .{ .start = 0x1E13E, .end = 0x1E13F },
+    .{ .start = 0x1E14A, .end = 0x1E14D },
+    .{ .start = 0x1E150, .end = 0x1E28F },
+    .{ .start = 0x1E2AF, .end = 0x1E2BF },
+    .{ .start = 0x1E2FA, .end = 0x1E2FE },
+    .{ .start = 0x1E300, .end = 0x1E4CF },
+    .{ .start = 0x1E4FA, .end = 0x1E5CF },
+    .{ .start = 0x1E5FB, .end = 0x1E5FE },
+    .{ .start = 0x1E600, .end = 0x1E6BF },
+    .{ .start = 0x1E6DF, .end = 0x1E6DF },
+    .{ .start = 0x1E6F6, .end = 0x1E6FD },
+    .{ .start = 0x1E700, .end = 0x1E7DF },
+    .{ .start = 0x1E7E7, .end = 0x1E7E7 },
+    .{ .start = 0x1E7EC, .end = 0x1E7EC },
+    .{ .start = 0x1E7EF, .end = 0x1E7EF },
+    .{ .start = 0x1E7FF, .end = 0x1E7FF },
+    .{ .start = 0x1E8C5, .end = 0x1E8C6 },
+    .{ .start = 0x1E8D7, .end = 0x1E8FF },
+    .{ .start = 0x1E94C, .end = 0x1E94F },
+    .{ .start = 0x1E95A, .end = 0x1E95D },
+    .{ .start = 0x1E960, .end = 0x1EC70 },
+    .{ .start = 0x1ECB5, .end = 0x1ED00 },
+    .{ .start = 0x1ED3E, .end = 0x1EDFF },
+    .{ .start = 0x1EE04, .end = 0x1EE04 },
+    .{ .start = 0x1EE20, .end = 0x1EE20 },
+    .{ .start = 0x1EE23, .end = 0x1EE23 },
+    .{ .start = 0x1EE25, .end = 0x1EE26 },
+    .{ .start = 0x1EE28, .end = 0x1EE28 },
+    .{ .start = 0x1EE33, .end = 0x1EE33 },
+    .{ .start = 0x1EE38, .end = 0x1EE38 },
+    .{ .start = 0x1EE3A, .end = 0x1EE3A },
+    .{ .start = 0x1EE3C, .end = 0x1EE41 },
+    .{ .start = 0x1EE43, .end = 0x1EE46 },
+    .{ .start = 0x1EE48, .end = 0x1EE48 },
+    .{ .start = 0x1EE4A, .end = 0x1EE4A },
+    .{ .start = 0x1EE4C, .end = 0x1EE4C },
+    .{ .start = 0x1EE50, .end = 0x1EE50 },
+    .{ .start = 0x1EE53, .end = 0x1EE53 },
+    .{ .start = 0x1EE55, .end = 0x1EE56 },
+    .{ .start = 0x1EE58, .end = 0x1EE58 },
+    .{ .start = 0x1EE5A, .end = 0x1EE5A },
+    .{ .start = 0x1EE5C, .end = 0x1EE5C },
+    .{ .start = 0x1EE5E, .end = 0x1EE5E },
+    .{ .start = 0x1EE60, .end = 0x1EE60 },
+    .{ .start = 0x1EE63, .end = 0x1EE63 },
+    .{ .start = 0x1EE65, .end = 0x1EE66 },
+    .{ .start = 0x1EE6B, .end = 0x1EE6B },
+    .{ .start = 0x1EE73, .end = 0x1EE73 },
+    .{ .start = 0x1EE78, .end = 0x1EE78 },
+    .{ .start = 0x1EE7D, .end = 0x1EE7D },
+    .{ .start = 0x1EE7F, .end = 0x1EE7F },
+    .{ .start = 0x1EE8A, .end = 0x1EE8A },
+    .{ .start = 0x1EE9C, .end = 0x1EEA0 },
+    .{ .start = 0x1EEA4, .end = 0x1EEA4 },
+    .{ .start = 0x1EEAA, .end = 0x1EEAA },
+    .{ .start = 0x1EEBC, .end = 0x1EEEF },
+    .{ .start = 0x1EEF2, .end = 0x1EFFF },
+    .{ .start = 0x1F02C, .end = 0x1F02F },
+    .{ .start = 0x1F094, .end = 0x1F09F },
+    .{ .start = 0x1F0AF, .end = 0x1F0B0 },
+    .{ .start = 0x1F0C0, .end = 0x1F0C0 },
+    .{ .start = 0x1F0D0, .end = 0x1F0D0 },
+    .{ .start = 0x1F0F6, .end = 0x1F0FF },
+    .{ .start = 0x1F1AE, .end = 0x1F1E5 },
+    .{ .start = 0x1F203, .end = 0x1F20F },
+    .{ .start = 0x1F23C, .end = 0x1F23F },
+    .{ .start = 0x1F249, .end = 0x1F24F },
+    .{ .start = 0x1F252, .end = 0x1F25F },
+    .{ .start = 0x1F266, .end = 0x1F2FF },
+    .{ .start = 0x1F6D9, .end = 0x1F6DB },
+    .{ .start = 0x1F6ED, .end = 0x1F6EF },
+    .{ .start = 0x1F6FD, .end = 0x1F6FF },
+    .{ .start = 0x1F7DA, .end = 0x1F7DF },
+    .{ .start = 0x1F7EC, .end = 0x1F7EF },
+    .{ .start = 0x1F7F1, .end = 0x1F7FF },
+    .{ .start = 0x1F80C, .end = 0x1F80F },
+    .{ .start = 0x1F848, .end = 0x1F84F },
+    .{ .start = 0x1F85A, .end = 0x1F85F },
+    .{ .start = 0x1F888, .end = 0x1F88F },
+    .{ .start = 0x1F8AE, .end = 0x1F8AF },
+    .{ .start = 0x1F8BC, .end = 0x1F8BF },
+    .{ .start = 0x1F8C2, .end = 0x1F8CF },
+    .{ .start = 0x1F8D9, .end = 0x1F8FF },
+    .{ .start = 0x1FA58, .end = 0x1FA5F },
+    .{ .start = 0x1FA6E, .end = 0x1FA6F },
+    .{ .start = 0x1FA7D, .end = 0x1FA7F },
+    .{ .start = 0x1FA8B, .end = 0x1FA8D },
+    .{ .start = 0x1FAC7, .end = 0x1FAC7 },
+    .{ .start = 0x1FAC9, .end = 0x1FACC },
+    .{ .start = 0x1FADD, .end = 0x1FADE },
+    .{ .start = 0x1FAEB, .end = 0x1FAEE },
+    .{ .start = 0x1FAF9, .end = 0x1FAFF },
+    .{ .start = 0x1FB93, .end = 0x1FB93 },
+    .{ .start = 0x1FBFB, .end = 0x1FFFF },
+    .{ .start = 0x2A6E0, .end = 0x2A6FF },
+    .{ .start = 0x2B81E, .end = 0x2B81F },
+    .{ .start = 0x2CEAE, .end = 0x2CEAF },
+    .{ .start = 0x2EBE1, .end = 0x2EBEF },
+    .{ .start = 0x2EE5E, .end = 0x2F7FF },
+    .{ .start = 0x2FA1E, .end = 0x2FFFF },
+    .{ .start = 0x3134B, .end = 0x3134F },
+    .{ .start = 0x3347A, .end = 0xE0000 },
+    .{ .start = 0xE0002, .end = 0xE001F },
+    .{ .start = 0xE0080, .end = 0xE00FF },
+    .{ .start = 0xE01F0, .end = 0x10FFFF },
+};
+
+pub const scx_Zzzz = [_]Range{
+    .{ .start = 0x0378, .end = 0x0379 },
+    .{ .start = 0x0380, .end = 0x0383 },
+    .{ .start = 0x038B, .end = 0x038B },
+    .{ .start = 0x038D, .end = 0x038D },
+    .{ .start = 0x03A2, .end = 0x03A2 },
+    .{ .start = 0x0530, .end = 0x0530 },
+    .{ .start = 0x0557, .end = 0x0558 },
+    .{ .start = 0x058B, .end = 0x058C },
+    .{ .start = 0x0590, .end = 0x0590 },
+    .{ .start = 0x05C8, .end = 0x05CF },
+    .{ .start = 0x05EB, .end = 0x05EE },
+    .{ .start = 0x05F5, .end = 0x05FF },
+    .{ .start = 0x070E, .end = 0x070E },
+    .{ .start = 0x074B, .end = 0x074C },
+    .{ .start = 0x07B2, .end = 0x07BF },
+    .{ .start = 0x07FB, .end = 0x07FC },
+    .{ .start = 0x082E, .end = 0x082F },
+    .{ .start = 0x083F, .end = 0x083F },
+    .{ .start = 0x085C, .end = 0x085D },
+    .{ .start = 0x085F, .end = 0x085F },
+    .{ .start = 0x086B, .end = 0x086F },
+    .{ .start = 0x0892, .end = 0x0896 },
+    .{ .start = 0x0984, .end = 0x0984 },
+    .{ .start = 0x098D, .end = 0x098E },
+    .{ .start = 0x0991, .end = 0x0992 },
+    .{ .start = 0x09A9, .end = 0x09A9 },
+    .{ .start = 0x09B1, .end = 0x09B1 },
+    .{ .start = 0x09B3, .end = 0x09B5 },
+    .{ .start = 0x09BA, .end = 0x09BB },
+    .{ .start = 0x09C5, .end = 0x09C6 },
+    .{ .start = 0x09C9, .end = 0x09CA },
+    .{ .start = 0x09CF, .end = 0x09D6 },
+    .{ .start = 0x09D8, .end = 0x09DB },
+    .{ .start = 0x09DE, .end = 0x09DE },
+    .{ .start = 0x09E4, .end = 0x09E5 },
+    .{ .start = 0x09FF, .end = 0x0A00 },
+    .{ .start = 0x0A04, .end = 0x0A04 },
+    .{ .start = 0x0A0B, .end = 0x0A0E },
+    .{ .start = 0x0A11, .end = 0x0A12 },
+    .{ .start = 0x0A29, .end = 0x0A29 },
+    .{ .start = 0x0A31, .end = 0x0A31 },
+    .{ .start = 0x0A34, .end = 0x0A34 },
+    .{ .start = 0x0A37, .end = 0x0A37 },
+    .{ .start = 0x0A3A, .end = 0x0A3B },
+    .{ .start = 0x0A3D, .end = 0x0A3D },
+    .{ .start = 0x0A43, .end = 0x0A46 },
+    .{ .start = 0x0A49, .end = 0x0A4A },
+    .{ .start = 0x0A4E, .end = 0x0A50 },
+    .{ .start = 0x0A52, .end = 0x0A58 },
+    .{ .start = 0x0A5D, .end = 0x0A5D },
+    .{ .start = 0x0A5F, .end = 0x0A65 },
+    .{ .start = 0x0A77, .end = 0x0A80 },
+    .{ .start = 0x0A84, .end = 0x0A84 },
+    .{ .start = 0x0A8E, .end = 0x0A8E },
+    .{ .start = 0x0A92, .end = 0x0A92 },
+    .{ .start = 0x0AA9, .end = 0x0AA9 },
+    .{ .start = 0x0AB1, .end = 0x0AB1 },
+    .{ .start = 0x0AB4, .end = 0x0AB4 },
+    .{ .start = 0x0ABA, .end = 0x0ABB },
+    .{ .start = 0x0AC6, .end = 0x0AC6 },
+    .{ .start = 0x0ACA, .end = 0x0ACA },
+    .{ .start = 0x0ACE, .end = 0x0ACF },
+    .{ .start = 0x0AD1, .end = 0x0ADF },
+    .{ .start = 0x0AE4, .end = 0x0AE5 },
+    .{ .start = 0x0AF2, .end = 0x0AF8 },
+    .{ .start = 0x0B00, .end = 0x0B00 },
+    .{ .start = 0x0B04, .end = 0x0B04 },
+    .{ .start = 0x0B0D, .end = 0x0B0E },
+    .{ .start = 0x0B11, .end = 0x0B12 },
+    .{ .start = 0x0B29, .end = 0x0B29 },
+    .{ .start = 0x0B31, .end = 0x0B31 },
+    .{ .start = 0x0B34, .end = 0x0B34 },
+    .{ .start = 0x0B3A, .end = 0x0B3B },
+    .{ .start = 0x0B45, .end = 0x0B46 },
+    .{ .start = 0x0B49, .end = 0x0B4A },
+    .{ .start = 0x0B4E, .end = 0x0B54 },
+    .{ .start = 0x0B58, .end = 0x0B5B },
+    .{ .start = 0x0B5E, .end = 0x0B5E },
+    .{ .start = 0x0B64, .end = 0x0B65 },
+    .{ .start = 0x0B78, .end = 0x0B81 },
+    .{ .start = 0x0B84, .end = 0x0B84 },
+    .{ .start = 0x0B8B, .end = 0x0B8D },
+    .{ .start = 0x0B91, .end = 0x0B91 },
+    .{ .start = 0x0B96, .end = 0x0B98 },
+    .{ .start = 0x0B9B, .end = 0x0B9B },
+    .{ .start = 0x0B9D, .end = 0x0B9D },
+    .{ .start = 0x0BA0, .end = 0x0BA2 },
+    .{ .start = 0x0BA5, .end = 0x0BA7 },
+    .{ .start = 0x0BAB, .end = 0x0BAD },
+    .{ .start = 0x0BBA, .end = 0x0BBD },
+    .{ .start = 0x0BC3, .end = 0x0BC5 },
+    .{ .start = 0x0BC9, .end = 0x0BC9 },
+    .{ .start = 0x0BCE, .end = 0x0BCF },
+    .{ .start = 0x0BD1, .end = 0x0BD6 },
+    .{ .start = 0x0BD8, .end = 0x0BE5 },
+    .{ .start = 0x0BFB, .end = 0x0BFF },
+    .{ .start = 0x0C0D, .end = 0x0C0D },
+    .{ .start = 0x0C11, .end = 0x0C11 },
+    .{ .start = 0x0C29, .end = 0x0C29 },
+    .{ .start = 0x0C3A, .end = 0x0C3B },
+    .{ .start = 0x0C45, .end = 0x0C45 },
+    .{ .start = 0x0C49, .end = 0x0C49 },
+    .{ .start = 0x0C4E, .end = 0x0C54 },
+    .{ .start = 0x0C57, .end = 0x0C57 },
+    .{ .start = 0x0C5B, .end = 0x0C5B },
+    .{ .start = 0x0C5E, .end = 0x0C5F },
+    .{ .start = 0x0C64, .end = 0x0C65 },
+    .{ .start = 0x0C70, .end = 0x0C76 },
+    .{ .start = 0x0C8D, .end = 0x0C8D },
+    .{ .start = 0x0C91, .end = 0x0C91 },
+    .{ .start = 0x0CA9, .end = 0x0CA9 },
+    .{ .start = 0x0CB4, .end = 0x0CB4 },
+    .{ .start = 0x0CBA, .end = 0x0CBB },
+    .{ .start = 0x0CC5, .end = 0x0CC5 },
+    .{ .start = 0x0CC9, .end = 0x0CC9 },
+    .{ .start = 0x0CCE, .end = 0x0CD4 },
+    .{ .start = 0x0CD7, .end = 0x0CDB },
+    .{ .start = 0x0CDF, .end = 0x0CDF },
+    .{ .start = 0x0CE4, .end = 0x0CE5 },
+    .{ .start = 0x0CF0, .end = 0x0CF0 },
+    .{ .start = 0x0CF4, .end = 0x0CFF },
+    .{ .start = 0x0D0D, .end = 0x0D0D },
+    .{ .start = 0x0D11, .end = 0x0D11 },
+    .{ .start = 0x0D45, .end = 0x0D45 },
+    .{ .start = 0x0D49, .end = 0x0D49 },
+    .{ .start = 0x0D50, .end = 0x0D53 },
+    .{ .start = 0x0D64, .end = 0x0D65 },
+    .{ .start = 0x0D80, .end = 0x0D80 },
+    .{ .start = 0x0D84, .end = 0x0D84 },
+    .{ .start = 0x0D97, .end = 0x0D99 },
+    .{ .start = 0x0DB2, .end = 0x0DB2 },
+    .{ .start = 0x0DBC, .end = 0x0DBC },
+    .{ .start = 0x0DBE, .end = 0x0DBF },
+    .{ .start = 0x0DC7, .end = 0x0DC9 },
+    .{ .start = 0x0DCB, .end = 0x0DCE },
+    .{ .start = 0x0DD5, .end = 0x0DD5 },
+    .{ .start = 0x0DD7, .end = 0x0DD7 },
+    .{ .start = 0x0DE0, .end = 0x0DE5 },
+    .{ .start = 0x0DF0, .end = 0x0DF1 },
+    .{ .start = 0x0DF5, .end = 0x0E00 },
+    .{ .start = 0x0E3B, .end = 0x0E3E },
+    .{ .start = 0x0E5C, .end = 0x0E80 },
+    .{ .start = 0x0E83, .end = 0x0E83 },
+    .{ .start = 0x0E85, .end = 0x0E85 },
+    .{ .start = 0x0E8B, .end = 0x0E8B },
+    .{ .start = 0x0EA4, .end = 0x0EA4 },
+    .{ .start = 0x0EA6, .end = 0x0EA6 },
+    .{ .start = 0x0EBE, .end = 0x0EBF },
+    .{ .start = 0x0EC5, .end = 0x0EC5 },
+    .{ .start = 0x0EC7, .end = 0x0EC7 },
+    .{ .start = 0x0ECF, .end = 0x0ECF },
+    .{ .start = 0x0EDA, .end = 0x0EDB },
+    .{ .start = 0x0EE0, .end = 0x0EFF },
+    .{ .start = 0x0F48, .end = 0x0F48 },
+    .{ .start = 0x0F6D, .end = 0x0F70 },
+    .{ .start = 0x0F98, .end = 0x0F98 },
+    .{ .start = 0x0FBD, .end = 0x0FBD },
+    .{ .start = 0x0FCD, .end = 0x0FCD },
+    .{ .start = 0x0FDB, .end = 0x0FFF },
+    .{ .start = 0x10C6, .end = 0x10C6 },
+    .{ .start = 0x10C8, .end = 0x10CC },
+    .{ .start = 0x10CE, .end = 0x10CF },
+    .{ .start = 0x1249, .end = 0x1249 },
+    .{ .start = 0x124E, .end = 0x124F },
+    .{ .start = 0x1257, .end = 0x1257 },
+    .{ .start = 0x1259, .end = 0x1259 },
+    .{ .start = 0x125E, .end = 0x125F },
+    .{ .start = 0x1289, .end = 0x1289 },
+    .{ .start = 0x128E, .end = 0x128F },
+    .{ .start = 0x12B1, .end = 0x12B1 },
+    .{ .start = 0x12B6, .end = 0x12B7 },
+    .{ .start = 0x12BF, .end = 0x12BF },
+    .{ .start = 0x12C1, .end = 0x12C1 },
+    .{ .start = 0x12C6, .end = 0x12C7 },
+    .{ .start = 0x12D7, .end = 0x12D7 },
+    .{ .start = 0x1311, .end = 0x1311 },
+    .{ .start = 0x1316, .end = 0x1317 },
+    .{ .start = 0x135B, .end = 0x135C },
+    .{ .start = 0x137D, .end = 0x137F },
+    .{ .start = 0x139A, .end = 0x139F },
+    .{ .start = 0x13F6, .end = 0x13F7 },
+    .{ .start = 0x13FE, .end = 0x13FF },
+    .{ .start = 0x169D, .end = 0x169F },
+    .{ .start = 0x16F9, .end = 0x16FF },
+    .{ .start = 0x1716, .end = 0x171E },
+    .{ .start = 0x1737, .end = 0x173F },
+    .{ .start = 0x1754, .end = 0x175F },
+    .{ .start = 0x176D, .end = 0x176D },
+    .{ .start = 0x1771, .end = 0x1771 },
+    .{ .start = 0x1774, .end = 0x177F },
+    .{ .start = 0x17DE, .end = 0x17DF },
+    .{ .start = 0x17EA, .end = 0x17EF },
+    .{ .start = 0x17FA, .end = 0x17FF },
+    .{ .start = 0x181A, .end = 0x181F },
+    .{ .start = 0x1879, .end = 0x187F },
+    .{ .start = 0x18AB, .end = 0x18AF },
+    .{ .start = 0x18F6, .end = 0x18FF },
+    .{ .start = 0x191F, .end = 0x191F },
+    .{ .start = 0x192C, .end = 0x192F },
+    .{ .start = 0x193C, .end = 0x193F },
+    .{ .start = 0x1941, .end = 0x1943 },
+    .{ .start = 0x196E, .end = 0x196F },
+    .{ .start = 0x1975, .end = 0x197F },
+    .{ .start = 0x19AC, .end = 0x19AF },
+    .{ .start = 0x19CA, .end = 0x19CF },
+    .{ .start = 0x19DB, .end = 0x19DD },
+    .{ .start = 0x1A1C, .end = 0x1A1D },
+    .{ .start = 0x1A5F, .end = 0x1A5F },
+    .{ .start = 0x1A7D, .end = 0x1A7E },
+    .{ .start = 0x1A8A, .end = 0x1A8F },
+    .{ .start = 0x1A9A, .end = 0x1A9F },
+    .{ .start = 0x1AAE, .end = 0x1AAF },
+    .{ .start = 0x1ADE, .end = 0x1ADF },
+    .{ .start = 0x1AEC, .end = 0x1AFF },
+    .{ .start = 0x1B4D, .end = 0x1B4D },
+    .{ .start = 0x1BF4, .end = 0x1BFB },
+    .{ .start = 0x1C38, .end = 0x1C3A },
+    .{ .start = 0x1C4A, .end = 0x1C4C },
+    .{ .start = 0x1C8B, .end = 0x1C8F },
+    .{ .start = 0x1CBB, .end = 0x1CBC },
+    .{ .start = 0x1CC8, .end = 0x1CCF },
+    .{ .start = 0x1CFB, .end = 0x1CFF },
+    .{ .start = 0x1F16, .end = 0x1F17 },
+    .{ .start = 0x1F1E, .end = 0x1F1F },
+    .{ .start = 0x1F46, .end = 0x1F47 },
+    .{ .start = 0x1F4E, .end = 0x1F4F },
+    .{ .start = 0x1F58, .end = 0x1F58 },
+    .{ .start = 0x1F5A, .end = 0x1F5A },
+    .{ .start = 0x1F5C, .end = 0x1F5C },
+    .{ .start = 0x1F5E, .end = 0x1F5E },
+    .{ .start = 0x1F7E, .end = 0x1F7F },
+    .{ .start = 0x1FB5, .end = 0x1FB5 },
+    .{ .start = 0x1FC5, .end = 0x1FC5 },
+    .{ .start = 0x1FD4, .end = 0x1FD5 },
+    .{ .start = 0x1FDC, .end = 0x1FDC },
+    .{ .start = 0x1FF0, .end = 0x1FF1 },
+    .{ .start = 0x1FF5, .end = 0x1FF5 },
+    .{ .start = 0x1FFF, .end = 0x1FFF },
+    .{ .start = 0x2065, .end = 0x2065 },
+    .{ .start = 0x2072, .end = 0x2073 },
+    .{ .start = 0x208F, .end = 0x208F },
+    .{ .start = 0x209D, .end = 0x209F },
+    .{ .start = 0x20C2, .end = 0x20CF },
+    .{ .start = 0x20F1, .end = 0x20FF },
+    .{ .start = 0x218C, .end = 0x218F },
+    .{ .start = 0x242A, .end = 0x243F },
+    .{ .start = 0x244B, .end = 0x245F },
+    .{ .start = 0x2B74, .end = 0x2B75 },
+    .{ .start = 0x2CF4, .end = 0x2CF8 },
+    .{ .start = 0x2D26, .end = 0x2D26 },
+    .{ .start = 0x2D28, .end = 0x2D2C },
+    .{ .start = 0x2D2E, .end = 0x2D2F },
+    .{ .start = 0x2D68, .end = 0x2D6E },
+    .{ .start = 0x2D71, .end = 0x2D7E },
+    .{ .start = 0x2D97, .end = 0x2D9F },
+    .{ .start = 0x2DA7, .end = 0x2DA7 },
+    .{ .start = 0x2DAF, .end = 0x2DAF },
+    .{ .start = 0x2DB7, .end = 0x2DB7 },
+    .{ .start = 0x2DBF, .end = 0x2DBF },
+    .{ .start = 0x2DC7, .end = 0x2DC7 },
+    .{ .start = 0x2DCF, .end = 0x2DCF },
+    .{ .start = 0x2DD7, .end = 0x2DD7 },
+    .{ .start = 0x2DDF, .end = 0x2DDF },
+    .{ .start = 0x2E5E, .end = 0x2E7F },
+    .{ .start = 0x2E9A, .end = 0x2E9A },
+    .{ .start = 0x2EF4, .end = 0x2EFF },
+    .{ .start = 0x2FD6, .end = 0x2FEF },
+    .{ .start = 0x3040, .end = 0x3040 },
+    .{ .start = 0x3097, .end = 0x3098 },
+    .{ .start = 0x3100, .end = 0x3104 },
+    .{ .start = 0x3130, .end = 0x3130 },
+    .{ .start = 0x318F, .end = 0x318F },
+    .{ .start = 0x31E6, .end = 0x31EE },
+    .{ .start = 0x321F, .end = 0x321F },
+    .{ .start = 0xA48D, .end = 0xA48F },
+    .{ .start = 0xA4C7, .end = 0xA4CF },
+    .{ .start = 0xA62C, .end = 0xA63F },
+    .{ .start = 0xA6F8, .end = 0xA6FF },
+    .{ .start = 0xA7DD, .end = 0xA7F0 },
+    .{ .start = 0xA82D, .end = 0xA82F },
+    .{ .start = 0xA83A, .end = 0xA83F },
+    .{ .start = 0xA878, .end = 0xA87F },
+    .{ .start = 0xA8C6, .end = 0xA8CD },
+    .{ .start = 0xA8DA, .end = 0xA8DF },
+    .{ .start = 0xA954, .end = 0xA95E },
+    .{ .start = 0xA97D, .end = 0xA97F },
+    .{ .start = 0xA9CE, .end = 0xA9CE },
+    .{ .start = 0xA9DA, .end = 0xA9DD },
+    .{ .start = 0xA9FF, .end = 0xA9FF },
+    .{ .start = 0xAA37, .end = 0xAA3F },
+    .{ .start = 0xAA4E, .end = 0xAA4F },
+    .{ .start = 0xAA5A, .end = 0xAA5B },
+    .{ .start = 0xAAC3, .end = 0xAADA },
+    .{ .start = 0xAAF7, .end = 0xAB00 },
+    .{ .start = 0xAB07, .end = 0xAB08 },
+    .{ .start = 0xAB0F, .end = 0xAB10 },
+    .{ .start = 0xAB17, .end = 0xAB1F },
+    .{ .start = 0xAB27, .end = 0xAB27 },
+    .{ .start = 0xAB2F, .end = 0xAB2F },
+    .{ .start = 0xAB6C, .end = 0xAB6F },
+    .{ .start = 0xABEE, .end = 0xABEF },
+    .{ .start = 0xABFA, .end = 0xABFF },
+    .{ .start = 0xD7A4, .end = 0xD7AF },
+    .{ .start = 0xD7C7, .end = 0xD7CA },
+    .{ .start = 0xD7FC, .end = 0xF8FF },
+    .{ .start = 0xFA6E, .end = 0xFA6F },
+    .{ .start = 0xFADA, .end = 0xFAFF },
+    .{ .start = 0xFB07, .end = 0xFB12 },
+    .{ .start = 0xFB18, .end = 0xFB1C },
+    .{ .start = 0xFB37, .end = 0xFB37 },
+    .{ .start = 0xFB3D, .end = 0xFB3D },
+    .{ .start = 0xFB3F, .end = 0xFB3F },
+    .{ .start = 0xFB42, .end = 0xFB42 },
+    .{ .start = 0xFB45, .end = 0xFB45 },
+    .{ .start = 0xFDD0, .end = 0xFDEF },
+    .{ .start = 0xFE1A, .end = 0xFE1F },
+    .{ .start = 0xFE53, .end = 0xFE53 },
+    .{ .start = 0xFE67, .end = 0xFE67 },
+    .{ .start = 0xFE6C, .end = 0xFE6F },
+    .{ .start = 0xFE75, .end = 0xFE75 },
+    .{ .start = 0xFEFD, .end = 0xFEFE },
+    .{ .start = 0xFF00, .end = 0xFF00 },
+    .{ .start = 0xFFBF, .end = 0xFFC1 },
+    .{ .start = 0xFFC8, .end = 0xFFC9 },
+    .{ .start = 0xFFD0, .end = 0xFFD1 },
+    .{ .start = 0xFFD8, .end = 0xFFD9 },
+    .{ .start = 0xFFDD, .end = 0xFFDF },
+    .{ .start = 0xFFE7, .end = 0xFFE7 },
+    .{ .start = 0xFFEF, .end = 0xFFF8 },
+    .{ .start = 0xFFFE, .end = 0xFFFF },
+    .{ .start = 0x1000C, .end = 0x1000C },
+    .{ .start = 0x10027, .end = 0x10027 },
+    .{ .start = 0x1003B, .end = 0x1003B },
+    .{ .start = 0x1003E, .end = 0x1003E },
+    .{ .start = 0x1004E, .end = 0x1004F },
+    .{ .start = 0x1005E, .end = 0x1007F },
+    .{ .start = 0x100FB, .end = 0x100FF },
+    .{ .start = 0x10103, .end = 0x10106 },
+    .{ .start = 0x10134, .end = 0x10136 },
+    .{ .start = 0x1018F, .end = 0x1018F },
+    .{ .start = 0x1019D, .end = 0x1019F },
+    .{ .start = 0x101A1, .end = 0x101CF },
+    .{ .start = 0x101FE, .end = 0x1027F },
+    .{ .start = 0x1029D, .end = 0x1029F },
+    .{ .start = 0x102D1, .end = 0x102DF },
+    .{ .start = 0x102FC, .end = 0x102FF },
+    .{ .start = 0x10324, .end = 0x1032C },
+    .{ .start = 0x1034B, .end = 0x1034F },
+    .{ .start = 0x1037B, .end = 0x1037F },
+    .{ .start = 0x1039E, .end = 0x1039E },
+    .{ .start = 0x103C4, .end = 0x103C7 },
+    .{ .start = 0x103D6, .end = 0x103FF },
+    .{ .start = 0x1049E, .end = 0x1049F },
+    .{ .start = 0x104AA, .end = 0x104AF },
+    .{ .start = 0x104D4, .end = 0x104D7 },
+    .{ .start = 0x104FC, .end = 0x104FF },
+    .{ .start = 0x10528, .end = 0x1052F },
+    .{ .start = 0x10564, .end = 0x1056E },
+    .{ .start = 0x1057B, .end = 0x1057B },
+    .{ .start = 0x1058B, .end = 0x1058B },
+    .{ .start = 0x10593, .end = 0x10593 },
+    .{ .start = 0x10596, .end = 0x10596 },
+    .{ .start = 0x105A2, .end = 0x105A2 },
+    .{ .start = 0x105B2, .end = 0x105B2 },
+    .{ .start = 0x105BA, .end = 0x105BA },
+    .{ .start = 0x105BD, .end = 0x105BF },
+    .{ .start = 0x105F4, .end = 0x105FF },
+    .{ .start = 0x10737, .end = 0x1073F },
+    .{ .start = 0x10756, .end = 0x1075F },
+    .{ .start = 0x10768, .end = 0x1077F },
+    .{ .start = 0x10786, .end = 0x10786 },
+    .{ .start = 0x107B1, .end = 0x107B1 },
+    .{ .start = 0x107BB, .end = 0x107FF },
+    .{ .start = 0x10806, .end = 0x10807 },
+    .{ .start = 0x10809, .end = 0x10809 },
+    .{ .start = 0x10836, .end = 0x10836 },
+    .{ .start = 0x10839, .end = 0x1083B },
+    .{ .start = 0x1083D, .end = 0x1083E },
+    .{ .start = 0x10856, .end = 0x10856 },
+    .{ .start = 0x1089F, .end = 0x108A6 },
+    .{ .start = 0x108B0, .end = 0x108DF },
+    .{ .start = 0x108F3, .end = 0x108F3 },
+    .{ .start = 0x108F6, .end = 0x108FA },
+    .{ .start = 0x1091C, .end = 0x1091E },
+    .{ .start = 0x1093A, .end = 0x1093E },
+    .{ .start = 0x1095A, .end = 0x1097F },
+    .{ .start = 0x109B8, .end = 0x109BB },
+    .{ .start = 0x109D0, .end = 0x109D1 },
+    .{ .start = 0x10A04, .end = 0x10A04 },
+    .{ .start = 0x10A07, .end = 0x10A0B },
+    .{ .start = 0x10A14, .end = 0x10A14 },
+    .{ .start = 0x10A18, .end = 0x10A18 },
+    .{ .start = 0x10A36, .end = 0x10A37 },
+    .{ .start = 0x10A3B, .end = 0x10A3E },
+    .{ .start = 0x10A49, .end = 0x10A4F },
+    .{ .start = 0x10A59, .end = 0x10A5F },
+    .{ .start = 0x10AA0, .end = 0x10ABF },
+    .{ .start = 0x10AE7, .end = 0x10AEA },
+    .{ .start = 0x10AF7, .end = 0x10AFF },
+    .{ .start = 0x10B36, .end = 0x10B38 },
+    .{ .start = 0x10B56, .end = 0x10B57 },
+    .{ .start = 0x10B73, .end = 0x10B77 },
+    .{ .start = 0x10B92, .end = 0x10B98 },
+    .{ .start = 0x10B9D, .end = 0x10BA8 },
+    .{ .start = 0x10BB0, .end = 0x10BFF },
+    .{ .start = 0x10C49, .end = 0x10C7F },
+    .{ .start = 0x10CB3, .end = 0x10CBF },
+    .{ .start = 0x10CF3, .end = 0x10CF9 },
+    .{ .start = 0x10D28, .end = 0x10D2F },
+    .{ .start = 0x10D3A, .end = 0x10D3F },
+    .{ .start = 0x10D66, .end = 0x10D68 },
+    .{ .start = 0x10D86, .end = 0x10D8D },
+    .{ .start = 0x10D90, .end = 0x10E5F },
+    .{ .start = 0x10E7F, .end = 0x10E7F },
+    .{ .start = 0x10EAA, .end = 0x10EAA },
+    .{ .start = 0x10EAE, .end = 0x10EAF },
+    .{ .start = 0x10EB2, .end = 0x10EC1 },
+    .{ .start = 0x10EC8, .end = 0x10ECF },
+    .{ .start = 0x10ED9, .end = 0x10EF9 },
+    .{ .start = 0x10F28, .end = 0x10F2F },
+    .{ .start = 0x10F5A, .end = 0x10F6F },
+    .{ .start = 0x10F8A, .end = 0x10FAF },
+    .{ .start = 0x10FCC, .end = 0x10FDF },
+    .{ .start = 0x10FF7, .end = 0x10FFF },
+    .{ .start = 0x1104E, .end = 0x11051 },
+    .{ .start = 0x11076, .end = 0x1107E },
+    .{ .start = 0x110C3, .end = 0x110CC },
+    .{ .start = 0x110CE, .end = 0x110CF },
+    .{ .start = 0x110E9, .end = 0x110EF },
+    .{ .start = 0x110FA, .end = 0x110FF },
+    .{ .start = 0x11135, .end = 0x11135 },
+    .{ .start = 0x11148, .end = 0x1114F },
+    .{ .start = 0x11177, .end = 0x1117F },
+    .{ .start = 0x111E0, .end = 0x111E0 },
+    .{ .start = 0x111F5, .end = 0x111FF },
+    .{ .start = 0x11212, .end = 0x11212 },
+    .{ .start = 0x11242, .end = 0x1127F },
+    .{ .start = 0x11287, .end = 0x11287 },
+    .{ .start = 0x11289, .end = 0x11289 },
+    .{ .start = 0x1128E, .end = 0x1128E },
+    .{ .start = 0x1129E, .end = 0x1129E },
+    .{ .start = 0x112AA, .end = 0x112AF },
+    .{ .start = 0x112EB, .end = 0x112EF },
+    .{ .start = 0x112FA, .end = 0x112FF },
+    .{ .start = 0x11304, .end = 0x11304 },
+    .{ .start = 0x1130D, .end = 0x1130E },
+    .{ .start = 0x11311, .end = 0x11312 },
+    .{ .start = 0x11329, .end = 0x11329 },
+    .{ .start = 0x11331, .end = 0x11331 },
+    .{ .start = 0x11334, .end = 0x11334 },
+    .{ .start = 0x1133A, .end = 0x1133A },
+    .{ .start = 0x11345, .end = 0x11346 },
+    .{ .start = 0x11349, .end = 0x1134A },
+    .{ .start = 0x1134E, .end = 0x1134F },
+    .{ .start = 0x11351, .end = 0x11356 },
+    .{ .start = 0x11358, .end = 0x1135C },
+    .{ .start = 0x11364, .end = 0x11365 },
+    .{ .start = 0x1136D, .end = 0x1136F },
+    .{ .start = 0x11375, .end = 0x1137F },
+    .{ .start = 0x1138A, .end = 0x1138A },
+    .{ .start = 0x1138C, .end = 0x1138D },
+    .{ .start = 0x1138F, .end = 0x1138F },
+    .{ .start = 0x113B6, .end = 0x113B6 },
+    .{ .start = 0x113C1, .end = 0x113C1 },
+    .{ .start = 0x113C3, .end = 0x113C4 },
+    .{ .start = 0x113C6, .end = 0x113C6 },
+    .{ .start = 0x113CB, .end = 0x113CB },
+    .{ .start = 0x113D6, .end = 0x113D6 },
+    .{ .start = 0x113D9, .end = 0x113E0 },
+    .{ .start = 0x113E3, .end = 0x113FF },
+    .{ .start = 0x1145C, .end = 0x1145C },
+    .{ .start = 0x11462, .end = 0x1147F },
+    .{ .start = 0x114C8, .end = 0x114CF },
+    .{ .start = 0x114DA, .end = 0x1157F },
+    .{ .start = 0x115B6, .end = 0x115B7 },
+    .{ .start = 0x115DE, .end = 0x115FF },
+    .{ .start = 0x11645, .end = 0x1164F },
+    .{ .start = 0x1165A, .end = 0x1165F },
+    .{ .start = 0x1166D, .end = 0x1167F },
+    .{ .start = 0x116BA, .end = 0x116BF },
+    .{ .start = 0x116CA, .end = 0x116CF },
+    .{ .start = 0x116E4, .end = 0x116FF },
+    .{ .start = 0x1171B, .end = 0x1171C },
+    .{ .start = 0x1172C, .end = 0x1172F },
+    .{ .start = 0x11747, .end = 0x117FF },
+    .{ .start = 0x1183C, .end = 0x1189F },
+    .{ .start = 0x118F3, .end = 0x118FE },
+    .{ .start = 0x11907, .end = 0x11908 },
+    .{ .start = 0x1190A, .end = 0x1190B },
+    .{ .start = 0x11914, .end = 0x11914 },
+    .{ .start = 0x11917, .end = 0x11917 },
+    .{ .start = 0x11936, .end = 0x11936 },
+    .{ .start = 0x11939, .end = 0x1193A },
+    .{ .start = 0x11947, .end = 0x1194F },
+    .{ .start = 0x1195A, .end = 0x1199F },
+    .{ .start = 0x119A8, .end = 0x119A9 },
+    .{ .start = 0x119D8, .end = 0x119D9 },
+    .{ .start = 0x119E5, .end = 0x119FF },
+    .{ .start = 0x11A48, .end = 0x11A4F },
+    .{ .start = 0x11AA3, .end = 0x11AAF },
+    .{ .start = 0x11AF9, .end = 0x11AFF },
+    .{ .start = 0x11B0A, .end = 0x11B5F },
+    .{ .start = 0x11B68, .end = 0x11BBF },
+    .{ .start = 0x11BE2, .end = 0x11BEF },
+    .{ .start = 0x11BFA, .end = 0x11BFF },
+    .{ .start = 0x11C09, .end = 0x11C09 },
+    .{ .start = 0x11C37, .end = 0x11C37 },
+    .{ .start = 0x11C46, .end = 0x11C4F },
+    .{ .start = 0x11C6D, .end = 0x11C6F },
+    .{ .start = 0x11C90, .end = 0x11C91 },
+    .{ .start = 0x11CA8, .end = 0x11CA8 },
+    .{ .start = 0x11CB7, .end = 0x11CFF },
+    .{ .start = 0x11D07, .end = 0x11D07 },
+    .{ .start = 0x11D0A, .end = 0x11D0A },
+    .{ .start = 0x11D37, .end = 0x11D39 },
+    .{ .start = 0x11D3B, .end = 0x11D3B },
+    .{ .start = 0x11D3E, .end = 0x11D3E },
+    .{ .start = 0x11D48, .end = 0x11D4F },
+    .{ .start = 0x11D5A, .end = 0x11D5F },
+    .{ .start = 0x11D66, .end = 0x11D66 },
+    .{ .start = 0x11D69, .end = 0x11D69 },
+    .{ .start = 0x11D8F, .end = 0x11D8F },
+    .{ .start = 0x11D92, .end = 0x11D92 },
+    .{ .start = 0x11D99, .end = 0x11D9F },
+    .{ .start = 0x11DAA, .end = 0x11DAF },
+    .{ .start = 0x11DDC, .end = 0x11DDF },
+    .{ .start = 0x11DEA, .end = 0x11EDF },
+    .{ .start = 0x11EF9, .end = 0x11EFF },
+    .{ .start = 0x11F11, .end = 0x11F11 },
+    .{ .start = 0x11F3B, .end = 0x11F3D },
+    .{ .start = 0x11F5B, .end = 0x11FAF },
+    .{ .start = 0x11FB1, .end = 0x11FBF },
+    .{ .start = 0x11FF2, .end = 0x11FFE },
+    .{ .start = 0x1239A, .end = 0x123FF },
+    .{ .start = 0x1246F, .end = 0x1246F },
+    .{ .start = 0x12475, .end = 0x1247F },
+    .{ .start = 0x12544, .end = 0x12F8F },
+    .{ .start = 0x12FF3, .end = 0x12FFF },
+    .{ .start = 0x13456, .end = 0x1345F },
+    .{ .start = 0x143FB, .end = 0x143FF },
+    .{ .start = 0x14647, .end = 0x160FF },
+    .{ .start = 0x1613A, .end = 0x167FF },
+    .{ .start = 0x16A39, .end = 0x16A3F },
+    .{ .start = 0x16A5F, .end = 0x16A5F },
+    .{ .start = 0x16A6A, .end = 0x16A6D },
+    .{ .start = 0x16ABF, .end = 0x16ABF },
+    .{ .start = 0x16ACA, .end = 0x16ACF },
+    .{ .start = 0x16AEE, .end = 0x16AEF },
+    .{ .start = 0x16AF6, .end = 0x16AFF },
+    .{ .start = 0x16B46, .end = 0x16B4F },
+    .{ .start = 0x16B5A, .end = 0x16B5A },
+    .{ .start = 0x16B62, .end = 0x16B62 },
+    .{ .start = 0x16B78, .end = 0x16B7C },
+    .{ .start = 0x16B90, .end = 0x16D3F },
+    .{ .start = 0x16D7A, .end = 0x16E3F },
+    .{ .start = 0x16E9B, .end = 0x16E9F },
+    .{ .start = 0x16EB9, .end = 0x16EBA },
+    .{ .start = 0x16ED4, .end = 0x16EFF },
+    .{ .start = 0x16F4B, .end = 0x16F4E },
+    .{ .start = 0x16F88, .end = 0x16F8E },
+    .{ .start = 0x16FA0, .end = 0x16FDF },
+    .{ .start = 0x16FE5, .end = 0x16FEF },
+    .{ .start = 0x16FF7, .end = 0x16FFF },
+    .{ .start = 0x18CD6, .end = 0x18CFE },
+    .{ .start = 0x18D1F, .end = 0x18D7F },
+    .{ .start = 0x18DF3, .end = 0x1AFEF },
+    .{ .start = 0x1AFF4, .end = 0x1AFF4 },
+    .{ .start = 0x1AFFC, .end = 0x1AFFC },
+    .{ .start = 0x1AFFF, .end = 0x1AFFF },
+    .{ .start = 0x1B123, .end = 0x1B131 },
+    .{ .start = 0x1B133, .end = 0x1B14F },
+    .{ .start = 0x1B153, .end = 0x1B154 },
+    .{ .start = 0x1B156, .end = 0x1B163 },
+    .{ .start = 0x1B168, .end = 0x1B16F },
+    .{ .start = 0x1B2FC, .end = 0x1BBFF },
+    .{ .start = 0x1BC6B, .end = 0x1BC6F },
+    .{ .start = 0x1BC7D, .end = 0x1BC7F },
+    .{ .start = 0x1BC89, .end = 0x1BC8F },
+    .{ .start = 0x1BC9A, .end = 0x1BC9B },
+    .{ .start = 0x1BCA4, .end = 0x1CBFF },
+    .{ .start = 0x1CCFD, .end = 0x1CCFF },
+    .{ .start = 0x1CEB4, .end = 0x1CEB9 },
+    .{ .start = 0x1CED1, .end = 0x1CEDF },
+    .{ .start = 0x1CEF1, .end = 0x1CEFF },
+    .{ .start = 0x1CF2E, .end = 0x1CF2F },
+    .{ .start = 0x1CF47, .end = 0x1CF4F },
+    .{ .start = 0x1CFC4, .end = 0x1CFFF },
+    .{ .start = 0x1D0F6, .end = 0x1D0FF },
+    .{ .start = 0x1D127, .end = 0x1D128 },
+    .{ .start = 0x1D1EB, .end = 0x1D1FF },
+    .{ .start = 0x1D246, .end = 0x1D2BF },
+    .{ .start = 0x1D2D4, .end = 0x1D2DF },
+    .{ .start = 0x1D2F4, .end = 0x1D2FF },
+    .{ .start = 0x1D357, .end = 0x1D35F },
+    .{ .start = 0x1D379, .end = 0x1D3FF },
+    .{ .start = 0x1D455, .end = 0x1D455 },
+    .{ .start = 0x1D49D, .end = 0x1D49D },
+    .{ .start = 0x1D4A0, .end = 0x1D4A1 },
+    .{ .start = 0x1D4A3, .end = 0x1D4A4 },
+    .{ .start = 0x1D4A7, .end = 0x1D4A8 },
+    .{ .start = 0x1D4AD, .end = 0x1D4AD },
+    .{ .start = 0x1D4BA, .end = 0x1D4BA },
+    .{ .start = 0x1D4BC, .end = 0x1D4BC },
+    .{ .start = 0x1D4C4, .end = 0x1D4C4 },
+    .{ .start = 0x1D506, .end = 0x1D506 },
+    .{ .start = 0x1D50B, .end = 0x1D50C },
+    .{ .start = 0x1D515, .end = 0x1D515 },
+    .{ .start = 0x1D51D, .end = 0x1D51D },
+    .{ .start = 0x1D53A, .end = 0x1D53A },
+    .{ .start = 0x1D53F, .end = 0x1D53F },
+    .{ .start = 0x1D545, .end = 0x1D545 },
+    .{ .start = 0x1D547, .end = 0x1D549 },
+    .{ .start = 0x1D551, .end = 0x1D551 },
+    .{ .start = 0x1D6A6, .end = 0x1D6A7 },
+    .{ .start = 0x1D7CC, .end = 0x1D7CD },
+    .{ .start = 0x1DA8C, .end = 0x1DA9A },
+    .{ .start = 0x1DAA0, .end = 0x1DAA0 },
+    .{ .start = 0x1DAB0, .end = 0x1DEFF },
+    .{ .start = 0x1DF1F, .end = 0x1DF24 },
+    .{ .start = 0x1DF2B, .end = 0x1DFFF },
+    .{ .start = 0x1E007, .end = 0x1E007 },
+    .{ .start = 0x1E019, .end = 0x1E01A },
+    .{ .start = 0x1E022, .end = 0x1E022 },
+    .{ .start = 0x1E025, .end = 0x1E025 },
+    .{ .start = 0x1E02B, .end = 0x1E02F },
+    .{ .start = 0x1E06E, .end = 0x1E08E },
+    .{ .start = 0x1E090, .end = 0x1E0FF },
+    .{ .start = 0x1E12D, .end = 0x1E12F },
+    .{ .start = 0x1E13E, .end = 0x1E13F },
+    .{ .start = 0x1E14A, .end = 0x1E14D },
+    .{ .start = 0x1E150, .end = 0x1E28F },
+    .{ .start = 0x1E2AF, .end = 0x1E2BF },
+    .{ .start = 0x1E2FA, .end = 0x1E2FE },
+    .{ .start = 0x1E300, .end = 0x1E4CF },
+    .{ .start = 0x1E4FA, .end = 0x1E5CF },
+    .{ .start = 0x1E5FB, .end = 0x1E5FE },
+    .{ .start = 0x1E600, .end = 0x1E6BF },
+    .{ .start = 0x1E6DF, .end = 0x1E6DF },
+    .{ .start = 0x1E6F6, .end = 0x1E6FD },
+    .{ .start = 0x1E700, .end = 0x1E7DF },
+    .{ .start = 0x1E7E7, .end = 0x1E7E7 },
+    .{ .start = 0x1E7EC, .end = 0x1E7EC },
+    .{ .start = 0x1E7EF, .end = 0x1E7EF },
+    .{ .start = 0x1E7FF, .end = 0x1E7FF },
+    .{ .start = 0x1E8C5, .end = 0x1E8C6 },
+    .{ .start = 0x1E8D7, .end = 0x1E8FF },
+    .{ .start = 0x1E94C, .end = 0x1E94F },
+    .{ .start = 0x1E95A, .end = 0x1E95D },
+    .{ .start = 0x1E960, .end = 0x1EC70 },
+    .{ .start = 0x1ECB5, .end = 0x1ED00 },
+    .{ .start = 0x1ED3E, .end = 0x1EDFF },
+    .{ .start = 0x1EE04, .end = 0x1EE04 },
+    .{ .start = 0x1EE20, .end = 0x1EE20 },
+    .{ .start = 0x1EE23, .end = 0x1EE23 },
+    .{ .start = 0x1EE25, .end = 0x1EE26 },
+    .{ .start = 0x1EE28, .end = 0x1EE28 },
+    .{ .start = 0x1EE33, .end = 0x1EE33 },
+    .{ .start = 0x1EE38, .end = 0x1EE38 },
+    .{ .start = 0x1EE3A, .end = 0x1EE3A },
+    .{ .start = 0x1EE3C, .end = 0x1EE41 },
+    .{ .start = 0x1EE43, .end = 0x1EE46 },
+    .{ .start = 0x1EE48, .end = 0x1EE48 },
+    .{ .start = 0x1EE4A, .end = 0x1EE4A },
+    .{ .start = 0x1EE4C, .end = 0x1EE4C },
+    .{ .start = 0x1EE50, .end = 0x1EE50 },
+    .{ .start = 0x1EE53, .end = 0x1EE53 },
+    .{ .start = 0x1EE55, .end = 0x1EE56 },
+    .{ .start = 0x1EE58, .end = 0x1EE58 },
+    .{ .start = 0x1EE5A, .end = 0x1EE5A },
+    .{ .start = 0x1EE5C, .end = 0x1EE5C },
+    .{ .start = 0x1EE5E, .end = 0x1EE5E },
+    .{ .start = 0x1EE60, .end = 0x1EE60 },
+    .{ .start = 0x1EE63, .end = 0x1EE63 },
+    .{ .start = 0x1EE65, .end = 0x1EE66 },
+    .{ .start = 0x1EE6B, .end = 0x1EE6B },
+    .{ .start = 0x1EE73, .end = 0x1EE73 },
+    .{ .start = 0x1EE78, .end = 0x1EE78 },
+    .{ .start = 0x1EE7D, .end = 0x1EE7D },
+    .{ .start = 0x1EE7F, .end = 0x1EE7F },
+    .{ .start = 0x1EE8A, .end = 0x1EE8A },
+    .{ .start = 0x1EE9C, .end = 0x1EEA0 },
+    .{ .start = 0x1EEA4, .end = 0x1EEA4 },
+    .{ .start = 0x1EEAA, .end = 0x1EEAA },
+    .{ .start = 0x1EEBC, .end = 0x1EEEF },
+    .{ .start = 0x1EEF2, .end = 0x1EFFF },
+    .{ .start = 0x1F02C, .end = 0x1F02F },
+    .{ .start = 0x1F094, .end = 0x1F09F },
+    .{ .start = 0x1F0AF, .end = 0x1F0B0 },
+    .{ .start = 0x1F0C0, .end = 0x1F0C0 },
+    .{ .start = 0x1F0D0, .end = 0x1F0D0 },
+    .{ .start = 0x1F0F6, .end = 0x1F0FF },
+    .{ .start = 0x1F1AE, .end = 0x1F1E5 },
+    .{ .start = 0x1F203, .end = 0x1F20F },
+    .{ .start = 0x1F23C, .end = 0x1F23F },
+    .{ .start = 0x1F249, .end = 0x1F24F },
+    .{ .start = 0x1F252, .end = 0x1F25F },
+    .{ .start = 0x1F266, .end = 0x1F2FF },
+    .{ .start = 0x1F6D9, .end = 0x1F6DB },
+    .{ .start = 0x1F6ED, .end = 0x1F6EF },
+    .{ .start = 0x1F6FD, .end = 0x1F6FF },
+    .{ .start = 0x1F7DA, .end = 0x1F7DF },
+    .{ .start = 0x1F7EC, .end = 0x1F7EF },
+    .{ .start = 0x1F7F1, .end = 0x1F7FF },
+    .{ .start = 0x1F80C, .end = 0x1F80F },
+    .{ .start = 0x1F848, .end = 0x1F84F },
+    .{ .start = 0x1F85A, .end = 0x1F85F },
+    .{ .start = 0x1F888, .end = 0x1F88F },
+    .{ .start = 0x1F8AE, .end = 0x1F8AF },
+    .{ .start = 0x1F8BC, .end = 0x1F8BF },
+    .{ .start = 0x1F8C2, .end = 0x1F8CF },
+    .{ .start = 0x1F8D9, .end = 0x1F8FF },
+    .{ .start = 0x1FA58, .end = 0x1FA5F },
+    .{ .start = 0x1FA6E, .end = 0x1FA6F },
+    .{ .start = 0x1FA7D, .end = 0x1FA7F },
+    .{ .start = 0x1FA8B, .end = 0x1FA8D },
+    .{ .start = 0x1FAC7, .end = 0x1FAC7 },
+    .{ .start = 0x1FAC9, .end = 0x1FACC },
+    .{ .start = 0x1FADD, .end = 0x1FADE },
+    .{ .start = 0x1FAEB, .end = 0x1FAEE },
+    .{ .start = 0x1FAF9, .end = 0x1FAFF },
+    .{ .start = 0x1FB93, .end = 0x1FB93 },
+    .{ .start = 0x1FBFB, .end = 0x1FFFF },
+    .{ .start = 0x2A6E0, .end = 0x2A6FF },
+    .{ .start = 0x2B81E, .end = 0x2B81F },
+    .{ .start = 0x2CEAE, .end = 0x2CEAF },
+    .{ .start = 0x2EBE1, .end = 0x2EBEF },
+    .{ .start = 0x2EE5E, .end = 0x2F7FF },
+    .{ .start = 0x2FA1E, .end = 0x2FFFF },
+    .{ .start = 0x3134B, .end = 0x3134F },
+    .{ .start = 0x3347A, .end = 0xE0000 },
+    .{ .start = 0xE0002, .end = 0xE001F },
+    .{ .start = 0xE0080, .end = 0xE00FF },
+    .{ .start = 0xE01F0, .end = 0x10FFFF },
+};
+
 /// Resolve a General_Category value name to its sorted ranges, or null
 /// if `name` is not a value ECMA-262 §22.2.1.1 recognises. Exact,
 /// case-sensitive match (no loose UCD matching).
@@ -19714,6 +24574,726 @@ pub fn binaryProperty(name: []const u8) ?[]const Range {
     if (std.mem.eql(u8, name, "XIDC")) return &bp_XID_Continue;
     if (std.mem.eql(u8, name, "XID_Start")) return &bp_XID_Start;
     if (std.mem.eql(u8, name, "XIDS")) return &bp_XID_Start;
+    return null;
+}
+
+/// Resolve a Script value (long name, short code, or alias) to its
+/// sorted ranges, or null if not a script ECMA-262 §22.2.1.1 lists.
+pub fn script(name: []const u8) ?[]const Range {
+    if (std.mem.eql(u8, name, "Adlm")) return &script_Adlm;
+    if (std.mem.eql(u8, name, "Adlam")) return &script_Adlm;
+    if (std.mem.eql(u8, name, "Aghb")) return &script_Aghb;
+    if (std.mem.eql(u8, name, "Caucasian_Albanian")) return &script_Aghb;
+    if (std.mem.eql(u8, name, "Ahom")) return &script_Ahom;
+    if (std.mem.eql(u8, name, "Ahom")) return &script_Ahom;
+    if (std.mem.eql(u8, name, "Arab")) return &script_Arab;
+    if (std.mem.eql(u8, name, "Arabic")) return &script_Arab;
+    if (std.mem.eql(u8, name, "Armi")) return &script_Armi;
+    if (std.mem.eql(u8, name, "Imperial_Aramaic")) return &script_Armi;
+    if (std.mem.eql(u8, name, "Armn")) return &script_Armn;
+    if (std.mem.eql(u8, name, "Armenian")) return &script_Armn;
+    if (std.mem.eql(u8, name, "Avst")) return &script_Avst;
+    if (std.mem.eql(u8, name, "Avestan")) return &script_Avst;
+    if (std.mem.eql(u8, name, "Bali")) return &script_Bali;
+    if (std.mem.eql(u8, name, "Balinese")) return &script_Bali;
+    if (std.mem.eql(u8, name, "Bamu")) return &script_Bamu;
+    if (std.mem.eql(u8, name, "Bamum")) return &script_Bamu;
+    if (std.mem.eql(u8, name, "Bass")) return &script_Bass;
+    if (std.mem.eql(u8, name, "Bassa_Vah")) return &script_Bass;
+    if (std.mem.eql(u8, name, "Batk")) return &script_Batk;
+    if (std.mem.eql(u8, name, "Batak")) return &script_Batk;
+    if (std.mem.eql(u8, name, "Beng")) return &script_Beng;
+    if (std.mem.eql(u8, name, "Bengali")) return &script_Beng;
+    if (std.mem.eql(u8, name, "Berf")) return &script_Berf;
+    if (std.mem.eql(u8, name, "Beria_Erfe")) return &script_Berf;
+    if (std.mem.eql(u8, name, "Bhks")) return &script_Bhks;
+    if (std.mem.eql(u8, name, "Bhaiksuki")) return &script_Bhks;
+    if (std.mem.eql(u8, name, "Bopo")) return &script_Bopo;
+    if (std.mem.eql(u8, name, "Bopomofo")) return &script_Bopo;
+    if (std.mem.eql(u8, name, "Brah")) return &script_Brah;
+    if (std.mem.eql(u8, name, "Brahmi")) return &script_Brah;
+    if (std.mem.eql(u8, name, "Brai")) return &script_Brai;
+    if (std.mem.eql(u8, name, "Braille")) return &script_Brai;
+    if (std.mem.eql(u8, name, "Bugi")) return &script_Bugi;
+    if (std.mem.eql(u8, name, "Buginese")) return &script_Bugi;
+    if (std.mem.eql(u8, name, "Buhd")) return &script_Buhd;
+    if (std.mem.eql(u8, name, "Buhid")) return &script_Buhd;
+    if (std.mem.eql(u8, name, "Cakm")) return &script_Cakm;
+    if (std.mem.eql(u8, name, "Chakma")) return &script_Cakm;
+    if (std.mem.eql(u8, name, "Cans")) return &script_Cans;
+    if (std.mem.eql(u8, name, "Canadian_Aboriginal")) return &script_Cans;
+    if (std.mem.eql(u8, name, "Cari")) return &script_Cari;
+    if (std.mem.eql(u8, name, "Carian")) return &script_Cari;
+    if (std.mem.eql(u8, name, "Cham")) return &script_Cham;
+    if (std.mem.eql(u8, name, "Cham")) return &script_Cham;
+    if (std.mem.eql(u8, name, "Cher")) return &script_Cher;
+    if (std.mem.eql(u8, name, "Cherokee")) return &script_Cher;
+    if (std.mem.eql(u8, name, "Chrs")) return &script_Chrs;
+    if (std.mem.eql(u8, name, "Chorasmian")) return &script_Chrs;
+    if (std.mem.eql(u8, name, "Copt")) return &script_Copt;
+    if (std.mem.eql(u8, name, "Coptic")) return &script_Copt;
+    if (std.mem.eql(u8, name, "Qaac")) return &script_Copt;
+    if (std.mem.eql(u8, name, "Cpmn")) return &script_Cpmn;
+    if (std.mem.eql(u8, name, "Cypro_Minoan")) return &script_Cpmn;
+    if (std.mem.eql(u8, name, "Cprt")) return &script_Cprt;
+    if (std.mem.eql(u8, name, "Cypriot")) return &script_Cprt;
+    if (std.mem.eql(u8, name, "Cyrl")) return &script_Cyrl;
+    if (std.mem.eql(u8, name, "Cyrillic")) return &script_Cyrl;
+    if (std.mem.eql(u8, name, "Deva")) return &script_Deva;
+    if (std.mem.eql(u8, name, "Devanagari")) return &script_Deva;
+    if (std.mem.eql(u8, name, "Diak")) return &script_Diak;
+    if (std.mem.eql(u8, name, "Dives_Akuru")) return &script_Diak;
+    if (std.mem.eql(u8, name, "Dogr")) return &script_Dogr;
+    if (std.mem.eql(u8, name, "Dogra")) return &script_Dogr;
+    if (std.mem.eql(u8, name, "Dsrt")) return &script_Dsrt;
+    if (std.mem.eql(u8, name, "Deseret")) return &script_Dsrt;
+    if (std.mem.eql(u8, name, "Dupl")) return &script_Dupl;
+    if (std.mem.eql(u8, name, "Duployan")) return &script_Dupl;
+    if (std.mem.eql(u8, name, "Egyp")) return &script_Egyp;
+    if (std.mem.eql(u8, name, "Egyptian_Hieroglyphs")) return &script_Egyp;
+    if (std.mem.eql(u8, name, "Elba")) return &script_Elba;
+    if (std.mem.eql(u8, name, "Elbasan")) return &script_Elba;
+    if (std.mem.eql(u8, name, "Elym")) return &script_Elym;
+    if (std.mem.eql(u8, name, "Elymaic")) return &script_Elym;
+    if (std.mem.eql(u8, name, "Ethi")) return &script_Ethi;
+    if (std.mem.eql(u8, name, "Ethiopic")) return &script_Ethi;
+    if (std.mem.eql(u8, name, "Gara")) return &script_Gara;
+    if (std.mem.eql(u8, name, "Garay")) return &script_Gara;
+    if (std.mem.eql(u8, name, "Geor")) return &script_Geor;
+    if (std.mem.eql(u8, name, "Georgian")) return &script_Geor;
+    if (std.mem.eql(u8, name, "Glag")) return &script_Glag;
+    if (std.mem.eql(u8, name, "Glagolitic")) return &script_Glag;
+    if (std.mem.eql(u8, name, "Gong")) return &script_Gong;
+    if (std.mem.eql(u8, name, "Gunjala_Gondi")) return &script_Gong;
+    if (std.mem.eql(u8, name, "Gonm")) return &script_Gonm;
+    if (std.mem.eql(u8, name, "Masaram_Gondi")) return &script_Gonm;
+    if (std.mem.eql(u8, name, "Goth")) return &script_Goth;
+    if (std.mem.eql(u8, name, "Gothic")) return &script_Goth;
+    if (std.mem.eql(u8, name, "Gran")) return &script_Gran;
+    if (std.mem.eql(u8, name, "Grantha")) return &script_Gran;
+    if (std.mem.eql(u8, name, "Grek")) return &script_Grek;
+    if (std.mem.eql(u8, name, "Greek")) return &script_Grek;
+    if (std.mem.eql(u8, name, "Gujr")) return &script_Gujr;
+    if (std.mem.eql(u8, name, "Gujarati")) return &script_Gujr;
+    if (std.mem.eql(u8, name, "Gukh")) return &script_Gukh;
+    if (std.mem.eql(u8, name, "Gurung_Khema")) return &script_Gukh;
+    if (std.mem.eql(u8, name, "Guru")) return &script_Guru;
+    if (std.mem.eql(u8, name, "Gurmukhi")) return &script_Guru;
+    if (std.mem.eql(u8, name, "Hang")) return &script_Hang;
+    if (std.mem.eql(u8, name, "Hangul")) return &script_Hang;
+    if (std.mem.eql(u8, name, "Hani")) return &script_Hani;
+    if (std.mem.eql(u8, name, "Han")) return &script_Hani;
+    if (std.mem.eql(u8, name, "Hano")) return &script_Hano;
+    if (std.mem.eql(u8, name, "Hanunoo")) return &script_Hano;
+    if (std.mem.eql(u8, name, "Hatr")) return &script_Hatr;
+    if (std.mem.eql(u8, name, "Hatran")) return &script_Hatr;
+    if (std.mem.eql(u8, name, "Hebr")) return &script_Hebr;
+    if (std.mem.eql(u8, name, "Hebrew")) return &script_Hebr;
+    if (std.mem.eql(u8, name, "Hira")) return &script_Hira;
+    if (std.mem.eql(u8, name, "Hiragana")) return &script_Hira;
+    if (std.mem.eql(u8, name, "Hluw")) return &script_Hluw;
+    if (std.mem.eql(u8, name, "Anatolian_Hieroglyphs")) return &script_Hluw;
+    if (std.mem.eql(u8, name, "Hmng")) return &script_Hmng;
+    if (std.mem.eql(u8, name, "Pahawh_Hmong")) return &script_Hmng;
+    if (std.mem.eql(u8, name, "Hmnp")) return &script_Hmnp;
+    if (std.mem.eql(u8, name, "Nyiakeng_Puachue_Hmong")) return &script_Hmnp;
+    if (std.mem.eql(u8, name, "Hrkt")) return &script_Hrkt;
+    if (std.mem.eql(u8, name, "Katakana_Or_Hiragana")) return &script_Hrkt;
+    if (std.mem.eql(u8, name, "Hung")) return &script_Hung;
+    if (std.mem.eql(u8, name, "Old_Hungarian")) return &script_Hung;
+    if (std.mem.eql(u8, name, "Ital")) return &script_Ital;
+    if (std.mem.eql(u8, name, "Old_Italic")) return &script_Ital;
+    if (std.mem.eql(u8, name, "Java")) return &script_Java;
+    if (std.mem.eql(u8, name, "Javanese")) return &script_Java;
+    if (std.mem.eql(u8, name, "Kali")) return &script_Kali;
+    if (std.mem.eql(u8, name, "Kayah_Li")) return &script_Kali;
+    if (std.mem.eql(u8, name, "Kana")) return &script_Kana;
+    if (std.mem.eql(u8, name, "Katakana")) return &script_Kana;
+    if (std.mem.eql(u8, name, "Kawi")) return &script_Kawi;
+    if (std.mem.eql(u8, name, "Kawi")) return &script_Kawi;
+    if (std.mem.eql(u8, name, "Khar")) return &script_Khar;
+    if (std.mem.eql(u8, name, "Kharoshthi")) return &script_Khar;
+    if (std.mem.eql(u8, name, "Khmr")) return &script_Khmr;
+    if (std.mem.eql(u8, name, "Khmer")) return &script_Khmr;
+    if (std.mem.eql(u8, name, "Khoj")) return &script_Khoj;
+    if (std.mem.eql(u8, name, "Khojki")) return &script_Khoj;
+    if (std.mem.eql(u8, name, "Kits")) return &script_Kits;
+    if (std.mem.eql(u8, name, "Khitan_Small_Script")) return &script_Kits;
+    if (std.mem.eql(u8, name, "Knda")) return &script_Knda;
+    if (std.mem.eql(u8, name, "Kannada")) return &script_Knda;
+    if (std.mem.eql(u8, name, "Krai")) return &script_Krai;
+    if (std.mem.eql(u8, name, "Kirat_Rai")) return &script_Krai;
+    if (std.mem.eql(u8, name, "Kthi")) return &script_Kthi;
+    if (std.mem.eql(u8, name, "Kaithi")) return &script_Kthi;
+    if (std.mem.eql(u8, name, "Lana")) return &script_Lana;
+    if (std.mem.eql(u8, name, "Tai_Tham")) return &script_Lana;
+    if (std.mem.eql(u8, name, "Laoo")) return &script_Laoo;
+    if (std.mem.eql(u8, name, "Lao")) return &script_Laoo;
+    if (std.mem.eql(u8, name, "Latn")) return &script_Latn;
+    if (std.mem.eql(u8, name, "Latin")) return &script_Latn;
+    if (std.mem.eql(u8, name, "Lepc")) return &script_Lepc;
+    if (std.mem.eql(u8, name, "Lepcha")) return &script_Lepc;
+    if (std.mem.eql(u8, name, "Limb")) return &script_Limb;
+    if (std.mem.eql(u8, name, "Limbu")) return &script_Limb;
+    if (std.mem.eql(u8, name, "Lina")) return &script_Lina;
+    if (std.mem.eql(u8, name, "Linear_A")) return &script_Lina;
+    if (std.mem.eql(u8, name, "Linb")) return &script_Linb;
+    if (std.mem.eql(u8, name, "Linear_B")) return &script_Linb;
+    if (std.mem.eql(u8, name, "Lisu")) return &script_Lisu;
+    if (std.mem.eql(u8, name, "Lisu")) return &script_Lisu;
+    if (std.mem.eql(u8, name, "Lyci")) return &script_Lyci;
+    if (std.mem.eql(u8, name, "Lycian")) return &script_Lyci;
+    if (std.mem.eql(u8, name, "Lydi")) return &script_Lydi;
+    if (std.mem.eql(u8, name, "Lydian")) return &script_Lydi;
+    if (std.mem.eql(u8, name, "Mahj")) return &script_Mahj;
+    if (std.mem.eql(u8, name, "Mahajani")) return &script_Mahj;
+    if (std.mem.eql(u8, name, "Maka")) return &script_Maka;
+    if (std.mem.eql(u8, name, "Makasar")) return &script_Maka;
+    if (std.mem.eql(u8, name, "Mand")) return &script_Mand;
+    if (std.mem.eql(u8, name, "Mandaic")) return &script_Mand;
+    if (std.mem.eql(u8, name, "Mani")) return &script_Mani;
+    if (std.mem.eql(u8, name, "Manichaean")) return &script_Mani;
+    if (std.mem.eql(u8, name, "Marc")) return &script_Marc;
+    if (std.mem.eql(u8, name, "Marchen")) return &script_Marc;
+    if (std.mem.eql(u8, name, "Medf")) return &script_Medf;
+    if (std.mem.eql(u8, name, "Medefaidrin")) return &script_Medf;
+    if (std.mem.eql(u8, name, "Mend")) return &script_Mend;
+    if (std.mem.eql(u8, name, "Mende_Kikakui")) return &script_Mend;
+    if (std.mem.eql(u8, name, "Merc")) return &script_Merc;
+    if (std.mem.eql(u8, name, "Meroitic_Cursive")) return &script_Merc;
+    if (std.mem.eql(u8, name, "Mero")) return &script_Mero;
+    if (std.mem.eql(u8, name, "Meroitic_Hieroglyphs")) return &script_Mero;
+    if (std.mem.eql(u8, name, "Mlym")) return &script_Mlym;
+    if (std.mem.eql(u8, name, "Malayalam")) return &script_Mlym;
+    if (std.mem.eql(u8, name, "Modi")) return &script_Modi;
+    if (std.mem.eql(u8, name, "Modi")) return &script_Modi;
+    if (std.mem.eql(u8, name, "Mong")) return &script_Mong;
+    if (std.mem.eql(u8, name, "Mongolian")) return &script_Mong;
+    if (std.mem.eql(u8, name, "Mroo")) return &script_Mroo;
+    if (std.mem.eql(u8, name, "Mro")) return &script_Mroo;
+    if (std.mem.eql(u8, name, "Mtei")) return &script_Mtei;
+    if (std.mem.eql(u8, name, "Meetei_Mayek")) return &script_Mtei;
+    if (std.mem.eql(u8, name, "Mult")) return &script_Mult;
+    if (std.mem.eql(u8, name, "Multani")) return &script_Mult;
+    if (std.mem.eql(u8, name, "Mymr")) return &script_Mymr;
+    if (std.mem.eql(u8, name, "Myanmar")) return &script_Mymr;
+    if (std.mem.eql(u8, name, "Nagm")) return &script_Nagm;
+    if (std.mem.eql(u8, name, "Nag_Mundari")) return &script_Nagm;
+    if (std.mem.eql(u8, name, "Nand")) return &script_Nand;
+    if (std.mem.eql(u8, name, "Nandinagari")) return &script_Nand;
+    if (std.mem.eql(u8, name, "Narb")) return &script_Narb;
+    if (std.mem.eql(u8, name, "Old_North_Arabian")) return &script_Narb;
+    if (std.mem.eql(u8, name, "Nbat")) return &script_Nbat;
+    if (std.mem.eql(u8, name, "Nabataean")) return &script_Nbat;
+    if (std.mem.eql(u8, name, "Newa")) return &script_Newa;
+    if (std.mem.eql(u8, name, "Newa")) return &script_Newa;
+    if (std.mem.eql(u8, name, "Nkoo")) return &script_Nkoo;
+    if (std.mem.eql(u8, name, "Nko")) return &script_Nkoo;
+    if (std.mem.eql(u8, name, "Nshu")) return &script_Nshu;
+    if (std.mem.eql(u8, name, "Nushu")) return &script_Nshu;
+    if (std.mem.eql(u8, name, "Ogam")) return &script_Ogam;
+    if (std.mem.eql(u8, name, "Ogham")) return &script_Ogam;
+    if (std.mem.eql(u8, name, "Olck")) return &script_Olck;
+    if (std.mem.eql(u8, name, "Ol_Chiki")) return &script_Olck;
+    if (std.mem.eql(u8, name, "Onao")) return &script_Onao;
+    if (std.mem.eql(u8, name, "Ol_Onal")) return &script_Onao;
+    if (std.mem.eql(u8, name, "Orkh")) return &script_Orkh;
+    if (std.mem.eql(u8, name, "Old_Turkic")) return &script_Orkh;
+    if (std.mem.eql(u8, name, "Orya")) return &script_Orya;
+    if (std.mem.eql(u8, name, "Oriya")) return &script_Orya;
+    if (std.mem.eql(u8, name, "Osge")) return &script_Osge;
+    if (std.mem.eql(u8, name, "Osage")) return &script_Osge;
+    if (std.mem.eql(u8, name, "Osma")) return &script_Osma;
+    if (std.mem.eql(u8, name, "Osmanya")) return &script_Osma;
+    if (std.mem.eql(u8, name, "Ougr")) return &script_Ougr;
+    if (std.mem.eql(u8, name, "Old_Uyghur")) return &script_Ougr;
+    if (std.mem.eql(u8, name, "Palm")) return &script_Palm;
+    if (std.mem.eql(u8, name, "Palmyrene")) return &script_Palm;
+    if (std.mem.eql(u8, name, "Pauc")) return &script_Pauc;
+    if (std.mem.eql(u8, name, "Pau_Cin_Hau")) return &script_Pauc;
+    if (std.mem.eql(u8, name, "Perm")) return &script_Perm;
+    if (std.mem.eql(u8, name, "Old_Permic")) return &script_Perm;
+    if (std.mem.eql(u8, name, "Phag")) return &script_Phag;
+    if (std.mem.eql(u8, name, "Phags_Pa")) return &script_Phag;
+    if (std.mem.eql(u8, name, "Phli")) return &script_Phli;
+    if (std.mem.eql(u8, name, "Inscriptional_Pahlavi")) return &script_Phli;
+    if (std.mem.eql(u8, name, "Phlp")) return &script_Phlp;
+    if (std.mem.eql(u8, name, "Psalter_Pahlavi")) return &script_Phlp;
+    if (std.mem.eql(u8, name, "Phnx")) return &script_Phnx;
+    if (std.mem.eql(u8, name, "Phoenician")) return &script_Phnx;
+    if (std.mem.eql(u8, name, "Plrd")) return &script_Plrd;
+    if (std.mem.eql(u8, name, "Miao")) return &script_Plrd;
+    if (std.mem.eql(u8, name, "Prti")) return &script_Prti;
+    if (std.mem.eql(u8, name, "Inscriptional_Parthian")) return &script_Prti;
+    if (std.mem.eql(u8, name, "Rjng")) return &script_Rjng;
+    if (std.mem.eql(u8, name, "Rejang")) return &script_Rjng;
+    if (std.mem.eql(u8, name, "Rohg")) return &script_Rohg;
+    if (std.mem.eql(u8, name, "Hanifi_Rohingya")) return &script_Rohg;
+    if (std.mem.eql(u8, name, "Runr")) return &script_Runr;
+    if (std.mem.eql(u8, name, "Runic")) return &script_Runr;
+    if (std.mem.eql(u8, name, "Samr")) return &script_Samr;
+    if (std.mem.eql(u8, name, "Samaritan")) return &script_Samr;
+    if (std.mem.eql(u8, name, "Sarb")) return &script_Sarb;
+    if (std.mem.eql(u8, name, "Old_South_Arabian")) return &script_Sarb;
+    if (std.mem.eql(u8, name, "Saur")) return &script_Saur;
+    if (std.mem.eql(u8, name, "Saurashtra")) return &script_Saur;
+    if (std.mem.eql(u8, name, "Sgnw")) return &script_Sgnw;
+    if (std.mem.eql(u8, name, "SignWriting")) return &script_Sgnw;
+    if (std.mem.eql(u8, name, "Shaw")) return &script_Shaw;
+    if (std.mem.eql(u8, name, "Shavian")) return &script_Shaw;
+    if (std.mem.eql(u8, name, "Shrd")) return &script_Shrd;
+    if (std.mem.eql(u8, name, "Sharada")) return &script_Shrd;
+    if (std.mem.eql(u8, name, "Sidd")) return &script_Sidd;
+    if (std.mem.eql(u8, name, "Siddham")) return &script_Sidd;
+    if (std.mem.eql(u8, name, "Sidt")) return &script_Sidt;
+    if (std.mem.eql(u8, name, "Sidetic")) return &script_Sidt;
+    if (std.mem.eql(u8, name, "Sind")) return &script_Sind;
+    if (std.mem.eql(u8, name, "Khudawadi")) return &script_Sind;
+    if (std.mem.eql(u8, name, "Sinh")) return &script_Sinh;
+    if (std.mem.eql(u8, name, "Sinhala")) return &script_Sinh;
+    if (std.mem.eql(u8, name, "Sogd")) return &script_Sogd;
+    if (std.mem.eql(u8, name, "Sogdian")) return &script_Sogd;
+    if (std.mem.eql(u8, name, "Sogo")) return &script_Sogo;
+    if (std.mem.eql(u8, name, "Old_Sogdian")) return &script_Sogo;
+    if (std.mem.eql(u8, name, "Sora")) return &script_Sora;
+    if (std.mem.eql(u8, name, "Sora_Sompeng")) return &script_Sora;
+    if (std.mem.eql(u8, name, "Soyo")) return &script_Soyo;
+    if (std.mem.eql(u8, name, "Soyombo")) return &script_Soyo;
+    if (std.mem.eql(u8, name, "Sund")) return &script_Sund;
+    if (std.mem.eql(u8, name, "Sundanese")) return &script_Sund;
+    if (std.mem.eql(u8, name, "Sunu")) return &script_Sunu;
+    if (std.mem.eql(u8, name, "Sunuwar")) return &script_Sunu;
+    if (std.mem.eql(u8, name, "Sylo")) return &script_Sylo;
+    if (std.mem.eql(u8, name, "Syloti_Nagri")) return &script_Sylo;
+    if (std.mem.eql(u8, name, "Syrc")) return &script_Syrc;
+    if (std.mem.eql(u8, name, "Syriac")) return &script_Syrc;
+    if (std.mem.eql(u8, name, "Tagb")) return &script_Tagb;
+    if (std.mem.eql(u8, name, "Tagbanwa")) return &script_Tagb;
+    if (std.mem.eql(u8, name, "Takr")) return &script_Takr;
+    if (std.mem.eql(u8, name, "Takri")) return &script_Takr;
+    if (std.mem.eql(u8, name, "Tale")) return &script_Tale;
+    if (std.mem.eql(u8, name, "Tai_Le")) return &script_Tale;
+    if (std.mem.eql(u8, name, "Talu")) return &script_Talu;
+    if (std.mem.eql(u8, name, "New_Tai_Lue")) return &script_Talu;
+    if (std.mem.eql(u8, name, "Taml")) return &script_Taml;
+    if (std.mem.eql(u8, name, "Tamil")) return &script_Taml;
+    if (std.mem.eql(u8, name, "Tang")) return &script_Tang;
+    if (std.mem.eql(u8, name, "Tangut")) return &script_Tang;
+    if (std.mem.eql(u8, name, "Tavt")) return &script_Tavt;
+    if (std.mem.eql(u8, name, "Tai_Viet")) return &script_Tavt;
+    if (std.mem.eql(u8, name, "Tayo")) return &script_Tayo;
+    if (std.mem.eql(u8, name, "Tai_Yo")) return &script_Tayo;
+    if (std.mem.eql(u8, name, "Telu")) return &script_Telu;
+    if (std.mem.eql(u8, name, "Telugu")) return &script_Telu;
+    if (std.mem.eql(u8, name, "Tfng")) return &script_Tfng;
+    if (std.mem.eql(u8, name, "Tifinagh")) return &script_Tfng;
+    if (std.mem.eql(u8, name, "Tglg")) return &script_Tglg;
+    if (std.mem.eql(u8, name, "Tagalog")) return &script_Tglg;
+    if (std.mem.eql(u8, name, "Thaa")) return &script_Thaa;
+    if (std.mem.eql(u8, name, "Thaana")) return &script_Thaa;
+    if (std.mem.eql(u8, name, "Thai")) return &script_Thai;
+    if (std.mem.eql(u8, name, "Thai")) return &script_Thai;
+    if (std.mem.eql(u8, name, "Tibt")) return &script_Tibt;
+    if (std.mem.eql(u8, name, "Tibetan")) return &script_Tibt;
+    if (std.mem.eql(u8, name, "Tirh")) return &script_Tirh;
+    if (std.mem.eql(u8, name, "Tirhuta")) return &script_Tirh;
+    if (std.mem.eql(u8, name, "Tnsa")) return &script_Tnsa;
+    if (std.mem.eql(u8, name, "Tangsa")) return &script_Tnsa;
+    if (std.mem.eql(u8, name, "Todr")) return &script_Todr;
+    if (std.mem.eql(u8, name, "Todhri")) return &script_Todr;
+    if (std.mem.eql(u8, name, "Tols")) return &script_Tols;
+    if (std.mem.eql(u8, name, "Tolong_Siki")) return &script_Tols;
+    if (std.mem.eql(u8, name, "Toto")) return &script_Toto;
+    if (std.mem.eql(u8, name, "Toto")) return &script_Toto;
+    if (std.mem.eql(u8, name, "Tutg")) return &script_Tutg;
+    if (std.mem.eql(u8, name, "Tulu_Tigalari")) return &script_Tutg;
+    if (std.mem.eql(u8, name, "Ugar")) return &script_Ugar;
+    if (std.mem.eql(u8, name, "Ugaritic")) return &script_Ugar;
+    if (std.mem.eql(u8, name, "Vaii")) return &script_Vaii;
+    if (std.mem.eql(u8, name, "Vai")) return &script_Vaii;
+    if (std.mem.eql(u8, name, "Vith")) return &script_Vith;
+    if (std.mem.eql(u8, name, "Vithkuqi")) return &script_Vith;
+    if (std.mem.eql(u8, name, "Wara")) return &script_Wara;
+    if (std.mem.eql(u8, name, "Warang_Citi")) return &script_Wara;
+    if (std.mem.eql(u8, name, "Wcho")) return &script_Wcho;
+    if (std.mem.eql(u8, name, "Wancho")) return &script_Wcho;
+    if (std.mem.eql(u8, name, "Xpeo")) return &script_Xpeo;
+    if (std.mem.eql(u8, name, "Old_Persian")) return &script_Xpeo;
+    if (std.mem.eql(u8, name, "Xsux")) return &script_Xsux;
+    if (std.mem.eql(u8, name, "Cuneiform")) return &script_Xsux;
+    if (std.mem.eql(u8, name, "Yezi")) return &script_Yezi;
+    if (std.mem.eql(u8, name, "Yezidi")) return &script_Yezi;
+    if (std.mem.eql(u8, name, "Yiii")) return &script_Yiii;
+    if (std.mem.eql(u8, name, "Yi")) return &script_Yiii;
+    if (std.mem.eql(u8, name, "Zanb")) return &script_Zanb;
+    if (std.mem.eql(u8, name, "Zanabazar_Square")) return &script_Zanb;
+    if (std.mem.eql(u8, name, "Zinh")) return &script_Zinh;
+    if (std.mem.eql(u8, name, "Inherited")) return &script_Zinh;
+    if (std.mem.eql(u8, name, "Qaai")) return &script_Zinh;
+    if (std.mem.eql(u8, name, "Zyyy")) return &script_Zyyy;
+    if (std.mem.eql(u8, name, "Common")) return &script_Zyyy;
+    if (std.mem.eql(u8, name, "Zzzz")) return &script_Zzzz;
+    if (std.mem.eql(u8, name, "Unknown")) return &script_Zzzz;
+    return null;
+}
+
+/// Resolve a Script_Extensions value to its sorted ranges, or null if
+/// not a script ECMA-262 §22.2.1.1 lists.
+pub fn scriptExtensions(name: []const u8) ?[]const Range {
+    if (std.mem.eql(u8, name, "Adlm")) return &scx_Adlm;
+    if (std.mem.eql(u8, name, "Adlam")) return &scx_Adlm;
+    if (std.mem.eql(u8, name, "Aghb")) return &scx_Aghb;
+    if (std.mem.eql(u8, name, "Caucasian_Albanian")) return &scx_Aghb;
+    if (std.mem.eql(u8, name, "Ahom")) return &scx_Ahom;
+    if (std.mem.eql(u8, name, "Ahom")) return &scx_Ahom;
+    if (std.mem.eql(u8, name, "Arab")) return &scx_Arab;
+    if (std.mem.eql(u8, name, "Arabic")) return &scx_Arab;
+    if (std.mem.eql(u8, name, "Armi")) return &scx_Armi;
+    if (std.mem.eql(u8, name, "Imperial_Aramaic")) return &scx_Armi;
+    if (std.mem.eql(u8, name, "Armn")) return &scx_Armn;
+    if (std.mem.eql(u8, name, "Armenian")) return &scx_Armn;
+    if (std.mem.eql(u8, name, "Avst")) return &scx_Avst;
+    if (std.mem.eql(u8, name, "Avestan")) return &scx_Avst;
+    if (std.mem.eql(u8, name, "Bali")) return &scx_Bali;
+    if (std.mem.eql(u8, name, "Balinese")) return &scx_Bali;
+    if (std.mem.eql(u8, name, "Bamu")) return &scx_Bamu;
+    if (std.mem.eql(u8, name, "Bamum")) return &scx_Bamu;
+    if (std.mem.eql(u8, name, "Bass")) return &scx_Bass;
+    if (std.mem.eql(u8, name, "Bassa_Vah")) return &scx_Bass;
+    if (std.mem.eql(u8, name, "Batk")) return &scx_Batk;
+    if (std.mem.eql(u8, name, "Batak")) return &scx_Batk;
+    if (std.mem.eql(u8, name, "Beng")) return &scx_Beng;
+    if (std.mem.eql(u8, name, "Bengali")) return &scx_Beng;
+    if (std.mem.eql(u8, name, "Berf")) return &scx_Berf;
+    if (std.mem.eql(u8, name, "Beria_Erfe")) return &scx_Berf;
+    if (std.mem.eql(u8, name, "Bhks")) return &scx_Bhks;
+    if (std.mem.eql(u8, name, "Bhaiksuki")) return &scx_Bhks;
+    if (std.mem.eql(u8, name, "Bopo")) return &scx_Bopo;
+    if (std.mem.eql(u8, name, "Bopomofo")) return &scx_Bopo;
+    if (std.mem.eql(u8, name, "Brah")) return &scx_Brah;
+    if (std.mem.eql(u8, name, "Brahmi")) return &scx_Brah;
+    if (std.mem.eql(u8, name, "Brai")) return &scx_Brai;
+    if (std.mem.eql(u8, name, "Braille")) return &scx_Brai;
+    if (std.mem.eql(u8, name, "Bugi")) return &scx_Bugi;
+    if (std.mem.eql(u8, name, "Buginese")) return &scx_Bugi;
+    if (std.mem.eql(u8, name, "Buhd")) return &scx_Buhd;
+    if (std.mem.eql(u8, name, "Buhid")) return &scx_Buhd;
+    if (std.mem.eql(u8, name, "Cakm")) return &scx_Cakm;
+    if (std.mem.eql(u8, name, "Chakma")) return &scx_Cakm;
+    if (std.mem.eql(u8, name, "Cans")) return &scx_Cans;
+    if (std.mem.eql(u8, name, "Canadian_Aboriginal")) return &scx_Cans;
+    if (std.mem.eql(u8, name, "Cari")) return &scx_Cari;
+    if (std.mem.eql(u8, name, "Carian")) return &scx_Cari;
+    if (std.mem.eql(u8, name, "Cham")) return &scx_Cham;
+    if (std.mem.eql(u8, name, "Cham")) return &scx_Cham;
+    if (std.mem.eql(u8, name, "Cher")) return &scx_Cher;
+    if (std.mem.eql(u8, name, "Cherokee")) return &scx_Cher;
+    if (std.mem.eql(u8, name, "Chrs")) return &scx_Chrs;
+    if (std.mem.eql(u8, name, "Chorasmian")) return &scx_Chrs;
+    if (std.mem.eql(u8, name, "Copt")) return &scx_Copt;
+    if (std.mem.eql(u8, name, "Coptic")) return &scx_Copt;
+    if (std.mem.eql(u8, name, "Qaac")) return &scx_Copt;
+    if (std.mem.eql(u8, name, "Cpmn")) return &scx_Cpmn;
+    if (std.mem.eql(u8, name, "Cypro_Minoan")) return &scx_Cpmn;
+    if (std.mem.eql(u8, name, "Cprt")) return &scx_Cprt;
+    if (std.mem.eql(u8, name, "Cypriot")) return &scx_Cprt;
+    if (std.mem.eql(u8, name, "Cyrl")) return &scx_Cyrl;
+    if (std.mem.eql(u8, name, "Cyrillic")) return &scx_Cyrl;
+    if (std.mem.eql(u8, name, "Deva")) return &scx_Deva;
+    if (std.mem.eql(u8, name, "Devanagari")) return &scx_Deva;
+    if (std.mem.eql(u8, name, "Diak")) return &scx_Diak;
+    if (std.mem.eql(u8, name, "Dives_Akuru")) return &scx_Diak;
+    if (std.mem.eql(u8, name, "Dogr")) return &scx_Dogr;
+    if (std.mem.eql(u8, name, "Dogra")) return &scx_Dogr;
+    if (std.mem.eql(u8, name, "Dsrt")) return &scx_Dsrt;
+    if (std.mem.eql(u8, name, "Deseret")) return &scx_Dsrt;
+    if (std.mem.eql(u8, name, "Dupl")) return &scx_Dupl;
+    if (std.mem.eql(u8, name, "Duployan")) return &scx_Dupl;
+    if (std.mem.eql(u8, name, "Egyp")) return &scx_Egyp;
+    if (std.mem.eql(u8, name, "Egyptian_Hieroglyphs")) return &scx_Egyp;
+    if (std.mem.eql(u8, name, "Elba")) return &scx_Elba;
+    if (std.mem.eql(u8, name, "Elbasan")) return &scx_Elba;
+    if (std.mem.eql(u8, name, "Elym")) return &scx_Elym;
+    if (std.mem.eql(u8, name, "Elymaic")) return &scx_Elym;
+    if (std.mem.eql(u8, name, "Ethi")) return &scx_Ethi;
+    if (std.mem.eql(u8, name, "Ethiopic")) return &scx_Ethi;
+    if (std.mem.eql(u8, name, "Gara")) return &scx_Gara;
+    if (std.mem.eql(u8, name, "Garay")) return &scx_Gara;
+    if (std.mem.eql(u8, name, "Geor")) return &scx_Geor;
+    if (std.mem.eql(u8, name, "Georgian")) return &scx_Geor;
+    if (std.mem.eql(u8, name, "Glag")) return &scx_Glag;
+    if (std.mem.eql(u8, name, "Glagolitic")) return &scx_Glag;
+    if (std.mem.eql(u8, name, "Gong")) return &scx_Gong;
+    if (std.mem.eql(u8, name, "Gunjala_Gondi")) return &scx_Gong;
+    if (std.mem.eql(u8, name, "Gonm")) return &scx_Gonm;
+    if (std.mem.eql(u8, name, "Masaram_Gondi")) return &scx_Gonm;
+    if (std.mem.eql(u8, name, "Goth")) return &scx_Goth;
+    if (std.mem.eql(u8, name, "Gothic")) return &scx_Goth;
+    if (std.mem.eql(u8, name, "Gran")) return &scx_Gran;
+    if (std.mem.eql(u8, name, "Grantha")) return &scx_Gran;
+    if (std.mem.eql(u8, name, "Grek")) return &scx_Grek;
+    if (std.mem.eql(u8, name, "Greek")) return &scx_Grek;
+    if (std.mem.eql(u8, name, "Gujr")) return &scx_Gujr;
+    if (std.mem.eql(u8, name, "Gujarati")) return &scx_Gujr;
+    if (std.mem.eql(u8, name, "Gukh")) return &scx_Gukh;
+    if (std.mem.eql(u8, name, "Gurung_Khema")) return &scx_Gukh;
+    if (std.mem.eql(u8, name, "Guru")) return &scx_Guru;
+    if (std.mem.eql(u8, name, "Gurmukhi")) return &scx_Guru;
+    if (std.mem.eql(u8, name, "Hang")) return &scx_Hang;
+    if (std.mem.eql(u8, name, "Hangul")) return &scx_Hang;
+    if (std.mem.eql(u8, name, "Hani")) return &scx_Hani;
+    if (std.mem.eql(u8, name, "Han")) return &scx_Hani;
+    if (std.mem.eql(u8, name, "Hano")) return &scx_Hano;
+    if (std.mem.eql(u8, name, "Hanunoo")) return &scx_Hano;
+    if (std.mem.eql(u8, name, "Hatr")) return &scx_Hatr;
+    if (std.mem.eql(u8, name, "Hatran")) return &scx_Hatr;
+    if (std.mem.eql(u8, name, "Hebr")) return &scx_Hebr;
+    if (std.mem.eql(u8, name, "Hebrew")) return &scx_Hebr;
+    if (std.mem.eql(u8, name, "Hira")) return &scx_Hira;
+    if (std.mem.eql(u8, name, "Hiragana")) return &scx_Hira;
+    if (std.mem.eql(u8, name, "Hluw")) return &scx_Hluw;
+    if (std.mem.eql(u8, name, "Anatolian_Hieroglyphs")) return &scx_Hluw;
+    if (std.mem.eql(u8, name, "Hmng")) return &scx_Hmng;
+    if (std.mem.eql(u8, name, "Pahawh_Hmong")) return &scx_Hmng;
+    if (std.mem.eql(u8, name, "Hmnp")) return &scx_Hmnp;
+    if (std.mem.eql(u8, name, "Nyiakeng_Puachue_Hmong")) return &scx_Hmnp;
+    if (std.mem.eql(u8, name, "Hrkt")) return &scx_Hrkt;
+    if (std.mem.eql(u8, name, "Katakana_Or_Hiragana")) return &scx_Hrkt;
+    if (std.mem.eql(u8, name, "Hung")) return &scx_Hung;
+    if (std.mem.eql(u8, name, "Old_Hungarian")) return &scx_Hung;
+    if (std.mem.eql(u8, name, "Ital")) return &scx_Ital;
+    if (std.mem.eql(u8, name, "Old_Italic")) return &scx_Ital;
+    if (std.mem.eql(u8, name, "Java")) return &scx_Java;
+    if (std.mem.eql(u8, name, "Javanese")) return &scx_Java;
+    if (std.mem.eql(u8, name, "Kali")) return &scx_Kali;
+    if (std.mem.eql(u8, name, "Kayah_Li")) return &scx_Kali;
+    if (std.mem.eql(u8, name, "Kana")) return &scx_Kana;
+    if (std.mem.eql(u8, name, "Katakana")) return &scx_Kana;
+    if (std.mem.eql(u8, name, "Kawi")) return &scx_Kawi;
+    if (std.mem.eql(u8, name, "Kawi")) return &scx_Kawi;
+    if (std.mem.eql(u8, name, "Khar")) return &scx_Khar;
+    if (std.mem.eql(u8, name, "Kharoshthi")) return &scx_Khar;
+    if (std.mem.eql(u8, name, "Khmr")) return &scx_Khmr;
+    if (std.mem.eql(u8, name, "Khmer")) return &scx_Khmr;
+    if (std.mem.eql(u8, name, "Khoj")) return &scx_Khoj;
+    if (std.mem.eql(u8, name, "Khojki")) return &scx_Khoj;
+    if (std.mem.eql(u8, name, "Kits")) return &scx_Kits;
+    if (std.mem.eql(u8, name, "Khitan_Small_Script")) return &scx_Kits;
+    if (std.mem.eql(u8, name, "Knda")) return &scx_Knda;
+    if (std.mem.eql(u8, name, "Kannada")) return &scx_Knda;
+    if (std.mem.eql(u8, name, "Krai")) return &scx_Krai;
+    if (std.mem.eql(u8, name, "Kirat_Rai")) return &scx_Krai;
+    if (std.mem.eql(u8, name, "Kthi")) return &scx_Kthi;
+    if (std.mem.eql(u8, name, "Kaithi")) return &scx_Kthi;
+    if (std.mem.eql(u8, name, "Lana")) return &scx_Lana;
+    if (std.mem.eql(u8, name, "Tai_Tham")) return &scx_Lana;
+    if (std.mem.eql(u8, name, "Laoo")) return &scx_Laoo;
+    if (std.mem.eql(u8, name, "Lao")) return &scx_Laoo;
+    if (std.mem.eql(u8, name, "Latn")) return &scx_Latn;
+    if (std.mem.eql(u8, name, "Latin")) return &scx_Latn;
+    if (std.mem.eql(u8, name, "Lepc")) return &scx_Lepc;
+    if (std.mem.eql(u8, name, "Lepcha")) return &scx_Lepc;
+    if (std.mem.eql(u8, name, "Limb")) return &scx_Limb;
+    if (std.mem.eql(u8, name, "Limbu")) return &scx_Limb;
+    if (std.mem.eql(u8, name, "Lina")) return &scx_Lina;
+    if (std.mem.eql(u8, name, "Linear_A")) return &scx_Lina;
+    if (std.mem.eql(u8, name, "Linb")) return &scx_Linb;
+    if (std.mem.eql(u8, name, "Linear_B")) return &scx_Linb;
+    if (std.mem.eql(u8, name, "Lisu")) return &scx_Lisu;
+    if (std.mem.eql(u8, name, "Lisu")) return &scx_Lisu;
+    if (std.mem.eql(u8, name, "Lyci")) return &scx_Lyci;
+    if (std.mem.eql(u8, name, "Lycian")) return &scx_Lyci;
+    if (std.mem.eql(u8, name, "Lydi")) return &scx_Lydi;
+    if (std.mem.eql(u8, name, "Lydian")) return &scx_Lydi;
+    if (std.mem.eql(u8, name, "Mahj")) return &scx_Mahj;
+    if (std.mem.eql(u8, name, "Mahajani")) return &scx_Mahj;
+    if (std.mem.eql(u8, name, "Maka")) return &scx_Maka;
+    if (std.mem.eql(u8, name, "Makasar")) return &scx_Maka;
+    if (std.mem.eql(u8, name, "Mand")) return &scx_Mand;
+    if (std.mem.eql(u8, name, "Mandaic")) return &scx_Mand;
+    if (std.mem.eql(u8, name, "Mani")) return &scx_Mani;
+    if (std.mem.eql(u8, name, "Manichaean")) return &scx_Mani;
+    if (std.mem.eql(u8, name, "Marc")) return &scx_Marc;
+    if (std.mem.eql(u8, name, "Marchen")) return &scx_Marc;
+    if (std.mem.eql(u8, name, "Medf")) return &scx_Medf;
+    if (std.mem.eql(u8, name, "Medefaidrin")) return &scx_Medf;
+    if (std.mem.eql(u8, name, "Mend")) return &scx_Mend;
+    if (std.mem.eql(u8, name, "Mende_Kikakui")) return &scx_Mend;
+    if (std.mem.eql(u8, name, "Merc")) return &scx_Merc;
+    if (std.mem.eql(u8, name, "Meroitic_Cursive")) return &scx_Merc;
+    if (std.mem.eql(u8, name, "Mero")) return &scx_Mero;
+    if (std.mem.eql(u8, name, "Meroitic_Hieroglyphs")) return &scx_Mero;
+    if (std.mem.eql(u8, name, "Mlym")) return &scx_Mlym;
+    if (std.mem.eql(u8, name, "Malayalam")) return &scx_Mlym;
+    if (std.mem.eql(u8, name, "Modi")) return &scx_Modi;
+    if (std.mem.eql(u8, name, "Modi")) return &scx_Modi;
+    if (std.mem.eql(u8, name, "Mong")) return &scx_Mong;
+    if (std.mem.eql(u8, name, "Mongolian")) return &scx_Mong;
+    if (std.mem.eql(u8, name, "Mroo")) return &scx_Mroo;
+    if (std.mem.eql(u8, name, "Mro")) return &scx_Mroo;
+    if (std.mem.eql(u8, name, "Mtei")) return &scx_Mtei;
+    if (std.mem.eql(u8, name, "Meetei_Mayek")) return &scx_Mtei;
+    if (std.mem.eql(u8, name, "Mult")) return &scx_Mult;
+    if (std.mem.eql(u8, name, "Multani")) return &scx_Mult;
+    if (std.mem.eql(u8, name, "Mymr")) return &scx_Mymr;
+    if (std.mem.eql(u8, name, "Myanmar")) return &scx_Mymr;
+    if (std.mem.eql(u8, name, "Nagm")) return &scx_Nagm;
+    if (std.mem.eql(u8, name, "Nag_Mundari")) return &scx_Nagm;
+    if (std.mem.eql(u8, name, "Nand")) return &scx_Nand;
+    if (std.mem.eql(u8, name, "Nandinagari")) return &scx_Nand;
+    if (std.mem.eql(u8, name, "Narb")) return &scx_Narb;
+    if (std.mem.eql(u8, name, "Old_North_Arabian")) return &scx_Narb;
+    if (std.mem.eql(u8, name, "Nbat")) return &scx_Nbat;
+    if (std.mem.eql(u8, name, "Nabataean")) return &scx_Nbat;
+    if (std.mem.eql(u8, name, "Newa")) return &scx_Newa;
+    if (std.mem.eql(u8, name, "Newa")) return &scx_Newa;
+    if (std.mem.eql(u8, name, "Nkoo")) return &scx_Nkoo;
+    if (std.mem.eql(u8, name, "Nko")) return &scx_Nkoo;
+    if (std.mem.eql(u8, name, "Nshu")) return &scx_Nshu;
+    if (std.mem.eql(u8, name, "Nushu")) return &scx_Nshu;
+    if (std.mem.eql(u8, name, "Ogam")) return &scx_Ogam;
+    if (std.mem.eql(u8, name, "Ogham")) return &scx_Ogam;
+    if (std.mem.eql(u8, name, "Olck")) return &scx_Olck;
+    if (std.mem.eql(u8, name, "Ol_Chiki")) return &scx_Olck;
+    if (std.mem.eql(u8, name, "Onao")) return &scx_Onao;
+    if (std.mem.eql(u8, name, "Ol_Onal")) return &scx_Onao;
+    if (std.mem.eql(u8, name, "Orkh")) return &scx_Orkh;
+    if (std.mem.eql(u8, name, "Old_Turkic")) return &scx_Orkh;
+    if (std.mem.eql(u8, name, "Orya")) return &scx_Orya;
+    if (std.mem.eql(u8, name, "Oriya")) return &scx_Orya;
+    if (std.mem.eql(u8, name, "Osge")) return &scx_Osge;
+    if (std.mem.eql(u8, name, "Osage")) return &scx_Osge;
+    if (std.mem.eql(u8, name, "Osma")) return &scx_Osma;
+    if (std.mem.eql(u8, name, "Osmanya")) return &scx_Osma;
+    if (std.mem.eql(u8, name, "Ougr")) return &scx_Ougr;
+    if (std.mem.eql(u8, name, "Old_Uyghur")) return &scx_Ougr;
+    if (std.mem.eql(u8, name, "Palm")) return &scx_Palm;
+    if (std.mem.eql(u8, name, "Palmyrene")) return &scx_Palm;
+    if (std.mem.eql(u8, name, "Pauc")) return &scx_Pauc;
+    if (std.mem.eql(u8, name, "Pau_Cin_Hau")) return &scx_Pauc;
+    if (std.mem.eql(u8, name, "Perm")) return &scx_Perm;
+    if (std.mem.eql(u8, name, "Old_Permic")) return &scx_Perm;
+    if (std.mem.eql(u8, name, "Phag")) return &scx_Phag;
+    if (std.mem.eql(u8, name, "Phags_Pa")) return &scx_Phag;
+    if (std.mem.eql(u8, name, "Phli")) return &scx_Phli;
+    if (std.mem.eql(u8, name, "Inscriptional_Pahlavi")) return &scx_Phli;
+    if (std.mem.eql(u8, name, "Phlp")) return &scx_Phlp;
+    if (std.mem.eql(u8, name, "Psalter_Pahlavi")) return &scx_Phlp;
+    if (std.mem.eql(u8, name, "Phnx")) return &scx_Phnx;
+    if (std.mem.eql(u8, name, "Phoenician")) return &scx_Phnx;
+    if (std.mem.eql(u8, name, "Plrd")) return &scx_Plrd;
+    if (std.mem.eql(u8, name, "Miao")) return &scx_Plrd;
+    if (std.mem.eql(u8, name, "Prti")) return &scx_Prti;
+    if (std.mem.eql(u8, name, "Inscriptional_Parthian")) return &scx_Prti;
+    if (std.mem.eql(u8, name, "Rjng")) return &scx_Rjng;
+    if (std.mem.eql(u8, name, "Rejang")) return &scx_Rjng;
+    if (std.mem.eql(u8, name, "Rohg")) return &scx_Rohg;
+    if (std.mem.eql(u8, name, "Hanifi_Rohingya")) return &scx_Rohg;
+    if (std.mem.eql(u8, name, "Runr")) return &scx_Runr;
+    if (std.mem.eql(u8, name, "Runic")) return &scx_Runr;
+    if (std.mem.eql(u8, name, "Samr")) return &scx_Samr;
+    if (std.mem.eql(u8, name, "Samaritan")) return &scx_Samr;
+    if (std.mem.eql(u8, name, "Sarb")) return &scx_Sarb;
+    if (std.mem.eql(u8, name, "Old_South_Arabian")) return &scx_Sarb;
+    if (std.mem.eql(u8, name, "Saur")) return &scx_Saur;
+    if (std.mem.eql(u8, name, "Saurashtra")) return &scx_Saur;
+    if (std.mem.eql(u8, name, "Sgnw")) return &scx_Sgnw;
+    if (std.mem.eql(u8, name, "SignWriting")) return &scx_Sgnw;
+    if (std.mem.eql(u8, name, "Shaw")) return &scx_Shaw;
+    if (std.mem.eql(u8, name, "Shavian")) return &scx_Shaw;
+    if (std.mem.eql(u8, name, "Shrd")) return &scx_Shrd;
+    if (std.mem.eql(u8, name, "Sharada")) return &scx_Shrd;
+    if (std.mem.eql(u8, name, "Sidd")) return &scx_Sidd;
+    if (std.mem.eql(u8, name, "Siddham")) return &scx_Sidd;
+    if (std.mem.eql(u8, name, "Sidt")) return &scx_Sidt;
+    if (std.mem.eql(u8, name, "Sidetic")) return &scx_Sidt;
+    if (std.mem.eql(u8, name, "Sind")) return &scx_Sind;
+    if (std.mem.eql(u8, name, "Khudawadi")) return &scx_Sind;
+    if (std.mem.eql(u8, name, "Sinh")) return &scx_Sinh;
+    if (std.mem.eql(u8, name, "Sinhala")) return &scx_Sinh;
+    if (std.mem.eql(u8, name, "Sogd")) return &scx_Sogd;
+    if (std.mem.eql(u8, name, "Sogdian")) return &scx_Sogd;
+    if (std.mem.eql(u8, name, "Sogo")) return &scx_Sogo;
+    if (std.mem.eql(u8, name, "Old_Sogdian")) return &scx_Sogo;
+    if (std.mem.eql(u8, name, "Sora")) return &scx_Sora;
+    if (std.mem.eql(u8, name, "Sora_Sompeng")) return &scx_Sora;
+    if (std.mem.eql(u8, name, "Soyo")) return &scx_Soyo;
+    if (std.mem.eql(u8, name, "Soyombo")) return &scx_Soyo;
+    if (std.mem.eql(u8, name, "Sund")) return &scx_Sund;
+    if (std.mem.eql(u8, name, "Sundanese")) return &scx_Sund;
+    if (std.mem.eql(u8, name, "Sunu")) return &scx_Sunu;
+    if (std.mem.eql(u8, name, "Sunuwar")) return &scx_Sunu;
+    if (std.mem.eql(u8, name, "Sylo")) return &scx_Sylo;
+    if (std.mem.eql(u8, name, "Syloti_Nagri")) return &scx_Sylo;
+    if (std.mem.eql(u8, name, "Syrc")) return &scx_Syrc;
+    if (std.mem.eql(u8, name, "Syriac")) return &scx_Syrc;
+    if (std.mem.eql(u8, name, "Tagb")) return &scx_Tagb;
+    if (std.mem.eql(u8, name, "Tagbanwa")) return &scx_Tagb;
+    if (std.mem.eql(u8, name, "Takr")) return &scx_Takr;
+    if (std.mem.eql(u8, name, "Takri")) return &scx_Takr;
+    if (std.mem.eql(u8, name, "Tale")) return &scx_Tale;
+    if (std.mem.eql(u8, name, "Tai_Le")) return &scx_Tale;
+    if (std.mem.eql(u8, name, "Talu")) return &scx_Talu;
+    if (std.mem.eql(u8, name, "New_Tai_Lue")) return &scx_Talu;
+    if (std.mem.eql(u8, name, "Taml")) return &scx_Taml;
+    if (std.mem.eql(u8, name, "Tamil")) return &scx_Taml;
+    if (std.mem.eql(u8, name, "Tang")) return &scx_Tang;
+    if (std.mem.eql(u8, name, "Tangut")) return &scx_Tang;
+    if (std.mem.eql(u8, name, "Tavt")) return &scx_Tavt;
+    if (std.mem.eql(u8, name, "Tai_Viet")) return &scx_Tavt;
+    if (std.mem.eql(u8, name, "Tayo")) return &scx_Tayo;
+    if (std.mem.eql(u8, name, "Tai_Yo")) return &scx_Tayo;
+    if (std.mem.eql(u8, name, "Telu")) return &scx_Telu;
+    if (std.mem.eql(u8, name, "Telugu")) return &scx_Telu;
+    if (std.mem.eql(u8, name, "Tfng")) return &scx_Tfng;
+    if (std.mem.eql(u8, name, "Tifinagh")) return &scx_Tfng;
+    if (std.mem.eql(u8, name, "Tglg")) return &scx_Tglg;
+    if (std.mem.eql(u8, name, "Tagalog")) return &scx_Tglg;
+    if (std.mem.eql(u8, name, "Thaa")) return &scx_Thaa;
+    if (std.mem.eql(u8, name, "Thaana")) return &scx_Thaa;
+    if (std.mem.eql(u8, name, "Thai")) return &scx_Thai;
+    if (std.mem.eql(u8, name, "Thai")) return &scx_Thai;
+    if (std.mem.eql(u8, name, "Tibt")) return &scx_Tibt;
+    if (std.mem.eql(u8, name, "Tibetan")) return &scx_Tibt;
+    if (std.mem.eql(u8, name, "Tirh")) return &scx_Tirh;
+    if (std.mem.eql(u8, name, "Tirhuta")) return &scx_Tirh;
+    if (std.mem.eql(u8, name, "Tnsa")) return &scx_Tnsa;
+    if (std.mem.eql(u8, name, "Tangsa")) return &scx_Tnsa;
+    if (std.mem.eql(u8, name, "Todr")) return &scx_Todr;
+    if (std.mem.eql(u8, name, "Todhri")) return &scx_Todr;
+    if (std.mem.eql(u8, name, "Tols")) return &scx_Tols;
+    if (std.mem.eql(u8, name, "Tolong_Siki")) return &scx_Tols;
+    if (std.mem.eql(u8, name, "Toto")) return &scx_Toto;
+    if (std.mem.eql(u8, name, "Toto")) return &scx_Toto;
+    if (std.mem.eql(u8, name, "Tutg")) return &scx_Tutg;
+    if (std.mem.eql(u8, name, "Tulu_Tigalari")) return &scx_Tutg;
+    if (std.mem.eql(u8, name, "Ugar")) return &scx_Ugar;
+    if (std.mem.eql(u8, name, "Ugaritic")) return &scx_Ugar;
+    if (std.mem.eql(u8, name, "Vaii")) return &scx_Vaii;
+    if (std.mem.eql(u8, name, "Vai")) return &scx_Vaii;
+    if (std.mem.eql(u8, name, "Vith")) return &scx_Vith;
+    if (std.mem.eql(u8, name, "Vithkuqi")) return &scx_Vith;
+    if (std.mem.eql(u8, name, "Wara")) return &scx_Wara;
+    if (std.mem.eql(u8, name, "Warang_Citi")) return &scx_Wara;
+    if (std.mem.eql(u8, name, "Wcho")) return &scx_Wcho;
+    if (std.mem.eql(u8, name, "Wancho")) return &scx_Wcho;
+    if (std.mem.eql(u8, name, "Xpeo")) return &scx_Xpeo;
+    if (std.mem.eql(u8, name, "Old_Persian")) return &scx_Xpeo;
+    if (std.mem.eql(u8, name, "Xsux")) return &scx_Xsux;
+    if (std.mem.eql(u8, name, "Cuneiform")) return &scx_Xsux;
+    if (std.mem.eql(u8, name, "Yezi")) return &scx_Yezi;
+    if (std.mem.eql(u8, name, "Yezidi")) return &scx_Yezi;
+    if (std.mem.eql(u8, name, "Yiii")) return &scx_Yiii;
+    if (std.mem.eql(u8, name, "Yi")) return &scx_Yiii;
+    if (std.mem.eql(u8, name, "Zanb")) return &scx_Zanb;
+    if (std.mem.eql(u8, name, "Zanabazar_Square")) return &scx_Zanb;
+    if (std.mem.eql(u8, name, "Zinh")) return &scx_Zinh;
+    if (std.mem.eql(u8, name, "Inherited")) return &scx_Zinh;
+    if (std.mem.eql(u8, name, "Qaai")) return &scx_Zinh;
+    if (std.mem.eql(u8, name, "Zyyy")) return &scx_Zyyy;
+    if (std.mem.eql(u8, name, "Common")) return &scx_Zyyy;
+    if (std.mem.eql(u8, name, "Zzzz")) return &scx_Zzzz;
+    if (std.mem.eql(u8, name, "Unknown")) return &scx_Zzzz;
     return null;
 }
 

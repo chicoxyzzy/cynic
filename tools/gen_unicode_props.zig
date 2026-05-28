@@ -164,6 +164,9 @@ pub fn main(init: std.process.Init) !void {
     const emoji_path = nextArg(&args_iter);
     const dbp_path = nextArg(&args_iter);
     const dnp_path = nextArg(&args_iter);
+    const pva_path = nextArg(&args_iter);
+    const scripts_path = nextArg(&args_iter);
+    const scx_path = nextArg(&args_iter);
 
     // ── General_Category ──
     const gc_data = try std.Io.Dir.cwd().readFileAlloc(io, gc_path, allocator, .unlimited);
@@ -230,6 +233,112 @@ pub fn main(init: std.process.Init) !void {
         },
     };
 
+    // ── Scripts & Script_Extensions ──
+    // The script name taxonomy is data-driven from PropertyValueAliases `sc`
+    // rows (short code, long name, aliases) — too many to hardcode. Tables
+    // key off the short code. Scripts.txt uses long names; ScriptExtensions
+    // uses short codes; both resolve through the one alias map.
+    const pva = try std.Io.Dir.cwd().readFileAlloc(io, pva_path, allocator, .unlimited);
+    defer allocator.free(pva);
+
+    var script_codes: std.ArrayListUnmanaged([]const u8) = .empty; // canonical short code per index
+    defer script_codes.deinit(allocator);
+    var script_names: std.ArrayListUnmanaged([]const []const u8) = .empty; // every spelling per index
+    defer {
+        for (script_names.items) |ns| allocator.free(ns);
+        script_names.deinit(allocator);
+    }
+    var name2idx: std.StringHashMapUnmanaged(usize) = .empty;
+    defer name2idx.deinit(allocator);
+    {
+        var it = std.mem.splitScalar(u8, pva, '\n');
+        while (it.next()) |line_raw| {
+            const line = std.mem.trimEnd(u8, line_raw, "\r");
+            if (!std.mem.startsWith(u8, line, "sc ;")) continue;
+            var body = line["sc ;".len..];
+            if (std.mem.indexOfScalar(u8, body, '#')) |h| body = body[0..h];
+            const idx = script_codes.items.len;
+            var names: std.ArrayListUnmanaged([]const u8) = .empty;
+            var fit = std.mem.splitScalar(u8, body, ';');
+            while (fit.next()) |f| {
+                const name = std.mem.trim(u8, f, " \t");
+                if (name.len == 0) continue;
+                try names.append(allocator, name);
+                try name2idx.put(allocator, name, idx);
+            }
+            if (names.items.len == 0) continue;
+            try script_codes.append(allocator, names.items[0]);
+            try script_names.append(allocator, try names.toOwnedSlice(allocator));
+        }
+    }
+    const nscript = script_codes.items.len;
+
+    const script_lists = try allocator.alloc(std.ArrayListUnmanaged(Range), nscript);
+    defer allocator.free(script_lists);
+    for (script_lists) |*l| l.* = .empty;
+    defer for (script_lists) |*l| l.deinit(allocator);
+    const scx_lists = try allocator.alloc(std.ArrayListUnmanaged(Range), nscript);
+    defer allocator.free(scx_lists);
+    for (scx_lists) |*l| l.* = .empty;
+    defer for (scx_lists) |*l| l.deinit(allocator);
+
+    // Scripts.txt → base Script value (long names).
+    {
+        const data = try std.Io.Dir.cwd().readFileAlloc(io, scripts_path, allocator, .unlimited);
+        defer allocator.free(data);
+        var it = std.mem.splitScalar(u8, data, '\n');
+        while (it.next()) |line_raw| {
+            const line = std.mem.trimEnd(u8, line_raw, "\r");
+            const pl = parsePropLine(line) orelse continue;
+            const idx = name2idx.get(pl.name) orelse continue;
+            const range = parseCodepointRange(pl.cps) catch continue;
+            try script_lists[idx].append(allocator, range);
+        }
+    }
+    for (script_lists) |*l| sortAndMerge(l);
+    // Scripts.txt @missing default is Unknown (Zzzz): the complement of all
+    // assigned-script ranges.
+    {
+        var all: std.ArrayListUnmanaged(Range) = .empty;
+        defer all.deinit(allocator);
+        for (script_lists) |l| try all.appendSlice(allocator, l.items);
+        sortAndMerge(&all);
+        const uk = name2idx.get("Unknown") orelse fatal("no Unknown script in PropertyValueAliases", .{});
+        script_lists[uk].clearRetainingCapacity();
+        try complementInto(allocator, &script_lists[uk], all.items);
+    }
+
+    // ScriptExtensions.txt → explicit scx sets (short codes). `escx` is the
+    // explicitly-listed domain; cps outside it default to their Script value.
+    var escx: std.ArrayListUnmanaged(Range) = .empty;
+    defer escx.deinit(allocator);
+    {
+        const data = try std.Io.Dir.cwd().readFileAlloc(io, scx_path, allocator, .unlimited);
+        defer allocator.free(data);
+        var it = std.mem.splitScalar(u8, data, '\n');
+        while (it.next()) |line_raw| {
+            const line = std.mem.trimEnd(u8, line_raw, "\r");
+            const pl = parsePropLine(line) orelse continue;
+            const range = parseCodepointRange(pl.cps) catch continue;
+            try escx.append(allocator, range);
+            var cit = std.mem.tokenizeScalar(u8, pl.name, ' ');
+            while (cit.next()) |code| {
+                const idx = name2idx.get(code) orelse continue;
+                try scx_lists[idx].append(allocator, range);
+            }
+        }
+    }
+    sortAndMerge(&escx);
+    // scx(S) = explicit(S) ∪ (Script(S) \ E): §22.2.1.1 with the default rule.
+    for (0..nscript) |i| {
+        sortAndMerge(&scx_lists[i]);
+        var defaulted: std.ArrayListUnmanaged(Range) = .empty;
+        defer defaulted.deinit(allocator);
+        try subtractInto(allocator, &defaulted, script_lists[i].items, escx.items);
+        try scx_lists[i].appendSlice(allocator, defaulted.items);
+        sortAndMerge(&scx_lists[i]);
+    }
+
     // ── Emit ──
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -265,6 +374,14 @@ pub fn main(init: std.process.Init) !void {
         try buf.append(allocator, '\n');
         bp_total += bin_lists[i].items.len;
     }
+    var sc_total: usize = 0;
+    for (0..nscript) |i| {
+        try emitRanges(allocator, &buf, "script_", script_codes.items[i], script_lists[i].items);
+        try buf.append(allocator, '\n');
+        try emitRanges(allocator, &buf, "scx_", script_codes.items[i], scx_lists[i].items);
+        try buf.append(allocator, '\n');
+        sc_total += script_lists[i].items.len + scx_lists[i].items.len;
+    }
 
     try buf.appendSlice(allocator,
         \\/// Resolve a General_Category value name to its sorted ranges, or null
@@ -290,13 +407,35 @@ pub fn main(init: std.process.Init) !void {
         \\    return null;
         \\}
         \\
+        \\/// Resolve a Script value (long name, short code, or alias) to its
+        \\/// sorted ranges, or null if not a script ECMA-262 §22.2.1.1 lists.
+        \\pub fn script(name: []const u8) ?[]const Range {
+        \\
+    );
+    for (0..nscript) |i| for (script_names.items[i]) |n|
+        try buf.print(allocator, "    if (std.mem.eql(u8, name, \"{s}\")) return &script_{s};\n", .{ n, script_codes.items[i] });
+    try buf.appendSlice(allocator,
+        \\    return null;
+        \\}
+        \\
+        \\/// Resolve a Script_Extensions value to its sorted ranges, or null if
+        \\/// not a script ECMA-262 §22.2.1.1 lists.
+        \\pub fn scriptExtensions(name: []const u8) ?[]const Range {
+        \\
+    );
+    for (0..nscript) |i| for (script_names.items[i]) |n|
+        try buf.print(allocator, "    if (std.mem.eql(u8, name, \"{s}\")) return &scx_{s};\n", .{ n, script_codes.items[i] });
+    try buf.appendSlice(allocator,
+        \\    return null;
+        \\}
+        \\
         \\const std = @import("std");
         \\
     );
 
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = buf.items });
-    std.debug.print("wrote {s}: {d} gc values ({d} ranges), {d} binary props ({d} ranges) (Unicode {s})\n", .{
-        out_path, categories.len, gc_total, bin_props.len, bp_total, unicode_version,
+    std.debug.print("wrote {s}: {d} gc ({d} ranges), {d} binary ({d} ranges), {d} scripts ({d} ranges) (Unicode {s})\n", .{
+        out_path, categories.len, gc_total, bin_props.len, bp_total, nscript, sc_total, unicode_version,
     });
 }
 
@@ -358,6 +497,30 @@ fn complementInto(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(Ran
         next = @as(u32, r.end) + 1;
     }
     if (next <= max_cp) try out.append(allocator, .{ .start = @intCast(next), .end = @intCast(max_cp) });
+}
+
+/// Append `ranges \ exclude` (set difference). Both inputs sorted, merged.
+fn subtractInto(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(Range),
+    ranges: []const Range,
+    exclude: []const Range,
+) !void {
+    for (ranges) |r| {
+        var lo: u32 = r.start;
+        const hi: u32 = r.end;
+        for (exclude) |e| {
+            if (@as(u32, e.end) < lo) continue;
+            if (@as(u32, e.start) > hi) break;
+            if (e.start > lo) try out.append(allocator, .{ .start = @intCast(lo), .end = @intCast(@as(u32, e.start) - 1) });
+            if (@as(u32, e.end) >= hi) {
+                lo = hi + 1;
+                break;
+            }
+            lo = @as(u32, e.end) + 1;
+        }
+        if (lo <= hi) try out.append(allocator, .{ .start = @intCast(lo), .end = @intCast(hi) });
+    }
 }
 
 fn emitRanges(
