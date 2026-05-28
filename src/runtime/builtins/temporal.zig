@@ -49,6 +49,7 @@ const stringifyArg = intrinsics.stringifyArg;
 
 const DurationRecord = temporal.DurationRecord;
 const PlainTimeRecord = temporal.PlainTimeRecord;
+const PlainDateRecord = temporal.PlainDateRecord;
 const TemporalRecord = temporal.TemporalRecord;
 
 /// Extract the f64 mathematical value from a Number `Value` (the
@@ -85,6 +86,7 @@ pub fn install(realm: *Realm) !void {
     try installDuration(realm, ns);
     try installPlainTime(realm, ns);
     try installInstant(realm, ns);
+    try installPlainDate(realm, ns);
 
     // `Temporal` is a non-enumerable, writable, configurable global
     // (§17 namespace-object convention, matching the property
@@ -1510,4 +1512,448 @@ fn instantToZonedDateTimeISO(realm: *Realm, this_value: Value, args: []const Val
     _ = args;
     _ = try requireInstant(realm, this_value);
     return throwTypeError(realm, "Temporal.Instant.prototype.toZonedDateTimeISO is not yet implemented");
+}
+
+// ── §3 Temporal.PlainDate (ISO calendar) ───────────────────────────────────
+
+fn installPlainDate(realm: *Realm, ns: *JSObject) !void {
+    // §3.1.1 — `new`-only constructor (year, month, day, [calendar]).
+    const r = try installConstructor(realm, .{
+        .name = "PlainDate",
+        .ctor = plainDateConstructor,
+        .arity = 3,
+        .is_class = true,
+        .set_home_object = true,
+        .to_string_tag = "Temporal.PlainDate",
+        .install_global = false,
+    });
+    const fn_obj = r.ctor;
+    const proto = r.proto;
+
+    try installNativeGetter(realm, proto, "calendarId", plainDateCalendarId);
+    try installNativeGetter(realm, proto, "year", plainDateYear);
+    try installNativeGetter(realm, proto, "month", plainDateMonth);
+    try installNativeGetter(realm, proto, "monthCode", plainDateMonthCode);
+    try installNativeGetter(realm, proto, "day", plainDateDay);
+    try installNativeGetter(realm, proto, "dayOfWeek", plainDateDayOfWeek);
+    try installNativeGetter(realm, proto, "dayOfYear", plainDateDayOfYear);
+    try installNativeGetter(realm, proto, "weekOfYear", plainDateWeekOfYear);
+    try installNativeGetter(realm, proto, "yearOfWeek", plainDateYearOfWeek);
+    try installNativeGetter(realm, proto, "daysInWeek", plainDateDaysInWeek);
+    try installNativeGetter(realm, proto, "daysInMonth", plainDateDaysInMonth);
+    try installNativeGetter(realm, proto, "daysInYear", plainDateDaysInYear);
+    try installNativeGetter(realm, proto, "monthsInYear", plainDateMonthsInYear);
+    try installNativeGetter(realm, proto, "inLeapYear", plainDateInLeapYear);
+    try installNativeGetter(realm, proto, "era", plainDateEra);
+    try installNativeGetter(realm, proto, "eraYear", plainDateEraYear);
+
+    try installNativeMethodOnProto(realm, proto, "with", plainDateWith, 1);
+    try installNativeMethodOnProto(realm, proto, "equals", plainDateEquals, 1);
+    try installNativeMethodOnProto(realm, proto, "toString", plainDateToString, 0);
+    try installNativeMethodOnProto(realm, proto, "toJSON", plainDateToJSON, 0);
+    try installNativeMethodOnProto(realm, proto, "toLocaleString", plainDateToLocaleString, 0);
+    try installNativeMethodOnProto(realm, proto, "valueOf", plainDateValueOf, 0);
+    // Deferred — date arithmetic / conversions to types Cynic doesn't ship yet.
+    try installNativeMethodOnProto(realm, proto, "add", plainDateAdd, 1);
+    try installNativeMethodOnProto(realm, proto, "subtract", plainDateSubtract, 1);
+    try installNativeMethodOnProto(realm, proto, "until", plainDateUntil, 1);
+    try installNativeMethodOnProto(realm, proto, "since", plainDateSince, 1);
+    try installNativeMethodOnProto(realm, proto, "withCalendar", plainDateWithCalendar, 1);
+    try installNativeMethodOnProto(realm, proto, "toPlainYearMonth", plainDateToPlainYearMonth, 0);
+    try installNativeMethodOnProto(realm, proto, "toPlainMonthDay", plainDateToPlainMonthDay, 0);
+    try installNativeMethodOnProto(realm, proto, "toPlainDateTime", plainDateToPlainDateTime, 1);
+    try installNativeMethodOnProto(realm, proto, "toZonedDateTime", plainDateToZonedDateTime, 1);
+
+    try installNativeMethod(realm, fn_obj, "from", plainDateFrom, 1);
+    try installNativeMethod(realm, fn_obj, "compare", plainDateCompare, 2);
+
+    realm.intrinsics.temporal_plain_date_constructor = fn_obj;
+    realm.intrinsics.temporal_plain_date_prototype = proto;
+    try setNonEnumerable(ns, realm.allocator, "PlainDate", heap_mod.taggedFunction(fn_obj));
+}
+
+/// Coerce a truncated date field to i64, rejecting values far outside
+/// the representable range (which also guards the later i32 cast).
+fn dateFieldToI64(realm: *Realm, v: f64) NativeError!i64 {
+    if (v < -1_000_000_000.0 or v > 1_000_000_000.0) return throwRangeError(realm, "date field is out of range");
+    return @intFromFloat(v);
+}
+
+/// §3.1.1 — the `calendar` argument must be undefined or a string that
+/// canonicalises to "iso8601" (Cynic ships only the ISO calendar). A
+/// non-string is a TypeError; an unsupported/unknown calendar string is
+/// a RangeError.
+fn requireISOCalendar(realm: *Realm, calendar: Value) NativeError!void {
+    if (calendar.isUndefined()) return;
+    if (!calendar.isString()) return throwTypeError(realm, "calendar must be a string");
+    const s: *JSString = @ptrCast(@alignCast(calendar.asString()));
+    if (!std.ascii.eqlIgnoreCase(s.flatBytes(), "iso8601")) {
+        return throwRangeError(realm, "only the iso8601 calendar is supported");
+    }
+}
+
+/// The `calendar` field of a Temporal-date-like property bag must be
+/// undefined or a String; a non-string (number, bigint, boolean, Symbol,
+/// null, or a non-calendar-bearing object) is a TypeError. Full
+/// canonicalisation of a calendar *string* — which may be a bare ID or an
+/// ISO string whose `[u-ca=…]` annotation names the calendar — is deferred
+/// with the rest of calendar support, so any accepted string resolves to
+/// the ISO calendar Cynic ships. (Distinct from the constructor's
+/// `requireISOCalendar`, which canonicalises a calendar ID strictly.)
+fn requireCalendarFieldType(realm: *Realm, calendar: Value) NativeError!void {
+    if (calendar.isUndefined()) return;
+    if (!calendar.isString()) return throwTypeError(realm, "calendar must be a string");
+}
+
+fn storePlainDate(realm: *Realm, inst: *JSObject, rec: PlainDateRecord) NativeError!void {
+    const r = realm.allocator.create(TemporalRecord) catch return error.OutOfMemory;
+    r.* = .{ .plain_date = rec };
+    inst.setTemporalRecord(realm.allocator, r) catch return error.OutOfMemory;
+}
+
+fn createTemporalDate(realm: *Realm, rec: PlainDateRecord) NativeError!Value {
+    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(inst, realm.intrinsics.temporal_plain_date_prototype.?);
+    try storePlainDate(realm, inst, rec);
+    return heap_mod.taggedObject(inst);
+}
+
+fn requirePlainDate(realm: *Realm, this_value: Value) NativeError!PlainDateRecord {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "not a Temporal.PlainDate");
+    const rec = obj.getTemporalRecord() orelse
+        return throwTypeError(realm, "not a Temporal.PlainDate");
+    return switch (rec.*) {
+        .plain_date => |pd| pd,
+        else => throwTypeError(realm, "not a Temporal.PlainDate"),
+    };
+}
+
+/// §3.1.1 Temporal.PlainDate ( isoYear, isoMonth, isoDay [, calendar] ).
+fn plainDateConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const inst = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "Temporal.PlainDate constructor requires 'new'");
+    const y = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 0, Value.undefined_)));
+    const m = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 1, Value.undefined_)));
+    const d = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 2, Value.undefined_)));
+    try requireISOCalendar(realm, argOr(args, 3, Value.undefined_));
+    const rec = temporal.regulateISODate(y, m, d, true) orelse
+        return throwRangeError(realm, "PlainDate is out of range");
+    try storePlainDate(realm, inst, rec);
+    return heap_mod.taggedObject(inst);
+}
+
+fn plainDateCalendarId(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requirePlainDate(realm, t);
+    const js = realm.heap.allocateString("iso8601") catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn plainDateYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32((try requirePlainDate(realm, t)).iso_year);
+}
+fn plainDateMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try requirePlainDate(realm, t)).iso_month));
+}
+fn plainDateDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try requirePlainDate(realm, t)).iso_day));
+}
+fn plainDateMonthCode(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDate(realm, t);
+    const mc = [_]u8{ 'M', '0' + @as(u8, @intCast(rec.iso_month / 10)), '0' + @as(u8, @intCast(rec.iso_month % 10)) };
+    const js = realm.heap.allocateString(&mc) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn plainDateDayOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDate(realm, t);
+    return Value.fromInt32(temporal.isoDayOfWeek(rec.iso_year, rec.iso_month, rec.iso_day));
+}
+fn plainDateDayOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDate(realm, t);
+    return Value.fromInt32(temporal.isoDayOfYear(rec.iso_year, rec.iso_month, rec.iso_day));
+}
+fn plainDateWeekOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDate(realm, t);
+    return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).week);
+}
+fn plainDateYearOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDate(realm, t);
+    return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).year);
+}
+fn plainDateDaysInWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requirePlainDate(realm, t);
+    return Value.fromInt32(7);
+}
+fn plainDateDaysInMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDate(realm, t);
+    return Value.fromInt32(@intCast(temporal.daysInIsoMonth(rec.iso_year, rec.iso_month)));
+}
+fn plainDateDaysInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDate(realm, t);
+    return Value.fromInt32(temporal.isoDaysInYear(rec.iso_year));
+}
+fn plainDateMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requirePlainDate(realm, t);
+    return Value.fromInt32(12);
+}
+fn plainDateInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDate(realm, t);
+    return Value.fromBool(temporal.isLeapYear(rec.iso_year));
+}
+fn plainDateEra(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requirePlainDate(realm, t);
+    return Value.undefined_; // ISO calendar has no era
+}
+fn plainDateEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requirePlainDate(realm, t);
+    return Value.undefined_;
+}
+
+/// §3.5.x parse an ISO monthCode ("M01".."M12"; no leap month in ISO).
+/// The `monthCode` field must be a primitive String — a number, bigint,
+/// boolean, Symbol, null, or object is a TypeError (it is never coerced),
+/// distinct from the RangeError for a malformed string.
+fn parseMonthCode(realm: *Realm, v: Value) NativeError!i64 {
+    if (!v.isString()) return throwTypeError(realm, "monthCode must be a string");
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    const b = s.flatBytes();
+    if (b.len != 3 or b[0] != 'M' or b[1] < '0' or b[1] > '9' or b[2] < '0' or b[2] > '9') {
+        return throwRangeError(realm, "invalid monthCode");
+    }
+    const m: i64 = @as(i64, b[1] - '0') * 10 + @as(i64, b[2] - '0');
+    if (m < 1 or m > 12) return throwRangeError(realm, "invalid monthCode");
+    return m;
+}
+
+/// §3.5.x ISODateFromFields — read year, month/monthCode, day off a
+/// property bag and regulate per `options`.
+fn toISODateFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!PlainDateRecord {
+    // The calendar field (if present) must be undefined or a String;
+    // the string's canonicalisation is deferred with calendar support.
+    try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
+    const day_v = try getPropertyChain(realm, obj, "day");
+    const month_v = try getPropertyChain(realm, obj, "month");
+    const month_code_v = try getPropertyChain(realm, obj, "monthCode");
+    const year_v = try getPropertyChain(realm, obj, "year");
+    if (year_v.isUndefined()) return throwTypeError(realm, "PlainDate-like is missing 'year'");
+    if (day_v.isUndefined()) return throwTypeError(realm, "PlainDate-like is missing 'day'");
+    const year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+    const day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
+    var month: i64 = undefined;
+    if (!month_code_v.isUndefined()) {
+        month = try parseMonthCode(realm, month_code_v);
+        if (!month_v.isUndefined()) {
+            const m2 = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+            if (m2 != month) return throwRangeError(realm, "month and monthCode disagree");
+        }
+    } else if (!month_v.isUndefined()) {
+        month = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+    } else {
+        return throwTypeError(realm, "PlainDate-like is missing 'month' / 'monthCode'");
+    }
+    const overflow = try getTemporalOverflowOption(realm, options);
+    return temporal.regulateISODate(year, month, day, overflow == .reject) orelse
+        throwRangeError(realm, "PlainDate is out of range");
+}
+
+/// §3.5.x ToTemporalDate — a PlainDate (copy), a property bag, or an
+/// ISO date string.
+fn toTemporalDate(realm: *Realm, item: Value, options: Value) NativeError!PlainDateRecord {
+    if (heap_mod.valueAsPlainObject(item)) |obj| {
+        if (obj.getTemporalRecord()) |rec| {
+            switch (rec.*) {
+                .plain_date => |pd| {
+                    _ = try getTemporalOverflowOption(realm, options);
+                    return pd;
+                },
+                else => {},
+            }
+        }
+        return toISODateFields(realm, obj, options);
+    }
+    if (!item.isString()) {
+        return throwTypeError(realm, "Temporal.PlainDate.from expects an object or ISO 8601 string");
+    }
+    const s: *JSString = @ptrCast(@alignCast(item.asString()));
+    const rec = temporal.parseTemporalDateString(s.flatBytes()) catch
+        return throwRangeError(realm, "invalid ISO 8601 date string");
+    _ = try getTemporalOverflowOption(realm, options);
+    return rec;
+}
+
+fn compareISODate(a: PlainDateRecord, b: PlainDateRecord) i32 {
+    if (a.iso_year != b.iso_year) return if (a.iso_year < b.iso_year) -1 else 1;
+    if (a.iso_month != b.iso_month) return if (a.iso_month < b.iso_month) -1 else 1;
+    if (a.iso_day != b.iso_day) return if (a.iso_day < b.iso_day) -1 else 1;
+    return 0;
+}
+
+/// §3.2.2 Temporal.PlainDate.from ( item [, options] ).
+fn plainDateFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const rec = try toTemporalDate(realm, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_));
+    return createTemporalDate(realm, rec);
+}
+
+/// §3.2.3 Temporal.PlainDate.compare ( one, two ).
+fn plainDateCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const a = try toTemporalDate(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    const b = try toTemporalDate(realm, argOr(args, 1, Value.undefined_), Value.undefined_);
+    return Value.fromInt32(compareISODate(a, b));
+}
+
+/// §3.3.x Temporal.PlainDate.prototype.equals ( other ).
+fn plainDateEquals(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try requirePlainDate(realm, this_value);
+    const b = try toTemporalDate(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    return Value.fromBool(compareISODate(a, b) == 0);
+}
+
+/// §3.3.x Temporal.PlainDate.prototype.with ( temporalDateLike [, options] ).
+fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const base = try requirePlainDate(realm, this_value);
+    const like = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(like) orelse
+        return throwTypeError(realm, "PlainDate-like must be an object");
+    try rejectTemporalLikeObject(realm, obj);
+
+    var year: i64 = base.iso_year;
+    var month: i64 = base.iso_month;
+    var day: i64 = base.iso_day;
+    var any = false;
+
+    const day_v = try getPropertyChain(realm, obj, "day");
+    if (!day_v.isUndefined()) {
+        day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
+        any = true;
+    }
+    const month_v = try getPropertyChain(realm, obj, "month");
+    const month_code_v = try getPropertyChain(realm, obj, "monthCode");
+    if (!month_code_v.isUndefined()) {
+        month = try parseMonthCode(realm, month_code_v);
+        any = true;
+        if (!month_v.isUndefined()) {
+            const m2 = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+            if (m2 != month) return throwRangeError(realm, "month and monthCode disagree");
+        }
+    } else if (!month_v.isUndefined()) {
+        month = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+        any = true;
+    }
+    const year_v = try getPropertyChain(realm, obj, "year");
+    if (!year_v.isUndefined()) {
+        year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+        any = true;
+    }
+    if (!any) return throwTypeError(realm, "PlainDate-like must have at least one date property");
+
+    const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
+    const rec = temporal.regulateISODate(year, month, day, overflow == .reject) orelse
+        return throwRangeError(realm, "PlainDate is out of range");
+    return createTemporalDate(realm, rec);
+}
+
+/// §13.x GetTemporalShowCalendarNameOption — auto / always / never /
+/// critical (default auto).
+fn getCalendarNameOption(realm: *Realm, options: Value) NativeError!temporal.CalendarDisplay {
+    const obj = (try getOptionsObject(realm, options)) orelse return .auto;
+    const v = try getPropertyChain(realm, obj, "calendarName");
+    if (v.isUndefined()) return .auto;
+    const s = try stringifyArg(realm, v);
+    const b = s.flatBytes();
+    if (std.mem.eql(u8, b, "auto")) return .auto;
+    if (std.mem.eql(u8, b, "always")) return .always;
+    if (std.mem.eql(u8, b, "never")) return .never;
+    if (std.mem.eql(u8, b, "critical")) return .critical;
+    return throwRangeError(realm, "calendarName must be auto / always / never / critical");
+}
+
+/// §3.3.x Temporal.PlainDate.prototype.toString ( [options] ).
+fn plainDateToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requirePlainDate(realm, this_value);
+    const cal = try getCalendarNameOption(realm, argOr(args, 0, Value.undefined_));
+    var buf: [40]u8 = undefined;
+    const s = temporal.isoDateToString(rec, &buf, cal);
+    const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn plainDateToJSON(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const rec = try requirePlainDate(realm, this_value);
+    var buf: [40]u8 = undefined;
+    const s = temporal.isoDateToString(rec, &buf, .auto);
+    const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn plainDateToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return plainDateToJSON(realm, this_value, args);
+}
+fn plainDateValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    _ = args;
+    return throwTypeError(realm, "Called valueOf on a Temporal.PlainDate; use compare() instead");
+}
+
+// Deferred PlainDate methods — date arithmetic and conversions to types
+// Cynic doesn't ship yet.
+fn plainDateAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requirePlainDate(realm, this_value);
+    return throwTypeError(realm, "Temporal.PlainDate.prototype.add is not yet implemented");
+}
+fn plainDateSubtract(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requirePlainDate(realm, this_value);
+    return throwTypeError(realm, "Temporal.PlainDate.prototype.subtract is not yet implemented");
+}
+fn plainDateUntil(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requirePlainDate(realm, this_value);
+    return throwTypeError(realm, "Temporal.PlainDate.prototype.until is not yet implemented");
+}
+fn plainDateSince(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requirePlainDate(realm, this_value);
+    return throwTypeError(realm, "Temporal.PlainDate.prototype.since is not yet implemented");
+}
+fn plainDateWithCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requirePlainDate(realm, this_value);
+    return throwTypeError(realm, "Temporal.PlainDate.prototype.withCalendar is not yet implemented");
+}
+fn plainDateToPlainYearMonth(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requirePlainDate(realm, this_value);
+    return throwTypeError(realm, "Temporal.PlainDate.prototype.toPlainYearMonth is not yet implemented");
+}
+fn plainDateToPlainMonthDay(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requirePlainDate(realm, this_value);
+    return throwTypeError(realm, "Temporal.PlainDate.prototype.toPlainMonthDay is not yet implemented");
+}
+fn plainDateToPlainDateTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requirePlainDate(realm, this_value);
+    return throwTypeError(realm, "Temporal.PlainDate.prototype.toPlainDateTime is not yet implemented");
+}
+fn plainDateToZonedDateTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requirePlainDate(realm, this_value);
+    return throwTypeError(realm, "Temporal.PlainDate.prototype.toZonedDateTime is not yet implemented");
 }
