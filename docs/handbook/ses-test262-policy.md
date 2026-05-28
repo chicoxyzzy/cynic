@@ -648,12 +648,16 @@ block per Phase 0c below.
 | `import-bytes` | Stage 3 |
 | `immutable-arraybuffer` | Stage 2.7 |
 | `await-dictionary` | Stage 2 |
-| `ShadowRealm` (path) | Stage 2.7 (67 fixtures) |
 
 **Already shipped natively** (no skip needed, scoring as expected):
 
 `Array.fromAsync`, `Error.isError`, `Promise.try`, `RegExp.escape`,
-`Math.sumPrecise`, `Iterator.concat` (iterator-sequencing). One
+`Math.sumPrecise`, `Iterator.concat` (iterator-sequencing),
+`ShadowRealm` (constructor + `.evaluate` + the §3.8.3.4 callable
+boundary — 47/64 fixtures pass; `.importValue` and the
+caller-realm-identity tail still pending, so the
+`built-ins/ShadowRealm/` path-skip is lifted and the remaining
+fails show as honest runtime gaps). One
 follow-up note: `upsert` reached Stage 4 in January 2026 — the
 in-code comment `Stage 3 as of 2026-05` in
 `src/runtime/builtins/iterator.zig:67` and `src/runtime/builtins/

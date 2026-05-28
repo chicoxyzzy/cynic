@@ -148,8 +148,11 @@ code construction (aligns with SES).
   (`Array = …`, `Math.PI = 4`) still throws. The whole SES
   posture toggles atomically with `--unhardened`; `--allow=eval`
   stays separate because it carries compile-time optimization-
-  fence cost. Compartments deferred (need multi-realm, which
-  Cynic still punts). The test262 sweep scores both modes — the
+  fence cost. Multi-realm is partial — cross-realm species
+  (§23.1.3.34 `GetFunctionRealm` carve-out) and `ShadowRealm`
+  (constructor + `.evaluate` + the §3.8.3.4 callable boundary)
+  ship; full Compartments are still deferred. The test262 sweep
+  scores both modes — the
   `runtime` row tracks the legacy ECMAScript baseline (unhardened),
   the `runtime-hardened` row tracks the SES posture. Brand bet
   delivered: Cynic ships the SES baseline natively, no
