@@ -870,14 +870,25 @@ const PreStage4Stats = struct {
 /// `Map.prototype.getOrInsert` is undefined, and vice versa).
 const Phase = union(enum) {
     main,
-    feature: cynic.runtime.FeatureFlag,
-    /// SES Phase 1 relaxation sweep. Runs the main-phase fixture
-    /// set against a realm with `realm.hardened = false` so the
-    /// Phase 1 freeze pass is skipped — confirms fixtures that
-    /// monkey-patch primordials (and therefore regress under the
-    /// hardened default) come back to life with the single
-    /// `--unhardened` opt-out. Selected via `--phase=unhardened`.
+    /// A dedicated per-proposal sweep, run twice per tracked flag —
+    /// once hardened (the as-shipped SES posture, with divergent
+    /// classification) and once unhardened (bare ECMA-262) — so each
+    /// proposal is measured the same two ways as the headline corpus.
+    feature: FeaturePhase,
+    /// SES relaxation sweep. Runs the main-phase fixture set against
+    /// a realm with `realm.hardened = false` so the freeze pass is
+    /// skipped — confirms fixtures that monkey-patch primordials (and
+    /// therefore regress under the hardened default) come back to
+    /// life with the single `--unhardened` opt-out. Selected via
+    /// `--phase=unhardened`.
     unhardened,
+
+    const FeaturePhase = struct {
+        flag: cynic.runtime.FeatureFlag,
+        /// Each tracked proposal is swept once with `hardened = true`
+        /// (as `--enable=<flag>` ships) and once `false` (SES off).
+        hardened: bool,
+    };
 
     /// FeatureSet to install on the per-fixture realm. Main +
     /// unhardened return empty (no proposals); a feature phase
@@ -887,20 +898,23 @@ const Phase = union(enum) {
             .main, .unhardened => cynic.runtime.FeatureSet.initEmpty(),
             .feature => |f| blk: {
                 var s = cynic.runtime.FeatureSet.initEmpty();
-                s.insert(f);
+                s.insert(f.flag);
                 break :blk s;
             },
         };
     }
 
-    /// Whether per-fixture realms run with the SES posture
-    /// disabled. Only the `.unhardened` phase flips this; main
-    /// and feature phases score the engine as embedders see it
-    /// by default (hardened).
+    /// Whether per-fixture realms run under the hardened SES
+    /// posture. `.main` is hardened (as embedders see it by
+    /// default); `.unhardened` is the freeze-off headline sweep;
+    /// each `.feature` sweep carries its own posture so a proposal
+    /// is scored both hardened (as `--enable=<flag>` ships, with
+    /// divergent classification) and unhardened (bare ECMA-262).
     fn realmHardened(self: Phase) bool {
         return switch (self) {
             .unhardened => false,
-            .main, .feature => true,
+            .main => true,
+            .feature => |f| f.hardened,
         };
     }
 
@@ -908,12 +922,12 @@ const Phase = union(enum) {
     /// pre-Stage-4 frontmatter bitmask. Main + unhardened admit
     /// only fixtures that reference no tracked proposal
     /// (mask == 0); a feature phase admits only fixtures whose
-    /// mask has the matching bit.
+    /// mask has the matching bit (regardless of posture).
     fn includesFixture(self: Phase, pre_stage4_mask: PreStage4Mask) bool {
         return switch (self) {
             .main, .unhardened => pre_stage4_mask == 0,
             .feature => |f| has: {
-                const idx: usize = @intFromEnum(f);
+                const idx: usize = @intFromEnum(f.flag);
                 const bit = @as(PreStage4Mask, 1) << @intCast(idx);
                 break :has (pre_stage4_mask & bit) != 0;
             },
@@ -922,13 +936,13 @@ const Phase = union(enum) {
 
     /// Short label for progress prefixes and the per-phase tally
     /// banner. `"main"` for the headline sweep; the feature's
-    /// `name()` (kebab-case, same string as the test262
-    /// frontmatter `features:` tag) for proposal sweeps;
-    /// `"unhardened"` for the SES-relaxation sweep.
+    /// `name()` (same string as the test262 frontmatter `features:`
+    /// tag) for proposal sweeps — the banner appends the SES
+    /// posture; `"unhardened"` for the SES-relaxation sweep.
     fn label(self: Phase) []const u8 {
         return switch (self) {
             .main => "main",
-            .feature => |f| f.name(),
+            .feature => |f| f.flag.name(),
             .unhardened => "unhardened",
         };
     }
@@ -1063,7 +1077,9 @@ pub fn main(init: std.process.Init) !void {
     // ECMA-262 with only its one flag enabled, mirroring how an
     // embedder would evaluate the feature in isolation.
     const tracked_count = @typeInfo(cynic.runtime.FeatureFlag).@"enum".fields.len;
-    var phases_buf: [tracked_count + 2]Phase = undefined;
+    // Each tracked proposal contributes two sweeps (hardened +
+    // unhardened), plus the two headline phases (main, unhardened).
+    var phases_buf: [tracked_count * 2 + 2]Phase = undefined;
     var phases_len: usize = 0;
     if (opts.phase) |p| {
         phases_buf[0] = p;
@@ -1073,7 +1089,10 @@ pub fn main(init: std.process.Init) !void {
         phases_buf[1] = .unhardened;
         phases_len = 2;
         inline for (@typeInfo(cynic.runtime.FeatureFlag).@"enum".fields) |f| {
-            phases_buf[phases_len] = .{ .feature = @enumFromInt(f.value) };
+            const flag: cynic.runtime.FeatureFlag = @enumFromInt(f.value);
+            phases_buf[phases_len] = .{ .feature = .{ .flag = flag, .hardened = true } };
+            phases_len += 1;
+            phases_buf[phases_len] = .{ .feature = .{ .flag = flag, .hardened = false } };
             phases_len += 1;
         }
     } else {
@@ -1086,8 +1105,10 @@ pub fn main(init: std.process.Init) !void {
     defer if (main_result) |*r| r.deinit(gpa);
     var unhardened_result: ?PhaseResult = null;
     defer if (unhardened_result) |*r| r.deinit(gpa);
-    var feature_results: [tracked_count]?PhaseResult = @splat(null);
-    defer for (&feature_results) |*slot| if (slot.*) |*pr| pr.deinit(gpa);
+    var feature_results_hardened: [tracked_count]?PhaseResult = @splat(null);
+    var feature_results_unhardened: [tracked_count]?PhaseResult = @splat(null);
+    defer for (&feature_results_hardened) |*slot| if (slot.*) |*pr| pr.deinit(gpa);
+    defer for (&feature_results_unhardened) |*slot| if (slot.*) |*pr| pr.deinit(gpa);
 
     for (phases_buf[0..phases_len]) |phase| {
         const res = try runSweep(gpa, io, cwd, corpus, harness_sources, &opts, phase);
@@ -1097,9 +1118,13 @@ pub fn main(init: std.process.Init) !void {
                 main_result = res;
             },
             .feature => |f| {
-                const idx: usize = @intFromEnum(f);
-                if (feature_results[idx]) |*old| old.deinit(gpa);
-                feature_results[idx] = res;
+                const idx: usize = @intFromEnum(f.flag);
+                const slot = if (f.hardened)
+                    &feature_results_hardened[idx]
+                else
+                    &feature_results_unhardened[idx];
+                if (slot.*) |*old| old.deinit(gpa);
+                slot.* = res;
             },
             .unhardened => {
                 if (unhardened_result) |*old| old.deinit(gpa);
@@ -1117,10 +1142,26 @@ pub fn main(init: std.process.Init) !void {
     // unhardened row since the feature phases run on the
     // unhardened path.
     if (opts.write_results) {
-        var pre_stage4: PreStage4Stats = .{};
-        for (feature_results, 0..) |maybe_r, i| {
+        // Per-feature scoreboard: each tracked proposal gets a
+        // hardened row (SES-adjusted — divergent fixtures count
+        // toward pass, same (pass + divergent) headline as the main
+        // hardened row) and an unhardened row (bare ECMA-262).
+        var pre_stage4_hardened: PreStage4Stats = .{};
+        var pre_stage4_unhardened: PreStage4Stats = .{};
+        for (feature_results_hardened, 0..) |maybe_r, i| {
             if (maybe_r) |r| {
-                pre_stage4.slots[i] = .{
+                pre_stage4_hardened.slots[i] = .{
+                    .name = tracked_pre_stage4_features[i],
+                    .pass = r.stats.pass() + r.stats.divergent,
+                    .fail = r.stats.fail(),
+                    .skip = r.stats.skip,
+                    .total = r.stats.total,
+                };
+            }
+        }
+        for (feature_results_unhardened, 0..) |maybe_r, i| {
+            if (maybe_r) |r| {
+                pre_stage4_unhardened.slots[i] = .{
                     .name = tracked_pre_stage4_features[i],
                     .pass = r.stats.pass(),
                     .fail = r.stats.fail(),
@@ -1131,22 +1172,19 @@ pub fn main(init: std.process.Init) !void {
         }
         const is_full = opts.filter == null and !opts.only_failing;
         const now_ts = std.Io.Clock.now(.real, io);
-        // SES-posture (hardened, default) row from the `.main`
-        // phase result. A hardened-row write gets an empty
-        // `PreStage4Stats` slot so the writer doesn't restamp the
-        // per-feature table with the SES-posture numbers; the
-        // per-feature scoreboard is unhardened-only (the
-        // proposals haven't been audited against hardened
-        // primordials yet).
+        // SES-posture (hardened, default) row from the `.main` phase
+        // result. The per-feature scoreboard is written only on the
+        // unhardened (`.runtime`) pass below, so the hardened row
+        // gets empty per-feature stats to avoid restamping it twice.
         if (main_result) |*mr| {
             const elapsed_for_row: ?u64 = if (is_full and mr.elapsed_ms > 0) @intCast(mr.elapsed_ms) else null;
             const empty_pre_stage4: PreStage4Stats = .{};
-            try writeResults(gpa, io, &mr.stats, &mr.buckets, &empty_pre_stage4, now_ts.toSeconds(), .runtime_hardened, elapsed_for_row);
+            try writeResults(gpa, io, &mr.stats, &mr.buckets, &empty_pre_stage4, &empty_pre_stage4, now_ts.toSeconds(), .runtime_hardened, elapsed_for_row);
         }
-        // Unhardened (legacy) row + the per-feature scoreboard.
+        // Unhardened (legacy) row + the two-row-per-feature scoreboard.
         if (unhardened_result) |*ur| {
             const elapsed_for_row: ?u64 = if (is_full and ur.elapsed_ms > 0) @intCast(ur.elapsed_ms) else null;
-            try writeResults(gpa, io, &ur.stats, &ur.buckets, &pre_stage4, now_ts.toSeconds(), .runtime, elapsed_for_row);
+            try writeResults(gpa, io, &ur.stats, &ur.buckets, &pre_stage4_hardened, &pre_stage4_unhardened, now_ts.toSeconds(), .runtime, elapsed_for_row);
         }
     }
 
@@ -1527,8 +1565,12 @@ fn runSweep(
     // multi-phase `--write-results` invocation surfaces each sweep
     // distinctly in the log.
     if (!opts.quiet) {
-        var label_buf: [64]u8 = undefined;
-        const banner = try std.fmt.bufPrint(&label_buf, "\n[{s}] ", .{phase.label()});
+        var label_buf: [80]u8 = undefined;
+        const posture: []const u8 = switch (phase) {
+            .feature => |f| if (f.hardened) " hardened" else " unhardened",
+            else => "",
+        };
+        const banner = try std.fmt.bufPrint(&label_buf, "\n[{s}{s}] ", .{ phase.label(), posture });
         try std.Io.File.stdout().writeStreamingAll(io, banner);
     }
     try printTally(io, &stats, elapsed);
@@ -1991,11 +2033,13 @@ fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
 }
 
 /// Outcome for a failure in the test SOURCE evaluation path
-/// (compile error or runtime throw at script eval). When the
-/// hardened `.main` phase is running and the path is in the
-/// curated `ses_divergent.divergent_paths` list, return
-/// `.fail_divergent` so the fixture lands in the divergent
-/// bucket instead of being scored as a real engine bug.
+/// (compile error or runtime throw at script eval). When a
+/// hardened phase is running (the headline `.main` sweep or a
+/// hardened per-feature sweep) and the path is in the curated
+/// `ses_divergent.divergent_paths` list, return `.fail_divergent`
+/// so the fixture lands in the divergent bucket instead of being
+/// scored as a real engine bug. Unhardened phases skip this —
+/// with the freeze pass off, the fixture passes outright.
 ///
 /// Only applied to the test source itself — harness preamble
 /// failures (sta.js, assert.js, $DONE setup, installBuiltins)
@@ -2003,7 +2047,7 @@ fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
 /// there would mask a real engine regression in the SES
 /// preamble path.
 fn testSourceFailureOutcome(phase: Phase, rel: []const u8) RunResult {
-    if (phase == .main) {
+    if (phase.realmHardened()) {
         if (ses_divergent.classifyByPath(rel) != null) {
             return .{ .kind = .fail_divergent };
         }
@@ -2458,7 +2502,7 @@ fn classifyAndRun(
         // «false», «true») to be true` from non-propertyHelper
         // asserts) is too broad to add as a pattern without
         // over-firing on real engine bugs.
-        if (phase == .main) {
+        if (phase.realmHardened()) {
             const cat = ses_divergent.classify(name_str, msg_str) orelse
                 ses_divergent.classifyByPath(rel);
             if (cat != null) {
@@ -3099,7 +3143,8 @@ fn writeResults(
     io: std.Io,
     stats: *const Stats,
     buckets: *const BucketMap,
-    pre_stage4: *const PreStage4Stats,
+    pre_stage4_hardened: *const PreStage4Stats,
+    pre_stage4_unhardened: *const PreStage4Stats,
     epoch_seconds: i64,
     mode: Mode,
     elapsed_ms: ?u64,
@@ -3207,7 +3252,7 @@ fn writeResults(
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
-    try writeFileBody(gpa, &buf, rows.items, buckets, pre_stage4, &prev_bucket_pass, mode, preserved_scoreboard, preserved_pre_stage4, preserved_witness_note, prev_scoreboard_phase5c);
+    try writeFileBody(gpa, &buf, rows.items, buckets, pre_stage4_hardened, pre_stage4_unhardened, &prev_bucket_pass, mode, preserved_scoreboard, preserved_pre_stage4, preserved_witness_note, prev_scoreboard_phase5c);
 
     try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
@@ -3507,7 +3552,8 @@ fn writeFileBody(
     out: *std.ArrayListUnmanaged(u8),
     rows: []Row,
     buckets: *const BucketMap,
-    pre_stage4: *const PreStage4Stats,
+    pre_stage4_hardened: *const PreStage4Stats,
+    pre_stage4_unhardened: *const PreStage4Stats,
     prev_bucket_pass: *const std.StringHashMapUnmanaged(u32),
     mode_just_run: Mode,
     /// Verbatim text of the previous `## Where the runtime …`
@@ -3762,8 +3808,8 @@ fn writeFileBody(
     // Per-feature scoreboard for the pre-Stage-4 proposals Cynic
     // ships ahead of the published edition. Same preservation
     // contract as the per-area scoreboard.
-    if (mode_just_run == .runtime and preStage4HasData(pre_stage4)) {
-        try writePreStage4Scoreboard(gpa, out, pre_stage4);
+    if (mode_just_run == .runtime and (preStage4HasData(pre_stage4_hardened) or preStage4HasData(pre_stage4_unhardened))) {
+        try writePreStage4Scoreboard(gpa, out, pre_stage4_hardened, pre_stage4_unhardened);
     } else if (preserved_pre_stage4) |s| {
         try out.appendSlice(gpa, s);
     }
@@ -4044,7 +4090,8 @@ fn preStage4HasData(pre_stage4: *const PreStage4Stats) bool {
 fn writePreStage4Scoreboard(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
-    pre_stage4: *const PreStage4Stats,
+    pre_stage4_hardened: *const PreStage4Stats,
+    pre_stage4_unhardened: *const PreStage4Stats,
 ) !void {
     try out.appendSlice(gpa,
         \\
@@ -4052,13 +4099,14 @@ fn writePreStage4Scoreboard(
         \\
         \\Per-feature scores for the TC39 proposals Cynic ships at
         \\Stage 1–3, ahead of their inclusion in the published
-        \\edition. **Each row is sourced from a dedicated phase
-        \\sweep** that runs only the fixtures whose frontmatter
+        \\edition. **Each proposal gets two rows** from dedicated
+        \\phase sweeps that run only the fixtures whose frontmatter
         \\`features:` list names the proposal, in a realm where only
-        \\that proposal's flag is enabled — a `joint-iteration`
-        \\fixture is scored here against a realm where
-        \\`Map.prototype.getOrInsert` is undefined, and vice versa,
-        \\so each row reflects the proposal in honest isolation.
+        \\that proposal's flag is enabled: a **(hardened)** row — the
+        \\as-shipped SES posture (`--enable=<flag>`), SES-adjusted so
+        \\`pass` counts divergent fixtures the same way the headline
+        \\hardened row does — and an **(unhardened)** row against bare
+        \\ECMA-262, mirroring the main / unhardened split.
         \\**These fixtures are excluded entirely from the top-line
         \\`## Current scores` and the per-area scoreboard** — they
         \\are not in the Cynic corpus and not in any bucket, so the
@@ -4072,15 +4120,22 @@ fn writePreStage4Scoreboard(
     );
 
     var buf: [320]u8 = undefined;
-    for (pre_stage4.slots, 0..) |b, i| {
+    for (0..tracked_pre_stage4_features.len) |i| {
         const name = tracked_pre_stage4_features[i];
-        const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(b.total));
-        const attempted: u32 = b.pass + b.fail;
-        const att_pct: f64 = if (attempted == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(attempted));
-        const line = try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{
-            name, b.pass, b.fail, b.skip, pct, att_pct,
-        });
-        try out.appendSlice(gpa, line);
+        const h = pre_stage4_hardened.slots[i];
+        if (h.total != 0) {
+            const pct: f64 = 100.0 * @as(f64, @floatFromInt(h.pass)) / @as(f64, @floatFromInt(h.total));
+            const att: u32 = h.pass + h.fail;
+            const att_pct: f64 = if (att == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(h.pass)) / @as(f64, @floatFromInt(att));
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (hardened) | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{ name, h.pass, h.fail, h.skip, pct, att_pct }));
+        }
+        const u = pre_stage4_unhardened.slots[i];
+        if (u.total != 0) {
+            const pct: f64 = 100.0 * @as(f64, @floatFromInt(u.pass)) / @as(f64, @floatFromInt(u.total));
+            const att: u32 = u.pass + u.fail;
+            const att_pct: f64 = if (att == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(u.pass)) / @as(f64, @floatFromInt(att));
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (unhardened) | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{ name, u.pass, u.fail, u.skip, pct, att_pct }));
+        }
     }
     try out.appendSlice(gpa, "\n");
 }
@@ -4401,12 +4456,22 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             } else if (std.mem.eql(u8, spec, "unhardened")) {
                 opts.phase = .unhardened;
             } else if (std.mem.startsWith(u8, spec, "feature:")) {
-                const fname = spec["feature:".len..];
+                // `feature:<name>` defaults to the hardened
+                // (as-shipped) sweep; append `:unhardened` /
+                // `:hardened` to pin the posture explicitly.
+                var fname: []const u8 = spec["feature:".len..];
+                var hardened = true;
+                if (std.mem.endsWith(u8, fname, ":unhardened")) {
+                    hardened = false;
+                    fname = fname[0 .. fname.len - ":unhardened".len];
+                } else if (std.mem.endsWith(u8, fname, ":hardened")) {
+                    fname = fname[0 .. fname.len - ":hardened".len];
+                }
                 const flag = cynic.runtime.FeatureFlag.fromName(fname) orelse {
                     std.debug.print("error: unknown --phase feature: '{s}'\n", .{fname});
                     std.process.exit(1);
                 };
-                opts.phase = .{ .feature = flag };
+                opts.phase = .{ .feature = .{ .flag = flag, .hardened = hardened } };
             } else {
                 std.debug.print("error: --phase expects 'main', 'unhardened', or 'feature:<name>', got '{s}'\n", .{spec});
                 std.process.exit(1);

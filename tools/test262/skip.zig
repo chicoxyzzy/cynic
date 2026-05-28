@@ -1012,10 +1012,11 @@ pub const stage_maturity_features = [_][]const u8{
 /// proposal hasn't reached a published edition yet, so shipping
 /// conformance against it isn't the point.
 pub const stage_maturity_path_prefixes = [_][]const u8{
-    // (ShadowRealm graduated out of stage-maturity skipping — the
-    // constructor, the `.evaluate()` callable boundary, and
-    // `.importValue()` all ship, so the whole `built-ins/ShadowRealm/`
-    // tree attempts as normal corpus.)
+    // (ShadowRealm isn't path-skipped — it ships behind the
+    // `--enable=ShadowRealm` feature flag (Stage 2.7), so the
+    // harness's feature-tag mechanism excludes its fixtures from the
+    // main / unhardened rows and scores them in the dedicated
+    // `feature:ShadowRealm` phase instead. Nothing to skip by path.)
 };
 
 // ── Vendor gaps ─────────────────────────────────────────────────────
@@ -1393,11 +1394,12 @@ test "skip: Temporal out of scope" {
     try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/PlainDate/prototype/add/branding.js"));
 }
 
-test "skip: ShadowRealm in scope (graduated)" {
-    // ShadowRealm ships — the constructor, the `.evaluate()`
-    // callable boundary, and `.importValue()` all attempt as normal
-    // corpus. (A handful classify SES-divergent under the hardened
-    // row, but that's scoring, not skipping.)
+test "skip: ShadowRealm is not path-skipped (feature-gated)" {
+    // ShadowRealm isn't out-of-scope at the path level — it ships
+    // behind `--enable=ShadowRealm` (Stage 2.7), so the harness's
+    // feature-tag mechanism (not skip.zig) keeps its fixtures out of
+    // the main row and scores them in the feature phase.
+    // pathIsCynicOutOfScope therefore stays false across the tree.
     try testing.expect(!pathIsCynicOutOfScope("built-ins/ShadowRealm/constructor.js"));
     try testing.expect(!pathIsCynicOutOfScope("built-ins/ShadowRealm/extensibility.js"));
     try testing.expect(!pathIsCynicOutOfScope("built-ins/ShadowRealm/prototype/evaluate/not-constructor.js"));

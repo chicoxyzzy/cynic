@@ -231,18 +231,18 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
         .category = .descriptor_assertion,
     },
     // §3.8 ShadowRealm — five fixtures that pass under the
-    // unhardened row but fail hardened purely because the SES
-    // posture freezes the child realm's primordials / globalThis.
-    // Each writes to a frozen globalThis (`globalThis.x = …`) or
-    // reads a frozen primordial's extensibility, so the hardened
-    // throw / `false` is the SES-correct behavior and the
-    // fixture's expectation is the non-SES one. The thrown message
-    // is generic (`ShadowRealm.prototype.evaluate: evaluation
-    // threw` / `Expected SameValue(«false», «true»)`), so they're
-    // listed by path. NOT included:
-    // `globalthis-config-only-properties.js`, which also fails the
-    // unhardened row (Cynic installs globals non-configurable —
-    // a real divergence, tracked separately).
+    // unhardened feature row but fail the hardened feature row
+    // purely because the SES posture freezes the child realm's
+    // primordials / globalThis. Each writes to a frozen globalThis
+    // (`globalThis.x = …`) or reads a frozen primordial's
+    // extensibility, so the hardened throw / `false` is the
+    // SES-correct behavior and the fixture's expectation is the
+    // non-SES one. The thrown message is generic
+    // (`ShadowRealm.prototype.evaluate: evaluation threw` /
+    // `Expected SameValue(«false», «true»)`), so they're listed by
+    // path. NOT included: `globalthis-config-only-properties.js`,
+    // which also fails the unhardened row (Cynic installs globals
+    // non-configurable — a real divergence, tracked separately).
     .{
         // `Object.isExtensible(ShadowRealm)` — SES freezes the
         // constructor primordial; fixture wants extensible.
