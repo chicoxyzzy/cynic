@@ -622,13 +622,13 @@ pub fn callJSFunction(
 
     // §3.8.3.6 WrappedFunctionCall — a function returned by
     // `ShadowRealm.prototype.evaluate` (or any cross-boundary
-    // crossing) carries its target in `wrapped_target_function`
-    // and its caller realm in `realm`. Each arg/return value
-    // crosses the §3.8.3.4 GetWrappedValue filter; abrupt
-    // completions are remapped to a TypeError in the caller realm.
-    // `this_value` is intentionally ignored per the spec —
-    // wrapped calls dispatch with `thisArgument = undefined`.
-    if (callee.wrapped_target_function != null) {
+    // crossing) carries its target in `wrapped_target` and its
+    // caller realm in `realm`. Each arg/return value crosses the
+    // §3.8.3.4 GetWrappedValue filter; abrupt completions are
+    // remapped to a TypeError in the caller realm. `this_value`
+    // is intentionally ignored per the spec — wrapped calls
+    // dispatch with `thisArgument = undefined`.
+    if (!callee.wrapped_target.isUndefined()) {
         return try @import("../builtins/shadow_realm.zig").callWrappedFunction(allocator, realm, callee, args);
     }
 

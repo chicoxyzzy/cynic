@@ -239,17 +239,21 @@ pub fn getWrappedValue(caller_realm: *Realm, value: Value) NativeError!Value {
     {
         return value;
     }
-    // Step 1 — non-primitive: must be a function. JSFunction-tagged
-    // values are callable; plain JSObjects are not (Cynic does not
-    // model callable proxies through JSObject, callable proxies
-    // route through JSFunction.proxy_target / revocable_proxy
-    // slots).
-    if (heap_mod.valueAsFunction(value)) |target| {
-        // Abrupt completions (e.g. target.length getter throws)
-        // propagate as NativeError — already pinned in
-        // `realm.pending_exception` by the inner throw.
-        const wrapper = try wrappedFunctionCreate(caller_realm, target);
+    // Step 1 — non-primitive: IsCallable must be true. JSFunction
+    // is callable; a JSObject is callable iff it's a Proxy whose
+    // target chain bottoms out on a callable (`proxy_callable`
+    // flag), or it's an engine-internal `proxy_callable` slot like
+    // %Function.prototype%. Wrapping either kind produces a fresh
+    // WrappedFunction in the caller realm.
+    if (heap_mod.valueAsFunction(value) != null) {
+        const wrapper = try wrappedFunctionCreate(caller_realm, value);
         return heap_mod.taggedFunction(wrapper);
+    }
+    if (heap_mod.valueAsPlainObject(value)) |obj| {
+        if (obj.proxy_callable) {
+            const wrapper = try wrappedFunctionCreate(caller_realm, value);
+            return heap_mod.taggedFunction(wrapper);
+        }
     }
     // Non-callable Object → TypeError in caller realm.
     return throwTypeError(caller_realm, "ShadowRealm boundary: non-callable, non-primitive value cannot cross");
@@ -261,42 +265,35 @@ pub fn getWrappedValue(caller_realm: *Realm, value: Value) NativeError!Value {
 ///   2. Set wrapped.[[Prototype]] to callerRealm's
 ///      %Function.prototype%.
 ///   3. Set wrapped.[[Call]] to WrappedFunctionCall (handled
-///      via the `wrapped_target_function` slot).
+///      via the `wrapped_target` slot).
 ///   4. Set wrapped.[[WrappedTargetFunction]] to Target.
 ///   5. Set wrapped.[[Realm]] to callerRealm.
 ///   6. Let result be CopyNameAndLength(wrapped, Target). If
 ///      result is an abrupt completion, throw a TypeError
 ///      exception in callerRealm.
 ///
-/// CopyNameAndLength fires accessors on Target — a throwing
-/// `length` or `name` getter must surface as an abrupt
-/// completion here (test262
-/// `WrappedFunction/{length,name}-throws-typeerror.js`).
-fn wrappedFunctionCreate(caller_realm: *Realm, target: *JSFunction) NativeError!*JSFunction {
+/// `target` is Value-typed: a JSFunction or a callable
+/// JSObject (Proxy on a callable target). CopyNameAndLength
+/// fires accessors on the target — a throwing `length` or
+/// `name` getter must surface as an abrupt completion
+/// (`WrappedFunction/{length,name}-throws-typeerror.js`).
+fn wrappedFunctionCreate(caller_realm: *Realm, target: Value) NativeError!*JSFunction {
     // Use a trampoline native that never actually runs — call
-    // dispatch detects `wrapped_target_function != null` and
-    // short-circuits before reaching the native body.
+    // dispatch detects `!wrapped_target.isUndefined()` and short-
+    // circuits before reaching the native body.
     const wrapped = caller_realm.heap.allocateFunctionNative(wrappedTrampoline, 0, "") catch return error.OutOfMemory;
     wrapped.proto = caller_realm.intrinsics.function_prototype;
     wrapped.realm = caller_realm;
-    wrapped.wrapped_target_function = target;
+    wrapped.wrapped_target = target;
     // §3.8.3.5 step 4 — wrapped functions have no [[Construct]].
     wrapped.has_construct = false;
 
     // §3.8.3.5 step 6 + §3.8.3.5.1 CopyNameAndLength. The spec
     // catches abrupt completions and rethrows them AS a fresh
-    // TypeError in callerRealm; this matches the §3.8 information-
-    // hiding posture (the target's exception object would leak its
-    // realm of origin).
+    // TypeError in callerRealm.
     copyNameAndLength(caller_realm, wrapped, target) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => {
-            // §3.8.3.5 step 8 — abrupt during CopyNameAndLength
-            // is remapped to a fresh TypeError IN callerRealm so
-            // the target's exception object doesn't leak its
-            // realm of origin. `throwTypeError` always returns
-            // `error.NativeThrew`; we drop the existing exception
-            // first to avoid double-throw confusion.
             caller_realm.pending_exception = null;
             return throwTypeError(caller_realm, "ShadowRealm: WrappedFunctionCreate could not copy target's length/name");
         },
@@ -325,7 +322,15 @@ fn wrappedFunctionCreate(caller_realm: *Realm, target: *JSFunction) NativeError!
 /// argCount = 0, so `wrapped.name === target.name` (no "wrapped "
 /// prefix) and `wrapped.length === target.length` (mod the
 /// special cases above).
-fn copyNameAndLength(realm: *Realm, wrapped: *JSFunction, target: *JSFunction) NativeError!void {
+fn copyNameAndLength(realm: *Realm, wrapped: *JSFunction, target_v: Value) NativeError!void {
+    // For a JSFunction target we use the typed accessor / data-bag
+    // path (mirrors `Function.prototype.bind`'s bound_length /
+    // bound_name logic). For a callable JSObject target (Proxy on
+    // a callable), we punt to L=0 / name="" today — refining
+    // would need the proxy `get` trap fired with "length" /
+    // "name", which the boundary doesn't yet plumb through.
+    const target_fn = heap_mod.valueAsFunction(target_v);
+
     // §17 — function `length` and `name` descriptors are
     // `{w:false, e:false, c:true}`.
     const fn_flags: PropertyFlags = .{
@@ -334,51 +339,54 @@ fn copyNameAndLength(realm: *Realm, wrapped: *JSFunction, target: *JSFunction) N
         .configurable = true,
     };
 
-    // Step 3-4 — length. `HasOwnProperty` here checks both the
-    // data bag AND the accessor map AND the synthesised default
-    // (§10.2.4 ordinary functions always have a `length` slot);
-    // matches `JSFunction.flagsForOwn`'s synthesis.
     var length_value: Value = Value.fromInt32(0);
-    const has_own_length = target.accessors.contains("length") or target.properties.contains("length");
-    if (has_own_length) {
-        const len_v = try getAccessorAware(realm, target, "length");
-        // Step 4.b — `Number` filter. Non-Number → L stays at 0.
-        if (len_v.isInt32()) {
-            // Integer length. ToIntegerOrInfinity is identity.
-            const li: i64 = len_v.asInt32();
-            const l = if (li > 0) li else 0;
-            length_value = Value.fromInt32(@intCast(l));
-        } else if (len_v.isDouble()) {
-            const d = len_v.asDouble();
-            if (std.math.isNan(d)) {
-                length_value = Value.fromInt32(0);
-            } else if (std.math.isInf(d)) {
-                length_value = if (d > 0) Value.fromDouble(std.math.inf(f64)) else Value.fromInt32(0);
-            } else {
-                const ti: f64 = @trunc(d);
-                const clamped: f64 = if (ti > 0) ti else 0;
-                if (clamped == @as(f64, @floatFromInt(@as(i64, @intFromFloat(clamped)))) and clamped < 2147483647.0) {
-                    length_value = Value.fromInt32(@intFromFloat(clamped));
+    var name_value: Value = blk: {
+        const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
+        break :blk Value.fromString(empty);
+    };
+
+    if (target_fn) |target| {
+        // Step 3-4 — length. `HasOwnProperty` checks both the
+        // data bag AND the accessor map. §10.2.4 ordinary
+        // functions always have a `length` slot.
+        const has_own_length = target.accessors.contains("length") or target.properties.contains("length");
+        if (has_own_length) {
+            const len_v = try getAccessorAware(realm, target, "length");
+            // Step 4.b — `Number` filter. Non-Number → L stays
+            // at 0.
+            if (len_v.isInt32()) {
+                const li: i64 = len_v.asInt32();
+                const l = if (li > 0) li else 0;
+                length_value = Value.fromInt32(@intCast(l));
+            } else if (len_v.isDouble()) {
+                const d = len_v.asDouble();
+                if (std.math.isNan(d)) {
+                    length_value = Value.fromInt32(0);
+                } else if (std.math.isInf(d)) {
+                    length_value = if (d > 0) Value.fromDouble(std.math.inf(f64)) else Value.fromInt32(0);
                 } else {
-                    length_value = Value.fromDouble(clamped);
+                    const ti: f64 = @trunc(d);
+                    const clamped: f64 = if (ti > 0) ti else 0;
+                    if (clamped == @as(f64, @floatFromInt(@as(i64, @intFromFloat(clamped)))) and clamped < 2147483647.0) {
+                        length_value = Value.fromInt32(@intFromFloat(clamped));
+                    } else {
+                        length_value = Value.fromDouble(clamped);
+                    }
                 }
             }
         }
-    }
-    try wrapped.setWithFlags(realm.allocator, "length", length_value, fn_flags);
 
-    // Step 6-7 — name. Non-String → "". Spec calls
-    // SetFunctionName(F, targetName) with no prefix, so name is
-    // installed verbatim.
-    const name_v = try getAccessorAware(realm, target, "name");
-    var name_str_v: Value = undefined;
-    if (name_v.isString()) {
-        name_str_v = name_v;
-    } else {
-        const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
-        name_str_v = Value.fromString(empty);
+        // Step 6-7 — name. Non-String → "". Spec calls
+        // SetFunctionName(F, targetName) with no prefix, so name
+        // is installed verbatim.
+        const name_v = try getAccessorAware(realm, target, "name");
+        if (name_v.isString()) {
+            name_value = name_v;
+        }
     }
-    try wrapped.setWithFlags(realm.allocator, "name", name_str_v, fn_flags);
+
+    try wrapped.setWithFlags(realm.allocator, "length", length_value, fn_flags);
+    try wrapped.setWithFlags(realm.allocator, "name", name_value, fn_flags);
 }
 
 /// Placeholder native body for WrappedFunction closures.
@@ -393,11 +401,13 @@ fn wrappedTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nati
 }
 
 /// §3.8.3.6 WrappedFunctionCall (called by `callJSFunction` when
-/// a JSFunction's `wrapped_target_function` slot is non-null).
+/// a JSFunction's `wrapped_target` slot is non-undefined).
 ///
 ///   1. Let target be F.[[WrappedTargetFunction]].
 ///   2. Let callerRealm be F.[[Realm]].
 ///   3. Let targetRealm be ? GetFunctionRealm(target).
+///      — for a revoked Proxy target, GetFunctionRealm throws
+///      TypeError per §10.2.5 step 3.a.
 ///   4. For each arg, let wrappedArg be ? GetWrappedValue(targetRealm, arg).
 ///   5. Let result be ? Call(target, undefined, wrappedArgs).
 ///   6. If result is abrupt, throw a TypeError in callerRealm.
@@ -408,16 +418,29 @@ pub fn callWrappedFunction(
     wrapper: *JSFunction,
     args: []const Value,
 ) call_mod.RunError!call_mod.RunResult {
-    const target = wrapper.wrapped_target_function orelse unreachable;
+    const target_v = wrapper.wrapped_target;
     const caller_realm = wrapper.realm orelse realm;
-    // Step 3 — `target_realm` is the realm `target` was created in.
-    // GetFunctionRealm walks the bound chain; falls back to `realm`
-    // (current) only when no tag is reachable.
-    const target_realm = target.getFunctionRealm() orelse realm;
+
+    // Step 3 — `target_realm` walks GetFunctionRealm on the
+    // target. A revoked proxy hits step 3.a and throws TypeError
+    // *in callerRealm*. For now we approximate: if the target is
+    // a revoked-proxy JSObject, throw immediately.
+    if (heap_mod.valueAsPlainObject(target_v)) |obj| {
+        if (obj.proxy_revoked) {
+            const ex = intrinsics.newTypeError(caller_realm, "ShadowRealm boundary: target proxy is revoked") catch return error.OutOfMemory;
+            return .{ .thrown = ex };
+        }
+    }
+    // For JSFunction targets, ask the function for its realm.
+    // For callable-proxy targets, default to caller realm — the
+    // proxy's [[Call]] trap runs in whichever realm the underlying
+    // target was defined in anyway.
+    const target_realm: *Realm = if (heap_mod.valueAsFunction(target_v)) |tf|
+        tf.getFunctionRealm() orelse realm
+    else
+        realm;
 
     // Step 4 — marshal each arg from callerRealm into targetRealm.
-    // Allocate the marshalled slice on the function-call allocator
-    // (caller's arena) since args don't escape the call.
     var wrapped_args = allocator.alloc(Value, args.len) catch return error.OutOfMemory;
     defer allocator.free(wrapped_args);
     for (args, 0..) |a, i| {
@@ -431,14 +454,15 @@ pub fn callWrappedFunction(
         };
     }
 
-    // Step 5 — call target with the marshalled args.
-    const inner_result = try call_mod.callJSFunction(allocator, target_realm, target, Value.undefined_, wrapped_args);
+    // Step 5 — call target with the marshalled args. `callValue`
+    // dispatches through Proxy traps for callable JSObject
+    // targets and direct call for JSFunctions.
+    const inner_result = try call_mod.callValue(allocator, target_realm, target_v, Value.undefined_, wrapped_args);
     switch (inner_result) {
         .thrown => {
             // Step 6 — the target threw; remap to TypeError in
-            // callerRealm. The §3.8 spec is intentionally
-            // information-hiding here — the target's error object
-            // would leak its realm-of-origin identity.
+            // callerRealm. §3.8's information-hiding posture
+            // requires not leaking the target's exception object.
             const ex = intrinsics.newTypeError(caller_realm, "ShadowRealm boundary: wrapped function threw") catch return error.OutOfMemory;
             return .{ .thrown = ex };
         },

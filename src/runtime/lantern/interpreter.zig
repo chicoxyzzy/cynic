@@ -1763,7 +1763,7 @@ pub fn runFrames(
             // args/return through the §3.8.3.4 filter; delegate
             // to `callJSFunction` which routes into the boundary
             // handler in `shadow_realm.zig`.
-            if (callee_fn.wrapped_target_function != null) {
+            if (!callee_fn.wrapped_target.isUndefined()) {
                 const args_start = @as(usize, r_callee) + 1;
                 const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
                 switch (result) {
@@ -2342,7 +2342,7 @@ pub fn runFrames(
             // in `.call`. Cross-realm callable boundary needs the
             // arg/return marshalling that the inline fast-path
             // can't do; delegate to `callJSFunction`.
-            if (callee_fn.wrapped_target_function != null) {
+            if (!callee_fn.wrapped_target.isUndefined()) {
                 const args_start = @as(usize, r_callee) + 1;
                 const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
                 switch (result) {
@@ -2599,7 +2599,7 @@ pub fn runFrames(
             }
 
             // §3.8.3.6 WrappedFunction — see the `.call` branch.
-            if (callee_fn.wrapped_target_function != null) {
+            if (!callee_fn.wrapped_target.isUndefined()) {
                 const args_start = @as(usize, r_callee) + 1;
                 const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
                 switch (result) {

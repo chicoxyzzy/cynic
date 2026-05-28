@@ -278,7 +278,16 @@ pub const JSFunction = struct {
     /// the cross-realm species work) carries the CALLER realm so
     /// the boundary knows which intrinsics to use when throwing
     /// the §3.8.3.6 TypeError remapping abrupt completions.
-    wrapped_target_function: ?*JSFunction = null,
+    ///
+    /// Value-typed (not `?*JSFunction`) because a callable Proxy
+    /// (`new Proxy(fn, handler)`) is `IsCallable: true` per §10.5
+    /// and so is a valid wrapping target per §3.8.3.4, but is
+    /// represented in Cynic as a JSObject with `proxy_callable =
+    /// true`. The dispatch path uses `callValue` to handle either
+    /// shape uniformly.
+    ///
+    /// `undefined_` means "this function is not a wrapper".
+    wrapped_target: Value = Value.undefined_,
     /// For `class B extends A { … }`, this points at `A` (the
     /// parent constructor) so `B.someStaticOfA()` resolves.
     /// `null` for non-derived classes / non-class functions.
