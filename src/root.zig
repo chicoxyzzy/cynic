@@ -30,6 +30,11 @@ pub const parser = struct {
 pub const runtime = @import("runtime.zig");
 pub const bytecode = @import("bytecode.zig");
 
+/// Perlex — Cynic's native regex engine. Self-contained (std only);
+/// the RegExp bridge routes supported patterns here and falls back to
+/// the vendored matcher for the rest.
+pub const perlex = @import("perlex/perlex.zig");
+
 /// Value → display-string formatter used by the playground panel.
 /// Lives at the library boundary (not under `runtime/`) because it
 /// is a display concern — the engine itself does not need it, but
@@ -53,6 +58,8 @@ test {
     _ = parser;
     _ = runtime;
     _ = bytecode;
+    _ = perlex;
+    _ = @import("perlex/perlex.zig");
     _ = @import("lexer/lexer.zig");
     _ = @import("lexer/token.zig");
     _ = @import("unicode/idents.zig");
