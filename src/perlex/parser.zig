@@ -18,8 +18,9 @@ const std = @import("std");
 pub const Node = union(enum) {
     /// Matches the empty string (an empty alternative, e.g. `a|`).
     empty,
-    /// A single UTF-16 code unit literal.
-    char: u16,
+    /// A single literal: a UTF-16 code unit, or (under `/u`) a code
+    /// point up to U+10FFFF.
+    char: u21,
     /// Concatenation of terms (an Alternative).
     concat: []*Node,
     /// `a | b | …` — ordered alternatives of a Disjunction.
@@ -109,12 +110,13 @@ pub const ParseError = error{ Unsupported, SyntaxError, OutOfMemory };
 /// Parse `src` into an AST. `a` should be an arena — the AST and the
 /// transient name list are allocated from it and freed wholesale by
 /// the caller once compilation has copied out what it needs.
-pub fn parse(a: std.mem.Allocator, src: []const u8) ParseError!ParseResult {
+pub fn parse(a: std.mem.Allocator, src: []const u8, unicode: bool) ParseError!ParseResult {
     var p: Parser = .{
         .a = a,
         .src = src,
         .pos = 0,
         .names = .empty,
+        .unicode = unicode,
     };
     // Index 0 is the implicit whole-match group; it has no name.
     try p.names.append(a, null);
@@ -138,6 +140,7 @@ const Parser = struct {
     src: []const u8,
     pos: usize,
     names: std.ArrayListUnmanaged(?[]const u8),
+    unicode: bool = false,
     non_ascii: bool = false,
 
     fn peek(self: *Parser) ?u8 {
@@ -422,7 +425,7 @@ const Parser = struct {
     /// it denotes. Class escapes (`\d` …) and `\b`/`\B` are handled by
     /// the callers; this covers control, hex, unicode (BMP), and
     /// identity escapes. Forms outside that set fall back.
-    fn parseEscapedChar(self: *Parser) ParseError!u16 {
+    fn parseEscapedChar(self: *Parser) ParseError!u21 {
         std.debug.assert(self.src[self.pos] == '\\');
         const k = self.at(1) orelse return error.SyntaxError;
         switch (k) {
@@ -442,19 +445,38 @@ const Parser = struct {
             'x' => {
                 const hi = hexVal(self.at(2) orelse return error.Unsupported) orelse return error.Unsupported;
                 const lo = hexVal(self.at(3) orelse return error.Unsupported) orelse return error.Unsupported;
-                const v = @as(u16, hi) * 16 + lo;
+                const v: u21 = @as(u21, hi) * 16 + lo;
                 if (v >= 0x80) self.non_ascii = true;
                 return self.takeEscaped(4, v);
             },
             'u' => {
-                // `\u{…}` is UnicodeMode-only; Perlex declines `u`/`v`.
-                if (self.at(2) == '{') return error.Unsupported;
-                var v: u16 = 0;
+                if (self.at(2) == '{') {
+                    // `\u{CodePoint}` — valid only under `/u`; non-`u`
+                    // defers (Annex B identity-escape territory).
+                    if (!self.unicode) return error.Unsupported;
+                    var i = self.pos + 3;
+                    const start = i;
+                    var v: u21 = 0;
+                    while (i < self.src.len) : (i += 1) {
+                        const d = hexVal(self.src[i]) orelse break;
+                        v = v *% 16 +% @as(u21, d);
+                        if (v > 0x10FFFF) return error.Unsupported;
+                    }
+                    if (i == start or i >= self.src.len or self.src[i] != '}') return error.Unsupported;
+                    if (v >= 0x80) self.non_ascii = true;
+                    self.pos = i + 1; // consume through `}`
+                    return v;
+                }
+                var v: u21 = 0;
                 var i: usize = 2;
                 while (i < 6) : (i += 1) {
                     const d = hexVal(self.at(i) orelse return error.Unsupported) orelse return error.Unsupported;
-                    v = v *% 16 +% @as(u16, d);
+                    v = v *% 16 +% @as(u21, d);
                 }
+                // Under `/u`, a surrogate-valued `\uHHHH` (lone, or the
+                // first half of a `\uHHHH\uHHHH` pair) needs code-point
+                // combining the v1 engine doesn't do — defer.
+                if (self.unicode and v >= 0xD800 and v <= 0xDFFF) return error.Unsupported;
                 if (v >= 0x80) self.non_ascii = true;
                 return self.takeEscaped(6, v);
             },
@@ -469,7 +491,7 @@ const Parser = struct {
         }
     }
 
-    fn takeEscaped(self: *Parser, advance: usize, value: u16) u16 {
+    fn takeEscaped(self: *Parser, advance: usize, value: u21) u21 {
         self.pos += advance;
         return value;
     }
@@ -491,7 +513,16 @@ const Parser = struct {
                 break;
             }
             switch (try self.parseClassMember(&ranges)) {
-                .class_added => {},
+                .class_added => {
+                    // A `-` right after a class escape would form a range
+                    // with a class-escape endpoint (`[\d-a]`): a
+                    // SyntaxError under /u, an Annex B leniency
+                    // otherwise. Implement neither — defer to the
+                    // fallback, which renders the mode-correct verdict.
+                    if (self.peek() == '-' and self.at(1) != null and self.at(1).? != ']') {
+                        return error.Unsupported;
+                    }
+                },
                 .ch => |lo| {
                     if (self.peek() == '-' and self.at(1) != null and self.at(1).? != ']') {
                         self.pos += 1; // consume `-`
@@ -500,11 +531,9 @@ const Parser = struct {
                                 if (hi < lo) return error.SyntaxError; // reversed range
                                 try ranges.append(self.a, .{ .lo = lo, .hi = hi });
                             },
-                            // `a-\d`: the `-` is a literal, not a range.
-                            .class_added => {
-                                try ranges.append(self.a, .{ .lo = lo, .hi = lo });
-                                try ranges.append(self.a, .{ .lo = '-', .hi = '-' });
-                            },
+                            // Range with a class-escape endpoint (`[a-\d]`)
+                            // — same as above, defer.
+                            .class_added => return error.Unsupported,
                         }
                     } else {
                         try ranges.append(self.a, .{ .lo = lo, .hi = lo });

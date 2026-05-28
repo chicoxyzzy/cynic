@@ -46,19 +46,18 @@ pub const CompileResult = union(enum) {
 /// for constructs it doesn't model — those return `.unsupported` so
 /// the fallback matcher renders the authoritative verdict.
 pub fn compile(gpa: std.mem.Allocator, pattern: []const u8, flags: Flags) error{OutOfMemory}!CompileResult {
-    // Unicode mode changes the unit of matching (code points, `\u{…}`,
-    // `\p{…}`) — defer it to the fallback. `g`/`y`/`d` affect the
-    // driver not the match; `i` (ASCII fold), `m` (multiline), and `s`
-    // (dotall) are handled by the compiler/VM.
-    if (flags.unicode or flags.unicode_sets) {
-        return .unsupported;
-    }
+    // `/v` (UnicodeSets) is deferred to the fallback. `/u` is handled
+    // (code-point matching) except combined with `i`: full Unicode case
+    // folding isn't built, so `/iu` defers. `g`/`y`/`d` affect the
+    // driver not the match; `m`/`s` and ASCII-`i` are handled.
+    if (flags.unicode_sets) return .unsupported;
+    if (flags.unicode and flags.ignore_case) return .unsupported;
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
 
-    const parsed = parser.parse(a, pattern) catch |e| switch (e) {
+    const parsed = parser.parse(a, pattern, flags.unicode) catch |e| switch (e) {
         error.Unsupported => return .unsupported,
         error.SyntaxError => return .syntax_error,
         error.OutOfMemory => return error.OutOfMemory,

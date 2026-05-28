@@ -218,6 +218,52 @@ test "perlex: lookbehind with captures or assertions falls back" {
     try expectCompile("(?<=(?=a))b", .unsupported); // nested assertion
 }
 
+// ── §22.2 Unicode mode (/u) — code-point matching ───────────────────
+
+const uf: perlex.Flags = .{ .unicode = true };
+
+test "perlex: /u matches ASCII and \\u{...} escapes" {
+    try expectMatchFlags("a+", uf, "aaa", "aaa");
+    try expectMatchFlags("\\u{61}", uf, "a", "a"); // U+0061 = 'a'
+    try expectMatchFlags("[\\u{41}-\\u{5A}]", uf, "Q", "Q"); // [A-Z]
+}
+
+test "perlex: /u declines what needs more than code-point matching" {
+    try expectCompileFlags("a", .{ .unicode = true, .ignore_case = true }, .unsupported); // /iu folding
+    try expectCompileFlags("\\uD83D", uf, .unsupported); // lone surrogate escape
+    try expectCompileFlags("\\p{L}", uf, .unsupported); // property escape (next increment)
+}
+
+test "perlex: /u treats a supplementary code point as one unit" {
+    const gpa = testing.allocator;
+    // U+1F600 "😀" is the surrogate pair [0xD83D, 0xDE00] in UTF-16.
+    const input = [_]u16{ 0xD83D, 0xDE00 };
+
+    // `^.$/u` — the single `.` spans the whole code point (2 units).
+    var dot = try perlex.compile(gpa, "^.$", uf);
+    try testing.expect(dot == .ok);
+    defer dot.ok.deinit();
+    var dm = (try perlex.exec(u16, gpa, &dot.ok, &input, 0)) orelse return error.ExpectedMatch;
+    defer dm.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), dm.slots[0]);
+    try testing.expectEqual(@as(usize, 2), dm.slots[1]);
+
+    // A `\u{1F600}` literal matches the same supplementary code point.
+    var lit = try perlex.compile(gpa, "\\u{1F600}", uf);
+    try testing.expect(lit == .ok);
+    defer lit.ok.deinit();
+    var lm = (try perlex.exec(u16, gpa, &lit.ok, &input, 0)) orelse return error.ExpectedMatch;
+    defer lm.deinit(gpa);
+    try testing.expectEqual(@as(usize, 2), lm.slots[1]);
+
+    // Without /u the same `.` matches only one code unit (the high
+    // surrogate), so `^.$` cannot reach the end.
+    var nonu = try perlex.compile(gpa, "^.$", .{});
+    try testing.expect(nonu == .ok);
+    defer nonu.ok.deinit();
+    try testing.expect((try perlex.exec(u16, gpa, &nonu.ok, &input, 0)) == null);
+}
+
 // ── §22.2.1 quantifiers (greedy / lazy / bounded) ───────────────────
 
 test "perlex: greedy quantifiers" {
@@ -300,6 +346,17 @@ test "perlex: class escapes inside a class" {
     try expectMatch("[a\\d]", "5", "5");
     try expectMatch("[a\\d]", "a", "a");
     try expectNoMatch("[\\d]", "z");
+}
+
+test "perlex: a class escape as a range endpoint falls back (no Annex B)" {
+    // §B.1.4 isn't applied: `[\d-a]` / `[a-\d]` are SyntaxErrors under
+    // /u and an Annex B leniency otherwise — Perlex implements neither.
+    try expectCompile("[\\d-a]", .unsupported);
+    try expectCompile("[a-\\d]", .unsupported);
+    // A `-` not forming such a range stays a literal and is ours.
+    try expectMatch("[\\d-]", "-", "-");
+    try expectMatch("[\\d-]", "7", "7");
+    try expectMatch("[-\\d]", "-", "-");
 }
 
 test "perlex: escaped literals and hex/unicode escapes" {

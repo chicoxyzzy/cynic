@@ -33,8 +33,9 @@ pub const Flags = packed struct {
 };
 
 pub const Inst = union(enum) {
-    /// Match one UTF-16 code unit equal to the operand, then advance.
-    char: u16,
+    /// Match one literal — a UTF-16 code unit, or a code point up to
+    /// U+10FFFF under `/u` — then advance.
+    char: u21,
     /// Accept — the whole-match end slot has already been saved.
     match,
     /// Unconditional jump to an instruction index.
