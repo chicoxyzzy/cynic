@@ -271,19 +271,19 @@ until its features ship in mainline ECMA-262.
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
 | `joint-iteration` (hardened) | 76 | 2 | 4796 | 2 % | 97 % |
-| `joint-iteration` (unhardened) | 74 | 4 | 4796 | 2 % | 95 % |
+| `joint-iteration` (unhardened) | 76 | 2 | 4796 | 2 % | 97 % |
 | `ShadowRealm` (hardened) | 62 | 1 | 4796 | 1 % | 98 % |
 | `ShadowRealm` (unhardened) | 62 | 1 | 4796 | 1 % | 98 % |
 
 
 ## History
 
-### 2026-05-28 — cynic `38aa4ed`, test262 `d0c1b455`
+### 2026-05-28 — cynic `82cb66e`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 84.36 % | 99.98 % | 37995 / 45039 | 37995 / 38004 | — | +42 | 50.5 s |
-| **runtime_hardened** | 84.36 % | 99.97 % | 37995 / 45039 | 34843 / 34852 | 3152 | +44 | 45.5 s |
+| **runtime** | 84.36 % | 99.98 % | 37995 / 45039 | 37995 / 38004 | — | +42 | 55.5 s |
+| **runtime_hardened** | 84.36 % | 99.97 % | 37995 / 45039 | 34843 / 34852 | 3152 | +44 | 1m 05s |
 
 ### 2026-05-27 — cynic `618f795`, test262 `d0c1b455`
 
