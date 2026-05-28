@@ -80,8 +80,19 @@ pub fn install(realm: *Realm) !void {
         .arity = 0,
         .to_string_tag = "ShadowRealm",
     });
-    _ = r.ctor;
+    // §3.8 — the constructor uses the `defers_proto_lookup`
+    // pattern (ArrayBuffer / Promise style) so the body can read
+    // `realm.pending_native_new_target` and derive the owner
+    // realm via GetFunctionRealm(new_target). Without this, a
+    // cross-realm construct (`Reflect.construct(OtherShadowRealm,
+    // [])`) would lose track of which realm to associate the
+    // instance with for boundary errors.
+    r.ctor.defers_proto_lookup = true;
     const proto = r.proto;
+    // Stash the prototype so `getPrototypeFromConstructorValue`
+    // can use it as the intrinsic-default fallback inside the
+    // constructor body.
+    realm.intrinsics.shadow_realm_prototype = proto;
 
     try installNativeMethodOnProto(realm, proto, "evaluate", shadowRealmEvaluate, 1);
     try installNativeMethodOnProto(realm, proto, "importValue", shadowRealmImportValue, 2);
@@ -110,9 +121,43 @@ fn shadowRealmConstructor(
     this_value: Value,
     args: []const Value,
 ) NativeError!Value {
+    _ = this_value; // OCFC deferred — see `defers_proto_lookup`
+    // in `install`. The new_target sits on
+    // `realm.pending_native_new_target`; absence means we were
+    // called without `new`.
     _ = args;
-    const inst = heap_mod.valueAsPlainObject(this_value) orelse
+    const new_target_v = realm.pending_native_new_target;
+    if (new_target_v.isUndefined()) {
         return throwTypeError(realm, "ShadowRealm constructor requires 'new'");
+    }
+    // §3.8 — the instance's owner realm is GetFunctionRealm(new_target).
+    // For `new ShadowRealm()` this is the running realm; for
+    // `Reflect.construct(OtherShadowRealm, [])` it's OtherRealm.
+    // Boundary errors and WrappedFunction `[[Realm]]` reads from
+    // this slot.
+    const owner_realm: *Realm = blk: {
+        if (heap_mod.valueAsFunction(new_target_v)) |nt| {
+            if (nt.getFunctionRealm()) |r_| break :blk r_;
+        }
+        break :blk realm;
+    };
+
+    // §3.8.1.1 step 2 — OrdinaryCreateFromConstructor. Read the
+    // prototype off newTarget (may throw from a user getter).
+    const interp = @import("../lantern/interpreter.zig");
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target_v, realm.intrinsics.shadow_realm_prototype) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const proto: ?*@import("../object.zig").JSObject = switch (proto_lookup) {
+        .proto => |p| p,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(inst, proto);
 
     // §3.8.1.1 step 3 — allocate a fresh child realm sharing the
     // parent's heap. Mirrors `test262CreateRealm` in tools/test262.zig.
@@ -124,33 +169,43 @@ fn shadowRealmConstructor(
         realm.allocator.destroy(child_ptr);
         return error.OutOfMemory;
     };
-    // §6.1.5.1 — well-known symbols are agent-wide. The child's
-    // `Symbol.iterator` etc. are rewired to the parent's pointers
-    // so `parentSr.evaluate("Symbol.iterator") === Symbol.iterator`
-    // holds (matches the spec's intent of single-agent symbols).
+    // §6.1.5.1 — well-known symbols are agent-wide.
     child_ptr.shareWellKnownSymbolsWith(realm) catch return error.OutOfMemory;
     // Register the child on the parent's list so it lives as long
-    // as the parent and gets torn down with it. (No GC tracking
-    // needed — the child Realm is not on the heap.)
+    // as the parent and gets torn down with it.
     realm.child_realms.append(realm.allocator, child_ptr) catch return error.OutOfMemory;
 
-    // Brand + stash the child pointer.
+    // Brand + stash slots: child realm, owner realm.
     inst.is_shadow_realm = true;
+    inst.shadow_realm_owner = owner_realm;
     inst.setHostData(realm.allocator, @ptrCast(child_ptr)) catch return error.OutOfMemory;
 
-    return this_value;
+    return heap_mod.taggedObject(inst);
 }
 
-/// Pulls the child `*Realm` out of a ShadowRealm receiver,
-/// throwing the §3.8 brand-check TypeError when `this_value`
-/// isn't a ShadowRealm instance. Used by every prototype method.
-fn shadowRealmOf(realm: *Realm, this_value: Value, method_name: []const u8) NativeError!*Realm {
+/// Pulls the (child realm, owner realm) pair out of a ShadowRealm
+/// receiver, throwing the §3.8 brand-check TypeError when
+/// `this_value` isn't a ShadowRealm instance.
+///
+/// `child` is where evaluate runs source / importValue loads
+/// modules. `owner` is the instance's `[[Realm]]`-equivalent —
+/// the realm where boundary errors land and WrappedFunctions
+/// get their `[[Realm]]` stamp.
+const ShadowRealmRefs = struct { child: *Realm, owner: *Realm };
+
+fn shadowRealmOf(realm: *Realm, this_value: Value, method_name: []const u8) NativeError!ShadowRealmRefs {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse {
         return throwBrandError(realm, method_name);
     };
     if (!inst.is_shadow_realm) return throwBrandError(realm, method_name);
     const raw = inst.getHostData() orelse return throwBrandError(realm, method_name);
-    return @ptrCast(@alignCast(raw));
+    const child: *Realm = @ptrCast(@alignCast(raw));
+    // Fall back to the running realm if the owner slot wasn't
+    // stamped (shouldn't happen for `new ShadowRealm()` post-
+    // refactor, but defensive — keeps same-realm semantics if a
+    // future construct path forgets the brand).
+    const owner = inst.shadow_realm_owner orelse realm;
+    return .{ .child = child, .owner = owner };
 }
 
 fn throwBrandError(realm: *Realm, method_name: []const u8) NativeError {
@@ -179,38 +234,66 @@ fn shadowRealmEvaluate(
     this_value: Value,
     args: []const Value,
 ) NativeError!Value {
-    const eval_realm = try shadowRealmOf(realm, this_value, "evaluate");
+    const refs = try shadowRealmOf(realm, this_value, "evaluate");
+    const owner = refs.owner;
+    const eval_realm = refs.child;
     const source_arg = argOr(args, 0, Value.undefined_);
     if (!source_arg.isString()) {
-        return throwTypeError(realm, "ShadowRealm.prototype.evaluate: sourceText must be a string");
+        const ex = intrinsics.newTypeError(owner, "ShadowRealm.prototype.evaluate: sourceText must be a string") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
     }
     const s: *JSString = @ptrCast(@alignCast(source_arg.asString()));
     // §3.8.3.7 PerformShadowRealmEval — parse + run the script in
     // the child realm. Any abrupt completion becomes a TypeError
-    // raised IN THE CALLER REALM (§3.8.3.7 step 6).
+    // raised IN THE OWNER REALM (the ShadowRealm instance's
+    // [[Realm]] — `Reflect.construct(OtherShadowRealm, [])` makes
+    // this different from the running realm).
     const result = interpreter.evaluateScript(eval_realm.allocator, eval_realm, s.flatBytes()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        // §3.8.3.7 step 4 — a parse failure produces a
-        // SyntaxError in the CALLER realm. The TypeError fallback
-        // (step 6) only applies to abrupt completions during
-        // evaluation, not parse-phase errors.
+        // §3.8.3.7 step 4 — parse failures produce a SyntaxError
+        // IN THE OWNER REALM.
         error.ParseError => {
-            const ex = intrinsics.newSyntaxError(realm, "ShadowRealm.prototype.evaluate: parse error in evaluated source") catch return error.OutOfMemory;
+            const ex = intrinsics.newSyntaxError(owner, "ShadowRealm.prototype.evaluate: parse error in evaluated source") catch return error.OutOfMemory;
             realm.pending_exception = ex;
             return error.NativeThrew;
         },
-        else => return throwTypeError(realm, "ShadowRealm.prototype.evaluate: evaluation failed"),
+        else => {
+            const ex = intrinsics.newTypeError(owner, "ShadowRealm.prototype.evaluate: evaluation failed") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
     };
     switch (result) {
         .value, .yielded => |v| {
             // §3.8.3.4 step 3 — filter the result through the
-            // callable boundary: primitives pass, callables get
-            // wrapped, all other Object values throw TypeError in
-            // the caller realm.
-            return try getWrappedValue(realm, v);
+            // callable boundary in the owner realm: primitives
+            // pass, callables get wrapped, non-callable Objects
+            // throw TypeError in OWNER realm.
+            const wrapped = getWrappedValue(owner, v) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NativeThrew => {
+                    // owner.pending_exception already carries the
+                    // boundary TypeError; surface it on the
+                    // running realm so the dispatcher unwinds.
+                    if (owner != realm) {
+                        realm.pending_exception = owner.pending_exception;
+                        owner.pending_exception = null;
+                    }
+                    return error.NativeThrew;
+                },
+            };
+            return wrapped;
         },
         .thrown => {
-            return throwTypeError(realm, "ShadowRealm.prototype.evaluate: evaluation threw");
+            // §3.8.3.7 step 6 — remap abrupt completion to a
+            // TypeError IN THE OWNER REALM. `throwTypeError`
+            // pins the exception on the supplied realm; copy it
+            // to the running realm so the dispatcher's unwinder
+            // picks it up.
+            const ex = intrinsics.newTypeError(owner, "ShadowRealm.prototype.evaluate: evaluation threw") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
         },
     }
 }
@@ -505,6 +588,8 @@ fn shadowRealmImportValue(
     args: []const Value,
 ) NativeError!Value {
     _ = args;
-    _ = try shadowRealmOf(realm, this_value, "importValue");
-    return throwTypeError(realm, "ShadowRealm.prototype.importValue is not yet implemented");
+    const refs = try shadowRealmOf(realm, this_value, "importValue");
+    const ex = intrinsics.newTypeError(refs.owner, "ShadowRealm.prototype.importValue is not yet implemented") catch return error.OutOfMemory;
+    realm.pending_exception = ex;
+    return error.NativeThrew;
 }

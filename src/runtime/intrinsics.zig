@@ -167,6 +167,13 @@ pub const Intrinsics = struct {
     /// `array_buffer_prototype` — supplies the intrinsic default
     /// for §25.3.2.1's deferred OCFC.
     data_view_prototype: ?*JSObject = null,
+    /// `%ShadowRealm.prototype%` (§3.8.4). The ShadowRealm
+    /// constructor uses the `defers_proto_lookup` pattern so it
+    /// can derive the owner realm from new_target; that path
+    /// allocates the instance itself and needs the intrinsic
+    /// default prototype here for GetPrototypeFromConstructor's
+    /// fallback when new_target.prototype isn't an Object.
+    shadow_realm_prototype: ?*JSObject = null,
     /// `%RegExp.prototype%` — populated by `installRegExp`. The
     /// flag/source getters need to recognise it as a special
     /// receiver: `RegExp.prototype.source === "(?:)"` per

@@ -991,6 +991,18 @@ pub const JSObject = struct {
     /// throws TypeError on any non-ShadowRealm receiver — like
     /// `evaluate.call({}, "1")`).
     is_shadow_realm: bool = false,
+    /// §3.8 — the realm the ShadowRealm INSTANCE was created in
+    /// (`GetFunctionRealm(new_target)` at construct time). Acts
+    /// as the "caller realm" parameter for every boundary
+    /// operation invoked on this instance: errors thrown by
+    /// `.evaluate` / `.importValue` are constructed in this
+    /// realm, and WrappedFunctions returned across the boundary
+    /// stamp this as their `[[Realm]]`. Differs from the running
+    /// realm when the constructor was called via
+    /// `Reflect.construct(OtherShadowRealm, [])` from a third
+    /// realm — the test262 cross-realm fixtures pin this. `null`
+    /// on non-ShadowRealm objects.
+    shadow_realm_owner: ?*@import("realm.zig").Realm = null,
     /// §10.4.2 Array exotic — packed indexed elements storage.
     /// Array instances set `is_array_exotic = true` and use
     /// `elements` as the source of truth for integer-indexed
