@@ -4793,6 +4793,28 @@ test "GC: computed-key enumeration order survives gc_threshold=1" {
     , "k0,k1,k2,k3,k4,k5,k6,k7,k8,k9,k10,k11");
 }
 
+test "GC: integer-index keys on an array-like survive gc_threshold=1" {
+    // `child[0..2] = …` are integer-index writes on a *non-array*
+    // object. They route through setComputedOwned but skip
+    // own_key_order (recordKey ignores integer keys), landing only in
+    // the properties bag — which borrows the key slice. Without
+    // anchoring the bag's first insertion, gc_threshold=1 swept the
+    // index keys and Array.prototype.forEach on the array-like saw
+    // zero elements (the length getter still returns 3; the indexed
+    // reads missed). Sum must be 0 + 10 + 20 = 30.
+    try expectScriptIntUnderGcPressure(
+        \\var proto = { length: 0 };
+        \\var Con = function() {};
+        \\Con.prototype = proto;
+        \\var child = new Con();
+        \\Object.defineProperty(child, "length", { get: function() { return 3; }, configurable: true });
+        \\child[0] = 0; child[1] = 10; child[2] = 20;
+        \\var sum = 0;
+        \\Array.prototype.forEach.call(child, function(v) { sum += v; });
+        \\sum;
+    , 30);
+}
+
 test "GC: long Promise microtask chain survives alternating GC pressure" {
     // The 3-deep chain above doesn't surface two interacting
     // hazards: (1) the colour-flip cross-cycle stale-mark hazard

@@ -3244,6 +3244,15 @@ fn arrayForEach(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // `undefined` as the callback; the test expects the length-
     // coercion throw to propagate, not the IsCallable error.
     const obj = try toObjectThis(realm, this_value);
+    // Pin the receiver across the length getter and the callback
+    // loop — both re-enter JS and can GC, and `obj` is a native
+    // local the GC can't see (mirrors the map/filter rooting). Open
+    // the scope BEFORE `toLengthOf`: without this, gc-threshold=1
+    // sweeps `obj` during the length read, the freed object has no
+    // `length` accessor, and forEach sees length 0 (zero iterations).
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(obj)) catch return error.OutOfMemory;
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const callback = heap_mod.valueAsFunction(argOr(args, 0, Value.undefined_)) orelse return throwTypeError(realm, "Array.prototype.forEach callback must be a function");
     const this_arg = argOr(args, 1, Value.undefined_);

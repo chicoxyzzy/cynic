@@ -1729,21 +1729,30 @@ pub const JSObject = struct {
         const key = key_str.flatBytes();
         const absorbed = try self.shadowSet(allocator, key, v, PropertyFlags.default);
         const newly_ordered = try self.recordKey(allocator, key);
-        // `own_key_order` borrows `key_str.bytes` for enumeration
-        // order, so the JSString must be anchored — even when the
-        // write is shape-absorbed. The shape's transition arena dupes
-        // the key only for *value lookup*; `own_key_order` still
-        // points at the JSString, and nothing else pins it in the
-        // absorbed path (the `properties` entry is skipped). Anchor
-        // once, on first insertion only, so repeated writes to the
-        // same key (`for (...) o[k] = i`) don't grow `key_anchors`.
-        // Skipping the anchor let gc-threshold=1 sweep the key out
-        // from under the order slice, observably reordering
-        // Object.keys/values (repro: Iterator.zipKeyed/basic-* under
-        // --enable=joint-iteration).
-        if (newly_ordered) try self.key_anchors.append(allocator, key_str);
-        if (absorbed) return;
-        try self.properties.put(allocator, key, v);
+        if (absorbed) {
+            // Shape-mode: only `own_key_order` borrows the slice (the
+            // shape's transition arena dupes the key for value lookup,
+            // and there is no `properties` entry). Anchor the JSString
+            // when newly recorded so a sweep can't free it out from
+            // under the order slice (gc-threshold=1 reorders
+            // Object.keys/values otherwise).
+            if (newly_ordered) try self.key_anchors.append(allocator, key_str);
+            return;
+        }
+        // Dictionary-mode: the `properties` bag ALSO borrows the key
+        // slice. Anchor the JSString on a first insertion into either
+        // `own_key_order` OR the bag. Integer-index keys on a non-array
+        // object (`o[0] = v`) skip `own_key_order` (recordKey returns
+        // false for them) but still land in the bag — so the bag
+        // insertion must anchor them too, else gc-threshold=1 sweeps
+        // the index key and a later indexed read misses (e.g.
+        // Array.prototype.forEach on an array-like saw zero-length
+        // iteration once the `o[i]=…` keys dangled). Repeated writes to
+        // an existing key (found_existing) skip the anchor so
+        // `key_anchors` can't grow unboundedly.
+        const gop = try self.properties.getOrPut(allocator, key);
+        gop.value_ptr.* = v;
+        if (newly_ordered or !gop.found_existing) try self.key_anchors.append(allocator, key_str);
     }
 
     /// Read the (possibly defaulted) descriptor flags for
