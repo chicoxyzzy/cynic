@@ -1376,9 +1376,329 @@ fn isAsciiDigit(ch: u8) bool {
     return ch >= '0' and ch <= '9';
 }
 
+// ── §13 Rounding primitives ───────────────────────────────────────────────
+
+/// §13.x The nine ECMAScript rounding modes.
+pub const RoundingMode = enum {
+    ceil,
+    floor,
+    expand,
+    trunc,
+    half_ceil,
+    half_floor,
+    half_expand,
+    half_trunc,
+    half_even,
+};
+
+/// §13.x RoundNumberToIncrement — round `value` to the nearest multiple
+/// of `increment` (which must be > 0) per `mode`, in exact i128
+/// arithmetic. Multiples are measured from zero, so rounding an
+/// epoch-nanosecond value lands on boundaries aligned with the Unix
+/// epoch. Sign-aware: `trunc` rounds toward zero, `expand` away from it,
+/// and the half-* ties resolve by the named direction relative to zero.
+pub fn roundToIncrement(value: i128, increment: i128, mode: RoundingMode) i128 {
+    return roundToIncrementImpl(value, increment, mode, false);
+}
+
+/// §13.x RoundNumberToIncrementAsIfPositive — like `roundToIncrement`
+/// but evaluates the directed / half-tie modes as though `value` were
+/// non-negative, so `floor`/`trunc` always round toward −∞ and
+/// `ceil`/`expand` toward +∞. `Temporal.Instant.prototype.round` uses
+/// this: rounding is anchored to the timeline (the epoch), not mirrored
+/// about zero.
+pub fn roundToIncrementAsIfPositive(value: i128, increment: i128, mode: RoundingMode) i128 {
+    return roundToIncrementImpl(value, increment, mode, true);
+}
+
+/// `@divFloor` for the lower multiple makes `lower ≤ value` hold for
+/// negative values too, so the sign handling is uniform.
+fn roundToIncrementImpl(value: i128, increment: i128, mode: RoundingMode, as_if_positive: bool) i128 {
+    const quotient = @divFloor(value, increment);
+    const lower = quotient * increment; // greatest multiple ≤ value
+    if (lower == value) return value; // already an exact multiple
+    const upper = lower + increment;
+    const remainder = value - lower; // in (0, increment)
+    const twice = remainder * 2;
+    const positive = as_if_positive or value > 0;
+    const negative = !as_if_positive and value < 0;
+    const pick_upper = switch (mode) {
+        .ceil => true,
+        .floor => false,
+        .trunc => negative, // toward zero
+        .expand => positive, // away from zero
+        .half_ceil => twice >= increment,
+        .half_floor => twice > increment,
+        .half_expand => if (positive) twice >= increment else twice > increment,
+        .half_trunc => if (positive) twice > increment else twice >= increment,
+        .half_even => if (twice != increment) twice > increment else @mod(quotient, 2) != 0,
+    };
+    return if (pick_upper) upper else lower;
+}
+
+/// Nanoseconds in one fixed-length time unit (day and below). Calendar
+/// units have no fixed length and never reach the time-only balancing
+/// path.
+pub fn unitNanoseconds(unit: LargestUnit) i128 {
+    return switch (unit) {
+        .day => 86_400_000_000_000,
+        .hour => 3_600_000_000_000,
+        .minute => 60_000_000_000,
+        .second => 1_000_000_000,
+        .millisecond => 1_000_000,
+        .microsecond => 1_000,
+        .nanosecond => 1,
+        .year, .month, .week => unreachable,
+    };
+}
+
+fn timeUnitIncluded(unit: LargestUnit, largest: LargestUnit) bool {
+    // `unit` participates when its magnitude is no larger than
+    // `largest` — i.e. its enum index is at or past `largest`'s.
+    return @intFromEnum(unit) >= @intFromEnum(largest);
+}
+
+fn takeTimeUnit(rem: *i128, scale: i128) f64 {
+    const q = @divTrunc(rem.*, scale);
+    rem.* = @rem(rem.*, scale);
+    return @floatFromInt(q);
+}
+
+/// §7.5.x BalanceTimeDuration — distribute a signed nanosecond total
+/// into a Duration's time fields, with the highest field capped at
+/// `largest` (one of day..nanosecond). Every field takes the sign of
+/// `total_ns`. Fields are exact for `largest` ≥ second; for a smaller
+/// `largest` a very large field rounds to the nearest f64, which is the
+/// Number the spec stores.
+pub fn balanceTimeDuration(total_ns: i128, largest: LargestUnit) DurationRecord {
+    var rem = total_ns;
+    var d = DurationRecord{};
+    if (timeUnitIncluded(.day, largest)) d.days = takeTimeUnit(&rem, 86_400_000_000_000);
+    if (timeUnitIncluded(.hour, largest)) d.hours = takeTimeUnit(&rem, 3_600_000_000_000);
+    if (timeUnitIncluded(.minute, largest)) d.minutes = takeTimeUnit(&rem, 60_000_000_000);
+    if (timeUnitIncluded(.second, largest)) d.seconds = takeTimeUnit(&rem, 1_000_000_000);
+    if (timeUnitIncluded(.millisecond, largest)) d.milliseconds = takeTimeUnit(&rem, 1_000_000);
+    if (timeUnitIncluded(.microsecond, largest)) d.microseconds = takeTimeUnit(&rem, 1_000);
+    d.nanoseconds = @floatFromInt(rem);
+    return d;
+}
+
+/// §13.x ValidateTemporalRoundingIncrement — `increment` must divide
+/// `dividend` evenly; when `inclusive` is false it must also be strictly
+/// less than `dividend`. (`increment` ≥ 1 is enforced when the option is
+/// read.)
+pub fn validateRoundingIncrement(increment: i128, dividend: i128, inclusive: bool) bool {
+    if (@mod(dividend, increment) != 0) return false;
+    if (!inclusive and increment == dividend) return false;
+    return true;
+}
+
+/// Map a Temporal unit name (singular or plural) to its `LargestUnit`;
+/// null for an unrecognised name.
+pub fn parseTemporalUnit(s: []const u8) ?LargestUnit {
+    const entries = .{
+        .{ "year", LargestUnit.year },               .{ "years", LargestUnit.year },
+        .{ "month", LargestUnit.month },             .{ "months", LargestUnit.month },
+        .{ "week", LargestUnit.week },               .{ "weeks", LargestUnit.week },
+        .{ "day", LargestUnit.day },                 .{ "days", LargestUnit.day },
+        .{ "hour", LargestUnit.hour },               .{ "hours", LargestUnit.hour },
+        .{ "minute", LargestUnit.minute },           .{ "minutes", LargestUnit.minute },
+        .{ "second", LargestUnit.second },           .{ "seconds", LargestUnit.second },
+        .{ "millisecond", LargestUnit.millisecond }, .{ "milliseconds", LargestUnit.millisecond },
+        .{ "microsecond", LargestUnit.microsecond }, .{ "microseconds", LargestUnit.microsecond },
+        .{ "nanosecond", LargestUnit.nanosecond },   .{ "nanoseconds", LargestUnit.nanosecond },
+    };
+    inline for (entries) |e| {
+        if (std.mem.eql(u8, s, e[0])) return e[1];
+    }
+    return null;
+}
+
+/// Map a `roundingMode` option string to its `RoundingMode`; null for an
+/// unrecognised name.
+pub fn parseRoundingMode(s: []const u8) ?RoundingMode {
+    const entries = .{
+        .{ "ceil", RoundingMode.ceil },              .{ "floor", RoundingMode.floor },
+        .{ "expand", RoundingMode.expand },          .{ "trunc", RoundingMode.trunc },
+        .{ "halfCeil", RoundingMode.half_ceil },     .{ "halfFloor", RoundingMode.half_floor },
+        .{ "halfExpand", RoundingMode.half_expand }, .{ "halfTrunc", RoundingMode.half_trunc },
+        .{ "halfEven", RoundingMode.half_even },
+    };
+    inline for (entries) |e| {
+        if (std.mem.eql(u8, s, e[0])) return e[1];
+    }
+    return null;
+}
+
+/// §4.5.x Total nanoseconds of a PlainTime within its day (0..86400×10^9).
+pub fn timeRecordToNanoseconds(t: PlainTimeRecord) i128 {
+    return @as(i128, t.hour) * 3_600_000_000_000 +
+        @as(i128, t.minute) * 60_000_000_000 +
+        @as(i128, t.second) * 1_000_000_000 +
+        @as(i128, t.millisecond) * 1_000_000 +
+        @as(i128, t.microsecond) * 1_000 +
+        @as(i128, t.nanosecond);
+}
+
+/// §4.5.x Build a PlainTime from a within-day nanosecond count
+/// (0..86399999999999). The caller wraps any day overflow first.
+pub fn nanosecondsToTimeRecord(ns_in_day: i128) PlainTimeRecord {
+    var rem = ns_in_day;
+    const hour: u32 = @intCast(@divTrunc(rem, 3_600_000_000_000));
+    rem = @mod(rem, 3_600_000_000_000);
+    const minute: u32 = @intCast(@divTrunc(rem, 60_000_000_000));
+    rem = @mod(rem, 60_000_000_000);
+    const second: u32 = @intCast(@divTrunc(rem, 1_000_000_000));
+    rem = @mod(rem, 1_000_000_000);
+    const millisecond: u32 = @intCast(@divTrunc(rem, 1_000_000));
+    rem = @mod(rem, 1_000_000);
+    const microsecond: u32 = @intCast(@divTrunc(rem, 1_000));
+    const nanosecond: u32 = @intCast(@mod(rem, 1_000));
+    return .{
+        .hour = hour,
+        .minute = minute,
+        .second = second,
+        .millisecond = millisecond,
+        .microsecond = microsecond,
+        .nanosecond = nanosecond,
+    };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "roundToIncrement: exact multiples are unchanged" {
+    inline for (.{ RoundingMode.ceil, .floor, .trunc, .expand, .half_even, .half_expand }) |m| {
+        try testing.expectEqual(@as(i128, 90), roundToIncrement(90, 30, m));
+        try testing.expectEqual(@as(i128, 0), roundToIncrement(0, 7, m));
+        try testing.expectEqual(@as(i128, -60), roundToIncrement(-60, 30, m));
+    }
+}
+
+test "roundToIncrement: directed modes" {
+    // value 100, increment 30 → lower 90, upper 120.
+    try testing.expectEqual(@as(i128, 120), roundToIncrement(100, 30, .ceil));
+    try testing.expectEqual(@as(i128, 90), roundToIncrement(100, 30, .floor));
+    try testing.expectEqual(@as(i128, 90), roundToIncrement(100, 30, .trunc));
+    try testing.expectEqual(@as(i128, 120), roundToIncrement(100, 30, .expand));
+    // value -100, increment 30 → lower -120, upper -90.
+    try testing.expectEqual(@as(i128, -90), roundToIncrement(-100, 30, .ceil));
+    try testing.expectEqual(@as(i128, -120), roundToIncrement(-100, 30, .floor));
+    try testing.expectEqual(@as(i128, -90), roundToIncrement(-100, 30, .trunc));
+    try testing.expectEqual(@as(i128, -120), roundToIncrement(-100, 30, .expand));
+}
+
+test "roundToIncrement: half modes on an exact tie" {
+    // value 15, increment 10 → lower 10, upper 20 (tie).
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(15, 10, .half_ceil));
+    try testing.expectEqual(@as(i128, 10), roundToIncrement(15, 10, .half_floor));
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(15, 10, .half_expand));
+    try testing.expectEqual(@as(i128, 10), roundToIncrement(15, 10, .half_trunc));
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(15, 10, .half_even)); // 10 is odd multiple → 20
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(25, 10, .half_even)); // 20 is even multiple → 20
+    // negative tie: value -15, increment 10 → lower -20, upper -10.
+    try testing.expectEqual(@as(i128, -10), roundToIncrement(-15, 10, .half_ceil));
+    try testing.expectEqual(@as(i128, -20), roundToIncrement(-15, 10, .half_floor));
+    try testing.expectEqual(@as(i128, -20), roundToIncrement(-15, 10, .half_expand));
+    try testing.expectEqual(@as(i128, -10), roundToIncrement(-15, 10, .half_trunc));
+    try testing.expectEqual(@as(i128, -20), roundToIncrement(-15, 10, .half_even));
+}
+
+test "roundToIncrement: half modes off a tie pick the nearer multiple" {
+    try testing.expectEqual(@as(i128, 10), roundToIncrement(12, 10, .half_expand));
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(18, 10, .half_expand));
+    try testing.expectEqual(@as(i128, 10), roundToIncrement(12, 10, .half_even));
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(18, 10, .half_even));
+}
+
+test "roundToIncrement: matches the Instant halfExpand fixture" {
+    const ns: i128 = 217175010123987500; // 1976-11-18T14:23:30.1239875Z
+    try testing.expectEqual(@as(i128, 217173600000000000), roundToIncrement(ns, 3_600_000_000_000, .half_expand)); // hour
+    try testing.expectEqual(@as(i128, 217175040000000000), roundToIncrement(ns, 60_000_000_000, .half_expand)); // minute
+    try testing.expectEqual(@as(i128, 217175010000000000), roundToIncrement(ns, 1_000_000_000, .half_expand)); // second
+    try testing.expectEqual(@as(i128, 217175010124000000), roundToIncrement(ns, 1_000_000, .half_expand)); // ms
+    try testing.expectEqual(@as(i128, 217175010123988000), roundToIncrement(ns, 1_000, .half_expand)); // µs
+}
+
+test "balanceTimeDuration: caps at largestUnit, carries sign" {
+    {
+        const d = balanceTimeDuration(3_600_000_000_000, .hour);
+        try testing.expectEqual(@as(f64, 1), d.hours);
+        try testing.expectEqual(@as(f64, 0), d.minutes);
+    }
+    {
+        const d = balanceTimeDuration(90 * 60_000_000_000, .hour);
+        try testing.expectEqual(@as(f64, 1), d.hours);
+        try testing.expectEqual(@as(f64, 30), d.minutes);
+    }
+    {
+        const d = balanceTimeDuration(90 * 60_000_000_000, .minute);
+        try testing.expectEqual(@as(f64, 0), d.hours);
+        try testing.expectEqual(@as(f64, 90), d.minutes);
+    }
+    {
+        // 366-day span, matching the Instant until minutes-and-hours fixture.
+        const total: i128 = @as(i128, 366) * 86400 * 1_000_000_000;
+        try testing.expectEqual(@as(f64, 8784), balanceTimeDuration(total, .hour).hours);
+        try testing.expectEqual(@as(f64, 527040), balanceTimeDuration(total, .minute).minutes);
+    }
+    {
+        const d = balanceTimeDuration(-(1_000_000_000 + 123_456_789), .second);
+        try testing.expectEqual(@as(f64, -1), d.seconds);
+        try testing.expectEqual(@as(f64, -123), d.milliseconds);
+        try testing.expectEqual(@as(f64, -456), d.microseconds);
+        try testing.expectEqual(@as(f64, -789), d.nanoseconds);
+    }
+}
+
+test "validateRoundingIncrement: round (inclusive) vs difference (exclusive)" {
+    try testing.expect(validateRoundingIncrement(24, 24, true)); // round hour: 24 ok
+    try testing.expect(validateRoundingIncrement(4, 24, true));
+    try testing.expect(!validateRoundingIncrement(7, 24, true)); // 7 ∤ 24
+    try testing.expect(!validateRoundingIncrement(24, 24, false)); // until hour: 24 rejected
+    try testing.expect(validateRoundingIncrement(12, 24, false));
+    try testing.expect(!validateRoundingIncrement(60, 60, false)); // until minute: 60 rejected
+    try testing.expect(validateRoundingIncrement(30, 60, false));
+    try testing.expect(!validateRoundingIncrement(29, 60, false));
+}
+
+test "parseTemporalUnit + parseRoundingMode" {
+    try testing.expectEqual(@as(?LargestUnit, .hour), parseTemporalUnit("hour"));
+    try testing.expectEqual(@as(?LargestUnit, .hour), parseTemporalUnit("hours"));
+    try testing.expectEqual(@as(?LargestUnit, .nanosecond), parseTemporalUnit("nanoseconds"));
+    try testing.expectEqual(@as(?LargestUnit, null), parseTemporalUnit("fortnight"));
+    try testing.expectEqual(@as(?RoundingMode, .half_expand), parseRoundingMode("halfExpand"));
+    try testing.expectEqual(@as(?RoundingMode, .trunc), parseRoundingMode("trunc"));
+    try testing.expectEqual(@as(?RoundingMode, null), parseRoundingMode("nearest"));
+}
+
+test "roundToIncrementAsIfPositive: directed modes ignore sign" {
+    // -65261246399.5 s rounded to the second (matches Instant rounding-direction.js).
+    const v: i128 = -65261246399500000000;
+    const inc: i128 = 1_000_000_000;
+    const down: i128 = -65261246400000000000; // toward -∞
+    const up: i128 = -65261246399000000000; // toward +∞
+    try testing.expectEqual(down, roundToIncrementAsIfPositive(v, inc, .floor));
+    try testing.expectEqual(down, roundToIncrementAsIfPositive(v, inc, .trunc));
+    try testing.expectEqual(up, roundToIncrementAsIfPositive(v, inc, .ceil));
+    try testing.expectEqual(up, roundToIncrementAsIfPositive(v, inc, .expand));
+    try testing.expectEqual(up, roundToIncrementAsIfPositive(v, inc, .half_expand)); // tie → +∞
+    // Sign-aware contrast: trunc → toward zero (+∞ side), expand → away (-∞ side).
+    try testing.expectEqual(up, roundToIncrement(v, inc, .trunc));
+    try testing.expectEqual(down, roundToIncrement(v, inc, .expand));
+}
+
+test "time record <-> nanoseconds round trip" {
+    const t = PlainTimeRecord{ .hour = 14, .minute = 23, .second = 30, .millisecond = 123, .microsecond = 456, .nanosecond = 789 };
+    try testing.expectEqual(@as(i128, 51810123456789), timeRecordToNanoseconds(t));
+    const back = nanosecondsToTimeRecord(timeRecordToNanoseconds(t));
+    try testing.expectEqual(@as(u32, 14), back.hour);
+    try testing.expectEqual(@as(u32, 23), back.minute);
+    try testing.expectEqual(@as(u32, 789), back.nanosecond);
+    try testing.expectEqual(@as(i128, 0), timeRecordToNanoseconds(.{}));
+    try testing.expectEqual(@as(u32, 23), nanosecondsToTimeRecord(86_399_999_999_999).hour);
+}
 
 test "durationSign: first non-zero field decides" {
     try testing.expectEqual(@as(i32, 0), durationSign(.{}));

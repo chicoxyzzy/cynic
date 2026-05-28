@@ -879,31 +879,106 @@ fn plainTimeCompare(realm: *Realm, this_value: Value, args: []const Value) Nativ
     return Value.fromInt32(temporal.compareTime(a, b));
 }
 
-// Deferred PlainTime arithmetic / difference.
+/// §4.5.x AddDurationToTime — add (`sign` +1) or subtract (−1) a
+/// duration's time part to a PlainTime, wrapping mod 24 h. A PlainTime
+/// has no date, so the duration's calendar units (years/months/weeks/
+/// days) are ignored, not rejected.
+fn plainTimeAddSubtract(realm: *Realm, this_value: Value, duration_like: Value, sign: i128) NativeError!Value {
+    const base = try requirePlainTime(realm, this_value);
+    const d = try toTemporalDuration(realm, duration_like);
+    if (!temporal.isValidDuration(d)) return throwRangeError(realm, "Duration values are out of range");
+    const total = temporal.timeRecordToNanoseconds(base) + temporal.timeDurationNanoseconds(d) * sign;
+    const wrapped = @mod(total, @as(i128, 86_400_000_000_000));
+    return createTemporalTime(realm, temporal.nanosecondsToTimeRecord(wrapped));
+}
+
 fn plainTimeAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainTime(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainTime.prototype.add is not yet implemented");
+    return plainTimeAddSubtract(realm, this_value, argOr(args, 0, Value.undefined_), 1);
 }
+
 fn plainTimeSubtract(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainTime(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainTime.prototype.subtract is not yet implemented");
+    return plainTimeAddSubtract(realm, this_value, argOr(args, 0, Value.undefined_), -1);
 }
+
+/// §4.5.x Temporal.PlainTime.prototype.round ( roundTo ). String
+/// shorthand for `{ smallestUnit }`; smallestUnit required (hour..ns).
+/// A rounding that reaches 24 h wraps back to 00:00.
 fn plainTimeRound(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainTime(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainTime.prototype.round is not yet implemented");
+    const t = try requirePlainTime(realm, this_value);
+    const round_to = argOr(args, 0, Value.undefined_);
+    if (round_to.isUndefined()) {
+        return throwTypeError(realm, "Temporal.PlainTime.prototype.round requires a smallestUnit");
+    }
+    var unit: temporal.LargestUnit = undefined;
+    var increment: i128 = 1;
+    var mode: temporal.RoundingMode = .half_expand;
+    if (round_to.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(round_to.asString()));
+        unit = temporal.parseTemporalUnit(s.flatBytes()) orelse
+            return throwRangeError(realm, "invalid smallestUnit");
+    } else {
+        const opts = try getOptionsObject(realm, round_to);
+        increment = try getRoundingIncrementOption(realm, opts);
+        mode = try getRoundingModeOption(realm, opts, .half_expand);
+        unit = (try getTemporalUnitOption(realm, opts, "smallestUnit")) orelse
+            return throwRangeError(realm, "smallestUnit is required");
+    }
+    try requireUnitInRange(realm, unit, .hour, .nanosecond);
+    const per_day = @divExact(@as(i128, 86_400_000_000_000), temporal.unitNanoseconds(unit));
+    if (!temporal.validateRoundingIncrement(increment, per_day, true)) {
+        return throwRangeError(realm, "roundingIncrement does not divide evenly into a day");
+    }
+    const rounded = temporal.roundToIncrement(temporal.timeRecordToNanoseconds(t), increment * temporal.unitNanoseconds(unit), mode);
+    const wrapped = @mod(rounded, @as(i128, 86_400_000_000_000));
+    return createTemporalTime(realm, temporal.nanosecondsToTimeRecord(wrapped));
 }
+
 fn plainTimeUntil(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainTime(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainTime.prototype.until is not yet implemented");
+    return differenceTemporalTime(realm, this_value, args, false);
 }
+
 fn plainTimeSince(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainTime(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainTime.prototype.since is not yet implemented");
+    return differenceTemporalTime(realm, this_value, args, true);
+}
+
+/// §4.5.x DifferenceTemporalPlainTime — like the Instant difference, but
+/// the operands are times-of-day (delta within ±24 h) and the default
+/// largestUnit is "hour".
+fn differenceTemporalTime(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
+    const this_t = try requirePlainTime(realm, this_value);
+    const other_t = try toTemporalTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    const opts = try getOptionsObject(realm, argOr(args, 1, Value.undefined_));
+
+    const largest_opt = try getTemporalUnitOption(realm, opts, "largestUnit");
+    const increment = try getRoundingIncrementOption(realm, opts);
+    const mode = try getRoundingModeOption(realm, opts, .trunc);
+    const smallest_opt = try getTemporalUnitOption(realm, opts, "smallestUnit");
+
+    if (largest_opt) |lu| try requireUnitInRange(realm, lu, .hour, .nanosecond);
+    const smallest = smallest_opt orelse temporal.LargestUnit.nanosecond;
+    try requireUnitInRange(realm, smallest, .hour, .nanosecond);
+    const largest = largest_opt orelse temporal.LargestUnit.hour;
+    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+        return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
+    }
+    if (!temporal.validateRoundingIncrement(increment, differenceDividend(smallest), false)) {
+        return throwRangeError(realm, "invalid roundingIncrement for the smallestUnit");
+    }
+
+    const diff = temporal.timeRecordToNanoseconds(other_t) - temporal.timeRecordToNanoseconds(this_t);
+    const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
+    const rounded = temporal.roundToIncrement(diff, increment * temporal.unitNanoseconds(smallest), eff_mode);
+    var dr = temporal.balanceTimeDuration(rounded, largest);
+    if (is_since) {
+        dr.days = negZero(dr.days);
+        dr.hours = negZero(dr.hours);
+        dr.minutes = negZero(dr.minutes);
+        dr.seconds = negZero(dr.seconds);
+        dr.milliseconds = negZero(dr.milliseconds);
+        dr.microseconds = negZero(dr.microseconds);
+        dr.nanoseconds = negZero(dr.nanoseconds);
+    }
+    return createTemporalDuration(realm, dr);
 }
 
 // ── §8 Temporal.Instant ────────────────────────────────────────────────────
@@ -1172,23 +1247,194 @@ fn instantValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeE
     return throwTypeError(realm, "Called valueOf on a Temporal.Instant; use compare() instead");
 }
 
-// Deferred Instant deep-end — present for shape, throw until the
-// rounding / time-zone machinery lands.
+// ── §13 Rounding / difference option parsing (shared) ─────────────────────
+
+/// §13.x GetOptionsObject — the options object, or null when options is
+/// undefined. A non-object, non-undefined value throws TypeError. A
+/// callable options bag is tolerated as empty (property reads want a
+/// plain object); function-valued options are a rare edge.
+fn getOptionsObject(realm: *Realm, options: Value) NativeError!?*JSObject {
+    if (options.isUndefined()) return null;
+    if (heap_mod.valueAsPlainObject(options)) |o| return o;
+    if (heap_mod.valueAsFunction(options) != null) return null;
+    return throwTypeError(realm, "options must be an object or undefined");
+}
+
+/// §13.x GetRoundingModeOption.
+fn getRoundingModeOption(realm: *Realm, opts: ?*JSObject, default_mode: temporal.RoundingMode) NativeError!temporal.RoundingMode {
+    const obj = opts orelse return default_mode;
+    const v = try getPropertyChain(realm, obj, "roundingMode");
+    if (v.isUndefined()) return default_mode;
+    const s = try stringifyArg(realm, v);
+    return temporal.parseRoundingMode(s.flatBytes()) orelse
+        throwRangeError(realm, "invalid roundingMode");
+}
+
+/// §13.x GetRoundingIncrementOption — ToNumber, reject non-finite,
+/// truncate, then require an integer in [1, 1e9].
+fn getRoundingIncrementOption(realm: *Realm, opts: ?*JSObject) NativeError!i128 {
+    const obj = opts orelse return 1;
+    const v = try getPropertyChain(realm, obj, "roundingIncrement");
+    if (v.isUndefined()) return 1;
+    const d = numberToF64(try toNumber(realm, v));
+    if (!std.math.isFinite(d)) return throwRangeError(realm, "roundingIncrement must be finite");
+    const t = std.math.trunc(d);
+    if (t < 1 or t > 1_000_000_000) return throwRangeError(realm, "roundingIncrement is out of range");
+    return @intFromFloat(t);
+}
+
+/// §13.x GetTemporalUnitValuedOption — read a unit option (ToString),
+/// returning null for undefined / "auto". Rejects only an *unrecognised*
+/// unit name here; the operation-specific allowed-range check is a later
+/// algorithmic validation (see `requireUnitInRange`), so every option is
+/// read before any range error fires.
+fn getTemporalUnitOption(realm: *Realm, opts: ?*JSObject, key: []const u8) NativeError!?temporal.LargestUnit {
+    const obj = opts orelse return null;
+    const v = try getPropertyChain(realm, obj, key);
+    if (v.isUndefined()) return null;
+    const s = try stringifyArg(realm, v);
+    const bytes = s.flatBytes();
+    if (std.mem.eql(u8, bytes, "auto")) return null;
+    return temporal.parseTemporalUnit(bytes) orelse
+        throwRangeError(realm, "invalid unit value");
+}
+
+/// Reject a resolved unit outside the operation's allowed magnitude
+/// range [largest_allowed, smallest_allowed]. Run after all options are
+/// read, per GetDifferenceSettings' read-then-validate ordering.
+fn requireUnitInRange(realm: *Realm, unit: temporal.LargestUnit, largest_allowed: temporal.LargestUnit, smallest_allowed: temporal.LargestUnit) NativeError!void {
+    if (@intFromEnum(unit) < @intFromEnum(largest_allowed) or @intFromEnum(unit) > @intFromEnum(smallest_allowed)) {
+        return throwRangeError(realm, "unit is outside the allowed range");
+    }
+}
+
+/// §13.x NegateRoundingMode — lets `since` round in the reverse
+/// direction of `until`. Only the directed ceil/floor pair flips; the
+/// sign-symmetric modes are unchanged.
+fn negateRoundingMode(mode: temporal.RoundingMode) temporal.RoundingMode {
+    return switch (mode) {
+        .ceil => .floor,
+        .floor => .ceil,
+        .half_ceil => .half_floor,
+        .half_floor => .half_ceil,
+        else => mode,
+    };
+}
+
+/// §8.4.x Temporal.Instant.prototype.round ( roundTo ). A string
+/// `roundTo` is shorthand for `{ smallestUnit }`; smallestUnit is
+/// required (hour..nanosecond). roundingIncrement (default 1) must
+/// divide a 24-hour day evenly; roundingMode defaults to halfExpand.
 fn instantRound(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requireInstant(realm, this_value);
-    return throwTypeError(realm, "Temporal.Instant.prototype.round is not yet implemented");
+    const ns = try requireInstant(realm, this_value);
+    const round_to = argOr(args, 0, Value.undefined_);
+    if (round_to.isUndefined()) {
+        return throwTypeError(realm, "Temporal.Instant.prototype.round requires a smallestUnit");
+    }
+
+    var unit: temporal.LargestUnit = undefined;
+    var increment: i128 = 1;
+    var mode: temporal.RoundingMode = .half_expand;
+    if (round_to.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(round_to.asString()));
+        unit = temporal.parseTemporalUnit(s.flatBytes()) orelse
+            return throwRangeError(realm, "invalid smallestUnit");
+        if (@intFromEnum(unit) < @intFromEnum(temporal.LargestUnit.hour)) {
+            return throwRangeError(realm, "smallestUnit is outside the allowed range");
+        }
+    } else {
+        const opts = try getOptionsObject(realm, round_to);
+        increment = try getRoundingIncrementOption(realm, opts);
+        mode = try getRoundingModeOption(realm, opts, .half_expand);
+        unit = (try getTemporalUnitOption(realm, opts, "smallestUnit")) orelse
+            return throwRangeError(realm, "smallestUnit is required");
+        try requireUnitInRange(realm, unit, .hour, .nanosecond);
+    }
+
+    // increment × unit-span must divide a solar day evenly (inclusive).
+    const per_day = @divExact(@as(i128, 86_400_000_000_000), temporal.unitNanoseconds(unit));
+    if (!temporal.validateRoundingIncrement(increment, per_day, true)) {
+        return throwRangeError(realm, "roundingIncrement does not divide evenly into a day");
+    }
+
+    const rounded = temporal.roundToIncrementAsIfPositive(ns, increment * temporal.unitNanoseconds(unit), mode);
+    if (!temporal.isValidEpochNanoseconds(rounded)) {
+        return throwRangeError(realm, "rounded instant is out of range");
+    }
+    return createTemporalInstant(realm, rounded);
 }
+
 fn instantUntil(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requireInstant(realm, this_value);
-    return throwTypeError(realm, "Temporal.Instant.prototype.until is not yet implemented");
+    return differenceTemporalInstant(realm, this_value, args, false);
 }
+
 fn instantSince(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requireInstant(realm, this_value);
-    return throwTypeError(realm, "Temporal.Instant.prototype.since is not yet implemented");
+    return differenceTemporalInstant(realm, this_value, args, true);
 }
+
+/// Dividend for a difference roundingIncrement: the count of `unit` in
+/// the next-larger unit (non-inclusive bound). Day and above are
+/// disallowed for Instant differences.
+fn differenceDividend(unit: temporal.LargestUnit) i128 {
+    return switch (unit) {
+        .hour => 24,
+        .minute, .second => 60,
+        .millisecond, .microsecond, .nanosecond => 1000,
+        else => unreachable,
+    };
+}
+
+/// §8.4.x DifferenceTemporalInstant — `until` (sign +) / `since` (sign
+/// −). Reads the difference settings (largestUnit, increment, mode,
+/// smallestUnit in that order), rounds the epoch-ns delta, and balances
+/// it into a time-only Duration. `since` negates the rounding mode and
+/// the result, so `a.since(b)` equals `a.until(b).negated()`.
+fn differenceTemporalInstant(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
+    const this_ns = try requireInstant(realm, this_value);
+    const other_ns = try toTemporalInstant(realm, argOr(args, 0, Value.undefined_));
+    const opts = try getOptionsObject(realm, argOr(args, 1, Value.undefined_));
+
+    // GetDifferenceSettings read order: largestUnit, increment, mode,
+    // smallestUnit. Allowed units: hour..nanosecond.
+    const largest_opt = try getTemporalUnitOption(realm, opts, "largestUnit");
+    const increment = try getRoundingIncrementOption(realm, opts);
+    const mode = try getRoundingModeOption(realm, opts, .trunc);
+    const smallest_opt = try getTemporalUnitOption(realm, opts, "smallestUnit");
+
+    // All options read; now validate. Units must be in range (hour..ns).
+    if (largest_opt) |lu| try requireUnitInRange(realm, lu, .hour, .nanosecond);
+    const smallest = smallest_opt orelse temporal.LargestUnit.nanosecond;
+    try requireUnitInRange(realm, smallest, .hour, .nanosecond);
+
+    // Default largestUnit is the larger of smallestUnit and "second".
+    const largest = largest_opt orelse (if (@intFromEnum(smallest) < @intFromEnum(temporal.LargestUnit.second))
+        smallest
+    else
+        temporal.LargestUnit.second);
+    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+        return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
+    }
+    if (!temporal.validateRoundingIncrement(increment, differenceDividend(smallest), false)) {
+        return throwRangeError(realm, "invalid roundingIncrement for the smallestUnit");
+    }
+
+    const diff = other_ns - this_ns;
+    const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
+    const rounded = temporal.roundToIncrement(diff, increment * temporal.unitNanoseconds(smallest), eff_mode);
+    var d = temporal.balanceTimeDuration(rounded, largest);
+    if (is_since) {
+        d.days = negZero(d.days);
+        d.hours = negZero(d.hours);
+        d.minutes = negZero(d.minutes);
+        d.seconds = negZero(d.seconds);
+        d.milliseconds = negZero(d.milliseconds);
+        d.microseconds = negZero(d.microseconds);
+        d.nanoseconds = negZero(d.nanoseconds);
+    }
+    return createTemporalDuration(realm, d);
+}
+
+/// Deferred — needs the time-zone machinery + Temporal.ZonedDateTime.
 fn instantToZonedDateTimeISO(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     _ = try requireInstant(realm, this_value);
