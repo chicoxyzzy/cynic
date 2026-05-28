@@ -69,6 +69,7 @@ test {
     _ = @import("runtime/heap.zig");
     _ = @import("runtime/c_alloc.zig");
     _ = @import("runtime/realm.zig");
+    _ = @import("runtime/temporal.zig");
     _ = @import("runtime/lantern/interpreter.zig");
     _ = @import("runtime/lantern/arith.zig");
     _ = @import("runtime/lantern/tests.zig");
@@ -94,6 +95,7 @@ test {
     _ = @import("runtime/builtins/uri.zig");
     _ = @import("runtime/builtins/function.zig");
     _ = @import("runtime/builtins/error.zig");
+    _ = @import("runtime/builtins/temporal.zig");
     _ = @import("bytecode/op.zig");
     _ = @import("bytecode/chunk.zig");
     _ = @import("bytecode/disasm.zig");

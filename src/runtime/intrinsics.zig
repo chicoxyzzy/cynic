@@ -93,6 +93,15 @@ pub const Intrinsics = struct {
     async_disposable_stack_constructor: ?*JSFunction = null,
     async_disposable_stack_prototype: ?*JSObject = null,
 
+    /// Temporal proposal — the `Temporal` namespace object plus the
+    /// plain value types implemented so far. Reflected as GC roots
+    /// like every other intrinsic slot.
+    temporal_namespace: ?*JSObject = null,
+    temporal_duration_constructor: ?*JSFunction = null,
+    temporal_duration_prototype: ?*JSObject = null,
+    temporal_plain_time_constructor: ?*JSFunction = null,
+    temporal_plain_time_prototype: ?*JSObject = null,
+
     /// `%GeneratorPrototype%` (§27.5.1). Lazily installed on the
     /// first `function*` call by `lantern.ensureGeneratorPrototype`;
     /// `null` until then. Carries `next` / `return` / `throw` and
@@ -562,6 +571,12 @@ pub fn install(realm: *Realm) !void {
     // Realm). Order matters only against the recursive install
     // re-entry, not against any inter-builtin dep.
     try @import("builtins/shadow_realm.zig").install(realm);
+    // Temporal — the `Temporal` namespace object plus the plain
+    // value types Cynic ships so far (Duration, PlainTime). Installed
+    // after the user-visible constructors; the per-type prototypes
+    // are reflected as GC roots via the new `temporal_*` intrinsic
+    // slots and frozen by the `freezePrimordials` pass below.
+    try @import("builtins/temporal.zig").install(realm);
     // Iterator.prototype is now live — wire
     // %GeneratorFunction.prototype.prototype% and %AsyncGeneratorFunction.prototype.prototype%
     // so `Object.getPrototypeOf(function*(){}).prototype` lands

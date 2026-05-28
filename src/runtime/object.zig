@@ -638,6 +638,14 @@ pub const JSObjectExtension = struct {
     /// start so re-entry during disposal sees an empty source).
     /// `null` for sync DisposableStack / non-stack objects.
     async_dispose_walk: ?*AsyncDisposeWalk = null,
+    /// Temporal proposal — the internal-slot record a plain
+    /// Temporal value (`Temporal.Duration`, `Temporal.PlainTime`)
+    /// carries. A tagged union over the plain Temporal types; the
+    /// tag also serves as the §RequireInternalSlot brand check. No
+    /// heap pointers inside, so the GC marker needs no mark edge —
+    /// the side allocation is freed in `deinit` like `map_data`.
+    /// `null` for every non-Temporal object.
+    temporal_record: ?*@import("temporal.zig").TemporalRecord = null,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
         self.accessors.deinit(allocator);
@@ -654,6 +662,10 @@ pub const JSObjectExtension = struct {
         if (self.array_buffer) |ab| allocator.free(ab);
         self.disposable_resources.deinit(allocator);
         if (self.async_dispose_walk) |w| w.deinit(allocator);
+        if (self.temporal_record) |tr| {
+            tr.deinit(allocator);
+            allocator.destroy(tr);
+        }
     }
 };
 
@@ -1485,6 +1497,24 @@ pub const JSObject = struct {
     pub fn disposableResourcesConst(self: *const JSObject) ?*const std.ArrayListUnmanaged(DisposableResource) {
         if (self.extension) |ext| return &ext.disposable_resources;
         return null;
+    }
+
+    // ── Temporal — plain value internal-slot record ────────────
+    //
+    // A `Temporal.Duration` / `Temporal.PlainTime` instance points
+    // at a heap-allocated `TemporalRecord` through the extension.
+    // The brand (the tagged-union variant) is checked by every
+    // prototype method's RequireInternalSlot. Plain objects pay the
+    // null-extension fast path.
+
+    pub fn getTemporalRecord(self: *const JSObject) ?*@import("temporal.zig").TemporalRecord {
+        if (self.extension) |ext| return ext.temporal_record;
+        return null;
+    }
+
+    pub fn setTemporalRecord(self: *JSObject, allocator: std.mem.Allocator, rec: *@import("temporal.zig").TemporalRecord) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.temporal_record = rec;
     }
 
     // ── §25 / §23 ArrayBuffer + TypedArray + DataView state ────

@@ -1127,16 +1127,31 @@ pub const single_realm_path_contains = [_][]const u8{
 
 pub const deferred_path_prefixes = [_][]const u8{
     // Temporal is a large Stage 4 surface (Calendar / TimeZone /
-    // Instant / PlainDate / …). Every fixture parses fine but
-    // runtime mode would attempt ~4500 tests against globals Cynic
-    // doesn't install, drowning the rest of the runtime scoreboard
-    // in 0 % noise. Path-skip wholesale until the implementation
-    // phase.
-    "built-ins/Temporal/",
+    // Instant / PlainDate / …). Cynic ships the two most self-
+    // contained plain value types so far — `Temporal.Duration`
+    // (§7) and `Temporal.PlainTime` (§4) — and those two subtrees
+    // run; the remaining types are skipped per-subtree until their
+    // implementation lands, so they don't drown the runtime
+    // scoreboard in 0 % noise. As each type ships, drop its line.
+    "built-ins/Temporal/Instant/",
+    "built-ins/Temporal/Now/",
+    "built-ins/Temporal/PlainDate/",
+    "built-ins/Temporal/PlainDateTime/",
+    "built-ins/Temporal/PlainMonthDay/",
+    "built-ins/Temporal/PlainYearMonth/",
+    "built-ins/Temporal/ZonedDateTime/",
+    // `built-ins/Temporal/getOwnPropertyNames.js` asserts every one
+    // of the nine type names is an own property of the `Temporal`
+    // namespace. Cynic installs only Duration + PlainTime so far, so
+    // this one fixture fails until the namespace is complete. The
+    // sibling `prop-desc.js` / `keys.js` (which only probe the
+    // namespace's own descriptor + that it has no enumerable keys)
+    // pass and stay in scope.
+    "built-ins/Temporal/getOwnPropertyNames.js",
     // Stage 3 — `Date.prototype.toTemporalInstant` is part of the
-    // Temporal proposal surface. Cynic doesn't install Temporal,
-    // so this whole subtree fails brand checks. Path-skip until
-    // Temporal lands. ~7 fixtures.
+    // Temporal proposal surface. Cynic doesn't install
+    // Temporal.Instant yet, so this whole subtree fails brand
+    // checks. Path-skip until Instant lands. ~7 fixtures.
     "built-ins/Date/prototype/toTemporalInstant/",
 };
 
