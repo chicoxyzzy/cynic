@@ -1054,10 +1054,11 @@ pub const vendor_features = [_][]const u8{
 };
 
 pub const vendor_path_contains = [_][]const u8{
-    // Unicode `Script_Extensions=Unknown` (alias `scx=Zzzz`) —
-    // libregexp's property tables don't include the "Unknown"
-    // special value.
-    "/property-escapes/special-property-value-Script_Extensions-Unknown",
+    // (`Script_Extensions=Unknown` / alias `scx=Zzzz` graduated out:
+    //  the native Perlex engine resolves these `\p{…}` escapes through
+    //  Cynic's own Unicode tables — `unicode/perlex_props.zig` — at both
+    //  parse and runtime, so the value no longer reaches libregexp,
+    //  whose property tables omit the "Unknown" special value.)
     // §22.2.1 /v flag — set-difference (`--`), string-literal
     // escapes (`\q{…}`), property-of-strings escapes
     // (`\p{RGI_Emoji}`, etc.), and nested character classes

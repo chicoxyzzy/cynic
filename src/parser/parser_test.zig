@@ -730,6 +730,46 @@ test "Parser: valid regex /abc/g produces no diagnostic" {
     try testing.expectEqual(@as(usize, 0), diags.items.len);
 }
 
+test "Parser: \\p{Script=Unknown} property escapes parse without diagnostic" {
+    // §22.2.1.1: `Script=Unknown` (alias `sc=Zzzz`) is the @missing
+    // complement — a valid property value Cynic's tables model. The
+    // parse-time validator must inject the same `\p{…}` resolver the
+    // runtime bridge uses (`unicode/perlex_props.zig`); a null resolver
+    // would defer to the vendored libregexp, which rejects this value
+    // and false-rejects the literal at parse phase.
+    const srcs = [_][]const u8{
+        "/\\p{Script=Unknown}/u;",
+        "/\\P{Script=Unknown}/u;",
+        "/\\p{sc=Zzzz}/u;",
+        "/\\p{Script_Extensions=Unknown}/u;",
+        "/\\p{scx=Zzzz}/u;",
+    };
+    for (srcs) |src| {
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        var diags: Diagnostics = .empty;
+        defer diags.deinit(arena.allocator());
+        _ = parseScript(arena.allocator(), src, &diags) catch unreachable;
+        testing.expectEqual(@as(usize, 0), diags.items.len) catch |e| {
+            std.debug.print("unexpected diagnostic for {s}\n", .{src});
+            return e;
+        };
+    }
+}
+
+test "Parser: \\p{NotAProperty} still rejects as invalid_regex_literal" {
+    // The resolver must not whitelist genuinely-unknown names: a value
+    // neither Cynic's tables nor libregexp recognise stays an early
+    // SyntaxError (§22.2.3.4 RegExpInitialize).
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    defer diags.deinit(arena.allocator());
+    _ = parseScript(arena.allocator(), "/\\p{NotAProperty}/u;", &diags) catch {};
+    try testing.expect(diags.items.len >= 1);
+    try testing.expectEqual(Code.invalid_regex_literal, diags.items[0].code);
+}
+
 test "Parser: for (var x in {}) let y; rejects Declaration as body" {
     // §14.7.5: substatement position accepts Statement, not Declaration.
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
