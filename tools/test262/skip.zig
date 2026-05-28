@@ -846,6 +846,20 @@ pub const ses_exact_paths = [_][]const u8{
     "language/white-space/string-nbsp.js",
     "language/white-space/string-space.js",
     "language/white-space/string-vertical-tab.js",
+    // `built-ins/Iterator/{zip,zipKeyed}/result-is-iterator.js`
+    // (joint-iteration) — both assert the result's `[[Prototype]]`
+    // is `%IteratorHelperPrototype%`, obtained through the harness
+    // include `wellKnownIntrinsicObjects.js`, which resolves every
+    // intrinsic via `new Function("return " + source)()`. Cynic bans
+    // runtime code construction (§15.3.2; AGENTS.md "eval and runtime
+    // code construction"), so the helper throws "could not obtain
+    // %IteratorHelperPrototype%" before the assertion runs — same
+    // permanent SES carve-out as `async-arrow-function/prototype.js`.
+    // The sibling `result-is-iterator.js` fixtures (iterator-helpers
+    // map/filter/take/drop/flatMap, iterator-sequencing concat)
+    // obtain the prototype directly and stay attempted.
+    "built-ins/Iterator/zip/result-is-iterator.js",
+    "built-ins/Iterator/zipKeyed/result-is-iterator.js",
 };
 
 /// AND-pair filters — both substrings must appear in the path. Used
@@ -1382,6 +1396,13 @@ test "skip: SES out of scope" {
     // Constructor-arg `ctx-*` siblings stay attempted.
     try testing.expect(!pathIsCynicOutOfScope("built-ins/Promise/try/ctx-ctor.js"));
     try testing.expect(!pathIsCynicOutOfScope("built-ins/Promise/try/ctx-ctor-throws.js"));
+    // Iterator.zip/zipKeyed result-is-iterator.js resolve
+    // %IteratorHelperPrototype% via wellKnownIntrinsicObjects.js
+    // (`new Function("return …")`) — SES carve-out. The
+    // iterator-helpers siblings obtain it directly and stay in.
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Iterator/zip/result-is-iterator.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Iterator/zipKeyed/result-is-iterator.js"));
+    try testing.expect(!pathIsCynicOutOfScope("built-ins/Iterator/prototype/map/result-is-iterator.js"));
 }
 
 test "skip: main-spec paths not OOS" {
