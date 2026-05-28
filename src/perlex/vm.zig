@@ -154,13 +154,14 @@ fn Matcher(comptime Unit: type) type {
             self.undo.clearRetainingCapacity();
             self.backtrack.clearRetainingCapacity();
             @memset(self.slots, none);
-            return self.runLoop(self.prog.insts, &self.backtrack, &self.undo, start);
+            return self.runLoop(self.prog.insts, &self.backtrack, &self.undo, start, false);
         }
 
         /// Run `insts` from `sp_start` against the given backtrack/undo
-        /// stacks. The main match uses the matcher's stacks; a lookahead
+        /// stacks. The main match uses the matcher's stacks; a lookaround
         /// runs its sub-program with fresh, self-contained stacks so it
-        /// can't disturb the outer match. Returns whether a `match`
+        /// can't disturb the outer match. `backward` matches characters
+        /// right-to-left (for a lookbehind). Returns whether a `match`
         /// instruction was reached.
         fn runLoop(
             self: *Self,
@@ -168,6 +169,7 @@ fn Matcher(comptime Unit: type) type {
             backtrack: *std.ArrayListUnmanaged(Frame),
             undo: *std.ArrayListUnmanaged(Undo),
             sp_start: usize,
+            backward: bool,
         ) error{ OutOfMemory, StepLimit }!bool {
             var pc: usize = 0;
             var sp: usize = sp_start;
@@ -177,12 +179,13 @@ fn Matcher(comptime Unit: type) type {
 
                 switch (insts[pc]) {
                     .char => |ch| {
-                        if (sp < self.input.len) {
-                            const ic: u21 = self.input[sp];
-                            const pat: u21 = ch;
+                        const pat: u21 = ch;
+                        const avail = if (backward) sp > 0 else sp < self.input.len;
+                        if (avail) {
+                            const ic: u21 = self.input[if (backward) sp - 1 else sp];
                             const ok = if (self.fold) asciiUpper(ic) == asciiUpper(pat) else ic == pat;
                             if (ok) {
-                                sp += 1;
+                                if (backward) sp -= 1 else sp += 1;
                                 pc += 1;
                                 continue;
                             }
@@ -231,14 +234,15 @@ fn Matcher(comptime Unit: type) type {
                         }
                     },
                     .class => |cls| {
-                        if (sp < self.input.len) {
-                            const cu: u21 = self.input[sp];
+                        const avail = if (backward) sp > 0 else sp < self.input.len;
+                        if (avail) {
+                            const cu: u21 = self.input[if (backward) sp - 1 else sp];
                             var inside = classContains(cls.ranges, cu);
                             // Under `i`, a letter matches the class if
                             // its other-case partner is in the set.
                             if (self.fold and !inside) inside = classContains(cls.ranges, asciiSwapCase(cu));
                             if (inside != cls.negated) {
-                                sp += 1;
+                                if (backward) sp -= 1 else sp += 1;
                                 pc += 1;
                                 continue;
                             }
@@ -292,7 +296,7 @@ fn Matcher(comptime Unit: type) type {
                         defer sub_bt.deinit(self.gpa);
                         var sub_undo: std.ArrayListUnmanaged(Undo) = .empty;
                         defer sub_undo.deinit(self.gpa);
-                        const matched = try self.runLoop(la.sub, &sub_bt, &sub_undo, sp);
+                        const matched = try self.runLoop(la.sub, &sub_bt, &sub_undo, sp, la.behind);
                         if (matched != la.negative) {
                             if (la.negative) {
                                 // A negative lookahead contributes no captures.

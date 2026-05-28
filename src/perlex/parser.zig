@@ -47,12 +47,12 @@ pub const Node = union(enum) {
     backref_name: []const u8,
     /// `\1`..`\99…` — a numeric backreference, resolved at compile.
     backref_index: usize,
-    /// `(?=…)` (negative == false) / `(?!…)` (negative == true)
-    /// lookahead assertion.
+    /// Lookaround assertion: `(?=…)`/`(?!…)` (lookahead) and
+    /// `(?<=…)`/`(?<!…)` (lookbehind, `behind == true`).
     lookahead: Lookahead,
 
     pub const Capture = struct { index: usize, name: ?[]const u8, body: *Node };
-    pub const Lookahead = struct { negative: bool, body: *Node };
+    pub const Lookahead = struct { negative: bool, behind: bool, body: *Node };
     pub const Repeat = struct { body: *Node, min: usize, max: usize, greedy: bool };
     pub const ClassRange = struct { lo: u21, hi: u21 };
     pub const Class = struct { negated: bool, ranges: []const ClassRange };
@@ -314,13 +314,13 @@ const Parser = struct {
                     return self.makeNode(.{ .noncapture = body });
                 },
                 '<' => {
-                    // `(?<=` / `(?<!` are lookbehind — not yet supported.
                     const k3 = self.at(3) orelse return error.Unsupported;
-                    if (k3 == '=' or k3 == '!') return error.Unsupported;
+                    if (k3 == '=') return self.parseLookaround(false, true);
+                    if (k3 == '!') return self.parseLookaround(true, true);
                     return self.parseNamedCapture();
                 },
-                '=' => return self.parseLookahead(false),
-                '!' => return self.parseLookahead(true),
+                '=' => return self.parseLookaround(false, false),
+                '!' => return self.parseLookaround(true, false),
                 // `(?flags:…)` modifiers are future grammar.
                 else => return error.Unsupported,
             }
@@ -334,13 +334,13 @@ const Parser = struct {
         return self.makeNode(.{ .capture = .{ .index = index, .name = null, .body = body } });
     }
 
-    /// `(?=Disjunction)` / `(?!Disjunction)` — at `(?` with the `=`/`!`
-    /// already identified.
-    fn parseLookahead(self: *Parser, negative: bool) ParseError!*Node {
-        self.pos += 3; // consume `(?=` or `(?!`
+    /// Lookaround: `(?=…)`/`(?!…)` (behind == false) or
+    /// `(?<=…)`/`(?<!…)` (behind == true).
+    fn parseLookaround(self: *Parser, negative: bool, behind: bool) ParseError!*Node {
+        self.pos += if (behind) 4 else 3; // `(?<=`/`(?<!` vs `(?=`/`(?!`
         const body = try self.parseDisjunction();
         try self.expect(')');
-        return self.makeNode(.{ .lookahead = .{ .negative = negative, .body = body } });
+        return self.makeNode(.{ .lookahead = .{ .negative = negative, .behind = behind, .body = body } });
     }
 
     fn parseNamedCapture(self: *Parser) ParseError!*Node {
