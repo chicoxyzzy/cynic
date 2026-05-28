@@ -603,6 +603,16 @@ pub const JSObjectExtension = struct {
     /// by `$262.createRealm()`. Not GC-traced; the harness keeps
     /// the child Realm rooted in `parent.child_realms` separately.
     host_data: ?*anyopaque = null,
+    /// §3.8 — the realm a ShadowRealm INSTANCE was created in
+    /// (`GetFunctionRealm(new_target)` at construct time). Cold:
+    /// only ShadowRealm instances populate it, and they already
+    /// allocate an extension for the child realm pointer in
+    /// `host_data`, so co-locating here is free. Read via
+    /// `JSObject.shadowRealmOwner` / set via
+    /// `setShadowRealmOwner`. See the `is_shadow_realm` brand flag
+    /// on the inline struct (kept inline — it packs into existing
+    /// bool padding at zero footprint cost).
+    shadow_realm_owner: ?*@import("realm.zig").Realm = null,
     /// ES2026 explicit-resource-management — `[[DisposableState]]`
     /// (§27.3.2 / §27.4.2). `null` means "not a DisposableStack /
     /// AsyncDisposableStack instance". The four enum variants
@@ -991,18 +1001,6 @@ pub const JSObject = struct {
     /// throws TypeError on any non-ShadowRealm receiver — like
     /// `evaluate.call({}, "1")`).
     is_shadow_realm: bool = false,
-    /// §3.8 — the realm the ShadowRealm INSTANCE was created in
-    /// (`GetFunctionRealm(new_target)` at construct time). Acts
-    /// as the "caller realm" parameter for every boundary
-    /// operation invoked on this instance: errors thrown by
-    /// `.evaluate` / `.importValue` are constructed in this
-    /// realm, and WrappedFunctions returned across the boundary
-    /// stamp this as their `[[Realm]]`. Differs from the running
-    /// realm when the constructor was called via
-    /// `Reflect.construct(OtherShadowRealm, [])` from a third
-    /// realm — the test262 cross-realm fixtures pin this. `null`
-    /// on non-ShadowRealm objects.
-    shadow_realm_owner: ?*@import("realm.zig").Realm = null,
     /// §10.4.2 Array exotic — packed indexed elements storage.
     /// Array instances set `is_array_exotic = true` and use
     /// `elements` as the source of truth for integer-indexed
@@ -1578,6 +1576,19 @@ pub const JSObject = struct {
     pub fn setHostData(self: *JSObject, allocator: std.mem.Allocator, p: ?*anyopaque) !void {
         const ext = try self.getOrCreateExtension(allocator);
         ext.host_data = p;
+    }
+
+    /// §3.8 ShadowRealm instance [[Realm]] — see the
+    /// `JSObjectExtension.shadow_realm_owner` doc. Cold; only
+    /// ShadowRealm instances populate it.
+    pub fn shadowRealmOwner(self: *const JSObject) ?*@import("realm.zig").Realm {
+        if (self.extension) |ext| return ext.shadow_realm_owner;
+        return null;
+    }
+
+    pub fn setShadowRealmOwner(self: *JSObject, allocator: std.mem.Allocator, r: ?*@import("realm.zig").Realm) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.shadow_realm_owner = r;
     }
 
     /// Drop every sub-allocation owned by this object — does NOT

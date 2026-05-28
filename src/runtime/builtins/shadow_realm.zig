@@ -175,10 +175,12 @@ fn shadowRealmConstructor(
     // as the parent and gets torn down with it.
     realm.child_realms.append(realm.allocator, child_ptr) catch return error.OutOfMemory;
 
-    // Brand + stash slots: child realm, owner realm.
+    // Brand + stash slots: child realm (host_data) + owner realm
+    // (both ride the cold-field extension; ShadowRealm instances
+    // are rare so neither sits inline on every JSObject).
     inst.is_shadow_realm = true;
-    inst.shadow_realm_owner = owner_realm;
     inst.setHostData(realm.allocator, @ptrCast(child_ptr)) catch return error.OutOfMemory;
+    inst.setShadowRealmOwner(realm.allocator, owner_realm) catch return error.OutOfMemory;
 
     return heap_mod.taggedObject(inst);
 }
@@ -204,7 +206,7 @@ fn shadowRealmOf(realm: *Realm, this_value: Value, method_name: []const u8) Nati
     // stamped (shouldn't happen for `new ShadowRealm()` post-
     // refactor, but defensive — keeps same-realm semantics if a
     // future construct path forgets the brand).
-    const owner = inst.shadow_realm_owner orelse realm;
+    const owner = inst.shadowRealmOwner() orelse realm;
     return .{ .child = child, .owner = owner };
 }
 
