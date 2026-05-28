@@ -16,6 +16,7 @@ pub const lexer = struct {
 
 pub const unicode = struct {
     pub const idents = @import("unicode/idents.zig");
+    pub const properties = @import("unicode/properties.zig");
 };
 
 pub const ast = @import("ast.zig");
@@ -63,6 +64,7 @@ test {
     _ = @import("lexer/lexer.zig");
     _ = @import("lexer/token.zig");
     _ = @import("unicode/idents.zig");
+    _ = @import("unicode/properties.zig");
     _ = @import("ast/printer.zig");
     _ = @import("parser/parser.zig");
     _ = @import("parser/parser_test.zig");
