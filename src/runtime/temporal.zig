@@ -1787,6 +1787,93 @@ pub fn addISODate(rec: PlainDateRecord, years: i64, months: i64, weeks: i64, day
     };
 }
 
+/// §3.5.x CompareISODate — total order on ISO dates (year, then month,
+/// then day). Compares raw integer fields so the difference constrain-loop
+/// can test an unregulated (year, month, day) tuple whose day may exceed
+/// the month's length.
+fn compareISODateTuple(ay: i64, am: i64, ad: i64, by: i64, bm: i64, bd: i64) i32 {
+    if (ay != by) return if (ay < by) -1 else 1;
+    if (am != bm) return if (am < bm) -1 else 1;
+    if (ad != bd) return if (ad < bd) -1 else 1;
+    return 0;
+}
+
+pub fn compareISODate(a: PlainDateRecord, b: PlainDateRecord) i32 {
+    return compareISODateTuple(a.iso_year, a.iso_month, a.iso_day, b.iso_year, b.iso_month, b.iso_day);
+}
+
+/// Did stepping to year-month (y0, m0) with anchor day `d0` reach or pass
+/// `target` in the direction `sign`? The per-step test inside
+/// DifferenceISODate's year/month constrain-loops: balance the year-month,
+/// then compare against the *unregulated* anchor day (compareISODateTuple
+/// tolerates a day beyond the month's length).
+fn isoDateSurpasses(sign: i32, y0: i64, m0: i64, d0: i64, target: PlainDateRecord) bool {
+    const bym = balanceISOYearMonth(y0, m0);
+    const c = compareISODateTuple(bym.year, bym.month, d0, target.iso_year, target.iso_month, target.iso_day);
+    return sign * c > 0;
+}
+
+/// §3.5.x DifferenceISODate — the ISO-calendar CalendarDateUntil: the date
+/// duration {years, months, weeks, days} from `d1` to `d2`, with the
+/// coarsest component capped at `largest`. Years and months come from an
+/// estimate-then-correct constrain-loop (so Jan-31 → Mar-01 across a short
+/// February yields one month, not two); the leftover whole days are an
+/// exact epoch-day subtraction from the day-constrained year-month anchor;
+/// weeks peel off only when `largest` is `week`. The result is
+/// sign-consistent — every field shares the direction of travel — and the
+/// time fields stay zero (a date has no time-of-day).
+pub fn differenceISODate(d1: PlainDateRecord, d2: PlainDateRecord, largest: LargestUnit) DurationRecord {
+    const cmp = compareISODate(d1, d2);
+    if (cmp == 0) return .{};
+    const sign: i32 = -cmp; // +1 when d2 is after d1
+    const sg: i64 = sign; // widened for the index arithmetic
+
+    var years: i64 = 0;
+    var months: i64 = 0;
+    if (largest == .year or largest == .month) {
+        // Year estimate: jump to the raw year delta, back off one step
+        // toward d1, then advance while we have not yet passed d2.
+        var candidate_years: i64 = @as(i64, d2.iso_year) - @as(i64, d1.iso_year);
+        if (candidate_years != 0) candidate_years -= sg;
+        while (!isoDateSurpasses(sign, @as(i64, d1.iso_year) + candidate_years, d1.iso_month, d1.iso_day, d2)) {
+            years = candidate_years;
+            candidate_years += sg;
+        }
+        // Month estimate: advance month-by-month from the year anchor.
+        var candidate_months: i64 = sg;
+        var inter = balanceISOYearMonth(@as(i64, d1.iso_year) + years, @as(i64, d1.iso_month) + candidate_months);
+        while (!isoDateSurpasses(sign, inter.year, inter.month, d1.iso_day, d2)) {
+            months = candidate_months;
+            candidate_months += sg;
+            inter = balanceISOYearMonth(inter.year, inter.month + sg);
+        }
+        if (largest == .month) {
+            months += years * 12;
+            years = 0;
+        }
+    }
+
+    // Whole days: exact epoch-day delta from the constrained year-month
+    // anchor (clamps e.g. Jan-31 + 1 month to Feb-28/29) to d2.
+    const bym = balanceISOYearMonth(@as(i64, d1.iso_year) + years, @as(i64, d1.iso_month) + months);
+    const anchor = regulateISODate(bym.year, bym.month, d1.iso_day, false).?;
+    var days: i64 = daysFromCivil(d2.iso_year, d2.iso_month, d2.iso_day) -
+        daysFromCivil(anchor.iso_year, anchor.iso_month, anchor.iso_day);
+
+    var weeks: i64 = 0;
+    if (largest == .week) {
+        weeks = @divTrunc(days, 7);
+        days -= weeks * 7;
+    }
+
+    return .{
+        .years = @floatFromInt(years),
+        .months = @floatFromInt(months),
+        .weeks = @floatFromInt(weeks),
+        .days = @floatFromInt(days),
+    };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -2059,6 +2146,69 @@ test "addISODate" {
     }
     // Out of range → null.
     try testing.expect(addISODate(base, 1_000_000, 0, 0, 0, false) == null);
+}
+
+test "differenceISODate" {
+    const mk = struct {
+        fn f(y: i32, m: u8, dd: u8) PlainDateRecord {
+            return .{ .iso_year = y, .iso_month = m, .iso_day = dd };
+        }
+    }.f;
+    // largestUnit=year: 1997-12-01 → 2001-06-18 = 3y 6m 17d (until/basic.js).
+    {
+        const r = differenceISODate(mk(1997, 12, 1), mk(2001, 6, 18), .year);
+        try testing.expectEqual(@as(f64, 3), r.years);
+        try testing.expectEqual(@as(f64, 6), r.months);
+        try testing.expectEqual(@as(f64, 0), r.weeks);
+        try testing.expectEqual(@as(f64, 17), r.days);
+    }
+    // largestUnit=month: 2000-12-01 → 2001-06-01 = 6 months.
+    {
+        const r = differenceISODate(mk(2000, 12, 1), mk(2001, 6, 1), .month);
+        try testing.expectEqual(@as(f64, 0), r.years);
+        try testing.expectEqual(@as(f64, 6), r.months);
+        try testing.expectEqual(@as(f64, 0), r.days);
+    }
+    // week/day: 2000-01-01 → 2000-10-07 = 40w / 280d.
+    {
+        const w = differenceISODate(mk(2000, 1, 1), mk(2000, 10, 7), .week);
+        try testing.expectEqual(@as(f64, 40), w.weeks);
+        try testing.expectEqual(@as(f64, 0), w.days);
+        const d = differenceISODate(mk(2000, 1, 1), mk(2000, 10, 7), .day);
+        try testing.expectEqual(@as(f64, 280), d.days);
+    }
+    // weeks/months don't mix (weeks-months.js): 1969-07-24 → 1969-09-04.
+    {
+        const w = differenceISODate(mk(1969, 7, 24), mk(1969, 9, 4), .week);
+        try testing.expectEqual(@as(f64, 6), w.weeks);
+        try testing.expectEqual(@as(f64, 0), w.days);
+        const mo = differenceISODate(mk(1969, 7, 24), mk(1969, 9, 4), .month);
+        try testing.expectEqual(@as(f64, 1), mo.months);
+        try testing.expectEqual(@as(f64, 11), mo.days);
+    }
+    // Jan-31 +1mo constrains to Feb-29: 2020-01-31 → 2020-03-01 = 1m 1d.
+    {
+        const r = differenceISODate(mk(2020, 1, 31), mk(2020, 3, 1), .month);
+        try testing.expectEqual(@as(f64, 1), r.months);
+        try testing.expectEqual(@as(f64, 1), r.days);
+    }
+    // Negative direction mirrors.
+    {
+        const d = differenceISODate(mk(1969, 10, 5), mk(1969, 7, 24), .day);
+        try testing.expectEqual(@as(f64, -73), d.days);
+        const big = differenceISODate(mk(1996, 3, 3), mk(1969, 7, 24), .day);
+        try testing.expectEqual(@as(f64, -9719), big.days);
+        const y = differenceISODate(mk(2001, 6, 18), mk(1997, 12, 1), .year);
+        try testing.expectEqual(@as(f64, -3), y.years);
+        try testing.expectEqual(@as(f64, -6), y.months);
+        try testing.expectEqual(@as(f64, -17), y.days);
+    }
+    // Equal dates → zero.
+    {
+        const r = differenceISODate(mk(2020, 5, 5), mk(2020, 5, 5), .year);
+        try testing.expectEqual(@as(f64, 0), r.years);
+        try testing.expectEqual(@as(f64, 0), r.days);
+    }
 }
 
 test "durationSign: first non-zero field decides" {

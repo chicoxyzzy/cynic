@@ -1942,14 +1942,80 @@ fn plainDateSubtract(realm: *Realm, this_value: Value, args: []const Value) Nati
     return plainDateAddSubtract(realm, this_value, args, true);
 }
 fn plainDateUntil(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainDate(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainDate.prototype.until is not yet implemented");
+    return differenceTemporalDate(realm, this_value, args, false);
 }
 fn plainDateSince(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainDate(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainDate.prototype.since is not yet implemented");
+    return differenceTemporalDate(realm, this_value, args, true);
+}
+
+/// §3.3.x DifferenceTemporalPlainDate — `until` (forward, this → other) /
+/// `since` (reverse). Reads GetDifferenceSettings for the date unit group
+/// (largestUnit, roundingIncrement, roundingMode, smallestUnit — in that
+/// read order, every option read before any range validation), computes
+/// the calendar difference via DifferenceISODate, and returns a date-only
+/// Duration. Per §13 GetDifferenceSettings the result is always computed
+/// in the this → other direction; `since` negates the rounding mode and
+/// then the result fields, so `a.since(b)` equals `a.until(b).negated()`.
+///
+/// Calendar-unit rounding — a smallestUnit of year/month/week, or a day
+/// increment that must bubble into a coarser largestUnit — needs
+/// RoundRelativeDuration / NudgeToCalendarUnit, which is not wired yet.
+/// Those option shapes throw a RangeError until that machinery lands; the
+/// default (smallestUnit "day", increment 1) and pure-day increments are
+/// handled here.
+fn differenceTemporalDate(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
+    const this_date = try requirePlainDate(realm, this_value);
+    const other_date = try toTemporalDate(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    const opts = try getOptionsObject(realm, argOr(args, 1, Value.undefined_));
+
+    // GetDifferenceSettings read order: largestUnit, increment, mode,
+    // smallestUnit — read every option before any range validation.
+    const largest_opt = try getTemporalUnitOption(realm, opts, "largestUnit");
+    const increment = try getRoundingIncrementOption(realm, opts);
+    const mode = try getRoundingModeOption(realm, opts, .trunc);
+    const smallest_opt = try getTemporalUnitOption(realm, opts, "smallestUnit");
+
+    if (largest_opt) |lu| try requireUnitInRange(realm, lu, .year, .day);
+    const smallest = smallest_opt orelse temporal.LargestUnit.day;
+    try requireUnitInRange(realm, smallest, .year, .day);
+    // defaultLargestUnit = LargerOfTwoTemporalUnits("day", smallestUnit).
+    // Within the date group "day" is the finest unit, so the coarser of
+    // the two is always the smallestUnit itself.
+    const largest = largest_opt orelse smallest;
+    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+        return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
+    }
+    // Date units have no MaximumTemporalDurationRoundingIncrement, so the
+    // increment is unconstrained beyond the [1, 1e9] range GetRounding-
+    // IncrementOption already enforced.
+
+    var diff = temporal.differenceISODate(this_date, other_date, largest);
+
+    // Rounding. The default (smallestUnit "day", increment 1) is a no-op
+    // on the whole-day difference. A day increment > 1 re-balances safely
+    // only when there is no coarser calendar unit to bubble into
+    // (largestUnit "day"); calendar smallestUnits (year/month/week) need
+    // RoundRelativeDuration — deferred.
+    if (smallest != .day) {
+        return throwRangeError(realm, "rounding to calendar units is not yet implemented");
+    }
+    if (increment != 1) {
+        if (largest != .day) {
+            return throwRangeError(realm, "day rounding with a calendar largestUnit is not yet implemented");
+        }
+        const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
+        const days_i: i128 = @intFromFloat(diff.days);
+        const rounded = temporal.roundToIncrement(days_i, increment, eff_mode);
+        diff.days = @floatFromInt(rounded);
+    }
+
+    if (is_since) {
+        diff.years = negZero(diff.years);
+        diff.months = negZero(diff.months);
+        diff.weeks = negZero(diff.weeks);
+        diff.days = negZero(diff.days);
+    }
+    return createTemporalDuration(realm, diff);
 }
 fn plainDateWithCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
