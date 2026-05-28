@@ -1137,32 +1137,21 @@ pub const single_realm_path_contains = [_][]const u8{
 // scoreboard in 0 / N noise.
 
 pub const deferred_path_prefixes = [_][]const u8{
-    // Temporal is a large Stage 4 surface (Calendar / TimeZone /
-    // Instant / PlainDate / …). Cynic ships the two most self-
-    // contained plain value types so far — `Temporal.Duration`
-    // (§7) and `Temporal.PlainTime` (§4) — and those two subtrees
-    // run; the remaining types are skipped per-subtree until their
-    // implementation lands, so they don't drown the runtime
-    // scoreboard in 0 % noise. As each type ships, drop its line.
-    "built-ins/Temporal/Instant/",
-    "built-ins/Temporal/Now/",
-    "built-ins/Temporal/PlainDate/",
-    "built-ins/Temporal/PlainDateTime/",
-    "built-ins/Temporal/PlainMonthDay/",
-    "built-ins/Temporal/PlainYearMonth/",
-    "built-ins/Temporal/ZonedDateTime/",
-    // `built-ins/Temporal/getOwnPropertyNames.js` asserts every one
-    // of the nine type names is an own property of the `Temporal`
-    // namespace. Cynic installs only Duration + PlainTime so far, so
-    // this one fixture fails until the namespace is complete. The
-    // sibling `prop-desc.js` / `keys.js` (which only probe the
-    // namespace's own descriptor + that it has no enumerable keys)
-    // pass and stay in scope.
-    "built-ins/Temporal/getOwnPropertyNames.js",
-    // Stage 3 — `Date.prototype.toTemporalInstant` is part of the
-    // Temporal proposal surface. Cynic doesn't install
-    // Temporal.Instant yet, so this whole subtree fails brand
-    // checks. Path-skip until Instant lands. ~7 fixtures.
+    // Temporal is a large Stage 4 surface (Duration / PlainTime /
+    // Instant / PlainDate / Calendar / TimeZone / ZonedDateTime / …).
+    // The implementation is being carried on a dedicated branch;
+    // on `main` the whole `built-ins/Temporal/` tree is skipped so
+    // the partial in-progress surface (constructors + a few methods,
+    // with the arithmetic-heavy `round` / `total` / `until` / `since`
+    // / `add` / `subtract` / `compare` paths unfinished) doesn't
+    // drown the runtime scoreboard in failing-method noise. The
+    // committed Temporal source stays in the tree — it's just not
+    // scored here until the dedicated effort lands the full surface
+    // and re-narrows this skip per-type.
+    "built-ins/Temporal/",
+    // `Date.prototype.toTemporalInstant` is part of the Temporal
+    // proposal surface; skipped on the same rationale until Temporal
+    // lands. ~7 fixtures.
     "built-ins/Date/prototype/toTemporalInstant/",
 };
 
