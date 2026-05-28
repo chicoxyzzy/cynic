@@ -1,18 +1,18 @@
 # test262 conformance — Cynic
 
-**Cynic passes 84.35 % of its 45103-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
+**Cynic passes 84.36 % of its 45039-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
-- **34877 pass** at the engine-true level (engine% = 99.93 % — see Legend).
-- **3167 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
-- **24 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
+- **34843 pass** at the engine-true level (engine% = 99.97 % — see Legend).
+- **3152 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
+- **9 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
 - **7035 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (Temporal, `explicit-resource-management`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
 
 ## Current scores
 
 | posture | pass% | engine% | passes / corpus | divergent |
 |---|---:|---:|---:|---:|
-| **hardened** (default — `cynic run`) | 84.35 % | 99.93 % | 38044 / 45103 | 3167 |
-| **unhardened** (`cynic --unhardened`) | 84.35 % | 99.94 % | 38046 / 45103 | — |
+| **hardened** (default — `cynic run`) | 84.36 % | 99.97 % | 37995 / 45039 | 3152 |
+| **unhardened** (`cynic --unhardened`) | 84.36 % | 99.98 % | 37995 / 45039 | — |
 
 > **pass%** is the headline — `pass / corpus` (a fixture
 > Cynic doesn't ship counts as a `skip`, lowering this).
@@ -159,8 +159,6 @@ first two path components (`built-ins/Set`,
 
 | area | pass | fail | skip | divergent | pass% | engine% |
 |---|---:|---:|---:|---:|---:|---:|
-| **_10–99 fails — engine-work tier_** | | | | | | |
-| `built-ins/ShadowRealm` | 34 | 15 | 0 | 15 | 77 % | 69 % |
 | **_1–9 fails — engine-work tier (libregexp Annex B carve-outs today)_** | | | | | | |
 | `built-ins/RegExp` | 1492 | 9 | 269 | 101 | 85 % | 99 % |
 | **_0 fails — passing / wholly OOS (sorted by divergent ↓)_** | | | | | | |
@@ -255,13 +253,14 @@ first two path components (`built-ins/Set`,
 
 Per-feature scores for the TC39 proposals Cynic ships at
 Stage 1–3, ahead of their inclusion in the published
-edition. **Each row is sourced from a dedicated phase
-sweep** that runs only the fixtures whose frontmatter
+edition. **Each proposal gets two rows** from dedicated
+phase sweeps that run only the fixtures whose frontmatter
 `features:` list names the proposal, in a realm where only
-that proposal's flag is enabled — a `joint-iteration`
-fixture is scored here against a realm where
-`Map.prototype.getOrInsert` is undefined, and vice versa,
-so each row reflects the proposal in honest isolation.
+that proposal's flag is enabled: a **(hardened)** row — the
+as-shipped SES posture (`--enable=<flag>`), SES-adjusted so
+`pass` counts divergent fixtures the same way the headline
+hardened row does — and an **(unhardened)** row against bare
+ECMA-262, mirroring the main / unhardened split.
 **These fixtures are excluded entirely from the top-line
 `## Current scores` and the per-area scoreboard** — they
 are not in the Cynic corpus and not in any bucket, so the
@@ -271,17 +270,20 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 70 | 8 | 4796 | 1 % | 90 % |
+| `joint-iteration` (hardened) | 76 | 2 | 4796 | 2 % | 97 % |
+| `joint-iteration` (unhardened) | 74 | 4 | 4796 | 2 % | 95 % |
+| `ShadowRealm` (hardened) | 62 | 1 | 4796 | 1 % | 98 % |
+| `ShadowRealm` (unhardened) | 62 | 1 | 4796 | 1 % | 98 % |
 
 
 ## History
 
-### 2026-05-28 — cynic `ae73fe7`, test262 `d0c1b455`
+### 2026-05-28 — cynic `38aa4ed`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 84.35 % | 99.94 % | 38046 / 45103 | 38046 / 38068 | — | +93 | 45.6 s |
-| **runtime_hardened** | 84.35 % | 99.93 % | 38044 / 45103 | 34877 / 34901 | 3167 | +93 | 45.5 s |
+| **runtime** | 84.36 % | 99.98 % | 37995 / 45039 | 37995 / 38004 | — | +42 | 50.5 s |
+| **runtime_hardened** | 84.36 % | 99.97 % | 37995 / 45039 | 34843 / 34852 | 3152 | +44 | 45.5 s |
 
 ### 2026-05-27 — cynic `618f795`, test262 `d0c1b455`
 
