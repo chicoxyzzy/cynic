@@ -441,14 +441,26 @@ pub fn callWrappedFunction(
         realm;
 
     // Step 4 — marshal each arg from callerRealm into targetRealm.
+    // §3.8.3.6 step 5 NOTE: "Any exception objects produced
+    // after this point are associated with callerRealm." So a
+    // non-wrappable arg's TypeError (raised inside GetWrappedValue
+    // with the targetRealm parameter) gets retagged here as a
+    // fresh callerRealm TypeError before propagation — otherwise
+    // the test262 `wrappedFunction(non-callable-obj)` fixtures see
+    // `targetRealm.TypeError` and fail the `instanceof
+    // callerRealm.TypeError` check.
     var wrapped_args = allocator.alloc(Value, args.len) catch return error.OutOfMemory;
     defer allocator.free(wrapped_args);
     for (args, 0..) |a, i| {
         wrapped_args[i] = getWrappedValue(target_realm, a) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NativeThrew => {
-                const ex = target_realm.pending_exception orelse Value.undefined_;
+                // Drop the target-realm exception; re-throw a
+                // fresh callerRealm TypeError so the instanceof
+                // check in the calling JS sees the right
+                // constructor identity.
                 target_realm.pending_exception = null;
+                const ex = intrinsics.newTypeError(caller_realm, "ShadowRealm boundary: argument cannot cross") catch return error.OutOfMemory;
                 return .{ .thrown = ex };
             },
         };
