@@ -1,18 +1,18 @@
 # test262 conformance — Cynic
 
-**Cynic passes 84.16 % of its 45096-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
+**Cynic passes 84.35 % of its 45103-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
-- **34806 pass** at the engine-true level (engine% = 99.95 % — see Legend).
-- **3145 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
-- **17 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
-- **7128 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (Temporal, `explicit-resource-management`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
+- **34877 pass** at the engine-true level (engine% = 99.93 % — see Legend).
+- **3167 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
+- **24 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
+- **7035 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (Temporal, `explicit-resource-management`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
 
 ## Current scores
 
 | posture | pass% | engine% | passes / corpus | divergent |
 |---|---:|---:|---:|---:|
-| **hardened** (default — `cynic run`) | 84.16 % | 99.95 % | 37951 / 45096 | 3145 |
-| **unhardened** (`cynic --unhardened`) | 84.16 % | 99.96 % | 37953 / 45096 | — |
+| **hardened** (default — `cynic run`) | 84.35 % | 99.93 % | 38044 / 45103 | 3167 |
+| **unhardened** (`cynic --unhardened`) | 84.35 % | 99.94 % | 38046 / 45103 | — |
 
 > **pass%** is the headline — `pass / corpus` (a fixture
 > Cynic doesn't ship counts as a `skip`, lowering this).
@@ -137,30 +137,13 @@ first two path components (`built-ins/Set`,
 **Reading guide:**
 
 - The **top tier** (`1+ fails`) is the engine-work list.
-  Today: `built-ins/RegExp` (9 vendor-libregexp gaps) and
-  `language/statements` (6 ERM edge cases).
-  - The 9 `built-ins/RegExp` fails are all in
-    `property-escapes/generated/` — 7 are `/v`-flag
-    property-of-strings escapes (`\p{RGI_Emoji}`,
-    `\p{Basic_Emoji}`, etc., normative §22.2.1 ES2024)
-    and 2 are `Script=Unknown` / `Script_Extensions=
-    Unknown` (Unicode `Zzzz` alias, normative). None of
-    them are Annex B — they're ES2024 normative spec
-    gaps in the vendored libregexp (QuickJS-NG). The
-    Annex B regex carve-out in AGENTS.md (§B.1.4 — `\1`
-    outside a capturing group, `{,n}` quantifier) is a
-    *separate* policy about libregexp being too
-    permissive; it's not what fails here. Closing these
-    9 means patching vendored libregexp or switching
-    matchers.
-  - The 6 `language/statements` fails are from the ERM
-    proposal landing this week (`using` / `await using`):
-    4 are negative parse tests we false-reject (`using`
-    reassignment inside for-update should TypeError at
-    runtime, not parse), 2 are
-    `for (using x of arr)` failing to create a fresh
-    per-iteration env. Both clusters are fixable Cynic-
-    side; tracked.
+  Today the only entry is `built-ins/RegExp` with 9
+  libregexp Annex B / `/v` grammar gaps — fixtures that
+  compile patterns the vendored libregexp matcher
+  (QuickJS-NG) doesn't accept. All 9 are documented
+  carve-outs in AGENTS.md ("Acknowledged exception —
+  regex Annex B §B.1.4"). Closing them means patching
+  vendored libregexp or switching matchers.
 - The **0-fails tier** is sorted by `divergent ↓` so
   SES-hot buckets cluster at the top of the tail — that's
   where Cynic's frozen primordials / locked descriptors /
@@ -176,21 +159,23 @@ first two path components (`built-ins/Set`,
 
 | area | pass | fail | skip | divergent | pass% | engine% |
 |---|---:|---:|---:|---:|---:|---:|
+| **_10–99 fails — engine-work tier_** | | | | | | |
+| `built-ins/ShadowRealm` | 34 | 15 | 0 | 15 | 77 % | 69 % |
 | **_1–9 fails — engine-work tier (libregexp Annex B carve-outs today)_** | | | | | | |
-| `built-ins/Iterator` | 367 | 2 | 1 | 62 | 99 % | 99 % |
 | `built-ins/RegExp` | 1492 | 9 | 269 | 101 | 85 % | 99 % |
-| `language/statements` | 8509 | 6 | 485 | 89 | 95 % | 100 % |
 | **_0 fails — passing / wholly OOS (sorted by divergent ↓)_** | | | | | | |
-| `built-ins/Array` | 2476 | 0 | 41 | 559 | 99 % | 100 % |
+| `built-ins/Array` | 2476 | 0 | 41 | 564 | 99 % | 100 % |
 | `built-ins/Object` | 2783 | 0 | 81 | 536 | 98 % | 100 % |
 | `built-ins/TypedArray` | 1104 | 0 | 8 | 319 | 99 % | 100 % |
 | `built-ins/String` | 1026 | 0 | 6 | 177 | 100 % | 100 % |
 | `built-ins/Date` | 431 | 0 | 11 | 152 | 98 % | 100 % |
 | `built-ins/Math` | 214 | 0 | 0 | 113 | 100 % | 100 % |
-| `built-ins/Promise` | 523 | 0 | 39 | 104 | 94 % | 100 % |
+| `built-ins/Promise` | 524 | 0 | 39 | 104 | 94 % | 100 % |
 | `language/expressions` | 9742 | 0 | 905 | 99 | 92 % | 100 % |
 | `built-ins/TypedArrayConstructors` | 562 | 0 | 26 | 93 | 96 % | 100 % |
+| `language/statements` | 8516 | 0 | 485 | 89 | 95 % | 100 % |
 | `built-ins/Set` | 310 | 0 | 2 | 71 | 99 % | 100 % |
+| `built-ins/Iterator` | 367 | 0 | 1 | 64 | 100 % | 100 % |
 | `built-ins/DataView` | 454 | 0 | 12 | 56 | 98 % | 100 % |
 | `built-ins/Map` | 150 | 0 | 2 | 52 | 99 % | 100 % |
 | `built-ins/ArrayBuffer` | 132 | 0 | 5 | 50 | 97 % | 100 % |
@@ -206,8 +191,8 @@ first two path components (`built-ins/Set`,
 | `built-ins/WeakSet` | 64 | 0 | 1 | 20 | 99 % | 100 % |
 | `built-ins/BigInt` | 58 | 0 | 1 | 18 | 99 % | 100 % |
 | `built-ins/Uint8Array` | 50 | 0 | 0 | 18 | 100 % | 100 % |
-| `built-ins/Error` | 41 | 0 | 1 | 14 | 98 % | 100 % |
-| `language/module-code` | 574 | 0 | 2 | 13 | 100 % | 100 % |
+| `built-ins/Error` | 42 | 0 | 1 | 14 | 98 % | 100 % |
+| `language/module-code` | 575 | 0 | 1 | 13 | 100 % | 100 % |
 | `built-ins/RegExpStringIteratorPrototype` | 5 | 0 | 0 | 12 | 100 % | 100 % |
 | `built-ins/AsyncGeneratorPrototype` | 37 | 0 | 0 | 11 | 100 % | 100 % |
 | `built-ins/FinalizationRegistry` | 35 | 0 | 1 | 11 | 98 % | 100 % |
@@ -245,16 +230,15 @@ first two path components (`built-ins/Set`,
 | `built-ins/AsyncFromSyncIteratorPrototype` | 38 | 0 | 0 | 0 | 100 % | 100 % |
 | `built-ins/Infinity` | 4 | 0 | 2 | 0 | 67 % | 100 % |
 | `built-ins/NaN` | 4 | 0 | 2 | 0 | 67 % | 100 % |
-| ~~`built-ins/ShadowRealm`~~ | ~~0~~ | ~~0~~ | ~~64~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
 | ~~`built-ins/Temporal`~~ | ~~0~~ | ~~0~~ | ~~4588~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/ThrowTypeError` | 13 | 0 | 0 | 0 | 100 % | 100 % |
 | `built-ins/undefined` | 4 | 0 | 3 | 0 | 57 % | 100 % |
 | `language/asi` | 102 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/block-scope` | 145 | 0 | 0 | 0 | 100 % | 100 % |
-| `language/comments` | 22 | 0 | 23 | 0 | 49 % | 100 % |
+| `language/comments` | 44 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/computed-property-names` | 48 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/destructuring` | 18 | 0 | 1 | 0 | 95 % | 100 % |
-| ~~`language/directive-prologue`~~ | ~~0~~ | ~~0~~ | ~~62~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
+| `language/directive-prologue` | 5 | 0 | 57 | 0 | 8 % | 100 % |
 | `language/export` | 3 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/future-reserved-words` | 48 | 0 | 7 | 0 | 87 % | 100 % |
 | `language/identifiers` | 268 | 0 | 0 | 0 | 100 % | 100 % |
@@ -287,10 +271,17 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` | 69 | 9 | 4860 | 1 % | 88 % |
+| `joint-iteration` | 70 | 8 | 4796 | 1 % | 90 % |
 
 
 ## History
+
+### 2026-05-28 — cynic `ae73fe7`, test262 `d0c1b455`
+
+|         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|---:|
+| **runtime** | 84.35 % | 99.94 % | 38046 / 45103 | 38046 / 38068 | — | +93 | 45.6 s |
+| **runtime_hardened** | 84.35 % | 99.93 % | 38044 / 45103 | 34877 / 34901 | 3167 | +93 | 45.5 s |
 
 ### 2026-05-27 — cynic `618f795`, test262 `d0c1b455`
 
