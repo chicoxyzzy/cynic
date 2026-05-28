@@ -32,15 +32,44 @@ const Value = @import("../value.zig").Value;
 const JSString = @import("../string.zig").JSString;
 const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
+const PropertyFlags = @import("../object.zig").PropertyFlags;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
 const interpreter = @import("../lantern/interpreter.zig");
 const call_mod = @import("../lantern/call.zig");
+const lantern_helpers = @import("../lantern/helpers.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const throwTypeError = intrinsics.throwTypeError;
 const argOr = intrinsics.argOr;
+
+/// §7.3.2 Get on a JSFunction receiver, honoring accessor
+/// descriptors so a throwing `length` or `name` getter
+/// propagates. Mirrors `getAccessorAwareOnFunction` in
+/// `builtins/function.zig`. Returns `undefined` when the
+/// property is missing entirely (caller layers the spec's
+/// "non-Number/Number → 0" / "non-String → empty" coercions on
+/// top).
+fn getAccessorAware(realm: *Realm, target: *JSFunction, key: []const u8) NativeError!Value {
+    if (lantern_helpers.lookupFunctionAccessor(target, key)) |acc| {
+        if (acc.getter) |getter| {
+            const outcome = call_mod.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(target), &[_]Value{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |v| return v,
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        }
+        return Value.undefined_;
+    }
+    return target.get(key);
+}
 
 // ── §3.8 ShadowRealm ──────────────────────────────────────────────────────
 
@@ -216,7 +245,10 @@ pub fn getWrappedValue(caller_realm: *Realm, value: Value) NativeError!Value {
     // route through JSFunction.proxy_target / revocable_proxy
     // slots).
     if (heap_mod.valueAsFunction(value)) |target| {
-        const wrapper = wrappedFunctionCreate(caller_realm, target) catch return error.OutOfMemory;
+        // Abrupt completions (e.g. target.length getter throws)
+        // propagate as NativeError — already pinned in
+        // `realm.pending_exception` by the inner throw.
+        const wrapper = try wrappedFunctionCreate(caller_realm, target);
         return heap_mod.taggedFunction(wrapper);
     }
     // Non-callable Object → TypeError in caller realm.
@@ -226,38 +258,127 @@ pub fn getWrappedValue(caller_realm: *Realm, value: Value) NativeError!Value {
 /// §3.8.3.5 WrappedFunctionCreate ( callerRealm, Target )
 ///   1. Let wrapped be ! MakeBasicObject(« [[Realm]],
 ///      [[WrappedTargetFunction]] »).
-///   2. Set wrapped.[[Prototype]] to callerRealm's %Function.prototype%.
-///   3. Set wrapped.[[Call]] to the WrappedFunctionCall spec
-///      operation (handled in `call.zig` via the
-///      `wrapped_target_function` slot).
+///   2. Set wrapped.[[Prototype]] to callerRealm's
+///      %Function.prototype%.
+///   3. Set wrapped.[[Call]] to WrappedFunctionCall (handled
+///      via the `wrapped_target_function` slot).
 ///   4. Set wrapped.[[WrappedTargetFunction]] to Target.
 ///   5. Set wrapped.[[Realm]] to callerRealm.
-///   6. CopyNameAndLength(wrapped, Target, "wrapped") — mirror
-///      `Target.name` (prefixed "wrapped " per §3.8.3.5.1) and
-///      `Target.length`.
-fn wrappedFunctionCreate(caller_realm: *Realm, target: *JSFunction) !*JSFunction {
+///   6. Let result be CopyNameAndLength(wrapped, Target). If
+///      result is an abrupt completion, throw a TypeError
+///      exception in callerRealm.
+///
+/// CopyNameAndLength fires accessors on Target — a throwing
+/// `length` or `name` getter must surface as an abrupt
+/// completion here (test262
+/// `WrappedFunction/{length,name}-throws-typeerror.js`).
+fn wrappedFunctionCreate(caller_realm: *Realm, target: *JSFunction) NativeError!*JSFunction {
     // Use a trampoline native that never actually runs — call
     // dispatch detects `wrapped_target_function != null` and
     // short-circuits before reaching the native body.
-    const wrapped = try caller_realm.heap.allocateFunctionNative(wrappedTrampoline, 0, "wrapped");
+    const wrapped = caller_realm.heap.allocateFunctionNative(wrappedTrampoline, 0, "") catch return error.OutOfMemory;
     wrapped.proto = caller_realm.intrinsics.function_prototype;
     wrapped.realm = caller_realm;
     wrapped.wrapped_target_function = target;
-    // §3.8.3.5.1 CopyNameAndLength step 5 — `name` = `"wrapped " ++ target.name`.
-    // §3.8.3.5.1 step 8 — `length` = max(0, target.length - 0) (no prefix args).
-    // Both default-installed by allocateFunctionNative; refine the
-    // name / length to mirror the target only when the target's
-    // values are observable (they typically are — tests check
-    // `wrapped.length === target.length`).
-    if (target.properties.get("length")) |len_v| {
-        try wrapped.properties.put(caller_realm.allocator, "length", len_v);
-    }
-    if (target.properties.get("name")) |name_v| {
-        try wrapped.properties.put(caller_realm.allocator, "name", name_v);
-    }
     // §3.8.3.5 step 4 — wrapped functions have no [[Construct]].
     wrapped.has_construct = false;
+
+    // §3.8.3.5 step 6 + §3.8.3.5.1 CopyNameAndLength. The spec
+    // catches abrupt completions and rethrows them AS a fresh
+    // TypeError in callerRealm; this matches the §3.8 information-
+    // hiding posture (the target's exception object would leak its
+    // realm of origin).
+    copyNameAndLength(caller_realm, wrapped, target) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => {
+            // §3.8.3.5 step 8 — abrupt during CopyNameAndLength
+            // is remapped to a fresh TypeError IN callerRealm so
+            // the target's exception object doesn't leak its
+            // realm of origin. `throwTypeError` always returns
+            // `error.NativeThrew`; we drop the existing exception
+            // first to avoid double-throw confusion.
+            caller_realm.pending_exception = null;
+            return throwTypeError(caller_realm, "ShadowRealm: WrappedFunctionCreate could not copy target's length/name");
+        },
+    };
+
     return wrapped;
+}
+
+/// §3.8.3.5.1 CopyNameAndLength(F, Target, prefix, argCount):
+///   1. If argCount is undefined, set argCount to 0.
+///   2. Let L be 0.
+///   3. Let targetHasLength be ? HasOwnProperty(Target, "length").
+///   4. If targetHasLength is true:
+///      a. Let targetLen be ? Get(Target, "length").
+///      b. If Type(targetLen) is Number:
+///         i.   If targetLen is +∞, set L to +∞.
+///         ii.  Else if targetLen is -∞, set L to 0.
+///         iii. Else: L = max(ToIntegerOrInfinity(targetLen) -
+///              argCount, 0).
+///   5. SetFunctionLength(F, L).
+///   6. Let targetName be ? Get(Target, "name").
+///   7. If Type(targetName) is not String, set targetName to "".
+///   8. SetFunctionName(F, targetName, prefix).
+///
+/// WrappedFunctionCreate calls this without a prefix and with
+/// argCount = 0, so `wrapped.name === target.name` (no "wrapped "
+/// prefix) and `wrapped.length === target.length` (mod the
+/// special cases above).
+fn copyNameAndLength(realm: *Realm, wrapped: *JSFunction, target: *JSFunction) NativeError!void {
+    // §17 — function `length` and `name` descriptors are
+    // `{w:false, e:false, c:true}`.
+    const fn_flags: PropertyFlags = .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
+    };
+
+    // Step 3-4 — length. `HasOwnProperty` here checks both the
+    // data bag AND the accessor map AND the synthesised default
+    // (§10.2.4 ordinary functions always have a `length` slot);
+    // matches `JSFunction.flagsForOwn`'s synthesis.
+    var length_value: Value = Value.fromInt32(0);
+    const has_own_length = target.accessors.contains("length") or target.properties.contains("length");
+    if (has_own_length) {
+        const len_v = try getAccessorAware(realm, target, "length");
+        // Step 4.b — `Number` filter. Non-Number → L stays at 0.
+        if (len_v.isInt32()) {
+            // Integer length. ToIntegerOrInfinity is identity.
+            const li: i64 = len_v.asInt32();
+            const l = if (li > 0) li else 0;
+            length_value = Value.fromInt32(@intCast(l));
+        } else if (len_v.isDouble()) {
+            const d = len_v.asDouble();
+            if (std.math.isNan(d)) {
+                length_value = Value.fromInt32(0);
+            } else if (std.math.isInf(d)) {
+                length_value = if (d > 0) Value.fromDouble(std.math.inf(f64)) else Value.fromInt32(0);
+            } else {
+                const ti: f64 = @trunc(d);
+                const clamped: f64 = if (ti > 0) ti else 0;
+                if (clamped == @as(f64, @floatFromInt(@as(i64, @intFromFloat(clamped)))) and clamped < 2147483647.0) {
+                    length_value = Value.fromInt32(@intFromFloat(clamped));
+                } else {
+                    length_value = Value.fromDouble(clamped);
+                }
+            }
+        }
+    }
+    try wrapped.setWithFlags(realm.allocator, "length", length_value, fn_flags);
+
+    // Step 6-7 — name. Non-String → "". Spec calls
+    // SetFunctionName(F, targetName) with no prefix, so name is
+    // installed verbatim.
+    const name_v = try getAccessorAware(realm, target, "name");
+    var name_str_v: Value = undefined;
+    if (name_v.isString()) {
+        name_str_v = name_v;
+    } else {
+        const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
+        name_str_v = Value.fromString(empty);
+    }
+    try wrapped.setWithFlags(realm.allocator, "name", name_str_v, fn_flags);
 }
 
 /// Placeholder native body for WrappedFunction closures.
