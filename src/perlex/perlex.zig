@@ -23,6 +23,7 @@ pub const Node = parser.Node;
 pub const Program = compiler.Program;
 pub const Inst = compiler.Inst;
 pub const Flags = compiler.Flags;
+pub const PropertyResolver = compiler.PropertyResolver;
 pub const Match = vm.Match;
 /// Sentinel for a capture slot that did not participate.
 pub const none = vm.none;
@@ -46,6 +47,19 @@ pub const CompileResult = union(enum) {
 /// for constructs it doesn't model — those return `.unsupported` so
 /// the fallback matcher renders the authoritative verdict.
 pub fn compile(gpa: std.mem.Allocator, pattern: []const u8, flags: Flags) error{OutOfMemory}!CompileResult {
+    return compileWithResolver(gpa, pattern, flags, null);
+}
+
+/// As `compile`, but with an injected `\p{…}` property resolver. The
+/// RegExp bridge passes one backed by Cynic's Unicode tables so property
+/// escapes match natively; a null resolver defers every `\p{…}` pattern
+/// to the fallback.
+pub fn compileWithResolver(
+    gpa: std.mem.Allocator,
+    pattern: []const u8,
+    flags: Flags,
+    resolver: ?PropertyResolver,
+) error{OutOfMemory}!CompileResult {
     // `/v` (UnicodeSets) is deferred to the fallback. `/u` is handled
     // (code-point matching) except combined with `i`: full Unicode case
     // folding isn't built, so `/iu` defers. `g`/`y`/`d` affect the
@@ -75,7 +89,7 @@ pub fn compile(gpa: std.mem.Allocator, pattern: []const u8, flags: Flags) error{
         error.OutOfMemory => return error.OutOfMemory,
     };
 
-    const program = compiler.compile(gpa, parsed, flags) catch |e| switch (e) {
+    const program = compiler.compile(gpa, parsed, flags, resolver) catch |e| switch (e) {
         error.Unsupported => return .unsupported,
         error.SyntaxError => return .syntax_error,
         error.OutOfMemory => return error.OutOfMemory,

@@ -32,6 +32,18 @@ pub const Flags = packed struct {
     unicode_sets: bool = false,
 };
 
+/// Resolves a `\p{…}` property escape to code-point ranges. Returns
+/// gpa-owned ranges (the Program takes ownership and frees them like any
+/// class) or null to decline the whole pattern to the fallback matcher.
+/// `key` is the `Name` of `\p{Name=Value}`, or null for the lone
+/// `\p{NameOrValue}` form. Injected so Perlex itself carries no Unicode
+/// data — the bridge backs it with Cynic's generated tables.
+pub const PropertyResolver = *const fn (
+    gpa: std.mem.Allocator,
+    key: ?[]const u8,
+    value: []const u8,
+) std.mem.Allocator.Error!?[]const parser.Node.ClassRange;
+
 pub const Inst = union(enum) {
     /// Match one literal — a UTF-16 code unit, or a code point up to
     /// U+10FFFF under `/u` — then advance.
@@ -117,13 +129,14 @@ pub const Program = struct {
 
 pub const CompileError = error{ Unsupported, SyntaxError, OutOfMemory };
 
-pub fn compile(gpa: std.mem.Allocator, result: parser.ParseResult, flags: Flags) CompileError!Program {
+pub fn compile(gpa: std.mem.Allocator, result: parser.ParseResult, flags: Flags, resolver: ?PropertyResolver) CompileError!Program {
     if (result.capture_count + 1 > max_groups) return error.Unsupported;
     var c: Compiler = .{
         .gpa = gpa,
         .names = result.names,
         .insts = .empty,
         .dot_all = flags.dot_all,
+        .resolver = resolver,
     };
     errdefer c.deinitPartial();
 
@@ -177,6 +190,9 @@ const Compiler = struct {
     /// Cleared to false the moment a backreference is emitted — the
     /// pattern is then no longer in the regular subset.
     regular: bool = true,
+    /// Resolver for `\p{…}` escapes, or null when the caller offers none
+    /// (then property escapes defer the whole pattern to the fallback).
+    resolver: ?PropertyResolver = null,
 
     fn deinitPartial(self: *Compiler) void {
         freeInstContents(self.gpa, self.insts.items);
@@ -215,6 +231,20 @@ const Compiler = struct {
                 // arena/const and freed after compilation).
                 const ranges = try self.gpa.dupe(parser.Node.ClassRange, cls.ranges);
                 self.emit(.{ .class = .{ .negated = cls.negated, .ranges = ranges } }) catch |e| {
+                    self.gpa.free(ranges);
+                    return e;
+                };
+            },
+            .prop => |p| {
+                // §22.2.1.1 — resolve the property to ranges via the
+                // injected resolver; declined properties (unknown, or valid
+                // but unsupported here, e.g. Script) defer the whole pattern
+                // to the fallback. Lowers to an ordinary class instruction.
+                const resolve = self.resolver orelse return error.Unsupported;
+                const ranges = (try resolve(self.gpa, p.key, p.value)) orelse return error.Unsupported;
+                // `ranges` is gpa-owned; transfer ownership to the class
+                // instruction (freed by Program.deinit like any class).
+                self.emit(.{ .class = .{ .negated = p.negated, .ranges = ranges } }) catch |e| {
                     self.gpa.free(ranges);
                     return e;
                 };
@@ -389,7 +419,7 @@ const Compiler = struct {
 fn lookbehindBodyOk(node: *const Node) bool {
     return switch (node.*) {
         .capture, .backref_name, .backref_index, .lookahead => false,
-        .empty, .char, .class, .dot, .anchor_start, .anchor_end, .word_boundary => true,
+        .empty, .char, .class, .dot, .prop, .anchor_start, .anchor_end, .word_boundary => true,
         .noncapture => |b| lookbehindBodyOk(b),
         .repeat => |r| lookbehindBodyOk(r.body),
         .concat => |parts| {
@@ -413,7 +443,7 @@ fn lookbehindBodyOk(node: *const Node) bool {
 fn nullable(node: *const Node) bool {
     return switch (node.*) {
         .empty, .anchor_start, .anchor_end, .word_boundary, .backref_name, .backref_index, .lookahead => true,
-        .char, .class, .dot => false,
+        .char, .class, .dot, .prop => false,
         .noncapture => |b| nullable(b),
         .capture => |g| nullable(g.body),
         .repeat => |r| r.min == 0 or nullable(r.body),
@@ -437,7 +467,7 @@ fn nullable(node: *const Node) bool {
 /// captures between iterations.
 fn groupSlotRange(node: *const Node) ?Inst.Range {
     return switch (node.*) {
-        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .backref_name, .backref_index => null,
+        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .prop, .backref_name, .backref_index => null,
         .noncapture => |body| groupSlotRange(body),
         .lookahead => |la| groupSlotRange(la.body),
         .repeat => |r| groupSlotRange(r.body),

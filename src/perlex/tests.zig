@@ -92,6 +92,114 @@ fn expectCompileFlags(pattern: []const u8, flags: perlex.Flags, want: std.meta.T
     }
 }
 
+// ── §22.2.1.1 \p{} property escapes ─────────────────────────────────
+// A tiny stub resolver exercises the parser / compiler / VM property
+// path without pulling the real Unicode tables (those are tested in
+// `unicode/properties.zig`; the table-backed resolver via test262).
+
+const CR = perlex.parser.Node.ClassRange;
+
+fn stubResolver(gpa: std.mem.Allocator, key: ?[]const u8, value: []const u8) std.mem.Allocator.Error!?[]const CR {
+    if (key) |k| {
+        if (!std.mem.eql(u8, k, "gc") and !std.mem.eql(u8, k, "General_Category")) return null;
+    }
+    const lu = [_]CR{.{ .lo = 'A', .hi = 'Z' }};
+    const ll = [_]CR{.{ .lo = 'a', .hi = 'z' }};
+    const l = [_]CR{ .{ .lo = 'A', .hi = 'Z' }, .{ .lo = 'a', .hi = 'z' } };
+    const ranges: []const CR =
+        if (std.mem.eql(u8, value, "Lu")) &lu else if (std.mem.eql(u8, value, "Ll")) &ll else if (std.mem.eql(u8, value, "L")) &l else return null;
+    return try gpa.dupe(CR, ranges);
+}
+
+const uflags = perlex.Flags{ .unicode = true };
+
+fn runProp(gpa: std.mem.Allocator, pattern: []const u8, flags: perlex.Flags, input: []const u8) !Outcome {
+    var res = try perlex.compileWithResolver(gpa, pattern, flags, stubResolver);
+    switch (res) {
+        .unsupported => return .unsupported,
+        .syntax_error => return .syntax_error,
+        .ok => |*prog| {
+            defer prog.deinit();
+            const units = try gpa.alloc(u16, input.len);
+            defer gpa.free(units);
+            for (input, 0..) |b, i| units[i] = @as(u16, b);
+            var m = (try perlex.exec(u16, gpa, prog, units, 0)) orelse return .no_match;
+            defer m.deinit(gpa);
+            var out: std.ArrayListUnmanaged(u8) = .empty;
+            errdefer out.deinit(gpa);
+            var g: usize = 0;
+            while (g < prog.group_count) : (g += 1) {
+                if (g != 0) try out.append(gpa, ',');
+                const cs = m.slots[2 * g];
+                const ce = m.slots[2 * g + 1];
+                if (cs != perlex.none and ce != perlex.none) {
+                    for (units[cs..ce]) |u| try out.append(gpa, @intCast(u));
+                }
+            }
+            return .{ .match = try out.toOwnedSlice(gpa) };
+        },
+    }
+}
+
+fn expectMatchProp(pattern: []const u8, input: []const u8, expected: []const u8) !void {
+    const o = try runProp(testing.allocator, pattern, uflags, input);
+    switch (o) {
+        .match => |s| {
+            defer testing.allocator.free(s);
+            try testing.expectEqualStrings(expected, s);
+        },
+        else => return error.ExpectedMatch,
+    }
+}
+
+fn expectNoMatchProp(pattern: []const u8, input: []const u8) !void {
+    const o = try runProp(testing.allocator, pattern, uflags, input);
+    if (o != .no_match) return error.ExpectedNoMatch;
+}
+
+fn expectCompileProp(pattern: []const u8, flags: perlex.Flags, want: std.meta.Tag(Outcome)) !void {
+    var res = try perlex.compileWithResolver(testing.allocator, pattern, flags, stubResolver);
+    switch (res) {
+        .ok => |*prog| {
+            prog.deinit();
+            try testing.expect(want == .match);
+        },
+        .unsupported => try testing.expect(want == .unsupported),
+        .syntax_error => try testing.expect(want == .syntax_error),
+    }
+}
+
+test "perlex: \\p{} lone gc value matches and negates" {
+    try expectMatchProp("\\p{Lu}", "A", "A");
+    try expectNoMatchProp("\\p{Lu}", "a");
+    try expectMatchProp("\\p{Ll}", "a", "a");
+    try expectMatchProp("\\P{Lu}", "a", "a");
+    try expectNoMatchProp("\\P{Lu}", "A");
+}
+
+test "perlex: \\p{} with gc= / General_Category= prefix" {
+    try expectMatchProp("\\p{gc=Lu}", "A", "A");
+    try expectMatchProp("\\p{General_Category=Ll}", "a", "a");
+}
+
+test "perlex: \\p{} group value, quantifier, and captures" {
+    try expectMatchProp("\\p{L}+", "abcD", "abcD");
+    try expectNoMatchProp("\\p{L}", "0");
+    try expectMatchProp("(\\p{Lu})(\\p{Ll}+)", "Hello", "Hello,H,ello");
+}
+
+test "perlex: \\p{} only recognised under /u, else defers to fallback" {
+    try expectCompileProp("\\p{Lu}", .{}, .unsupported);
+}
+
+test "perlex: declined or malformed property defers to fallback" {
+    try expectCompileProp("\\p{Nd}", uflags, .unsupported); // stub doesn't know Nd
+    try expectCompileProp("\\p{Script=Greek}", uflags, .unsupported); // non-gc key
+    try expectCompileProp("\\p", uflags, .unsupported); // no brace
+    try expectCompileProp("\\p{", uflags, .unsupported); // unterminated
+    try expectCompileProp("\\p{}", uflags, .unsupported); // empty
+}
+
 // ── Plain matching sanity ───────────────────────────────────────────
 
 test "perlex: literal sequence" {

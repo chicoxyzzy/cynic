@@ -51,9 +51,15 @@ pub const Node = union(enum) {
     /// Lookaround assertion: `(?=…)`/`(?!…)` (lookahead) and
     /// `(?<=…)`/`(?<!…)` (lookbehind, `behind == true`).
     lookahead: Lookahead,
+    /// `\p{…}` / `\P{…}` Unicode property escape (only under `/u`). The
+    /// compiler resolves `(key, value)` to code-point ranges via an
+    /// injected resolver and lowers to a `class`; properties the resolver
+    /// declines defer the whole pattern to the fallback. `negated` is `\P`.
+    prop: Property,
 
     pub const Capture = struct { index: usize, name: ?[]const u8, body: *Node };
     pub const Lookahead = struct { negative: bool, behind: bool, body: *Node };
+    pub const Property = struct { negated: bool, key: ?[]const u8, value: []const u8 };
     pub const Repeat = struct { body: *Node, min: usize, max: usize, greedy: bool };
     pub const ClassRange = struct { lo: u21, hi: u21 };
     pub const Class = struct { negated: bool, ranges: []const ClassRange };
@@ -412,8 +418,49 @@ const Parser = struct {
                 self.pos = i;
                 return self.makeNode(.{ .backref_index = n });
             },
+            'p', 'P' => {
+                // §22.2.1 CharacterClassEscape — Unicode property escape.
+                // Only valid under `/u`; without it `\p` is Annex B
+                // identity-escape territory, deferred to the fallback.
+                if (!self.unicode) return error.Unsupported;
+                return self.parsePropertyEscape(k == 'P');
+            },
             else => return self.makeNode(.{ .char = try self.parseEscapedChar() }),
         }
+    }
+
+    /// `\p{Name}` / `\p{Name=Value}` / `\P{…}` at `\p`/`\P` with `/u`
+    /// set. Extracts `(key, value)` syntactically; the compiler's resolver
+    /// decides validity. Malformed forms defer to the fallback, which is
+    /// authoritative for the SyntaxError verdict.
+    fn parsePropertyEscape(self: *Parser, negated: bool) ParseError!*Node {
+        if (self.at(2) != '{') return error.Unsupported;
+        var i = self.pos + 3;
+        const name_start = i;
+        var eq: ?usize = null;
+        while (i < self.src.len) : (i += 1) {
+            const ch = self.src[i];
+            if (ch == '}') break;
+            if (ch == '=' and eq == null) {
+                eq = i;
+                continue;
+            }
+            // UnicodePropertyName / UnicodePropertyValue chars: [A-Za-z0-9_].
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) return error.Unsupported;
+        }
+        if (i >= self.src.len or self.src[i] != '}') return error.Unsupported; // unterminated
+        const close = i;
+        var key: ?[]const u8 = null;
+        const value = blk: {
+            if (eq) |e| {
+                key = self.src[name_start..e];
+                break :blk self.src[e + 1 .. close];
+            }
+            break :blk self.src[name_start..close];
+        };
+        if (value.len == 0 or (key != null and key.?.len == 0)) return error.Unsupported;
+        self.pos = close + 1; // consume through `}`
+        return self.makeNode(.{ .prop = .{ .negated = negated, .key = key, .value = value } });
     }
 
     fn classAtom(self: *Parser, negated: bool, ranges: []const Node.ClassRange) ParseError!*Node {
@@ -641,7 +688,7 @@ fn collectNames(a: std.mem.Allocator, node: *const Node) error{ SyntaxError, Out
     var set: NameSet = .empty;
     errdefer set.deinit(a);
     switch (node.*) {
-        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .backref_name, .backref_index => {},
+        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .prop, .backref_name, .backref_index => {},
         .noncapture => |body| {
             set.deinit(a);
             return try collectNames(a, body);
