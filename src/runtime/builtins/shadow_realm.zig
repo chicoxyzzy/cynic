@@ -458,6 +458,16 @@ fn copyNameAndLength(realm: *Realm, wrapped: *JSFunction, target_v: Value) Nativ
         }
         raw_name = try getAccessorAware(realm, target, "name");
     } else if (heap_mod.valueAsPlainObject(target_v)) |obj| {
+        // §3.8.3.5.1 step 3 — `HasOwnProperty(Target, "length")`
+        // composes `[[GetOwnProperty]]`, which on a proxy fires the
+        // `getOwnPropertyDescriptor` trap (§10.5.5). A throwing trap
+        // is the abrupt completion `wrap-throwing` sub-4 pins — plain
+        // `[[Get]]` would forward to the target and miss it. Fire it
+        // via the proxy-aware Object.getOwnPropertyDescriptor (the
+        // descriptor result is discarded; we re-Get the value below
+        // per step 4 so a `get` trap still participates).
+        const len_key = realm.heap.allocateString("length") catch return error.OutOfMemory;
+        _ = try intrinsics.objectGetOwnPropertyDescriptor(realm, Value.undefined_, &[_]Value{ target_v, Value.fromString(len_key) });
         raw_len = try intrinsics.getPropertyChain(realm, obj, "length");
         raw_name = try intrinsics.getPropertyChain(realm, obj, "name");
     }
