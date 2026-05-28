@@ -995,7 +995,15 @@ pub const JSObject = struct {
     /// libregexp bytecode (vendored QuickJS-NG engine). The first
     /// call to `.exec`/`.test` parses the `source` + `flags` and
     /// caches the bytecode here. The runtime owns the allocation.
+    /// Set only when the pattern fell back to the vendored matcher;
+    /// otherwise `regex_perlex` holds the native-engine program.
     regex_bytecode: ?[]u8 = null,
+    /// §22.2.7 RegExp instance — compiled Perlex (native engine)
+    /// program, when the pattern is within Perlex's grammar. Mutually
+    /// exclusive with `regex_bytecode`. Allocated against the realm
+    /// allocator and freed in `deinitFields` (it holds no GC
+    /// references, so the collector doesn't trace it).
+    regex_perlex: ?*@import("../perlex/perlex.zig").Program = null,
     // (`finalization_cells` + `weak_ref_target` moved to
     // `JSObjectExtension` — only `FinalizationRegistry` /
     // `WeakRef` instances populate them. Access via
@@ -1640,6 +1648,10 @@ pub const JSObject = struct {
         if (self.iter_record) |s| s.deinit(allocator);
         if (self.iter_helper) |s| s.deinit(allocator);
         if (self.capability_record) |s| s.deinit(allocator);
+        if (self.regex_perlex) |p| {
+            p.deinit();
+            allocator.destroy(p);
+        }
         // `finalization_cells`, `promise_waiters`, `promise_reactions`,
         // `weak_ref_target`, `array_buffer`, `typed_view`, `data_view`,
         // `array_buffer_max_byte_length` all live in the extension —

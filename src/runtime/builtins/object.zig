@@ -3991,7 +3991,13 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
             // `Object.prototype.toString.call(new Proxy(fn, {}))`
             // → `"[object Function]"`.
             if (isCallableProxy(obj)) break :blk "Function";
-            if (obj.regex_bytecode != null) break :blk "RegExp";
+            // §20.1.3.6 — a RegExp instance ([[RegExpMatcher]]).
+            // Brand on `regexp_source` (the [[OriginalSource]] slot
+            // set at RegExpInitialize), not on a compiled-matcher
+            // slot: the matcher is lazy and engine-specific (Perlex
+            // vs libregexp), so keying off it misclassifies regexes
+            // the native engine owns.
+            if (obj.regexp_source != null) break :blk "RegExp";
             if (obj.getArrayBuffer() != null) break :blk "Object"; // ArrayBuffer uses @@toStringTag
             if (obj.boxed_primitive) |bp| {
                 if (bp.isBool()) break :blk "Boolean";

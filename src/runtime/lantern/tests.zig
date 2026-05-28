@@ -1372,6 +1372,111 @@ test "later: RegExp.escape escapes syntax characters" {
     , "\\^\\.\\*\\$");
 }
 
+// ── §22.2.1.1 duplicate named capture groups (ES2025) ───────────────
+// A GroupName may repeat across mutually exclusive alternatives of a
+// Disjunction; repeating it within a single Alternative
+// (concatenation) is an early SyntaxError.
+
+test "RegExp: duplicate group name across alternatives parses" {
+    try expectScriptStringWithBuiltins(
+        \\new RegExp("(?<x>a)|(?<x>b)").source;
+    , "(?<x>a)|(?<x>b)");
+}
+
+test "RegExp: duplicate group name in same alternative is a SyntaxError" {
+    try expectScriptStringWithBuiltins(
+        \\(() => { try { new RegExp("(?<x>a)(?<x>b)"); return "no-throw"; }
+        \\  catch (e) { return e.constructor.name; } })();
+    , "SyntaxError");
+}
+
+test "RegExp: nested duplicate group name in same alternative is a SyntaxError" {
+    try expectScriptStringWithBuiltins(
+        \\(() => { try { new RegExp("(?<x>(?<x>a))"); return "no-throw"; }
+        \\  catch (e) { return e.constructor.name; } })();
+    , "SyntaxError");
+}
+
+test "RegExp: exec result array keeps a slot per duplicated group" {
+    // §22.2.7.2 — captures stay positional; only the matched
+    // alternative's slot is populated.
+    try expectScriptStringWithBuiltins(
+        \\String(/(?<x>a)|(?<x>b)/.exec("bab"));
+    , "b,,b");
+}
+
+test "RegExp: exec result array slot order follows source order" {
+    try expectScriptStringWithBuiltins(
+        \\String(/(?<x>b)|(?<x>a)/.exec("bab"));
+    , "b,b,");
+}
+
+test "RegExp: groups.x reflects the participating alternative" {
+    try expectScriptStringWithBuiltins(
+        \\/(?<x>a)|(?<x>b)/.exec("bab").groups.x;
+    , "b");
+}
+
+test "RegExp: backreference resolves the participating duplicated name" {
+    try expectScriptStringWithBuiltins(
+        \\String(/(?:(?<x>a)|(?<x>b))\k<x>/.exec("aa"));
+    , "aa,a,");
+}
+
+test "RegExp: backreference resolves the second duplicated name" {
+    try expectScriptStringWithBuiltins(
+        \\String(/(?:(?<x>a)|(?<x>b))\k<x>/.exec("bb"));
+    , "bb,,b");
+}
+
+test "RegExp: backreference to unset duplicated name matches empty" {
+    // /(?<a>x)|(?:zy\k<a>)/ on "zy": second alternative matches, a is
+    // unset, \k<a> matches the empty string.
+    try expectScriptStringWithBuiltins(
+        \\String(/(?<a>x)|(?:zy\k<a>)/.exec("zy"));
+    , "zy,");
+}
+
+test "RegExp: backreference to duplicated name fails when neither matches" {
+    try expectScriptStringWithBuiltins(
+        \\String(/(?:(?<x>a)|(?<x>b))\k<x>/.exec("abab"));
+    , "null");
+}
+
+test "RegExp: duplicated name across three alternatives" {
+    try expectScriptStringWithBuiltins(
+        \\String(/^(?:(?<a>x)|(?<a>y)|z)\k<a>$/.exec("xx"));
+    , "xx,x,");
+}
+
+test "RegExp: groups object emits one property per distinct name in source order" {
+    try expectScriptStringWithBuiltins(
+        \\Object.keys(/(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))/.exec("abc").groups).join(",");
+    , "x,y,z");
+}
+
+test "RegExp: groups object dedups to participating capture across names" {
+    try expectScriptStringWithBuiltins(
+        \\const m = /(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))/.exec("abc");
+        \\[m.groups.x, m.groups.y, m.groups.z].join(",");
+    , "b,a,c");
+}
+
+test "RegExp: groups object preserves names with no participating capture" {
+    try expectScriptStringWithBuiltins(
+        \\const m = /(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))/.exec("ad");
+        \\[m.groups.x, String(m.groups.y), m.groups.z].join(",");
+    , "a,undefined,d");
+}
+
+test "RegExp: iterated duplicated group resets across iterations" {
+    // /(?:(?:(?<x>a)|(?<x>b)|c)\k<x>){2}/ on "aac": last iteration
+    // takes the `c` branch, so groups.x is undefined.
+    try expectScriptStringWithBuiltins(
+        \\typeof /(?:(?:(?<x>a)|(?<x>b)|c)\k<x>){2}/.exec("aac").groups.x;
+    , "undefined");
+}
+
 test "later: WeakMap.prototype.delete on a Map throws TypeError" {
     try expectScriptThrows(
         \\WeakMap.prototype.delete.call(new Map(), {});
