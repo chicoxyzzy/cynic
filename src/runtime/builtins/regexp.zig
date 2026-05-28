@@ -21,6 +21,7 @@ const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
 const c_alloc = @import("../c_alloc.zig");
+const perlex = @import("../../perlex/perlex.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -1510,9 +1511,9 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // §22.2.3.2 RegExpInitialize step 12 — compile the pattern
     // eagerly so syntactic errors raise SyntaxError at
     // construction time rather than on the first match. The
-    // bytecode is cached on the instance, so methods that go
-    // through `ensureBytecode` reuse it.
-    _ = try ensureBytecode(realm, inst);
+    // compiled matcher (Perlex program or libregexp bytecode) is
+    // cached on the instance and reused by the exec paths.
+    _ = try ensureCompiled(realm, inst);
     return heap_mod.taggedObject(inst);
 }
 
@@ -1593,7 +1594,59 @@ fn parseFlags(s: []const u8) c_int {
     return f;
 }
 
-fn ensureBytecode(realm: *Realm, regex_obj: *JSObject) NativeError!?[]u8 {
+/// Map an `[[OriginalFlags]]` string to Perlex's flag set.
+fn perlexFlags(s: []const u8) perlex.Flags {
+    var f: perlex.Flags = .{};
+    for (s) |ch| switch (ch) {
+        'g' => f.global = true,
+        'i' => f.ignore_case = true,
+        'm' => f.multiline = true,
+        's' => f.dot_all = true,
+        'u' => f.unicode = true,
+        'y' => f.sticky = true,
+        'd' => f.has_indices = true,
+        'v' => f.unicode_sets = true,
+        else => {},
+    };
+    return f;
+}
+
+/// Ensure the regex has a compiled matcher — Perlex when the pattern
+/// is within its grammar, otherwise the vendored libregexp. Returns
+/// false when the object has no source (caller treats as no match).
+/// Throws SyntaxError for a pattern Perlex is authoritative about
+/// (e.g. a group name reused within one Alternative, §22.2.1.1).
+fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
+    if (regex_obj.regex_perlex != null or regex_obj.regex_bytecode != null) return true;
+    const src_s = regex_obj.regexp_source orelse return false;
+    const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.flatBytes() else "";
+
+    const result = perlex.compile(realm.allocator, src_s.flatBytes(), perlexFlags(flag_str)) catch return error.OutOfMemory;
+    switch (result) {
+        .ok => |program| {
+            const boxed = realm.allocator.create(perlex.Program) catch {
+                var p = program;
+                p.deinit();
+                return error.OutOfMemory;
+            };
+            boxed.* = program;
+            regex_obj.regex_perlex = boxed;
+            return true;
+        },
+        .syntax_error => {
+            // §22.2.3.2 step 12 — invalid pattern → SyntaxError.
+            const ex = intrinsics.newSyntaxError(realm, "Invalid regular expression: duplicate capture group name in the same alternative") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+        .unsupported => {
+            _ = (try compileLibregexp(realm, regex_obj)) orelse return false;
+            return true;
+        },
+    }
+}
+
+fn compileLibregexp(realm: *Realm, regex_obj: *JSObject) NativeError!?[]u8 {
     if (regex_obj.regex_bytecode) |bc| return bc;
     const src_s = regex_obj.regexp_source orelse return null;
     const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.flatBytes() else "";
@@ -1782,7 +1835,9 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return throwTypeError(realm, "RegExp.prototype.exec called on non-RegExp");
     }
     const input_s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
-    const bc = (try ensureBytecode(realm, regex_obj)) orelse return Value.null_;
+    if (!try ensureCompiled(realm, regex_obj)) return Value.null_;
+    if (regex_obj.regex_perlex) |prog| return execPerlex(realm, regex_obj, prog, input_s);
+    const bc = regex_obj.regex_bytecode.?;
 
     var input = buildInputBuf(realm.allocator, input_s.flatBytes()) catch return error.OutOfMemory;
     defer input.deinit();
@@ -2099,6 +2154,238 @@ fn buildGroupsObject(
     return heap_mod.taggedObject(groups);
 }
 
+// ── Perlex (native engine) exec paths ───────────────────────────────
+//
+// Mirror the libregexp `regexpExec` / `regexpBuiltinExecMatchOnly`
+// shape — same §22.2.7.2 `lastIndex` handling and result structure —
+// but drive the native matcher and read its `usize` capture slots
+// (UTF-16 code-unit offsets) directly. The `groups` / `indices.groups`
+// builders additionally de-duplicate by name: with duplicate named
+// groups the property is emitted once, at the first occurrence in
+// source order, carrying whichever same-named capture participated.
+// (A future cleanup can unify these with the libregexp builders behind
+// a neutral capture view; kept separate here to leave the proven
+// vendored path untouched.)
+
+/// §22.2.7.2 RegExpBuiltinExec, driven by Perlex.
+fn execPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Program, input_s: *JSString) NativeError!Value {
+    var input = buildInputBuf(realm.allocator, input_s.flatBytes()) catch return error.OutOfMemory;
+    defer input.deinit();
+
+    const is_global = prog.flags.global;
+    const is_sticky = prog.flags.sticky;
+    const cap_count = prog.group_count;
+
+    const last_index_v = try intrinsics.getPropertyChain(realm, regex_obj, "lastIndex");
+    const last_index_i64: i64 = try intrinsics.toLengthValue(realm, last_index_v);
+    var last_index: usize = if (last_index_i64 > 0) @intCast(last_index_i64) else 0;
+    if (!is_global and !is_sticky) last_index = 0;
+    if (last_index > input.units.len) {
+        if (is_global or is_sticky) try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
+        return Value.null_;
+    }
+
+    const maybe_match = perlex.exec(u16, realm.allocator, prog, input.units, last_index) catch return error.OutOfMemory;
+    if (maybe_match == null) {
+        if (is_global or is_sticky) try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
+        return Value.null_;
+    }
+    var m = maybe_match.?;
+    defer m.deinit(realm.allocator);
+
+    const whole_start = m.slots[0];
+    const whole_end = m.slots[1];
+    if (is_global or is_sticky) try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(@intCast(whole_end)));
+
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
+    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    const whole_str = try allocMatchString(realm, input_s.flatBytes(), whole_start, whole_end);
+    out.set(realm.allocator, "0", Value.fromString(whole_str)) catch return error.OutOfMemory;
+
+    var g: usize = 1;
+    while (g < cap_count) : (g += 1) {
+        var ibuf: [16]u8 = undefined;
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{g}) catch unreachable;
+        const owned_idx = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+        const cs = m.slots[2 * g];
+        const ce = m.slots[2 * g + 1];
+        if (cs == perlex.none or ce == perlex.none) {
+            out.set(realm.allocator, owned_idx.flatBytes(), Value.undefined_) catch return error.OutOfMemory;
+        } else {
+            const cap_str = try allocMatchString(realm, input_s.flatBytes(), cs, ce);
+            out.set(realm.allocator, owned_idx.flatBytes(), Value.fromString(cap_str)) catch return error.OutOfMemory;
+        }
+    }
+    out.set(realm.allocator, "length", Value.fromInt32(@intCast(cap_count))) catch return error.OutOfMemory;
+    out.set(realm.allocator, "index", Value.fromInt32(@intCast(whole_start))) catch return error.OutOfMemory;
+    out.set(realm.allocator, "input", Value.fromString(input_s)) catch return error.OutOfMemory;
+
+    const groups_v = try buildGroupsObjectPerlex(realm, prog, m.slots, input_s);
+    out.set(realm.allocator, "groups", groups_v) catch return error.OutOfMemory;
+
+    if (prog.flags.has_indices) {
+        const indices_v = try buildIndicesPerlex(realm, prog, m.slots);
+        out.set(realm.allocator, "indices", indices_v) catch return error.OutOfMemory;
+    }
+    return heap_mod.taggedObject(out);
+}
+
+/// Allocation-free match check for `RegExp.prototype.test`, Perlex side.
+fn matchOnlyPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Program, input_s: *JSString) NativeError!bool {
+    var input = buildInputBuf(realm.allocator, input_s.flatBytes()) catch return error.OutOfMemory;
+    defer input.deinit();
+
+    const is_global = prog.flags.global;
+    const is_sticky = prog.flags.sticky;
+
+    const last_index_v = try intrinsics.getPropertyChain(realm, regex_obj, "lastIndex");
+    const last_index_i64: i64 = try intrinsics.toLengthValue(realm, last_index_v);
+    var last_index: usize = if (last_index_i64 > 0) @intCast(last_index_i64) else 0;
+    if (!is_global and !is_sticky) last_index = 0;
+    if (last_index > input.units.len) {
+        if (is_global or is_sticky) try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
+        return false;
+    }
+
+    const maybe_match = perlex.exec(u16, realm.allocator, prog, input.units, last_index) catch return error.OutOfMemory;
+    if (maybe_match == null) {
+        if (is_global or is_sticky) try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
+        return false;
+    }
+    var m = maybe_match.?;
+    defer m.deinit(realm.allocator);
+    if (is_global or is_sticky) {
+        try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(@intCast(m.slots[1])));
+    }
+    return true;
+}
+
+/// Index of the first capturing group carrying `name`, in source
+/// order. Used so a duplicated name is emitted once, at its first
+/// occurrence.
+fn firstNameIndex(names: []const ?[]const u8, name: []const u8) usize {
+    var i: usize = 1;
+    while (i < names.len) : (i += 1) {
+        if (names[i]) |n| {
+            if (std.mem.eql(u8, n, name)) return i;
+        }
+    }
+    return 0;
+}
+
+fn buildGroupsObjectPerlex(realm: *Realm, prog: *const perlex.Program, slots: []const usize, input_s: *JSString) NativeError!Value {
+    var has_named = false;
+    for (prog.names) |maybe| {
+        if (maybe != null) {
+            has_named = true;
+            break;
+        }
+    }
+    if (!has_named) return Value.undefined_;
+
+    const groups = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(groups, null);
+
+    var g: usize = 1;
+    while (g < prog.group_count) : (g += 1) {
+        const name = prog.names[g] orelse continue;
+        if (firstNameIndex(prog.names, name) != g) continue; // emit once
+
+        // The participating capture among all same-named groups.
+        var value = Value.undefined_;
+        var i: usize = 1;
+        while (i < prog.group_count) : (i += 1) {
+            if (prog.names[i]) |n| {
+                if (std.mem.eql(u8, n, name)) {
+                    const cs = slots[2 * i];
+                    const ce = slots[2 * i + 1];
+                    if (cs != perlex.none and ce != perlex.none) {
+                        const s = try allocMatchString(realm, input_s.flatBytes(), cs, ce);
+                        value = Value.fromString(s);
+                        break;
+                    }
+                }
+            }
+        }
+        groups.set(realm.allocator, name, value) catch return error.OutOfMemory;
+    }
+    return heap_mod.taggedObject(groups);
+}
+
+/// A `[startIndex, endIndex]` pair for the `/d` indices array.
+fn makeIndexPair(realm: *Realm, start: usize, end: usize) NativeError!Value {
+    const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(pair, realm.intrinsics.array_prototype);
+    pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    pair.set(realm.allocator, "0", Value.fromInt32(@intCast(start))) catch return error.OutOfMemory;
+    pair.set(realm.allocator, "1", Value.fromInt32(@intCast(end))) catch return error.OutOfMemory;
+    pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(pair);
+}
+
+fn buildIndicesPerlex(realm: *Realm, prog: *const perlex.Program, slots: []const usize) NativeError!Value {
+    const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
+    arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+
+    var ibuf: [16]u8 = undefined;
+    var g: usize = 0;
+    while (g < prog.group_count) : (g += 1) {
+        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{g}) catch unreachable;
+        const cs = slots[2 * g];
+        const ce = slots[2 * g + 1];
+        if (cs == perlex.none or ce == perlex.none) {
+            arr.set(realm.allocator, islice, Value.undefined_) catch return error.OutOfMemory;
+        } else {
+            const pair = try makeIndexPair(realm, cs, ce);
+            arr.set(realm.allocator, islice, pair) catch return error.OutOfMemory;
+        }
+    }
+    arr.set(realm.allocator, "length", Value.fromInt32(@intCast(prog.group_count))) catch return error.OutOfMemory;
+
+    const groups_v = try buildIndicesGroupsObjectPerlex(realm, prog, slots);
+    arr.set(realm.allocator, "groups", groups_v) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(arr);
+}
+
+fn buildIndicesGroupsObjectPerlex(realm: *Realm, prog: *const perlex.Program, slots: []const usize) NativeError!Value {
+    var has_named = false;
+    for (prog.names) |maybe| {
+        if (maybe != null) {
+            has_named = true;
+            break;
+        }
+    }
+    if (!has_named) return Value.undefined_;
+
+    const groups = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(groups, null);
+
+    var g: usize = 1;
+    while (g < prog.group_count) : (g += 1) {
+        const name = prog.names[g] orelse continue;
+        if (firstNameIndex(prog.names, name) != g) continue;
+
+        var value = Value.undefined_;
+        var i: usize = 1;
+        while (i < prog.group_count) : (i += 1) {
+            if (prog.names[i]) |n| {
+                if (std.mem.eql(u8, n, name)) {
+                    const cs = slots[2 * i];
+                    const ce = slots[2 * i + 1];
+                    if (cs != perlex.none and ce != perlex.none) {
+                        value = try makeIndexPair(realm, cs, ce);
+                        break;
+                    }
+                }
+            }
+        }
+        groups.set(realm.allocator, name, value) catch return error.OutOfMemory;
+    }
+    return heap_mod.taggedObject(groups);
+}
+
 /// §22.2.7.2 RegExpBuiltinExec — match-only variant. Runs the
 /// libregexp matcher and updates `lastIndex` exactly as the full
 /// `regexpExec` does, but returns just a boolean instead of
@@ -2115,7 +2402,9 @@ fn buildGroupsObject(
 /// writes can re-enter JS (a non-writable own slot raises
 /// TypeError), so the result is still `NativeError!bool`.
 fn regexpBuiltinExecMatchOnly(realm: *Realm, regex_obj: *JSObject, input_s: *JSString) NativeError!bool {
-    const bc = (try ensureBytecode(realm, regex_obj)) orelse return false;
+    if (!try ensureCompiled(realm, regex_obj)) return false;
+    if (regex_obj.regex_perlex) |prog| return matchOnlyPerlex(realm, regex_obj, prog, input_s);
+    const bc = regex_obj.regex_bytecode.?;
 
     var input = buildInputBuf(realm.allocator, input_s.flatBytes()) catch return error.OutOfMemory;
     defer input.deinit();

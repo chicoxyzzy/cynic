@@ -21,6 +21,25 @@ const std = @import("std");
 
 const c = @import("c");
 
+const perlex = @import("../perlex/perlex.zig");
+
+/// Map a flag string to Perlex's flag set for the parse-time check.
+fn perlexFlagsFromText(flags: []const u8) perlex.Flags {
+    var f: perlex.Flags = .{};
+    for (flags) |ch| switch (ch) {
+        'g' => f.global = true,
+        'i' => f.ignore_case = true,
+        'm' => f.multiline = true,
+        's' => f.dot_all = true,
+        'u' => f.unicode = true,
+        'y' => f.sticky = true,
+        'd' => f.has_indices = true,
+        'v' => f.unicode_sets = true,
+        else => {},
+    };
+    return f;
+}
+
 const source_mod = @import("../source.zig");
 const Span = source_mod.Span;
 
@@ -80,6 +99,24 @@ pub fn validateRegexLiteralToken(
     if (!validateFlags(flags_text, &re_flags)) {
         try report(allocator, diagnostics, .invalid_regex_literal, span);
         return;
+    }
+    // Perlex owns patterns within its grammar; consult it before the
+    // vendored matcher. A pattern it accepts is valid; one it rejects
+    // as a same-Alternative duplicate group name (§22.2.1.1) is an
+    // early SyntaxError; anything it doesn't model falls through to
+    // the libregexp syntax check below. (`OutOfMemory` is treated as
+    // "unsupported" so validation still proceeds.)
+    var perlex_result = perlex.compile(allocator, pattern, perlexFlagsFromText(flags_text)) catch perlex.CompileResult.unsupported;
+    switch (perlex_result) {
+        .ok => |*program| {
+            program.deinit();
+            return;
+        },
+        .syntax_error => {
+            try report(allocator, diagnostics, .invalid_regex_literal, span);
+            return;
+        },
+        .unsupported => {},
     }
     if (!validatePattern(allocator, pattern, re_flags)) {
         try report(allocator, diagnostics, .invalid_regex_literal, span);
