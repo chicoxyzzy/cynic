@@ -107,6 +107,7 @@ pub fn compile(gpa: std.mem.Allocator, result: parser.ParseResult, flags: Flags)
         .gpa = gpa,
         .names = result.names,
         .insts = .empty,
+        .dot_all = flags.dot_all,
     };
     errdefer c.deinitPartial();
 
@@ -152,6 +153,8 @@ const Compiler = struct {
     gpa: std.mem.Allocator,
     names: []const ?[]const u8,
     insts: std.ArrayListUnmanaged(Inst),
+    /// The `s` (dotall) flag — `.` matches line terminators too.
+    dot_all: bool,
     /// Cleared to false the moment a backreference is emitted — the
     /// pattern is then no longer in the regular subset.
     regular: bool = true,
@@ -182,6 +185,18 @@ const Compiler = struct {
             .anchor_start => try self.emit(.assert_start),
             .anchor_end => try self.emit(.assert_end),
             .word_boundary => |neg| try self.emit(.{ .word_boundary = neg }),
+            .dot => {
+                // `.` excludes line terminators unless dotall (`s`), in
+                // which case it matches any code unit (negated empty
+                // class).
+                const src_ranges: []const parser.Node.ClassRange =
+                    if (self.dot_all) &[_]parser.Node.ClassRange{} else &parser.line_terminator_ranges;
+                const ranges = try self.gpa.dupe(parser.Node.ClassRange, src_ranges);
+                self.emit(.{ .class = .{ .negated = true, .ranges = ranges } }) catch |e| {
+                    self.gpa.free(ranges);
+                    return e;
+                };
+            },
             .class => |cls| {
                 // Copy the ranges into program-owned memory (the AST is
                 // arena/const and freed after compilation).
@@ -307,7 +322,7 @@ const Compiler = struct {
 fn nullable(node: *const Node) bool {
     return switch (node.*) {
         .empty, .anchor_start, .anchor_end, .word_boundary, .backref_name => true,
-        .char, .class => false,
+        .char, .class, .dot => false,
         .noncapture => |b| nullable(b),
         .capture => |g| nullable(g.body),
         .repeat => |r| r.min == 0 or nullable(r.body),
@@ -331,7 +346,7 @@ fn nullable(node: *const Node) bool {
 /// captures between iterations.
 fn groupSlotRange(node: *const Node) ?Inst.Range {
     return switch (node.*) {
-        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .class, .backref_name => null,
+        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .backref_name => null,
         .noncapture => |body| groupSlotRange(body),
         .repeat => |r| groupSlotRange(r.body),
         .capture => |g| blk: {

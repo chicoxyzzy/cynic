@@ -311,6 +311,23 @@ test "perlex: i with non-ASCII units falls back" {
     try expectCompileFlags("\\u00e0", .{}, .match);
 }
 
+// ── `s` (dotall) and `m` (multiline) flags ──────────────────────────
+
+test "perlex: s flag makes dot match line terminators" {
+    try expectMatchFlags(".", .{ .dot_all = true }, "\n", "\n");
+    try expectMatchFlags("a.b", .{ .dot_all = true }, "a\nb", "a\nb");
+    // Without `s`, dot still excludes the newline.
+    try expectNoMatch(".", "\n");
+}
+
+test "perlex: m flag anchors at line boundaries" {
+    try expectMatchFlags("^b", .{ .multiline = true }, "a\nb", "b");
+    try expectMatchFlags("a$", .{ .multiline = true }, "a\nb", "a");
+    // Without `m`, `^`/`$` are input-relative only.
+    try expectNoMatch("^b", "a\nb");
+    try expectNoMatch("a$", "a\nb");
+}
+
 test "perlex: u8 fast path matches like the u16 path" {
     const o = try runUnit(u8, testing.allocator, "(?:(?<x>a)|(?<x>b))\\k<x>", .{}, "bb");
     switch (o) {

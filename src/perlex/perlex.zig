@@ -46,12 +46,11 @@ pub const CompileResult = union(enum) {
 /// for constructs it doesn't model — those return `.unsupported` so
 /// the fallback matcher renders the authoritative verdict.
 pub fn compile(gpa: std.mem.Allocator, pattern: []const u8, flags: Flags) error{OutOfMemory}!CompileResult {
-    // Flags that change match semantics Perlex doesn't implement yet:
-    // hand those patterns to the fallback. `global` / `sticky` /
-    // `hasIndices` affect the driver, not the core match, so they stay.
-    // `ignore_case` is supported via ASCII case folding — declined
-    // below only when the pattern carries a non-ASCII unit.
-    if (flags.multiline or flags.dot_all or flags.unicode or flags.unicode_sets) {
+    // Unicode mode changes the unit of matching (code points, `\u{…}`,
+    // `\p{…}`) — defer it to the fallback. `g`/`y`/`d` affect the
+    // driver not the match; `i` (ASCII fold), `m` (multiline), and `s`
+    // (dotall) are handled by the compiler/VM.
+    if (flags.unicode or flags.unicode_sets) {
         return .unsupported;
     }
 

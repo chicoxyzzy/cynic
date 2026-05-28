@@ -36,7 +36,10 @@ pub const Node = union(enum) {
     anchor_end,
     /// `\b` (negated == false) / `\B` (negated == true) word boundary.
     word_boundary: bool,
-    /// A single-code-unit class: `.`, `[…]`, `\d`/`\w`/`\s` and their
+    /// `.` — resolved by the compiler to a class that excludes line
+    /// terminators (default) or matches any code unit (dotall `s`).
+    dot,
+    /// A single-code-unit class: `[…]`, `\d`/`\w`/`\s` and their
     /// negated forms. Membership is "code unit lies in some range",
     /// XOR `negated`.
     class: Class,
@@ -75,7 +78,7 @@ const space_ranges = [_]Node.ClassRange{
     .{ .lo = 0xFEFF, .hi = 0xFEFF },
 };
 // `.` in non-dotall mode matches any code unit except LineTerminator.
-const line_terminator_ranges = [_]Node.ClassRange{
+pub const line_terminator_ranges = [_]Node.ClassRange{
     .{ .lo = 0x0A, .hi = 0x0A },
     .{ .lo = 0x0D, .hi = 0x0D },
     .{ .lo = 0x2028, .hi = 0x2029 },
@@ -277,8 +280,7 @@ const Parser = struct {
             '\\' => return self.parseEscape(),
             '.' => {
                 self.pos += 1;
-                // `.` = any code unit except a LineTerminator.
-                return self.makeNode(.{ .class = .{ .negated = true, .ranges = &line_terminator_ranges } });
+                return self.makeNode(.dot);
             },
             '[' => return self.parseCharClass(),
             // Bare metacharacters in atom position aren't valid here;
@@ -583,7 +585,7 @@ fn collectNames(a: std.mem.Allocator, node: *const Node) error{ SyntaxError, Out
     var set: NameSet = .empty;
     errdefer set.deinit(a);
     switch (node.*) {
-        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .class, .backref_name => {},
+        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .backref_name => {},
         .noncapture => |body| {
             set.deinit(a);
             return try collectNames(a, body);
