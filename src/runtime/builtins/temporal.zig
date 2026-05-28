@@ -32,6 +32,7 @@ const NativeFn = @import("../function.zig").NativeFn;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
 const temporal = @import("../temporal.zig");
+const bigint_builtin = @import("bigint.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -83,6 +84,7 @@ pub fn install(realm: *Realm) !void {
 
     try installDuration(realm, ns);
     try installPlainTime(realm, ns);
+    try installInstant(realm, ns);
 
     // `Temporal` is a non-enumerable, writable, configurable global
     // (§17 namespace-object convention, matching the property
@@ -902,4 +904,293 @@ fn plainTimeSince(realm: *Realm, this_value: Value, args: []const Value) NativeE
     _ = args;
     _ = try requirePlainTime(realm, this_value);
     return throwTypeError(realm, "Temporal.PlainTime.prototype.since is not yet implemented");
+}
+
+// ── §8 Temporal.Instant ────────────────────────────────────────────────────
+
+fn installInstant(realm: *Realm, ns: *JSObject) !void {
+    // §8.1.1 — `new`-only constructor, arity 1 (the epoch-nanoseconds
+    // BigInt).
+    const r = try installConstructor(realm, .{
+        .name = "Instant",
+        .ctor = instantConstructor,
+        .arity = 1,
+        .is_class = true,
+        .set_home_object = true,
+        .to_string_tag = "Temporal.Instant",
+        .install_global = false,
+    });
+    const fn_obj = r.ctor;
+    const proto = r.proto;
+
+    try installNativeGetter(realm, proto, "epochMilliseconds", instantEpochMilliseconds);
+    try installNativeGetter(realm, proto, "epochNanoseconds", instantEpochNanoseconds);
+
+    try installNativeMethodOnProto(realm, proto, "add", instantAdd, 1);
+    try installNativeMethodOnProto(realm, proto, "subtract", instantSubtract, 1);
+    try installNativeMethodOnProto(realm, proto, "equals", instantEquals, 1);
+    try installNativeMethodOnProto(realm, proto, "toString", instantToString, 0);
+    try installNativeMethodOnProto(realm, proto, "toJSON", instantToJSON, 0);
+    try installNativeMethodOnProto(realm, proto, "toLocaleString", instantToLocaleString, 0);
+    try installNativeMethodOnProto(realm, proto, "valueOf", instantValueOf, 0);
+    // Deferred deep-end methods — present with the right shape, but
+    // they throw until the rounding / time-zone machinery lands.
+    try installNativeMethodOnProto(realm, proto, "round", instantRound, 1);
+    try installNativeMethodOnProto(realm, proto, "until", instantUntil, 1);
+    try installNativeMethodOnProto(realm, proto, "since", instantSince, 1);
+    try installNativeMethodOnProto(realm, proto, "toZonedDateTimeISO", instantToZonedDateTimeISO, 1);
+
+    try installNativeMethod(realm, fn_obj, "from", instantFrom, 1);
+    try installNativeMethod(realm, fn_obj, "fromEpochMilliseconds", instantFromEpochMilliseconds, 1);
+    try installNativeMethod(realm, fn_obj, "fromEpochNanoseconds", instantFromEpochNanoseconds, 1);
+    try installNativeMethod(realm, fn_obj, "compare", instantCompare, 2);
+
+    realm.intrinsics.temporal_instant_constructor = fn_obj;
+    realm.intrinsics.temporal_instant_prototype = proto;
+
+    try setNonEnumerable(ns, realm.allocator, "Instant", heap_mod.taggedFunction(fn_obj));
+}
+
+/// §8.1.1 Temporal.Instant ( epochNanoseconds ). `new`-only. ToBigInt-
+/// coerces the argument (so a numeric string parses as a BigInt and a
+/// Number throws TypeError), then validates the epoch-ns range.
+fn instantConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const inst = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "Temporal.Instant constructor requires 'new'");
+    // §8.1.1 step 2 — ToBigInt(epochNanoseconds) (§7.1.13).
+    const bi_val = try bigint_builtin.toBigIntValue(realm, argOr(args, 0, Value.undefined_));
+    const epoch_ns = try epochNsFromBigInt(realm, bi_val);
+    try storeInstant(realm, inst, epoch_ns);
+    return heap_mod.taggedObject(inst);
+}
+
+/// Extract a validated epoch-ns `i128` from a BigInt `Value`, throwing
+/// RangeError when it is outside the representable instant range —
+/// including BigInts too large to fit `i128` (`2n ** 128n`).
+fn epochNsFromBigInt(realm: *Realm, bi_val: Value) NativeError!i128 {
+    const bi = heap_mod.valueAsBigInt(bi_val) orelse
+        return throwTypeError(realm, "expected a BigInt");
+    if (!bi.fitsI128()) return throwRangeError(realm, "epoch nanoseconds are out of range");
+    const ns = bi.toI128();
+    if (!temporal.isValidEpochNanoseconds(ns)) {
+        return throwRangeError(realm, "epoch nanoseconds are out of range");
+    }
+    return ns;
+}
+
+fn storeInstant(realm: *Realm, inst: *JSObject, epoch_ns: i128) NativeError!void {
+    const rec = realm.allocator.create(TemporalRecord) catch return error.OutOfMemory;
+    rec.* = .{ .instant = .{ .epoch_ns = epoch_ns } };
+    inst.setTemporalRecord(realm.allocator, rec) catch return error.OutOfMemory;
+}
+
+/// §8.1.x CreateTemporalInstant — allocate a fresh Instant with the
+/// realm prototype. Exposed (`pub`) so `Date.prototype.toTemporalInstant`
+/// can mint the bridged Instant.
+pub fn createTemporalInstant(realm: *Realm, epoch_ns: i128) NativeError!Value {
+    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(inst, realm.intrinsics.temporal_instant_prototype.?);
+    try storeInstant(realm, inst, epoch_ns);
+    return heap_mod.taggedObject(inst);
+}
+
+/// §8.x RequireInternalSlot(instant, [[InitializedTemporalInstant]]).
+fn requireInstant(realm: *Realm, this_value: Value) NativeError!i128 {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "not a Temporal.Instant");
+    const rec = obj.getTemporalRecord() orelse
+        return throwTypeError(realm, "not a Temporal.Instant");
+    return switch (rec.*) {
+        .instant => |i| i.epoch_ns,
+        else => throwTypeError(realm, "not a Temporal.Instant"),
+    };
+}
+
+/// §8.5.x ToTemporalInstant — a Temporal.Instant (copy), or any other
+/// value coerced via ToPrimitive(string) and parsed as an ISO instant
+/// string. A non-string primitive (Number, …) throws TypeError; a
+/// malformed string throws RangeError. (Temporal.ZonedDateTime would
+/// also resolve here once it ships.)
+fn toTemporalInstant(realm: *Realm, item: Value) NativeError!i128 {
+    var v = item;
+    // Any Object — plain OR callable (a function is still an Object per
+    // the spec) — coerces via ToPrimitive(string); a branded
+    // Temporal.Instant short-circuits to its epoch ns. A non-string,
+    // non-object primitive (Number, Symbol, …) falls through to the
+    // TypeError below.
+    if (heap_mod.valueAsPlainObject(v) != null or heap_mod.valueAsFunction(v) != null) {
+        if (heap_mod.valueAsPlainObject(v)) |obj| {
+            if (obj.getTemporalRecord()) |rec| {
+                switch (rec.*) {
+                    .instant => |i| return i.epoch_ns,
+                    else => {},
+                }
+            }
+        }
+        v = try intrinsics.toPrimitive(realm, v, .string);
+    }
+    if (!v.isString()) {
+        return throwTypeError(realm, "Temporal.Instant.from expects a Temporal.Instant or ISO 8601 string");
+    }
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    return temporal.parseInstantString(s.flatBytes()) catch
+        return throwRangeError(realm, "invalid ISO 8601 instant string");
+}
+
+/// §8.4.4 get Temporal.Instant.prototype.epochMilliseconds — floor of
+/// the epoch ns divided by 10^6, as a Number (always exact: |ms| ≤
+/// 8.64×10^15 < 2^53).
+fn instantEpochMilliseconds(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const ns = try requireInstant(realm, t);
+    const ms = @divFloor(ns, 1_000_000);
+    return Value.fromDouble(@floatFromInt(ms));
+}
+
+/// §8.4.5 get Temporal.Instant.prototype.epochNanoseconds — the slot
+/// value as a BigInt.
+fn instantEpochNanoseconds(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const ns = try requireInstant(realm, t);
+    const bi = realm.heap.allocateBigInt(ns) catch return error.OutOfMemory;
+    return heap_mod.taggedBigInt(bi);
+}
+
+/// §8.2.2 Temporal.Instant.from ( item ).
+fn instantFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const ns = try toTemporalInstant(realm, argOr(args, 0, Value.undefined_));
+    return createTemporalInstant(realm, ns);
+}
+
+/// §8.2.3 Temporal.Instant.fromEpochMilliseconds ( epochMilliseconds ).
+fn instantFromEpochMilliseconds(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const num = try toNumber(realm, argOr(args, 0, Value.undefined_));
+    const d = numberToF64(num);
+    // §21.2.1.1.1 NumberToBigInt — RangeError on a non-finite or
+    // non-integral Number.
+    if (!std.math.isFinite(d) or @trunc(d) != d) {
+        return throwRangeError(realm, "epoch milliseconds must be an integer");
+    }
+    // |ms| ≤ 8.64×10^15 ⇔ |ns| ≤ 8.64×10^21; the bound also keeps the
+    // i128 conversion in range.
+    if (d < -8_640_000_000_000_000.0 or d > 8_640_000_000_000_000.0) {
+        return throwRangeError(realm, "epoch milliseconds are out of range");
+    }
+    const ns: i128 = @as(i128, @intFromFloat(d)) * 1_000_000;
+    return createTemporalInstant(realm, ns);
+}
+
+/// §8.2.4 Temporal.Instant.fromEpochNanoseconds ( epochNanoseconds ).
+fn instantFromEpochNanoseconds(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const bi_val = try bigint_builtin.toBigIntValue(realm, argOr(args, 0, Value.undefined_));
+    const ns = try epochNsFromBigInt(realm, bi_val);
+    return createTemporalInstant(realm, ns);
+}
+
+/// §8.2.5 Temporal.Instant.compare ( one, two ).
+fn instantCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const a = try toTemporalInstant(realm, argOr(args, 0, Value.undefined_));
+    const b = try toTemporalInstant(realm, argOr(args, 1, Value.undefined_));
+    return Value.fromInt32(temporal.compareInstant(a, b));
+}
+
+/// §8.4.9 Temporal.Instant.prototype.equals ( other ).
+fn instantEquals(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try requireInstant(realm, this_value);
+    const b = try toTemporalInstant(realm, argOr(args, 0, Value.undefined_));
+    return Value.fromBool(a == b);
+}
+
+fn instantAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return instantAddSubtract(realm, this_value, argOr(args, 0, Value.undefined_), 1);
+}
+
+fn instantSubtract(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return instantAddSubtract(realm, this_value, argOr(args, 0, Value.undefined_), -1);
+}
+
+/// §8.4.6 / §8.4.7 AddDurationToInstant — fold a time-only Duration
+/// into the epoch nanoseconds. `sign` is +1 for `add`, -1 for
+/// `subtract`. §8 disallows calendar units (years / months / weeks /
+/// days): a non-zero one throws RangeError.
+fn instantAddSubtract(realm: *Realm, this_value: Value, duration_like: Value, sign: i128) NativeError!Value {
+    const epoch_ns = try requireInstant(realm, this_value);
+    const d = try toTemporalDuration(realm, duration_like);
+    // ToTemporalDuration's property-bag path does not itself run
+    // IsValidDuration, so a mixed-sign / out-of-range duration-like
+    // reaches here unvalidated — reject it (RangeError).
+    if (!temporal.isValidDuration(d)) {
+        return throwRangeError(realm, "Duration values are out of range");
+    }
+    if (d.years != 0 or d.months != 0 or d.weeks != 0 or d.days != 0) {
+        return throwRangeError(realm, "Temporal.Instant arithmetic does not allow calendar units (years/months/weeks/days)");
+    }
+    const delta = temporal.timeDurationNanoseconds(d) * sign;
+    const result = temporal.addInstant(epoch_ns, delta) orelse
+        return throwRangeError(realm, "Temporal.Instant arithmetic result is out of range");
+    return createTemporalInstant(realm, result);
+}
+
+/// §8.4.10 Temporal.Instant.prototype.toString — default / `auto`
+/// precision (UTC, trailing `Z`). Options-driven rounding / time-zone
+/// rendering is deferred; an options argument is rejected.
+fn instantToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const ns = try requireInstant(realm, this_value);
+    const opts = argOr(args, 0, Value.undefined_);
+    if (!opts.isUndefined()) {
+        return throwTypeError(realm, "Temporal.Instant.prototype.toString options are not yet supported");
+    }
+    var buf: [48]u8 = undefined;
+    const s = temporal.instantToString(ns, &buf);
+    const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+
+/// §8.4.11 Temporal.Instant.prototype.toJSON — always `auto`, UTC.
+fn instantToJSON(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const ns = try requireInstant(realm, this_value);
+    var buf: [48]u8 = undefined;
+    const s = temporal.instantToString(ns, &buf);
+    const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+
+fn instantToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return instantToJSON(realm, this_value, args);
+}
+
+/// §8.4.12 Temporal.Instant.prototype.valueOf — always throws
+/// (Temporal values are not relationally comparable via the operators).
+fn instantValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    _ = args;
+    return throwTypeError(realm, "Called valueOf on a Temporal.Instant; use compare() instead");
+}
+
+// Deferred Instant deep-end — present for shape, throw until the
+// rounding / time-zone machinery lands.
+fn instantRound(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requireInstant(realm, this_value);
+    return throwTypeError(realm, "Temporal.Instant.prototype.round is not yet implemented");
+}
+fn instantUntil(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requireInstant(realm, this_value);
+    return throwTypeError(realm, "Temporal.Instant.prototype.until is not yet implemented");
+}
+fn instantSince(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requireInstant(realm, this_value);
+    return throwTypeError(realm, "Temporal.Instant.prototype.since is not yet implemented");
+}
+fn instantToZonedDateTimeISO(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requireInstant(realm, this_value);
+    return throwTypeError(realm, "Temporal.Instant.prototype.toZonedDateTimeISO is not yet implemented");
 }

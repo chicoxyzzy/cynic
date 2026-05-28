@@ -28,6 +28,7 @@ const std = @import("std");
 pub const TemporalKind = enum {
     duration,
     plain_time,
+    instant,
 };
 
 /// §7.5 Temporal.Duration internal slots. Each field is the ℝ
@@ -59,12 +60,22 @@ pub const PlainTimeRecord = struct {
     nanosecond: u32 = 0,
 };
 
+/// §8.1 Temporal.Instant internal slot ([[EpochNanoseconds]]). The
+/// representable range is ±(86400 × 10^17) ns = ±8.64×10^21, which
+/// fits an `i128` with room to spare, so the record carries no heap
+/// pointer and adds no GC mark edge; it converts to/from a `JSBigInt`
+/// only at the JS boundary, like the other plain records.
+pub const InstantRecord = struct {
+    epoch_ns: i128 = 0,
+};
+
 /// The side allocation a Temporal instance's `JSObject` points to
 /// through `JSObjectExtension.temporal_record`. A tagged union so
 /// the single slot serves every plain Temporal type.
 pub const TemporalRecord = union(TemporalKind) {
     duration: DurationRecord,
     plain_time: PlainTimeRecord,
+    instant: InstantRecord,
 
     pub fn deinit(self: *TemporalRecord, allocator: std.mem.Allocator) void {
         // No owned heap memory inside any variant today; the record
@@ -911,6 +922,460 @@ pub fn plainTimeToString(t: PlainTimeRecord, buf: []u8) []const u8 {
     return w.buf[0..w.len];
 }
 
+// ── §8 Temporal.Instant abstract operations (pure) ────────────────────────
+
+/// §8.x nsMinInstant / nsMaxInstant — the inclusive epoch-nanosecond
+/// bounds of a representable Instant: ±(86400 × 10^17) ns (±10^8 days
+/// from the epoch). Equal to the nanosecond form of the legacy Date
+/// ±8.64×10^15 ms range, so `Date.prototype.toTemporalInstant` never
+/// overflows.
+pub const ns_min_instant: i128 = -8_640_000_000_000_000_000_000;
+pub const ns_max_instant: i128 = 8_640_000_000_000_000_000_000;
+
+/// §8.x IsValidEpochNanoseconds — within the inclusive instant bounds.
+pub fn isValidEpochNanoseconds(ns: i128) bool {
+    return ns >= ns_min_instant and ns <= ns_max_instant;
+}
+
+/// §8.x AddInstant — add a signed nanosecond delta to an epoch-ns
+/// value, returning null when the result leaves the representable
+/// range (the caller throws RangeError). The i128 sum cannot overflow:
+/// a valid Instant is ≤ 8.64×10^21 and a valid Duration's time total
+/// is ≤ ~9×10^24 ns, both far inside i128.
+pub fn addInstant(epoch_ns: i128, delta_ns: i128) ?i128 {
+    const sum = epoch_ns + delta_ns;
+    if (!isValidEpochNanoseconds(sum)) return null;
+    return sum;
+}
+
+/// Total nanoseconds contributed by a duration's time components
+/// (hours and smaller). Callers performing Instant arithmetic must
+/// first verify the date components (years/months/weeks/days) are
+/// zero — §8 disallows calendar units. Exact for the valid duration
+/// range (each field is an integer ≤ 2^53).
+pub fn timeDurationNanoseconds(d: DurationRecord) i128 {
+    return f64ToI128(d.hours) * 3_600_000_000_000 +
+        f64ToI128(d.minutes) * 60_000_000_000 +
+        f64ToI128(d.seconds) * 1_000_000_000 +
+        f64ToI128(d.milliseconds) * 1_000_000 +
+        f64ToI128(d.microseconds) * 1_000 +
+        f64ToI128(d.nanoseconds);
+}
+
+fn f64ToI128(v: f64) i128 {
+    return @intFromFloat(v);
+}
+
+/// §8.x CompareEpochNanoseconds — -1 / 0 / +1.
+pub fn compareInstant(a: i128, b: i128) i32 {
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+// ── Proleptic-Gregorian civil-date math (Howard Hinnant) ──────────────────
+// Implemented here in the runtime layer so Temporal stays independent
+// of `builtins/date.zig` (runtime must not depend on the builtins
+// layer). Valid across the whole Temporal year range.
+
+const Ymd = struct { year: i64, month: u32, day: u32 };
+
+/// Days from 1970-01-01 to a proleptic-Gregorian date. `month` is
+/// 1..12, `day` 1..31.
+pub fn daysFromCivil(year: i64, month: u32, day: u32) i64 {
+    const m: i64 = @intCast(month);
+    const d: i64 = @intCast(day);
+    const y: i64 = year - (if (month <= 2) @as(i64, 1) else 0);
+    const era: i64 = @divTrunc(if (y >= 0) y else y - 399, 400);
+    const yoe: i64 = y - era * 400; // [0, 399]
+    const doy: i64 = @divTrunc(153 * (if (m > 2) m - 3 else m + 9) + 2, 5) + d - 1; // [0, 365]
+    const doe: i64 = yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy; // [0, 146096]
+    return era * 146097 + doe - 719468;
+}
+
+/// Inverse of `daysFromCivil`.
+pub fn civilFromDays(z_in: i64) Ymd {
+    const z: i64 = z_in + 719468;
+    const era: i64 = @divTrunc(if (z >= 0) z else z - 146096, 146097);
+    const doe: i64 = z - era * 146097; // [0, 146096]
+    const yoe: i64 = @divTrunc(doe - @divTrunc(doe, 1460) + @divTrunc(doe, 36524) - @divTrunc(doe, 146096), 365); // [0, 399]
+    const y: i64 = yoe + era * 400;
+    const doy: i64 = doe - (365 * yoe + @divTrunc(yoe, 4) - @divTrunc(yoe, 100)); // [0, 365]
+    const mp: i64 = @divTrunc(5 * doy + 2, 153); // [0, 11]
+    const d: i64 = doy - @divTrunc(153 * mp + 2, 5) + 1; // [1, 31]
+    const m: i64 = if (mp < 10) mp + 3 else mp - 9; // [1, 12]
+    return .{ .year = y + (if (m <= 2) @as(i64, 1) else 0), .month = @intCast(m), .day = @intCast(d) };
+}
+
+fn isLeapYear(y: i64) bool {
+    return (@mod(y, 4) == 0 and @mod(y, 100) != 0) or @mod(y, 400) == 0;
+}
+
+fn daysInIsoMonth(y: i64, m: u32) u32 {
+    return switch (m) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(y)) @as(u32, 29) else 28,
+        else => 0,
+    };
+}
+
+// ── §8.x TemporalInstantToString (UTC, precision = "auto") ────────────────
+
+/// Format an epoch-ns value to its UTC ISO-8601 string — the form
+/// `Temporal.Instant.prototype.toString` / `toJSON` produce with no
+/// time-zone and `precision="auto"`: `YYYY-MM-DDTHH:MM:SS` plus a
+/// trimmed sub-second fraction and a trailing `Z`. Years outside
+/// 0000..9999 use the expanded `±YYYYYY` form.
+pub fn instantToString(epoch_ns: i128, buf: []u8) []const u8 {
+    const sec = @divFloor(epoch_ns, 1_000_000_000);
+    const sub_ns: u32 = @intCast(epoch_ns - sec * 1_000_000_000); // [0, 999999999]
+    const days = @divFloor(sec, 86400);
+    const sod = sec - days * 86400; // [0, 86399]
+    const ymd = civilFromDays(@intCast(days));
+    const hour: u32 = @intCast(@divTrunc(sod, 3600));
+    const minute: u32 = @intCast(@divTrunc(@mod(sod, 3600), 60));
+    const second: u32 = @intCast(@mod(sod, 60));
+
+    var w = Writer{ .buf = buf, .len = 0 };
+    writeIsoYear(&w, ymd.year);
+    w.byte('-');
+    w.pad2(ymd.month);
+    w.byte('-');
+    w.pad2(ymd.day);
+    w.byte('T');
+    w.pad2(hour);
+    w.byte(':');
+    w.pad2(minute);
+    w.byte(':');
+    w.pad2(second);
+    if (sub_ns != 0) {
+        w.byte('.');
+        w.fraction9(sub_ns);
+    }
+    w.byte('Z');
+    return w.buf[0..w.len];
+}
+
+fn writeIsoYear(w: *Writer, year: i64) void {
+    if (year >= 0 and year <= 9999) {
+        var tmp: [4]u8 = undefined;
+        var y: u32 = @intCast(year);
+        var i: usize = 4;
+        while (i > 0) {
+            i -= 1;
+            tmp[i] = '0' + @as(u8, @intCast(y % 10));
+            y /= 10;
+        }
+        w.bytes(&tmp);
+        return;
+    }
+    w.byte(if (year < 0) '-' else '+');
+    var y: u64 = @intCast(if (year < 0) -year else year);
+    var tmp: [6]u8 = undefined;
+    var i: usize = 6;
+    while (i > 0) {
+        i -= 1;
+        tmp[i] = '0' + @as(u8, @intCast(y % 10));
+        y /= 10;
+    }
+    w.bytes(&tmp);
+}
+
+// ── §8.x ParseTemporalInstantString ───────────────────────────────────────
+
+/// Parse an ISO-8601 / RFC 9557 date-time that carries BOTH a time and
+/// a UTC offset (or `Z`), then fold the offset in to yield the epoch
+/// nanoseconds. Returns `error.Invalid` (caller throws RangeError) on
+/// any malformed / unsupported form, or when the resulting instant is
+/// out of range.
+///
+/// Required shape: a calendar date (`YYYY-MM-DD`, basic `YYYYMMDD`, or
+/// expanded `±YYYYYY-MM-DD`), a `T`/`t`/space separator, a time
+/// (`HH[:MM[:SS[.fraction]]]` or the compact colon-free forms), and a
+/// trailing `Z`/`z` or numeric offset. Optional `[...]` annotations
+/// (a time-zone identifier, then `key=value` pairs) follow and are
+/// validated then discarded. A date with no time, or a date-time with
+/// no offset, is rejected — an Instant needs an exact point in time.
+pub fn parseInstantString(input: []const u8) error{Invalid}!i128 {
+    var c = Cursor{ .s = input };
+
+    const date = try parseIsoDate(&c);
+
+    // Date-time separator (required — an Instant must have a time).
+    if (!c.eatAny("Tt ")) return error.Invalid;
+
+    const time = try parseIsoTime(&c);
+
+    // Offset (required) — `Z`/`z` or a signed numeric offset.
+    var offset_ns: i128 = 0;
+    if (c.eatAny("Zz")) {
+        offset_ns = 0;
+    } else if (c.peek()) |ch| {
+        if (ch == '+' or ch == '-') {
+            offset_ns = try parseUtcOffsetNs(&c);
+        } else return error.Invalid;
+    } else return error.Invalid;
+
+    // Optional annotations, then the string must end.
+    try consumeAnnotations(&c);
+    if (!c.done()) return error.Invalid;
+
+    // Fold the offset in: epoch = wall-clock-as-UTC − offset.
+    const epoch_days = daysFromCivil(date.year, date.month, date.day);
+    const wall_sec: i128 = @as(i128, epoch_days) * 86400 +
+        @as(i128, time.hour) * 3600 + @as(i128, time.minute) * 60 + @as(i128, time.second);
+    const wall_ns: i128 = wall_sec * 1_000_000_000 + @as(i128, time.sub_ns);
+    const epoch_ns = wall_ns - offset_ns;
+    if (!isValidEpochNanoseconds(epoch_ns)) return error.Invalid;
+    return epoch_ns;
+}
+
+const Cursor = struct {
+    s: []const u8,
+    i: usize = 0,
+
+    fn done(self: *const Cursor) bool {
+        return self.i >= self.s.len;
+    }
+    fn peek(self: *const Cursor) ?u8 {
+        return if (self.i < self.s.len) self.s[self.i] else null;
+    }
+    fn eat(self: *Cursor, ch: u8) bool {
+        if (self.i < self.s.len and self.s[self.i] == ch) {
+            self.i += 1;
+            return true;
+        }
+        return false;
+    }
+    fn eatAny(self: *Cursor, set: []const u8) bool {
+        const ch = self.peek() orelse return false;
+        for (set) |x| {
+            if (ch == x) {
+                self.i += 1;
+                return true;
+            }
+        }
+        return false;
+    }
+    fn isDigit(self: *const Cursor) bool {
+        const ch = self.peek() orelse return false;
+        return ch >= '0' and ch <= '9';
+    }
+    /// Read EXACTLY n decimal digits as a u64; null (no advance) if
+    /// fewer than n digits are available at the cursor.
+    fn fixedDigits(self: *Cursor, n: usize) ?u64 {
+        if (self.i + n > self.s.len) return null;
+        var v: u64 = 0;
+        var k: usize = 0;
+        while (k < n) : (k += 1) {
+            const ch = self.s[self.i + k];
+            if (ch < '0' or ch > '9') return null;
+            v = v * 10 + (ch - '0');
+        }
+        self.i += n;
+        return v;
+    }
+};
+
+const ParsedDate = struct { year: i64, month: u32, day: u32 };
+const ParsedTime = struct { hour: u32, minute: u32, second: u32, sub_ns: u32 };
+
+fn parseIsoDate(c: *Cursor) error{Invalid}!ParsedDate {
+    var year: i64 = undefined;
+    var expanded = false;
+    const lead = c.peek() orelse return error.Invalid;
+    if (lead == '+' or lead == '-') {
+        // Expanded year: ASCII sign + exactly six digits. A `-000000`
+        // (negative zero) expanded year is forbidden.
+        const neg = lead == '-';
+        c.i += 1;
+        const y = c.fixedDigits(6) orelse return error.Invalid;
+        if (neg and y == 0) return error.Invalid;
+        year = if (neg) -@as(i64, @intCast(y)) else @as(i64, @intCast(y));
+        expanded = true;
+    } else {
+        const y = c.fixedDigits(4) orelse return error.Invalid;
+        year = @intCast(y);
+    }
+
+    // Extended (`-` separators) vs basic (none). An expanded `±YYYYYY`
+    // year may be followed by either form (`+001976-11-18` and the
+    // dash-free `+0019761118` are both valid).
+    const extended = c.eat('-');
+    const month_u = c.fixedDigits(2) orelse return error.Invalid;
+    if (extended and !c.eat('-')) return error.Invalid;
+    const day_u = c.fixedDigits(2) orelse return error.Invalid;
+
+    const month: u32 = @intCast(month_u);
+    const day: u32 = @intCast(day_u);
+    if (month < 1 or month > 12) return error.Invalid;
+    if (day < 1 or day > daysInIsoMonth(year, month)) return error.Invalid;
+    return .{ .year = year, .month = month, .day = day };
+}
+
+fn parseIsoTime(c: *Cursor) error{Invalid}!ParsedTime {
+    const hour_u = c.fixedDigits(2) orelse return error.Invalid;
+    var minute: u32 = 0;
+    var second: u32 = 0;
+    var sub_ns: u32 = 0;
+
+    if (c.eat(':')) {
+        minute = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+        if (c.eat(':')) {
+            second = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+            sub_ns = try parseFractionNs(c);
+        }
+    } else if (c.isDigit()) {
+        minute = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+        if (c.isDigit()) {
+            second = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+            sub_ns = try parseFractionNs(c);
+        }
+    }
+
+    const hour: u32 = @intCast(hour_u);
+    if (hour > 23 or minute > 59 or second > 60) return error.Invalid;
+    if (second == 60) second = 59; // leap second → clamp (Temporal has none)
+    return .{ .hour = hour, .minute = minute, .second = second, .sub_ns = sub_ns };
+}
+
+/// Parse a numeric UTC offset at the cursor (`+`/`-` already peeked):
+/// `±HH`, `±HH:MM`, `±HH:MM:SS`, `±HH:MM:SS(.|,)fraction`, or the
+/// compact colon-free forms. Returns the offset in signed nanoseconds.
+fn parseUtcOffsetNs(c: *Cursor) error{Invalid}!i128 {
+    const sign = c.peek() orelse return error.Invalid;
+    if (sign != '+' and sign != '-') return error.Invalid;
+    c.i += 1;
+    const neg = sign == '-';
+
+    const hour: u32 = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+    var minute: u32 = 0;
+    var second: u32 = 0;
+    var sub_ns: u32 = 0;
+
+    if (c.eat(':')) {
+        minute = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+        if (c.eat(':')) {
+            second = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+            sub_ns = try parseFractionNs(c);
+        }
+    } else if (c.isDigit()) {
+        minute = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+        if (c.isDigit()) {
+            second = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+            sub_ns = try parseFractionNs(c);
+        }
+    }
+
+    if (hour > 23 or minute > 59 or second > 59) return error.Invalid;
+    const total: i128 = (@as(i128, hour) * 3600 + @as(i128, minute) * 60 + @as(i128, second)) *
+        1_000_000_000 + @as(i128, sub_ns);
+    return if (neg) -total else total;
+}
+
+/// Read an optional `.`/`,` fraction (1..9 digits) at the cursor,
+/// returning whole nanoseconds (0 when no fraction follows).
+fn parseFractionNs(c: *Cursor) error{Invalid}!u32 {
+    const ch = c.peek() orelse return 0;
+    if (ch != '.' and ch != ',') return 0;
+    c.i += 1;
+    const start = c.i;
+    while (c.isDigit()) c.i += 1;
+    const len = c.i - start;
+    if (len == 0 or len > 9) return error.Invalid;
+    return fractionToNanos(c.s[start..c.i]);
+}
+
+/// Validate and discard the trailing `[...]` annotation blocks per the
+/// RFC 9557 grammar: an optional leading time-zone annotation (an
+/// identifier, no `=`), then zero or more `key=value` annotations. At
+/// most one time-zone and at most one `u-ca` calendar annotation; a
+/// `[!key=…]` critical flag on an unknown key is rejected. Leaves the
+/// cursor at the first non-`[` byte (the caller requires end-of-input).
+fn consumeAnnotations(c: *Cursor) error{Invalid}!void {
+    var saw_tz = false;
+    var calendars: usize = 0;
+    var critical_calendar = false;
+    var first = true;
+    while (c.peek()) |ch| {
+        if (ch != '[') break;
+        c.i += 1; // consume '['
+        const critical = c.eat('!');
+        const start = c.i;
+        while (c.peek()) |x| {
+            if (x == ']') break;
+            c.i += 1;
+        }
+        if (c.peek() != ']') return error.Invalid; // unterminated
+        const body = c.s[start..c.i];
+        c.i += 1; // consume ']'
+        if (body.len == 0) return error.Invalid;
+
+        if (std.mem.indexOfScalar(u8, body, '=')) |eq| {
+            // key=value annotation. The key must match the lowercase
+            // AnnotationKey grammar; a non-empty value is required.
+            const key = body[0..eq];
+            const value = body[eq + 1 ..];
+            if (!isValidAnnotationKey(key) or value.len == 0) return error.Invalid;
+            if (std.mem.eql(u8, key, "u-ca")) {
+                calendars += 1;
+                if (critical) critical_calendar = true;
+                // Two or more calendar annotations are only syntactical
+                // if none carries the critical flag.
+                if (calendars > 1 and critical_calendar) return error.Invalid;
+            } else if (critical) {
+                return error.Invalid; // unknown critical annotation
+            }
+        } else {
+            // Time-zone annotation (an identifier or a numeric offset):
+            // at most one, and it must precede any key=value
+            // annotations. A numeric offset must not carry sub-minute
+            // precision.
+            if (saw_tz or !first) return error.Invalid;
+            if (!isValidTimeZoneAnnotation(body)) return error.Invalid;
+            saw_tz = true;
+        }
+        first = false;
+    }
+}
+
+/// AnnotationKey :: AKeyLeadingChar (AKeyChar)*, where AKeyLeadingChar
+/// is a lowercase letter or `_`, and AKeyChar adds digits and `-`.
+/// Capitalised keys (`U-CA`, `u-CA`) are not valid; `_foo-bar0` is.
+fn isValidAnnotationKey(key: []const u8) bool {
+    if (key.len == 0) return false;
+    if (!((key[0] >= 'a' and key[0] <= 'z') or key[0] == '_')) return false;
+    for (key[1..]) |ch| {
+        const ok = (ch >= 'a' and ch <= 'z') or ch == '_' or
+            (ch >= '0' and ch <= '9') or ch == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// A time-zone annotation is either an IANA-style identifier or a
+/// numeric UTC offset. A numeric offset (`±HH`, `±HH:MM`, `±HHMM`) must
+/// NOT carry sub-minute precision — `[-07:00:01]` is rejected. Other
+/// identifier shapes are accepted and discarded (Instant is
+/// time-zone-free).
+fn isValidTimeZoneAnnotation(body: []const u8) bool {
+    if (body.len == 0) return false;
+    if (body[0] != '+' and body[0] != '-') return true; // IANA-style name
+    var k: usize = 1;
+    if (k + 2 > body.len or !isAsciiDigit(body[k]) or !isAsciiDigit(body[k + 1])) return false;
+    k += 2;
+    if (k == body.len) return true; // ±HH
+    if (body[k] == ':') k += 1;
+    if (k + 2 > body.len or !isAsciiDigit(body[k]) or !isAsciiDigit(body[k + 1])) return false;
+    k += 2;
+    return k == body.len; // ±HH:MM / ±HHMM — seconds are not allowed
+}
+
+fn isAsciiDigit(ch: u8) bool {
+    return ch >= '0' and ch <= '9';
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1158,4 +1623,116 @@ test "parseTemporalTimeString: Z designator (trailing) rejected as UTC" {
     try testing.expectError(error.UTCDesignator, parseTemporalTimeString("00:00:00Z"));
     try testing.expectError(error.Invalid, parseTemporalTimeString("00:00:00Zjunk"));
     try testing.expectError(error.Invalid, parseTemporalTimeString("00:00Zjunk"));
+}
+
+test "isValidEpochNanoseconds: inclusive bounds" {
+    try testing.expect(isValidEpochNanoseconds(0));
+    try testing.expect(isValidEpochNanoseconds(ns_max_instant));
+    try testing.expect(isValidEpochNanoseconds(ns_min_instant));
+    try testing.expect(!isValidEpochNanoseconds(ns_max_instant + 1));
+    try testing.expect(!isValidEpochNanoseconds(ns_min_instant - 1));
+}
+
+test "civil-date round trip" {
+    try testing.expectEqual(@as(i64, 0), daysFromCivil(1970, 1, 1));
+    try testing.expectEqual(@as(i64, -1), daysFromCivil(1969, 12, 31));
+    const r = civilFromDays(2513);
+    try testing.expectEqual(@as(i64, 1976), r.year);
+    try testing.expectEqual(@as(u32, 11), r.month);
+    try testing.expectEqual(@as(u32, 18), r.day);
+    var d: i64 = -2_000_000;
+    while (d < 2_000_000) : (d += 7919) {
+        const ymd = civilFromDays(d);
+        try testing.expectEqual(d, daysFromCivil(ymd.year, ymd.month, ymd.day));
+    }
+}
+
+test "instantToString: UTC forms with trimmed fraction" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("1970-01-01T00:00:00Z", instantToString(0, &buf));
+    try testing.expectEqualStrings("1976-11-18T14:23:30.123456789Z", instantToString(217175010123456789, &buf));
+    try testing.expectEqualStrings("1963-02-13T09:36:29.123456789Z", instantToString(-217175010876543211, &buf));
+}
+
+test "compareInstant" {
+    try testing.expectEqual(@as(i32, 0), compareInstant(5, 5));
+    try testing.expectEqual(@as(i32, -1), compareInstant(-1, 1));
+    try testing.expectEqual(@as(i32, 1), compareInstant(2, -2));
+}
+
+test "timeDurationNanoseconds" {
+    try testing.expectEqual(@as(i128, 3_600_000_000_000), timeDurationNanoseconds(.{ .hours = 1 }));
+    try testing.expectEqual(@as(i128, -1_000_000_000), timeDurationNanoseconds(.{ .seconds = -1 }));
+    try testing.expectEqual(@as(i128, 1_001_001_001), timeDurationNanoseconds(.{ .seconds = 1, .milliseconds = 1, .microseconds = 1, .nanoseconds = 1 }));
+}
+
+test "parseInstantString: valid forms fold the offset" {
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00Z"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00+00:00"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1969-12-31T16-08[America/Vancouver]"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00:00+00:00[UTC][u-ca=iso8601]"));
+    try testing.expectEqual(@as(i128, 217175010123456789), try parseInstantString("1976-11-18T14:23:30.123456789Z"));
+    // Range edges (inclusive).
+    try testing.expectEqual(ns_min_instant, try parseInstantString("-271821-04-20T00:00Z"));
+    try testing.expectEqual(ns_max_instant, try parseInstantString("+275760-09-13T00:00Z"));
+    try testing.expectEqual(ns_min_instant, try parseInstantString("-271821-04-19T23:00-01:00"));
+}
+
+test "parseInstantString: invalid forms reject" {
+    const bad = [_][]const u8{
+        "",                          "invalid iso8601",
+        "2020-01-00T00:00Z",         "2020-01-32T00:00Z",
+        "2020-02-30T00:00Z",         "2021-02-29T00:00Z",
+        "2020-00-01T00:00Z",         "2020-13-01T00:00Z",
+        "2020-01-01TZ",              "2020-01-01T25:00:00Z",
+        "2020-01-01T01:60:00Z",      "2020-01-01T00:00Zjunk",
+        "2020-01-01T00:00:00+00:00junk", "2020-01-01T00:00:00+00:00[UTC]junk",
+        "02020-01-01T00:00Z",        "2020-001-01T00:00Z",
+        "2020-01-001T00:00Z",        "2020-01-01T001Z",
+        "2020-01-01T00:00-24:00",    "2020-01-01T00:00+24:00",
+        "2020-W01-1T00:00Z",         "2020-001T00:00Z",
+        "+0002020-01-01T00:00Z",     "2020-01",
+        "01-01",                     "P1Y",
+        "2020-01-01",                "2020-01-01T00",
+        "2020-01-01T00:00",          "2020-01-01T00:00:00",
+        "2020-01-01T00:00:00.000000000", "-999999-01-01T00:00Z",
+        "+999999-01-01T00:00Z",      "2025-01-01T00:00:00+00:0000",
+        "2022-09-15Z",               "2022-09-15+00:00",
+    };
+    for (bad) |s| {
+        try testing.expectError(error.Invalid, parseInstantString(s));
+    }
+}
+
+test "parseInstantString: non-ASCII minus sign rejected" {
+    try testing.expectError(error.Invalid, parseInstantString("1976-11-18T15:23:30.12\u{2212}02:00"));
+    try testing.expectError(error.Invalid, parseInstantString("\u{2212}009999-11-18T15:23:30.12Z"));
+}
+
+test "parseInstantString: annotations + expanded basic year accepted" {
+    // Two non-critical calendar annotations are allowed (first wins,
+    // rest ignored); numeric-offset and IANA-style time-zone
+    // annotations are accepted and discarded.
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z[u-ca=iso8601][u-ca=discord]"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z[+00]"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z[-00:00]"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z[NotATimeZone]"));
+    // Unknown annotation keys may lead with `_` and carry mixed-case values.
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z[foo=bar][_foo-bar0=Ignore-This-999999999999]"));
+    // Expanded year followed by basic (dash-free) date + time.
+    try testing.expectEqual(@as(i128, 217178610100000000), try parseInstantString("+0019761118T15:23:30.1+00:00"));
+}
+
+test "parseInstantString: annotation rule violations reject" {
+    const bad = [_][]const u8{
+        "1970-01-01T00:00Z[U-CA=iso8601]", // uppercase key
+        "1970-01-01T00:00Z[u-CA=iso8601]", // partially capitalised key
+        "1970-01-01T00:00Z[FOO=bar]", // capitalised unknown key
+        "1970-01-01T00:00Z[u-ca=iso8601][!u-ca=iso8601]", // 2 calendars, one critical
+        "1970-01-01T00:00Z[!u-ca=iso8601][u-ca=iso8601]",
+        "1970-01-01T00:00Z[!unknown=x]", // critical unknown annotation
+        "2021-08-19T17:30-07:00:01[-07:00:01]", // sub-minute time-zone offset annotation
+    };
+    for (bad) |s| try testing.expectError(error.Invalid, parseInstantString(s));
 }

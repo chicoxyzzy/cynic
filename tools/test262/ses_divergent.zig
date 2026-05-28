@@ -289,6 +289,23 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
         .path = "built-ins/ShadowRealm/prototype/evaluate/globalthis-config-only-properties.js",
         .category = .descriptor_assertion,
     },
+    .{
+        // §8.4.4 / §8.4.5 `Temporal.Instant.prototype.epochMilliseconds`
+        // / `epochNanoseconds` getters — the fixture asserts
+        // `desc.configurable === true` directly. Cynic's SES freeze
+        // demotes every intrinsic accessor to `configurable: false`
+        // (verified: hardened → false, `--unhardened` → true, exactly
+        // matching every other Temporal getter), so the assert fires
+        // the generic `Expected SameValue(«false», «true») to be true`.
+        // Generic-shape message — path-classify, like the Iterator
+        // accessor entries above.
+        .path = "built-ins/Temporal/Instant/prototype/epochMilliseconds/prop-desc.js",
+        .category = .descriptor_assertion,
+    },
+    .{
+        .path = "built-ins/Temporal/Instant/prototype/epochNanoseconds/prop-desc.js",
+        .category = .descriptor_assertion,
+    },
 };
 
 /// Path-based divergence lookup — the escape hatch for
@@ -378,6 +395,10 @@ test "classifyByPath: known generic-message divergent path" {
     try std.testing.expectEqual(
         @as(?Category, .frozen_intrinsic_typeerror),
         classifyByPath("language/global-code/decl-lex-configurable-global.js"),
+    );
+    try std.testing.expectEqual(
+        @as(?Category, .descriptor_assertion),
+        classifyByPath("built-ins/Temporal/Instant/prototype/epochMilliseconds/prop-desc.js"),
     );
 }
 
