@@ -28,6 +28,15 @@ pub fn generalCategory(name: []const u8) ?[]const Range {
     return tables.generalCategory(name);
 }
 
+/// Resolve a binary Unicode property — by canonical name (`White_Space`)
+/// or alias (`WSpace`, `space`) — to its sorted, non-overlapping ranges.
+/// Returns `null` when `name` is not a binary property ECMA-262 §22.2.1.1
+/// recognises; exact, case-sensitive match. `ASCII`, `Any`, and `Assigned`
+/// are synthesised (`Assigned` is the complement of General_Category `Cn`).
+pub fn binaryProperty(name: []const u8) ?[]const Range {
+    return tables.binaryProperty(name);
+}
+
 /// True iff `cp` lies within any range of `ranges`, which must be sorted by
 /// `start` and non-overlapping (the generator guarantees this).
 pub fn rangeContains(ranges: []const Range, cp: u21) bool {
@@ -214,6 +223,68 @@ test "grouped categories union and agree across spellings" {
                     try testing.expect(rangeContains(by_long, r.cp));
                 }
             }
+        }
+    }
+}
+
+fn binIn(name: []const u8, cp: u21) !bool {
+    const ranges = binaryProperty(name) orelse return error.UnknownProperty;
+    return rangeContains(ranges, cp);
+}
+
+test "binary properties classify representatives and aliases" {
+    try testing.expect(try binIn("White_Space", 0x20));
+    try testing.expect(try binIn("White_Space", 0x09));
+    try testing.expect(try binIn("White_Space", 0xA0)); // NBSP
+    try testing.expect(try binIn("WSpace", 0x20)); // alias
+    try testing.expect(try binIn("space", 0x20)); // alias
+    try testing.expect(!try binIn("White_Space", 'A'));
+    try testing.expect(try binIn("Alphabetic", 'A'));
+    try testing.expect(try binIn("Alpha", 0x4E2D)); // alias, CJK
+    try testing.expect(!try binIn("Alphabetic", '0'));
+    try testing.expect(try binIn("ASCII_Hex_Digit", 'F'));
+    try testing.expect(try binIn("AHex", 'f')); // alias
+    try testing.expect(try binIn("Hex_Digit", '0'));
+    try testing.expect(!try binIn("ASCII_Hex_Digit", 'g'));
+    try testing.expect(try binIn("Lowercase", 'a'));
+    try testing.expect(try binIn("Uppercase", 'A'));
+    try testing.expect(!try binIn("Lowercase", 'A'));
+}
+
+test "synthesized binary properties: ASCII, Any, Assigned" {
+    try testing.expect(try binIn("ASCII", 0x00));
+    try testing.expect(try binIn("ASCII", 0x7F));
+    try testing.expect(!try binIn("ASCII", 0x80));
+    try testing.expect(try binIn("Any", 0x00));
+    try testing.expect(try binIn("Any", 0x10FFFF));
+    try testing.expect(try binIn("Assigned", 'A')); // assigned
+    try testing.expect(!try binIn("Assigned", 0x0378)); // unassigned (Cn)
+    try testing.expect(try binIn("Assigned", 0x10FFFD)); // plane-16 PUA (Co)
+}
+
+test "emoji binary properties" {
+    try testing.expect(try binIn("Emoji", 0x1F600)); // grinning face
+    try testing.expect(try binIn("Emoji_Presentation", 0x1F600));
+    try testing.expect(try binIn("Extended_Pictographic", 0x1F600));
+    try testing.expect(try binIn("Regional_Indicator", 0x1F1E6)); // 🇦
+    try testing.expect(!try binIn("Emoji", 'A'));
+}
+
+test "binary and gc name spaces are disjoint; unknown returns null" {
+    try testing.expectEqual(@as(?[]const Range, null), binaryProperty("NotABinaryProp"));
+    try testing.expectEqual(@as(?[]const Range, null), binaryProperty("white_space")); // case-sensitive
+    try testing.expectEqual(@as(?[]const Range, null), binaryProperty("Lu")); // gc value, not binary
+    try testing.expectEqual(@as(?[]const Range, null), generalCategory("White_Space")); // binary, not gc
+}
+
+test "Assigned is exactly the complement of Cn over a sample" {
+    const cn = generalCategory("Cn").?;
+    const assigned = binaryProperty("Assigned").?;
+    var cp: u21 = 0;
+    while (cp <= 0x3000) : (cp += 1) {
+        if (rangeContains(cn, cp) == rangeContains(assigned, cp)) {
+            std.debug.print("U+{X:0>4}: Cn and Assigned agree (should be opposite)\n", .{cp});
+            return error.NotComplement;
         }
     }
 }

@@ -150,6 +150,11 @@ pub fn build(b: *std.Build) void {
     const run_gen_props = b.addRunArtifact(gen_props_exe);
     run_gen_props.addArg(b.pathFromRoot("src/unicode/property_tables.zig"));
     run_gen_props.addFileArg(b.path("vendor/unicode/DerivedGeneralCategory.txt"));
+    run_gen_props.addFileArg(b.path("vendor/unicode/DerivedCoreProperties.txt"));
+    run_gen_props.addFileArg(b.path("vendor/unicode/PropList.txt"));
+    run_gen_props.addFileArg(b.path("vendor/unicode/emoji-data.txt"));
+    run_gen_props.addFileArg(b.path("vendor/unicode/DerivedBinaryProperties.txt"));
+    run_gen_props.addFileArg(b.path("vendor/unicode/DerivedNormalizationProps.txt"));
     gen_step.dependOn(&run_gen_props.step);
 
     // `zig build fmt-check` runs `zig fmt --check` over `src/` and

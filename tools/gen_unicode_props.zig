@@ -6,14 +6,19 @@
 //!
 //!     zig build gen-unicode
 //!
-//! The *names* a property exposes (abbreviation, long name, aliases) and the
-//! membership of the grouped General_Category values are fixed by the spec,
-//! so they are hardcoded here; only the code-point ranges are version data,
-//! parsed from `vendor/unicode/DerivedGeneralCategory.txt`.
+//! The *names* a property exposes (abbreviation, long name, aliases), the
+//! membership of grouped General_Category values, and the set of binary
+//! properties ECMA-262 recognises are all fixed by the spec, so they are
+//! hardcoded here; only the code-point ranges are version data, parsed from
+//! the UCD. Args: <out> <DerivedGeneralCategory> <DerivedCoreProperties>
+//! <PropList> <emoji-data> <DerivedBinaryProperties> <DerivedNormalizationProps>.
 
 const std = @import("std");
 
 const Range = struct { start: u21, end: u21 };
+const max_cp: u32 = 0x10FFFF;
+
+// ── General_Category ────────────────────────────────────────────────
 
 /// One General_Category value ECMA-262 §22.2.1.1 recognises. `members` is
 /// empty for an atomic category; a non-empty `members` marks a grouped value
@@ -25,21 +30,17 @@ const Category = struct {
 };
 
 const categories = [_]Category{
-    // Letters
     .{ .abbr = "Lu", .names = &.{ "Lu", "Uppercase_Letter" } },
     .{ .abbr = "Ll", .names = &.{ "Ll", "Lowercase_Letter" } },
     .{ .abbr = "Lt", .names = &.{ "Lt", "Titlecase_Letter" } },
     .{ .abbr = "Lm", .names = &.{ "Lm", "Modifier_Letter" } },
     .{ .abbr = "Lo", .names = &.{ "Lo", "Other_Letter" } },
-    // Marks
     .{ .abbr = "Mn", .names = &.{ "Mn", "Nonspacing_Mark" } },
     .{ .abbr = "Mc", .names = &.{ "Mc", "Spacing_Mark" } },
     .{ .abbr = "Me", .names = &.{ "Me", "Enclosing_Mark" } },
-    // Numbers
     .{ .abbr = "Nd", .names = &.{ "Nd", "Decimal_Number", "digit" } },
     .{ .abbr = "Nl", .names = &.{ "Nl", "Letter_Number" } },
     .{ .abbr = "No", .names = &.{ "No", "Other_Number" } },
-    // Punctuation
     .{ .abbr = "Pc", .names = &.{ "Pc", "Connector_Punctuation" } },
     .{ .abbr = "Pd", .names = &.{ "Pd", "Dash_Punctuation" } },
     .{ .abbr = "Ps", .names = &.{ "Ps", "Open_Punctuation" } },
@@ -47,22 +48,18 @@ const categories = [_]Category{
     .{ .abbr = "Pi", .names = &.{ "Pi", "Initial_Punctuation" } },
     .{ .abbr = "Pf", .names = &.{ "Pf", "Final_Punctuation" } },
     .{ .abbr = "Po", .names = &.{ "Po", "Other_Punctuation" } },
-    // Symbols
     .{ .abbr = "Sm", .names = &.{ "Sm", "Math_Symbol" } },
     .{ .abbr = "Sc", .names = &.{ "Sc", "Currency_Symbol" } },
     .{ .abbr = "Sk", .names = &.{ "Sk", "Modifier_Symbol" } },
     .{ .abbr = "So", .names = &.{ "So", "Other_Symbol" } },
-    // Separators
     .{ .abbr = "Zs", .names = &.{ "Zs", "Space_Separator" } },
     .{ .abbr = "Zl", .names = &.{ "Zl", "Line_Separator" } },
     .{ .abbr = "Zp", .names = &.{ "Zp", "Paragraph_Separator" } },
-    // Other
     .{ .abbr = "Cc", .names = &.{ "Cc", "Control", "cntrl" } },
     .{ .abbr = "Cf", .names = &.{ "Cf", "Format" } },
     .{ .abbr = "Cs", .names = &.{ "Cs", "Surrogate" } },
     .{ .abbr = "Co", .names = &.{ "Co", "Private_Use" } },
     .{ .abbr = "Cn", .names = &.{ "Cn", "Unassigned" } },
-    // Groups (union of member categories) — §22.2.1.1 Table of gc values.
     .{ .abbr = "L", .names = &.{ "L", "Letter" }, .members = &.{ "Lu", "Ll", "Lt", "Lm", "Lo" } },
     .{ .abbr = "LC", .names = &.{ "LC", "Cased_Letter" }, .members = &.{ "Lu", "Ll", "Lt" } },
     .{ .abbr = "M", .names = &.{ "M", "Mark", "Combining_Mark" }, .members = &.{ "Mn", "Mc", "Me" } },
@@ -74,9 +71,83 @@ const categories = [_]Category{
 };
 
 fn indexOfAbbr(abbr: []const u8) ?usize {
-    for (categories, 0..) |c, i| {
-        if (std.mem.eql(u8, c.abbr, abbr)) return i;
-    }
+    for (categories, 0..) |c, i| if (std.mem.eql(u8, c.abbr, abbr)) return i;
+    return null;
+}
+
+// ── Binary properties ───────────────────────────────────────────────
+
+/// How a binary property's ranges are produced when not read from a file.
+const Synth = enum { none, ascii, any, assigned };
+
+/// One binary Unicode property ECMA-262 §22.2.1.1 recognises. `ucd` is the
+/// property's name in the UCD files (empty when synthesised); `names` is
+/// every spelling ECMA-262 accepts (canonical long name + aliases).
+const BinProp = struct {
+    ucd: []const u8,
+    names: []const []const u8,
+    synth: Synth = .none,
+};
+
+const bin_props = [_]BinProp{
+    .{ .ucd = "", .names = &.{"ASCII"}, .synth = .ascii },
+    .{ .ucd = "ASCII_Hex_Digit", .names = &.{ "ASCII_Hex_Digit", "AHex" } },
+    .{ .ucd = "Alphabetic", .names = &.{ "Alphabetic", "Alpha" } },
+    .{ .ucd = "", .names = &.{"Any"}, .synth = .any },
+    .{ .ucd = "", .names = &.{"Assigned"}, .synth = .assigned },
+    .{ .ucd = "Bidi_Control", .names = &.{ "Bidi_Control", "Bidi_C" } },
+    .{ .ucd = "Bidi_Mirrored", .names = &.{ "Bidi_Mirrored", "Bidi_M" } },
+    .{ .ucd = "Case_Ignorable", .names = &.{ "Case_Ignorable", "CI" } },
+    .{ .ucd = "Cased", .names = &.{"Cased"} },
+    .{ .ucd = "Changes_When_Casefolded", .names = &.{ "Changes_When_Casefolded", "CWCF" } },
+    .{ .ucd = "Changes_When_Casemapped", .names = &.{ "Changes_When_Casemapped", "CWCM" } },
+    .{ .ucd = "Changes_When_Lowercased", .names = &.{ "Changes_When_Lowercased", "CWL" } },
+    .{ .ucd = "Changes_When_NFKC_Casefolded", .names = &.{ "Changes_When_NFKC_Casefolded", "CWKCF" } },
+    .{ .ucd = "Changes_When_Titlecased", .names = &.{ "Changes_When_Titlecased", "CWT" } },
+    .{ .ucd = "Changes_When_Uppercased", .names = &.{ "Changes_When_Uppercased", "CWU" } },
+    .{ .ucd = "Dash", .names = &.{"Dash"} },
+    .{ .ucd = "Default_Ignorable_Code_Point", .names = &.{ "Default_Ignorable_Code_Point", "DI" } },
+    .{ .ucd = "Deprecated", .names = &.{ "Deprecated", "Dep" } },
+    .{ .ucd = "Diacritic", .names = &.{ "Diacritic", "Dia" } },
+    .{ .ucd = "Emoji", .names = &.{"Emoji"} },
+    .{ .ucd = "Emoji_Component", .names = &.{ "Emoji_Component", "EComp" } },
+    .{ .ucd = "Emoji_Modifier", .names = &.{ "Emoji_Modifier", "EMod" } },
+    .{ .ucd = "Emoji_Modifier_Base", .names = &.{ "Emoji_Modifier_Base", "EBase" } },
+    .{ .ucd = "Emoji_Presentation", .names = &.{ "Emoji_Presentation", "EPres" } },
+    .{ .ucd = "Extended_Pictographic", .names = &.{ "Extended_Pictographic", "ExtPict" } },
+    .{ .ucd = "Extender", .names = &.{ "Extender", "Ext" } },
+    .{ .ucd = "Grapheme_Base", .names = &.{ "Grapheme_Base", "Gr_Base" } },
+    .{ .ucd = "Grapheme_Extend", .names = &.{ "Grapheme_Extend", "Gr_Ext" } },
+    .{ .ucd = "Hex_Digit", .names = &.{ "Hex_Digit", "Hex" } },
+    .{ .ucd = "IDS_Binary_Operator", .names = &.{ "IDS_Binary_Operator", "IDSB" } },
+    .{ .ucd = "IDS_Trinary_Operator", .names = &.{ "IDS_Trinary_Operator", "IDST" } },
+    .{ .ucd = "ID_Continue", .names = &.{ "ID_Continue", "IDC" } },
+    .{ .ucd = "ID_Start", .names = &.{ "ID_Start", "IDS" } },
+    .{ .ucd = "Ideographic", .names = &.{ "Ideographic", "Ideo" } },
+    .{ .ucd = "Join_Control", .names = &.{ "Join_Control", "Join_C" } },
+    .{ .ucd = "Logical_Order_Exception", .names = &.{ "Logical_Order_Exception", "LOE" } },
+    .{ .ucd = "Lowercase", .names = &.{ "Lowercase", "Lower" } },
+    .{ .ucd = "Math", .names = &.{"Math"} },
+    .{ .ucd = "Noncharacter_Code_Point", .names = &.{ "Noncharacter_Code_Point", "NChar" } },
+    .{ .ucd = "Pattern_Syntax", .names = &.{ "Pattern_Syntax", "Pat_Syn" } },
+    .{ .ucd = "Pattern_White_Space", .names = &.{ "Pattern_White_Space", "Pat_WS" } },
+    .{ .ucd = "Quotation_Mark", .names = &.{ "Quotation_Mark", "QMark" } },
+    .{ .ucd = "Radical", .names = &.{"Radical"} },
+    .{ .ucd = "Regional_Indicator", .names = &.{ "Regional_Indicator", "RI" } },
+    .{ .ucd = "Sentence_Terminal", .names = &.{ "Sentence_Terminal", "STerm" } },
+    .{ .ucd = "Soft_Dotted", .names = &.{ "Soft_Dotted", "SD" } },
+    .{ .ucd = "Terminal_Punctuation", .names = &.{ "Terminal_Punctuation", "Term" } },
+    .{ .ucd = "Unified_Ideograph", .names = &.{ "Unified_Ideograph", "UIdeo" } },
+    .{ .ucd = "Uppercase", .names = &.{ "Uppercase", "Upper" } },
+    .{ .ucd = "Variation_Selector", .names = &.{ "Variation_Selector", "VS" } },
+    .{ .ucd = "White_Space", .names = &.{ "White_Space", "space", "WSpace" } },
+    .{ .ucd = "XID_Continue", .names = &.{ "XID_Continue", "XIDC" } },
+    .{ .ucd = "XID_Start", .names = &.{ "XID_Start", "XIDS" } },
+};
+
+fn indexOfUcd(name: []const u8) ?usize {
+    if (name.len == 0) return null;
+    for (bin_props, 0..) |p, i| if (p.synth == .none and std.mem.eql(u8, p.ucd, name)) return i;
     return null;
 }
 
@@ -86,69 +157,89 @@ pub fn main(init: std.process.Init) !void {
 
     var args_iter = init.minimal.args.iterate();
     _ = args_iter.next();
-    const out_path = args_iter.next() orelse fatal("usage: gen_unicode_props <output> <DerivedGeneralCategory.txt>", .{});
-    const gc_path = args_iter.next() orelse fatal("usage: gen_unicode_props <output> <DerivedGeneralCategory.txt>", .{});
+    const out_path = nextArg(&args_iter);
+    const gc_path = nextArg(&args_iter);
+    const dcp_path = nextArg(&args_iter);
+    const proplist_path = nextArg(&args_iter);
+    const emoji_path = nextArg(&args_iter);
+    const dbp_path = nextArg(&args_iter);
+    const dnp_path = nextArg(&args_iter);
 
-    const data = try std.Io.Dir.cwd().readFileAlloc(io, gc_path, allocator, .unlimited);
-    defer allocator.free(data);
+    // ── General_Category ──
+    const gc_data = try std.Io.Dir.cwd().readFileAlloc(io, gc_path, allocator, .unlimited);
+    defer allocator.free(gc_data);
 
-    var lists: [categories.len]std.ArrayListUnmanaged(Range) = undefined;
-    for (&lists) |*l| l.* = .empty;
-    defer for (&lists) |*l| l.deinit(allocator);
+    var gc_lists: [categories.len]std.ArrayListUnmanaged(Range) = undefined;
+    for (&gc_lists) |*l| l.* = .empty;
+    defer for (&gc_lists) |*l| l.deinit(allocator);
 
     var unicode_version: []const u8 = "unknown";
-
-    var line_iter = std.mem.splitScalar(u8, data, '\n');
-    while (line_iter.next()) |line_raw| {
-        const line = std.mem.trimEnd(u8, line_raw, "\r");
-
-        if (std.mem.startsWith(u8, line, "# DerivedGeneralCategory-") and std.mem.eql(u8, unicode_version, "unknown")) {
-            const tail = line["# DerivedGeneralCategory-".len..];
-            const dot = std.mem.indexOf(u8, tail, ".txt") orelse tail.len;
-            unicode_version = tail[0..dot];
-            continue;
+    {
+        var it = std.mem.splitScalar(u8, gc_data, '\n');
+        while (it.next()) |line_raw| {
+            const line = std.mem.trimEnd(u8, line_raw, "\r");
+            if (std.mem.startsWith(u8, line, "# DerivedGeneralCategory-") and std.mem.eql(u8, unicode_version, "unknown")) {
+                const tail = line["# DerivedGeneralCategory-".len..];
+                const dot = std.mem.indexOf(u8, tail, ".txt") orelse tail.len;
+                unicode_version = tail[0..dot];
+                continue;
+            }
+            const pl = parsePropLine(line) orelse continue;
+            const idx = indexOfAbbr(pl.name) orelse continue;
+            const range = parseCodepointRange(pl.cps) catch continue;
+            try gc_lists[idx].append(allocator, range);
         }
-        if (line.len == 0 or line[0] == '#') continue;
-
-        const semi = std.mem.indexOfScalar(u8, line, ';') orelse continue;
-        const cps = std.mem.trim(u8, line[0..semi], " \t");
-        var abbr_part = line[semi + 1 ..];
-        if (std.mem.indexOfScalar(u8, abbr_part, '#')) |hash| abbr_part = abbr_part[0..hash];
-        const abbr = std.mem.trim(u8, abbr_part, " \t");
-
-        const idx = indexOfAbbr(abbr) orelse {
-            std.debug.print("warning: unrecognised gc value '{s}'\n", .{abbr});
-            continue;
-        };
-        const range = parseCodepointRange(cps) catch |err| {
-            std.debug.print("warning: skipping malformed line '{s}': {t}\n", .{ line, err });
-            continue;
-        };
-        try lists[idx].append(allocator, range);
     }
-
-    // Atomic categories first, so grouped values can union finished ranges.
-    for (categories, 0..) |c, i| {
-        if (c.members.len == 0) sortAndMerge(&lists[i]);
-    }
+    for (categories, 0..) |c, i| if (c.members.len == 0) sortAndMerge(&gc_lists[i]);
     for (categories, 0..) |c, i| {
         if (c.members.len == 0) continue;
         for (c.members) |m| {
             const mi = indexOfAbbr(m) orelse fatal("group '{s}' references unknown member '{s}'", .{ c.abbr, m });
-            try lists[i].appendSlice(allocator, lists[mi].items);
+            try gc_lists[i].appendSlice(allocator, gc_lists[mi].items);
         }
-        sortAndMerge(&lists[i]);
+        sortAndMerge(&gc_lists[i]);
     }
 
+    // ── Binary properties ──
+    var bin_lists: [bin_props.len]std.ArrayListUnmanaged(Range) = undefined;
+    for (&bin_lists) |*l| l.* = .empty;
+    defer for (&bin_lists) |*l| l.deinit(allocator);
+
+    for ([_][]const u8{ dcp_path, proplist_path, emoji_path, dbp_path, dnp_path }) |path| {
+        const data = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+        defer allocator.free(data);
+        var it = std.mem.splitScalar(u8, data, '\n');
+        while (it.next()) |line_raw| {
+            const line = std.mem.trimEnd(u8, line_raw, "\r");
+            const pl = parsePropLine(line) orelse continue;
+            const idx = indexOfUcd(pl.name) orelse continue;
+            const range = parseCodepointRange(pl.cps) catch continue;
+            try bin_lists[idx].append(allocator, range);
+        }
+    }
+    for (&bin_lists) |*l| sortAndMerge(l);
+
+    // Synthesised properties: ASCII, Any, and Assigned (= ¬Cn).
+    for (bin_props, 0..) |p, i| switch (p.synth) {
+        .none => {},
+        .ascii => try bin_lists[i].append(allocator, .{ .start = 0x00, .end = 0x7F }),
+        .any => try bin_lists[i].append(allocator, .{ .start = 0x00, .end = @intCast(max_cp) }),
+        .assigned => {
+            const cn = gc_lists[indexOfAbbr("Cn").?].items;
+            try complementInto(allocator, &bin_lists[i], cn);
+        },
+    };
+
+    // ── Emit ──
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator,
         \\//! GENERATED FILE — DO NOT EDIT BY HAND.
         \\//!
-        \\//! Produced by `zig build gen-unicode` from
-        \\//! `vendor/unicode/DerivedGeneralCategory.txt`. Backs RegExp `\p{…}`
-        \\//! General_Category escapes (ECMA-262 §22.2.1.1).
+        \\//! Produced by `zig build gen-unicode` from the vendored UCD files.
+        \\//! Backs RegExp `\p{…}` Unicode property escapes (ECMA-262 §22.2.1.1):
+        \\//! General_Category values and the binary properties.
         \\//!
         \\
     );
@@ -162,11 +253,17 @@ pub fn main(init: std.process.Init) !void {
         \\
     );
 
-    var total: usize = 0;
+    var gc_total: usize = 0;
     for (categories, 0..) |c, i| {
-        try emitRanges(allocator, &buf, c.abbr, lists[i].items);
+        try emitRanges(allocator, &buf, "gc_", c.abbr, gc_lists[i].items);
         try buf.append(allocator, '\n');
-        total += lists[i].items.len;
+        gc_total += gc_lists[i].items.len;
+    }
+    var bp_total: usize = 0;
+    for (bin_props, 0..) |p, i| {
+        try emitRanges(allocator, &buf, "bp_", p.names[0], bin_lists[i].items);
+        try buf.append(allocator, '\n');
+        bp_total += bin_lists[i].items.len;
     }
 
     try buf.appendSlice(allocator,
@@ -176,11 +273,19 @@ pub fn main(init: std.process.Init) !void {
         \\pub fn generalCategory(name: []const u8) ?[]const Range {
         \\
     );
-    for (categories) |c| {
-        for (c.names) |n| {
-            try buf.print(allocator, "    if (std.mem.eql(u8, name, \"{s}\")) return &gc_{s};\n", .{ n, c.abbr });
-        }
-    }
+    for (categories) |c| for (c.names) |n|
+        try buf.print(allocator, "    if (std.mem.eql(u8, name, \"{s}\")) return &gc_{s};\n", .{ n, c.abbr });
+    try buf.appendSlice(allocator,
+        \\    return null;
+        \\}
+        \\
+        \\/// Resolve a binary Unicode property name to its sorted ranges, or null
+        \\/// if `name` is not a binary property ECMA-262 §22.2.1.1 recognises.
+        \\pub fn binaryProperty(name: []const u8) ?[]const Range {
+        \\
+    );
+    for (bin_props) |p| for (p.names) |n|
+        try buf.print(allocator, "    if (std.mem.eql(u8, name, \"{s}\")) return &bp_{s};\n", .{ n, p.names[0] });
     try buf.appendSlice(allocator,
         \\    return null;
         \\}
@@ -190,9 +295,27 @@ pub fn main(init: std.process.Init) !void {
     );
 
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = buf.items });
-    std.debug.print("wrote {s}: {d} General_Category values, {d} total ranges (Unicode {s})\n", .{
-        out_path, categories.len, total, unicode_version,
+    std.debug.print("wrote {s}: {d} gc values ({d} ranges), {d} binary props ({d} ranges) (Unicode {s})\n", .{
+        out_path, categories.len, gc_total, bin_props.len, bp_total, unicode_version,
     });
+}
+
+fn nextArg(it: anytype) []const u8 {
+    return it.next() orelse fatal("usage: gen_unicode_props <out> <DerivedGeneralCategory> <DerivedCoreProperties> <PropList> <emoji-data> <DerivedBinaryProperties> <DerivedNormalizationProps>", .{});
+}
+
+const PropLine = struct { cps: []const u8, name: []const u8 };
+
+/// Parse a UCD data line `cps ; PropName [; value] # comment` into its
+/// code-point field and property name, or null for blank/comment lines.
+fn parsePropLine(line: []const u8) ?PropLine {
+    if (line.len == 0 or line[0] == '#') return null;
+    const semi = std.mem.indexOfScalar(u8, line, ';') orelse return null;
+    const cps = std.mem.trim(u8, line[0..semi], " \t");
+    var rest = line[semi + 1 ..];
+    if (std.mem.indexOfScalar(u8, rest, '#')) |h| rest = rest[0..h];
+    if (std.mem.indexOfScalar(u8, rest, ';')) |s| rest = rest[0..s]; // drop value field
+    return .{ .cps = cps, .name = std.mem.trim(u8, rest, " \t") };
 }
 
 fn parseCodepointRange(s: []const u8) !Range {
@@ -227,13 +350,24 @@ fn sortAndMerge(list: *std.ArrayListUnmanaged(Range)) void {
     list.items.len = write + 1;
 }
 
+/// Append the complement of `ranges` (sorted, merged) over [0, max_cp].
+fn complementInto(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(Range), ranges: []const Range) !void {
+    var next: u32 = 0;
+    for (ranges) |r| {
+        if (r.start > next) try out.append(allocator, .{ .start = @intCast(next), .end = @intCast(r.start - 1) });
+        next = @as(u32, r.end) + 1;
+    }
+    if (next <= max_cp) try out.append(allocator, .{ .start = @intCast(next), .end = @intCast(max_cp) });
+}
+
 fn emitRanges(
     allocator: std.mem.Allocator,
     buf: *std.ArrayListUnmanaged(u8),
-    abbr: []const u8,
+    prefix: []const u8,
+    name: []const u8,
     ranges: []const Range,
 ) !void {
-    try buf.print(allocator, "pub const gc_{s} = [_]Range{{\n", .{abbr});
+    try buf.print(allocator, "pub const {s}{s} = [_]Range{{\n", .{ prefix, name });
     for (ranges) |r| {
         try buf.print(allocator, "    .{{ .start = 0x{X:0>4}, .end = 0x{X:0>4} }},\n", .{ r.start, r.end });
     }

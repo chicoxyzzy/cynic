@@ -1618,19 +1618,28 @@ fn perlexFlags(s: []const u8) perlex.Flags {
 /// Throws SyntaxError for a pattern Perlex is authoritative about
 /// (e.g. a group name reused within one Alternative, §22.2.1.1).
 /// `\p{…}` resolver for Perlex (§22.2.1.1), backed by Cynic's generated
-/// Unicode tables. Resolves General_Category values (lone, or `gc=` /
-/// `General_Category=`); other property kinds and unknown names return
-/// null so the whole pattern defers to the libregexp fallback, which
-/// stays authoritative for those and for the SyntaxError verdict.
+/// Unicode tables. Resolves binary properties and General_Category values:
+/// a lone `\p{NameOrValue}` is a binary property or a gc value (disjoint
+/// name spaces), and `\p{gc=Value}` / `\p{General_Category=Value}` selects
+/// a gc value. Other kinds (Script / Script_Extensions) and unknown names
+/// return null so the whole pattern defers to the libregexp fallback,
+/// which stays authoritative for those and for the SyntaxError verdict.
 fn perlexPropertyResolver(
     gpa: std.mem.Allocator,
     key: ?[]const u8,
     value: []const u8,
 ) std.mem.Allocator.Error!?[]const perlex.parser.Node.ClassRange {
-    if (key) |k| {
-        if (!std.mem.eql(u8, k, "gc") and !std.mem.eql(u8, k, "General_Category")) return null;
-    }
-    const ranges = unicode_properties.generalCategory(value) orelse return null;
+    const ranges: []const unicode_properties.Range = if (key) |k| blk: {
+        // Key=Value form: only General_Category (binary properties are
+        // lone-only; Script / Script_Extensions are not handled yet).
+        if (std.mem.eql(u8, k, "gc") or std.mem.eql(u8, k, "General_Category"))
+            break :blk (unicode_properties.generalCategory(value) orelse return null);
+        return null;
+    } else
+        // Lone form: a binary property, else a gc value.
+        unicode_properties.binaryProperty(value) orelse
+            unicode_properties.generalCategory(value) orelse return null;
+
     const out = try gpa.alloc(perlex.parser.Node.ClassRange, ranges.len);
     for (ranges, out) |r, *o| o.* = .{ .lo = r.start, .hi = r.end };
     return out;
