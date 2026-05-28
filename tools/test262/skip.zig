@@ -9,8 +9,8 @@
 //!
 //!   2. CURRENTLY SKIPPED — standardised work blocked on engineering,
 //!      vendor, or stage maturity. Promote out once the proposal
-//!      advances or the blocking infra lands. ShadowRealm, Temporal,
-//!      libregexp `/v` cluster, focused engine refactors.
+//!      advances or the blocking infra lands. Temporal, the libregexp
+//!      `/v` cluster, and the cross-realm families.
 //!
 //! Lookup is `mem.startsWith`, `mem.indexOf`, `mem.endsWith`, or
 //! `mem.eql` over comptime-iterable lists.
@@ -907,12 +907,12 @@ pub const single_realm_exact_paths = [_][]const u8{
     // path-contains entries; these basenames don't match either
     // pattern, so list them exact). Permanent single-realm carve-out
     // per AGENTS.md. 17 fixtures.
-    // (ShadowRealm Phase 1 closed the 5 `Array/prototype/<m>/
-    //  create-proto-from-ctor-realm-array.js` siblings — they now
-    //  pass the unhardened legacy row and classify divergent under
-    //  SES. ArraySpeciesCreate's GetFunctionRealm step 4 carve-out
-    //  is wired in `array.zig`.)
-    // (ShadowRealm Phase 1 closed `errors-other-realm.js` —
+    // (The cross-realm GetFunctionRealm work closed the 5
+    //  `Array/prototype/<m>/create-proto-from-ctor-realm-array.js`
+    //  siblings — they now pass the unhardened legacy row and
+    //  classify divergent under SES. ArraySpeciesCreate's
+    //  GetFunctionRealm step 4 carve-out is wired in `array.zig`.)
+    // (That same work closed `errors-other-realm.js` —
     //  `Error.isError` reads `has_error_data` on the shared heap,
     //  which both realms write at instantiation.) The sibling
     //  `non-error-objects-other-realm.js` still uses
@@ -926,8 +926,8 @@ pub const single_realm_exact_paths = [_][]const u8{
     //     and throw TypeError (separate engine bug; not realm-tagged
     //     throws).
     //   - String.prototype.{toString,valueOf} throws need to come
-    //     from the called function's realm — Phase 2 (realm-tagged
-    //     throws in builtins).
+    //     from the called function's realm — needs realm-tagged
+    //     throws in builtins.
     "built-ins/JSON/stringify/value-bigint-cross-realm.js",
     "built-ins/Proxy/apply/arguments-realm.js",
     "built-ins/Proxy/construct/arguments-realm.js",
@@ -1012,11 +1012,10 @@ pub const stage_maturity_features = [_][]const u8{
 /// proposal hasn't reached a published edition yet, so shipping
 /// conformance against it isn't the point.
 pub const stage_maturity_path_prefixes = [_][]const u8{
-    // (Stage 2.7 ShadowRealm graduated out of skip-on-stage-maturity
-    // — Phase 3 shipped the constructor + `.evaluate()` callable
-    // boundary. `.importValue()` still throws "not yet implemented",
-    // so the importValue/* subtree is path-skipped one level below
-    // via `pending_refactor_path_prefixes`.)
+    // (ShadowRealm graduated out of stage-maturity skipping — the
+    // constructor, the `.evaluate()` callable boundary, and
+    // `.importValue()` all ship, so the whole `built-ins/ShadowRealm/`
+    // tree attempts as normal corpus.)
 };
 
 // ── Vendor gaps ─────────────────────────────────────────────────────
@@ -1028,13 +1027,12 @@ pub const stage_maturity_path_prefixes = [_][]const u8{
 pub const vendor_features = [_][]const u8{
     "regexp-duplicate-named-groups", // ES2025 — libregexp gap.
     "regexp-modifiers", // ES2024 inline `(?i:…)` / `(?-i:…)`.
-    // (Stage 4 explicit-resource-management used to skip here.
-    // Phases 1-6 of the ERM rollout shipped the full surface:
-    // `Symbol.dispose` / `Symbol.asyncDispose` well-known symbols,
-    // `SuppressedError`, `DisposableStack` / `AsyncDisposableStack`,
-    // `using` / `await using` declarations + the §9.5.4
-    // DisposeResources runtime walk. Feature-tagged fixtures now
-    // attempt as normal corpus.)
+    // (Stage 4 explicit-resource-management used to skip here. The
+    // full surface shipped: `Symbol.dispose` / `Symbol.asyncDispose`
+    // well-known symbols, `SuppressedError`, `DisposableStack` /
+    // `AsyncDisposableStack`, `using` / `await using` declarations +
+    // the §9.5.4 DisposeResources runtime walk. Feature-tagged
+    // fixtures now attempt as normal corpus.)
 };
 
 pub const vendor_path_contains = [_][]const u8{
@@ -1255,13 +1253,12 @@ pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
 }
 
 /// Fixtures Cynic skips **today** but should eventually attempt
-/// — either pre-Stage-4 proposals (ShadowRealm) or Stage-4-
-/// shipped surfaces blocked on vendor / runtime-glue gaps
-/// (Temporal, libregexp `/v` escapes) or focused engine
-/// refactors (try/finally completion ordering, Promise
-/// construct dispatch order, function-as-prototype). These
-/// move to the `attempted` column once the proposal advances,
-/// the blocking infra lands, or the refactor is done.
+/// — either pre-Stage-4 proposals (decorators, import-defer,
+/// source-phase-imports) or Stage-4-shipped surfaces blocked on
+/// vendor / runtime-glue gaps (Temporal, libregexp `/v` escapes)
+/// or focused engine refactors. These move to the `attempted`
+/// column once the proposal advances, the blocking infra lands,
+/// or the refactor is done.
 /// Separated from `pathIsPermanentlyOutOfScope` so the "what
 /// work is left" signal stays distinct from the "what we refuse
 /// to do" signal.
@@ -1396,9 +1393,18 @@ test "skip: Temporal out of scope" {
     try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/PlainDate/prototype/add/branding.js"));
 }
 
-test "skip: ShadowRealm out of scope" {
-    try testing.expect(pathIsCynicOutOfScope("built-ins/ShadowRealm/constructor.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/ShadowRealm/prototype/evaluate/this.js"));
+test "skip: ShadowRealm in scope (graduated)" {
+    // ShadowRealm ships — the constructor, the `.evaluate()`
+    // callable boundary, and `.importValue()` all attempt as normal
+    // corpus. (A handful classify SES-divergent under the hardened
+    // row, but that's scoring, not skipping.)
+    try testing.expect(!pathIsCynicOutOfScope("built-ins/ShadowRealm/constructor.js"));
+    try testing.expect(!pathIsCynicOutOfScope("built-ins/ShadowRealm/extensibility.js"));
+    try testing.expect(!pathIsCynicOutOfScope("built-ins/ShadowRealm/prototype/evaluate/not-constructor.js"));
+    // One carve-out remains: the sloppy-mode `evaluate` fixture is
+    // permanently OOS under the strict-only policy — it asserts the
+    // child Script runs non-strict, which Cynic never does.
+    try testing.expect(pathIsCynicOutOfScope("built-ins/ShadowRealm/prototype/evaluate/no-conditional-strict-mode.js"));
 }
 
 test "skip: /v unicodeSets generated — libregexp parse-time gaps" {
@@ -1504,7 +1510,7 @@ test "skip: unsupported features — stage maturity + planned" {
     // Planned — libregexp.
     try testing.expect(featureIsUnsupported("regexp-modifiers"));
     try testing.expect(featureIsUnsupported("regexp-duplicate-named-groups"));
-    // explicit-resource-management is supported (Phases 1-6
+    // explicit-resource-management is supported (full surface
     // shipped); it must NOT be flagged unsupported.
     try testing.expect(!featureIsUnsupported("explicit-resource-management"));
 }
