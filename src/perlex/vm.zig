@@ -61,6 +61,11 @@ fn isLineTerminator(c: anytype) bool {
     return c == 0x0A or c == 0x0D or c == 0x2028 or c == 0x2029;
 }
 
+/// Combine a UTF-16 surrogate pair into a supplementary code point.
+fn combineSurrogates(hi: u21, lo: u21) u21 {
+    return 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+}
+
 /// Sentinel for a capture slot that did not participate. Real offsets
 /// are bounded by the input length, well below `maxInt`.
 pub const none: usize = std.math.maxInt(usize);
@@ -103,6 +108,7 @@ pub fn exec(
         .gpa = gpa,
         .fold = program.flags.ignore_case,
         .multiline = program.flags.multiline,
+        .unicode = program.flags.unicode,
     };
     defer m.deinit();
 
@@ -136,6 +142,8 @@ fn Matcher(comptime Unit: type) type {
         fold: bool,
         /// `m` flag — `^`/`$` also match at line-terminator boundaries.
         multiline: bool,
+        /// `u` flag — match over code points (decode surrogate pairs).
+        unicode: bool,
         undo: std.ArrayListUnmanaged(Undo) = .empty,
         backtrack: std.ArrayListUnmanaged(Frame) = .empty,
         steps: u64 = 0,
@@ -179,13 +187,10 @@ fn Matcher(comptime Unit: type) type {
 
                 switch (insts[pc]) {
                     .char => |ch| {
-                        const pat: u21 = ch;
-                        const avail = if (backward) sp > 0 else sp < self.input.len;
-                        if (avail) {
-                            const ic: u21 = self.input[if (backward) sp - 1 else sp];
-                            const ok = if (self.fold) asciiUpper(ic) == asciiUpper(pat) else ic == pat;
+                        if (self.peek(sp, backward)) |c| {
+                            const ok = if (self.fold) asciiUpper(c.cp) == asciiUpper(ch) else c.cp == ch;
                             if (ok) {
-                                if (backward) sp -= 1 else sp += 1;
+                                sp = if (backward) sp - c.len else sp + c.len;
                                 pc += 1;
                                 continue;
                             }
@@ -234,15 +239,13 @@ fn Matcher(comptime Unit: type) type {
                         }
                     },
                     .class => |cls| {
-                        const avail = if (backward) sp > 0 else sp < self.input.len;
-                        if (avail) {
-                            const cu: u21 = self.input[if (backward) sp - 1 else sp];
-                            var inside = classContains(cls.ranges, cu);
+                        if (self.peek(sp, backward)) |c| {
+                            var inside = classContains(cls.ranges, c.cp);
                             // Under `i`, a letter matches the class if
                             // its other-case partner is in the set.
-                            if (self.fold and !inside) inside = classContains(cls.ranges, asciiSwapCase(cu));
+                            if (self.fold and !inside) inside = classContains(cls.ranges, asciiSwapCase(c.cp));
                             if (inside != cls.negated) {
-                                if (backward) sp -= 1 else sp += 1;
+                                sp = if (backward) sp - c.len else sp + c.len;
                                 pc += 1;
                                 continue;
                             }
@@ -345,6 +348,35 @@ fn Matcher(comptime Unit: type) type {
                 undo.items.len -= 1;
                 self.slots[u.slot] = u.old;
             }
+        }
+
+        const CodePoint = struct { cp: u21, len: usize };
+
+        /// Read one code point at `sp` (forward) or ending just before
+        /// `sp` (backward). Under `/u` a surrogate pair decodes to one
+        /// code point of length 2; otherwise each code unit stands
+        /// alone. Returns null at the input boundary.
+        fn peek(self: *Self, sp: usize, backward: bool) ?CodePoint {
+            if (backward) {
+                if (sp == 0) return null;
+                const lo: u21 = self.input[sp - 1];
+                if (self.unicode and lo >= 0xDC00 and lo <= 0xDFFF and sp >= 2) {
+                    const hi: u21 = self.input[sp - 2];
+                    if (hi >= 0xD800 and hi <= 0xDBFF) {
+                        return .{ .cp = combineSurrogates(hi, lo), .len = 2 };
+                    }
+                }
+                return .{ .cp = lo, .len = 1 };
+            }
+            if (sp >= self.input.len) return null;
+            const hi: u21 = self.input[sp];
+            if (self.unicode and hi >= 0xD800 and hi <= 0xDBFF and sp + 1 < self.input.len) {
+                const lo: u21 = self.input[sp + 1];
+                if (lo >= 0xDC00 and lo <= 0xDFFF) {
+                    return .{ .cp = combineSurrogates(hi, lo), .len = 2 };
+                }
+            }
+            return .{ .cp = hi, .len = 1 };
         }
 
         /// Match the text captured by group `g` at `sp`, advancing
