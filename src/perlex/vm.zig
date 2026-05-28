@@ -154,14 +154,28 @@ fn Matcher(comptime Unit: type) type {
             self.undo.clearRetainingCapacity();
             self.backtrack.clearRetainingCapacity();
             @memset(self.slots, none);
+            return self.runLoop(self.prog.insts, &self.backtrack, &self.undo, start);
+        }
 
+        /// Run `insts` from `sp_start` against the given backtrack/undo
+        /// stacks. The main match uses the matcher's stacks; a lookahead
+        /// runs its sub-program with fresh, self-contained stacks so it
+        /// can't disturb the outer match. Returns whether a `match`
+        /// instruction was reached.
+        fn runLoop(
+            self: *Self,
+            insts: []const compiler.Inst,
+            backtrack: *std.ArrayListUnmanaged(Frame),
+            undo: *std.ArrayListUnmanaged(Undo),
+            sp_start: usize,
+        ) error{ OutOfMemory, StepLimit }!bool {
             var pc: usize = 0;
-            var sp: usize = start;
+            var sp: usize = sp_start;
             while (true) {
                 self.steps += 1;
                 if (self.steps > step_limit) return error.StepLimit;
 
-                switch (self.prog.insts[pc]) {
+                switch (insts[pc]) {
                     .char => |ch| {
                         if (sp < self.input.len) {
                             const ic: u21 = self.input[sp];
@@ -181,22 +195,22 @@ fn Matcher(comptime Unit: type) type {
                     },
                     .split => |s| {
                         // Try `a` now; `b` is the backtrack target.
-                        try self.backtrack.append(self.gpa, .{
+                        try backtrack.append(self.gpa, .{
                             .pc = s.b,
                             .sp = sp,
-                            .undo_mark = self.undo.items.len,
+                            .undo_mark = undo.items.len,
                         });
                         pc = s.a;
                         continue;
                     },
                     .save => |slot| {
-                        try self.write(slot, sp);
+                        try self.write(undo, slot, sp);
                         pc += 1;
                         continue;
                     },
                     .clear => |r| {
                         var i = r.from;
-                        while (i < r.to) : (i += 1) try self.write(i, none);
+                        while (i < r.to) : (i += 1) try self.write(undo, i, none);
                         pc += 1;
                         continue;
                     },
@@ -266,31 +280,65 @@ fn Matcher(comptime Unit: type) type {
                             continue;
                         }
                     },
+                    .lookahead => |la| {
+                        // §22.2.2.4 — run the sub-program at `sp` with
+                        // fresh stacks, sharing the capture array. The
+                        // assertion is zero-width: `sp` is unchanged
+                        // whatever the outcome.
+                        var saved: [2 * compiler.max_groups]usize = undefined;
+                        const n = self.slots.len;
+                        @memcpy(saved[0..n], self.slots);
+                        var sub_bt: std.ArrayListUnmanaged(Frame) = .empty;
+                        defer sub_bt.deinit(self.gpa);
+                        var sub_undo: std.ArrayListUnmanaged(Undo) = .empty;
+                        defer sub_undo.deinit(self.gpa);
+                        const matched = try self.runLoop(la.sub, &sub_bt, &sub_undo, sp);
+                        if (matched != la.negative) {
+                            if (la.negative) {
+                                // A negative lookahead contributes no captures.
+                                @memcpy(self.slots, saved[0..n]);
+                            } else {
+                                // A positive lookahead keeps its captures;
+                                // log them so an outer backtrack restores
+                                // the pre-lookahead state.
+                                var i: usize = 0;
+                                while (i < n) : (i += 1) {
+                                    if (self.slots[i] != saved[i]) {
+                                        try undo.append(self.gpa, .{ .slot = i, .old = saved[i] });
+                                    }
+                                }
+                            }
+                            pc += 1;
+                            continue;
+                        }
+                        // Assertion failed — restore captures and backtrack.
+                        @memcpy(self.slots, saved[0..n]);
+                    },
                 }
 
                 // Falling out of the switch means this instruction
                 // failed: pop the most recent choice point, undo the
                 // captures it accumulated, and resume there.
-                if (self.backtrack.items.len == 0) return false;
-                const f = self.backtrack.items[self.backtrack.items.len - 1];
-                self.backtrack.items.len -= 1;
-                self.undoTo(f.undo_mark);
+                if (backtrack.items.len == 0) return false;
+                const f = backtrack.items[backtrack.items.len - 1];
+                backtrack.items.len -= 1;
+                self.undoTo(undo, f.undo_mark);
                 pc = f.pc;
                 sp = f.sp;
             }
         }
 
-        /// Set capture slot `slot`, logging the prior value so a later
-        /// backtrack can restore it.
-        fn write(self: *Self, slot: usize, value: usize) error{OutOfMemory}!void {
-            try self.undo.append(self.gpa, .{ .slot = slot, .old = self.slots[slot] });
+        /// Set capture slot `slot`, logging the prior value to `undo`
+        /// so a later backtrack can restore it.
+        fn write(self: *Self, undo: *std.ArrayListUnmanaged(Undo), slot: usize, value: usize) error{OutOfMemory}!void {
+            try undo.append(self.gpa, .{ .slot = slot, .old = self.slots[slot] });
             self.slots[slot] = value;
         }
 
-        fn undoTo(self: *Self, mark: usize) void {
-            while (self.undo.items.len > mark) {
-                const u = self.undo.items[self.undo.items.len - 1];
-                self.undo.items.len -= 1;
+        fn undoTo(self: *Self, undo: *std.ArrayListUnmanaged(Undo), mark: usize) void {
+            while (undo.items.len > mark) {
+                const u = undo.items[undo.items.len - 1];
+                undo.items.len -= 1;
                 self.slots[u.slot] = u.old;
             }
         }

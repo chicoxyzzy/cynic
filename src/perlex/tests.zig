@@ -158,15 +158,40 @@ test "perlex: iterated duplicate group clears captures each iteration" {
 // ── Fallback routing — constructs outside the v1 grammar ─────────────
 
 test "perlex: unsupported constructs fall back" {
-    try expectCompile("(?=a)", .unsupported); // lookahead
     try expectCompile("(?<=a)", .unsupported); // lookbehind
     try expectCompile("[\\D]", .unsupported); // negated class escape in class
-    try expectCompile("\\1", .unsupported); // numeric backreference
+    try expectCompile("\\1", .unsupported); // numeric backreference (no groups)
     try expectCompile("\\p{L}", .unsupported); // property escape
     try expectCompile("(a?)*", .unsupported); // nullable quantifier body
     try expectCompile("(?:)*", .unsupported); // nullable quantifier body
+    try expectCompile("(?=a)*", .unsupported); // quantified assertion (Annex B)
     try expectCompile("a{0,5000}", .unsupported); // bound exceeds inline-expansion cap
     try expectCompile("a{99999}", .unsupported); // huge exact bound
+}
+
+// ── §22.2.2.4 lookahead ─────────────────────────────────────────────
+
+test "perlex: positive lookahead is zero-width" {
+    try expectMatch("a(?=b)", "ab", "a"); // assertion not consumed
+    try expectNoMatch("a(?=b)", "ac");
+    try expectMatch("(?=ab)a", "ab", "a");
+    try expectMatch("\\d+(?=px)", "10px", "10");
+}
+
+test "perlex: negative lookahead" {
+    try expectMatch("a(?!b)", "ac", "a");
+    try expectNoMatch("a(?!b)", "ab");
+}
+
+test "perlex: positive lookahead keeps captures, negative does not" {
+    try expectMatch("(?=(a))a", "a", "a,a"); // group set by positive lookahead
+    try expectMatch("(?!(a))b", "b", "b,"); // negative lookahead group undefined
+}
+
+test "perlex: duplicate name across a lookahead and the sequence errors" {
+    try expectCompile("(?=(?<x>a))(?<x>b)", .syntax_error);
+    // …but the same name across mutually exclusive alternatives is fine.
+    try expectCompile("(?=(?<x>a))|(?<x>b)", .match);
 }
 
 // ── §22.2.1 quantifiers (greedy / lazy / bounded) ───────────────────
