@@ -3762,7 +3762,11 @@ fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) N
         // Proxy that dispatches the `getOwnPropertyDescriptor` trap
         // (§10.5.5); we reuse Object.getOwnPropertyDescriptor which
         // already walks the proxy chain and enforces the invariants.
-        if (obj.proxy_target != null or obj.proxy_revoked) {
+        // Callable proxies (`new Proxy(fn, …)`) carry their target
+        // in `proxy_target_fn`, not `proxy_target`, so include it —
+        // otherwise `hasOwnProperty` on a callable proxy skips the
+        // trap and reads the (empty) wrapper object directly.
+        if (obj.proxy_target != null or obj.proxy_target_fn != null or obj.proxy_revoked) {
             const probe_args = [_]Value{ this_value, argOr(args, 0, Value.undefined_) };
             const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &probe_args);
             return Value.fromBool(!desc_v.isUndefined());
@@ -3801,8 +3805,9 @@ fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []con
         // §20.1.3.4 step 3 composes `O.[[GetOwnProperty]](P)`. For a
         // Proxy that dispatches the `getOwnPropertyDescriptor` trap
         // and returns the descriptor (or undefined). Reuse the
-        // already-spec-faithful entry point.
-        if (obj.proxy_target != null or obj.proxy_revoked) {
+        // already-spec-faithful entry point. Include `proxy_target_fn`
+        // so a callable proxy routes through the trap too.
+        if (obj.proxy_target != null or obj.proxy_target_fn != null or obj.proxy_revoked) {
             const probe_args = [_]Value{ this_value, argOr(args, 0, Value.undefined_) };
             const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &probe_args);
             if (desc_v.isUndefined()) return Value.false_;
