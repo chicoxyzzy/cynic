@@ -28,11 +28,20 @@ pub const FeatureFlag = enum {
     /// 2026-05. Installer site: `src/runtime/builtins/iterator.zig`.
     joint_iteration,
 
-    /// CLI flag / test262 `features:` frontmatter name (kebab-case,
-    /// matching the upstream tc39/test262 convention).
+    /// `ShadowRealm` constructor + the §3.8 cross-realm callable
+    /// boundary (`.evaluate` / `.importValue`). Stage 2.7 as of
+    /// 2026-05. Installer site: `src/runtime/builtins/shadow_realm.zig`,
+    /// gated in `intrinsics.install`.
+    shadow_realm,
+
+    /// CLI flag / test262 `features:` frontmatter name. Case follows
+    /// the upstream tc39/test262 tag, which varies by proposal —
+    /// kebab-case for newer tags (`joint-iteration`), PascalCase for
+    /// older ones (`ShadowRealm`).
     pub fn name(self: FeatureFlag) []const u8 {
         return switch (self) {
             .joint_iteration => "joint-iteration",
+            .shadow_realm => "ShadowRealm",
         };
     }
 
@@ -40,6 +49,7 @@ pub const FeatureFlag = enum {
     pub fn description(self: FeatureFlag) []const u8 {
         return switch (self) {
             .joint_iteration => "Iterator.zip / Iterator.zipKeyed (Stage 3)",
+            .shadow_realm => "ShadowRealm + cross-realm callable boundary (Stage 2.7)",
         };
     }
 

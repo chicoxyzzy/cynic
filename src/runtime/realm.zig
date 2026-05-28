@@ -963,6 +963,11 @@ pub const Realm = struct {
             // loader is null and every import fails
             // `error.ModuleNotFound`.
             .module_loader = parent.module_loader,
+            // Children inherit the parent's enabled feature set so a
+            // flag-gated builtin is present in the child too — without
+            // this, nested `new ShadowRealm()` inside `.evaluate()`
+            // would skip the ShadowRealm install on the grandchild.
+            .feature_flags = parent.feature_flags,
         };
         r.globals.heap = parent.heap;
         return r;

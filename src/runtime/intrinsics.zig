@@ -569,8 +569,13 @@ pub fn install(realm: *Realm) !void {
     // realms (the constructor calls `Realm.installBuiltins` on the
     // child, which is THIS install pass running again on a fresh
     // Realm). Order matters only against the recursive install
-    // re-entry, not against any inter-builtin dep.
-    try @import("builtins/shadow_realm.zig").install(realm);
+    // re-entry, not against any inter-builtin dep. Stage 2.7, so
+    // default-off behind `--enable=ShadowRealm`; child realms inherit
+    // the parent's `feature_flags` (see `Realm.initChild`) so the
+    // recursive install on the child reaches this same gate.
+    if (realm.feature_flags.contains(.shadow_realm)) {
+        try @import("builtins/shadow_realm.zig").install(realm);
+    }
     // Temporal — the `Temporal` namespace object plus the plain
     // value types Cynic ships so far (Duration, PlainTime). Installed
     // after the user-visible constructors; the per-type prototypes
