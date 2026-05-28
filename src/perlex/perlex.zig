@@ -49,7 +49,9 @@ pub fn compile(gpa: std.mem.Allocator, pattern: []const u8, flags: Flags) error{
     // Flags that change match semantics Perlex doesn't implement yet:
     // hand those patterns to the fallback. `global` / `sticky` /
     // `hasIndices` affect the driver, not the core match, so they stay.
-    if (flags.ignore_case or flags.multiline or flags.dot_all or flags.unicode or flags.unicode_sets) {
+    // `ignore_case` is supported via ASCII case folding — declined
+    // below only when the pattern carries a non-ASCII unit.
+    if (flags.multiline or flags.dot_all or flags.unicode or flags.unicode_sets) {
         return .unsupported;
     }
 
@@ -62,6 +64,13 @@ pub fn compile(gpa: std.mem.Allocator, pattern: []const u8, flags: Flags) error{
         error.SyntaxError => return .syntax_error,
         error.OutOfMemory => return error.OutOfMemory,
     };
+
+    // §22.2.2.7.1 — non-Unicode Canonicalize never folds a non-ASCII
+    // unit to ASCII, so ASCII folding is exact for an all-ASCII
+    // pattern. A pattern with an explicit non-ASCII unit could fold to
+    // another non-ASCII unit (e.g. à↔À), which the ASCII fold misses —
+    // defer those `i` patterns to the fallback.
+    if (flags.ignore_case and parsed.non_ascii) return .unsupported;
 
     parser.checkDuplicateNames(a, parsed.root) catch |e| switch (e) {
         error.SyntaxError => return .syntax_error,

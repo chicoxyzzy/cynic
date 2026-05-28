@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const compiler = @import("compiler.zig");
+const parser = @import("parser.zig");
 const Program = compiler.Program;
 
 /// §22.2.1 word character: `[A-Za-z0-9_]`. Accepts either code-unit
@@ -31,6 +32,28 @@ fn isWordChar(c: anytype) bool {
         (c >= 'A' and c <= 'Z') or
         (c >= '0' and c <= '9') or
         c == '_';
+}
+
+/// §22.2.2.7.1 Canonicalize, ASCII case: fold a lowercase letter to
+/// upper. Exact for non-Unicode `i` on all-ASCII patterns (the spec
+/// never folds a non-ASCII unit to ASCII).
+fn asciiUpper(c: u21) u21 {
+    return if (c >= 'a' and c <= 'z') c - ('a' - 'A') else c;
+}
+
+/// The ASCII case partner of `c` (the other case of a letter, else
+/// `c`). Used to test class membership case-insensitively.
+fn asciiSwapCase(c: u21) u21 {
+    if (c >= 'a' and c <= 'z') return c - ('a' - 'A');
+    if (c >= 'A' and c <= 'Z') return c + ('a' - 'A');
+    return c;
+}
+
+fn classContains(ranges: []const parser.Node.ClassRange, c: u21) bool {
+    for (ranges) |r| {
+        if (c >= r.lo and c <= r.hi) return true;
+    }
+    return false;
 }
 
 /// Sentinel for a capture slot that did not participate. Real offsets
@@ -73,6 +96,7 @@ pub fn exec(
         .input = input,
         .slots = slots,
         .gpa = gpa,
+        .fold = program.flags.ignore_case,
     };
     defer m.deinit();
 
@@ -102,6 +126,8 @@ fn Matcher(comptime Unit: type) type {
         input: []const Unit,
         slots: []usize,
         gpa: std.mem.Allocator,
+        /// `i` flag — fold ASCII case in char/class/backref matching.
+        fold: bool,
         undo: std.ArrayListUnmanaged(Undo) = .empty,
         backtrack: std.ArrayListUnmanaged(Frame) = .empty,
         steps: u64 = 0,
@@ -129,10 +155,15 @@ fn Matcher(comptime Unit: type) type {
 
                 switch (self.prog.insts[pc]) {
                     .char => |ch| {
-                        if (sp < self.input.len and @as(u16, self.input[sp]) == ch) {
-                            sp += 1;
-                            pc += 1;
-                            continue;
+                        if (sp < self.input.len) {
+                            const ic: u21 = self.input[sp];
+                            const pat: u21 = ch;
+                            const ok = if (self.fold) asciiUpper(ic) == asciiUpper(pat) else ic == pat;
+                            if (ok) {
+                                sp += 1;
+                                pc += 1;
+                                continue;
+                            }
                         }
                     },
                     .match => return true,
@@ -178,13 +209,10 @@ fn Matcher(comptime Unit: type) type {
                     .class => |cls| {
                         if (sp < self.input.len) {
                             const cu: u21 = self.input[sp];
-                            var inside = false;
-                            for (cls.ranges) |r| {
-                                if (cu >= r.lo and cu <= r.hi) {
-                                    inside = true;
-                                    break;
-                                }
-                            }
+                            var inside = classContains(cls.ranges, cu);
+                            // Under `i`, a letter matches the class if
+                            // its other-case partner is in the set.
+                            if (self.fold and !inside) inside = classContains(cls.ranges, asciiSwapCase(cu));
                             if (inside != cls.negated) {
                                 sp += 1;
                                 pc += 1;
@@ -265,7 +293,14 @@ fn Matcher(comptime Unit: type) type {
             if (cs == none or ce == none) return true; // unset → empty
             const len = ce - cs;
             if (sp.* + len > self.input.len) return false;
-            if (!std.mem.eql(Unit, self.input[cs..ce], self.input[sp.* .. sp.* + len])) return false;
+            if (self.fold) {
+                var i: usize = 0;
+                while (i < len) : (i += 1) {
+                    if (asciiUpper(self.input[cs + i]) != asciiUpper(self.input[sp.* + i])) return false;
+                }
+            } else {
+                if (!std.mem.eql(Unit, self.input[cs..ce], self.input[sp.* .. sp.* + len])) return false;
+            }
             sp.* += len;
             return true;
         }

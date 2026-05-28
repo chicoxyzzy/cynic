@@ -18,8 +18,8 @@ const Outcome = union(enum) {
 
 /// Compile `pattern` and run it from offset 0 over an ASCII `input`,
 /// instantiated at code-unit width `Unit` (`u8` or `u16`).
-fn runUnit(comptime Unit: type, gpa: std.mem.Allocator, pattern: []const u8, input: []const u8) !Outcome {
-    var res = try perlex.compile(gpa, pattern, .{});
+fn runUnit(comptime Unit: type, gpa: std.mem.Allocator, pattern: []const u8, flags: perlex.Flags, input: []const u8) !Outcome {
+    var res = try perlex.compile(gpa, pattern, flags);
     switch (res) {
         .unsupported => return .unsupported,
         .syntax_error => return .syntax_error,
@@ -49,11 +49,15 @@ fn runUnit(comptime Unit: type, gpa: std.mem.Allocator, pattern: []const u8, inp
 }
 
 fn run(gpa: std.mem.Allocator, pattern: []const u8, input: []const u8) !Outcome {
-    return runUnit(u16, gpa, pattern, input);
+    return runUnit(u16, gpa, pattern, .{}, input);
 }
 
 fn expectMatch(pattern: []const u8, input: []const u8, expected: []const u8) !void {
-    const o = try run(testing.allocator, pattern, input);
+    return expectMatchFlags(pattern, .{}, input, expected);
+}
+
+fn expectMatchFlags(pattern: []const u8, flags: perlex.Flags, input: []const u8, expected: []const u8) !void {
+    const o = try runUnit(u16, testing.allocator, pattern, flags, input);
     switch (o) {
         .match => |s| {
             defer testing.allocator.free(s);
@@ -64,14 +68,20 @@ fn expectMatch(pattern: []const u8, input: []const u8, expected: []const u8) !vo
 }
 
 fn expectNoMatch(pattern: []const u8, input: []const u8) !void {
-    const o = try run(testing.allocator, pattern, input);
+    return expectNoMatchFlags(pattern, .{}, input);
+}
+
+fn expectNoMatchFlags(pattern: []const u8, flags: perlex.Flags, input: []const u8) !void {
+    const o = try runUnit(u16, testing.allocator, pattern, flags, input);
     if (o != .no_match) return error.ExpectedNoMatch;
 }
 
 fn expectCompile(pattern: []const u8, want: std.meta.Tag(Outcome)) !void {
-    // Compile only; an empty input is enough to classify the outcome
-    // for the syntax-error / unsupported cases.
-    var res = try perlex.compile(testing.allocator, pattern, .{});
+    return expectCompileFlags(pattern, .{}, want);
+}
+
+fn expectCompileFlags(pattern: []const u8, flags: perlex.Flags, want: std.meta.Tag(Outcome)) !void {
+    var res = try perlex.compile(testing.allocator, pattern, flags);
     switch (res) {
         .ok => |*prog| {
             prog.deinit();
@@ -262,8 +272,47 @@ test "perlex: class participates in captures and groups" {
     try expectMatch("(?<d>[0-9])(?<l>[a-z])", "3q", "3q,3,q");
 }
 
+// ── §22.2.2.7.1 `i` flag (ASCII case folding) ───────────────────────
+
+const ci: perlex.Flags = .{ .ignore_case = true };
+
+test "perlex: i flag folds literals" {
+    try expectMatchFlags("abc", ci, "ABC", "ABC");
+    try expectMatchFlags("abc", ci, "AbC", "AbC");
+    try expectMatchFlags("ABC", ci, "abc", "abc");
+    try expectNoMatchFlags("abc", ci, "abd");
+}
+
+test "perlex: i flag folds classes both directions" {
+    try expectMatchFlags("[a-z]+", ci, "AbC", "AbC");
+    try expectMatchFlags("[A-Z]", ci, "a", "a");
+    try expectMatchFlags("[a-z]", ci, "A", "A");
+    try expectNoMatchFlags("[a-z]", ci, "0");
+    // Negated class is case-insensitive too.
+    try expectNoMatchFlags("[^a-z]", ci, "A");
+}
+
+test "perlex: i flag folds backreferences" {
+    try expectMatchFlags("(?<x>a)\\k<x>", ci, "aA", "aA,a");
+    try expectMatchFlags("(?<x>ab)\\k<x>", ci, "abAB", "abAB,ab");
+}
+
+test "perlex: i flag leaves non-letters and dot/word unchanged" {
+    try expectMatchFlags("\\w+", ci, "Ab_9", "Ab_9");
+    try expectMatchFlags("a.c", ci, "AXC", "AXC");
+    try expectMatchFlags("\\d+", ci, "42", "42");
+}
+
+test "perlex: i with non-ASCII units falls back" {
+    // ASCII folding can't model à↔À, so these defer to the fallback.
+    try expectCompileFlags("\\u00e0", ci, .unsupported);
+    try expectCompileFlags("[\\u00c0-\\u00ff]", ci, .unsupported);
+    // …but the same patterns compile fine without `i`.
+    try expectCompileFlags("\\u00e0", .{}, .match);
+}
+
 test "perlex: u8 fast path matches like the u16 path" {
-    const o = try runUnit(u8, testing.allocator, "(?:(?<x>a)|(?<x>b))\\k<x>", "bb");
+    const o = try runUnit(u8, testing.allocator, "(?:(?<x>a)|(?<x>b))\\k<x>", .{}, "bb");
     switch (o) {
         .match => |s| {
             defer testing.allocator.free(s);
