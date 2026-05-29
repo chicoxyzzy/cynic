@@ -688,13 +688,27 @@ match indices land in spec-correct UTF-16 code units. A native Zig
 backtracking engine — **Perlex** (`src/perlex/`) — now sits first in
 regex dispatch and owns most patterns it can compile; libregexp is
 the shrinking fallback for constructs Perlex doesn't yet support.
+Perlex now covers the whole `/v` UnicodeSets grammar (set algebra,
+nested classes, `\q{…}` string disjunctions, `\p{…}` properties of
+strings) and `/iu` / `/iv` simple case folding (§22.2.2.9) natively —
+no real engine failures remain in the RegExp corpus.
 
-**Planned.** Widen Perlex toward full §22.2 coverage so the
-libregexp fallback can eventually be retired (`/vi` case folding and
-emoji-sequence string properties are the main gaps left). Plus
-integration polish: `RegExp.prototype` properties matching V8 / JSC
-for `lastIndex`, `flags`, `dotAll` accessor; minor edge cases in the
-String.prototype dispatch.
+**Planned.** Move the remaining libregexp-deferred constructs into
+Perlex so the fallback can be retired. Each works today via fallback,
+so these are footprint-shrinking, not conformance gaps:
+
+- nullable quantifier bodies (`(a?)*`) — needs the §22.2.2.3
+  zero-width progress guard;
+- repeat bounds above the inline-expansion cap (`a{2000}`);
+- lookbehind bodies with captures, backreferences, or nested
+  assertions (v1 lookbehind is capture/assertion-free);
+- patterns with more than 64 capturing groups.
+
+The one unshipped *feature* is `regexp-modifiers` (ES2024 inline
+`(?i:…)` / `(?-i:…)`), unsupported by both Perlex and libregexp.
+Plus integration polish: `RegExp.prototype` properties matching
+V8 / JSC for `lastIndex`, `flags`, `dotAll` accessor; minor edge
+cases in the String.prototype dispatch.
 
 **Annex B regex grammar (§B.1.4) — narrowed by Perlex.**
 The §22.2.1 main grammar makes `]`, `{`, `}` SyntaxCharacters

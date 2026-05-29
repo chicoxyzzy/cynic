@@ -1059,27 +1059,19 @@ pub const vendor_path_contains = [_][]const u8{
     //  Cynic's own Unicode tables — `unicode/perlex_props.zig` — at both
     //  parse and runtime, so the value no longer reaches libregexp,
     //  whose property tables omit the "Unknown" special value.)
-    // §22.2.1 /v flag — Perlex compiles the code-point half of the
-    // UnicodeSets grammar natively (set operators, nested classes,
-    // `\p{…}` operands) and now the `\q{…}` ClassStringDisjunction
-    // half too: a class that may contain strings lowers to an ordered
-    // alternation (§22.2.2.7), and the §22.2.1.1 negated-class-with-
-    // strings early error is enforced. So the pure string-literal
-    // fixtures (`string-literal` combined with character / class /
-    // property-escape operands) run and pass. What remains deferred is
-    // the *property-of-strings* escapes (`\p{RGI_Emoji}`,
-    // `\p{Emoji_Keycap_Sequence}`, …), which need the emoji-sequence
-    // Unicode tables Cynic hasn't generated yet. Perlex reports those
-    // `.unsupported` and routes them to vendored libregexp, whose tables
-    // omit them, so the fixture fails at pattern-compile time. The
-    // patterns below catch every property-of-strings / rgi-emoji
-    // basename, including the combos that pair a `\q{…}` with a
-    // property-of-strings escape (caught by the `property-of-strings`
-    // entries on whichever side the escape sits). The skips shrink
-    // further when Perlex's property-of-strings phase lands.
-    "/unicodeSets/generated/property-of-strings-",
-    "-property-of-strings-escape.js",
-    "/unicodeSets/generated/rgi-emoji-",
+    //
+    // (§22.2.1 /v flag graduated out: Perlex compiles the whole
+    //  UnicodeSets grammar natively now — the code-point half (set
+    //  operators, nested classes, `\p{…}` operands), the `\q{…}`
+    //  ClassStringDisjunction half (lowered to an ordered alternation
+    //  per §22.2.2.7, with the §22.2.1.1 negated-class-with-strings
+    //  early error enforced), and the *property-of-strings* escapes
+    //  (`\p{RGI_Emoji}`, `\p{Basic_Emoji}`, `\p{Emoji_Keycap_Sequence}`,
+    //  and the four other §22.2.1.1 sequence properties), backed by the
+    //  generated emoji-sequence tables in `unicode/properties.zig`. The
+    //  `property-of-strings` / `rgi-emoji` generated fixtures resolve and
+    //  pass, so their skips — and the `\p{…}`-of-strings deferral to
+    //  libregexp — are gone.)
 };
 
 // ── Single-realm path-contains ──────────────────────────────────────
