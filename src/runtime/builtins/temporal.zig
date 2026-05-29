@@ -1650,6 +1650,24 @@ fn requireISOCalendar(realm: *Realm, calendar: Value) NativeError!void {
 /// bare calendar id only — no embedded ISO string.)
 fn requireCalendarFieldType(realm: *Realm, calendar: Value) NativeError!void {
     if (calendar.isUndefined()) return;
+    return toTemporalCalendarIdentifier(realm, calendar);
+}
+
+/// §13.x ToTemporalCalendarIdentifier — the bare abstract operation, with no
+/// `undefined`-means-default special case. An object carrying a
+/// calendar-bearing Temporal internal slot (PlainDate / PlainDateTime /
+/// PlainYearMonth / PlainMonthDay / ZonedDateTime) contributes its
+/// `[[Calendar]]` (always "iso8601" in Cynic) and is accepted; a
+/// Temporal.Instant / Duration / PlainTime (no `[[Calendar]]`), any other
+/// object, or any non-string primitive (including `undefined`) is a
+/// TypeError. A calendar *string* must be the bare ASCII "iso8601" id or a
+/// parseable ISO 8601 string whose `[u-ca=…]` annotation (when present)
+/// names the ISO calendar — every other string is a RangeError. Used by
+/// `withCalendar`, where the argument is a required value passed straight to
+/// ToTemporalCalendarIdentifier; `requireCalendarFieldType` wraps this for the
+/// property-bag `calendar` field, where an absent (`undefined`) field instead
+/// keeps the ISO default.
+fn toTemporalCalendarIdentifier(realm: *Realm, calendar: Value) NativeError!void {
     if (heap_mod.valueAsPlainObject(calendar)) |obj| {
         if (obj.getTemporalRecord()) |rec| switch (rec.*) {
             // §13.x ToTemporalCalendarIdentifier step 1.a — read the
@@ -2109,10 +2127,15 @@ fn differenceTemporalDate(realm: *Realm, this_value: Value, args: []const Value,
     }
     return createTemporalDuration(realm, diff);
 }
+/// §3.3.x Temporal.PlainDate.prototype.withCalendar ( calendarLike ) — Cynic
+/// ships only the ISO calendar, so any accepted identifier yields a copy of
+/// the same ISO date. ToTemporalCalendarIdentifier validates the argument
+/// (calendar-bearing object or ISO string ok; Instant / Duration / PlainTime
+/// or non-string → TypeError; non-ISO string → RangeError).
 fn plainDateWithCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainDate(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainDate.prototype.withCalendar is not yet implemented");
+    const rec = try requirePlainDate(realm, this_value);
+    try toTemporalCalendarIdentifier(realm, argOr(args, 0, Value.undefined_));
+    return createTemporalDate(realm, rec);
 }
 fn plainDateToPlainYearMonth(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
@@ -2709,15 +2732,7 @@ fn plainDateTimeWithPlainTime(realm: *Realm, this_value: Value, args: []const Va
 /// non-Temporal value is TypeError.
 fn plainDateTimeWithCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requirePlainDateTime(realm, this_value);
-    const arg = argOr(args, 0, Value.undefined_);
-    if (heap_mod.valueAsPlainObject(arg)) |o| {
-        if (o.getTemporalRecord() != null) return createTemporalDateTime(realm, rec);
-    }
-    if (!arg.isString()) return throwTypeError(realm, "calendar must be a string or calendar-bearing object");
-    const s: *JSString = @ptrCast(@alignCast(arg.asString()));
-    if (!std.ascii.eqlIgnoreCase(s.flatBytes(), "iso8601")) {
-        return throwRangeError(realm, "only the iso8601 calendar is supported");
-    }
+    try toTemporalCalendarIdentifier(realm, argOr(args, 0, Value.undefined_));
     return createTemporalDateTime(realm, rec);
 }
 
@@ -4562,15 +4577,7 @@ fn zonedDateTimeWithTimeZone(realm: *Realm, this_value: Value, args: []const Val
 /// copy with the same instant + zone.
 fn zonedDateTimeWithCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const z = try requireZonedDateTime(realm, this_value);
-    const arg = argOr(args, 0, Value.undefined_);
-    if (heap_mod.valueAsPlainObject(arg)) |o| {
-        if (o.getTemporalRecord() != null) return createTemporalZonedDateTime(realm, z);
-    }
-    if (!arg.isString()) return throwTypeError(realm, "calendar must be a string or calendar-bearing object");
-    const s: *JSString = @ptrCast(@alignCast(arg.asString()));
-    if (!std.ascii.eqlIgnoreCase(s.flatBytes(), "iso8601")) {
-        return throwRangeError(realm, "only the iso8601 calendar is supported");
-    }
+    try toTemporalCalendarIdentifier(realm, argOr(args, 0, Value.undefined_));
     return createTemporalZonedDateTime(realm, z);
 }
 
