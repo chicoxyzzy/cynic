@@ -135,7 +135,7 @@ pub fn build(b: *std.Build) void {
     const run_gen = b.addRunArtifact(gen_exe);
     run_gen.addFileArg(b.path("vendor/unicode/DerivedCoreProperties.txt"));
     run_gen.addArg(b.pathFromRoot("src/unicode/ident_tables.zig"));
-    const gen_step = b.step("gen-unicode", "Regenerate src/unicode/{ident,property}_tables.zig from UCD");
+    const gen_step = b.step("gen-unicode", "Regenerate src/unicode/{ident,property,case_fold}_tables.zig from UCD");
     gen_step.dependOn(&run_gen.step);
 
     const gen_props_mod = b.createModule(.{
@@ -161,6 +161,22 @@ pub fn build(b: *std.Build) void {
     run_gen_props.addFileArg(b.path("vendor/unicode/emoji-sequences.txt"));
     run_gen_props.addFileArg(b.path("vendor/unicode/emoji-zwj-sequences.txt"));
     gen_step.dependOn(&run_gen_props.step);
+
+    // src/unicode/case_fold_tables.zig (RegExp `/iu`/`/iv` case folding,
+    // §22.2.2.9) from the vendored CaseFolding.txt — same on-demand model.
+    const gen_cf_mod = b.createModule(.{
+        .root_source_file = b.path("tools/gen_case_fold.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const gen_cf_exe = b.addExecutable(.{
+        .name = "gen_case_fold",
+        .root_module = gen_cf_mod,
+    });
+    const run_gen_cf = b.addRunArtifact(gen_cf_exe);
+    run_gen_cf.addArg(b.pathFromRoot("src/unicode/case_fold_tables.zig"));
+    run_gen_cf.addFileArg(b.path("vendor/unicode/CaseFolding.txt"));
+    gen_step.dependOn(&run_gen_cf.step);
 
     // `zig build fmt-check` runs `zig fmt --check` over `src/` and
     // `tools/`. Advisory in CI (non-gating) — flags drift on PR
