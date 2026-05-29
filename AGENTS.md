@@ -358,7 +358,12 @@ build — see `.github/workflows/ci.yml`). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
 and the browser-era built-ins Cynic doesn't ship are dropped from
-`total` entirely. Re-running for the same `(date, mode)` replaces
+`total` entirely. (`intl402/` is dropped for the *default* build;
+a future Intl-enabled build flavour — opt-in, linking a CLDR/ICU
++ IANA `tzdata` stack — would bring it back into scope, along
+with named time zones and non-ISO calendars. See
+[docs/ROADMAP.md](docs/ROADMAP.md) under "Intl".) Re-running for
+the same `(date, mode)` replaces
 that day's row. Each row records `spec%` (pass / total) and
 `attempted%` (pass / (pass + fail)). `test262-results.md` opens
 with a `## Current scores` snapshot, a `## Legend` explaining the

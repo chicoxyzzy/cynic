@@ -348,11 +348,16 @@ Before the divergence work itself, audit the current skip list
 (`tools/test262/skip.zig`). The list today mixes three rationales
 under one mechanism, and only one of the three is permanent:
 
-1. **Permanent OOS** — Annex B, intl402, harness/, staging/,
-   browser-era built-ins (`escape`, `String.prototype` HTML
-   wrappers, `Date.{getYear, setYear}`, etc.). These will *never*
-   apply to Cynic's target. Strikethrough rows in the scoreboard
-   make sense. Keep as-is.
+1. **Permanent OOS** — Annex B, harness/, staging/, browser-era
+   built-ins (`escape`, `String.prototype` HTML wrappers,
+   `Date.{getYear, setYear}`, etc.). These will *never* apply to
+   Cynic's target. Strikethrough rows in the scoreboard make
+   sense. Keep as-is. (`intl402/` rides the same skip mechanism
+   but is *not* permanent in principle: it's OOS for the default
+   non-Intl build, and a future Intl-enabled build flavour would
+   bring it — named time zones, non-ISO calendars, the `Intl.*`
+   formatters — back into scope. See
+   [ROADMAP.md](../ROADMAP.md) under "Intl".)
 2. **Stage maturity** — pre-Stage-4 proposals
    (`decorators`, `explicit-resource-management`, `ShadowRealm`,
    `import-defer`, …). These *might* ship later; today they'd

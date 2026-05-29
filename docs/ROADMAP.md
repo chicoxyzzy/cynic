@@ -559,14 +559,28 @@ automatically on the next full sweep.
   render local time. Real timezone handling would need a
   vendored tz-data source (IANA `tzdata`) plus the per-method
   local-time conversions; deferred until a user actually asks.
-- `Intl` is not implemented — `Intl.NumberFormat`,
-  `Intl.DateTimeFormat`, `Intl.Collator`, `Intl.Segmenter`, etc.
-  are absent. The whole `intl402/` test262 tree is path-skipped
-  (out-of-scope per [AGENTS.md](../AGENTS.md)). Cynic's
-  `localeCompare` returns a canonical-equivalence-aware
-  compare via NFD-then-ordinal (note in §22.1.3.12);
-  case-sensitive Turkish-style collation is what's missing,
-  not basic NFC folding.
+- `Intl` is not implemented in the default build —
+  `Intl.NumberFormat`, `Intl.DateTimeFormat`, `Intl.Collator`,
+  `Intl.Segmenter`, etc. are absent, and the whole `intl402/`
+  test262 tree is path-skipped (out-of-scope per
+  [AGENTS.md](../AGENTS.md)). Cynic's `localeCompare` returns a
+  canonical-equivalence-aware compare via NFD-then-ordinal (note
+  in §22.1.3.12); case-sensitive Turkish-style collation is
+  what's missing, not basic NFC folding.
+
+  **A future Intl-enabled build is contemplated.** ECMA-402 needs
+  a CLDR/ICU-class locale database plus IANA `tzdata` — a large
+  vendored dependency the default edge-runtime build deliberately
+  omits to stay small and dependency-light. It's a separate
+  *build flavour*, not a default-on feature: an opt-in Cynic that
+  links the locale/tz stack. The seams are being kept clean so it
+  can land without a rewrite — Temporal funnels every zone-offset
+  lookup through a single `getOffsetNanosecondsFor` chokepoint
+  (see "Temporal" below) so a named-IANA-zone provider drops in at
+  one place, and `localeCompare` already isolates its NFD
+  pipeline. If that build ships, the `intl402/` tree — named time
+  zones, non-ISO calendars, and the `Intl.*` formatters — comes
+  back into the scored scope with it.
 
 **Deferred.** `Temporal` (ES2025) — a complete date/time API
 replacement (calendars, time zones, ISO 8601, etc.) and a
@@ -577,7 +591,14 @@ arithmetic-heavy methods aren't finished, so on `main` the whole
 `built-ins/Temporal/` tree is path-skipped — out of the score
 denominator rather than dragging runtime spec% down. The full
 surface is carried as a separate effort; it remains the largest
-known coverage gap.
+known coverage gap. The time-zone scope is **UTC + fixed-offset
+only**: no vendored IANA `tzdata` in the default build, so named
+zones (e.g. `"America/New_York"`) and non-ISO calendars are the
+payoff of the future Intl-enabled build (above), not of this
+effort. Every offset lookup already routes through one
+`getOffsetNanosecondsFor` seam, so that build plugs a tzdata
+provider in at a single place rather than threading it through
+each `ZonedDateTime` operation.
 
 **Out of scope.** Annex B in its entirety — language extensions
 *and* every browser-era built-in (`escape` / `unescape`, the
