@@ -56,6 +56,16 @@ pub const PropertyResolver = *const fn (
     value: []const u8,
 ) std.mem.Allocator.Error!?ResolvedProperty;
 
+/// Resolves a code point to the other members of its §22.2.2.9
+/// Canonicalize equivalence class under Unicode case folding — the
+/// simple/common case-folding orbit (CaseFolding.txt statuses C and S)
+/// *excluding* `cp` itself. Returns an empty slice when `cp` folds only
+/// to itself. The returned slice points at static table data the VM
+/// never frees. Injected so Perlex carries no Unicode data — the bridge
+/// backs it with Cynic's generated CaseFolding tables; a null folder
+/// defers every `/iu`/`/iv` pattern to the fallback matcher.
+pub const CaseFoldFn = *const fn (cp: u21) []const u21;
+
 pub const Inst = union(enum) {
     /// Match one literal — a UTF-16 code unit, or a code point up to
     /// U+10FFFF under `/u` — then advance.
@@ -128,6 +138,11 @@ pub const Program = struct {
     /// when this is false. Unused until that engine lands, but the
     /// classification is the seam it plugs into.
     is_regular: bool,
+    /// Unicode case-folding orbit resolver, applied at match time for
+    /// `/iu`/`/iv` (§22.2.2.9 Canonicalize). Null for non-folding
+    /// patterns and for ASCII-`i`, which the VM folds inline. Set by the
+    /// caller after `compile`; it is injected data, not derived here.
+    case_folder: ?CaseFoldFn = null,
     gpa: std.mem.Allocator,
 
     pub fn deinit(self: *Program) void {

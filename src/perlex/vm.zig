@@ -110,6 +110,7 @@ pub fn exec(
         .multiline = program.flags.multiline,
         // `/v` (UnicodeSets) matches over code points like `/u`.
         .unicode = program.flags.unicode or program.flags.unicode_sets,
+        .folder = program.case_folder,
     };
     defer m.deinit();
 
@@ -145,6 +146,9 @@ fn Matcher(comptime Unit: type) type {
         multiline: bool,
         /// `u` flag — match over code points (decode surrogate pairs).
         unicode: bool,
+        /// §22.2.2.9 case-folding orbits, injected for `/iu`/`/iv`. Null
+        /// for ASCII-`i` (folded inline) and non-folding patterns.
+        folder: ?compiler.CaseFoldFn,
         undo: std.ArrayListUnmanaged(Undo) = .empty,
         backtrack: std.ArrayListUnmanaged(Frame) = .empty,
         steps: u64 = 0,
@@ -189,7 +193,7 @@ fn Matcher(comptime Unit: type) type {
                 switch (insts[pc]) {
                     .char => |ch| {
                         if (self.peek(sp, backward)) |c| {
-                            const ok = if (self.fold) asciiUpper(c.cp) == asciiUpper(ch) else c.cp == ch;
+                            const ok = self.charEq(c.cp, ch);
                             if (ok) {
                                 sp = if (backward) sp - c.len else sp + c.len;
                                 pc += 1;
@@ -242,9 +246,24 @@ fn Matcher(comptime Unit: type) type {
                     .class => |cls| {
                         if (self.peek(sp, backward)) |c| {
                             var inside = classContains(cls.ranges, c.cp);
-                            // Under `i`, a letter matches the class if
-                            // its other-case partner is in the set.
-                            if (self.fold and !inside) inside = classContains(cls.ranges, asciiSwapCase(c.cp));
+                            // Under `i`, a code point matches the class if
+                            // any case-fold partner is in the set. Under
+                            // `/iu`/`/iv` that is the full orbit (§22.2.2.9);
+                            // otherwise the single ASCII case partner.
+                            if (self.fold and !inside) {
+                                if (self.unicode) {
+                                    if (self.folder) |f| {
+                                        for (f(c.cp)) |p| {
+                                            if (classContains(cls.ranges, p)) {
+                                                inside = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    inside = classContains(cls.ranges, asciiSwapCase(c.cp));
+                                }
+                            }
                             if (inside != cls.negated) {
                                 sp = if (backward) sp - c.len else sp + c.len;
                                 pc += 1;
@@ -351,6 +370,24 @@ fn Matcher(comptime Unit: type) type {
             }
         }
 
+        /// §22.2.2.9 Canonicalize equality: does input code point `a`
+        /// match pattern code point `b` under the active flags? Without
+        /// `i`, exact equality. With non-Unicode `i`, ASCII case fold.
+        /// With `/iu`/`/iv`, `a` matches `b` if they share a case-folding
+        /// orbit — `b` is among `a`'s injected partners. Symmetric, since
+        /// orbit membership is mutual.
+        fn charEq(self: *Self, a: u21, b: u21) bool {
+            if (!self.fold) return a == b;
+            if (self.unicode) {
+                if (a == b) return true;
+                if (self.folder) |f| {
+                    for (f(a)) |p| if (p == b) return true;
+                }
+                return false;
+            }
+            return asciiUpper(a) == asciiUpper(b);
+        }
+
         const CodePoint = struct { cp: u21, len: usize };
 
         /// Read one code point at `sp` (forward) or ending just before
@@ -369,10 +406,18 @@ fn Matcher(comptime Unit: type) type {
                 }
                 return .{ .cp = lo, .len = 1 };
             }
-            if (sp >= self.input.len) return null;
-            const hi: u21 = self.input[sp];
-            if (self.unicode and hi >= 0xD800 and hi <= 0xDBFF and sp + 1 < self.input.len) {
-                const lo: u21 = self.input[sp + 1];
+            return self.peekAt(sp, self.input.len);
+        }
+
+        /// Forward-decode one code point at `idx`, bounded by `limit` (so
+        /// a surrogate pair is never read across a slice boundary). Under
+        /// `/u`/`/v` a valid high+low pair is one code point of length 2;
+        /// otherwise each code unit stands alone. Null when `idx >= limit`.
+        fn peekAt(self: *Self, idx: usize, limit: usize) ?CodePoint {
+            if (idx >= limit) return null;
+            const hi: u21 = self.input[idx];
+            if (self.unicode and hi >= 0xD800 and hi <= 0xDBFF and idx + 1 < limit) {
+                const lo: u21 = self.input[idx + 1];
                 if (lo >= 0xDC00 and lo <= 0xDFFF) {
                     return .{ .cp = combineSurrogates(hi, lo), .len = 2 };
                 }
@@ -386,6 +431,24 @@ fn Matcher(comptime Unit: type) type {
             const cs = self.slots[2 * g];
             const ce = self.slots[2 * g + 1];
             if (cs == none or ce == none) return true; // unset → empty
+            // Under `/iu`/`/iv` fold code point by code point: a fold pair
+            // can span a surrogate pair (e.g. Deseret U+10400↔U+10428), so
+            // per-code-unit folding would break. Simple case folding never
+            // changes the code-point count, but compare against each cursor
+            // independently rather than assuming equal unit lengths.
+            if (self.fold and self.unicode) {
+                var ci = cs;
+                var si = sp.*;
+                while (ci < ce) {
+                    const cap = self.peekAt(ci, ce).?; // in-bounds: ci < ce
+                    const cand = self.peekAt(si, self.input.len) orelse return false;
+                    if (!self.charEq(cand.cp, cap.cp)) return false;
+                    ci += cap.len;
+                    si += cand.len;
+                }
+                sp.* = si;
+                return true;
+            }
             const len = ce - cs;
             if (sp.* + len > self.input.len) return false;
             if (self.fold) {

@@ -122,6 +122,79 @@ fn stubResolver(gpa: std.mem.Allocator, key: ?[]const u8, value: []const u8) std
     return .{ .ranges = try gpa.dupe(CR, ranges), .strings = &.{} };
 }
 
+/// A §22.2.2.9 case-folding orbit resolver backed by tiny fake data, so
+/// the VM's `/iu`/`/iv` folding is exercised without the real CaseFolding
+/// tables. Returns the orbit members *excluding* `cp` (empty when `cp`
+/// folds only to itself), mirroring `perlex.CaseFoldFn`. The orbits:
+/// `k`/`K`/KELVIN SIGN (U+212A); the three ASCII letter pairs a/b/c; and a
+/// supplementary Deseret pair (U+10400 LONG I ↔ U+10428 long i) to cover
+/// per-code-point folding across a surrogate pair.
+fn stubFolder(cp: u21) []const u21 {
+    return switch (cp) {
+        'k' => &.{ 'K', 0x212A },
+        'K' => &.{ 'k', 0x212A },
+        0x212A => &.{ 'k', 'K' },
+        'a' => &.{'A'},
+        'A' => &.{'a'},
+        'b' => &.{'B'},
+        'B' => &.{'b'},
+        'c' => &.{'C'},
+        'C' => &.{'c'},
+        0x10400 => &.{0x10428},
+        0x10428 => &.{0x10400},
+        else => &.{},
+    };
+}
+
+/// Compile with both the stub property resolver and the stub case folder,
+/// then run over a UTF-16 `units` input (passed directly so supplementary
+/// code points can be expressed as surrogate pairs). Returns the same
+/// comma-joined capture rendering as `runUnit`/`runProp`.
+fn runHooks(gpa: std.mem.Allocator, pattern: []const u8, flags: perlex.Flags, units: []const u16) !Outcome {
+    var res = try perlex.compileWithHooks(gpa, pattern, flags, .{ .resolver = stubResolver, .case_folder = stubFolder });
+    switch (res) {
+        .unsupported => return .unsupported,
+        .syntax_error => return .syntax_error,
+        .ok => |*prog| {
+            defer prog.deinit();
+            var m = (try perlex.exec(u16, gpa, prog, units, 0)) orelse return .no_match;
+            defer m.deinit(gpa);
+            var out: std.ArrayListUnmanaged(u8) = .empty;
+            errdefer out.deinit(gpa);
+            var g: usize = 0;
+            while (g < prog.group_count) : (g += 1) {
+                if (g != 0) try out.append(gpa, ',');
+                const cs = m.slots[2 * g];
+                const ce = m.slots[2 * g + 1];
+                if (cs != perlex.none and ce != perlex.none) {
+                    for (units[cs..ce]) |u| {
+                        // Render only BMP units as bytes; supplementary
+                        // matches are asserted by capture span, not text.
+                        if (u <= 0x7F) try out.append(gpa, @intCast(u));
+                    }
+                }
+            }
+            return .{ .match = try out.toOwnedSlice(gpa) };
+        },
+    }
+}
+
+fn expectFoldMatch(pattern: []const u8, flags: perlex.Flags, units: []const u16, expected: []const u8) !void {
+    const o = try runHooks(testing.allocator, pattern, flags, units);
+    switch (o) {
+        .match => |s| {
+            defer testing.allocator.free(s);
+            try testing.expectEqualStrings(expected, s);
+        },
+        else => return error.ExpectedMatch,
+    }
+}
+
+fn expectFoldNoMatch(pattern: []const u8, flags: perlex.Flags, units: []const u16) !void {
+    const o = try runHooks(testing.allocator, pattern, flags, units);
+    if (o != .no_match) return error.ExpectedNoMatch;
+}
+
 const uflags = perlex.Flags{ .unicode = true };
 
 fn runProp(gpa: std.mem.Allocator, pattern: []const u8, flags: perlex.Flags, input: []const u8) !Outcome {
@@ -606,6 +679,61 @@ test "perlex: i with non-ASCII units falls back" {
     try expectCompileFlags("[\\u00c0-\\u00ff]", ci, .unsupported);
     // …but the same patterns compile fine without `i`.
     try expectCompileFlags("\\u00e0", .{}, .match);
+}
+
+// ── §22.2.2.9 Canonicalize — /iu and /iv Unicode case folding ────────
+
+const iu: perlex.Flags = .{ .unicode = true, .ignore_case = true };
+const iv: perlex.Flags = .{ .unicode_sets = true, .ignore_case = true };
+
+test "perlex: /iu defers without an injected folder" {
+    // The bridge always injects one; bare `compile` does not, so a
+    // folding pattern still defers to the fallback (unchanged contract).
+    try expectCompileFlags("a", iu, .unsupported);
+    try expectCompileFlags("k", iv, .unsupported);
+}
+
+test "perlex: /iu folds a literal across its whole orbit" {
+    // /k/iu matches k, K, and U+212A KELVIN SIGN (one orbit).
+    try expectFoldMatch("k", iu, &[_]u16{'k'}, "k");
+    try expectFoldMatch("k", iu, &[_]u16{'K'}, "K");
+    try expectFoldMatch("k", iu, &[_]u16{0x212A}, ""); // matches; non-ASCII renders empty
+    try expectFoldMatch("K", iu, &[_]u16{0x212A}, "");
+    // A code point outside the orbit does not match.
+    try expectFoldNoMatch("k", iu, &[_]u16{'x'});
+}
+
+test "perlex: /iu folds a character class via orbit membership" {
+    // [a-c] under fold matches the uppercase partners too.
+    try expectFoldMatch("[a-c]", iu, &[_]u16{'B'}, "B");
+    try expectFoldMatch("[a-c]", iu, &[_]u16{'c'}, "c");
+    try expectFoldNoMatch("[a-c]", iu, &[_]u16{'D'});
+    // Negated class is case-insensitive too: 'B' folds into [a-c].
+    try expectFoldNoMatch("[^a-c]", iu, &[_]u16{'B'});
+}
+
+test "perlex: /iu folds a backreference across the orbit" {
+    // Captured "k" matches a later "K"/U+212A under fold. The rendering is
+    // whole-match (group 0) then group 1, comma-joined.
+    try expectFoldMatch("(k)\\1", iu, &[_]u16{ 'k', 'K' }, "kK,k");
+    try expectFoldMatch("(?<x>ab)\\k<x>", iu, &[_]u16{ 'a', 'b', 'A', 'B' }, "abAB,ab");
+}
+
+test "perlex: /iu folds a supplementary backreference per code point" {
+    // U+10400 ↔ U+10428 are a fold pair, each a surrogate pair in UTF-16.
+    // Per-code-unit folding would break; per-code-point folding matches.
+    // Both captures are supplementary (>U+7F), so they render empty: the
+    // assertion is that the match succeeds (group 0 then group 1 → ",").
+    const cap = [_]u16{ 0xD801, 0xDC00 }; // U+10400
+    const ref = [_]u16{ 0xD801, 0xDC28 }; // U+10428
+    try expectFoldMatch("(.)\\1", iu, &(cap ++ ref), ",");
+}
+
+test "perlex: /iv folds \\q{} string members" {
+    // [\q{ab}] lowers to the literal "ab"; under /iv each char folds.
+    try expectFoldMatch("[\\q{ab}]", iv, &[_]u16{ 'A', 'B' }, "AB");
+    try expectFoldMatch("[\\q{ab}]", iv, &[_]u16{ 'a', 'b' }, "ab");
+    try expectFoldNoMatch("[\\q{ab}]", iv, &[_]u16{ 'A', 'x' });
 }
 
 // ── `s` (dotall) and `m` (multiline) flags ──────────────────────────
