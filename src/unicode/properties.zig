@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const tables = @import("property_tables.zig");
+const cf_tables = @import("case_fold_tables.zig");
 
 pub const Range = tables.Range;
 
@@ -66,6 +67,18 @@ pub fn scriptExtensions(name: []const u8) ?[]const Range {
 /// (each property's short name equals its long name).
 pub fn stringProperty(name: []const u8) ?StringProp {
     return tables.stringProperty(name);
+}
+
+/// The other members of `cp`'s simple case-folding orbit (§22.2.2.9
+/// Canonicalize), or an empty slice when `cp` folds only to itself.
+/// Backs RegExp `/iu` and `/iv` matching: a pattern code point matches any
+/// code point sharing its fold equivalence class. The orbit is built from
+/// CaseFolding.txt statuses C and S only (simple/common folding) — full (F)
+/// and Turkic (T) mappings are excluded, so ß (U+00DF) folds only to itself
+/// while capital ẞ (U+1E9E) shares ß's orbit. The returned slice points
+/// into static table data and must not be freed or mutated.
+pub fn caseFoldPartners(cp: u21) []const u21 {
+    return cf_tables.caseFoldPartners(cp);
 }
 
 /// True iff `cp` lies within any range of `ranges`, which must be sorted by
@@ -153,8 +166,8 @@ test "every generated category table is sorted and non-overlapping" {
     const names = [_][]const u8{
         "Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No",
         "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po", "Sm", "Sc", "Sk", "So",
-        "Zs", "Zl", "Zp", "Cc", "Cf", "Cs", "Co", "Cn",
-        "L",  "LC", "M",  "N",  "P",  "S",  "Z",  "C",
+        "Zs", "Zl", "Zp", "Cc", "Cf", "Cs", "Co", "Cn", "L",  "LC", "M",
+        "N",  "P",  "S",  "Z",  "C",
     };
     for (names) |name| {
         const ranges = generalCategory(name) orelse return error.MissingCategory;
@@ -171,16 +184,16 @@ const Rep = struct { name: []const u8, cp: u21 };
 
 /// One stable, well-known representative code point per atomic gc value.
 const atomic_reps = [_]Rep{
-    .{ .name = "Lu", .cp = 'A' },      .{ .name = "Ll", .cp = 'a' },      .{ .name = "Lt", .cp = 0x01C5 },
-    .{ .name = "Lm", .cp = 0x02B0 },   .{ .name = "Lo", .cp = 0x4E2D },   .{ .name = "Mn", .cp = 0x0300 },
-    .{ .name = "Mc", .cp = 0x0903 },   .{ .name = "Me", .cp = 0x0488 },   .{ .name = "Nd", .cp = '0' },
-    .{ .name = "Nl", .cp = 0x2160 },   .{ .name = "No", .cp = 0x00B2 },   .{ .name = "Pc", .cp = '_' },
-    .{ .name = "Pd", .cp = '-' },      .{ .name = "Ps", .cp = '(' },      .{ .name = "Pe", .cp = ')' },
-    .{ .name = "Pi", .cp = 0x00AB },   .{ .name = "Pf", .cp = 0x00BB },   .{ .name = "Po", .cp = '!' },
-    .{ .name = "Sm", .cp = '+' },      .{ .name = "Sc", .cp = '$' },      .{ .name = "Sk", .cp = '^' },
-    .{ .name = "So", .cp = 0x00A6 },   .{ .name = "Zs", .cp = ' ' },      .{ .name = "Zl", .cp = 0x2028 },
-    .{ .name = "Zp", .cp = 0x2029 },   .{ .name = "Cc", .cp = 0x00 },     .{ .name = "Cf", .cp = 0x00AD },
-    .{ .name = "Cs", .cp = 0xD800 },   .{ .name = "Co", .cp = 0xE000 },   .{ .name = "Cn", .cp = 0x0378 },
+    .{ .name = "Lu", .cp = 'A' },    .{ .name = "Ll", .cp = 'a' },    .{ .name = "Lt", .cp = 0x01C5 },
+    .{ .name = "Lm", .cp = 0x02B0 }, .{ .name = "Lo", .cp = 0x4E2D }, .{ .name = "Mn", .cp = 0x0300 },
+    .{ .name = "Mc", .cp = 0x0903 }, .{ .name = "Me", .cp = 0x0488 }, .{ .name = "Nd", .cp = '0' },
+    .{ .name = "Nl", .cp = 0x2160 }, .{ .name = "No", .cp = 0x00B2 }, .{ .name = "Pc", .cp = '_' },
+    .{ .name = "Pd", .cp = '-' },    .{ .name = "Ps", .cp = '(' },    .{ .name = "Pe", .cp = ')' },
+    .{ .name = "Pi", .cp = 0x00AB }, .{ .name = "Pf", .cp = 0x00BB }, .{ .name = "Po", .cp = '!' },
+    .{ .name = "Sm", .cp = '+' },    .{ .name = "Sc", .cp = '$' },    .{ .name = "Sk", .cp = '^' },
+    .{ .name = "So", .cp = 0x00A6 }, .{ .name = "Zs", .cp = ' ' },    .{ .name = "Zl", .cp = 0x2028 },
+    .{ .name = "Zp", .cp = 0x2029 }, .{ .name = "Cc", .cp = 0x00 },   .{ .name = "Cf", .cp = 0x00AD },
+    .{ .name = "Cs", .cp = 0xD800 }, .{ .name = "Co", .cp = 0xE000 }, .{ .name = "Cn", .cp = 0x0378 },
 };
 
 test "all 30 atomic categories classify their representative code point" {
@@ -410,4 +423,78 @@ test "string-property names are disjoint from gc/binary/script; unknown is null"
     try testing.expectEqual(@as(?[]const Range, null), generalCategory("RGI_Emoji"));
     try testing.expectEqual(@as(?[]const Range, null), binaryProperty("RGI_Emoji"));
     try testing.expectEqual(@as(?[]const Range, null), script("Basic_Emoji"));
+}
+
+// ---------------------------------------------------------------------------
+// Tests — independent ground truth for the §22.2.2.9 case-folding orbits.
+// ---------------------------------------------------------------------------
+
+fn foldsTo(a: u21, b: u21) bool {
+    for (caseFoldPartners(a)) |p| {
+        if (p == b) return true;
+    }
+    return false;
+}
+
+test "case-fold orbit: ASCII letters pair up" {
+    try testing.expectEqual(@as(usize, 1), caseFoldPartners('a').len);
+    try testing.expect(foldsTo('a', 'A'));
+    try testing.expect(foldsTo('A', 'a'));
+    try testing.expect(!foldsTo('a', 'b'));
+}
+
+test "case-fold orbit: K, k, and KELVIN SIGN share one class" {
+    // U+004B K, U+006B k, and U+212A KELVIN SIGN all simple-fold to U+006B
+    // (CaseFolding.txt statuses C/C/C), so the orbit has three members.
+    for ([_]u21{ 0x004B, 0x006B, 0x212A }) |m|
+        try testing.expectEqual(@as(usize, 2), caseFoldPartners(m).len);
+    try testing.expect(foldsTo(0x004B, 0x006B));
+    try testing.expect(foldsTo(0x004B, 0x212A));
+    try testing.expect(foldsTo(0x006B, 0x212A));
+    try testing.expect(foldsTo(0x212A, 0x004B));
+    try testing.expect(foldsTo(0x212A, 0x006B));
+}
+
+test "case-fold orbit: capital sharp S joins small sharp S, never the full fold" {
+    // ß (U+00DF) has only a full (F) fold to "ss", excluded from simple
+    // folding, so its sole simple-fold partner is capital ẞ (U+1E9E,
+    // status S → 00DF). §22.2.2.9 thus makes /ß/iu match ẞ but never "ss".
+    try testing.expectEqual(@as(usize, 1), caseFoldPartners(0x00DF).len);
+    try testing.expect(foldsTo(0x00DF, 0x1E9E));
+    try testing.expect(foldsTo(0x1E9E, 0x00DF));
+}
+
+test "case-fold orbit: Greek sigma has three members" {
+    // Σ (U+03A3) and final ς (U+03C2) both fold to σ (U+03C3).
+    for ([_]u21{ 0x03A3, 0x03C2, 0x03C3 }) |m|
+        try testing.expectEqual(@as(usize, 2), caseFoldPartners(m).len);
+    try testing.expect(foldsTo(0x03A3, 0x03C3));
+    try testing.expect(foldsTo(0x03C2, 0x03C3));
+    try testing.expect(foldsTo(0x03C3, 0x03A3));
+    try testing.expect(foldsTo(0x03C3, 0x03C2));
+}
+
+test "case-fold orbit: supplementary-plane Deseret pairs in plane" {
+    // Simple folding is length-preserving: U+10400 ↔ U+10428 (Deseret),
+    // both supplementary, no cross-plane fold.
+    try testing.expectEqual(@as(usize, 1), caseFoldPartners(0x10400).len);
+    try testing.expect(foldsTo(0x10400, 0x10428));
+    try testing.expect(foldsTo(0x10428, 0x10400));
+}
+
+test "case-fold orbit: caseless and uncased code points fold to themselves" {
+    try testing.expectEqual(@as(usize, 0), caseFoldPartners('5').len);
+    try testing.expectEqual(@as(usize, 0), caseFoldPartners(0x4E2D).len); // CJK 中
+    try testing.expectEqual(@as(usize, 0), caseFoldPartners(' ').len);
+}
+
+test "every case-fold orbit is symmetric and excludes its own member" {
+    // Whole-table self-consistency: if b ∈ partners(a) then a ∈ partners(b),
+    // and a ∉ partners(a) (a member never lists itself).
+    for (cf_tables.entries) |e| {
+        for (caseFoldPartners(e.cp)) |b| {
+            try testing.expect(b != e.cp); // never self
+            try testing.expect(foldsTo(b, e.cp)); // symmetric
+        }
+    }
 }
