@@ -1991,22 +1991,27 @@ fn differenceTemporalDate(realm: *Realm, this_value: Value, args: []const Value,
 
     var diff = temporal.differenceISODate(this_date, other_date, largest);
 
-    // Rounding. The default (smallestUnit "day", increment 1) is a no-op
-    // on the whole-day difference. A day increment > 1 re-balances safely
-    // only when there is no coarser calendar unit to bubble into
-    // (largestUnit "day"); calendar smallestUnits (year/month/week) need
-    // RoundRelativeDuration — deferred.
-    if (smallest != .day) {
-        return throwRangeError(realm, "rounding to calendar units is not yet implemented");
-    }
-    if (increment != 1) {
-        if (largest != .day) {
-            return throwRangeError(realm, "day rounding with a calendar largestUnit is not yet implemented");
+    // §7.5.31 RoundRelativeDuration. For `since` the mode is negated before
+    // rounding and the result negated after (§ NegateRoundingMode +
+    // CreateNegatedDateDuration), so rounding `this → other` then flipping
+    // matches rounding `other → this` directly.
+    const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
+    if (smallest == .day) {
+        // A "day" smallestUnit has fixed length, so it rounds by pure
+        // day-count arithmetic (NudgeToDayOrTime) — no date is constructed, so
+        // a large increment (e.g. 1e9) stays representable. increment 1 is a
+        // no-op on the already whole-day difference.
+        if (increment != 1) {
+            const days_i: i128 = @intFromFloat(diff.days);
+            diff.days = @floatFromInt(temporal.roundToIncrement(days_i, increment, eff_mode));
         }
-        const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
-        const days_i: i128 = @intFromFloat(diff.days);
-        const rounded = temporal.roundToIncrement(days_i, increment, eff_mode);
-        diff.days = @floatFromInt(rounded);
+    } else {
+        // Calendar smallestUnits (year/month/week) round through NudgeToCalen-
+        // darUnit, which re-expresses the span capped at largestUnit (folding
+        // in BubbleRelativeDuration's unit promotion). A candidate end date
+        // out of range yields RangeError, matching AddDate overflow.
+        diff = temporal.roundRelativeDate(this_date, other_date, diff, smallest, increment, eff_mode, largest) orelse
+            return throwRangeError(realm, "rounded date is outside the representable range");
     }
 
     if (is_since) {
