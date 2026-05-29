@@ -1620,12 +1620,18 @@ fn perlexFlags(s: []const u8) perlex.Flags {
 /// `\p{…}` property escapes (§22.2.1.1) resolve through the shared
 /// `unicode/perlex_props.zig` seam — the same resolver the parse-time
 /// validator injects, so both paths agree on which escapes are valid.
+/// The matching case folder for `/iu`/`/iv` (§22.2.2.9 Canonicalize)
+/// comes from the same seam, so Perlex folds Unicode patterns at match
+/// time instead of deferring them to libregexp.
 fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
     if (regex_obj.regex_perlex != null or regex_obj.regex_bytecode != null) return true;
     const src_s = regex_obj.regexp_source orelse return false;
     const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.flatBytes() else "";
 
-    const result = perlex.compileWithResolver(realm.allocator, src_s.flatBytes(), perlexFlags(flag_str), perlex_props.resolve) catch return error.OutOfMemory;
+    const result = perlex.compileWithHooks(realm.allocator, src_s.flatBytes(), perlexFlags(flag_str), .{
+        .resolver = perlex_props.resolve,
+        .case_folder = perlex_props.caseFold,
+    }) catch return error.OutOfMemory;
     switch (result) {
         .ok => |program| {
             const boxed = realm.allocator.create(perlex.Program) catch {

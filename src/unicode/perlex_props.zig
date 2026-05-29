@@ -58,6 +58,16 @@ pub fn resolve(
     return try resolveStringProperty(gpa, value); // null when not a string prop
 }
 
+/// The other members of `cp`'s §22.2.2.9 simple case-folding orbit (empty
+/// when `cp` folds only to itself), forwarded from Cynic's generated tables.
+/// Injected into Perlex's compiler as `perlex.CaseFoldFn` so the matcher can
+/// fold `/iu`/`/iv` literals, classes, and backreferences at match time
+/// without carrying any Unicode data of its own. The returned slice is
+/// static table data — never freed, never mutated.
+pub fn caseFold(cp: u21) []const u21 {
+    return properties.caseFoldPartners(cp);
+}
+
 /// Wrap source-table `ranges` as a char-only `ResolvedProperty` (no string
 /// members), copying into a fresh slice the caller owns.
 fn rangesOnly(
