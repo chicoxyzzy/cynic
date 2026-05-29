@@ -1343,15 +1343,27 @@ pub const OffsetOption = enum { prefer, use, ignore, reject };
 /// §13.x The `timeZoneName` display option (default `auto`).
 pub const TimeZoneNameDisplay = enum { auto, never, critical };
 
+/// §13.x ToSecondsStringPrecisionRecord's `[[Precision]]` — how the
+/// sub-minute portion of a Temporal ToString renders. Shared by every
+/// serializer (Instant, PlainTime, PlainDateTime, ZonedDateTime).
+pub const Precision = union(enum) {
+    /// Trim trailing zeros; omit the fraction (and its `.`) entirely when
+    /// the sub-second value is zero. Still always emits `:SS`.
+    auto,
+    /// Stop after `HH:MM` — no `:SS`, no fraction (smallestUnit "minute").
+    minute,
+    /// Exactly `n` ∈ 0..9 truncated fractional digits. `0` ⇒ `:SS` with no
+    /// fraction.
+    digits: u4,
+};
+
 /// Options bag for `zonedDateTimeToString` — what the four display knobs
 /// (`calendarName`, `timeZoneName`, `offset`, precision) resolve to.
 pub const ZonedToStringOptions = struct {
     calendar: CalendarDisplay = .auto,
     time_zone_name: TimeZoneNameDisplay = .auto,
     show_offset: bool = true,
-    /// null ⇒ "auto" (trim trailing zeros, omit if integral); 0..9 ⇒
-    /// exactly that many fractional digits (truncated).
-    fractional_digits: ?u4 = null,
+    precision: Precision = .auto,
 };
 
 /// §6.5.x InterpretISODateTimeOffset — fold a wall-clock ISO date-time and
@@ -1388,6 +1400,59 @@ pub fn interpretISODateTimeOffset(
     return candidate; // prefer — fall back to the zone's own offset
 }
 
+/// §6.5.x AddZonedDateTime — add a calendar + time duration to an exact
+/// instant in `tz`. The date component (years / months / weeks / days)
+/// is applied to the wall-clock date and re-anchored to an instant; the
+/// time component is then added in exact time, where it can span a wider
+/// range than any single PlainDateTime. For a fixed-offset zone the
+/// offset is constant, so there are no DST gaps / overlaps to
+/// disambiguate. Returns null when an intermediate date-time or the final
+/// instant leaves the representable range.
+pub fn addZonedDateTime(epoch_ns: i128, tz: TimeZone, dur: DurationRecord, reject: bool) ?i128 {
+    const time_ns = timeDurationNanoseconds(dur);
+    // Pure time shift adds directly in exact time.
+    if (dur.years == 0 and dur.months == 0 and dur.weeks == 0 and dur.days == 0) {
+        return addInstant(epoch_ns, time_ns);
+    }
+    const wall = getISODateTimeFor(tz, epoch_ns);
+    const new_date = addISODate(
+        wall.date(),
+        @intFromFloat(dur.years),
+        @intFromFloat(dur.months),
+        @intFromFloat(dur.weeks),
+        @intFromFloat(dur.days),
+        reject,
+    ) orelse return null;
+    const intermediate = PlainDateTimeRecord.combine(new_date, wall.time());
+    if (!isoDateTimeWithinLimits(intermediate)) return null;
+    const intermediate_epoch = getEpochNanosecondsFor(tz, intermediate) orelse return null;
+    return addInstant(intermediate_epoch, time_ns);
+}
+
+/// §6.5.x RoundZonedDateTime — round an exact instant to a multiple of
+/// `increment` of `unit` (day..nanosecond) under `mode`, measured in the
+/// zone's wall clock. For a fixed-offset zone every day is exactly 24 h,
+/// so rounding the wall-clock date-time and re-anchoring it is exact.
+/// Returns null when the rounded instant leaves the representable range.
+pub fn roundZonedDateTime(epoch_ns: i128, tz: TimeZone, unit: LargestUnit, increment: i128, mode: RoundingMode) ?i128 {
+    const wall = getISODateTimeFor(tz, epoch_ns);
+    const rounded = roundISODateTime(wall, unit, increment, mode) orelse return null;
+    return getEpochNanosecondsFor(tz, rounded);
+}
+
+/// §6.5.x — the instant of the first wall-clock moment (midnight,
+/// 00:00:00.000000000) of `epoch_ns`'s calendar day in `tz`. For a
+/// fixed-offset zone midnight always exists and is unique.
+pub fn zonedStartOfDay(epoch_ns: i128, tz: TimeZone) ?i128 {
+    const wall = getISODateTimeFor(tz, epoch_ns);
+    const midnight = PlainDateTimeRecord{
+        .iso_year = wall.iso_year,
+        .iso_month = wall.iso_month,
+        .iso_day = wall.iso_day,
+    };
+    return getEpochNanosecondsFor(tz, midnight);
+}
+
 /// §6.5.x TemporalZonedDateTimeToString — `<localISO><±HH:MM>[<tzid>]`
 /// plus an optional `[u-ca=…]` calendar annotation. The local wall-clock
 /// fields come from `GetISODateTimeFor`; the offset is the zone's offset
@@ -1402,13 +1467,8 @@ pub fn zonedDateTimeToString(rec: ZonedDateTimeRecord, buf: []u8, opts: ZonedToS
     w.byte('-');
     w.pad2(local.iso_day);
     w.byte('T');
-    w.pad2(local.hour);
-    w.byte(':');
-    w.pad2(local.minute);
-    w.byte(':');
-    w.pad2(local.second);
     const sub_ns: u32 = local.millisecond * 1_000_000 + local.microsecond * 1_000 + local.nanosecond;
-    writeFractionDigits(&w, sub_ns, opts.fractional_digits);
+    writeTimeFields(&w, local.hour, local.minute, local.second, sub_ns, opts.precision);
     if (opts.show_offset) {
         const off_min: i32 = @intCast(@divTrunc(getOffsetNanosecondsFor(rec.time_zone, rec.epoch_ns), 60_000_000_000));
         writeOffsetMinutes(&w, off_min);
@@ -1441,63 +1501,66 @@ fn writeOffsetMinutes(w: *Writer, off_min: i32) void {
     w.pad2(abs % 60);
 }
 
-/// Write the sub-second fraction. `null` digits ⇒ the trimmed "auto"
-/// form (nothing when `sub_ns == 0`); an explicit `n` ⇒ a leading `.`
-/// then exactly `n` truncated digits (and nothing at all when `n == 0`).
-fn writeFractionDigits(w: *Writer, sub_ns: u32, digits: ?u4) void {
-    if (digits) |d| {
-        if (d == 0) return;
-        w.byte('.');
-        var scale: u32 = 100_000_000; // 1e8 — most-significant of nine
-        var rem = sub_ns;
-        var i: u4 = 0;
-        while (i < d) : (i += 1) {
-            const digit = rem / scale;
-            w.byte('0' + @as(u8, @intCast(digit)));
-            rem -= digit * scale;
-            scale /= 10;
-        }
-        return;
-    }
-    if (sub_ns == 0) return;
-    w.byte('.');
-    w.fraction9(sub_ns);
-}
-
-// ── §8.x TemporalInstantToString (UTC, precision = "auto") ────────────────
-
-/// Format an epoch-ns value to its UTC ISO-8601 string — the form
-/// `Temporal.Instant.prototype.toString` / `toJSON` produce with no
-/// time-zone and `precision="auto"`: `YYYY-MM-DDTHH:MM:SS` plus a
-/// trimmed sub-second fraction and a trailing `Z`. Years outside
-/// 0000..9999 use the expanded `±YYYYYY` form.
-pub fn instantToString(epoch_ns: i128, buf: []u8) []const u8 {
-    const sec = @divFloor(epoch_ns, 1_000_000_000);
-    const sub_ns: u32 = @intCast(epoch_ns - sec * 1_000_000_000); // [0, 999999999]
-    const days = @divFloor(sec, 86400);
-    const sod = sec - days * 86400; // [0, 86399]
-    const ymd = civilFromDays(@intCast(days));
-    const hour: u32 = @intCast(@divTrunc(sod, 3600));
-    const minute: u32 = @intCast(@divTrunc(@mod(sod, 3600), 60));
-    const second: u32 = @intCast(@mod(sod, 60));
-
-    var w = Writer{ .buf = buf, .len = 0 };
-    writeIsoYear(&w, ymd.year);
-    w.byte('-');
-    w.pad2(ymd.month);
-    w.byte('-');
-    w.pad2(ymd.day);
-    w.byte('T');
+/// Write `HH:MM`, then — unless `precision` is `.minute` — `:SS` and the
+/// sub-second fraction `precision` dictates. Shared by every Temporal
+/// serializer's time portion (FormatTimeString, §13.x).
+fn writeTimeFields(w: *Writer, hour: u32, minute: u32, second: u32, sub_ns: u32, precision: Precision) void {
     w.pad2(hour);
     w.byte(':');
     w.pad2(minute);
+    if (precision == .minute) return;
     w.byte(':');
     w.pad2(second);
-    if (sub_ns != 0) {
-        w.byte('.');
-        w.fraction9(sub_ns);
+    switch (precision) {
+        .minute => unreachable,
+        .auto => {
+            if (sub_ns == 0) return;
+            w.byte('.');
+            w.fraction9(sub_ns);
+        },
+        .digits => |d| {
+            if (d == 0) return;
+            w.byte('.');
+            var scale: u32 = 100_000_000; // 1e8 — most-significant of nine
+            var rem = sub_ns;
+            var i: u4 = 0;
+            while (i < d) : (i += 1) {
+                const digit = rem / scale;
+                w.byte('0' + @as(u8, @intCast(digit)));
+                rem -= digit * scale;
+                scale /= 10;
+            }
+        },
     }
-    w.byte('Z');
+}
+
+// ── §8.x TemporalInstantToString ──────────────────────────────────────────
+
+/// Format an epoch-ns value to an ISO-8601 string. With `time_zone` null
+/// the output is the UTC wall clock plus a trailing `Z` (the form
+/// `Temporal.Instant.prototype.toString` / `toJSON` default to); with a
+/// time zone the output is that zone's wall clock plus its numeric
+/// `±HH:MM` offset (no `Z`, no `[...]` annotation — an Instant carries
+/// none). `precision` controls the sub-second portion; years outside
+/// 0000..9999 use the expanded `±YYYYYY` form. `buf` must hold ≥ 48 bytes.
+pub fn instantToString(epoch_ns: i128, buf: []u8, precision: Precision, time_zone: ?TimeZone) []const u8 {
+    const tz = time_zone orelse TimeZone.utc;
+    const local = getISODateTimeFor(tz, epoch_ns);
+    var w = Writer{ .buf = buf, .len = 0 };
+    writeIsoYear(&w, local.iso_year);
+    w.byte('-');
+    w.pad2(local.iso_month);
+    w.byte('-');
+    w.pad2(local.iso_day);
+    w.byte('T');
+    const sub_ns: u32 = local.millisecond * 1_000_000 + local.microsecond * 1_000 + local.nanosecond;
+    writeTimeFields(&w, local.hour, local.minute, local.second, sub_ns, precision);
+    if (time_zone == null) {
+        w.byte('Z');
+    } else {
+        const off_min: i32 = @intCast(@divTrunc(getOffsetNanosecondsFor(tz, epoch_ns), 60_000_000_000));
+        writeOffsetMinutes(&w, off_min);
+    }
     return w.buf[0..w.len];
 }
 
@@ -2532,12 +2595,280 @@ pub fn differenceISODateTime(dt1: PlainDateTimeRecord, dt2: PlainDateTimeRecord,
     };
 }
 
+/// GetUTCEpochNanoseconds for a PlainDateTime read as a UTC wall clock.
+/// `roundRelativeDateTime` only ever compares *differences* of these
+/// epochs, so a constant time-zone offset cancels out — which is why a
+/// fixed-offset (or UTC) ZonedDateTime difference can delegate to the
+/// PlainDateTime computation over its two wall-clock times.
+fn utcEpochNsOf(dt: PlainDateTimeRecord) i128 {
+    return @as(i128, daysFromCivil(dt.iso_year, dt.iso_month, dt.iso_day)) * ns_per_day +
+        timeRecordToNanoseconds(dt.time());
+}
+
+/// §7.5.x ComputeNudgeWindow candidate epoch: `start.date` advanced by the
+/// held coarser units (`hy`, `hm`) plus `r` of the `smallest` calendar
+/// unit, recombined with `start`'s time-of-day. Null on range overflow.
+fn calendarWindowEpoch(start_date: PlainDateRecord, smallest: LargestUnit, hy: i64, hm: i64, r: i64, time_ns: i128) ?i128 {
+    const d = addCalendarUnit(start_date, smallest, hy, hm, r) orelse return null;
+    return @as(i128, daysFromCivil(d.iso_year, d.iso_month, d.iso_day)) * ns_per_day + time_ns;
+}
+
+/// Does `dest` lie within the inclusive [start, end] candidate window,
+/// oriented by the travel direction `sign`?
+fn destInWindow(sign: i32, start_epoch: i128, end_epoch: i128, dest: i128) bool {
+    return if (sign == 1)
+        (start_epoch <= dest and dest <= end_epoch)
+    else
+        (end_epoch <= dest and dest <= start_epoch);
+}
+
+/// §7.5.x NudgeToCalendarUnit specialised to the ISO calendar with the
+/// time zone unset / fixed-offset (see `utcEpochNsOf`). Rounds the
+/// irregular-length `smallest` unit (year / month / week) of `diff` to a
+/// multiple of `increment` under `mode`, measuring progress toward `end`
+/// in nanoseconds (so the time-of-day participates). The held coarser
+/// units stay fixed. For year / month, re-differencing the rounded end
+/// date folds BubbleRelativeDuration's promotion into the canonical
+/// largest-capped form; week never bubbles (§7.5 RoundRelativeDuration
+/// step 9 excludes it), so its result is assembled verbatim.
+fn nudgeToCalendarUnitDateTime(
+    start: PlainDateTimeRecord,
+    diff: DurationRecord,
+    largest: LargestUnit,
+    smallest: LargestUnit,
+    increment: i128,
+    mode: RoundingMode,
+    sign: i32,
+    dest_epoch: i128,
+) ?DurationRecord {
+    const start_date = start.date();
+    const start_time_ns = timeRecordToNanoseconds(start.time());
+
+    const dy: i64 = @intFromFloat(diff.years);
+    const dm: i64 = @intFromFloat(diff.months);
+    const dw: i64 = @intFromFloat(diff.weeks);
+    const dd: i64 = @intFromFloat(diff.days);
+
+    var hy: i64 = 0;
+    var hm: i64 = 0;
+    var unit_val: i64 = 0;
+    switch (smallest) {
+        .year => unit_val = dy,
+        .month => {
+            hy = dy;
+            unit_val = dm;
+        },
+        .week => {
+            hy = dy;
+            hm = dm;
+            unit_val = @divTrunc(dw * 7 + dd, 7);
+        },
+        else => unreachable, // irregular-length calendar units only.
+    }
+
+    const inc: i64 = @intCast(increment);
+    const base: i64 = @divTrunc(unit_val, inc) * inc; // trunc toward zero
+
+    // ComputeNudgeWindow(additionalShift=false), then the spec's retry:
+    // if `dest` is not bracketed by the truncated window (a calendar
+    // irregularity), recompute one increment further out.
+    var r1: i64 = base;
+    var r2: i64 = base + inc * sign;
+    var start_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r1, start_time_ns) orelse return null;
+    var end_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r2, start_time_ns) orelse return null;
+    if (!destInWindow(sign, start_epoch, end_epoch, dest_epoch)) {
+        r1 = base + inc * sign;
+        r2 = r1 + inc * sign;
+        start_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r1, start_time_ns) orelse return null;
+        end_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r2, start_time_ns) orelse return null;
+    }
+
+    // progress = (dest - start)/(end - start); total = r1 + progress·inc·sign.
+    // Scale by the positive denominator so `roundToIncrement` applies the
+    // nine modes exactly, then divide back out → r1 or r2.
+    const sg: i128 = sign;
+    const denom: i128 = sg * (end_epoch - start_epoch); // > 0
+    const num: i128 = sg * (dest_epoch - start_epoch); // in [0, denom]
+    const scaled: i128 = @as(i128, r1) * denom + sg * @as(i128, inc) * num;
+    const rounded_scaled = roundToIncrement(scaled, @as(i128, inc) * denom, mode);
+    const rounded_unit: i64 = @intCast(@divExact(rounded_scaled, denom));
+
+    if (smallest == .week) {
+        return .{
+            .years = @floatFromInt(hy),
+            .months = @floatFromInt(hm),
+            .weeks = @floatFromInt(rounded_unit),
+            .days = 0,
+        };
+    }
+    const rounded_end = addCalendarUnit(start_date, smallest, hy, hm, rounded_unit) orelse return null;
+    return differenceISODate(start_date, rounded_end, largest);
+}
+
+/// §7.5.x BubbleRelativeDuration specialised to the ISO calendar with the
+/// time zone unset / fixed-offset. After NudgeToDayOrTime has expanded the
+/// day count, promote day → week → month → year (up to `largest`) wherever
+/// the rounded instant has reached the next coarser boundary. Weeks are
+/// only promoted when `largest` is week (they don't compose with months).
+/// Null on range overflow. The start unit is always `day` for this path
+/// (LargerOfTwoTemporalUnits(timeUnitOrDay, day)).
+fn bubbleRelativeDateTime(
+    start: PlainDateTimeRecord,
+    duration: DurationRecord,
+    nudged_epoch: i128,
+    largest: LargestUnit,
+    sign: i32,
+) ?DurationRecord {
+    const largest_idx: i64 = @intFromEnum(largest);
+    const day_idx: i64 = @intFromEnum(LargestUnit.day);
+    if (day_idx == largest_idx) return duration; // startUnit == largestUnit.
+
+    const start_date = start.date();
+    const start_time_ns = timeRecordToNanoseconds(start.time());
+
+    var result = duration;
+    var unit_idx: i64 = day_idx - 1; // one coarser than day = week
+    var done = false;
+    while (unit_idx >= largest_idx and !done) : (unit_idx -= 1) {
+        const unit: LargestUnit = @enumFromInt(@as(u4, @intCast(unit_idx)));
+        if (unit == .week and largest != .week) continue;
+
+        const cy: i64 = @intFromFloat(result.years);
+        const cm: i64 = @intFromFloat(result.months);
+        const cw: i64 = @intFromFloat(result.weeks);
+        var end_dur: DurationRecord = undefined;
+        var end_date_opt: ?PlainDateRecord = null;
+        switch (unit) {
+            .year => {
+                end_dur = .{ .years = @floatFromInt(cy + sign) };
+                end_date_opt = addISODate(start_date, cy + sign, 0, 0, 0, false);
+            },
+            .month => {
+                end_dur = .{ .years = result.years, .months = @floatFromInt(cm + sign) };
+                end_date_opt = addISODate(start_date, cy, cm + sign, 0, 0, false);
+            },
+            .week => {
+                end_dur = .{ .years = result.years, .months = result.months, .weeks = @floatFromInt(cw + sign) };
+                end_date_opt = addISODate(start_date, cy, cm, cw + sign, 0, false);
+            },
+            else => unreachable,
+        }
+        const end_date = end_date_opt orelse return null;
+        const end_epoch = @as(i128, daysFromCivil(end_date.iso_year, end_date.iso_month, end_date.iso_day)) * ns_per_day + start_time_ns;
+        const beyond = nudged_epoch - end_epoch;
+        const beyond_sign: i32 = if (beyond < 0) -1 else if (beyond > 0) 1 else 0;
+        if (beyond_sign != -sign) {
+            result = end_dur; // the rounded instant still reaches this boundary.
+        } else {
+            done = true;
+        }
+    }
+    return result;
+}
+
+/// §7.5.x NudgeToDayOrTime specialised to the ISO calendar with the time
+/// zone unset / fixed-offset. Rounds the combined day+time span (days fold
+/// into nanoseconds at 24 h each) to a multiple of `increment` of the
+/// `smallest` time unit (day … nanosecond) under `mode`. When `largest`
+/// is a date unit the whole-day carry stays in the date half and the
+/// sub-day remainder balances into hours-and-finer; a day expansion then
+/// bubbles up. When `largest` is a time unit the whole span balances into
+/// time fields. Null on range overflow (via the bubble step).
+fn nudgeToDayOrTimeDateTime(
+    start: PlainDateTimeRecord,
+    diff: DurationRecord,
+    largest: LargestUnit,
+    smallest: LargestUnit,
+    increment: i128,
+    mode: RoundingMode,
+    sign: i32,
+    dest_epoch: i128,
+) ?DurationRecord {
+    const diff_days: i64 = @intFromFloat(diff.days);
+    const time_total: i128 = timeDurationNanoseconds(diff) + @as(i128, diff_days) * ns_per_day;
+    const unit_len = unitNanoseconds(smallest); // day … nanosecond
+    const rounded = roundToIncrement(time_total, unit_len * increment, mode);
+    const diff_time = rounded - time_total;
+    const whole_days = @divTrunc(time_total, ns_per_day);
+    const rounded_whole_days = @divTrunc(rounded, ns_per_day);
+    const day_delta = rounded_whole_days - whole_days;
+
+    const tsign: i32 = if (time_total < 0) -1 else if (time_total > 0) 1 else 0;
+    const ddsign: i32 = if (day_delta < 0) -1 else if (day_delta > 0) 1 else 0;
+    const did_expand_days = ddsign == tsign;
+    const nudged_epoch = dest_epoch + diff_time;
+
+    const date_category = @intFromEnum(largest) <= @intFromEnum(LargestUnit.day);
+    var days_field: i64 = 0;
+    var remainder: i128 = rounded;
+    var time_largest = largest;
+    if (date_category) {
+        days_field = @intCast(rounded_whole_days);
+        remainder = rounded - rounded_whole_days * ns_per_day;
+        time_largest = .hour;
+    }
+
+    const time_dur = balanceTimeDuration(remainder, time_largest);
+    var result = DurationRecord{
+        .years = diff.years,
+        .months = diff.months,
+        .weeks = diff.weeks,
+        .days = @floatFromInt(days_field),
+        .hours = time_dur.hours,
+        .minutes = time_dur.minutes,
+        .seconds = time_dur.seconds,
+        .milliseconds = time_dur.milliseconds,
+        .microseconds = time_dur.microseconds,
+        .nanoseconds = time_dur.nanoseconds,
+    };
+
+    // §7.5 RoundRelativeDuration step 9: smallest is day-or-finer here, so
+    // it is never week → always bubble-eligible. Bubbling only has an
+    // effect when `largest` is a date unit (else it is a no-op).
+    if (did_expand_days and date_category) {
+        result = bubbleRelativeDateTime(start, result, nudged_epoch, largest, sign) orelse return null;
+    }
+    return result;
+}
+
+/// §7.5.x RoundRelativeDuration specialised to the ISO calendar with the
+/// time zone unset (PlainDateTime) or fixed-offset/UTC (ZonedDateTime — a
+/// constant offset cancels in every epoch difference, so the zoned
+/// difference equals the PlainDateTime difference of the two wall-clock
+/// times). `diff` is the unrounded span `differenceISODateTime(start, end,
+/// largest)`; this rounds its `smallest` unit to a multiple of `increment`
+/// under `mode` and bubbles overflow up to `largest`. Returns null when a
+/// candidate date leaves the representable range (→ caller raises
+/// RangeError).
+pub fn roundRelativeDateTime(
+    start: PlainDateTimeRecord,
+    end: PlainDateTimeRecord,
+    diff: DurationRecord,
+    largest: LargestUnit,
+    smallest: LargestUnit,
+    increment: i128,
+    mode: RoundingMode,
+) ?DurationRecord {
+    const sign: i32 = durationSign(diff);
+    if (sign == 0) return diff;
+    const dest_epoch = utcEpochNsOf(end);
+
+    // IsCalendarUnit(smallest): year / month / week have irregular length
+    // and route through NudgeToCalendarUnit; day-or-finer through
+    // NudgeToDayOrTime. (Day is irregular only under a real time zone,
+    // which the fixed-offset scope never has.)
+    if (@intFromEnum(smallest) < @intFromEnum(LargestUnit.day)) {
+        return nudgeToCalendarUnitDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch);
+    }
+    return nudgeToDayOrTimeDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch);
+}
+
 /// §5.5.x ISODateTimeToString with `precision="auto"` — the form
 /// `Temporal.PlainDateTime.prototype.toString` / `toJSON` produce:
 /// `YYYY-MM-DDTHH:MM:SS` plus a trimmed sub-second fraction, then the
 /// ISO calendar annotation per `calendar`. Years outside 0000..9999 use
 /// the expanded `±YYYYYY` form.
-pub fn isoDateTimeToString(dt: PlainDateTimeRecord, buf: []u8, calendar: CalendarDisplay) []const u8 {
+pub fn isoDateTimeToString(dt: PlainDateTimeRecord, buf: []u8, calendar: CalendarDisplay, precision: Precision) []const u8 {
     var w = Writer{ .buf = buf, .len = 0 };
     writeIsoYear(&w, dt.iso_year);
     w.byte('-');
@@ -2545,16 +2876,8 @@ pub fn isoDateTimeToString(dt: PlainDateTimeRecord, buf: []u8, calendar: Calenda
     w.byte('-');
     w.pad2(dt.iso_day);
     w.byte('T');
-    w.pad2(dt.hour);
-    w.byte(':');
-    w.pad2(dt.minute);
-    w.byte(':');
-    w.pad2(dt.second);
     const sub_ns: u32 = dt.millisecond * 1_000_000 + dt.microsecond * 1_000 + dt.nanosecond;
-    if (sub_ns != 0) {
-        w.byte('.');
-        w.fraction9(sub_ns);
-    }
+    writeTimeFields(&w, dt.hour, dt.minute, dt.second, sub_ns, precision);
     switch (calendar) {
         .auto, .never => {},
         .always => w.bytes("[u-ca=iso8601]"),
@@ -3511,9 +3834,15 @@ test "civil-date round trip" {
 
 test "instantToString: UTC forms with trimmed fraction" {
     var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings("1970-01-01T00:00:00Z", instantToString(0, &buf));
-    try testing.expectEqualStrings("1976-11-18T14:23:30.123456789Z", instantToString(217175010123456789, &buf));
-    try testing.expectEqualStrings("1963-02-13T09:36:29.123456789Z", instantToString(-217175010876543211, &buf));
+    try testing.expectEqualStrings("1970-01-01T00:00:00Z", instantToString(0, &buf, .auto, null));
+    try testing.expectEqualStrings("1976-11-18T14:23:30.123456789Z", instantToString(217175010123456789, &buf, .auto, null));
+    try testing.expectEqualStrings("1963-02-13T09:36:29.123456789Z", instantToString(-217175010876543211, &buf, .auto, null));
+    // With a fixed-offset time zone: that zone's wall clock + `±HH:MM`.
+    try testing.expectEqualStrings("1970-01-01T05:30:00+05:30", instantToString(0, &buf, .auto, .{ .offset_minutes = 330 }));
+    try testing.expectEqualStrings("1970-01-01T00:00:00+00:00", instantToString(0, &buf, .auto, .utc));
+    // Explicit precision digits truncate the fraction.
+    try testing.expectEqualStrings("1976-11-18T14:23:30.123Z", instantToString(217175010123456789, &buf, .{ .digits = 3 }, null));
+    try testing.expectEqualStrings("1976-11-18T14:23Z", instantToString(217175010123456789, &buf, .minute, null));
 }
 
 test "compareInstant" {
@@ -3723,10 +4052,13 @@ test "parseTemporalDateTimeString: Z designator and non-ISO calendar reject" {
 
 test "isoDateTimeToString: auto precision + calendar annotation" {
     var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings("2024-01-15T13:45:30", isoDateTimeToString(pdt(2024, 1, 15, 13, 45, 30, 0, 0, 0), &buf, .auto));
-    try testing.expectEqualStrings("2024-01-15T13:45:30.5", isoDateTimeToString(pdt(2024, 1, 15, 13, 45, 30, 500, 0, 0), &buf, .auto));
-    try testing.expectEqualStrings("2024-01-15T00:00:00[u-ca=iso8601]", isoDateTimeToString(pdt(2024, 1, 15, 0, 0, 0, 0, 0, 0), &buf, .always));
-    try testing.expectEqualStrings("-000001-01-01T00:00:00", isoDateTimeToString(pdt(-1, 1, 1, 0, 0, 0, 0, 0, 0), &buf, .auto));
+    try testing.expectEqualStrings("2024-01-15T13:45:30", isoDateTimeToString(pdt(2024, 1, 15, 13, 45, 30, 0, 0, 0), &buf, .auto, .auto));
+    try testing.expectEqualStrings("2024-01-15T13:45:30.5", isoDateTimeToString(pdt(2024, 1, 15, 13, 45, 30, 500, 0, 0), &buf, .auto, .auto));
+    try testing.expectEqualStrings("2024-01-15T00:00:00[u-ca=iso8601]", isoDateTimeToString(pdt(2024, 1, 15, 0, 0, 0, 0, 0, 0), &buf, .always, .auto));
+    try testing.expectEqualStrings("-000001-01-01T00:00:00", isoDateTimeToString(pdt(-1, 1, 1, 0, 0, 0, 0, 0, 0), &buf, .auto, .auto));
+    // Explicit precision: fixed digits, and `.minute` drops the seconds.
+    try testing.expectEqualStrings("2024-01-15T13:45:30.500", isoDateTimeToString(pdt(2024, 1, 15, 13, 45, 30, 500, 0, 0), &buf, .auto, .{ .digits = 3 }));
+    try testing.expectEqualStrings("2024-01-15T13:45", isoDateTimeToString(pdt(2024, 1, 15, 13, 45, 30, 500, 0, 0), &buf, .auto, .minute));
 }
 
 test "isoYearMonthWithinLimits: April -271821 … September 275760" {
@@ -4062,11 +4394,136 @@ test "zonedDateTimeToString: fractional-second precision" {
     // explicit 2 digits truncates.
     try testing.expectEqualStrings(
         "1970-01-01T00:00:00.78+00:00[UTC]",
-        zonedDateTimeToString(rec, &buf, .{ .fractional_digits = 2 }),
+        zonedDateTimeToString(rec, &buf, .{ .precision = .{ .digits = 2 } }),
     );
     // 0 digits omits the fraction entirely.
     try testing.expectEqualStrings(
         "1970-01-01T00:00:00+00:00[UTC]",
-        zonedDateTimeToString(rec, &buf, .{ .fractional_digits = 0 }),
+        zonedDateTimeToString(rec, &buf, .{ .precision = .{ .digits = 0 } }),
     );
+    // `.minute` precision stops at HH:MM.
+    try testing.expectEqualStrings(
+        "1970-01-01T00:00+00:00[UTC]",
+        zonedDateTimeToString(rec, &buf, .{ .precision = .minute }),
+    );
+}
+
+test "addZonedDateTime: time part in exact time, date part in wall clock" {
+    // Pure time shift: +2h in UTC is exact-time arithmetic.
+    try testing.expectEqual(@as(?i128, 2 * 3_600_000_000_000), addZonedDateTime(0, .utc, .{ .hours = 2 }, false));
+    // In a +05:00 zone every day is exactly 24 h (no DST), so +P1D from
+    // epoch 0 advances exactly one solar day.
+    const plus5 = TimeZone{ .offset_minutes = 300 };
+    try testing.expectEqual(@as(?i128, ns_per_day), addZonedDateTime(0, plus5, .{ .days = 1 }, false));
+    // Date then time: +P1DT2H = one day + two hours.
+    try testing.expectEqual(
+        @as(?i128, ns_per_day + 2 * 3_600_000_000_000),
+        addZonedDateTime(0, plus5, .{ .days = 1, .hours = 2 }, false),
+    );
+}
+
+test "roundZonedDateTime: round in the zone's wall clock" {
+    // 01:30 UTC rounds up to 02:00 at hour granularity (halfExpand).
+    try testing.expectEqual(
+        @as(?i128, 2 * 3_600_000_000_000),
+        roundZonedDateTime(5_400_000_000_000, .utc, .hour, 1, .half_expand),
+    );
+    // Day rounding in a +05:00 zone: wall 05:00 floors to wall midnight,
+    // whose instant is one zone-offset (5 h) before the UTC day start.
+    const plus5 = TimeZone{ .offset_minutes = 300 };
+    try testing.expectEqual(
+        @as(?i128, -5 * 3_600_000_000_000),
+        roundZonedDateTime(0, plus5, .day, 1, .half_expand),
+    );
+}
+
+test "zonedStartOfDay: wall midnight re-anchored to an instant" {
+    // 1970-01-02T01:00Z → 1970-01-02T00:00Z.
+    try testing.expectEqual(@as(?i128, ns_per_day), zonedStartOfDay(90_000_000_000_000, .utc));
+    // +05:00 zone, epoch 0 (wall 05:00) → wall midnight = epoch −5 h.
+    const plus5 = TimeZone{ .offset_minutes = 300 };
+    try testing.expectEqual(@as(?i128, -5 * 3_600_000_000_000), zonedStartOfDay(0, plus5));
+}
+
+fn expectDur(expected: DurationRecord, got: ?DurationRecord) !void {
+    const d = got orelse return error.TestUnexpectedNull;
+    try testing.expectEqual(expected.years, d.years);
+    try testing.expectEqual(expected.months, d.months);
+    try testing.expectEqual(expected.weeks, d.weeks);
+    try testing.expectEqual(expected.days, d.days);
+    try testing.expectEqual(expected.hours, d.hours);
+    try testing.expectEqual(expected.minutes, d.minutes);
+    try testing.expectEqual(expected.seconds, d.seconds);
+    try testing.expectEqual(expected.milliseconds, d.milliseconds);
+    try testing.expectEqual(expected.microseconds, d.microseconds);
+    try testing.expectEqual(expected.nanoseconds, d.nanoseconds);
+}
+
+fn roundDT(
+    start: PlainDateTimeRecord,
+    end: PlainDateTimeRecord,
+    largest: LargestUnit,
+    smallest: LargestUnit,
+    inc: i128,
+    mode: RoundingMode,
+) ?DurationRecord {
+    const diff = differenceISODateTime(start, end, largest);
+    return roundRelativeDateTime(start, end, diff, largest, smallest, inc, mode);
+}
+
+test "roundRelativeDateTime: year smallest rounds up past the half mark" {
+    // 2000-01-01 → 2001-09-01 is 1y8m; rounding to whole years (halfExpand)
+    // sits at ~1.67 years → 2 years.
+    const start = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 1, .iso_day = 1 };
+    const end = PlainDateTimeRecord{ .iso_year = 2001, .iso_month = 9, .iso_day = 1 };
+    try expectDur(.{ .years = 2 }, roundDT(start, end, .year, .year, 1, .half_expand));
+}
+
+test "roundRelativeDateTime: month smallest truncates toward zero" {
+    // 2000-01-15 → 2000-04-10 is 2m26d; trunc to whole months → 2 months.
+    const start = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 1, .iso_day = 15 };
+    const end = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 4, .iso_day = 10 };
+    try expectDur(.{ .months = 2 }, roundDT(start, end, .month, .month, 1, .trunc));
+}
+
+test "roundRelativeDateTime: month rounding bubbles 12 months up to a year" {
+    // 2000-01-01 → 2000-12-20, largestUnit year: 11m19d. Rounding the month
+    // up (halfExpand, ~0.61 into December) yields 12 months, which the
+    // re-difference promotes to 1 year.
+    const start = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 1, .iso_day = 1 };
+    const end = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 12, .iso_day = 20 };
+    try expectDur(.{ .years = 1 }, roundDT(start, end, .year, .month, 1, .half_expand));
+}
+
+test "roundRelativeDateTime: week smallest stays unbubbled under month largest" {
+    // 2000-01-01 → 2000-02-10, largestUnit month: 1m9d. Rounding to weeks
+    // keeps the held month and the rounded week count (no promotion to
+    // months/days — §7.5 step 9 excludes week from bubbling).
+    const start = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 1, .iso_day = 1 };
+    const end = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 2, .iso_day = 10 };
+    try expectDur(.{ .months = 1, .weeks = 1 }, roundDT(start, end, .month, .week, 1, .trunc));
+}
+
+test "roundRelativeDateTime: day smallest rounds the time-of-day carry" {
+    // 2000-01-01T00:00 → 2000-01-10T12:00 is 9d12h; rounding to whole days
+    // (halfExpand) lands on 10 days.
+    const start = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 1, .iso_day = 1 };
+    const end = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 1, .iso_day = 10, .hour = 12 };
+    try expectDur(.{ .days = 10 }, roundDT(start, end, .day, .day, 1, .half_expand));
+}
+
+test "roundRelativeDateTime: hour rounding expands a day, no bubble at day largest" {
+    // 2000-01-01T00:00 → 2000-01-05T23:30 is 4d23h30m; rounding to the hour
+    // rolls 23:30 up to a full day → exactly 5 days.
+    const start = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 1, .iso_day = 1 };
+    const end = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 1, .iso_day = 5, .hour = 23, .minute = 30 };
+    try expectDur(.{ .days = 5 }, roundDT(start, end, .day, .hour, 1, .half_expand));
+}
+
+test "roundRelativeDateTime: hour largest keeps the whole span in time fields" {
+    // 2000-01-01T00:00 → 2000-01-02T05:30, largestUnit hour: 29h30m; the
+    // day stays folded into hours, rounding half-up to 30 hours.
+    const start = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 1, .iso_day = 1 };
+    const end = PlainDateTimeRecord{ .iso_year = 2000, .iso_month = 1, .iso_day = 2, .hour = 5, .minute = 30 };
+    try expectDur(.{ .hours = 30 }, roundDT(start, end, .hour, .hour, 1, .half_expand));
 }

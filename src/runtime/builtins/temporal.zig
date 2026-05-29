@@ -1292,17 +1292,34 @@ fn instantAddSubtract(realm: *Realm, this_value: Value, duration_like: Value, si
     return createTemporalInstant(realm, result);
 }
 
-/// §8.4.10 Temporal.Instant.prototype.toString — default / `auto`
-/// precision (UTC, trailing `Z`). Options-driven rounding / time-zone
-/// rendering is deferred; an options argument is rejected.
+/// §8.4.10 Temporal.Instant.prototype.toString ( [options] ) — read
+/// fractionalSecondDigits, roundingMode, smallestUnit, timeZone (in that
+/// order, before any validation), round the instant to the resolved
+/// unit/increment, then render. With no `timeZone` the output is the UTC
+/// wall clock with a trailing `Z`; with one it is that zone's wall clock
+/// plus its numeric `±HH:MM` offset.
 fn instantToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ns = try requireInstant(realm, this_value);
-    const opts = argOr(args, 0, Value.undefined_);
-    if (!opts.isUndefined()) {
-        return throwTypeError(realm, "Temporal.Instant.prototype.toString options are not yet supported");
+    const options = argOr(args, 0, Value.undefined_);
+    const frac = try getFractionalSecondDigitsOption(realm, options);
+    const opts_obj = try getOptionsObject(realm, options);
+    const mode = try getRoundingModeOption(realm, opts_obj, .trunc);
+    const smallest = try getTemporalUnitOption(realm, opts_obj, "smallestUnit");
+    var time_zone: ?temporal.TimeZone = null;
+    if (opts_obj) |o| {
+        const tz_val = try getPropertyChain(realm, o, "timeZone");
+        if (!tz_val.isUndefined()) time_zone = try toTimeZoneArg(realm, tz_val);
+    }
+    try requireToStringSmallestUnit(realm, smallest);
+
+    const prec = toSecondsStringPrecision(smallest, frac);
+    const inc_ns = prec.increment * temporal.unitNanoseconds(prec.unit);
+    const rounded_ns = temporal.roundToIncrementAsIfPositive(ns, inc_ns, mode);
+    if (!temporal.isValidEpochNanoseconds(rounded_ns)) {
+        return throwRangeError(realm, "rounded Instant is out of range");
     }
     var buf: [48]u8 = undefined;
-    const s = temporal.instantToString(ns, &buf);
+    const s = temporal.instantToString(rounded_ns, &buf, prec.precision, time_zone);
     const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
     return Value.fromString(js);
 }
@@ -1312,7 +1329,7 @@ fn instantToJSON(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     _ = args;
     const ns = try requireInstant(realm, this_value);
     var buf: [48]u8 = undefined;
-    const s = temporal.instantToString(ns, &buf);
+    const s = temporal.instantToString(ns, &buf, .auto, null);
     const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
     return Value.fromString(js);
 }
@@ -1516,11 +1533,13 @@ fn differenceTemporalInstant(realm: *Realm, this_value: Value, args: []const Val
     return createTemporalDuration(realm, d);
 }
 
-/// Deferred — needs the time-zone machinery + Temporal.ZonedDateTime.
+/// §8.3.x Temporal.Instant.prototype.toZonedDateTimeISO ( timeZone ) —
+/// pair this instant with a time zone (ISO calendar) to form a
+/// ZonedDateTime at the same epoch nanoseconds.
 fn instantToZonedDateTimeISO(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requireInstant(realm, this_value);
-    return throwTypeError(realm, "Temporal.Instant.prototype.toZonedDateTimeISO is not yet implemented");
+    const epoch = try requireInstant(realm, this_value);
+    const tz = try toTimeZoneArg(realm, argOr(args, 0, Value.undefined_));
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = tz });
 }
 
 // ── §3 Temporal.PlainDate (ISO calendar) ───────────────────────────────────
@@ -2068,10 +2087,36 @@ fn plainDateToPlainDateTime(realm: *Realm, this_value: Value, args: []const Valu
     const t: PlainTimeRecord = if (arg.isUndefined()) .{} else try toTemporalTime(realm, arg, Value.undefined_);
     return createTemporalDateTime(realm, PlainDateTimeRecord.combine(d, t));
 }
+/// §3.3.x Temporal.PlainDate.prototype.toZonedDateTime ( item ) — anchor
+/// this date in a time zone. `item` is either a time-zone identifier
+/// (string / ZonedDateTime) used at start-of-day, or a property bag
+/// `{ timeZone, plainTime }`. For a fixed-offset zone start-of-day is just
+/// midnight wall-clock mapped to the epoch.
 fn plainDateToZonedDateTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainDate(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainDate.prototype.toZonedDateTime is not yet implemented");
+    const d = try requirePlainDate(realm, this_value);
+    const item = argOr(args, 0, Value.undefined_);
+    var tz: temporal.TimeZone = undefined;
+    var time_arg = Value.undefined_;
+    if (heap_mod.valueAsPlainObject(item)) |obj| {
+        // A property bag carries an explicit `timeZone`; otherwise the
+        // object is itself the identifier (e.g. a ZonedDateTime) used at
+        // start-of-day.
+        const tz_like = try getPropertyChain(realm, obj, "timeZone");
+        if (tz_like.isUndefined()) {
+            tz = try toTimeZoneArg(realm, item);
+        } else {
+            tz = try toTimeZoneArg(realm, tz_like);
+            time_arg = try getPropertyChain(realm, obj, "plainTime");
+        }
+    } else {
+        tz = try toTimeZoneArg(realm, item);
+    }
+    const t: PlainTimeRecord = if (time_arg.isUndefined()) .{} else try toTemporalTime(realm, time_arg, Value.undefined_);
+    const wall = PlainDateTimeRecord.combine(d, t);
+    if (!temporal.isoDateTimeWithinLimits(wall)) return throwRangeError(realm, "ZonedDateTime is out of range");
+    const epoch = temporal.getEpochNanosecondsFor(tz, wall) orelse
+        return throwRangeError(realm, "ZonedDateTime is out of range");
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = tz });
 }
 
 // ── §5 Temporal.PlainDateTime (ISO calendar) ───────────────────────────────
@@ -2603,10 +2648,10 @@ fn plainDateTimeSince(realm: *Realm, this_value: Value, args: []const Value) Nat
 /// reduces to the same epoch-nanosecond arithmetic the Instant difference
 /// uses: subtract the two wall-clock instants, round at the smallestUnit,
 /// and balance into the largestUnit (which may be "day"). A year / month
-/// / week unit (as largest OR smallest) needs RoundRelativeDateTime with
-/// calendar context, which is not wired yet — those throw a RangeError
-/// until that machinery lands. The default settings (largestUnit "day",
-/// smallestUnit "nanosecond") fall in the handled subset.
+/// / week unit (as largest OR smallest) routes through DifferenceISODateTime
+/// + RoundRelativeDateTime, which carries the calendar context. For `since`
+/// the rounding mode is negated and the result negated after, matching the
+/// spec's NegateRoundingMode + negated-duration construction.
 fn differenceTemporalDateTime(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
     const this_dt = try requirePlainDateTime(realm, this_value);
     const other_dt = try toTemporalDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
@@ -2630,30 +2675,50 @@ fn differenceTemporalDateTime(realm: *Realm, this_value: Value, args: []const Va
         return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
     }
 
-    // Calendar units (year/month/week) as either bound need the calendar-
-    // aware relative rounding that PlainDateTime differences don't ship
-    // yet.
-    if (@intFromEnum(largest) < @intFromEnum(temporal.LargestUnit.day) or
-        @intFromEnum(smallest) < @intFromEnum(temporal.LargestUnit.day))
-    {
-        return throwRangeError(realm, "year, month, and week units are not yet supported for PlainDateTime.prototype.until / since");
-    }
-
     // smallestUnit "day" has no maximum increment; the finer units must
-    // divide their next-larger unit evenly (non-inclusive).
-    if (smallest != .day) {
+    // divide their next-larger unit evenly (non-inclusive). Calendar units
+    // (year/month/week) likewise carry no increment ceiling.
+    if (smallest != .day and @intFromEnum(smallest) >= @intFromEnum(temporal.LargestUnit.day)) {
         if (!temporal.validateRoundingIncrement(increment, differenceDividend(smallest), false)) {
             return throwRangeError(realm, "invalid roundingIncrement for the smallestUnit");
         }
     }
 
-    // Uniform span: collapse each side to an epoch-nanosecond count.
+    const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
+
+    // Calendar units (year/month/week as either bound) need calendar-aware
+    // relative rounding: difference the two wall clocks, then round/bubble.
+    if (@intFromEnum(largest) < @intFromEnum(temporal.LargestUnit.day) or
+        @intFromEnum(smallest) < @intFromEnum(temporal.LargestUnit.day))
+    {
+        const base_diff = temporal.differenceISODateTime(this_dt, other_dt, largest);
+        var dr = if (smallest == .nanosecond and increment == 1)
+            base_diff
+        else
+            temporal.roundRelativeDateTime(this_dt, other_dt, base_diff, largest, smallest, increment, eff_mode) orelse
+                return throwRangeError(realm, "rounded PlainDateTime is outside the representable range");
+        if (is_since) {
+            dr.years = negZero(dr.years);
+            dr.months = negZero(dr.months);
+            dr.weeks = negZero(dr.weeks);
+            dr.days = negZero(dr.days);
+            dr.hours = negZero(dr.hours);
+            dr.minutes = negZero(dr.minutes);
+            dr.seconds = negZero(dr.seconds);
+            dr.milliseconds = negZero(dr.milliseconds);
+            dr.microseconds = negZero(dr.microseconds);
+            dr.nanoseconds = negZero(dr.nanoseconds);
+        }
+        return createTemporalDuration(realm, dr);
+    }
+
+    // Uniform span (day-or-finer both bounds): collapse each side to an
+    // epoch-nanosecond count — every day is a flat 24 h.
     const ns1 = @as(i128, temporal.daysFromCivil(this_dt.iso_year, this_dt.iso_month, this_dt.iso_day)) * temporal.ns_per_day +
         temporal.timeRecordToNanoseconds(this_dt.time());
     const ns2 = @as(i128, temporal.daysFromCivil(other_dt.iso_year, other_dt.iso_month, other_dt.iso_day)) * temporal.ns_per_day +
         temporal.timeRecordToNanoseconds(other_dt.time());
     const diff = ns2 - ns1;
-    const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
     const rounded = temporal.roundToIncrement(diff, increment * temporal.unitNanoseconds(smallest), eff_mode);
     var dr = temporal.balanceTimeDuration(rounded, largest);
     if (is_since) {
@@ -2712,15 +2777,28 @@ fn plainDateTimeRound(realm: *Realm, this_value: Value, args: []const Value) Nat
     return createTemporalDateTime(realm, rounded);
 }
 
-/// §5.3.x Temporal.PlainDateTime.prototype.toString ( [options] ) — the
-/// `calendarName` display option (auto / always / never / critical) plus
-/// `auto` sub-second precision. Output-rounding options
-/// (fractionalSecondDigits / smallestUnit / roundingMode) are deferred.
+/// §5.3.x Temporal.PlainDateTime.prototype.toString ( [options] ) — read
+/// calendarName, fractionalSecondDigits, roundingMode, smallestUnit (in
+/// that order, before any validation), round the wall-clock date-time to
+/// the resolved unit/increment, then render with the calendar annotation.
 fn plainDateTimeToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requirePlainDateTime(realm, this_value);
-    const cal = try getCalendarNameOption(realm, argOr(args, 0, Value.undefined_));
+    const options = argOr(args, 0, Value.undefined_);
+    const cal = try getCalendarNameOption(realm, options);
+    const frac = try getFractionalSecondDigitsOption(realm, options);
+    const opts_obj = try getOptionsObject(realm, options);
+    const mode = try getRoundingModeOption(realm, opts_obj, .trunc);
+    const smallest = try getTemporalUnitOption(realm, opts_obj, "smallestUnit");
+    try requireToStringSmallestUnit(realm, smallest);
+
+    const prec = toSecondsStringPrecision(smallest, frac);
+    const rounded = temporal.roundISODateTime(rec, prec.unit, prec.increment, mode) orelse
+        return throwRangeError(realm, "rounded PlainDateTime is out of range");
+    if (!temporal.isoDateTimeWithinLimits(rounded)) {
+        return throwRangeError(realm, "rounded PlainDateTime is out of range");
+    }
     var buf: [48]u8 = undefined;
-    const s = temporal.isoDateTimeToString(rec, &buf, cal);
+    const s = temporal.isoDateTimeToString(rounded, &buf, cal, prec.precision);
     const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
     return Value.fromString(js);
 }
@@ -2728,7 +2806,7 @@ fn plainDateTimeToJSON(realm: *Realm, this_value: Value, args: []const Value) Na
     _ = args;
     const rec = try requirePlainDateTime(realm, this_value);
     var buf: [48]u8 = undefined;
-    const s = temporal.isoDateTimeToString(rec, &buf, .auto);
+    const s = temporal.isoDateTimeToString(rec, &buf, .auto, .auto);
     const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
     return Value.fromString(js);
 }
@@ -3653,6 +3731,19 @@ fn installZonedDateTime(realm: *Realm, ns: *JSObject) !void {
     try installNativeMethodOnProto(realm, proto, "toPlainTime", zonedDateTimeToPlainTime, 0);
     try installNativeMethodOnProto(realm, proto, "toPlainDateTime", zonedDateTimeToPlainDateTime, 0);
 
+    // §6.3 field replacement, arithmetic, rounding, and transitions.
+    try installNativeMethodOnProto(realm, proto, "with", zonedDateTimeWith, 1);
+    try installNativeMethodOnProto(realm, proto, "withPlainTime", zonedDateTimeWithPlainTime, 0);
+    try installNativeMethodOnProto(realm, proto, "withTimeZone", zonedDateTimeWithTimeZone, 1);
+    try installNativeMethodOnProto(realm, proto, "withCalendar", zonedDateTimeWithCalendar, 1);
+    try installNativeMethodOnProto(realm, proto, "add", zonedDateTimeAdd, 1);
+    try installNativeMethodOnProto(realm, proto, "subtract", zonedDateTimeSubtract, 1);
+    try installNativeMethodOnProto(realm, proto, "until", zonedDateTimeUntil, 1);
+    try installNativeMethodOnProto(realm, proto, "since", zonedDateTimeSince, 1);
+    try installNativeMethodOnProto(realm, proto, "round", zonedDateTimeRound, 1);
+    try installNativeMethodOnProto(realm, proto, "startOfDay", zonedDateTimeStartOfDay, 0);
+    try installNativeMethodOnProto(realm, proto, "getTimeZoneTransition", zonedDateTimeGetTimeZoneTransition, 1);
+
     try installNativeMethod(realm, fn_obj, "from", zonedDateTimeFrom, 1);
     try installNativeMethod(realm, fn_obj, "compare", zonedDateTimeCompare, 2);
 
@@ -3950,9 +4041,59 @@ fn getFractionalSecondDigitsOption(realm: *Realm, options: Value) NativeError!?u
         if (std.mem.eql(u8, s.flatBytes(), "auto")) return null;
         return throwRangeError(realm, "fractionalSecondDigits must be 'auto' or an integer 0..9");
     }
-    const n = try toIntegerWithTruncation(realm, v);
-    if (!(n >= 0 and n <= 9)) return throwRangeError(realm, "fractionalSecondDigits must be 0..9");
-    return @as(u4, @intFromFloat(n));
+    // §13.x GetStringOrNumberOption: reject non-finite, then FLOOR (not
+    // truncate) — so -0.6 floors to -1 and is rejected, 2.5 floors to 2.
+    const d = numberToF64(try toNumber(realm, v));
+    if (!std.math.isFinite(d)) return throwRangeError(realm, "fractionalSecondDigits must be finite");
+    const floored = std.math.floor(d);
+    if (!(floored >= 0 and floored <= 9)) return throwRangeError(realm, "fractionalSecondDigits must be 0..9");
+    return @as(u4, @intFromFloat(floored));
+}
+
+/// §13.x ToSecondsStringPrecisionRecord — fold a resolved `smallestUnit`
+/// (minute..nanosecond, or null) and `fractionalSecondDigits` (0..9 digits,
+/// or null ⇒ "auto") into the display precision plus the unit / increment
+/// the value is rounded to before formatting. `smallestUnit` wins when set.
+const SecondsStringPrecision = struct {
+    precision: temporal.Precision,
+    unit: temporal.LargestUnit,
+    increment: i128,
+};
+fn toSecondsStringPrecision(smallest: ?temporal.LargestUnit, digits: ?u4) SecondsStringPrecision {
+    if (smallest) |u| {
+        return switch (u) {
+            .minute => .{ .precision = .minute, .unit = .minute, .increment = 1 },
+            .second => .{ .precision = .{ .digits = 0 }, .unit = .second, .increment = 1 },
+            .millisecond => .{ .precision = .{ .digits = 3 }, .unit = .millisecond, .increment = 1 },
+            .microsecond => .{ .precision = .{ .digits = 6 }, .unit = .microsecond, .increment = 1 },
+            .nanosecond => .{ .precision = .{ .digits = 9 }, .unit = .nanosecond, .increment = 1 },
+            // hour / day / week / month / year are rejected before this point.
+            else => unreachable,
+        };
+    }
+    const d = digits orelse return .{ .precision = .auto, .unit = .nanosecond, .increment = 1 };
+    if (d == 0) return .{ .precision = .{ .digits = 0 }, .unit = .second, .increment = 1 };
+    if (d <= 3) return .{ .precision = .{ .digits = d }, .unit = .millisecond, .increment = pow10(3 - d) };
+    if (d <= 6) return .{ .precision = .{ .digits = d }, .unit = .microsecond, .increment = pow10(6 - d) };
+    return .{ .precision = .{ .digits = d }, .unit = .nanosecond, .increment = pow10(9 - d) };
+}
+fn pow10(e: u4) i128 {
+    var r: i128 = 1;
+    var i: u4 = 0;
+    while (i < e) : (i += 1) r *= 10;
+    return r;
+}
+
+/// Reject a `smallestUnit` toString option coarser than `minute`
+/// (year..hour). Per GetTemporalUnitValuedOption's read-then-validate
+/// ordering this must run only after every other option has been read and
+/// cast — the order-of-operations fixtures observe `timeZoneName` /
+/// `timeZone` being read even when `smallestUnit` is an invalid date unit.
+fn requireToStringSmallestUnit(realm: *Realm, unit: ?temporal.LargestUnit) NativeError!void {
+    const u = unit orelse return;
+    if (@intFromEnum(u) < @intFromEnum(temporal.LargestUnit.minute)) {
+        return throwRangeError(realm, "smallestUnit must be minute, second, millisecond, microsecond, or nanosecond");
+    }
 }
 
 /// §11.x TimeZoneEquals — for the offset-only scope two zones are equal when
@@ -4063,16 +4204,30 @@ fn zonedDateTimeEquals(realm: *Realm, this_value: Value, args: []const Value) Na
 fn zonedDateTimeToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const z = try requireZonedDateTime(realm, this_value);
     const options = argOr(args, 0, Value.undefined_);
+    // §6.3.x — read every option (in the spec's alphabetical order) before
+    // any algorithmic validation: calendarName, fractionalSecondDigits,
+    // offset, roundingMode, smallestUnit, timeZoneName.
     const cal = try getCalendarNameOption(realm, options);
     const frac = try getFractionalSecondDigitsOption(realm, options);
     const show_off = try getShowOffsetOption(realm, options);
+    const opts_obj = try getOptionsObject(realm, options);
+    const mode = try getRoundingModeOption(realm, opts_obj, .trunc);
+    const smallest = try getTemporalUnitOption(realm, opts_obj, "smallestUnit");
     const tz_name = try getTimeZoneNameOption(realm, options);
+    try requireToStringSmallestUnit(realm, smallest);
+
+    const prec = toSecondsStringPrecision(smallest, frac);
+    const inc_ns = prec.increment * temporal.unitNanoseconds(prec.unit);
+    const rounded_ns = temporal.roundToIncrementAsIfPositive(z.epoch_ns, inc_ns, mode);
+    if (!temporal.isValidEpochNanoseconds(rounded_ns)) {
+        return throwRangeError(realm, "rounded ZonedDateTime is out of range");
+    }
     var buf: [80]u8 = undefined;
-    const out = temporal.zonedDateTimeToString(z, &buf, .{
+    const out = temporal.zonedDateTimeToString(.{ .epoch_ns = rounded_ns, .time_zone = z.time_zone }, &buf, .{
         .calendar = cal,
         .time_zone_name = tz_name,
         .show_offset = show_off,
-        .fractional_digits = frac,
+        .precision = prec.precision,
     });
     const js = realm.heap.allocateString(out) catch return error.OutOfMemory;
     return Value.fromString(js);
@@ -4140,4 +4295,379 @@ fn zonedDateTimeToPlainDateTime(realm: *Realm, this_value: Value, args: []const 
     const z = try requireZonedDateTime(realm, this_value);
     const dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
     return createTemporalDateTime(realm, dt);
+}
+
+/// §11.x ToTemporalTimeZoneIdentifier — a ZonedDateTime-bearing object
+/// yields its own [[TimeZone]]; a String is parsed as an identifier (bare
+/// or extracted from an ISO date-time string); anything else is a
+/// TypeError. The offset-only scope means the parse rejects named IANA
+/// zones and sub-minute precision.
+fn toTimeZoneArg(realm: *Realm, arg: Value) NativeError!temporal.TimeZone {
+    if (heap_mod.valueAsPlainObject(arg)) |o| {
+        if (o.getTemporalRecord()) |rec| {
+            if (rec.* == .zoned_date_time) return rec.zoned_date_time.time_zone;
+        }
+    }
+    if (!arg.isString()) return throwTypeError(realm, "time zone must be a string or Temporal.ZonedDateTime");
+    const s: *JSString = @ptrCast(@alignCast(arg.asString()));
+    return temporal.parseTimeZoneString(s.flatBytes()) orelse
+        return throwRangeError(realm, "invalid time zone identifier");
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.with ( temporalZonedDateTimeLike
+/// [ , options ] ) — merge partial fields over the receiver's wall-clock
+/// fields (and offset), then re-anchor to an instant via
+/// InterpretISODateTimeOffset. The `offset` field defaults to the
+/// receiver's current offset; the `offset` resolution option defaults to
+/// "prefer". `calendar` / `timeZone` keys on the like-object are rejected.
+fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const z = try requireZonedDateTime(realm, this_value);
+    const like = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(like) orelse
+        return throwTypeError(realm, "ZonedDateTime-like must be an object");
+    try rejectTemporalLikeObject(realm, obj);
+
+    const base = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    var year: i64 = base.iso_year;
+    var month_int: i64 = base.iso_month;
+    var month_int_set = false;
+    var month_code: i64 = 0;
+    var month_code_set = false;
+    var day: i64 = base.iso_day;
+    var hour: f64 = @floatFromInt(base.hour);
+    var minute: f64 = @floatFromInt(base.minute);
+    var second: f64 = @floatFromInt(base.second);
+    var millisecond: f64 = @floatFromInt(base.millisecond);
+    var microsecond: f64 = @floatFromInt(base.microsecond);
+    var nanosecond: f64 = @floatFromInt(base.nanosecond);
+    // The offset field defaults to the receiver's current offset; a
+    // supplied numeric offset overrides it. Either way the behaviour is
+    // "option" (an explicit offset to reconcile with the zone).
+    var offset_ns: i128 = @as(i128, temporal.getOffsetNanosecondsFor(z.time_zone, z.epoch_ns));
+    var any = false;
+
+    // Alphabetical field order (PrepareTemporalFields): day, hour,
+    // microsecond, millisecond, minute, month, monthCode, nanosecond,
+    // offset, second, year.
+    const day_v = try getPropertyChain(realm, obj, "day");
+    if (!day_v.isUndefined()) {
+        day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
+        any = true;
+    }
+    const hour_v = try getPropertyChain(realm, obj, "hour");
+    if (!hour_v.isUndefined()) {
+        hour = try toIntegerWithTruncation(realm, hour_v);
+        any = true;
+    }
+    const microsecond_v = try getPropertyChain(realm, obj, "microsecond");
+    if (!microsecond_v.isUndefined()) {
+        microsecond = try toIntegerWithTruncation(realm, microsecond_v);
+        any = true;
+    }
+    const millisecond_v = try getPropertyChain(realm, obj, "millisecond");
+    if (!millisecond_v.isUndefined()) {
+        millisecond = try toIntegerWithTruncation(realm, millisecond_v);
+        any = true;
+    }
+    const minute_v = try getPropertyChain(realm, obj, "minute");
+    if (!minute_v.isUndefined()) {
+        minute = try toIntegerWithTruncation(realm, minute_v);
+        any = true;
+    }
+    const month_v = try getPropertyChain(realm, obj, "month");
+    if (!month_v.isUndefined()) {
+        month_int = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+        month_int_set = true;
+        any = true;
+    }
+    const month_code_v = try getPropertyChain(realm, obj, "monthCode");
+    if (!month_code_v.isUndefined()) {
+        month_code = try parseMonthCode(realm, month_code_v);
+        month_code_set = true;
+        any = true;
+    }
+    const nanosecond_v = try getPropertyChain(realm, obj, "nanosecond");
+    if (!nanosecond_v.isUndefined()) {
+        nanosecond = try toIntegerWithTruncation(realm, nanosecond_v);
+        any = true;
+    }
+    const offset_v = try getPropertyChain(realm, obj, "offset");
+    if (!offset_v.isUndefined()) {
+        if (!offset_v.isString()) return throwTypeError(realm, "offset must be a string");
+        const os: *JSString = @ptrCast(@alignCast(offset_v.asString()));
+        offset_ns = temporal.parseOffsetString(os.flatBytes()) orelse
+            return throwRangeError(realm, "invalid offset string");
+        any = true;
+    }
+    const second_v = try getPropertyChain(realm, obj, "second");
+    if (!second_v.isUndefined()) {
+        second = try toIntegerWithTruncation(realm, second_v);
+        any = true;
+    }
+    const year_v = try getPropertyChain(realm, obj, "year");
+    if (!year_v.isUndefined()) {
+        year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+        any = true;
+    }
+    if (!any) return throwTypeError(realm, "ZonedDateTime-like must have at least one recognized property");
+
+    var month: i64 = base.iso_month;
+    if (month_code_set) {
+        month = month_code;
+        if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
+    } else if (month_int_set) {
+        month = month_int;
+    }
+
+    // Resolved-options reads: disambiguation, offset, overflow.
+    try getDisambiguationOption(realm, argOr(args, 1, Value.undefined_));
+    const offset_opt = try getOffsetOption(realm, argOr(args, 1, Value.undefined_), .prefer);
+    const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
+
+    const new_date = temporal.regulateISODate(year, month, day, overflow == .reject) orelse
+        return throwRangeError(realm, "ZonedDateTime date is out of range");
+    const new_time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
+    const wall = PlainDateTimeRecord.combine(new_date, new_time);
+    const epoch = temporal.interpretISODateTimeOffset(wall, .option, offset_ns, z.time_zone, offset_opt) catch |e| switch (e) {
+        error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
+        error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
+    };
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone });
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.withPlainTime ( [ plainTimeLike ] )
+/// — keep the wall-clock date, replace the time (undefined ⇒ start of day,
+/// i.e. midnight for a fixed-offset zone), re-anchor to an instant.
+fn zonedDateTimeWithPlainTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const z = try requireZonedDateTime(realm, this_value);
+    const arg = argOr(args, 0, Value.undefined_);
+    const t: PlainTimeRecord = if (arg.isUndefined()) .{} else try toTemporalTime(realm, arg, Value.undefined_);
+    const base = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    const wall = PlainDateTimeRecord.combine(base.date(), t);
+    const epoch = temporal.getEpochNanosecondsFor(z.time_zone, wall) orelse
+        return throwRangeError(realm, "ZonedDateTime is out of range");
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone });
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.withTimeZone ( timeZoneLike ) —
+/// same instant, different zone.
+fn zonedDateTimeWithTimeZone(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const z = try requireZonedDateTime(realm, this_value);
+    const tz = try toTimeZoneArg(realm, argOr(args, 0, Value.undefined_));
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = z.epoch_ns, .time_zone = tz });
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.withCalendar ( calendarLike ) —
+/// Cynic ships only the ISO calendar, so any accepted identifier yields a
+/// copy with the same instant + zone.
+fn zonedDateTimeWithCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const z = try requireZonedDateTime(realm, this_value);
+    const arg = argOr(args, 0, Value.undefined_);
+    if (heap_mod.valueAsPlainObject(arg)) |o| {
+        if (o.getTemporalRecord() != null) return createTemporalZonedDateTime(realm, z);
+    }
+    if (!arg.isString()) return throwTypeError(realm, "calendar must be a string or calendar-bearing object");
+    const s: *JSString = @ptrCast(@alignCast(arg.asString()));
+    if (!std.ascii.eqlIgnoreCase(s.flatBytes(), "iso8601")) {
+        return throwRangeError(realm, "only the iso8601 calendar is supported");
+    }
+    return createTemporalZonedDateTime(realm, z);
+}
+
+/// §6.5.x AddDurationToZonedDateTime — `add` (negate=false) / `subtract`
+/// (negate=true). The date part is applied in wall clock, the time part in
+/// exact time (see temporal.addZonedDateTime).
+fn zonedDateTimeAddSubtract(realm: *Realm, this_value: Value, args: []const Value, negate: bool) NativeError!Value {
+    const z = try requireZonedDateTime(realm, this_value);
+    var dur = try toTemporalDuration(realm, argOr(args, 0, Value.undefined_));
+    if (!temporal.isValidDuration(dur)) return throwRangeError(realm, "Duration values are out of range");
+    const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
+    if (negate) dur = temporal.negateDuration(dur);
+    const epoch = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, dur, overflow == .reject) orelse
+        return throwRangeError(realm, "ZonedDateTime is out of range");
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone });
+}
+fn zonedDateTimeAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return zonedDateTimeAddSubtract(realm, this_value, args, false);
+}
+fn zonedDateTimeSubtract(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return zonedDateTimeAddSubtract(realm, this_value, args, true);
+}
+fn zonedDateTimeUntil(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return differenceTemporalZonedDateTime(realm, this_value, args, false);
+}
+fn zonedDateTimeSince(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return differenceTemporalZonedDateTime(realm, this_value, args, true);
+}
+
+/// §6.5.x DifferenceTemporalZonedDateTime — `until` / `since`.
+///
+/// The default largestUnit is "hour" (not "day"), so the common case is a
+/// pure exact-time difference: subtract the two instants, round at the
+/// smallestUnit, balance into the largestUnit. A "day" largestUnit is
+/// handled too — every day in a fixed-offset zone is a uniform 24 h — but
+/// only when both ZonedDateTimes share a time zone (a date unit spanning
+/// two zones is a RangeError per spec). Year / month / week units need the
+/// calendar-relative rounding that is not wired yet and throw a RangeError.
+fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
+    const z = try requireZonedDateTime(realm, this_value);
+    const other = try toTemporalZonedDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    const opts = try getOptionsObject(realm, argOr(args, 1, Value.undefined_));
+
+    const largest_opt = try getTemporalUnitOption(realm, opts, "largestUnit");
+    const increment = try getRoundingIncrementOption(realm, opts);
+    const mode = try getRoundingModeOption(realm, opts, .trunc);
+    const smallest_opt = try getTemporalUnitOption(realm, opts, "smallestUnit");
+
+    if (largest_opt) |lu| try requireUnitInRange(realm, lu, .year, .nanosecond);
+    const smallest = smallest_opt orelse temporal.LargestUnit.nanosecond;
+    try requireUnitInRange(realm, smallest, .year, .nanosecond);
+    // smallestLargestDefaultUnit for ZonedDateTime is "hour".
+    const default_largest: temporal.LargestUnit = @enumFromInt(@min(@intFromEnum(temporal.LargestUnit.hour), @intFromEnum(smallest)));
+    const largest = largest_opt orelse default_largest;
+    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+        return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
+    }
+
+    // A date-category largestUnit (year/month/week/day) requires both
+    // instants be measured in the same zone: a calendar difference across
+    // two zones is undefined per spec.
+    if (@intFromEnum(largest) <= @intFromEnum(temporal.LargestUnit.day) and
+        !timeZoneEquals(z.time_zone, other.time_zone))
+    {
+        return throwRangeError(realm, "cannot compute a calendar difference between ZonedDateTimes in different time zones");
+    }
+
+    // Time / day smallestUnits cap their increment at the next-larger unit;
+    // calendar units (year/month/week) carry no ceiling.
+    if (smallest != .day and @intFromEnum(smallest) >= @intFromEnum(temporal.LargestUnit.day)) {
+        if (!temporal.validateRoundingIncrement(increment, differenceDividend(smallest), false)) {
+            return throwRangeError(realm, "invalid roundingIncrement for the smallestUnit");
+        }
+    }
+
+    const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
+
+    // Calendar units (year/month/week as either bound): a constant offset
+    // cancels in every epoch difference the Nudge/Bubble AOs use, so the
+    // zoned difference equals the PlainDateTime difference of the two
+    // wall-clock times.
+    if (@intFromEnum(largest) < @intFromEnum(temporal.LargestUnit.day) or
+        @intFromEnum(smallest) < @intFromEnum(temporal.LargestUnit.day))
+    {
+        const start_wall = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+        const end_wall = temporal.getISODateTimeFor(other.time_zone, other.epoch_ns);
+        const base_diff = temporal.differenceISODateTime(start_wall, end_wall, largest);
+        var dr = if (smallest == .nanosecond and increment == 1)
+            base_diff
+        else
+            temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest, smallest, increment, eff_mode) orelse
+                return throwRangeError(realm, "rounded ZonedDateTime is outside the representable range");
+        if (is_since) {
+            dr.years = negZero(dr.years);
+            dr.months = negZero(dr.months);
+            dr.weeks = negZero(dr.weeks);
+            dr.days = negZero(dr.days);
+            dr.hours = negZero(dr.hours);
+            dr.minutes = negZero(dr.minutes);
+            dr.seconds = negZero(dr.seconds);
+            dr.milliseconds = negZero(dr.milliseconds);
+            dr.microseconds = negZero(dr.microseconds);
+            dr.nanoseconds = negZero(dr.nanoseconds);
+        }
+        return createTemporalDuration(realm, dr);
+    }
+
+    // Pure exact-time / uniform-day span: subtract the instants directly.
+    const diff = other.epoch_ns - z.epoch_ns;
+    const rounded = temporal.roundToIncrement(diff, increment * temporal.unitNanoseconds(smallest), eff_mode);
+    var dr = temporal.balanceTimeDuration(rounded, largest);
+    if (is_since) {
+        dr.days = negZero(dr.days);
+        dr.hours = negZero(dr.hours);
+        dr.minutes = negZero(dr.minutes);
+        dr.seconds = negZero(dr.seconds);
+        dr.milliseconds = negZero(dr.milliseconds);
+        dr.microseconds = negZero(dr.microseconds);
+        dr.nanoseconds = negZero(dr.nanoseconds);
+    }
+    return createTemporalDuration(realm, dr);
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.round ( roundTo ) — round the
+/// instant in the zone's wall clock. smallestUnit is required (day..
+/// nanosecond); for a fixed-offset zone a day is exactly 24 h.
+fn zonedDateTimeRound(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const z = try requireZonedDateTime(realm, this_value);
+    const round_to = argOr(args, 0, Value.undefined_);
+    if (round_to.isUndefined()) {
+        return throwTypeError(realm, "Temporal.ZonedDateTime.prototype.round requires a smallestUnit");
+    }
+    var unit: temporal.LargestUnit = undefined;
+    var increment: i128 = 1;
+    var mode: temporal.RoundingMode = .half_expand;
+    if (round_to.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(round_to.asString()));
+        unit = temporal.parseTemporalUnit(s.flatBytes()) orelse
+            return throwRangeError(realm, "invalid smallestUnit");
+    } else {
+        const opts = try getOptionsObject(realm, round_to);
+        increment = try getRoundingIncrementOption(realm, opts);
+        mode = try getRoundingModeOption(realm, opts, .half_expand);
+        unit = (try getTemporalUnitOption(realm, opts, "smallestUnit")) orelse
+            return throwRangeError(realm, "smallestUnit is required");
+    }
+    try requireUnitInRange(realm, unit, .day, .nanosecond);
+    const increment_ok = if (unit == .day)
+        temporal.validateRoundingIncrement(increment, 1, true)
+    else
+        temporal.validateRoundingIncrement(increment, differenceDividend(unit), false);
+    if (!increment_ok) {
+        return throwRangeError(realm, "roundingIncrement is out of range for the smallestUnit");
+    }
+    const epoch = temporal.roundZonedDateTime(z.epoch_ns, z.time_zone, unit, increment, mode) orelse
+        return throwRangeError(realm, "rounded ZonedDateTime is out of range");
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone });
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.startOfDay ( ) — the instant of
+/// the first wall-clock moment (midnight) of the current calendar day.
+fn zonedDateTimeStartOfDay(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const z = try requireZonedDateTime(realm, this_value);
+    const epoch = temporal.zonedStartOfDay(z.epoch_ns, z.time_zone) orelse
+        return throwRangeError(realm, "ZonedDateTime is out of range");
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone });
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.getTimeZoneTransition
+/// ( directionParam ) — a UTC or fixed-offset zone never changes offset, so
+/// there is no next/previous transition: the result is always null. The
+/// `direction` argument is still validated (required; "next" / "previous",
+/// as a bare string or a `{ direction }` bag).
+fn zonedDateTimeGetTimeZoneTransition(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = try requireZonedDateTime(realm, this_value);
+    const arg = argOr(args, 0, Value.undefined_);
+    // §6.3.x step 3 — a missing direction argument is a TypeError.
+    if (arg.isUndefined()) return throwTypeError(realm, "getTimeZoneTransition requires a direction");
+    // A bare string is shorthand for `{ direction: <string> }`; otherwise
+    // the argument is an options bag (GetOptionsObject rejects a non-object,
+    // non-string primitive with a TypeError).
+    var dir_v = arg;
+    if (!arg.isString()) {
+        const opts = try getOptionsObject(realm, arg);
+        dir_v = if (opts) |o| try getPropertyChain(realm, o, "direction") else Value.undefined_;
+        // GetDirectionOption reads a *required* option, so a missing value
+        // is a RangeError (not a TypeError).
+        if (dir_v.isUndefined()) return throwRangeError(realm, "the 'direction' option is required");
+    }
+    // GetOption coerces with ToString (a Symbol throws TypeError), then the
+    // value must be one of the allowed strings.
+    const s = try stringifyArg(realm, dir_v);
+    const b = s.flatBytes();
+    if (!std.mem.eql(u8, b, "next") and !std.mem.eql(u8, b, "previous")) {
+        return throwRangeError(realm, "direction must be 'next' or 'previous'");
+    }
+    // A UTC / fixed-offset zone never changes its offset — no transition.
+    return Value.null_;
 }
