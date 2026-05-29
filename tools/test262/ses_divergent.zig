@@ -377,6 +377,46 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
     .{ .path = "built-ins/Temporal/PlainMonthDay/prototype/calendarId/prop-desc.js", .category = .descriptor_assertion },
     .{ .path = "built-ins/Temporal/PlainMonthDay/prototype/monthCode/prop-desc.js", .category = .descriptor_assertion },
     .{ .path = "built-ins/Temporal/PlainMonthDay/prototype/day/prop-desc.js", .category = .descriptor_assertion },
+    // §6.3.x `Temporal.ZonedDateTime.prototype` getters — same SES
+    // accessor-freeze divergence as the other Temporal types: each
+    // fixture asserts `desc.configurable === true` directly and, on
+    // the frozen intrinsic, fires the bare
+    // `Expected SameValue(«false», «true») to be true`. That message
+    // has no `e `/`b ` prefix, so it slips past the generic patterns
+    // (which scope those prefixes to avoid over-firing on real
+    // boolean assertions) — path-classify, like every other getter
+    // block above. The sibling method `prop-desc.js` fixtures
+    // (add, with, until, …) are data properties whose richer
+    // propertyHelper message *does* match a generic pattern, so they
+    // need no path entry.
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/calendarId/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/timeZoneId/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/epochMilliseconds/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/epochNanoseconds/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/year/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/month/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/monthCode/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/day/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/hour/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/minute/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/second/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/millisecond/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/microsecond/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/nanosecond/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/dayOfWeek/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/dayOfYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/weekOfYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/yearOfWeek/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/daysInWeek/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/daysInMonth/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/daysInYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/monthsInYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/inLeapYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/hoursInDay/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/offset/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/offsetNanoseconds/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/era/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js", .category = .descriptor_assertion },
 };
 
 /// Path-based divergence lookup — the escape hatch for

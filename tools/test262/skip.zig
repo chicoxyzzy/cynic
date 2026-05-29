@@ -1159,17 +1159,19 @@ pub const deferred_path_prefixes = [_][]const u8{
     // `Temporal.Duration` (§7), `Temporal.PlainTime` (§4),
     // `Temporal.Instant` (§8), `Temporal.PlainDate` (§3, ISO
     // calendar only), `Temporal.PlainDateTime` (§5, ISO calendar
-    // only), `Temporal.PlainYearMonth` (§9, ISO calendar only), and
-    // `Temporal.PlainMonthDay` (§10, ISO calendar only) — and those
-    // subtrees run; the remaining types stay skipped per-subtree until
-    // their implementation lands. As each type ships, drop its line.
+    // only), `Temporal.PlainYearMonth` (§9, ISO calendar only),
+    // `Temporal.PlainMonthDay` (§10, ISO calendar only), and
+    // `Temporal.ZonedDateTime` (§6, ISO calendar + offset-only/UTC
+    // time zones — no IANA tzdata, so fixed-offset zones never have
+    // DST gaps/overlaps or transitions) — and those subtrees run; the
+    // remaining types stay skipped per-subtree until their
+    // implementation lands. As each type ships, drop its line.
     "built-ins/Temporal/Now/",
-    "built-ins/Temporal/ZonedDateTime/",
     // `built-ins/Temporal/getOwnPropertyNames.js` asserts every one
     // of the nine type names is an own property of the `Temporal`
-    // namespace. Cynic installs seven (Duration + PlainTime + Instant
-    // + PlainDate + PlainDateTime + PlainYearMonth + PlainMonthDay) so
-    // far — Now + ZonedDateTime remain — so this one fixture fails
+    // namespace. Cynic installs eight (Duration + PlainTime + Instant
+    // + PlainDate + PlainDateTime + PlainYearMonth + PlainMonthDay +
+    // ZonedDateTime) so far — Now remains — so this one fixture fails
     // until the namespace is complete. The sibling
     // `prop-desc.js` / `keys.js` (which only
     // probe the namespace's own descriptor + that it has no
@@ -1420,18 +1422,19 @@ test "skip: main-spec paths not OOS" {
 }
 
 test "skip: Temporal out of scope" {
-    // Now + ZonedDateTime are the two Temporal types Cynic doesn't ship
-    // yet, so their whole subtrees stay path-skipped.
+    // Now is the only Temporal type Cynic doesn't ship yet, so its whole
+    // subtree stays path-skipped.
     try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/Now/extensible.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/ZonedDateTime/prototype/add/branding.js"));
     // The shipped ISO-calendar value types are in scope — their subtrees
-    // run. PlainYearMonth (§9) and PlainMonthDay (§10) joined PlainDate /
-    // PlainDateTime / PlainTime / Instant / Duration in this set; assert
-    // they are no longer path-skipped so this test catches a future ship
-    // that forgets to drop the prefix (as PlainDateTime once did).
+    // run. ZonedDateTime (§6, offset-only zones) joined PlainYearMonth /
+    // PlainMonthDay / PlainDate / PlainDateTime / PlainTime / Instant /
+    // Duration in this set; assert they are no longer path-skipped so this
+    // test catches a future ship that forgets to drop the prefix (as
+    // PlainDateTime once did).
     try testing.expect(!pathIsCynicOutOfScope("built-ins/Temporal/PlainDateTime/prototype/add/branding.js"));
     try testing.expect(!pathIsCynicOutOfScope("built-ins/Temporal/PlainYearMonth/prototype/with/branding.js"));
     try testing.expect(!pathIsCynicOutOfScope("built-ins/Temporal/PlainMonthDay/prototype/with/branding.js"));
+    try testing.expect(!pathIsCynicOutOfScope("built-ins/Temporal/ZonedDateTime/prototype/add/branding.js"));
 }
 
 test "skip: ShadowRealm is not path-skipped (feature-gated)" {
