@@ -17,6 +17,12 @@ const tables = @import("property_tables.zig");
 
 pub const Range = tables.Range;
 
+/// A §22.2.1.1 *property of strings* (the `/v`-mode emoji-sequence sets):
+/// single-code-point members folded into `ranges`, plus the multi-code-point
+/// emoji `sequences`. These match strings, so they are valid only under the
+/// `/v` flag and only in positive (non-complemented) form.
+pub const StringProp = tables.StringProp;
+
 /// Resolve a `General_Category` value — by abbreviation (`Lu`), long name
 /// (`Uppercase_Letter`), or spec alias (`cntrl`, `digit`, `punct`,
 /// `Combining_Mark`) — to its sorted, non-overlapping code-point ranges.
@@ -49,6 +55,17 @@ pub fn script(name: []const u8) ?[]const Range {
 /// points absent from ScriptExtensions.txt). `null` if unrecognised.
 pub fn scriptExtensions(name: []const u8) ?[]const Range {
     return tables.scriptExtensions(name);
+}
+
+/// Resolve a §22.2.1.1 *property of strings* — one of the seven UTS #51
+/// emoji-sequence sets (`Basic_Emoji`, `Emoji_Keycap_Sequence`,
+/// `RGI_Emoji_Modifier_Sequence`, `RGI_Emoji_Flag_Sequence`,
+/// `RGI_Emoji_Tag_Sequence`, `RGI_Emoji_ZWJ_Sequence`, and their union
+/// `RGI_Emoji`) — to its single-code-point ranges plus multi-code-point
+/// sequence members. `null` if `name` is not such a property; exact match
+/// (each property's short name equals its long name).
+pub fn stringProperty(name: []const u8) ?StringProp {
+    return tables.stringProperty(name);
 }
 
 /// True iff `cp` lies within any range of `ranges`, which must be sorted by
@@ -345,4 +362,52 @@ test "script and scx names are disjoint from gc and binary" {
     try testing.expectEqual(@as(?[]const Range, null), generalCategory("Latin"));
     try testing.expectEqual(@as(?[]const Range, null), binaryProperty("Latin"));
     try testing.expectEqual(@as(?[]const Range, null), script("NotAScript"));
+}
+
+fn seqIn(sp: StringProp, s: []const u21) bool {
+    for (sp.sequences) |seq| if (std.mem.eql(u21, seq, s)) return true;
+    return false;
+}
+
+test "Basic_Emoji: single code points fold into ranges, pairs into sequences" {
+    const be = stringProperty("Basic_Emoji").?;
+    try testing.expect(rangeContains(be.ranges, 0x231A)); // ⌚ WATCH (single cp)
+    try testing.expect(rangeContains(be.ranges, 0x1F600)); // 😀 (single cp)
+    try testing.expect(!rangeContains(be.ranges, 'A'));
+    try testing.expect(seqIn(be, &.{ 0xA9, 0xFE0F })); // ©️ (text-style + VS16)
+    try testing.expect(!seqIn(be, &.{ 0xA9, 0x41 }));
+}
+
+test "flag / keycap / zwj sequences are multi-code-point members" {
+    const flag = stringProperty("RGI_Emoji_Flag_Sequence").?;
+    try testing.expectEqual(@as(usize, 0), flag.ranges.len); // all sequences, no singles
+    try testing.expect(seqIn(flag, &.{ 0x1F1E6, 0x1F1E8 })); // 🇦🇨
+
+    const keycap = stringProperty("Emoji_Keycap_Sequence").?;
+    try testing.expect(seqIn(keycap, &.{ 0x23, 0xFE0F, 0x20E3 })); // #️⃣
+
+    const zwj = stringProperty("RGI_Emoji_ZWJ_Sequence").?;
+    try testing.expect(seqIn(zwj, &.{ 0x1F468, 0x200D, 0x1F466 })); // 👨‍👦 family
+}
+
+test "RGI_Emoji is the union of the six sub-properties" {
+    const rgi = stringProperty("RGI_Emoji").?;
+    // single-cp Basic_Emoji member survives in the union's ranges
+    try testing.expect(rangeContains(rgi.ranges, 0x231A));
+    // a member drawn from each multi-cp sub-property
+    try testing.expect(seqIn(rgi, &.{ 0xA9, 0xFE0F })); // Basic_Emoji pair
+    try testing.expect(seqIn(rgi, &.{ 0x1F1E6, 0x1F1E8 })); // Flag
+    try testing.expect(seqIn(rgi, &.{ 0x23, 0xFE0F, 0x20E3 })); // Keycap
+    try testing.expect(seqIn(rgi, &.{ 0x1F468, 0x200D, 0x1F466 })); // ZWJ
+}
+
+test "string-property names are disjoint from gc/binary/script; unknown is null" {
+    try testing.expectEqual(@as(?StringProp, null), stringProperty("NotAStringProp"));
+    try testing.expectEqual(@as(?StringProp, null), stringProperty("basic_emoji")); // case-sensitive
+    try testing.expectEqual(@as(?StringProp, null), stringProperty("Lu")); // gc value
+    try testing.expectEqual(@as(?StringProp, null), stringProperty("Emoji")); // binary, not a string prop
+    // and the reverse: a string-prop name is not a gc/binary/script value
+    try testing.expectEqual(@as(?[]const Range, null), generalCategory("RGI_Emoji"));
+    try testing.expectEqual(@as(?[]const Range, null), binaryProperty("RGI_Emoji"));
+    try testing.expectEqual(@as(?[]const Range, null), script("Basic_Emoji"));
 }

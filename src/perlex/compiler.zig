@@ -33,17 +33,28 @@ pub const Flags = packed struct {
     unicode_sets: bool = false,
 };
 
-/// Resolves a `\p{…}` property escape to code-point ranges. Returns
-/// gpa-owned ranges (the Program takes ownership and frees them like any
-/// class) or null to decline the whole pattern to the fallback matcher.
-/// `key` is the `Name` of `\p{Name=Value}`, or null for the lone
-/// `\p{NameOrValue}` form. Injected so Perlex itself carries no Unicode
-/// data — the bridge backs it with Cynic's generated tables.
+/// A resolved `\p{…}` property: its code-point ranges plus, for the
+/// `/v`-mode *properties of strings* (§22.2.1.1, e.g. `RGI_Emoji`), the
+/// multi-code-point sequence members. `strings` is empty for every
+/// ordinary property; each entry has length ≥ 2 (single-code-point
+/// members fold into `ranges`). Both halves are allocated by the resolver
+/// from the allocator it is handed.
+pub const ResolvedProperty = struct {
+    ranges: []const parser.Node.ClassRange,
+    strings: []const []const u21 = &.{},
+};
+
+/// Resolves a `\p{…}` property escape to ranges (and, for properties of
+/// strings, sequence members). Returns a `ResolvedProperty` allocated
+/// from the handed allocator, or null to decline the whole pattern to the
+/// fallback matcher. `key` is the `Name` of `\p{Name=Value}`, or null for
+/// the lone `\p{NameOrValue}` form. Injected so Perlex itself carries no
+/// Unicode data — the bridge backs it with Cynic's generated tables.
 pub const PropertyResolver = *const fn (
     gpa: std.mem.Allocator,
     key: ?[]const u8,
     value: []const u8,
-) std.mem.Allocator.Error!?[]const parser.Node.ClassRange;
+) std.mem.Allocator.Error!?ResolvedProperty;
 
 pub const Inst = union(enum) {
     /// Match one literal — a UTF-16 code unit, or a code point up to
@@ -237,18 +248,33 @@ const Compiler = struct {
                 };
             },
             .prop => |p| {
-                // §22.2.1.1 — resolve the property to ranges via the
-                // injected resolver; declined properties (unknown, or valid
-                // but unsupported here, e.g. Script) defer the whole pattern
-                // to the fallback. Lowers to an ordinary class instruction.
+                // §22.2.1.1 — resolve the property via the injected
+                // resolver; declined properties (unknown, or valid but
+                // unsupported here, e.g. Script) defer the whole pattern to
+                // the fallback. The resolver allocates into a scratch arena;
+                // the emitted instructions copy what they keep into program
+                // memory.
+                var scratch = std.heap.ArenaAllocator.init(self.gpa);
+                defer scratch.deinit();
+                const a = scratch.allocator();
                 const resolve = self.resolver orelse return error.Unsupported;
-                const ranges = (try resolve(self.gpa, p.key, p.value)) orelse return error.Unsupported;
-                // `ranges` is gpa-owned; transfer ownership to the class
-                // instruction (freed by Program.deinit like any class).
-                self.emit(.{ .class = .{ .negated = p.negated, .ranges = ranges } }) catch |e| {
-                    self.gpa.free(ranges);
-                    return e;
-                };
+                const rp = (try resolve(a, p.key, p.value)) orelse return error.Unsupported;
+                if (rp.strings.len == 0) {
+                    // Ordinary property → one class instruction.
+                    const ranges = try self.gpa.dupe(Node.ClassRange, rp.ranges);
+                    self.emit(.{ .class = .{ .negated = p.negated, .ranges = ranges } }) catch |e| {
+                        self.gpa.free(ranges);
+                        return e;
+                    };
+                } else {
+                    // A property of strings (§22.2.1.1). The parser rejects
+                    // `\P{…}` of one and the non-`/v` forms as early errors,
+                    // so a resolved string set here is positive and `/v`;
+                    // lower it like a `/v` ClassSetExpression. The negation
+                    // guard is defensive — it cannot fire post-parse.
+                    if (p.negated) return error.SyntaxError;
+                    try self.emitResolvedSet(a, rp.ranges, rp.strings);
+                }
             },
             .class_set => |cs| try self.compileClassSet(cs),
             .concat => |parts| {
@@ -427,12 +453,30 @@ const Compiler = struct {
         defer scratch.deinit();
         const a = scratch.allocator();
         const set = try self.evalSet(a, cs);
+        try self.emitResolvedSet(a, set.ranges, set.strings);
+    }
 
+    /// Lower a resolved set — code-point `ranges` plus multi-code-point
+    /// `strings` members — to instructions. A char-only result becomes one
+    /// ordinary class instruction; a result that may contain strings
+    /// becomes an ordered alternation: each multi-character string (longest
+    /// first), then the single-character class, then the empty string if
+    /// present (§22.2.2.7). Shared by `/v` ClassSetExpressions
+    /// (`compileClassSet`) and atom-position properties of strings
+    /// (`\p{RGI_Emoji}`). `a` is a scratch arena owning `ranges`/`strings`;
+    /// `compileNode` copies the char values and class ranges it needs into
+    /// program (gpa) memory.
+    fn emitResolvedSet(
+        self: *Compiler,
+        a: std.mem.Allocator,
+        ranges: []const Node.ClassRange,
+        strings: []const []const u21,
+    ) CompileError!void {
         // Common case: a flat code-point class (no string members).
-        if (set.strings.len == 0) {
-            const ranges = try self.gpa.dupe(Node.ClassRange, set.ranges);
-            self.emit(.{ .class = .{ .negated = false, .ranges = ranges } }) catch |e| {
-                self.gpa.free(ranges);
+        if (strings.len == 0) {
+            const owned = try self.gpa.dupe(Node.ClassRange, ranges);
+            self.emit(.{ .class = .{ .negated = false, .ranges = owned } }) catch |e| {
+                self.gpa.free(owned);
                 return e;
             };
             return;
@@ -446,7 +490,7 @@ const Compiler = struct {
         var alts: std.ArrayListUnmanaged(*Node) = .empty;
 
         // Multi-character strings, longest first (§22.2.2.7).
-        const multi = try collectMultiStringsDesc(a, set.strings);
+        const multi = try collectMultiStringsDesc(a, strings);
         for (multi) |s| {
             const seq = try a.alloc(*Node, s.len);
             for (s, 0..) |cp, i| {
@@ -460,20 +504,20 @@ const Compiler = struct {
         }
 
         // The collapsed single-character class, if any.
-        if (set.ranges.len != 0) {
+        if (ranges.len != 0) {
             const cn = try a.create(Node);
-            cn.* = .{ .class = .{ .negated = false, .ranges = set.ranges } };
+            cn.* = .{ .class = .{ .negated = false, .ranges = ranges } };
             try alts.append(a, cn);
         }
 
         // The empty string, last, if the set contains it (§22.2.2.7).
-        if (containsEmptySeq(set.strings)) {
+        if (containsEmptySeq(strings)) {
             const en = try a.create(Node);
             en.* = .empty;
             try alts.append(a, en);
         }
 
-        // `set.strings` is non-empty, so `alts` has at least one element.
+        // `strings` is non-empty, so `alts` has at least one element.
         const root = try a.create(Node);
         root.* = .{ .alternate = alts.items };
         try self.compileNode(root);
@@ -521,12 +565,17 @@ const Compiler = struct {
             .nested => |n| try self.evalSet(a, n),
             .prop => |p| blk: {
                 // §22.2.1.1 — resolve `\p{}` via the injected resolver;
-                // a declined property defers the whole pattern. The B1
-                // resolver yields only ranges (no properties of strings).
+                // a declined property defers the whole pattern.
                 const resolve = self.resolver orelse return error.Unsupported;
-                const rr = (try resolve(a, p.key, p.value)) orelse return error.Unsupported;
-                const ranges = if (p.negated) try charset.complement(a, rr) else rr;
-                break :blk .{ .ranges = ranges, .strings = &.{} };
+                const rp = (try resolve(a, p.key, p.value)) orelse return error.Unsupported;
+                if (p.negated) {
+                    // `\P{…}` operand. A property of strings can't be
+                    // negated (§22.2.1.1, the parser rejects it), so a
+                    // negated property contributes only its complemented
+                    // ranges — no string members.
+                    break :blk .{ .ranges = try charset.complement(a, rp.ranges), .strings = &.{} };
+                }
+                break :blk .{ .ranges = rp.ranges, .strings = rp.strings };
             },
             // §22.2.1.8 — fold `\q{…}`: single-character strings join the
             // char set; the rest (empty or length ≥ 2) stay as string
