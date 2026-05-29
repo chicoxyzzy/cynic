@@ -358,6 +358,13 @@ fn runModuleImportJob(
     base_url: ?[]const u8,
     attribute_type: ?[]const u8,
 ) RunError!void {
+    // `enqueueModuleImport` duped the attribute slice into queue-
+    // owned memory (the enqueuing opcode's copy is long gone by
+    // now). This job is its sole consumer, so free it here on
+    // every exit path. `loadModule` only ever copies the slice
+    // (the §16.2.1.4 cache key is an independent `allocPrint`), so
+    // releasing it after the load is safe.
+    defer if (attribute_type) |t| realm.allocator.free(t);
     const promise_obj = heap_mod.valueAsPlainObject(result_promise) orelse return;
     if (!specifier_v.isString()) {
         const ex = try makeTypeError(realm, "import specifier is not a string");

@@ -1222,12 +1222,21 @@ pub const Realm = struct {
         base_url: ?[]const u8,
         attribute_type: ?[]const u8,
     ) !void {
+        // The import job runs later off the queue, after the
+        // enqueuing opcode's locals (including any freshly-coerced
+        // `with { type: ... }` attribute slice) have gone out of
+        // scope. Borrowing the caller's slice would dangle, so the
+        // queue owns its own copy; `runModuleImportJob` frees it.
+        const owned_attr: ?[]const u8 = if (attribute_type) |t|
+            try self.allocator.dupe(u8, t)
+        else
+            null;
         try self.microtask_queue.append(self.allocator, .{
             .kind = .module_import,
             .callback = specifier,
             .reaction_result = result_promise,
             .module_import_base = base_url,
-            .module_import_attribute_type = attribute_type,
+            .module_import_attribute_type = owned_attr,
         });
     }
 
