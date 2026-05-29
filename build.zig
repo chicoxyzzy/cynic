@@ -89,10 +89,12 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // `zig build test` runs lib + exe unit tests.
-    const lib_tests = b.addTest(.{ .root_module = lib_mod });
+    const test_filter = b.option([]const u8, "test-filter", "Filter unit tests by name");
+    const test_filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
+    const lib_tests = b.addTest(.{ .root_module = lib_mod, .filters = test_filters });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
-    const exe_tests = b.addTest(.{ .root_module = exe_mod });
+    const exe_tests = b.addTest(.{ .root_module = exe_mod, .filters = test_filters });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run all unit tests");
