@@ -357,6 +357,20 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
     .{ .path = "built-ins/Temporal/PlainDateTime/prototype/inLeapYear/prop-desc.js", .category = .descriptor_assertion },
     .{ .path = "built-ins/Temporal/PlainDateTime/prototype/era/prop-desc.js", .category = .descriptor_assertion },
     .{ .path = "built-ins/Temporal/PlainDateTime/prototype/eraYear/prop-desc.js", .category = .descriptor_assertion },
+    // §9.3.x `Temporal.PlainYearMonth.prototype` getters — same SES
+    // accessor-freeze divergence as PlainDate: each fixture asserts
+    // `desc.configurable === true` and fires the generic
+    // `Expected SameValue(«false», «true») to be true`. Path-classify.
+    .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/calendarId/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/year/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/month/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/monthCode/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/daysInMonth/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/daysInYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/monthsInYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/inLeapYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/era/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/eraYear/prop-desc.js", .category = .descriptor_assertion },
 };
 
 /// Path-based divergence lookup — the escape hatch for

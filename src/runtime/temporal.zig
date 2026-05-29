@@ -31,6 +31,7 @@ pub const TemporalKind = enum {
     instant,
     plain_date,
     plain_date_time,
+    plain_year_month,
 };
 
 /// §7.5 Temporal.Duration internal slots. Each field is the ℝ
@@ -128,6 +129,22 @@ pub const PlainDateTimeRecord = struct {
     }
 };
 
+/// §9.3 Temporal.PlainYearMonth internal slots — an ISO date whose day
+/// is a *reference* day (the calendar's first-of-month, day 1 for ISO)
+/// rather than an observable field. The year-month is the meaningful
+/// part; `ref_iso_day` only fixes the underlying ISODate so the type can
+/// reuse the PlainDate arithmetic / comparison AOs. ISO calendar only,
+/// so no calendar pointer is stored.
+pub const PlainYearMonthRecord = struct {
+    iso_year: i32 = 0,
+    iso_month: u8 = 1,
+    ref_iso_day: u8 = 1,
+
+    pub fn date(self: PlainYearMonthRecord) PlainDateRecord {
+        return .{ .iso_year = self.iso_year, .iso_month = self.iso_month, .iso_day = self.ref_iso_day };
+    }
+};
+
 /// The side allocation a Temporal instance's `JSObject` points to
 /// through `JSObjectExtension.temporal_record`. A tagged union so
 /// the single slot serves every plain Temporal type.
@@ -137,6 +154,7 @@ pub const TemporalRecord = union(TemporalKind) {
     instant: InstantRecord,
     plain_date: PlainDateRecord,
     plain_date_time: PlainDateTimeRecord,
+    plain_year_month: PlainYearMonthRecord,
 
     pub fn deinit(self: *TemporalRecord, allocator: std.mem.Allocator) void {
         // No owned heap memory inside any variant today; the record
@@ -2226,6 +2244,102 @@ pub fn parseTemporalDateTimeString(input: []const u8) error{Invalid}!PlainDateTi
     return rec;
 }
 
+// ── §9 Temporal.PlainYearMonth abstract operations (pure) ──────────────────
+
+/// §9.5.x ISOYearMonthWithinLimits — the year-month is representable iff
+/// it overlaps the ISODate range; the spec checks only year+month (the
+/// reference day is irrelevant). Limits: April -271821 … September 275760.
+pub fn isoYearMonthWithinLimits(year: i64, month: i64) bool {
+    if (year < -271821 or year > 275760) return false;
+    if (year == -271821 and month < 4) return false;
+    if (year == 275760 and month > 9) return false;
+    return true;
+}
+
+/// §9.5.x TemporalYearMonthToString — `YYYY-MM`, expanding the year past
+/// 0000..9999. The reference day is appended (`YYYY-MM-DD`) only when the
+/// calendar annotation is shown (always / critical), per the spec's
+/// "show calendar OR non-ISO calendar" condition — Cynic is ISO-only, so
+/// auto / never omit both day and annotation.
+pub fn isoYearMonthToString(rec: PlainYearMonthRecord, buf: []u8, calendar: CalendarDisplay) []const u8 {
+    var w = Writer{ .buf = buf, .len = 0 };
+    writeIsoYear(&w, rec.iso_year);
+    w.byte('-');
+    w.pad2(rec.iso_month);
+    switch (calendar) {
+        .auto, .never => {},
+        .always => {
+            w.byte('-');
+            w.pad2(rec.ref_iso_day);
+            w.bytes("[u-ca=iso8601]");
+        },
+        .critical => {
+            w.byte('-');
+            w.pad2(rec.ref_iso_day);
+            w.bytes("[!u-ca=iso8601]");
+        },
+    }
+    return w.buf[0..w.len];
+}
+
+/// Parse year, month, and an OPTIONAL reference day (default 1) at the
+/// cursor — the DateSpecYearMonth (`YYYY-MM`, `YYYYMM`) grammar plus the
+/// full-date form an AnnotatedDateTime allows. A `±YYYYYY` expanded year
+/// is accepted in either separator style.
+fn parseIsoYearMonth(c: *Cursor) error{Invalid}!ParsedDate {
+    var year: i64 = undefined;
+    const lead = c.peek() orelse return error.Invalid;
+    if (lead == '+' or lead == '-') {
+        const neg = lead == '-';
+        c.i += 1;
+        const y = c.fixedDigits(6) orelse return error.Invalid;
+        if (neg and y == 0) return error.Invalid;
+        year = if (neg) -@as(i64, @intCast(y)) else @as(i64, @intCast(y));
+    } else {
+        const y = c.fixedDigits(4) orelse return error.Invalid;
+        year = @intCast(y);
+    }
+    const extended = c.eat('-');
+    const month: u32 = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+    if (month < 1 or month > 12) return error.Invalid;
+    var day: u32 = 1;
+    if (extended) {
+        if (c.eat('-')) day = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+    } else if (c.isDigit()) {
+        day = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+    }
+    if (day < 1 or day > daysInIsoMonth(year, month)) return error.Invalid;
+    return .{ .year = year, .month = month, .day = day };
+}
+
+/// §9.5.x ParseTemporalYearMonthString — the reference day comes from the
+/// string when it carried a full date, else defaults to 1. A trailing
+/// time / offset / annotation block is validated but discarded; a `Z`
+/// UTC designator is rejected (a year-month has no time zone).
+pub fn parseTemporalYearMonthString(input: []const u8) error{Invalid}!PlainYearMonthRecord {
+    var c = Cursor{ .s = input };
+    const date = try parseIsoYearMonth(&c);
+    if (c.eatAny("Tt ")) {
+        _ = try parseIsoTime(&c);
+        if (c.eatAny("Zz")) {
+            return error.Invalid;
+        } else if (c.peek()) |ch| {
+            if (ch == '+' or ch == '-') _ = try parseUtcOffsetNs(&c);
+        }
+    }
+    const calendar = try consumeAnnotations(&c);
+    if (!c.done()) return error.Invalid;
+    if (calendar) |cal| {
+        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
+    }
+    if (!isoYearMonthWithinLimits(date.year, date.month)) return error.Invalid;
+    return .{
+        .iso_year = @intCast(date.year),
+        .iso_month = @intCast(date.month),
+        .ref_iso_day = @intCast(date.day),
+    };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -3100,4 +3214,47 @@ test "isoDateTimeToString: auto precision + calendar annotation" {
     try testing.expectEqualStrings("2024-01-15T13:45:30.5", isoDateTimeToString(pdt(2024, 1, 15, 13, 45, 30, 500, 0, 0), &buf, .auto));
     try testing.expectEqualStrings("2024-01-15T00:00:00[u-ca=iso8601]", isoDateTimeToString(pdt(2024, 1, 15, 0, 0, 0, 0, 0, 0), &buf, .always));
     try testing.expectEqualStrings("-000001-01-01T00:00:00", isoDateTimeToString(pdt(-1, 1, 1, 0, 0, 0, 0, 0, 0), &buf, .auto));
+}
+
+test "isoYearMonthWithinLimits: April -271821 … September 275760" {
+    try testing.expect(isoYearMonthWithinLimits(2020, 6));
+    try testing.expect(!isoYearMonthWithinLimits(-271822, 12)); // year below floor
+    try testing.expect(!isoYearMonthWithinLimits(275761, 1)); // year above ceiling
+    try testing.expect(isoYearMonthWithinLimits(-271821, 4)); // April is the floor month
+    try testing.expect(!isoYearMonthWithinLimits(-271821, 3)); // March falls outside
+    try testing.expect(isoYearMonthWithinLimits(275760, 9)); // September is the ceiling month
+    try testing.expect(!isoYearMonthWithinLimits(275760, 10)); // October falls outside
+}
+
+test "isoYearMonthToString: day + annotation shown only for always/critical" {
+    var buf: [40]u8 = undefined;
+    const rec: PlainYearMonthRecord = .{ .iso_year = 2020, .iso_month = 6, .ref_iso_day = 15 };
+    try testing.expectEqualStrings("2020-06", isoYearMonthToString(rec, &buf, .auto));
+    try testing.expectEqualStrings("2020-06", isoYearMonthToString(rec, &buf, .never));
+    try testing.expectEqualStrings("2020-06-15[u-ca=iso8601]", isoYearMonthToString(rec, &buf, .always));
+    try testing.expectEqualStrings("2020-06-15[!u-ca=iso8601]", isoYearMonthToString(rec, &buf, .critical));
+    // Expanded year, default reference day 1.
+    try testing.expectEqualStrings("-009999-01", isoYearMonthToString(.{ .iso_year = -9999, .iso_month = 1, .ref_iso_day = 1 }, &buf, .auto));
+}
+
+test "parseTemporalYearMonthString: optional day → reference day, default 1" {
+    {
+        const r = try parseTemporalYearMonthString("2020-06");
+        try testing.expectEqual(@as(i32, 2020), r.iso_year);
+        try testing.expectEqual(@as(u8, 6), r.iso_month);
+        try testing.expectEqual(@as(u8, 1), r.ref_iso_day); // absent day defaults to 1
+    }
+    // Basic form `YYYYMM` and full date `YYYY-MM-DD` (the day becomes the reference).
+    try testing.expectEqual(@as(u8, 6), (try parseTemporalYearMonthString("202006")).iso_month);
+    try testing.expectEqual(@as(u8, 15), (try parseTemporalYearMonthString("2020-06-15")).ref_iso_day);
+    try testing.expectEqual(@as(i32, 2020), (try parseTemporalYearMonthString("+002020-06")).iso_year);
+    // A trailing time block is validated then discarded; a `Z` UTC designator is not.
+    try testing.expectEqual(@as(u8, 15), (try parseTemporalYearMonthString("2020-06-15T12:30:00")).ref_iso_day);
+    try testing.expectError(error.Invalid, parseTemporalYearMonthString("2020-06-15T00:00Z"));
+    // A `u-ca` annotation must name the ISO calendar.
+    try testing.expectEqual(@as(u8, 6), (try parseTemporalYearMonthString("2020-06[u-ca=iso8601]")).iso_month);
+    try testing.expectError(error.Invalid, parseTemporalYearMonthString("2020-06[u-ca=notexist]"));
+    try testing.expectError(error.Invalid, parseTemporalYearMonthString("2020-13")); // month out of range
+    try testing.expectError(error.Invalid, parseTemporalYearMonthString("2020-06-31")); // June has 30 days
+    try testing.expectError(error.Invalid, parseTemporalYearMonthString("2020-06X")); // trailing junk
 }
