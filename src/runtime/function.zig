@@ -398,6 +398,12 @@ pub const JSFunction = struct {
     /// Set when this function is in the heap's remembered set as a
     /// known old→young store source.
     in_remembered_set: bool = false,
+    /// Owning heap, stamped at allocation (`allocateFunction` /
+    /// `allocateFunctionNative`). Mirrors `JSObject.heap`; lets the
+    /// property-bag store paths run the generational write barrier
+    /// without threading a `*Heap` through every caller. `null` for
+    /// the test-only functions built via `JSFunction.init` directly.
+    heap: ?*@import("heap.zig").Heap = null,
 
     /// §10.1.11 OrdinaryOwnPropertyKeys — unified insertion-order
     /// list spanning `properties` and `accessors`, mirroring
@@ -557,6 +563,11 @@ pub const JSFunction = struct {
             // property bag). We mirror that with a fallthrough.
         }
         try self.properties.put(allocator, key, v);
+        // Generational write barrier — a mature function gaining a
+        // young referent in its property bag must join the remembered
+        // set, or the minor sweep reclaims the still-reachable value
+        // (`verifyRememberedSet` JSFunction bag-edge assert).
+        if (self.heap) |h| h.writeBarrier(.{ .function = self }, v);
     }
 
     /// `[[Set]]` honoring §10.5.5 writability. Same contract as
@@ -598,6 +609,8 @@ pub const JSFunction = struct {
             }
         }
         try self.properties.put(allocator, key, v);
+        // Generational write barrier — see `set`.
+        if (self.heap) |h| h.writeBarrier(.{ .function = self }, v);
         return true;
     }
 
@@ -631,6 +644,8 @@ pub const JSFunction = struct {
             }
         }
         try self.properties.put(allocator, key, v);
+        // Generational write barrier — see `set`.
+        if (self.heap) |h| h.writeBarrier(.{ .function = self }, v);
         // Mirror JSObject — only record non-default flags.
         const is_default = flags.writable and flags.enumerable and flags.configurable;
         if (is_default) {

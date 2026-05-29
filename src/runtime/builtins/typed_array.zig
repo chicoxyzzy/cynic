@@ -2898,6 +2898,14 @@ fn typedArrayMap(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const ctx = try taCallbackPreamble(realm, this_value, args);
     // §23.2.3.19 step 6 — TypedArraySpeciesCreate(O, « len »).
     const out = try taSpeciesCreate(realm, ctx.self_obj, ctx.tv.kind, ctx.len);
+    // `out` and its backing buffer are native locals held across the
+    // per-element `invokeCallback` re-entry below (the buffer is
+    // written through a raw slice). Root the species result so a
+    // callback-triggered sweep can't reclaim it (and its buffer)
+    // mid-loop, leaving `out_buf` dangling.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     // §23.2.3.20 map writes through the species result's
     // [[ElementType]], which may differ from `O.[[ContentType]]`
     // when a custom @@species returns a different-kind TA.
@@ -3587,6 +3595,13 @@ fn typedArrayToSorted(realm: *Realm, this_value: Value, args: []const Value) Nat
     // %TypedArray% per [[TypedArrayName]] so Uint8ClampedArray
     // round-trips as itself.
     const out = try taMakeNewNamed(realm, tv.kind, ts_len, tv.name);
+    // `out` is a native local; `taSortInPlace` runs the comparator
+    // (JS re-entry) then re-fetches `out`'s buffer to write the
+    // sorted values back. Root `out` so a comparator-triggered sweep
+    // can't reclaim it (and its buffer) mid-sort.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     const out_buf = out.getTypedView().?.viewed.getArrayBuffer().?;
     const elem_size = tv.kind.elementSize();
     @memcpy(out_buf[0 .. ts_len * elem_size], buf[tv.byte_offset .. tv.byte_offset + ts_len * elem_size]);

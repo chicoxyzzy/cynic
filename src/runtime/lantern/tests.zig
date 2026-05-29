@@ -5179,6 +5179,197 @@ test "GC: String.prototype.matchAll survives gc_threshold=1" {
     , "a1b2c3");
 }
 
+test "GC: JSON.stringify replacer holder survives gc_threshold=1" {
+    // §25.5.2 JSON.stringify wraps the value in a synthetic
+    // `{ "": value }` holder and passes it as the replacer's `this`
+    // (SerializeJSONProperty step 2.a → 2.b's Call). The holder is a
+    // native local; the property reads + ToString coercions before
+    // the replacer call allocate, so with threshold=1 a sweep fired
+    // and left a dangling `this` for the replacer call. Asserting the
+    // serialized output proves the holder (and the value it owns)
+    // stayed live across every replacer re-entry.
+    try expectScriptStringUnderGcPressure(
+        \\JSON.stringify({ a: 1, b: 2, c: 3 }, function (k, v) { return v; });
+    , "{\"a\":1,\"b\":2,\"c\":3}");
+}
+
+test "GC: RegExp.prototype[@@match] global array survives gc_threshold=1" {
+    // §22.2.5.8 step 6 — the global match loop allocates result
+    // array A up front, then repeatedly RegExpExecs and
+    // CreateDataPropertys the per-match strings into A. A, the
+    // subject S, and the per-iteration exec result / match string
+    // are native locals; under threshold=1 a sweep mid-loop freed
+    // A and the next `out.set` dereferenced its poisoned extension.
+    try expectScriptStringUnderGcPressure(
+        \\"a1b2c3".match(/\d/g).join("");
+    , "123");
+}
+
+test "GC: RegExp.prototype[@@split] with captures survives gc_threshold=1" {
+    // §22.2.5.13 step 19 — the split loop allocates result array A
+    // and a species-constructed splitter up front, then repeatedly
+    // RegExpExecs, Gets `length`/captures, and CreateDataPropertys
+    // segment + capture strings into A. A, S, the splitter, and the
+    // per-iteration exec result / segment / capture values are
+    // native locals; under threshold=1 a sweep mid-loop freed A and
+    // the next `out.set` dereferenced poisoned memory.
+    try expectScriptStringUnderGcPressure(
+        \\"a1b2c".split(/(\d)/).join("-");
+    , "a-1-b-2-c");
+}
+
+test "GC: TypedArray.prototype.map species result survives gc_threshold=1" {
+    // §23.2.3.20 — map allocates the result typed array up front via
+    // TypedArraySpeciesCreate, holds its raw backing-buffer view, then
+    // runs the user callback per element. The callback re-enters JS and
+    // can GC; the result object was a native local reachable through
+    // nothing, so under threshold=1 a sweep mid-loop freed it and the
+    // next element write-back dereferenced its poisoned buffer.
+    try expectScriptStringUnderGcPressure(
+        \\new Int32Array([1, 2, 3, 4, 5]).map(function (x) { return x * 2; }).join("-");
+    , "2-4-6-8-10");
+}
+
+test "GC: TypedArray.prototype.toSorted result survives gc_threshold=1" {
+    // §23.2.3.34 — toSorted allocates the result typed array, copies the
+    // source into it, then sorts in place with a user comparator. The
+    // comparator re-enters JS and can GC, and the post-sort write-back
+    // re-fetches the result's backing buffer; the result was a native
+    // local reachable through nothing, so under threshold=1 a comparator
+    // sweep freed it and the write-back hit a dangling view.
+    try expectScriptStringUnderGcPressure(
+        \\new Int32Array([3, 1, 2]).toSorted(function (a, b) { return a - b; }).join("-");
+    , "1-2-3");
+}
+
+test "GC: mature function's young bag value survives gc_threshold=1" {
+    // A function that has survived a collection is in the mature
+    // generation; attaching a freshly-allocated (young) object to one of
+    // its property-bag slots creates a mature→young edge that the
+    // generational write barrier must record, or a later minor sweep
+    // reclaims the young value while the function still points at it.
+    // `Object.defineProperty` on a function receiver routes through
+    // JSFunction.setWithFlags (the bag-store path), distinct from the
+    // sta_property opcode barrier. Churn allocations to age the function
+    // and force minor collections, then read the value back.
+    try expectScriptIntUnderGcPressure(
+        \\function f() {}
+        \\for (let i = 0; i < 40; i++) { ({}); }
+        \\Object.defineProperty(f, "tag", {
+        \\  value: { v: 42 }, writable: true, enumerable: true, configurable: true });
+        \\for (let i = 0; i < 40; i++) { ({}); }
+        \\f.tag.v;
+    , 42);
+}
+
+test "GC: symbol-keyed property survives gc_threshold=1" {
+    // §6.1.5.1 / §10.1 — a JSSymbol used as a property key is stored
+    // flattened to its owned `<sym:N>` slug; the owner's mark walk
+    // reaches the value but never the JSSymbol itself. A user symbol
+    // reachable ONLY as a live object's key would be swept, its slug
+    // freed, and the owner's borrowed accessor-map key slice left
+    // dangling — the key then resolves back to no Symbol
+    // (`symbolForKey` returns null once the symbol leaves the list),
+    // so `getOwnPropertySymbols` drops it. The symbol is created
+    // inline and never bound, so `src`'s key is its sole reference;
+    // `getOwnPropertySymbols` re-enumerates the key without needing a
+    // handle to the symbol. Alternating pressure (young threshold 1)
+    // fires a minor cycle on every allocation and a full cycle every
+    // eighth, exercising both `markSymbolKeys` call sites. Returns 0
+    // if the key was swept, 1 once it survives.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\function make() {
+        \\  const o = {};
+        \\  Object.defineProperty(o, Symbol("k"), {
+        \\    get: function () { return 1; },
+        \\    enumerable: true, configurable: true });
+        \\  return o;
+        \\}
+        \\const src = make();
+        \\for (let i = 0; i < 60; i++) { ({}); }
+        \\Object.getOwnPropertySymbols(src).length;
+    , 1);
+}
+
+test "GC: ToPrimitive receiver survives gc_threshold=1" {
+    // §7.1.1 ToPrimitive — coerce a temporary object that lives only
+    // in the interpreter accumulator (never a named binding, so the
+    // GC reaches it through nothing it scans). The object's
+    // @@toPrimitive is an accessor: ToPrimitive fetches the trap via
+    // `getPropertyChain` (which fires the getter — a JS re-entry that
+    // builds a call frame), then allocates the hint string before
+    // Calling the trap. That lookup-then-allocate window is reachable
+    // by the GC only through toPrimitive's own `value` local, so under
+    // young-gen pressure (threshold 1) a sweep there reclaimed the
+    // receiver and the trap Call dereferenced freed memory. Returns 42
+    // once the receiver is rooted across the whole coercion.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\function mk() {
+        \\  const o = {};
+        \\  Object.defineProperty(o, Symbol.toPrimitive, {
+        \\    get: function () { return function () { return 42; }; },
+        \\  });
+        \\  return o;
+        \\}
+        \\+mk();
+    , 42);
+}
+
+test "GC: String.prototype.slice fresh-ToString receiver survives gc_threshold=1" {
+    // §22.1.3.20 — an object receiver makes `coerceThisToJSString`
+    // stringify via §7.1.17 ToString, producing a FRESH `JSString`
+    // reachable only through slice's native local. The `end` argument
+    // then re-enters JS (§7.1.4 ToNumber → user `valueOf`), and that
+    // re-entry's frame churn drives a young-gen collection which —
+    // before the fix — reclaimed the receiver. The subsequent
+    // code-unit slice read of its freed bytes then either returned
+    // corruption or tripped a WTF-8 decode panic. Astral receiver so
+    // the slice cuts exactly at the surrogate-pair boundary (2 code
+    // units): the result is the 4-byte UTF-8 of U+1F600.
+    try expectScriptStringUnderGcPressure(
+        \\var end = { valueOf: function () {
+        \\  var s = ""; for (var i = 0; i < 300; i++) { s = ("" + i).padStart(6, "0"); }
+        \\  return 2;
+        \\} };
+        \\var weird = { toString: function () { return String.fromCodePoint(0x1F600) + "ab"; } };
+        \\String.prototype.slice.call(weird, 0, end);
+    , "\u{1F600}");
+}
+
+test "GC: String.prototype.codePointAt fresh-ToString receiver survives gc_threshold=1" {
+    // §22.1.3.4 — same fresh-receiver hazard, but the read happens
+    // *after* the argument coercion rather than producing a new
+    // string: `pos`'s `valueOf` re-enters and collects, then
+    // codePointAt decodes the receiver's bytes at the resolved index.
+    // Reading the astral code point at index 0 must still yield
+    // 0x1F600 (128512) with the receiver rooted across the coercion.
+    try expectScriptIntUnderGcPressure(
+        \\var pos = { valueOf: function () {
+        \\  var s = ""; for (var i = 0; i < 300; i++) { s = ("" + i).padStart(6, "0"); }
+        \\  return 0;
+        \\} };
+        \\var weird = { toString: function () { return String.fromCodePoint(0x1F600) + "ab"; } };
+        \\String.prototype.codePointAt.call(weird, pos);
+    , 128512);
+}
+
+test "GC: String.prototype.indexOf fresh receiver survives needle coercion under gc_threshold=1" {
+    // §22.1.3.9 — the fresh receiver `s` is held across the SEARCH
+    // STRING's coercion: `stringifyArg(needle)` re-enters JS (ToString
+    // on the object needle) and collects. Before the fix the receiver
+    // was freed there and the code-unit search read freed bytes. With
+    // the astral lead the match index is in code units: "ab" sits at
+    // index 2 (the surrogate pair occupies units 0-1).
+    try expectScriptIntUnderGcPressure(
+        \\var needle = { toString: function () {
+        \\  var s = ""; for (var i = 0; i < 300; i++) { s = ("" + i).padStart(6, "0"); }
+        \\  return "ab";
+        \\} };
+        \\var weird = { toString: function () { return String.fromCodePoint(0x1F600) + "abXYZ"; } };
+        \\String.prototype.indexOf.call(weird, needle);
+    , 2);
+}
+
 test "GC: destructuring iterator record survives gc_threshold=1" {
     // `[a, b, c] = src` runs three iter_steps; the cached
     // [[NextMethod]] / [[Done]] live on the iterated object's typed

@@ -1707,6 +1707,22 @@ pub const JSObject = struct {
         }
     }
 
+    /// Property-bag store with the generational write barrier folded
+    /// in. A named-data write that lands in the dictionary bag (not a
+    /// shape slot) still creates an owner→value edge the GC must see:
+    /// a mature object gaining a young referent here must join the
+    /// remembered set, or the minor sweep reclaims the still-reachable
+    /// value (`verifyRememberedSet` bag-edge assert). Mirrors the
+    /// barrier `shadowSet` applies on the shape-slot path and
+    /// `setIndexed` on the element vector — the bag is the third
+    /// storage chokepoint, and native callers reach it through
+    /// `set` / `setIfWritable` / `setWithFlags`, never the barriered
+    /// interpreter store opcode.
+    fn bagPut(self: *JSObject, allocator: std.mem.Allocator, key: []const u8, v: Value) std.mem.Allocator.Error!void {
+        try self.properties.put(allocator, key, v);
+        if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
+    }
+
     /// Like `set`, but anchors `key_str` (whose `bytes` is the
     /// property key) onto this object so the GC keeps it alive
     /// for as long as the object is reachable. Use when the key
@@ -1752,6 +1768,10 @@ pub const JSObject = struct {
         // `key_anchors` can't grow unboundedly.
         const gop = try self.properties.getOrPut(allocator, key);
         gop.value_ptr.* = v;
+        // Generational write barrier — see `bagPut` (this site can't
+        // use the helper: it needs `getOrPut`'s `found_existing` for
+        // the key-anchor bookkeeping below).
+        if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
         if (newly_ordered or !gop.found_existing) try self.key_anchors.append(allocator, key_str);
     }
 
@@ -1848,7 +1868,7 @@ pub const JSObject = struct {
             return;
         }
         // Dictionary-mode: bag is the source of truth.
-        try self.properties.put(allocator, key, v);
+        try self.bagPut(allocator, key, v);
         if (is_default) {
             _ = self.property_flags.swapRemove(key);
         } else {
@@ -1875,7 +1895,7 @@ pub const JSObject = struct {
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 if (self.properties.contains(key)) {
-                    try self.properties.put(allocator, key, v);
+                    try self.bagPut(allocator, key, v);
                     // Already-tracked key — no-op for recordKey.
                     return;
                 }
@@ -1923,7 +1943,7 @@ pub const JSObject = struct {
         const absorbed = try self.shadowSet(allocator, key, v, PropertyFlags.default);
         _ = try self.recordKey(allocator, key);
         if (absorbed) return;
-        try self.properties.put(allocator, key, v);
+        try self.bagPut(allocator, key, v);
     }
 
     /// Demote a shaped object back to dictionary mode. Phase 3 of
@@ -2093,7 +2113,7 @@ pub const JSObject = struct {
                 if (self.properties.contains(key)) {
                     const flags = self.flagsFor(key);
                     if (!flags.writable) return false;
-                    try self.properties.put(allocator, key, v);
+                    try self.bagPut(allocator, key, v);
                     return true;
                 }
                 try self.setIndexed(allocator, idx, v);
@@ -2110,7 +2130,7 @@ pub const JSObject = struct {
         const absorbed = try self.shadowSet(allocator, key, v, cur_flags);
         _ = try self.recordKey(allocator, key);
         if (absorbed) return true;
-        try self.properties.put(allocator, key, v);
+        try self.bagPut(allocator, key, v);
         return true;
     }
 
@@ -2441,6 +2461,17 @@ pub const JSObject = struct {
         } else {
             self.elements.items[idx] = v;
         }
+        // Generational write barrier — a mature array gaining a young
+        // element referent must join the remembered set, or the minor
+        // sweep reclaims the still-reachable young value
+        // (`verifyRememberedSet` element-edge assert). Native array
+        // builders reach here through `JSObject.set`, not the
+        // `heap.storeElement` wrapper, and may hold the result array
+        // across a re-entrant build loop where it matures mid-build —
+        // so the barrier has to live at this storage chokepoint, not
+        // only in the wrapper. Idempotent + O(1)-rejected for the
+        // young-array / primitive-element common case.
+        if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
         try self.syncLengthProperty(allocator);
     }
 

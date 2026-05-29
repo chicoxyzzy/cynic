@@ -239,11 +239,28 @@ fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) Nativ
     realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
+    // Root the result array A and the subject string S across the
+    // match loop. Each iteration re-enters user JS (RegExpExec, the
+    // `Get(result, "0")` accessor walk, ToString) and allocates the
+    // per-match index/value strings — any allocation can drive a GC
+    // that would otherwise sweep these bare locals while the loop is
+    // still building A (§22.2.5.8 step 6).
+    const match_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer match_scope.close();
+    match_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    match_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
+
     // step 6.d — `Let n be 0`.
     var n: i32 = 0;
     var ibuf: [24]u8 = undefined;
     // step 6.e — `Repeat`.
     while (true) {
+        // Per-iteration scope: pin the freshly-allocated exec result
+        // and match string across the re-entrant Get / ToString /
+        // CreateDataProperty steps below. Closed at each iteration's
+        // end so the root set stays bounded over a long match run.
+        const iter_scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer iter_scope.close();
         // step 6.e.i — `Let result be ? RegExpExec(rx, S)`.
         const result_v = try regExpExecGeneric(realm, rx, s);
         // step 6.e.ii — `If result is null`:
@@ -256,13 +273,16 @@ fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) Nativ
         }
         // step 6.e.iii — `Else`:
         const result_obj = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.match]: RegExpExec returned non-Object");
+        iter_scope.push(result_v) catch return error.OutOfMemory;
         // step 6.e.iii.1 — `Let matchStr be ?
         // ToString(? Get(result, "0"))`. Accessor-aware Get so a
         // `get 0()` poisoned getter (g-get-result-err.js)
         // propagates; ToString coerces a non-string match value
         // (g-coerce-result-err.js).
         const zero_v = try intrinsics.getPropertyChain(realm, result_obj, "0");
+        iter_scope.push(zero_v) catch return error.OutOfMemory;
         const match_str = try intrinsics.stringifyArg(realm, zero_v);
+        iter_scope.push(Value.fromString(match_str)) catch return error.OutOfMemory;
         // step 6.e.iii.2 — `Perform
         // CreateDataPropertyOrThrow(A, ToString(n), matchStr)`.
         const name_slice = std.fmt.bufPrint(&ibuf, "{d}", .{n}) catch unreachable;
@@ -898,6 +918,20 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
     realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
+    // Root the result array A, the subject string S, and the
+    // species-constructed splitter across the split loop. Each
+    // iteration re-enters user JS (RegExpExec via the splitter's
+    // `exec`, the `lastIndex` / `length` / capture Gets, ToLength)
+    // and allocates the per-segment substrings and index keys — any
+    // allocation can drive a GC that would otherwise sweep these
+    // bare locals while the loop is still building A (§22.2.5.13
+    // step 19).
+    const split_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer split_scope.close();
+    split_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    split_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
+    split_scope.push(heap_mod.taggedObject(splitter)) catch return error.OutOfMemory;
+
     // step 12 — `Let lengthA be 0`.
     var length_a: i32 = 0;
 
@@ -948,6 +982,13 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // step 19 — `Repeat, while q < size`.
     var ibuf: [24]u8 = undefined;
     while (q < size) {
+        // Per-iteration scope: pin the RegExpExec result and the
+        // freshly-built segment / capture strings across the
+        // re-entrant Get / ToLength / CreateDataProperty steps
+        // below. Closed at each iteration's end so the root set
+        // stays bounded over a long split run.
+        const iter_scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer iter_scope.close();
         // step 19.a — `Perform ? Set(splitter, "lastIndex", q, true)`.
         try setPropertyChainOrThrow(realm, splitter, "lastIndex", Value.fromInt32(@intCast(q)));
         // step 19.b-c — `Let z be ? RegExpExec(splitter, S)`.
@@ -959,6 +1000,7 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
             continue;
         }
         const z_obj = heap_mod.valueAsPlainObject(z) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.split]: RegExpExec returned non-Object");
+        iter_scope.push(z) catch return error.OutOfMemory;
         // step 19.e.i — `Let e be ? ToLength(? Get(splitter,
         // "lastIndex"))`. Then `e = min(e, size)`.
         const li_v = try intrinsics.getPropertyChain(realm, splitter, "lastIndex");
@@ -976,6 +1018,7 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
         // to byte offsets through the WTF-8 buffer.
         const t_slice = utf16.sliceCodeUnits(s.flatBytes(), @intCast(p), @intCast(q));
         const t_str = try jsStringFromUtf16Slice(realm, t_slice);
+        iter_scope.push(Value.fromString(t_str)) catch return error.OutOfMemory;
         //   2. Perform ! CreateDataPropertyOrThrow(A, ToString(lengthA), T).
         var name_slice = std.fmt.bufPrint(&ibuf, "{d}", .{length_a}) catch unreachable;
         const t_key = realm.heap.allocateString(name_slice) catch return error.OutOfMemory;
@@ -1002,6 +1045,7 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
             var cap_key_buf: [24]u8 = undefined;
             const cap_key = std.fmt.bufPrint(&cap_key_buf, "{d}", .{i}) catch unreachable;
             const next_capture = try intrinsics.getPropertyChain(realm, z_obj, cap_key);
+            iter_scope.push(next_capture) catch return error.OutOfMemory;
             //  9.c — Perform ! CreateDataPropertyOrThrow(A,
             //         ToString(lengthA), nextCapture).
             name_slice = std.fmt.bufPrint(&ibuf, "{d}", .{length_a}) catch unreachable;
@@ -1021,6 +1065,7 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // step 20 — `Let T be the substring of S from p to size`.
     const tail_slice = utf16.sliceCodeUnits(s.flatBytes(), @intCast(p), size_usize);
     const tail_str = try jsStringFromUtf16Slice(realm, tail_slice);
+    split_scope.push(Value.fromString(tail_str)) catch return error.OutOfMemory;
     // step 21 — `Perform ! CreateDataPropertyOrThrow(A,
     // ToString(lengthA), T)`.
     const tail_key_slice = std.fmt.bufPrint(&ibuf, "{d}", .{length_a}) catch unreachable;

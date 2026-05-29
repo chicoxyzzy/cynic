@@ -212,6 +212,17 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     realm.heap.setObjectPrototype(wrapper, realm.intrinsics.object_prototype);
     wrapper.set(realm.allocator, "", value) catch return error.OutOfMemory;
 
+    // Root the synthetic { "": value } holder for the duration of
+    // serialization. SerializeJSONProperty re-enters user JS via
+    // `toJSON` and the replacer function, and those calls allocate;
+    // under allocation pressure a GC would otherwise sweep this bare
+    // local, leaving a dangling `this` for the replacer call
+    // (§25.5.2.4 step 3). Rooting the holder also keeps `value`
+    // reachable, since the holder owns it.
+    const wrapper_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer wrapper_scope.close();
+    wrapper_scope.push(heap_mod.taggedObject(wrapper)) catch return error.OutOfMemory;
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
 

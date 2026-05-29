@@ -761,6 +761,7 @@ pub const Heap = struct {
     ) !*JSFunction {
         const f = try JSFunction.init(self.allocator, chunk, param_count, name, is_arrow, captured_env);
         errdefer f.deinit(self.allocator);
+        f.heap = self;
         // §10.2.4 / §10.2.9 — install `length` and `name` as own
         // properties with the spec-mandated descriptor flags
         // ({w:false, e:false, c:true}). Storing them in the
@@ -799,6 +800,7 @@ pub const Heap = struct {
     ) !*JSFunction {
         const f = try JSFunction.initNative(self.allocator, callback, param_count, name);
         errdefer f.deinit(self.allocator);
+        f.heap = self;
         // §20.2.3 — a native function's `[[Prototype]]` is
         // %Function.prototype%. Wire it here so it holds for
         // functions allocated lazily after realm init (the init
@@ -1311,6 +1313,11 @@ pub const Heap = struct {
                 // dangles. Computed `obj[expr] = v` writes go
                 // through `setComputedOwned` which pushes here.
                 for (o.key_anchors.items) |s| s.mark_color = self.live_color;
+                // §6.1.5.1 — JSSymbols used as property keys are
+                // stored flattened (`<sym:N>`), never reached as a
+                // Value; keep a symbol alive while it is a live
+                // object's key. See `markSymbolKeys`.
+                self.markSymbolKeys(o);
                 // Pending Promise reactions / waiters — settlement
                 // microtasks read these lists. A reaction's
                 // `result_promise` is the chained sub-Promise that
@@ -2298,6 +2305,56 @@ pub const Heap = struct {
         }
     }
 
+    /// Keep alive any JSSymbol used as a property key on `o`.
+    /// §6.1.5.1 — a Symbol property key is flattened to its owned
+    /// `<sym:N>` slug and stored in the named-data / accessor map
+    /// as a plain string, so neither the full mark walk (it marks
+    /// the value, not the key) nor the minor-cycle slot scan ever
+    /// reaches the JSSymbol as a `Value`. A user symbol reachable
+    /// ONLY as a live object's key would then be swept, freeing the
+    /// slug and dangling the owner's borrowed key slice — a
+    /// `<sym:N>`-keyed getter silently stops resolving. Well-known
+    /// and registered symbols are `pinned` (the sweep skips them),
+    /// so only the `<sym:` user-symbol form needs the resolve.
+    /// Called from both mark paths: `markValue`'s object arm (full
+    /// cycle) and `markObjectInternalSlots` (minor cycle, where
+    /// `collectYoung` scans every mature object unconditionally).
+    fn markSymbolKeys(self: *Heap, o: *JSObject) void {
+        // Named keys live in the shape transition chain (shape-mode)
+        // or the property bag (dictionary-mode). Installing an
+        // accessor or touching an exotic demotes out of shape mode,
+        // so a shape-mode object's bag and accessor map are both
+        // empty — walk the chain leaf→root in O(depth). Going
+        // through `iterOwnNamedKeys` would re-walk the chain per slot
+        // (O(property_count²)), far too costly to run over every
+        // mature object on every minor cycle.
+        if (o.shape) |sh| {
+            var node: ?*const @import("shape.zig").Shape = sh;
+            while (node) |n| : (node = n.parent) {
+                if (n.parent == null) break; // root adds no property
+                self.markIfSymbolKey(n.key);
+            }
+        } else {
+            var it = o.properties.iterator();
+            while (it.next()) |entry| self.markIfSymbolKey(entry.key_ptr.*);
+        }
+        if (o.accessorIterator()) |ait_outer| {
+            var ait = ait_outer;
+            while (ait.next()) |entry| self.markIfSymbolKey(entry.key_ptr.*);
+        }
+    }
+
+    /// Mark the JSSymbol a flattened `<sym:N>` property key resolves
+    /// to (a leaf mark — a symbol has no out-edges to trace). Keys
+    /// not in the user-symbol form (`@@name` well-known / registered
+    /// symbols, plain string keys) are pinned or not symbols, so they
+    /// short-circuit on the prefix test.
+    inline fn markIfSymbolKey(self: *Heap, key: []const u8) void {
+        if (std.mem.startsWith(u8, key, "<sym:")) {
+            if (self.symbolForKey(key)) |sym| sym.mark_color = self.live_color;
+        }
+    }
+
     /// Mark the typed internal-slot pointers of a `JSObject` —
     /// everything `markValue` reaches for an object EXCEPT the
     /// property bag / element vector (those are covered by the
@@ -2395,6 +2452,9 @@ pub const Heap = struct {
             }
         }
         for (o.key_anchors.items) |s| self.markString(s);
+        // §6.1.5.1 — symbol property keys, same rationale as the
+        // `markValue` object arm. See `markSymbolKeys`.
+        self.markSymbolKeys(o);
         if (o.promiseReactionsConst()) |reactions| {
             for (reactions.items) |r| {
                 self.markValue(r.on_fulfilled);

@@ -1828,6 +1828,20 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     if (!value.isObject()) return value;
     const interp = @import("lantern/interpreter.zig");
 
+    // Root the receiver for the duration of the coercion. §7.1.1 /
+    // §7.1.1.1 — resolving @@toPrimitive and the OrdinaryToPrimitive
+    // `valueOf` / `toString` methods fires user getters and calls
+    // those methods (`getPropertyChain` + `callJSFunction`), each of
+    // which allocates a call frame and can therefore drive a GC.
+    // Between those re-entry hops `value` (and the `obj` / `fn_obj`
+    // aliases derived from it) is reachable through nothing but this
+    // native local, so under allocation pressure a sweep would reclaim
+    // the receiver mid-coercion and the next slot read
+    // (`obj.proxy_target`, `fn_obj.get`) would hit freed memory.
+    const recv_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer recv_scope.close();
+    recv_scope.push(value) catch return error.OutOfMemory;
+
     // §7.1.1.1 OrdinaryToPrimitive maps "default"→"number" for
     // non-Date objects, but the @@toPrimitive trap receives the
     // raw hint string verbatim — "default", "number", or "string".

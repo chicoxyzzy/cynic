@@ -126,8 +126,14 @@ fn stringSymbolIterator(realm: *Realm, this_value: Value, args: []const Value) N
     _ = args;
     // §22.1.3.36 step 1 — `this` must be a string-coercible
     // (RequireObjectCoercible); `coerceThisToJSString` handles
-    // the wrapper-unbox and the null/undefined → TypeError.
-    const s = try coerceThisToJSString(realm, this_value);
+    // the wrapper-unbox and the null/undefined → TypeError. For an
+    // object receiver ToString yields a fresh `JSString`; the
+    // iterator-object allocation inside `openIteratorAllowArrayLike`
+    // (which then stores the string for later `next()` reads) can
+    // drive a collection, so pin the receiver first.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     return lantern.openIteratorAllowArrayLike(realm.allocator, realm, Value.fromString(s)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return throwTypeError(realm, "could not open string iterator"),
@@ -423,10 +429,15 @@ fn stringMatchAllDispatched(realm: *Realm, this_value: Value, args: []const Valu
             return invokeSymbolMethod(realm, matcher, arg, this_value, null);
         }
     }
-    // step 4 — Let str be ? ToString(thisValue).
-    const s = try coerceThisToJSString(realm, this_value);
+    // step 4 — Let str be ? ToString(thisValue). `str` (fresh for an
+    // object receiver) and the freshly-created regex are held across
+    // the `@@matchAll` accessor walk and the invoke — both can GC.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     // step 5 — Let regexp be ? RegExpCreate(regexpOrPattern, "g").
     const rx_v = try regExpCreate(realm, arg, "g");
+    scope.push(rx_v) catch return error.OutOfMemory;
     // step 6 — Return ? Invoke(regexp, @@matchAll, « str »).
     const rx_obj = heap_mod.valueAsPlainObject(rx_v) orelse return throwTypeError(realm, "matchAll: RegExpCreate did not return an object");
     const matcher_v = try intrinsics.getPropertyChain(realm, rx_obj, "@@matchAll");
@@ -452,7 +463,9 @@ fn stringMatchDispatched(realm: *Realm, this_value: Value, args: []const Value) 
     const regexp_arg = argOr(args, 0, Value.undefined_);
     // §22.1.3.13 step 2 — direct @@match on the supplied regexp.
     if (try getSymbolMethod(realm, regexp_arg, "@@match")) |matcher| {
-        const recv_s = try coerceThisToJSString(realm, this_value);
+        const scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer scope.close();
+        const recv_s = try coerceThisStringRooted(realm, this_value, scope);
         return invokeSymbolMethod(realm, matcher, regexp_arg, Value.fromString(recv_s), null);
     }
     // §22.1.3.13 step 4-5 — wrap the argument in a fresh RegExp via
@@ -461,8 +474,11 @@ fn stringMatchDispatched(realm: *Realm, this_value: Value, args: []const Value) 
     // fires here even when the source argument is a bare string,
     // because @@match lives on the freshly-allocated regex's
     // prototype.
-    const recv_s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const recv_s = try coerceThisStringRooted(realm, this_value, scope);
     const rx = try regExpCreate(realm, regexp_arg, null);
+    scope.push(rx) catch return error.OutOfMemory;
     if (try getSymbolMethod(realm, rx, "@@match")) |matcher| {
         return invokeSymbolMethod(realm, matcher, rx, Value.fromString(recv_s), null);
     }
@@ -476,8 +492,15 @@ fn stringMatchDispatched(realm: *Realm, this_value: Value, args: []const Value) 
 /// the global flag, iterates `exec` calls and returns an array
 /// of whole-match strings (no captures, no `index`).
 pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    // `s` (a fresh string for an object receiver) and `re` (possibly a
+    // freshly-constructed RegExp) are held across the `flags` / `exec`
+    // accessor walk and the `exec` call below — all JS re-entries that
+    // can GC. Pin both for the whole method. §22.1.3.11.
+    const match_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer match_scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, match_scope);
     const re = try ensureRegExp(realm, argOr(args, 0, Value.undefined_));
+    match_scope.push(re) catch return error.OutOfMemory;
     const re_obj = heap_mod.valueAsPlainObject(re) orelse return Value.null_;
     // `flags` is an accessor on `%RegExp.prototype%` (§22.2.6.4),
     // so `obj.get` returns undefined unless we walk accessors.
@@ -508,13 +531,10 @@ pub fn stringMatch(realm: *Realm, this_value: Value, args: []const Value) Native
     realm.heap.setObjectPrototype(result, realm.intrinsics.array_prototype);
     result.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // The match loop calls `exec` (JS re-entry → GC) on every step;
-    // root the result array, the source string and the regex so a
-    // mid-loop sweep can't free a native-stack-only local.
-    const match_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer match_scope.close();
+    // root the result array on the same scope that already pins the
+    // source string and the regex so a mid-loop sweep can't free a
+    // native-stack-only local.
     match_scope.push(heap_mod.taggedObject(result)) catch return error.OutOfMemory;
-    match_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
-    match_scope.push(re) catch return error.OutOfMemory;
     var idx: i32 = 0;
     var ibuf: [16]u8 = undefined;
     var prev_last_index: i32 = -1;
@@ -566,7 +586,9 @@ fn stringSearchDispatched(realm: *Realm, this_value: Value, args: []const Value)
     // falls through to the RegExpCreate path
     // (`search/invoke-builtin-search-searcher-undef.js`).
     if (try getSymbolMethod(realm, regexp_arg, "@@search")) |searcher| {
-        const recv_s = try coerceThisToJSString(realm, this_value);
+        const scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer scope.close();
+        const recv_s = try coerceThisStringRooted(realm, this_value, scope);
         return invokeSymbolMethod(realm, searcher, regexp_arg, Value.fromString(recv_s), null);
     }
     // §22.1.3.13 step 4-5 — wrap in `RegExpCreate(regexp, undefined)`,
@@ -575,8 +597,11 @@ fn stringSearchDispatched(realm: *Realm, this_value: Value, args: []const Value)
     // argument is a primitive string (`search/invoke-builtin-
     // search.js` swaps the prototype method and asserts the
     // fresh regex is the `this` value).
-    const recv_s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const recv_s = try coerceThisStringRooted(realm, this_value, scope);
     const rx = try regExpCreate(realm, regexp_arg, null);
+    scope.push(rx) catch return error.OutOfMemory;
     if (try getSymbolMethod(realm, rx, "@@search")) |searcher| {
         return invokeSymbolMethod(realm, searcher, rx, Value.fromString(recv_s), null);
     }
@@ -589,8 +614,14 @@ fn stringSearchDispatched(realm: *Realm, this_value: Value, args: []const Value)
 /// first match, or -1 if none. Doesn't update lastIndex on the
 /// regex.
 pub fn stringSearch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    // `s` (fresh for an object receiver) and `re` (possibly fresh) are
+    // held across the `exec` accessor walk and the `exec` call below —
+    // JS re-entries that can GC. Pin both. §22.1.3.13.
+    const search_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer search_scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, search_scope);
     const re = try ensureRegExp(realm, argOr(args, 0, Value.undefined_));
+    search_scope.push(re) catch return error.OutOfMemory;
     const re_obj = heap_mod.valueAsPlainObject(re) orelse return Value.fromInt32(-1);
     const saved_li = re_obj.get("lastIndex");
     re_obj.set(realm.allocator, "lastIndex", Value.fromInt32(0)) catch return error.OutOfMemory;
@@ -730,13 +761,37 @@ fn coerceThisToJSString(realm: *Realm, this_value: Value) NativeError!*JSString 
     return stringifyArg(realm, this_value);
 }
 
+/// §22.1.3 RequireObjectCoercible(this) → ToString, pinned on
+/// `scope`. For an object receiver, ToString runs §7.1.1
+/// ToPrimitive then stringifies — the result is a FRESH `JSString`
+/// reachable only through this native frame's local. Any later
+/// step that re-enters JS (§7.1.4 ToNumber / §7.1.17 ToString on an
+/// argument, a user `exec` / replacer call) or simply allocates a
+/// result via `allocateString(<slice of this string>)` can drive a
+/// collection; under a low allocation threshold that collection
+/// reclaims the receiver before its bytes are read. Pinning the
+/// string on a caller-owned `HandleScope` keeps it live for the
+/// whole method body. `openScope` / `push` use the raw allocator,
+/// so rooting before the first heap allocation is race-free.
+fn coerceThisStringRooted(
+    realm: *Realm,
+    this_value: Value,
+    scope: *heap_mod.HandleScope,
+) NativeError!*JSString {
+    const s = try coerceThisToJSString(realm, this_value);
+    scope.push(Value.fromString(s)) catch return error.OutOfMemory;
+    return s;
+}
+
 /// §22.1.3.1 String.prototype.charAt(pos). Returns the single-
 /// code-unit String at position `pos` (1-based on the code-unit
 /// view), or the empty String if `pos` is out of range. The unit
 /// is re-encoded as WTF-8 — a surrogate half from a supplementary
 /// pair is emitted as the matching 3-byte CESU-8 escape.
 fn stringCharAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const idx_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     // §7.1.5 ToIntegerOrInfinity — NaN → 0; +Inf / -Inf are
     // out-of-range; finite values truncate toward zero.
@@ -765,7 +820,9 @@ fn stringCharAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 /// numeric value (an integer in 0..0xFFFF) of the code unit at
 /// `pos`, or NaN if `pos` is out of range.
 fn stringCharCodeAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const idx_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     // §7.1.5 ToIntegerOrInfinity — see stringCharAt for the rule.
     const idx: i64 = if (idx_v.isInt32()) idx_v.asInt32() else blk: {
@@ -785,8 +842,12 @@ fn stringCharCodeAt(realm: *Realm, this_value: Value, args: []const Value) Nativ
 /// first appears at or after `position` in the receiver, or -1.
 /// Empty `searchString` returns the clamped `position`.
 fn stringIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const needle = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+    // `needle` is held across the `position` ToNumber re-entry below.
+    scope.push(Value.fromString(needle)) catch return error.OutOfMemory;
     const pos_v = argOr(args, 1, Value.undefined_);
     // Receiver length in code units, used for clamping `position`
     // (§22.1.3.8 step 5 — Min(Max(intPosition, 0), len)).
@@ -899,8 +960,12 @@ fn clampPos(p: i64, len: usize) usize {
 /// reduces to a byte-level search after converting `position`
 /// from code units to bytes).
 fn stringIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "includes");
+    // `needle` is held across the `position` ToNumber re-entry below.
+    scope.push(Value.fromString(needle)) catch return error.OutOfMemory;
     const pos_v = argOr(args, 1, Value.undefined_);
     const cu_len = utf16.lengthInCodeUnits(s.flatBytes());
     var start_cu: usize = 0;
@@ -922,8 +987,12 @@ fn stringIncludes(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// byte prefix-test after converting `position` from code units
 /// to bytes.
 fn stringStartsWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "startsWith");
+    // `needle` is held across the `position` ToNumber re-entry below.
+    scope.push(Value.fromString(needle)) catch return error.OutOfMemory;
     const pos_v = argOr(args, 1, Value.undefined_);
     const cu_len = utf16.lengthInCodeUnits(s.flatBytes());
     var start_cu: usize = 0;
@@ -943,8 +1012,12 @@ fn stringStartsWith(realm: *Realm, this_value: Value, args: []const Value) Nativ
 /// byte suffix-of-prefix test after converting `endPosition` from
 /// code units to bytes.
 fn stringEndsWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const needle = try coerceSearchString(realm, argOr(args, 0, Value.undefined_), "endsWith");
+    // `needle` is held across the `endPosition` ToNumber re-entry below.
+    scope.push(Value.fromString(needle)) catch return error.OutOfMemory;
     const end_pos_v = argOr(args, 1, Value.undefined_);
     const cu_len = utf16.lengthInCodeUnits(s.flatBytes());
     var end_cu: usize = cu_len;
@@ -983,7 +1056,9 @@ fn jsStringFromUtf16Slice(realm: *Realm, sl: utf16.Slice) NativeError!*JSString 
 /// code-unit length. Result is the substring covering the
 /// code-unit range `[start, end)` (clamped to `[0, len]`).
 fn stringSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const len: i64 = @intCast(utf16.lengthInCodeUnits(s.flatBytes()));
     const start_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     var start: i64 = intrinsics.toInt(start_num);
@@ -1008,7 +1083,9 @@ fn stringSlice(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 /// two endpoints are swapped (lower precedes higher) when out of
 /// order. Indexed in UTF-16 code units.
 fn stringSubstring(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const len: i64 = @intCast(utf16.lengthInCodeUnits(s.flatBytes()));
     const start_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     var start: i64 = intrinsics.toInt(start_num);
@@ -1229,7 +1306,12 @@ fn endAfterTrailingWhitespace(bytes: []const u8) usize {
 
 fn stringTrim(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const s = try coerceThisToJSString(realm, this_value);
+    // ToString of an object receiver allocates a fresh string; the
+    // `allocateString` below copies from a slice of it, so a
+    // collection during that allocation would read freed bytes.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const start = skipLeadingWhitespace(s.flatBytes());
     const end = endAfterTrailingWhitespace(s.flatBytes());
     const trimmed = if (start >= end) s.flatBytes()[0..0] else s.flatBytes()[start..end];
@@ -1268,7 +1350,9 @@ fn stringConcat(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn stringRepeat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     // §22.1.3.16 — ToIntegerOrInfinity(count); NaN ⇒ 0 (not throw);
     // negative or +Infinity ⇒ RangeError.
     const n_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
@@ -1337,8 +1421,14 @@ fn stringSplitDispatched(realm: *Realm, this_value: Value, args: []const Value) 
 pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     // §22.1.3.23 step 4 — `str = ? ToString(thisValue)`. The
     // ToString(this) call happens *before* the limit computation so
-    // a throwing toString on `this` short-circuits the rest.
-    const s = try coerceThisToJSString(realm, this_value);
+    // a throwing toString on `this` short-circuits the rest. Root
+    // `str` immediately: an object receiver's ToString is a fresh
+    // string, and the `ToUint32(limit)` coercion below re-enters JS
+    // (a `{valueOf}` shadow) so a mid-coercion collection would
+    // otherwise reclaim this native-stack-only local.
+    const split_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer split_scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, split_scope);
     const sep_v = argOr(args, 0, Value.undefined_);
     const limit_v = argOr(args, 1, Value.undefined_);
     // §22.1.3.23 step 5 — `lim = ToUint32(limit)` (default 2^32-1
@@ -1360,12 +1450,9 @@ pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) Native
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
     // `out` is the result array. The separator `ToString` below and
     // the `regexSplit` path both re-enter JS and can trigger a GC
-    // while `out` is still a native-stack-only local — root it (and
-    // the source string) for the whole builder.
-    const split_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer split_scope.close();
+    // while `out` is still a native-stack-only local — root it on the
+    // same scope that already pins the source string `s`.
     split_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
-    split_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
 
     // §22.1.3.23 — when separator is a regex (we already filtered
     // out the @@split dispatch in `stringSplitDispatched`), drive
@@ -1464,7 +1551,9 @@ fn stringPadEnd(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 /// UTF-16 code units; the fill string is truncated by code units
 /// (not bytes) when its last copy would overshoot.
 fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     // §22.1.3.14 step 3 — ToLength(maxLength). NaN / negative
     // values clamp to 0 (§7.1.20 makes negatives → 0; we follow
     // the more permissive ToIntegerOrInfinity per the spec which
@@ -1541,7 +1630,9 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
 /// code unit) and out-of-range returns `undefined` rather than
 /// the empty String. Indexing is in UTF-16 code units (§6.1.4).
 fn stringAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const idx_num = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     var idx: i64 = intrinsics.toInt(idx_num);
     const cu_len: i64 = @intCast(utf16.lengthInCodeUnits(s.flatBytes()));
@@ -1562,8 +1653,12 @@ fn stringAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 /// `position = NaN` is treated as +Infinity (search the whole
 /// string).
 fn stringLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const needle = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
+    // `needle` is held across the `position` ToNumber re-entry below.
+    scope.push(Value.fromString(needle)) catch return error.OutOfMemory;
     // §22.1.3.9 step 4-6 — `position` is ToNumber, NaN ⇒ +Inf so
     // the search starts from the end. Anything else is
     // ToIntegerOrInfinity, then clamped to [0, len]. Indexing is
@@ -1795,14 +1890,22 @@ fn stringReplaceDispatched(realm: *Realm, this_value: Value, args: []const Value
     const pat_v = argOr(args, 0, Value.undefined_);
     const repl_v = argOr(args, 1, Value.undefined_);
     if (try getSymbolMethod(realm, pat_v, "@@replace")) |replacer| {
-        const recv_s = try coerceThisToJSString(realm, this_value);
+        const scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer scope.close();
+        const recv_s = try coerceThisStringRooted(realm, this_value, scope);
         return invokeSymbolMethod(realm, replacer, pat_v, Value.fromString(recv_s), repl_v);
     }
     return stringReplace(realm, this_value, args);
 }
 
 pub fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    // `s` (fresh for an object receiver), the pattern string and the
+    // replacement string are each held across a later coercion or the
+    // functional-replacer call — all JS re-entries that can GC. Pin
+    // them on one scope for the whole method. §22.1.3.19.
+    const replace_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer replace_scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, replace_scope);
     const pat_v = argOr(args, 0, Value.undefined_);
     const repl_v = argOr(args, 1, Value.undefined_);
     // §22.1.3.19 — when the pattern is a regex, dispatch through
@@ -1816,12 +1919,18 @@ pub fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) Nati
         @as(*JSString, @ptrCast(@alignCast(pat_v.asString())))
     else
         try intrinsics.stringifyArg(realm, pat_v);
+    // `pat` is held across the replacement ToString and the match
+    // splice below — pin it.
+    replace_scope.push(Value.fromString(pat)) catch return error.OutOfMemory;
     // step 5-6 — IsCallable(replaceValue); else ToString-coerce
     // eagerly. The ToString runs *before* the StringIndexOf scan
     // so a throwing replacement-toString surfaces even on a
     // no-match input (fixture `replaceValue-evaluation-order`).
     const functional = heap_mod.valueAsFunction(repl_v) != null;
     const repl_s: ?*JSString = if (functional) null else try intrinsics.stringifyArg(realm, repl_v);
+    // A non-functional replacement string is read inside the splice
+    // (which may itself allocate) — pin it too.
+    if (repl_s) |rs| replace_scope.push(Value.fromString(rs)) catch return error.OutOfMemory;
     // step 8-10 — first-match position lookup; on miss return the
     // unchanged source.
     const pos = std.mem.indexOf(u8, s.flatBytes(), pat.flatBytes()) orelse {
@@ -2253,13 +2362,20 @@ fn stringReplaceAllDispatched(realm: *Realm, this_value: Value, args: []const Va
 /// ToString(searchValue) run here (in spec order), then the
 /// GetSubstitution loop slices over `string`.
 fn stringReplaceAllCore(realm: *Realm, this_value: Value, pat_v: Value, repl_v_in: Value) NativeError!Value {
+    // `s` (fresh for an object receiver), the pattern string and the
+    // replacement string are each held across a later coercion or the
+    // functional-replacer call — all JS re-entries that can GC. Pin
+    // them on one scope for the whole method. §22.1.3.20.
+    const replace_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer replace_scope.close();
     // step 4 — string = ? ToString(thisValue).
-    const s = try coerceThisToJSString(realm, this_value);
+    const s = try coerceThisStringRooted(realm, this_value, replace_scope);
     // step 5 — searchString = ? ToString(searchValue).
     const pat = if (pat_v.isString())
         @as(*JSString, @ptrCast(@alignCast(pat_v.asString())))
     else
         try intrinsics.stringifyArg(realm, pat_v);
+    replace_scope.push(Value.fromString(pat)) catch return error.OutOfMemory;
     // step 6-7 — functionalReplace = IsCallable(replaceValue); else
     // ToString-coerce. Run the coercion eagerly so a throwing
     // toString surfaces before the match scan begins (fixture
@@ -2269,6 +2385,7 @@ fn stringReplaceAllCore(realm: *Realm, this_value: Value, pat_v: Value, repl_v_i
         null
     else
         try intrinsics.stringifyArg(realm, repl_v_in);
+    if (repl_s) |rs| replace_scope.push(Value.fromString(rs)) catch return error.OutOfMemory;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
     if (pat.flatBytes().len == 0) {
@@ -2413,14 +2530,18 @@ fn expandSubstitutionEmptyCaptures(
 
 fn stringTrimStart(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const start = skipLeadingWhitespace(s.flatBytes());
     const out = realm.heap.allocateString(s.flatBytes()[start..]) catch return error.OutOfMemory;
     return Value.fromString(out);
 }
 fn stringTrimEnd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const end = endAfterTrailingWhitespace(s.flatBytes());
     const out = realm.heap.allocateString(s.flatBytes()[0..end]) catch return error.OutOfMemory;
     return Value.fromString(out);
@@ -2491,7 +2612,9 @@ fn normalizeWtf8(
 /// result as WTF-8. The default form is NFC (§22.1.3.16 step 4);
 /// unknown forms throw RangeError per step 7.
 fn stringNormalize(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const form_v = argOr(args, 0, Value.undefined_);
     // §22.1.3.16 step 4 — defaulting to "NFC".
     var form_kind: lib_unicode.UnicodeNormalizationEnum = lib_unicode.UNICODE_NFC;
@@ -2550,7 +2673,9 @@ fn normalizeRealloc(opaque_ptr: ?*anyopaque, ptr: ?*anyopaque, size: usize) call
 /// and the bare trail surrogate value at the trail index. Out-of-
 /// range positions (< 0 or ≥ size) return undefined per step 5.
 fn stringCodePointAt(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     // §7.1.5 ToIntegerOrInfinity — NaN → 0; finite truncates to int.
     const pos_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.fromInt32(0)));
     const pos: i64 = if (pos_v.isInt32()) pos_v.asInt32() else blk: {
@@ -2752,7 +2877,9 @@ fn stringToWellFormed(realm: *Realm, this_value: Value, args: []const Value) Nat
 /// sequences are compared directly; a tie under NFD means
 /// canonical equivalence and yields 0. Returns -1/0/+1 per spec.
 fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const s = try coerceThisToJSString(realm, this_value);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const s = try coerceThisStringRooted(realm, this_value, scope);
     const other_s = try intrinsics.stringifyArg(realm, argOr(args, 0, Value.undefined_));
 
     // Fast path — byte-identical strings are trivially equal and
