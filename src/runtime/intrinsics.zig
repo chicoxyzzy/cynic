@@ -109,6 +109,8 @@ pub const Intrinsics = struct {
     temporal_plain_date_time_prototype: ?*JSObject = null,
     temporal_plain_year_month_constructor: ?*JSFunction = null,
     temporal_plain_year_month_prototype: ?*JSObject = null,
+    temporal_plain_month_day_constructor: ?*JSFunction = null,
+    temporal_plain_month_day_prototype: ?*JSObject = null,
 
     /// `%GeneratorPrototype%` (§27.5.1). Lazily installed on the
     /// first `function*` call by `lantern.ensureGeneratorPrototype`;

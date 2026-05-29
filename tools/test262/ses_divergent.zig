@@ -371,6 +371,12 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
     .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/inLeapYear/prop-desc.js", .category = .descriptor_assertion },
     .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/era/prop-desc.js", .category = .descriptor_assertion },
     .{ .path = "built-ins/Temporal/PlainYearMonth/prototype/eraYear/prop-desc.js", .category = .descriptor_assertion },
+    // §10.3.x `Temporal.PlainMonthDay.prototype` getters — calendarId,
+    // monthCode, day only (a month-day exposes no year / month getter).
+    // Same accessor-freeze divergence; path-classify.
+    .{ .path = "built-ins/Temporal/PlainMonthDay/prototype/calendarId/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainMonthDay/prototype/monthCode/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainMonthDay/prototype/day/prop-desc.js", .category = .descriptor_assertion },
 };
 
 /// Path-based divergence lookup — the escape hatch for
