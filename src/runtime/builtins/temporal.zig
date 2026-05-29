@@ -91,6 +91,7 @@ pub fn install(realm: *Realm) !void {
     try installPlainDateTime(realm, ns);
     try installPlainYearMonth(realm, ns);
     try installPlainMonthDay(realm, ns);
+    try installZonedDateTime(realm, ns);
 
     // `Temporal` is a non-enumerable, writable, configurable global
     // (§17 namespace-object convention, matching the property
@@ -3573,4 +3574,278 @@ fn plainMonthDayToPlainDate(realm: *Realm, this_value: Value, args: []const Valu
     const rec = temporal.regulateISODate(year, md.iso_month, md.iso_day, false) orelse
         return throwRangeError(realm, "PlainDate is out of range");
     return createTemporalDate(realm, rec);
+}
+
+// ── §6 Temporal.ZonedDateTime ───────────────────────────────────────────────
+// An exact instant ([[EpochNanoseconds]]) viewed through a [[TimeZone]]
+// (offset-only scope) and the ISO [[Calendar]]. Date/time field getters
+// derive a local wall-clock PlainDateTimeRecord via the §6 core AO
+// `getISODateTimeFor`, then reuse the same ISO-calendar field helpers the
+// other plain types use. Conversions, formatting, and arithmetic land in
+// follow-up commits.
+
+const ZonedDateTimeRecord = temporal.ZonedDateTimeRecord;
+
+fn installZonedDateTime(realm: *Realm, ns: *JSObject) !void {
+    // §6.1.1 — `new`-only constructor; length 2 (epochNanoseconds,
+    // timeZone), with an optional trailing calendar.
+    const r = try installConstructor(realm, .{
+        .name = "ZonedDateTime",
+        .ctor = zonedDateTimeConstructor,
+        .arity = 2,
+        .is_class = true,
+        .set_home_object = true,
+        .to_string_tag = "Temporal.ZonedDateTime",
+        .install_global = false,
+    });
+    const fn_obj = r.ctor;
+    const proto = r.proto;
+
+    try installNativeGetter(realm, proto, "calendarId", zonedDateTimeCalendarId);
+    try installNativeGetter(realm, proto, "timeZoneId", zonedDateTimeTimeZoneId);
+    try installNativeGetter(realm, proto, "year", zonedDateTimeYear);
+    try installNativeGetter(realm, proto, "month", zonedDateTimeMonth);
+    try installNativeGetter(realm, proto, "monthCode", zonedDateTimeMonthCode);
+    try installNativeGetter(realm, proto, "day", zonedDateTimeDay);
+    try installNativeGetter(realm, proto, "hour", zonedDateTimeHour);
+    try installNativeGetter(realm, proto, "minute", zonedDateTimeMinute);
+    try installNativeGetter(realm, proto, "second", zonedDateTimeSecond);
+    try installNativeGetter(realm, proto, "millisecond", zonedDateTimeMillisecond);
+    try installNativeGetter(realm, proto, "microsecond", zonedDateTimeMicrosecond);
+    try installNativeGetter(realm, proto, "nanosecond", zonedDateTimeNanosecond);
+    try installNativeGetter(realm, proto, "epochMilliseconds", zonedDateTimeEpochMilliseconds);
+    try installNativeGetter(realm, proto, "epochNanoseconds", zonedDateTimeEpochNanoseconds);
+    try installNativeGetter(realm, proto, "dayOfWeek", zonedDateTimeDayOfWeek);
+    try installNativeGetter(realm, proto, "dayOfYear", zonedDateTimeDayOfYear);
+    try installNativeGetter(realm, proto, "weekOfYear", zonedDateTimeWeekOfYear);
+    try installNativeGetter(realm, proto, "yearOfWeek", zonedDateTimeYearOfWeek);
+    try installNativeGetter(realm, proto, "hoursInDay", zonedDateTimeHoursInDay);
+    try installNativeGetter(realm, proto, "daysInWeek", zonedDateTimeDaysInWeek);
+    try installNativeGetter(realm, proto, "daysInMonth", zonedDateTimeDaysInMonth);
+    try installNativeGetter(realm, proto, "daysInYear", zonedDateTimeDaysInYear);
+    try installNativeGetter(realm, proto, "monthsInYear", zonedDateTimeMonthsInYear);
+    try installNativeGetter(realm, proto, "inLeapYear", zonedDateTimeInLeapYear);
+    try installNativeGetter(realm, proto, "offset", zonedDateTimeOffset);
+    try installNativeGetter(realm, proto, "offsetNanoseconds", zonedDateTimeOffsetNanoseconds);
+    try installNativeGetter(realm, proto, "era", zonedDateTimeEra);
+    try installNativeGetter(realm, proto, "eraYear", zonedDateTimeEraYear);
+
+    realm.intrinsics.temporal_zoned_date_time_constructor = fn_obj;
+    realm.intrinsics.temporal_zoned_date_time_prototype = proto;
+    try setNonEnumerable(ns, realm.allocator, "ZonedDateTime", heap_mod.taggedFunction(fn_obj));
+}
+
+/// §6.1.1 Temporal.ZonedDateTime ( epochNanoseconds, timeZone [, calendar] ).
+/// `new`-only. ToBigInt-coerces + range-checks the epoch ns first (so a
+/// Number throws TypeError, an out-of-range BigInt a RangeError), then
+/// requires `timeZone` to be a String it can parse as a time-zone
+/// identifier — a non-string is a TypeError, and a string that is not a
+/// bare identifier (empty, a full ISO date-time, or a named IANA zone) is
+/// a RangeError. Finally only the ISO calendar is accepted.
+fn zonedDateTimeConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const inst = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "Temporal.ZonedDateTime constructor requires 'new'");
+    // §6.1.1 step 2-3 — ToBigInt(epochNanoseconds) then IsValidEpochNanoseconds.
+    const bi_val = try bigint_builtin.toBigIntValue(realm, argOr(args, 0, Value.undefined_));
+    const epoch_ns = try epochNsFromBigInt(realm, bi_val);
+    // step 4-5 — timeZone must be a String; parse it as an identifier.
+    const tz_arg = argOr(args, 1, Value.undefined_);
+    if (!tz_arg.isString()) return throwTypeError(realm, "time zone must be a string");
+    const tz_str: *JSString = @ptrCast(@alignCast(tz_arg.asString()));
+    const tz = temporal.parseTimeZoneIdentifier(tz_str.flatBytes()) orelse
+        return throwRangeError(realm, "invalid time zone identifier");
+    // step 7-9 — calendar defaults to iso8601; only the ISO calendar ships.
+    try requireISOCalendar(realm, argOr(args, 2, Value.undefined_));
+    try storeZonedDateTime(realm, inst, .{ .epoch_ns = epoch_ns, .time_zone = tz });
+    return heap_mod.taggedObject(inst);
+}
+
+fn storeZonedDateTime(realm: *Realm, inst: *JSObject, rec: ZonedDateTimeRecord) NativeError!void {
+    const r = realm.allocator.create(TemporalRecord) catch return error.OutOfMemory;
+    r.* = .{ .zoned_date_time = rec };
+    inst.setTemporalRecord(realm.allocator, r) catch return error.OutOfMemory;
+}
+
+/// §6.5.x CreateTemporalZonedDateTime — allocate a fresh ZonedDateTime with
+/// the realm prototype. `pub` so future Instant / PlainDateTime bridges
+/// (`toZonedDateTimeISO`, …) can mint one.
+pub fn createTemporalZonedDateTime(realm: *Realm, rec: ZonedDateTimeRecord) NativeError!Value {
+    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(inst, realm.intrinsics.temporal_zoned_date_time_prototype.?);
+    try storeZonedDateTime(realm, inst, rec);
+    return heap_mod.taggedObject(inst);
+}
+
+/// §6.x RequireInternalSlot(zdt, [[InitializedTemporalZonedDateTime]]).
+fn requireZonedDateTime(realm: *Realm, this_value: Value) NativeError!ZonedDateTimeRecord {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "not a Temporal.ZonedDateTime");
+    const rec = obj.getTemporalRecord() orelse
+        return throwTypeError(realm, "not a Temporal.ZonedDateTime");
+    return switch (rec.*) {
+        .zoned_date_time => |z| z,
+        else => throwTypeError(realm, "not a Temporal.ZonedDateTime"),
+    };
+}
+
+/// The local (wall-clock) ISO date-time the receiver's zone shows — the
+/// basis for every date/time field getter (§6.5.x GetISODateTimeFor).
+fn zonedDateTimeFields(realm: *Realm, this_value: Value) NativeError!PlainDateTimeRecord {
+    const z = try requireZonedDateTime(realm, this_value);
+    return temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+}
+
+// Getters — calendar/zone identity, the local date/time fields (derived
+// through the zone offset), and the epoch read-throughs.
+fn zonedDateTimeCalendarId(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requireZonedDateTime(realm, t);
+    const js = realm.heap.allocateString("iso8601") catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn zonedDateTimeTimeZoneId(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const z = try requireZonedDateTime(realm, t);
+    var buf: [16]u8 = undefined;
+    const s = temporal.timeZoneIdentifierString(z.time_zone, &buf);
+    const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn zonedDateTimeYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32((try zonedDateTimeFields(realm, t)).iso_year);
+}
+fn zonedDateTimeMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try zonedDateTimeFields(realm, t)).iso_month));
+}
+fn zonedDateTimeMonthCode(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try zonedDateTimeFields(realm, t);
+    const mc = [_]u8{ 'M', '0' + @as(u8, @intCast(rec.iso_month / 10)), '0' + @as(u8, @intCast(rec.iso_month % 10)) };
+    const js = realm.heap.allocateString(&mc) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn zonedDateTimeDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try zonedDateTimeFields(realm, t)).iso_day));
+}
+fn zonedDateTimeHour(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try zonedDateTimeFields(realm, t)).hour));
+}
+fn zonedDateTimeMinute(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try zonedDateTimeFields(realm, t)).minute));
+}
+fn zonedDateTimeSecond(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try zonedDateTimeFields(realm, t)).second));
+}
+fn zonedDateTimeMillisecond(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try zonedDateTimeFields(realm, t)).millisecond));
+}
+fn zonedDateTimeMicrosecond(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try zonedDateTimeFields(realm, t)).microsecond));
+}
+fn zonedDateTimeNanosecond(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try zonedDateTimeFields(realm, t)).nanosecond));
+}
+fn zonedDateTimeEpochMilliseconds(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const z = try requireZonedDateTime(realm, t);
+    const ms = @divFloor(z.epoch_ns, 1_000_000);
+    return Value.fromDouble(@floatFromInt(ms));
+}
+fn zonedDateTimeEpochNanoseconds(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const z = try requireZonedDateTime(realm, t);
+    const bi = realm.heap.allocateBigInt(z.epoch_ns) catch return error.OutOfMemory;
+    return heap_mod.taggedBigInt(bi);
+}
+fn zonedDateTimeDayOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try zonedDateTimeFields(realm, t);
+    return Value.fromInt32(temporal.isoDayOfWeek(rec.iso_year, rec.iso_month, rec.iso_day));
+}
+fn zonedDateTimeDayOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try zonedDateTimeFields(realm, t);
+    return Value.fromInt32(temporal.isoDayOfYear(rec.iso_year, rec.iso_month, rec.iso_day));
+}
+fn zonedDateTimeWeekOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try zonedDateTimeFields(realm, t);
+    return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).week);
+}
+fn zonedDateTimeYearOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try zonedDateTimeFields(realm, t);
+    return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).year);
+}
+fn zonedDateTimeHoursInDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requireZonedDateTime(realm, t);
+    // A constant-offset zone has no DST transition, so every day is exactly
+    // 24 hours. (A future tzdata build would diff this day's start-of-day
+    // epoch from the next day's via getEpochNanosecondsFor.)
+    return Value.fromInt32(24);
+}
+fn zonedDateTimeDaysInWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requireZonedDateTime(realm, t);
+    return Value.fromInt32(7);
+}
+fn zonedDateTimeDaysInMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try zonedDateTimeFields(realm, t);
+    return Value.fromInt32(@intCast(temporal.daysInIsoMonth(rec.iso_year, rec.iso_month)));
+}
+fn zonedDateTimeDaysInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try zonedDateTimeFields(realm, t);
+    return Value.fromInt32(temporal.isoDaysInYear(rec.iso_year));
+}
+fn zonedDateTimeMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requireZonedDateTime(realm, t);
+    return Value.fromInt32(12);
+}
+fn zonedDateTimeInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try zonedDateTimeFields(realm, t);
+    return Value.fromBool(temporal.isLeapYear(rec.iso_year));
+}
+fn zonedDateTimeOffset(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const z = try requireZonedDateTime(realm, t);
+    // §6.5.x get offset — FormatUTCOffsetNanoseconds of the numeric offset.
+    // Whole-minute offsets render as ±HH:MM; the UTC zone reports "+00:00"
+    // here (distinct from its "UTC" timeZoneId).
+    const off_ns = temporal.getOffsetNanosecondsFor(z.time_zone, z.epoch_ns);
+    const off_min: i32 = @intCast(@divTrunc(off_ns, 60_000_000_000));
+    var buf: [16]u8 = undefined;
+    const s = temporal.timeZoneIdentifierString(.{ .offset_minutes = off_min }, &buf);
+    const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn zonedDateTimeOffsetNanoseconds(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const z = try requireZonedDateTime(realm, t);
+    // |offset| ≤ 1439 min ⇒ |ns| ≤ 8.6×10^13 < 2^53, so the Number is exact.
+    const off_ns = temporal.getOffsetNanosecondsFor(z.time_zone, z.epoch_ns);
+    return Value.fromDouble(@floatFromInt(off_ns));
+}
+fn zonedDateTimeEra(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requireZonedDateTime(realm, t);
+    return Value.undefined_; // ISO calendar has no era
+}
+fn zonedDateTimeEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requireZonedDateTime(realm, t);
+    return Value.undefined_;
 }
