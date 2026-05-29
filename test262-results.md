@@ -270,13 +270,20 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` (hardened) | 76 | 2 | 4796 | 2 % | 97 % |
-| `joint-iteration` (unhardened) | 76 | 2 | 4796 | 2 % | 97 % |
+| `joint-iteration` (hardened) | 76 | 0 | 4796 | 2 % | 100 % |
+| `joint-iteration` (unhardened) | 76 | 0 | 4796 | 2 % | 100 % |
 | `ShadowRealm` (hardened) | 62 | 1 | 4796 | 1 % | 98 % |
 | `ShadowRealm` (unhardened) | 62 | 1 | 4796 | 1 % | 98 % |
 
 
 ## History
+
+### 2026-05-29 — cynic `df78bb3`, test262 `d0c1b455`
+
+|         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|---:|
+| **runtime** | 84.36 % | 99.98 % | 37995 / 45039 | 37995 / 38004 | — | ±0 | 50.5 s |
+| **runtime_hardened** | 84.36 % | 99.97 % | 37995 / 45039 | 34843 / 34852 | 3152 | ±0 | 50.5 s |
 
 ### 2026-05-28 — cynic `82cb66e`, test262 `d0c1b455`
 
