@@ -275,13 +275,65 @@ test "perlex: iterated duplicate group clears captures each iteration" {
 
 test "perlex: unsupported constructs fall back" {
     try expectCompile("[\\D]", .unsupported); // negated class escape in class
-    try expectCompile("\\1", .unsupported); // numeric backreference (no groups)
     try expectCompile("\\p{L}", .unsupported); // property escape
     try expectCompile("(a?)*", .unsupported); // nullable quantifier body
     try expectCompile("(?:)*", .unsupported); // nullable quantifier body
     try expectCompile("(?=a)*", .unsupported); // quantified assertion (Annex B)
     try expectCompile("a{0,5000}", .unsupported); // bound exceeds inline-expansion cap
     try expectCompile("a{99999}", .unsupported); // huge exact bound
+}
+
+// ── §22.2.1 strict-grammar closure of the Annex B regex carve-outs ───
+//
+// Cynic drops Annex B regex leniency (§B.1.2) in every mode, not just
+// under `/u` and `/v`. Perlex is authoritative for the forms the
+// vendored fallback would otherwise accept in non-Unicode mode:
+//   • the lower-bound-elided quantifier `{,n}` / `{,}` — every §22.2.1
+//     Quantifier brace form requires DecimalDigits as the lower bound,
+//     and `{` is a SyntaxCharacter, so `{,…` cannot be a literal and is
+//     a Syntax Error (Annex B would read the `{` as a literal);
+//   • any stray `]`, `{`, or `}` — these are exactly the SyntaxCharacters
+//     that Annex B §B.1.2's ExtendedPatternCharacter reinterprets as
+//     literals; outside a CharacterClass or a well-formed Quantifier they
+//     have no main-grammar interpretation and are a Syntax Error;
+//   • a DecimalEscape `\N` whose value exceeds the capture count —
+//     §22.2.1.1's early error (Annex B would reinterpret it as a legacy
+//     octal/identity escape).
+
+test "perlex: lower-bound-elided quantifier {,n} is a syntax error" {
+    try expectCompile("a{,3}", .syntax_error);
+    try expectCompile("a{,}", .syntax_error);
+    try expectCompileFlags("a{,3}", uflags, .syntax_error); // also under /u
+    // Well-formed brace quantifiers are unaffected.
+    try expectMatch("a{2,3}", "aaa", "aaa");
+    try expectMatch("a{2}", "aa", "aa");
+}
+
+test "perlex: stray brace or bracket is a syntax error" {
+    // The three Annex B ExtendedPatternCharacter literals (`] { }`), now
+    // rejected in every mode rather than deferred to the fallback.
+    try expectCompile("{", .syntax_error);
+    try expectCompile("}", .syntax_error);
+    try expectCompile("]", .syntax_error);
+    try expectCompile("{foo}", .syntax_error);
+    try expectCompile("a{b}", .syntax_error); // `{` that isn't a quantifier
+    try expectCompile("a{}", .syntax_error);
+    try expectCompile("a}", .syntax_error);
+    try expectCompile("a]b", .syntax_error);
+    try expectCompileFlags("a{b}", uflags, .syntax_error); // already so under /u
+    // A well-formed class still consumes its own `]`, and a quantifier its
+    // own braces, so neither reaches the stray-brace path.
+    try expectMatch("[a]", "a", "a");
+    try expectMatch("a{2}", "aa", "aa");
+}
+
+test "perlex: out-of-range numeric backreference is a syntax error" {
+    try expectCompile("\\1", .syntax_error); // no capturing groups
+    try expectCompile("(a)\\2", .syntax_error); // \2 past the one group
+    try expectCompileFlags("\\1", uflags, .syntax_error); // also under /u
+    // In-range references (including a forward reference) still compile.
+    try expectMatch("(a)\\1", "aa", "aa,a");
+    try expectMatch("\\1(a)", "a", "a,a");
 }
 
 // ── §22.2.2.4 lookahead ─────────────────────────────────────────────
@@ -503,11 +555,8 @@ test "perlex: numeric backreference" {
     try expectMatch("(?<x>a)(b)\\2", "abb", "abb,a,b");
 }
 
-test "perlex: out-of-range numeric escape falls back" {
-    // `\2` with one group is an Annex B octal escape, not a backref.
-    try expectCompile("(a)\\2", .unsupported);
-    try expectCompile("\\1", .unsupported);
-}
+// (Out-of-range `\N` is a §22.2.1.1 Syntax Error in every mode — see
+// "out-of-range numeric backreference is a syntax error" above.)
 
 // ── §22.2.2.7.1 `i` flag (ASCII case folding) ───────────────────────
 

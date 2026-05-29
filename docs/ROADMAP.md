@@ -684,31 +684,43 @@ hosts are single-agent-per-isolate).
 ECMA-262 surface — backreferences, named groups, lookahead /
 lookbehind, `u` / `v` flags, sticky / global / multiline / dotAll
 / ignoreCase. Bridged from Zig with UTF-8 ↔ UTF-16 transcoding so
-match indices land in spec-correct UTF-16 code units.
+match indices land in spec-correct UTF-16 code units. A native Zig
+backtracking engine — **Perlex** (`src/perlex/`) — now sits first in
+regex dispatch and owns most patterns it can compile; libregexp is
+the shrinking fallback for constructs Perlex doesn't yet support.
 
-**Planned.** None for the engine itself; integration polish:
-`RegExp.prototype` properties matching V8 / JSC for `lastIndex`,
-`flags`, `dotAll` accessor; minor edge cases in the
+**Planned.** Widen Perlex toward full §22.2 coverage so the
+libregexp fallback can eventually be retired (`/vi` case folding and
+emoji-sequence string properties are the main gaps left). Plus
+integration polish: `RegExp.prototype` properties matching V8 / JSC
+for `lastIndex`, `flags`, `dotAll` accessor; minor edge cases in the
 String.prototype dispatch.
 
-**Acknowledged exception — Annex B regex grammar (§B.1.4).**
-The vendored libregexp (QuickJS-NG) accepts a handful of
-permissive forms that apply only when the pattern is compiled
-*without* the `u` (or `v`) flag — e.g. `\1` outside a capturing
-group treated as octal `\001`, and the lower-bound-elided
-quantifier `{,n}`. With `u` / `v` both forms correctly throw
-`SyntaxError`; without the flag libregexp accepts them, as
-Annex B is part of the normative spec and every shipping
-engine (V8 / JSC / SpiderMonkey) accepts the same forms.
+**Annex B regex grammar (§B.1.4) — narrowed by Perlex.**
+The §22.2.1 main grammar makes `]`, `{`, `}` SyntaxCharacters
+with no literal reading, treats a DecimalEscape `\N` past the
+capture count as an early error (§22.2.1.1), and requires a
+DecimalDigits lower bound on every Quantifier brace. Annex B
+§B.1.2 relaxes all of these when a pattern is compiled *without*
+the `u` / `v` flag — a stray brace/bracket becomes a literal
+ExtendedPatternCharacter, `\N` rereads as a legacy octal/identity
+escape (e.g. `\1` outside a group → `\001`), and `{,n}` reads as
+literal text.
 
-This is the **only** Annex B carve-out Cynic ships. Everywhere
-else the "no Annex B" stance from AGENTS.md is enforced
-(language extensions, browser-era built-ins, accessor / legacy-
-global aliases). Closing this leak would mean patching vendored
-libregexp or building a Cynic-side pattern pre-validator on
-top of it; both cost more than the leak is worth, real-world
-regex code relies on the leak, and the `annexB/built-ins/
-RegExp/` test corpus is already path-skipped.
+Cynic drops every one of these in every mode. **Perlex** — the
+native regex engine, first in dispatch — raises `SyntaxError` for
+all of them, so any pattern Perlex compiles is held to the strict
+main grammar (`u` / `v` already rejected them; now non-Unicode
+mode does too). The residual is narrow: a pattern that *also*
+uses a construct Perlex doesn't yet support falls through to the
+vendored libregexp fallback, which still applies the Annex B
+leniency — so as Perlex's coverage grows the residual shrinks
+toward zero. Every shipping browser engine (V8 / JSC /
+SpiderMonkey) accepts the Annex B forms; Cynic's non-browser
+target is why it doesn't. Everywhere else the "no Annex B" stance
+from AGENTS.md is enforced (language extensions, browser-era
+built-ins, accessor / legacy-global aliases), and the
+`annexB/built-ins/RegExp/` corpus stays path-skipped.
 
 ## Tooling
 

@@ -316,7 +316,19 @@ const Parser = struct {
         var i = self.pos + 1;
         const lo_start = i;
         while (i < self.src.len and self.src[i] >= '0' and self.src[i] <= '9') i += 1;
-        if (i == lo_start) return error.NotAQuantifier; // `{` then non-digit
+        if (i == lo_start) {
+            // §22.2.1: `{` is a SyntaxCharacter and every Quantifier brace
+            // form requires DecimalDigits as the lower bound, so a `{,`
+            // (the lower-bound-elided `{,n}` / `{,}` form) cannot be a
+            // literal and is a Syntax Error. Annex B §B.1.2 would read the
+            // `{` as a literal ExtendedPatternCharacter, but Cynic drops
+            // Annex B regex leniency in every mode. Any other non-digit
+            // after `{` (e.g. `{b}`, `{}`) makes this not a quantifier; the
+            // `{` is re-parsed as an atom, where parseAtom rejects a stray
+            // `{` under the same §22.2.1 rule.
+            if (i < self.src.len and self.src[i] == ',') return error.SyntaxError;
+            return error.NotAQuantifier; // `{` then non-digit, non-comma
+        }
         const min = std.fmt.parseInt(usize, self.src[lo_start..i], 10) catch return error.Unsupported;
         var max: usize = min;
         if (i < self.src.len and self.src[i] == ',') {
@@ -354,9 +366,21 @@ const Parser = struct {
                 return self.makeNode(.dot);
             },
             '[' => return if (self.unicode_sets) self.parseClassSet() else self.parseCharClass(),
-            // Bare metacharacters in atom position aren't valid here;
-            // defer the authoritative verdict to the fallback matcher.
-            ')', '*', '+', '?', '{', '}', ']', '|' => return error.Unsupported,
+            // §22.2.1: `]`, `{`, `}` are SyntaxCharacters. Outside a
+            // CharacterClass (`]`) or a well-formed Quantifier (`{`/`}`)
+            // they have no literal interpretation in the main grammar —
+            // they are exactly the three chars Annex B §B.1.2's
+            // ExtendedPatternCharacter (SourceCharacter but not one of
+            // ^ $ \ . * + ? ( ) [ |) would reinterpret as literals. Cynic
+            // drops Annex B regex leniency in every mode, so a stray one
+            // is a Syntax Error (`/{/`, `/}/`, `/]/`, `/a{b}/`, `/{foo}/`).
+            // A real quantifier brace is consumed by parseBraceQuantifier
+            // and a class-closing `]` by parseCharClass before reaching here.
+            ']', '{', '}' => return error.SyntaxError,
+            // Other bare metacharacters in atom position aren't valid here
+            // either, but their authoritative verdict (e.g. `)` balance,
+            // empty `|` alternatives) is left to the fallback matcher.
+            ')', '*', '+', '?', '|' => return error.Unsupported,
             else => {
                 // A plain ASCII literal. Non-ASCII bytes need code-point
                 // decoding the v1 engine doesn't do yet → fall back.
