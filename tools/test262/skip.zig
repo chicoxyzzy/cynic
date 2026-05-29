@@ -1060,20 +1060,23 @@ pub const vendor_path_contains = [_][]const u8{
     //  parse and runtime, so the value no longer reaches libregexp,
     //  whose property tables omit the "Unknown" special value.)
     // §22.2.1 /v flag — Perlex compiles the code-point half of the
-    // UnicodeSets grammar natively: the set operators (union by
-    // juxtaposition, intersection `&&`, difference `--`), nested `[…]`
-    // classes, and `\p{…}` operands all resolve and lower to one class
-    // instruction. So the char-only set-op fixtures (difference, nested
-    // classes, flat union / intersection) run and pass. Still deferred
-    // are the may-contain-strings forms — the `\q{…}` string-literal
-    // operand and the property-of-strings escapes (`\p{RGI_Emoji}`,
-    // `\p{Emoji_Keycap_Sequence}`, …): Perlex reports those `.unsupported`
-    // and routes them to vendored libregexp, whose tables omit them, so
-    // each fails at pattern-compile time. The patterns below catch every
-    // string-literal / property-of-strings / rgi-emoji basename on either
-    // operand side. The skips shrink as later Perlex phases land.
-    "/unicodeSets/generated/string-literal-",
-    "-string-literal.js",
+    // UnicodeSets grammar natively (set operators, nested classes,
+    // `\p{…}` operands) and now the `\q{…}` ClassStringDisjunction
+    // half too: a class that may contain strings lowers to an ordered
+    // alternation (§22.2.2.7), and the §22.2.1.1 negated-class-with-
+    // strings early error is enforced. So the pure string-literal
+    // fixtures (`string-literal` combined with character / class /
+    // property-escape operands) run and pass. What remains deferred is
+    // the *property-of-strings* escapes (`\p{RGI_Emoji}`,
+    // `\p{Emoji_Keycap_Sequence}`, …), which need the emoji-sequence
+    // Unicode tables Cynic hasn't generated yet. Perlex reports those
+    // `.unsupported` and routes them to vendored libregexp, whose tables
+    // omit them, so the fixture fails at pattern-compile time. The
+    // patterns below catch every property-of-strings / rgi-emoji
+    // basename, including the combos that pair a `\q{…}` with a
+    // property-of-strings escape (caught by the `property-of-strings`
+    // entries on whichever side the escape sits). The skips shrink
+    // further when Perlex's property-of-strings phase lands.
     "/unicodeSets/generated/property-of-strings-",
     "-property-of-strings-escape.js",
     "/unicodeSets/generated/rgi-emoji-",
@@ -1453,20 +1456,18 @@ test "skip: /v unicodeSets generated — Perlex handles code-point set ops" {
         "built-ins/RegExp/unicodeSets/generated/character-class-escape-union-character.js",
     ));
 
-    // Still deferred — the `\q{…}` string-literal operand. The
-    // may-contain-strings half of the grammar lands in a later phase; for
-    // now Perlex declines it and libregexp (which can't parse `\q{…}`)
-    // renders the compile-time failure, so the fixtures stay skipped:
-    try testing.expect(pathIsCynicOutOfScope(
+    // String-literal escape (`\q{…}`) is now in scope — Perlex lowers a
+    // may-contain-strings class to an alternation (§22.2.2.7):
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/string-literal-intersection-character.js",
     ));
-    try testing.expect(pathIsCynicOutOfScope(
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/character-union-string-literal.js",
     ));
-    try testing.expect(pathIsCynicOutOfScope(
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/string-literal-difference-character.js",
     ));
-    try testing.expect(pathIsCynicOutOfScope(
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/string-literal-union-string-literal.js",
     ));
 
@@ -1484,6 +1485,14 @@ test "skip: /v unicodeSets generated — Perlex handles code-point set ops" {
     ));
     try testing.expect(pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/character-property-escape-difference-property-of-strings-escape.js",
+    ));
+    // A `\q{…}` paired with a property-of-strings escape stays deferred
+    // (caught by the `property-of-strings` patterns on either side):
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/string-literal-union-property-of-strings-escape.js",
+    ));
+    try testing.expect(pathIsCynicOutOfScope(
+        "built-ins/RegExp/unicodeSets/generated/property-of-strings-escape-union-string-literal.js",
     ));
 }
 

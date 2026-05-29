@@ -88,10 +88,17 @@ pub const Node = union(enum) {
             /// their complemented `\D`/`\W`/`\S` forms — all already
             /// reduced to code-point ranges at parse time.
             ranges: []const ClassRange,
-            /// `\p{…}` / `\P{…}`, resolved to ranges at compile time.
+            /// `\p{…}` / `\P{…}`, resolved to ranges (and, for a
+            /// property of strings, to string members) at compile time.
             prop: Property,
             /// A nested `[…]` ClassSetExpression.
             nested: *ClassSet,
+            /// `\q{…}` ClassStringDisjunction — each inner slice is one
+            /// ClassString's code points (length 0 for the empty
+            /// alternative, ≥1 otherwise). Single-character strings fold
+            /// into the character set at compile time; the rest make the
+            /// set "may contain strings" (§22.2.1.8).
+            strings: []const []const u21,
         };
     };
 };
@@ -694,11 +701,22 @@ const Parser = struct {
         ranges: []const Node.ClassRange,
         prop: Node.Property,
         nested: *Node.ClassSet,
+        /// `\q{…}` ClassStringDisjunction — one slice per ClassString.
+        strings: []const []const u21,
     };
 
     fn makeClassSet(self: *Parser, value: Node.ClassSet) ParseError!*Node.ClassSet {
         const n = try self.a.create(Node.ClassSet);
         n.* = value;
+        return n;
+    }
+
+    /// Build a ClassSet node and enforce the §22.2.1.1 early error:
+    /// `[^ ClassContents ]` is a SyntaxError if MayContainStrings of the
+    /// contents is true (a negated set may not contain strings).
+    fn finishClassSet(self: *Parser, value: Node.ClassSet) ParseError!*Node.ClassSet {
+        const n = try self.makeClassSet(value);
+        if (n.negated and mayContainStrings(n)) return error.SyntaxError;
         return n;
     }
 
@@ -724,7 +742,7 @@ const Parser = struct {
         // Empty class `[]` / `[^]`.
         if (self.peekIs(']')) {
             self.pos += 1;
-            return self.makeClassSet(.{ .negated = negated, .op = .union_, .operands = operands.items });
+            return self.finishClassSet(.{ .negated = negated, .op = .union_, .operands = operands.items });
         }
 
         const first = try self.parseSetAtom();
@@ -738,7 +756,7 @@ const Parser = struct {
                 try operands.append(self.a, try self.atomToOperand(try self.parseSetAtom()));
             }
             try self.expect(']');
-            return self.makeClassSet(.{ .negated = negated, .op = .intersection, .operands = operands.items });
+            return self.finishClassSet(.{ .negated = negated, .op = .intersection, .operands = operands.items });
         }
 
         if (self.peekDouble('-')) {
@@ -748,13 +766,13 @@ const Parser = struct {
                 try operands.append(self.a, try self.atomToOperand(try self.parseSetAtom()));
             }
             try self.expect(']');
-            return self.makeClassSet(.{ .negated = negated, .op = .difference, .operands = operands.items });
+            return self.finishClassSet(.{ .negated = negated, .op = .difference, .operands = operands.items });
         }
 
         // Union (ClassUnion): juxtaposed operands and `a-z` ranges.
         try self.collectUnion(first, &operands);
         try self.expect(']');
-        return self.makeClassSet(.{ .negated = negated, .op = .union_, .operands = operands.items });
+        return self.finishClassSet(.{ .negated = negated, .op = .union_, .operands = operands.items });
     }
 
     /// Collect the operands of a ClassUnion, starting with the
@@ -799,6 +817,7 @@ const Parser = struct {
             .ranges => |r| .{ .ranges = r },
             .prop => |p| .{ .prop = p },
             .nested => |n| .{ .nested = n },
+            .strings => |s| .{ .strings = s },
         };
     }
 
@@ -832,7 +851,8 @@ const Parser = struct {
 
     /// Class-set escapes: `\d`/`\w`/`\s` and the complemented
     /// `\D`/`\W`/`\S` (as ranges), `\p{}`/`\P{}` (a property operand),
-    /// `\b` (backspace inside a class), and single-character escapes.
+    /// `\q{…}` (a ClassStringDisjunction), `\b` (backspace inside a
+    /// class), and single-character escapes.
     fn parseSetEscape(self: *Parser) ParseError!SetAtom {
         const k = self.at(1) orelse return error.SyntaxError;
         switch (k) {
@@ -843,12 +863,87 @@ const Parser = struct {
             's' => return self.setRanges(false, &space_ranges),
             'S' => return self.setRanges(true, &space_ranges),
             'p', 'P' => return .{ .prop = try self.scanProperty(k == 'P') },
+            'q' => return self.parseStringDisjunction(),
             'b' => {
                 self.pos += 2;
                 return .{ .char = 0x08 };
             },
             else => return .{ .char = try self.parseEscapedChar() },
         }
+    }
+
+    /// §22.2.1 ClassStringDisjunction — `\q{ ClassString (| ClassString)* }`.
+    /// Each ClassString is a (possibly empty) run of ClassSetCharacters.
+    /// Every string is retained, including the length-1 case; the
+    /// compiler folds single-character strings into the character set and
+    /// uses the remaining lengths (0 or ≥2) to decide MayContainStrings
+    /// (§22.2.1.8). The vendored matcher cannot parse `\q{…}`, so Perlex
+    /// owns the verdict for any pattern containing one.
+    fn parseStringDisjunction(self: *Parser) ParseError!SetAtom {
+        std.debug.assert(self.src[self.pos] == '\\' and self.at(1) == 'q');
+        self.pos += 2; // consume `\q`
+        if (!self.peekIs('{')) return error.SyntaxError;
+        self.pos += 1; // consume `{`
+
+        var strings: std.ArrayListUnmanaged([]const u21) = .empty;
+        while (true) {
+            // One ClassString: a run of ClassSetCharacters (possibly empty).
+            var cps: std.ArrayListUnmanaged(u21) = .empty;
+            while (true) {
+                const c = self.peek() orelse return error.SyntaxError; // unterminated `\q{`
+                if (c == '}' or c == '|') break;
+                try cps.append(self.a, try self.parseStringChar());
+            }
+            try strings.append(self.a, cps.items);
+
+            const sep = self.peek() orelse return error.SyntaxError;
+            if (sep == '}') {
+                self.pos += 1; // consume `}`
+                break;
+            }
+            self.pos += 1; // consume `|`, parse the next ClassString
+        }
+        return .{ .strings = strings.items };
+    }
+
+    /// One ClassSetCharacter inside a `\q{…}` ClassString (§22.2.1).
+    /// `\b` is backspace; `\` before a ClassSetReservedPunctuator yields
+    /// that punctuator; other `\` forms are CharacterEscapes. A bare
+    /// ClassSetSyntaxCharacter or a doubled ClassSetReservedDoublePunctuator
+    /// is a SyntaxError.
+    fn parseStringChar(self: *Parser) ParseError!u21 {
+        const c = self.peek() orelse return error.SyntaxError;
+        if (c == '\\') {
+            const k = self.at(1) orelse return error.SyntaxError;
+            // `\b` is backspace inside a class (§22.2.1 ClassSetCharacter).
+            if (k == 'b') {
+                self.pos += 2;
+                return 0x08;
+            }
+            // `\` + ClassSetReservedPunctuator — the literal punctuator.
+            if (isReservedPunct(k)) {
+                self.pos += 2;
+                return k;
+            }
+            // Otherwise a CharacterEscape (`\n`, `\x41`, `\u{1F600}`, `\|`…).
+            // parseEscapedChar declines forms Perlex can't model (e.g. a
+            // surrogate-pair escape) with error.Unsupported, which is
+            // surfaced as a SyntaxError because the fallback can't parse
+            // `\q{…}` to render the authoritative verdict.
+            return self.parseEscapedChar() catch |e| {
+                if (e == error.Unsupported) return error.SyntaxError;
+                return e;
+            };
+        }
+        // A bare ClassSetSyntaxCharacter is not a ClassSetCharacter; `}`
+        // and `|` are consumed by the caller, the rest are SyntaxErrors.
+        if (isClassSetSyntaxChar(c)) return error.SyntaxError;
+        // `[lookahead ∉ ClassSetReservedDoublePunctuator]` — a doubled
+        // reserved punctuator must not be read as two SourceCharacters.
+        // `&&` counts here too (it is the intersection operator at the
+        // class level but is still a reserved double punctuator).
+        if ((isReservedDoublePunct(c) or c == '&') and self.atIs(1, c)) return error.SyntaxError;
+        return self.nextCodePoint();
     }
 
     /// `\d`/`\w`/`\s` → their ranges; the `\D`/`\W`/`\S` complement is
@@ -905,6 +1000,75 @@ fn isReservedDoublePunct(c: u8) bool {
     return switch (c) {
         '!', '#', '$', '%', '*', '+', ',', '.', ':', ';', '<', '=', '>', '?', '@', '^', '`', '~' => true,
         else => false,
+    };
+}
+
+/// §22.2.1 ClassSetReservedPunctuator — `& - ! # % , : ; < = > @ ` ~`.
+/// A `\` escape may quote any of these to denote the literal punctuator
+/// inside a `/v` class or `\q{…}` string.
+fn isReservedPunct(c: u8) bool {
+    return switch (c) {
+        '&', '-', '!', '#', '%', ',', ':', ';', '<', '=', '>', '@', '`', '~' => true,
+        else => false,
+    };
+}
+
+/// §22.2.1 ClassSetSyntaxCharacter — `( ) [ ] { } / - \ |`. These must be
+/// escaped to appear literally inside a `/v` class.
+fn isClassSetSyntaxChar(c: u8) bool {
+    return switch (c) {
+        '(', ')', '[', ']', '{', '}', '/', '-', '\\', '|' => true,
+        else => false,
+    };
+}
+
+/// §22.2.1.8 MayContainStrings, computed structurally on a parsed
+/// ClassSet. The §22.2.1.1 early error forbids negating a class whose
+/// contents may contain strings, so the predicate is evaluated at parse
+/// time on the AST shape — not on the resolved membership. For example
+/// `[^[\q{ab}]&&[\q{cd}]]` is a SyntaxError even though the intersection
+/// resolves to no strings.
+fn mayContainStrings(cs: *const Node.ClassSet) bool {
+    switch (cs.op) {
+        // Union: true if any operand may contain strings.
+        .union_ => {
+            for (cs.operands) |op| {
+                if (operandMayContainStrings(op)) return true;
+            }
+            return false;
+        },
+        // Intersection: true only if every operand may contain strings.
+        .intersection => {
+            if (cs.operands.len == 0) return false;
+            for (cs.operands) |op| {
+                if (!operandMayContainStrings(op)) return false;
+            }
+            return true;
+        },
+        // Subtraction: true if the left (first) operand may contain strings.
+        .difference => {
+            if (cs.operands.len == 0) return false;
+            return operandMayContainStrings(cs.operands[0]);
+        },
+    }
+}
+
+fn operandMayContainStrings(op: Node.ClassSet.Operand) bool {
+    return switch (op) {
+        .ranges => false,
+        // A negated property never contributes strings; a positive
+        // property of strings would (recognised once the string-valued
+        // Unicode properties land in a later phase).
+        .prop => false,
+        .nested => |n| mayContainStrings(n),
+        // §22.2.1.8 — a ClassString of length ≠ 1 makes the set may
+        // contain strings (the length-1 case folds into the char set).
+        .strings => |ss| blk: {
+            for (ss) |s| {
+                if (s.len != 1) break :blk true;
+            }
+            break :blk false;
+        },
     };
 }
 

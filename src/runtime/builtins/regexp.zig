@@ -1638,8 +1638,11 @@ fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
             return true;
         },
         .syntax_error => {
-            // §22.2.3.2 step 12 — invalid pattern → SyntaxError.
-            const ex = intrinsics.newSyntaxError(realm, "Invalid regular expression: duplicate capture group name in the same alternative") catch return error.OutOfMemory;
+            // §22.2.3.2 step 12 — invalid pattern → SyntaxError. Perlex
+            // is authoritative for the early errors it models: a group
+            // name reused within one Alternative, a negated class that
+            // may contain strings (§22.2.1.1), and malformed `\q{…}`.
+            const ex = intrinsics.newSyntaxError(realm, "Invalid regular expression") catch return error.OutOfMemory;
             realm.pending_exception = ex;
             return error.NativeThrew;
         },
