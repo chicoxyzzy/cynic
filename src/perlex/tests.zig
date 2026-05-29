@@ -697,3 +697,107 @@ test "perlex/v: supplementary code points match as one element" {
     const out_of_range = [_]u16{ 0xD83D, 0xDE20 }; // U+1F620, above the range
     try testing.expect(.no_match == try runV16Tag(testing.allocator, "[\\u{1F600}-\\u{1F610}]", &out_of_range));
 }
+
+// ── §22.2.1 ClassStringDisjunction `\q{…}` (the may-contain-strings half
+// of `/v`) — multi-code-point class members, set algebra over them, and
+// the §22.2.1.1 negated-set-with-strings early error. ────────────────
+
+test "perlex/v: \\q{} matches a multi-character string" {
+    // A lone string disjunction is a class whose only member is "abc".
+    try expectMatchFlags("[\\q{abc}]", vflags, "abc", "abc");
+    // A prefix can't satisfy the whole string element.
+    try expectNoMatchFlags("[\\q{abc}]", vflags, "ab");
+    // Leftmost match consumes exactly the element.
+    try expectMatchFlags("[\\q{abc}]", vflags, "abcd", "abc");
+}
+
+test "perlex/v: \\q{} tries longer alternatives first (§22.2.2.7)" {
+    // §22.2.2.7 sorts string members by descending length, independent of
+    // source order: "abc" is attempted before "ab" either way.
+    try expectMatchFlags("[\\q{abc|ab}]", vflags, "abc", "abc");
+    try expectMatchFlags("[\\q{ab|abc}]", vflags, "abc", "abc");
+    // When the longer one can't match, the shorter still does.
+    try expectMatchFlags("[\\q{abc|ab}]", vflags, "abx", "ab");
+}
+
+test "perlex/v: single-character \\q strings fold into the char set" {
+    // A length-1 ClassString is just a character — `[\q{a}]` ≡ `[a]`.
+    try expectMatchFlags("[\\q{a}]", vflags, "a", "a");
+    try expectNoMatchFlags("[\\q{a}]", vflags, "b");
+    // …so negating it is allowed (MayContainStrings is false).
+    try expectMatchFlags("[^\\q{a}]", vflags, "b", "b");
+    try expectNoMatchFlags("[^\\q{a}]", vflags, "a");
+}
+
+test "perlex/v: \\q{} in a union with characters and nested classes" {
+    try expectMatchFlags("[[0-9]\\q{ab}]", vflags, "5", "5");
+    try expectMatchFlags("[[0-9]\\q{ab}]", vflags, "ab", "ab");
+    try expectNoMatchFlags("[[0-9]\\q{ab}]", vflags, "x");
+    // The single chars in the union still match on their own.
+    try expectMatchFlags("[x\\q{ab}]", vflags, "x", "x");
+}
+
+test "perlex/v: quantified may-contain-strings class" {
+    // `+` over a class whose members include a 2-char string.
+    try expectMatchFlags("^[[0-9]\\q{ab}]+$", vflags, "5ab9", "5ab9");
+    try expectMatchFlags("^[[0-9]\\q{ab}]+$", vflags, "abab", "abab");
+    try expectNoMatchFlags("^[[0-9]\\q{ab}]+$", vflags, "a");
+}
+
+test "perlex/v: intersection keeps only shared members" {
+    // Strings intersect by sequence equality.
+    try expectMatchFlags("[\\q{ab|cd}&&\\q{ab|xy}]", vflags, "ab", "ab");
+    try expectNoMatchFlags("[\\q{ab|cd}&&\\q{ab|xy}]", vflags, "cd");
+    // A range-only operand drops every multi-char string (no overlap).
+    try expectMatchFlags("[[0-9]&&\\q{1|ab}]", vflags, "1", "1");
+    try expectNoMatchFlags("[[0-9]&&\\q{1|ab}]", vflags, "ab");
+    try expectNoMatchFlags("[[0-9]&&\\q{1|ab}]", vflags, "5");
+}
+
+test "perlex/v: difference removes matching string members" {
+    try expectMatchFlags("[\\q{ab|cd|ef}--\\q{cd}]", vflags, "ab", "ab");
+    try expectMatchFlags("[\\q{ab|cd|ef}--\\q{cd}]", vflags, "ef", "ef");
+    try expectNoMatchFlags("[\\q{ab|cd|ef}--\\q{cd}]", vflags, "cd");
+}
+
+test "perlex/v: negating a set that may contain strings is a SyntaxError" {
+    // §22.2.1.1 — `[^…]` is a Syntax Error when MayContainStrings is true.
+    try expectCompileFlags("[^\\q{ab}]", vflags, .syntax_error);
+    try expectCompileFlags("[^[0-9]\\q{ab}]", vflags, .syntax_error);
+    try expectCompileFlags("[[^\\q{ab}]]", vflags, .syntax_error);
+    // §22.2.1.8 is structural, not resolved: an intersection MayContainStrings
+    // iff BOTH operands do — so this is an error even though the resolved
+    // intersection is empty of strings.
+    try expectCompileFlags("[^\\q{ab}&&\\q{cd}]", vflags, .syntax_error);
+    // …and a subtraction iff its LEFT operand does.
+    try expectCompileFlags("[^\\q{ab}--\\q{ab}]", vflags, .syntax_error);
+}
+
+test "perlex/v: negation allowed when MayContainStrings is structurally false" {
+    // Intersection with a range-only left operand: MayContainStrings false,
+    // so the negation is legal (the resolved set is empty → complement is all).
+    try expectCompileFlags("[^[0-9]&&\\q{ab}]", vflags, .match);
+    // A single-char-only \q never makes a set may-contain-strings.
+    try expectCompileFlags("[^\\q{a|b|c}]", vflags, .match);
+}
+
+test "perlex/v: \\q{} with a supplementary / multi-unit string" {
+    // The keycap sequence "9️⃣" is a single 3-code-point member.
+    const keycap = [_]u16{ 0x39, 0xFE0F, 0x20E3 };
+    try testing.expect(.match == try runV16Tag(testing.allocator, "[\\q{9\\uFE0F\\u20E3}]", &keycap));
+    // "9" alone is not the member (no single-char fold for a 3-char string).
+    const just_nine = [_]u16{0x39};
+    try testing.expect(.no_match == try runV16Tag(testing.allocator, "[\\q{9\\uFE0F\\u20E3}]", &just_nine));
+    // The test262 calibration pattern, end to end.
+    try testing.expect(.match == try runV16Tag(
+        testing.allocator,
+        "^[[0-9]\\q{0|2|4|9\\uFE0F\\u20E3}]+$",
+        &keycap,
+    ));
+    const six_keycap = [_]u16{ 0x36, 0xFE0F, 0x20E3 }; // "6️⃣" — not a member
+    try testing.expect(.no_match == try runV16Tag(
+        testing.allocator,
+        "^[[0-9]\\q{0|2|4|9\\uFE0F\\u20E3}]+$",
+        &six_keycap,
+    ));
+}

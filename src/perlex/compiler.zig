@@ -413,60 +413,216 @@ const Compiler = struct {
         }
     }
 
-    /// §22.2.2.7 Atom :: CharacterClass — lower a `/v` ClassSetExpression
-    /// to one ordinary class instruction. The set algebra runs in a
-    /// scratch arena (including the resolver's allocations); only the
-    /// final normalized range list is copied out with the long-lived
-    /// allocator.
+    /// §22.2.2.7 Atom :: CharacterClass — lower a `/v` ClassSetExpression.
+    /// The set algebra runs in a scratch arena (including the resolver's
+    /// allocations). A char-only result becomes one ordinary class
+    /// instruction; a result that may contain strings becomes an ordered
+    /// alternation: each multi-character string (longest first), then the
+    /// single-character class, then the empty string if the set has it.
     fn compileClassSet(self: *Compiler, cs: *const Node.ClassSet) CompileError!void {
         var scratch = std.heap.ArenaAllocator.init(self.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
-        const ranges_scratch = try self.evalSet(a, cs);
-        const ranges = try self.gpa.dupe(Node.ClassRange, ranges_scratch);
-        self.emit(.{ .class = .{ .negated = false, .ranges = ranges } }) catch |e| {
-            self.gpa.free(ranges);
-            return e;
-        };
+        const set = try self.evalSet(a, cs);
+
+        // Common case: a flat code-point class (no string members).
+        if (set.strings.len == 0) {
+            const ranges = try self.gpa.dupe(Node.ClassRange, set.ranges);
+            self.emit(.{ .class = .{ .negated = false, .ranges = ranges } }) catch |e| {
+                self.gpa.free(ranges);
+                return e;
+            };
+            return;
+        }
+
+        // Build a synthetic alternation AST and compile it: this reuses
+        // the existing split/jmp lowering, and a concatenation reverses
+        // correctly inside a lookbehind via compileNode's `backward`
+        // handling. The nodes live in the scratch arena; compileNode
+        // copies the char values and class ranges it needs.
+        var alts: std.ArrayListUnmanaged(*Node) = .empty;
+
+        // Multi-character strings, longest first (§22.2.2.7).
+        const multi = try collectMultiStringsDesc(a, set.strings);
+        for (multi) |s| {
+            const seq = try a.alloc(*Node, s.len);
+            for (s, 0..) |cp, i| {
+                const cn = try a.create(Node);
+                cn.* = .{ .char = cp };
+                seq[i] = cn;
+            }
+            const concat = try a.create(Node);
+            concat.* = .{ .concat = seq };
+            try alts.append(a, concat);
+        }
+
+        // The collapsed single-character class, if any.
+        if (set.ranges.len != 0) {
+            const cn = try a.create(Node);
+            cn.* = .{ .class = .{ .negated = false, .ranges = set.ranges } };
+            try alts.append(a, cn);
+        }
+
+        // The empty string, last, if the set contains it (§22.2.2.7).
+        if (containsEmptySeq(set.strings)) {
+            const en = try a.create(Node);
+            en.* = .empty;
+            try alts.append(a, en);
+        }
+
+        // `set.strings` is non-empty, so `alts` has at least one element.
+        const root = try a.create(Node);
+        root.* = .{ .alternate = alts.items };
+        try self.compileNode(root);
     }
 
     /// Fold the operands of one ClassSetExpression together under its
     /// operator, then apply `^` negation. Recurses into nested classes.
-    /// Returns a normalized code-point range list; all allocations come
-    /// from the scratch arena `a`.
-    fn evalSet(self: *Compiler, a: std.mem.Allocator, cs: *const Node.ClassSet) CompileError![]const Node.ClassRange {
+    /// Returns a ResolvedSet (ranges + string members); all allocations
+    /// come from the scratch arena `a`.
+    fn evalSet(self: *Compiler, a: std.mem.Allocator, cs: *const Node.ClassSet) CompileError!ResolvedSet {
         if (cs.operands.len == 0) {
             // `[]` matches nothing; `[^]` matches every code point.
-            if (cs.negated) return try charset.complement(a, &.{});
-            return &.{};
+            if (cs.negated) return .{ .ranges = try charset.complement(a, &.{}), .strings = &.{} };
+            return .{ .ranges = &.{}, .strings = &.{} };
         }
         var acc = try self.evalOperand(a, cs.operands[0]);
         for (cs.operands[1..]) |op| {
             const r = try self.evalOperand(a, op);
             acc = switch (cs.op) {
-                .union_ => try charset.unionRanges(a, acc, r),
-                .intersection => try charset.intersect(a, acc, r),
-                .difference => try charset.subtract(a, acc, r),
+                .union_ => .{
+                    .ranges = try charset.unionRanges(a, acc.ranges, r.ranges),
+                    .strings = try unionStrings(a, acc.strings, r.strings),
+                },
+                .intersection => .{
+                    .ranges = try charset.intersect(a, acc.ranges, r.ranges),
+                    .strings = try intersectStrings(a, acc.strings, r.strings),
+                },
+                .difference => .{
+                    .ranges = try charset.subtract(a, acc.ranges, r.ranges),
+                    .strings = try subtractStrings(a, acc.strings, r.strings),
+                },
             };
         }
-        if (cs.negated) return try charset.complement(a, acc);
+        if (cs.negated) {
+            // §22.2.1.1's early error guarantees a negated set's contents
+            // cannot contain strings, so `acc.strings` is empty here.
+            return .{ .ranges = try charset.complement(a, acc.ranges), .strings = &.{} };
+        }
         return acc;
     }
 
-    fn evalOperand(self: *Compiler, a: std.mem.Allocator, op: Node.ClassSet.Operand) CompileError![]const Node.ClassRange {
+    fn evalOperand(self: *Compiler, a: std.mem.Allocator, op: Node.ClassSet.Operand) CompileError!ResolvedSet {
         return switch (op) {
-            .ranges => |r| r,
+            .ranges => |r| .{ .ranges = r, .strings = &.{} },
             .nested => |n| try self.evalSet(a, n),
             .prop => |p| blk: {
                 // §22.2.1.1 — resolve `\p{}` via the injected resolver;
-                // a declined property defers the whole pattern.
+                // a declined property defers the whole pattern. The B1
+                // resolver yields only ranges (no properties of strings).
                 const resolve = self.resolver orelse return error.Unsupported;
                 const rr = (try resolve(a, p.key, p.value)) orelse return error.Unsupported;
-                break :blk if (p.negated) try charset.complement(a, rr) else rr;
+                const ranges = if (p.negated) try charset.complement(a, rr) else rr;
+                break :blk .{ .ranges = ranges, .strings = &.{} };
             },
+            // §22.2.1.8 — fold `\q{…}`: single-character strings join the
+            // char set; the rest (empty or length ≥ 2) stay as string
+            // members. Sequences are deduplicated (set semantics).
+            .strings => |ss| try foldStrings(a, ss),
         };
     }
 };
+
+/// A resolved `/v` ClassSetExpression: a normalized code-point range set
+/// plus its multi-code-point string members. A string member has length
+/// 0 (the empty string) or ≥ 2; single-character strings fold into
+/// `ranges`. Members of different lengths never coincide, so the union /
+/// intersection / difference algebra runs independently on the two
+/// halves (§22.2.1.8 / §22.2.2.7).
+const ResolvedSet = struct {
+    ranges: []const Node.ClassRange,
+    strings: []const []const u21,
+};
+
+/// Equality of two code-point sequences (string members).
+fn seqEql(x: []const u21, y: []const u21) bool {
+    if (x.len != y.len) return false;
+    for (x, y) |xc, yc| {
+        if (xc != yc) return false;
+    }
+    return true;
+}
+
+/// Whether `list` already holds a sequence equal to `s`.
+fn containsSeq(list: []const []const u21, s: []const u21) bool {
+    for (list) |e| {
+        if (seqEql(e, s)) return true;
+    }
+    return false;
+}
+
+fn containsEmptySeq(list: []const []const u21) bool {
+    for (list) |s| {
+        if (s.len == 0) return true;
+    }
+    return false;
+}
+
+/// Fold a `\q{…}` disjunction into a ResolvedSet: length-1 strings become
+/// single-point ranges; the rest stay as deduplicated string members.
+fn foldStrings(a: std.mem.Allocator, ss: []const []const u21) std.mem.Allocator.Error!ResolvedSet {
+    var ranges: std.ArrayListUnmanaged(Node.ClassRange) = .empty;
+    var strs: std.ArrayListUnmanaged([]const u21) = .empty;
+    for (ss) |s| {
+        if (s.len == 1) {
+            try ranges.append(a, .{ .lo = s[0], .hi = s[0] });
+        } else if (!containsSeq(strs.items, s)) {
+            try strs.append(a, s);
+        }
+    }
+    return .{ .ranges = try charset.normalize(a, ranges.items), .strings = strs.items };
+}
+
+/// x ∪ y over string members, deduplicated.
+fn unionStrings(a: std.mem.Allocator, x: []const []const u21, y: []const []const u21) std.mem.Allocator.Error![]const []const u21 {
+    var out: std.ArrayListUnmanaged([]const u21) = .empty;
+    for (x) |s| if (!containsSeq(out.items, s)) try out.append(a, s);
+    for (y) |s| if (!containsSeq(out.items, s)) try out.append(a, s);
+    return out.items;
+}
+
+/// x ∩ y over string members.
+fn intersectStrings(a: std.mem.Allocator, x: []const []const u21, y: []const []const u21) std.mem.Allocator.Error![]const []const u21 {
+    var out: std.ArrayListUnmanaged([]const u21) = .empty;
+    for (x) |s| {
+        if (containsSeq(y, s) and !containsSeq(out.items, s)) try out.append(a, s);
+    }
+    return out.items;
+}
+
+/// x ∖ y over string members.
+fn subtractStrings(a: std.mem.Allocator, x: []const []const u21, y: []const []const u21) std.mem.Allocator.Error![]const []const u21 {
+    var out: std.ArrayListUnmanaged([]const u21) = .empty;
+    for (x) |s| {
+        if (!containsSeq(y, s) and !containsSeq(out.items, s)) try out.append(a, s);
+    }
+    return out.items;
+}
+
+fn longerFirst(_: void, x: []const u21, y: []const u21) bool {
+    return x.len > y.len;
+}
+
+/// The length-≥ 2 members of `strings`, sorted longest first (§22.2.2.7
+/// matches longer alternatives before shorter ones).
+fn collectMultiStringsDesc(a: std.mem.Allocator, strings: []const []const u21) std.mem.Allocator.Error![]const []const u21 {
+    var multi: std.ArrayListUnmanaged([]const u21) = .empty;
+    for (strings) |s| {
+        if (s.len >= 2) try multi.append(a, s);
+    }
+    std.mem.sort([]const u21, multi.items, {}, longerFirst);
+    return multi.items;
+}
 
 /// A lookbehind body the v1 backward matcher handles: no capturing
 /// groups (which would need reversed capture saves), no
@@ -499,8 +655,11 @@ fn lookbehindBodyOk(node: *const Node) bool {
 fn nullable(node: *const Node) bool {
     return switch (node.*) {
         .empty, .anchor_start, .anchor_end, .word_boundary, .backref_name, .backref_index, .lookahead => true,
-        // A char-only `/v` class always consumes exactly one code point.
-        .char, .class, .dot, .prop, .class_set => false,
+        .char, .class, .dot, .prop => false,
+        // A `/v` class is nullable only when its membership includes the
+        // empty string (a `\q{}` empty alternative); a quantifier over
+        // such a body would otherwise spin a zero-width loop.
+        .class_set => |cs| classSetMayMatchEmpty(cs),
         .noncapture => |b| nullable(b),
         .capture => |g| nullable(g.body),
         .repeat => |r| r.min == 0 or nullable(r.body),
@@ -515,6 +674,42 @@ fn nullable(node: *const Node) bool {
                 if (nullable(a)) return true;
             }
             return false;
+        },
+    };
+}
+
+/// Whether a `/v` ClassSetExpression's resolved membership can include
+/// the empty string. Computed structurally as a conservative
+/// over-approximation (subtraction's right operand — which could remove
+/// the empty string — is ignored), so it never reports false for a set
+/// that truly matches empty. A negated set is char-only (the §22.2.1.1
+/// early error forbids strings under `^`), so it never matches empty.
+fn classSetMayMatchEmpty(cs: *const Node.ClassSet) bool {
+    if (cs.negated) return false;
+    switch (cs.op) {
+        .union_ => {
+            for (cs.operands) |op| if (operandMayMatchEmpty(op)) return true;
+            return false;
+        },
+        .intersection => {
+            if (cs.operands.len == 0) return false;
+            for (cs.operands) |op| if (!operandMayMatchEmpty(op)) return false;
+            return true;
+        },
+        .difference => {
+            if (cs.operands.len == 0) return false;
+            return operandMayMatchEmpty(cs.operands[0]);
+        },
+    }
+}
+
+fn operandMayMatchEmpty(op: Node.ClassSet.Operand) bool {
+    return switch (op) {
+        .ranges, .prop => false,
+        .nested => |n| classSetMayMatchEmpty(n),
+        .strings => |ss| blk: {
+            for (ss) |s| if (s.len == 0) break :blk true;
+            break :blk false;
         },
     };
 }
