@@ -560,12 +560,97 @@ fn durationSubtract(realm: *Realm, this_value: Value, args: []const Value) Nativ
     return durationAddSubtract(realm, this_value, argOr(args, 0, Value.undefined_), -1);
 }
 
-/// Deferred — rounding/balancing calendar units against a relativeTo
-/// reference still needs the calendar path.
+/// Read the `largestUnit` option, distinguishing an absent option (unset —
+/// `present` false) from an explicit `"auto"` (present, value null → caller
+/// substitutes the default largest unit). §7.3.21 keeps these distinct: an
+/// `"auto"` largestUnit counts as present, so it alone satisfies the
+/// "neither largestUnit nor smallestUnit given" guard.
+const LargestUnitOption = struct { unit: ?temporal.LargestUnit = null, present: bool = false };
+
+fn getLargestUnitOption(realm: *Realm, opts: ?*JSObject) NativeError!LargestUnitOption {
+    const obj = opts orelse return .{};
+    const v = try getPropertyChain(realm, obj, "largestUnit");
+    if (v.isUndefined()) return .{};
+    const s = try stringifyArg(realm, v);
+    const bytes = s.flatBytes();
+    if (std.mem.eql(u8, bytes, "auto")) return .{ .present = true };
+    const u = temporal.parseTemporalUnit(bytes) orelse
+        return throwRangeError(realm, "invalid largestUnit value");
+    return .{ .unit = u, .present = true };
+}
+
+/// §7.3.21 Temporal.Duration.prototype.round ( roundTo ). Without a
+/// relativeTo, calendar units (years/months/weeks) can't be balanced and
+/// throw; a calendar-unit-free duration rounds its day-and-time span (each
+/// day a fixed 24 h) to the requested smallest unit and re-balances to
+/// largestUnit. The relativeTo path is deferred.
 fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requireDuration(realm, this_value);
-    return throwTypeError(realm, "Temporal.Duration.prototype.round is not yet implemented");
+    const d = try requireDuration(realm, this_value);
+    const round_to = argOr(args, 0, Value.undefined_);
+    if (round_to.isUndefined()) {
+        return throwTypeError(realm, "Temporal.Duration.prototype.round requires an options argument");
+    }
+
+    // §7.3.21 steps 4-15: a String shorthand sets smallestUnit; otherwise an
+    // options object whose options are read in the spec's fixed order
+    // (largestUnit, relativeTo, roundingIncrement, roundingMode,
+    // smallestUnit) before any algorithmic validation fires.
+    var largest_opt: LargestUnitOption = .{};
+    var smallest: ?temporal.LargestUnit = null;
+    var increment: i128 = 1;
+    var mode: temporal.RoundingMode = .half_expand;
+    var relative_present = false;
+    if (round_to.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(round_to.asString()));
+        smallest = temporal.parseTemporalUnit(s.flatBytes()) orelse
+            return throwRangeError(realm, "invalid smallestUnit value");
+    } else {
+        const opts = try getOptionsObject(realm, round_to);
+        largest_opt = try getLargestUnitOption(realm, opts);
+        relative_present = try relativeToPresent(realm, opts);
+        increment = try getRoundingIncrementOption(realm, opts);
+        mode = try getRoundingModeOption(realm, opts, .half_expand);
+        smallest = try getTemporalUnitOption(realm, opts, "smallestUnit");
+    }
+
+    // §7.3.21 steps 16-23: resolve defaults + validate the unit pair and the
+    // increment — independent of relativeTo, so these run before the branch.
+    const smallest_present = smallest != null;
+    const smallest_u = smallest orelse temporal.LargestUnit.nanosecond;
+    const existing = temporal.defaultTemporalLargestUnit(d);
+    const default_largest = largerLargestUnit(existing, smallest_u);
+    const largest_u = largest_opt.unit orelse default_largest;
+    if (!smallest_present and !largest_opt.present) {
+        return throwRangeError(realm, "round requires either largestUnit or smallestUnit");
+    }
+    // LargerOfTwoTemporalUnits(largestUnit, smallestUnit) must be largestUnit:
+    // largestUnit can be no finer than smallestUnit (smaller enum = coarser).
+    if (@intFromEnum(largest_u) > @intFromEnum(smallest_u)) {
+        return throwRangeError(realm, "largestUnit must be larger than or equal to smallestUnit");
+    }
+    if (temporal.maximumTemporalDurationRoundingIncrement(smallest_u)) |maximum| {
+        if (!temporal.validateRoundingIncrement(increment, maximum, false)) {
+            return throwRangeError(realm, "roundingIncrement is out of range");
+        }
+    }
+
+    if (relative_present) {
+        return throwTypeError(realm, "Temporal.Duration.prototype.round with relativeTo is not yet implemented");
+    }
+
+    // §7.3.21 step 25 (no relativeTo): calendar units are unbalanceable.
+    if (temporal.hasCalendarUnits(d) or @intFromEnum(largest_u) < @intFromEnum(temporal.LargestUnit.day)) {
+        return throwRangeError(realm, "a relativeTo is required to round a duration with calendar units");
+    }
+
+    const total_ns = temporal.dayTimeDurationNanoseconds(d);
+    const inc_ns = increment * temporal.unitNanoseconds(smallest_u);
+    const rounded = temporal.roundToIncrement(total_ns, inc_ns, mode);
+    const result = temporal.balanceTimeDuration(rounded, largest_u);
+    if (!temporal.isValidDuration(result)) {
+        return throwRangeError(realm, "duration out of range after rounding");
+    }
+    return createTemporalDuration(realm, result);
 }
 
 /// §7.3.x Temporal.Duration.prototype.total ( totalOf ). A string

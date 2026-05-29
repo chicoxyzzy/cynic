@@ -2042,6 +2042,20 @@ pub fn validateRoundingIncrement(increment: i128, dividend: i128, inclusive: boo
     return true;
 }
 
+/// §13.x MaximumTemporalDurationRoundingIncrement — the exclusive upper
+/// bound a `roundingIncrement` must stay under for a given smallest unit.
+/// Calendar units and `day` have no maximum (null — any positive integer is
+/// allowed); each time unit's maximum is the count that fills one of the
+/// next-coarser unit (24 hours, 60 minutes/seconds, 1000 sub-second steps).
+pub fn maximumTemporalDurationRoundingIncrement(unit: LargestUnit) ?i128 {
+    return switch (unit) {
+        .year, .month, .week, .day => null,
+        .hour => 24,
+        .minute, .second => 60,
+        .millisecond, .microsecond, .nanosecond => 1000,
+    };
+}
+
 /// Map a Temporal unit name (singular or plural) to its `LargestUnit`;
 /// null for an unrecognised name.
 pub fn parseTemporalUnit(s: []const u8) ?LargestUnit {
