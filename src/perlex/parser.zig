@@ -14,6 +14,7 @@
 //! piece the vendored matcher can't express.
 
 const std = @import("std");
+const charset = @import("charset.zig");
 
 pub const Node = union(enum) {
     /// Matches the empty string (an empty alternative, e.g. `a|`).
@@ -56,6 +57,13 @@ pub const Node = union(enum) {
     /// injected resolver and lowers to a `class`; properties the resolver
     /// declines defer the whole pattern to the fallback. `negated` is `\P`.
     prop: Property,
+    /// `/v` (UnicodeSets) extended character class — §22.2.1
+    /// ClassSetExpression: nested `[…]` classes, set operators
+    /// (union / intersection `&&` / difference `--`) and `^` negation.
+    /// The compiler evaluates the operands (resolving `\p{}` via the
+    /// injected resolver), applies the set algebra, and lowers a
+    /// char-only result to a `class`.
+    class_set: *ClassSet,
 
     pub const Capture = struct { index: usize, name: ?[]const u8, body: *Node };
     pub const Lookahead = struct { negative: bool, behind: bool, body: *Node };
@@ -63,6 +71,29 @@ pub const Node = union(enum) {
     pub const Repeat = struct { body: *Node, min: usize, max: usize, greedy: bool };
     pub const ClassRange = struct { lo: u21, hi: u21 };
     pub const Class = struct { negated: bool, ranges: []const ClassRange };
+
+    /// A `/v` ClassSetExpression. `operands` are combined by `op`; a
+    /// ClassSetExpression is exactly one of union / intersection /
+    /// difference (mixing operators at one level is a SyntaxError).
+    /// `negated` records a leading `^`.
+    pub const ClassSet = struct {
+        negated: bool,
+        op: SetOp,
+        operands: []const Operand,
+
+        pub const SetOp = enum { union_, intersection, difference };
+
+        pub const Operand = union(enum) {
+            /// Bare characters, `a-z` ranges, and `\d`/`\w`/`\s` and
+            /// their complemented `\D`/`\W`/`\S` forms — all already
+            /// reduced to code-point ranges at parse time.
+            ranges: []const ClassRange,
+            /// `\p{…}` / `\P{…}`, resolved to ranges at compile time.
+            prop: Property,
+            /// A nested `[…]` ClassSetExpression.
+            nested: *ClassSet,
+        };
+    };
 };
 
 /// `Repeat.max` sentinel for an unbounded upper bound (`*`, `+`, `{n,}`).
@@ -116,13 +147,14 @@ pub const ParseError = error{ Unsupported, SyntaxError, OutOfMemory };
 /// Parse `src` into an AST. `a` should be an arena — the AST and the
 /// transient name list are allocated from it and freed wholesale by
 /// the caller once compilation has copied out what it needs.
-pub fn parse(a: std.mem.Allocator, src: []const u8, unicode: bool) ParseError!ParseResult {
+pub fn parse(a: std.mem.Allocator, src: []const u8, unicode: bool, unicode_sets: bool) ParseError!ParseResult {
     var p: Parser = .{
         .a = a,
         .src = src,
         .pos = 0,
         .names = .empty,
         .unicode = unicode,
+        .unicode_sets = unicode_sets,
     };
     // Index 0 is the implicit whole-match group; it has no name.
     try p.names.append(a, null);
@@ -147,6 +179,9 @@ const Parser = struct {
     pos: usize,
     names: std.ArrayListUnmanaged(?[]const u8),
     unicode: bool = false,
+    /// `/v` — UnicodeSets mode. Implies code-point (`/u`) matching and
+    /// switches `[…]` parsing to the ClassSetExpression grammar.
+    unicode_sets: bool = false,
     non_ascii: bool = false,
 
     fn peek(self: *Parser) ?u8 {
@@ -156,6 +191,20 @@ const Parser = struct {
     fn at(self: *Parser, off: usize) ?u8 {
         const i = self.pos + off;
         return if (i < self.src.len) self.src[i] else null;
+    }
+
+    fn peekIs(self: *Parser, ch: u8) bool {
+        return (self.peek() orelse 0) == ch;
+    }
+
+    fn atIs(self: *Parser, off: usize, ch: u8) bool {
+        return (self.at(off) orelse 0) == ch;
+    }
+
+    /// True when the next two bytes are both `ch` (e.g. the `&&` / `--`
+    /// ClassSetExpression operators).
+    fn peekDouble(self: *Parser, ch: u8) bool {
+        return self.peekIs(ch) and self.atIs(1, ch);
     }
 
     fn makeNode(self: *Parser, value: Node) ParseError!*Node {
@@ -297,7 +346,7 @@ const Parser = struct {
                 self.pos += 1;
                 return self.makeNode(.dot);
             },
-            '[' => return self.parseCharClass(),
+            '[' => return if (self.unicode_sets) self.parseClassSet() else self.parseCharClass(),
             // Bare metacharacters in atom position aren't valid here;
             // defer the authoritative verdict to the fallback matcher.
             ')', '*', '+', '?', '{', '}', ']', '|' => return error.Unsupported,
@@ -420,9 +469,9 @@ const Parser = struct {
             },
             'p', 'P' => {
                 // §22.2.1 CharacterClassEscape — Unicode property escape.
-                // Only valid under `/u`; without it `\p` is Annex B
+                // Valid under `/u` or `/v`; without either `\p` is Annex B
                 // identity-escape territory, deferred to the fallback.
-                if (!self.unicode) return error.Unsupported;
+                if (!self.unicode and !self.unicode_sets) return error.Unsupported;
                 return self.parsePropertyEscape(k == 'P');
             },
             else => return self.makeNode(.{ .char = try self.parseEscapedChar() }),
@@ -434,6 +483,13 @@ const Parser = struct {
     /// decides validity. Malformed forms defer to the fallback, which is
     /// authoritative for the SyntaxError verdict.
     fn parsePropertyEscape(self: *Parser, negated: bool) ParseError!*Node {
+        return self.makeNode(.{ .prop = try self.scanProperty(negated) });
+    }
+
+    /// The syntactic core of a `\p{…}` / `\P{…}` escape, returning the
+    /// `(negated, key, value)` triple. Shared by the atom path
+    /// (`parsePropertyEscape`) and `/v` class-set operands.
+    fn scanProperty(self: *Parser, negated: bool) ParseError!Node.Property {
         if (self.at(2) != '{') return error.Unsupported;
         var i = self.pos + 3;
         const name_start = i;
@@ -460,7 +516,7 @@ const Parser = struct {
         };
         if (value.len == 0 or (key != null and key.?.len == 0)) return error.Unsupported;
         self.pos = close + 1; // consume through `}`
-        return self.makeNode(.{ .prop = .{ .negated = negated, .key = key, .value = value } });
+        return .{ .negated = negated, .key = key, .value = value };
     }
 
     fn classAtom(self: *Parser, negated: bool, ranges: []const Node.ClassRange) ParseError!*Node {
@@ -498,9 +554,9 @@ const Parser = struct {
             },
             'u' => {
                 if (self.at(2) == '{') {
-                    // `\u{CodePoint}` — valid only under `/u`; non-`u`
-                    // defers (Annex B identity-escape territory).
-                    if (!self.unicode) return error.Unsupported;
+                    // `\u{CodePoint}` — valid only under `/u` or `/v`;
+                    // non-Unicode defers (Annex B identity-escape territory).
+                    if (!self.unicode and !self.unicode_sets) return error.Unsupported;
                     var i = self.pos + 3;
                     const start = i;
                     var v: u21 = 0;
@@ -520,10 +576,10 @@ const Parser = struct {
                     const d = hexVal(self.at(i) orelse return error.Unsupported) orelse return error.Unsupported;
                     v = v *% 16 +% @as(u21, d);
                 }
-                // Under `/u`, a surrogate-valued `\uHHHH` (lone, or the
-                // first half of a `\uHHHH\uHHHH` pair) needs code-point
-                // combining the v1 engine doesn't do — defer.
-                if (self.unicode and v >= 0xD800 and v <= 0xDFFF) return error.Unsupported;
+                // Under `/u` or `/v`, a surrogate-valued `\uHHHH` (lone,
+                // or the first half of a `\uHHHH\uHHHH` pair) needs
+                // code-point combining the v1 engine doesn't do — defer.
+                if ((self.unicode or self.unicode_sets) and v >= 0xD800 and v <= 0xDFFF) return error.Unsupported;
                 if (v >= 0x80) self.non_ascii = true;
                 return self.takeEscaped(6, v);
             },
@@ -629,6 +685,196 @@ const Parser = struct {
         return .{ .ch = c };
     }
 
+    // ---- §22.2.1 ClassSetExpression — the `/v` extended class grammar ----
+
+    /// A single ClassSetOperand / ClassSetCharacter, before any range or
+    /// operator context is applied.
+    const SetAtom = union(enum) {
+        char: u21,
+        ranges: []const Node.ClassRange,
+        prop: Node.Property,
+        nested: *Node.ClassSet,
+    };
+
+    fn makeClassSet(self: *Parser, value: Node.ClassSet) ParseError!*Node.ClassSet {
+        const n = try self.a.create(Node.ClassSet);
+        n.* = value;
+        return n;
+    }
+
+    /// `[ … ]` under `/v`. Wraps the ClassSetExpression in a node.
+    fn parseClassSet(self: *Parser) ParseError!*Node {
+        return self.makeNode(.{ .class_set = try self.parseClassSetInner() });
+    }
+
+    /// Parse one `[ (^)? ClassSetExpression ]`. The operator (union by
+    /// juxtaposition, `&&`, or `--`) is chosen by what follows the first
+    /// operand; mixing operators at one level is rejected.
+    fn parseClassSetInner(self: *Parser) ParseError!*Node.ClassSet {
+        std.debug.assert(self.src[self.pos] == '[');
+        self.pos += 1;
+        var negated = false;
+        if (self.peekIs('^')) {
+            negated = true;
+            self.pos += 1;
+        }
+
+        var operands: std.ArrayListUnmanaged(Node.ClassSet.Operand) = .empty;
+
+        // Empty class `[]` / `[^]`.
+        if (self.peekIs(']')) {
+            self.pos += 1;
+            return self.makeClassSet(.{ .negated = negated, .op = .union_, .operands = operands.items });
+        }
+
+        const first = try self.parseSetAtom();
+
+        if (self.peekDouble('&')) {
+            try operands.append(self.a, try self.atomToOperand(first));
+            while (self.peekDouble('&')) {
+                self.pos += 2;
+                // §22.2.1 — a third `&` (`&&&`) is a SyntaxError.
+                if (self.peekIs('&')) return error.Unsupported;
+                try operands.append(self.a, try self.atomToOperand(try self.parseSetAtom()));
+            }
+            try self.expect(']');
+            return self.makeClassSet(.{ .negated = negated, .op = .intersection, .operands = operands.items });
+        }
+
+        if (self.peekDouble('-')) {
+            try operands.append(self.a, try self.atomToOperand(first));
+            while (self.peekDouble('-')) {
+                self.pos += 2;
+                try operands.append(self.a, try self.atomToOperand(try self.parseSetAtom()));
+            }
+            try self.expect(']');
+            return self.makeClassSet(.{ .negated = negated, .op = .difference, .operands = operands.items });
+        }
+
+        // Union (ClassUnion): juxtaposed operands and `a-z` ranges.
+        try self.collectUnion(first, &operands);
+        try self.expect(']');
+        return self.makeClassSet(.{ .negated = negated, .op = .union_, .operands = operands.items });
+    }
+
+    /// Collect the operands of a ClassUnion, starting with the
+    /// already-parsed `first`. A ClassSetCharacter followed by `-` and
+    /// another character forms a ClassSetRange.
+    fn collectUnion(
+        self: *Parser,
+        first: SetAtom,
+        operands: *std.ArrayListUnmanaged(Node.ClassSet.Operand),
+    ) ParseError!void {
+        var cur = first;
+        while (true) {
+            const lo: ?u21 = switch (cur) {
+                .char => |c| c,
+                else => null,
+            };
+            if (lo != null and self.peekIs('-') and self.at(1) != null and !self.atIs(1, '-') and !self.atIs(1, ']')) {
+                self.pos += 1; // consume `-`
+                const hi: u21 = switch (try self.parseSetAtom()) {
+                    .char => |c| c,
+                    // A range endpoint must be a single character.
+                    else => return error.Unsupported,
+                };
+                if (hi < lo.?) return error.SyntaxError; // reversed range
+                try operands.append(self.a, .{ .ranges = try self.dupeRange(lo.?, hi) });
+            } else {
+                try operands.append(self.a, try self.atomToOperand(cur));
+            }
+
+            const c = self.peek() orelse return error.SyntaxError; // unterminated
+            if (c == ']') return;
+            // A union may not contain `&&` / `--` operators (mixed forms
+            // are SyntaxErrors); defer the verdict to the fallback.
+            if (self.peekDouble('&') or self.peekDouble('-')) return error.Unsupported;
+            cur = try self.parseSetAtom();
+        }
+    }
+
+    fn atomToOperand(self: *Parser, atom: SetAtom) ParseError!Node.ClassSet.Operand {
+        return switch (atom) {
+            .char => |c| .{ .ranges = try self.dupeRange(c, c) },
+            .ranges => |r| .{ .ranges = r },
+            .prop => |p| .{ .prop = p },
+            .nested => |n| .{ .nested = n },
+        };
+    }
+
+    fn dupeRange(self: *Parser, lo: u21, hi: u21) ParseError![]const Node.ClassRange {
+        const r = try self.a.alloc(Node.ClassRange, 1);
+        r[0] = .{ .lo = lo, .hi = hi };
+        return r;
+    }
+
+    /// Parse a single ClassSetOperand / ClassSetCharacter.
+    fn parseSetAtom(self: *Parser) ParseError!SetAtom {
+        const c = self.peek() orelse return error.SyntaxError;
+        if (c == '[') return .{ .nested = try self.parseClassSetInner() };
+        if (c == '\\') return self.parseSetEscape();
+        switch (c) {
+            ']' => return error.SyntaxError, // empty operand
+            // ClassSetSyntaxCharacter / operator lead-ins must be escaped;
+            // an unescaped one here is a SyntaxError — defer the verdict.
+            '(', ')', '{', '}', '/', '|', '-' => return error.Unsupported,
+            else => {},
+        }
+        // §22.2.1 ClassSetCharacter has `[lookahead ∉
+        // ClassSetReservedDoublePunctuator]`: a doubled punctuator
+        // (`~~`, `!!`, `::`, …) is reserved and must not be read as two
+        // literals. `&&`/`--` are the set operators (handled by the
+        // operand dispatch); the rest are early errors — defer so the
+        // fallback's double-punctuator table renders the SyntaxError.
+        if (isReservedDoublePunct(c) and self.atIs(1, c)) return error.Unsupported;
+        return .{ .char = try self.nextCodePoint() };
+    }
+
+    /// Class-set escapes: `\d`/`\w`/`\s` and the complemented
+    /// `\D`/`\W`/`\S` (as ranges), `\p{}`/`\P{}` (a property operand),
+    /// `\b` (backspace inside a class), and single-character escapes.
+    fn parseSetEscape(self: *Parser) ParseError!SetAtom {
+        const k = self.at(1) orelse return error.SyntaxError;
+        switch (k) {
+            'd' => return self.setRanges(false, &digit_ranges),
+            'D' => return self.setRanges(true, &digit_ranges),
+            'w' => return self.setRanges(false, &word_ranges),
+            'W' => return self.setRanges(true, &word_ranges),
+            's' => return self.setRanges(false, &space_ranges),
+            'S' => return self.setRanges(true, &space_ranges),
+            'p', 'P' => return .{ .prop = try self.scanProperty(k == 'P') },
+            'b' => {
+                self.pos += 2;
+                return .{ .char = 0x08 };
+            },
+            else => return .{ .char = try self.parseEscapedChar() },
+        }
+    }
+
+    /// `\d`/`\w`/`\s` → their ranges; the `\D`/`\W`/`\S` complement is
+    /// taken over the full code-point universe (§22.2.2.9.1).
+    fn setRanges(self: *Parser, negate: bool, base: []const Node.ClassRange) ParseError!SetAtom {
+        self.pos += 2;
+        if (!negate) return .{ .ranges = base };
+        return .{ .ranges = charset.complement(self.a, base) catch return error.OutOfMemory };
+    }
+
+    /// Decode the next code point: an ASCII byte or a UTF-8 sequence, so
+    /// `/v` classes may contain literal non-ASCII characters.
+    fn nextCodePoint(self: *Parser) ParseError!u21 {
+        const c = self.peek() orelse return error.SyntaxError;
+        if (c < 0x80) {
+            self.pos += 1;
+            return c;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(c) catch return error.Unsupported;
+        if (self.pos + len > self.src.len) return error.Unsupported;
+        const cp = std.unicode.utf8Decode(self.src[self.pos .. self.pos + len]) catch return error.Unsupported;
+        if (cp >= 0x80) self.non_ascii = true;
+        self.pos += len;
+        return cp;
+    }
+
     fn expect(self: *Parser, c: u8) ParseError!void {
         if (self.peek() != c) return error.SyntaxError;
         self.pos += 1;
@@ -647,6 +893,17 @@ fn hexVal(c: u8) ?u8 {
 fn isSyntaxChar(c: u8) bool {
     return switch (c) {
         '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '/' => true,
+        else => false,
+    };
+}
+
+/// §22.2.1 — the lead character of a ClassSetReservedDoublePunctuator
+/// (`!! ## $$ %% ** ++ ,, .. :: ;; << == >> ?? @@ ^^ `` ~~`). The two
+/// set operators `&&`/`--` are recognised by the operand dispatch and
+/// are not listed here.
+fn isReservedDoublePunct(c: u8) bool {
+    return switch (c) {
+        '!', '#', '$', '%', '*', '+', ',', '.', ':', ';', '<', '=', '>', '?', '@', '^', '`', '~' => true,
         else => false,
     };
 }
@@ -688,7 +945,7 @@ fn collectNames(a: std.mem.Allocator, node: *const Node) error{ SyntaxError, Out
     var set: NameSet = .empty;
     errdefer set.deinit(a);
     switch (node.*) {
-        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .prop, .backref_name, .backref_index => {},
+        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .prop, .class_set, .backref_name, .backref_index => {},
         .noncapture => |body| {
             set.deinit(a);
             return try collectNames(a, body);

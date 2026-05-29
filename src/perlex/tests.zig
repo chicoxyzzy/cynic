@@ -142,7 +142,11 @@ fn runProp(gpa: std.mem.Allocator, pattern: []const u8, flags: perlex.Flags, inp
 }
 
 fn expectMatchProp(pattern: []const u8, input: []const u8, expected: []const u8) !void {
-    const o = try runProp(testing.allocator, pattern, uflags, input);
+    return expectMatchPropFlags(pattern, uflags, input, expected);
+}
+
+fn expectMatchPropFlags(pattern: []const u8, flags: perlex.Flags, input: []const u8, expected: []const u8) !void {
+    const o = try runProp(testing.allocator, pattern, flags, input);
     switch (o) {
         .match => |s| {
             defer testing.allocator.free(s);
@@ -153,7 +157,11 @@ fn expectMatchProp(pattern: []const u8, input: []const u8, expected: []const u8)
 }
 
 fn expectNoMatchProp(pattern: []const u8, input: []const u8) !void {
-    const o = try runProp(testing.allocator, pattern, uflags, input);
+    return expectNoMatchPropFlags(pattern, uflags, input);
+}
+
+fn expectNoMatchPropFlags(pattern: []const u8, flags: perlex.Flags, input: []const u8) !void {
+    const o = try runProp(testing.allocator, pattern, flags, input);
     if (o != .no_match) return error.ExpectedNoMatch;
 }
 
@@ -581,4 +589,111 @@ test "perlex: classifier flags regular vs backtracking patterns" {
         defer res.ok.deinit();
         try testing.expect(!res.ok.is_regular); // backref → needs backtracking
     }
+}
+
+// §22.2.1 ClassSetExpression — the `/v` (UnicodeSets) extended class
+// grammar: nested classes, set operators (union / intersection `&&` /
+// difference `--`), and `^` negation. Phase A covers char-only results
+// (no `\q{}` string literals, no properties-of-strings — those defer to
+// the fallback until the string-aware phase).
+
+const vflags = perlex.Flags{ .unicode_sets = true };
+
+/// Compile a `/v` pattern (property-resolver backed, so `\p{}` operands
+/// work) and run it over a u16 input given directly as code units, so a
+/// supplementary code point can be supplied as a surrogate pair. Returns
+/// only the outcome tag (no captures), so there is nothing to free.
+fn runV16Tag(gpa: std.mem.Allocator, pattern: []const u8, input: []const u16) !std.meta.Tag(Outcome) {
+    var res = try perlex.compileWithResolver(gpa, pattern, vflags, stubResolver);
+    switch (res) {
+        .unsupported => return .unsupported,
+        .syntax_error => return .syntax_error,
+        .ok => |*prog| {
+            defer prog.deinit();
+            var m = (try perlex.exec(u16, gpa, prog, input, 0)) orelse return .no_match;
+            m.deinit(gpa);
+            return .match;
+        },
+    }
+}
+
+test "perlex/v: nested-class union" {
+    try expectMatchFlags("[[0-9][a-c]]", vflags, "5", "5");
+    try expectMatchFlags("[[0-9][a-c]]", vflags, "b", "b");
+    try expectNoMatchFlags("[[0-9][a-c]]", vflags, "z");
+    // Implicit union of a bare char with a nested class.
+    try expectMatchFlags("[x[0-9]]", vflags, "x", "x");
+    try expectNoMatchFlags("[x[0-9]]", vflags, "y");
+}
+
+test "perlex/v: intersection &&" {
+    try expectMatchFlags("[[0-9]&&[4-8]]", vflags, "5", "5");
+    try expectNoMatchFlags("[[0-9]&&[4-8]]", vflags, "2");
+    try expectNoMatchFlags("[[0-9]&&[4-8]]", vflags, "9");
+}
+
+test "perlex/v: difference --" {
+    try expectMatchFlags("[[0-9]--[3-5]]", vflags, "2", "2");
+    try expectMatchFlags("[[0-9]--[3-5]]", vflags, "8", "8");
+    try expectNoMatchFlags("[[0-9]--[3-5]]", vflags, "4");
+    // Self-difference is empty: nothing matches.
+    try expectNoMatchFlags("[[0-9]--[0-9]]", vflags, "5");
+}
+
+test "perlex/v: negated set complements the whole expression" {
+    try expectMatchFlags("[^[0-9]]", vflags, "a", "a");
+    try expectNoMatchFlags("[^[0-9]]", vflags, "5");
+    try expectMatchFlags("[^[a-z]--[aeiou]]", vflags, "e", "e"); // 'e' removed → in complement
+    try expectNoMatchFlags("[^[a-z]--[aeiou]]", vflags, "b");
+}
+
+test "perlex/v: class-escape operands and complement" {
+    try expectMatchFlags("[\\d&&[4-8]]", vflags, "6", "6");
+    try expectNoMatchFlags("[\\d&&[4-8]]", vflags, "1");
+    // \D = all non-digits; intersect [a-c] → [a-c].
+    try expectMatchFlags("[\\D&&[a-c]]", vflags, "b", "b");
+    try expectNoMatchFlags("[\\D&&[a-c]]", vflags, "1");
+    try expectNoMatchFlags("[\\D&&[a-c]]", vflags, "d");
+}
+
+test "perlex/v: deeply nested operators" {
+    // ((0-9) − {5}) ∩ (3-8) = {3,4,6,7,8}
+    try expectMatchFlags("[[[0-9]--[5]]&&[3-8]]", vflags, "4", "4");
+    try expectMatchFlags("[[[0-9]--[5]]&&[3-8]]", vflags, "7", "7");
+    try expectNoMatchFlags("[[[0-9]--[5]]&&[3-8]]", vflags, "5");
+    try expectNoMatchFlags("[[[0-9]--[5]]&&[3-8]]", vflags, "2");
+}
+
+test "perlex/v: reserved double punctuators defer to the fallback" {
+    // §22.2.1 ClassSetReservedDoublePunctuator — these are early errors;
+    // Perlex defers so the fallback's table renders the SyntaxError.
+    try expectCompileFlags("[a~~b]", vflags, .unsupported);
+    try expectCompileFlags("[a!!b]", vflags, .unsupported);
+    try expectCompileFlags("[a::b]", vflags, .unsupported);
+    try expectCompileFlags("[a==b]", vflags, .unsupported);
+    try expectCompileFlags("[a..b]", vflags, .unsupported);
+}
+
+test "perlex/v: single punctuators are ordinary class characters" {
+    // A lone reserved punctuator is a valid ClassSetCharacter.
+    try expectMatchFlags("[a~b]", vflags, "~", "~");
+    try expectMatchFlags("[a&b]", vflags, "&", "&");
+    // A punctuator range still parses (`!`..`~` spans ASCII punctuation).
+    try expectMatchFlags("[!-~]", vflags, "#", "#");
+    try expectNoMatchFlags("[!-~]", vflags, " ");
+}
+
+test "perlex/v: \\p{} operand resolves and combines" {
+    // stubResolver knows Lu/Ll/L. [\p{L}&&[a-z]] = lowercase ASCII letters.
+    try expectMatchPropFlags("[\\p{L}&&[a-z]]", vflags, "m", "m");
+    try expectNoMatchPropFlags("[\\p{L}&&[a-z]]", vflags, "M");
+    try expectNoMatchPropFlags("[\\p{L}&&[a-z]]", vflags, "5");
+}
+
+test "perlex/v: supplementary code points match as one element" {
+    // U+1F603 as a surrogate pair; the class is a code-point range.
+    const smile = [_]u16{ 0xD83D, 0xDE03 };
+    try testing.expect(.match == try runV16Tag(testing.allocator, "[\\u{1F600}-\\u{1F610}]", &smile));
+    const out_of_range = [_]u16{ 0xD83D, 0xDE20 }; // U+1F620, above the range
+    try testing.expect(.no_match == try runV16Tag(testing.allocator, "[\\u{1F600}-\\u{1F610}]", &out_of_range));
 }

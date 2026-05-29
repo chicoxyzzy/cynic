@@ -60,18 +60,17 @@ pub fn compileWithResolver(
     flags: Flags,
     resolver: ?PropertyResolver,
 ) error{OutOfMemory}!CompileResult {
-    // `/v` (UnicodeSets) is deferred to the fallback. `/u` is handled
-    // (code-point matching) except combined with `i`: full Unicode case
-    // folding isn't built, so `/iu` defers. `g`/`y`/`d` affect the
-    // driver not the match; `m`/`s` and ASCII-`i` are handled.
-    if (flags.unicode_sets) return .unsupported;
-    if (flags.unicode and flags.ignore_case) return .unsupported;
+    // `/u` and `/v` are handled (code-point matching) except combined
+    // with `i`: full Unicode case folding isn't built, so `/iu` and
+    // `/iv` defer to the fallback. `g`/`y`/`d` affect the driver not the
+    // match; `m`/`s` and ASCII-`i` are handled.
+    if ((flags.unicode or flags.unicode_sets) and flags.ignore_case) return .unsupported;
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
 
-    const parsed = parser.parse(a, pattern, flags.unicode) catch |e| switch (e) {
+    const parsed = parser.parse(a, pattern, flags.unicode, flags.unicode_sets) catch |e| switch (e) {
         error.Unsupported => return .unsupported,
         error.SyntaxError => return .syntax_error,
         error.OutOfMemory => return error.OutOfMemory,
