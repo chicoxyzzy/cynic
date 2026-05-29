@@ -207,3 +207,39 @@ the corpus under the relevant section's directory before adding.
   No existing fixture concatenates split surrogate halves and
   checks the result is a well-formed pair — the corpus tests
   lone surrogates and pairs, but not the *cross-concat* seam.
+
+### Fresh-coerced primitive receiver freed across a re-entrant builtin
+
+- **Fixed in:** `d4b20c7`
+- **Spec:** §22.1.3 String.prototype methods (RequireObjectCoercible
+  then ToString on a non-string `this`); §7.1.1.1 OrdinaryToPrimitive.
+  The coerced result is a spec value the method must keep live for the
+  whole of its body — Cynic-internal: the `HandleScope` rooting
+  contract in [docs/handbook/gc.md](handbook/gc.md).
+- **Reproducer:**
+  ```js
+  // Only observable under allocation-triggered GC (the harness'
+  // --gc-threshold=1). An object receiver coerces to a *fresh*
+  // JSString that no register roots; the allocating argument
+  // coercion below then drives a collection that frees it mid-method.
+  const recv = { toString() { return "\u{1F600}abcdef"; } };
+  const arg  = { valueOf() { for (let i = 0; i < 300; i++) ("" + i).padStart(64); return 2; } };
+  String.prototype.indexOf.call(recv, arg); // must read live bytes, not freed
+  ```
+- **Before fix:** the fresh receiver string was unrooted; a GC during
+  the argument's `valueOf` (or any later re-entry / allocate-from-slice)
+  swept it, and the method then read freed / recycled WTF-8 bytes —
+  surfacing as a `Utf8ExpectedContinuation` panic or a wrong result. A
+  *string* receiver (register-rooted) and a wrapper-object receiver
+  (slot-marked) were both fine; only the primitive-coercion path leaked.
+- **After fix:** the coerced receiver is pushed onto a `HandleScope`
+  before the first re-entry / allocation, so it survives to the end of
+  the method.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/String/prototype/<method>/`. Fixtures exercising object
+  receivers and side-effecting argument coercion exist separately, but
+  none combine an object receiver whose `toString` yields a
+  supplementary-plane string with a heap-allocating argument coercion —
+  the combination a robust engine (ASAN / GC-stress) needs to expose
+  the freed-receiver read. The same shape recurs for object-receiver
+  coercion on `Symbol.prototype.toString` / `valueOf` (§20.4.3).
