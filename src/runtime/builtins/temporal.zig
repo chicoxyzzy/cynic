@@ -2412,63 +2412,67 @@ const ZonedFieldExtras = struct {
     offset_ns: i128 = 0,
 };
 
-/// §5.5.x InterpretTemporalDateTimeFields — read year / month / monthCode
-/// / day plus the six time fields off a property bag (coerced in
-/// alphabetical order, per PrepareCalendarFields), regulate per the
-/// `overflow` option (read last), and reject an out-of-limits composite.
-/// Absent time fields default to 0; year + day + (month or monthCode) are
-/// required. When `zoned` is non-null the bag is a ZonedDateTime-like:
-/// `offset` (alphabetically between `nanosecond` and `second`) and the
-/// required `time-zone` (between `second` and `year`) are read into it.
-fn toISODateTimeFields(realm: *Realm, obj: *JSObject, options: Value, zoned: ?*ZonedFieldExtras) NativeError!PlainDateTimeRecord {
+/// The raw, un-resolved field set read off a Temporal property bag in one
+/// alphabetical pass (§13.x PrepareCalendarFields). `monthCode` is kept as
+/// its well-formed bytes + length; its *suitability* (ISO has no leap
+/// month; the numeric month is 1..12) is deferred to
+/// `resolveDateTimeFields`, which runs only after every option getter has
+/// fired. The year/day-required TypeErrors and the regulate / within-limits
+/// checks are deferred for the same reason — order-of-operations fixtures
+/// observe the option reads happening before any algorithmic validation.
+const RawDateTimeFields = struct {
+    year: i64 = 0,
+    year_set: bool = false,
+    month_int: i64 = 0,
+    month_int_set: bool = false,
+    month_code_buf: [8]u8 = undefined,
+    month_code_len: ?usize = null,
+    day: i64 = 1,
+    day_set: bool = false,
+    hour: f64 = 0,
+    minute: f64 = 0,
+    second: f64 = 0,
+    millisecond: f64 = 0,
+    microsecond: f64 = 0,
+    nanosecond: f64 = 0,
+};
+
+/// §13.x PrepareCalendarFields — validate the calendar, then read + coerce
+/// every date/time field off `obj` in alphabetical code-unit order, with no
+/// required-field checks, no `monthCode` suitability, no overflow and no
+/// regulate (all deferred to `resolveDateTimeFields` so the option getters
+/// fire first). When `zoned` is non-null the bag is a ZonedDateTime-like:
+/// `offset` (between `nanosecond` and `second`) and the required `timeZone`
+/// (between `second` and `year`) are captured into it.
+fn readDateTimeFieldsRaw(realm: *Realm, obj: *JSObject, zoned: ?*ZonedFieldExtras) NativeError!RawDateTimeFields {
     try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
+    var f: RawDateTimeFields = .{};
 
-    var day: i64 = 1;
-    var day_set = false;
-    var hour: f64 = 0;
-    var microsecond: f64 = 0;
-    var millisecond: f64 = 0;
-    var minute: f64 = 0;
-    var month_int: i64 = 0;
-    var month_int_set = false;
-    var month_code: i64 = 0;
-    var month_code_set = false;
-    var nanosecond: f64 = 0;
-    var second: f64 = 0;
-    var year: i64 = 0;
-    var year_set = false;
-
-    // Alphabetical read + coerce: day, hour, microsecond, millisecond,
-    // minute, month, monthCode, nanosecond, second, year.
     const day_v = try getPropertyChain(realm, obj, "day");
     if (!day_v.isUndefined()) {
-        day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
-        day_set = true;
+        f.day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
+        f.day_set = true;
     }
     const hour_v = try getPropertyChain(realm, obj, "hour");
-    if (!hour_v.isUndefined()) hour = try toIntegerWithTruncation(realm, hour_v);
+    if (!hour_v.isUndefined()) f.hour = try toIntegerWithTruncation(realm, hour_v);
     const microsecond_v = try getPropertyChain(realm, obj, "microsecond");
-    if (!microsecond_v.isUndefined()) microsecond = try toIntegerWithTruncation(realm, microsecond_v);
+    if (!microsecond_v.isUndefined()) f.microsecond = try toIntegerWithTruncation(realm, microsecond_v);
     const millisecond_v = try getPropertyChain(realm, obj, "millisecond");
-    if (!millisecond_v.isUndefined()) millisecond = try toIntegerWithTruncation(realm, millisecond_v);
+    if (!millisecond_v.isUndefined()) f.millisecond = try toIntegerWithTruncation(realm, millisecond_v);
     const minute_v = try getPropertyChain(realm, obj, "minute");
-    if (!minute_v.isUndefined()) minute = try toIntegerWithTruncation(realm, minute_v);
+    if (!minute_v.isUndefined()) f.minute = try toIntegerWithTruncation(realm, minute_v);
     const month_v = try getPropertyChain(realm, obj, "month");
     if (!month_v.isUndefined()) {
-        month_int = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
-        month_int_set = true;
+        f.month_int = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+        f.month_int_set = true;
     }
     const month_code_v = try getPropertyChain(realm, obj, "monthCode");
-    if (!month_code_v.isUndefined()) {
-        month_code = try parseMonthCode(realm, month_code_v);
-        month_code_set = true;
-    }
+    f.month_code_len = try readMonthCodeField(realm, month_code_v, &f.month_code_buf);
     const nanosecond_v = try getPropertyChain(realm, obj, "nanosecond");
-    if (!nanosecond_v.isUndefined()) nanosecond = try toIntegerWithTruncation(realm, nanosecond_v);
-    // §6.5.x — a ZonedDateTime-like also reads `offset` here (alphabetically
-    // after `nanosecond`, before `second`). ToPrimitiveAndRequireString: an
-    // object is coerced via its `toString`; a non-string primitive throws.
-    // An absent offset leaves the wall-clock OffsetBehaviour intact.
+    if (!nanosecond_v.isUndefined()) f.nanosecond = try toIntegerWithTruncation(realm, nanosecond_v);
+    // §6.5.x — a ZonedDateTime-like reads `offset` here (after `nanosecond`,
+    // before `second`). ToPrimitiveAndRequireString: an object coerces via
+    // its `toString`; a non-string primitive throws. Absent ⇒ wall-clock.
     if (zoned) |z| {
         const off_v = try getPropertyChain(realm, obj, "offset");
         if (!off_v.isUndefined()) {
@@ -2481,11 +2485,11 @@ fn toISODateTimeFields(realm: *Realm, obj: *JSObject, options: Value, zoned: ?*Z
         }
     }
     const second_v = try getPropertyChain(realm, obj, "second");
-    if (!second_v.isUndefined()) second = try toIntegerWithTruncation(realm, second_v);
-    // §6.5.x — `time-zone` is the one required ZonedDateTime field, read
-    // here (after `second`, before `year`). It is read *after* the calendar
-    // was validated at the top, so an invalid calendar is a RangeError
-    // before an absent time zone could become a TypeError.
+    if (!second_v.isUndefined()) f.second = try toIntegerWithTruncation(realm, second_v);
+    // §6.5.x — `timeZone` is the one required ZonedDateTime field, read here
+    // (after `second`, before `year`). The calendar was validated at the
+    // top, so an invalid calendar is a RangeError before an absent time zone
+    // could become a TypeError.
     if (zoned) |z| {
         const tz_v = try getPropertyChain(realm, obj, "timeZone");
         if (tz_v.isUndefined()) return throwTypeError(realm, "ZonedDateTime-like is missing 'timeZone'");
@@ -2496,29 +2500,46 @@ fn toISODateTimeFields(realm: *Realm, obj: *JSObject, options: Value, zoned: ?*Z
     }
     const year_v = try getPropertyChain(realm, obj, "year");
     if (!year_v.isUndefined()) {
-        year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
-        year_set = true;
+        f.year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+        f.year_set = true;
     }
+    return f;
+}
 
-    if (!year_set) return throwTypeError(realm, "PlainDateTime-like is missing 'year'");
-    if (!day_set) return throwTypeError(realm, "PlainDateTime-like is missing 'day'");
+/// §13.x CalendarResolveFields (ISO, date type) + RegulateISODateTime — run
+/// *after* every option has been read. The error order is proven by
+/// from/calendarresolvefields-error-ordering.js: year-required TypeError →
+/// day-required TypeError → `monthCode` suitability RangeError →
+/// month/monthCode reconcile → regulate (per `overflow`) → within-limits.
+fn resolveDateTimeFields(realm: *Realm, f: RawDateTimeFields, overflow: Overflow) NativeError!PlainDateTimeRecord {
+    if (!f.year_set) return throwTypeError(realm, "PlainDateTime-like is missing 'year'");
+    if (!f.day_set) return throwTypeError(realm, "PlainDateTime-like is missing 'day'");
     var month: i64 = undefined;
-    if (month_code_set) {
-        month = month_code;
-        if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
-    } else if (month_int_set) {
-        month = month_int;
+    if (f.month_code_len) |len| {
+        month = try monthFromCodeBytes(realm, &f.month_code_buf, len);
+        if (f.month_int_set and f.month_int != month) return throwRangeError(realm, "month and monthCode disagree");
+    } else if (f.month_int_set) {
+        month = f.month_int;
     } else {
         return throwTypeError(realm, "PlainDateTime-like is missing 'month' / 'monthCode'");
     }
 
-    const overflow = try getTemporalOverflowOption(realm, options);
-    const date = temporal.regulateISODate(year, month, day, overflow == .reject) orelse
+    const date = temporal.regulateISODate(f.year, month, f.day, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDateTime date is out of range");
-    const time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
+    const time = try regulateTime(realm, f.hour, f.minute, f.second, f.millisecond, f.microsecond, f.nanosecond, overflow);
     const rec = PlainDateTimeRecord.combine(date, time);
     if (!temporal.isoDateTimeWithinLimits(rec)) return throwRangeError(realm, "PlainDateTime is out of range");
     return rec;
+}
+
+/// §5.5.x InterpretTemporalDateTimeFields — read a PlainDateTime-like
+/// property bag (alphabetical coerce), read the `overflow` option, then
+/// resolve + regulate. Absent time fields default to 0; year + day +
+/// (month or monthCode) are required.
+fn toISODateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!PlainDateTimeRecord {
+    const f = try readDateTimeFieldsRaw(realm, obj, null);
+    const overflow = try getTemporalOverflowOption(realm, options);
+    return resolveDateTimeFields(realm, f, overflow);
 }
 
 /// §5.5.x ToTemporalDateTime — a PlainDateTime (copy), a PlainDate
@@ -2539,7 +2560,7 @@ fn toTemporalDateTime(realm: *Realm, item: Value, options: Value) NativeError!Pl
                 else => {},
             }
         }
-        return toISODateTimeFields(realm, obj, options, null);
+        return toISODateTimeFields(realm, obj, options);
     }
     if (!item.isString()) {
         return throwTypeError(realm, "Temporal.PlainDateTime.from expects an object or ISO 8601 string");
@@ -2589,8 +2610,8 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     var year: i64 = base.iso_year;
     var month_int: i64 = base.iso_month;
     var month_int_set = false;
-    var month_code: i64 = 0;
-    var month_code_set = false;
+    var month_code_buf: [8]u8 = undefined;
+    var month_code_len: ?usize = null;
     var day: i64 = base.iso_day;
     var hour: f64 = @floatFromInt(base.hour);
     var minute: f64 = @floatFromInt(base.minute);
@@ -2634,11 +2655,8 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         any = true;
     }
     const month_code_v = try getPropertyChain(realm, obj, "monthCode");
-    if (!month_code_v.isUndefined()) {
-        month_code = try parseMonthCode(realm, month_code_v);
-        month_code_set = true;
-        any = true;
-    }
+    month_code_len = try readMonthCodeField(realm, month_code_v, &month_code_buf);
+    if (month_code_len != null) any = true;
     const nanosecond_v = try getPropertyChain(realm, obj, "nanosecond");
     if (!nanosecond_v.isUndefined()) {
         nanosecond = try toIntegerWithTruncation(realm, nanosecond_v);
@@ -2656,15 +2674,18 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     if (!any) return throwTypeError(realm, "PlainDateTime-like must have at least one recognized property");
 
+    const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
+
+    // §5.3.x — `monthCode` suitability is validated only after the overflow
+    // option has been read (per with/options-read-before-algorithmic-
+    // validation.js); regulate then runs on the resolved month.
     var month: i64 = base.iso_month;
-    if (month_code_set) {
-        month = month_code;
+    if (month_code_len) |len| {
+        month = try monthFromCodeBytes(realm, &month_code_buf, len);
         if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_int_set) {
         month = month_int;
     }
-
-    const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
     const date = temporal.regulateISODate(year, month, day, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDateTime date is out of range");
     const time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
@@ -4195,18 +4216,24 @@ fn timeZoneEquals(a: temporal.TimeZone, b: temporal.TimeZone) bool {
 }
 
 /// §6.5.x ToTemporalZonedDateTime, property-bag branch — read `timeZone`
-/// (required) and `offset` (optional) off the item, fold the calendar
-/// date/time fields through the shared reader, then resolve to an instant
-/// via InterpretISODateTimeOffset. `toISODateTimeFields` consumes the
-/// `overflow` option itself, so it is not re-read here.
+/// (required) and `offset` (optional) off the item alongside the calendar
+/// date/time fields via the shared raw reader, read the three options in
+/// their fixed order (disambiguation → offset → overflow), resolve +
+/// regulate, then anchor to an instant via InterpretISODateTimeOffset.
 fn toZonedDateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!ZonedDateTimeRecord {
-    // §6.5.x ToTemporalZonedDateTime steps 4.b–4.c: read the calendar and
-    // the full field set (date/time + `offset` + required `time-zone`) in
-    // one alphabetical pass, then the resolved options.
+    // §6.5.x ToTemporalZonedDateTime: read the calendar + full field set
+    // (date/time + `offset` + required `time-zone`) in one alphabetical
+    // pass, then the three resolved options in their fixed order
+    // (disambiguation → offset → overflow, per from/order-of-operations.js),
+    // and only then resolve + regulate. Reading every field before the
+    // options matters for `from(item, null)`, which must observe all field
+    // gets before the options-object TypeError.
     var extras: ZonedFieldExtras = .{};
-    const dt = try toISODateTimeFields(realm, obj, options, &extras);
-    const offset_opt = try getOffsetOption(realm, options, .reject);
+    const f = try readDateTimeFieldsRaw(realm, obj, &extras);
     try getDisambiguationOption(realm, options);
+    const offset_opt = try getOffsetOption(realm, options, .reject);
+    const overflow = try getTemporalOverflowOption(realm, options);
+    const dt = try resolveDateTimeFields(realm, f, overflow);
     const epoch = temporal.interpretISODateTimeOffset(dt, extras.behaviour, extras.offset_ns, extras.time_zone, offset_opt) catch |e| switch (e) {
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
         error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
@@ -4403,8 +4430,8 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     var year: i64 = base.iso_year;
     var month_int: i64 = base.iso_month;
     var month_int_set = false;
-    var month_code: i64 = 0;
-    var month_code_set = false;
+    var month_code_buf: [8]u8 = undefined;
+    var month_code_len: ?usize = null;
     var day: i64 = base.iso_day;
     var hour: f64 = @floatFromInt(base.hour);
     var minute: f64 = @floatFromInt(base.minute);
@@ -4453,11 +4480,8 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         any = true;
     }
     const month_code_v = try getPropertyChain(realm, obj, "monthCode");
-    if (!month_code_v.isUndefined()) {
-        month_code = try parseMonthCode(realm, month_code_v);
-        month_code_set = true;
-        any = true;
-    }
+    month_code_len = try readMonthCodeField(realm, month_code_v, &month_code_buf);
+    if (month_code_len != null) any = true;
     const nanosecond_v = try getPropertyChain(realm, obj, "nanosecond");
     if (!nanosecond_v.isUndefined()) {
         nanosecond = try toIntegerWithTruncation(realm, nanosecond_v);
@@ -4465,8 +4489,9 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     const offset_v = try getPropertyChain(realm, obj, "offset");
     if (!offset_v.isUndefined()) {
-        if (!offset_v.isString()) return throwTypeError(realm, "offset must be a string");
-        const os: *JSString = @ptrCast(@alignCast(offset_v.asString()));
+        const prim = try intrinsics.toPrimitive(realm, offset_v, .string);
+        if (!prim.isString()) return throwTypeError(realm, "offset must be a string");
+        const os: *JSString = @ptrCast(@alignCast(prim.asString()));
         offset_ns = temporal.parseOffsetString(os.flatBytes()) orelse
             return throwRangeError(realm, "invalid offset string");
         any = true;
@@ -4483,18 +4508,21 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     if (!any) return throwTypeError(realm, "ZonedDateTime-like must have at least one recognized property");
 
+    // §6.3.x — the three resolved-options reads (disambiguation → offset →
+    // overflow) run before any algorithmic validation: a bad `monthCode` is
+    // a RangeError only after all three have fired (per
+    // with/options-read-before-algorithmic-validation.js).
+    try getDisambiguationOption(realm, argOr(args, 1, Value.undefined_));
+    const offset_opt = try getOffsetOption(realm, argOr(args, 1, Value.undefined_), .prefer);
+    const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
+
     var month: i64 = base.iso_month;
-    if (month_code_set) {
-        month = month_code;
+    if (month_code_len) |len| {
+        month = try monthFromCodeBytes(realm, &month_code_buf, len);
         if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_int_set) {
         month = month_int;
     }
-
-    // Resolved-options reads: disambiguation, offset, overflow.
-    try getDisambiguationOption(realm, argOr(args, 1, Value.undefined_));
-    const offset_opt = try getOffsetOption(realm, argOr(args, 1, Value.undefined_), .prefer);
-    const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
 
     const new_date = temporal.regulateISODate(year, month, day, overflow == .reject) orelse
         return throwRangeError(realm, "ZonedDateTime date is out of range");
