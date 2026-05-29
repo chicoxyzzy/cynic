@@ -108,7 +108,8 @@ pub fn exec(
         .gpa = gpa,
         .fold = program.flags.ignore_case,
         .multiline = program.flags.multiline,
-        .unicode = program.flags.unicode,
+        // `/v` (UnicodeSets) matches over code points like `/u`.
+        .unicode = program.flags.unicode or program.flags.unicode_sets,
     };
     defer m.deinit();
 

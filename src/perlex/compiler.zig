@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const parser = @import("parser.zig");
+const charset = @import("charset.zig");
 const Node = parser.Node;
 
 /// Upper bound on capturing groups (including the whole match) the v1
@@ -249,6 +250,7 @@ const Compiler = struct {
                     return e;
                 };
             },
+            .class_set => |cs| try self.compileClassSet(cs),
             .concat => |parts| {
                 if (self.backward) {
                     // Reverse the sequence so right-to-left execution in
@@ -410,6 +412,60 @@ const Compiler = struct {
             else => try self.emit(.{ .backref_dup = try indices.toOwnedSlice(self.gpa) }),
         }
     }
+
+    /// §22.2.2.7 Atom :: CharacterClass — lower a `/v` ClassSetExpression
+    /// to one ordinary class instruction. The set algebra runs in a
+    /// scratch arena (including the resolver's allocations); only the
+    /// final normalized range list is copied out with the long-lived
+    /// allocator.
+    fn compileClassSet(self: *Compiler, cs: *const Node.ClassSet) CompileError!void {
+        var scratch = std.heap.ArenaAllocator.init(self.gpa);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        const ranges_scratch = try self.evalSet(a, cs);
+        const ranges = try self.gpa.dupe(Node.ClassRange, ranges_scratch);
+        self.emit(.{ .class = .{ .negated = false, .ranges = ranges } }) catch |e| {
+            self.gpa.free(ranges);
+            return e;
+        };
+    }
+
+    /// Fold the operands of one ClassSetExpression together under its
+    /// operator, then apply `^` negation. Recurses into nested classes.
+    /// Returns a normalized code-point range list; all allocations come
+    /// from the scratch arena `a`.
+    fn evalSet(self: *Compiler, a: std.mem.Allocator, cs: *const Node.ClassSet) CompileError![]const Node.ClassRange {
+        if (cs.operands.len == 0) {
+            // `[]` matches nothing; `[^]` matches every code point.
+            if (cs.negated) return try charset.complement(a, &.{});
+            return &.{};
+        }
+        var acc = try self.evalOperand(a, cs.operands[0]);
+        for (cs.operands[1..]) |op| {
+            const r = try self.evalOperand(a, op);
+            acc = switch (cs.op) {
+                .union_ => try charset.unionRanges(a, acc, r),
+                .intersection => try charset.intersect(a, acc, r),
+                .difference => try charset.subtract(a, acc, r),
+            };
+        }
+        if (cs.negated) return try charset.complement(a, acc);
+        return acc;
+    }
+
+    fn evalOperand(self: *Compiler, a: std.mem.Allocator, op: Node.ClassSet.Operand) CompileError![]const Node.ClassRange {
+        return switch (op) {
+            .ranges => |r| r,
+            .nested => |n| try self.evalSet(a, n),
+            .prop => |p| blk: {
+                // §22.2.1.1 — resolve `\p{}` via the injected resolver;
+                // a declined property defers the whole pattern.
+                const resolve = self.resolver orelse return error.Unsupported;
+                const rr = (try resolve(a, p.key, p.value)) orelse return error.Unsupported;
+                break :blk if (p.negated) try charset.complement(a, rr) else rr;
+            },
+        };
+    }
 };
 
 /// A lookbehind body the v1 backward matcher handles: no capturing
@@ -419,7 +475,7 @@ const Compiler = struct {
 fn lookbehindBodyOk(node: *const Node) bool {
     return switch (node.*) {
         .capture, .backref_name, .backref_index, .lookahead => false,
-        .empty, .char, .class, .dot, .prop, .anchor_start, .anchor_end, .word_boundary => true,
+        .empty, .char, .class, .dot, .prop, .class_set, .anchor_start, .anchor_end, .word_boundary => true,
         .noncapture => |b| lookbehindBodyOk(b),
         .repeat => |r| lookbehindBodyOk(r.body),
         .concat => |parts| {
@@ -443,7 +499,8 @@ fn lookbehindBodyOk(node: *const Node) bool {
 fn nullable(node: *const Node) bool {
     return switch (node.*) {
         .empty, .anchor_start, .anchor_end, .word_boundary, .backref_name, .backref_index, .lookahead => true,
-        .char, .class, .dot, .prop => false,
+        // A char-only `/v` class always consumes exactly one code point.
+        .char, .class, .dot, .prop, .class_set => false,
         .noncapture => |b| nullable(b),
         .capture => |g| nullable(g.body),
         .repeat => |r| r.min == 0 or nullable(r.body),
@@ -467,7 +524,7 @@ fn nullable(node: *const Node) bool {
 /// captures between iterations.
 fn groupSlotRange(node: *const Node) ?Inst.Range {
     return switch (node.*) {
-        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .prop, .backref_name, .backref_index => null,
+        .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .prop, .class_set, .backref_name, .backref_index => null,
         .noncapture => |body| groupSlotRange(body),
         .lookahead => |la| groupSlotRange(la.body),
         .repeat => |r| groupSlotRange(r.body),
