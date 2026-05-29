@@ -1874,6 +1874,110 @@ pub fn differenceISODate(d1: PlainDateRecord, d2: PlainDateRecord, largest: Larg
     };
 }
 
+/// Advance `start` by the held coarser units plus `r` of the `smallest`
+/// calendar unit — the candidate end date NudgeToCalendarUnit measures
+/// against. Returns null when the result leaves the representable range.
+fn addCalendarUnit(start: PlainDateRecord, smallest: LargestUnit, hy: i64, hm: i64, r: i64) ?PlainDateRecord {
+    return switch (smallest) {
+        .year => addISODate(start, hy + r, 0, 0, 0, false),
+        .month => addISODate(start, hy, hm + r, 0, 0, false),
+        .week => addISODate(start, hy, hm, r, 0, false),
+        else => unreachable, // irregular-length calendar units only.
+    };
+}
+
+/// §7.5.31 RoundRelativeDuration / §7.5.34 NudgeToCalendarUnit — the
+/// date-only (ISO calendar, no wall-clock time, no time zone)
+/// specialization for an irregular-length calendar `smallest` unit
+/// (year/month/week). `diff` is the unrounded DifferenceISODate(start, dest,
+/// largest) span; round its `smallest` unit to a multiple of `increment`
+/// under `mode`, then re-express the rounded span from `start` capped at
+/// `largest`. Re-differencing the rounded end date folds in
+/// BubbleRelativeDuration's promotion (e.g. 1 year 12 months → 2 years) for
+/// free. A `day` smallest unit has fixed length, so it rounds by pure
+/// day-count arithmetic in the caller (NudgeToDayOrTime), not here.
+///
+/// For a date with no time-of-day the epoch-nanosecond ratios of the spec
+/// collapse to epoch-day ratios — the 86400×10^9 ns/day factor cancels in
+/// every comparison — so progress between the two candidate end dates is
+/// measured directly in days. The nine rounding modes are reused exactly by
+/// scaling the candidate values by the (positive) day-span denominator and
+/// deferring to `roundToIncrement`.
+///
+/// Returns null when a candidate end date leaves the representable ISO date
+/// range (→ the caller raises RangeError, matching AddDate overflow).
+pub fn roundRelativeDate(
+    start: PlainDateRecord,
+    dest: PlainDateRecord,
+    diff: DurationRecord,
+    smallest: LargestUnit,
+    increment: i128,
+    mode: RoundingMode,
+    largest: LargestUnit,
+) ?DurationRecord {
+    const sign: i64 = durationSign(diff);
+    if (sign == 0) return diff; // start == dest: nothing to round.
+
+    // DifferenceISODate populates only the fields from `largest` down to
+    // day, so a year/month-capped diff carries weeks == 0 and folds the
+    // sub-month remainder into days. Pick out the unit being rounded and the
+    // coarser units held fixed while it rounds.
+    const dy: i64 = @intFromFloat(diff.years);
+    const dm: i64 = @intFromFloat(diff.months);
+    const dw: i64 = @intFromFloat(diff.weeks);
+    const dd: i64 = @intFromFloat(diff.days);
+
+    var hy: i64 = 0;
+    var hm: i64 = 0;
+    var unit_val: i64 = 0;
+    switch (smallest) {
+        .year => unit_val = dy,
+        .month => {
+            hy = dy;
+            unit_val = dm;
+        },
+        .week => {
+            hy = dy;
+            hm = dm;
+            // Whole weeks in the sub-month remainder. When `largest` is week
+            // the remainder is already split (dw weeks + dd days, |dd| < 7);
+            // when it is year/month the weeks sit unsplit inside dd.
+            unit_val = @divTrunc(dw * 7 + dd, 7);
+        },
+        else => unreachable, // irregular-length calendar units only.
+    }
+
+    // r1 = unit_val truncated toward zero to a multiple of `increment`;
+    // r2 = the next multiple one increment further in the sign direction.
+    const inc: i64 = @intCast(increment);
+    const r1: i64 = @divTrunc(unit_val, inc) * inc;
+    const r2: i64 = r1 + inc * sign;
+
+    const end1 = addCalendarUnit(start, smallest, hy, hm, r1) orelse return null;
+    const end2 = addCalendarUnit(start, smallest, hy, hm, r2) orelse return null;
+
+    // Progress of `dest` between the candidates, in epoch days, normalised so
+    // the denominator is positive regardless of travel direction. `dest`
+    // always lies between end1 and end2, so num ∈ [0, denom].
+    const e1: i128 = daysFromCivil(end1.iso_year, end1.iso_month, end1.iso_day);
+    const e2: i128 = daysFromCivil(end2.iso_year, end2.iso_month, end2.iso_day);
+    const ed: i128 = daysFromCivil(dest.iso_year, dest.iso_month, dest.iso_day);
+    const sg: i128 = sign;
+    const denom: i128 = sg * (e2 - e1); // > 0
+    const num: i128 = sg * (ed - e1); // in [0, denom]
+
+    // total = r1 + (num/denom)·increment·sign. Scale by denom so the nine
+    // rounding modes reuse roundToIncrement exactly, then divide back out:
+    // rounding total to a multiple of `inc` is rounding (total·denom) to a
+    // multiple of (inc·denom). The result is r1 or r2.
+    const scaled: i128 = @as(i128, r1) * denom + sg * @as(i128, inc) * num;
+    const rounded_scaled = roundToIncrement(scaled, @as(i128, inc) * denom, mode);
+    const rounded_unit: i64 = @intCast(@divExact(rounded_scaled, denom));
+
+    const rounded_end = addCalendarUnit(start, smallest, hy, hm, rounded_unit) orelse return null;
+    return differenceISODate(start, rounded_end, largest);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -2209,6 +2313,58 @@ test "differenceISODate" {
         try testing.expectEqual(@as(f64, 0), r.years);
         try testing.expectEqual(@as(f64, 0), r.days);
     }
+}
+
+test "roundRelativeDate: calendar-unit rounding (until/since fixtures)" {
+    const mk = struct {
+        fn f(y: i32, m: u8, dd: u8) PlainDateRecord {
+            return .{ .iso_year = y, .iso_month = m, .iso_day = dd };
+        }
+    }.f;
+    // Round start→dest under (smallest, increment, mode), capped at largest,
+    // and assert the {years, months, weeks, days} of the rounded duration.
+    const check = struct {
+        fn f(
+            start: PlainDateRecord,
+            dest: PlainDateRecord,
+            smallest: LargestUnit,
+            increment: i128,
+            mode: RoundingMode,
+            largest: LargestUnit,
+            ey: f64,
+            em: f64,
+            ew: f64,
+            ed: f64,
+        ) !void {
+            const diff = differenceISODate(start, dest, largest);
+            const r = roundRelativeDate(start, dest, diff, smallest, increment, mode, largest).?;
+            try testing.expectEqual(ey, r.years);
+            try testing.expectEqual(em, r.months);
+            try testing.expectEqual(ew, r.weeks);
+            try testing.expectEqual(ed, r.days);
+        }
+    }.f;
+
+    // roundingmode-ceil.js: 2019-01-08 → 2021-09-07 (1y/31m/139w/973d raw).
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .year, 1, .ceil, .year, 3, 0, 0, 0);
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .month, 1, .ceil, .month, 0, 32, 0, 0);
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .week, 1, .ceil, .week, 0, 0, 139, 0);
+    // reverse direction (later → earlier): ceil rounds toward zero.
+    try check(mk(2021, 9, 7), mk(2019, 1, 8), .year, 1, .ceil, .year, -2, 0, 0, 0);
+    try check(mk(2021, 9, 7), mk(2019, 1, 8), .month, 1, .ceil, .month, 0, -31, 0, 0);
+    try check(mk(2021, 9, 7), mk(2019, 1, 8), .week, 1, .ceil, .week, 0, 0, -139, 0);
+
+    // roundingincrement.js: same dates, halfExpand with various increments.
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .year, 4, .half_expand, .year, 4, 0, 0, 0);
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .month, 10, .half_expand, .month, 0, 30, 0, 0);
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .week, 12, .half_expand, .week, 0, 0, 144, 0);
+
+    // round-cross-unit-boundary.js: largestUnit=year bubbles 1y 12m → 2y.
+    try check(mk(2022, 1, 1), mk(2023, 12, 25), .month, 1, .expand, .year, 2, 0, 0, 0);
+
+    // rounding-relative.js: half ties decided by the day fraction.
+    try check(mk(2019, 1, 1), mk(2019, 2, 15), .month, 1, .half_expand, .month, 0, 2, 0, 0); // 14/28 = 0.5 → up
+    try check(mk(2019, 2, 15), mk(2019, 1, 1), .month, 1, .half_expand, .month, 0, -1, 0, 0); // 14/31 < 0.5 → toward zero
 }
 
 test "durationSign: first non-zero field decides" {
