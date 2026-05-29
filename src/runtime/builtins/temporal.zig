@@ -1633,17 +1633,58 @@ fn requireISOCalendar(realm: *Realm, calendar: Value) NativeError!void {
     }
 }
 
-/// The `calendar` field of a Temporal-date-like property bag must be
-/// undefined or a String; a non-string (number, bigint, boolean, Symbol,
-/// null, or a non-calendar-bearing object) is a TypeError. Full
-/// canonicalisation of a calendar *string* — which may be a bare ID or an
-/// ISO string whose `[u-ca=…]` annotation names the calendar — is deferred
-/// with the rest of calendar support, so any accepted string resolves to
-/// the ISO calendar Cynic ships. (Distinct from the constructor's
-/// `requireISOCalendar`, which canonicalises a calendar ID strictly.)
+/// ToTemporalCalendarIdentifier for the `calendar` field of a Temporal
+/// date-like property bag (§12.2.x). `undefined` keeps the ISO default.
+/// An object carrying a calendar-bearing Temporal internal slot
+/// (PlainDate / PlainDateTime / PlainYearMonth / PlainMonthDay /
+/// ZonedDateTime) contributes its `[[Calendar]]` — always "iso8601" in
+/// Cynic — and is accepted via the internal-slot fast path; a
+/// Temporal.Instant / Duration / PlainTime (no `[[Calendar]]`), any other
+/// object, or any non-string primitive is a TypeError. A calendar
+/// *string* is canonicalised (CanonicalizeCalendar): it must be the bare
+/// ASCII "iso8601" id, or a parseable ISO 8601 string whose `[u-ca=…]`
+/// annotation (when present) names the ISO calendar — every other string
+/// (empty, unknown id, non-ASCII case fold like dotted-İ, year-zero,
+/// unknown annotation) is a RangeError. Cynic ships only the ISO calendar.
+/// (Distinct from the constructor's `requireISOCalendar`, which accepts a
+/// bare calendar id only — no embedded ISO string.)
 fn requireCalendarFieldType(realm: *Realm, calendar: Value) NativeError!void {
     if (calendar.isUndefined()) return;
+    if (heap_mod.valueAsPlainObject(calendar)) |obj| {
+        if (obj.getTemporalRecord()) |rec| switch (rec.*) {
+            // §13.x ToTemporalCalendarIdentifier step 1.a — read the
+            // `[[Calendar]]` of a calendar-bearing Temporal object.
+            .plain_date, .plain_date_time, .plain_year_month, .plain_month_day, .zoned_date_time => return,
+            // Instant / Duration / PlainTime have no `[[Calendar]]`.
+            else => {},
+        };
+        return throwTypeError(realm, "calendar must be a string or a calendar-bearing Temporal object");
+    }
     if (!calendar.isString()) return throwTypeError(realm, "calendar must be a string");
+    const s: *JSString = @ptrCast(@alignCast(calendar.asString()));
+    const bytes = s.flatBytes();
+    // Bare calendar id — ASCII case-insensitive "iso8601" (the dotted-İ
+    // fixture relies on this being ASCII-only, never a Unicode fold).
+    if (std.ascii.eqlIgnoreCase(bytes, "iso8601")) return;
+    // Otherwise it must be a full ISO 8601 string. The per-type parsers
+    // each validate an embedded `[u-ca=…]` annotation against the ISO
+    // calendar and reject malformed forms (year-zero extended year, …),
+    // so any one accepting it proves the calendar is the ISO calendar.
+    if (calendarStringIsISO(bytes)) return;
+    return throwRangeError(realm, "invalid calendar identifier");
+}
+
+/// True when `bytes` parses as any ISO 8601 Temporal string whose calendar
+/// (annotation, defaulting to ISO) is the supported ISO calendar — the
+/// string branch of ParseTemporalCalendarString limited to Cynic's scope.
+fn calendarStringIsISO(bytes: []const u8) bool {
+    if (temporal.parseTemporalDateTimeString(bytes)) |_| return true else |_| {}
+    if (temporal.parseTemporalDateString(bytes)) |_| return true else |_| {}
+    if (temporal.parseTemporalYearMonthString(bytes)) |_| return true else |_| {}
+    if (temporal.parseTemporalMonthDayString(bytes)) |_| return true else |_| {}
+    if (temporal.parseTemporalTimeString(bytes)) |_| return true else |_| {}
+    if (temporal.parseInstantString(bytes)) |_| return true else |_| {}
+    return false;
 }
 
 fn storePlainDate(realm: *Realm, inst: *JSObject, rec: PlainDateRecord) NativeError!void {
@@ -1770,8 +1811,13 @@ fn plainDateEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value
 /// boolean, Symbol, null, or object is a TypeError (it is never coerced),
 /// distinct from the RangeError for a malformed string.
 fn parseMonthCode(realm: *Realm, v: Value) NativeError!i64 {
-    if (!v.isString()) return throwTypeError(realm, "monthCode must be a string");
-    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    // §13.x ToMonthCode is ToPrimitiveAndRequireString: an object coerces via
+    // its `toString`; a non-string primitive is a TypeError before any
+    // format check. The grammar (`M` + two digits) is then validated here so
+    // an ill-formed code is a RangeError before a later field is read.
+    const prim = try intrinsics.toPrimitive(realm, v, .string);
+    if (!prim.isString()) return throwTypeError(realm, "monthCode must be a string");
+    const s: *JSString = @ptrCast(@alignCast(prim.asString()));
     const b = s.flatBytes();
     if (b.len != 3 or b[0] != 'M' or b[1] < '0' or b[1] > '9' or b[2] < '0' or b[2] > '9') {
         return throwRangeError(realm, "invalid monthCode");
@@ -2355,13 +2401,26 @@ fn plainDateTimeEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!V
     return Value.undefined_;
 }
 
+/// The ZonedDateTime-only fields a property bag carries on top of the
+/// PlainDateTime set — `offset` and the required `time-zone` — captured by
+/// `toISODateTimeFields` as it walks the alphabetical read order so a
+/// ZonedDateTime-like reads its fields in one pass (§6.5.x
+/// PrepareCalendarFields with `« …, offset, time-zone »`).
+const ZonedFieldExtras = struct {
+    time_zone: temporal.TimeZone = undefined,
+    behaviour: temporal.OffsetBehaviour = .wall,
+    offset_ns: i128 = 0,
+};
+
 /// §5.5.x InterpretTemporalDateTimeFields — read year / month / monthCode
 /// / day plus the six time fields off a property bag (coerced in
 /// alphabetical order, per PrepareCalendarFields), regulate per the
 /// `overflow` option (read last), and reject an out-of-limits composite.
 /// Absent time fields default to 0; year + day + (month or monthCode) are
-/// required.
-fn toISODateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!PlainDateTimeRecord {
+/// required. When `zoned` is non-null the bag is a ZonedDateTime-like:
+/// `offset` (alphabetically between `nanosecond` and `second`) and the
+/// required `time-zone` (between `second` and `year`) are read into it.
+fn toISODateTimeFields(realm: *Realm, obj: *JSObject, options: Value, zoned: ?*ZonedFieldExtras) NativeError!PlainDateTimeRecord {
     try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
 
     var day: i64 = 1;
@@ -2406,8 +2465,35 @@ fn toISODateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeErro
     }
     const nanosecond_v = try getPropertyChain(realm, obj, "nanosecond");
     if (!nanosecond_v.isUndefined()) nanosecond = try toIntegerWithTruncation(realm, nanosecond_v);
+    // §6.5.x — a ZonedDateTime-like also reads `offset` here (alphabetically
+    // after `nanosecond`, before `second`). ToPrimitiveAndRequireString: an
+    // object is coerced via its `toString`; a non-string primitive throws.
+    // An absent offset leaves the wall-clock OffsetBehaviour intact.
+    if (zoned) |z| {
+        const off_v = try getPropertyChain(realm, obj, "offset");
+        if (!off_v.isUndefined()) {
+            const prim = try intrinsics.toPrimitive(realm, off_v, .string);
+            if (!prim.isString()) return throwTypeError(realm, "offset must be a string");
+            const off_s: *JSString = @ptrCast(@alignCast(prim.asString()));
+            z.offset_ns = temporal.parseOffsetString(off_s.flatBytes()) orelse
+                return throwRangeError(realm, "invalid offset string");
+            z.behaviour = .option;
+        }
+    }
     const second_v = try getPropertyChain(realm, obj, "second");
     if (!second_v.isUndefined()) second = try toIntegerWithTruncation(realm, second_v);
+    // §6.5.x — `time-zone` is the one required ZonedDateTime field, read
+    // here (after `second`, before `year`). It is read *after* the calendar
+    // was validated at the top, so an invalid calendar is a RangeError
+    // before an absent time zone could become a TypeError.
+    if (zoned) |z| {
+        const tz_v = try getPropertyChain(realm, obj, "timeZone");
+        if (tz_v.isUndefined()) return throwTypeError(realm, "ZonedDateTime-like is missing 'timeZone'");
+        if (!tz_v.isString()) return throwTypeError(realm, "time zone must be a string");
+        const tz_s: *JSString = @ptrCast(@alignCast(tz_v.asString()));
+        z.time_zone = temporal.parseTimeZoneString(tz_s.flatBytes()) orelse
+            return throwRangeError(realm, "invalid time zone identifier");
+    }
     const year_v = try getPropertyChain(realm, obj, "year");
     if (!year_v.isUndefined()) {
         year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
@@ -2453,7 +2539,7 @@ fn toTemporalDateTime(realm: *Realm, item: Value, options: Value) NativeError!Pl
                 else => {},
             }
         }
-        return toISODateTimeFields(realm, obj, options);
+        return toISODateTimeFields(realm, obj, options, null);
     }
     if (!item.isString()) {
         return throwTypeError(realm, "Temporal.PlainDateTime.from expects an object or ISO 8601 string");
@@ -4114,32 +4200,18 @@ fn timeZoneEquals(a: temporal.TimeZone, b: temporal.TimeZone) bool {
 /// via InterpretISODateTimeOffset. `toISODateTimeFields` consumes the
 /// `overflow` option itself, so it is not re-read here.
 fn toZonedDateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!ZonedDateTimeRecord {
-    const tz_v = try getPropertyChain(realm, obj, "timeZone");
-    if (tz_v.isUndefined()) return throwTypeError(realm, "ZonedDateTime-like is missing 'timeZone'");
-    if (!tz_v.isString()) return throwTypeError(realm, "time zone must be a string");
-    const tz_s: *JSString = @ptrCast(@alignCast(tz_v.asString()));
-    const tz = temporal.parseTimeZoneString(tz_s.flatBytes()) orelse
-        return throwRangeError(realm, "invalid time zone identifier");
-
-    const off_v = try getPropertyChain(realm, obj, "offset");
-    var behaviour: temporal.OffsetBehaviour = .wall;
-    var offset_ns: i128 = 0;
-    if (!off_v.isUndefined()) {
-        if (!off_v.isString()) return throwTypeError(realm, "offset must be a string");
-        const off_s: *JSString = @ptrCast(@alignCast(off_v.asString()));
-        offset_ns = temporal.parseOffsetString(off_s.flatBytes()) orelse
-            return throwRangeError(realm, "invalid offset string");
-        behaviour = .option;
-    }
-
-    const dt = try toISODateTimeFields(realm, obj, options);
+    // §6.5.x ToTemporalZonedDateTime steps 4.b–4.c: read the calendar and
+    // the full field set (date/time + `offset` + required `time-zone`) in
+    // one alphabetical pass, then the resolved options.
+    var extras: ZonedFieldExtras = .{};
+    const dt = try toISODateTimeFields(realm, obj, options, &extras);
     const offset_opt = try getOffsetOption(realm, options, .reject);
     try getDisambiguationOption(realm, options);
-    const epoch = temporal.interpretISODateTimeOffset(dt, behaviour, offset_ns, tz, offset_opt) catch |e| switch (e) {
+    const epoch = temporal.interpretISODateTimeOffset(dt, extras.behaviour, extras.offset_ns, extras.time_zone, offset_opt) catch |e| switch (e) {
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
         error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
     };
-    return .{ .epoch_ns = epoch, .time_zone = tz };
+    return .{ .epoch_ns = epoch, .time_zone = extras.time_zone };
 }
 
 /// §6.5.x ToTemporalZonedDateTime — a ZonedDateTime (copy, options read for
