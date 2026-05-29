@@ -714,31 +714,36 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const items_v = argOr(args, 0, Value.undefined_);
     const cb_v = argOr(args, 1, Value.undefined_);
     const cb = heap_mod.valueAsFunction(cb_v) orelse return throwTypeError(realm, "Map.groupBy callback is not callable");
-
-    // Allocate a fresh Map by reusing the constructor.
     const map_proto = if (heap_mod.valueAsFunction(realm.globals.get("Map") orelse Value.undefined_)) |mp| mp.prototype else null;
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(out, map_proto);
-    const data = realm.allocator.create(ObjMod.MapData) catch return error.OutOfMemory;
-    data.* = .{};
-    out.setMapData(realm.allocator, data) catch return error.OutOfMemory;
+
+    // The loop drives `next()` and the grouping callback — both
+    // re-enter JS and can GC — and every allocation below (the
+    // result Map, per-bucket arrays, index strings) triggers a
+    // collection under allocation pressure. Open the root scope
+    // FIRST and root the iterator + result before any later
+    // allocation can sweep them while still unrooted; once linked
+    // into the rooted `out`, every accumulated bucket stays
+    // reachable through `out.map_data`.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
 
     const iter = lantern.openIterator(realm.allocator, realm, items_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return throwTypeError(realm, "Map.groupBy items is not iterable"),
     };
+    scope.push(iter) catch return error.OutOfMemory;
     const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "Map.groupBy items is not iterable");
     const next_v = iter_obj.get("next");
     const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "iterator.next is not callable");
 
-    // The loop drives `next()` and the grouping callback — both
-    // re-enter JS and can GC. Root the result Map and the iterator
-    // for the whole loop; `markValue(out)` keeps every accumulated
-    // bucket reachable through `out.map_data`.
-    const scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer scope.close();
+    // Allocate a fresh Map (reusing the constructor's data shape).
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(out, map_proto);
+    const data = realm.allocator.create(ObjMod.MapData) catch return error.OutOfMemory;
+    data.* = .{};
+    out.setMapData(realm.allocator, data) catch return error.OutOfMemory;
     scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
-    scope.push(iter) catch return error.OutOfMemory;
+    const loop_base = scope.handles.items.len;
 
     const max_iter: i64 = 1 << 24;
     var i: i64 = 0;
@@ -757,6 +762,11 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
         const result = heap_mod.valueAsPlainObject(result_v) orelse break;
         if (intrinsics.toBoolean(try intrinsics.getPropertyChain(realm, result, "done"))) break;
         const item = try intrinsics.getPropertyChain(realm, result, "value");
+        // Root `item` across the grouping callback AND the bucket
+        // allocations below — `callJSFunction`, `allocateString`,
+        // and `allocateObject` all GC, and `item` is only linked
+        // into the rooted Map at the end of the iteration.
+        scope.push(item) catch return error.OutOfMemory;
         const cb_args = [_]Value{ item, Value.fromInt32(@intCast(i)) };
         const key_outcome = lantern.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &cb_args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -769,10 +779,17 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 return error.NativeThrew;
             },
         };
+        // Root the callback's key result too — it lands in
+        // `data.entries` only at the append below, after the index
+        // string / bucket allocations (each a GC point).
+        scope.push(key_v) catch return error.OutOfMemory;
         // Look up or create the bucket array (under the Map's
         // SameValueZero key equality).
         if (mapEntryIndex(data, key_v)) |existing_idx| {
-            const bucket_obj = heap_mod.valueAsPlainObject(data.entries.items[existing_idx].value) orelse continue;
+            const bucket_obj = heap_mod.valueAsPlainObject(data.entries.items[existing_idx].value) orelse {
+                scope.handles.shrinkRetainingCapacity(loop_base);
+                continue;
+            };
             const cur_len = bucket_obj.get("length");
             const len_i: i32 = if (cur_len.isInt32()) cur_len.asInt32() else 0;
             var idx_buf: [16]u8 = undefined;
@@ -782,6 +799,9 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
             bucket_obj.set(realm.allocator, "length", Value.fromInt32(len_i + 1)) catch return error.OutOfMemory;
         } else {
             const bucket = realm.heap.allocateObject() catch return error.OutOfMemory;
+            // Root the fresh bucket before the next `allocateString`
+            // GC can collect it (it is not yet in `data.entries`).
+            scope.push(heap_mod.taggedObject(bucket)) catch return error.OutOfMemory;
             realm.heap.setObjectPrototype(bucket, realm.intrinsics.array_prototype);
             bucket.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             const idx_owned = realm.heap.allocateString("0") catch return error.OutOfMemory;
@@ -789,6 +809,10 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
             bucket.set(realm.allocator, "length", Value.fromInt32(1)) catch return error.OutOfMemory;
             data.entries.append(realm.allocator, .{ .key = key_v, .value = heap_mod.taggedObject(bucket) }) catch return error.OutOfMemory;
         }
+        // Per-iteration handles (item, key_v, bucket) are now
+        // reachable through the rooted `out`; drop them so the
+        // scope can't grow unboundedly across a long iterable.
+        scope.handles.shrinkRetainingCapacity(loop_base);
     }
     return heap_mod.taggedObject(out);
 }
@@ -852,9 +876,24 @@ fn mapAddEntriesFromIterable(
     adder: *JSFunction,
 ) NativeError!Value {
     const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "Map iterator did not return an object");
+    // `iter_v` / `target_v` / `adder` are held raw across the
+    // `next()` / accessor / `adder` re-entries below — all run user
+    // JS and can GC. `iter_v` is not on any frame during the `adder`
+    // call (the receiver there is `target_v`), so a sweep there frees
+    // the iterator and the next `iter_obj.get("next")` walks a
+    // poisoned shape pointer (the `0xaa…` crash under gc-stress).
+    // Root all three for the whole drive loop. Mirror of
+    // `weakSetAddValuesFromIterable` / `setAddValuesFromIterable`.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(iter_v) catch return error.OutOfMemory;
+    scope.push(target_v) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedFunction(adder)) catch return error.OutOfMemory;
+    const loop_base = scope.handles.items.len;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
+        scope.handles.shrinkRetainingCapacity(loop_base);
         const next_v = iter_obj.get("next");
         const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "Map iterator missing next");
         const outcome = lantern.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch |err| switch (err) {
@@ -908,6 +947,12 @@ fn mapAddEntriesFromIterable(
                 return error.NativeThrew;
             },
         };
+        // `key` is held across `Get(entry, "1")` below, which fires a
+        // user `get '1'` accessor and can GC — and here `key` is
+        // neither the receiver nor an argument of that call, so it
+        // would be swept. Root it (same evaluation-order hazard as
+        // Object.fromEntries' key-before-value read).
+        scope.push(key) catch return error.OutOfMemory;
         const val = intrinsics.getPropertyChain(realm, entry, "1") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
@@ -1383,6 +1428,16 @@ fn weakSetAddValuesFromIterable(
     adder: *JSFunction,
 ) NativeError!Value {
     const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "WeakSet iterator did not return an object");
+    // `iter_v` / `target_v` / `adder` are held raw across the
+    // `next()` and `adder` re-entries below — both run user JS and
+    // can GC. Root them for the whole drive loop; otherwise a sweep
+    // frees the iterator and the next `iter_obj.get("next")` walks a
+    // poisoned shape pointer (the `0xaa…` crash under gc-stress).
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(iter_v) catch return error.OutOfMemory;
+    scope.push(target_v) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedFunction(adder)) catch return error.OutOfMemory;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
@@ -1623,6 +1678,20 @@ fn setAddValuesFromIterable(
     adder: *JSFunction,
 ) NativeError!Value {
     const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "Set iterator did not return an object");
+    // `iter_v` / `target_v` / `adder` are held raw across the
+    // `next()` and `adder` re-entries below — both run user JS and
+    // can GC. `iter_v` is the receiver of `next()` (so rooted for
+    // that call) but is NOT on any frame during the `adder` call,
+    // where the receiver is `target_v`; a sweep there frees the
+    // iterator and the next `iter_obj.get("next")` walks a poisoned
+    // shape pointer (the `0xaa…` crash under gc-stress). Root all
+    // three for the whole drive loop. Mirror of
+    // `weakSetAddValuesFromIterable`.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(iter_v) catch return error.OutOfMemory;
+    scope.push(target_v) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedFunction(adder)) catch return error.OutOfMemory;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
@@ -1903,6 +1972,19 @@ fn forEachSetLikeKey(
         .value, .yielded => |v| v,
         .thrown => return error.NativeThrew,
     };
+    // Root the iterator for the whole walk. It is held raw across
+    // every `next()` re-entry below and reused as that call's
+    // `this`; without rooting, a full GC triggered between
+    // iterations sweeps it and the next `next()` marks a freed
+    // object as its frame `this`. The per-iteration `result` / `v`
+    // are also held across the `done` / `value` accessor reads and
+    // the `each` callback, so they ride the same scope and are
+    // dropped at the top of each iteration. (HandleScope uses the
+    // raw allocator — no GC between obtaining `iter` and rooting.)
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(iter) catch return error.OutOfMemory;
+    const loop_base = scope.handles.items.len;
     const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "set-like keys() did not return an iterator");
     // §7.4.1 GetIteratorFromMethod step 4 — `next` is cached on
     // the IteratorRecord at open time, not refetched every step.
@@ -1913,6 +1995,7 @@ fn forEachSetLikeKey(
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
+        scope.handles.shrinkRetainingCapacity(loop_base);
         const out = callJSFunction(realm.allocator, realm, next_fn, iter, &.{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
@@ -1921,9 +2004,11 @@ fn forEachSetLikeKey(
             .value, .yielded => |v| v,
             .thrown => return error.NativeThrew,
         };
+        scope.push(result) catch return error.OutOfMemory;
         const ro = heap_mod.valueAsPlainObject(result) orelse return throwTypeError(realm, "iterator next() did not return an object");
         if (intrinsics.toBoolean(try intrinsics.getPropertyChain(realm, ro, "done"))) return;
         const v = try intrinsics.getPropertyChain(realm, ro, "value");
+        scope.push(v) catch return error.OutOfMemory;
         each(ctx, v) catch |err| switch (err) {
             error.IterStop => {
                 // §7.4.10 IteratorClose — early termination invokes
@@ -1982,6 +2067,14 @@ fn setUnion(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     const sl = try validateSetLike(realm, "union", argOr(args, 0, Value.undefined_));
 
     const out = try allocateEmptySet(realm);
+    // `out` is held raw across `forEachSetLikeKey`, which re-enters
+    // JS (the set-like's `keys()` iterator + accessors) and can GC
+    // under allocation pressure. Root the half-built result so a
+    // sweep can't collect it before `setAddInternal` dereferences
+    // `out.getSetData()`.
+    const out_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer out_scope.close();
+    out_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     // Copy this set first, then add other's keys (sameValueZero
     // dedup keeps duplicates out).
     {
@@ -2005,6 +2098,14 @@ fn setIntersection(realm: *Realm, this_value: Value, args: []const Value) Native
     const sl = try validateSetLike(realm, "intersection", argOr(args, 0, Value.undefined_));
 
     const out = try allocateEmptySet(realm);
+    // `out` is held raw across `setLikeHas` / `forEachSetLikeKey`,
+    // both of which re-enter JS (the set-like's `has` / `keys` /
+    // iterator accessors) and can GC. Root the half-built result
+    // so a sweep there can't collect it before `setAddInternal`
+    // dereferences `out.getSetData()`.
+    const out_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer out_scope.close();
+    out_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     // §24.2.4.5 step 5 — branch on size. When `this` is smaller
     // (or equal), iterate `this` and probe `other.has(value)`.
     // Otherwise iterate `other`'s keys() and probe `this.has`.
@@ -2058,6 +2159,13 @@ fn setDifference(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const sl = try validateSetLike(realm, "difference", argOr(args, 0, Value.undefined_));
 
     const out = try allocateEmptySet(realm);
+    // `out` (and the `out_d` slot pointer cached below) are held raw
+    // across `setLikeHas` / `forEachSetLikeKey`, both of which
+    // re-enter JS and can GC. Root `out` so neither it nor its
+    // `getSetData()` slot is swept mid-loop.
+    const out_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer out_scope.close();
+    out_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     // §24.2.4.5 step 5-7 — start from a copy of `this`, then branch
     // on size. When `this` is smaller (or equal), call `other.has`
     // for each `this` entry and drop matches. When `this` is larger,
@@ -2121,6 +2229,13 @@ fn setSymmetricDifference(realm: *Realm, this_value: Value, args: []const Value)
     // mid-iteration and asserts the toggle reads the post-
     // mutation membership.
     const out = try allocateEmptySet(realm);
+    // `out` (and the `out_d` slot pointer cached below) are held raw
+    // across `forEachSetLikeKey`, which re-enters JS (the set-like's
+    // `keys()` iterator + accessors) and can GC. Root `out` so a
+    // sweep can't free it (or its `getSetData()` slot) mid-loop.
+    const out_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer out_scope.close();
+    out_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     {
         var i: usize = 0;
         while (i < this_d.entries.items.len) : (i += 1) {

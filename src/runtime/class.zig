@@ -458,7 +458,15 @@ pub fn buildClass(
             .configurable = true,
         };
         switch (m.kind) {
-            .method => try proto.setWithFlags(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj), method_flags),
+            .method => {
+                // `proto` tenures to the mature generation during the
+                // member-install loop; the freshly-built method is
+                // young. Record the mature→young edge before the bag
+                // store (the accessor arms route through
+                // `setAccessorGetter`/`Setter`, which barrier).
+                realm.heap.writeBarrier(.{ .object = proto }, heap_mod.taggedFunction(fn_obj));
+                try proto.setWithFlags(realm.allocator, runtime_name, heap_mod.taggedFunction(fn_obj), method_flags);
+            },
             .getter => {
                 const entry = try proto.getOrPutAccessor(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
@@ -635,11 +643,21 @@ pub fn buildClass(
             .configurable = true,
         };
         switch (m.kind) {
+            // A class constructor tenures to the mature generation
+            // mid-build under allocation pressure (each member is a
+            // fresh allocation); the freshly-built static method is
+            // young. Record the mature→young edge before storing it
+            // into the constructor's bag — the accessor arms below
+            // route through `setAccessorGetter`/`Setter`, which
+            // barrier internally, but `set` / `properties.put` do
+            // not.
             .method => if (is_priv_static) {
+                realm.heap.writeBarrier(.{ .function = ctor }, heap_mod.taggedFunction(fn_obj));
                 try ctor.private_properties.put(realm.allocator, slot_name, heap_mod.taggedFunction(fn_obj));
                 // §7.3.30 PrivateSet step 4 — methods are read-only.
                 try ctor.private_methods.put(realm.allocator, slot_name, {});
             } else {
+                realm.heap.writeBarrier(.{ .function = ctor }, heap_mod.taggedFunction(fn_obj));
                 try ctor.set(realm.allocator, slot_name, heap_mod.taggedFunction(fn_obj));
                 try ctor.property_flags.put(realm.allocator, slot_name, static_method_flags);
             },
@@ -788,6 +806,9 @@ pub fn buildClass(
                 return error.Propagated;
             }
             const slot_name = try brandMangle(realm, template.private_prefix, brand_prefix, runtime_name);
+            // Same mature-constructor / young-value edge as static
+            // methods: record it before the bag store.
+            realm.heap.writeBarrier(.{ .function = ctor }, v);
             try ctor.private_properties.put(realm.allocator, slot_name, v);
         } else {
             // §15.7.14 step 18 — guard against `static prototype = …`
@@ -798,6 +819,7 @@ pub fn buildClass(
                 realm.pending_exception = try @import("intrinsics.zig").newTypeError(realm, "Cannot redefine non-configurable property 'prototype'");
                 return error.Propagated;
             }
+            realm.heap.writeBarrier(.{ .function = ctor }, v);
             try ctor.set(realm.allocator, runtime_name, v);
         }
     }

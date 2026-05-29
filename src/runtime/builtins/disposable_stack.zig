@@ -337,7 +337,19 @@ pub fn disposeResources(realm: *Realm, stack: *JSObject) NativeError!Value {
 /// while an external throw was already in flight).
 pub fn disposeResourcesWithCompletion(realm: *Realm, stack: *JSObject, existing_throw: ?Value) NativeError!Value {
     const lantern = @import("../lantern/interpreter.zig");
+    // Root the running completion across the disposal walk. `pending`
+    // chases error3 → SuppressedError(error2, error3) → SuppressedError(
+    // error1, …) in the multi-throw case; each intermediate
+    // SuppressedError is freshly allocated and bound to no JS variable,
+    // so the *next* iteration's disposer re-entry (arbitrary user JS →
+    // GC) would sweep it and the wrapped chain would dangle. The async
+    // walk roots its pending throw via a typed slot (see heap.zig
+    // markValue / async_dispose_walk); the sync walk keeps it in this
+    // native local, so it needs a HandleScope.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
     var pending: ?Value = existing_throw;
+    if (existing_throw) |et| scope.push(et) catch return error.OutOfMemory;
     if (stack.disposableResourcesConst()) |list| {
         var i: usize = list.items.len;
         while (i > 0) {
@@ -365,6 +377,9 @@ pub fn disposeResourcesWithCompletion(realm: *Realm, stack: *JSObject, existing_
                     } else {
                         pending = ex;
                     }
+                    // Anchor the new running completion before the next
+                    // disposer re-entry can GC.
+                    if (pending) |p| scope.push(p) catch return error.OutOfMemory;
                 },
             }
         }
@@ -387,7 +402,18 @@ pub fn disposeResourcesWithCompletion(realm: *Realm, stack: *JSObject, existing_
 /// throw is in flight (§9.5.4 step 2.b.iv-vi).
 fn makeSuppressedError(realm: *Realm, err_v: Value, suppressed_v: Value) !Value {
     const proto = realm.intrinsics.suppressed_error_prototype.?;
+    // Root the two payloads (and the half-built instance) across the
+    // allocations below: they are raw Values held only in native
+    // locals, and allocateObject / setWithFlags can each trigger a GC
+    // that would otherwise sweep them before they're linked onto the
+    // instance — leaving a SuppressedError with a dangling .error /
+    // .suppressed.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(err_v) catch return error.OutOfMemory;
+    scope.push(suppressed_v) catch return error.OutOfMemory;
     const instance = try realm.heap.allocateObject();
+    scope.push(heap_mod.taggedObject(instance)) catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(instance, proto);
     instance.has_error_data = true;
     try instance.setWithFlags(realm.allocator, "error", err_v, .{

@@ -5246,6 +5246,73 @@ test "GC: young fn assigned to a promise's .then survives gc_threshold=1" {
     , 3);
 }
 
+test "GC: Map.groupBy buckets survive gc_threshold=1" {
+    // §24.1.1.1 GroupBy — the native allocates the result Map, then
+    // drives `next()` + the grouping callback (both re-enter JS) and
+    // allocates a fresh bucket array + index string per group. The
+    // result Map, the iterator, and the per-iteration `item` / key /
+    // bucket are all held raw across those allocations; without
+    // rooting them the openIterator / allocateString / allocateObject
+    // sweeps freed the half-built Map (or a young item) and the next
+    // `bucket.set(…)` dereferenced poison. `n` only sums to 12 if
+    // every grouped object survived to land in its bucket.
+    try expectScriptIntUnderGcPressure(
+        \\const items = [];
+        \\for (let i = 0; i < 12; i++) items.push({ v: i });
+        \\const g = Map.groupBy(items, (o) => o.v % 3);
+        \\g.get(0).length + g.get(1).length + g.get(2).length;
+    , 12);
+}
+
+test "GC: Set.prototype.intersection result survives gc_threshold=1" {
+    // §24.2.4.5 — when `this` is the smaller set the native iterates
+    // `this` and probes `other.has(value)`; a user `has` re-enters JS
+    // and, with threshold=1, sweeps mid-loop. The fresh result Set is
+    // held raw across every probe, so without rooting it the sweep
+    // freed it and the next `setAddInternal` dereferenced poison via
+    // `out.getSetData()`. Size is 2 only if `out` stayed live.
+    try expectScriptIntUnderGcPressure(
+        \\const a = new Set([10, 20, 30]);
+        \\const b = { size: 99, has(x) { return x === 10 || x === 30; },
+        \\            keys() { return [][Symbol.iterator](); } };
+        \\a.intersection(b).size;
+    , 2);
+}
+
+test "GC: WeakSet from a custom iterable survives gc_threshold=1" {
+    // §24.4.1.1 — the WeakSet constructor drives a user iterator and
+    // routes each value through the (possibly overridden) `add`. The
+    // iterator object / target set / adder fn are held raw across the
+    // `next()` and `add` re-entries; without rooting them a sweep
+    // freed the iterator and the next `iter_obj.get("next")` walked a
+    // poisoned shape pointer. Counts to 3 only if all three members
+    // were added.
+    try expectScriptIntUnderGcPressure(
+        \\const a = {}, b = {}, c = {};
+        \\const iterable = { [Symbol.iterator]() {
+        \\  let i = 0; const arr = [a, b, c];
+        \\  return { next() { return i < arr.length
+        \\    ? { value: arr[i++], done: false }
+        \\    : { value: undefined, done: true }; } };
+        \\} };
+        \\const ws = new WeakSet(iterable);
+        \\(ws.has(a) ? 1 : 0) + (ws.has(b) ? 1 : 0) + (ws.has(c) ? 1 : 0);
+    , 3);
+}
+
+test "GC: Object.fromEntries result survives gc_threshold=1" {
+    // §20.1.2.7 — the native opens the iterator, then allocates the
+    // result object; that `allocateObject` GCs under threshold=1 and
+    // would sweep the still-unrooted iterator (the first `next_fn`
+    // call would then dereference poison). Rooting the iterator before
+    // the result allocation keeps it live; the sum is 6 only if the
+    // iteration ran to completion.
+    try expectScriptIntUnderGcPressure(
+        \\const o = Object.fromEntries([["a", 1], ["b", 2], ["c", 3]]);
+        \\o.a + o.b + o.c;
+    , 6);
+}
+
 test "debug globals: installBuiltins is debug-clean — production realms ship without test hooks" {
     // A `Realm.init + installBuiltins` (the production-style
     // embedding shape) MUST NOT install `__collectGarbage` /
@@ -5611,17 +5678,100 @@ test "GC: non-computed class method survives gc_threshold=1" {
     , "function");
 }
 
-// `class C { [expr]() {} }` + `gc_threshold=1` currently fails
-// in `typeof C.prototype.m1` (returns "undefined" instead of
-// "function"). The `resolveComputedKey` HandleScope keeps proto
-// and ctor alive, the JSString key is anchored on
-// `proto.key_anchors`, and the baseline non-computed
-// `class C { m1() {} }` IS green under the same pressure — so
-// the regression is specific to the computed-key path's
-// interaction with the threshold=1 stress pattern. Tracked here
-// as a known gap; the production-path tests above (leak-bound
-// loop and a normal-threshold smoke via test262 / unit tests)
-// give the real coverage.
+test "GC: computed-key class method survives gc_threshold=1" {
+    // Regression — evaluating the computed key `[k]` allocates (the
+    // key string), which under threshold=1 promotes the class
+    // prototype to the mature generation mid-build. The subsequent
+    // `proto.setWithFlags(method)` then forms a mature→young edge to
+    // the freshly-allocated method JSFunction. The minor cycle walks
+    // only the remembered set (never `proto.properties`), so without
+    // a post-store write barrier the next sweep freed the young
+    // method and `C.prototype.m1` read back "undefined". The
+    // non-computed baseline above stays green because its proto never
+    // tenures before the store (no allocation in between). "function"
+    // only if the barrier recorded the edge.
+    try expectScriptStringUnderGcPressure(
+        \\const k = "m1";
+        \\class C { [k]() { return 7; } }
+        \\typeof C.prototype.m1;
+    , "function");
+}
+
+test "GC: computed-key static class method survives gc_threshold=1" {
+    // Same hazard on the constructor side — the `ctor` tenures while
+    // the computed key is evaluated, then the static-method store
+    // (`ctor.set` / `ctor.private_properties.put`) forms a
+    // mature→young edge. The write barrier before each store records
+    // it. "function" only if the method survived the sweep.
+    try expectScriptStringUnderGcPressure(
+        \\const k = "s1";
+        \\class C { static [k]() { return 7; } }
+        \\typeof C.s1;
+    , "function");
+}
+
+test "GC: static class field survives gc_threshold=1" {
+    // The static field initializer's value is a freshly allocated
+    // young object stored via `ctor.set(name, value)` on a ctor that
+    // has already tenured. The pre-store `writeBarrier(.{ .function =
+    // ctor }, value)` records the mature→young edge so the field
+    // object isn't swept before it's read back. "object" only if it
+    // survived.
+    try expectScriptStringUnderGcPressure(
+        \\class C { static f = { tag: 1 }; }
+        \\typeof C.f;
+    , "object");
+}
+
+test "GC: Promise.try capability survives gc_threshold=1" {
+    // §27.2.4.7 Promise.try builds a PromiseCapability (promise +
+    // resolve + reject) that lives only in a native struct, then runs
+    // the callback — arbitrary user JS that GCs. The callback below
+    // allocates, so a full sweep fires *inside* it; pre-fix the unrooted
+    // capability island was swept and `capabilityResolve` then called a
+    // freed function ("value is not callable"). With the triad rooted
+    // via a HandleScope the chained `.then` observes the fulfilled
+    // value. 42 only if the capability survived.
+    try expectScriptIntUnderGcPressure(
+        \\let acc = 0;
+        \\Promise.try(function () { let o = { a: 1, b: 2 }; return o.a + o.b + 39; })
+        \\  .then(function (v) { acc = v; });
+        \\globalThis.__drainMicrotasks();
+        \\acc;
+    , 42);
+}
+
+test "GC: using SuppressedError chain survives gc_threshold=1" {
+    // §9.5.4 DisposeResources, multi-throw: the running completion walks
+    // error3 → SuppressedError(error2, error3) → SuppressedError(error1,
+    // …). Each intermediate SuppressedError is bound to no JS variable,
+    // so the next disposer re-entry (which GCs) swept it pre-fix and the
+    // wrapped chain dangled — `e.suppressed.error` was no longer error2.
+    // Rooting the running completion across the walk keeps the identity
+    // chain intact. All five identity checks read "true" only if it
+    // survived.
+    try expectScriptStringUnderGcPressure(
+        \\class MyError extends Error {}
+        \\const error1 = new MyError();
+        \\const error2 = new MyError();
+        \\const error3 = new MyError();
+        \\let out = "no-throw";
+        \\try {
+        \\  using _1 = { [Symbol.dispose]() { throw error1; } };
+        \\  using _2 = { [Symbol.dispose]() { throw error2; } };
+        \\  throw error3;
+        \\} catch (e) {
+        \\  out = [
+        \\    e instanceof SuppressedError,
+        \\    e.error === error1,
+        \\    e.suppressed instanceof SuppressedError,
+        \\    e.suppressed.error === error2,
+        \\    e.suppressed.suppressed === error3,
+        \\  ].join(",");
+        \\}
+        \\out;
+    , "true,true,true,true,true");
+}
 
 // ---------------------------------------------------------------------------
 // §23.1.3 Array.prototype — receiver coercion + spec dispatch regressions.

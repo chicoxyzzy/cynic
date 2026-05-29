@@ -2030,6 +2030,18 @@ fn promiseTry(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // synchronously propagate that abrupt out (ctx-ctor-throws).
     const ctor = try thisAsPromiseCtor(realm, this_value, "try");
     const cap = try newPromiseCapability(realm, ctor);
+    // Root the capability triad across the callback re-entry below.
+    // `cap` is a native struct the GC can't scan, and its freshly
+    // allocated promise / resolve / reject have no other live
+    // reference (the resolve/reject closures only point *back* at the
+    // promise) — a GC during the user callback would sweep the whole
+    // island, leaving capabilityResolve/Reject to call a freed function
+    // ("value is not callable") and the returned promise dangling.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(cap.promise) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedFunction(cap.resolve)) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedFunction(cap.reject)) catch return error.OutOfMemory;
     const callback = argOr(args, 0, Value.undefined_);
     const callback_fn = heap_mod.valueAsFunction(callback) orelse {
         const ex = intrinsics.newTypeError(realm, "Promise.try requires a function") catch return error.OutOfMemory;

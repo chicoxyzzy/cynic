@@ -3342,17 +3342,21 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
         else => return throwTypeError(realm, "Object.fromEntries argument is not iterable"),
     };
     const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "Object.fromEntries argument is not iterable");
+    // Root the iterator BEFORE allocating `out`: `allocateObject`
+    // GCs under allocation pressure and would otherwise sweep the
+    // freshly-opened, still-unrooted iterator — the first loop
+    // step's `next_fn` call would then dereference poison.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(iter) catch return error.OutOfMemory;
     const next_v = iter_obj.get("next");
     const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "iterator.next is not callable");
 
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(out, realm.intrinsics.object_prototype);
-    // Root the result and the iterator across the iteration loop —
-    // every `next()` / accessor read re-enters JS and allocates.
-    const scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer scope.close();
+    // Root the result across the iteration loop — every `next()` /
+    // accessor read re-enters JS and allocates.
     scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
-    scope.push(iter) catch return error.OutOfMemory;
     const scope_base = scope.handles.items.len;
 
     const max_iter: i64 = 1 << 24;
@@ -3375,6 +3379,10 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
         // the spec returns ? IteratorNext throw, which surfaces
         // without invoking return.
         const result = heap_mod.valueAsPlainObject(result_v) orelse return throwTypeError(realm, "iterator next result is not an object");
+        // Root the result object across the `done` / `value` reads —
+        // either can be an accessor (evaluation-order.js) that
+        // re-enters JS and GCs, freeing this still-unrooted object.
+        scope.push(result_v) catch return error.OutOfMemory;
         // §7.4.5 IteratorComplete uses Get() — a throwing
         // `get done()` IS a close case per §7.4.6.
         const done_v = getPropertyChain(realm, result, "done") catch |err| switch (err) {
@@ -3399,6 +3407,9 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
             invokeFromEntriesReturn(realm, iter_obj, iter);
             return throwTypeError(realm, "Object.fromEntries entry must be an object");
         };
+        // Root the entry object — its `get '0'` / `get '1'` accessors
+        // (evaluation-order.js) re-enter JS, and `pair` is read twice.
+        scope.push(pair_v) catch return error.OutOfMemory;
         // §7.3.5 Get — accessor getters on key/value can throw;
         // close the iterator on throw.
         const k = getPropertyChain(realm, pair, "0") catch |err| switch (err) {
@@ -3408,6 +3419,12 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
                 return error.NativeThrew;
             },
         };
+        // Root `k` BEFORE reading "1": a `get '1'` accessor re-enters
+        // JS and GCs, and `k` (an object key whose `toString` runs
+        // later in `propertyKeyForFromEntries`) is otherwise unrooted
+        // between the two reads — evaluation-order.js freed it here,
+        // then ToString dereferenced poison.
+        scope.push(k) catch return error.OutOfMemory;
         const v = getPropertyChain(realm, pair, "1") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
@@ -3415,11 +3432,9 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
                 return error.NativeThrew;
             },
         };
-        // Root the key object and the value across
-        // `propertyKeyForFromEntries` — its ToString re-enters JS
-        // (the key's `toString`) and a GC there would otherwise
-        // collect `v` before it is stored into `out`.
-        scope.push(k) catch return error.OutOfMemory;
+        // Root the value across `propertyKeyForFromEntries` — its
+        // ToString re-enters JS (the key's `toString`) and a GC there
+        // would otherwise collect `v` before it is stored into `out`.
         scope.push(v) catch return error.OutOfMemory;
         // §7.1.19 ToPropertyKey — Symbol keys preserve as Symbol
         // (Cynic stores them as `<sym:N>` / `@@<name>`); other
@@ -3648,22 +3663,28 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const cb_v = argOr(args, 1, Value.undefined_);
     const cb = heap_mod.valueAsFunction(cb_v) orelse return throwTypeError(realm, "Object.groupBy callback is not callable");
 
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(out, null); // null-prototype per spec
+    // Open the root scope FIRST: `openIterator` and every allocation
+    // below GC under pressure, so the iterator and the result object
+    // must be rooted before any sweep can reach them while unrooted.
+    // (Allocating `out` before `openIterator` while `out` was still
+    // unrooted let the iterator allocation's sweep free the half-built
+    // result.)
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
 
     const iter = lantern.openIterator(realm.allocator, realm, items_v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return throwTypeError(realm, "Object.groupBy items is not iterable"),
     };
-    // Root the result and the iterator across the iteration loop —
-    // `next()` and the grouping callback re-enter JS and allocate.
-    const scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer scope.close();
-    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     scope.push(iter) catch return error.OutOfMemory;
     const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "Object.groupBy items is not iterable");
     const next_v = iter_obj.get("next");
     const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "iterator.next is not callable");
+
+    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(out, null); // null-prototype per spec
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    const loop_base = scope.handles.items.len;
 
     const max_iter: i64 = 1 << 24;
     var i: i64 = 0;
@@ -3688,6 +3709,12 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         const result = heap_mod.valueAsPlainObject(result_v) orelse break;
         if (toBoolean(try getPropertyChain(realm, result, "done"))) break;
         const item = try getPropertyChain(realm, result, "value");
+        // Root `item` across the grouping callback AND the bucket /
+        // index-string allocations below — `callJSFunction`,
+        // `allocateObject`, and `allocateString` all GC, and `item`
+        // is only linked into the rooted `out` (via its bucket) at
+        // the very end of the iteration.
+        scope.push(item) catch return error.OutOfMemory;
         const cb_args = [_]Value{ item, Value.fromInt32(@intCast(i)) };
         // §23.1 GroupBy step 6.e — `Let key be Completion(Call(callbackfn, …))`.
         // A user callback throw (test262
@@ -3704,10 +3731,19 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                 return error.NativeThrew;
             },
         };
+        // Root the raw key across `stringifyArg` — an object-valued
+        // key re-enters JS through its `toString`, and `key_v` is the
+        // receiver of that call.
+        scope.push(key_v) catch return error.OutOfMemory;
         const key_js: *JSString = if (key_v.isString())
             @ptrCast(@alignCast(key_v.asString()))
         else
             try stringifyArg(realm, key_v);
+        // Root the key string: `key_str` borrows its WTF-8 bytes, and
+        // the new-bucket branch's `allocateObject` GCs before `out`
+        // borrows the slice (and anchors `key_js`) — without rooting,
+        // that sweep would free `key_js` and `key_str` would dangle.
+        scope.push(Value.fromString(key_js)) catch return error.OutOfMemory;
         const key_str = key_js.flatBytes();
         // Look up or create the bucket array.
         var bucket: *JSObject = undefined;
@@ -3715,6 +3751,9 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             bucket = heap_mod.valueAsPlainObject(existing) orelse return error.NativeThrew;
         } else {
             bucket = realm.heap.allocateObject() catch return error.OutOfMemory;
+            // Root the fresh bucket before the next `allocateString`
+            // GC: it is only linked into `out` at the `out.set` below.
+            scope.push(heap_mod.taggedObject(bucket)) catch return error.OutOfMemory;
             realm.heap.setObjectPrototype(bucket, realm.intrinsics.array_prototype);
             bucket.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
             bucket.set(realm.allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
@@ -3732,6 +3771,10 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         const idx_owned = realm.heap.allocateString(idx_slice) catch return error.OutOfMemory;
         bucket.set(realm.allocator, idx_owned.flatBytes(), item) catch return error.OutOfMemory;
         bucket.set(realm.allocator, "length", Value.fromInt32(len_i + 1)) catch return error.OutOfMemory;
+        // Per-iteration handles (item, key, bucket) are now reachable
+        // through the rooted `out`; drop them so the scope can't grow
+        // unboundedly across a long iterable.
+        scope.handles.shrinkRetainingCapacity(loop_base);
     }
     return heap_mod.taggedObject(out);
 }
