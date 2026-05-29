@@ -50,6 +50,7 @@ const stringifyArg = intrinsics.stringifyArg;
 const DurationRecord = temporal.DurationRecord;
 const PlainTimeRecord = temporal.PlainTimeRecord;
 const PlainDateRecord = temporal.PlainDateRecord;
+const PlainDateTimeRecord = temporal.PlainDateTimeRecord;
 const TemporalRecord = temporal.TemporalRecord;
 
 /// Extract the f64 mathematical value from a Number `Value` (the
@@ -87,6 +88,7 @@ pub fn install(realm: *Realm) !void {
     try installPlainTime(realm, ns);
     try installInstant(realm, ns);
     try installPlainDate(realm, ns);
+    try installPlainDateTime(realm, ns);
 
     // `Temporal` is a non-enumerable, writable, configurable global
     // (§17 namespace-object convention, matching the property
@@ -997,9 +999,13 @@ fn plainTimeRound(realm: *Realm, this_value: Value, args: []const Value) NativeE
             return throwRangeError(realm, "smallestUnit is required");
     }
     try requireUnitInRange(realm, unit, .hour, .nanosecond);
-    const per_day = @divExact(@as(i128, 86_400_000_000_000), temporal.unitNanoseconds(unit));
-    if (!temporal.validateRoundingIncrement(increment, per_day, true)) {
-        return throwRangeError(realm, "roundingIncrement does not divide evenly into a day");
+    // §4.3.x ValidateTemporalRoundingIncrement(increment,
+    // MaximumTemporalDurationRoundingIncrement(smallestUnit), false): the
+    // increment must divide the next-larger unit and stay strictly below
+    // it (hour < 24, minute/second < 60, sub-second < 1000) — NOT the
+    // per-day "inclusive" rule Instant.round uses.
+    if (!temporal.validateRoundingIncrement(increment, differenceDividend(unit), false)) {
+        return throwRangeError(realm, "roundingIncrement is out of range for the smallestUnit");
     }
     const rounded = temporal.roundToIncrement(temporal.timeRecordToNanoseconds(t), increment * temporal.unitNanoseconds(unit), mode);
     const wrapped = @mod(rounded, @as(i128, 86_400_000_000_000));
@@ -2037,13 +2043,702 @@ fn plainDateToPlainMonthDay(realm: *Realm, this_value: Value, args: []const Valu
     _ = try requirePlainDate(realm, this_value);
     return throwTypeError(realm, "Temporal.PlainDate.prototype.toPlainMonthDay is not yet implemented");
 }
+/// §3.3.x Temporal.PlainDate.prototype.toPlainDateTime ( [ temporalTime ] )
+/// — combine this date with a time (midnight when the argument is
+/// undefined; otherwise ToTemporalTime) into a PlainDateTime.
 fn plainDateToPlainDateTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainDate(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainDate.prototype.toPlainDateTime is not yet implemented");
+    const d = try requirePlainDate(realm, this_value);
+    const arg = argOr(args, 0, Value.undefined_);
+    const t: PlainTimeRecord = if (arg.isUndefined()) .{} else try toTemporalTime(realm, arg, Value.undefined_);
+    return createTemporalDateTime(realm, PlainDateTimeRecord.combine(d, t));
 }
 fn plainDateToZonedDateTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     _ = try requirePlainDate(realm, this_value);
     return throwTypeError(realm, "Temporal.PlainDate.prototype.toZonedDateTime is not yet implemented");
+}
+
+// ── §5 Temporal.PlainDateTime (ISO calendar) ───────────────────────────────
+
+fn installPlainDateTime(realm: *Realm, ns: *JSObject) !void {
+    // §5.1.1 — `new`-only constructor (year, month, day, [hour, minute,
+    // second, ms, µs, ns, calendar]); arity 3 (only the date is required).
+    const r = try installConstructor(realm, .{
+        .name = "PlainDateTime",
+        .ctor = plainDateTimeConstructor,
+        .arity = 3,
+        .is_class = true,
+        .set_home_object = true,
+        .to_string_tag = "Temporal.PlainDateTime",
+        .install_global = false,
+    });
+    const fn_obj = r.ctor;
+    const proto = r.proto;
+
+    // Date getters (delegating to the PlainDate ISO-calendar helpers).
+    try installNativeGetter(realm, proto, "calendarId", plainDateTimeCalendarId);
+    try installNativeGetter(realm, proto, "year", plainDateTimeYear);
+    try installNativeGetter(realm, proto, "month", plainDateTimeMonth);
+    try installNativeGetter(realm, proto, "monthCode", plainDateTimeMonthCode);
+    try installNativeGetter(realm, proto, "day", plainDateTimeDay);
+    // Time getters.
+    try installNativeGetter(realm, proto, "hour", plainDateTimeHour);
+    try installNativeGetter(realm, proto, "minute", plainDateTimeMinute);
+    try installNativeGetter(realm, proto, "second", plainDateTimeSecond);
+    try installNativeGetter(realm, proto, "millisecond", plainDateTimeMillisecond);
+    try installNativeGetter(realm, proto, "microsecond", plainDateTimeMicrosecond);
+    try installNativeGetter(realm, proto, "nanosecond", plainDateTimeNanosecond);
+    // Derived calendar getters.
+    try installNativeGetter(realm, proto, "dayOfWeek", plainDateTimeDayOfWeek);
+    try installNativeGetter(realm, proto, "dayOfYear", plainDateTimeDayOfYear);
+    try installNativeGetter(realm, proto, "weekOfYear", plainDateTimeWeekOfYear);
+    try installNativeGetter(realm, proto, "yearOfWeek", plainDateTimeYearOfWeek);
+    try installNativeGetter(realm, proto, "daysInWeek", plainDateTimeDaysInWeek);
+    try installNativeGetter(realm, proto, "daysInMonth", plainDateTimeDaysInMonth);
+    try installNativeGetter(realm, proto, "daysInYear", plainDateTimeDaysInYear);
+    try installNativeGetter(realm, proto, "monthsInYear", plainDateTimeMonthsInYear);
+    try installNativeGetter(realm, proto, "inLeapYear", plainDateTimeInLeapYear);
+    try installNativeGetter(realm, proto, "era", plainDateTimeEra);
+    try installNativeGetter(realm, proto, "eraYear", plainDateTimeEraYear);
+
+    try installNativeMethodOnProto(realm, proto, "with", plainDateTimeWith, 1);
+    try installNativeMethodOnProto(realm, proto, "withPlainTime", plainDateTimeWithPlainTime, 0);
+    try installNativeMethodOnProto(realm, proto, "withCalendar", plainDateTimeWithCalendar, 1);
+    try installNativeMethodOnProto(realm, proto, "add", plainDateTimeAdd, 1);
+    try installNativeMethodOnProto(realm, proto, "subtract", plainDateTimeSubtract, 1);
+    try installNativeMethodOnProto(realm, proto, "until", plainDateTimeUntil, 1);
+    try installNativeMethodOnProto(realm, proto, "since", plainDateTimeSince, 1);
+    try installNativeMethodOnProto(realm, proto, "round", plainDateTimeRound, 1);
+    try installNativeMethodOnProto(realm, proto, "equals", plainDateTimeEquals, 1);
+    try installNativeMethodOnProto(realm, proto, "toString", plainDateTimeToString, 0);
+    try installNativeMethodOnProto(realm, proto, "toJSON", plainDateTimeToJSON, 0);
+    try installNativeMethodOnProto(realm, proto, "toLocaleString", plainDateTimeToLocaleString, 0);
+    try installNativeMethodOnProto(realm, proto, "valueOf", plainDateTimeValueOf, 0);
+    try installNativeMethodOnProto(realm, proto, "toPlainDate", plainDateTimeToPlainDate, 0);
+    try installNativeMethodOnProto(realm, proto, "toPlainTime", plainDateTimeToPlainTime, 0);
+    try installNativeMethodOnProto(realm, proto, "toZonedDateTime", plainDateTimeToZonedDateTime, 1);
+
+    try installNativeMethod(realm, fn_obj, "from", plainDateTimeFrom, 1);
+    try installNativeMethod(realm, fn_obj, "compare", plainDateTimeCompare, 2);
+
+    realm.intrinsics.temporal_plain_date_time_constructor = fn_obj;
+    realm.intrinsics.temporal_plain_date_time_prototype = proto;
+    try setNonEnumerable(ns, realm.allocator, "PlainDateTime", heap_mod.taggedFunction(fn_obj));
+}
+
+fn storePlainDateTime(realm: *Realm, inst: *JSObject, rec: PlainDateTimeRecord) NativeError!void {
+    const r = realm.allocator.create(TemporalRecord) catch return error.OutOfMemory;
+    r.* = .{ .plain_date_time = rec };
+    inst.setTemporalRecord(realm.allocator, r) catch return error.OutOfMemory;
+}
+
+/// §5.5.x CreateTemporalDateTime — allocate a fresh PlainDateTime,
+/// throwing RangeError when the composed wall-clock date-time leaves the
+/// representable range (every derived-value path funnels through here).
+fn createTemporalDateTime(realm: *Realm, rec: PlainDateTimeRecord) NativeError!Value {
+    if (!temporal.isoDateTimeWithinLimits(rec)) {
+        return throwRangeError(realm, "PlainDateTime is out of range");
+    }
+    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(inst, realm.intrinsics.temporal_plain_date_time_prototype.?);
+    try storePlainDateTime(realm, inst, rec);
+    return heap_mod.taggedObject(inst);
+}
+
+fn requirePlainDateTime(realm: *Realm, this_value: Value) NativeError!PlainDateTimeRecord {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "not a Temporal.PlainDateTime");
+    const rec = obj.getTemporalRecord() orelse
+        return throwTypeError(realm, "not a Temporal.PlainDateTime");
+    return switch (rec.*) {
+        .plain_date_time => |pdt| pdt,
+        else => throwTypeError(realm, "not a Temporal.PlainDateTime"),
+    };
+}
+
+/// §5.1.1 Temporal.PlainDateTime ( isoYear, isoMonth, isoDay [, hour [,
+/// minute [, second [, millisecond [, microsecond [, nanosecond [,
+/// calendar ]]]]]]] ). The numeric fields coerce in positional order
+/// (year..nanosecond) before the calendar identifier is read, matching
+/// `order-of-operations.js`. There is no overflow option — the
+/// constructor always rejects out-of-range fields.
+fn plainDateTimeConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const inst = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "Temporal.PlainDateTime constructor requires 'new'");
+    const y = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 0, Value.undefined_)));
+    const mo = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 1, Value.undefined_)));
+    const d = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 2, Value.undefined_)));
+    const hour = try toIntegerWithTruncation(realm, argDefault0(args, 3));
+    const minute = try toIntegerWithTruncation(realm, argDefault0(args, 4));
+    const second = try toIntegerWithTruncation(realm, argDefault0(args, 5));
+    const millisecond = try toIntegerWithTruncation(realm, argDefault0(args, 6));
+    const microsecond = try toIntegerWithTruncation(realm, argDefault0(args, 7));
+    const nanosecond = try toIntegerWithTruncation(realm, argDefault0(args, 8));
+    try requireISOCalendar(realm, argOr(args, 9, Value.undefined_));
+
+    const date = temporal.regulateISODate(y, mo, d, true) orelse
+        return throwRangeError(realm, "PlainDateTime date is out of range");
+    const time = try rejectTime(realm, hour, minute, second, millisecond, microsecond, nanosecond);
+    const rec = PlainDateTimeRecord.combine(date, time);
+    if (!temporal.isoDateTimeWithinLimits(rec)) {
+        return throwRangeError(realm, "PlainDateTime is out of range");
+    }
+    try storePlainDateTime(realm, inst, rec);
+    return heap_mod.taggedObject(inst);
+}
+
+// Getters — date half delegates to the shared ISO-calendar helpers, time
+// half reads the record field directly.
+fn plainDateTimeCalendarId(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requirePlainDateTime(realm, t);
+    const js = realm.heap.allocateString("iso8601") catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn plainDateTimeYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32((try requirePlainDateTime(realm, t)).iso_year);
+}
+fn plainDateTimeMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try requirePlainDateTime(realm, t)).iso_month));
+}
+fn plainDateTimeDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try requirePlainDateTime(realm, t)).iso_day));
+}
+fn plainDateTimeMonthCode(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDateTime(realm, t);
+    const mc = [_]u8{ 'M', '0' + @as(u8, @intCast(rec.iso_month / 10)), '0' + @as(u8, @intCast(rec.iso_month % 10)) };
+    const js = realm.heap.allocateString(&mc) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn plainDateTimeHour(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try requirePlainDateTime(realm, t)).hour));
+}
+fn plainDateTimeMinute(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try requirePlainDateTime(realm, t)).minute));
+}
+fn plainDateTimeSecond(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try requirePlainDateTime(realm, t)).second));
+}
+fn plainDateTimeMillisecond(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try requirePlainDateTime(realm, t)).millisecond));
+}
+fn plainDateTimeMicrosecond(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try requirePlainDateTime(realm, t)).microsecond));
+}
+fn plainDateTimeNanosecond(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    return Value.fromInt32(@intCast((try requirePlainDateTime(realm, t)).nanosecond));
+}
+fn plainDateTimeDayOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDateTime(realm, t);
+    return Value.fromInt32(temporal.isoDayOfWeek(rec.iso_year, rec.iso_month, rec.iso_day));
+}
+fn plainDateTimeDayOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDateTime(realm, t);
+    return Value.fromInt32(temporal.isoDayOfYear(rec.iso_year, rec.iso_month, rec.iso_day));
+}
+fn plainDateTimeWeekOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDateTime(realm, t);
+    return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).week);
+}
+fn plainDateTimeYearOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDateTime(realm, t);
+    return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).year);
+}
+fn plainDateTimeDaysInWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requirePlainDateTime(realm, t);
+    return Value.fromInt32(7);
+}
+fn plainDateTimeDaysInMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDateTime(realm, t);
+    return Value.fromInt32(@intCast(temporal.daysInIsoMonth(rec.iso_year, rec.iso_month)));
+}
+fn plainDateTimeDaysInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDateTime(realm, t);
+    return Value.fromInt32(temporal.isoDaysInYear(rec.iso_year));
+}
+fn plainDateTimeMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requirePlainDateTime(realm, t);
+    return Value.fromInt32(12);
+}
+fn plainDateTimeInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    const rec = try requirePlainDateTime(realm, t);
+    return Value.fromBool(temporal.isLeapYear(rec.iso_year));
+}
+fn plainDateTimeEra(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requirePlainDateTime(realm, t);
+    return Value.undefined_; // ISO calendar has no era
+}
+fn plainDateTimeEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
+    _ = a;
+    _ = try requirePlainDateTime(realm, t);
+    return Value.undefined_;
+}
+
+/// §5.5.x InterpretTemporalDateTimeFields — read year / month / monthCode
+/// / day plus the six time fields off a property bag (coerced in
+/// alphabetical order, per PrepareCalendarFields), regulate per the
+/// `overflow` option (read last), and reject an out-of-limits composite.
+/// Absent time fields default to 0; year + day + (month or monthCode) are
+/// required.
+fn toISODateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!PlainDateTimeRecord {
+    try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
+
+    var day: i64 = 1;
+    var day_set = false;
+    var hour: f64 = 0;
+    var microsecond: f64 = 0;
+    var millisecond: f64 = 0;
+    var minute: f64 = 0;
+    var month_int: i64 = 0;
+    var month_int_set = false;
+    var month_code: i64 = 0;
+    var month_code_set = false;
+    var nanosecond: f64 = 0;
+    var second: f64 = 0;
+    var year: i64 = 0;
+    var year_set = false;
+
+    // Alphabetical read + coerce: day, hour, microsecond, millisecond,
+    // minute, month, monthCode, nanosecond, second, year.
+    const day_v = try getPropertyChain(realm, obj, "day");
+    if (!day_v.isUndefined()) {
+        day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
+        day_set = true;
+    }
+    const hour_v = try getPropertyChain(realm, obj, "hour");
+    if (!hour_v.isUndefined()) hour = try toIntegerWithTruncation(realm, hour_v);
+    const microsecond_v = try getPropertyChain(realm, obj, "microsecond");
+    if (!microsecond_v.isUndefined()) microsecond = try toIntegerWithTruncation(realm, microsecond_v);
+    const millisecond_v = try getPropertyChain(realm, obj, "millisecond");
+    if (!millisecond_v.isUndefined()) millisecond = try toIntegerWithTruncation(realm, millisecond_v);
+    const minute_v = try getPropertyChain(realm, obj, "minute");
+    if (!minute_v.isUndefined()) minute = try toIntegerWithTruncation(realm, minute_v);
+    const month_v = try getPropertyChain(realm, obj, "month");
+    if (!month_v.isUndefined()) {
+        month_int = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+        month_int_set = true;
+    }
+    const month_code_v = try getPropertyChain(realm, obj, "monthCode");
+    if (!month_code_v.isUndefined()) {
+        month_code = try parseMonthCode(realm, month_code_v);
+        month_code_set = true;
+    }
+    const nanosecond_v = try getPropertyChain(realm, obj, "nanosecond");
+    if (!nanosecond_v.isUndefined()) nanosecond = try toIntegerWithTruncation(realm, nanosecond_v);
+    const second_v = try getPropertyChain(realm, obj, "second");
+    if (!second_v.isUndefined()) second = try toIntegerWithTruncation(realm, second_v);
+    const year_v = try getPropertyChain(realm, obj, "year");
+    if (!year_v.isUndefined()) {
+        year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+        year_set = true;
+    }
+
+    if (!year_set) return throwTypeError(realm, "PlainDateTime-like is missing 'year'");
+    if (!day_set) return throwTypeError(realm, "PlainDateTime-like is missing 'day'");
+    var month: i64 = undefined;
+    if (month_code_set) {
+        month = month_code;
+        if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
+    } else if (month_int_set) {
+        month = month_int;
+    } else {
+        return throwTypeError(realm, "PlainDateTime-like is missing 'month' / 'monthCode'");
+    }
+
+    const overflow = try getTemporalOverflowOption(realm, options);
+    const date = temporal.regulateISODate(year, month, day, overflow == .reject) orelse
+        return throwRangeError(realm, "PlainDateTime date is out of range");
+    const time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
+    const rec = PlainDateTimeRecord.combine(date, time);
+    if (!temporal.isoDateTimeWithinLimits(rec)) return throwRangeError(realm, "PlainDateTime is out of range");
+    return rec;
+}
+
+/// §5.5.x ToTemporalDateTime — a PlainDateTime (copy), a PlainDate
+/// (combined with midnight), a property bag, or an ISO 8601 string.
+fn toTemporalDateTime(realm: *Realm, item: Value, options: Value) NativeError!PlainDateTimeRecord {
+    if (heap_mod.valueAsPlainObject(item)) |obj| {
+        if (obj.getTemporalRecord()) |rec| {
+            switch (rec.*) {
+                .plain_date_time => |pdt| {
+                    _ = try getTemporalOverflowOption(realm, options);
+                    return pdt;
+                },
+                .plain_date => |pd| {
+                    // A PlainDate maps to that date at midnight.
+                    _ = try getTemporalOverflowOption(realm, options);
+                    return PlainDateTimeRecord.combine(pd, .{});
+                },
+                else => {},
+            }
+        }
+        return toISODateTimeFields(realm, obj, options);
+    }
+    if (!item.isString()) {
+        return throwTypeError(realm, "Temporal.PlainDateTime.from expects an object or ISO 8601 string");
+    }
+    const s: *JSString = @ptrCast(@alignCast(item.asString()));
+    const rec = temporal.parseTemporalDateTimeString(s.flatBytes()) catch
+        return throwRangeError(realm, "invalid ISO 8601 date-time string");
+    _ = try getTemporalOverflowOption(realm, options);
+    return rec;
+}
+
+/// §5.2.2 Temporal.PlainDateTime.from ( item [, options] ).
+fn plainDateTimeFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const rec = try toTemporalDateTime(realm, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_));
+    return createTemporalDateTime(realm, rec);
+}
+
+/// §5.2.3 Temporal.PlainDateTime.compare ( one, two ).
+fn plainDateTimeCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const a = try toTemporalDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    const b = try toTemporalDateTime(realm, argOr(args, 1, Value.undefined_), Value.undefined_);
+    return Value.fromInt32(temporal.compareISODateTime(a, b));
+}
+
+/// §5.3.x Temporal.PlainDateTime.prototype.equals ( other ).
+fn plainDateTimeEquals(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const a = try requirePlainDateTime(realm, this_value);
+    const b = try toTemporalDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    return Value.fromBool(temporal.compareISODateTime(a, b) == 0);
+}
+
+/// §5.3.x Temporal.PlainDateTime.prototype.with ( temporalDateTimeLike
+/// [, options] ). Reads the full interleaved date + time field set in
+/// alphabetical order, merging present fields over the receiver, then
+/// regulates per `overflow`.
+fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const base = try requirePlainDateTime(realm, this_value);
+    const like = argOr(args, 0, Value.undefined_);
+    const obj = heap_mod.valueAsPlainObject(like) orelse
+        return throwTypeError(realm, "PlainDateTime-like must be an object");
+    // RejectObjectWithCalendarOrTimeZone — get calendar, get timeZone,
+    // and reject a branded Temporal value.
+    try rejectTemporalLikeObject(realm, obj);
+
+    var year: i64 = base.iso_year;
+    var month_int: i64 = base.iso_month;
+    var month_int_set = false;
+    var month_code: i64 = 0;
+    var month_code_set = false;
+    var day: i64 = base.iso_day;
+    var hour: f64 = @floatFromInt(base.hour);
+    var minute: f64 = @floatFromInt(base.minute);
+    var second: f64 = @floatFromInt(base.second);
+    var millisecond: f64 = @floatFromInt(base.millisecond);
+    var microsecond: f64 = @floatFromInt(base.microsecond);
+    var nanosecond: f64 = @floatFromInt(base.nanosecond);
+    var any = false;
+
+    // Alphabetical: day, hour, microsecond, millisecond, minute, month,
+    // monthCode, nanosecond, second, year.
+    const day_v = try getPropertyChain(realm, obj, "day");
+    if (!day_v.isUndefined()) {
+        day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
+        any = true;
+    }
+    const hour_v = try getPropertyChain(realm, obj, "hour");
+    if (!hour_v.isUndefined()) {
+        hour = try toIntegerWithTruncation(realm, hour_v);
+        any = true;
+    }
+    const microsecond_v = try getPropertyChain(realm, obj, "microsecond");
+    if (!microsecond_v.isUndefined()) {
+        microsecond = try toIntegerWithTruncation(realm, microsecond_v);
+        any = true;
+    }
+    const millisecond_v = try getPropertyChain(realm, obj, "millisecond");
+    if (!millisecond_v.isUndefined()) {
+        millisecond = try toIntegerWithTruncation(realm, millisecond_v);
+        any = true;
+    }
+    const minute_v = try getPropertyChain(realm, obj, "minute");
+    if (!minute_v.isUndefined()) {
+        minute = try toIntegerWithTruncation(realm, minute_v);
+        any = true;
+    }
+    const month_v = try getPropertyChain(realm, obj, "month");
+    if (!month_v.isUndefined()) {
+        month_int = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+        month_int_set = true;
+        any = true;
+    }
+    const month_code_v = try getPropertyChain(realm, obj, "monthCode");
+    if (!month_code_v.isUndefined()) {
+        month_code = try parseMonthCode(realm, month_code_v);
+        month_code_set = true;
+        any = true;
+    }
+    const nanosecond_v = try getPropertyChain(realm, obj, "nanosecond");
+    if (!nanosecond_v.isUndefined()) {
+        nanosecond = try toIntegerWithTruncation(realm, nanosecond_v);
+        any = true;
+    }
+    const second_v = try getPropertyChain(realm, obj, "second");
+    if (!second_v.isUndefined()) {
+        second = try toIntegerWithTruncation(realm, second_v);
+        any = true;
+    }
+    const year_v = try getPropertyChain(realm, obj, "year");
+    if (!year_v.isUndefined()) {
+        year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+        any = true;
+    }
+    if (!any) return throwTypeError(realm, "PlainDateTime-like must have at least one recognized property");
+
+    var month: i64 = base.iso_month;
+    if (month_code_set) {
+        month = month_code;
+        if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
+    } else if (month_int_set) {
+        month = month_int;
+    }
+
+    const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
+    const date = temporal.regulateISODate(year, month, day, overflow == .reject) orelse
+        return throwRangeError(realm, "PlainDateTime date is out of range");
+    const time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
+    return createTemporalDateTime(realm, PlainDateTimeRecord.combine(date, time));
+}
+
+/// §5.3.x Temporal.PlainDateTime.prototype.withPlainTime ( [ plainTimeLike ] )
+/// — replace the time half. An undefined argument means midnight;
+/// otherwise ToTemporalTime.
+fn plainDateTimeWithPlainTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const base = try requirePlainDateTime(realm, this_value);
+    const arg = argOr(args, 0, Value.undefined_);
+    const t: PlainTimeRecord = if (arg.isUndefined()) .{} else try toTemporalTime(realm, arg, Value.undefined_);
+    return createTemporalDateTime(realm, PlainDateTimeRecord.combine(base.date(), t));
+}
+
+/// §5.3.x Temporal.PlainDateTime.prototype.withCalendar ( calendar ) —
+/// Cynic ships only the ISO calendar, so any accepted identifier yields a
+/// copy. A calendar-bearing Temporal object resolves to its calendar
+/// (always ISO here); a non-ISO string is RangeError; a non-string,
+/// non-Temporal value is TypeError.
+fn plainDateTimeWithCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requirePlainDateTime(realm, this_value);
+    const arg = argOr(args, 0, Value.undefined_);
+    if (heap_mod.valueAsPlainObject(arg)) |o| {
+        if (o.getTemporalRecord() != null) return createTemporalDateTime(realm, rec);
+    }
+    if (!arg.isString()) return throwTypeError(realm, "calendar must be a string or calendar-bearing object");
+    const s: *JSString = @ptrCast(@alignCast(arg.asString()));
+    if (!std.ascii.eqlIgnoreCase(s.flatBytes(), "iso8601")) {
+        return throwRangeError(realm, "only the iso8601 calendar is supported");
+    }
+    return createTemporalDateTime(realm, rec);
+}
+
+/// §5.3.x AddDurationToDateTime — `add` (negate=false) / `subtract`
+/// (negate=true). AddDateTime folds the duration's time part into a
+/// within-day remainder with a whole-day carry, then AddISODate applies
+/// the calendar units under `overflow`.
+fn plainDateTimeAddSubtract(realm: *Realm, this_value: Value, args: []const Value, negate: bool) NativeError!Value {
+    const base = try requirePlainDateTime(realm, this_value);
+    var dur = try toTemporalDuration(realm, argOr(args, 0, Value.undefined_));
+    if (!temporal.isValidDuration(dur)) return throwRangeError(realm, "Duration values are out of range");
+    const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
+    if (negate) dur = temporal.negateDuration(dur);
+    const rec = temporal.addDateTime(base, dur, overflow == .reject) orelse
+        return throwRangeError(realm, "PlainDateTime is out of range");
+    return createTemporalDateTime(realm, rec);
+}
+fn plainDateTimeAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return plainDateTimeAddSubtract(realm, this_value, args, false);
+}
+fn plainDateTimeSubtract(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return plainDateTimeAddSubtract(realm, this_value, args, true);
+}
+fn plainDateTimeUntil(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return differenceTemporalDateTime(realm, this_value, args, false);
+}
+fn plainDateTimeSince(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return differenceTemporalDateTime(realm, this_value, args, true);
+}
+
+/// §5.3.x DifferenceTemporalPlainDateTime — `until` / `since`.
+///
+/// A difference whose largestUnit and smallestUnit are both "day" or
+/// finer has no calendar component (every day is a uniform 24 h), so it
+/// reduces to the same epoch-nanosecond arithmetic the Instant difference
+/// uses: subtract the two wall-clock instants, round at the smallestUnit,
+/// and balance into the largestUnit (which may be "day"). A year / month
+/// / week unit (as largest OR smallest) needs RoundRelativeDateTime with
+/// calendar context, which is not wired yet — those throw a RangeError
+/// until that machinery lands. The default settings (largestUnit "day",
+/// smallestUnit "nanosecond") fall in the handled subset.
+fn differenceTemporalDateTime(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
+    const this_dt = try requirePlainDateTime(realm, this_value);
+    const other_dt = try toTemporalDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    const opts = try getOptionsObject(realm, argOr(args, 1, Value.undefined_));
+
+    // GetDifferenceSettings read order: largestUnit, increment, mode,
+    // smallestUnit — every option read before any validation.
+    const largest_opt = try getTemporalUnitOption(realm, opts, "largestUnit");
+    const increment = try getRoundingIncrementOption(realm, opts);
+    const mode = try getRoundingModeOption(realm, opts, .trunc);
+    const smallest_opt = try getTemporalUnitOption(realm, opts, "smallestUnit");
+
+    if (largest_opt) |lu| try requireUnitInRange(realm, lu, .year, .nanosecond);
+    const smallest = smallest_opt orelse temporal.LargestUnit.nanosecond;
+    try requireUnitInRange(realm, smallest, .year, .nanosecond);
+    // defaultLargestUnit = LargerOfTwoTemporalUnits("day", smallestUnit):
+    // the coarser (smaller enum index) of "day" and the smallestUnit.
+    const default_largest: temporal.LargestUnit = @enumFromInt(@min(@intFromEnum(temporal.LargestUnit.day), @intFromEnum(smallest)));
+    const largest = largest_opt orelse default_largest;
+    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+        return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
+    }
+
+    // Calendar units (year/month/week) as either bound need the calendar-
+    // aware relative rounding that PlainDateTime differences don't ship
+    // yet.
+    if (@intFromEnum(largest) < @intFromEnum(temporal.LargestUnit.day) or
+        @intFromEnum(smallest) < @intFromEnum(temporal.LargestUnit.day))
+    {
+        return throwRangeError(realm, "year, month, and week units are not yet supported for PlainDateTime.prototype.until / since");
+    }
+
+    // smallestUnit "day" has no maximum increment; the finer units must
+    // divide their next-larger unit evenly (non-inclusive).
+    if (smallest != .day) {
+        if (!temporal.validateRoundingIncrement(increment, differenceDividend(smallest), false)) {
+            return throwRangeError(realm, "invalid roundingIncrement for the smallestUnit");
+        }
+    }
+
+    // Uniform span: collapse each side to an epoch-nanosecond count.
+    const ns1 = @as(i128, temporal.daysFromCivil(this_dt.iso_year, this_dt.iso_month, this_dt.iso_day)) * temporal.ns_per_day +
+        temporal.timeRecordToNanoseconds(this_dt.time());
+    const ns2 = @as(i128, temporal.daysFromCivil(other_dt.iso_year, other_dt.iso_month, other_dt.iso_day)) * temporal.ns_per_day +
+        temporal.timeRecordToNanoseconds(other_dt.time());
+    const diff = ns2 - ns1;
+    const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
+    const rounded = temporal.roundToIncrement(diff, increment * temporal.unitNanoseconds(smallest), eff_mode);
+    var dr = temporal.balanceTimeDuration(rounded, largest);
+    if (is_since) {
+        dr.days = negZero(dr.days);
+        dr.hours = negZero(dr.hours);
+        dr.minutes = negZero(dr.minutes);
+        dr.seconds = negZero(dr.seconds);
+        dr.milliseconds = negZero(dr.milliseconds);
+        dr.microseconds = negZero(dr.microseconds);
+        dr.nanoseconds = negZero(dr.nanoseconds);
+    }
+    return createTemporalDuration(realm, dr);
+}
+
+/// §5.3.x Temporal.PlainDateTime.prototype.round ( roundTo ). A string
+/// `roundTo` is shorthand for `{ smallestUnit }`; smallestUnit is
+/// required (day..nanosecond). The increment × unit-span must divide a
+/// solar day evenly (a "day" smallestUnit therefore permits only
+/// increment 1); roundingMode defaults to halfExpand. Rounding the upper
+/// edge up can exceed the representable range → RangeError.
+fn plainDateTimeRound(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requirePlainDateTime(realm, this_value);
+    const round_to = argOr(args, 0, Value.undefined_);
+    if (round_to.isUndefined()) {
+        return throwTypeError(realm, "Temporal.PlainDateTime.prototype.round requires a smallestUnit");
+    }
+    var unit: temporal.LargestUnit = undefined;
+    var increment: i128 = 1;
+    var mode: temporal.RoundingMode = .half_expand;
+    if (round_to.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(round_to.asString()));
+        unit = temporal.parseTemporalUnit(s.flatBytes()) orelse
+            return throwRangeError(realm, "invalid smallestUnit");
+    } else {
+        const opts = try getOptionsObject(realm, round_to);
+        increment = try getRoundingIncrementOption(realm, opts);
+        mode = try getRoundingModeOption(realm, opts, .half_expand);
+        unit = (try getTemporalUnitOption(realm, opts, "smallestUnit")) orelse
+            return throwRangeError(realm, "smallestUnit is required");
+    }
+    try requireUnitInRange(realm, unit, .day, .nanosecond);
+    // §5.3.x increment validation splits by unit: "day" caps at 1
+    // (maximum 1, inclusive — only increment 1 passes); every finer unit
+    // uses MaximumTemporalDurationRoundingIncrement with inclusive=false,
+    // so the increment must divide its next-larger unit and stay strictly
+    // below it (hour < 24, minute/second < 60, sub-second < 1000).
+    const increment_ok = if (unit == .day)
+        temporal.validateRoundingIncrement(increment, 1, true)
+    else
+        temporal.validateRoundingIncrement(increment, differenceDividend(unit), false);
+    if (!increment_ok) {
+        return throwRangeError(realm, "roundingIncrement is out of range for the smallestUnit");
+    }
+    const rounded = temporal.roundISODateTime(rec, unit, increment, mode) orelse
+        return throwRangeError(realm, "rounded PlainDateTime is out of range");
+    return createTemporalDateTime(realm, rounded);
+}
+
+/// §5.3.x Temporal.PlainDateTime.prototype.toString ( [options] ) — the
+/// `calendarName` display option (auto / always / never / critical) plus
+/// `auto` sub-second precision. Output-rounding options
+/// (fractionalSecondDigits / smallestUnit / roundingMode) are deferred.
+fn plainDateTimeToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requirePlainDateTime(realm, this_value);
+    const cal = try getCalendarNameOption(realm, argOr(args, 0, Value.undefined_));
+    var buf: [48]u8 = undefined;
+    const s = temporal.isoDateTimeToString(rec, &buf, cal);
+    const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn plainDateTimeToJSON(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const rec = try requirePlainDateTime(realm, this_value);
+    var buf: [48]u8 = undefined;
+    const s = temporal.isoDateTimeToString(rec, &buf, .auto);
+    const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+fn plainDateTimeToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return plainDateTimeToJSON(realm, this_value, args);
+}
+fn plainDateTimeValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    _ = args;
+    return throwTypeError(realm, "Called valueOf on a Temporal.PlainDateTime; use compare() instead");
+}
+
+/// §5.3.x Temporal.PlainDateTime.prototype.toPlainDate — the date half.
+fn plainDateTimeToPlainDate(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const rec = try requirePlainDateTime(realm, this_value);
+    return createTemporalDate(realm, rec.date());
+}
+/// §5.3.x Temporal.PlainDateTime.prototype.toPlainTime — the time half.
+fn plainDateTimeToPlainTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const rec = try requirePlainDateTime(realm, this_value);
+    return createTemporalTime(realm, rec.time());
+}
+fn plainDateTimeToZonedDateTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requirePlainDateTime(realm, this_value);
+    return throwTypeError(realm, "Temporal.PlainDateTime.prototype.toZonedDateTime is not yet implemented");
 }

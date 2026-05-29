@@ -328,6 +328,35 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
     .{ .path = "built-ins/Temporal/PlainDate/prototype/inLeapYear/prop-desc.js", .category = .descriptor_assertion },
     .{ .path = "built-ins/Temporal/PlainDate/prototype/era/prop-desc.js", .category = .descriptor_assertion },
     .{ .path = "built-ins/Temporal/PlainDate/prototype/eraYear/prop-desc.js", .category = .descriptor_assertion },
+    // §5.3.x `Temporal.PlainDateTime.prototype` getters — same SES
+    // freeze demotes every intrinsic accessor to `configurable: false`
+    // (verified: hardened → false, `--unhardened` → true), so each
+    // fires the generic `Expected SameValue(«false», «true») to be true`.
+    // Generic-shape message — path-classify, like the PlainDate getters.
+    // The date-core + derived-calendar getters mirror PlainDate; the
+    // six time getters (hour … nanosecond) are PlainDateTime-only.
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/calendarId/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/year/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/monthCode/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/day/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/hour/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/minute/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/second/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/millisecond/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/microsecond/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/nanosecond/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/dayOfWeek/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/dayOfYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/weekOfYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/yearOfWeek/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/daysInWeek/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/daysInMonth/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/daysInYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/monthsInYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/inLeapYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/era/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDateTime/prototype/eraYear/prop-desc.js", .category = .descriptor_assertion },
 };
 
 /// Path-based divergence lookup — the escape hatch for

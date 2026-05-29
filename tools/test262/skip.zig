@@ -1157,20 +1157,21 @@ pub const deferred_path_prefixes = [_][]const u8{
     // per-type as each lands. Cynic ships the self-contained,
     // calendar- and time-zone-free value types so far —
     // `Temporal.Duration` (§7), `Temporal.PlainTime` (§4),
-    // `Temporal.Instant` (§8), and `Temporal.PlainDate` (§3, ISO
+    // `Temporal.Instant` (§8), `Temporal.PlainDate` (§3, ISO
+    // calendar only), and `Temporal.PlainDateTime` (§5, ISO
     // calendar only) — and those subtrees run; the remaining types
     // stay skipped per-subtree until their implementation lands. As
     // each type ships, drop its line.
     "built-ins/Temporal/Now/",
-    "built-ins/Temporal/PlainDateTime/",
     "built-ins/Temporal/PlainMonthDay/",
     "built-ins/Temporal/PlainYearMonth/",
     "built-ins/Temporal/ZonedDateTime/",
     // `built-ins/Temporal/getOwnPropertyNames.js` asserts every one
     // of the nine type names is an own property of the `Temporal`
     // namespace. Cynic installs only Duration + PlainTime + Instant
-    // + PlainDate so far, so this one fixture fails until the namespace is
-    // complete. The sibling `prop-desc.js` / `keys.js` (which only
+    // + PlainDate + PlainDateTime so far, so this one fixture fails
+    // until the namespace is complete. The sibling
+    // `prop-desc.js` / `keys.js` (which only
     // probe the namespace's own descriptor + that it has no
     // enumerable keys) pass and stay in scope.
     "built-ins/Temporal/getOwnPropertyNames.js",

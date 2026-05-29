@@ -30,6 +30,7 @@ pub const TemporalKind = enum {
     plain_time,
     instant,
     plain_date,
+    plain_date_time,
 };
 
 /// §7.5 Temporal.Duration internal slots. Each field is the ℝ
@@ -79,6 +80,54 @@ pub const PlainDateRecord = struct {
     iso_day: u8 = 1,
 };
 
+/// §5.3 Temporal.PlainDateTime internal slots — an ISO date paired
+/// with an ISO time ([[ISOYear]]…[[ISONanosecond]]). The calendar is
+/// always ISO 8601, so no calendar pointer is stored; the record
+/// carries no heap reference. The split `date()` / `time()` helpers
+/// hand the existing PlainDate / PlainTime abstract operations their
+/// narrower records, and `combine` reassembles one after date- or
+/// time-only arithmetic.
+pub const PlainDateTimeRecord = struct {
+    iso_year: i32 = 0,
+    iso_month: u8 = 1,
+    iso_day: u8 = 1,
+    hour: u32 = 0,
+    minute: u32 = 0,
+    second: u32 = 0,
+    millisecond: u32 = 0,
+    microsecond: u32 = 0,
+    nanosecond: u32 = 0,
+
+    pub fn date(self: PlainDateTimeRecord) PlainDateRecord {
+        return .{ .iso_year = self.iso_year, .iso_month = self.iso_month, .iso_day = self.iso_day };
+    }
+
+    pub fn time(self: PlainDateTimeRecord) PlainTimeRecord {
+        return .{
+            .hour = self.hour,
+            .minute = self.minute,
+            .second = self.second,
+            .millisecond = self.millisecond,
+            .microsecond = self.microsecond,
+            .nanosecond = self.nanosecond,
+        };
+    }
+
+    pub fn combine(d: PlainDateRecord, t: PlainTimeRecord) PlainDateTimeRecord {
+        return .{
+            .iso_year = d.iso_year,
+            .iso_month = d.iso_month,
+            .iso_day = d.iso_day,
+            .hour = t.hour,
+            .minute = t.minute,
+            .second = t.second,
+            .millisecond = t.millisecond,
+            .microsecond = t.microsecond,
+            .nanosecond = t.nanosecond,
+        };
+    }
+};
+
 /// The side allocation a Temporal instance's `JSObject` points to
 /// through `JSObjectExtension.temporal_record`. A tagged union so
 /// the single slot serves every plain Temporal type.
@@ -87,6 +136,7 @@ pub const TemporalRecord = union(TemporalKind) {
     plain_time: PlainTimeRecord,
     instant: InstantRecord,
     plain_date: PlainDateRecord,
+    plain_date_time: PlainDateTimeRecord,
 
     pub fn deinit(self: *TemporalRecord, allocator: std.mem.Allocator) void {
         // No owned heap memory inside any variant today; the record
@@ -1978,6 +2028,204 @@ pub fn roundRelativeDate(
     return differenceISODate(start, rounded_end, largest);
 }
 
+// ── §5.5 PlainDateTime (ISO calendar) abstract operations ─────────────────
+
+/// Nanoseconds in one 24-hour day — the carry unit between the date
+/// and time halves of a PlainDateTime.
+pub const ns_per_day: i128 = 86_400_000_000_000;
+
+/// §5.5.x ISODateTimeWithinLimits — a PlainDateTime is representable
+/// when its date sits within ±(10^8 + 1) days of the epoch AND the
+/// wall-clock instant (taken as UTC) stays within one day of the
+/// Instant range. The one-day slop on each side mirrors the spec: a
+/// PlainDateTime at the very edge can still map to an in-range Instant
+/// once a time-zone offset is applied.
+pub fn isoDateTimeWithinLimits(dt: PlainDateTimeRecord) bool {
+    const epoch_days = daysFromCivil(dt.iso_year, dt.iso_month, dt.iso_day);
+    if (epoch_days > 100_000_001 or epoch_days < -100_000_001) return false;
+    const ns = @as(i128, epoch_days) * ns_per_day + timeRecordToNanoseconds(dt.time());
+    if (ns <= ns_min_instant - ns_per_day) return false;
+    if (ns >= ns_max_instant + ns_per_day) return false;
+    return true;
+}
+
+/// §5.5.x AddDateTime — add a Duration to a PlainDateTime. The time
+/// fields fold into a within-day nanosecond total whose whole-day
+/// overflow (`@divFloor`, so a negative duration borrows correctly)
+/// carries into the date half; the date half then reuses AddISODate
+/// under `reject` (the overflow option). Returns null when AddISODate
+/// leaves the representable range OR the composed result is out of
+/// limits (→ the caller raises RangeError).
+pub fn addDateTime(dt: PlainDateTimeRecord, dur: DurationRecord, reject: bool) ?PlainDateTimeRecord {
+    const time_ns = timeRecordToNanoseconds(dt.time()) + timeDurationNanoseconds(dur);
+    const day_carry: i64 = @intCast(@divFloor(time_ns, ns_per_day));
+    const within = time_ns - @as(i128, day_carry) * ns_per_day; // [0, ns_per_day)
+    const new_time = nanosecondsToTimeRecord(within);
+    const new_date = addISODate(
+        dt.date(),
+        @intFromFloat(dur.years),
+        @intFromFloat(dur.months),
+        @intFromFloat(dur.weeks),
+        @as(i64, @intFromFloat(dur.days)) + day_carry,
+        reject,
+    ) orelse return null;
+    const result = PlainDateTimeRecord.combine(new_date, new_time);
+    if (!isoDateTimeWithinLimits(result)) return null;
+    return result;
+}
+
+/// The day-carry + rounded time a RoundTime step produces.
+pub const RoundTimeResult = struct { days: i64, time: PlainTimeRecord };
+
+/// §5.5.x RoundTime — round a wall-clock time to a multiple of
+/// `increment` of `unit` (day..nanosecond) under `mode`. The within-day
+/// nanosecond total rounds to the requested boundary measured from
+/// midnight; any whole-day overflow becomes the `days` carry (rounding
+/// 23:59 up to the next day yields `days = 1`, `time = 00:00`). A `day`
+/// unit collapses the time to midnight. `increment` must already be a
+/// validated divisor of the unit's day-span.
+pub fn roundTime(t: PlainTimeRecord, unit: LargestUnit, increment: i128, mode: RoundingMode) RoundTimeResult {
+    const total_ns = timeRecordToNanoseconds(t);
+    const rounded = roundToIncrement(total_ns, unitNanoseconds(unit) * increment, mode);
+    const days: i64 = @intCast(@divFloor(rounded, ns_per_day));
+    const within = rounded - @as(i128, days) * ns_per_day;
+    return .{ .days = days, .time = nanosecondsToTimeRecord(within) };
+}
+
+/// §5.5.x RoundISODateTime — round the time half (carrying whole days
+/// into the date half via AddISODate) and recombine. Returns null when
+/// the carried date leaves the representable range.
+pub fn roundISODateTime(dt: PlainDateTimeRecord, unit: LargestUnit, increment: i128, mode: RoundingMode) ?PlainDateTimeRecord {
+    const rt = roundTime(dt.time(), unit, increment, mode);
+    const new_date = addISODate(dt.date(), 0, 0, 0, rt.days, false) orelse return null;
+    return PlainDateTimeRecord.combine(new_date, rt.time);
+}
+
+/// §5.5.x CompareISODateTime — total order: date first, then wall-clock
+/// time. Returns -1 / 0 / +1.
+pub fn compareISODateTime(a: PlainDateTimeRecord, b: PlainDateTimeRecord) i32 {
+    const c = compareISODate(a.date(), b.date());
+    if (c != 0) return c;
+    return compareTime(a.time(), b.time());
+}
+
+/// §5.5.x DifferenceISODateTime — the Duration from `dt1` to `dt2`,
+/// coarsest field capped at `largest`. The time halves differ by a
+/// signed nanosecond delta in (-ns_per_day, ns_per_day); when that delta
+/// opposes the date direction one day is borrowed from the date half
+/// into the time half (so every output field shares a single sign). The
+/// date half then defers to DifferenceISODate (capped no finer than
+/// `day`), and the borrowed-balanced time delta to BalanceTimeDuration
+/// (capped no coarser than `hour`, since whole days live in the date
+/// half). The two partial Durations share no field, so the merge is a
+/// plain field-wise sum.
+pub fn differenceISODateTime(dt1: PlainDateTimeRecord, dt2: PlainDateTimeRecord, largest: LargestUnit) DurationRecord {
+    const time_delta = timeRecordToNanoseconds(dt2.time()) - timeRecordToNanoseconds(dt1.time());
+    const time_sign: i32 = if (time_delta < 0) -1 else if (time_delta > 0) 1 else 0;
+    const date_sign = compareISODate(dt2.date(), dt1.date()); // +1 when dt2 is later
+
+    var adjusted_date1 = dt1.date();
+    var time_rem = time_delta;
+    if (time_sign != 0 and time_sign == -date_sign) {
+        // The time goes one way while the date goes the other: roll
+        // `dt1`'s date one day toward `dt2` and add that day back into
+        // the time remainder, leaving the total span unchanged.
+        adjusted_date1 = addISODate(adjusted_date1, 0, 0, 0, date_sign, false).?;
+        time_rem += @as(i128, date_sign) * ns_per_day;
+    }
+
+    // dateLargestUnit = LargerOfTwoTemporalUnits("day", largest): the
+    // coarser of the two (smaller enum index), but never finer than day.
+    const date_largest: LargestUnit = @enumFromInt(@min(@intFromEnum(largest), @intFromEnum(LargestUnit.day)));
+    const date_diff = differenceISODate(adjusted_date1, dt2.date(), date_largest);
+
+    // The time remainder is < 1 day, so it never produces a `days`
+    // field; balance it with the largest time unit no coarser than hour.
+    const time_largest: LargestUnit = @enumFromInt(@max(@intFromEnum(largest), @intFromEnum(LargestUnit.hour)));
+    const time_dur = balanceTimeDuration(time_rem, time_largest);
+
+    return .{
+        .years = date_diff.years,
+        .months = date_diff.months,
+        .weeks = date_diff.weeks,
+        .days = date_diff.days,
+        .hours = time_dur.hours,
+        .minutes = time_dur.minutes,
+        .seconds = time_dur.seconds,
+        .milliseconds = time_dur.milliseconds,
+        .microseconds = time_dur.microseconds,
+        .nanoseconds = time_dur.nanoseconds,
+    };
+}
+
+/// §5.5.x ISODateTimeToString with `precision="auto"` — the form
+/// `Temporal.PlainDateTime.prototype.toString` / `toJSON` produce:
+/// `YYYY-MM-DDTHH:MM:SS` plus a trimmed sub-second fraction, then the
+/// ISO calendar annotation per `calendar`. Years outside 0000..9999 use
+/// the expanded `±YYYYYY` form.
+pub fn isoDateTimeToString(dt: PlainDateTimeRecord, buf: []u8, calendar: CalendarDisplay) []const u8 {
+    var w = Writer{ .buf = buf, .len = 0 };
+    writeIsoYear(&w, dt.iso_year);
+    w.byte('-');
+    w.pad2(dt.iso_month);
+    w.byte('-');
+    w.pad2(dt.iso_day);
+    w.byte('T');
+    w.pad2(dt.hour);
+    w.byte(':');
+    w.pad2(dt.minute);
+    w.byte(':');
+    w.pad2(dt.second);
+    const sub_ns: u32 = dt.millisecond * 1_000_000 + dt.microsecond * 1_000 + dt.nanosecond;
+    if (sub_ns != 0) {
+        w.byte('.');
+        w.fraction9(sub_ns);
+    }
+    switch (calendar) {
+        .auto, .never => {},
+        .always => w.bytes("[u-ca=iso8601]"),
+        .critical => w.bytes("[!u-ca=iso8601]"),
+    }
+    return w.buf[0..w.len];
+}
+
+/// §5.5.x ParseTemporalDateTimeString — parse an ISO / RFC 9557 string
+/// into an ISO date-time. The time is optional (a bare date defaults to
+/// midnight); any UTC offset is validated then discarded (a PlainDateTime
+/// carries no offset), but a `Z`/`z` UTC designator is rejected as
+/// ambiguous. A `[u-ca=…]` annotation must name the ISO calendar.
+pub fn parseTemporalDateTimeString(input: []const u8) error{Invalid}!PlainDateTimeRecord {
+    var c = Cursor{ .s = input };
+    const date = try parseIsoDate(&c);
+    var time = ParsedTime{ .hour = 0, .minute = 0, .second = 0, .sub_ns = 0 };
+    if (c.eatAny("Tt ")) {
+        time = try parseIsoTime(&c);
+        if (c.eatAny("Zz")) {
+            return error.Invalid;
+        } else if (c.peek()) |ch| {
+            if (ch == '+' or ch == '-') _ = try parseUtcOffsetNs(&c);
+        }
+    }
+    const calendar = try consumeAnnotations(&c);
+    if (!c.done()) return error.Invalid;
+    if (calendar) |cal| {
+        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
+    }
+    const rec = PlainDateTimeRecord{
+        .iso_year = @intCast(date.year),
+        .iso_month = @intCast(date.month),
+        .iso_day = @intCast(date.day),
+        .hour = time.hour,
+        .minute = time.minute,
+        .second = time.second,
+        .millisecond = time.sub_ns / 1_000_000,
+        .microsecond = (time.sub_ns / 1_000) % 1_000,
+        .nanosecond = time.sub_ns % 1_000,
+    };
+    if (!isoDateTimeWithinLimits(rec)) return error.Invalid;
+    return rec;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -2722,4 +2970,134 @@ test "parseInstantString: annotation rule violations reject" {
         "2021-08-19T17:30-07:00:01[-07:00:01]", // sub-minute time-zone offset annotation
     };
     for (bad) |s| try testing.expectError(error.Invalid, parseInstantString(s));
+}
+
+// ── PlainDateTime AO tests ────────────────────────────────────────────────
+
+fn pdt(y: i32, mo: u8, d: u8, h: u32, mi: u32, s: u32, ms: u32, us: u32, ns: u32) PlainDateTimeRecord {
+    return .{ .iso_year = y, .iso_month = mo, .iso_day = d, .hour = h, .minute = mi, .second = s, .millisecond = ms, .microsecond = us, .nanosecond = ns };
+}
+
+test "isoDateTimeWithinLimits: representable edges (test262 from/argument-string-limits)" {
+    try testing.expect(isoDateTimeWithinLimits(pdt(2024, 1, 1, 0, 0, 0, 0, 0, 0)));
+    try testing.expect(isoDateTimeWithinLimits(pdt(1970, 1, 1, 0, 0, 0, 0, 0, 0)));
+    // Max edge: +275760-09-13T23:59:59.999999999 in; +275760-09-14 out.
+    try testing.expect(isoDateTimeWithinLimits(pdt(275760, 9, 13, 23, 59, 59, 999, 999, 999)));
+    try testing.expect(!isoDateTimeWithinLimits(pdt(275760, 9, 14, 0, 0, 0, 0, 0, 0)));
+    // Min edge: midnight on -271821-04-19 is OUT (one day beyond the
+    // Instant range maps to exactly nsMinInstant − nsPerDay, which the
+    // ≤ bound rejects); one nanosecond later, and the next midnight, are in.
+    try testing.expect(!isoDateTimeWithinLimits(pdt(-271821, 4, 19, 0, 0, 0, 0, 0, 0)));
+    try testing.expect(isoDateTimeWithinLimits(pdt(-271821, 4, 19, 0, 0, 0, 0, 0, 1)));
+    try testing.expect(isoDateTimeWithinLimits(pdt(-271821, 4, 20, 0, 0, 0, 0, 0, 0)));
+}
+
+test "addDateTime: time carry across the day boundary" {
+    // 15:00 + 19h → next day 10:00.
+    var dur = DurationRecord{ .hours = 19 };
+    try testing.expectEqual(pdt(2024, 1, 2, 10, 0, 0, 0, 0, 0), addDateTime(pdt(2024, 1, 1, 15, 0, 0, 0, 0, 0), dur, false).?);
+    // 10:00 − 19h → previous day 15:00 (negative carry via @divFloor).
+    dur = DurationRecord{ .hours = -19 };
+    try testing.expectEqual(pdt(2024, 1, 1, 15, 0, 0, 0, 0, 0), addDateTime(pdt(2024, 1, 2, 10, 0, 0, 0, 0, 0), dur, false).?);
+}
+
+test "addDateTime: day + time carry compose, leap February" {
+    // 2020-02-28T23:30 + P1DT1H → +2 civil days across the leap day → 2020-03-01T00:30.
+    const dur = DurationRecord{ .days = 1, .hours = 1 };
+    try testing.expectEqual(pdt(2020, 3, 1, 0, 30, 0, 0, 0, 0), addDateTime(pdt(2020, 2, 28, 23, 30, 0, 0, 0, 0), dur, false).?);
+}
+
+test "addDateTime: month add constrains day, time untouched" {
+    // 2024-01-31T12:00 + P1M (constrain) → 2024-02-29T12:00 (leap clamp).
+    const dur = DurationRecord{ .months = 1 };
+    try testing.expectEqual(pdt(2024, 2, 29, 12, 0, 0, 0, 0, 0), addDateTime(pdt(2024, 1, 31, 12, 0, 0, 0, 0, 0), dur, false).?);
+}
+
+test "roundTime: day carry, day unit, sub-second" {
+    // 23:59:59 ceil to minute → next day midnight.
+    var r = roundTime(.{ .hour = 23, .minute = 59, .second = 59 }, .minute, 1, .ceil);
+    try testing.expectEqual(@as(i64, 1), r.days);
+    try testing.expectEqual(PlainTimeRecord{}, r.time);
+    // 12:34:56 to whole day, half_expand → past noon rounds up.
+    r = roundTime(.{ .hour = 12, .minute = 34, .second = 56 }, .day, 1, .half_expand);
+    try testing.expectEqual(@as(i64, 1), r.days);
+    try testing.expectEqual(PlainTimeRecord{}, r.time);
+    // 12:34:56.789 to nearest second, half_expand → 12:34:57.
+    r = roundTime(.{ .hour = 12, .minute = 34, .second = 56, .millisecond = 789 }, .second, 1, .half_expand);
+    try testing.expectEqual(@as(i64, 0), r.days);
+    try testing.expectEqual(PlainTimeRecord{ .hour = 12, .minute = 34, .second = 57 }, r.time);
+}
+
+test "roundISODateTime: time carry advances the date" {
+    try testing.expectEqual(
+        pdt(2024, 1, 2, 0, 0, 0, 0, 0, 0),
+        roundISODateTime(pdt(2024, 1, 1, 23, 59, 59, 0, 0, 0), .minute, 1, .ceil).?,
+    );
+}
+
+test "compareISODateTime: date dominates, then time" {
+    try testing.expectEqual(@as(i32, -1), compareISODateTime(pdt(2024, 1, 1, 12, 0, 0, 0, 0, 0), pdt(2024, 1, 1, 13, 0, 0, 0, 0, 0)));
+    try testing.expectEqual(@as(i32, 1), compareISODateTime(pdt(2024, 1, 2, 0, 0, 0, 0, 0, 0), pdt(2024, 1, 1, 23, 59, 0, 0, 0, 0)));
+    try testing.expectEqual(@as(i32, 0), compareISODateTime(pdt(2024, 1, 1, 5, 6, 7, 0, 0, 0), pdt(2024, 1, 1, 5, 6, 7, 0, 0, 0)));
+}
+
+test "differenceISODateTime: time opposes date → borrow a day (forward)" {
+    // 2024-01-01T15:00 → 2024-01-02T10:00 is +19h, not 1 day − 5h.
+    const d = differenceISODateTime(pdt(2024, 1, 1, 15, 0, 0, 0, 0, 0), pdt(2024, 1, 2, 10, 0, 0, 0, 0, 0), .day);
+    try testing.expectEqual(@as(f64, 0), d.days);
+    try testing.expectEqual(@as(f64, 19), d.hours);
+    try testing.expectEqual(@as(f64, 0), d.minutes);
+}
+
+test "differenceISODateTime: time opposes date → borrow a day (backward)" {
+    // 2024-01-02T10:00 → 2024-01-01T15:00 is −19h.
+    const d = differenceISODateTime(pdt(2024, 1, 2, 10, 0, 0, 0, 0, 0), pdt(2024, 1, 1, 15, 0, 0, 0, 0, 0), .day);
+    try testing.expectEqual(@as(f64, 0), d.days);
+    try testing.expectEqual(@as(f64, -19), d.hours);
+}
+
+test "differenceISODateTime: same direction keeps the day" {
+    // 2024-01-01T10:00 → 2024-01-02T15:00 is 1 day + 5h.
+    const d = differenceISODateTime(pdt(2024, 1, 1, 10, 0, 0, 0, 0, 0), pdt(2024, 1, 2, 15, 0, 0, 0, 0, 0), .day);
+    try testing.expectEqual(@as(f64, 1), d.days);
+    try testing.expectEqual(@as(f64, 5), d.hours);
+}
+
+test "differenceISODateTime: multi-unit span with largest=year" {
+    const d = differenceISODateTime(pdt(2020, 1, 15, 10, 30, 0, 0, 0, 0), pdt(2021, 3, 20, 14, 45, 30, 0, 0, 0), .year);
+    try testing.expectEqual(@as(f64, 1), d.years);
+    try testing.expectEqual(@as(f64, 2), d.months);
+    try testing.expectEqual(@as(f64, 0), d.weeks);
+    try testing.expectEqual(@as(f64, 5), d.days);
+    try testing.expectEqual(@as(f64, 4), d.hours);
+    try testing.expectEqual(@as(f64, 15), d.minutes);
+    try testing.expectEqual(@as(f64, 30), d.seconds);
+}
+
+test "parseTemporalDateTimeString: date-only defaults to midnight" {
+    try testing.expectEqual(pdt(2024, 1, 15, 0, 0, 0, 0, 0, 0), try parseTemporalDateTimeString("2024-01-15"));
+}
+
+test "parseTemporalDateTimeString: full form with sub-second split" {
+    try testing.expectEqual(pdt(2024, 1, 15, 13, 45, 30, 123, 456, 789), try parseTemporalDateTimeString("2024-01-15T13:45:30.123456789"));
+    try testing.expectEqual(pdt(2024, 1, 15, 13, 45, 30, 500, 0, 0), try parseTemporalDateTimeString("2024-01-15T13:45:30.5"));
+}
+
+test "parseTemporalDateTimeString: offset discarded, ISO calendar ok" {
+    try testing.expectEqual(pdt(2024, 1, 15, 13, 45, 30, 0, 0, 0), try parseTemporalDateTimeString("2024-01-15T13:45:30+05:00"));
+    try testing.expectEqual(pdt(2024, 1, 15, 13, 45, 0, 0, 0, 0), try parseTemporalDateTimeString("2024-01-15T13:45[u-ca=iso8601]"));
+}
+
+test "parseTemporalDateTimeString: Z designator and non-ISO calendar reject" {
+    try testing.expectError(error.Invalid, parseTemporalDateTimeString("2024-01-15T13:45:30Z"));
+    try testing.expectError(error.Invalid, parseTemporalDateTimeString("2024-01-15T13:45[u-ca=gregory]"));
+    try testing.expectError(error.Invalid, parseTemporalDateTimeString("2024-13-01"));
+}
+
+test "isoDateTimeToString: auto precision + calendar annotation" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("2024-01-15T13:45:30", isoDateTimeToString(pdt(2024, 1, 15, 13, 45, 30, 0, 0, 0), &buf, .auto));
+    try testing.expectEqualStrings("2024-01-15T13:45:30.5", isoDateTimeToString(pdt(2024, 1, 15, 13, 45, 30, 500, 0, 0), &buf, .auto));
+    try testing.expectEqualStrings("2024-01-15T00:00:00[u-ca=iso8601]", isoDateTimeToString(pdt(2024, 1, 15, 0, 0, 0, 0, 0, 0), &buf, .always));
+    try testing.expectEqualStrings("-000001-01-01T00:00:00", isoDateTimeToString(pdt(-1, 1, 1, 0, 0, 0, 0, 0, 0), &buf, .auto));
 }
