@@ -380,19 +380,60 @@ fn durationAbs(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     return createTemporalDuration(realm, a);
 }
 
-/// §7.3.24 Temporal.Duration.prototype.toString — default / `auto`
-/// precision path. Options-driven rounding is deferred; an options
-/// argument that requests a non-default precision / smallestUnit /
-/// roundingMode is rejected with a clear TypeError so the fixture
-/// fails loudly rather than returning a wrong (un-rounded) string.
+/// §7.3.24 Temporal.Duration.prototype.toString — read the
+/// `fractionalSecondDigits` / `roundingMode` / `smallestUnit` options (in
+/// that order, each read before `smallestUnit` is validated), round the
+/// duration's *time* part to the resulting precision, then format.
+///
+/// Per §7.3.24 steps 9-11: with `auto` precision (unit = nanosecond,
+/// increment = 1) no rounding occurs. Otherwise round the time component
+/// (RoundTimeDuration over the time-only nanoseconds, days excluded), then
+/// re-expand it capped at LargerOfTwoTemporalUnits(DefaultTemporalLargestUnit,
+/// second) — so the seconds floor holds (PT60S never balances to PT1M) and
+/// any whole-day carry from the rounding adds into the days field without
+/// cascading into weeks/months/years (a calendar boundary the time round
+/// can't cross).
 fn durationToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const d = try requireDuration(realm, this_value);
-    const opts = argOr(args, 0, Value.undefined_);
-    if (!opts.isUndefined()) {
-        return throwTypeError(realm, "Temporal.Duration.prototype.toString options are not yet supported");
+    const options = argOr(args, 0, Value.undefined_);
+    const frac = try getFractionalSecondDigitsOption(realm, options);
+    const opts_obj = try getOptionsObject(realm, options);
+    const mode = try getRoundingModeOption(realm, opts_obj, .trunc);
+    const smallest = try getTemporalUnitOption(realm, opts_obj, "smallestUnit");
+    try requireDurationToStringSmallestUnit(realm, smallest);
+
+    const prec = toSecondsStringPrecision(smallest, frac);
+    var result = d;
+    if (!(prec.unit == .nanosecond and prec.increment == 1)) {
+        const time_ns = temporal.timeDurationNanoseconds(d);
+        const inc_ns = prec.increment * temporal.unitNanoseconds(prec.unit);
+        const rounded = temporal.roundToIncrement(time_ns, inc_ns, mode);
+        const dl = temporal.defaultTemporalLargestUnit(d);
+        // LargerOfTwoTemporalUnits(dl, second): coarser unit wins (coarser =
+        // smaller enum index). balanceTimeDuration caps extraction at days.
+        const largest = if (@intFromEnum(dl) < @intFromEnum(temporal.LargestUnit.second)) dl else temporal.LargestUnit.second;
+        const bal = temporal.balanceTimeDuration(rounded, largest);
+        result = .{
+            .years = d.years,
+            .months = d.months,
+            .weeks = d.weeks,
+            .days = d.days + bal.days,
+            .hours = bal.hours,
+            .minutes = bal.minutes,
+            .seconds = bal.seconds,
+            .milliseconds = bal.milliseconds,
+            .microseconds = bal.microseconds,
+            .nanoseconds = bal.nanoseconds,
+        };
+        // §7.5.x CreateDurationRecord step 1 — the rounded duration must
+        // still be a valid (float64-representable) duration; ceil/expand on
+        // a near-maximal seconds field can push the total past 2^53−1 s.
+        if (!temporal.isValidDuration(result)) {
+            return throwRangeError(realm, "duration out of range after rounding");
+        }
     }
     var buf: [128]u8 = undefined;
-    const s = temporal.temporalDurationToString(d, &buf);
+    const s = temporal.temporalDurationToString(result, &buf, prec.precision);
     const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
     return Value.fromString(js);
 }
@@ -402,7 +443,7 @@ fn durationToJSON(realm: *Realm, this_value: Value, args: []const Value) NativeE
     _ = args;
     const d = try requireDuration(realm, this_value);
     var buf: [128]u8 = undefined;
-    const s = temporal.temporalDurationToString(d, &buf);
+    const s = temporal.temporalDurationToString(d, &buf, .auto);
     const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
     return Value.fromString(js);
 }
@@ -4222,6 +4263,20 @@ fn requireToStringSmallestUnit(realm: *Realm, unit: ?temporal.LargestUnit) Nativ
     const u = unit orelse return;
     if (@intFromEnum(u) < @intFromEnum(temporal.LargestUnit.minute)) {
         return throwRangeError(realm, "smallestUnit must be minute, second, millisecond, microsecond, or nanosecond");
+    }
+}
+
+/// §7.3.x Temporal.Duration.prototype.toString rejects a `smallestUnit`
+/// coarser than `second` (year..hour). Unlike the PlainTime form it does
+/// not accept `minute` — the duration grammar has no minute-only seconds
+/// suppression. The spec reads `smallestUnit` with the `time` unit group
+/// (so year/month/week/day fail the group) then throws for hour/minute;
+/// both paths surface a RangeError, so one coarser-than-second guard
+/// reproduces the observable result. Run after every other option is read.
+fn requireDurationToStringSmallestUnit(realm: *Realm, unit: ?temporal.LargestUnit) NativeError!void {
+    const u = unit orelse return;
+    if (@intFromEnum(u) < @intFromEnum(temporal.LargestUnit.second)) {
+        return throwRangeError(realm, "smallestUnit must be second, millisecond, microsecond, or nanosecond");
     }
 }
 

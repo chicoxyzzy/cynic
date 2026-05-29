@@ -347,7 +347,7 @@ pub fn defaultTemporalLargestUnit(d: DurationRecord) LargestUnit {
 ///   • date part: Y / M / W / D for each non-zero field
 ///   • time part (after `T`): H / M, then a seconds part that
 ///     balances ms/µs/ns into whole seconds + a trimmed fraction.
-pub fn temporalDurationToString(d: DurationRecord, buf: []u8) []const u8 {
+pub fn temporalDurationToString(d: DurationRecord, buf: []u8, precision: Precision) []const u8 {
     var w = Writer{ .buf = buf, .len = 0 };
     const sign = durationSign(d);
     if (sign < 0) w.byte('-');
@@ -400,14 +400,26 @@ pub fn temporalDurationToString(d: DurationRecord, buf: []u8) []const u8 {
         .second, .millisecond, .microsecond, .nanosecond => true,
         else => false,
     };
-    // Emit the seconds part when there's a non-zero seconds value,
-    // OR the largest unit is second-or-smaller (so an all-zero
-    // duration still renders "PT0S").
-    if (seconds_total != 0 or frac_ns != 0 or sub_second_largest) {
+    // Emit the seconds part when there's a non-zero seconds value, the
+    // largest unit is second-or-smaller (so an all-zero duration still
+    // renders "PT0S"), OR an explicit `fractionalSecondDigits` /
+    // `smallestUnit` was given (a fixed precision always shows seconds).
+    const auto_emit = seconds_total != 0 or frac_ns != 0 or sub_second_largest;
+    const emit_seconds = switch (precision) {
+        .auto, .minute => auto_emit,
+        .digits => true,
+    };
+    if (emit_seconds) {
         tw.decimalI128(seconds_total);
-        if (frac_ns != 0) {
-            tw.byte('.');
-            tw.fraction9(@intCast(frac_ns));
+        switch (precision) {
+            .auto, .minute => if (frac_ns != 0) {
+                tw.byte('.');
+                tw.fraction9(@intCast(frac_ns));
+            },
+            .digits => |dd| if (dd > 0) {
+                tw.byte('.');
+                tw.fractionN(@intCast(frac_ns), dd);
+            },
         }
         tw.byte('S');
     }
@@ -467,6 +479,21 @@ const Writer = struct {
         var end: usize = 9;
         while (end > 1 and tmp[end - 1] == '0') end -= 1;
         self.bytes(tmp[0..end]);
+    }
+    /// Emit exactly `digits` (1..9) most-significant digits of the
+    /// nanosecond fraction `ns` (0..999999999), zero-padded, no trailing
+    /// trim — the fixed-width form an explicit `fractionalSecondDigits`
+    /// requests.
+    fn fractionN(self: *Writer, ns: u32, digits: u4) void {
+        var scale: u32 = 100_000_000; // 1e8 — most-significant of nine
+        var rem = ns;
+        var i: u4 = 0;
+        while (i < digits) : (i += 1) {
+            const digit = rem / scale;
+            self.byte('0' + @as(u8, @intCast(digit)));
+            rem -= digit * scale;
+            scale /= 10;
+        }
     }
 };
 
@@ -3594,28 +3621,28 @@ test "isValidDuration: seconds safe-integer balancing limit" {
 
 test "temporalDurationToString: basic forms" {
     var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings("PT0S", temporalDurationToString(.{}, &buf));
-    try testing.expectEqualStrings("P1Y", temporalDurationToString(.{ .years = 1 }, &buf));
-    try testing.expectEqualStrings("-P1Y", temporalDurationToString(.{ .years = -1 }, &buf));
-    try testing.expectEqualStrings("P1Y2M3W4D", temporalDurationToString(.{ .years = 1, .months = 2, .weeks = 3, .days = 4 }, &buf));
-    try testing.expectEqualStrings("PT5H", temporalDurationToString(.{ .hours = 5 }, &buf));
-    try testing.expectEqualStrings("PT6M", temporalDurationToString(.{ .minutes = 6 }, &buf));
-    try testing.expectEqualStrings("PT7S", temporalDurationToString(.{ .seconds = 7 }, &buf));
+    try testing.expectEqualStrings("PT0S", temporalDurationToString(.{}, &buf, .auto));
+    try testing.expectEqualStrings("P1Y", temporalDurationToString(.{ .years = 1 }, &buf, .auto));
+    try testing.expectEqualStrings("-P1Y", temporalDurationToString(.{ .years = -1 }, &buf, .auto));
+    try testing.expectEqualStrings("P1Y2M3W4D", temporalDurationToString(.{ .years = 1, .months = 2, .weeks = 3, .days = 4 }, &buf, .auto));
+    try testing.expectEqualStrings("PT5H", temporalDurationToString(.{ .hours = 5 }, &buf, .auto));
+    try testing.expectEqualStrings("PT6M", temporalDurationToString(.{ .minutes = 6 }, &buf, .auto));
+    try testing.expectEqualStrings("PT7S", temporalDurationToString(.{ .seconds = 7 }, &buf, .auto));
 }
 
 test "temporalDurationToString: sub-second balancing" {
     var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings("PT0.008S", temporalDurationToString(.{ .milliseconds = 8 }, &buf));
-    try testing.expectEqualStrings("PT0.000009S", temporalDurationToString(.{ .microseconds = 9 }, &buf));
-    try testing.expectEqualStrings("PT0.000000001S", temporalDurationToString(.{ .nanoseconds = 1 }, &buf));
-    try testing.expectEqualStrings("PT4.003002001S", temporalDurationToString(.{ .seconds = 4, .milliseconds = 3, .microseconds = 2, .nanoseconds = 1 }, &buf));
+    try testing.expectEqualStrings("PT0.008S", temporalDurationToString(.{ .milliseconds = 8 }, &buf, .auto));
+    try testing.expectEqualStrings("PT0.000009S", temporalDurationToString(.{ .microseconds = 9 }, &buf, .auto));
+    try testing.expectEqualStrings("PT0.000000001S", temporalDurationToString(.{ .nanoseconds = 1 }, &buf, .auto));
+    try testing.expectEqualStrings("PT4.003002001S", temporalDurationToString(.{ .seconds = 4, .milliseconds = 3, .microseconds = 2, .nanoseconds = 1 }, &buf, .auto));
     // 999 ms + 999999 µs + 999999999 ns balances to 2.998998999 s.
-    try testing.expectEqualStrings("PT2.998998999S", temporalDurationToString(.{ .milliseconds = 999, .microseconds = 999999, .nanoseconds = 999999999 }, &buf));
-    try testing.expectEqualStrings("-PT2.998998999S", temporalDurationToString(.{ .milliseconds = -999, .microseconds = -999999, .nanoseconds = -999999999 }, &buf));
+    try testing.expectEqualStrings("PT2.998998999S", temporalDurationToString(.{ .milliseconds = 999, .microseconds = 999999, .nanoseconds = 999999999 }, &buf, .auto));
+    try testing.expectEqualStrings("-PT2.998998999S", temporalDurationToString(.{ .milliseconds = -999, .microseconds = -999999, .nanoseconds = -999999999 }, &buf, .auto));
     // All fields large.
     try testing.expectEqualStrings(
         "P1234Y2345M3456W4567DT5678H6789M7890.890901123S",
-        temporalDurationToString(.{ .years = 1234, .months = 2345, .weeks = 3456, .days = 4567, .hours = 5678, .minutes = 6789, .seconds = 7890, .milliseconds = 890, .microseconds = 901, .nanoseconds = 123 }, &buf),
+        temporalDurationToString(.{ .years = 1234, .months = 2345, .weeks = 3456, .days = 4567, .hours = 5678, .minutes = 6789, .seconds = 7890, .milliseconds = 890, .microseconds = 901, .nanoseconds = 123 }, &buf, .auto),
     );
 }
 
