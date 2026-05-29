@@ -1262,6 +1262,50 @@ pub fn parseTimeZoneIdentifier(s: []const u8) ?TimeZone {
     return .{ .offset_minutes = if (neg) -total else total };
 }
 
+/// §11.x ParseTemporalTimeZoneString — the time-zone *argument* form, broader
+/// than `parseTimeZoneIdentifier`: a bare identifier ("UTC", "+05:30"), or a
+/// full ISO date-time string from which the zone is extracted. Precedence: a
+/// `[...]` time-zone annotation wins; else a `Z` designator is UTC; else a
+/// numeric offset is the offset zone; else (a bare date-time with no zone
+/// determinant) it is rejected. The zone determinant must be minute-precise —
+/// a `±HH:MM:SS[.fff]` offset is a sub-minute *precision* and invalid as a
+/// time zone even when its value lands on a whole minute (`-07:00:00` throws),
+/// so the candidate offset slice is re-validated through the strict
+/// identifier parser rather than checked by value.
+pub fn parseTimeZoneString(s: []const u8) ?TimeZone {
+    // Bare identifier fast path ("UTC", "+05:30").
+    if (parseTimeZoneIdentifier(s)) |tz| return tz;
+
+    var c = Cursor{ .s = s };
+    _ = parseIsoDate(&c) catch return null;
+    var saw_z = false;
+    var offset_slice: ?[]const u8 = null;
+    if (c.eatAny("Tt ")) {
+        _ = parseIsoTime(&c) catch return null;
+        if (c.eatAny("Zz")) {
+            saw_z = true;
+        } else if (c.peek()) |ch| {
+            if (ch == '+' or ch == '-') {
+                const off_start = c.i;
+                _ = parseUtcOffsetNs(&c) catch return null;
+                offset_slice = c.s[off_start..c.i];
+            }
+        }
+    }
+    var tz_body: ?[]const u8 = null;
+    _ = consumeAnnotationsImpl(&c, &tz_body) catch return null;
+    if (!c.done()) return null;
+
+    // A bracket annotation wins outright over Z / the time offset.
+    if (tz_body) |body| return parseTimeZoneIdentifier(body);
+    if (saw_z) return .utc;
+    // The offset slice is the zone only when minute-precise — feed it back
+    // through the strict identifier parser so `-07:00:00` (seconds field
+    // present) is rejected the same as garbage.
+    if (offset_slice) |slice| return parseTimeZoneIdentifier(slice);
+    return null; // bare date-time, no zone determinant
+}
+
 /// The canonical time-zone identifier string for `tz`: "UTC", or an
 /// offset identifier in the always-extended `±HH:MM` form (the form
 /// `get Temporal.ZonedDateTime.prototype.timeZoneId` returns). Writes into
@@ -1282,6 +1326,142 @@ pub fn timeZoneIdentifierString(tz: TimeZone, buf: []u8) []const u8 {
             return w.buf[0..w.len];
         },
     }
+}
+
+// ── §6.5.x ZonedDateTime epoch interpretation + formatting ────────────────
+
+/// How a parsed (or property-bag) wall-clock + offset combine into an
+/// exact epoch instant. `wall` — no offset was supplied, so the zone
+/// computes the instant. `exact` — a `Z` designator, so the wall time is
+/// already UTC. `option` — an explicit numeric offset whose treatment is
+/// governed by the `offset` resolution option.
+pub const OffsetBehaviour = enum { wall, exact, option };
+
+/// §13.x The four `offset` resolution options (default `reject`).
+pub const OffsetOption = enum { prefer, use, ignore, reject };
+
+/// §13.x The `timeZoneName` display option (default `auto`).
+pub const TimeZoneNameDisplay = enum { auto, never, critical };
+
+/// Options bag for `zonedDateTimeToString` — what the four display knobs
+/// (`calendarName`, `timeZoneName`, `offset`, precision) resolve to.
+pub const ZonedToStringOptions = struct {
+    calendar: CalendarDisplay = .auto,
+    time_zone_name: TimeZoneNameDisplay = .auto,
+    show_offset: bool = true,
+    /// null ⇒ "auto" (trim trailing zeros, omit if integral); 0..9 ⇒
+    /// exactly that many fractional digits (truncated).
+    fractional_digits: ?u4 = null,
+};
+
+/// §6.5.x InterpretISODateTimeOffset — fold a wall-clock ISO date-time and
+/// an optional offset into epoch nanoseconds for `timeZone`. Returns
+/// `error.OffsetMismatch` when `behaviour` is `option`, the option is
+/// `reject`, and the supplied offset disagrees with the zone; returns
+/// `error.Invalid` when the resulting instant falls outside the
+/// representable range. For a fixed-offset zone there is exactly one
+/// candidate instant (no DST gaps/overlaps), so `disambiguation` never
+/// applies.
+pub fn interpretISODateTimeOffset(
+    dt: PlainDateTimeRecord,
+    behaviour: OffsetBehaviour,
+    offset_ns: i128,
+    tz: TimeZone,
+    offset_option: OffsetOption,
+) error{ Invalid, OffsetMismatch }!i128 {
+    // Wall clock, or the supplied offset is explicitly ignored: the zone
+    // alone places the instant.
+    if (behaviour == .wall or offset_option == .ignore) {
+        return getEpochNanosecondsFor(tz, dt) orelse error.Invalid;
+    }
+    // Exact UTC (`Z`), or the supplied offset is taken verbatim (`use`).
+    if (behaviour == .exact or offset_option == .use) {
+        const e = isoDateTimeToEpochNs(dt) - offset_ns;
+        if (!isValidEpochNanoseconds(e)) return error.Invalid;
+        return e;
+    }
+    // behaviour == option, offset_option is prefer or reject.
+    const candidate = getEpochNanosecondsFor(tz, dt) orelse return error.Invalid;
+    const cand_off: i128 = getOffsetNanosecondsFor(tz, candidate);
+    if (cand_off == offset_ns) return candidate;
+    if (offset_option == .reject) return error.OffsetMismatch;
+    return candidate; // prefer — fall back to the zone's own offset
+}
+
+/// §6.5.x TemporalZonedDateTimeToString — `<localISO><±HH:MM>[<tzid>]`
+/// plus an optional `[u-ca=…]` calendar annotation. The local wall-clock
+/// fields come from `GetISODateTimeFor`; the offset is the zone's offset
+/// at the instant (`+00:00` for the UTC zone, distinct from its `[UTC]`
+/// annotation). `buf` must hold ≥ 80 bytes.
+pub fn zonedDateTimeToString(rec: ZonedDateTimeRecord, buf: []u8, opts: ZonedToStringOptions) []const u8 {
+    const local = getISODateTimeFor(rec.time_zone, rec.epoch_ns);
+    var w = Writer{ .buf = buf, .len = 0 };
+    writeIsoYear(&w, local.iso_year);
+    w.byte('-');
+    w.pad2(local.iso_month);
+    w.byte('-');
+    w.pad2(local.iso_day);
+    w.byte('T');
+    w.pad2(local.hour);
+    w.byte(':');
+    w.pad2(local.minute);
+    w.byte(':');
+    w.pad2(local.second);
+    const sub_ns: u32 = local.millisecond * 1_000_000 + local.microsecond * 1_000 + local.nanosecond;
+    writeFractionDigits(&w, sub_ns, opts.fractional_digits);
+    if (opts.show_offset) {
+        const off_min: i32 = @intCast(@divTrunc(getOffsetNanosecondsFor(rec.time_zone, rec.epoch_ns), 60_000_000_000));
+        writeOffsetMinutes(&w, off_min);
+    }
+    switch (opts.time_zone_name) {
+        .never => {},
+        .auto, .critical => {
+            var tzbuf: [16]u8 = undefined;
+            const tzid = timeZoneIdentifierString(rec.time_zone, &tzbuf);
+            w.byte('[');
+            if (opts.time_zone_name == .critical) w.byte('!');
+            w.bytes(tzid);
+            w.byte(']');
+        },
+    }
+    switch (opts.calendar) {
+        .auto, .never => {},
+        .always => w.bytes("[u-ca=iso8601]"),
+        .critical => w.bytes("[!u-ca=iso8601]"),
+    }
+    return w.buf[0..w.len];
+}
+
+/// Write a `±HH:MM` numeric UTC offset (whole-minute precision).
+fn writeOffsetMinutes(w: *Writer, off_min: i32) void {
+    w.byte(if (off_min < 0) '-' else '+');
+    const abs: u32 = @intCast(if (off_min < 0) -off_min else off_min);
+    w.pad2(abs / 60);
+    w.byte(':');
+    w.pad2(abs % 60);
+}
+
+/// Write the sub-second fraction. `null` digits ⇒ the trimmed "auto"
+/// form (nothing when `sub_ns == 0`); an explicit `n` ⇒ a leading `.`
+/// then exactly `n` truncated digits (and nothing at all when `n == 0`).
+fn writeFractionDigits(w: *Writer, sub_ns: u32, digits: ?u4) void {
+    if (digits) |d| {
+        if (d == 0) return;
+        w.byte('.');
+        var scale: u32 = 100_000_000; // 1e8 — most-significant of nine
+        var rem = sub_ns;
+        var i: u4 = 0;
+        while (i < d) : (i += 1) {
+            const digit = rem / scale;
+            w.byte('0' + @as(u8, @intCast(digit)));
+            rem -= digit * scale;
+            scale /= 10;
+        }
+        return;
+    }
+    if (sub_ns == 0) return;
+    w.byte('.');
+    w.fraction9(sub_ns);
 }
 
 // ── §8.x TemporalInstantToString (UTC, precision = "auto") ────────────────
@@ -1565,6 +1745,14 @@ fn parseFractionNs(c: *Cursor) error{Invalid}!u32 {
 /// PlainDate) validate it against the supported calendars, while
 /// calendar-free callers (e.g. Instant) discard it.
 fn consumeAnnotations(c: *Cursor) error{Invalid}!?[]const u8 {
+    var tz_unused: ?[]const u8 = null;
+    return consumeAnnotationsImpl(c, &tz_unused);
+}
+
+/// As `consumeAnnotations`, but also writes the time-zone annotation body
+/// (an identifier or numeric offset, sans brackets) to `tz_out` when one
+/// is present — the ZonedDateTime parser needs to keep it.
+fn consumeAnnotationsImpl(c: *Cursor, tz_out: *?[]const u8) error{Invalid}!?[]const u8 {
     var saw_tz = false;
     var calendars: usize = 0;
     var critical_calendar = false;
@@ -1608,6 +1796,7 @@ fn consumeAnnotations(c: *Cursor) error{Invalid}!?[]const u8 {
             if (saw_tz or !first) return error.Invalid;
             if (!isValidTimeZoneAnnotation(body)) return error.Invalid;
             saw_tz = true;
+            tz_out.* = body;
         }
         first = false;
     }
@@ -2409,6 +2598,80 @@ pub fn parseTemporalDateTimeString(input: []const u8) error{Invalid}!PlainDateTi
     };
     if (!isoDateTimeWithinLimits(rec)) return error.Invalid;
     return rec;
+}
+
+/// The pieces a ZonedDateTime string yields: the wall-clock ISO date-time,
+/// how its offset should be interpreted, the parsed offset (signed ns,
+/// meaningful only when `behaviour == .option`), and the bracketed time
+/// zone. Folding these into an epoch is `interpretISODateTimeOffset`'s job
+/// (it needs the `offset` resolution option, which lives JS-side).
+pub const ParsedZonedDateTime = struct {
+    date_time: PlainDateTimeRecord,
+    behaviour: OffsetBehaviour,
+    offset_ns: i128,
+    time_zone: TimeZone,
+};
+
+/// §6.5.x ParseTemporalZonedDateTimeString — an ISO / RFC 9557 date-time
+/// with a **required** `[time-zone]` annotation. The time is optional (a
+/// bare date is midnight); a `Z`/`z` designator marks the wall time as
+/// exact UTC, a numeric offset is resolved per the caller's `offset`
+/// option, and absence of both means the zone alone places the instant.
+/// A named IANA zone is syntactically valid but unsupported in the
+/// default build, so it is rejected here (the caller throws RangeError) —
+/// a future Intl build resolves it through `getOffsetNanosecondsFor`. A
+/// `[u-ca=…]` annotation must name the ISO calendar.
+pub fn parseTemporalZonedDateTimeString(input: []const u8) error{Invalid}!ParsedZonedDateTime {
+    var c = Cursor{ .s = input };
+    const date = try parseIsoDate(&c);
+    var time = ParsedTime{ .hour = 0, .minute = 0, .second = 0, .sub_ns = 0 };
+    var behaviour: OffsetBehaviour = .wall;
+    var offset_ns: i128 = 0;
+    if (c.eatAny("Tt ")) {
+        time = try parseIsoTime(&c);
+        if (c.eatAny("Zz")) {
+            behaviour = .exact;
+        } else if (c.peek()) |ch| {
+            if (ch == '+' or ch == '-') {
+                offset_ns = try parseUtcOffsetNs(&c);
+                behaviour = .option;
+            }
+        }
+    }
+    var tz_body: ?[]const u8 = null;
+    const calendar = try consumeAnnotationsImpl(&c, &tz_body);
+    if (!c.done()) return error.Invalid;
+    const body = tz_body orelse return error.Invalid; // the annotation is required
+    const tz = parseTimeZoneIdentifier(body) orelse return error.Invalid;
+    if (calendar) |cal| {
+        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
+    }
+    const rec = PlainDateTimeRecord{
+        .iso_year = @intCast(date.year),
+        .iso_month = @intCast(date.month),
+        .iso_day = @intCast(date.day),
+        .hour = time.hour,
+        .minute = time.minute,
+        .second = time.second,
+        .millisecond = time.sub_ns / 1_000_000,
+        .microsecond = (time.sub_ns / 1_000) % 1_000,
+        .nanosecond = time.sub_ns % 1_000,
+    };
+    if (!isoDateTimeWithinLimits(rec)) return error.Invalid;
+    return .{ .date_time = rec, .behaviour = behaviour, .offset_ns = offset_ns, .time_zone = tz };
+}
+
+/// Parse a standalone numeric UTC-offset string (`±HH`, `±HH:MM`,
+/// `±HH:MM:SS[.fraction]`, or the colon-free forms) — the value of a
+/// property bag's `offset` field — into signed nanoseconds. Returns null
+/// on any malformed input or trailing garbage.
+pub fn parseOffsetString(input: []const u8) ?i128 {
+    var c = Cursor{ .s = input };
+    const ch = c.peek() orelse return null;
+    if (ch != '+' and ch != '-') return null;
+    const ns = parseUtcOffsetNs(&c) catch return null;
+    if (!c.done()) return null;
+    return ns;
 }
 
 // ── §9 Temporal.PlainYearMonth abstract operations (pure) ──────────────────
@@ -3579,6 +3842,31 @@ test "parseTimeZoneIdentifier: rejects named zones, sub-minute, and garbage" {
     try testing.expect(parseTimeZoneIdentifier("+1:00") == null); // single-digit hour
 }
 
+test "parseTimeZoneString: bare identifier and zone extracted from a date-time string" {
+    // Bare identifiers still work (the fast path).
+    try testing.expect(std.meta.activeTag(parseTimeZoneString("UTC").?) == .utc);
+    try testing.expectEqual(@as(i32, 330), parseTimeZoneString("+05:30").?.offset_minutes);
+
+    // Annotation wins over the time portion's Z / offset.
+    try testing.expect(std.meta.activeTag(parseTimeZoneString("2021-08-19T17:30[UTC]").?) == .utc);
+    try testing.expect(std.meta.activeTag(parseTimeZoneString("2021-08-19T17:30-07:00[UTC]").?) == .utc);
+    try testing.expectEqual(@as(i32, 106), parseTimeZoneString("2021-08-19T17:30:45.123456789-12:12[+01:46]").?.offset_minutes);
+
+    // No annotation: Z ⇒ UTC, a minute-precise offset ⇒ that offset.
+    try testing.expect(std.meta.activeTag(parseTimeZoneString("2021-08-19T17:30Z").?) == .utc);
+    try testing.expectEqual(@as(i32, -420), parseTimeZoneString("2021-08-19T17:30-07:00").?.offset_minutes);
+
+    // A bare date-time has no zone determinant.
+    try testing.expect(parseTimeZoneString("2021-08-19T17:30") == null);
+    // A sub-minute-*precision* offset (seconds field present, even ":00") is
+    // not a valid zone, regardless of value.
+    try testing.expect(parseTimeZoneString("2021-08-19T17:30-07:00:00") == null);
+    try testing.expect(parseTimeZoneString("2021-08-19T17:30-07:00:01") == null);
+    try testing.expect(parseTimeZoneString("2021-08-19T17:30-07:00:00.000000000") == null);
+    // A leap-second / sub-minute in the annotation name is invalid.
+    try testing.expect(parseTimeZoneString("2021-08-19T17:30:45+23:59[+23:59:60]") == null);
+}
+
 test "timeZoneIdentifierString: UTC named vs extended ±HH:MM offset" {
     var buf: [16]u8 = undefined;
     try testing.expectEqualStrings("UTC", timeZoneIdentifierString(.utc, &buf));
@@ -3663,4 +3951,122 @@ test "getISODateTimeFor/getEpochNanosecondsFor: apply the constant zone offset" 
         // Wall clock back to the source instant: getEpochNanosecondsFor inverts the shift.
         try testing.expectEqual(midnight_2020, getEpochNanosecondsFor(.{ .offset_minutes = -480 }, dt).?);
     }
+}
+
+test "interpretISODateTimeOffset: behaviour + offset option matrix" {
+    const dt = PlainDateTimeRecord{
+        .iso_year = 2020,
+        .iso_month = 1,
+        .iso_day = 1,
+        .hour = 0,
+        .minute = 0,
+        .second = 0,
+        .millisecond = 0,
+        .microsecond = 0,
+        .nanosecond = 0,
+    };
+    const w: i128 = 1_577_836_800_000_000_000; // 2020-01-01T00:00:00 as if UTC
+    const o: i128 = 19_800_000_000_000; // +05:30
+    const plus530 = TimeZone{ .offset_minutes = 330 };
+
+    // wall — the zone places the instant (offset arg irrelevant).
+    try testing.expectEqual(w, try interpretISODateTimeOffset(dt, .wall, 0, .utc, .reject));
+    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .wall, 0, plus530, .reject));
+    // exact (`Z`) — wall time is UTC, shifted by the parsed offset (0 here).
+    try testing.expectEqual(w, try interpretISODateTimeOffset(dt, .exact, 0, plus530, .reject));
+    // option + reject — must match the zone's offset, else OffsetMismatch.
+    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .option, o, plus530, .reject));
+    try testing.expectError(error.OffsetMismatch, interpretISODateTimeOffset(dt, .option, 0, plus530, .reject));
+    // option + use — take the supplied offset verbatim.
+    try testing.expectEqual(w, try interpretISODateTimeOffset(dt, .option, 0, plus530, .use));
+    // option + ignore — discard the supplied offset, defer to the zone.
+    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .option, 0, plus530, .ignore));
+    // option + prefer — mismatch falls back to the zone offset (no throw).
+    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .option, 0, plus530, .prefer));
+}
+
+test "parseTemporalZonedDateTimeString: offset / Z / bare-date forms" {
+    {
+        const p = try parseTemporalZonedDateTimeString("2020-01-01T00:00:00+05:30[+05:30]");
+        try testing.expectEqual(OffsetBehaviour.option, p.behaviour);
+        try testing.expectEqual(@as(i128, 19_800_000_000_000), p.offset_ns);
+        switch (p.time_zone) {
+            .offset_minutes => |m| try testing.expectEqual(@as(i32, 330), m),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    {
+        const p = try parseTemporalZonedDateTimeString("2020-01-01T00:00:00Z[UTC]");
+        try testing.expectEqual(OffsetBehaviour.exact, p.behaviour);
+        try testing.expect(std.meta.activeTag(p.time_zone) == .utc);
+    }
+    {
+        // Bare date → midnight, no offset ⇒ wall behaviour.
+        const p = try parseTemporalZonedDateTimeString("2020-01-01[+05:30]");
+        try testing.expectEqual(OffsetBehaviour.wall, p.behaviour);
+        try testing.expectEqual(@as(u32, 0), p.date_time.hour);
+    }
+    // ISO calendar annotation is accepted.
+    _ = try parseTemporalZonedDateTimeString("2020-01-01T00:00:00+05:30[+05:30][u-ca=iso8601]");
+}
+
+test "parseTemporalZonedDateTimeString: rejects missing annotation / named zone / non-ISO calendar" {
+    try testing.expectError(error.Invalid, parseTemporalZonedDateTimeString("2020-01-01T00:00:00"));
+    try testing.expectError(error.Invalid, parseTemporalZonedDateTimeString("2020-01-01T00:00:00[America/New_York]"));
+    try testing.expectError(error.Invalid, parseTemporalZonedDateTimeString("2020-01-01T00:00:00+05:30[+05:30][u-ca=hebrew]"));
+}
+
+test "parseOffsetString: numeric offset field, signed nanoseconds" {
+    try testing.expectEqual(@as(?i128, 19_800_000_000_000), parseOffsetString("+05:30"));
+    try testing.expectEqual(@as(?i128, -28_800_000_000_000), parseOffsetString("-08:00"));
+    try testing.expectEqual(@as(?i128, 0), parseOffsetString("+00:00"));
+    try testing.expectEqual(@as(?i128, null), parseOffsetString("05:30")); // no sign
+    try testing.expectEqual(@as(?i128, null), parseOffsetString("+05:30x")); // trailing junk
+}
+
+test "zonedDateTimeToString: local fields + offset + zone annotation" {
+    var buf: [80]u8 = undefined;
+    // UTC zone renders its offset as +00:00, annotated [UTC].
+    try testing.expectEqualStrings(
+        "1970-01-01T00:00:00+00:00[UTC]",
+        zonedDateTimeToString(.{ .epoch_ns = 0, .time_zone = .utc }, &buf, .{}),
+    );
+    // +05:30 advances the wall clock and shows the matching offset.
+    try testing.expectEqualStrings(
+        "1970-01-01T05:30:00+05:30[+05:30]",
+        zonedDateTimeToString(.{ .epoch_ns = 0, .time_zone = .{ .offset_minutes = 330 } }, &buf, .{}),
+    );
+    // offset:never + timeZoneName:never strips both annotations.
+    try testing.expectEqualStrings(
+        "1970-01-01T05:30:00",
+        zonedDateTimeToString(.{ .epoch_ns = 0, .time_zone = .{ .offset_minutes = 330 } }, &buf, .{
+            .show_offset = false,
+            .time_zone_name = .never,
+        }),
+    );
+    // calendarName:always appends the ISO calendar annotation.
+    try testing.expectEqualStrings(
+        "1970-01-01T00:00:00+00:00[UTC][u-ca=iso8601]",
+        zonedDateTimeToString(.{ .epoch_ns = 0, .time_zone = .utc }, &buf, .{ .calendar = .always }),
+    );
+}
+
+test "zonedDateTimeToString: fractional-second precision" {
+    var buf: [80]u8 = undefined;
+    const rec = ZonedDateTimeRecord{ .epoch_ns = 789_000_000, .time_zone = .utc }; // 0.789s
+    // auto trims trailing zeros.
+    try testing.expectEqualStrings(
+        "1970-01-01T00:00:00.789+00:00[UTC]",
+        zonedDateTimeToString(rec, &buf, .{}),
+    );
+    // explicit 2 digits truncates.
+    try testing.expectEqualStrings(
+        "1970-01-01T00:00:00.78+00:00[UTC]",
+        zonedDateTimeToString(rec, &buf, .{ .fractional_digits = 2 }),
+    );
+    // 0 digits omits the fraction entirely.
+    try testing.expectEqualStrings(
+        "1970-01-01T00:00:00+00:00[UTC]",
+        zonedDateTimeToString(rec, &buf, .{ .fractional_digits = 0 }),
+    );
 }

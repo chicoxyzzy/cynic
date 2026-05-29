@@ -2753,10 +2753,22 @@ fn plainDateTimeToPlainTime(realm: *Realm, this_value: Value, args: []const Valu
     const rec = try requirePlainDateTime(realm, this_value);
     return createTemporalTime(realm, rec.time());
 }
+/// §5.3.x Temporal.PlainDateTime.prototype.toZonedDateTime ( timeZone [,
+/// options] ). The receiver's wall-clock date-time is interpreted in the
+/// target zone (no offset is supplied, so the zone alone places the
+/// instant — `disambiguation` is validated but never bites a fixed-offset
+/// zone).
 fn plainDateTimeToZonedDateTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
-    _ = try requirePlainDateTime(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainDateTime.prototype.toZonedDateTime is not yet implemented");
+    const rec = try requirePlainDateTime(realm, this_value);
+    const tz_arg = argOr(args, 0, Value.undefined_);
+    if (!tz_arg.isString()) return throwTypeError(realm, "time zone must be a string");
+    const tz_s: *JSString = @ptrCast(@alignCast(tz_arg.asString()));
+    const tz = temporal.parseTimeZoneString(tz_s.flatBytes()) orelse
+        return throwRangeError(realm, "invalid time zone identifier");
+    try getDisambiguationOption(realm, argOr(args, 1, Value.undefined_));
+    const epoch = temporal.getEpochNanosecondsFor(tz, rec) orelse
+        return throwRangeError(realm, "ZonedDateTime is out of range");
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = tz });
 }
 
 // ── §9 Temporal.PlainYearMonth (ISO calendar) ──────────────────────────────
@@ -3630,6 +3642,20 @@ fn installZonedDateTime(realm: *Realm, ns: *JSObject) !void {
     try installNativeGetter(realm, proto, "era", zonedDateTimeEra);
     try installNativeGetter(realm, proto, "eraYear", zonedDateTimeEraYear);
 
+    // §6.3 conversions, serialization, and comparison.
+    try installNativeMethodOnProto(realm, proto, "equals", zonedDateTimeEquals, 1);
+    try installNativeMethodOnProto(realm, proto, "toString", zonedDateTimeToString, 0);
+    try installNativeMethodOnProto(realm, proto, "toJSON", zonedDateTimeToJSON, 0);
+    try installNativeMethodOnProto(realm, proto, "toLocaleString", zonedDateTimeToLocaleString, 0);
+    try installNativeMethodOnProto(realm, proto, "valueOf", zonedDateTimeValueOf, 0);
+    try installNativeMethodOnProto(realm, proto, "toInstant", zonedDateTimeToInstant, 0);
+    try installNativeMethodOnProto(realm, proto, "toPlainDate", zonedDateTimeToPlainDate, 0);
+    try installNativeMethodOnProto(realm, proto, "toPlainTime", zonedDateTimeToPlainTime, 0);
+    try installNativeMethodOnProto(realm, proto, "toPlainDateTime", zonedDateTimeToPlainDateTime, 0);
+
+    try installNativeMethod(realm, fn_obj, "from", zonedDateTimeFrom, 1);
+    try installNativeMethod(realm, fn_obj, "compare", zonedDateTimeCompare, 2);
+
     realm.intrinsics.temporal_zoned_date_time_constructor = fn_obj;
     realm.intrinsics.temporal_zoned_date_time_prototype = proto;
     try setNonEnumerable(ns, realm.allocator, "ZonedDateTime", heap_mod.taggedFunction(fn_obj));
@@ -3652,7 +3678,7 @@ fn zonedDateTimeConstructor(realm: *Realm, this_value: Value, args: []const Valu
     const tz_arg = argOr(args, 1, Value.undefined_);
     if (!tz_arg.isString()) return throwTypeError(realm, "time zone must be a string");
     const tz_str: *JSString = @ptrCast(@alignCast(tz_arg.asString()));
-    const tz = temporal.parseTimeZoneIdentifier(tz_str.flatBytes()) orelse
+    const tz = temporal.parseTimeZoneString(tz_str.flatBytes()) orelse
         return throwRangeError(realm, "invalid time zone identifier");
     // step 7-9 — calendar defaults to iso8601; only the ISO calendar ships.
     try requireISOCalendar(realm, argOr(args, 2, Value.undefined_));
@@ -3848,4 +3874,270 @@ fn zonedDateTimeEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!V
     _ = a;
     _ = try requireZonedDateTime(realm, t);
     return Value.undefined_;
+}
+
+// ── §6 option readers + conversions ────────────────────────────────────────
+
+/// §13.x GetTemporalDisambiguationOption — read + validate `disambiguation`
+/// ("compatible" / "earlier" / "later" / "reject"). Cynic ships fixed-offset
+/// zones only, so there is never a DST gap/overlap and the resolved value is
+/// never consulted; we still read and range-check it for the observable
+/// side effect (a getter on the options bag) and the RangeError on a bad
+/// value that fixtures assert.
+fn getDisambiguationOption(realm: *Realm, options: Value) NativeError!void {
+    const obj = (try getOptionsObject(realm, options)) orelse return;
+    const v = try getPropertyChain(realm, obj, "disambiguation");
+    if (v.isUndefined()) return;
+    const s = try stringifyArg(realm, v);
+    const b = s.flatBytes();
+    if (std.mem.eql(u8, b, "compatible") or std.mem.eql(u8, b, "earlier") or
+        std.mem.eql(u8, b, "later") or std.mem.eql(u8, b, "reject")) return;
+    return throwRangeError(realm, "disambiguation must be compatible / earlier / later / reject");
+}
+
+/// §13.x GetTemporalOffsetOption — read + validate the `offset` resolution
+/// option ("prefer" / "use" / "ignore" / "reject"), falling back to
+/// `fallback` when absent.
+fn getOffsetOption(realm: *Realm, options: Value, fallback: temporal.OffsetOption) NativeError!temporal.OffsetOption {
+    const obj = (try getOptionsObject(realm, options)) orelse return fallback;
+    const v = try getPropertyChain(realm, obj, "offset");
+    if (v.isUndefined()) return fallback;
+    const s = try stringifyArg(realm, v);
+    const b = s.flatBytes();
+    if (std.mem.eql(u8, b, "prefer")) return .prefer;
+    if (std.mem.eql(u8, b, "use")) return .use;
+    if (std.mem.eql(u8, b, "ignore")) return .ignore;
+    if (std.mem.eql(u8, b, "reject")) return .reject;
+    return throwRangeError(realm, "offset must be prefer / use / ignore / reject");
+}
+
+/// §13.x GetTemporalTimeZoneNameOption — `timeZoneName` for toString
+/// ("auto" / "never" / "critical"; default "auto").
+fn getTimeZoneNameOption(realm: *Realm, options: Value) NativeError!temporal.TimeZoneNameDisplay {
+    const obj = (try getOptionsObject(realm, options)) orelse return .auto;
+    const v = try getPropertyChain(realm, obj, "timeZoneName");
+    if (v.isUndefined()) return .auto;
+    const s = try stringifyArg(realm, v);
+    const b = s.flatBytes();
+    if (std.mem.eql(u8, b, "auto")) return .auto;
+    if (std.mem.eql(u8, b, "never")) return .never;
+    if (std.mem.eql(u8, b, "critical")) return .critical;
+    return throwRangeError(realm, "timeZoneName must be auto / never / critical");
+}
+
+/// §13.x GetTemporalShowOffsetOption — the toString `offset` knob
+/// ("auto" ⇒ show, "never" ⇒ hide; default "auto"). Distinct option space
+/// from `getOffsetOption`, which reads the same key for the `from` family.
+fn getShowOffsetOption(realm: *Realm, options: Value) NativeError!bool {
+    const obj = (try getOptionsObject(realm, options)) orelse return true;
+    const v = try getPropertyChain(realm, obj, "offset");
+    if (v.isUndefined()) return true;
+    const s = try stringifyArg(realm, v);
+    const b = s.flatBytes();
+    if (std.mem.eql(u8, b, "auto")) return true;
+    if (std.mem.eql(u8, b, "never")) return false;
+    return throwRangeError(realm, "offset must be auto / never");
+}
+
+/// §13.x GetTemporalFractionalSecondDigitsOption — null ⇒ "auto"; otherwise
+/// an integer 0..9 (truncated). A non-Number value must stringify to "auto".
+fn getFractionalSecondDigitsOption(realm: *Realm, options: Value) NativeError!?u4 {
+    const obj = (try getOptionsObject(realm, options)) orelse return null;
+    const v = try getPropertyChain(realm, obj, "fractionalSecondDigits");
+    if (v.isUndefined()) return null;
+    if (!v.isInt32() and !v.isDouble()) {
+        const s = try stringifyArg(realm, v);
+        if (std.mem.eql(u8, s.flatBytes(), "auto")) return null;
+        return throwRangeError(realm, "fractionalSecondDigits must be 'auto' or an integer 0..9");
+    }
+    const n = try toIntegerWithTruncation(realm, v);
+    if (!(n >= 0 and n <= 9)) return throwRangeError(realm, "fractionalSecondDigits must be 0..9");
+    return @as(u4, @intFromFloat(n));
+}
+
+/// §11.x TimeZoneEquals — for the offset-only scope two zones are equal when
+/// both are the named UTC zone or both carry the same whole-minute offset.
+fn timeZoneEquals(a: temporal.TimeZone, b: temporal.TimeZone) bool {
+    return switch (a) {
+        .utc => std.meta.activeTag(b) == .utc,
+        .offset_minutes => |am| switch (b) {
+            .offset_minutes => |bm| am == bm,
+            else => false,
+        },
+    };
+}
+
+/// §6.5.x ToTemporalZonedDateTime, property-bag branch — read `timeZone`
+/// (required) and `offset` (optional) off the item, fold the calendar
+/// date/time fields through the shared reader, then resolve to an instant
+/// via InterpretISODateTimeOffset. `toISODateTimeFields` consumes the
+/// `overflow` option itself, so it is not re-read here.
+fn toZonedDateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!ZonedDateTimeRecord {
+    const tz_v = try getPropertyChain(realm, obj, "timeZone");
+    if (tz_v.isUndefined()) return throwTypeError(realm, "ZonedDateTime-like is missing 'timeZone'");
+    if (!tz_v.isString()) return throwTypeError(realm, "time zone must be a string");
+    const tz_s: *JSString = @ptrCast(@alignCast(tz_v.asString()));
+    const tz = temporal.parseTimeZoneString(tz_s.flatBytes()) orelse
+        return throwRangeError(realm, "invalid time zone identifier");
+
+    const off_v = try getPropertyChain(realm, obj, "offset");
+    var behaviour: temporal.OffsetBehaviour = .wall;
+    var offset_ns: i128 = 0;
+    if (!off_v.isUndefined()) {
+        if (!off_v.isString()) return throwTypeError(realm, "offset must be a string");
+        const off_s: *JSString = @ptrCast(@alignCast(off_v.asString()));
+        offset_ns = temporal.parseOffsetString(off_s.flatBytes()) orelse
+            return throwRangeError(realm, "invalid offset string");
+        behaviour = .option;
+    }
+
+    const dt = try toISODateTimeFields(realm, obj, options);
+    const offset_opt = try getOffsetOption(realm, options, .reject);
+    try getDisambiguationOption(realm, options);
+    const epoch = temporal.interpretISODateTimeOffset(dt, behaviour, offset_ns, tz, offset_opt) catch |e| switch (e) {
+        error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
+        error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
+    };
+    return .{ .epoch_ns = epoch, .time_zone = tz };
+}
+
+/// §6.5.x ToTemporalZonedDateTime — a ZonedDateTime (copy, options read for
+/// side effects), a property bag, or an ISO 8601 string with a required
+/// `[time-zone]` annotation.
+fn toTemporalZonedDateTime(realm: *Realm, item: Value, options: Value) NativeError!ZonedDateTimeRecord {
+    if (heap_mod.valueAsPlainObject(item)) |obj| {
+        if (obj.getTemporalRecord()) |rec| {
+            switch (rec.*) {
+                .zoned_date_time => |z| {
+                    try getDisambiguationOption(realm, options);
+                    _ = try getOffsetOption(realm, options, .reject);
+                    _ = try getTemporalOverflowOption(realm, options);
+                    return z;
+                },
+                else => {},
+            }
+        }
+        return toZonedDateTimeFields(realm, obj, options);
+    }
+    if (!item.isString()) return throwTypeError(realm, "Temporal.ZonedDateTime.from expects an object or ISO 8601 string");
+    const s: *JSString = @ptrCast(@alignCast(item.asString()));
+    const parsed = temporal.parseTemporalZonedDateTimeString(s.flatBytes()) catch
+        return throwRangeError(realm, "invalid ISO 8601 ZonedDateTime string");
+    try getDisambiguationOption(realm, options);
+    const offset_opt = try getOffsetOption(realm, options, .reject);
+    _ = try getTemporalOverflowOption(realm, options);
+    const epoch = temporal.interpretISODateTimeOffset(parsed.date_time, parsed.behaviour, parsed.offset_ns, parsed.time_zone, offset_opt) catch |e| switch (e) {
+        error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
+        error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
+    };
+    return .{ .epoch_ns = epoch, .time_zone = parsed.time_zone };
+}
+
+/// §6.2.x Temporal.ZonedDateTime.from ( item [ , options ] ).
+fn zonedDateTimeFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const rec = try toTemporalZonedDateTime(realm, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_));
+    return createTemporalZonedDateTime(realm, rec);
+}
+
+/// §6.2.x Temporal.ZonedDateTime.compare ( one, two ) — ordered by the
+/// underlying epoch nanoseconds (the zone and calendar are irrelevant).
+fn zonedDateTimeCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const one = try toTemporalZonedDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    const two = try toTemporalZonedDateTime(realm, argOr(args, 1, Value.undefined_), Value.undefined_);
+    const cmp: i32 = if (one.epoch_ns < two.epoch_ns) -1 else if (one.epoch_ns > two.epoch_ns) @as(i32, 1) else 0;
+    return Value.fromInt32(cmp);
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.equals ( other ) — same instant,
+/// same time zone, same calendar (always ISO here).
+fn zonedDateTimeEquals(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const z = try requireZonedDateTime(realm, this_value);
+    const other = try toTemporalZonedDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    const eq = z.epoch_ns == other.epoch_ns and timeZoneEquals(z.time_zone, other.time_zone);
+    return Value.fromBool(eq);
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.toString ( [ options ] ).
+fn zonedDateTimeToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const z = try requireZonedDateTime(realm, this_value);
+    const options = argOr(args, 0, Value.undefined_);
+    const cal = try getCalendarNameOption(realm, options);
+    const frac = try getFractionalSecondDigitsOption(realm, options);
+    const show_off = try getShowOffsetOption(realm, options);
+    const tz_name = try getTimeZoneNameOption(realm, options);
+    var buf: [80]u8 = undefined;
+    const out = temporal.zonedDateTimeToString(z, &buf, .{
+        .calendar = cal,
+        .time_zone_name = tz_name,
+        .show_offset = show_off,
+        .fractional_digits = frac,
+    });
+    const js = realm.heap.allocateString(out) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.toJSON ( ) — the default
+/// serialization (no options).
+fn zonedDateTimeToJSON(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const z = try requireZonedDateTime(realm, this_value);
+    var buf: [80]u8 = undefined;
+    const out = temporal.zonedDateTimeToString(z, &buf, .{});
+    const js = realm.heap.allocateString(out) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.toLocaleString ( ) — without an
+/// Intl build, this is the default ISO serialization (locale/options ignored).
+fn zonedDateTimeToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const z = try requireZonedDateTime(realm, this_value);
+    var buf: [80]u8 = undefined;
+    const out = temporal.zonedDateTimeToString(z, &buf, .{});
+    const js = realm.heap.allocateString(out) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.valueOf — always throws, to head
+/// off the implicit relational comparison `zdt1 < zdt2` losing information.
+fn zonedDateTimeValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    _ = args;
+    return throwTypeError(realm, "Temporal.ZonedDateTime does not support implicit conversion; use compare() or equals()");
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.toInstant ( ) — the same instant.
+fn zonedDateTimeToInstant(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const z = try requireZonedDateTime(realm, this_value);
+    return createTemporalInstant(realm, z.epoch_ns);
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.toPlainDate ( ) — the local
+/// (wall-clock) ISO date the zone shows at the instant.
+fn zonedDateTimeToPlainDate(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const z = try requireZonedDateTime(realm, this_value);
+    const dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return createTemporalDate(realm, dt.date());
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.toPlainTime ( ) — the local
+/// wall-clock time the zone shows at the instant.
+fn zonedDateTimeToPlainTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const z = try requireZonedDateTime(realm, this_value);
+    const dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return createTemporalTime(realm, dt.time());
+}
+
+/// §6.3.x Temporal.ZonedDateTime.prototype.toPlainDateTime ( ) — the local
+/// wall-clock date-time the zone shows at the instant.
+fn zonedDateTimeToPlainDateTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const z = try requireZonedDateTime(realm, this_value);
+    const dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return createTemporalDateTime(realm, dt);
 }
