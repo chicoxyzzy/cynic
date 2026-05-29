@@ -33,6 +33,7 @@ pub const TemporalKind = enum {
     plain_date_time,
     plain_year_month,
     plain_month_day,
+    zoned_date_time,
 };
 
 /// §7.5 Temporal.Duration internal slots. Each field is the ℝ
@@ -161,6 +162,35 @@ pub const PlainMonthDayRecord = struct {
     }
 };
 
+/// The time zone of a `ZonedDateTimeRecord`. Cynic ships the offset-only
+/// scope today: the named UTC zone and offset identifiers (`±HH:MM`,
+/// whole-minute precision). These have a constant UTC offset, so there
+/// is never a DST gap or overlap to disambiguate. Named IANA zones —
+/// which need a vendored tz database — are deferred to a future
+/// Intl-enabled build; that build would add a variant here and a tzdata
+/// lookup inside `getOffsetNanosecondsFor`, the single offset-resolution
+/// seam every operation routes through.
+pub const TimeZone = union(enum) {
+    /// The "UTC" named zone. A distinct identifier from the "+00:00"
+    /// offset zone (the `timeZoneId` getters differ) though numerically
+    /// the same offset.
+    utc,
+    /// An offset time-zone identifier, stored as whole minutes east of
+    /// UTC in -1439..+1439.
+    offset_minutes: i32,
+};
+
+/// §6.3 Temporal.ZonedDateTime internal slots — an exact instant
+/// ([[EpochNanoseconds]]) paired with a [[TimeZone]] (and an ISO-8601
+/// [[Calendar]], implicit in this scope). Because the offset-only
+/// `TimeZone` carries no heap pointer, the record adds no GC mark edge,
+/// matching the other plain Temporal records; it converts to/from a
+/// `JSBigInt` only at the JS boundary.
+pub const ZonedDateTimeRecord = struct {
+    epoch_ns: i128 = 0,
+    time_zone: TimeZone = .utc,
+};
+
 /// The side allocation a Temporal instance's `JSObject` points to
 /// through `JSObjectExtension.temporal_record`. A tagged union so
 /// the single slot serves every plain Temporal type.
@@ -172,6 +202,7 @@ pub const TemporalRecord = union(TemporalKind) {
     plain_date_time: PlainDateTimeRecord,
     plain_year_month: PlainYearMonthRecord,
     plain_month_day: PlainMonthDayRecord,
+    zoned_date_time: ZonedDateTimeRecord,
 
     pub fn deinit(self: *TemporalRecord, allocator: std.mem.Allocator) void {
         // No owned heap memory inside any variant today; the record
@@ -1132,6 +1163,125 @@ pub fn daysInIsoMonth(y: i64, m: u32) u32 {
         2 => if (isLeapYear(y)) @as(u32, 29) else 28,
         else => 0,
     };
+}
+
+// ── §6 Temporal.ZonedDateTime core operations ─────────────────────────────
+// An exact instant viewed through a time zone. The offset-only `TimeZone`
+// scope keeps every operation a pure i128 computation; the named-IANA-zone
+// path a future Intl build would add funnels through the one offset seam,
+// `getOffsetNanosecondsFor`.
+
+/// §11.x GetOffsetNanosecondsFor — the signed UTC offset, in nanoseconds,
+/// that `tz` applies at `epoch_ns`. UTC and offset zones have a constant
+/// offset, so `epoch_ns` is unused today; it is the seam where a named-zone
+/// provider would consult tzdata transitions.
+pub fn getOffsetNanosecondsFor(tz: TimeZone, epoch_ns: i128) i64 {
+    _ = epoch_ns;
+    return switch (tz) {
+        .utc => 0,
+        .offset_minutes => |m| @as(i64, m) * 60_000_000_000,
+    };
+}
+
+/// Decompose an epoch-nanosecond value into ISO date-time fields,
+/// flooring toward −∞ so pre-epoch instants land on the correct civil
+/// day. Inverse of `isoDateTimeToEpochNs`.
+pub fn isoDateTimeFromEpochNs(ns: i128) PlainDateTimeRecord {
+    const sec = @divFloor(ns, 1_000_000_000);
+    const sub_ns: u32 = @intCast(ns - sec * 1_000_000_000); // [0, 10^9)
+    const days = @divFloor(sec, 86400);
+    const sod = sec - days * 86400; // [0, 86399]
+    const ymd = civilFromDays(@intCast(days));
+    return .{
+        .iso_year = @intCast(ymd.year),
+        .iso_month = @intCast(ymd.month),
+        .iso_day = @intCast(ymd.day),
+        .hour = @intCast(@divTrunc(sod, 3600)),
+        .minute = @intCast(@divTrunc(@mod(sod, 3600), 60)),
+        .second = @intCast(@mod(sod, 60)),
+        .millisecond = sub_ns / 1_000_000,
+        .microsecond = (sub_ns / 1_000) % 1_000,
+        .nanosecond = sub_ns % 1_000,
+    };
+}
+
+/// The epoch-nanosecond value of an ISO date-time read as UTC wall-clock
+/// (no zone offset applied). Inverse of `isoDateTimeFromEpochNs`.
+pub fn isoDateTimeToEpochNs(dt: PlainDateTimeRecord) i128 {
+    const epoch_days = daysFromCivil(dt.iso_year, dt.iso_month, dt.iso_day);
+    const sec: i128 = @as(i128, epoch_days) * 86400 +
+        @as(i128, dt.hour) * 3600 + @as(i128, dt.minute) * 60 + @as(i128, dt.second);
+    return sec * 1_000_000_000 +
+        @as(i128, dt.millisecond) * 1_000_000 +
+        @as(i128, dt.microsecond) * 1_000 +
+        @as(i128, dt.nanosecond);
+}
+
+/// §6.5.x GetISODateTimeFor — the local (wall-clock) ISO date-time that
+/// `tz` shows at `epoch_ns`: shift the instant by the zone offset, then
+/// decompose into ISO fields.
+pub fn getISODateTimeFor(tz: TimeZone, epoch_ns: i128) PlainDateTimeRecord {
+    const local = epoch_ns + @as(i128, getOffsetNanosecondsFor(tz, epoch_ns));
+    return isoDateTimeFromEpochNs(local);
+}
+
+/// §6.5.x GetEpochNanosecondsFor for a constant-offset zone — interpret
+/// `dt` as wall-clock in `tz` and return the epoch ns, or null when the
+/// result leaves the representable Instant range. Offset zones have no
+/// DST gap/overlap, so exactly one instant maps to any wall-clock time
+/// and the `disambiguation` option never changes the answer.
+pub fn getEpochNanosecondsFor(tz: TimeZone, dt: PlainDateTimeRecord) ?i128 {
+    const wall_ns = isoDateTimeToEpochNs(dt);
+    const epoch = wall_ns - @as(i128, getOffsetNanosecondsFor(tz, wall_ns));
+    if (!isValidEpochNanoseconds(epoch)) return null;
+    return epoch;
+}
+
+/// §11.x ParseTimeZoneIdentifier (offset-only scope) — recognise the
+/// named "UTC" zone (ASCII case-insensitive) and offset identifiers
+/// (`±HH`, `±HH:MM`, `±HHMM` — whole-minute precision; sub-minute is not a
+/// valid identifier). Returns null for a named IANA zone or any malformed
+/// input, which the caller reports as a RangeError. Named zones are
+/// deferred to a future Intl build.
+pub fn parseTimeZoneIdentifier(s: []const u8) ?TimeZone {
+    if (std.ascii.eqlIgnoreCase(s, "UTC")) return .utc;
+    if (s.len == 0) return null;
+    if (s[0] != '+' and s[0] != '-') return null; // named IANA zone — unsupported
+    const neg = s[0] == '-';
+    var i: usize = 1;
+    const hour = read2(s, &i) orelse return null;
+    if (hour > 23) return null;
+    var minute: u32 = 0;
+    if (i < s.len) {
+        if (s[i] == ':') i += 1;
+        minute = read2(s, &i) orelse return null;
+        if (minute > 59) return null;
+    }
+    if (i != s.len) return null; // trailing bytes (sub-minute, garbage) → reject
+    const total: i32 = @intCast(hour * 60 + minute);
+    return .{ .offset_minutes = if (neg) -total else total };
+}
+
+/// The canonical time-zone identifier string for `tz`: "UTC", or an
+/// offset identifier in the always-extended `±HH:MM` form (the form
+/// `get Temporal.ZonedDateTime.prototype.timeZoneId` returns). Writes into
+/// `buf` (≥ 6 bytes) and returns the populated slice.
+pub fn timeZoneIdentifierString(tz: TimeZone, buf: []u8) []const u8 {
+    switch (tz) {
+        .utc => {
+            @memcpy(buf[0..3], "UTC");
+            return buf[0..3];
+        },
+        .offset_minutes => |m| {
+            var w = Writer{ .buf = buf, .len = 0 };
+            const abs: u32 = @intCast(if (m < 0) -m else m);
+            w.byte(if (m < 0) '-' else '+');
+            w.pad2(abs / 60);
+            w.byte(':');
+            w.pad2(abs % 60);
+            return w.buf[0..w.len];
+        },
+    }
 }
 
 // ── §8.x TemporalInstantToString (UTC, precision = "auto") ────────────────
@@ -3392,4 +3542,125 @@ test "parseTemporalMonthDayString: reference year always 1972" {
     try testing.expectError(error.Invalid, parseTemporalMonthDayString("13-01")); // month out of range
     try testing.expectError(error.Invalid, parseTemporalMonthDayString("06-31")); // June has 30 days
     try testing.expectError(error.Invalid, parseTemporalMonthDayString("06-15Z")); // trailing junk
+}
+
+test "parseTimeZoneIdentifier: UTC is ASCII case-insensitive" {
+    try testing.expect(std.meta.activeTag(parseTimeZoneIdentifier("UTC").?) == .utc);
+    try testing.expect(std.meta.activeTag(parseTimeZoneIdentifier("utc").?) == .utc);
+    try testing.expect(std.meta.activeTag(parseTimeZoneIdentifier("Utc").?) == .utc);
+}
+
+test "parseTimeZoneIdentifier: offset forms resolve to whole-minute offsets" {
+    const cases = [_]struct { s: []const u8, want: i32 }{
+        .{ .s = "+01:00", .want = 60 },
+        .{ .s = "+01", .want = 60 }, // minute block optional
+        .{ .s = "+0130", .want = 90 }, // basic (colon-less) form
+        .{ .s = "+05:30", .want = 330 },
+        .{ .s = "-08:00", .want = -480 },
+        .{ .s = "-00:02", .want = -2 }, // negative sign retained at zero hour
+        .{ .s = "+00:00", .want = 0 }, // a positive zero offset, distinct from .utc
+    };
+    for (cases) |c| {
+        const tz = parseTimeZoneIdentifier(c.s) orelse return error.TestUnexpectedNull;
+        switch (tz) {
+            .offset_minutes => |m| try testing.expectEqual(c.want, m),
+            .utc => return error.TestExpectedOffsetZone,
+        }
+    }
+}
+
+test "parseTimeZoneIdentifier: rejects named zones, sub-minute, and garbage" {
+    try testing.expect(parseTimeZoneIdentifier("+01:00:00") == null); // sub-minute precision
+    try testing.expect(parseTimeZoneIdentifier("America/New_York") == null); // named IANA zone
+    try testing.expect(parseTimeZoneIdentifier("") == null); // empty
+    try testing.expect(parseTimeZoneIdentifier("+24:00") == null); // hour out of range
+    try testing.expect(parseTimeZoneIdentifier("+01:60") == null); // minute out of range
+    try testing.expect(parseTimeZoneIdentifier("Z") == null); // UTC designator is not an identifier
+    try testing.expect(parseTimeZoneIdentifier("+1:00") == null); // single-digit hour
+}
+
+test "timeZoneIdentifierString: UTC named vs extended ±HH:MM offset" {
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("UTC", timeZoneIdentifierString(.utc, &buf));
+    try testing.expectEqualStrings("+01:00", timeZoneIdentifierString(.{ .offset_minutes = 60 }, &buf));
+    try testing.expectEqualStrings("-08:00", timeZoneIdentifierString(.{ .offset_minutes = -480 }, &buf));
+    try testing.expectEqualStrings("+05:30", timeZoneIdentifierString(.{ .offset_minutes = 330 }, &buf));
+    // A zero offset still renders "+00:00" — only the .utc variant prints "UTC".
+    try testing.expectEqualStrings("+00:00", timeZoneIdentifierString(.{ .offset_minutes = 0 }, &buf));
+    try testing.expectEqualStrings("-00:02", timeZoneIdentifierString(.{ .offset_minutes = -2 }, &buf));
+}
+
+test "isoDateTimeFromEpochNs/isoDateTimeToEpochNs: round trip and floor toward -inf" {
+    // Epoch 0 is the Unix epoch.
+    {
+        const dt = isoDateTimeFromEpochNs(0);
+        try testing.expectEqual(@as(i32, 1970), dt.iso_year);
+        try testing.expectEqual(@as(u8, 1), dt.iso_month);
+        try testing.expectEqual(@as(u8, 1), dt.iso_day);
+        try testing.expectEqual(@as(u32, 0), dt.hour);
+        try testing.expectEqual(@as(i128, 0), isoDateTimeToEpochNs(dt));
+    }
+    // One nanosecond before the epoch floors onto the prior civil day.
+    {
+        const dt = isoDateTimeFromEpochNs(-1);
+        try testing.expectEqual(@as(i32, 1969), dt.iso_year);
+        try testing.expectEqual(@as(u8, 12), dt.iso_month);
+        try testing.expectEqual(@as(u8, 31), dt.iso_day);
+        try testing.expectEqual(@as(u32, 23), dt.hour);
+        try testing.expectEqual(@as(u32, 59), dt.minute);
+        try testing.expectEqual(@as(u32, 59), dt.second);
+        try testing.expectEqual(@as(u32, 999), dt.millisecond);
+        try testing.expectEqual(@as(u32, 999), dt.microsecond);
+        try testing.expectEqual(@as(u32, 999), dt.nanosecond);
+        try testing.expectEqual(@as(i128, -1), isoDateTimeToEpochNs(dt));
+    }
+    // A representative instant with a sub-second fraction, both directions.
+    {
+        const ns: i128 = 1_597_494_896_789_000_000; // 2020-08-15T12:34:56.789Z
+        const dt = isoDateTimeFromEpochNs(ns);
+        try testing.expectEqual(@as(i32, 2020), dt.iso_year);
+        try testing.expectEqual(@as(u8, 8), dt.iso_month);
+        try testing.expectEqual(@as(u8, 15), dt.iso_day);
+        try testing.expectEqual(@as(u32, 12), dt.hour);
+        try testing.expectEqual(@as(u32, 34), dt.minute);
+        try testing.expectEqual(@as(u32, 56), dt.second);
+        try testing.expectEqual(@as(u32, 789), dt.millisecond);
+        try testing.expectEqual(@as(u32, 0), dt.microsecond);
+        try testing.expectEqual(@as(u32, 0), dt.nanosecond);
+        try testing.expectEqual(ns, isoDateTimeToEpochNs(dt));
+    }
+}
+
+test "getISODateTimeFor/getEpochNanosecondsFor: apply the constant zone offset" {
+    try testing.expectEqual(@as(i64, 0), getOffsetNanosecondsFor(.utc, 0));
+    try testing.expectEqual(@as(i64, 19_800_000_000_000), getOffsetNanosecondsFor(.{ .offset_minutes = 330 }, 0));
+    try testing.expectEqual(@as(i64, -28_800_000_000_000), getOffsetNanosecondsFor(.{ .offset_minutes = -480 }, 0));
+
+    const noon: i128 = 1_597_494_896_000_000_000; // 2020-08-15T12:34:56Z
+    // UTC shows wall-clock equal to the instant.
+    {
+        const dt = getISODateTimeFor(.utc, noon);
+        try testing.expectEqual(@as(u8, 15), dt.iso_day);
+        try testing.expectEqual(@as(u32, 12), dt.hour);
+        try testing.expectEqual(@as(u32, 34), dt.minute);
+    }
+    // +05:30 advances the wall clock by five and a half hours.
+    {
+        const dt = getISODateTimeFor(.{ .offset_minutes = 330 }, noon);
+        try testing.expectEqual(@as(u8, 15), dt.iso_day);
+        try testing.expectEqual(@as(u32, 18), dt.hour);
+        try testing.expectEqual(@as(u32, 4), dt.minute);
+        try testing.expectEqual(@as(u32, 56), dt.second);
+    }
+    // A negative offset can push the wall clock back across a day boundary.
+    {
+        const midnight_2020: i128 = 1_577_836_800_000_000_000; // 2020-01-01T00:00:00Z
+        const dt = getISODateTimeFor(.{ .offset_minutes = -480 }, midnight_2020);
+        try testing.expectEqual(@as(i32, 2019), dt.iso_year);
+        try testing.expectEqual(@as(u8, 12), dt.iso_month);
+        try testing.expectEqual(@as(u8, 31), dt.iso_day);
+        try testing.expectEqual(@as(u32, 16), dt.hour);
+        // Wall clock back to the source instant: getEpochNanosecondsFor inverts the shift.
+        try testing.expectEqual(midnight_2020, getEpochNanosecondsFor(.{ .offset_minutes = -480 }, dt).?);
+    }
 }
