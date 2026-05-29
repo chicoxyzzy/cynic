@@ -231,7 +231,7 @@ fn numberToExponential(realm: *Realm, this_value: Value, args: []const Value) Na
                 zn += 1;
             }
         }
-        @memcpy(zbuf[zn .. zn + 4], "e+0");
+        @memcpy(zbuf[zn .. zn + 3], "e+0");
         const s0 = realm.heap.allocateString(zbuf[0 .. zn + 3]) catch return error.OutOfMemory;
         return Value.fromString(s0);
     }
