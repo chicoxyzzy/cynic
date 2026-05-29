@@ -285,10 +285,13 @@ const Compiler = struct {
             },
             .backref_name => |name| try self.compileBackref(name),
             .backref_index => |n| {
-                // In range → a backreference; out of range is an Annex B
-                // octal/identity escape the v1 grammar doesn't model.
+                // §22.2.1.1: a DecimalEscape whose CapturingGroupNumber
+                // exceeds the number of capturing groups is a Syntax Error.
+                // Annex B §B.1.2 would reinterpret `\N` as a legacy
+                // octal/identity escape, but Cynic drops Annex B regex
+                // leniency in every mode, so the early error stands.
                 const total = self.names.len - 1; // capturing groups, excl group 0
-                if (n == 0 or n > total) return error.Unsupported;
+                if (n == 0 or n > total) return error.SyntaxError;
                 self.regular = false;
                 try self.emit(.{ .backref = n });
             },

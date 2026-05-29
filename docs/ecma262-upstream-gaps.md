@@ -49,39 +49,6 @@ that we'd like the editors to consider.
 
 ## Entries
 
-### §B.1.4 regex grammar — promote permissive forms to normative
-
-- **Spec:** §B.1.4 ExtendedRegExp / ExtendedAtom / ExtendedPatternCharacter.
-- **Observed during:** every shipping regex engine (libregexp,
-  V8 Irregexp, SpiderMonkey, JSC). Cynic ships these via the
-  vendored QuickJS-NG libregexp and acknowledges the exception
-  in `AGENTS.md`.
-- **Issue:** Annex B is informative for non-web hosts per
-  §B.0. But the permissive regex forms it carves out —
-  octal `\1` outside a capturing group, the lower-bound-elided
-  quantifier `{,n}`, identity-escape on
-  non-Syntax / non-Unicode characters — are accepted by every
-  shipping engine without the `/u` or `/v` flag. Real-world
-  regexes in npm packages, Stack Overflow snippets, and
-  config files rely on them. A SES-flavoured engine that
-  followed §B.0 literally and refused them would reject ~3 %
-  of real-world regex literals at parse time. Cynic targets
-  edge runtimes (non-browser, no Annex B in general) and
-  still ships these — that's the level of de-facto
-  normativity at play.
-- **Proposal:** move §B.1.4's extensions for non-Unicode (no
-  `/u` / `/v`) regex patterns into the main grammar (§22.2.1).
-  Keep the Unicode-mode strictness where it lives today (the
-  `/u` and `/v` flags already enforce the strict grammar
-  inside Annex B itself). The net effect on conforming
-  implementations is zero — they all ship the extensions —
-  but the spec stops lying about "non-web hosts may omit
-  Annex B."
-- **Prior art:** [ecma262 #2034](https://github.com/tc39/ecma262/issues/2034)
-  (Annex B layering discussion). The QuickJS-NG, V8, JSC, and
-  SpiderMonkey source all confirm by behaviour: there is no
-  engine that ships `RegExp("\\1")` rejection.
-
 ### §16.2.1.5 InnerModuleEvaluation — simpler approximation viable for non-cycle graphs
 
 - **Spec:** §16.2.1.5 InnerModuleEvaluation, §16.2.1.6

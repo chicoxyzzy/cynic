@@ -53,8 +53,8 @@ These are project rules — they apply to everyone.
   the spec ordering.
 - **Strict-only, non-browser-host target.** Cynic targets edge
   runtimes (Workers / Deno / server JS) — not browsers. So:
-  - **Annex B in its entirety** — out, with one acknowledged
-    exception (regex grammar §B.1.4 — see below). No sloppy
+  - **Annex B in its entirety** — out. The lone regex-grammar
+    residual (§B.1.4) is narrowed by Perlex — see below. No sloppy
     mode, no labelled function declarations (B.3.1), no
     HTML-like comments, no sloppy-mode function-in-block, no
     legacy octal, no for-in initializer. No `escape` /
@@ -70,16 +70,25 @@ These are project rules — they apply to everyone.
     features list because the fixtures using them parse fine
     — they show as honest runtime-mode failures.
 
-    **Acknowledged exception — regex Annex B (§B.1.4).** The
-    vendored libregexp (QuickJS-NG) accepts permissive forms
-    like `\1` outside a capturing group (octal `\001`) and the
-    lower-bound-elided quantifier `{,n}` when the pattern is
-    compiled without `/u` or `/v`. Every shipping engine
-    (V8 / JSC / SpiderMonkey) accepts the same forms — Annex B
-    is normative spec and real-world regexes rely on these
-    leaks. Closing it would mean patching vendored libregexp or
-    adding a Cynic-side pattern pre-validator; we deemed the
-    leak narrower than the policy and live with it. See
+    **Regex Annex B (§B.1.4) — narrowed by Perlex.** Three
+    §22.2.1 main-grammar rules that Annex B §B.1.2 relaxes when
+    a pattern is compiled without `/u` or `/v`: `]`, `{`, `}` are
+    SyntaxCharacters (Annex B's ExtendedPatternCharacter makes a
+    stray one literal); a DecimalEscape `\N` past the capture
+    count is an early error (§22.2.1.1; Annex B rereads it as a
+    legacy octal/identity escape, e.g. `\1` outside a group →
+    `\001`); and every Quantifier brace needs a DecimalDigits
+    lower bound (Annex B reads `{,n}` as literal text). Cynic
+    enforces all three in every mode: Perlex — the native regex
+    engine, first in dispatch — raises `SyntaxError`, so any
+    pattern it compiles is held to the strict grammar. The
+    residual leak is narrow: a pattern that *also* uses a
+    construct Perlex doesn't yet support falls through to the
+    vendored libregexp fallback, which still applies the Annex B
+    leniency; as Perlex's coverage grows that residual shrinks
+    toward zero. (Every shipping browser engine — V8 / JSC /
+    SpiderMonkey — accepts the Annex B forms; Cynic's non-browser
+    target is why it doesn't.) See
     [docs/ROADMAP.md](docs/ROADMAP.md) under "Regex".
   - **`eval` and runtime code construction** — out by
     default. `eval()` itself, `new Function(string)` /
