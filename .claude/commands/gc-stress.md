@@ -24,7 +24,13 @@ panic inside the engine (Debug rebuilds the harness + linked
 library; ~5-10× slower). Note: the `verifyRememberedSet` verifier
 and 0xaa poison are **no-ops in ReleaseFast** — ReleaseFast still
 exercises the real GC and catches crashes / wrong answers, but
-for verifier asserts build `-Doptimize=ReleaseSafe`.
+for verifier asserts build the ReleaseSafe harness:
+`zig build test262-safe` installs `zig-out/bin/cynic-test262-safe`
+at a distinct path (it does **not** clobber the ReleaseFast binary
+the way `-Dtest262-debug` does, so build each once and invoke
+either directly). ReleaseSafe arms the verifier + poison while
+running ~2-3× faster than Debug — the right binary for this
+workflow.
 
 ## 2. Run the gc1 sweep — chunked
 

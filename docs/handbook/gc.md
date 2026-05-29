@@ -162,15 +162,24 @@ description).
 
 ### Finding these bugs
 
-Run any suspect area under maximum allocation pressure:
+Run any suspect area under maximum allocation pressure. The
+dedicated ReleaseSafe harness is the fastest way, with the
+verifiers armed:
+
+    zig build test262-safe -- --gc-threshold=1 --filter=<area>
+
+That installs `zig-out/bin/cynic-test262-safe` at a distinct path
+— it does **not** clobber the ReleaseFast `cynic-test262`, so keep
+both and invoke either directly. For a stack trace on a panic
+inside the engine, the Debug harness works too:
 
     zig build test262 -Dtest262-debug=true -- \
       --gc-threshold=1 --filter=<area>
 
 `--gc-threshold=1` collects on every allocation, so a pointer held
 unrooted across a re-entry is freed immediately — the failure is
-deterministic instead of a rare flake. Building the harness Debug
-(or `-Doptimize=ReleaseSafe`) also arms `Heap.verifyRememberedSet`,
+deterministic instead of a rare flake. The ReleaseSafe or Debug
+harness also arms `Heap.verifyRememberedSet`,
 which before every minor cycle asserts every routed-setter
 mature→young edge is remembered and names the exact
 `(container, field, young-target)` triple of an un-barriered store.

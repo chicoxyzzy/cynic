@@ -250,6 +250,7 @@ Common commands:
     zig build test                                  # all unit tests
     zig build test-ses                              # hand-written SES positive-coverage tests
     zig build test262                               # full conformance run (runtime mode)
+    zig build test262-safe                          # same harness, ReleaseSafe (GC verifiers + poison live)
     zig build run -- parse <file>                   # script-mode parse
     zig build run -- parse --module <file>          # module-mode parse (alias: -m)
     zig build run -- parse <file>.mjs               # `.mjs` auto-detected as module
@@ -376,7 +377,14 @@ by default (interpreters are 5-10× slower in Debug; the harness
 chews ~50k fixtures). Pass `-Doptimize=Debug` or
 `-Dtest262-debug=true` if you need stack traces on a panic
 inside the engine — that rebuilds both the harness and the
-`cynic` library it links at Debug.
+`cynic` library it links at Debug, clobbering the ReleaseFast
+binary at the same path. To keep both, use `zig build
+test262-safe`: it installs a separate
+`zig-out/bin/cynic-test262-safe` built `ReleaseSafe`, which arms
+the GC verifiers (`verifyRememberedSet` / `verifyShapeInvariant`)
+and the 0xaa free-poison — all gated on `runtime_safety`, hence
+no-ops in ReleaseFast — while running ~2-3× faster than Debug.
+The right binary for `/gc-stress` use-after-free hunts.
 
 **Leak-check before every full sweep.** Past leaks (e.g. JSString
 bytes pinned in the per-fixture arena before `7a6a0d8`) ballooned
