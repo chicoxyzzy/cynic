@@ -11,7 +11,9 @@
 //! properties ECMA-262 recognises are all fixed by the spec, so they are
 //! hardcoded here; only the code-point ranges are version data, parsed from
 //! the UCD. Args: <out> <DerivedGeneralCategory> <DerivedCoreProperties>
-//! <PropList> <emoji-data> <DerivedBinaryProperties> <DerivedNormalizationProps>.
+//! <PropList> <emoji-data> <DerivedBinaryProperties> <DerivedNormalizationProps>
+//! <PropertyValueAliases> <Scripts> <ScriptExtensions> <emoji-sequences>
+//! <emoji-zwj-sequences>.
 
 const std = @import("std");
 
@@ -151,6 +153,77 @@ fn indexOfUcd(name: []const u8) ?usize {
     return null;
 }
 
+// ── Properties of strings (§22.2.1.1) ───────────────────────────────
+
+/// One §22.2.1.1 *property of strings* — the `/v`-mode emoji-sequence
+/// set. Its members are code-point *sequences* (length ≥ 2), plus, for
+/// `Basic_Emoji`, single code points. The UCD type field equals the
+/// ECMA-262 name. Five are read from emoji-sequences.txt; the sixth from
+/// emoji-zwj-sequences.txt. `RGI_Emoji` (a seventh name) is synthesised as
+/// the union of all six and so is not listed here.
+const StrProp = struct { name: []const u8, zwj: bool = false };
+
+const str_props = [_]StrProp{
+    .{ .name = "Basic_Emoji" },
+    .{ .name = "Emoji_Keycap_Sequence" },
+    .{ .name = "RGI_Emoji_Modifier_Sequence" },
+    .{ .name = "RGI_Emoji_Flag_Sequence" },
+    .{ .name = "RGI_Emoji_Tag_Sequence" },
+    .{ .name = "RGI_Emoji_ZWJ_Sequence", .zwj = true },
+};
+
+/// Accumulated members of one property of strings: single-code-point
+/// members (folded into ranges) and the multi-code-point sequences.
+const StrSet = struct {
+    ranges: std.ArrayListUnmanaged(Range) = .empty,
+    seqs: std.ArrayListUnmanaged([]u21) = .empty,
+
+    fn deinit(self: *StrSet, allocator: std.mem.Allocator) void {
+        self.ranges.deinit(allocator);
+        for (self.seqs.items) |s| allocator.free(s);
+        self.seqs.deinit(allocator);
+    }
+
+    /// Add a code-point field: a range (`A..B`), a single code point, or a
+    /// space-separated sequence. Length-1 entries fold into `ranges`;
+    /// length ≥ 2 entries become deduplicated sequence members.
+    fn add(self: *StrSet, allocator: std.mem.Allocator, cps_field: []const u8) !void {
+        if (std.mem.indexOf(u8, cps_field, "..")) |_| {
+            try self.ranges.append(allocator, try parseCodepointRange(cps_field));
+            return;
+        }
+        var cps: std.ArrayListUnmanaged(u21) = .empty;
+        defer cps.deinit(allocator);
+        var it = std.mem.tokenizeScalar(u8, cps_field, ' ');
+        while (it.next()) |tok| try cps.append(allocator, try std.fmt.parseInt(u21, tok, 16));
+        switch (cps.items.len) {
+            0 => {},
+            1 => try self.ranges.append(allocator, .{ .start = cps.items[0], .end = cps.items[0] }),
+            else => {
+                if (!self.hasSeq(cps.items)) try self.seqs.append(allocator, try cps.toOwnedSlice(allocator));
+            },
+        }
+    }
+
+    fn hasSeq(self: *const StrSet, s: []const u21) bool {
+        for (self.seqs.items) |e| if (std.mem.eql(u21, e, s)) return true;
+        return false;
+    }
+
+    /// Fold every member of `other` into self (for the RGI_Emoji union).
+    fn merge(self: *StrSet, allocator: std.mem.Allocator, other: *const StrSet) !void {
+        try self.ranges.appendSlice(allocator, other.ranges.items);
+        for (other.seqs.items) |s| {
+            if (!self.hasSeq(s)) try self.seqs.append(allocator, try allocator.dupe(u21, s));
+        }
+    }
+};
+
+fn indexOfStrProp(name: []const u8) ?usize {
+    for (str_props, 0..) |p, i| if (std.mem.eql(u8, p.name, name)) return i;
+    return null;
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -167,6 +240,8 @@ pub fn main(init: std.process.Init) !void {
     const pva_path = nextArg(&args_iter);
     const scripts_path = nextArg(&args_iter);
     const scx_path = nextArg(&args_iter);
+    const emoji_seq_path = nextArg(&args_iter);
+    const emoji_zwj_path = nextArg(&args_iter);
 
     // ── General_Category ──
     const gc_data = try std.Io.Dir.cwd().readFileAlloc(io, gc_path, allocator, .unlimited);
@@ -339,6 +414,34 @@ pub fn main(init: std.process.Init) !void {
         sortAndMerge(&scx_lists[i]);
     }
 
+    // ── Properties of strings (emoji sequences, §22.2.1.1) ──
+    // Route each line by its type field (= the ECMA-262 property name) into
+    // the matching accumulator. Five names live in emoji-sequences.txt, the
+    // sixth (RGI_Emoji_ZWJ_Sequence) in emoji-zwj-sequences.txt; the type
+    // field disambiguates, so reading both files into one loop is safe.
+    var str_sets: [str_props.len]StrSet = undefined;
+    for (&str_sets) |*s| s.* = .{};
+    defer for (&str_sets) |*s| s.deinit(allocator);
+
+    for ([_][]const u8{ emoji_seq_path, emoji_zwj_path }) |path| {
+        const data = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+        defer allocator.free(data);
+        var it = std.mem.splitScalar(u8, data, '\n');
+        while (it.next()) |line_raw| {
+            const line = std.mem.trimEnd(u8, line_raw, "\r");
+            const pl = parsePropLine(line) orelse continue;
+            const idx = indexOfStrProp(pl.name) orelse continue;
+            try str_sets[idx].add(allocator, pl.cps);
+        }
+    }
+    for (&str_sets) |*s| sortAndMerge(&s.ranges);
+
+    // RGI_Emoji (ED-27, UTS #51): the union of all six sub-properties.
+    var rgi: StrSet = .{};
+    defer rgi.deinit(allocator);
+    for (&str_sets) |*s| try rgi.merge(allocator, s);
+    sortAndMerge(&rgi.ranges);
+
     // ── Emit ──
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -348,7 +451,8 @@ pub fn main(init: std.process.Init) !void {
         \\//!
         \\//! Produced by `zig build gen-unicode` from the vendored UCD files.
         \\//! Backs RegExp `\p{…}` Unicode property escapes (ECMA-262 §22.2.1.1):
-        \\//! General_Category values and the binary properties.
+        \\//! General_Category values, binary properties, Scripts, and the
+        \\//! `/v`-mode properties of strings (emoji sequences).
         \\//!
         \\
     );
@@ -382,6 +486,15 @@ pub fn main(init: std.process.Init) !void {
         try buf.append(allocator, '\n');
         sc_total += script_lists[i].items.len + scx_lists[i].items.len;
     }
+    var sp_total: usize = 0;
+    for (str_props, 0..) |p, i| {
+        try emitStrProp(allocator, &buf, p.name, &str_sets[i]);
+        try buf.append(allocator, '\n');
+        sp_total += str_sets[i].ranges.items.len + str_sets[i].seqs.items.len;
+    }
+    try emitStrProp(allocator, &buf, "RGI_Emoji", &rgi);
+    try buf.append(allocator, '\n');
+    sp_total += rgi.ranges.items.len + rgi.seqs.items.len;
 
     try buf.appendSlice(allocator,
         \\/// Resolve a General_Category value name to its sorted ranges, or null
@@ -429,18 +542,39 @@ pub fn main(init: std.process.Init) !void {
         \\    return null;
         \\}
         \\
+        \\/// A §22.2.1.1 *property of strings*: single-code-point members folded
+        \\/// into `ranges`, plus the multi-code-point `sequences`. Valid only
+        \\/// under the `/v` flag and only in positive (non-complemented) form.
+        \\pub const StringProp = struct {
+        \\    ranges: []const Range,
+        \\    sequences: []const []const u21,
+        \\};
+        \\
+        \\/// Resolve a property-of-strings name to its members, or null if `name`
+        \\/// is not one of the §22.2.1.1 emoji-sequence properties. Exact match;
+        \\/// each property's short name equals its long name (UTS #51).
+        \\pub fn stringProperty(name: []const u8) ?StringProp {
+        \\
+    );
+    for (str_props) |p|
+        try buf.print(allocator, "    if (std.mem.eql(u8, name, \"{s}\")) return .{{ .ranges = &strprop_{s}_ranges, .sequences = &strprop_{s}_seqs }};\n", .{ p.name, p.name, p.name });
+    try buf.appendSlice(allocator, "    if (std.mem.eql(u8, name, \"RGI_Emoji\")) return .{ .ranges = &strprop_RGI_Emoji_ranges, .sequences = &strprop_RGI_Emoji_seqs };\n");
+    try buf.appendSlice(allocator,
+        \\    return null;
+        \\}
+        \\
         \\const std = @import("std");
         \\
     );
 
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = buf.items });
-    std.debug.print("wrote {s}: {d} gc ({d} ranges), {d} binary ({d} ranges), {d} scripts ({d} ranges) (Unicode {s})\n", .{
-        out_path, categories.len, gc_total, bin_props.len, bp_total, nscript, sc_total, unicode_version,
+    std.debug.print("wrote {s}: {d} gc ({d} ranges), {d} binary ({d} ranges), {d} scripts ({d} ranges), {d} string props ({d} ranges+seqs) (Unicode {s})\n", .{
+        out_path, categories.len, gc_total, bin_props.len, bp_total, nscript, sc_total, str_props.len + 1, sp_total, unicode_version,
     });
 }
 
 fn nextArg(it: anytype) []const u8 {
-    return it.next() orelse fatal("usage: gen_unicode_props <out> <DerivedGeneralCategory> <DerivedCoreProperties> <PropList> <emoji-data> <DerivedBinaryProperties> <DerivedNormalizationProps>", .{});
+    return it.next() orelse fatal("usage: gen_unicode_props <out> <DerivedGeneralCategory> <DerivedCoreProperties> <PropList> <emoji-data> <DerivedBinaryProperties> <DerivedNormalizationProps> <PropertyValueAliases> <Scripts> <ScriptExtensions> <emoji-sequences> <emoji-zwj-sequences>", .{});
 }
 
 const PropLine = struct { cps: []const u8, name: []const u8 };
@@ -533,6 +667,31 @@ fn emitRanges(
     try buf.print(allocator, "pub const {s}{s} = [_]Range{{\n", .{ prefix, name });
     for (ranges) |r| {
         try buf.print(allocator, "    .{{ .start = 0x{X:0>4}, .end = 0x{X:0>4} }},\n", .{ r.start, r.end });
+    }
+    try buf.appendSlice(allocator, "};\n");
+}
+
+/// Emit a property of strings as a `strprop_<name>_ranges` ([_]Range) table
+/// plus a `strprop_<name>_seqs` ([_][]const u21) table of its multi-code-point
+/// sequence members.
+fn emitStrProp(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    name: []const u8,
+    set: *const StrSet,
+) !void {
+    try buf.print(allocator, "pub const strprop_{s}_ranges = [_]Range{{\n", .{name});
+    for (set.ranges.items) |r|
+        try buf.print(allocator, "    .{{ .start = 0x{X:0>4}, .end = 0x{X:0>4} }},\n", .{ r.start, r.end });
+    try buf.appendSlice(allocator, "};\n");
+    try buf.print(allocator, "pub const strprop_{s}_seqs = [_][]const u21{{\n", .{name});
+    for (set.seqs.items) |seq| {
+        try buf.appendSlice(allocator, "    &[_]u21{ ");
+        for (seq, 0..) |cp, j| {
+            if (j != 0) try buf.appendSlice(allocator, ", ");
+            try buf.print(allocator, "0x{X}", .{cp});
+        }
+        try buf.appendSlice(allocator, " },\n");
     }
     try buf.appendSlice(allocator, "};\n");
 }

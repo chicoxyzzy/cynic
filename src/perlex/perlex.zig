@@ -24,6 +24,7 @@ pub const Program = compiler.Program;
 pub const Inst = compiler.Inst;
 pub const Flags = compiler.Flags;
 pub const PropertyResolver = compiler.PropertyResolver;
+pub const ResolvedProperty = compiler.ResolvedProperty;
 pub const Match = vm.Match;
 /// Sentinel for a capture slot that did not participate.
 pub const none = vm.none;

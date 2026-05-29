@@ -511,8 +511,10 @@ const Parser = struct {
 
     /// `\p{Name}` / `\p{Name=Value}` / `\P{…}` at `\p`/`\P` with `/u`
     /// set. Extracts `(key, value)` syntactically; the compiler's resolver
-    /// decides validity. Malformed forms defer to the fallback, which is
-    /// authoritative for the SyntaxError verdict.
+    /// decides validity, except for the §22.2.1.1 properties of strings,
+    /// whose misuse `scanProperty` rejects directly. Other malformed forms
+    /// defer to the fallback, which is authoritative for the SyntaxError
+    /// verdict.
     fn parsePropertyEscape(self: *Parser, negated: bool) ParseError!*Node {
         return self.makeNode(.{ .prop = try self.scanProperty(negated) });
     }
@@ -546,6 +548,16 @@ const Parser = struct {
             break :blk self.src[name_start..close];
         };
         if (value.len == 0 or (key != null and key.?.len == 0)) return error.Unsupported;
+        // §22.2.1.1 properties of strings: valid only as a positive, lone
+        // `\p{…}` under `/v`. `\P{…}` of one and any non-`/v` form are early
+        // errors (they would match — or complement — strings where the
+        // grammar forbids it). Perlex owns the verdict because its resolver
+        // recognises these names; without this gate they would silently
+        // lower (a false accept) instead of raising SyntaxError.
+        if (isStringProp(key, value)) {
+            if (negated) return error.SyntaxError;
+            if (!self.unicode_sets) return error.SyntaxError;
+        }
         self.pos = close + 1; // consume through `}`
         return .{ .negated = negated, .key = key, .value = value };
     }
@@ -1080,10 +1092,12 @@ fn mayContainStrings(cs: *const Node.ClassSet) bool {
 fn operandMayContainStrings(op: Node.ClassSet.Operand) bool {
     return switch (op) {
         .ranges => false,
-        // A negated property never contributes strings; a positive
-        // property of strings would (recognised once the string-valued
-        // Unicode properties land in a later phase).
-        .prop => false,
+        // A positive property of strings contributes string members
+        // (§22.2.1.1); a negated one (`\P{…}`) or a non-string property
+        // never does. `scanProperty` already rejected a negated property
+        // of strings, so any `.prop` reaching here that names one is
+        // positive — `isStringProp` is the whole test.
+        .prop => |p| isStringProp(p.key, p.value),
         .nested => |n| mayContainStrings(n),
         // §22.2.1.8 — a ClassString of length ≠ 1 makes the set may
         // contain strings (the length-1 case folds into the char set).
@@ -1094,6 +1108,30 @@ fn operandMayContainStrings(op: Node.ClassSet.Operand) bool {
             break :blk false;
         },
     };
+}
+
+/// The seven §22.2.1.1 *properties of strings* (the UTS #51 emoji-sequence
+/// sets). Their members are strings, so the grammar admits them only as a
+/// positive, lone `\p{…}` under `/v`. The list is the grammar's — the
+/// resolver's data is keyed by the same names — so a non-`/v` use, a `\P{…}`
+/// negation, or appearance in a negated set is an early error regardless of
+/// whether Cynic's tables happen to carry the name.
+const string_property_names = [_][]const u8{
+    "Basic_Emoji",
+    "Emoji_Keycap_Sequence",
+    "RGI_Emoji_Modifier_Sequence",
+    "RGI_Emoji_Flag_Sequence",
+    "RGI_Emoji_Tag_Sequence",
+    "RGI_Emoji_ZWJ_Sequence",
+    "RGI_Emoji",
+};
+
+/// True iff `\p{value}` (a lone name — no `key=`) names a property of
+/// strings. A keyed escape (`\p{gc=…}`, `\p{Script=…}`) never is.
+fn isStringProp(key: ?[]const u8, value: []const u8) bool {
+    if (key != null) return false;
+    for (string_property_names) |n| if (std.mem.eql(u8, n, value)) return true;
+    return false;
 }
 
 fn appendRanges(a: std.mem.Allocator, dst: *std.ArrayListUnmanaged(Node.ClassRange), src: []const Node.ClassRange) error{OutOfMemory}!void {

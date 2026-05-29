@@ -158,6 +158,8 @@ pub fn build(b: *std.Build) void {
     run_gen_props.addFileArg(b.path("vendor/unicode/PropertyValueAliases.txt"));
     run_gen_props.addFileArg(b.path("vendor/unicode/Scripts.txt"));
     run_gen_props.addFileArg(b.path("vendor/unicode/ScriptExtensions.txt"));
+    run_gen_props.addFileArg(b.path("vendor/unicode/emoji-sequences.txt"));
+    run_gen_props.addFileArg(b.path("vendor/unicode/emoji-zwj-sequences.txt"));
     gen_step.dependOn(&run_gen_props.step);
 
     // `zig build fmt-check` runs `zig fmt --check` over `src/` and

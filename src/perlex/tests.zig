@@ -99,7 +99,18 @@ fn expectCompileFlags(pattern: []const u8, flags: perlex.Flags, want: std.meta.T
 
 const CR = perlex.parser.Node.ClassRange;
 
-fn stubResolver(gpa: std.mem.Allocator, key: ?[]const u8, value: []const u8) std.mem.Allocator.Error!?[]const CR {
+fn stubResolver(gpa: std.mem.Allocator, key: ?[]const u8, value: []const u8) std.mem.Allocator.Error!?perlex.ResolvedProperty {
+    // A §22.2.1.1 *property of strings*: a real name ("Basic_Emoji") backed by
+    // tiny fake data so the parser's name-based early-error gating fires while
+    // the compiler's alternation lowering is exercised without real tables.
+    // Single chars [a-c] fold into ranges; "xy" and "123" are string members.
+    if (key == null and std.mem.eql(u8, value, "Basic_Emoji")) {
+        const ranges = try gpa.dupe(CR, &[_]CR{.{ .lo = 'a', .hi = 'c' }});
+        const seqs = try gpa.alloc([]const u21, 2);
+        seqs[0] = &[_]u21{ 'x', 'y' };
+        seqs[1] = &[_]u21{ '1', '2', '3' };
+        return .{ .ranges = ranges, .strings = seqs };
+    }
     if (key) |k| {
         if (!std.mem.eql(u8, k, "gc") and !std.mem.eql(u8, k, "General_Category")) return null;
     }
@@ -108,7 +119,7 @@ fn stubResolver(gpa: std.mem.Allocator, key: ?[]const u8, value: []const u8) std
     const l = [_]CR{ .{ .lo = 'A', .hi = 'Z' }, .{ .lo = 'a', .hi = 'z' } };
     const ranges: []const CR =
         if (std.mem.eql(u8, value, "Lu")) &lu else if (std.mem.eql(u8, value, "Ll")) &ll else if (std.mem.eql(u8, value, "L")) &l else return null;
-    return try gpa.dupe(CR, ranges);
+    return .{ .ranges = try gpa.dupe(CR, ranges), .strings = &.{} };
 }
 
 const uflags = perlex.Flags{ .unicode = true };
@@ -849,4 +860,56 @@ test "perlex/v: \\q{} with a supplementary / multi-unit string" {
         "^[[0-9]\\q{0|2|4|9\\uFE0F\\u20E3}]+$",
         &six_keycap,
     ));
+}
+
+// ── §22.2.1.1 properties of strings (`\p{RGI_Emoji}` …) as an atom. The
+// stub resolver backs "Basic_Emoji" with chars [a-c] and the string
+// members "xy" and "123". Valid only as a positive lone `\p{…}` under
+// `/v`; `\P{…}`, a non-`/v` flag, and a negated enclosing set are all
+// §22.2.1.1 early errors. ─────────────────────────────────────────────
+
+test "perlex/v: \\p{stringprop} atom matches its string and char members" {
+    // Multi-character members lower to an alternation (longest first).
+    try expectMatchPropFlags("\\p{Basic_Emoji}", vflags, "xy", "xy");
+    try expectMatchPropFlags("\\p{Basic_Emoji}", vflags, "123", "123");
+    // Single-character members come from the folded ranges.
+    try expectMatchPropFlags("\\p{Basic_Emoji}", vflags, "b", "b");
+    try expectNoMatchPropFlags("\\p{Basic_Emoji}", vflags, "z");
+    // A prefix of a string member is not the whole member on its own.
+    try expectNoMatchPropFlags("\\p{Basic_Emoji}", vflags, "x");
+}
+
+test "perlex/v: quantified \\p{stringprop} backtracks through the concatenation" {
+    // Mirrors the test262 harness: `^\p{X}+$` must consume the whole input.
+    try expectMatchPropFlags("^\\p{Basic_Emoji}+$", vflags, "xy123a", "xy123a");
+    try expectMatchPropFlags("^\\p{Basic_Emoji}+$", vflags, "abcxy", "abcxy");
+    try expectNoMatchPropFlags("^\\p{Basic_Emoji}+$", vflags, "xyz"); // 'z' not a member
+}
+
+test "perlex/v: \\p{stringprop} inside a positive set unions its members" {
+    try expectMatchPropFlags("[\\p{Basic_Emoji}[0-9]]", vflags, "xy", "xy");
+    try expectMatchPropFlags("[\\p{Basic_Emoji}[0-9]]", vflags, "5", "5");
+    try expectMatchPropFlags("[\\p{Basic_Emoji}[0-9]]", vflags, "a", "a");
+    try expectNoMatchPropFlags("[\\p{Basic_Emoji}[0-9]]", vflags, "w");
+}
+
+test "perlex: \\P{stringprop} is a SyntaxError (no complement of strings)" {
+    // §22.2.1.1 — a property of strings can't be negated, in either mode.
+    try expectCompileProp("\\P{Basic_Emoji}", vflags, .syntax_error);
+    try expectCompileProp("\\P{Basic_Emoji}", uflags, .syntax_error);
+    // …and inside a `/v` class operand.
+    try expectCompileProp("[\\P{Basic_Emoji}]", vflags, .syntax_error);
+}
+
+test "perlex: \\p{stringprop} without /v is a SyntaxError" {
+    // Valid only under `/v`; under `/u` (or a class operand reached in /u)
+    // it is an early error.
+    try expectCompileProp("\\p{Basic_Emoji}", uflags, .syntax_error);
+}
+
+test "perlex/v: negated set containing \\p{stringprop} is a SyntaxError" {
+    // §22.2.1.1 — `[^…]` is a Syntax Error when MayContainStrings is true,
+    // and a positive property of strings makes the set may-contain-strings.
+    try expectCompileProp("[^\\p{Basic_Emoji}]", vflags, .syntax_error);
+    try expectCompileProp("[^\\p{Basic_Emoji}[0-9]]", vflags, .syntax_error);
 }
