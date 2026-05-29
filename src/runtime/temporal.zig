@@ -1052,18 +1052,14 @@ pub fn compareTime(a: PlainTimeRecord, b: PlainTimeRecord) i32 {
 /// `PlainTime.prototype.toJSON` / default `toString` produce:
 /// `HH:MM:SS` plus a trimmed sub-second fraction when any sub-second
 /// field is non-zero.
-pub fn plainTimeToString(t: PlainTimeRecord, buf: []u8) []const u8 {
+/// §4.3.x TimeRecordToString — format a wall-clock time at `precision`
+/// (FormatTimeString). `.auto` emits `HH:MM:SS` and trims the fraction
+/// (omitting it when zero); `.minute` stops after `HH:MM`; `.digits`
+/// emits exactly N fractional digits.
+pub fn plainTimeToString(t: PlainTimeRecord, buf: []u8, precision: Precision) []const u8 {
     var w = Writer{ .buf = buf, .len = 0 };
-    w.pad2(t.hour);
-    w.byte(':');
-    w.pad2(t.minute);
-    w.byte(':');
-    w.pad2(t.second);
     const sub_ns: u32 = t.millisecond * 1_000_000 + t.microsecond * 1_000 + t.nanosecond;
-    if (sub_ns != 0) {
-        w.byte('.');
-        w.fraction9(sub_ns);
-    }
+    writeTimeFields(&w, t.hour, t.minute, t.second, sub_ns, precision);
     return w.buf[0..w.len];
 }
 
@@ -3682,10 +3678,14 @@ test "isValidTime + compareTime" {
 
 test "plainTimeToString: forms" {
     var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings("00:00:00", plainTimeToString(.{}, &buf));
-    try testing.expectEqualStrings("15:23:30.123456789", plainTimeToString(.{ .hour = 15, .minute = 23, .second = 30, .millisecond = 123, .microsecond = 456, .nanosecond = 789 }, &buf));
-    try testing.expectEqualStrings("01:02:03", plainTimeToString(.{ .hour = 1, .minute = 2, .second = 3 }, &buf));
-    try testing.expectEqualStrings("12:00:00.5", plainTimeToString(.{ .hour = 12, .millisecond = 500 }, &buf));
+    try testing.expectEqualStrings("00:00:00", plainTimeToString(.{}, &buf, .auto));
+    try testing.expectEqualStrings("15:23:30.123456789", plainTimeToString(.{ .hour = 15, .minute = 23, .second = 30, .millisecond = 123, .microsecond = 456, .nanosecond = 789 }, &buf, .auto));
+    try testing.expectEqualStrings("01:02:03", plainTimeToString(.{ .hour = 1, .minute = 2, .second = 3 }, &buf, .auto));
+    try testing.expectEqualStrings("12:00:00.5", plainTimeToString(.{ .hour = 12, .millisecond = 500 }, &buf, .auto));
+    // Precision knobs: minute stops at HH:MM; fixed digits pad/truncate.
+    try testing.expectEqualStrings("15:23", plainTimeToString(.{ .hour = 15, .minute = 23, .second = 30 }, &buf, .minute));
+    try testing.expectEqualStrings("12:00:00.500", plainTimeToString(.{ .hour = 12, .millisecond = 500 }, &buf, .{ .digits = 3 }));
+    try testing.expectEqualStrings("12:00:00", plainTimeToString(.{ .hour = 12, .millisecond = 500 }, &buf, .{ .digits = 0 }));
 }
 
 test "parseTemporalTimeString: bare time forms" {

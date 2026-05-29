@@ -841,17 +841,24 @@ fn plainTimeEquals(realm: *Realm, this_value: Value, args: []const Value) Native
     return Value.fromBool(temporal.compareTime(a, b) == 0);
 }
 
-/// §4.3.x Temporal.PlainTime.prototype.toString — `auto` precision
-/// path. Options-driven rounding is deferred; an options argument is
-/// rejected with a TypeError.
+/// §4.3.x Temporal.PlainTime.prototype.toString — read the
+/// `fractionalSecondDigits` / `roundingMode` / `smallestUnit` options (in
+/// that order, each read before `smallestUnit` is validated), round the
+/// time to the resulting precision (any whole-day carry is discarded — a
+/// PlainTime has no date), and format.
 fn plainTimeToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const t = try requirePlainTime(realm, this_value);
-    const opts = argOr(args, 0, Value.undefined_);
-    if (!opts.isUndefined()) {
-        return throwTypeError(realm, "Temporal.PlainTime.prototype.toString options are not yet supported");
-    }
+    const options = argOr(args, 0, Value.undefined_);
+    const frac = try getFractionalSecondDigitsOption(realm, options);
+    const opts_obj = try getOptionsObject(realm, options);
+    const mode = try getRoundingModeOption(realm, opts_obj, .trunc);
+    const smallest = try getTemporalUnitOption(realm, opts_obj, "smallestUnit");
+    try requireToStringSmallestUnit(realm, smallest);
+
+    const prec = toSecondsStringPrecision(smallest, frac);
+    const rt = temporal.roundTime(t, prec.unit, prec.increment, mode);
     var buf: [64]u8 = undefined;
-    const s = temporal.plainTimeToString(t, &buf);
+    const s = temporal.plainTimeToString(rt.time, &buf, prec.precision);
     const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
     return Value.fromString(js);
 }
@@ -860,7 +867,7 @@ fn plainTimeToJSON(realm: *Realm, this_value: Value, args: []const Value) Native
     _ = args;
     const t = try requirePlainTime(realm, this_value);
     var buf: [64]u8 = undefined;
-    const s = temporal.plainTimeToString(t, &buf);
+    const s = temporal.plainTimeToString(t, &buf, .auto);
     const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
     return Value.fromString(js);
 }
