@@ -210,6 +210,43 @@ pub fn build(b: *std.Build) void {
     const run_t262_tests = b.addRunArtifact(t262_tests);
     test_step.dependOn(&run_t262_tests.step);
 
+    // A second harness binary, built ReleaseSafe and installed under
+    // a DISTINCT name (`cynic-test262-safe`) so it coexists with the
+    // ReleaseFast `cynic-test262` — build each once and invoke either
+    // directly, no recompile-and-clobber when switching between fast
+    // sweeps and GC diagnosis. ReleaseSafe keeps the GC verifiers
+    // (`verifyRememberedSet` / `verifyShapeInvariant`) and the 0xaa
+    // free-poison live — all gated on `runtime_safety`, hence no-ops
+    // in ReleaseFast — while running ~2-3× faster than Debug. That
+    // makes it the right binary for the `/gc-stress` workflow: a
+    // use-after-free derefs poison deterministically and panics with
+    // a stack trace. `-Dtest262-debug=true` still flips the primary
+    // binary to Debug for the rare zero-inlining full-trace case.
+    const lib_mod_safe = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    lib_mod_safe.linkLibrary(qjs_regex);
+    lib_mod_safe.addIncludePath(b.path("vendor/quickjs"));
+    lib_mod_safe.addImport("c", c_mod);
+    const t262_mod_safe = b.createModule(.{
+        .root_source_file = b.path("tools/test262.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    t262_mod_safe.addImport("cynic", lib_mod_safe);
+    const t262_exe_safe = b.addExecutable(.{
+        .name = "cynic-test262-safe",
+        .root_module = t262_mod_safe,
+    });
+    const install_t262_safe = b.addInstallArtifact(t262_exe_safe, .{});
+    const run_t262_safe = b.addRunArtifact(t262_exe_safe);
+    run_t262_safe.step.dependOn(&install_t262_safe.step);
+    if (b.args) |args| run_t262_safe.addArgs(args);
+    const t262_safe_step = b.step("test262-safe", "Build + run the test262 harness in ReleaseSafe (GC verifiers + 0xaa poison live; for /gc-stress)");
+    t262_safe_step.dependOn(&run_t262_safe.step);
+
     // `zig build bench` — Phase 1 micro-bench driver from
     // docs/benchmarking.md. Spawns a ReleaseFast cynic CLI per
     // fixture in `bench/micros/`, captures wall time + peak RSS,
