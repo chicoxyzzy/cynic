@@ -850,6 +850,17 @@ pub fn parseTemporalTimeString(input: []const u8) TimeParseError!PlainTimeRecord
         },
     }
 
+    // §ISO 8601 ambiguity (Temporal grammar): with no `T` designator,
+    // a dashed `YYYY-MM` (DateSpecYearMonth) or `MM-DD`
+    // (DateSpecMonthDay) is ambiguous with a date spec and must be
+    // rejected for a bare PlainTime — only a `T` prefix forces the
+    // time reading. These dashed forms reach here because the
+    // `-MM` / `-DD` tail would otherwise be mis-read as a UTC offset
+    // below, parsing the prefix as a compact `HHMM` time. (The
+    // colon-free compact `YYYYMM` / `MMDD` equivalents are
+    // disambiguated inside parseBareTime.)
+    if (!had_designator and isAmbiguousExtendedDateSpec(s)) return error.Invalid;
+
     // Split off a trailing UTC offset or `Z` designator. The
     // offset (when present) MUST consume the rest of the string —
     // trailing junk (`00:00:00+00:00junk`) is invalid.
@@ -1005,6 +1016,33 @@ fn isValidMonthDay(month: u32, day: u32) bool {
         else => 0,
     };
     return day >= 1 and day <= max_day;
+}
+
+/// Whether `s` is a bare extended date-spec — `YYYY-MM`
+/// (DateSpecYearMonth) or `MM-DD` (DateSpecMonthDay). A PlainTime
+/// string treats both as ambiguous and rejects them unless a `T`
+/// designator forces the time reading. The colon-free compact
+/// equivalents (`YYYYMM`, `MMDD`) are handled in parseBareTime; these
+/// dashed forms would otherwise be mis-parsed as a compact `HHMM`
+/// time plus a `-MM` / `-DD` UTC offset.
+fn isAmbiguousExtendedDateSpec(s: []const u8) bool {
+    // YYYY-MM : four digits, '-', two-digit month in 1..12.
+    if (s.len == 7 and s[4] == '-') {
+        var i: usize = 0;
+        if (!skipDigits(s, &i, 4)) return false;
+        i += 1; // skip the '-'
+        const month = read2(s, &i) orelse return false;
+        return i == s.len and isValidMonth(month);
+    }
+    // MM-DD : two-digit month, '-', two-digit day valid for the month.
+    if (s.len == 5 and s[2] == '-') {
+        var i: usize = 0;
+        const month = read2(s, &i) orelse return false;
+        i += 1; // skip the '-'
+        const day = read2(s, &i) orelse return false;
+        return i == s.len and isValidMonthDay(month, day);
+    }
+    return false;
 }
 
 /// Parse the bare time portion: `HH`, `HH:MM`, `HH:MM:SS`,
@@ -4275,6 +4313,32 @@ test "parseTemporalTimeString: compact-form date/time disambiguation" {
     const e = try parseTemporalTimeString("T1214");
     try testing.expectEqual(@as(u32, 12), e.hour);
     try testing.expectEqual(@as(u32, 14), e.minute);
+}
+
+test "parseTemporalTimeString: extended-form date/time disambiguation" {
+    // Dashed `YYYY-MM` (DateSpecYearMonth) and `MM-DD`
+    // (DateSpecMonthDay) are ambiguous with a date spec — the `-MM` /
+    // `-DD` tail would otherwise be mis-read as a UTC offset, parsing
+    // the prefix as a compact time. Rejected unless a `T` forces it.
+    try testing.expectError(error.Invalid, parseTemporalTimeString("2021-12")); // YYYY-MM
+    try testing.expectError(error.Invalid, parseTemporalTimeString("12-14")); // Dec 14 (MM-DD)
+    // Annotation variants reduce to the bare ambiguous form once the
+    // `[…]` block is stripped.
+    try testing.expectError(error.Invalid, parseTemporalTimeString("2021-12[-12:00]"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("12-14[-14:00]"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("2021-12[u-ca=iso8601]"));
+    // Unambiguous extended forms (month / day out of range) stay times.
+    const a = try parseTemporalTimeString("2021-13"); // month 13 invalid → 20:21
+    try testing.expectEqual(@as(u32, 20), a.hour);
+    try testing.expectEqual(@as(u32, 21), a.minute);
+    const b = try parseTemporalTimeString("13-14"); // month 13 invalid → 13:00
+    try testing.expectEqual(@as(u32, 13), b.hour);
+    const c = try parseTemporalTimeString("0000-00"); // month 00 invalid → 00:00
+    try testing.expectEqual(@as(u32, 0), c.hour);
+    try testing.expectEqual(@as(u32, 0), c.minute);
+    // A `T` designator forces the time reading of a dashed form.
+    const d = try parseTemporalTimeString("T2021-13");
+    try testing.expectEqual(@as(u32, 20), d.hour);
 }
 
 test "parseTemporalTimeString: negative-zero expanded year rejected" {
