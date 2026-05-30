@@ -294,6 +294,21 @@ const Compiler = struct {
         try self.insts.append(self.gpa, inst);
     }
 
+    /// Emit a `.class` instruction with program-owned ranges that are
+    /// sorted ascending and disjoint. `charset.normalize` does the
+    /// sort+merge and allocates the kept copy, so callers may pass raw,
+    /// unsorted, or overlapping ranges (a user class like `[c-ea-c]`)
+    /// or already-sorted ones (a resolved `\p{…}` set) interchangeably.
+    /// This is the single choke point that establishes the sorted-and-
+    /// disjoint invariant the VM's binary `classContains` relies on.
+    fn emitClass(self: *Compiler, negated: bool, ranges: []const Node.ClassRange, fold: bool) CompileError!void {
+        const owned = try charset.normalize(self.gpa, ranges);
+        self.emit(.{ .class = .{ .negated = negated, .ranges = owned, .fold = fold } }) catch |e| {
+            self.gpa.free(owned);
+            return e;
+        };
+    }
+
     fn here(self: *Compiler) usize {
         return self.insts.items.len;
     }
@@ -309,24 +324,17 @@ const Compiler = struct {
                 // `.` excludes line terminators unless dotall (`s`), in
                 // which case it matches any code unit (negated empty
                 // class).
-                const src_ranges: []const parser.Node.ClassRange =
-                    if (self.dot_all) &[_]parser.Node.ClassRange{} else &parser.line_terminator_ranges;
-                const ranges = try self.gpa.dupe(parser.Node.ClassRange, src_ranges);
                 // The line-terminator set has no case partners, so the
                 // effective `i` flag never changes a `.` match: bake false.
-                self.emit(.{ .class = .{ .negated = true, .ranges = ranges, .fold = false } }) catch |e| {
-                    self.gpa.free(ranges);
-                    return e;
-                };
+                const src_ranges: []const parser.Node.ClassRange =
+                    if (self.dot_all) &[_]parser.Node.ClassRange{} else &parser.line_terminator_ranges;
+                try self.emitClass(true, src_ranges, false);
             },
             .class => |cls| {
                 // Copy the ranges into program-owned memory (the AST is
-                // arena/const and freed after compilation).
-                const ranges = try self.gpa.dupe(parser.Node.ClassRange, cls.ranges);
-                self.emit(.{ .class = .{ .negated = cls.negated, .ranges = ranges, .fold = self.fold } }) catch |e| {
-                    self.gpa.free(ranges);
-                    return e;
-                };
+                // arena/const and freed after compilation); emitClass
+                // sorts + merges them for the VM's binary search.
+                try self.emitClass(cls.negated, cls.ranges, self.fold);
             },
             .prop => |p| {
                 // §22.2.1.1 — resolve the property via the injected
@@ -355,11 +363,7 @@ const Compiler = struct {
                         try charset.complement(a, rp.ranges)
                     else
                         rp.ranges;
-                    const ranges = try self.gpa.dupe(Node.ClassRange, base);
-                    self.emit(.{ .class = .{ .negated = false, .ranges = ranges, .fold = self.fold } }) catch |e| {
-                        self.gpa.free(ranges);
-                        return e;
-                    };
+                    try self.emitClass(false, base, self.fold);
                 } else {
                     // A property of strings (§22.2.1.1). The parser rejects
                     // `\P{…}` of one and the non-`/v` forms as early errors,
@@ -611,11 +615,7 @@ const Compiler = struct {
     ) CompileError!void {
         // Common case: a flat code-point class (no string members).
         if (strings.len == 0) {
-            const owned = try self.gpa.dupe(Node.ClassRange, ranges);
-            self.emit(.{ .class = .{ .negated = false, .ranges = owned, .fold = self.fold } }) catch |e| {
-                self.gpa.free(owned);
-                return e;
-            };
+            try self.emitClass(false, ranges, self.fold);
             return;
         }
 
