@@ -2135,7 +2135,9 @@ fn installPlainDate(realm: *Realm, ns: *JSObject) !void {
     try installNativeMethodOnProto(realm, proto, "withCalendar", plainDateWithCalendar, 1);
     try installNativeMethodOnProto(realm, proto, "toPlainYearMonth", plainDateToPlainYearMonth, 0);
     try installNativeMethodOnProto(realm, proto, "toPlainMonthDay", plainDateToPlainMonthDay, 0);
-    try installNativeMethodOnProto(realm, proto, "toPlainDateTime", plainDateToPlainDateTime, 1);
+    // §3.3.20 toPlainDateTime ( [ temporalTime ] ) — the sole
+    // parameter is optional, so the function .length is 0.
+    try installNativeMethodOnProto(realm, proto, "toPlainDateTime", plainDateToPlainDateTime, 0);
     try installNativeMethodOnProto(realm, proto, "toZonedDateTime", plainDateToZonedDateTime, 1);
 
     try installNativeMethod(realm, fn_obj, "from", plainDateFrom, 1);
@@ -2370,55 +2372,62 @@ fn plainDateEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value
     return Value.undefined_;
 }
 
-/// §3.5.x parse an ISO monthCode ("M01".."M12"; no leap month in ISO).
-/// The `monthCode` field must be a primitive String — a number, bigint,
-/// boolean, Symbol, null, or object is a TypeError (it is never coerced),
-/// distinct from the RangeError for a malformed string.
-fn parseMonthCode(realm: *Realm, v: Value) NativeError!i64 {
-    // §13.x ToMonthCode is ToPrimitiveAndRequireString: an object coerces via
-    // its `toString`; a non-string primitive is a TypeError before any
-    // format check. The grammar (`M` + two digits) is then validated here so
-    // an ill-formed code is a RangeError before a later field is read.
-    const prim = try intrinsics.toPrimitive(realm, v, .string);
-    if (!prim.isString()) return throwTypeError(realm, "monthCode must be a string");
-    const s: *JSString = @ptrCast(@alignCast(prim.asString()));
-    const b = s.flatBytes();
-    if (b.len != 3 or b[0] != 'M' or b[1] < '0' or b[1] > '9' or b[2] < '0' or b[2] > '9') {
-        return throwRangeError(realm, "invalid monthCode");
-    }
-    const m: i64 = @as(i64, b[1] - '0') * 10 + @as(i64, b[2] - '0');
-    if (m < 1 or m > 12) return throwRangeError(realm, "invalid monthCode");
-    return m;
-}
-
-/// §3.5.x ISODateFromFields — read year, month/monthCode, day off a
-/// property bag and regulate per `options`.
+/// §3.5.x ISODateFromFields — read the date fields off a property bag and
+/// regulate per `options`. §13.x PrepareCalendarFields reads the calendar
+/// field first, then each remaining field in alphabetical order (day,
+/// month, monthCode, year), coercing each immediately after its Get so an
+/// earlier field's type error surfaces before a later field is read.
+/// `month` / `day` use ToPositiveIntegerWithTruncation (a < 1 RangeError at
+/// read time); `monthCode` validates only its grammar here. The overflow
+/// option is read before any algorithmic validation; the monthCode ISO
+/// suitability, the month / monthCode reconciliation, and the required-field
+/// checks are all part of CalendarResolveFields, after the overflow read.
 fn toISODateFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!PlainDateRecord {
     // The calendar field (if present) must be undefined or a String;
     // the string's canonicalisation is deferred with calendar support.
     try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
+
     const day_v = try getPropertyChain(realm, obj, "day");
+    var day_present = false;
+    var day_val: i64 = 0;
+    if (!day_v.isUndefined()) {
+        day_val = try readPositiveDateField(realm, day_v);
+        day_present = true;
+    }
+
     const month_v = try getPropertyChain(realm, obj, "month");
-    const month_code_v = try getPropertyChain(realm, obj, "monthCode");
+    var month_present = false;
+    var month_val: i64 = 0;
+    if (!month_v.isUndefined()) {
+        month_val = try readPositiveDateField(realm, month_v);
+        month_present = true;
+    }
+
+    var mc_buf: [8]u8 = undefined;
+    const mc_len = try readMonthCodeField(realm, try getPropertyChain(realm, obj, "monthCode"), &mc_buf);
+
     const year_v = try getPropertyChain(realm, obj, "year");
-    if (year_v.isUndefined()) return throwTypeError(realm, "PlainDate-like is missing 'year'");
-    if (day_v.isUndefined()) return throwTypeError(realm, "PlainDate-like is missing 'day'");
-    const year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
-    const day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
+    var year_present = false;
+    var year_val: i64 = 0;
+    if (!year_v.isUndefined()) {
+        year_val = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+        year_present = true;
+    }
+
+    const overflow = try getTemporalOverflowOption(realm, options);
+
+    if (!year_present) return throwTypeError(realm, "PlainDate-like is missing 'year'");
+    if (!day_present) return throwTypeError(realm, "PlainDate-like is missing 'day'");
     var month: i64 = undefined;
-    if (!month_code_v.isUndefined()) {
-        month = try parseMonthCode(realm, month_code_v);
-        if (!month_v.isUndefined()) {
-            const m2 = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
-            if (m2 != month) return throwRangeError(realm, "month and monthCode disagree");
-        }
-    } else if (!month_v.isUndefined()) {
-        month = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+    if (mc_len) |len| {
+        month = try monthFromCodeBytes(realm, &mc_buf, len);
+        if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
+    } else if (month_present) {
+        month = month_val;
     } else {
         return throwTypeError(realm, "PlainDate-like is missing 'month' / 'monthCode'");
     }
-    const overflow = try getTemporalOverflowOption(realm, options);
-    return temporal.regulateISODate(year, month, day, overflow == .reject) orelse
+    return temporal.regulateISODate(year_val, month, day_val, overflow == .reject) orelse
         throwRangeError(realm, "PlainDate is out of range");
 }
 
@@ -2498,39 +2507,56 @@ fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         return throwTypeError(realm, "PlainDate-like must be an object");
     try rejectTemporalLikeObject(realm, obj);
 
-    var year: i64 = base.iso_year;
-    var month: i64 = base.iso_month;
-    var day: i64 = base.iso_day;
-    var any = false;
-
+    // §13.x PrepareCalendarFields ('partial') — read each field in
+    // alphabetical order (day, month, monthCode, year), coercing each
+    // immediately after its Get. At least one field must be present, and
+    // that check precedes the overflow read; the monthCode ISO suitability
+    // and the month / monthCode reconciliation follow it (CalendarDateFromFields).
     const day_v = try getPropertyChain(realm, obj, "day");
+    var day_present = false;
+    var day_val: i64 = 0;
     if (!day_v.isUndefined()) {
-        day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
-        any = true;
+        day_val = try readPositiveDateField(realm, day_v);
+        day_present = true;
     }
+
     const month_v = try getPropertyChain(realm, obj, "month");
-    const month_code_v = try getPropertyChain(realm, obj, "monthCode");
-    if (!month_code_v.isUndefined()) {
-        month = try parseMonthCode(realm, month_code_v);
-        any = true;
-        if (!month_v.isUndefined()) {
-            const m2 = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
-            if (m2 != month) return throwRangeError(realm, "month and monthCode disagree");
-        }
-    } else if (!month_v.isUndefined()) {
-        month = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
-        any = true;
+    var month_present = false;
+    var month_val: i64 = 0;
+    if (!month_v.isUndefined()) {
+        month_val = try readPositiveDateField(realm, month_v);
+        month_present = true;
     }
+
+    var mc_buf: [8]u8 = undefined;
+    const mc_len = try readMonthCodeField(realm, try getPropertyChain(realm, obj, "monthCode"), &mc_buf);
+
     const year_v = try getPropertyChain(realm, obj, "year");
+    var year_present = false;
+    var year_val: i64 = 0;
     if (!year_v.isUndefined()) {
-        year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
-        any = true;
+        year_val = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+        year_present = true;
     }
-    if (!any) return throwTypeError(realm, "PlainDate-like must have at least one date property");
+
+    if (!day_present and !month_present and mc_len == null and !year_present)
+        return throwTypeError(realm, "PlainDate-like must have at least one date property");
 
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
-    const rec = temporal.regulateISODate(year, month, day, overflow == .reject) orelse
-        return throwRangeError(realm, "PlainDate is out of range");
+
+    var month: i64 = base.iso_month;
+    if (mc_len) |len| {
+        month = try monthFromCodeBytes(realm, &mc_buf, len);
+        if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
+    } else if (month_present) {
+        month = month_val;
+    }
+    const rec = temporal.regulateISODate(
+        if (year_present) year_val else base.iso_year,
+        month,
+        if (day_present) day_val else base.iso_day,
+        overflow == .reject,
+    ) orelse return throwRangeError(realm, "PlainDate is out of range");
     return createTemporalDate(realm, rec);
 }
 
@@ -3250,7 +3276,7 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     // monthCode, nanosecond, second, year.
     const day_v = try getPropertyChain(realm, obj, "day");
     if (!day_v.isUndefined()) {
-        day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
+        day = try readPositiveDateField(realm, day_v);
         any = true;
     }
     const hour_v = try getPropertyChain(realm, obj, "hour");
@@ -3275,7 +3301,7 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     const month_v = try getPropertyChain(realm, obj, "month");
     if (!month_v.isUndefined()) {
-        month_int = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+        month_int = try readPositiveDateField(realm, month_v);
         month_int_set = true;
         any = true;
     }
@@ -5081,7 +5107,7 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     // offset, second, year.
     const day_v = try getPropertyChain(realm, obj, "day");
     if (!day_v.isUndefined()) {
-        day = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, day_v));
+        day = try readPositiveDateField(realm, day_v);
         any = true;
     }
     const hour_v = try getPropertyChain(realm, obj, "hour");
@@ -5106,7 +5132,7 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     const month_v = try getPropertyChain(realm, obj, "month");
     if (!month_v.isUndefined()) {
-        month_int = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, month_v));
+        month_int = try readPositiveDateField(realm, month_v);
         month_int_set = true;
         any = true;
     }
