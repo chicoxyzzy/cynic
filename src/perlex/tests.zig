@@ -473,6 +473,53 @@ test "perlex: empty group name is a syntax error" {
     try expectCompile("(?<>a)", .syntax_error);
 }
 
+test "perlex: an invalid named-group name is a syntax error" {
+    // §22.2.1.1: a GroupName must be a valid RegExpIdentifierName — its
+    // first code point a RegExpIdentifierStart (UnicodeIDStart ∪ {$, _}),
+    // the rest RegExpIdentifierPart. That rule is mode-independent, and
+    // `(?<` has no Annex B reinterpretation (the only other `(?<…` Atoms
+    // are the `(?<=` / `(?<!` lookbehinds, already routed away), so a
+    // malformed name is a SyntaxError in every mode. Perlex implements the
+    // whole name grammar, so it is authoritative.
+    //
+    // Pictographic code points (Extended_Pictographic, never ID_Start):
+    try expectCompile("(?<🐕>dog)", .syntax_error);
+    try expectCompile("(?<🦊>fox)", .syntax_error);
+    try expectCompileFlags("(?<🐕>dog)", uf, .syntax_error);
+    try expectCompileFlags("(?<🦊>fox)", uf, .syntax_error);
+    // A decimal-number start (U+1D7DA MATHEMATICAL DOUBLE-STRUCK DIGIT
+    // TWO, category Nd → IdentifierPart but not IdentifierStart):
+    try expectCompile("(?<𝟚the>the)", .syntax_error);
+    try expectCompileFlags("(?<𝟚the>the)", uf, .syntax_error);
+    // An ASCII digit start.
+    try expectCompile("(?<1a>x)", .syntax_error);
+    // A lone surrogate (WTF-8 0xED 0xA0 0x80 = U+D800) is neither a valid
+    // scalar identifier code point nor half of a valid pair → SyntaxError.
+    try expectCompile("(?<\xed\xa0\x80>x)", .syntax_error);
+    try expectCompileFlags("(?<\xed\xa0\x80>x)", uf, .syntax_error);
+}
+
+test "perlex: a malformed escape inside a group name is a syntax error" {
+    // §22.2.1 RegExpIdentifierName admits only `\ RegExpUnicodeEscapeSequence`
+    // (a `\u` / `\u{}` escape). Any other `\` escape, or a malformed `\u`,
+    // cannot form a valid name, so it is a §22.2.1.1 SyntaxError everywhere.
+    try expectCompile("(?<a\\db>x)", .syntax_error); // \d is not \u
+    try expectCompile("(?<\\x41>x)", .syntax_error); // \x is not \u
+    try expectCompile("(?<\\u{110000}>x)", .syntax_error); // out of range
+    try expectCompile("(?<\\u{}>x)", .syntax_error); // empty \u{}
+    try expectCompile("(?<\\uZZZZ>x)", .syntax_error); // not four hex digits
+}
+
+test "perlex: a \\k reference to a malformed name is a syntax error" {
+    // Under ES2025 NamedCaptureGroups is always enabled, so a `\k` followed
+    // by `<` always begins a `\k GroupName` — there is no Annex B
+    // `\k`-as-identity-escape fallback in that position. A malformed
+    // referenced name is therefore the same §22.2.1.1 SyntaxError as a
+    // malformed definition.
+    try expectCompile("\\k<🐕>", .syntax_error);
+    try expectCompileFlags("\\k<🐕>", uf, .syntax_error);
+}
+
 // ── Fallback routing — constructs outside the v1 grammar ─────────────
 
 test "perlex: unsupported constructs fall back" {
