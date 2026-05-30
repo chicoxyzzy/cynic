@@ -500,23 +500,133 @@ fn durationFrom(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     return createTemporalDuration(realm, d);
 }
 
-/// Whether an options bag carries a present `relativeTo` — the
-/// calendar / zoned-anchored path, which Cynic defers.
-fn relativeToPresent(realm: *Realm, opts: ?*JSObject) NativeError!bool {
-    const obj = opts orelse return false;
-    const v = try getPropertyChain(realm, obj, "relativeTo");
-    return !v.isUndefined();
-}
-
 /// The larger-magnitude of two largest units (smaller enum index wins).
 fn largerLargestUnit(a: temporal.LargestUnit, b: temporal.LargestUnit) temporal.LargestUnit {
     return if (@intFromEnum(a) < @intFromEnum(b)) a else b;
 }
 
-/// §7.3.x Temporal.Duration.compare ( one, two [, options] ). Without a
-/// relativeTo, calendar units (years/months/weeks) can't be ordered and
-/// throw; day-and-smaller durations compare by total nanoseconds (each
-/// day a fixed 24 h). The relativeTo path is deferred.
+/// §7.5.x TotalTimeDuration — a span of `total_ns` expressed as a fractional
+/// count of `unit` (day or a finer time unit, each a fixed length): the exact
+/// rational `total_ns / unit_ns` rounded once to a double, matching the spec's
+/// `TimeDuration.fdiv`.
+fn totalInUnit(total_ns: i128, unit: temporal.LargestUnit) f64 {
+    return temporal.divRoundToF64(total_ns, temporal.unitNanoseconds(unit));
+}
+
+/// §7.3.x Temporal.Duration.compare step 7 — whether two durations have
+/// identical fields component-for-component (an early-return shortcut that
+/// precedes any relativeTo-dependent balancing).
+fn durationFieldsEqual(a: temporal.DurationRecord, b: temporal.DurationRecord) bool {
+    return a.years == b.years and a.months == b.months and a.weeks == b.weeks and
+        a.days == b.days and a.hours == b.hours and a.minutes == b.minutes and
+        a.seconds == b.seconds and a.milliseconds == b.milliseconds and
+        a.microseconds == b.microseconds and a.nanoseconds == b.nanoseconds;
+}
+
+/// The anchor a duration is measured relative to: either a *plain* wall-clock
+/// PlainDateTime (a PlainDate / PlainDateTime / time-zone-less property bag /
+/// bare date string — its date at midnight, any time component discarded) or
+/// a *zoned* anchor (a ZonedDateTime / time-zone-bearing bag or string), kept
+/// as its exact instant + time zone. The two drive different spec paths: a
+/// plain anchor differences in the wall clock
+/// (DifferencePlainDateTimeWithRounding / …WithTotal); a zoned anchor adds and
+/// differences through the instant (AddZonedDateTime / DifferenceZonedDateTime
+/// …), so the sum overflows the *Instant* range — narrower than a bare
+/// PlainDateTime, whose midnight can sit one ISO day past the Instant floor —
+/// and the next-day boundary the NudgeToZonedTime nudge probes must itself be
+/// a representable instant.
+const RelativeToAnchor = union(enum) {
+    plain: temporal.PlainDateTimeRecord,
+    zoned: struct { epoch_ns: i128, time_zone: temporal.TimeZone },
+};
+
+/// §7.3.x GetTemporalRelativeToOption — read the `relativeTo` option and
+/// reduce it to the start wall-clock PlainDateTime the duration is measured
+/// from (with its zoned-vs-plain provenance), or null when `relativeTo` is
+/// absent.
+///
+/// A plain relativeTo (PlainDate / PlainDateTime, a time-zone-less property
+/// bag, or a bare date string) is its date at midnight — CreateTemporalDate
+/// discards any time. A zoned relativeTo (ZonedDateTime, a property bag or
+/// string carrying a `[time-zone]`) is the wall-clock GetISODateTimeFor shows
+/// at its instant. Because Cynic's time zones are fixed-offset, the constant
+/// offset cancels in every later epoch difference, so the *date* arithmetic is
+/// shared — only the rounding nudge differs (see `RelativeToAnchor`). A
+/// branded Temporal value that is not one of the three valid types falls
+/// through to the field-bag reader, which rejects it with a TypeError
+/// (missing / throwing `year`..`day` getters).
+fn getTemporalRelativeToOption(realm: *Realm, opts: ?*JSObject) NativeError!?RelativeToAnchor {
+    const obj = opts orelse return null;
+    const v = try getPropertyChain(realm, obj, "relativeTo");
+    if (v.isUndefined()) return null;
+
+    if (heap_mod.valueAsPlainObject(v)) |bag| {
+        if (bag.getTemporalRecord()) |rec| switch (rec.*) {
+            .zoned_date_time => |z| return .{ .zoned = .{ .epoch_ns = z.epoch_ns, .time_zone = z.time_zone } },
+            // A PlainDate / PlainDateTime relativeTo is its date at midnight —
+            // the time component is discarded. Both were range-checked at
+            // construction (CreateTemporalDate), so no re-check is needed.
+            .plain_date => |pd| return .{ .plain = temporal.PlainDateTimeRecord.combine(pd, .{}) },
+            .plain_date_time => |pdt| return .{ .plain = temporal.PlainDateTimeRecord.combine(pdt.date(), .{}) },
+            // Other Temporal types fall through to the property-bag reader.
+            else => {},
+        };
+        // Generic property bag: one alphabetical pass over calendar + date /
+        // time + optional offset / time-zone, resolved under `constrain`, then
+        // anchored — zoned when a time zone was present, else plain (midnight).
+        // InterpretTemporalDateTimeFields applies no PlainDateTime-range gate
+        // here (each branch range-checks with its own wider bound below), so the
+        // no-range resolver is used.
+        var extras: ZonedFieldExtras = .{ .time_zone_required = false };
+        const f = try readDateTimeFieldsRaw(realm, bag, &extras);
+        const dt = try resolveDateTimeFieldsNoRange(realm, f, .constrain);
+        if (!extras.time_zone_present) {
+            // §7.3.x: the plain anchor is CreateTemporalDate(isoDate), which
+            // rejects a date outside the representable PlainDate range.
+            if (!temporal.isoDateWithinLimits(dt.iso_year, dt.iso_month, dt.iso_day)) {
+                return throwRangeError(realm, "relativeTo date is outside the representable range");
+            }
+            return .{ .plain = temporal.PlainDateTimeRecord.combine(dt.date(), .{}) };
+        }
+        const epoch = temporal.interpretISODateTimeOffset(dt, extras.behaviour, extras.offset_ns, extras.time_zone, .reject) catch |e| switch (e) {
+            error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
+            error.Invalid => return throwRangeError(realm, "relativeTo is out of range"),
+        };
+        return .{ .zoned = .{ .epoch_ns = epoch, .time_zone = extras.time_zone } };
+    }
+
+    if (!v.isString()) {
+        return throwTypeError(realm, "relativeTo must be an object or string");
+    }
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    const bytes = s.flatBytes();
+    // A `[time-zone]`-annotated string is zoned; a bare date / date-time
+    // string is a plain date at midnight. A string with a `Z` designator but
+    // no annotation parses as neither (a PlainDate forbids UTC) → RangeError.
+    if (temporal.parseTemporalZonedDateTimeString(bytes)) |pz| {
+        const epoch = temporal.interpretISODateTimeOffset(pz.date_time, pz.behaviour, pz.offset_ns, pz.time_zone, .reject) catch |e| switch (e) {
+            error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
+            error.Invalid => return throwRangeError(realm, "relativeTo is out of range"),
+        };
+        return .{ .zoned = .{ .epoch_ns = epoch, .time_zone = pz.time_zone } };
+    } else |_| {}
+    const pd = temporal.parseTemporalDateString(bytes) catch
+        return throwRangeError(realm, "invalid relativeTo string");
+    // §7.3.x: the plain anchor is CreateTemporalDate(isoDate), which rejects a
+    // date outside the representable PlainDate range (e.g. -271821-04-18).
+    if (!temporal.isoDateWithinLimits(pd.iso_year, pd.iso_month, pd.iso_day)) {
+        return throwRangeError(realm, "relativeTo date is outside the representable range");
+    }
+    return .{ .plain = temporal.PlainDateTimeRecord.combine(pd, .{}) };
+}
+
+/// §7.3.x Temporal.Duration.compare ( one, two [, options] ). With a zoned
+/// relativeTo and a date-category largest unit on either side, the two
+/// durations are ordered by the instant each reaches (AddZonedDateTime). With
+/// calendar units (years/months/weeks) the date components are balanced to a
+/// common day axis through a plain anchor (DateDurationDays) — absent that
+/// anchor they're unorderable and throw. Otherwise both reduce to a total
+/// nanosecond count (each day a fixed 24 h) and compare directly.
 fn durationCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const one = try toTemporalDuration(realm, argOr(args, 0, Value.undefined_));
@@ -524,15 +634,60 @@ fn durationCompare(realm: *Realm, this_value: Value, args: []const Value) Native
     const two = try toTemporalDuration(realm, argOr(args, 1, Value.undefined_));
     if (!temporal.isValidDuration(two)) return throwRangeError(realm, "Duration values are out of range");
     const opts = try getOptionsObject(realm, argOr(args, 2, Value.undefined_));
-    if (try relativeToPresent(realm, opts)) {
-        return throwTypeError(realm, "Temporal.Duration.compare with relativeTo is not yet implemented");
-    }
+    const rel = try getTemporalRelativeToOption(realm, opts);
+
+    // §7.3.x step 7: field-for-field identical durations compare equal,
+    // short-circuiting before any anchor-dependent balancing.
+    if (durationFieldsEqual(one, two)) return Value.fromInt32(0);
+
+    const day_idx = @intFromEnum(temporal.LargestUnit.day);
+    const largest1 = temporal.defaultTemporalLargestUnit(one);
+    const largest2 = temporal.defaultTemporalLargestUnit(two);
+
+    // §7.3.x step 12: a zoned anchor with a date-category largest unit
+    // (year/month/week/day) on either side orders by the reached instant.
+    if (rel) |r| switch (r) {
+        .zoned => |z| {
+            if (@intFromEnum(largest1) <= day_idx or @intFromEnum(largest2) <= day_idx) {
+                const after1 = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, one, false) orelse
+                    return throwRangeError(realm, "duration is out of range relative to relativeTo");
+                const after2 = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, two, false) orelse
+                    return throwRangeError(realm, "duration is out of range relative to relativeTo");
+                const cmp: i32 = if (after1 < after2) -1 else if (after1 > after2) 1 else 0;
+                return Value.fromInt32(cmp);
+            }
+        },
+        .plain => {},
+    };
+
+    // §7.3.x steps 13-14: place both durations on a common day axis. Calendar
+    // units need a plain anchor to balance to days (DateDurationDays); without
+    // one they're unorderable. (A zoned anchor with calendar units always took
+    // step 12 above, so only a plain anchor can reach here with them.)
+    var d1: i128 = @intFromFloat(one.days);
+    var d2: i128 = @intFromFloat(two.days);
     if (temporal.hasCalendarUnits(one) or temporal.hasCalendarUnits(two)) {
-        return throwRangeError(realm, "a relativeTo is required to compare durations with calendar units");
+        const anchor = switch (rel orelse
+            return throwRangeError(realm, "a relativeTo is required to compare durations with calendar units")) {
+            .plain => |s| s.date(),
+            .zoned => |z| temporal.getISODateTimeFor(z.time_zone, z.epoch_ns).date(),
+        };
+        d1 = temporal.dateDurationDays(anchor, one) orelse
+            return throwRangeError(realm, "duration is out of range relative to relativeTo");
+        d2 = temporal.dateDurationDays(anchor, two) orelse
+            return throwRangeError(realm, "duration is out of range relative to relativeTo");
     }
-    const ns_one = temporal.dayTimeDurationNanoseconds(one);
-    const ns_two = temporal.dayTimeDurationNanoseconds(two);
-    const cmp: i32 = if (ns_one < ns_two) -1 else if (ns_one > ns_two) 1 else 0;
+    // §7.3.x steps 15-17: Add24HourDaysToTimeDuration then CompareTimeDuration.
+    // Add24HourDaysToTimeDuration throws RangeError when folding the whole-day
+    // count into the time duration overflows maxTimeDuration (2^53 × 10^9 − 1
+    // ns) — a duration valid on its own can exceed the limit once its calendar
+    // span is resolved to days against the anchor.
+    const t1 = temporal.timeDurationNanoseconds(one) + d1 * temporal.ns_per_day;
+    const t2 = temporal.timeDurationNanoseconds(two) + d2 * temporal.ns_per_day;
+    if (@abs(t1) > temporal.max_time_duration_ns or @abs(t2) > temporal.max_time_duration_ns) {
+        return throwRangeError(realm, "duration is out of range relative to relativeTo");
+    }
+    const cmp: i32 = if (t1 < t2) -1 else if (t1 > t2) 1 else 0;
     return Value.fromInt32(cmp);
 }
 
@@ -599,7 +754,7 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     var smallest: ?temporal.LargestUnit = null;
     var increment: i128 = 1;
     var mode: temporal.RoundingMode = .half_expand;
-    var relative_present = false;
+    var start: ?RelativeToAnchor = null;
     if (round_to.isString()) {
         const s: *JSString = @ptrCast(@alignCast(round_to.asString()));
         smallest = temporal.parseTemporalUnit(s.flatBytes()) orelse
@@ -607,7 +762,7 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     } else {
         const opts = try getOptionsObject(realm, round_to);
         largest_opt = try getLargestUnitOption(realm, opts);
-        relative_present = try relativeToPresent(realm, opts);
+        start = try getTemporalRelativeToOption(realm, opts);
         increment = try getRoundingIncrementOption(realm, opts);
         mode = try getRoundingModeOption(realm, opts, .half_expand);
         smallest = try getTemporalUnitOption(realm, opts, "smallestUnit");
@@ -628,14 +783,99 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     if (@intFromEnum(largest_u) > @intFromEnum(smallest_u)) {
         return throwRangeError(realm, "largestUnit must be larger than or equal to smallestUnit");
     }
+    // §7.3.21: a date unit (year/month/week/day) has no fixed sub-unit count,
+    // so an increment above 1 only makes sense when the rounded unit is also
+    // the largest — otherwise the result would mix it with a coarser unit it
+    // cannot balance against (e.g. weeks beneath a `month` largestUnit).
+    if (increment > 1 and @intFromEnum(smallest_u) <= @intFromEnum(temporal.LargestUnit.day) and largest_u != smallest_u) {
+        return throwRangeError(realm, "for calendar units with roundingIncrement > 1, largestUnit must equal smallestUnit");
+    }
     if (temporal.maximumTemporalDurationRoundingIncrement(smallest_u)) |maximum| {
         if (!temporal.validateRoundingIncrement(increment, maximum, false)) {
             return throwRangeError(realm, "roundingIncrement is out of range");
         }
     }
 
-    if (relative_present) {
-        return throwTypeError(realm, "Temporal.Duration.prototype.round with relativeTo is not yet implemented");
+    // §7.3.21 with a relativeTo: add the duration to the anchor wall-clock to
+    // resolve its calendar units into a concrete target, then difference back
+    // and round. The nudge dispatch follows RoundRelativeDuration, keyed on
+    // the smallest unit + zoned provenance:
+    //   • largestUnit a time unit → a uniform epoch-nanosecond span balanced
+    //     to largestUnit (DifferenceInstant for zoned; the time-category
+    //     NudgeToDayOrTime for plain — identical under a fixed offset);
+    //   • smallestUnit a calendar unit (year/month/week) → NudgeToCalendarUnit;
+    //   • smallestUnit a time unit with a *zoned* anchor → NudgeToZonedTime,
+    //     which holds days fixed and rounds only the sub-day time;
+    //   • otherwise (plain time-unit, or day) → NudgeToDayOrTime, folding days
+    //     into the rounded span.
+    const day_idx = @intFromEnum(temporal.LargestUnit.day);
+    if (start) |rel| {
+        const result: temporal.DurationRecord = switch (rel) {
+            // §7.3.21 plainRelativeTo: DifferencePlainDateTimeWithRounding.
+            // The duration's calendar units resolve against the wall date
+            // (CalendarDateAdd, 'constrain' / date-only range); the wall span
+            // is then differenced and rounded.
+            .plain => |s| blk: {
+                const target = temporal.addDateTimeDateChecked(s, d, false) orelse
+                    return throwRangeError(realm, "duration is out of range relative to relativeTo");
+                // The zero short-circuit precedes RejectDateTimeRange: an
+                // empty span on an edge anchor (whose midnight sits one ISO
+                // day past the Instant floor) returns zero, not RangeError.
+                if (temporal.compareISODateTime(s, target) == 0) break :blk temporal.DurationRecord{};
+                if (!temporal.isoDateTimeWithinLimits(s) or !temporal.isoDateTimeWithinLimits(target)) {
+                    return throwRangeError(realm, "relativeTo or its sum is outside the representable range");
+                }
+                if (@intFromEnum(largest_u) > day_idx) {
+                    // largestUnit a time unit → fold the whole wall span into
+                    // a uniform nanosecond count and balance to largestUnit.
+                    const span = temporal.isoDateTimeToEpochNs(target) - temporal.isoDateTimeToEpochNs(s);
+                    const rounded = temporal.roundToIncrement(span, increment * temporal.unitNanoseconds(smallest_u), mode);
+                    break :blk temporal.balanceTimeDuration(rounded, largest_u);
+                }
+                const base_diff = temporal.differenceISODateTime(s, target, largest_u);
+                if (smallest_u == .nanosecond and increment == 1) break :blk base_diff;
+                break :blk temporal.roundRelativeDateTime(s, target, base_diff, largest_u, smallest_u, increment, mode) orelse
+                    return throwRangeError(realm, "rounded duration is outside the representable range");
+            },
+            // §7.3.21 zonedRelativeTo: DifferenceZonedDateTimeWithRounding.
+            // The duration is added through the instant (AddZonedDateTime —
+            // Instant-range overflow throws); the wall span between the two
+            // instants is then differenced and rounded. For a fixed-offset
+            // zone the constant offset cancels in the difference, so the
+            // wall-clock arithmetic matches — only the NudgeToZonedTime
+            // next-day instant probe can additionally overflow.
+            .zoned => |z| blk: {
+                const target_epoch = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, d, false) orelse
+                    return throwRangeError(realm, "duration is out of range relative to relativeTo");
+                if (@intFromEnum(largest_u) > day_idx) {
+                    // largestUnit a time unit → DifferenceInstant: a uniform
+                    // epoch-nanosecond span balanced to largestUnit.
+                    const span = target_epoch - z.epoch_ns;
+                    const rounded = temporal.roundToIncrement(span, increment * temporal.unitNanoseconds(smallest_u), mode);
+                    break :blk temporal.balanceTimeDuration(rounded, largest_u);
+                }
+                const start_wall = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+                const end_wall = temporal.getISODateTimeFor(z.time_zone, target_epoch);
+                const base_diff = temporal.differenceISODateTime(start_wall, end_wall, largest_u);
+                if (smallest_u == .nanosecond and increment == 1) break :blk base_diff;
+                if (@intFromEnum(smallest_u) > day_idx) {
+                    // smallestUnit a time unit with a zoned anchor →
+                    // NudgeToZonedTime (holds days fixed, rounds the sub-day
+                    // time, probes the ±1-day instant boundary).
+                    break :blk temporal.nudgeToZonedTimeDateTime(start_wall, z.time_zone, base_diff, largest_u, smallest_u, increment, mode) orelse
+                        return throwRangeError(realm, "rounded duration is outside the representable range");
+                }
+                // smallestUnit a calendar unit or day → NudgeToCalendarUnit /
+                // NudgeToDayOrTime; under a fixed offset every day is 24 h, so
+                // the wall-clock nudge is exact.
+                break :blk temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest_u, smallest_u, increment, mode) orelse
+                    return throwRangeError(realm, "rounded duration is outside the representable range");
+            },
+        };
+        if (!temporal.isValidDuration(result)) {
+            return throwRangeError(realm, "duration out of range after rounding");
+        }
+        return createTemporalDuration(realm, result);
     }
 
     // §7.3.21 step 25 (no relativeTo): calendar units are unbalanceable.
@@ -653,10 +893,14 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     return createTemporalDuration(realm, result);
 }
 
-/// §7.3.x Temporal.Duration.prototype.total ( totalOf ). A string
-/// selects the unit; an options bag may also carry relativeTo
-/// (deferred). For a day-or-smaller unit and a calendar-unit-free
-/// duration, returns the ratio as a Number.
+/// §7.3.x Temporal.Duration.prototype.total ( totalOf ). A string selects the
+/// unit; an options bag may also carry a relativeTo anchor (read before the
+/// unit per spec). With a relativeTo the duration is added to the anchor and
+/// the fractional count of `unit` between anchor and target is returned
+/// (DifferencePlainDateTimeWithTotal / DifferenceZonedDateTimeWithTotal —
+/// TotalRelativeDuration for an irregular calendar unit, a uniform ratio for a
+/// day-or-finer unit). Without one, calendar units are untotalable and a
+/// day-and-time duration returns the fixed-length ratio.
 fn durationTotal(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const d = try requireDuration(realm, this_value);
     const total_of = argOr(args, 0, Value.undefined_);
@@ -664,29 +908,74 @@ fn durationTotal(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         return throwTypeError(realm, "Temporal.Duration.prototype.total requires a unit");
     }
     var unit_opt: ?temporal.LargestUnit = null;
+    var start: ?RelativeToAnchor = null;
     if (total_of.isString()) {
         const s: *JSString = @ptrCast(@alignCast(total_of.asString()));
         unit_opt = temporal.parseTemporalUnit(s.flatBytes());
     } else {
         const opts = try getOptionsObject(realm, total_of);
-        if (try relativeToPresent(realm, opts)) {
-            return throwTypeError(realm, "Temporal.Duration.prototype.total with relativeTo is not yet implemented");
-        }
+        // §7.3.x: relativeTo is read before the unit.
+        start = try getTemporalRelativeToOption(realm, opts);
         unit_opt = try getTemporalUnitOption(realm, opts, "unit");
     }
     const unit = unit_opt orelse return throwRangeError(realm, "a unit is required");
-    if (@intFromEnum(unit) < @intFromEnum(temporal.LargestUnit.day)) {
-        return throwTypeError(realm, "totalling a calendar unit requires relativeTo (not yet implemented)");
+    const day_idx = @intFromEnum(temporal.LargestUnit.day);
+
+    if (start) |rel| {
+        const total: f64 = switch (rel) {
+            // §7.3.x plainRelativeTo: DifferencePlainDateTimeWithTotal. The
+            // duration's calendar units resolve against the wall date
+            // (date-only range); the wall span is then totalled.
+            .plain => |s| blk: {
+                const target = temporal.addDateTimeDateChecked(s, d, false) orelse
+                    return throwRangeError(realm, "duration is out of range relative to relativeTo");
+                // Zero short-circuit precedes RejectDateTimeRange (an empty
+                // span on an edge anchor totals to zero, not RangeError).
+                if (temporal.compareISODateTime(s, target) == 0) break :blk 0;
+                if (!temporal.isoDateTimeWithinLimits(s) or !temporal.isoDateTimeWithinLimits(target)) {
+                    return throwRangeError(realm, "relativeTo or its sum is outside the representable range");
+                }
+                if (@intFromEnum(unit) >= day_idx) {
+                    // A day-or-finer unit totals the uniform wall span.
+                    const span = temporal.isoDateTimeToEpochNs(target) - temporal.isoDateTimeToEpochNs(s);
+                    break :blk totalInUnit(span, unit);
+                }
+                const base_diff = temporal.differenceISODateTime(s, target, unit);
+                break :blk temporal.totalRelativeDateTime(s, base_diff, temporal.isoDateTimeToEpochNs(target), unit) orelse
+                    return throwRangeError(realm, "duration is out of range relative to relativeTo");
+            },
+            // §7.3.x zonedRelativeTo: DifferenceZonedDateTimeWithTotal. The
+            // duration is added through the instant (Instant-range overflow
+            // throws); under a fixed offset the constant offset cancels, so the
+            // wall span between the two instants drives the total.
+            .zoned => |z| blk: {
+                const target_epoch = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, d, false) orelse
+                    return throwRangeError(realm, "duration is out of range relative to relativeTo");
+                if (@intFromEnum(unit) > day_idx) {
+                    // A sub-day (time) unit totals the uniform epoch span
+                    // (DifferenceInstant); each day is 24 h under a fixed offset.
+                    break :blk totalInUnit(target_epoch - z.epoch_ns, unit);
+                }
+                // A calendar unit OR `day`: DifferenceZonedDateTimeWithTotal
+                // routes both through the calendar-window technique, whose
+                // boundaries are re-anchored through the zone — a next-day
+                // boundary past the Instant range throws.
+                const start_wall = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+                const end_wall = temporal.getISODateTimeFor(z.time_zone, target_epoch);
+                const base_diff = temporal.differenceISODateTime(start_wall, end_wall, unit);
+                break :blk temporal.totalRelativeZonedDateTime(start_wall, z.time_zone, z.epoch_ns, base_diff, target_epoch, unit) orelse
+                    return throwRangeError(realm, "duration is out of range relative to relativeTo");
+            },
+        };
+        return Value.fromDouble(total);
     }
-    if (temporal.hasCalendarUnits(d)) {
+
+    // No relativeTo: a calendar unit (or a calendar-bearing duration) is
+    // untotalable; a day-and-time duration totals by fixed-length ratio.
+    if (@intFromEnum(unit) < day_idx or temporal.hasCalendarUnits(d)) {
         return throwRangeError(realm, "a relativeTo is required to total a duration with calendar units");
     }
-    const total_ns = temporal.dayTimeDurationNanoseconds(d);
-    const unit_ns = temporal.unitNanoseconds(unit);
-    const q = @divTrunc(total_ns, unit_ns);
-    const r = @rem(total_ns, unit_ns);
-    const result: f64 = @as(f64, @floatFromInt(q)) + @as(f64, @floatFromInt(r)) / @as(f64, @floatFromInt(unit_ns));
-    return Value.fromDouble(result);
+    return Value.fromDouble(totalInUnit(temporal.dayTimeDurationNanoseconds(d), unit));
 }
 
 // ── §4 Temporal.PlainTime ────────────────────────────────────────────────
@@ -2566,6 +2855,12 @@ const ZonedFieldExtras = struct {
     time_zone: temporal.TimeZone = undefined,
     behaviour: temporal.OffsetBehaviour = .wall,
     offset_ns: i128 = 0,
+    /// When false an absent `timeZone` is tolerated (the bag is a
+    /// relativeTo, which may be either zoned or plain); `time_zone_present`
+    /// then reports which. ToTemporalZonedDateTime keeps the default `true`
+    /// (a ZonedDateTime-like requires its time zone).
+    time_zone_required: bool = true,
+    time_zone_present: bool = false,
 };
 
 /// The raw, un-resolved field set read off a Temporal property bag in one
@@ -2642,17 +2937,23 @@ fn readDateTimeFieldsRaw(realm: *Realm, obj: *JSObject, zoned: ?*ZonedFieldExtra
     }
     const second_v = try getPropertyChain(realm, obj, "second");
     if (!second_v.isUndefined()) f.second = try toIntegerWithTruncation(realm, second_v);
-    // §6.5.x — `timeZone` is the one required ZonedDateTime field, read here
-    // (after `second`, before `year`). The calendar was validated at the
-    // top, so an invalid calendar is a RangeError before an absent time zone
-    // could become a TypeError.
+    // §6.5.x — `timeZone` is read here (after `second`, before `year`). For a
+    // ZonedDateTime-like it is required; for a relativeTo bag
+    // (`time_zone_required == false`) it is optional — present ⇒ a zoned
+    // relativeTo, absent ⇒ a plain one (`time_zone_present` reports which).
+    // The calendar was validated at the top, so an invalid calendar is a
+    // RangeError before an absent time zone could become a TypeError.
     if (zoned) |z| {
         const tz_v = try getPropertyChain(realm, obj, "timeZone");
-        if (tz_v.isUndefined()) return throwTypeError(realm, "ZonedDateTime-like is missing 'timeZone'");
-        if (!tz_v.isString()) return throwTypeError(realm, "time zone must be a string");
-        const tz_s: *JSString = @ptrCast(@alignCast(tz_v.asString()));
-        z.time_zone = temporal.parseTimeZoneString(tz_s.flatBytes()) orelse
-            return throwRangeError(realm, "invalid time zone identifier");
+        if (tz_v.isUndefined()) {
+            if (z.time_zone_required) return throwTypeError(realm, "ZonedDateTime-like is missing 'timeZone'");
+        } else {
+            if (!tz_v.isString()) return throwTypeError(realm, "time zone must be a string");
+            const tz_s: *JSString = @ptrCast(@alignCast(tz_v.asString()));
+            z.time_zone = temporal.parseTimeZoneString(tz_s.flatBytes()) orelse
+                return throwRangeError(realm, "invalid time zone identifier");
+            z.time_zone_present = true;
+        }
     }
     const year_v = try getPropertyChain(realm, obj, "year");
     if (!year_v.isUndefined()) {
@@ -2668,6 +2969,20 @@ fn readDateTimeFieldsRaw(realm: *Realm, obj: *JSObject, zoned: ?*ZonedFieldExtra
 /// day-required TypeError → `monthCode` suitability RangeError →
 /// month/monthCode reconcile → regulate (per `overflow`) → within-limits.
 fn resolveDateTimeFields(realm: *Realm, f: RawDateTimeFields, overflow: Overflow) NativeError!PlainDateTimeRecord {
+    const rec = try resolveDateTimeFieldsNoRange(realm, f, overflow);
+    if (!temporal.isoDateTimeWithinLimits(rec)) return throwRangeError(realm, "PlainDateTime is out of range");
+    return rec;
+}
+
+/// As `resolveDateTimeFields`, but without the final RejectDateTimeRange
+/// (`isoDateTimeWithinLimits`) gate — the field resolution + regulation only.
+/// The relativeTo bag path uses this because InterpretTemporalDateTimeFields
+/// applies no PlainDateTime-range check itself: a *plain* anchor range-checks
+/// later through CreateTemporalDate (the wider noon-based PlainDate range —
+/// e.g. the minimum `-271821-04-19` is a valid PlainDate but its midnight sits
+/// one ISO day below the PlainDateTime floor), and a *zoned* anchor through
+/// InterpretISODateTimeOffset.
+fn resolveDateTimeFieldsNoRange(realm: *Realm, f: RawDateTimeFields, overflow: Overflow) NativeError!PlainDateTimeRecord {
     if (!f.year_set) return throwTypeError(realm, "PlainDateTime-like is missing 'year'");
     if (!f.day_set) return throwTypeError(realm, "PlainDateTime-like is missing 'day'");
     var month: i64 = undefined;
@@ -2683,9 +2998,7 @@ fn resolveDateTimeFields(realm: *Realm, f: RawDateTimeFields, overflow: Overflow
     const date = temporal.regulateISODate(f.year, month, f.day, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDateTime date is out of range");
     const time = try regulateTime(realm, f.hour, f.minute, f.second, f.millisecond, f.microsecond, f.nanosecond, overflow);
-    const rec = PlainDateTimeRecord.combine(date, time);
-    if (!temporal.isoDateTimeWithinLimits(rec)) return throwRangeError(realm, "PlainDateTime is out of range");
-    return rec;
+    return PlainDateTimeRecord.combine(date, time);
 }
 
 /// §5.5.x InterpretTemporalDateTimeFields — read a PlainDateTime-like

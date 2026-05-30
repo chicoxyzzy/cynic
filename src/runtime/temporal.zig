@@ -282,30 +282,69 @@ pub fn isValidDuration(d: DurationRecord) bool {
         return false;
     }
     // Total of time units (with days as 86400 s) must be a safe
-    // integer in seconds. Compute the integer part exactly with
-    // i128 so the bound check isn't fooled by f64 rounding near
-    // 2^53; the sub-second remainder only affects the fractional
-    // part, which the spec allows (…991.999999999).
+    // integer in seconds. The spec (§ IsValidDuration via
+    // TruncatingDivModByPowerOf10) computes this on the *exact*
+    // mathematical value of each Number field — it stringifies
+    // the double with toFixed(0) and slices decimal digits, which
+    // is exact integer arithmetic. f64 division can't reproduce
+    // that: `µs / 1e6` rounds the quotient to nearest, so a true
+    // value of …495.9999 rounds up to …496 and `trunc` then
+    // reports one second too many, falsely rejecting a duration
+    // whose real second-total is a safe integer. Do the split in
+    // i128 instead — `@intFromFloat` yields the double's exact
+    // integer value and `@divTrunc` / `@rem` truncate exactly,
+    // matching the spec's digit-slice div/mod to the unit.
     //
-    // Mirrors the polyfill's RejectDuration: split ms/µs/ns into
-    // (div = whole seconds contributed, mod = sub-second leftover),
-    // sum the whole-second contributions, and require the seconds
-    // total to be a safe integer.
-    const ms_div = std.math.trunc(d.milliseconds / 1000.0);
-    const ms_mod = d.milliseconds - ms_div * 1000.0; // (-999..999) ms
-    const us_div = std.math.trunc(d.microseconds / 1.0e6);
-    const us_mod = d.microseconds - us_div * 1.0e6; // (-999999..999999) µs
-    const ns_div = std.math.trunc(d.nanoseconds / 1.0e9);
-    const ns_mod = d.nanoseconds - ns_div * 1.0e9; // ns leftover
+    // Fields large enough to overflow the i128 products are also
+    // far too large to be valid (the biggest a valid field can be
+    // is ~9e24 ns ≈ 2^83, since the second-total must stay ≤ 2^53);
+    // `durationFieldToI128` rejects anything ≥ 2^100, which both
+    // guards the arithmetic and never refuses a representable
+    // valid duration.
+    const days_i = durationFieldToI128(d.days) orelse return false;
+    const hours_i = durationFieldToI128(d.hours) orelse return false;
+    const minutes_i = durationFieldToI128(d.minutes) orelse return false;
+    const seconds_i = durationFieldToI128(d.seconds) orelse return false;
+    const ms_i = durationFieldToI128(d.milliseconds) orelse return false;
+    const us_i = durationFieldToI128(d.microseconds) orelse return false;
+    const ns_i = durationFieldToI128(d.nanoseconds) orelse return false;
+
+    const ms_div = @divTrunc(ms_i, 1_000);
+    const ms_mod = @rem(ms_i, 1_000); // (-999..999) ms
+    const us_div = @divTrunc(us_i, 1_000_000);
+    const us_mod = @rem(us_i, 1_000_000); // (-999999..999999) µs
+    const ns_div = @divTrunc(ns_i, 1_000_000_000);
+    const ns_mod = @rem(ns_i, 1_000_000_000); // ns leftover
     // Sub-second leftovers, expressed in nanoseconds, contribute
-    // their whole-second carry to the seconds total.
-    const remainder_ns = ms_mod * 1.0e6 + us_mod * 1.0e3 + ns_mod;
-    const remainder_sec = std.math.trunc(remainder_ns / 1.0e9);
-    const total_sec = d.days * 86400.0 + d.hours * 3600.0 + d.minutes * 60.0 +
-        d.seconds + ms_div + us_div + ns_div + remainder_sec;
-    if (!isSafeInteger(total_sec)) return false;
+    // their whole-second carry to the seconds total; the fractional
+    // residue (< 1 s) is discarded, as the spec allows (…991.999999999).
+    const remainder_ns = ms_mod * 1_000_000 + us_mod * 1_000 + ns_mod;
+    const remainder_sec = @divTrunc(remainder_ns, 1_000_000_000);
+    const total_sec = days_i * 86_400 + hours_i * 3_600 + minutes_i * 60 +
+        seconds_i + ms_div + us_div + ns_div + remainder_sec;
+    const max_safe: i128 = 9_007_199_254_740_991; // 2^53 − 1
+    if (total_sec > max_safe or total_sec < -max_safe) return false;
     return true;
 }
+
+/// Convert a duration field (an integral, finite f64) to i128 for
+/// exact arithmetic, returning null when the magnitude is so large
+/// (≥ 2^100) that the value can't belong to a valid duration and
+/// would risk overflowing the second-total products. No valid
+/// duration field exceeds ~2^83, so this never rejects a
+/// representable valid duration.
+fn durationFieldToI128(v: f64) ?i128 {
+    if (!std.math.isFinite(v)) return null;
+    if (@abs(v) >= 0x1p100) return null;
+    return @intFromFloat(v);
+}
+
+/// §7 maxTimeDuration — the largest magnitude, in nanoseconds, that
+/// a TimeDuration record may hold: 2^53 × 10^9 − 1 =
+/// 9007199254740991999999999. Add24HourDaysToTimeDuration and the
+/// other time-duration constructors throw RangeError when a result
+/// exceeds it in magnitude.
+pub const max_time_duration_ns: i128 = 9_007_199_254_740_991_999_999_999;
 
 /// §7.1 NumberIsSafeInteger — integral and |n| ≤ 2^53 − 1.
 fn isSafeInteger(n: f64) bool {
@@ -1416,6 +1455,12 @@ pub fn interpretISODateTimeOffset(
         return e;
     }
     // behaviour == option, offset_option is prefer or reject.
+    // §6.5.x CheckISODaysRange on the *wall* date: symmetric |days| ≤ 1e8,
+    // tighter than the noon-based PlainDate range — it rejects the boundary
+    // days (e.g. -271821-04-19) a bare PlainDate alone still allows, since a
+    // zoned wall clock must round-trip through an in-range instant.
+    const wall_days = daysFromCivil(dt.iso_year, dt.iso_month, dt.iso_day);
+    if (wall_days > 100_000_000 or wall_days < -100_000_000) return error.Invalid;
     const candidate = getEpochNanosecondsFor(tz, dt) orelse return error.Invalid;
     const cand_off: i128 = getOffsetNanosecondsFor(tz, candidate);
     if (cand_off == offset_ns) return candidate;
@@ -2001,6 +2046,20 @@ pub fn unitNanoseconds(unit: LargestUnit) i128 {
     };
 }
 
+/// Correctly-rounded round-to-nearest-even division of two i128 values to a
+/// double — the exact rational `num / den` rounded once to f64, matching the
+/// spec's `TimeDuration.fdiv` (and `RoundNumberToIncrement`'s fractional
+/// totals). Converting each operand to f64 *before* dividing rounds twice and
+/// drifts by 1–2 ULP once a quotient exceeds 2^53; an f128 intermediate avoids
+/// that. Every in-range Temporal total stays well under f128's 113-bit exact
+/// integer range (the largest day-time span is ≈2^100 ns and calendar-unit
+/// counts are ≈2^20), so the i128→f128 widening is exact and only the final
+/// f128→f64 narrowing rounds.
+pub fn divRoundToF64(num: i128, den: i128) f64 {
+    const q: f128 = @as(f128, @floatFromInt(num)) / @as(f128, @floatFromInt(den));
+    return @floatCast(q);
+}
+
 fn timeUnitIncluded(unit: LargestUnit, largest: LargestUnit) bool {
     // `unit` participates when its magnitude is no larger than
     // `largest` — i.e. its enum index is at or past `largest`'s.
@@ -2498,8 +2557,31 @@ pub fn roundRelativeDate(
     const rounded_scaled = roundToIncrement(scaled, @as(i128, inc) * denom, mode);
     const rounded_unit: i64 = @intCast(@divExact(rounded_scaled, denom));
 
-    const rounded_end = addCalendarUnit(start, smallest, hy, hm, rounded_unit) orelse return null;
-    return differenceISODate(start, rounded_end, largest);
+    // §7.5 NudgeToCalendarUnit steps 18-20: emit the held-units start/end
+    // duration verbatim — re-differencing through `differenceISODate` is
+    // lossy at end-of-month (rounding 2023-05-31 up to 11 months lands on
+    // 2024-04-30, whose `until` is 10mo30d — `until` and `round` legitimately
+    // disagree). r1 is the contracted unit, r2 the expanded one.
+    const result: DurationRecord = switch (smallest) {
+        .year => .{ .years = @floatFromInt(rounded_unit) },
+        .month => .{ .years = @floatFromInt(hy), .months = @floatFromInt(rounded_unit) },
+        .week => .{ .years = @floatFromInt(hy), .months = @floatFromInt(hm), .weeks = @floatFromInt(rounded_unit) },
+        else => unreachable,
+    };
+
+    // §7.5 RoundRelativeDuration step 9: bubble an expanded calendar unit up
+    // toward `largest` (week never bubbles — it doesn't compose with months).
+    // The date has no time-of-day, so the bubble compares end-of-unit
+    // boundaries in the midnight frame (epoch-day × ns/day).
+    if (rounded_unit == r2 and smallest != .week) {
+        const start_dt = PlainDateTimeRecord{
+            .iso_year = start.iso_year,
+            .iso_month = start.iso_month,
+            .iso_day = start.iso_day,
+        };
+        return bubbleRelativeDateTime(start_dt, result, e2 * ns_per_day, largest, smallest, @intCast(sign));
+    }
+    return result;
 }
 
 // ── §5.5 PlainDateTime (ISO calendar) abstract operations ─────────────────
@@ -2531,6 +2613,21 @@ pub fn isoDateTimeWithinLimits(dt: PlainDateTimeRecord) bool {
 /// leaves the representable range OR the composed result is out of
 /// limits (→ the caller raises RangeError).
 pub fn addDateTime(dt: PlainDateTimeRecord, dur: DurationRecord, reject: bool) ?PlainDateTimeRecord {
+    const result = addDateTimeDateChecked(dt, dur, reject) orelse return null;
+    if (!isoDateTimeWithinLimits(result)) return null;
+    return result;
+}
+
+/// §5.5.x AddDateTime, *date-range only* — identical to AddDateTime but
+/// WITHOUT the closing isoDateTimeWithinLimits (RejectDateTimeRange) gate.
+/// AddISODate still rejects the date half when it leaves the noon-based
+/// PlainDate window, but the composed PlainDateTime may sit in the one-day
+/// overflow slop just beyond the Instant limits. DifferencePlainDateTime-
+/// WithRounding applies RejectDateTimeRange itself, and only AFTER the
+/// CompareISODateTime zero short-circuit — so an empty Duration on an edge
+/// relativeTo (whose midnight sits one day below the Instant floor) must not
+/// be rejected here.
+pub fn addDateTimeDateChecked(dt: PlainDateTimeRecord, dur: DurationRecord, reject: bool) ?PlainDateTimeRecord {
     const time_ns = timeRecordToNanoseconds(dt.time()) + timeDurationNanoseconds(dur);
     const day_carry: i64 = @intCast(@divFloor(time_ns, ns_per_day));
     const within = time_ns - @as(i128, day_carry) * ns_per_day; // [0, ns_per_day)
@@ -2543,9 +2640,7 @@ pub fn addDateTime(dt: PlainDateTimeRecord, dur: DurationRecord, reject: bool) ?
         @as(i64, @intFromFloat(dur.days)) + day_carry,
         reject,
     ) orelse return null;
-    const result = PlainDateTimeRecord.combine(new_date, new_time);
-    if (!isoDateTimeWithinLimits(result)) return null;
-    return result;
+    return PlainDateTimeRecord.combine(new_date, new_time);
 }
 
 /// The day-carry + rounded time a RoundTime step produces.
@@ -2713,11 +2808,13 @@ fn nudgeToCalendarUnitDateTime(
     var r2: i64 = base + inc * sign;
     var start_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r1, start_time_ns) orelse return null;
     var end_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r2, start_time_ns) orelse return null;
+    var did_expand = false;
     if (!destInWindow(sign, start_epoch, end_epoch, dest_epoch)) {
         r1 = base + inc * sign;
         r2 = r1 + inc * sign;
         start_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r1, start_time_ns) orelse return null;
         end_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r2, start_time_ns) orelse return null;
+        did_expand = true; // the retry shift is itself a calendar expansion.
     }
 
     // progress = (dest - start)/(end - start); total = r1 + progress·inc·sign.
@@ -2730,41 +2827,58 @@ fn nudgeToCalendarUnitDateTime(
     const rounded_scaled = roundToIncrement(scaled, @as(i128, inc) * denom, mode);
     const rounded_unit: i64 = @intCast(@divExact(rounded_scaled, denom));
 
-    if (smallest == .week) {
-        return .{
-            .years = @floatFromInt(hy),
-            .months = @floatFromInt(hm),
-            .weeks = @floatFromInt(rounded_unit),
-            .days = 0,
-        };
+    // §7.5 NudgeToCalendarUnit steps 18-20: emit the held-units start/end
+    // duration verbatim — NOT a re-differenced date. Re-differencing through
+    // `differenceISODate` is lossy at end-of-month (e.g. 2023-05-31 rounded
+    // up to 11 months lands on 2024-04-30, whose `until` from the start is
+    // 10mo30d — `until` and `round` legitimately disagree there). The
+    // rounded unit is r1 (contracted) or r2 (expanded); the coarser held
+    // units stay fixed.
+    did_expand = did_expand or (rounded_unit == r2);
+    const result: DurationRecord = switch (smallest) {
+        .year => .{ .years = @floatFromInt(rounded_unit) },
+        .month => .{ .years = @floatFromInt(hy), .months = @floatFromInt(rounded_unit) },
+        .week => .{ .years = @floatFromInt(hy), .months = @floatFromInt(hm), .weeks = @floatFromInt(rounded_unit) },
+        else => unreachable,
+    };
+
+    // §7.5 RoundRelativeDuration step 9: when the calendar unit expanded,
+    // bubble it up toward `largest` (week never bubbles — it doesn't compose
+    // with months). Per NudgeToCalendarUnit the nudged epoch when expanded is
+    // always the window end (`didExpandCalendarUnit ? endEpochNs : …`).
+    if (did_expand and smallest != .week) {
+        return bubbleRelativeDateTime(start, result, end_epoch, largest, smallest, sign);
     }
-    const rounded_end = addCalendarUnit(start_date, smallest, hy, hm, rounded_unit) orelse return null;
-    return differenceISODate(start_date, rounded_end, largest);
+    return result;
 }
 
 /// §7.5.x BubbleRelativeDuration specialised to the ISO calendar with the
-/// time zone unset / fixed-offset. After NudgeToDayOrTime has expanded the
-/// day count, promote day → week → month → year (up to `largest`) wherever
-/// the rounded instant has reached the next coarser boundary. Weeks are
-/// only promoted when `largest` is week (they don't compose with months).
-/// Null on range overflow. The start unit is always `day` for this path
-/// (LargerOfTwoTemporalUnits(timeUnitOrDay, day)).
+/// time zone unset / fixed-offset. After a nudge has expanded the rounded
+/// unit, promote it up toward `largest` wherever the rounded instant has
+/// reached the next coarser boundary. `smallest_bubble` is the unit just
+/// rounded — LargerOfTwoTemporalUnits(smallestUnit, "day"): `day` for the
+/// NudgeToDayOrTime / NudgeToZonedTime paths (start the scan at week), or
+/// the calendar `smallest` itself (year / month) for the NudgeToCalendarUnit
+/// path (start the scan one unit coarser). Weeks are only promoted when
+/// `largest` is week (they don't compose with months). Null on range
+/// overflow.
 fn bubbleRelativeDateTime(
     start: PlainDateTimeRecord,
     duration: DurationRecord,
     nudged_epoch: i128,
     largest: LargestUnit,
+    smallest_bubble: LargestUnit,
     sign: i32,
 ) ?DurationRecord {
     const largest_idx: i64 = @intFromEnum(largest);
-    const day_idx: i64 = @intFromEnum(LargestUnit.day);
-    if (day_idx == largest_idx) return duration; // startUnit == largestUnit.
+    const start_unit_idx: i64 = @intFromEnum(smallest_bubble);
+    if (start_unit_idx == largest_idx) return duration; // startUnit == largestUnit.
 
     const start_date = start.date();
     const start_time_ns = timeRecordToNanoseconds(start.time());
 
     var result = duration;
-    var unit_idx: i64 = day_idx - 1; // one coarser than day = week
+    var unit_idx: i64 = start_unit_idx - 1; // one unit coarser than the start
     var done = false;
     while (unit_idx >= largest_idx and !done) : (unit_idx -= 1) {
         const unit: LargestUnit = @enumFromInt(@as(u4, @intCast(unit_idx)));
@@ -2863,7 +2977,7 @@ fn nudgeToDayOrTimeDateTime(
     // it is never week → always bubble-eligible. Bubbling only has an
     // effect when `largest` is a date unit (else it is a no-op).
     if (did_expand_days and date_category) {
-        result = bubbleRelativeDateTime(start, result, nudged_epoch, largest, sign) orelse return null;
+        result = bubbleRelativeDateTime(start, result, nudged_epoch, largest, .day, sign) orelse return null;
     }
     return result;
 }
@@ -2898,6 +3012,305 @@ pub fn roundRelativeDateTime(
         return nudgeToCalendarUnitDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch);
     }
     return nudgeToDayOrTimeDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch);
+}
+
+/// §7.5.x NudgeToZonedTime specialised to fixed-offset / UTC time zones,
+/// where every day is exactly 24 h. The zoned branch of RoundRelativeDuration
+/// rounds only the sub-day *time* component of `diff`, holding the date
+/// (years/months/weeks/days) fixed except for a possible ±1-day carry when
+/// the rounded time reaches the 24 h day boundary — unlike NudgeToDayOrTime,
+/// which folds whole days into the rounded span (so a ZonedDateTime
+/// relativeTo accounts days separately even when, as here, every day is the
+/// same length). `smallest` is a time unit (hour … nanosecond). A whole-day
+/// carry then bubbles up toward `largest`. Null on range overflow.
+pub fn nudgeToZonedTimeDateTime(
+    start: PlainDateTimeRecord,
+    tz: TimeZone,
+    diff: DurationRecord,
+    largest: LargestUnit,
+    smallest: LargestUnit,
+    increment: i128,
+    mode: RoundingMode,
+) ?DurationRecord {
+    // §7.5.x RoundRelativeDuration: a zero duration takes sign +1 (the nudge
+    // still runs), so even an empty duration probes the next-day boundary.
+    const sign: i32 = if (durationSign(diff) < 0) -1 else 1;
+
+    const dy: i64 = @intFromFloat(diff.years);
+    const dm: i64 = @intFromFloat(diff.months);
+    const dw: i64 = @intFromFloat(diff.weeks);
+    const dd: i64 = @intFromFloat(diff.days);
+
+    // start = CalendarDateAdd(start.date, diff.date); end = start ± 1 day.
+    // Both whole-day boundaries must anchor to in-range instants: when the
+    // next day overflows the Instant limits GetEpochNanosecondsFor fails and
+    // the entire round is a RangeError (e.g. a relativeTo at the max instant
+    // whose following midnight is unrepresentable).
+    const anchor_date = addISODate(start.date(), dy, dm, dw, dd, false) orelse return null;
+    const end_date = addISODate(anchor_date, 0, 0, 0, sign, false) orelse return null;
+    const start_dt = PlainDateTimeRecord.combine(anchor_date, start.time());
+    const end_dt = PlainDateTimeRecord.combine(end_date, start.time());
+    const start_epoch = getEpochNanosecondsFor(tz, start_dt) orelse return null;
+    const end_epoch = getEpochNanosecondsFor(tz, end_dt) orelse return null;
+    const day_span: i128 = end_epoch - start_epoch; // ±ns_per_day for a fixed offset
+
+    const unit_inc = unitNanoseconds(smallest) * increment;
+    const time_ns = timeDurationNanoseconds(diff);
+
+    var rounded = roundToIncrement(time_ns, unit_inc, mode);
+    const beyond = rounded - day_span;
+    const beyond_sign: i32 = if (beyond < 0) -1 else if (beyond > 0) 1 else 0;
+    const did_round_beyond = beyond_sign != -sign;
+
+    var day_delta: i64 = 0;
+    if (did_round_beyond) {
+        day_delta = sign;
+        rounded = roundToIncrement(beyond, unit_inc, mode);
+    }
+
+    const time_dur = balanceTimeDuration(rounded, .hour);
+    var result = DurationRecord{
+        .years = diff.years,
+        .months = diff.months,
+        .weeks = diff.weeks,
+        .days = @floatFromInt(dd + day_delta),
+        .hours = time_dur.hours,
+        .minutes = time_dur.minutes,
+        .seconds = time_dur.seconds,
+        .milliseconds = time_dur.milliseconds,
+        .microseconds = time_dur.microseconds,
+        .nanoseconds = time_dur.nanoseconds,
+    };
+
+    if (did_round_beyond) {
+        // BubbleRelativeDuration compares end-of-unit boundaries in the
+        // UTC-wall frame, so recompute the nudged instant there: the wall
+        // epoch of `end_dt` (the anchor advanced one day) plus the rounded
+        // sub-day remainder.
+        const start_time_ns = timeRecordToNanoseconds(start.time());
+        const end_wall_epoch = @as(i128, daysFromCivil(end_date.iso_year, end_date.iso_month, end_date.iso_day)) * ns_per_day + start_time_ns;
+        const nudged_epoch = end_wall_epoch + rounded;
+        result = bubbleRelativeDateTime(start, result, nudged_epoch, largest, .day, sign) orelse return null;
+    }
+    return result;
+}
+
+/// §7.5.x DateDurationDays — the whole-day span of a duration's date
+/// component: the years / months / weeks balanced down to days through the
+/// ISO calendar from `anchor` (under `constrain`), plus the duration's
+/// literal `days`. Temporal.Duration.compare uses this to place two
+/// calendar-bearing durations on a common day axis before adding their
+/// sub-day time. Null when the balanced date leaves the representable range.
+pub fn dateDurationDays(anchor: PlainDateRecord, dur: DurationRecord) ?i128 {
+    const dd: i128 = f64ToI128(dur.days);
+    if (dur.years == 0 and dur.months == 0 and dur.weeks == 0) return dd;
+    const later = addISODate(
+        anchor,
+        @intFromFloat(dur.years),
+        @intFromFloat(dur.months),
+        @intFromFloat(dur.weeks),
+        0,
+        false,
+    ) orelse return null;
+    const ymw_days: i128 = @as(i128, daysFromCivil(later.iso_year, later.iso_month, later.iso_day)) -
+        @as(i128, daysFromCivil(anchor.iso_year, anchor.iso_month, anchor.iso_day));
+    return dd + ymw_days;
+}
+
+/// §7.5.x TotalRelativeDuration for an irregular calendar unit
+/// (year / month / week) — the *fractional* count of `unit` between `start`
+/// and `dest_epoch`, matching NudgeToCalendarUnit's `total` output at
+/// increment 1. `diff` is the already-balanced difference
+/// (DifferenceISODateTime at largestUnit = `unit`); `dest_epoch` is the
+/// destination's UTC-wall epoch (`isoDateTimeToEpochNs` of the target wall
+/// clock — a constant zone offset cancels in the ratio, so the wall frame is
+/// exact for the fixed-offset / unset scope). The window is the pair of
+/// integer-unit boundaries bracketing `dest_epoch`; the total interpolates
+/// linearly between them. Null on range overflow.
+pub fn totalRelativeDateTime(start: PlainDateTimeRecord, diff: DurationRecord, dest_epoch: i128, unit: LargestUnit) ?f64 {
+    const start_date = start.date();
+    const start_time_ns = timeRecordToNanoseconds(start.time());
+    const sign: i32 = if (durationSign(diff) < 0) -1 else 1;
+
+    const dy: i64 = @intFromFloat(diff.years);
+    const dm: i64 = @intFromFloat(diff.months);
+    const dw: i64 = @intFromFloat(diff.weeks);
+    const dd: i64 = @intFromFloat(diff.days);
+
+    var hy: i64 = 0;
+    var hm: i64 = 0;
+    var unit_val: i64 = 0;
+    switch (unit) {
+        .year => unit_val = dy,
+        .month => {
+            hy = dy;
+            unit_val = dm;
+        },
+        .week => {
+            hy = dy;
+            hm = dm;
+            unit_val = @divTrunc(dw * 7 + dd, 7);
+        },
+        else => unreachable, // irregular-length calendar units only.
+    }
+
+    // ComputeNudgeWindow at increment 1, then the spec's retry when `dest`
+    // is not bracketed by the truncated window (a calendar irregularity).
+    var r1: i64 = unit_val;
+    var start_epoch = calendarWindowEpoch(start_date, unit, hy, hm, r1, start_time_ns) orelse return null;
+    var end_epoch = calendarWindowEpoch(start_date, unit, hy, hm, r1 + sign, start_time_ns) orelse return null;
+    if (!destInWindow(sign, start_epoch, end_epoch, dest_epoch)) {
+        r1 = unit_val + sign;
+        start_epoch = calendarWindowEpoch(start_date, unit, hy, hm, r1, start_time_ns) orelse return null;
+        end_epoch = calendarWindowEpoch(start_date, unit, hy, hm, r1 + sign, start_time_ns) orelse return null;
+    }
+
+    // total = r1 + sign·(dest − start)/(end − start), formed as the single
+    // fraction (denominator·r1 + numerator·sign) ⁄ denominator to mirror the
+    // spec's `fakeNumerator.fdiv(denominator)` shape.
+    const denom: i128 = end_epoch - start_epoch;
+    const numer: i128 = dest_epoch - start_epoch;
+    const fake: i128 = denom * @as(i128, r1) + numer * @as(i128, sign);
+    return divRoundToF64(fake, denom);
+}
+
+/// §7.5.x ComputeNudgeWindow candidate end date: `start_date` advanced by the
+/// held coarser units plus `r` of `unit`. Generalises `addCalendarUnit` to
+/// the `day` unit (holding weeks as well), as the zoned `day` total needs.
+/// Null on ISO-date overflow.
+fn windowBoundaryDate(start_date: PlainDateRecord, unit: LargestUnit, hy: i64, hm: i64, hw: i64, r: i64) ?PlainDateRecord {
+    return switch (unit) {
+        .year => addISODate(start_date, r, 0, 0, 0, false),
+        .month => addISODate(start_date, hy, r, 0, 0, false),
+        .week => addISODate(start_date, hy, hm, r, 0, false),
+        .day => addISODate(start_date, hy, hm, hw, r, false),
+        else => unreachable, // year / month / week / day windows only.
+    };
+}
+
+/// Is ComputeNudgeWindow's start duration all zero? When so the spec reuses
+/// `originEpochNs` directly rather than round-tripping the start date through
+/// the zone (§7.5.x ComputeNudgeWindow, the `DateDurationSign === 0` branch).
+fn windowStartIsOrigin(unit: LargestUnit, hy: i64, hm: i64, hw: i64, r1: i64) bool {
+    return switch (unit) {
+        .year => r1 == 0,
+        .month => hy == 0 and r1 == 0,
+        .week => hy == 0 and hm == 0 and r1 == 0,
+        .day => hy == 0 and hm == 0 and hw == 0 and r1 == 0,
+        else => unreachable,
+    };
+}
+
+const ZonedWindowBounds = struct { start_epoch: i128, end_epoch: i128 };
+
+/// §7.5.x ComputeNudgeWindow for a fixed-offset (or UTC) zone: the window's
+/// start (`r1` units from the origin) and end (`r1 + sign` units) boundaries
+/// re-anchored to epoch nanoseconds *through the time zone*. Returns null when
+/// either boundary leaves the representable Instant range — the overflow path
+/// that distinguishes a zoned total from the wall-frame one.
+fn zonedWindowBounds(
+    start_date: PlainDateRecord,
+    start_time: PlainTimeRecord,
+    tz: TimeZone,
+    unit: LargestUnit,
+    hy: i64,
+    hm: i64,
+    hw: i64,
+    r1: i64,
+    sign: i64,
+    origin_epoch: i128,
+) ?ZonedWindowBounds {
+    const start_epoch = if (windowStartIsOrigin(unit, hy, hm, hw, r1))
+        origin_epoch
+    else blk: {
+        const d = windowBoundaryDate(start_date, unit, hy, hm, hw, r1) orelse return null;
+        break :blk getEpochNanosecondsFor(tz, PlainDateTimeRecord.combine(d, start_time)) orelse return null;
+    };
+    const end_date = windowBoundaryDate(start_date, unit, hy, hm, hw, r1 + sign) orelse return null;
+    const end_epoch = getEpochNanosecondsFor(tz, PlainDateTimeRecord.combine(end_date, start_time)) orelse return null;
+    return .{ .start_epoch = start_epoch, .end_epoch = end_epoch };
+}
+
+/// §7.5.x TotalRelativeDuration / NudgeToCalendarUnit for a fixed-offset (or
+/// UTC) time zone and the ISO calendar — the fractional count of an
+/// irregular-length calendar unit (year / month / week) OR a `day` unit
+/// between `origin_epoch` and `dest_epoch`. Unlike `totalRelativeDateTime`
+/// (the time-zone-free wall-frame total) the window boundaries are re-anchored
+/// through the zone with `getEpochNanosecondsFor`, so a boundary instant past
+/// the representable Instant range yields null and the caller raises
+/// RangeError. This is the one observable divergence between a zoned and a
+/// plain `day` total: DifferenceZonedDateTimeWithTotal routes a `day` unit
+/// through this calendar-window technique (the `timeZone && unit === "day"`
+/// branch of TotalRelativeDuration) precisely so a next-day boundary past the
+/// Instant range throws, whereas the plain `day` total is a pure wall span.
+///
+/// For a fixed-offset zone every day is exactly 24 h and the constant offset
+/// cancels in the (dest − start)/(end − start) ratio, so `diff` — the
+/// DifferenceISODateTime of the two wall clocks capped at `unit` — and the
+/// resulting value match the instant-frame computation exactly. `start` is the
+/// origin wall clock (GetISODateTimeFor at `origin_epoch`); the spec's
+/// `originEpochNs` short-circuit reuses `origin_epoch` when the window's start
+/// duration is zero.
+pub fn totalRelativeZonedDateTime(
+    start: PlainDateTimeRecord,
+    tz: TimeZone,
+    origin_epoch: i128,
+    diff: DurationRecord,
+    dest_epoch: i128,
+    unit: LargestUnit,
+) ?f64 {
+    const start_date = start.date();
+    const start_time = start.time();
+    const sign: i64 = if (durationSign(diff) < 0) -1 else 1;
+
+    const dy: i64 = @intFromFloat(diff.years);
+    const dm: i64 = @intFromFloat(diff.months);
+    const dw: i64 = @intFromFloat(diff.weeks);
+    const dd: i64 = @intFromFloat(diff.days);
+
+    // Held coarser units + the value of the unit being totalled, matching
+    // ComputeNudgeWindow's per-unit start/end duration construction. `day`
+    // holds years/months/weeks; week folds the sub-month day remainder in.
+    var hy: i64 = 0;
+    var hm: i64 = 0;
+    var hw: i64 = 0;
+    var unit_val: i64 = 0;
+    switch (unit) {
+        .year => unit_val = dy,
+        .month => {
+            hy = dy;
+            unit_val = dm;
+        },
+        .week => {
+            hy = dy;
+            hm = dm;
+            unit_val = @divTrunc(dw * 7 + dd, 7);
+        },
+        .day => {
+            hy = dy;
+            hm = dm;
+            hw = dw;
+            unit_val = dd;
+        },
+        else => unreachable, // calendar units + day only.
+    }
+
+    // ComputeNudgeWindow at increment 1, then the spec's retry when `dest`
+    // is not bracketed by the truncated window (a calendar irregularity).
+    var r1: i64 = unit_val;
+    var bounds = zonedWindowBounds(start_date, start_time, tz, unit, hy, hm, hw, r1, sign, origin_epoch) orelse return null;
+    if (!destInWindow(@intCast(sign), bounds.start_epoch, bounds.end_epoch, dest_epoch)) {
+        r1 = unit_val + sign;
+        bounds = zonedWindowBounds(start_date, start_time, tz, unit, hy, hm, hw, r1, sign, origin_epoch) orelse return null;
+    }
+
+    // total = r1 + sign·(dest − start)/(end − start), formed as the single
+    // fraction (denominator·r1 + numerator·sign) ⁄ denominator to mirror the
+    // spec's `fakeNumerator.fdiv(denominator)` shape.
+    const denom: i128 = bounds.end_epoch - bounds.start_epoch;
+    const numer: i128 = dest_epoch - bounds.start_epoch;
+    const fake: i128 = denom * @as(i128, r1) + numer * @as(i128, sign);
+    return divRoundToF64(fake, denom);
 }
 
 /// §5.5.x ISODateTimeToString with `precision="auto"` — the form
@@ -3017,7 +3430,13 @@ pub fn parseTemporalZonedDateTimeString(input: []const u8) error{Invalid}!Parsed
         .microsecond = (time.sub_ns / 1_000) % 1_000,
         .nanosecond = time.sub_ns % 1_000,
     };
-    if (!isoDateTimeWithinLimits(rec)) return error.Invalid;
+    // No PlainDateTime-range gate here: ParseISODateTime does not range-check,
+    // and the wall clock of a valid zoned string can legitimately sit one ISO
+    // day below the PlainDateTime floor (e.g. `-271821-04-19T00:00`, whose
+    // midnight is one day under the floor but whose instant after the offset is
+    // representable). InterpretISODateTimeOffset applies the right bound
+    // (CheckISODaysRange for an `option` offset, IsValidEpochNanoseconds for an
+    // exact `Z`), so a genuinely out-of-range value still rejects — just later.
     return .{ .date_time = rec, .behaviour = behaviour, .offset_ns = offset_ns, .time_zone = tz };
 }
 
