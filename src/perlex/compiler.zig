@@ -421,17 +421,28 @@ const Compiler = struct {
             },
             .noncapture => |body| try self.compileNode(body),
             .capture => |g| {
-                try self.emit(.{ .save = 2 * g.index });
-                try self.compileNode(g.body);
-                try self.emit(.{ .save = 2 * g.index + 1 });
+                // In a lookbehind the body runs right-to-left, entering at
+                // the group's right boundary and exiting at the left, so
+                // save the end slot (2g+1) first and the start slot (2g)
+                // last — keeping the recorded [start, end) left-to-right.
+                if (self.backward) {
+                    try self.emit(.{ .save = 2 * g.index + 1 });
+                    try self.compileNode(g.body);
+                    try self.emit(.{ .save = 2 * g.index });
+                } else {
+                    try self.emit(.{ .save = 2 * g.index });
+                    try self.compileNode(g.body);
+                    try self.emit(.{ .save = 2 * g.index + 1 });
+                }
             },
             .alternate => |alts| try self.compileAlternation(alts),
             .repeat => |r| try self.compileRepeat(r),
             .lookahead => |la| {
-                // Lookbehind matches backward and (v1) only supports
-                // capture-free, assertion-free bodies; richer bodies
-                // defer to the fallback. Lookahead has no restriction.
-                if (la.behind and !lookbehindBodyOk(la.body)) return error.Unsupported;
+                // §22.2.2.4 — a lookbehind compiles its body backward
+                // (`compileSubProgram` reverses concatenations, swaps
+                // capture saves, and matches backreferences ending at the
+                // cursor); a nested assertion re-anchors with its own
+                // direction. No body construct is excluded.
                 const sub = try self.compileSubProgram(la.body, la.behind);
                 self.emit(.{ .lookahead = .{ .negative = la.negative, .behind = la.behind, .sub = sub } }) catch |e| {
                     freeInsts(self.gpa, sub);
@@ -868,32 +879,6 @@ fn collectMultiStringsDesc(a: std.mem.Allocator, strings: []const []const u21) s
     }
     std.mem.sort([]const u21, multi.items, {}, longerFirst);
     return multi.items;
-}
-
-/// A lookbehind body the v1 backward matcher handles: no capturing
-/// groups (which would need reversed capture saves), no
-/// backreferences, and no nested assertions. Richer bodies defer to
-/// the fallback.
-fn lookbehindBodyOk(node: *const Node) bool {
-    return switch (node.*) {
-        .capture, .backref_name, .backref_index, .lookahead => false,
-        .empty, .char, .class, .dot, .prop, .class_set, .anchor_start, .anchor_end, .word_boundary => true,
-        .noncapture => |b| lookbehindBodyOk(b),
-        .modifier_group => |mg| lookbehindBodyOk(mg.body),
-        .repeat => |r| lookbehindBodyOk(r.body),
-        .concat => |parts| {
-            for (parts) |p| {
-                if (!lookbehindBodyOk(p)) return false;
-            }
-            return true;
-        },
-        .alternate => |alts| {
-            for (alts) |a| {
-                if (!lookbehindBodyOk(a)) return false;
-            }
-            return true;
-        },
-    };
 }
 
 /// Whether a subtree can match the empty string. A quantifier over a
