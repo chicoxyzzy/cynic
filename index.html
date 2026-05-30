@@ -625,11 +625,11 @@
         </article>
 
         <article class="refuse">
-          <div class="stamp">NOPE</div>
+          <div class="stamp">NOT IN DEFAULT</div>
           <span class="feature">Intl.*</span>
           <h3>The internationalization API</h3>
-          <p>Locale-aware formatting is a separate runtime project. <code>Date</code>, <code>Number.prototype.toLocaleString</code>, and friends use ISO / C locale and stay that way.</p>
-          <div class="quote">ReferenceError: Intl is not shipped here.</div>
+          <p>Not in the default build — it'd drag in a CLDR/ICU + tzdata stack. A separate opt-in <code>Intl</code> build is planned; the default uses ISO / C locale.</p>
+          <div class="quote">ReferenceError: Intl is not shipped here (yet).</div>
         </article>
 
         <article class="refuse">
