@@ -736,6 +736,43 @@ test "perlex: /iv folds \\q{} string members" {
     try expectFoldNoMatch("[\\q{ab}]", iv, &[_]u16{ 'A', 'x' });
 }
 
+test "perlex: /iu \\b/\\B fold word-char membership through the orbit (§22.2.2.9.3)" {
+    // §22.2.2.9.3 WordCharacters — under /iu the word set extends to every
+    // character whose Canonicalize is an ASCII word char. The stub folds
+    // U+212A KELVIN SIGN to 'k', so it counts as a word char for \b/\B. With
+    // "Z" (a word char) just before it there is no boundary between them: \B
+    // matches at that position, \b does not.
+    try expectFoldMatch("Z\\B", iu, &[_]u16{ 'Z', 0x212A }, "Z");
+    try expectFoldNoMatch("Z\\b", iu, &[_]u16{ 'Z', 0x212A });
+    // Against a non-word follower (space) the boundary is present again.
+    try expectFoldMatch("Z\\b", iu, &[_]u16{ 'Z', ' ' }, "Z");
+    try expectFoldNoMatch("Z\\B", iu, &[_]u16{ 'Z', ' ' });
+    // The inline (?i:…) modifier scopes the same word-set fold for \b/\B
+    // (ES2024 regexp-modifiers): under bare /u the group still folds.
+    try expectFoldMatch("(?i:Z\\B)", uf, &[_]u16{ 'Z', 0x212A }, "Z");
+    try expectFoldNoMatch("(?i:Z\\b)", uf, &[_]u16{ 'Z', 0x212A });
+}
+
+test "perlex: /iu \\P{property} is a complement set, not an inverted class (§22.2.2.7.1)" {
+    // §22.2.2.7.1 — `\P{Lu}` builds the COMPLEMENT CharSet matched with
+    // invert = false, whereas `[^…]` builds a base set matched with
+    // invert = true. The two coincide without folding but DIVERGE under /iu
+    // when the property isn't closed under Canonicalize: stub Lu = [A-Z]
+    // contains 'A', whose fold 'a' ∉ Lu. So `\P{Lu}` matches both 'A' (some
+    // orbit member lies outside Lu) and 'a'.
+    try expectFoldMatch("\\P{Lu}", iu, &[_]u16{'A'}, "A");
+    try expectFoldMatch("\\P{Lu}", iu, &[_]u16{'a'}, "a");
+    try expectFoldMatch("\\P{Lu}", iu, &[_]u16{'5'}, "5"); // whole orbit outside Lu
+    // The invert form `[^A-Z]` (same set, true invert) matches NEITHER 'A'
+    // nor 'a' under fold: orbit('A') = {A, a} meets [A-Z] at 'A'.
+    try expectFoldNoMatch("[^A-Z]", iu, &[_]u16{'A'});
+    try expectFoldNoMatch("[^A-Z]", iu, &[_]u16{'a'});
+    // Positive `\p{Lu}` is unaffected: it matches an uppercase letter and,
+    // under fold, its lowercase orbit partner too.
+    try expectFoldMatch("\\p{Lu}", iu, &[_]u16{'A'}, "A");
+    try expectFoldMatch("\\p{Lu}", iu, &[_]u16{'a'}, "a");
+}
+
 // ── `s` (dotall) and `m` (multiline) flags ──────────────────────────
 
 test "perlex: s flag makes dot match line terminators" {
@@ -751,6 +788,107 @@ test "perlex: m flag anchors at line boundaries" {
     // Without `m`, `^`/`$` are input-relative only.
     try expectNoMatch("^b", "a\nb");
     try expectNoMatch("a$", "a\nb");
+}
+
+// ── §22.2.1 inline pattern modifiers `(?ims-ims:…)` (ES2024) ─────────
+//
+// The two Atom productions `( ? RegularExpressionFlags : Disjunction )`
+// and `( ? RegularExpressionFlags - RegularExpressionFlags : Disjunction )`
+// add and/or remove the `i`/`m`/`s` flags for a scoped subpattern. Only
+// those three flags are modifiable; the change affects local matching
+// only and never the RegExp object's own flag properties (a runtime
+// concern, covered by the test262 modifiers fixtures).
+
+test "perlex: modifier group adds a flag locally" {
+    // (?i:…) folds case only inside the group.
+    try expectMatch("(?i:a)", "A", "A");
+    try expectMatch("(?i:a)", "a", "a");
+    try expectMatch("(?i:abc)", "AbC", "AbC");
+    try expectNoMatch("(?i:a)", "b");
+    // (?s:.) lets dot span a line terminator locally.
+    try expectMatch("(?s:.)", "\n", "\n");
+    // (?m:^a) anchors at a line boundary locally.
+    try expectMatch("(?m:^a)", "b\na", "a");
+}
+
+test "perlex: a modifier's scope ends at its group" {
+    // The `b` after the group stays case-sensitive.
+    try expectMatch("(?i:a)b", "Ab", "Ab");
+    try expectNoMatch("(?i:a)b", "AB");
+    try expectNoMatch("(?i:a)b", "aB");
+    // The `a` before the group stays case-sensitive too.
+    try expectMatch("a(?i:b)", "ab", "ab");
+    try expectMatch("a(?i:b)", "aB", "aB");
+    try expectNoMatch("a(?i:b)", "Ab");
+}
+
+test "perlex: remove-flag modifier turns a program flag off locally" {
+    // /(?-i:a)/i — the group opts out of folding.
+    try expectMatchFlags("(?-i:a)", ci, "a", "a");
+    try expectNoMatchFlags("(?-i:a)", ci, "A");
+    // /(?-s:.)/s — dot excludes the newline again inside the group.
+    try expectNoMatchFlags("(?-s:.)", .{ .dot_all = true }, "\n");
+    try expectMatchFlags("(?-s:.)", .{ .dot_all = true }, "x", "x");
+    // /(?-m:^a)/m — `^` is input-relative again inside the group.
+    try expectMatchFlags("(?-m:^a)", .{ .multiline = true }, "ab", "a");
+    try expectNoMatchFlags("(?-m:^a)", .{ .multiline = true }, "b\na");
+}
+
+test "perlex: add-remove modifier combines both in one group" {
+    // /(?m-i:^a$)/i — add m, remove i: multiline + case-sensitive.
+    try expectMatchFlags("(?m-i:^a$)", ci, "a\n", "a");
+    try expectNoMatchFlags("(?m-i:^a$)", ci, "A\n");
+}
+
+test "perlex: modifiers nest and the inner scope wins" {
+    // Outer folds; inner removes folding for `b` only.
+    try expectMatch("(?i:a(?-i:b)c)", "AbC", "AbC");
+    try expectNoMatch("(?i:a(?-i:b)c)", "ABC");
+    // Inner adds folding back for `b` only, under a remove-i outer scope.
+    try expectMatchFlags("(?-i:a(?i:b)c)", ci, "aBc", "aBc");
+    try expectNoMatchFlags("(?-i:a(?i:b)c)", ci, "AbC");
+}
+
+test "perlex: modifier group carries captures and quantifies" {
+    try expectMatch("(?i:(a)(b))", "AB", "AB,A,B");
+    try expectMatch("(?i:ab)+", "ABab", "ABab");
+}
+
+test "perlex: modifier early errors are syntax errors (§22.2.1.1)" {
+    try expectCompile("(?ii:a)", .syntax_error); // duplicate flag in add
+    try expectCompile("(?ss:a)", .syntax_error);
+    try expectCompile("(?i-mm:a)", .syntax_error); // duplicate in remove
+    try expectCompile("(?i-i:a)", .syntax_error); // add ∩ remove ≠ ∅
+    try expectCompile("(?ms-s:a)", .syntax_error); // overlap on s
+    try expectCompile("(?-:a)", .syntax_error); // add and remove both empty
+    try expectCompile("(?x:a)", .syntax_error); // non-ims flag
+    try expectCompile("(?I:a)", .syntax_error); // flag letters are case-sensitive
+    try expectCompile("(?im-x:a)", .syntax_error); // non-ims in remove
+}
+
+test "perlex: well-formed modifier flag spellings compile" {
+    try expectCompile("(?ims:a)", .match);
+    try expectCompile("(?smi:a)", .match); // order-independent
+    try expectCompile("(?i-m:a)", .match);
+    try expectCompile("(?-i:a)", .match); // empty add, non-empty remove
+    try expectCompile("(?ims-:a)", .match); // non-empty add, empty remove
+}
+
+test "perlex: /u modifier folds across the orbit with an injected folder" {
+    // The group adds `i`; under /u that needs the case folder the bridge
+    // injects (bare compile defers — see the gate test below).
+    try expectFoldMatch("(?i:a)", uf, &[_]u16{'A'}, "A");
+    try expectFoldMatch("(?i:a)", uf, &[_]u16{'a'}, "a");
+    try expectFoldNoMatch("(?i:a)", uf, &[_]u16{'x'});
+}
+
+test "perlex: /u modifier adding i defers without a folder" {
+    // Same deferral contract as a program-level /iu pattern: no injected
+    // folder → defer the whole pattern to the fallback.
+    try expectCompileFlags("(?i:a)", uf, .unsupported);
+    // A modifier that doesn't add folding still compiles under bare /u.
+    try expectCompileFlags("(?m:^a)", uf, .match);
+    try expectCompileFlags("(?-i:a)", uf, .match);
 }
 
 test "perlex: u8 fast path matches like the u16 path" {

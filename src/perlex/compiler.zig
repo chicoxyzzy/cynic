@@ -68,8 +68,10 @@ pub const CaseFoldFn = *const fn (cp: u21) []const u21;
 
 pub const Inst = union(enum) {
     /// Match one literal — a UTF-16 code unit, or a code point up to
-    /// U+10FFFF under `/u` — then advance.
-    char: u21,
+    /// U+10FFFF under `/u` — then advance. `fold` is the effective `i`
+    /// flag baked at this position (§22.2.1 inline modifiers let it
+    /// differ from the program flag inside a `(?i:…)` / `(?-i:…)` group).
+    char: Char,
     /// Accept — the whole-match end slot has already been saved.
     match,
     /// Unconditional jump to an instruction index.
@@ -80,28 +82,41 @@ pub const Inst = union(enum) {
     save: usize,
     /// Reset capture slots `[from, to)` to "unset" (§22.2.2.3 step 4).
     clear: Range,
-    /// `^` — succeed only at input start (non-multiline mode).
-    assert_start,
-    /// `$` — succeed only at input end (non-multiline mode).
-    assert_end,
+    /// `^` — succeed only at input start; the bool is the effective `m`
+    /// flag, baked per-position so an inline modifier group can override
+    /// it (true → also match just after a line terminator).
+    assert_start: bool,
+    /// `$` — succeed only at input end; the bool is the effective `m`
+    /// flag (true → also match just before a line terminator).
+    assert_end: bool,
     /// Match the text previously captured by group `n` (or the empty
     /// string if that group did not participate).
-    backref: usize,
+    backref: Backref,
     /// `\k<name>` where the name is duplicated: match the text of
     /// whichever listed group participated (§22.2.2 with duplicate
     /// group names). At most one can be set, per the early error.
-    backref_dup: []const usize,
+    backref_dup: BackrefDup,
     /// Match one code unit against a class (`.`, `[…]`, `\d`/`\w`/`\s`
     /// and negated forms), advancing on success. `ranges` is owned by
-    /// the program.
-    class: parser.Node.Class,
-    /// `\b` (false) / `\B` (true) word-boundary assertion.
-    word_boundary: bool,
+    /// the program; `fold` is the effective `i` flag baked at this
+    /// position.
+    class: ClassInst,
+    /// `\b` / `\B` word-boundary assertion. `negated` is true for `\B`;
+    /// `fold` is the effective `i` flag baked at this position (an inline
+    /// `(?i:…)` group scopes it). Under `/iu`/`/iv` the word set extends to
+    /// every character whose Canonicalize is an ASCII word char (§22.2.2.9.3
+    /// WordCharacters), so the assertion needs the flag at match time.
+    word_boundary: WordBoundary,
     /// `(?=…)` / `(?!…)` — run `sub` (a self-contained program ending
     /// in `match`) at the current position without consuming input;
     /// `negative` inverts success.
     lookahead: LookInst,
 
+    pub const Char = struct { cp: u21, fold: bool };
+    pub const WordBoundary = struct { negated: bool, fold: bool };
+    pub const Backref = struct { index: usize, fold: bool };
+    pub const BackrefDup = struct { indices: []const usize, fold: bool };
+    pub const ClassInst = struct { negated: bool, ranges: []const parser.Node.ClassRange, fold: bool };
     pub const Split = struct { a: usize, b: usize };
     pub const Range = struct { from: usize, to: usize };
     pub const LookInst = struct { negative: bool, behind: bool, sub: []const Inst };
@@ -111,7 +126,7 @@ pub const Inst = union(enum) {
 /// dup-backref index lists, nested lookahead sub-programs).
 fn freeInstContents(gpa: std.mem.Allocator, insts: []const Inst) void {
     for (insts) |inst| switch (inst) {
-        .backref_dup => |idxs| gpa.free(idxs),
+        .backref_dup => |bd| gpa.free(bd.indices),
         .class => |cls| gpa.free(cls.ranges),
         .lookahead => |la| freeInsts(gpa, la.sub),
         else => {},
@@ -162,6 +177,8 @@ pub fn compile(gpa: std.mem.Allocator, result: parser.ParseResult, flags: Flags,
         .gpa = gpa,
         .names = result.names,
         .insts = .empty,
+        .fold = flags.ignore_case,
+        .multiline = flags.multiline,
         .dot_all = flags.dot_all,
         .resolver = resolver,
     };
@@ -209,6 +226,13 @@ const Compiler = struct {
     gpa: std.mem.Allocator,
     names: []const ?[]const u8,
     insts: std.ArrayListUnmanaged(Inst),
+    /// Effective `i`/`m`/`s` flags at the current compile position.
+    /// Seeded from the program flags; an inline modifier group
+    /// (`(?i-m:…)`, §22.2.1 UpdateModifiers) saves, overrides, compiles
+    /// its body, and restores these — so each char/class/anchor
+    /// instruction bakes the flag in force where it sits.
+    fold: bool,
+    multiline: bool,
     /// The `s` (dotall) flag — `.` matches line terminators too.
     dot_all: bool,
     /// True while compiling a lookbehind body — concatenations are
@@ -237,10 +261,10 @@ const Compiler = struct {
     fn compileNode(self: *Compiler, node: *const Node) CompileError!void {
         switch (node.*) {
             .empty => {},
-            .char => |ch| try self.emit(.{ .char = ch }),
-            .anchor_start => try self.emit(.assert_start),
-            .anchor_end => try self.emit(.assert_end),
-            .word_boundary => |neg| try self.emit(.{ .word_boundary = neg }),
+            .char => |ch| try self.emit(.{ .char = .{ .cp = ch, .fold = self.fold } }),
+            .anchor_start => try self.emit(.{ .assert_start = self.multiline }),
+            .anchor_end => try self.emit(.{ .assert_end = self.multiline }),
+            .word_boundary => |neg| try self.emit(.{ .word_boundary = .{ .negated = neg, .fold = self.fold } }),
             .dot => {
                 // `.` excludes line terminators unless dotall (`s`), in
                 // which case it matches any code unit (negated empty
@@ -248,7 +272,9 @@ const Compiler = struct {
                 const src_ranges: []const parser.Node.ClassRange =
                     if (self.dot_all) &[_]parser.Node.ClassRange{} else &parser.line_terminator_ranges;
                 const ranges = try self.gpa.dupe(parser.Node.ClassRange, src_ranges);
-                self.emit(.{ .class = .{ .negated = true, .ranges = ranges } }) catch |e| {
+                // The line-terminator set has no case partners, so the
+                // effective `i` flag never changes a `.` match: bake false.
+                self.emit(.{ .class = .{ .negated = true, .ranges = ranges, .fold = false } }) catch |e| {
                     self.gpa.free(ranges);
                     return e;
                 };
@@ -257,7 +283,7 @@ const Compiler = struct {
                 // Copy the ranges into program-owned memory (the AST is
                 // arena/const and freed after compilation).
                 const ranges = try self.gpa.dupe(parser.Node.ClassRange, cls.ranges);
-                self.emit(.{ .class = .{ .negated = cls.negated, .ranges = ranges } }) catch |e| {
+                self.emit(.{ .class = .{ .negated = cls.negated, .ranges = ranges, .fold = self.fold } }) catch |e| {
                     self.gpa.free(ranges);
                     return e;
                 };
@@ -275,9 +301,22 @@ const Compiler = struct {
                 const resolve = self.resolver orelse return error.Unsupported;
                 const rp = (try resolve(a, p.key, p.value)) orelse return error.Unsupported;
                 if (rp.strings.len == 0) {
-                    // Ordinary property → one class instruction.
-                    const ranges = try self.gpa.dupe(Node.ClassRange, rp.ranges);
-                    self.emit(.{ .class = .{ .negated = p.negated, .ranges = ranges } }) catch |e| {
+                    // §22.2.2.7.1 — `\P{…}` builds the COMPLEMENT CharSet
+                    // matched with invert = false, not the base set matched
+                    // with invert = true (that is what `[^…]` does). The two
+                    // coincide without case folding, but diverge under /iu
+                    // when the property isn't closed under §22.2.2.9.3
+                    // Canonicalize (e.g. Lu holds 'A' whose fold 'a' ∉ Lu):
+                    // only the complemented set, tested via the VM's orbit
+                    // membership, yields the spec's `∃ d ∈ orbit(ch): d ∉ Lu`.
+                    // Mirror the /v operand path (evalOperand), which already
+                    // complements `\P{…}`.
+                    const base: []const Node.ClassRange = if (p.negated)
+                        try charset.complement(a, rp.ranges)
+                    else
+                        rp.ranges;
+                    const ranges = try self.gpa.dupe(Node.ClassRange, base);
+                    self.emit(.{ .class = .{ .negated = false, .ranges = ranges, .fold = self.fold } }) catch |e| {
                         self.gpa.free(ranges);
                         return e;
                     };
@@ -334,7 +373,31 @@ const Compiler = struct {
                 const total = self.names.len - 1; // capturing groups, excl group 0
                 if (n == 0 or n > total) return error.SyntaxError;
                 self.regular = false;
-                try self.emit(.{ .backref = n });
+                try self.emit(.{ .backref = .{ .index = n, .fold = self.fold } });
+            },
+            .modifier_group => |mg| {
+                // §22.2.1 inline modifiers — UpdateModifiers: an added flag
+                // is set true and a removed flag false, scoped to this
+                // group's body only. `u`/`v` aren't modifiable (the parser
+                // rejects them), so the matcher-global unicode decode and
+                // case-folder are untouched; only the per-position `i`/`m`/
+                // `s` baking changes. Save/restore so the scope ends with
+                // the group.
+                const saved_fold = self.fold;
+                const saved_multiline = self.multiline;
+                const saved_dot_all = self.dot_all;
+                defer {
+                    self.fold = saved_fold;
+                    self.multiline = saved_multiline;
+                    self.dot_all = saved_dot_all;
+                }
+                if (mg.add.ignore_case) self.fold = true;
+                if (mg.add.multiline) self.multiline = true;
+                if (mg.add.dot_all) self.dot_all = true;
+                if (mg.remove.ignore_case) self.fold = false;
+                if (mg.remove.multiline) self.multiline = false;
+                if (mg.remove.dot_all) self.dot_all = false;
+                try self.compileNode(mg.body);
             },
         }
     }
@@ -452,8 +515,8 @@ const Compiler = struct {
             // An unresolved `\k<name>` carries Annex-B-tolerant
             // semantics the v1 grammar doesn't model — defer.
             0 => return error.Unsupported,
-            1 => try self.emit(.{ .backref = indices.items[0] }),
-            else => try self.emit(.{ .backref_dup = try indices.toOwnedSlice(self.gpa) }),
+            1 => try self.emit(.{ .backref = .{ .index = indices.items[0], .fold = self.fold } }),
+            else => try self.emit(.{ .backref_dup = .{ .indices = try indices.toOwnedSlice(self.gpa), .fold = self.fold } }),
         }
     }
 
@@ -490,7 +553,7 @@ const Compiler = struct {
         // Common case: a flat code-point class (no string members).
         if (strings.len == 0) {
             const owned = try self.gpa.dupe(Node.ClassRange, ranges);
-            self.emit(.{ .class = .{ .negated = false, .ranges = owned } }) catch |e| {
+            self.emit(.{ .class = .{ .negated = false, .ranges = owned, .fold = self.fold } }) catch |e| {
                 self.gpa.free(owned);
                 return e;
             };
@@ -700,6 +763,7 @@ fn lookbehindBodyOk(node: *const Node) bool {
         .capture, .backref_name, .backref_index, .lookahead => false,
         .empty, .char, .class, .dot, .prop, .class_set, .anchor_start, .anchor_end, .word_boundary => true,
         .noncapture => |b| lookbehindBodyOk(b),
+        .modifier_group => |mg| lookbehindBodyOk(mg.body),
         .repeat => |r| lookbehindBodyOk(r.body),
         .concat => |parts| {
             for (parts) |p| {
@@ -728,6 +792,7 @@ fn nullable(node: *const Node) bool {
         // such a body would otherwise spin a zero-width loop.
         .class_set => |cs| classSetMayMatchEmpty(cs),
         .noncapture => |b| nullable(b),
+        .modifier_group => |mg| nullable(mg.body),
         .capture => |g| nullable(g.body),
         .repeat => |r| r.min == 0 or nullable(r.body),
         .concat => |parts| {
@@ -788,6 +853,7 @@ fn groupSlotRange(node: *const Node) ?Inst.Range {
     return switch (node.*) {
         .empty, .char, .anchor_start, .anchor_end, .word_boundary, .dot, .class, .prop, .class_set, .backref_name, .backref_index => null,
         .noncapture => |body| groupSlotRange(body),
+        .modifier_group => |mg| groupSlotRange(mg.body),
         .lookahead => |la| groupSlotRange(la.body),
         .repeat => |r| groupSlotRange(r.body),
         .capture => |g| blk: {

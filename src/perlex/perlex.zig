@@ -101,14 +101,21 @@ pub fn compileWithHooks(
         error.OutOfMemory => return error.OutOfMemory,
     };
 
+    // An inline `(?i:…)` group (§22.2.1) turns `i` on for a subpattern
+    // even when the program-level flag is off. It needs the same orbit
+    // folder under `/u`/`/v`: the pre-parse gate above can't see it
+    // (the flag is only known after parsing), so re-check post-parse.
+    // Removing `i` (`(?-i:…)`) or adding only `m`/`s` needs no folder.
+    if ((flags.unicode or flags.unicode_sets) and parsed.has_ignore_case_modifier and hooks.case_folder == null) return .unsupported;
+
     // §22.2.2.7.1 — non-Unicode Canonicalize never folds a non-ASCII
     // unit to ASCII, so ASCII folding is exact for an all-ASCII
     // pattern. A pattern with an explicit non-ASCII unit could fold to
     // another non-ASCII unit (e.g. à↔À), which the ASCII fold misses —
-    // defer those non-Unicode `i` patterns to the fallback. Under
-    // `/iu`/`/iv` the injected folder handles non-ASCII orbits, so the
-    // gate is limited to the non-Unicode case.
-    if (flags.ignore_case and !(flags.unicode or flags.unicode_sets) and parsed.non_ascii) return .unsupported;
+    // defer those non-Unicode `i` patterns to the fallback. An inline
+    // `(?i:…)` group counts too. Under `/iu`/`/iv` the injected folder
+    // handles non-ASCII orbits, so the gate is limited to non-Unicode.
+    if ((flags.ignore_case or parsed.has_ignore_case_modifier) and !(flags.unicode or flags.unicode_sets) and parsed.non_ascii) return .unsupported;
 
     parser.checkDuplicateNames(a, parsed.root) catch |e| switch (e) {
         error.SyntaxError => return .syntax_error,

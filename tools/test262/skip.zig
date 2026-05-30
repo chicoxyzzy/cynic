@@ -1044,7 +1044,11 @@ pub const vendor_features = [_][]const u8{
     //  engine — src/perlex/ — handles duplicate named capture groups
     //  and resolves `\k<name>` to whichever same-named group
     //  participated, which the vendored matcher rejects outright.)
-    "regexp-modifiers", // ES2024 inline `(?i:…)` / `(?-i:…)`.
+    // (regexp-modifiers graduated out: Perlex compiles the ES2024
+    //  inline `(?ims-ims:…)` modifier groups — §22.2.1 UpdateModifiers
+    //  — baking the scoped `i`/`m`/`s` flags per-instruction, with the
+    //  four §22.2.1.1 early errors raised at parse. The vendored matcher
+    //  rejects the `(?…)` syntax outright.)
     // (Stage 4 explicit-resource-management used to skip here. The
     // full surface shipped: `Symbol.dispose` / `Symbol.asyncDispose`
     // well-known symbols, `SuppressedError`, `DisposableStack` /
@@ -1463,27 +1467,31 @@ test "skip: /v unicodeSets generated — Perlex handles code-point set ops" {
         "built-ins/RegExp/unicodeSets/generated/string-literal-union-string-literal.js",
     ));
 
-    // Still deferred — the property-of-strings half of the grammar
-    // (`\p{RGI_Emoji}`, `\p{Emoji_Keycap_Sequence}`), pending the
-    // emoji-sequence tables:
-    try testing.expect(pathIsCynicOutOfScope(
+    // Property-of-strings escapes (`\p{RGI_Emoji}`,
+    // `\p{Emoji_Keycap_Sequence}`) are now in scope — the
+    // emoji-sequence tables and the resolver's string members shipped,
+    // so Perlex lowers them to an alternation like any `\q{…}` set:
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/property-of-strings-escape-union-character.js",
     ));
-    try testing.expect(pathIsCynicOutOfScope(
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/character-union-property-of-strings-escape.js",
     ));
-    try testing.expect(pathIsCynicOutOfScope(
+    // `\p{RGI_Emoji}` matched against the emoji-16.0 data, set-difference
+    // against a property-of-strings operand, and a `\q{…}` unioned with a
+    // property-of-strings escape all resolve through the shipped
+    // emoji-sequence tables — every fixture attempts and passes (verified
+    // against the harness), so none is deferred to libregexp any longer:
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/rgi-emoji-16.0.js",
     ));
-    try testing.expect(pathIsCynicOutOfScope(
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/character-property-escape-difference-property-of-strings-escape.js",
     ));
-    // A `\q{…}` paired with a property-of-strings escape stays deferred
-    // (caught by the `property-of-strings` patterns on either side):
-    try testing.expect(pathIsCynicOutOfScope(
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/string-literal-union-property-of-strings-escape.js",
     ));
-    try testing.expect(pathIsCynicOutOfScope(
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/RegExp/unicodeSets/generated/property-of-strings-escape-union-string-literal.js",
     ));
 }
@@ -1537,8 +1545,9 @@ test "skip: unsupported features — stage maturity + planned" {
     try testing.expect(featureIsUnsupported("decorators"));
     try testing.expect(featureIsUnsupported("import-defer"));
     try testing.expect(featureIsUnsupported("source-phase-imports"));
-    // Planned — libregexp.
-    try testing.expect(featureIsUnsupported("regexp-modifiers"));
+    // regexp-modifiers is supported (Perlex compiles `(?ims-ims:…)`);
+    // it must NOT be flagged unsupported.
+    try testing.expect(!featureIsUnsupported("regexp-modifiers"));
     // explicit-resource-management is supported (full surface
     // shipped); it must NOT be flagged unsupported.
     try testing.expect(!featureIsUnsupported("explicit-resource-management"));
