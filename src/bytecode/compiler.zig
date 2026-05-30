@@ -209,6 +209,21 @@ pub const Compiler = struct {
     /// `false` for scripts and inline-test compiles, where
     /// import/export still parse but compile as no-ops.
     is_module: bool = false,
+    /// True when compiling eval code (§3.8.3.7 PerformShadowRealmEval
+    /// today; §19.2.1.1 PerformEval when `eval` ships). Top-level
+    /// **lexical** declarations (`let` / `const` / `class`) then bind
+    /// in the fresh per-invocation declarative environment allocated
+    /// by the body's leading `make_environment` (§3.8.3.7 step 5,
+    /// lexEnv = NewDeclarativeEnvironment(GlobalEnv)) instead of the
+    /// realm's shared global env-record, so repeated evaluations are
+    /// independent: redeclaring a `let` / `const` a prior evaluation
+    /// used does not collide. Top-level `var` / function declarations
+    /// are unaffected — they keep targeting the eval realm's global
+    /// env (step 6, varEnv = [[GlobalEnv]]), so they persist across
+    /// evaluations and appear on globalThis, matching every
+    /// production engine. Free references resolve via `lda_global`
+    /// regardless.
+    eval_scope: bool = false,
     /// §9.4.6.7 Module Namespace [[Get]] live binding propagation —
     /// maps a module-local binding name to the namespace key(s) it
     /// is exported under. Populated by `compileModuleAsChunk` from
@@ -450,8 +465,18 @@ pub const Compiler = struct {
         // `const` / `function`) live on the realm's global
         // bindings map rather than the per-frame env. Module
         // top-levels stay scope-local — their visibility model is
-        // import / export, not the global object.
-        const is_global = target.kind == .script and !self.is_module;
+        // import / export, not the global object. Eval code
+        // (§3.8.3.7 PerformShadowRealmEval) splits the two: lexical
+        // declarations (`let` / `const` / `class`) bind in the fresh
+        // per-invocation declarative environment (step 5,
+        // lexEnv = NewDeclarativeEnvironment) so repeated evaluations
+        // don't collide; `var` / function declarations target the
+        // eval realm's variable environment, which is its global env
+        // (step 6, varEnv = [[GlobalEnv]]), so they persist across
+        // evaluations and surface on globalThis. So `eval_scope`
+        // suppresses the global path only for the lexical kinds.
+        const is_global = target.kind == .script and !self.is_module and
+            !(self.eval_scope and kind != .var_);
         const slot: u8 = if (is_global) 0 else try self.newEnvSlot();
         // Slot-indexed global-lexical access: a top-level script
         // `let` / `const` / `class` binding gets a compile-time
@@ -12502,11 +12527,48 @@ pub fn compileScriptAsChunk(
     source: []const u8,
     diagnostics: ?*Diagnostics,
 ) CompileError!Chunk {
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, false);
+}
+
+/// Compile eval code (§3.8.3.7 PerformShadowRealmEval today; the
+/// indirect-`eval` path when `eval` ships). Same shape as
+/// `compileScriptAsChunk`, but top-level **lexical** declarations
+/// (`let` / `const` / `class`) bind in the fresh per-invocation
+/// declarative environment (§3.8.3.7 step 5) instead of the realm's
+/// shared global env-record (`eval_scope`), so repeated evaluations
+/// in one realm are independent: redeclaring a `let` / `const` a
+/// prior evaluation used does not collide. Top-level `var` / function
+/// declarations still target the eval realm's global env (step 6,
+/// varEnv = [[GlobalEnv]]) and persist across evaluations. The
+/// §16.1.7 GlobalDeclarationInstantiation collision pre-check is
+/// skipped — lexical names are local (within-body duplicates are
+/// still caught by `declareBinding`) and var / function names install
+/// idempotently. Free references resolve through `lda_global` against
+/// the eval realm's global table exactly as in a script.
+pub fn compileEvalAsChunk(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    program: *const ast.program.Program,
+    source: []const u8,
+    diagnostics: ?*Diagnostics,
+) CompileError!Chunk {
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true);
+}
+
+fn compileScriptLikeChunk(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    program: *const ast.program.Program,
+    source: []const u8,
+    diagnostics: ?*Diagnostics,
+    eval_scope: bool,
+) CompileError!Chunk {
     var c = Compiler.init(allocator, realm, source);
     errdefer c.deinit();
     defer c.class_stack.deinit(c.allocator);
     defer c.pending_labels.deinit(c.allocator);
     c.diagnostics = diagnostics;
+    c.eval_scope = eval_scope;
 
     var script_scope: Scope = .{ .parent = null, .kind = .script };
     defer script_scope.deinit(c.allocator);
@@ -12522,8 +12584,14 @@ pub fn compileScriptAsChunk(
     // CanDeclareGlobalFunction failures set
     // `pending_global_decl_error`; the emit path below builds a
     // chunk whose first opcode is an unconditional TypeError
-    // throw, with NO hoist installation.
-    try c.validateGlobalDeclarations(program.body);
+    // throw, with NO hoist installation. Eval code skips this: its
+    // lexical top-level bindings are local to the fresh declarative
+    // env, so they don't collide with the global env-record or
+    // across evaluations, and its var / function names install
+    // idempotently on the global. §19.2.1.3 EvalDeclarationInstantiation
+    // does its own, narrower checks; `declareBinding` still catches
+    // within-body duplicates.
+    if (!eval_scope) try c.validateGlobalDeclarations(program.body);
 
     const start_span: Span = .{ .start = 0, .end = 0 };
     try c.builder.emitOp(.make_environment, start_span);

@@ -230,19 +230,18 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
         .path = "built-ins/Iterator/prototype/constructor/prop-desc.js",
         .category = .descriptor_assertion,
     },
-    // §3.8 ShadowRealm — five fixtures that pass under the
+    // §3.8 ShadowRealm — six fixtures that pass under the
     // unhardened feature row but fail the hardened feature row
     // purely because the SES posture freezes the child realm's
     // primordials / globalThis. Each writes to a frozen globalThis
-    // (`globalThis.x = …`) or reads a frozen primordial's
-    // extensibility, so the hardened throw / `false` is the
+    // (`globalThis.x = …`), reads a frozen primordial's
+    // extensibility, or enumerates globalThis and finds every slot
+    // non-configurable — so the hardened throw / `false` is the
     // SES-correct behavior and the fixture's expectation is the
     // non-SES one. The thrown message is generic
     // (`ShadowRealm.prototype.evaluate: evaluation threw` /
     // `Expected SameValue(«false», «true»)`), so they're listed by
-    // path. NOT included: `globalthis-config-only-properties.js`,
-    // which also fails the unhardened row (Cynic installs globals
-    // non-configurable — a real divergence, tracked separately).
+    // path.
     .{
         // `Object.isExtensible(ShadowRealm)` — SES freezes the
         // constructor primordial; fixture wants extensible.
@@ -272,6 +271,23 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
         // share-no-identity sibling above.
         .path = "built-ins/ShadowRealm/prototype/evaluate/wrapped-functions-share-no-properties-extended.js",
         .category = .frozen_intrinsic_typeerror,
+    },
+    .{
+        // Block 1 asserts every globalThis own property (bar the
+        // three non-configurable ES values undefined/Infinity/NaN)
+        // is `configurable: true`; block 2 then deletes them all.
+        // Under SES the child realm's globalThis + primordials are
+        // frozen, so block 1's `assert.sameValue(anyMissed, '', …)`
+        // reports the entire global table as non-configurable and
+        // throws — the SES-correct outcome. Passes the unhardened
+        // row, where the globals are configurable and deletable.
+        // (ShadowRealm.evaluate compiles each source as eval code
+        // with a fresh per-call declarative env, so block 2
+        // redeclaring `const esNonConfigValues` after block 1 no
+        // longer collides — the prerequisite for the unhardened
+        // pass.)
+        .path = "built-ins/ShadowRealm/prototype/evaluate/globalthis-config-only-properties.js",
+        .category = .descriptor_assertion,
     },
 };
 

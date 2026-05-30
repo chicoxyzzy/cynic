@@ -447,6 +447,34 @@ pub fn evaluateScript(
     realm: *Realm,
     source: []const u8,
 ) EvaluateError!RunResult {
+    return evaluateSource(allocator, realm, source, false);
+}
+
+/// Evaluate `source` as eval code against `realm` (§3.8.3.7
+/// PerformShadowRealmEval; the indirect-`eval` path when `eval`
+/// ships). Like `evaluateScript`, but top-level lexical declarations
+/// (`let` / `const` / `class`) bind in a fresh per-call declarative
+/// environment rather than the realm's shared global env-record (see
+/// `compileEvalAsChunk`). Repeated calls against one realm are
+/// therefore independent: a later evaluation redeclaring a top-level
+/// `let` / `const` a prior evaluation used does not collide. Top-level
+/// `var` / function declarations still bind on the realm's global env
+/// and persist across calls. Free references resolve against the
+/// realm's globals.
+pub fn evaluateEval(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    source: []const u8,
+) EvaluateError!RunResult {
+    return evaluateSource(allocator, realm, source, true);
+}
+
+fn evaluateSource(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    source: []const u8,
+    eval_scope: bool,
+) EvaluateError!RunResult {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     const aa = arena.allocator();
@@ -469,12 +497,15 @@ pub fn evaluateScript(
     // the same realm. Heap-allocated so its address is stable
     // across `script_chunks` array growth.
     const chunk_ptr = try realm.allocator.create(Chunk);
-    chunk_ptr.* = compiler_mod.compileScriptAsChunk(realm.allocator, realm, &program, source, null) catch {
+    chunk_ptr.* = (if (eval_scope)
+        compiler_mod.compileEvalAsChunk(realm.allocator, realm, &program, source, null)
+    else
+        compiler_mod.compileScriptAsChunk(realm.allocator, realm, &program, source, null)) catch {
         realm.allocator.destroy(chunk_ptr);
         return error.CompileError;
     };
     try realm.script_chunks.append(realm.allocator, chunk_ptr);
-    // (chunk constants pinned inside `compileScriptAsChunk`)
+    // (chunk constants pinned inside the compile entry above)
     return run(allocator, realm, chunk_ptr);
 }
 

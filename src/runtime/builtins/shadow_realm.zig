@@ -262,12 +262,21 @@ fn shadowRealmEvaluate(
         return error.NativeThrew;
     }
     const s: *JSString = @ptrCast(@alignCast(source_arg.asString()));
-    // §3.8.3.7 PerformShadowRealmEval — parse + run the script in
-    // the child realm. Any abrupt completion becomes a TypeError
-    // raised IN THE OWNER REALM (the ShadowRealm instance's
-    // [[Realm]] — `Reflect.construct(OtherShadowRealm, [])` makes
-    // this different from the running realm).
-    const result = interpreter.evaluateScript(eval_realm.allocator, eval_realm, s.flatBytes()) catch |err| switch (err) {
+    // §3.8.3.7 PerformShadowRealmEval — parse + run the source as
+    // eval code in the child realm. `evaluateEval` (not
+    // `evaluateScript`) gives each call a fresh declarative
+    // environment for its top-level LEXICAL bindings (step 5,
+    // lexEnv = NewDeclarativeEnvironment(evalRealm.[[GlobalEnv]])),
+    // so two evaluations may both declare `const x` without
+    // colliding. Top-level `var` / function declarations still
+    // bind on the child realm's global env (step 6, varEnv =
+    // [[GlobalEnv]]) and persist across evaluations — a later
+    // `evaluate('fn')` sees a `function fn(){}` declared earlier.
+    // Any abrupt completion becomes a TypeError raised IN THE
+    // OWNER REALM (the ShadowRealm instance's [[Realm]] —
+    // `Reflect.construct(OtherShadowRealm, [])` makes this
+    // different from the running realm).
+    const result = interpreter.evaluateEval(eval_realm.allocator, eval_realm, s.flatBytes()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // §3.8.3.7 step 4 — parse failures produce a SyntaxError
         // IN THE OWNER REALM.
