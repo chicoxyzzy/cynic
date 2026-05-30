@@ -3627,7 +3627,7 @@ fn writeFileBody(
                 "- **{d} real engine failures** — all libregexp Annex B / `/v` grammar " ++
                 "carve-outs documented in [AGENTS.md](../AGENTS.md).\n" ++
                 "- **{d} skipped** — **tech debt + vendor gaps**. Features Cynic " ++
-                "should eventually ship (Temporal, `explicit-resource-management`) or " ++
+                "should eventually ship (`explicit-resource-management`) or " ++
                 "fixtures blocked on vendored libregexp (`/v` set-difference, " ++
                 "`\\q{{…}}`, property-of-strings) and single-realm Cynic " ++
                 "(`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope " ++
@@ -3795,7 +3795,7 @@ fn writeFileBody(
         \\  `## Pre-Stage-4 proposals shipped` below).
         \\- **In `corpus` as `skip`** — *tech debt*, should
         \\  eventually pass: Stage-4 features Cynic hasn't shipped
-        \\  yet (Temporal, `explicit-resource-management`),
+        \\  yet (`explicit-resource-management`),
         \\  libregexp `/v` grammar gaps (vendored matcher),
         \\  cross-realm fixtures (`$262.createRealm()` —
         \\  single-realm Cynic doesn't expose multi-realm to user
@@ -4031,7 +4031,7 @@ fn writeScoreboard(
         \\  those descriptors back expecting `configurable: true`.
         \\- ~~Strikethrough~~ rows are buckets we skip wholesale
         \\  (out of scope per the Cynic-targeted skiplist — Annex B
-        \\  language extensions, `intl402`, `staging`, Temporal,
+        \\  language extensions, `intl402`, `staging`,
         \\  browser-era built-ins, …).
         \\
         \\| area | pass | fail | skip | divergent | pass% | engine% |

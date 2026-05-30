@@ -1,18 +1,18 @@
 # test262 conformance — Cynic
 
-**Cynic passes 84.36 % of its 45039-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
+**Cynic passes 94.56 % of its 45039-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
-- **34843 pass** at the engine-true level (engine% = 99.97 % — see Legend).
-- **3152 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
+- **38733 pass** at the engine-true level (engine% = 99.98 % — see Legend).
+- **3858 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
 - **9 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
-- **7035 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (Temporal, `explicit-resource-management`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
+- **2439 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (`explicit-resource-management`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
 
 ## Current scores
 
 | posture | pass% | engine% | passes / corpus | divergent |
 |---|---:|---:|---:|---:|
-| **hardened** (default — `cynic run`) | 84.36 % | 99.97 % | 37995 / 45039 | 3152 |
-| **unhardened** (`cynic --unhardened`) | 84.36 % | 99.98 % | 37995 / 45039 | — |
+| **hardened** (default — `cynic run`) | 94.56 % | 99.98 % | 42591 / 45039 | 3858 |
+| **unhardened** (`cynic --unhardened`) | 94.56 % | 99.98 % | 42591 / 45039 | — |
 
 > **pass%** is the headline — `pass / corpus` (a fixture
 > Cynic doesn't ship counts as a `skip`, lowering this).
@@ -118,7 +118,7 @@ Two-tier skiplist in
   `## Pre-Stage-4 proposals shipped` below).
 - **In `corpus` as `skip`** — *tech debt*, should
   eventually pass: Stage-4 features Cynic hasn't shipped
-  yet (Temporal, `explicit-resource-management`),
+  yet (`explicit-resource-management`),
   libregexp `/v` grammar gaps (vendored matcher),
   cross-realm fixtures (`$262.createRealm()` —
   single-realm Cynic doesn't expose multi-realm to user
@@ -154,7 +154,7 @@ first two path components (`built-ins/Set`,
   those descriptors back expecting `configurable: true`.
 - ~~Strikethrough~~ rows are buckets we skip wholesale
   (out of scope per the Cynic-targeted skiplist — Annex B
-  language extensions, `intl402`, `staging`, Temporal,
+  language extensions, `intl402`, `staging`,
   browser-era built-ins, …).
 
 | area | pass | fail | skip | divergent | pass% | engine% |
@@ -162,11 +162,12 @@ first two path components (`built-ins/Set`,
 | **_1–9 fails — engine-work tier (libregexp Annex B carve-outs today)_** | | | | | | |
 | `built-ins/RegExp` | 1492 | 9 | 269 | 101 | 85 % | 99 % |
 | **_0 fails — passing / wholly OOS (sorted by divergent ↓)_** | | | | | | |
+| `built-ins/Temporal` | 3885 | 0 | 0 | 703 | 100 % | 100 % |
 | `built-ins/Array` | 2476 | 0 | 41 | 564 | 99 % | 100 % |
 | `built-ins/Object` | 2783 | 0 | 81 | 536 | 98 % | 100 % |
 | `built-ins/TypedArray` | 1104 | 0 | 8 | 319 | 99 % | 100 % |
 | `built-ins/String` | 1026 | 0 | 6 | 177 | 100 % | 100 % |
-| `built-ins/Date` | 431 | 0 | 11 | 152 | 98 % | 100 % |
+| `built-ins/Date` | 436 | 0 | 3 | 155 | 99 % | 100 % |
 | `built-ins/Math` | 214 | 0 | 0 | 113 | 100 % | 100 % |
 | `built-ins/Promise` | 524 | 0 | 39 | 104 | 94 % | 100 % |
 | `language/expressions` | 9742 | 0 | 905 | 99 | 92 % | 100 % |
@@ -228,7 +229,6 @@ first two path components (`built-ins/Set`,
 | `built-ins/AsyncFromSyncIteratorPrototype` | 38 | 0 | 0 | 0 | 100 % | 100 % |
 | `built-ins/Infinity` | 4 | 0 | 2 | 0 | 67 % | 100 % |
 | `built-ins/NaN` | 4 | 0 | 2 | 0 | 67 % | 100 % |
-| ~~`built-ins/Temporal`~~ | ~~0~~ | ~~0~~ | ~~4588~~ | ~~0~~ | ~~0 %~~ | ~~0 %~~ |
 | `built-ins/ThrowTypeError` | 13 | 0 | 0 | 0 | 100 % | 100 % |
 | `built-ins/undefined` | 4 | 0 | 3 | 0 | 57 % | 100 % |
 | `language/asi` | 102 | 0 | 0 | 0 | 100 % | 100 % |
@@ -270,13 +270,20 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` (hardened) | 76 | 0 | 4796 | 2 % | 100 % |
-| `joint-iteration` (unhardened) | 76 | 0 | 4796 | 2 % | 100 % |
-| `ShadowRealm` (hardened) | 62 | 1 | 4796 | 1 % | 98 % |
-| `ShadowRealm` (unhardened) | 62 | 1 | 4796 | 1 % | 98 % |
+| `joint-iteration` (hardened) | 76 | 0 | 200 | 28 % | 100 % |
+| `joint-iteration` (unhardened) | 76 | 0 | 200 | 28 % | 100 % |
+| `ShadowRealm` (hardened) | 63 | 0 | 200 | 24 % | 100 % |
+| `ShadowRealm` (unhardened) | 63 | 0 | 200 | 24 % | 100 % |
 
 
 ## History
+
+### 2026-05-30 — cynic `a72bf19`, test262 `d0c1b4555b`
+
+|         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|---:|
+| **runtime** | 94.56 % | 99.98 % | 42591 / 45039 | 42591 / 42600 | — | +4596 | 35.5 s |
+| **runtime_hardened** | 94.56 % | 99.98 % | 42591 / 45039 | 38733 / 38742 | 3858 | +4596 | 40.5 s |
 
 ### 2026-05-29 — cynic `7ce0853`, test262 `d0c1b455`
 
