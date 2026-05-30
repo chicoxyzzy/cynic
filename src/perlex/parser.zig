@@ -770,8 +770,8 @@ const Parser = struct {
                 return self.takeEscaped(2, 0x00);
             },
             'x' => {
-                const hi = hexVal(self.at(2) orelse return error.Unsupported) orelse return error.Unsupported;
-                const lo = hexVal(self.at(3) orelse return error.Unsupported) orelse return error.Unsupported;
+                const hi = hexVal(self.at(2) orelse return self.malformedEscape()) orelse return self.malformedEscape();
+                const lo = hexVal(self.at(3) orelse return self.malformedEscape()) orelse return self.malformedEscape();
                 const v: u21 = @as(u21, hi) * 16 + lo;
                 if (v >= 0x80) self.non_ascii = true;
                 return self.takeEscaped(4, v);
@@ -795,7 +795,9 @@ const Parser = struct {
                         v = v * 16 + d;
                         if (v > 0x10FFFF) return error.SyntaxError;
                     }
-                    if (i == start or i >= self.src.len or self.src[i] != '}') return error.Unsupported;
+                    // Past the non-Unicode gate above, so an empty or
+                    // unterminated `\u{…}` is a §22.2.1.1 early error.
+                    if (i == start or i >= self.src.len or self.src[i] != '}') return error.SyntaxError;
                     if (v >= 0x80) self.non_ascii = true;
                     self.pos = i + 1; // consume through `}`
                     return @intCast(v);
@@ -803,7 +805,7 @@ const Parser = struct {
                 var v: u21 = 0;
                 var i: usize = 2;
                 while (i < 6) : (i += 1) {
-                    const d = hexVal(self.at(i) orelse return error.Unsupported) orelse return error.Unsupported;
+                    const d = hexVal(self.at(i) orelse return self.malformedEscape()) orelse return self.malformedEscape();
                     v = v *% 16 +% @as(u21, d);
                 }
                 // Under `/u` or `/v`, a surrogate-valued `\uHHHH` (lone,
@@ -841,6 +843,13 @@ const Parser = struct {
     fn takeEscaped(self: *Parser, advance: usize, value: u21) u21 {
         self.pos += advance;
         return value;
+    }
+
+    /// §22.2.1.1 — under `/u` or `/v` an incomplete `\x`/`\u` escape is an
+    /// early error; without it the libregexp fallback still applies the
+    /// Annex B identity-escape leniency (`\x` → literal 'x', …), so defer.
+    fn malformedEscape(self: *Parser) ParseError {
+        return if (self.unicode or self.unicode_sets) error.SyntaxError else error.Unsupported;
     }
 
     /// `[ClassRanges]` / `[^ClassRanges]` → a single class node.

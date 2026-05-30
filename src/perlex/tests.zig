@@ -721,6 +721,48 @@ test "perlex: \\c not followed by a letter defers without /u (Annex B)" {
     try expectCompile("[\\c_]", .unsupported);
 }
 
+// ── §22.2.1.1 incomplete \x / \u escapes ────────────────────────────
+// A \x with fewer than two hex digits, a \u with fewer than four, or a
+// malformed \u{…} is an early error under /u or /v. Without /u each is
+// Annex B identity-escape leniency (`\x` → literal 'x', …) the libregexp
+// fallback still owns.
+
+test "perlex: incomplete \\x escape is a /u early error" {
+    try expectCompileFlags("\\x", uf, .syntax_error);
+    try expectCompileFlags("\\x1", uf, .syntax_error);
+    try expectCompileFlags("[\\x]", uf, .syntax_error);
+    try expectCompileFlags("[\\x1]", uf, .syntax_error);
+}
+
+test "perlex: incomplete \\u escape is a /u early error" {
+    try expectCompileFlags("\\u", uf, .syntax_error);
+    try expectCompileFlags("\\u1", uf, .syntax_error);
+    try expectCompileFlags("\\u12", uf, .syntax_error);
+    try expectCompileFlags("\\u123", uf, .syntax_error);
+    try expectCompileFlags("[\\u123]", uf, .syntax_error);
+}
+
+test "perlex: malformed \\u{...} is a /u early error" {
+    try expectCompileFlags("\\u{", uf, .syntax_error);
+    try expectCompileFlags("\\u{1", uf, .syntax_error); // unterminated
+    try expectCompileFlags("\\u{}", uf, .syntax_error); // empty
+    try expectCompileFlags("[\\u{1]", uf, .syntax_error);
+}
+
+test "perlex: incomplete \\x / \\u escapes defer without /u (Annex B)" {
+    try expectCompile("\\x", .unsupported);
+    try expectCompile("\\x1", .unsupported);
+    try expectCompile("\\u", .unsupported);
+    try expectCompile("\\u12", .unsupported);
+    try expectCompile("\\u{1", .unsupported); // non-/u \u{ is Annex B too
+}
+
+test "perlex: well-formed \\x / \\u escapes still match under /u" {
+    try expectMatchFlags("\\x61", uf, "a", "a"); // U+0061
+    try expectMatchFlags("\\u0061", uf, "a", "a");
+    try expectMatchFlags("\\u{61}", uf, "a", "a");
+}
+
 // ── §22.2 Unicode mode (/u) — code-point matching ───────────────────
 
 const uf: perlex.Flags = .{ .unicode = true };
