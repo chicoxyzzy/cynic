@@ -106,8 +106,6 @@ pub fn exec(
         .input = input,
         .slots = slots,
         .gpa = gpa,
-        .fold = program.flags.ignore_case,
-        .multiline = program.flags.multiline,
         // `/v` (UnicodeSets) matches over code points like `/u`.
         .unicode = program.flags.unicode or program.flags.unicode_sets,
         .folder = program.case_folder,
@@ -140,11 +138,10 @@ fn Matcher(comptime Unit: type) type {
         input: []const Unit,
         slots: []usize,
         gpa: std.mem.Allocator,
-        /// `i` flag — fold ASCII case in char/class/backref matching.
-        fold: bool,
-        /// `m` flag — `^`/`$` also match at line-terminator boundaries.
-        multiline: bool,
         /// `u` flag — match over code points (decode surrogate pairs).
+        /// `u`/`v` aren't modifiable by an inline `(?…)` group, so unlike
+        /// the `i`/`m`/`s` flags (now baked per-instruction by the
+        /// compiler) this stays matcher-global.
         unicode: bool,
         /// §22.2.2.9 case-folding orbits, injected for `/iu`/`/iv`. Null
         /// for ASCII-`i` (folded inline) and non-folding patterns.
@@ -193,7 +190,7 @@ fn Matcher(comptime Unit: type) type {
                 switch (insts[pc]) {
                     .char => |ch| {
                         if (self.peek(sp, backward)) |c| {
-                            const ok = self.charEq(c.cp, ch);
+                            const ok = self.charEq(c.cp, ch.cp, ch.fold);
                             if (ok) {
                                 sp = if (backward) sp - c.len else sp + c.len;
                                 pc += 1;
@@ -227,18 +224,18 @@ fn Matcher(comptime Unit: type) type {
                         pc += 1;
                         continue;
                     },
-                    .assert_start => {
+                    .assert_start => |multiline| {
                         // `^`: input start, or (multiline) just after a
                         // line terminator.
-                        if (sp == 0 or (self.multiline and isLineTerminator(self.input[sp - 1]))) {
+                        if (sp == 0 or (multiline and isLineTerminator(self.input[sp - 1]))) {
                             pc += 1;
                             continue;
                         }
                     },
-                    .assert_end => {
+                    .assert_end => |multiline| {
                         // `$`: input end, or (multiline) just before a
                         // line terminator.
-                        if (sp == self.input.len or (self.multiline and isLineTerminator(self.input[sp]))) {
+                        if (sp == self.input.len or (multiline and isLineTerminator(self.input[sp]))) {
                             pc += 1;
                             continue;
                         }
@@ -249,8 +246,10 @@ fn Matcher(comptime Unit: type) type {
                             // Under `i`, a code point matches the class if
                             // any case-fold partner is in the set. Under
                             // `/iu`/`/iv` that is the full orbit (§22.2.2.9);
-                            // otherwise the single ASCII case partner.
-                            if (self.fold and !inside) {
+                            // otherwise the single ASCII case partner. The
+                            // `i` flag is baked per-instruction so an inline
+                            // `(?i:…)` / `(?-i:…)` group scopes it.
+                            if (cls.fold and !inside) {
                                 if (self.unicode) {
                                     if (self.folder) |f| {
                                         for (f(c.cp)) |p| {
@@ -271,34 +270,34 @@ fn Matcher(comptime Unit: type) type {
                             }
                         }
                     },
-                    .word_boundary => |negated| {
-                        const before = sp > 0 and isWordChar(self.input[sp - 1]);
-                        const after = sp < self.input.len and isWordChar(self.input[sp]);
-                        if ((before != after) != negated) {
+                    .word_boundary => |wb| {
+                        const before = sp > 0 and self.wordCharAt(sp - 1, wb.fold);
+                        const after = sp < self.input.len and self.wordCharAt(sp, wb.fold);
+                        if ((before != after) != wb.negated) {
                             pc += 1;
                             continue;
                         }
                     },
                     .backref => |g| {
-                        if (self.matchBackref(g, &sp)) {
+                        if (self.matchBackref(g.index, &sp, g.fold)) {
                             pc += 1;
                             continue;
                         }
                     },
-                    .backref_dup => |idxs| {
+                    .backref_dup => |bd| {
                         // Match whichever same-named group participated
                         // (the early error guarantees at most one is
                         // set); if none, the backreference matches the
                         // empty string.
                         var g: ?usize = null;
-                        for (idxs) |cand| {
+                        for (bd.indices) |cand| {
                             if (self.slots[2 * cand] != none and self.slots[2 * cand + 1] != none) {
                                 g = cand;
                                 break;
                             }
                         }
                         if (g) |group| {
-                            if (self.matchBackref(group, &sp)) {
+                            if (self.matchBackref(group, &sp, bd.fold)) {
                                 pc += 1;
                                 continue;
                             }
@@ -371,13 +370,14 @@ fn Matcher(comptime Unit: type) type {
         }
 
         /// §22.2.2.9 Canonicalize equality: does input code point `a`
-        /// match pattern code point `b` under the active flags? Without
-        /// `i`, exact equality. With non-Unicode `i`, ASCII case fold.
-        /// With `/iu`/`/iv`, `a` matches `b` if they share a case-folding
-        /// orbit — `b` is among `a`'s injected partners. Symmetric, since
-        /// orbit membership is mutual.
-        fn charEq(self: *Self, a: u21, b: u21) bool {
-            if (!self.fold) return a == b;
+        /// match pattern code point `b` under the active flags? `fold` is
+        /// the effective `i` flag baked at the instruction (an inline
+        /// modifier group can flip it). Without `i`, exact equality. With
+        /// non-Unicode `i`, ASCII case fold. With `/iu`/`/iv`, `a` matches
+        /// `b` if they share a case-folding orbit — `b` is among `a`'s
+        /// injected partners. Symmetric, since orbit membership is mutual.
+        fn charEq(self: *Self, a: u21, b: u21, fold: bool) bool {
+            if (!fold) return a == b;
             if (self.unicode) {
                 if (a == b) return true;
                 if (self.folder) |f| {
@@ -386,6 +386,24 @@ fn Matcher(comptime Unit: type) type {
                 return false;
             }
             return asciiUpper(a) == asciiUpper(b);
+        }
+
+        /// Whether the code unit at `idx` is a §22.2.2.9.3 WordCharacters
+        /// member. `fold` is the effective `i` flag; under `/iu`/`/iv`
+        /// the set extends to every character whose Canonicalize is an
+        /// ASCII word char — e.g. ſ (U+017F) and U+212A KELVIN SIGN, which
+        /// fold to `s` and `k`. Those partners are all BMP, so one code
+        /// unit suffices; non-Unicode `i` never folds a non-ASCII unit to
+        /// ASCII (§22.2.2.7.3), so the extension is gated on `unicode`.
+        fn wordCharAt(self: *Self, idx: usize, fold: bool) bool {
+            const u: u21 = self.input[idx];
+            if (isWordChar(u)) return true;
+            if (fold and self.unicode) {
+                if (self.folder) |f| {
+                    for (f(u)) |p| if (isWordChar(p)) return true;
+                }
+            }
+            return false;
         }
 
         const CodePoint = struct { cp: u21, len: usize };
@@ -427,7 +445,8 @@ fn Matcher(comptime Unit: type) type {
 
         /// Match the text captured by group `g` at `sp`, advancing
         /// `sp` on success. An unset group matches the empty string.
-        fn matchBackref(self: *Self, g: usize, sp: *usize) bool {
+        /// `fold` is the effective `i` flag baked at the backreference.
+        fn matchBackref(self: *Self, g: usize, sp: *usize, fold: bool) bool {
             const cs = self.slots[2 * g];
             const ce = self.slots[2 * g + 1];
             if (cs == none or ce == none) return true; // unset → empty
@@ -436,13 +455,13 @@ fn Matcher(comptime Unit: type) type {
             // per-code-unit folding would break. Simple case folding never
             // changes the code-point count, but compare against each cursor
             // independently rather than assuming equal unit lengths.
-            if (self.fold and self.unicode) {
+            if (fold and self.unicode) {
                 var ci = cs;
                 var si = sp.*;
                 while (ci < ce) {
                     const cap = self.peekAt(ci, ce).?; // in-bounds: ci < ce
                     const cand = self.peekAt(si, self.input.len) orelse return false;
-                    if (!self.charEq(cand.cp, cap.cp)) return false;
+                    if (!self.charEq(cand.cp, cap.cp, fold)) return false;
                     ci += cap.len;
                     si += cand.len;
                 }
@@ -451,7 +470,7 @@ fn Matcher(comptime Unit: type) type {
             }
             const len = ce - cs;
             if (sp.* + len > self.input.len) return false;
-            if (self.fold) {
+            if (fold) {
                 var i: usize = 0;
                 while (i < len) : (i += 1) {
                     if (asciiUpper(self.input[cs + i]) != asciiUpper(self.input[sp.* + i])) return false;

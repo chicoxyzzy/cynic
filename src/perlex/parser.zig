@@ -64,9 +64,28 @@ pub const Node = union(enum) {
     /// injected resolver), applies the set algebra, and lowers a
     /// char-only result to a `class`.
     class_set: *ClassSet,
+    /// `(?ims-ims:…)` inline modifier group (§22.2.1, ES2024). Turns the
+    /// `i`/`m`/`s` flags on (`add`) and/or off (`remove`) for the scoped
+    /// `body` only — never the surrounding pattern or the RegExp object's
+    /// own flag properties. The compiler bakes the effective flags into the
+    /// body's instructions.
+    modifier_group: ModifierGroup,
 
     pub const Capture = struct { index: usize, name: ?[]const u8, body: *Node };
     pub const Lookahead = struct { negative: bool, behind: bool, body: *Node };
+
+    /// The `i`/`m`/`s` flags an inline modifier group toggles. Only these
+    /// three are modifiable (§22.2.1); `g`/`y`/`u`/`v`/`d` are fixed for
+    /// the whole pattern and may not appear in a modifier.
+    pub const Modifiers = struct {
+        ignore_case: bool = false,
+        multiline: bool = false,
+        dot_all: bool = false,
+    };
+
+    /// `(?add-remove:body)` — an inline modifier group. `add` and `remove`
+    /// are disjoint (a §22.2.1.1 early error otherwise).
+    pub const ModifierGroup = struct { add: Modifiers, remove: Modifiers, body: *Node };
     pub const Property = struct { negated: bool, key: ?[]const u8, value: []const u8 };
     pub const Repeat = struct { body: *Node, min: usize, max: usize, greedy: bool };
     pub const ClassRange = struct { lo: u21, hi: u21 };
@@ -147,6 +166,11 @@ pub const ParseResult = struct {
     /// case-fold to another non-ASCII unit, which the ASCII-only fold
     /// doesn't model — the caller declines `i` patterns with this set.
     non_ascii: bool,
+    /// True if any inline modifier group *adds* the `i` flag (§22.2.1).
+    /// Such a pattern needs case folding even when the program-level `i`
+    /// flag is off, so the caller applies the same `/iu` folder gate and
+    /// non-ASCII deferral it applies to a program-level `i`.
+    has_ignore_case_modifier: bool,
 };
 
 pub const ParseError = error{ Unsupported, SyntaxError, OutOfMemory };
@@ -177,6 +201,7 @@ pub fn parse(a: std.mem.Allocator, src: []const u8, unicode: bool, unicode_sets:
         .capture_count = p.names.items.len - 1,
         .names = p.names.items,
         .non_ascii = p.non_ascii,
+        .has_ignore_case_modifier = p.modifier_adds_i,
     };
 }
 
@@ -190,6 +215,9 @@ const Parser = struct {
     /// switches `[…]` parsing to the ClassSetExpression grammar.
     unicode_sets: bool = false,
     non_ascii: bool = false,
+    /// Set when an inline modifier group adds the `i` flag (§22.2.1) —
+    /// surfaced on `ParseResult.has_ignore_case_modifier`.
+    modifier_adds_i: bool = false,
 
     fn peek(self: *Parser) ?u8 {
         return if (self.pos < self.src.len) self.src[self.pos] else null;
@@ -410,8 +438,10 @@ const Parser = struct {
                 },
                 '=' => return self.parseLookaround(false, false),
                 '!' => return self.parseLookaround(true, false),
-                // `(?flags:…)` modifiers are future grammar.
-                else => return error.Unsupported,
+                // The only remaining `(?…` constructs are inline modifier
+                // groups (§22.2.1 `(?ims-ims:…)`); a non-modifier shape is
+                // either a Syntax Error or deferred there.
+                else => return self.parseModifierGroup(),
             }
         }
         // Plain capturing group.
@@ -430,6 +460,66 @@ const Parser = struct {
         const body = try self.parseDisjunction();
         try self.expect(')');
         return self.makeNode(.{ .lookahead = .{ .negative = negative, .behind = behind, .body = body } });
+    }
+
+    /// §22.2.1 inline modifier group (ES2024 regexp-modifiers):
+    ///   Atom :: `( ? RegularExpressionFlags : Disjunction )`
+    ///   Atom :: `( ? RegularExpressionFlags - RegularExpressionFlags : Disjunction )`
+    /// Entered from `parseGroup` at `(?` once the byte after `?` is none of
+    /// `:`/`<`/`=`/`!`. Recognises the shape `(? add (- remove)? :`, where
+    /// `add`/`remove` are runs of IdentifierPart bytes, and confirms it only
+    /// at the closing `:`. A shape that never reaches that `:` is not a
+    /// modifier group, so it defers to the fallback for the authoritative
+    /// verdict (every other `(?…` form is already handled by `parseGroup`,
+    /// so in practice the fallback reports a Syntax Error). Once confirmed,
+    /// the four §22.2.1.1 early errors apply.
+    fn parseModifierGroup(self: *Parser) ParseError!*Node {
+        // `self.pos` is at `(`; the flags begin at `pos + 2` (after `(?`).
+        var i = self.pos + 2;
+        const add_start = i;
+        i = self.scanIdentRun(i);
+        const add_text = self.src[add_start..i];
+
+        var remove_text: []const u8 = "";
+        var had_dash = false;
+        if (i < self.src.len and self.src[i] == '-') {
+            had_dash = true;
+            i += 1;
+            const rem_start = i;
+            i = self.scanIdentRun(i);
+            remove_text = self.src[rem_start..i];
+        }
+
+        // The modifier shape is only confirmed by the closing `:`.
+        if (i >= self.src.len or self.src[i] != ':') return error.Unsupported;
+
+        // §22.2.1.1 — each RegularExpressionFlags may contain only `i`/`m`/
+        // `s`, with no repeats; `add` and `remove` may not overlap; and the
+        // add-remove form may not have both halves empty.
+        const add = try parseModifierFlags(add_text);
+        const remove = try parseModifierFlags(remove_text);
+        if (modifiersOverlap(add, remove)) return error.SyntaxError;
+        if (had_dash and modifiersEmpty(add) and modifiersEmpty(remove)) return error.SyntaxError;
+
+        if (add.ignore_case) self.modifier_adds_i = true;
+        self.pos = i + 1; // consume the `:`
+        const body = try self.parseDisjunction();
+        try self.expect(')');
+        return self.makeNode(.{ .modifier_group = .{ .add = add, .remove = remove, .body = body } });
+    }
+
+    /// Advance past a maximal run of ASCII IdentifierPart bytes
+    /// (`[A-Za-z0-9_$]`) from `start`, returning the index of the first
+    /// byte that is not one (or `src.len`). A non-ASCII IdentifierPart
+    /// would never be a valid modifier flag, so restricting to ASCII here
+    /// only affects where an already-invalid modifier shape terminates.
+    fn scanIdentRun(self: *Parser, start: usize) usize {
+        var i = start;
+        while (i < self.src.len) : (i += 1) {
+            const ch = self.src[i];
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '$')) break;
+        }
+        return i;
     }
 
     fn parseNamedCapture(self: *Parser) ParseError!*Node {
@@ -1021,6 +1111,41 @@ fn hexVal(c: u8) ?u8 {
     };
 }
 
+/// Parse one RegularExpressionFlags run (§22.2.1) into a `Modifiers`. Each
+/// byte must be `i`/`m`/`s` (case-sensitive) and may not repeat — both are
+/// §22.2.1.1 early errors. An empty run yields all-false.
+fn parseModifierFlags(text: []const u8) ParseError!Node.Modifiers {
+    var m: Node.Modifiers = .{};
+    for (text) |ch| switch (ch) {
+        'i' => {
+            if (m.ignore_case) return error.SyntaxError;
+            m.ignore_case = true;
+        },
+        'm' => {
+            if (m.multiline) return error.SyntaxError;
+            m.multiline = true;
+        },
+        's' => {
+            if (m.dot_all) return error.SyntaxError;
+            m.dot_all = true;
+        },
+        else => return error.SyntaxError, // only i/m/s are modifiable
+    };
+    return m;
+}
+
+/// Whether `a` and `b` share any flag — the §22.2.1.1 early error for the
+/// add-remove modifier form (a flag may not be both added and removed).
+fn modifiersOverlap(a: Node.Modifiers, b: Node.Modifiers) bool {
+    return (a.ignore_case and b.ignore_case) or
+        (a.multiline and b.multiline) or
+        (a.dot_all and b.dot_all);
+}
+
+fn modifiersEmpty(m: Node.Modifiers) bool {
+    return !m.ignore_case and !m.multiline and !m.dot_all;
+}
+
 fn isSyntaxChar(c: u8) bool {
     return switch (c) {
         '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '/' => true,
@@ -1175,6 +1300,12 @@ fn collectNames(a: std.mem.Allocator, node: *const Node) error{ SyntaxError, Out
         .noncapture => |body| {
             set.deinit(a);
             return try collectNames(a, body);
+        },
+        .modifier_group => |mg| {
+            // An inline modifier group adds no capture of its own; its
+            // body's named groups participate in the enclosing alternative.
+            set.deinit(a);
+            return try collectNames(a, mg.body);
         },
         .lookahead => |la| {
             // A lookahead's groups participate alongside the rest of
