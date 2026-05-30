@@ -822,7 +822,11 @@ fn currentTimeMs() f64 {
     if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) != 0) return 0;
     const sec_f: f64 = @floatFromInt(ts.sec);
     const nsec_f: f64 = @floatFromInt(ts.nsec);
-    return sec_f * 1000.0 + nsec_f / 1_000_000.0;
+    // §21.4.1.6 SystemUTCEpochMilliseconds is floor(nowNs / 10^6) — an
+    // integral millisecond count. Drop the sub-millisecond remainder so
+    // `Date.now()` returns an integer (§21.4.3.1 returns 𝔽 of it) rather
+    // than leaking nanosecond precision as a fractional Number.
+    return @floor(sec_f * 1000.0 + nsec_f / 1_000_000.0);
 }
 
 /// Convert a (y, m, d, h, mi, s, ms) tuple to UTC milliseconds.
