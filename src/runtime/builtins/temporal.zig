@@ -1417,6 +1417,20 @@ fn toTemporalTime(realm: *Realm, item: Value, options: Value) NativeError!PlainT
                     _ = try getTemporalOverflowOption(realm, options);
                     return t;
                 },
+                // §4.5.x ToTemporalTime — a PlainDateTime / ZonedDateTime
+                // converts via its internal slots, never the user-facing
+                // getters: the time part of the ISO date-time (the
+                // ZonedDateTime first resolved to wall-clock via
+                // GetISODateTimeFor).
+                .plain_date_time => |pdt| {
+                    _ = try getTemporalOverflowOption(realm, options);
+                    return pdt.time();
+                },
+                .zoned_date_time => |zdt| {
+                    const iso = temporal.getISODateTimeFor(zdt.time_zone, zdt.epoch_ns);
+                    _ = try getTemporalOverflowOption(realm, options);
+                    return iso.time();
+                },
                 else => {},
             }
         }
@@ -1708,6 +1722,10 @@ fn toTemporalInstant(realm: *Realm, item: Value) NativeError!i128 {
             if (obj.getTemporalRecord()) |rec| {
                 switch (rec.*) {
                     .instant => |i| return i.epoch_ns,
+                    // §8.5.x ToTemporalInstant step 1.b — a ZonedDateTime
+                    // converts via its [[EpochNanoseconds]] slot directly;
+                    // no ToPrimitive / toString is observed.
+                    .zoned_date_time => |zdt| return zdt.epoch_ns,
                     else => {},
                 }
             }
@@ -2414,6 +2432,20 @@ fn toTemporalDate(realm: *Realm, item: Value, options: Value) NativeError!PlainD
                     _ = try getTemporalOverflowOption(realm, options);
                     return pd;
                 },
+                // §3.5.x ToTemporalDate — a PlainDateTime / ZonedDateTime
+                // converts via its internal slots, never the user-facing
+                // getters: the date part of the ISO date-time (the
+                // ZonedDateTime first resolved to wall-clock via
+                // GetISODateTimeFor). The overflow option is still read.
+                .plain_date_time => |pdt| {
+                    _ = try getTemporalOverflowOption(realm, options);
+                    return pdt.date();
+                },
+                .zoned_date_time => |zdt| {
+                    const iso = temporal.getISODateTimeFor(zdt.time_zone, zdt.epoch_ns);
+                    _ = try getTemporalOverflowOption(realm, options);
+                    return iso.date();
+                },
                 else => {},
             }
         }
@@ -2665,15 +2697,33 @@ fn plainDateWithCalendar(realm: *Realm, this_value: Value, args: []const Value) 
     try toTemporalCalendarIdentifier(realm, argOr(args, 0, Value.undefined_));
     return createTemporalDate(realm, rec);
 }
+/// §3.3.x Temporal.PlainDate.prototype.toPlainYearMonth ( ) — drop the
+/// day, keeping the year-month. ISODateToFields(year-month) discards the
+/// day; CalendarYearMonthFromFields for ISO fixes the reference day at 1
+/// (matching the `Temporal.PlainYearMonth.from` path). The source year is
+/// already within range, so the year-month is always in limits.
 fn plainDateToPlainYearMonth(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    _ = try requirePlainDate(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainDate.prototype.toPlainYearMonth is not yet implemented");
+    const d = try requirePlainDate(realm, this_value);
+    return createTemporalYearMonth(realm, .{
+        .iso_year = d.iso_year,
+        .iso_month = d.iso_month,
+        .ref_iso_day = 1,
+    });
 }
+/// §3.3.x Temporal.PlainDate.prototype.toPlainMonthDay ( ) — drop the
+/// year, keeping the month-day. ISODateToFields(month-day) discards the
+/// year; CalendarMonthDayFromFields for ISO fixes the reference year at
+/// 1972 (a leap year, so Feb 29 is representable — matching the
+/// `Temporal.PlainMonthDay.from` path).
 fn plainDateToPlainMonthDay(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    _ = try requirePlainDate(realm, this_value);
-    return throwTypeError(realm, "Temporal.PlainDate.prototype.toPlainMonthDay is not yet implemented");
+    const d = try requirePlainDate(realm, this_value);
+    return createTemporalMonthDay(realm, .{
+        .ref_iso_year = 1972,
+        .iso_month = d.iso_month,
+        .iso_day = d.iso_day,
+    });
 }
 /// §3.3.x Temporal.PlainDate.prototype.toPlainDateTime ( [ temporalTime ] )
 /// — combine this date with a time (midnight when the argument is
