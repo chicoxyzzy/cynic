@@ -1539,6 +1539,26 @@ pub fn addZonedDateTime(epoch_ns: i128, tz: TimeZone, dur: DurationRecord, rejec
 /// Returns null when the rounded instant leaves the representable range.
 pub fn roundZonedDateTime(epoch_ns: i128, tz: TimeZone, unit: LargestUnit, increment: i128, mode: RoundingMode) ?i128 {
     const wall = getISODateTimeFor(tz, epoch_ns);
+    if (unit == .day) {
+        // Day rounding measures progress through the *actual* span between
+        // the start of this day and the start of the next (GetStartOfDay for
+        // both boundaries). For a fixed-offset zone the span is 24 h, but
+        // either boundary can leave the valid epoch range — the upper bound
+        // in particular, near the +8.64×10^21 ns limit. The day increment is
+        // capped at 1, so the rounding increment is the whole day length.
+        const start_ns = getEpochNanosecondsFor(tz, PlainDateTimeRecord{
+            .iso_year = wall.iso_year,
+            .iso_month = wall.iso_month,
+            .iso_day = wall.iso_day,
+        }) orelse return null;
+        const tomorrow = addISODate(wall.date(), 0, 0, 0, 1, false) orelse return null;
+        const end_ns = getEpochNanosecondsFor(tz, PlainDateTimeRecord.combine(tomorrow, .{})) orelse return null;
+        const day_len = end_ns - start_ns;
+        const rounded = roundToIncrement(epoch_ns - start_ns, day_len * increment, mode);
+        const result = start_ns + rounded;
+        if (!isValidEpochNanoseconds(result)) return null;
+        return result;
+    }
     const rounded = roundISODateTime(wall, unit, increment, mode) orelse return null;
     return getEpochNanosecondsFor(tz, rounded);
 }
@@ -1554,6 +1574,26 @@ pub fn zonedStartOfDay(epoch_ns: i128, tz: TimeZone) ?i128 {
         .iso_day = wall.iso_day,
     };
     return getEpochNanosecondsFor(tz, midnight);
+}
+
+/// §6.3.4 get hoursInDay — the number of hours spanned by `epoch_ns`'s
+/// calendar day in `tz`: the gap between the start of that day and the
+/// start of the next one (GetStartOfDay of `today`, and of the balanced
+/// `today + 1 day`). A fixed-offset day is always exactly 24 h, but either
+/// boundary can leave the representable Instant range near the ±8.64×10^21
+/// ns limits — when `today + 1 day` overflows the ISO date range, or when
+/// either midnight maps outside the valid epoch. Returns the ns difference,
+/// or null in that case so the caller throws RangeError.
+pub fn zonedHoursInDay(epoch_ns: i128, tz: TimeZone) ?i128 {
+    const wall = getISODateTimeFor(tz, epoch_ns);
+    const today_ns = getEpochNanosecondsFor(tz, PlainDateTimeRecord{
+        .iso_year = wall.iso_year,
+        .iso_month = wall.iso_month,
+        .iso_day = wall.iso_day,
+    }) orelse return null;
+    const tomorrow = addISODate(wall.date(), 0, 0, 0, 1, false) orelse return null;
+    const tomorrow_ns = getEpochNanosecondsFor(tz, PlainDateTimeRecord.combine(tomorrow, .{})) orelse return null;
+    return tomorrow_ns - today_ns;
 }
 
 /// §6.5.x TemporalZonedDateTimeToString — `<localISO><±HH:MM>[<tzid>]`

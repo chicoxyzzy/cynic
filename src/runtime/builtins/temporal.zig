@@ -4655,11 +4655,15 @@ fn zonedDateTimeYearOfWeek(realm: *Realm, t: Value, a: []const Value) NativeErro
 }
 fn zonedDateTimeHoursInDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requireZonedDateTime(realm, t);
-    // A constant-offset zone has no DST transition, so every day is exactly
-    // 24 hours. (A future tzdata build would diff this day's start-of-day
-    // epoch from the next day's via getEpochNanosecondsFor.)
-    return Value.fromInt32(24);
+    const z = try requireZonedDateTime(realm, t);
+    // §6.3.4 get hoursInDay — GetStartOfDay for today and the next day. A
+    // constant-offset zone yields exactly 24 h, but either start-of-day
+    // boundary can leave the representable Instant range near the limits
+    // (get-start-of-day-throws.js, next-day-out-of-range.js → RangeError).
+    const diff_ns = temporal.zonedHoursInDay(z.epoch_ns, z.time_zone) orelse
+        return throwRangeError(realm, "ZonedDateTime day boundary is out of range");
+    const hours = @as(f64, @floatFromInt(diff_ns)) / 3_600_000_000_000.0;
+    return Value.fromDouble(hours);
 }
 fn zonedDateTimeDaysInWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -5329,6 +5333,23 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
 
     // Pure exact-time / uniform-day span: subtract the instants directly.
     const diff = other.epoch_ns - z.epoch_ns;
+    // §7.5.x A ZonedDateTime "day" difference routes through
+    // NudgeToCalendarUnit (a zoned day has zone-dependent length), which
+    // materialises the ending-bound instant — AddDateTime(reference,
+    // ±increment days) from the receiver — before the mode picks between the
+    // floor/ceil candidates. For a fixed-offset zone that bound is the
+    // receiver's epoch ± r2·24h; when it leaves the valid range the whole
+    // operation is a RangeError, mode-independently. (Finer time smallestUnits
+    // cap their increment, so only `day` can blow the bound out of range.)
+    if (smallest == .day) {
+        const inc: i128 = increment;
+        const dsign: i128 = if (diff < 0) -1 else if (diff > 0) 1 else 0;
+        const base: i128 = @divTrunc(@divTrunc(diff, temporal.ns_per_day), inc) * inc;
+        const bound_epoch: i128 = z.epoch_ns + (base + inc * dsign) * temporal.ns_per_day;
+        if (!temporal.isValidEpochNanoseconds(bound_epoch)) {
+            return throwRangeError(realm, "ZonedDateTime difference ending bound is out of range");
+        }
+    }
     const rounded = temporal.roundToIncrement(diff, increment * temporal.unitNanoseconds(smallest), eff_mode);
     var dr = temporal.balanceTimeDuration(rounded, largest);
     if (is_since) {
