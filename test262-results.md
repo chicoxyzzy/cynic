@@ -278,12 +278,12 @@ until its features ship in mainline ECMA-262.
 
 ## History
 
-### 2026-05-29 — cynic `df78bb3`, test262 `d0c1b455`
+### 2026-05-29 — cynic `7ce0853`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 84.36 % | 99.98 % | 37995 / 45039 | 37995 / 38004 | — | ±0 | 50.5 s |
-| **runtime_hardened** | 84.36 % | 99.97 % | 37995 / 45039 | 34843 / 34852 | 3152 | ±0 | 50.5 s |
+| **runtime** | 84.36 % | 99.98 % | 37995 / 45039 | 37995 / 38004 | — | ±0 | 40.5 s |
+| **runtime_hardened** | 84.36 % | 99.97 % | 37995 / 45039 | 34843 / 34852 | 3152 | ±0 | 1m 00s |
 
 ### 2026-05-28 — cynic `82cb66e`, test262 `d0c1b455`
 
