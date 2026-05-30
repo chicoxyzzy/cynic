@@ -9,8 +9,9 @@
 //!
 //!   2. CURRENTLY SKIPPED — standardised work blocked on engineering,
 //!      vendor, or stage maturity. Promote out once the proposal
-//!      advances or the blocking infra lands. Temporal, the libregexp
-//!      `/v` cluster, and the cross-realm families.
+//!      advances or the blocking infra lands. Pre-Stage-4 proposals
+//!      (decorators, import-defer), the cross-realm families, and the
+//!      eval-dependent fixtures awaiting `--allow=eval`.
 //!
 //! Lookup is `mem.startsWith`, `mem.indexOf`, `mem.endsWith`, or
 //! `mem.eql` over comptime-iterable lists.
@@ -921,27 +922,15 @@ pub const single_realm_exact_paths = [_][]const u8{
     // path-contains entries; these basenames don't match either
     // pattern, so list them exact). Permanent single-realm carve-out
     // per AGENTS.md. 17 fixtures.
-    // (The cross-realm GetFunctionRealm work closed the 5
-    //  `Array/prototype/<m>/create-proto-from-ctor-realm-array.js`
-    //  siblings — they now pass the unhardened legacy row and
-    //  classify divergent under SES. ArraySpeciesCreate's
-    //  GetFunctionRealm step 4 carve-out is wired in `array.zig`.)
-    // (That same work closed `errors-other-realm.js` —
-    //  `Error.isError` reads `has_error_data` on the shared heap,
-    //  which both realms write at instantiation.) The sibling
-    //  `non-error-objects-other-realm.js` still uses
-    //  `new other.Function('')` (runtime code construction) and
-    //  stays skipped until --allow=eval lands.
+    // `non-error-objects-other-realm.js` builds the other realm's
+    // object via `new other.Function('')` — runtime code construction,
+    // so it stays skipped until `--allow=eval` lands.
     "built-ins/Error/isError/non-error-objects-other-realm.js",
     "built-ins/Function/internals/Construct/derived-return-val-realm.js",
     "built-ins/Function/internals/Construct/derived-this-uninitialized-realm.js",
-    // Pre-stage cross-realm semantics needed before these pass:
-    //   - JSON.stringify must detect cross-realm BigInt-box receivers
-    //     and throw TypeError (separate engine bug; not realm-tagged
-    //     throws).
-    //   - String.prototype.{toString,valueOf} throws need to come
-    //     from the called function's realm — needs realm-tagged
-    //     throws in builtins.
+    // `JSON/stringify/value-bigint-cross-realm` and the
+    // `String.prototype.{toString,valueOf}/non-generic-realm` siblings
+    // need realm-aware throws Cynic doesn't model under its single realm.
     "built-ins/JSON/stringify/value-bigint-cross-realm.js",
     "built-ins/Proxy/apply/arguments-realm.js",
     "built-ins/Proxy/construct/arguments-realm.js",
@@ -1026,11 +1015,9 @@ pub const stage_maturity_features = [_][]const u8{
 /// proposal hasn't reached a published edition yet, so shipping
 /// conformance against it isn't the point.
 pub const stage_maturity_path_prefixes = [_][]const u8{
-    // (ShadowRealm isn't path-skipped — it ships behind the
-    // `--enable=ShadowRealm` feature flag (Stage 2.7), so the
-    // harness's feature-tag mechanism excludes its fixtures from the
-    // main / unhardened rows and scores them in the dedicated
-    // `feature:ShadowRealm` phase instead. Nothing to skip by path.)
+    // Empty: ShadowRealm — the one Stage-2.7 surface that might live
+    // here — ships behind `--enable=ShadowRealm`, so the harness scores
+    // it in the `feature:ShadowRealm` phase rather than skipping by path.
 };
 
 // ── Vendor gaps ─────────────────────────────────────────────────────
@@ -1040,42 +1027,14 @@ pub const stage_maturity_path_prefixes = [_][]const u8{
 // Reviewed each libregexp / Unicode bump.
 
 pub const vendor_features = [_][]const u8{
-    // (regexp-duplicate-named-groups graduated out: the native Perlex
-    //  engine — src/perlex/ — handles duplicate named capture groups
-    //  and resolves `\k<name>` to whichever same-named group
-    //  participated, which the vendored matcher rejects outright.)
-    // (regexp-modifiers graduated out: Perlex compiles the ES2024
-    //  inline `(?ims-ims:…)` modifier groups — §22.2.1 UpdateModifiers
-    //  — baking the scoped `i`/`m`/`s` flags per-instruction, with the
-    //  four §22.2.1.1 early errors raised at parse. The vendored matcher
-    //  rejects the `(?…)` syntax outright.)
-    // (Stage 4 explicit-resource-management used to skip here. The
-    // full surface shipped: `Symbol.dispose` / `Symbol.asyncDispose`
-    // well-known symbols, `SuppressedError`, `DisposableStack` /
-    // `AsyncDisposableStack`, `using` / `await using` declarations +
-    // the §9.5.4 DisposeResources runtime walk. Feature-tagged
-    // fixtures now attempt as normal corpus.)
+    // Empty: no feature-tagged proposal is currently blocked on the
+    // vendored libregexp matcher or on unshipped Unicode-property data.
 };
 
 pub const vendor_path_contains = [_][]const u8{
-    // (`Script_Extensions=Unknown` / alias `scx=Zzzz` graduated out:
-    //  the native Perlex engine resolves these `\p{…}` escapes through
-    //  Cynic's own Unicode tables — `unicode/perlex_props.zig` — at both
-    //  parse and runtime, so the value no longer reaches libregexp,
-    //  whose property tables omit the "Unknown" special value.)
-    //
-    // (§22.2.1 /v flag graduated out: Perlex compiles the whole
-    //  UnicodeSets grammar natively now — the code-point half (set
-    //  operators, nested classes, `\p{…}` operands), the `\q{…}`
-    //  ClassStringDisjunction half (lowered to an ordered alternation
-    //  per §22.2.2.7, with the §22.2.1.1 negated-class-with-strings
-    //  early error enforced), and the *property-of-strings* escapes
-    //  (`\p{RGI_Emoji}`, `\p{Basic_Emoji}`, `\p{Emoji_Keycap_Sequence}`,
-    //  and the four other §22.2.1.1 sequence properties), backed by the
-    //  generated emoji-sequence tables in `unicode/properties.zig`. The
-    //  `property-of-strings` / `rgi-emoji` generated fixtures resolve and
-    //  pass, so their skips — and the `\p{…}`-of-strings deferral to
-    //  libregexp — are gone.)
+    // Empty: the native Perlex engine now owns the `\p{…}` property
+    // escapes and the whole `/v` UnicodeSets grammar, so no RegExp path
+    // bottoms out on a libregexp gap today.
 };
 
 // ── Single-realm path-contains ──────────────────────────────────────
@@ -1134,19 +1093,10 @@ pub const single_realm_path_contains = [_][]const u8{
 // scoreboard in 0 / N noise.
 
 pub const deferred_path_prefixes = [_][]const u8{
-    // Temporal is fully installed: all nine namespace members ship —
-    // the eight value types `Temporal.Duration` (§7),
-    // `Temporal.PlainTime` (§4), `Temporal.Instant` (§8),
-    // `Temporal.PlainDate` (§3, ISO calendar only),
-    // `Temporal.PlainDateTime` (§5, ISO calendar only),
-    // `Temporal.PlainYearMonth` (§9, ISO calendar only),
-    // `Temporal.PlainMonthDay` (§10, ISO calendar only), and
-    // `Temporal.ZonedDateTime` (§6, ISO calendar + offset-only/UTC
-    // time zones — no IANA tzdata, so fixed-offset zones never have
-    // DST gaps/overlaps or transitions) — plus the `Temporal.Now`
-    // (§2) namespace, whose clock reads the host realtime clock and
-    // whose system time zone is always UTC (again, no IANA tzdata).
-    // Nothing in the `built-ins/Temporal/` tree is deferred.
+    // Empty: the whole Temporal namespace ships (ISO calendar only,
+    // offset-only/UTC time zones — no IANA tzdata), so nothing under
+    // `built-ins/Temporal/` is deferred. The `skip: Temporal fully in
+    // scope` test guards against a subtree regressing back to here.
 };
 
 // ── --allow=eval-dependent ──────────────────────────────────────────
@@ -1194,14 +1144,10 @@ pub const eval_dependent_exact_paths = [_][]const u8{
 
 // ── Focused refactor pending ────────────────────────────────────────
 //
-// Fixtures blocked on a small targeted engine refactor. Each
-// entry documents the exact engine surface that needs to change;
-// lifts once the refactor lands. The function-as-prototype pair
-// (`S13.2.2_A1_T{1,2}`) requires architectural unification of
-// JSObject / JSFunction heap types and stays under PERMANENT in
-// `ses_exact_paths` (the corpus denominator math is identical
-// from either bucket; placement reflects whether engineering work
-// is bounded vs. multi-week).
+// Reserved for fixtures blocked on a small, bounded engine refactor.
+// Currently empty: the one candidate pair (`S13.2.2_A1_T{1,2}`,
+// function-as-prototype) is parked under PERMANENT above — the
+// corpus-denominator math is identical from either bucket.
 
 pub const pending_refactor_exact_paths = [_][]const u8{};
 
@@ -1248,13 +1194,12 @@ pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
     return false;
 }
 
-/// Fixtures Cynic skips **today** but should eventually attempt
-/// — either pre-Stage-4 proposals (decorators, import-defer,
-/// source-phase-imports) or Stage-4-shipped surfaces blocked on
-/// vendor / runtime-glue gaps (Temporal, libregexp `/v` escapes)
-/// or focused engine refactors. These move to the `attempted`
-/// column once the proposal advances, the blocking infra lands,
-/// or the refactor is done.
+/// Fixtures Cynic skips **today** but should eventually attempt —
+/// pre-Stage-4 proposals (decorators, import-defer,
+/// source-phase-imports), the cross-realm families (single-realm
+/// host), and eval-dependent fixtures awaiting `--allow=eval`.
+/// These move to the `attempted` column once the proposal advances
+/// or the blocking infra lands.
 /// Separated from `pathIsPermanentlyOutOfScope` so the "what
 /// work is left" signal stays distinct from the "what we refuse
 /// to do" signal.
