@@ -479,10 +479,35 @@ test "perlex: unsupported constructs fall back" {
     try expectCompile("[\\D]", .unsupported); // negated class escape in class
     try expectCompile("\\p{L}", .unsupported); // property escape
     // A nullable body whose empty match comes from an *assertion* stays
-    // deferred: `(?=a)*` is a §22.2.1 QuantifiableAssertion, accepted only
-    // under Annex B (non-/u) and a SyntaxError under /u — leaving it to the
-    // fallback keeps that mode split rather than baking either reading in.
-    try expectCompile("(?=a)*", .unsupported); // quantified assertion (Annex B)
+    // deferred only in its Annex-B-valid form: `(?=a)*` is a §22.2.1
+    // QuantifiableAssertion, accepted without /u and left to the fallback
+    // to match (Perlex doesn't lower a quantified lookahead yet). Its /u/v
+    // reading — and any quantified lookbehind — is a SyntaxError Perlex now
+    // owns directly (see the dedicated test below).
+    try expectCompile("(?=a)*", .unsupported); // quantified lookahead (Annex B)
+}
+
+test "perlex: a quantified lookaround is a syntax error under /u, /v, or for any lookbehind" {
+    // §22.2.1 Term: +UnicodeMode has no `Assertion Quantifier` production,
+    // so quantifying a lookaround is a SyntaxError; ~UnicodeMode allows a
+    // *lookahead* (QuantifiableAssertion, Annex B §B.1.2) but never a
+    // lookbehind. Under /u — both lookahead and lookbehind, every shape:
+    try expectCompileFlags("(?=a)*", uf, .syntax_error);
+    try expectCompileFlags("(?!a)+", uf, .syntax_error);
+    try expectCompileFlags("(?=a)?", uf, .syntax_error);
+    try expectCompileFlags("(?=a){2,3}", uf, .syntax_error);
+    try expectCompileFlags("(?=a)*?", uf, .syntax_error); // lazy too
+    try expectCompileFlags("(?<=a)*", uf, .syntax_error);
+    try expectCompileFlags("(?<!a)+", uf, .syntax_error);
+    // Under /v — same.
+    try expectCompileFlags("(?=a)*", vflags, .syntax_error);
+    try expectCompileFlags("(?<=a){1,}", vflags, .syntax_error);
+    // A quantified *lookbehind* is a SyntaxError even without /u — it is not
+    // a QuantifiableAssertion in Annex B.
+    try expectCompile("(?<=a)*", .syntax_error);
+    try expectCompile("(?<!a)?", .syntax_error);
+    try expectCompile("(?<=a){2}", .syntax_error);
+    // Non-Unicode quantified *lookahead* stays the Annex-B defer (above).
 }
 
 test "perlex: large bounded quantifiers lower to a counted loop" {
