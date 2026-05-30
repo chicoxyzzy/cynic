@@ -8374,14 +8374,28 @@ pub fn runFrames(
                     }
                 }
             }
-            // Allocate a heap-owned copy of the key — the
-            // scratch buffer is reused on every iteration.
-            // Anchor the JSString to the receiver so GC keeps
-            // the key's backing memory alive (the property
-            // map only stores the slice).
-            const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
+            // The property map stores only the key slice, so a
+            // heap-owned JSString is allocated to anchor the
+            // key's backing memory against GC. Skip that
+            // allocation for an Array exotic receiver indexed by
+            // a non-negative Int32: such a [[Set]] resolves to
+            // `storeElement` (the packed `elements` vector, which
+            // keys on the integer index, not a string) on a fresh
+            // index, or — when the slot was descriptor-demoted
+            // into the named bag — to an in-place update of the
+            // already-anchored entry. Neither path inserts a new
+            // string key, so no anchor is consumed; the stack
+            // `key_slice` stays valid for the whole synchronous
+            // call. Hot loops like `a[i++] = x` (e.g. test262's
+            // `buildString` code-point accumulation) allocated one
+            // throwaway JSString per iteration before this guard.
+            const skip_key_anchor = key_v.isInt32() and key_v.asInt32() >= 0 and
+                if (heap_mod.valueAsPlainObject(recv)) |o| o.is_array_exotic else false;
+            const owned: ?*JSString =
+                if (skip_key_anchor) null else (realm.heap.allocateString(key_slice) catch return error.OutOfMemory);
             {
-                const set_outcome = try strictSetPropertyAnchored(allocator, realm, frames, f, ip, recv, owned.flatBytes(), owned, acc);
+                const key_arg: []const u8 = if (owned) |o| o.flatBytes() else key_slice;
+                const set_outcome = try strictSetPropertyAnchored(allocator, realm, frames, f, ip, recv, key_arg, owned, acc);
                 switch (set_outcome) {
                     .ok => {},
                     .handled => {
