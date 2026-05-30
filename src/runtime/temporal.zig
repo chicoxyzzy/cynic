@@ -28,6 +28,8 @@ const std = @import("std");
 pub const TemporalKind = enum {
     duration,
     plain_time,
+    instant,
+    plain_date,
 };
 
 /// §7.5 Temporal.Duration internal slots. Each field is the ℝ
@@ -59,12 +61,32 @@ pub const PlainTimeRecord = struct {
     nanosecond: u32 = 0,
 };
 
+/// §8.1 Temporal.Instant internal slot ([[EpochNanoseconds]]). The
+/// representable range is ±(86400 × 10^17) ns = ±8.64×10^21, which
+/// fits an `i128` with room to spare, so the record carries no heap
+/// pointer and adds no GC mark edge; it converts to/from a `JSBigInt`
+/// only at the JS boundary, like the other plain records.
+pub const InstantRecord = struct {
+    epoch_ns: i128 = 0,
+};
+
+/// §3.5 Temporal.PlainDate internal slots ([[ISOYear]], [[ISOMonth]],
+/// [[ISODay]]). The calendar is always the ISO 8601 calendar, so no
+/// calendar pointer is stored; the record carries no heap reference.
+pub const PlainDateRecord = struct {
+    iso_year: i32 = 0,
+    iso_month: u8 = 1,
+    iso_day: u8 = 1,
+};
+
 /// The side allocation a Temporal instance's `JSObject` points to
 /// through `JSObjectExtension.temporal_record`. A tagged union so
 /// the single slot serves every plain Temporal type.
 pub const TemporalRecord = union(TemporalKind) {
     duration: DurationRecord,
     plain_time: PlainTimeRecord,
+    instant: InstantRecord,
+    plain_date: PlainDateRecord,
 
     pub fn deinit(self: *TemporalRecord, allocator: std.mem.Allocator) void {
         // No owned heap memory inside any variant today; the record
@@ -89,6 +111,24 @@ pub fn durationSign(d: DurationRecord) i32 {
         if (v > 0) return 1;
     }
     return 0;
+}
+
+/// §7.5.x CreateNegatedTemporalDuration — flip the sign of every field.
+/// Used by the `subtract` methods, which negate the operand duration
+/// and reuse the `add` path.
+pub fn negateDuration(d: DurationRecord) DurationRecord {
+    return .{
+        .years = -d.years,
+        .months = -d.months,
+        .weeks = -d.weeks,
+        .days = -d.days,
+        .hours = -d.hours,
+        .minutes = -d.minutes,
+        .seconds = -d.seconds,
+        .milliseconds = -d.milliseconds,
+        .microseconds = -d.microseconds,
+        .nanoseconds = -d.nanoseconds,
+    };
 }
 
 /// §7.5.x IsValidDuration — the validity predicate `CreateTemporal
@@ -911,9 +951,1421 @@ pub fn plainTimeToString(t: PlainTimeRecord, buf: []u8) []const u8 {
     return w.buf[0..w.len];
 }
 
+// ── §8 Temporal.Instant abstract operations (pure) ────────────────────────
+
+/// §8.x nsMinInstant / nsMaxInstant — the inclusive epoch-nanosecond
+/// bounds of a representable Instant: ±(86400 × 10^17) ns (±10^8 days
+/// from the epoch). Equal to the nanosecond form of the legacy Date
+/// ±8.64×10^15 ms range, so `Date.prototype.toTemporalInstant` never
+/// overflows.
+pub const ns_min_instant: i128 = -8_640_000_000_000_000_000_000;
+pub const ns_max_instant: i128 = 8_640_000_000_000_000_000_000;
+
+/// §8.x IsValidEpochNanoseconds — within the inclusive instant bounds.
+pub fn isValidEpochNanoseconds(ns: i128) bool {
+    return ns >= ns_min_instant and ns <= ns_max_instant;
+}
+
+/// §8.x AddInstant — add a signed nanosecond delta to an epoch-ns
+/// value, returning null when the result leaves the representable
+/// range (the caller throws RangeError). The i128 sum cannot overflow:
+/// a valid Instant is ≤ 8.64×10^21 and a valid Duration's time total
+/// is ≤ ~9×10^24 ns, both far inside i128.
+pub fn addInstant(epoch_ns: i128, delta_ns: i128) ?i128 {
+    const sum = epoch_ns + delta_ns;
+    if (!isValidEpochNanoseconds(sum)) return null;
+    return sum;
+}
+
+/// Total nanoseconds contributed by a duration's time components
+/// (hours and smaller). Callers performing Instant arithmetic must
+/// first verify the date components (years/months/weeks/days) are
+/// zero — §8 disallows calendar units. Exact for the valid duration
+/// range (each field is an integer ≤ 2^53).
+pub fn timeDurationNanoseconds(d: DurationRecord) i128 {
+    return f64ToI128(d.hours) * 3_600_000_000_000 +
+        f64ToI128(d.minutes) * 60_000_000_000 +
+        f64ToI128(d.seconds) * 1_000_000_000 +
+        f64ToI128(d.milliseconds) * 1_000_000 +
+        f64ToI128(d.microseconds) * 1_000 +
+        f64ToI128(d.nanoseconds);
+}
+
+fn f64ToI128(v: f64) i128 {
+    return @intFromFloat(v);
+}
+
+/// §8.x CompareEpochNanoseconds — -1 / 0 / +1.
+pub fn compareInstant(a: i128, b: i128) i32 {
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+// ── Proleptic-Gregorian civil-date math (Howard Hinnant) ──────────────────
+// Implemented here in the runtime layer so Temporal stays independent
+// of `builtins/date.zig` (runtime must not depend on the builtins
+// layer). Valid across the whole Temporal year range.
+
+const Ymd = struct { year: i64, month: u32, day: u32 };
+
+/// Days from 1970-01-01 to a proleptic-Gregorian date. `month` is
+/// 1..12, `day` 1..31.
+pub fn daysFromCivil(year: i64, month: u32, day: u32) i64 {
+    const m: i64 = @intCast(month);
+    const d: i64 = @intCast(day);
+    const y: i64 = year - (if (month <= 2) @as(i64, 1) else 0);
+    const era: i64 = @divTrunc(if (y >= 0) y else y - 399, 400);
+    const yoe: i64 = y - era * 400; // [0, 399]
+    const doy: i64 = @divTrunc(153 * (if (m > 2) m - 3 else m + 9) + 2, 5) + d - 1; // [0, 365]
+    const doe: i64 = yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy; // [0, 146096]
+    return era * 146097 + doe - 719468;
+}
+
+/// Inverse of `daysFromCivil`.
+pub fn civilFromDays(z_in: i64) Ymd {
+    const z: i64 = z_in + 719468;
+    const era: i64 = @divTrunc(if (z >= 0) z else z - 146096, 146097);
+    const doe: i64 = z - era * 146097; // [0, 146096]
+    const yoe: i64 = @divTrunc(doe - @divTrunc(doe, 1460) + @divTrunc(doe, 36524) - @divTrunc(doe, 146096), 365); // [0, 399]
+    const y: i64 = yoe + era * 400;
+    const doy: i64 = doe - (365 * yoe + @divTrunc(yoe, 4) - @divTrunc(yoe, 100)); // [0, 365]
+    const mp: i64 = @divTrunc(5 * doy + 2, 153); // [0, 11]
+    const d: i64 = doy - @divTrunc(153 * mp + 2, 5) + 1; // [1, 31]
+    const m: i64 = if (mp < 10) mp + 3 else mp - 9; // [1, 12]
+    return .{ .year = y + (if (m <= 2) @as(i64, 1) else 0), .month = @intCast(m), .day = @intCast(d) };
+}
+
+pub fn isLeapYear(y: i64) bool {
+    return (@mod(y, 4) == 0 and @mod(y, 100) != 0) or @mod(y, 400) == 0;
+}
+
+pub fn daysInIsoMonth(y: i64, m: u32) u32 {
+    return switch (m) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(y)) @as(u32, 29) else 28,
+        else => 0,
+    };
+}
+
+// ── §8.x TemporalInstantToString (UTC, precision = "auto") ────────────────
+
+/// Format an epoch-ns value to its UTC ISO-8601 string — the form
+/// `Temporal.Instant.prototype.toString` / `toJSON` produce with no
+/// time-zone and `precision="auto"`: `YYYY-MM-DDTHH:MM:SS` plus a
+/// trimmed sub-second fraction and a trailing `Z`. Years outside
+/// 0000..9999 use the expanded `±YYYYYY` form.
+pub fn instantToString(epoch_ns: i128, buf: []u8) []const u8 {
+    const sec = @divFloor(epoch_ns, 1_000_000_000);
+    const sub_ns: u32 = @intCast(epoch_ns - sec * 1_000_000_000); // [0, 999999999]
+    const days = @divFloor(sec, 86400);
+    const sod = sec - days * 86400; // [0, 86399]
+    const ymd = civilFromDays(@intCast(days));
+    const hour: u32 = @intCast(@divTrunc(sod, 3600));
+    const minute: u32 = @intCast(@divTrunc(@mod(sod, 3600), 60));
+    const second: u32 = @intCast(@mod(sod, 60));
+
+    var w = Writer{ .buf = buf, .len = 0 };
+    writeIsoYear(&w, ymd.year);
+    w.byte('-');
+    w.pad2(ymd.month);
+    w.byte('-');
+    w.pad2(ymd.day);
+    w.byte('T');
+    w.pad2(hour);
+    w.byte(':');
+    w.pad2(minute);
+    w.byte(':');
+    w.pad2(second);
+    if (sub_ns != 0) {
+        w.byte('.');
+        w.fraction9(sub_ns);
+    }
+    w.byte('Z');
+    return w.buf[0..w.len];
+}
+
+fn writeIsoYear(w: *Writer, year: i64) void {
+    if (year >= 0 and year <= 9999) {
+        var tmp: [4]u8 = undefined;
+        var y: u32 = @intCast(year);
+        var i: usize = 4;
+        while (i > 0) {
+            i -= 1;
+            tmp[i] = '0' + @as(u8, @intCast(y % 10));
+            y /= 10;
+        }
+        w.bytes(&tmp);
+        return;
+    }
+    w.byte(if (year < 0) '-' else '+');
+    var y: u64 = @intCast(if (year < 0) -year else year);
+    var tmp: [6]u8 = undefined;
+    var i: usize = 6;
+    while (i > 0) {
+        i -= 1;
+        tmp[i] = '0' + @as(u8, @intCast(y % 10));
+        y /= 10;
+    }
+    w.bytes(&tmp);
+}
+
+// ── §8.x ParseTemporalInstantString ───────────────────────────────────────
+
+/// Parse an ISO-8601 / RFC 9557 date-time that carries BOTH a time and
+/// a UTC offset (or `Z`), then fold the offset in to yield the epoch
+/// nanoseconds. Returns `error.Invalid` (caller throws RangeError) on
+/// any malformed / unsupported form, or when the resulting instant is
+/// out of range.
+///
+/// Required shape: a calendar date (`YYYY-MM-DD`, basic `YYYYMMDD`, or
+/// expanded `±YYYYYY-MM-DD`), a `T`/`t`/space separator, a time
+/// (`HH[:MM[:SS[.fraction]]]` or the compact colon-free forms), and a
+/// trailing `Z`/`z` or numeric offset. Optional `[...]` annotations
+/// (a time-zone identifier, then `key=value` pairs) follow and are
+/// validated then discarded. A date with no time, or a date-time with
+/// no offset, is rejected — an Instant needs an exact point in time.
+pub fn parseInstantString(input: []const u8) error{Invalid}!i128 {
+    var c = Cursor{ .s = input };
+
+    const date = try parseIsoDate(&c);
+
+    // Date-time separator (required — an Instant must have a time).
+    if (!c.eatAny("Tt ")) return error.Invalid;
+
+    const time = try parseIsoTime(&c);
+
+    // Offset (required) — `Z`/`z` or a signed numeric offset.
+    var offset_ns: i128 = 0;
+    if (c.eatAny("Zz")) {
+        offset_ns = 0;
+    } else if (c.peek()) |ch| {
+        if (ch == '+' or ch == '-') {
+            offset_ns = try parseUtcOffsetNs(&c);
+        } else return error.Invalid;
+    } else return error.Invalid;
+
+    // Optional annotations, then the string must end. Instant is
+    // calendar-free, so the `u-ca` value (if any) is discarded — an
+    // unknown calendar like `[u-ca=discord]` is still a valid Instant
+    // string per the grammar.
+    _ = try consumeAnnotations(&c);
+    if (!c.done()) return error.Invalid;
+
+    // Fold the offset in: epoch = wall-clock-as-UTC − offset.
+    const epoch_days = daysFromCivil(date.year, date.month, date.day);
+    const wall_sec: i128 = @as(i128, epoch_days) * 86400 +
+        @as(i128, time.hour) * 3600 + @as(i128, time.minute) * 60 + @as(i128, time.second);
+    const wall_ns: i128 = wall_sec * 1_000_000_000 + @as(i128, time.sub_ns);
+    const epoch_ns = wall_ns - offset_ns;
+    if (!isValidEpochNanoseconds(epoch_ns)) return error.Invalid;
+    return epoch_ns;
+}
+
+const Cursor = struct {
+    s: []const u8,
+    i: usize = 0,
+
+    fn done(self: *const Cursor) bool {
+        return self.i >= self.s.len;
+    }
+    fn peek(self: *const Cursor) ?u8 {
+        return if (self.i < self.s.len) self.s[self.i] else null;
+    }
+    fn eat(self: *Cursor, ch: u8) bool {
+        if (self.i < self.s.len and self.s[self.i] == ch) {
+            self.i += 1;
+            return true;
+        }
+        return false;
+    }
+    fn eatAny(self: *Cursor, set: []const u8) bool {
+        const ch = self.peek() orelse return false;
+        for (set) |x| {
+            if (ch == x) {
+                self.i += 1;
+                return true;
+            }
+        }
+        return false;
+    }
+    fn isDigit(self: *const Cursor) bool {
+        const ch = self.peek() orelse return false;
+        return ch >= '0' and ch <= '9';
+    }
+    /// Read EXACTLY n decimal digits as a u64; null (no advance) if
+    /// fewer than n digits are available at the cursor.
+    fn fixedDigits(self: *Cursor, n: usize) ?u64 {
+        if (self.i + n > self.s.len) return null;
+        var v: u64 = 0;
+        var k: usize = 0;
+        while (k < n) : (k += 1) {
+            const ch = self.s[self.i + k];
+            if (ch < '0' or ch > '9') return null;
+            v = v * 10 + (ch - '0');
+        }
+        self.i += n;
+        return v;
+    }
+};
+
+const ParsedDate = struct { year: i64, month: u32, day: u32 };
+const ParsedTime = struct { hour: u32, minute: u32, second: u32, sub_ns: u32 };
+
+fn parseIsoDate(c: *Cursor) error{Invalid}!ParsedDate {
+    var year: i64 = undefined;
+    var expanded = false;
+    const lead = c.peek() orelse return error.Invalid;
+    if (lead == '+' or lead == '-') {
+        // Expanded year: ASCII sign + exactly six digits. A `-000000`
+        // (negative zero) expanded year is forbidden.
+        const neg = lead == '-';
+        c.i += 1;
+        const y = c.fixedDigits(6) orelse return error.Invalid;
+        if (neg and y == 0) return error.Invalid;
+        year = if (neg) -@as(i64, @intCast(y)) else @as(i64, @intCast(y));
+        expanded = true;
+    } else {
+        const y = c.fixedDigits(4) orelse return error.Invalid;
+        year = @intCast(y);
+    }
+
+    // Extended (`-` separators) vs basic (none). An expanded `±YYYYYY`
+    // year may be followed by either form (`+001976-11-18` and the
+    // dash-free `+0019761118` are both valid).
+    const extended = c.eat('-');
+    const month_u = c.fixedDigits(2) orelse return error.Invalid;
+    if (extended and !c.eat('-')) return error.Invalid;
+    const day_u = c.fixedDigits(2) orelse return error.Invalid;
+
+    const month: u32 = @intCast(month_u);
+    const day: u32 = @intCast(day_u);
+    if (month < 1 or month > 12) return error.Invalid;
+    if (day < 1 or day > daysInIsoMonth(year, month)) return error.Invalid;
+    return .{ .year = year, .month = month, .day = day };
+}
+
+fn parseIsoTime(c: *Cursor) error{Invalid}!ParsedTime {
+    const hour_u = c.fixedDigits(2) orelse return error.Invalid;
+    var minute: u32 = 0;
+    var second: u32 = 0;
+    var sub_ns: u32 = 0;
+
+    if (c.eat(':')) {
+        minute = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+        if (c.eat(':')) {
+            second = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+            sub_ns = try parseFractionNs(c);
+        }
+    } else if (c.isDigit()) {
+        minute = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+        if (c.isDigit()) {
+            second = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+            sub_ns = try parseFractionNs(c);
+        }
+    }
+
+    const hour: u32 = @intCast(hour_u);
+    if (hour > 23 or minute > 59 or second > 60) return error.Invalid;
+    if (second == 60) second = 59; // leap second → clamp (Temporal has none)
+    return .{ .hour = hour, .minute = minute, .second = second, .sub_ns = sub_ns };
+}
+
+/// Parse a numeric UTC offset at the cursor (`+`/`-` already peeked):
+/// `±HH`, `±HH:MM`, `±HH:MM:SS`, `±HH:MM:SS(.|,)fraction`, or the
+/// compact colon-free forms. Returns the offset in signed nanoseconds.
+fn parseUtcOffsetNs(c: *Cursor) error{Invalid}!i128 {
+    const sign = c.peek() orelse return error.Invalid;
+    if (sign != '+' and sign != '-') return error.Invalid;
+    c.i += 1;
+    const neg = sign == '-';
+
+    const hour: u32 = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+    var minute: u32 = 0;
+    var second: u32 = 0;
+    var sub_ns: u32 = 0;
+
+    if (c.eat(':')) {
+        minute = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+        if (c.eat(':')) {
+            second = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+            sub_ns = try parseFractionNs(c);
+        }
+    } else if (c.isDigit()) {
+        minute = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+        if (c.isDigit()) {
+            second = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+            sub_ns = try parseFractionNs(c);
+        }
+    }
+
+    if (hour > 23 or minute > 59 or second > 59) return error.Invalid;
+    const total: i128 = (@as(i128, hour) * 3600 + @as(i128, minute) * 60 + @as(i128, second)) *
+        1_000_000_000 + @as(i128, sub_ns);
+    return if (neg) -total else total;
+}
+
+/// Read an optional `.`/`,` fraction (1..9 digits) at the cursor,
+/// returning whole nanoseconds (0 when no fraction follows).
+fn parseFractionNs(c: *Cursor) error{Invalid}!u32 {
+    const ch = c.peek() orelse return 0;
+    if (ch != '.' and ch != ',') return 0;
+    c.i += 1;
+    const start = c.i;
+    while (c.isDigit()) c.i += 1;
+    const len = c.i - start;
+    if (len == 0 or len > 9) return error.Invalid;
+    return fractionToNanos(c.s[start..c.i]);
+}
+
+/// Validate the trailing `[...]` annotation blocks per the RFC 9557
+/// grammar: an optional leading time-zone annotation (an identifier, no
+/// `=`), then zero or more `key=value` annotations. At most one
+/// time-zone and at most one `u-ca` calendar annotation; a `[!key=…]`
+/// critical flag on an unknown key is rejected. Leaves the cursor at the
+/// first non-`[` byte (the caller requires end-of-input). Returns the
+/// first `u-ca` calendar value (a slice into the input) or null when no
+/// calendar annotation is present — the calendar-aware callers (e.g.
+/// PlainDate) validate it against the supported calendars, while
+/// calendar-free callers (e.g. Instant) discard it.
+fn consumeAnnotations(c: *Cursor) error{Invalid}!?[]const u8 {
+    var saw_tz = false;
+    var calendars: usize = 0;
+    var critical_calendar = false;
+    var first = true;
+    var calendar: ?[]const u8 = null;
+    while (c.peek()) |ch| {
+        if (ch != '[') break;
+        c.i += 1; // consume '['
+        const critical = c.eat('!');
+        const start = c.i;
+        while (c.peek()) |x| {
+            if (x == ']') break;
+            c.i += 1;
+        }
+        if (c.peek() != ']') return error.Invalid; // unterminated
+        const body = c.s[start..c.i];
+        c.i += 1; // consume ']'
+        if (body.len == 0) return error.Invalid;
+
+        if (std.mem.indexOfScalar(u8, body, '=')) |eq| {
+            // key=value annotation. The key must match the lowercase
+            // AnnotationKey grammar; a non-empty value is required.
+            const key = body[0..eq];
+            const value = body[eq + 1 ..];
+            if (!isValidAnnotationKey(key) or value.len == 0) return error.Invalid;
+            if (std.mem.eql(u8, key, "u-ca")) {
+                calendars += 1;
+                if (calendars == 1) calendar = value;
+                if (critical) critical_calendar = true;
+                // Two or more calendar annotations are only syntactical
+                // if none carries the critical flag.
+                if (calendars > 1 and critical_calendar) return error.Invalid;
+            } else if (critical) {
+                return error.Invalid; // unknown critical annotation
+            }
+        } else {
+            // Time-zone annotation (an identifier or a numeric offset):
+            // at most one, and it must precede any key=value
+            // annotations. A numeric offset must not carry sub-minute
+            // precision.
+            if (saw_tz or !first) return error.Invalid;
+            if (!isValidTimeZoneAnnotation(body)) return error.Invalid;
+            saw_tz = true;
+        }
+        first = false;
+    }
+    return calendar;
+}
+
+/// AnnotationKey :: AKeyLeadingChar (AKeyChar)*, where AKeyLeadingChar
+/// is a lowercase letter or `_`, and AKeyChar adds digits and `-`.
+/// Capitalised keys (`U-CA`, `u-CA`) are not valid; `_foo-bar0` is.
+fn isValidAnnotationKey(key: []const u8) bool {
+    if (key.len == 0) return false;
+    if (!((key[0] >= 'a' and key[0] <= 'z') or key[0] == '_')) return false;
+    for (key[1..]) |ch| {
+        const ok = (ch >= 'a' and ch <= 'z') or ch == '_' or
+            (ch >= '0' and ch <= '9') or ch == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// A time-zone annotation is either an IANA-style identifier or a
+/// numeric UTC offset. A numeric offset (`±HH`, `±HH:MM`, `±HHMM`) must
+/// NOT carry sub-minute precision — `[-07:00:01]` is rejected. Other
+/// identifier shapes are accepted and discarded (Instant is
+/// time-zone-free).
+fn isValidTimeZoneAnnotation(body: []const u8) bool {
+    if (body.len == 0) return false;
+    if (body[0] != '+' and body[0] != '-') return true; // IANA-style name
+    var k: usize = 1;
+    if (k + 2 > body.len or !isAsciiDigit(body[k]) or !isAsciiDigit(body[k + 1])) return false;
+    k += 2;
+    if (k == body.len) return true; // ±HH
+    if (body[k] == ':') k += 1;
+    if (k + 2 > body.len or !isAsciiDigit(body[k]) or !isAsciiDigit(body[k + 1])) return false;
+    k += 2;
+    return k == body.len; // ±HH:MM / ±HHMM — seconds are not allowed
+}
+
+fn isAsciiDigit(ch: u8) bool {
+    return ch >= '0' and ch <= '9';
+}
+
+// ── §13 Rounding primitives ───────────────────────────────────────────────
+
+/// §13.x The nine ECMAScript rounding modes.
+pub const RoundingMode = enum {
+    ceil,
+    floor,
+    expand,
+    trunc,
+    half_ceil,
+    half_floor,
+    half_expand,
+    half_trunc,
+    half_even,
+};
+
+/// §13.x RoundNumberToIncrement — round `value` to the nearest multiple
+/// of `increment` (which must be > 0) per `mode`, in exact i128
+/// arithmetic. Multiples are measured from zero, so rounding an
+/// epoch-nanosecond value lands on boundaries aligned with the Unix
+/// epoch. Sign-aware: `trunc` rounds toward zero, `expand` away from it,
+/// and the half-* ties resolve by the named direction relative to zero.
+pub fn roundToIncrement(value: i128, increment: i128, mode: RoundingMode) i128 {
+    return roundToIncrementImpl(value, increment, mode, false);
+}
+
+/// §13.x RoundNumberToIncrementAsIfPositive — like `roundToIncrement`
+/// but evaluates the directed / half-tie modes as though `value` were
+/// non-negative, so `floor`/`trunc` always round toward −∞ and
+/// `ceil`/`expand` toward +∞. `Temporal.Instant.prototype.round` uses
+/// this: rounding is anchored to the timeline (the epoch), not mirrored
+/// about zero.
+pub fn roundToIncrementAsIfPositive(value: i128, increment: i128, mode: RoundingMode) i128 {
+    return roundToIncrementImpl(value, increment, mode, true);
+}
+
+/// `@divFloor` for the lower multiple makes `lower ≤ value` hold for
+/// negative values too, so the sign handling is uniform.
+fn roundToIncrementImpl(value: i128, increment: i128, mode: RoundingMode, as_if_positive: bool) i128 {
+    const quotient = @divFloor(value, increment);
+    const lower = quotient * increment; // greatest multiple ≤ value
+    if (lower == value) return value; // already an exact multiple
+    const upper = lower + increment;
+    const remainder = value - lower; // in (0, increment)
+    const twice = remainder * 2;
+    const positive = as_if_positive or value > 0;
+    const negative = !as_if_positive and value < 0;
+    const pick_upper = switch (mode) {
+        .ceil => true,
+        .floor => false,
+        .trunc => negative, // toward zero
+        .expand => positive, // away from zero
+        .half_ceil => twice >= increment,
+        .half_floor => twice > increment,
+        .half_expand => if (positive) twice >= increment else twice > increment,
+        .half_trunc => if (positive) twice > increment else twice >= increment,
+        .half_even => if (twice != increment) twice > increment else @mod(quotient, 2) != 0,
+    };
+    return if (pick_upper) upper else lower;
+}
+
+/// Nanoseconds in one fixed-length time unit (day and below). Calendar
+/// units have no fixed length and never reach the time-only balancing
+/// path.
+pub fn unitNanoseconds(unit: LargestUnit) i128 {
+    return switch (unit) {
+        .day => 86_400_000_000_000,
+        .hour => 3_600_000_000_000,
+        .minute => 60_000_000_000,
+        .second => 1_000_000_000,
+        .millisecond => 1_000_000,
+        .microsecond => 1_000,
+        .nanosecond => 1,
+        .year, .month, .week => unreachable,
+    };
+}
+
+fn timeUnitIncluded(unit: LargestUnit, largest: LargestUnit) bool {
+    // `unit` participates when its magnitude is no larger than
+    // `largest` — i.e. its enum index is at or past `largest`'s.
+    return @intFromEnum(unit) >= @intFromEnum(largest);
+}
+
+fn takeTimeUnit(rem: *i128, scale: i128) f64 {
+    const q = @divTrunc(rem.*, scale);
+    rem.* = @rem(rem.*, scale);
+    return @floatFromInt(q);
+}
+
+/// §7.5.x BalanceTimeDuration — distribute a signed nanosecond total
+/// into a Duration's time fields, with the highest field capped at
+/// `largest` (one of day..nanosecond). Every field takes the sign of
+/// `total_ns`. Fields are exact for `largest` ≥ second; for a smaller
+/// `largest` a very large field rounds to the nearest f64, which is the
+/// Number the spec stores.
+pub fn balanceTimeDuration(total_ns: i128, largest: LargestUnit) DurationRecord {
+    var rem = total_ns;
+    var d = DurationRecord{};
+    if (timeUnitIncluded(.day, largest)) d.days = takeTimeUnit(&rem, 86_400_000_000_000);
+    if (timeUnitIncluded(.hour, largest)) d.hours = takeTimeUnit(&rem, 3_600_000_000_000);
+    if (timeUnitIncluded(.minute, largest)) d.minutes = takeTimeUnit(&rem, 60_000_000_000);
+    if (timeUnitIncluded(.second, largest)) d.seconds = takeTimeUnit(&rem, 1_000_000_000);
+    if (timeUnitIncluded(.millisecond, largest)) d.milliseconds = takeTimeUnit(&rem, 1_000_000);
+    if (timeUnitIncluded(.microsecond, largest)) d.microseconds = takeTimeUnit(&rem, 1_000);
+    d.nanoseconds = @floatFromInt(rem);
+    return d;
+}
+
+/// §13.x ValidateTemporalRoundingIncrement — `increment` must divide
+/// `dividend` evenly; when `inclusive` is false it must also be strictly
+/// less than `dividend`. (`increment` ≥ 1 is enforced when the option is
+/// read.)
+pub fn validateRoundingIncrement(increment: i128, dividend: i128, inclusive: bool) bool {
+    if (@mod(dividend, increment) != 0) return false;
+    if (!inclusive and increment == dividend) return false;
+    return true;
+}
+
+/// Map a Temporal unit name (singular or plural) to its `LargestUnit`;
+/// null for an unrecognised name.
+pub fn parseTemporalUnit(s: []const u8) ?LargestUnit {
+    const entries = .{
+        .{ "year", LargestUnit.year },               .{ "years", LargestUnit.year },
+        .{ "month", LargestUnit.month },             .{ "months", LargestUnit.month },
+        .{ "week", LargestUnit.week },               .{ "weeks", LargestUnit.week },
+        .{ "day", LargestUnit.day },                 .{ "days", LargestUnit.day },
+        .{ "hour", LargestUnit.hour },               .{ "hours", LargestUnit.hour },
+        .{ "minute", LargestUnit.minute },           .{ "minutes", LargestUnit.minute },
+        .{ "second", LargestUnit.second },           .{ "seconds", LargestUnit.second },
+        .{ "millisecond", LargestUnit.millisecond }, .{ "milliseconds", LargestUnit.millisecond },
+        .{ "microsecond", LargestUnit.microsecond }, .{ "microseconds", LargestUnit.microsecond },
+        .{ "nanosecond", LargestUnit.nanosecond },   .{ "nanoseconds", LargestUnit.nanosecond },
+    };
+    inline for (entries) |e| {
+        if (std.mem.eql(u8, s, e[0])) return e[1];
+    }
+    return null;
+}
+
+/// Map a `roundingMode` option string to its `RoundingMode`; null for an
+/// unrecognised name.
+pub fn parseRoundingMode(s: []const u8) ?RoundingMode {
+    const entries = .{
+        .{ "ceil", RoundingMode.ceil },              .{ "floor", RoundingMode.floor },
+        .{ "expand", RoundingMode.expand },          .{ "trunc", RoundingMode.trunc },
+        .{ "halfCeil", RoundingMode.half_ceil },     .{ "halfFloor", RoundingMode.half_floor },
+        .{ "halfExpand", RoundingMode.half_expand }, .{ "halfTrunc", RoundingMode.half_trunc },
+        .{ "halfEven", RoundingMode.half_even },
+    };
+    inline for (entries) |e| {
+        if (std.mem.eql(u8, s, e[0])) return e[1];
+    }
+    return null;
+}
+
+/// §4.5.x Total nanoseconds of a PlainTime within its day (0..86400×10^9).
+pub fn timeRecordToNanoseconds(t: PlainTimeRecord) i128 {
+    return @as(i128, t.hour) * 3_600_000_000_000 +
+        @as(i128, t.minute) * 60_000_000_000 +
+        @as(i128, t.second) * 1_000_000_000 +
+        @as(i128, t.millisecond) * 1_000_000 +
+        @as(i128, t.microsecond) * 1_000 +
+        @as(i128, t.nanosecond);
+}
+
+/// §4.5.x Build a PlainTime from a within-day nanosecond count
+/// (0..86399999999999). The caller wraps any day overflow first.
+pub fn nanosecondsToTimeRecord(ns_in_day: i128) PlainTimeRecord {
+    var rem = ns_in_day;
+    const hour: u32 = @intCast(@divTrunc(rem, 3_600_000_000_000));
+    rem = @mod(rem, 3_600_000_000_000);
+    const minute: u32 = @intCast(@divTrunc(rem, 60_000_000_000));
+    rem = @mod(rem, 60_000_000_000);
+    const second: u32 = @intCast(@divTrunc(rem, 1_000_000_000));
+    rem = @mod(rem, 1_000_000_000);
+    const millisecond: u32 = @intCast(@divTrunc(rem, 1_000_000));
+    rem = @mod(rem, 1_000_000);
+    const microsecond: u32 = @intCast(@divTrunc(rem, 1_000));
+    const nanosecond: u32 = @intCast(@mod(rem, 1_000));
+    return .{
+        .hour = hour,
+        .minute = minute,
+        .second = second,
+        .millisecond = millisecond,
+        .microsecond = microsecond,
+        .nanosecond = nanosecond,
+    };
+}
+
+/// Whether a duration carries calendar units (years/months/weeks),
+/// which need a relativeTo reference to interpret.
+pub fn hasCalendarUnits(d: DurationRecord) bool {
+    return d.years != 0 or d.months != 0 or d.weeks != 0;
+}
+
+/// Total nanoseconds of a calendar-unit-free duration, each day a fixed
+/// 24 h. Callers must verify `hasCalendarUnits(d)` is false first.
+pub fn dayTimeDurationNanoseconds(d: DurationRecord) i128 {
+    return f64ToI128(d.days) * 86_400_000_000_000 + timeDurationNanoseconds(d);
+}
+
+// ── §3.5 PlainDate (ISO calendar) abstract operations ─────────────────────
+
+/// Inclusive day-number bounds of a representable PlainDate
+/// (-271821-04-19 .. +275760-09-13) — one ISO day beyond the
+/// representable instant range on each side.
+const iso_date_min_days: i64 = daysFromCivil(-271821, 4, 19);
+const iso_date_max_days: i64 = daysFromCivil(275760, 9, 13);
+
+/// §3.5.x IsValidISODate — structural validity: month 1..12, day within
+/// that month (leap-aware). Independent of the representable-range limit.
+pub fn isValidISODate(year: i64, month: i64, day: i64) bool {
+    if (month < 1 or month > 12) return false;
+    return day >= 1 and day <= daysInIsoMonth(year, @intCast(month));
+}
+
+/// §3.5.x ISODateWithinLimits — the date is representable.
+pub fn isoDateWithinLimits(year: i64, month: u32, day: u32) bool {
+    const d = daysFromCivil(year, month, day);
+    return d >= iso_date_min_days and d <= iso_date_max_days;
+}
+
+/// §12.x ISO weekday, 1 = Monday … 7 = Sunday (1970-01-01 was Thursday).
+pub fn isoDayOfWeek(year: i64, month: u32, day: u32) u8 {
+    return @intCast(@mod(daysFromCivil(year, month, day) + 3, 7) + 1);
+}
+
+/// §12.x Day of the year, 1-based.
+pub fn isoDayOfYear(year: i64, month: u32, day: u32) u16 {
+    return @intCast(daysFromCivil(year, month, day) - daysFromCivil(year, 1, 1) + 1);
+}
+
+pub fn isoDaysInYear(year: i64) u16 {
+    return if (isLeapYear(year)) 366 else 365;
+}
+
+fn isoYearStartShift(y: i64) i64 {
+    return @mod(y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400), 7);
+}
+
+/// ISO weeks in a given week-year — 53 when the year starts on a
+/// Thursday (or a leap year starting Wednesday), otherwise 52.
+fn isoWeeksInYear(year: i64) i64 {
+    return if (isoYearStartShift(year) == 4 or isoYearStartShift(year - 1) == 3) 53 else 52;
+}
+
+pub const IsoWeek = struct { week: u16, year: i32 };
+
+/// §12.x ISO 8601 week-of-year + week-year. Week 1 holds the year's
+/// first Thursday; the first/last days of a calendar year can fall in
+/// the adjacent week-year.
+pub fn isoWeekOfYear(year: i64, month: u32, day: u32) IsoWeek {
+    const dow: i64 = isoDayOfWeek(year, month, day);
+    const doy: i64 = isoDayOfYear(year, month, day);
+    var week: i64 = @divFloor(doy - dow + 10, 7);
+    var wyear: i64 = year;
+    if (week < 1) {
+        wyear = year - 1;
+        week = isoWeeksInYear(wyear);
+    } else if (week > isoWeeksInYear(year)) {
+        wyear = year + 1;
+        week = 1;
+    }
+    return .{ .week = @intCast(week), .year = @intCast(wyear) };
+}
+
+/// How the ISO calendar is rendered in a date string.
+pub const CalendarDisplay = enum { auto, always, never, critical };
+
+/// §3.5.x TemporalDateToString — `YYYY-MM-DD` (expanded year when out of
+/// 0000..9999), with the ISO calendar annotation appended per
+/// `calendar` (auto/never omit it for the ISO calendar).
+pub fn isoDateToString(rec: PlainDateRecord, buf: []u8, calendar: CalendarDisplay) []const u8 {
+    var w = Writer{ .buf = buf, .len = 0 };
+    writeIsoYear(&w, rec.iso_year);
+    w.byte('-');
+    w.pad2(rec.iso_month);
+    w.byte('-');
+    w.pad2(rec.iso_day);
+    switch (calendar) {
+        .auto, .never => {},
+        .always => w.bytes("[u-ca=iso8601]"),
+        .critical => w.bytes("[!u-ca=iso8601]"),
+    }
+    return w.buf[0..w.len];
+}
+
+/// §3.5.x ParseTemporalDateString — parse the date portion of an ISO /
+/// RFC 9557 string (`YYYY-MM-DD`, expanded `±YYYYYY`, or basic),
+/// discarding (but validating) any time / offset / annotation tail.
+pub fn parseTemporalDateString(input: []const u8) error{Invalid}!PlainDateRecord {
+    var c = Cursor{ .s = input };
+    const date = try parseIsoDate(&c);
+    if (c.eatAny("Tt ")) {
+        _ = try parseIsoTime(&c);
+        // A `Z`/`z` UTC designator is rejected: a PlainDate has no time
+        // zone, so a UTC point-in-time string is ambiguous as a date
+        // (§3.5.x — ToTemporalDate throws when [[Z]] is present).
+        if (c.eatAny("Zz")) {
+            return error.Invalid;
+        } else if (c.peek()) |ch| {
+            if (ch == '+' or ch == '-') _ = try parseUtcOffsetNs(&c);
+        }
+    }
+    const calendar = try consumeAnnotations(&c);
+    if (!c.done()) return error.Invalid;
+    // PlainDate is calendar-aware: a `[u-ca=…]` annotation must name a
+    // supported calendar. Cynic ships only the ISO 8601 calendar, so an
+    // unknown calendar (`[u-ca=notexist]`) is a parse error.
+    if (calendar) |cal| {
+        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
+    }
+    if (!isoDateWithinLimits(date.year, date.month, date.day)) return error.Invalid;
+    return .{
+        .iso_year = @intCast(date.year),
+        .iso_month = @intCast(date.month),
+        .iso_day = @intCast(date.day),
+    };
+}
+
+/// §3.5.x RegulateISODate — apply an overflow option to raw (possibly
+/// out-of-range) fields. `reject` returns null on any out-of-range
+/// field; otherwise `constrain` clamps only the *upper* bound (month to
+/// ≤12, day to ≤ that month's length). A non-positive month or day is a
+/// RangeError even under constrain (the test262 `with/overflow.js` and
+/// `from/negative-month-or-day.js` fixtures), so those return null too.
+/// Returns null when the result leaves the representable range — which
+/// also guards the i32 year cast against a huge input year.
+pub fn regulateISODate(year: i64, month: i64, day: i64, reject: bool) ?PlainDateRecord {
+    var m = month;
+    var d = day;
+    if (reject) {
+        if (!isValidISODate(year, month, day)) return null;
+    } else {
+        if (month < 1 or day < 1) return null;
+        m = @min(month, 12);
+        d = @min(day, daysInIsoMonth(year, @intCast(m)));
+    }
+    if (!isoDateWithinLimits(year, @intCast(m), @intCast(d))) return null;
+    return .{ .iso_year = @intCast(year), .iso_month = @intCast(m), .iso_day = @intCast(d) };
+}
+
+/// §3.5.x BalanceISOYearMonth — fold an out-of-range month into the
+/// year so the month lands in 1..12 (carrying whole years; works for
+/// negative months too via floored division).
+pub fn balanceISOYearMonth(year: i64, month: i64) struct { year: i64, month: i64 } {
+    return .{
+        .year = year + @divFloor(month - 1, 12),
+        .month = @mod(month - 1, 12) + 1,
+    };
+}
+
+/// §3.5.x AddISODate — add a date duration (years, months, weeks, days)
+/// to an ISO date under `overflow`. Years/months shift the year-month
+/// first, with the original day constrained into (or rejected against)
+/// the target month; then weeks·7 + days are folded in through the
+/// civil-day calendar. Returns null when the result leaves the
+/// representable range (→ the caller raises RangeError). Components are
+/// the already-validated integer parts of a duration; the valid
+/// duration range keeps every intermediate inside i64.
+pub fn addISODate(rec: PlainDateRecord, years: i64, months: i64, weeks: i64, days: i64, reject: bool) ?PlainDateRecord {
+    const bym = balanceISOYearMonth(@as(i64, rec.iso_year) + years, @as(i64, rec.iso_month) + months);
+    const anchored = regulateISODate(bym.year, bym.month, rec.iso_day, reject) orelse return null;
+    const epoch = daysFromCivil(anchored.iso_year, anchored.iso_month, anchored.iso_day) + days + weeks * 7;
+    if (epoch < iso_date_min_days or epoch > iso_date_max_days) return null;
+    const ymd = civilFromDays(epoch);
+    return .{
+        .iso_year = @intCast(ymd.year),
+        .iso_month = @intCast(ymd.month),
+        .iso_day = @intCast(ymd.day),
+    };
+}
+
+/// §3.5.x CompareISODate — total order on ISO dates (year, then month,
+/// then day). Compares raw integer fields so the difference constrain-loop
+/// can test an unregulated (year, month, day) tuple whose day may exceed
+/// the month's length.
+fn compareISODateTuple(ay: i64, am: i64, ad: i64, by: i64, bm: i64, bd: i64) i32 {
+    if (ay != by) return if (ay < by) -1 else 1;
+    if (am != bm) return if (am < bm) -1 else 1;
+    if (ad != bd) return if (ad < bd) -1 else 1;
+    return 0;
+}
+
+pub fn compareISODate(a: PlainDateRecord, b: PlainDateRecord) i32 {
+    return compareISODateTuple(a.iso_year, a.iso_month, a.iso_day, b.iso_year, b.iso_month, b.iso_day);
+}
+
+/// Did stepping to year-month (y0, m0) with anchor day `d0` reach or pass
+/// `target` in the direction `sign`? The per-step test inside
+/// DifferenceISODate's year/month constrain-loops: balance the year-month,
+/// then compare against the *unregulated* anchor day (compareISODateTuple
+/// tolerates a day beyond the month's length).
+fn isoDateSurpasses(sign: i32, y0: i64, m0: i64, d0: i64, target: PlainDateRecord) bool {
+    const bym = balanceISOYearMonth(y0, m0);
+    const c = compareISODateTuple(bym.year, bym.month, d0, target.iso_year, target.iso_month, target.iso_day);
+    return sign * c > 0;
+}
+
+/// §3.5.x DifferenceISODate — the ISO-calendar CalendarDateUntil: the date
+/// duration {years, months, weeks, days} from `d1` to `d2`, with the
+/// coarsest component capped at `largest`. Years and months come from an
+/// estimate-then-correct constrain-loop (so Jan-31 → Mar-01 across a short
+/// February yields one month, not two); the leftover whole days are an
+/// exact epoch-day subtraction from the day-constrained year-month anchor;
+/// weeks peel off only when `largest` is `week`. The result is
+/// sign-consistent — every field shares the direction of travel — and the
+/// time fields stay zero (a date has no time-of-day).
+pub fn differenceISODate(d1: PlainDateRecord, d2: PlainDateRecord, largest: LargestUnit) DurationRecord {
+    const cmp = compareISODate(d1, d2);
+    if (cmp == 0) return .{};
+    const sign: i32 = -cmp; // +1 when d2 is after d1
+    const sg: i64 = sign; // widened for the index arithmetic
+
+    var years: i64 = 0;
+    var months: i64 = 0;
+    if (largest == .year or largest == .month) {
+        // Year estimate: jump to the raw year delta, back off one step
+        // toward d1, then advance while we have not yet passed d2.
+        var candidate_years: i64 = @as(i64, d2.iso_year) - @as(i64, d1.iso_year);
+        if (candidate_years != 0) candidate_years -= sg;
+        while (!isoDateSurpasses(sign, @as(i64, d1.iso_year) + candidate_years, d1.iso_month, d1.iso_day, d2)) {
+            years = candidate_years;
+            candidate_years += sg;
+        }
+        // Month estimate: advance month-by-month from the year anchor.
+        var candidate_months: i64 = sg;
+        var inter = balanceISOYearMonth(@as(i64, d1.iso_year) + years, @as(i64, d1.iso_month) + candidate_months);
+        while (!isoDateSurpasses(sign, inter.year, inter.month, d1.iso_day, d2)) {
+            months = candidate_months;
+            candidate_months += sg;
+            inter = balanceISOYearMonth(inter.year, inter.month + sg);
+        }
+        if (largest == .month) {
+            months += years * 12;
+            years = 0;
+        }
+    }
+
+    // Whole days: exact epoch-day delta from the constrained year-month
+    // anchor (clamps e.g. Jan-31 + 1 month to Feb-28/29) to d2.
+    const bym = balanceISOYearMonth(@as(i64, d1.iso_year) + years, @as(i64, d1.iso_month) + months);
+    const anchor = regulateISODate(bym.year, bym.month, d1.iso_day, false).?;
+    var days: i64 = daysFromCivil(d2.iso_year, d2.iso_month, d2.iso_day) -
+        daysFromCivil(anchor.iso_year, anchor.iso_month, anchor.iso_day);
+
+    var weeks: i64 = 0;
+    if (largest == .week) {
+        weeks = @divTrunc(days, 7);
+        days -= weeks * 7;
+    }
+
+    return .{
+        .years = @floatFromInt(years),
+        .months = @floatFromInt(months),
+        .weeks = @floatFromInt(weeks),
+        .days = @floatFromInt(days),
+    };
+}
+
+/// Advance `start` by the held coarser units plus `r` of the `smallest`
+/// calendar unit — the candidate end date NudgeToCalendarUnit measures
+/// against. Returns null when the result leaves the representable range.
+fn addCalendarUnit(start: PlainDateRecord, smallest: LargestUnit, hy: i64, hm: i64, r: i64) ?PlainDateRecord {
+    return switch (smallest) {
+        .year => addISODate(start, hy + r, 0, 0, 0, false),
+        .month => addISODate(start, hy, hm + r, 0, 0, false),
+        .week => addISODate(start, hy, hm, r, 0, false),
+        else => unreachable, // irregular-length calendar units only.
+    };
+}
+
+/// §7.5.31 RoundRelativeDuration / §7.5.34 NudgeToCalendarUnit — the
+/// date-only (ISO calendar, no wall-clock time, no time zone)
+/// specialization for an irregular-length calendar `smallest` unit
+/// (year/month/week). `diff` is the unrounded DifferenceISODate(start, dest,
+/// largest) span; round its `smallest` unit to a multiple of `increment`
+/// under `mode`, then re-express the rounded span from `start` capped at
+/// `largest`. Re-differencing the rounded end date folds in
+/// BubbleRelativeDuration's promotion (e.g. 1 year 12 months → 2 years) for
+/// free. A `day` smallest unit has fixed length, so it rounds by pure
+/// day-count arithmetic in the caller (NudgeToDayOrTime), not here.
+///
+/// For a date with no time-of-day the epoch-nanosecond ratios of the spec
+/// collapse to epoch-day ratios — the 86400×10^9 ns/day factor cancels in
+/// every comparison — so progress between the two candidate end dates is
+/// measured directly in days. The nine rounding modes are reused exactly by
+/// scaling the candidate values by the (positive) day-span denominator and
+/// deferring to `roundToIncrement`.
+///
+/// Returns null when a candidate end date leaves the representable ISO date
+/// range (→ the caller raises RangeError, matching AddDate overflow).
+pub fn roundRelativeDate(
+    start: PlainDateRecord,
+    dest: PlainDateRecord,
+    diff: DurationRecord,
+    smallest: LargestUnit,
+    increment: i128,
+    mode: RoundingMode,
+    largest: LargestUnit,
+) ?DurationRecord {
+    const sign: i64 = durationSign(diff);
+    if (sign == 0) return diff; // start == dest: nothing to round.
+
+    // DifferenceISODate populates only the fields from `largest` down to
+    // day, so a year/month-capped diff carries weeks == 0 and folds the
+    // sub-month remainder into days. Pick out the unit being rounded and the
+    // coarser units held fixed while it rounds.
+    const dy: i64 = @intFromFloat(diff.years);
+    const dm: i64 = @intFromFloat(diff.months);
+    const dw: i64 = @intFromFloat(diff.weeks);
+    const dd: i64 = @intFromFloat(diff.days);
+
+    var hy: i64 = 0;
+    var hm: i64 = 0;
+    var unit_val: i64 = 0;
+    switch (smallest) {
+        .year => unit_val = dy,
+        .month => {
+            hy = dy;
+            unit_val = dm;
+        },
+        .week => {
+            hy = dy;
+            hm = dm;
+            // Whole weeks in the sub-month remainder. When `largest` is week
+            // the remainder is already split (dw weeks + dd days, |dd| < 7);
+            // when it is year/month the weeks sit unsplit inside dd.
+            unit_val = @divTrunc(dw * 7 + dd, 7);
+        },
+        else => unreachable, // irregular-length calendar units only.
+    }
+
+    // r1 = unit_val truncated toward zero to a multiple of `increment`;
+    // r2 = the next multiple one increment further in the sign direction.
+    const inc: i64 = @intCast(increment);
+    const r1: i64 = @divTrunc(unit_val, inc) * inc;
+    const r2: i64 = r1 + inc * sign;
+
+    const end1 = addCalendarUnit(start, smallest, hy, hm, r1) orelse return null;
+    const end2 = addCalendarUnit(start, smallest, hy, hm, r2) orelse return null;
+
+    // Progress of `dest` between the candidates, in epoch days, normalised so
+    // the denominator is positive regardless of travel direction. `dest`
+    // always lies between end1 and end2, so num ∈ [0, denom].
+    const e1: i128 = daysFromCivil(end1.iso_year, end1.iso_month, end1.iso_day);
+    const e2: i128 = daysFromCivil(end2.iso_year, end2.iso_month, end2.iso_day);
+    const ed: i128 = daysFromCivil(dest.iso_year, dest.iso_month, dest.iso_day);
+    const sg: i128 = sign;
+    const denom: i128 = sg * (e2 - e1); // > 0
+    const num: i128 = sg * (ed - e1); // in [0, denom]
+
+    // total = r1 + (num/denom)·increment·sign. Scale by denom so the nine
+    // rounding modes reuse roundToIncrement exactly, then divide back out:
+    // rounding total to a multiple of `inc` is rounding (total·denom) to a
+    // multiple of (inc·denom). The result is r1 or r2.
+    const scaled: i128 = @as(i128, r1) * denom + sg * @as(i128, inc) * num;
+    const rounded_scaled = roundToIncrement(scaled, @as(i128, inc) * denom, mode);
+    const rounded_unit: i64 = @intCast(@divExact(rounded_scaled, denom));
+
+    const rounded_end = addCalendarUnit(start, smallest, hy, hm, rounded_unit) orelse return null;
+    return differenceISODate(start, rounded_end, largest);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "roundToIncrement: exact multiples are unchanged" {
+    inline for (.{ RoundingMode.ceil, .floor, .trunc, .expand, .half_even, .half_expand }) |m| {
+        try testing.expectEqual(@as(i128, 90), roundToIncrement(90, 30, m));
+        try testing.expectEqual(@as(i128, 0), roundToIncrement(0, 7, m));
+        try testing.expectEqual(@as(i128, -60), roundToIncrement(-60, 30, m));
+    }
+}
+
+test "roundToIncrement: directed modes" {
+    // value 100, increment 30 → lower 90, upper 120.
+    try testing.expectEqual(@as(i128, 120), roundToIncrement(100, 30, .ceil));
+    try testing.expectEqual(@as(i128, 90), roundToIncrement(100, 30, .floor));
+    try testing.expectEqual(@as(i128, 90), roundToIncrement(100, 30, .trunc));
+    try testing.expectEqual(@as(i128, 120), roundToIncrement(100, 30, .expand));
+    // value -100, increment 30 → lower -120, upper -90.
+    try testing.expectEqual(@as(i128, -90), roundToIncrement(-100, 30, .ceil));
+    try testing.expectEqual(@as(i128, -120), roundToIncrement(-100, 30, .floor));
+    try testing.expectEqual(@as(i128, -90), roundToIncrement(-100, 30, .trunc));
+    try testing.expectEqual(@as(i128, -120), roundToIncrement(-100, 30, .expand));
+}
+
+test "roundToIncrement: half modes on an exact tie" {
+    // value 15, increment 10 → lower 10, upper 20 (tie).
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(15, 10, .half_ceil));
+    try testing.expectEqual(@as(i128, 10), roundToIncrement(15, 10, .half_floor));
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(15, 10, .half_expand));
+    try testing.expectEqual(@as(i128, 10), roundToIncrement(15, 10, .half_trunc));
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(15, 10, .half_even)); // 10 is odd multiple → 20
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(25, 10, .half_even)); // 20 is even multiple → 20
+    // negative tie: value -15, increment 10 → lower -20, upper -10.
+    try testing.expectEqual(@as(i128, -10), roundToIncrement(-15, 10, .half_ceil));
+    try testing.expectEqual(@as(i128, -20), roundToIncrement(-15, 10, .half_floor));
+    try testing.expectEqual(@as(i128, -20), roundToIncrement(-15, 10, .half_expand));
+    try testing.expectEqual(@as(i128, -10), roundToIncrement(-15, 10, .half_trunc));
+    try testing.expectEqual(@as(i128, -20), roundToIncrement(-15, 10, .half_even));
+}
+
+test "roundToIncrement: half modes off a tie pick the nearer multiple" {
+    try testing.expectEqual(@as(i128, 10), roundToIncrement(12, 10, .half_expand));
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(18, 10, .half_expand));
+    try testing.expectEqual(@as(i128, 10), roundToIncrement(12, 10, .half_even));
+    try testing.expectEqual(@as(i128, 20), roundToIncrement(18, 10, .half_even));
+}
+
+test "roundToIncrement: matches the Instant halfExpand fixture" {
+    const ns: i128 = 217175010123987500; // 1976-11-18T14:23:30.1239875Z
+    try testing.expectEqual(@as(i128, 217173600000000000), roundToIncrement(ns, 3_600_000_000_000, .half_expand)); // hour
+    try testing.expectEqual(@as(i128, 217175040000000000), roundToIncrement(ns, 60_000_000_000, .half_expand)); // minute
+    try testing.expectEqual(@as(i128, 217175010000000000), roundToIncrement(ns, 1_000_000_000, .half_expand)); // second
+    try testing.expectEqual(@as(i128, 217175010124000000), roundToIncrement(ns, 1_000_000, .half_expand)); // ms
+    try testing.expectEqual(@as(i128, 217175010123988000), roundToIncrement(ns, 1_000, .half_expand)); // µs
+}
+
+test "balanceTimeDuration: caps at largestUnit, carries sign" {
+    {
+        const d = balanceTimeDuration(3_600_000_000_000, .hour);
+        try testing.expectEqual(@as(f64, 1), d.hours);
+        try testing.expectEqual(@as(f64, 0), d.minutes);
+    }
+    {
+        const d = balanceTimeDuration(90 * 60_000_000_000, .hour);
+        try testing.expectEqual(@as(f64, 1), d.hours);
+        try testing.expectEqual(@as(f64, 30), d.minutes);
+    }
+    {
+        const d = balanceTimeDuration(90 * 60_000_000_000, .minute);
+        try testing.expectEqual(@as(f64, 0), d.hours);
+        try testing.expectEqual(@as(f64, 90), d.minutes);
+    }
+    {
+        // 366-day span, matching the Instant until minutes-and-hours fixture.
+        const total: i128 = @as(i128, 366) * 86400 * 1_000_000_000;
+        try testing.expectEqual(@as(f64, 8784), balanceTimeDuration(total, .hour).hours);
+        try testing.expectEqual(@as(f64, 527040), balanceTimeDuration(total, .minute).minutes);
+    }
+    {
+        const d = balanceTimeDuration(-(1_000_000_000 + 123_456_789), .second);
+        try testing.expectEqual(@as(f64, -1), d.seconds);
+        try testing.expectEqual(@as(f64, -123), d.milliseconds);
+        try testing.expectEqual(@as(f64, -456), d.microseconds);
+        try testing.expectEqual(@as(f64, -789), d.nanoseconds);
+    }
+}
+
+test "validateRoundingIncrement: round (inclusive) vs difference (exclusive)" {
+    try testing.expect(validateRoundingIncrement(24, 24, true)); // round hour: 24 ok
+    try testing.expect(validateRoundingIncrement(4, 24, true));
+    try testing.expect(!validateRoundingIncrement(7, 24, true)); // 7 ∤ 24
+    try testing.expect(!validateRoundingIncrement(24, 24, false)); // until hour: 24 rejected
+    try testing.expect(validateRoundingIncrement(12, 24, false));
+    try testing.expect(!validateRoundingIncrement(60, 60, false)); // until minute: 60 rejected
+    try testing.expect(validateRoundingIncrement(30, 60, false));
+    try testing.expect(!validateRoundingIncrement(29, 60, false));
+}
+
+test "parseTemporalUnit + parseRoundingMode" {
+    try testing.expectEqual(@as(?LargestUnit, .hour), parseTemporalUnit("hour"));
+    try testing.expectEqual(@as(?LargestUnit, .hour), parseTemporalUnit("hours"));
+    try testing.expectEqual(@as(?LargestUnit, .nanosecond), parseTemporalUnit("nanoseconds"));
+    try testing.expectEqual(@as(?LargestUnit, null), parseTemporalUnit("fortnight"));
+    try testing.expectEqual(@as(?RoundingMode, .half_expand), parseRoundingMode("halfExpand"));
+    try testing.expectEqual(@as(?RoundingMode, .trunc), parseRoundingMode("trunc"));
+    try testing.expectEqual(@as(?RoundingMode, null), parseRoundingMode("nearest"));
+}
+
+test "roundToIncrementAsIfPositive: directed modes ignore sign" {
+    // -65261246399.5 s rounded to the second (matches Instant rounding-direction.js).
+    const v: i128 = -65261246399500000000;
+    const inc: i128 = 1_000_000_000;
+    const down: i128 = -65261246400000000000; // toward -∞
+    const up: i128 = -65261246399000000000; // toward +∞
+    try testing.expectEqual(down, roundToIncrementAsIfPositive(v, inc, .floor));
+    try testing.expectEqual(down, roundToIncrementAsIfPositive(v, inc, .trunc));
+    try testing.expectEqual(up, roundToIncrementAsIfPositive(v, inc, .ceil));
+    try testing.expectEqual(up, roundToIncrementAsIfPositive(v, inc, .expand));
+    try testing.expectEqual(up, roundToIncrementAsIfPositive(v, inc, .half_expand)); // tie → +∞
+    // Sign-aware contrast: trunc → toward zero (+∞ side), expand → away (-∞ side).
+    try testing.expectEqual(up, roundToIncrement(v, inc, .trunc));
+    try testing.expectEqual(down, roundToIncrement(v, inc, .expand));
+}
+
+test "time record <-> nanoseconds round trip" {
+    const t = PlainTimeRecord{ .hour = 14, .minute = 23, .second = 30, .millisecond = 123, .microsecond = 456, .nanosecond = 789 };
+    try testing.expectEqual(@as(i128, 51810123456789), timeRecordToNanoseconds(t));
+    const back = nanosecondsToTimeRecord(timeRecordToNanoseconds(t));
+    try testing.expectEqual(@as(u32, 14), back.hour);
+    try testing.expectEqual(@as(u32, 23), back.minute);
+    try testing.expectEqual(@as(u32, 789), back.nanosecond);
+    try testing.expectEqual(@as(i128, 0), timeRecordToNanoseconds(.{}));
+    try testing.expectEqual(@as(u32, 23), nanosecondsToTimeRecord(86_399_999_999_999).hour);
+}
+
+test "dayTimeDurationNanoseconds + hasCalendarUnits" {
+    try testing.expect(!hasCalendarUnits(.{ .days = 5, .hours = 1 }));
+    try testing.expect(hasCalendarUnits(.{ .years = 1 }));
+    try testing.expect(hasCalendarUnits(.{ .weeks = 1 }));
+    try testing.expectEqual(@as(i128, 90_000_000_000_000), dayTimeDurationNanoseconds(.{ .days = 1, .hours = 1 }));
+    try testing.expectEqual(@as(i128, -86_400_000_000_000), dayTimeDurationNanoseconds(.{ .days = -1 }));
+}
+
+test "isValidISODate + isoDateWithinLimits" {
+    try testing.expect(isValidISODate(2021, 2, 28));
+    try testing.expect(!isValidISODate(2021, 2, 29)); // not a leap year
+    try testing.expect(isValidISODate(2004, 2, 29)); // leap
+    try testing.expect(!isValidISODate(2021, 13, 1));
+    try testing.expect(!isValidISODate(2021, 4, 31));
+    try testing.expect(isoDateWithinLimits(-271821, 4, 19));
+    try testing.expect(!isoDateWithinLimits(-271821, 4, 18));
+    try testing.expect(isoDateWithinLimits(275760, 9, 13));
+    try testing.expect(!isoDateWithinLimits(275760, 9, 14));
+}
+
+test "isoDayOfWeek + isoDayOfYear + daysInYear" {
+    try testing.expectEqual(@as(u8, 4), isoDayOfWeek(1970, 1, 1)); // Thursday
+    try testing.expectEqual(@as(u8, 3), isoDayOfWeek(1969, 12, 31)); // Wednesday
+    try testing.expectEqual(@as(u16, 1), isoDayOfYear(2020, 1, 1));
+    try testing.expectEqual(@as(u16, 366), isoDayOfYear(2020, 12, 31)); // leap
+    try testing.expectEqual(@as(u16, 365), isoDayOfYear(2021, 12, 31));
+    try testing.expectEqual(@as(u16, 366), isoDaysInYear(2020));
+    try testing.expectEqual(@as(u16, 365), isoDaysInYear(2021));
+}
+
+test "isoWeekOfYear: boundary weeks (matches weekOfYear/basic.js)" {
+    {
+        const w = isoWeekOfYear(1975, 12, 29);
+        try testing.expectEqual(@as(u16, 1), w.week);
+        try testing.expectEqual(@as(i32, 1976), w.year);
+    }
+    try testing.expectEqual(@as(u16, 1), isoWeekOfYear(1976, 1, 1).week);
+    try testing.expectEqual(@as(u16, 2), isoWeekOfYear(1976, 1, 5).week);
+    try testing.expectEqual(@as(u16, 52), isoWeekOfYear(1976, 12, 26).week);
+    try testing.expectEqual(@as(u16, 53), isoWeekOfYear(1976, 12, 27).week);
+    {
+        const w = isoWeekOfYear(1977, 1, 2);
+        try testing.expectEqual(@as(u16, 53), w.week);
+        try testing.expectEqual(@as(i32, 1976), w.year);
+    }
+}
+
+test "isoDateToString" {
+    var buf: [40]u8 = undefined;
+    try testing.expectEqualStrings("2000-05-02", isoDateToString(.{ .iso_year = 2000, .iso_month = 5, .iso_day = 2 }, &buf, .auto));
+    try testing.expectEqualStrings("2000-05-02[u-ca=iso8601]", isoDateToString(.{ .iso_year = 2000, .iso_month = 5, .iso_day = 2 }, &buf, .always));
+    try testing.expectEqualStrings("-009999-01-01", isoDateToString(.{ .iso_year = -9999, .iso_month = 1, .iso_day = 1 }, &buf, .never));
+}
+
+test "parseTemporalDateString + regulateISODate" {
+    {
+        const d = try parseTemporalDateString("2020-12-24");
+        try testing.expectEqual(@as(i32, 2020), d.iso_year);
+        try testing.expectEqual(@as(u8, 12), d.iso_month);
+        try testing.expectEqual(@as(u8, 24), d.iso_day);
+    }
+    // A bare time component is fine; a UTC designator (`Z`) is not — a
+    // PlainDate is time-zone-free, so a UTC point-in-time is ambiguous.
+    try testing.expectEqual(@as(u8, 18), (try parseTemporalDateString("1976-11-18T14:23:30")).iso_day);
+    try testing.expectError(error.Invalid, parseTemporalDateString("1976-11-18T14:23:30Z"));
+    try testing.expectError(error.Invalid, parseTemporalDateString("1976-11-18T14:23:30Z[UTC]"));
+    // A `u-ca` calendar annotation must name the ISO calendar.
+    try testing.expectEqual(@as(u8, 1), (try parseTemporalDateString("2020-01-01[u-ca=iso8601]")).iso_day);
+    try testing.expectError(error.Invalid, parseTemporalDateString("2020-01-01[u-ca=notexist]"));
+    try testing.expectError(error.Invalid, parseTemporalDateString("2021-02-29"));
+    try testing.expectError(error.Invalid, parseTemporalDateString("2020-13-01"));
+    try testing.expect(regulateISODate(2021, 2, 29, true) == null);
+    try testing.expectEqual(@as(u8, 28), regulateISODate(2021, 2, 29, false).?.iso_day);
+    try testing.expectEqual(@as(u8, 12), regulateISODate(2021, 20, 1, false).?.iso_month);
+    // Non-positive month/day reject even under constrain.
+    try testing.expect(regulateISODate(2000, -1, 1, false) == null);
+    try testing.expect(regulateISODate(2000, 0, 1, false) == null);
+    try testing.expect(regulateISODate(2000, 1, -1, false) == null);
+    try testing.expect(regulateISODate(2000, 1, 0, false) == null);
+    try testing.expect(regulateISODate(1_000_000_000, 1, 1, true) == null);
+}
+
+test "balanceISOYearMonth" {
+    try testing.expectEqual(@as(i64, 1977), balanceISOYearMonth(1976, 14).year);
+    try testing.expectEqual(@as(i64, 2), balanceISOYearMonth(1976, 14).month);
+    try testing.expectEqual(@as(i64, 1975), balanceISOYearMonth(1976, 0).year);
+    try testing.expectEqual(@as(i64, 12), balanceISOYearMonth(1976, 0).month);
+    try testing.expectEqual(@as(i64, 1976), balanceISOYearMonth(1976, 6).year);
+    try testing.expectEqual(@as(i64, 6), balanceISOYearMonth(1976, 6).month);
+}
+
+test "addISODate" {
+    const base: PlainDateRecord = .{ .iso_year = 1976, .iso_month = 11, .iso_day = 18 };
+    // +43 years: only the year moves (basic.js).
+    {
+        const r = addISODate(base, 43, 0, 0, 0, false).?;
+        try testing.expectEqual(@as(i32, 2019), r.iso_year);
+        try testing.expectEqual(@as(u8, 11), r.iso_month);
+        try testing.expectEqual(@as(u8, 18), r.iso_day);
+    }
+    // +3 months wraps the year (Nov → Feb next year).
+    {
+        const r = addISODate(base, 0, 3, 0, 0, false).?;
+        try testing.expectEqual(@as(i32, 1977), r.iso_year);
+        try testing.expectEqual(@as(u8, 2), r.iso_month);
+    }
+    // +20 days balances into the next month.
+    {
+        const r = addISODate(base, 0, 0, 0, 20, false).?;
+        try testing.expectEqual(@as(u8, 12), r.iso_month);
+        try testing.expectEqual(@as(u8, 8), r.iso_day);
+    }
+    // +1 week.
+    try testing.expectEqual(@as(u8, 25), addISODate(base, 0, 0, 1, 0, false).?.iso_day);
+    // Jan 31 + 1 month: constrain clamps the day to Feb 28; reject → null.
+    {
+        const jan31: PlainDateRecord = .{ .iso_year = 2019, .iso_month = 1, .iso_day = 31 };
+        try testing.expectEqual(@as(u8, 28), addISODate(jan31, 0, 1, 0, 0, false).?.iso_day);
+        try testing.expect(addISODate(jan31, 0, 1, 0, 0, true) == null);
+    }
+    // Negative months symmetric (Feb 28 − 1 month → Jan 28).
+    {
+        const feb: PlainDateRecord = .{ .iso_year = 2019, .iso_month = 2, .iso_day = 28 };
+        const r = addISODate(feb, 0, -1, 0, 0, false).?;
+        try testing.expectEqual(@as(u8, 1), r.iso_month);
+        try testing.expectEqual(@as(u8, 28), r.iso_day);
+    }
+    // Leap-day clamp: 2020-02-29 + 1 year → 2021-02-28.
+    {
+        const leap: PlainDateRecord = .{ .iso_year = 2020, .iso_month = 2, .iso_day = 29 };
+        const r = addISODate(leap, 1, 0, 0, 0, false).?;
+        try testing.expectEqual(@as(i32, 2021), r.iso_year);
+        try testing.expectEqual(@as(u8, 28), r.iso_day);
+    }
+    // Out of range → null.
+    try testing.expect(addISODate(base, 1_000_000, 0, 0, 0, false) == null);
+}
+
+test "differenceISODate" {
+    const mk = struct {
+        fn f(y: i32, m: u8, dd: u8) PlainDateRecord {
+            return .{ .iso_year = y, .iso_month = m, .iso_day = dd };
+        }
+    }.f;
+    // largestUnit=year: 1997-12-01 → 2001-06-18 = 3y 6m 17d (until/basic.js).
+    {
+        const r = differenceISODate(mk(1997, 12, 1), mk(2001, 6, 18), .year);
+        try testing.expectEqual(@as(f64, 3), r.years);
+        try testing.expectEqual(@as(f64, 6), r.months);
+        try testing.expectEqual(@as(f64, 0), r.weeks);
+        try testing.expectEqual(@as(f64, 17), r.days);
+    }
+    // largestUnit=month: 2000-12-01 → 2001-06-01 = 6 months.
+    {
+        const r = differenceISODate(mk(2000, 12, 1), mk(2001, 6, 1), .month);
+        try testing.expectEqual(@as(f64, 0), r.years);
+        try testing.expectEqual(@as(f64, 6), r.months);
+        try testing.expectEqual(@as(f64, 0), r.days);
+    }
+    // week/day: 2000-01-01 → 2000-10-07 = 40w / 280d.
+    {
+        const w = differenceISODate(mk(2000, 1, 1), mk(2000, 10, 7), .week);
+        try testing.expectEqual(@as(f64, 40), w.weeks);
+        try testing.expectEqual(@as(f64, 0), w.days);
+        const d = differenceISODate(mk(2000, 1, 1), mk(2000, 10, 7), .day);
+        try testing.expectEqual(@as(f64, 280), d.days);
+    }
+    // weeks/months don't mix (weeks-months.js): 1969-07-24 → 1969-09-04.
+    {
+        const w = differenceISODate(mk(1969, 7, 24), mk(1969, 9, 4), .week);
+        try testing.expectEqual(@as(f64, 6), w.weeks);
+        try testing.expectEqual(@as(f64, 0), w.days);
+        const mo = differenceISODate(mk(1969, 7, 24), mk(1969, 9, 4), .month);
+        try testing.expectEqual(@as(f64, 1), mo.months);
+        try testing.expectEqual(@as(f64, 11), mo.days);
+    }
+    // Jan-31 +1mo constrains to Feb-29: 2020-01-31 → 2020-03-01 = 1m 1d.
+    {
+        const r = differenceISODate(mk(2020, 1, 31), mk(2020, 3, 1), .month);
+        try testing.expectEqual(@as(f64, 1), r.months);
+        try testing.expectEqual(@as(f64, 1), r.days);
+    }
+    // Negative direction mirrors.
+    {
+        const d = differenceISODate(mk(1969, 10, 5), mk(1969, 7, 24), .day);
+        try testing.expectEqual(@as(f64, -73), d.days);
+        const big = differenceISODate(mk(1996, 3, 3), mk(1969, 7, 24), .day);
+        try testing.expectEqual(@as(f64, -9719), big.days);
+        const y = differenceISODate(mk(2001, 6, 18), mk(1997, 12, 1), .year);
+        try testing.expectEqual(@as(f64, -3), y.years);
+        try testing.expectEqual(@as(f64, -6), y.months);
+        try testing.expectEqual(@as(f64, -17), y.days);
+    }
+    // Equal dates → zero.
+    {
+        const r = differenceISODate(mk(2020, 5, 5), mk(2020, 5, 5), .year);
+        try testing.expectEqual(@as(f64, 0), r.years);
+        try testing.expectEqual(@as(f64, 0), r.days);
+    }
+}
+
+test "roundRelativeDate: calendar-unit rounding (until/since fixtures)" {
+    const mk = struct {
+        fn f(y: i32, m: u8, dd: u8) PlainDateRecord {
+            return .{ .iso_year = y, .iso_month = m, .iso_day = dd };
+        }
+    }.f;
+    // Round start→dest under (smallest, increment, mode), capped at largest,
+    // and assert the {years, months, weeks, days} of the rounded duration.
+    const check = struct {
+        fn f(
+            start: PlainDateRecord,
+            dest: PlainDateRecord,
+            smallest: LargestUnit,
+            increment: i128,
+            mode: RoundingMode,
+            largest: LargestUnit,
+            ey: f64,
+            em: f64,
+            ew: f64,
+            ed: f64,
+        ) !void {
+            const diff = differenceISODate(start, dest, largest);
+            const r = roundRelativeDate(start, dest, diff, smallest, increment, mode, largest).?;
+            try testing.expectEqual(ey, r.years);
+            try testing.expectEqual(em, r.months);
+            try testing.expectEqual(ew, r.weeks);
+            try testing.expectEqual(ed, r.days);
+        }
+    }.f;
+
+    // roundingmode-ceil.js: 2019-01-08 → 2021-09-07 (1y/31m/139w/973d raw).
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .year, 1, .ceil, .year, 3, 0, 0, 0);
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .month, 1, .ceil, .month, 0, 32, 0, 0);
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .week, 1, .ceil, .week, 0, 0, 139, 0);
+    // reverse direction (later → earlier): ceil rounds toward zero.
+    try check(mk(2021, 9, 7), mk(2019, 1, 8), .year, 1, .ceil, .year, -2, 0, 0, 0);
+    try check(mk(2021, 9, 7), mk(2019, 1, 8), .month, 1, .ceil, .month, 0, -31, 0, 0);
+    try check(mk(2021, 9, 7), mk(2019, 1, 8), .week, 1, .ceil, .week, 0, 0, -139, 0);
+
+    // roundingincrement.js: same dates, halfExpand with various increments.
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .year, 4, .half_expand, .year, 4, 0, 0, 0);
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .month, 10, .half_expand, .month, 0, 30, 0, 0);
+    try check(mk(2019, 1, 8), mk(2021, 9, 7), .week, 12, .half_expand, .week, 0, 0, 144, 0);
+
+    // round-cross-unit-boundary.js: largestUnit=year bubbles 1y 12m → 2y.
+    try check(mk(2022, 1, 1), mk(2023, 12, 25), .month, 1, .expand, .year, 2, 0, 0, 0);
+
+    // rounding-relative.js: half ties decided by the day fraction.
+    try check(mk(2019, 1, 1), mk(2019, 2, 15), .month, 1, .half_expand, .month, 0, 2, 0, 0); // 14/28 = 0.5 → up
+    try check(mk(2019, 2, 15), mk(2019, 1, 1), .month, 1, .half_expand, .month, 0, -1, 0, 0); // 14/31 < 0.5 → toward zero
+}
 
 test "durationSign: first non-zero field decides" {
     try testing.expectEqual(@as(i32, 0), durationSign(.{}));
@@ -1158,4 +2610,116 @@ test "parseTemporalTimeString: Z designator (trailing) rejected as UTC" {
     try testing.expectError(error.UTCDesignator, parseTemporalTimeString("00:00:00Z"));
     try testing.expectError(error.Invalid, parseTemporalTimeString("00:00:00Zjunk"));
     try testing.expectError(error.Invalid, parseTemporalTimeString("00:00Zjunk"));
+}
+
+test "isValidEpochNanoseconds: inclusive bounds" {
+    try testing.expect(isValidEpochNanoseconds(0));
+    try testing.expect(isValidEpochNanoseconds(ns_max_instant));
+    try testing.expect(isValidEpochNanoseconds(ns_min_instant));
+    try testing.expect(!isValidEpochNanoseconds(ns_max_instant + 1));
+    try testing.expect(!isValidEpochNanoseconds(ns_min_instant - 1));
+}
+
+test "civil-date round trip" {
+    try testing.expectEqual(@as(i64, 0), daysFromCivil(1970, 1, 1));
+    try testing.expectEqual(@as(i64, -1), daysFromCivil(1969, 12, 31));
+    const r = civilFromDays(2513);
+    try testing.expectEqual(@as(i64, 1976), r.year);
+    try testing.expectEqual(@as(u32, 11), r.month);
+    try testing.expectEqual(@as(u32, 18), r.day);
+    var d: i64 = -2_000_000;
+    while (d < 2_000_000) : (d += 7919) {
+        const ymd = civilFromDays(d);
+        try testing.expectEqual(d, daysFromCivil(ymd.year, ymd.month, ymd.day));
+    }
+}
+
+test "instantToString: UTC forms with trimmed fraction" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("1970-01-01T00:00:00Z", instantToString(0, &buf));
+    try testing.expectEqualStrings("1976-11-18T14:23:30.123456789Z", instantToString(217175010123456789, &buf));
+    try testing.expectEqualStrings("1963-02-13T09:36:29.123456789Z", instantToString(-217175010876543211, &buf));
+}
+
+test "compareInstant" {
+    try testing.expectEqual(@as(i32, 0), compareInstant(5, 5));
+    try testing.expectEqual(@as(i32, -1), compareInstant(-1, 1));
+    try testing.expectEqual(@as(i32, 1), compareInstant(2, -2));
+}
+
+test "timeDurationNanoseconds" {
+    try testing.expectEqual(@as(i128, 3_600_000_000_000), timeDurationNanoseconds(.{ .hours = 1 }));
+    try testing.expectEqual(@as(i128, -1_000_000_000), timeDurationNanoseconds(.{ .seconds = -1 }));
+    try testing.expectEqual(@as(i128, 1_001_001_001), timeDurationNanoseconds(.{ .seconds = 1, .milliseconds = 1, .microseconds = 1, .nanoseconds = 1 }));
+}
+
+test "parseInstantString: valid forms fold the offset" {
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00Z"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00+00:00"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1969-12-31T16-08[America/Vancouver]"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00:00+00:00[UTC][u-ca=iso8601]"));
+    try testing.expectEqual(@as(i128, 217175010123456789), try parseInstantString("1976-11-18T14:23:30.123456789Z"));
+    // Range edges (inclusive).
+    try testing.expectEqual(ns_min_instant, try parseInstantString("-271821-04-20T00:00Z"));
+    try testing.expectEqual(ns_max_instant, try parseInstantString("+275760-09-13T00:00Z"));
+    try testing.expectEqual(ns_min_instant, try parseInstantString("-271821-04-19T23:00-01:00"));
+}
+
+test "parseInstantString: invalid forms reject" {
+    const bad = [_][]const u8{
+        "",                          "invalid iso8601",
+        "2020-01-00T00:00Z",         "2020-01-32T00:00Z",
+        "2020-02-30T00:00Z",         "2021-02-29T00:00Z",
+        "2020-00-01T00:00Z",         "2020-13-01T00:00Z",
+        "2020-01-01TZ",              "2020-01-01T25:00:00Z",
+        "2020-01-01T01:60:00Z",      "2020-01-01T00:00Zjunk",
+        "2020-01-01T00:00:00+00:00junk", "2020-01-01T00:00:00+00:00[UTC]junk",
+        "02020-01-01T00:00Z",        "2020-001-01T00:00Z",
+        "2020-01-001T00:00Z",        "2020-01-01T001Z",
+        "2020-01-01T00:00-24:00",    "2020-01-01T00:00+24:00",
+        "2020-W01-1T00:00Z",         "2020-001T00:00Z",
+        "+0002020-01-01T00:00Z",     "2020-01",
+        "01-01",                     "P1Y",
+        "2020-01-01",                "2020-01-01T00",
+        "2020-01-01T00:00",          "2020-01-01T00:00:00",
+        "2020-01-01T00:00:00.000000000", "-999999-01-01T00:00Z",
+        "+999999-01-01T00:00Z",      "2025-01-01T00:00:00+00:0000",
+        "2022-09-15Z",               "2022-09-15+00:00",
+    };
+    for (bad) |s| {
+        try testing.expectError(error.Invalid, parseInstantString(s));
+    }
+}
+
+test "parseInstantString: non-ASCII minus sign rejected" {
+    try testing.expectError(error.Invalid, parseInstantString("1976-11-18T15:23:30.12\u{2212}02:00"));
+    try testing.expectError(error.Invalid, parseInstantString("\u{2212}009999-11-18T15:23:30.12Z"));
+}
+
+test "parseInstantString: annotations + expanded basic year accepted" {
+    // Two non-critical calendar annotations are allowed (first wins,
+    // rest ignored); numeric-offset and IANA-style time-zone
+    // annotations are accepted and discarded.
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z[u-ca=iso8601][u-ca=discord]"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z[+00]"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z[-00:00]"));
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z[NotATimeZone]"));
+    // Unknown annotation keys may lead with `_` and carry mixed-case values.
+    try testing.expectEqual(@as(i128, 0), try parseInstantString("1970-01-01T00:00Z[foo=bar][_foo-bar0=Ignore-This-999999999999]"));
+    // Expanded year followed by basic (dash-free) date + time.
+    try testing.expectEqual(@as(i128, 217178610100000000), try parseInstantString("+0019761118T15:23:30.1+00:00"));
+}
+
+test "parseInstantString: annotation rule violations reject" {
+    const bad = [_][]const u8{
+        "1970-01-01T00:00Z[U-CA=iso8601]", // uppercase key
+        "1970-01-01T00:00Z[u-CA=iso8601]", // partially capitalised key
+        "1970-01-01T00:00Z[FOO=bar]", // capitalised unknown key
+        "1970-01-01T00:00Z[u-ca=iso8601][!u-ca=iso8601]", // 2 calendars, one critical
+        "1970-01-01T00:00Z[!u-ca=iso8601][u-ca=iso8601]",
+        "1970-01-01T00:00Z[!unknown=x]", // critical unknown annotation
+        "2021-08-19T17:30-07:00:01[-07:00:01]", // sub-minute time-zone offset annotation
+    };
+    for (bad) |s| try testing.expectError(error.Invalid, parseInstantString(s));
 }

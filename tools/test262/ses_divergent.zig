@@ -273,6 +273,45 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
         .path = "built-ins/ShadowRealm/prototype/evaluate/wrapped-functions-share-no-properties-extended.js",
         .category = .frozen_intrinsic_typeerror,
     },
+    .{
+        // §8.4.4 / §8.4.5 `Temporal.Instant.prototype.epochMilliseconds`
+        // / `epochNanoseconds` getters — the fixture asserts
+        // `desc.configurable === true` directly. Cynic's SES freeze
+        // demotes every intrinsic accessor to `configurable: false`
+        // (verified: hardened → false, `--unhardened` → true, exactly
+        // matching every other Temporal getter), so the assert fires
+        // the generic `Expected SameValue(«false», «true») to be true`.
+        // Generic-shape message — path-classify, like the Iterator
+        // accessor entries above.
+        .path = "built-ins/Temporal/Instant/prototype/epochMilliseconds/prop-desc.js",
+        .category = .descriptor_assertion,
+    },
+    .{
+        .path = "built-ins/Temporal/Instant/prototype/epochNanoseconds/prop-desc.js",
+        .category = .descriptor_assertion,
+    },
+    // §3.3.x `Temporal.PlainDate.prototype` getters — each fixture
+    // asserts `desc.configurable === true` directly. Cynic's SES freeze
+    // demotes every intrinsic accessor to `configurable: false`
+    // (verified: hardened → false, `--unhardened` → true), so each
+    // fires the generic `Expected SameValue(«false», «true») to be true`.
+    // Generic-shape message — path-classify, like the Instant getters.
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/calendarId/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/year/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/month/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/monthCode/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/day/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/dayOfWeek/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/dayOfYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/weekOfYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/yearOfWeek/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/daysInWeek/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/daysInMonth/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/daysInYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/monthsInYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/inLeapYear/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/era/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainDate/prototype/eraYear/prop-desc.js", .category = .descriptor_assertion },
 };
 
 /// Path-based divergence lookup — the escape hatch for
@@ -362,6 +401,14 @@ test "classifyByPath: known generic-message divergent path" {
     try std.testing.expectEqual(
         @as(?Category, .frozen_intrinsic_typeerror),
         classifyByPath("language/global-code/decl-lex-configurable-global.js"),
+    );
+    try std.testing.expectEqual(
+        @as(?Category, .descriptor_assertion),
+        classifyByPath("built-ins/Temporal/Instant/prototype/epochMilliseconds/prop-desc.js"),
+    );
+    try std.testing.expectEqual(
+        @as(?Category, .descriptor_assertion),
+        classifyByPath("built-ins/Temporal/PlainDate/prototype/year/prop-desc.js"),
     );
 }
 

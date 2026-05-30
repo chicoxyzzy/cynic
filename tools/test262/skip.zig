@@ -1150,22 +1150,30 @@ pub const single_realm_path_contains = [_][]const u8{
 // scoreboard in 0 / N noise.
 
 pub const deferred_path_prefixes = [_][]const u8{
-    // Temporal is a large Stage 4 surface (Duration / PlainTime /
-    // Instant / PlainDate / Calendar / TimeZone / ZonedDateTime / …).
-    // The implementation is being carried on a dedicated branch;
-    // on `main` the whole `built-ins/Temporal/` tree is skipped so
-    // the partial in-progress surface (constructors + a few methods,
-    // with the arithmetic-heavy `round` / `total` / `until` / `since`
-    // / `add` / `subtract` / `compare` paths unfinished) doesn't
-    // drown the runtime scoreboard in failing-method noise. The
-    // committed Temporal source stays in the tree — it's just not
-    // scored here until the dedicated effort lands the full surface
-    // and re-narrows this skip per-type.
-    "built-ins/Temporal/",
-    // `Date.prototype.toTemporalInstant` is part of the Temporal
-    // proposal surface; skipped on the same rationale until Temporal
-    // lands. ~7 fixtures.
-    "built-ins/Date/prototype/toTemporalInstant/",
+    // Temporal is a large Stage 4 surface (Calendar / TimeZone /
+    // PlainDate / …). On `main` the whole `built-ins/Temporal/` tree
+    // is blanket-skipped while the full implementation is carried here
+    // on the dedicated branch; this branch re-narrows the skip
+    // per-type as each lands. Cynic ships the self-contained,
+    // calendar- and time-zone-free value types so far —
+    // `Temporal.Duration` (§7), `Temporal.PlainTime` (§4),
+    // `Temporal.Instant` (§8), and `Temporal.PlainDate` (§3, ISO
+    // calendar only) — and those subtrees run; the remaining types
+    // stay skipped per-subtree until their implementation lands. As
+    // each type ships, drop its line.
+    "built-ins/Temporal/Now/",
+    "built-ins/Temporal/PlainDateTime/",
+    "built-ins/Temporal/PlainMonthDay/",
+    "built-ins/Temporal/PlainYearMonth/",
+    "built-ins/Temporal/ZonedDateTime/",
+    // `built-ins/Temporal/getOwnPropertyNames.js` asserts every one
+    // of the nine type names is an own property of the `Temporal`
+    // namespace. Cynic installs only Duration + PlainTime + Instant
+    // + PlainDate so far, so this one fixture fails until the namespace is
+    // complete. The sibling `prop-desc.js` / `keys.js` (which only
+    // probe the namespace's own descriptor + that it has no
+    // enumerable keys) pass and stay in scope.
+    "built-ins/Temporal/getOwnPropertyNames.js",
 };
 
 // ── --allow=eval-dependent ──────────────────────────────────────────
@@ -1412,7 +1420,7 @@ test "skip: main-spec paths not OOS" {
 
 test "skip: Temporal out of scope" {
     try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/Now/extensible.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/PlainDate/prototype/add/branding.js"));
+    try testing.expect(pathIsCynicOutOfScope("built-ins/Temporal/PlainDateTime/prototype/add/branding.js"));
 }
 
 test "skip: ShadowRealm is not path-skipped (feature-gated)" {
