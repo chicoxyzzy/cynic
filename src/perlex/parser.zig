@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const charset = @import("charset.zig");
+const idents = @import("../unicode/idents.zig");
 
 pub const Node = union(enum) {
     /// Matches the empty string (an empty alternative, e.g. `a|`).
@@ -534,23 +535,113 @@ const Parser = struct {
         return self.makeNode(.{ .capture = .{ .index = index, .name = name, .body = body } });
     }
 
-    /// A v1 group name is a run of ASCII identifier characters ended by
-    /// `>`. `\u` escapes and non-ASCII identifier code points exist in
-    /// the full grammar; patterns using them fall back so name equality
-    /// stays byte-exact here.
+    /// Parse a §22.2.1 GroupName body — a RegExpIdentifierName terminated
+    /// by `>` — returning its StringValue as freshly-allocated UTF-8.
+    /// Escapes decode to their canonical code points, so `\u{03C0}` and a
+    /// literal `π` yield byte-identical names; that makes `\k<…>`
+    /// resolution and the §22.2.1.1 duplicate-name early error fall out of
+    /// a plain byte comparison. The first code point must be a
+    /// RegExpIdentifierStart (UnicodeIDStart ∪ {$, _}); the rest
+    /// RegExpIdentifierPart (UnicodeIDContinue ∪ {$, _, <ZWNJ>, <ZWJ>}).
+    /// A `\u`/`\u{}` escape is read in +UnicodeMode regardless of the
+    /// pattern's `u` flag (the grammar fixes the escape sequence to
+    /// [+UnicodeMode]), and a `\uHHHH\uHHHH` lead/trail pair combines into
+    /// one supplementary code point. A code point that fails the
+    /// identifier test — or a stray non-`\u` escape, or a lone-surrogate
+    /// value — defers to the fallback, which is authoritative for the
+    /// SyntaxError verdict; an empty or unterminated name is itself an
+    /// unambiguous SyntaxError.
     fn parseGroupName(self: *Parser) ParseError![]const u8 {
-        const start = self.pos;
-        while (self.peek()) |c| {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var first = true;
+        while (true) {
+            const c = self.peek() orelse return error.SyntaxError; // unterminated
             if (c == '>') break;
-            if (c >= 0x80 or c == '\\') return error.Unsupported;
-            if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '$')) return error.Unsupported;
-            self.pos += 1;
+            const cp = try self.nextIdentifierCodePoint();
+            const is_ident = if (first)
+                idents.isIdentifierStart(cp)
+            else
+                idents.isIdentifierPart(cp);
+            if (!is_ident) return error.Unsupported;
+            var utf8: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cp, &utf8) catch return error.Unsupported;
+            try buf.appendSlice(self.a, utf8[0..n]);
+            first = false;
         }
-        if (self.peek() != '>') return error.SyntaxError;
-        if (self.pos == start) return error.SyntaxError; // empty name
-        const name = self.src[start..self.pos];
+        if (first) return error.SyntaxError; // empty name
         self.pos += 1; // consume `>`
-        return name;
+        return try buf.toOwnedSlice(self.a);
+    }
+
+    /// Read one code point of a RegExpIdentifierName, advancing past it. A
+    /// `\u`/`\u{}` escape decodes in +UnicodeMode (§22.2.1); any other `\`
+    /// escape, or invalid UTF-8 (e.g. a WTF-8 lone surrogate in the
+    /// source), defers to the fallback.
+    fn nextIdentifierCodePoint(self: *Parser) ParseError!u21 {
+        const c = self.peek() orelse return error.SyntaxError;
+        if (c == '\\') {
+            if (self.at(1) != 'u') return error.Unsupported;
+            return self.readGroupNameUnicodeEscape();
+        }
+        if (c < 0x80) {
+            self.pos += 1;
+            return c;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(c) catch return error.Unsupported;
+        if (self.pos + len > self.src.len) return error.Unsupported;
+        const cp = std.unicode.utf8Decode(self.src[self.pos .. self.pos + len]) catch return error.Unsupported;
+        self.pos += len;
+        return cp;
+    }
+
+    /// Read a RegExpUnicodeEscapeSequence[+UnicodeMode] beginning at `\u`
+    /// (`self.pos` on the `\`): `\u{CodePoint}` or `\uHHHH`, combining a
+    /// `\uHHHH\uHHHH` lead+trail surrogate pair into one supplementary
+    /// code point. A bare value is returned as-is — a lone surrogate fails
+    /// to UTF-8-encode in `parseGroupName` and defers.
+    fn readGroupNameUnicodeEscape(self: *Parser) ParseError!u21 {
+        std.debug.assert(self.src[self.pos] == '\\' and self.at(1) == 'u');
+        if (self.at(2) == '{') {
+            var i = self.pos + 3;
+            const start = i;
+            // u32 accumulator so an over-long run can't wrap a too-large
+            // value back under the 0x10FFFF cap (a u21 `*%` would).
+            var v: u32 = 0;
+            while (i < self.src.len) : (i += 1) {
+                const d = hexVal(self.src[i]) orelse break;
+                v = v * 16 + d;
+                if (v > 0x10FFFF) return error.Unsupported;
+            }
+            if (i == start or i >= self.src.len or self.src[i] != '}') return error.Unsupported;
+            self.pos = i + 1; // consume through `}`
+            return @intCast(v);
+        }
+        const lead = self.hex4At(self.pos + 2) orelse return error.Unsupported;
+        // [+UnicodeMode] HexLeadSurrogate \u HexTrailSurrogate → one code point.
+        if (lead >= 0xD800 and lead <= 0xDBFF and self.at(6) == '\\' and self.at(7) == 'u') {
+            if (self.hex4At(self.pos + 8)) |trail| {
+                if (trail >= 0xDC00 and trail <= 0xDFFF) {
+                    self.pos += 12; // two `\uHHHH` escapes
+                    return 0x10000 +
+                        (@as(u21, lead - 0xD800) << 10) +
+                        @as(u21, trail - 0xDC00);
+                }
+            }
+        }
+        self.pos += 6;
+        return lead;
+    }
+
+    /// Read exactly four hex digits at absolute index `idx`, or null if
+    /// fewer than four remain or a non-hex byte intervenes.
+    fn hex4At(self: *Parser, idx: usize) ?u16 {
+        if (idx + 4 > self.src.len) return null;
+        var v: u16 = 0;
+        for (self.src[idx .. idx + 4]) |ch| {
+            const d = hexVal(ch) orelse return null;
+            v = v * 16 + d;
+        }
+        return v;
     }
 
     fn parseEscape(self: *Parser) ParseError!*Node {
@@ -692,16 +783,22 @@ const Parser = struct {
                     if (!self.unicode and !self.unicode_sets) return error.Unsupported;
                     var i = self.pos + 3;
                     const start = i;
-                    var v: u21 = 0;
+                    // u32 accumulator so an over-long run can't wrap a
+                    // too-large value back under the 0x10FFFF cap (a u21 `*%`
+                    // would: `\u{200000}` → 0, `\u{300000}` → U+100000). Past
+                    // the non-Unicode gate above, CodePoint > 0x10FFFF is a
+                    // §22.2.1.1 early error Perlex owns directly — like the
+                    // out-of-range numeric backreference — rather than deferring.
+                    var v: u32 = 0;
                     while (i < self.src.len) : (i += 1) {
                         const d = hexVal(self.src[i]) orelse break;
-                        v = v *% 16 +% @as(u21, d);
-                        if (v > 0x10FFFF) return error.Unsupported;
+                        v = v * 16 + d;
+                        if (v > 0x10FFFF) return error.SyntaxError;
                     }
                     if (i == start or i >= self.src.len or self.src[i] != '}') return error.Unsupported;
                     if (v >= 0x80) self.non_ascii = true;
                     self.pos = i + 1; // consume through `}`
-                    return v;
+                    return @intCast(v);
                 }
                 var v: u21 = 0;
                 var i: usize = 2;

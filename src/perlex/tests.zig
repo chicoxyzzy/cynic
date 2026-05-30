@@ -417,6 +417,62 @@ test "perlex: iterated duplicate group clears captures each iteration" {
     try expectMatch("(?:(?:(?<x>a)|(?<x>b)|c)\\k<x>){2}", "aac", "aac,,");
 }
 
+// ── §22.2.1 RegExpIdentifierName — non-ASCII & escaped group names ───
+
+test "perlex: literal non-ASCII group name compiles and captures" {
+    // π (U+03C0) is UnicodeIDStart; a name is legal in both modes.
+    try expectMatch("(?<π>a)", "a", "a,a");
+    try expectMatchFlags("(?<π>a)", .{ .unicode = true }, "a", "a,a");
+    // A multi-code-point CJK name.
+    try expectMatch("(?<狐狸>a)", "a", "a,a");
+}
+
+test "perlex: \\u{} group-name escape is accepted regardless of the u flag" {
+    // §22.2.1: a RegExpIdentifier's `\ RegExpUnicodeEscapeSequence` is
+    // always [+UnicodeMode], so `\u{}` names are legal without `/u`.
+    try expectCompile("(?<\\u{03C0}>a)", .match);
+    try expectCompileFlags("(?<\\u{03C0}>a)", .{ .unicode = true }, .match);
+}
+
+test "perlex: \\uHHHH BMP group-name escape" {
+    // A == 'A'.
+    try expectMatch("(?<\\u0041>.)", "x", "x,x");
+}
+
+test "perlex: \\uHHHH\\uHHHH surrogate pair combines into one name code point" {
+    // 𝓑 == U+1D4D1 (MATH BOLD SCRIPT CAPITAL B), UnicodeIDStart.
+    try expectMatch("(?<\\ud835\\udcd1>a)", "a", "a,a");
+    try expectCompileFlags("(?<\\ud835\\udcd1>a)", .{ .unicode = true }, .match);
+}
+
+test "perlex: ZWNJ / ZWJ are IdentifierPart in a group name" {
+    // `_` start, then ZWNJ (U+200C) / ZWJ (U+200D) as a continue char.
+    try expectCompile("(?<_\\u200C>a)", .match);
+    try expectCompile("(?<_\\u200D>a)", .match);
+}
+
+test "perlex: $ start then non-Start continue (Osmanya digit) in a name" {
+    // \u{104A4} (Osmanya digit four) is UnicodeIDContinue but not Start;
+    // legal only after a Start char.
+    try expectCompileFlags("(?<$\\u{104A4}>a)", .{ .unicode = true }, .match);
+}
+
+test "perlex: escaped and literal spellings name the same group (\\k equality)" {
+    // §22.2.1.1 GroupName equality is by StringValue, so `\u{03C0}` and a
+    // literal `π` are the same name.
+    try expectMatch("(?<\\u{03C0}>a)\\k<π>", "aa", "aa,a");
+    try expectMatchFlags("(?<π>a)\\k<\\u{03C0}>", .{ .unicode = true }, "aa", "aa,a");
+}
+
+test "perlex: duplicate group name across escaped spellings is a syntax error" {
+    // Same StringValue twice in one Alternative — §22.2.1.1 early error.
+    try expectCompile("(?<π>a)(?<\\u{03C0}>b)", .syntax_error);
+}
+
+test "perlex: empty group name is a syntax error" {
+    try expectCompile("(?<>a)", .syntax_error);
+}
+
 // ── Fallback routing — constructs outside the v1 grammar ─────────────
 
 test "perlex: unsupported constructs fall back" {
@@ -513,6 +569,27 @@ test "perlex: out-of-range numeric backreference is a syntax error" {
     // In-range references (including a forward reference) still compile.
     try expectMatch("(a)\\1", "aa", "aa,a");
     try expectMatch("\\1(a)", "a", "a,a");
+}
+
+test "perlex: \\u{} code point past 0x10FFFF is a syntax error (§22.2.1.1)" {
+    // §22.2.1.1: a `\u{CodePoint}` whose MV exceeds 0x10FFFF is an early
+    // error. Under /u (or /v) — past the non-Unicode Annex B identity-escape
+    // gate — Perlex owns that verdict directly, exactly like the out-of-range
+    // numeric backreference above; it does not defer. The accumulator must be
+    // u32: a u21 `*%` would wrap a too-large value back under the 0x10FFFF cap
+    // and silently match (`\u{200000}` → NUL, `\u{300000}` → U+100000).
+    try expectCompileFlags("\\u{200000}", uflags, .syntax_error); // u21 *% wrapped to 0
+    try expectCompileFlags("\\u{300000}", uflags, .syntax_error); // u21 *% wrapped to U+100000
+    try expectCompileFlags("\\u{110000}", uflags, .syntax_error); // smallest over-range
+    try expectCompileFlags("\\u{FFFFFF}", uflags, .syntax_error);
+    try expectCompileFlags("\\u{200000}", .{ .unicode_sets = true }, .syntax_error); // also /v
+    // Boundary + ordinary supplementary code points still compile (the guard
+    // is `>`, not `>=`).
+    try expectCompileFlags("\\u{10FFFF}", uflags, .match); // max valid code point
+    try expectCompileFlags("\\u{1F600}", uflags, .match);
+    // Without /u or /v, `\u{…}` is Annex B identity-escape territory — Perlex
+    // defers to the fallback rather than ruling on it.
+    try expectCompile("\\u{200000}", .unsupported);
 }
 
 // ── §22.2.2.4 lookahead ─────────────────────────────────────────────
