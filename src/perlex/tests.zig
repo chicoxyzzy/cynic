@@ -92,6 +92,52 @@ fn expectCompileFlags(pattern: []const u8, flags: perlex.Flags, want: std.meta.T
     }
 }
 
+/// Render every capture group so the §22.2.2.3 zero-width distinction is
+/// visible: a *participating* group prints as its substring in single
+/// quotes (an empty capture shows as `''`), a *non-participating* group
+/// prints as `undef`. Groups are space-joined. The comma-joined
+/// `expectMatch` renders both unset and empty-captured as "", so it can't
+/// tell a guarded empty iteration (group stays undefined) from a mandatory
+/// empty iteration (group captures ""). The expected strings come from the
+/// cross-engine differential (engine262 authority).
+fn expectCaps(pattern: []const u8, input: []const u8, expected: []const u8) !void {
+    return expectCapsFlags(pattern, .{}, input, expected);
+}
+
+fn expectCapsFlags(pattern: []const u8, flags: perlex.Flags, input: []const u8, expected: []const u8) !void {
+    const gpa = testing.allocator;
+    var res = try perlex.compile(gpa, pattern, flags);
+    switch (res) {
+        .ok => |*prog| {
+            defer prog.deinit();
+            const units = try gpa.alloc(u16, input.len);
+            defer gpa.free(units);
+            for (input, 0..) |b, i| units[i] = @as(u16, b);
+
+            var m = (try perlex.exec(u16, gpa, prog, units, 0)) orelse return error.ExpectedMatch;
+            defer m.deinit(gpa);
+
+            var out: std.ArrayListUnmanaged(u8) = .empty;
+            defer out.deinit(gpa);
+            var g: usize = 0;
+            while (g < prog.group_count) : (g += 1) {
+                if (g != 0) try out.append(gpa, ' ');
+                const cs = m.slots[2 * g];
+                const ce = m.slots[2 * g + 1];
+                if (cs == perlex.none or ce == perlex.none) {
+                    try out.appendSlice(gpa, "undef");
+                } else {
+                    try out.append(gpa, '\'');
+                    for (units[cs..ce]) |u| try out.append(gpa, @intCast(u));
+                    try out.append(gpa, '\'');
+                }
+            }
+            try testing.expectEqualStrings(expected, out.items);
+        },
+        else => return error.ExpectedMatch,
+    }
+}
+
 // ── §22.2.1.1 \p{} property escapes ─────────────────────────────────
 // A tiny stub resolver exercises the parser / compiler / VM property
 // path without pulling the real Unicode tables (those are tested in
@@ -360,8 +406,10 @@ test "perlex: iterated duplicate group clears captures each iteration" {
 test "perlex: unsupported constructs fall back" {
     try expectCompile("[\\D]", .unsupported); // negated class escape in class
     try expectCompile("\\p{L}", .unsupported); // property escape
-    try expectCompile("(a?)*", .unsupported); // nullable quantifier body
-    try expectCompile("(?:)*", .unsupported); // nullable quantifier body
+    // A nullable body whose empty match comes from an *assertion* stays
+    // deferred: `(?=a)*` is a §22.2.1 QuantifiableAssertion, accepted only
+    // under Annex B (non-/u) and a SyntaxError under /u — leaving it to the
+    // fallback keeps that mode split rather than baking either reading in.
     try expectCompile("(?=a)*", .unsupported); // quantified assertion (Annex B)
     try expectCompile("a{0,5000}", .unsupported); // bound exceeds inline-expansion cap
     try expectCompile("a{99999}", .unsupported); // huge exact bound
@@ -559,6 +607,66 @@ test "perlex: quantifier clears captures each iteration" {
     // §22.2.2.3 step 4 — the last iteration takes the `b` branch, so
     // the group captured in an earlier iteration is left undefined.
     try expectMatch("(?:(a)|b)+", "ab", "ab,");
+}
+
+// ── §22.2.2.3 RepeatMatcher zero-width progress guard ───────────────
+//
+// Step 2.b: "If min = 0 and y.[[EndIndex]] = x.[[EndIndex]], return
+// FAILURE." — an *optional* iteration of a body that can match the
+// empty string fails the moment it consumes nothing, so the loop stops
+// and that empty iteration's captures roll back to undefined. Step 4
+// clears the body's groups before each iteration. A *mandatory*
+// iteration (one of the first `min`) is not guarded: it participates
+// even when empty, capturing "". The expected captures below come from
+// the cross-engine differential (engine262 authority; V8 / JSC /
+// SpiderMonkey / QuickJS unanimous). `expectCaps` renders a
+// participating group as 'substring' (empty as '') and a
+// non-participating group as `undef`, the distinction this guard turns on.
+
+test "perlex: nullable star body stops on the first empty optional iteration" {
+    // Each iteration consumes one 'a' until the input runs out; the final
+    // empty iteration is rolled back, so the group holds the last
+    // non-empty capture, never "".
+    try expectCaps("(a?)*", "aaa", "'aaa' 'a'");
+    try expectCaps("(a|)*", "aaa", "'aaa' 'a'");
+    try expectCaps("(|a)*", "aaa", "'aaa' 'a'");
+    // A greedy inner star swallows the whole run in one iteration.
+    try expectCaps("(a*)*", "aaa", "'aaa' 'aaa'");
+    try expectCaps("(a*)*", "aab", "'aa' 'aa'");
+    try expectCaps("(a*)*", "aaab", "'aaa' 'aaa'");
+    // No progress at all → zero iterations → the group never participates.
+    try expectCaps("(a?)*", "", "'' undef");
+    try expectCaps("(a?)*", "b", "'' undef");
+    try expectCaps("(a*)*", "", "'' undef");
+}
+
+test "perlex: nullable body — mandatory iterations participate, optional ones are guarded" {
+    // `{2}` / `{2,}` — the two mandatory iterations are unguarded, so an
+    // empty body still captures "".
+    try expectCaps("(a?){2}", "b", "'' ''");
+    try expectCaps("(a?){2,}", "b", "'' ''");
+    // `+` is min = 1: the one mandatory empty iteration captures "".
+    try expectCaps("(a*)+", "", "'' ''");
+    try expectCaps("(a?)+", "aaa", "'aaa' 'a'");
+    // `{0,3}` — every iteration is optional, so the first empty one is
+    // rolled back and the group stays undefined.
+    try expectCaps("(a?){0,3}", "b", "'' undef");
+}
+
+test "perlex: nullable body — lazy, empty non-capture, and concat" {
+    // Lazy `*?` prefers zero iterations: the group never participates.
+    try expectCaps("(a?)*?", "aaa", "'' undef");
+    // A capture-free nullable body: only the whole-match group exists.
+    try expectCaps("(?:)*", "aaa", "''");
+    // Concatenated nullable atoms inside the body.
+    try expectCaps("(a?b?)*", "ab", "'ab' 'ab'");
+}
+
+test "perlex: nested nullable quantifier bodies use independent progress marks" {
+    // Two nested guarded loops → two scratch slots; each tracks its own
+    // iteration's start so an inner empty iteration can't fool the outer.
+    try expectCaps("((a?)*)*", "aa", "'aa' 'aa' 'a'");
+    try expectCaps("((a)?)*", "aa", "'aa' 'a' 'a'");
 }
 
 // ── §22.2.1 character classes, `.`, class escapes, boundaries ───────

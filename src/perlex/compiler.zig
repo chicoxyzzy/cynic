@@ -22,6 +22,13 @@ pub const max_groups = 64;
 /// fall back to the vendored matcher's counted-loop lowering.
 pub const max_repeat_expand = 1024;
 
+/// Upper bound on §22.2.2.3 progress-guard scratch slots — one per
+/// quantifier over a nullable body. The VM snapshots the whole slot
+/// array into a fixed stack buffer for each lookaround, so the count
+/// must be bounded; patterns with more nullable quantifiers than this
+/// defer to the vendored matcher.
+pub const max_scratch = 64;
+
 pub const Flags = packed struct {
     global: bool = false,
     ignore_case: bool = false,
@@ -111,6 +118,17 @@ pub const Inst = union(enum) {
     /// in `match`) at the current position without consuming input;
     /// `negative` inverts success.
     lookahead: LookInst,
+    /// §22.2.2.3 zero-width progress guard, top of a guarded iteration:
+    /// record the current input position into scratch slot `n` (a slot
+    /// past the capture slots in the same array). Logged to the undo
+    /// stack, so a backtrack rolls it back like any capture write.
+    prog_mark: usize,
+    /// §22.2.2.3 step 2.b, bottom of a guarded iteration: succeed only
+    /// when the position advanced since the matching `prog_mark`. An
+    /// iteration that consumed nothing fails here, which (falling
+    /// through to backtrack) stops the loop and rolls the empty
+    /// iteration's captures back to "unset".
+    prog_check: usize,
 
     pub const Char = struct { cp: u21, fold: bool };
     pub const WordBoundary = struct { negated: bool, fold: bool };
@@ -141,9 +159,15 @@ fn freeInsts(gpa: std.mem.Allocator, insts: []const Inst) void {
 
 pub const Program = struct {
     insts: []Inst,
-    /// Capturing groups including the whole match (group 0); capture
-    /// slot array length is `2 * group_count`.
+    /// Capturing groups including the whole match (group 0). The VM's
+    /// slot array holds `2 * group_count` capture slots followed by
+    /// `scratch_count` progress-guard slots, so its length is
+    /// `2 * group_count + scratch_count`.
     group_count: usize,
+    /// §22.2.2.3 progress-guard scratch slots appended after the
+    /// capture slots (see `group_count`). Zero for a pattern with no
+    /// quantifier over a nullable body.
+    scratch_count: usize = 0,
     /// Group name per group index; length `group_count`, index 0 null.
     names: []const ?[]const u8,
     flags: Flags,
@@ -196,6 +220,7 @@ pub fn compile(gpa: std.mem.Allocator, result: parser.ParseResult, flags: Flags,
     return .{
         .insts = try c.insts.toOwnedSlice(gpa),
         .group_count = result.capture_count + 1,
+        .scratch_count = c.scratch_count,
         .names = names,
         .flags = flags,
         .is_regular = c.regular,
@@ -244,6 +269,21 @@ const Compiler = struct {
     /// Resolver for `\p{…}` escapes, or null when the caller offers none
     /// (then property escapes defer the whole pattern to the fallback).
     resolver: ?PropertyResolver = null,
+    /// Count of §22.2.2.3 progress-guard scratch slots handed out so far
+    /// (see `allocScratch`); becomes `Program.scratch_count`.
+    scratch_count: usize = 0,
+
+    /// Hand out a fresh progress-guard scratch slot, positioned just past
+    /// the `2 * group_count` capture slots in the VM's shared slot array
+    /// (`names.len` is the group count, including group 0). Living in that
+    /// array means the VM's undo log rolls the slot back on backtrack like
+    /// any capture, and the bridge — which reads only the capture slots —
+    /// never sees it.
+    fn allocScratch(self: *Compiler) usize {
+        const idx = 2 * self.names.len + self.scratch_count;
+        self.scratch_count += 1;
+        return idx;
+    }
 
     fn deinitPartial(self: *Compiler) void {
         freeInstContents(self.gpa, self.insts.items);
@@ -423,18 +463,31 @@ const Compiler = struct {
     }
 
     fn compileRepeat(self: *Compiler, r: Node.Repeat) CompileError!void {
-        // A quantified body that can match the empty string risks a
-        // zero-width infinite loop; the §22.2.2.3 progress guard for
-        // that case isn't built yet, so defer such patterns to the
-        // fallback. With a non-nullable body every iteration consumes
-        // at least one code unit, so the loops below terminate.
-        if (nullable(r.body)) return error.Unsupported;
+        // A body that can match the empty string would spin a zero-width
+        // loop without the §22.2.2.3 progress guard emitted below. Most
+        // such bodies are guarded here; a few kinds still defer to the
+        // fallback (see `deferNullableBody`). With a non-nullable body
+        // every iteration consumes at least one code unit, so the loops
+        // below terminate without a guard.
+        const body_nullable = nullable(r.body);
+        if (body_nullable and deferNullableBody(r.body)) return error.Unsupported;
 
         // Inline expansion would blow up for huge bounds; defer those.
         if (r.min > max_repeat_expand) return error.Unsupported;
         if (r.max != parser.unbounded_max and r.max - r.min > max_repeat_expand) return error.Unsupported;
 
-        // `min` mandatory iterations.
+        // §22.2.2.3 step 2.b guards only the *optional* iterations (the
+        // unbounded tail, or the `max - min` skippable ones); its `min = 0`
+        // precondition exempts the mandatory `min` iterations, which run
+        // unconditionally and so participate even when they match empty.
+        // One scratch slot serves all of a quantifier's optional
+        // iterations, since each `prog_mark` re-stamps it.
+        const has_optional = r.max == parser.unbounded_max or r.max > r.min;
+        const guard = body_nullable and has_optional;
+        if (guard and self.scratch_count >= max_scratch) return error.Unsupported;
+        const scratch: usize = if (guard) self.allocScratch() else undefined;
+
+        // `min` mandatory iterations — unguarded.
         var i: usize = 0;
         while (i < r.min) : (i += 1) try self.compileIteration(r.body);
 
@@ -444,7 +497,9 @@ const Compiler = struct {
             const split_idx = self.here();
             try self.emit(.{ .split = .{ .a = 0, .b = 0 } });
             const body_start = self.here();
+            if (guard) try self.emit(.{ .prog_mark = scratch });
             try self.compileIteration(r.body);
+            if (guard) try self.emit(.{ .prog_check = scratch });
             try self.emit(.{ .jmp = loop });
             const exit = self.here();
             self.insts.items[split_idx].split = if (r.greedy)
@@ -459,10 +514,14 @@ const Compiler = struct {
             while (k < r.max) : (k += 1) {
                 try splits.append(self.gpa, self.here());
                 try self.emit(.{ .split = .{ .a = 0, .b = 0 } });
+                if (guard) try self.emit(.{ .prog_mark = scratch });
                 try self.compileIteration(r.body);
+                if (guard) try self.emit(.{ .prog_check = scratch });
             }
             const exit = self.here();
             for (splits.items) |s| {
+                // `s` is the split; its body begins at the next instruction
+                // (the `prog_mark` when guarded, else the iteration body).
                 const body_start = s + 1;
                 self.insts.items[s].split = if (r.greedy)
                     .{ .a = body_start, .b = exit }
@@ -781,8 +840,9 @@ fn lookbehindBodyOk(node: *const Node) bool {
 }
 
 /// Whether a subtree can match the empty string. A quantifier over a
-/// nullable body needs the §22.2.2.3 zero-width progress guard, which
-/// isn't built yet — such bodies are declined to the fallback.
+/// nullable body needs the §22.2.2.3 zero-width progress guard
+/// (`compileRepeat` emits `prog_mark`/`prog_check`); a non-nullable body
+/// makes every iteration consume input, so no guard is needed.
 fn nullable(node: *const Node) bool {
     return switch (node.*) {
         .empty, .anchor_start, .anchor_end, .word_boundary, .backref_name, .backref_index, .lookahead => true,
@@ -805,6 +865,38 @@ fn nullable(node: *const Node) bool {
             for (alts) |a| {
                 if (nullable(a)) return true;
             }
+            return false;
+        },
+    };
+}
+
+/// Whether a nullable quantifier body must still defer to the fallback
+/// even though `compileRepeat` can guard it. The §22.2.2.3 progress
+/// guard lets Perlex own most nullable bodies; three kinds stay deferred:
+///   • an *assertion* body (`(?=…)`, `^`, `$`, `\b`) — `(?=a)*` is a
+///     §22.2.1 QuantifiableAssertion, a SyntaxError under `/u` but
+///     Annex-B-legal without it; that mode split is only modelled by the
+///     fallback, so compiling it here would bake in one reading;
+///   • a *backreference* body — its participation-dependent width
+///     interacts with the guard in ways the v1 lowering doesn't model;
+///   • a `/v` set whose membership includes the empty string (a `\q{}`
+///     empty alternative) — left to the fallback until that path lands.
+/// Called only when `nullable(node)` already holds.
+fn deferNullableBody(node: *const Node) bool {
+    return switch (node.*) {
+        .anchor_start, .anchor_end, .word_boundary, .lookahead, .backref_name, .backref_index => true,
+        .class_set => |cs| classSetMayMatchEmpty(cs),
+        .empty, .char, .class, .dot, .prop => false,
+        .noncapture => |b| deferNullableBody(b),
+        .modifier_group => |mg| deferNullableBody(mg.body),
+        .capture => |g| deferNullableBody(g.body),
+        .repeat => |r| deferNullableBody(r.body),
+        .concat => |parts| {
+            for (parts) |p| if (deferNullableBody(p)) return true;
+            return false;
+        },
+        .alternate => |alts| {
+            for (alts) |a| if (deferNullableBody(a)) return true;
             return false;
         },
     };
