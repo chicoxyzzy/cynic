@@ -96,6 +96,17 @@ pub const none: usize = std.math.maxInt(usize);
 /// engine, not this limit.
 const step_limit: u64 = 1 << 24;
 
+/// Inline capacity for the per-lookaround capture-snapshot buffer. A
+/// zero-width assertion snapshots the live slot array before running
+/// its sub-program; slot counts at or below this use a stack buffer,
+/// larger ones spill to the heap. This is a small-vector perf hint,
+/// not a correctness bound — it's deliberately decoupled from the
+/// compiler's group/scratch ceilings so those can grow without
+/// resizing a fixed buffer. 32 slots covers ≈every real pattern (16
+/// capturing groups, or fewer groups plus progress-guard scratch)
+/// with no allocation.
+const lookaround_inline_slots: usize = 32;
+
 pub const Match = struct {
     /// `2 * group_count` capture slots: `[2g]` start, `[2g+1]` end (in
     /// code units of the matched `Unit` width), or `none` if group `g`
@@ -266,6 +277,27 @@ fn Matcher(comptime Unit: type) type {
                             continue;
                         }
                     },
+                    .counter_init => |ci| {
+                        // §22.2.2.3 — seed a counted loop's iteration count.
+                        // Logged to `undo`, so a backtrack restores any
+                        // prior value (a counted loop nested inside another
+                        // quantifier's body is re-seeded each outer pass).
+                        try self.write(undo, ci.slot, ci.n);
+                        pc += 1;
+                        continue;
+                    },
+                    .counter_loop => |cl| {
+                        // §22.2.2.3 — one counted iteration done: decrement
+                        // and loop back while passes remain, else fall
+                        // through. Only reached by fall-through after a full
+                        // body match, so the counter is ≥ 1. The decrement
+                        // is logged so a backtrack restores the count.
+                        std.debug.assert(self.slots[cl.slot] >= 1);
+                        const remaining = self.slots[cl.slot] - 1;
+                        try self.write(undo, cl.slot, remaining);
+                        pc = if (remaining > 0) cl.target else pc + 1;
+                        continue;
+                    },
                     .assert_start => |multiline| {
                         // `^`: input start, or (multiline) just after a
                         // line terminator.
@@ -353,12 +385,25 @@ fn Matcher(comptime Unit: type) type {
                         // fresh stacks, sharing the capture array. The
                         // assertion is zero-width: `sp` is unchanged
                         // whatever the outcome.
-                        // Sized for the full slot array: capture slots plus
+                        //
+                        // Snapshot the live slot array — capture slots plus
                         // the §22.2.2.3 scratch slots a nullable quantifier
-                        // inside the sub-program may use.
-                        var saved: [2 * compiler.max_groups + compiler.max_scratch]usize = undefined;
+                        // in the sub-program may use — so the outcome can be
+                        // rolled back. Sized to the actual slot count, not a
+                        // compile-time ceiling: small counts (≈all patterns)
+                        // use the inline buffer, larger ones spill to the
+                        // heap. Each lookaround (including nested ones) gets
+                        // its own `saved` on the call stack, so there's no
+                        // sharing hazard; the heap slice, when taken, stays
+                        // valid across the recursive `runLoop` below.
                         const n = self.slots.len;
-                        @memcpy(saved[0..n], self.slots);
+                        var inline_buf: [lookaround_inline_slots]usize = undefined;
+                        const saved = if (n <= inline_buf.len)
+                            inline_buf[0..n]
+                        else
+                            try self.gpa.alloc(usize, n);
+                        defer if (n > inline_buf.len) self.gpa.free(saved);
+                        @memcpy(saved, self.slots);
                         var sub_bt: std.ArrayListUnmanaged(Frame) = .empty;
                         defer sub_bt.deinit(self.gpa);
                         var sub_undo: std.ArrayListUnmanaged(Undo) = .empty;
@@ -367,7 +412,7 @@ fn Matcher(comptime Unit: type) type {
                         if (matched != la.negative) {
                             if (la.negative) {
                                 // A negative lookahead contributes no captures.
-                                @memcpy(self.slots, saved[0..n]);
+                                @memcpy(self.slots, saved);
                             } else {
                                 // A positive lookahead keeps its captures;
                                 // log them so an outer backtrack restores
