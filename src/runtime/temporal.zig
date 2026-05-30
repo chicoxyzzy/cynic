@@ -812,9 +812,20 @@ pub const TimeParseError = error{ Invalid, UTCDesignator };
 pub fn parseTemporalTimeString(input: []const u8) TimeParseError!PlainTimeRecord {
     var s = input;
 
-    // Strip trailing annotation blocks `[...]` (calendar / time-zone
-    // annotations). There may be more than one; each is balanced.
-    s = stripAnnotations(s) catch return error.Invalid;
+    // Split off the trailing RFC 9557 annotation blocks at the first `[`
+    // and validate them with the shared grammar (consumeAnnotations):
+    // duplicate time-zone annotations, a time-zone annotation following a
+    // key=value one, capitalised annotation keys, unknown critical
+    // annotations, and >1 critical calendar are all rejected. The time /
+    // UTC-offset portion preceding the annotations never contains a `[`,
+    // so the first one cleanly delimits them. (A bare strip-and-discard
+    // accepted every malformed block.)
+    if (std.mem.indexOfScalar(u8, s, '[')) |ann_start| {
+        var c = Cursor{ .s = s[ann_start..] };
+        _ = consumeAnnotations(&c) catch return error.Invalid;
+        if (!c.done()) return error.Invalid; // trailing junk after the annotations
+        s = s[0..ann_start];
+    }
 
     // A date-time string starts with a date (`YYYY-MM-DD` or the
     // compact `YYYYMMDD` / `±YYYYYY-MM-DD`). Detect a date prefix
@@ -901,20 +912,6 @@ fn isValidUtcOffset(s: []const u8) bool {
     const sub = readFraction(s, &i) catch return false;
     _ = sub;
     return i == s.len;
-}
-
-/// Strip one or more trailing `[...]` annotation blocks. Errors if a
-/// `[` is unbalanced.
-fn stripAnnotations(s: []const u8) error{Invalid}![]const u8 {
-    var end = s.len;
-    while (end > 0 and s[end - 1] == ']') {
-        // Find the matching `[`.
-        var i = end - 1;
-        while (i > 0 and s[i] != '[') i -= 1;
-        if (s[i] != '[') return error.Invalid;
-        end = i;
-    }
-    return s[0..end];
 }
 
 const DatePrefix = union(enum) {
@@ -4186,6 +4183,32 @@ test "parseTemporalTimeString: offset + annotations discarded" {
     try testing.expectEqual(@as(u32, 12), d.hour);
     const e = try parseTemporalTimeString("T12:34:56[!Africa/Abidjan]");
     try testing.expectEqual(@as(u32, 56), e.second);
+}
+
+test "parseTemporalTimeString: malformed annotations rejected (RFC 9557)" {
+    // The trailing `[...]` blocks must satisfy the RFC 9557 grammar — a
+    // bare strip-and-discard accepted these. Each is a RangeError source
+    // in ToTemporalTime / the *ISO conversions (e.g. withPlainTime).
+    // More than one time-zone annotation.
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00[UTC][UTC]"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00[!UTC][UTC]"));
+    // A time-zone annotation must precede any key=value annotation.
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00[foo=bar][UTC]"));
+    // Annotation keys are lowercase only.
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00[U-CA=iso8601]"));
+    // Unknown annotation carrying the critical `!` flag.
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00[!foo=bar]"));
+    // Two calendar annotations are only syntactical if neither is critical.
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00[u-ca=iso8601][!u-ca=iso8601]"));
+    // Empty annotation / unterminated bracket / trailing junk.
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00[]"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00[UTC"));
+    try testing.expectError(error.Invalid, parseTemporalTimeString("00:00[UTC]junk"));
+    // Valid multi-annotation forms still parse (tz then calendar).
+    const a = try parseTemporalTimeString("00:00[UTC][u-ca=iso8601]");
+    try testing.expectEqual(@as(u32, 0), a.hour);
+    const b = try parseTemporalTimeString("00:00[u-ca=iso8601][u-ca=iso8601]");
+    try testing.expectEqual(@as(u32, 0), b.minute);
 }
 
 test "parseTemporalTimeString: leap second clamps to 59" {
