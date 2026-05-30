@@ -440,6 +440,13 @@ const SkipReason = enum {
     raw_flag,
     has_includes,
     unsupported_feature,
+    /// Fixture is tagged with an Annex B / SES-carve-out feature
+    /// (`skip_rules.featureIsOutOfScope`). Permanently out of scope
+    /// for a strict-only, SES-hardened, non-browser engine — dropped
+    /// from the `corpus` denominator entirely, like the `annexB/`
+    /// path tree, instead of counted as an in-corpus skip. See
+    /// `recordOutcome` and `Stats.oos`.
+    annex_b,
     no_frontmatter,
     malformed_frontmatter,
     /// Fixture is filtered out of the current sweep's `Phase`.
@@ -673,6 +680,17 @@ const Stats = struct {
     /// roadmap work — `by_path` is policy-set, `unsupported_feature`
     /// is feature-flag-set, the rest are corpus-shape skips.
     skip_by_reason: [skip_reason_count]u32 = std.mem.zeroes([skip_reason_count]u32),
+    /// Fixtures dropped from the `corpus` denominator as permanently
+    /// out of scope — `flags: [noStrict]` (strict-only engine) and
+    /// Annex B / SES-carve-out feature tags. NOT part of `total`,
+    /// `skip`, or any bucket; tracked here purely so the tally can
+    /// report how much the corpus was trimmed and why. The frontmatter
+    /// analogue of the path-based `pathIsPermanentlyOutOfScope` walk
+    /// filter (those never reach `recordOutcome` at all).
+    oos: u32 = 0,
+    /// Per-reason histogram of `oos`. Indexed by `SkipReason`; only
+    /// `.no_strict` and `.annex_b` are ever non-zero. Sums to `oos`.
+    oos_by_reason: [skip_reason_count]u32 = std.mem.zeroes([skip_reason_count]u32),
 
     fn pass(self: *const Stats) u32 {
         return self.pass_pos + self.pass_neg;
@@ -1741,17 +1759,36 @@ const PhaseResult = struct {
     }
 };
 
+/// Skip reasons that take a fixture *out of the corpus denominator*
+/// rather than counting as an in-corpus skip. These mirror the
+/// path-based `pathIsPermanentlyOutOfScope` filter for frontmatter-
+/// derived exclusions:
+///   - `.no_strict` — `flags: [noStrict]` fixtures exercise sloppy
+///     mode, which Cynic does not implement (strict-only by design).
+///   - `.annex_b`   — feature tags for browser-only Annex B / SES
+///     carve-outs Cynic intentionally omits (`__proto__`,
+///     `legacy-regexp`, `IsHTMLDDA`, …).
+/// Both are permanent design boundaries, not tech debt, so they are
+/// dropped from `total` like `intl402/` and the `annexB/` tree.
+fn isOutOfScopeReason(r: SkipReason) bool {
+    return switch (r) {
+        .no_strict, .annex_b => true,
+        else => false,
+    };
+}
+
 /// Update `stats` / `buckets` / `failures` / `pass_paths` for one
 /// test outcome. Pulled out so the sequential and per-worker code
 /// paths share the bookkeeping logic instead of drifting. Worker
 /// version operates on its private structs and merges under
 /// `merge_mu` at exit; sequential version passes the globals.
 ///
-/// `stats.total` is bumped *here* (not at dispatch). Out-of-phase
-/// fixtures — those filtered to a different phase, with
-/// `outcome.skip_reason == .out_of_phase` — return immediately
-/// without touching anything: no stats bump, no bucket bump, no
-/// failures, no pass_paths.
+/// `stats.total` is bumped *here* (not at dispatch). Two classes of
+/// skip return early *before* the bump, so they never enter the
+/// corpus denominator: out-of-phase fixtures (filtered to a
+/// different phase) touch nothing at all, and out-of-scope skips
+/// (`isOutOfScopeReason`) are tallied under `oos` / `oos_by_reason`
+/// for the trim report but excluded from `total`.
 fn recordOutcome(
     gpa: std.mem.Allocator,
     stats: *Stats,
@@ -1762,8 +1799,22 @@ fn recordOutcome(
     outcome: RunResult,
     is_full_run: bool,
 ) !void {
-    if (outcome.kind == .skip and outcome.skip_reason != null and outcome.skip_reason.? == .out_of_phase) {
-        return;
+    if (outcome.kind == .skip) {
+        if (outcome.skip_reason) |reason| {
+            // Out-of-phase fixtures are ignored entirely (phase
+            // filtering): no stats, no bucket, no failures, no cache.
+            if (reason == .out_of_phase) return;
+            // Permanently out-of-scope frontmatter skips (strict-only
+            // `flags: [noStrict]`, Annex B / SES-carve-out feature
+            // tags) are dropped from the corpus denominator like the
+            // path-based `pathIsPermanentlyOutOfScope` filter, but
+            // tallied under `oos` so the tally can show the trim.
+            if (isOutOfScopeReason(reason)) {
+                stats.oos += 1;
+                stats.oos_by_reason[@intFromEnum(reason)] += 1;
+                return;
+            }
+        }
     }
     stats.total += 1;
 
@@ -2010,8 +2061,10 @@ fn mergeStats(dst: *Stats, src: *const Stats) void {
     dst.divergent += src.divergent;
     dst.witness_pass += src.witness_pass;
     dst.witness_fail += src.witness_fail;
+    dst.oos += src.oos;
     inline for (0..skip_reason_count) |i| {
         dst.skip_by_reason[i] += src.skip_by_reason[i];
+        dst.oos_by_reason[i] += src.oos_by_reason[i];
     }
 }
 
@@ -2154,8 +2207,18 @@ fn classifyAndRun(
     // effect: parser `pass%` becomes a real "what fraction of
     // the corpus does the parser handle" gauge instead of a
     // heuristic-skipped underestimate.
+    // Split the feature gate two ways. Out-of-scope tags (Annex B /
+    // SES carve-outs Cynic never implements) classify as `.annex_b`
+    // — `recordOutcome` drops those from the corpus denominator.
+    // Currently-skipped tags (unimplemented pre-Stage-4 proposals,
+    // vendored gaps) stay in-corpus as `.unsupported_feature` so
+    // they keep dragging `pass%` until the work lands. Check OOS
+    // first: a tag in neither set falls through and runs.
     for (fm.features) |feat| {
-        if (skip_rules.featureIsUnsupported(feat)) {
+        if (skip_rules.featureIsOutOfScope(feat)) {
+            return .{ .kind = .skip, .skip_reason = .annex_b };
+        }
+        if (skip_rules.featureIsCurrentlySkipped(feat)) {
             return .{ .kind = .skip, .skip_reason = .unsupported_feature };
         }
     }
@@ -2834,6 +2897,7 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
             \\pass:     {d}   ({d:.2}% — pass / corpus)
             \\fail:     {d}
             \\skip:     {d}
+            \\oos:      {d}   (dropped from corpus — strict-only + Annex B)
             \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
             \\  parse-negative: {d} attempted, {d} pass, {d} fail (false-accept)
             \\elapsed:  {d}ms
@@ -2844,6 +2908,7 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
             pass_pct,
             stats.fail(),
             stats.skip,
+            stats.oos,
             stats.pos_attempted,
             stats.pass_pos,
             stats.fail_reject,
@@ -2861,6 +2926,7 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
             \\pass%:     {d:.2}% — (pass + divergent) / corpus under SES policy
             \\fail:      {d}
             \\skip:      {d}
+            \\oos:       {d}   (dropped from corpus — strict-only + Annex B)
             \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
             \\  parse-negative: {d} attempted, {d} pass, {d} fail (false-accept)
             \\elapsed:   {d}ms
@@ -2873,6 +2939,7 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
             adj_pct,
             stats.fail(),
             stats.skip,
+            stats.oos,
             stats.pos_attempted,
             stats.pass_pos,
             stats.fail_reject,
@@ -2900,23 +2967,42 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
     }
 }
 
-/// `--skip-breakdown` output: a one-block histogram of the
-/// `skip` count by `SkipReason`. Each row is the reason label,
-/// count, and percent-of-skip. Sums to `stats.skip`. Useful for
-/// sizing roadmap work — `by_path` reflects the policy skiplist,
-/// `unsupported_feature` reflects per-realm feature flags, the
-/// rest are corpus-shape skips that won't move with more
+/// `--skip-breakdown` output: two histograms.
+///
+/// First, the in-corpus `skip` count by `SkipReason`, each row a
+/// reason label, count, and percent-of-skip — sums to `stats.skip`.
+/// Useful for sizing roadmap work: `by_path` reflects the policy
+/// skiplist, `unsupported_feature` reflects unimplemented features,
+/// the rest are corpus-shape skips that won't move with more
 /// engineering.
+///
+/// Second, the out-of-scope trim (`stats.oos`) — fixtures dropped
+/// from the corpus denominator entirely (strict-only `noStrict`
+/// fixtures, Annex B / SES feature tags). These are permanent
+/// design boundaries, not deferred work, so they're reported
+/// separately from `skip` rather than folded into it.
 fn printSkipBreakdown(io: std.Io, stats: *const Stats) !void {
-    if (stats.skip == 0) return;
     var buf: [1024]u8 = undefined;
-    try std.Io.File.stdout().writeStreamingAll(io, "\nskip breakdown:\n");
-    inline for (@typeInfo(SkipReason).@"enum".fields) |f| {
-        const count = stats.skip_by_reason[f.value];
-        if (count > 0) {
-            const pct: f64 = 100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(stats.skip));
-            const line = try std.fmt.bufPrint(&buf, "  {s:<24} {d:>6}  ({d:>5.2}%)\n", .{ f.name, count, pct });
-            try std.Io.File.stdout().writeStreamingAll(io, line);
+    if (stats.skip > 0) {
+        try std.Io.File.stdout().writeStreamingAll(io, "\nskip breakdown:\n");
+        inline for (@typeInfo(SkipReason).@"enum".fields) |f| {
+            const count = stats.skip_by_reason[f.value];
+            if (count > 0) {
+                const pct: f64 = 100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(stats.skip));
+                const line = try std.fmt.bufPrint(&buf, "  {s:<24} {d:>6}  ({d:>5.2}%)\n", .{ f.name, count, pct });
+                try std.Io.File.stdout().writeStreamingAll(io, line);
+            }
+        }
+    }
+    if (stats.oos > 0) {
+        try std.Io.File.stdout().writeStreamingAll(io, "\nout-of-scope (dropped from corpus):\n");
+        inline for (@typeInfo(SkipReason).@"enum".fields) |f| {
+            const count = stats.oos_by_reason[f.value];
+            if (count > 0) {
+                const pct: f64 = 100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(stats.oos));
+                const line = try std.fmt.bufPrint(&buf, "  {s:<24} {d:>6}  ({d:>5.2}%)\n", .{ f.name, count, pct });
+                try std.Io.File.stdout().writeStreamingAll(io, line);
+            }
         }
     }
 }
@@ -3624,15 +3710,20 @@ fn writeFileBody(
                 "design where test262 expects the spec-literal success (frozen primordials, " ++
                 "locked descriptors, override-mistake fix). Counted as engine-correct in " ++
                 "the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.\n" ++
-                "- **{d} real engine failures** — all libregexp Annex B / `/v` grammar " ++
-                "carve-outs documented in [AGENTS.md](../AGENTS.md).\n" ++
-                "- **{d} skipped** — **tech debt + vendor gaps**. Features Cynic " ++
-                "should eventually ship (`explicit-resource-management`) or " ++
-                "fixtures blocked on vendored libregexp (`/v` set-difference, " ++
-                "`\\q{{…}}`, property-of-strings) and single-realm Cynic " ++
-                "(`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope " ++
-                "(Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered " ++
-                "before corpus — those are not counted here.\n\n",
+                "- **{d} real engine failures** — libregexp Annex B / `/v` grammar " ++
+                "carve-outs are path-skipped (documented in [AGENTS.md](../AGENTS.md)), " ++
+                "not counted as failures.\n" ++
+                "- **{d} skipped** — *in-corpus* skips that should eventually pass: " ++
+                "Stage-4+ proposals Cynic hasn't implemented yet (decorators, " ++
+                "import-defer, source-phase imports), libregexp `/v` grammar gaps " ++
+                "(`/v` set-difference, `\\q{{…}}`, property-of-strings), and " ++
+                "single-realm Cynic (`$262.createRealm()` cross-realm fixtures).\n" ++
+                "- **Out of scope, dropped before `corpus`:** sloppy-mode " ++
+                "(`flags: [noStrict]`) fixtures — Cynic is strict-only — plus the " ++
+                "Annex B / browser-era feature tags (`__proto__`, `legacy-regexp`, " ++
+                "`IsHTMLDDA`, …), the `annexB/` tree, `intl402/`, `staging/`, SES " ++
+                "carve-outs, and pre-Stage-4 proposals behind `--enable=`. Permanent " ++
+                "design boundaries, not counted in any number above.\n\n",
             .{ r.spec_pct, r.total, engine_pass, r.attempted_pct, r.divergent, real_fails, skip },
         );
         try out.appendSlice(gpa, tldr);
@@ -3787,23 +3878,28 @@ fn writeFileBody(
         \\(see the per-group comments there for the full list):
         \\
         \\- **Filtered out** (not in `corpus`, won't ever be):
-        \\  Annex B language extensions + browser-era built-ins,
+        \\  sloppy-mode fixtures (`flags: [noStrict]`) — Cynic is
+        \\  strict-only; Annex B language extensions + browser-era
+        \\  built-ins (both the `annexB/` tree and the `__proto__`
+        \\  / `legacy-regexp` / `IsHTMLDDA` feature tags);
         \\  `intl402/`, `harness/`, `staging/`, SES carve-outs
         \\  (`eval()` until `--allow=eval` ships, SharedArrayBuffer
         \\  / Atomics), pre-Stage-4 proposals Cynic ships behind
         \\  `--enable=<name>` (each has its own phase sweep in
-        \\  `## Pre-Stage-4 proposals shipped` below).
+        \\  `## Pre-Stage-4 proposals shipped` below). The harness
+        \\  reports the frontmatter-driven trim (`noStrict` + Annex
+        \\  B feature tags) as `oos` in its per-run tally.
         \\- **In `corpus` as `skip`** — *tech debt*, should
-        \\  eventually pass: Stage-4 features Cynic hasn't shipped
-        \\  yet (`explicit-resource-management`),
-        \\  libregexp `/v` grammar gaps (vendored matcher),
-        \\  cross-realm fixtures (`$262.createRealm()` —
+        \\  eventually pass: Stage-4+ proposals Cynic hasn't
+        \\  implemented yet (decorators, import-defer, source-phase
+        \\  imports), libregexp `/v` grammar gaps (vendored
+        \\  matcher), cross-realm fixtures (`$262.createRealm()` —
         \\  single-realm Cynic doesn't expose multi-realm to user
         \\  JS yet). These count toward `corpus` so `pass%`
         \\  reflects the actual work left instead of a trimmed-
         \\  denominator headline.
         \\
-        \\Today: test262 ships ~52k fixtures; `corpus` is ~45k.
+        \\Today: test262 ships ~52k fixtures; `corpus` is ~44k.
         \\
     );
 

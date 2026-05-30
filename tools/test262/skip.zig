@@ -1234,18 +1234,41 @@ pub fn pathIsCynicOutOfScope(rel_path: []const u8) bool {
     return pathIsPermanentlyOutOfScope(rel_path) or pathIsCurrentlySkipped(rel_path);
 }
 
-pub fn featureIsUnsupported(feature: []const u8) bool {
-    inline for (.{
-        annex_b_features,
-        ses_features,
-        stage_maturity_features,
-        vendor_features,
-    }) |group| {
-        for (group) |unsup| {
-            if (std.mem.eql(u8, feature, unsup)) return true;
+/// Feature tags that put a fixture **permanently out of scope**:
+/// Annex B browser constructs (§B) and the SES carve-outs. A
+/// strict-only, SES-hardened, non-browser engine will never ship
+/// these, so the fixtures can't pass under any plausible Cynic
+/// posture — exactly like the `annexB/` path tree. The harness drops
+/// them from the `corpus` denominator entirely rather than counting
+/// them as in-corpus skips (see `recordOutcome` in `test262.zig`).
+pub fn featureIsOutOfScope(feature: []const u8) bool {
+    inline for (.{ annex_b_features, ses_features }) |group| {
+        for (group) |f| {
+            if (std.mem.eql(u8, feature, f)) return true;
         }
     }
     return false;
+}
+
+/// Feature tags Cynic skips **today** but should eventually attempt:
+/// pre-Stage-4 proposals whose grammar/semantics aren't shipped
+/// (decorators, import-defer, …) and any vendor-blocked feature.
+/// These stay **in** the corpus as `skip`, so `pass%` reflects the
+/// work left rather than a trimmed-denominator headline.
+pub fn featureIsCurrentlySkipped(feature: []const u8) bool {
+    inline for (.{ stage_maturity_features, vendor_features }) |group| {
+        for (group) |f| {
+            if (std.mem.eql(u8, feature, f)) return true;
+        }
+    }
+    return false;
+}
+
+/// Union of the two — any feature tag the engine doesn't currently
+/// run, regardless of whether it's permanently out of scope or just
+/// not-yet-shipped.
+pub fn featureIsUnsupported(feature: []const u8) bool {
+    return featureIsOutOfScope(feature) or featureIsCurrentlySkipped(feature);
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1511,6 +1534,31 @@ test "skip: Annex B feature flags are hidden via feature filter" {
     try testing.expect(featureIsUnsupported("__setter__"));
     try testing.expect(featureIsUnsupported("legacy-regexp"));
     try testing.expect(featureIsUnsupported("IsHTMLDDA"));
+}
+
+test "skip: OOS feature tags vs currently-skipped feature tags" {
+    // Annex B (+ SES carve-out) feature tags are permanently out of
+    // scope — the harness drops them from the corpus denominator, so
+    // they classify via `featureIsOutOfScope`, never as in-corpus skip.
+    try testing.expect(featureIsOutOfScope("__proto__"));
+    try testing.expect(featureIsOutOfScope("__getter__"));
+    try testing.expect(featureIsOutOfScope("__setter__"));
+    try testing.expect(featureIsOutOfScope("legacy-regexp"));
+    try testing.expect(featureIsOutOfScope("IsHTMLDDA"));
+    try testing.expect(!featureIsCurrentlySkipped("__proto__"));
+    // Pre-Stage-4 proposals are recoverable work-left — they stay in
+    // the corpus as `skip`, so they classify via
+    // `featureIsCurrentlySkipped`, never as out-of-scope.
+    try testing.expect(featureIsCurrentlySkipped("decorators"));
+    try testing.expect(featureIsCurrentlySkipped("import-defer"));
+    try testing.expect(featureIsCurrentlySkipped("source-phase-imports"));
+    try testing.expect(!featureIsOutOfScope("decorators"));
+    // The union recognises both halves.
+    try testing.expect(featureIsUnsupported("__proto__"));
+    try testing.expect(featureIsUnsupported("decorators"));
+    // A feature in neither group is runnable under both predicates.
+    try testing.expect(!featureIsOutOfScope("class"));
+    try testing.expect(!featureIsCurrentlySkipped("class"));
 }
 
 test "skip: runtime-only gaps are NOT hidden" {
