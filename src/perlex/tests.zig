@@ -1243,6 +1243,33 @@ test "perlex: well-formed modifier flag spellings compile" {
     try expectCompile("(?ims-:a)", .match); // non-empty add, empty remove
 }
 
+test "perlex: a modifier run not closed by `-`/`:` is a syntax error" {
+    // §22.2.1: after `(?` the only productions are `(?:`, `(?=`, `(?!`,
+    // `(?<…`, and the modifier group `(? ims (- ims)? : …)`. A modifier
+    // run that reaches a byte other than `-` or `:` matches no production,
+    // so the pattern is a SyntaxError in every mode (the form is not
+    // `/u`-gated). ASCII representatives:
+    try expectCompile("(?i)", .syntax_error); // no `:`-scoped body
+    try expectCompile("(?i :a)", .syntax_error); // space breaks the run
+    try expectCompile("(?s -:a)", .syntax_error);
+    try expectCompile("(?foo)", .syntax_error); // not a modifier at all
+    try expectCompile("(?P<n>x)", .syntax_error); // Python-style named group
+    try expectCompile("(?)", .syntax_error); // empty
+    // The exact non-ASCII bytes test262 exercises in the flag position: a
+    // combining mark, ZWNJ, and a fold-only letter, bare and under /u.
+    try expectCompile("(?i\xcd\xa5:a)", .syntax_error); // U+0365 after add
+    try expectCompile("(?m\xcd\xab-:a)", .syntax_error); // U+036B before `-`
+    try expectCompile("(?-s\xcc\x80:a)", .syntax_error); // U+0300 in remove
+    try expectCompile("(?-s\xe2\x80\x8c:a)", .syntax_error); // U+200C ZWNJ
+    try expectCompile("(?\xc4\xb0:a)", .syntax_error); // U+0130 İ
+    // Mode-independent: a `/u` pattern reaches the parser and is rejected
+    // just the same. (The matching `/iu` census case defers at the
+    // match-capability gate under a folderless bare compile, but the
+    // production bridge injects a folder, so it reaches this same verdict —
+    // exercised by the built-ins/RegExp differential sweep.)
+    try expectCompileFlags("(?\xc5\xbf:a)", uf, .syntax_error); // U+017F ſ /u
+}
+
 test "perlex: /u modifier folds across the orbit with an injected folder" {
     // The group adds `i`; under /u that needs the case folder the bridge
     // injects (bare compile defers — see the gate test below).

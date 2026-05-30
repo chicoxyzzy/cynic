@@ -491,8 +491,15 @@ const Parser = struct {
             remove_text = self.src[rem_start..i];
         }
 
-        // The modifier shape is only confirmed by the closing `:`.
-        if (i >= self.src.len or self.src[i] != ':') return error.Unsupported;
+        // A modifier run may be followed only by `-` (the add/remove
+        // separator, handled above) or the `:` that opens the body. Any
+        // other byte here — a non-`ims` letter, a combining mark, a space,
+        // EOF — means no `(?…` Atom production matches, since `parseGroup`
+        // has already routed `(?:`/`(?=`/`(?!`/`(?<…` away. So this is a
+        // §22.2.1 SyntaxError in every mode, and Perlex is authoritative:
+        // a valid modifier group's run is all-ASCII `ims`, which
+        // `scanIdentRun` always consumes whole, stopping exactly at `-`/`:`.
+        if (i >= self.src.len or self.src[i] != ':') return error.SyntaxError;
 
         // §22.2.1.1 — each RegularExpressionFlags may contain only `i`/`m`/
         // `s`, with no repeats; `add` and `remove` may not overlap; and the
