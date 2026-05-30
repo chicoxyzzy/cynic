@@ -49,9 +49,26 @@ fn asciiSwapCase(c: u21) u21 {
     return c;
 }
 
+/// Membership test over `ranges`. The compiler emits every class with
+/// its ranges sorted ascending by `lo` and made disjoint (via
+/// `charset.normalize`), so this is a binary search — O(log n) per code
+/// point rather than a linear scan. The win is large for property
+/// classes: `\p{L}` resolves to hundreds of ranges, and the frequent
+/// non-member rejection (a `+` quantifier hitting a delimiter, say)
+/// would otherwise walk the entire list before failing.
 fn classContains(ranges: []const parser.Node.ClassRange, c: u21) bool {
-    for (ranges) |r| {
-        if (c >= r.lo and c <= r.hi) return true;
+    var lo: usize = 0;
+    var hi: usize = ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const r = ranges[mid];
+        if (c < r.lo) {
+            hi = mid;
+        } else if (c > r.hi) {
+            lo = mid + 1;
+        } else {
+            return true;
+        }
     }
     return false;
 }

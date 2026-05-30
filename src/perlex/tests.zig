@@ -685,6 +685,22 @@ test "perlex: character class membership" {
     try expectNoMatch("[a-z]", "Q");
 }
 
+test "perlex: out-of-order class ranges still match every member" {
+    // The class lists the higher range `x-z` *before* `a-c`. The
+    // compiler must sort+merge the ranges (charset.normalize) so the VM
+    // can binary-search membership; without that, a search for 'y' — a
+    // member of the leading-but-higher range — takes the wrong branch
+    // (it compares against `a-c`, then walks right and falls off the
+    // end) and falsely misses. Guards the sorted-and-disjoint invariant
+    // the binary search relies on, independent of any one emission site.
+    try expectMatch("[x-za-c]", "y", "y"); // in the leading, higher range
+    try expectMatch("[x-za-c]", "a", "a");
+    try expectMatch("[x-za-c]", "z", "z");
+    try expectMatch("[x-za-c]", "c", "c");
+    try expectNoMatch("[x-za-c]", "d"); // between the two ranges
+    try expectNoMatch("[x-za-c]", "w"); // just below 'x'
+}
+
 test "perlex: negated character class" {
     try expectMatch("[^abc]", "d", "d");
     try expectNoMatch("[^abc]", "a");
