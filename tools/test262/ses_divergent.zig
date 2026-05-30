@@ -417,6 +417,33 @@ pub const divergent_paths = [_]struct { path: []const u8, category: Category }{
     .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/offsetNanoseconds/prop-desc.js", .category = .descriptor_assertion },
     .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/era/prop-desc.js", .category = .descriptor_assertion },
     .{ .path = "built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js", .category = .descriptor_assertion },
+    // §4.3.x `Temporal.PlainTime.prototype` getters — the six time-unit
+    // accessors. Same SES accessor-freeze divergence as the date types:
+    // each fixture asserts `descriptor.configurable === true` with no
+    // message argument, so it fires the bare
+    // `Expected SameValue(«false», «true») to be true` (no `e `/`b `
+    // prefix) and slips past the generic patterns — path-classify.
+    .{ .path = "built-ins/Temporal/PlainTime/prototype/hour/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainTime/prototype/minute/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainTime/prototype/second/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainTime/prototype/millisecond/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainTime/prototype/microsecond/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/PlainTime/prototype/nanosecond/prop-desc.js", .category = .descriptor_assertion },
+    // §7.3.x `Temporal.Duration.prototype` getters — the ten unit
+    // accessors plus `sign` and `blank`. Same accessor-freeze divergence;
+    // path-classify like the other Temporal getter blocks.
+    .{ .path = "built-ins/Temporal/Duration/prototype/years/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/months/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/weeks/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/days/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/hours/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/minutes/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/seconds/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/milliseconds/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/microseconds/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/nanoseconds/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/sign/prop-desc.js", .category = .descriptor_assertion },
+    .{ .path = "built-ins/Temporal/Duration/prototype/blank/prop-desc.js", .category = .descriptor_assertion },
 };
 
 /// Path-based divergence lookup — the escape hatch for
