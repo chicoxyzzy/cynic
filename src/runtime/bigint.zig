@@ -143,18 +143,23 @@ pub const JSBigInt = struct {
     }
 
     /// Convert to f64 (§6.1.6.2 — used by Number(bigint) and
-    /// BigInt-vs-Number comparison fallbacks). Lossy for
-    /// magnitudes beyond 2^53; rounds toward the nearest double
-    /// the way `@floatFromInt` would for an exact integer.
+    /// BigInt-vs-Number comparison fallbacks). Rounds to the
+    /// nearest representable double with round-half-to-even on the
+    /// exact integer, matching IEEE-754 roundTiesToEven and the
+    /// result `@floatFromInt` yields for an in-range integer.
+    ///
+    /// A limb-by-limb Horner accumulation (`acc*2^64 + limb`)
+    /// double-rounds — each step quantizes to f64 — so a value
+    /// spanning more than one limb can land one ULP off the
+    /// correctly-rounded result. Instead: anything within i128
+    /// converts with a single correctly-rounded compiler-rt
+    /// conversion; larger magnitudes round explicitly via
+    /// `magToF64`.
     pub fn toF64(self: *const JSBigInt) f64 {
         if (self.limbs.len == 0) return 0.0;
-        var acc: f64 = 0.0;
-        var i: usize = self.limbs.len;
-        while (i > 0) {
-            i -= 1;
-            acc = acc * 18446744073709551616.0 + @as(f64, @floatFromInt(self.limbs[i]));
-        }
-        return if (self.sign) -acc else acc;
+        if (self.fitsI128()) return @floatFromInt(self.toI128());
+        const mag = magToF64(self.limbs);
+        return if (self.sign) -mag else mag;
     }
 
     /// True iff the value fits exactly in an i128 — lets callers
@@ -201,6 +206,73 @@ fn magBitLength(m: []const Limb) usize {
     if (used == 0) return 0;
     const top = m[used - 1];
     return (used - 1) * limb_bits + (limb_bits - @clz(top));
+}
+
+/// Limb at `idx`, or 0 when out of range — lets bit-window reads
+/// run past the top of a short slice without bounds checks.
+fn readLimb(m: []const Limb, idx: usize) Limb {
+    return if (idx < m.len) m[idx] else 0;
+}
+
+/// Extract `count` (≤ 63) consecutive bits beginning at bit
+/// position `start` (0 = LSB) into a u64. The window spans at most
+/// two limbs (count + 63 < 128).
+fn readBits(m: []const Limb, start: usize, count: u6) u64 {
+    const lo = start / limb_bits;
+    const off: u6 = @intCast(start % limb_bits);
+    var bits: u64 = readLimb(m, lo) >> off;
+    if (off != 0) {
+        // High part of the straddled window; off ≠ 0 keeps the
+        // shift below 64 (the off == 0 case needs no high limb).
+        const up: u6 = @intCast(limb_bits - @as(usize, off));
+        bits |= readLimb(m, lo + 1) << up;
+    }
+    return bits & ((@as(u64, 1) << count) - 1);
+}
+
+/// True iff any bit strictly below position `pos` is set — the
+/// sticky bit for round-to-nearest.
+fn anyBitSetBelow(m: []const Limb, pos: usize) bool {
+    const full = pos / limb_bits; // limbs wholly below pos
+    var i: usize = 0;
+    while (i < full and i < m.len) : (i += 1) {
+        if (m[i] != 0) return true;
+    }
+    const rem: u6 = @intCast(pos % limb_bits);
+    if (rem != 0) {
+        const mask = (@as(u64, 1) << rem) - 1;
+        if (readLimb(m, full) & mask != 0) return true;
+    }
+    return false;
+}
+
+/// Round a magnitude slice to the nearest f64 with
+/// round-half-to-even (§6.1.6.2). Always non-negative; the slice
+/// need not be normalized.
+fn magToF64(m: []const Limb) f64 {
+    const bl = magBitLength(m);
+    if (bl == 0) return 0.0;
+    // A 53-bit (or smaller) value is exactly representable and
+    // lives entirely in the low limb.
+    if (bl <= 53) return @floatFromInt(readLimb(m, 0));
+    // Beyond the largest finite double (2^1024 − 2^971) overflow
+    // to infinity. bl == 1024 falls through: a carry out of the
+    // rounded significand lands exactly on 2^1024, which ldexp
+    // resolves to +Inf.
+    if (bl > 1024) return std.math.inf(f64);
+    // Top 54 bits: 53 significand bits plus one guard bit. Bits
+    // below `drop` are summarized by the sticky flag.
+    const drop = bl - 54;
+    const window = readBits(m, drop, 54);
+    const guard = window & 1;
+    var mant = window >> 1; // top 53 significand bits, in [2^52, 2^53)
+    const sticky = anyBitSetBelow(m, drop);
+    // round-half-to-even: round up on guard when the remainder is
+    // non-zero (sticky) or the surviving LSB is odd (ties to even).
+    if (guard == 1 and (sticky or (mant & 1) == 1)) mant += 1;
+    // A carry can push mant to exactly 2^53, bumping the binary
+    // exponent — ldexp absorbs it (and overflows to Inf at 2^1024).
+    return std.math.ldexp(@as(f64, @floatFromInt(mant)), @intCast(bl - 53));
 }
 
 /// Compare two magnitudes. Returns .lt / .eq / .gt.
@@ -1349,4 +1421,66 @@ test "bigint: JSBigInt i128 roundtrip" {
         defer b.deinit(a);
         try testing.expectEqual(@as(u64, 0xFFFFFFFFFFFFFFFF), b.toU64Truncating());
     }
+}
+
+fn bigToF64(allocator: std.mem.Allocator, s: []const u8) !f64 {
+    const v = try tv(allocator, s);
+    defer allocator.free(v.limbs);
+    const b = try JSBigInt.initFromLimbs(allocator, v.sign, v.limbs);
+    defer b.deinit(allocator);
+    return b.toF64();
+}
+
+test "bigint: toF64 round-half-to-even (§6.1.6.2)" {
+    const a = testing.allocator;
+
+    // Exactly-representable small values stay exact (i128 path).
+    try testing.expectEqual(@as(f64, 0.0), try bigToF64(a, "0"));
+    try testing.expectEqual(@as(f64, 5.0), try bigToF64(a, "5"));
+
+    // Regression: the limb-by-limb Horner accumulation double-rounded
+    // this 2-limb (≈2^73) value one ULP low (…520e21 instead of
+    // …521e21). The correctly-rounded nearest double matches the
+    // numeric literal — which Zig also rounds-to-nearest-even.
+    try testing.expectEqual(
+        @as(f64, 8692288669465520373761.0),
+        try bigToF64(a, "8692288669465520373761"),
+    );
+    try testing.expectEqual(
+        @as(f64, -8692288669465520373761.0),
+        try bigToF64(a, "-8692288669465520373761"),
+    );
+
+    // Beyond i128 — explicit round-to-nearest path (magToF64).
+    // Exact power of two: no rounding.
+    try testing.expectEqual(
+        std.math.ldexp(@as(f64, 1.0), 130),
+        try bigToF64(a, "1361129467683753853853498429727072845824"), // 2^130
+    );
+    // 2^127 is a 2-limb value that does NOT fit i128 (hi == 2^63),
+    // so it routes through magToF64 rather than the i128 path.
+    try testing.expectEqual(
+        std.math.ldexp(@as(f64, 1.0), 127),
+        try bigToF64(a, "170141183460469231731687303715884105728"), // 2^127
+    );
+
+    // ULP(2^128) is 2^76; the midpoint 2^128 + 2^75 is an exact tie
+    // and rounds to even → 2^128 (mantissa 2^52, even). The 54-bit
+    // window straddles a limb boundary here (guard bit in limb 1,
+    // top bit in limb 2).
+    try testing.expectEqual(
+        std.math.ldexp(@as(f64, 1.0), 128),
+        try bigToF64(a, "340282366920938501242306470388929921024"), // 2^128 + 2^75
+    );
+    // One past the tie sets a sticky bit → rounds up to 2^128 + 2^76.
+    try testing.expectEqual(
+        std.math.ldexp(@as(f64, 4503599627370497.0), 76), // (2^52+1)·2^76
+        try bigToF64(a, "340282366920938501242306470388929921025"), // 2^128 + 2^75 + 1
+    );
+    // Exact tie with an odd surviving LSB → ties-to-even rounds UP to
+    // 2^128 + 2^77.
+    try testing.expectEqual(
+        std.math.ldexp(@as(f64, 4503599627370498.0), 76), // (2^52+2)·2^76
+        try bigToF64(a, "340282366920938576800170196303253340160"), // 2^128 + 2^76 + 2^75
+    );
 }
