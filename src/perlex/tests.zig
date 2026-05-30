@@ -52,6 +52,22 @@ fn run(gpa: std.mem.Allocator, pattern: []const u8, input: []const u8) !Outcome 
     return runUnit(u16, gpa, pattern, .{}, input);
 }
 
+/// `s` repeated `n` times as a comptime-known string (this Zig dev build
+/// mis-tokenizes the `**` array-repeat operator). Returns a pointer to a
+/// fixed-size array so the length lives in the type — that lets callers
+/// `++` a suffix on (slice concatenation needs comptime-known lengths).
+/// Used to build the long inputs the counted-loop quantifier tests need.
+fn rep(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const buf = comptime blk: {
+        @setEvalBranchQuota(s.len * n * 4 + 1000);
+        var b: [s.len * n]u8 = undefined;
+        var i: usize = 0;
+        while (i < n) : (i += 1) @memcpy(b[i * s.len ..][0..s.len], s);
+        break :blk b;
+    };
+    return &buf;
+}
+
 fn expectMatch(pattern: []const u8, input: []const u8, expected: []const u8) !void {
     return expectMatchFlags(pattern, .{}, input, expected);
 }
@@ -411,8 +427,39 @@ test "perlex: unsupported constructs fall back" {
     // under Annex B (non-/u) and a SyntaxError under /u — leaving it to the
     // fallback keeps that mode split rather than baking either reading in.
     try expectCompile("(?=a)*", .unsupported); // quantified assertion (Annex B)
-    try expectCompile("a{0,5000}", .unsupported); // bound exceeds inline-expansion cap
-    try expectCompile("a{99999}", .unsupported); // huge exact bound
+}
+
+test "perlex: large bounded quantifiers lower to a counted loop" {
+    // §22.2.2.3 RepeatMatcher. Bounds past the inline-expansion cap
+    // (`max_repeat_expand`) used to defer to the fallback because inlining
+    // one body copy per iteration would emit thousands of instructions.
+    // They now lower to a counted loop (the counter_init / counter_loop
+    // opcodes), so the body is emitted once and a runtime counter bounds
+    // the iterations — constant program size regardless of the bound.
+
+    // Exact huge bound — the mandatory counted loop.
+    try expectMatch("a{5000}", rep("a", 5000), rep("a", 5000));
+    try expectNoMatch("a{5000}", rep("a", 4999)); // one short of the mandatory min
+    try expectMatch("(a){2000}", rep("a", 2000), rep("a", 2000) ++ ",a"); // last iteration's capture
+
+    // Large optional span (greedy) — the counted optional loop.
+    try expectMatch("a{0,5000}", rep("a", 10), rep("a", 10));
+    try expectMatch("a{0,5000}", "", ""); // zero iterations allowed
+    try expectMatch("a{2,5000}b", "aaab", "aaab"); // small min inlined, large optional counted
+    try expectMatch("a{2,5000}a", "aaa", "aaa"); // greedy gives one back to the trailing `a`
+    try expectMatch("(a){2,5000}", "aaa", "aaa,a");
+
+    // Large min with an unbounded tail — counted mandatory + star.
+    try expectMatch("a{5000,}", rep("a", 6000), rep("a", 6000));
+    try expectNoMatch("a{5000,}", rep("a", 4999));
+
+    // Lazy large bound matches the minimum.
+    try expectMatch("a{2,5000}?", "aaaa", "aa");
+
+    // Nullable body under a large bound: the §22.2.2.3 progress guard
+    // (prog_mark / prog_check) still stops the loop at the first empty
+    // iteration, so it doesn't spin to the bound.
+    try expectMatch("(?:a?){0,5000}b", "aaab", "aaab");
 }
 
 // ── §22.2.1 strict-grammar closure of the Annex B regex carve-outs ───
@@ -485,6 +532,20 @@ test "perlex: negative lookahead" {
 test "perlex: positive lookahead keeps captures, negative does not" {
     try expectMatch("(?=(a))a", "a", "a,a"); // group set by positive lookahead
     try expectMatch("(?!(a))b", "b", "b,"); // negative lookahead group undefined
+}
+
+test "perlex: lookahead snapshot survives a large slot array" {
+    // The lookaround capture-snapshot buffer is inline up to
+    // `lookaround_inline_slots`, then spills to the heap. This pattern
+    // has 18 groups (incl. the whole match) → 36 slots > the inline
+    // size, so it drives the heap-spill path: the positive lookahead's
+    // capture (group 1) plus all 16 sequence captures must round-trip
+    // through the heap-allocated snapshot intact.
+    try expectMatch(
+        "(?=(a))(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)(m)(n)(o)(p)",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop,a,a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p",
+    );
 }
 
 test "perlex: duplicate name across a lookahead and the sequence errors" {

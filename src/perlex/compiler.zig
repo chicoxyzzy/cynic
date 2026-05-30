@@ -12,21 +12,31 @@ const charset = @import("charset.zig");
 const Node = parser.Node;
 
 /// Upper bound on capturing groups (including the whole match) the v1
-/// VM handles, set by the fixed per-`split` snapshot buffer. Patterns
-/// with more groups fall back to the vendored matcher.
+/// VM handles; patterns with more fall back to the vendored matcher.
+/// A conservative deferral threshold: the slot array is heap-sized per
+/// program and the lookaround snapshot spills to the heap past a small
+/// inline size, so this bound is no longer forced by a fixed buffer.
+/// Raising it is a deliberate follow-up gated on differential
+/// verification, not a buffer resize.
 pub const max_groups = 64;
 
-/// Bounded quantifiers are lowered by inlining the body, so a huge
-/// bound (`a{0,4294967295}`) would emit billions of instructions.
-/// Patterns whose mandatory or optional iteration count exceeds this
-/// fall back to the vendored matcher's counted-loop lowering.
+/// Inline-vs-counted threshold for a bounded quantifier. At or below
+/// this, each mandatory / optional iteration inlines one body copy — no
+/// per-iteration counter overhead, fastest for the common small bounds.
+/// Above it the lowering switches to a counted loop (`counter_init` /
+/// `counter_loop`), so a huge bound (`a{0,1000000}`) compiles to a
+/// constant-size program instead of a million inlined copies. The
+/// mandatory `min` and optional `max − min` spans are decided
+/// independently — `a{2,100000}` inlines the two mandatory copies and
+/// counts the optional tail.
 pub const max_repeat_expand = 1024;
 
 /// Upper bound on §22.2.2.3 progress-guard scratch slots — one per
-/// quantifier over a nullable body. The VM snapshots the whole slot
-/// array into a fixed stack buffer for each lookaround, so the count
-/// must be bounded; patterns with more nullable quantifiers than this
-/// defer to the vendored matcher.
+/// quantifier over a nullable body; patterns with more defer to the
+/// vendored matcher. Like `max_groups`, a conservative deferral
+/// threshold rather than a structural limit: the slot array and the
+/// per-lookaround snapshot are both sized at runtime, so the bound
+/// isn't forced by a fixed buffer.
 pub const max_scratch = 64;
 
 pub const Flags = packed struct {
@@ -129,6 +139,20 @@ pub const Inst = union(enum) {
     /// through to backtrack) stops the loop and rolls the empty
     /// iteration's captures back to "unset".
     prog_check: usize,
+    /// Counted-loop initializer: set counter slot `slot` to its bound `n`
+    /// (the mandatory `min`, or the optional `max − min`). The slot lives
+    /// past the captures like a progress mark, so the undo log rolls it
+    /// back on backtrack. Emitted by the counted-loop lowering of a large
+    /// bounded quantifier so the body need not be inlined per iteration —
+    /// the program stays a constant size regardless of the bound.
+    /// §22.2.2.3 RepeatMatcher.
+    counter_init: CounterInit,
+    /// Counted-loop step: decrement counter slot `slot`; jump to `target`
+    /// while it is still greater than zero, else fall through (iterations
+    /// exhausted). The decrement is undo-logged so a backtrack restores
+    /// the prior count. Reached only by fall-through after a body match,
+    /// so the counter is ≥ 1 here. §22.2.2.3 RepeatMatcher.
+    counter_loop: CounterLoop,
 
     pub const Char = struct { cp: u21, fold: bool };
     pub const WordBoundary = struct { negated: bool, fold: bool };
@@ -138,6 +162,8 @@ pub const Inst = union(enum) {
     pub const Split = struct { a: usize, b: usize };
     pub const Range = struct { from: usize, to: usize };
     pub const LookInst = struct { negative: bool, behind: bool, sub: []const Inst };
+    pub const CounterInit = struct { slot: usize, n: usize };
+    pub const CounterLoop = struct { slot: usize, target: usize };
 };
 
 /// Free the owned allocations inside each instruction (class ranges,
@@ -273,13 +299,18 @@ const Compiler = struct {
     /// (see `allocScratch`); becomes `Program.scratch_count`.
     scratch_count: usize = 0,
 
-    /// Hand out a fresh progress-guard scratch slot, positioned just past
-    /// the `2 * group_count` capture slots in the VM's shared slot array
-    /// (`names.len` is the group count, including group 0). Living in that
-    /// array means the VM's undo log rolls the slot back on backtrack like
-    /// any capture, and the bridge — which reads only the capture slots —
-    /// never sees it.
-    fn allocScratch(self: *Compiler) usize {
+    /// Hand out a fresh VM slot just past the `2 * group_count` capture
+    /// slots in the shared slot array (`names.len` is the group count,
+    /// including group 0), for a §22.2.2.3 progress guard
+    /// (`prog_mark`/`prog_check`) or a counted-loop counter
+    /// (`counter_init`/`counter_loop`). Living in that array means the
+    /// undo log rolls the slot back on backtrack like any capture, and the
+    /// bridge — which reads only the capture slots — never sees it.
+    /// Declines to the fallback once the fixed slot budget (`max_scratch`)
+    /// is spent: the VM snapshots the whole array into a stack buffer per
+    /// lookaround, so the count must be bounded.
+    fn allocScratch(self: *Compiler) CompileError!usize {
+        if (self.scratch_count >= max_scratch) return error.Unsupported;
         const idx = 2 * self.names.len + self.scratch_count;
         self.scratch_count += 1;
         return idx;
@@ -476,10 +507,6 @@ const Compiler = struct {
         const body_nullable = nullable(r.body);
         if (body_nullable and deferNullableBody(r.body)) return error.Unsupported;
 
-        // Inline expansion would blow up for huge bounds; defer those.
-        if (r.min > max_repeat_expand) return error.Unsupported;
-        if (r.max != parser.unbounded_max and r.max - r.min > max_repeat_expand) return error.Unsupported;
-
         // §22.2.2.3 step 2.b guards only the *optional* iterations (the
         // unbounded tail, or the `max - min` skippable ones); its `min = 0`
         // precondition exempts the mandatory `min` iterations, which run
@@ -488,12 +515,21 @@ const Compiler = struct {
         // iterations, since each `prog_mark` re-stamps it.
         const has_optional = r.max == parser.unbounded_max or r.max > r.min;
         const guard = body_nullable and has_optional;
-        if (guard and self.scratch_count >= max_scratch) return error.Unsupported;
-        const scratch: usize = if (guard) self.allocScratch() else undefined;
+        const scratch: usize = if (guard) try self.allocScratch() else undefined;
 
-        // `min` mandatory iterations — unguarded.
-        var i: usize = 0;
-        while (i < r.min) : (i += 1) try self.compileIteration(r.body);
+        // `min` mandatory iterations — unguarded. A small count inlines one
+        // body copy each (no per-iteration counter overhead); a large count
+        // lowers to a counted loop so the program size stays constant.
+        if (r.min <= max_repeat_expand) {
+            var i: usize = 0;
+            while (i < r.min) : (i += 1) try self.compileIteration(r.body);
+        } else {
+            const counter = try self.allocScratch();
+            try self.emit(.{ .counter_init = .{ .slot = counter, .n = r.min } });
+            const loop = self.here();
+            try self.compileIteration(r.body);
+            try self.emit(.{ .counter_loop = .{ .slot = counter, .target = loop } });
+        }
 
         if (r.max == parser.unbounded_max) {
             // Greedy/lazy star over the body.
@@ -510,8 +546,8 @@ const Compiler = struct {
                 .{ .a = body_start, .b = exit }
             else
                 .{ .a = exit, .b = body_start };
-        } else {
-            // `max - min` optional, each-skippable iterations.
+        } else if (r.max - r.min <= max_repeat_expand) {
+            // `max - min` optional, each-skippable iterations, inlined.
             var splits: std.ArrayListUnmanaged(usize) = .empty;
             defer splits.deinit(self.gpa);
             var k = r.min;
@@ -532,6 +568,27 @@ const Compiler = struct {
                 else
                     .{ .a = exit, .b = body_start };
             }
+        } else {
+            // A large optional span — a counted loop wrapping one body
+            // copy. The `split` at the loop top is the skip choice point
+            // (greedy: try the body; on backtrack, exit), and the trailing
+            // `counter_loop` bounds it to `max - min` passes. Together they
+            // give bounded, backtrackable iteration without inlining.
+            const counter = try self.allocScratch();
+            try self.emit(.{ .counter_init = .{ .slot = counter, .n = r.max - r.min } });
+            const loop = self.here();
+            const split_idx = self.here();
+            try self.emit(.{ .split = .{ .a = 0, .b = 0 } });
+            const body_start = self.here();
+            if (guard) try self.emit(.{ .prog_mark = scratch });
+            try self.compileIteration(r.body);
+            if (guard) try self.emit(.{ .prog_check = scratch });
+            try self.emit(.{ .counter_loop = .{ .slot = counter, .target = loop } });
+            const exit = self.here();
+            self.insts.items[split_idx].split = if (r.greedy)
+                .{ .a = body_start, .b = exit }
+            else
+                .{ .a = exit, .b = body_start };
         }
     }
 

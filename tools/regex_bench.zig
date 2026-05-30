@@ -123,6 +123,12 @@ const corpus = [_]Case{
     .{ .cat = .worst, .name = "scan-miss-64k", .pattern = "needle", .input = "abcdefghij ", .repeat = 6000 },
     .{ .cat = .worst, .name = "class-scan-64k", .pattern = "[0-9]{4}", .input = "abcdefghij ", .repeat = 6000 },
     .{ .cat = .worst, .name = "restart-heavy", .pattern = "abcdefgh", .input = "abcdefgX ", .repeat = 7000 },
+    // Large bounded quantifiers — counted-loop lowering (body emitted once,
+    // wrapped in a runtime counter) instead of inlining one copy per
+    // iteration. Bounds exceed max_repeat_expand=1024, so these exercise the
+    // mandatory ({n}) and optional ({n,m}) counter paths respectively.
+    .{ .cat = .worst, .name = "big-bound-exact", .pattern = "[a-z]{2000}", .input = "abcdefghij", .repeat = 600 },
+    .{ .cat = .worst, .name = "big-bound-range", .pattern = "[a-z]{2,5000}", .input = "abcdefghij", .repeat = 600 },
 };
 
 // ── flag builders (mirror regexp.zig) ───────────────────────────────────────
