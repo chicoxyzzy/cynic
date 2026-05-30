@@ -651,9 +651,38 @@ test "perlex: variable-length lookbehind" {
     try expectMatch("(?<=ab|cd)x", "cdx", "x");
 }
 
-test "perlex: lookbehind with captures or assertions falls back" {
-    try expectCompile("(?<=(a))b", .unsupported); // capture in lookbehind
-    try expectCompile("(?<=(?=a))b", .unsupported); // nested assertion
+// Backward matching enters a group at its right boundary, so capture
+// saves are emitted end-slot-first; a backreference matches the captured
+// text *ending* at the cursor; a nested assertion re-anchors with its own
+// direction. Expected captures come from the cross-engine differential
+// (engine262 authority). `expectCaps` renders each group as `'substr'`
+// (participating) or `undef` (non-participating), space-joined.
+
+test "perlex: capturing group inside a lookbehind" {
+    try expectCaps("(?<=(\\w))f", "xf", "'f' 'x'");
+    try expectCaps("(?<=(\\w(\\w)))def", "abdef", "'def' 'ab' 'b'");
+    // Quantified capture: the leftmost (last-written, backward) iteration wins.
+    try expectCaps("(?<=(\\w)+)f", "abcf", "'f' 'a'");
+    // Alternation: only the taken branch's group participates.
+    try expectCaps("(?<=(bc)|(cd)).", "bcX", "'X' 'bc' undef");
+}
+
+test "perlex: backreference inside a lookbehind" {
+    // Group set *outside* the lookbehind, referenced within it.
+    try expectCaps("(.)(?<=\\1\\1)", "aa", "'a' 'a'");
+    // Source-order forward reference: backward execution sets the group
+    // (rightmost) before the `\1` to its left runs.
+    try expectCaps("(?<=\\1(\\w))d", "xxd", "'d' 'x'");
+    try expectNoMatch("(?<=\\1(\\w))d", "xd"); // nothing to the left of the group
+}
+
+test "perlex: backreference inside a lookbehind under /i (ASCII fold)" {
+    try expectCapsFlags("^(f)oo(?<=^\\1o+)$", .{ .ignore_case = true }, "Foo", "'Foo' 'F'");
+}
+
+test "perlex: nested assertion inside a lookbehind" {
+    try expectMatch("(?<=ab(?=c)\\wd)\\w\\w", "abcdXY", "XY"); // nested lookahead
+    try expectMatch("(?<=\\B)(?<=c(?<=\\w))\\w{3}", "abcdef", "def"); // nested lookbehind + \B
 }
 
 // ── §22.2 Unicode mode (/u) — code-point matching ───────────────────

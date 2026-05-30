@@ -353,7 +353,7 @@ fn Matcher(comptime Unit: type) type {
                         }
                     },
                     .backref => |g| {
-                        if (self.matchBackref(g.index, &sp, g.fold)) {
+                        if (self.matchBackref(g.index, &sp, g.fold, backward)) {
                             pc += 1;
                             continue;
                         }
@@ -371,7 +371,7 @@ fn Matcher(comptime Unit: type) type {
                             }
                         }
                         if (g) |group| {
-                            if (self.matchBackref(group, &sp, bd.fold)) {
+                            if (self.matchBackref(group, &sp, bd.fold, backward)) {
                                 pc += 1;
                                 continue;
                             }
@@ -503,18 +503,24 @@ fn Matcher(comptime Unit: type) type {
         /// code point of length 2; otherwise each code unit stands
         /// alone. Returns null at the input boundary.
         fn peek(self: *Self, sp: usize, backward: bool) ?CodePoint {
-            if (backward) {
-                if (sp == 0) return null;
-                const lo: u21 = self.input[sp - 1];
-                if (self.unicode and lo >= 0xDC00 and lo <= 0xDFFF and sp >= 2) {
-                    const hi: u21 = self.input[sp - 2];
-                    if (hi >= 0xD800 and hi <= 0xDBFF) {
-                        return .{ .cp = combineSurrogates(hi, lo), .len = 2 };
-                    }
+            return if (backward) self.peekBack(sp, 0) else self.peekAt(sp, self.input.len);
+        }
+
+        /// Backward-decode one code point *ending* at `idx` (exclusive
+        /// upper), bounded below by `lower` so a surrogate pair is never
+        /// read across a slice boundary. Under `/u`/`/v` a valid high+low
+        /// pair ending at `idx` is one code point of length 2; otherwise
+        /// each code unit stands alone. Null when `idx <= lower`.
+        fn peekBack(self: *Self, idx: usize, lower: usize) ?CodePoint {
+            if (idx <= lower) return null;
+            const lo: u21 = self.input[idx - 1];
+            if (self.unicode and lo >= 0xDC00 and lo <= 0xDFFF and idx >= lower + 2) {
+                const hi: u21 = self.input[idx - 2];
+                if (hi >= 0xD800 and hi <= 0xDBFF) {
+                    return .{ .cp = combineSurrogates(hi, lo), .len = 2 };
                 }
-                return .{ .cp = lo, .len = 1 };
             }
-            return self.peekAt(sp, self.input.len);
+            return .{ .cp = lo, .len = 1 };
         }
 
         /// Forward-decode one code point at `idx`, bounded by `limit` (so
@@ -533,10 +539,13 @@ fn Matcher(comptime Unit: type) type {
             return .{ .cp = hi, .len = 1 };
         }
 
-        /// Match the text captured by group `g` at `sp`, advancing
-        /// `sp` on success. An unset group matches the empty string.
-        /// `fold` is the effective `i` flag baked at the backreference.
-        fn matchBackref(self: *Self, g: usize, sp: *usize, fold: bool) bool {
+        /// Match the text captured by group `g` against the input at `sp`,
+        /// advancing `sp` on success. Forward (`backward == false`) the
+        /// candidate *begins* at `sp`; in a lookbehind (`backward == true`)
+        /// it *ends* at `sp`, so `sp` moves left. An unset group matches
+        /// the empty string. `fold` is the effective `i` flag baked at the
+        /// backreference.
+        fn matchBackref(self: *Self, g: usize, sp: *usize, fold: bool, backward: bool) bool {
             const cs = self.slots[2 * g];
             const ce = self.slots[2 * g + 1];
             if (cs == none or ce == none) return true; // unset → empty
@@ -544,8 +553,23 @@ fn Matcher(comptime Unit: type) type {
             // can span a surrogate pair (e.g. Deseret U+10400↔U+10428), so
             // per-code-unit folding would break. Simple case folding never
             // changes the code-point count, but compare against each cursor
-            // independently rather than assuming equal unit lengths.
+            // independently rather than assuming equal unit lengths. The
+            // captured text and the candidate are decoded in the same
+            // direction, so comparing them pairwise stays in source order.
             if (fold and self.unicode) {
+                if (backward) {
+                    var ci = ce;
+                    var si = sp.*;
+                    while (ci > cs) {
+                        const cap = self.peekBack(ci, cs).?; // in-bounds: ci > cs
+                        const cand = self.peekBack(si, 0) orelse return false;
+                        if (!self.charEq(cand.cp, cap.cp, fold)) return false;
+                        ci -= cap.len;
+                        si -= cand.len;
+                    }
+                    sp.* = si;
+                    return true;
+                }
                 var ci = cs;
                 var si = sp.*;
                 while (ci < ce) {
@@ -559,16 +583,25 @@ fn Matcher(comptime Unit: type) type {
                 return true;
             }
             const len = ce - cs;
-            if (sp.* + len > self.input.len) return false;
+            // Exact / ASCII-fold matching compares code units directly, so a
+            // backreference of `len` units begins at `sp` forward, or ends
+            // at `sp` (begins at `sp - len`) in a lookbehind.
+            const base = if (backward) blk: {
+                if (sp.* < len) return false;
+                break :blk sp.* - len;
+            } else blk: {
+                if (sp.* + len > self.input.len) return false;
+                break :blk sp.*;
+            };
             if (fold) {
                 var i: usize = 0;
                 while (i < len) : (i += 1) {
-                    if (asciiUpper(self.input[cs + i]) != asciiUpper(self.input[sp.* + i])) return false;
+                    if (asciiUpper(self.input[cs + i]) != asciiUpper(self.input[base + i])) return false;
                 }
             } else {
-                if (!std.mem.eql(Unit, self.input[cs..ce], self.input[sp.* .. sp.* + len])) return false;
+                if (!std.mem.eql(Unit, self.input[cs..ce], self.input[base .. base + len])) return false;
             }
-            sp.* += len;
+            sp.* = if (backward) base else sp.* + len;
             return true;
         }
     };
