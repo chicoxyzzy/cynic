@@ -370,7 +370,7 @@ under one mechanism, and only one of the three is permanent:
    and downgrades anything Stage 4 from "stage maturity" to
    "planned".
 3. **Planned (vendor/infra gap)** — Stage 4 features Cynic
-   *should* ship but hasn't yet (Temporal, Float16Array,
+   *should* ship but hasn't yet (Float16Array,
    libregexp Annex B grammar, json-parse-with-source). Skipping
    them hides real work-to-do. Surface them as a separate
    **`## Planned features`** section in `test262-results.md`
@@ -540,7 +540,7 @@ Risk: low. Test262 risk: zero (not from test262).
   described under "Per-bucket scoreboard under dual-mode" above.
 - Add the new `## Planned features` section per Phase 0's
   sketch — fixture counts for each Stage-4-but-unshipped feature
-  (Temporal, Float16Array, etc.).
+  (Float16Array, etc.).
 - Update legend.
 - Update `--min-hardened-spec-pct` floor to track the adjusted
   number (~92.5).
@@ -642,6 +642,12 @@ the rest were already correct.
 Total currently-Planned fixture exposure: **≈ 5350 fixtures** dominated
 by Temporal. These all get a row in the new `## Planned features`
 block per Phase 0c below.
+
+**Update (2026-05-30):** Temporal has since shipped — all eight value
+types + `Temporal.Now`, ISO-8601 calendar, UTC/fixed-offset zones — and
+now scores as an ordinary `built-ins/Temporal` bucket (3885 pass /
+0 fail), no longer Planned. The remaining Planned exposure is ≈ 760
+fixtures; the table above is the pre-ship snapshot.
 
 **Correctly classified as Stage maturity (still pre-Stage-4):**
 

@@ -153,10 +153,10 @@ the bump alongside the standard `Δ pass`:
 
 3. **Skip-list bit-rot.** New fixtures may land in a path
    currently path-skipped in `tools/test262/skip.zig` (e.g.
-   a new `built-ins/Temporal/` subdirectory). The skip
+   a new `intl402/` subdirectory). The skip
    absorbs them silently — `total` doesn't grow. That's
-   *usually* what we want (Temporal is Planned, not
-   implemented), but a path-skip that's actually intended
+   *usually* what we want (`intl402` is out of scope for the
+   default build), but a path-skip that's actually intended
    to be narrow (a specific browser-era built-in) can drift
    to cover too much. Check: scan the bump's `git log
    vendor/test262` output for new top-level directories.

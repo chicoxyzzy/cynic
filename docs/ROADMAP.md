@@ -582,23 +582,31 @@ automatically on the next full sweep.
   zones, non-ISO calendars, and the `Intl.*` formatters — comes
   back into the scored scope with it.
 
-**Deferred.** `Temporal` (ES2025) — a complete date/time API
-replacement (calendars, time zones, ISO 8601, etc.) and a
-multi-week project with its own tzdata story; ~4500 test262
-fixtures depend on it. A partial surface is committed (the
-`Temporal` namespace plus `Duration` and `PlainTime`), but the
-arithmetic-heavy methods aren't finished, so on `main` the whole
-`built-ins/Temporal/` tree is path-skipped — out of the score
-denominator rather than dragging runtime spec% down. The full
-surface is carried as a separate effort; it remains the largest
-known coverage gap. The time-zone scope is **UTC + fixed-offset
-only**: no vendored IANA `tzdata` in the default build, so named
-zones (e.g. `"America/New_York"`) and non-ISO calendars are the
-payoff of the future Intl-enabled build (above), not of this
-effort. Every offset lookup already routes through one
-`getOffsetNanosecondsFor` seam, so that build plugs a tzdata
-provider in at a single place rather than threading it through
-each `ZonedDateTime` operation.
+**Shipped.** `Temporal` (ES2025) — the full value-type surface
+plus `Temporal.Now`. All eight types land: `Instant`, `PlainTime`,
+`PlainDate`, `PlainDateTime`, `PlainYearMonth`, `PlainMonthDay`,
+`Duration`, and `ZonedDateTime`, each with its constructor,
+getters, `from` / `compare`, `with*`, the arithmetic chain
+(`add` / `subtract` / `until` / `since`), `round` / `total`, the
+`toString` / `toJSON` / `toLocaleString` family with precision +
+rounding options, and ISO-8601 string parsing — plus
+`Date.prototype.toTemporalInstant`. The arithmetic and rounding
+abstract operations (RoundNumberToIncrement, the duration
+balance / round / difference chain, NudgeToCalendarUnit /
+BubbleRelativeDuration, RoundRelativeDuration) are named to match
+proposal-temporal so test262 failures map to spec steps.
+`built-ins/Temporal` scores 3885 pass / 0 fail across the corpus,
+and the headline runtime spec% moved to ~94.56% when the tree came
+out of the skip list.
+
+The scope is **ISO-8601 calendar + UTC/fixed-offset zones only**.
+There is no vendored IANA `tzdata` in the default build, so named
+zones (e.g. `"America/New_York"`), DST transitions, and non-ISO
+calendars are deferred — they are the payoff of the future
+Intl-enabled build (above), not of this effort. Every offset
+lookup already routes through one `getOffsetNanosecondsFor` seam,
+so that build plugs a tzdata provider in at a single place rather
+than threading it through each `ZonedDateTime` operation.
 
 **Out of scope.** Annex B in its entirety — language extensions
 *and* every browser-era built-in (`escape` / `unescape`, the
