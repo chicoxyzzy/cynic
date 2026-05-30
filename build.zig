@@ -334,6 +334,43 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run the micro-bench suite (p50 + spread + outliers; --runs=N for tail percentiles)");
     bench_step.dependOn(&run_bench.step);
 
+    // `zig build bench-regex` — in-process Perlex-vs-libregexp matcher
+    // benchmark (tools/regex_bench.zig). Links both engines into one
+    // ReleaseFast binary and times compile + exec on identical
+    // (pattern, UTF-16 input) pairs — the decision gate for retiring
+    // the vendored fallback. The bench imports perlex and perlex_props
+    // via relative path so they share ONE perlex module instance (the
+    // injected resolver / case-folder function types must match
+    // `compileWithHooks`'s `Hooks`). It links the qjs_regex static lib
+    // and the `c` translate-c view of libregexp.h; the lre_* host hooks
+    // are defined inside the bench itself, and `link_libc` backs both
+    // those hooks' `std.c.*` calls and libregexp.
+    const regex_bench_mod = b.createModule(.{
+        .root_source_file = b.path("tools/regex_bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    // Perlex + its `\p{…}` resolver, bundled from one module so the
+    // injected hook types match (see src/regex_engines.zig).
+    const regex_engines_mod = b.createModule(.{
+        .root_source_file = b.path("src/regex_engines.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    regex_bench_mod.addImport("engine", regex_engines_mod);
+    regex_bench_mod.linkLibrary(qjs_regex);
+    regex_bench_mod.addIncludePath(b.path("vendor/quickjs"));
+    regex_bench_mod.addImport("c", c_mod);
+    const regex_bench_exe = b.addExecutable(.{
+        .name = "regex-bench",
+        .root_module = regex_bench_mod,
+    });
+    const run_regex_bench = b.addRunArtifact(regex_bench_exe);
+    if (b.args) |args| run_regex_bench.addArgs(args);
+    const regex_bench_step = b.step("bench-regex", "Run the in-process Perlex-vs-libregexp matcher benchmark (compile + exec; --filter=, --quick, --batches=N, --target-us=N)");
+    regex_bench_step.dependOn(&run_regex_bench.step);
+
     // -----------------------------------------------------------------
     // `zig build wasm` — the browser-playground WebAssembly module.
     //
