@@ -563,12 +563,28 @@ const Parser = struct {
     /// A `\u`/`\u{}` escape is read in +UnicodeMode regardless of the
     /// pattern's `u` flag (the grammar fixes the escape sequence to
     /// [+UnicodeMode]), and a `\uHHHH\uHHHH` lead/trail pair combines into
-    /// one supplementary code point. A code point that fails the
-    /// identifier test — or a stray non-`\u` escape, or a lone-surrogate
-    /// value — defers to the fallback, which is authoritative for the
-    /// SyntaxError verdict; an empty or unterminated name is itself an
-    /// unambiguous SyntaxError.
+    /// one supplementary code point.
+    ///
+    /// Perlex implements that grammar in full, and under ES2025
+    /// NamedCaptureGroups is always enabled, so a name it cannot form is a
+    /// §22.2.1.1 SyntaxError in every mode — never a deferrable construct.
+    /// `(?<` has no Annex B reinterpretation (the only other `(?<…` Atoms,
+    /// the `(?<=` / `(?<!` lookbehinds, are routed away before we get
+    /// here), and a `\k` followed by `<` is always a backreference, so both
+    /// call sites are authoritative. The body signals every malformed-name
+    /// case — a code point that fails the identifier test, a stray non-`\u`
+    /// escape, a malformed `\u`, a lone-surrogate value — as
+    /// `error.Unsupported`; this wrapper promotes those to the
+    /// authoritative `error.SyntaxError`. An empty or unterminated name is
+    /// raised as a SyntaxError directly and passes through unchanged.
     fn parseGroupName(self: *Parser) ParseError![]const u8 {
+        return self.parseGroupNameBody() catch |e| switch (e) {
+            error.Unsupported => error.SyntaxError,
+            else => e,
+        };
+    }
+
+    fn parseGroupNameBody(self: *Parser) ParseError![]const u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         var first = true;
         while (true) {
