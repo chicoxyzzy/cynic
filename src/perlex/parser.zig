@@ -813,9 +813,23 @@ const Parser = struct {
                 if (v >= 0x80) self.non_ascii = true;
                 return self.takeEscaped(6, v);
             },
+            'c' => {
+                // §22.2.1 CharacterEscape :: `c` ControlLetter — the value
+                // is the letter's code point mod 32 (`\cA` → U+0001 …).
+                if (self.at(2)) |cc| {
+                    if ((cc >= 'A' and cc <= 'Z') or (cc >= 'a' and cc <= 'z')) {
+                        return self.takeEscaped(3, cc % 32);
+                    }
+                }
+                // `\c` not followed by [A-Za-z]: a §22.2.1.1 early error
+                // under /u or /v; otherwise Annex B leniency (`\c0` → U+0010,
+                // bare `\c` → literal) the fallback still owns — defer.
+                if (self.unicode or self.unicode_sets) return error.SyntaxError;
+                return error.Unsupported;
+            },
             else => {
                 // IdentityEscape: `\` before a syntax character (or `/`)
-                // is that literal. Other escapes (`\c…`, `\p{…}`, numeric
+                // is that literal. Other escapes (`\p{…}`, numeric
                 // backrefs, arbitrary-letter Annex B identity escapes)
                 // fall back.
                 if (isSyntaxChar(k)) return self.takeEscaped(2, k);

@@ -685,6 +685,42 @@ test "perlex: nested assertion inside a lookbehind" {
     try expectMatch("(?<=\\B)(?<=c(?<=\\w))\\w{3}", "abcdef", "def"); // nested lookbehind + \B
 }
 
+// ── §22.2.1 \c ControlLetter ────────────────────────────────────────
+// CharacterEscape :: `c` ControlLetter — the value is the letter's code
+// point mod 32, so `\cA`..`\cZ` (and lowercase) map to U+0001..U+001A.
+
+test "perlex: \\c control-letter escapes" {
+    try expectMatch("\\cA", "\x01", "\x01"); // 'A' % 32 = 1
+    try expectMatch("\\cI", "\x09", "\x09"); // tab
+    try expectMatch("\\cM", "\x0D", "\x0D"); // CR
+    try expectMatch("\\cZ", "\x1A", "\x1A");
+    try expectMatch("\\cj", "\x0A", "\x0A"); // lowercase: 'j' % 32 = 10 (LF)
+    try expectMatch("[\\cI]", "\x09", "\x09"); // inside a class
+}
+
+test "perlex: \\c control-letter escapes under /u" {
+    try expectMatchFlags("\\cA", uf, "\x01", "\x01");
+    try expectMatchFlags("[\\cj]", uf, "\x0A", "\x0A");
+}
+
+test "perlex: \\c not followed by a letter is a /u early error" {
+    // §22.2.1.1: under /u or /v, `\c` requires a ControlLetter.
+    try expectCompileFlags("\\c", uf, .syntax_error);
+    try expectCompileFlags("\\c0", uf, .syntax_error);
+    try expectCompileFlags("\\c_", uf, .syntax_error);
+    try expectCompileFlags("[\\c]", uf, .syntax_error);
+    try expectCompileFlags("[\\c0]", uf, .syntax_error);
+}
+
+test "perlex: \\c not followed by a letter defers without /u (Annex B)" {
+    // Without /u these are Annex B leniency (`\c0` → U+0010, bare `\c` →
+    // literal) that the libregexp fallback still owns.
+    try expectCompile("\\c", .unsupported);
+    try expectCompile("\\c0", .unsupported);
+    try expectCompile("[\\c0]", .unsupported);
+    try expectCompile("[\\c_]", .unsupported);
+}
+
 // ── §22.2 Unicode mode (/u) — code-point matching ───────────────────
 
 const uf: perlex.Flags = .{ .unicode = true };
