@@ -3130,10 +3130,11 @@ fn readDateTimeFieldsRaw(realm: *Realm, obj: *JSObject, zoned: ?*ZonedFieldExtra
         if (tz_v.isUndefined()) {
             if (z.time_zone_required) return throwTypeError(realm, "ZonedDateTime-like is missing 'timeZone'");
         } else {
-            if (!tz_v.isString()) return throwTypeError(realm, "time zone must be a string");
-            const tz_s: *JSString = @ptrCast(@alignCast(tz_v.asString()));
-            z.time_zone = temporal.parseTimeZoneString(tz_s.flatBytes()) orelse
-                return throwRangeError(realm, "invalid time zone identifier");
+            // §11 ToTemporalTimeZoneIdentifier — a ZonedDateTime-bearing
+            // object yields its own [[TimeZone]]; a String routes through
+            // the broad ParseTemporalTimeZoneString
+            // (from/argument-propertybag-timezone-object.js).
+            z.time_zone = try toTimeZoneArg(realm, tz_v);
             z.time_zone_present = true;
         }
     }
@@ -4519,7 +4520,11 @@ fn zonedDateTimeConstructor(realm: *Realm, this_value: Value, args: []const Valu
     const tz_arg = argOr(args, 1, Value.undefined_);
     if (!tz_arg.isString()) return throwTypeError(realm, "time zone must be a string");
     const tz_str: *JSString = @ptrCast(@alignCast(tz_arg.asString()));
-    const tz = temporal.parseTimeZoneString(tz_str.flatBytes()) orelse
+    // §6.1.1 step 5 — ParseTimeZoneIdentifier, NOT the broad
+    // ParseTemporalTimeZoneString: the constructor accepts only a bare
+    // identifier ("UTC", "±HH:MM"), so a full ISO date-time string is a
+    // RangeError (timezone-iso-string.js).
+    const tz = temporal.parseTimeZoneIdentifier(tz_str.flatBytes()) orelse
         return throwRangeError(realm, "invalid time zone identifier");
     // step 7-9 — calendar defaults to iso8601; only the ISO calendar ships.
     try requireISOCalendar(realm, argOr(args, 2, Value.undefined_));
