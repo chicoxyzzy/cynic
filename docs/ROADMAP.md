@@ -690,23 +690,28 @@ regex dispatch and owns most patterns it can compile; libregexp is
 the shrinking fallback for constructs Perlex doesn't yet support.
 Perlex now covers the whole `/v` UnicodeSets grammar (set algebra,
 nested classes, `\q{…}` string disjunctions, `\p{…}` properties of
-strings) and `/iu` / `/iv` simple case folding (§22.2.2.9) natively —
-no real engine failures remain in the RegExp corpus.
+strings), `/iu` / `/iv` simple case folding (§22.2.2.9), the ES2024
+inline-modifier groups (`(?ims-ims:…)`), and quantifiers over nullable
+bodies (`(a?)*`, `(a*)*`, via the §22.2.2.3 zero-width progress guard)
+natively — no real engine failures remain in the RegExp corpus.
 
 **Planned.** Move the remaining libregexp-deferred constructs into
 Perlex so the fallback can be retired. Each works today via fallback,
 so these are footprint-shrinking, not conformance gaps:
 
-- nullable quantifier bodies (`(a?)*`) — needs the §22.2.2.3
-  zero-width progress guard;
 - repeat bounds above the inline-expansion cap (`a{2000}`);
 - lookbehind bodies with captures, backreferences, or nested
   assertions (v1 lookbehind is capture/assertion-free);
-- patterns with more than 64 capturing groups.
+- patterns with more than 64 capturing groups;
+- a nullable quantifier body whose empty match comes from an
+  assertion, backreference, or empty `\q{}` alternative — the
+  §22.2.2.3 guard ships, but these bodies stay deferred (`(?=a)*`
+  is a `/u` SyntaxError yet Annex-B-legal without it, a mode split
+  only the fallback models).
 
-The one unshipped *feature* is `regexp-modifiers` (ES2024 inline
-`(?i:…)` / `(?-i:…)`), unsupported by both Perlex and libregexp.
-Plus integration polish: `RegExp.prototype` properties matching
+The ES2024 `regexp-modifiers` feature (inline `(?ims-ims:…)`) now
+ships via Perlex, so no regex *feature* is unshipped. Remaining work
+is integration polish: `RegExp.prototype` properties matching
 V8 / JSC for `lastIndex`, `flags`, `dotAll` accessor; minor edge
 cases in the String.prototype dispatch.
 

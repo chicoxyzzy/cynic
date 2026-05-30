@@ -70,17 +70,21 @@ fn combineSurrogates(hi: u21, lo: u21) u21 {
 /// are bounded by the input length, well below `maxInt`.
 pub const none: usize = std.math.maxInt(usize);
 
-/// Backtracking-effort ceiling across one `exec` (all start
-/// positions). The v1 grammar has no unbounded quantifiers, so step
-/// counts are tiny and this never trips; it is a backstop for when
-/// `*`/`+`/`{n,}` land — at which point the real ReDoS answer is the
-/// linear engine, not this limit.
+/// Backtracking-effort ceiling across one `exec` (all start positions).
+/// Unbounded quantifiers can't spin a zero-width loop — the §22.2.2.3
+/// progress guard (`prog_mark`/`prog_check`) fails an iteration that
+/// consumes nothing — but a pathological nesting of bounded backtracking
+/// (`(a*)*b` on a long non-matching run) can still blow up. This is the
+/// backstop for that; the real ReDoS answer is the planned linear
+/// engine, not this limit.
 const step_limit: u64 = 1 << 24;
 
 pub const Match = struct {
-    /// `2 * group_count` slots: `[2g]` start, `[2g+1]` end (in code
-    /// units of the matched `Unit` width), or `none` if group `g` did
-    /// not participate. Group 0 is the whole match. Caller-owned.
+    /// `2 * group_count` capture slots: `[2g]` start, `[2g+1]` end (in
+    /// code units of the matched `Unit` width), or `none` if group `g`
+    /// did not participate. Group 0 is the whole match. Any trailing
+    /// `scratch_count` slots are VM-internal §22.2.2.3 progress marks —
+    /// the caller reads only the capture slots. Caller-owned.
     slots: []usize,
 
     pub fn deinit(self: *Match, gpa: std.mem.Allocator) void {
@@ -98,7 +102,9 @@ pub fn exec(
     input: []const Unit,
     start: usize,
 ) error{OutOfMemory}!?Match {
-    const slots = try gpa.alloc(usize, 2 * program.group_count);
+    // `2 * group_count` capture slots, then `scratch_count` §22.2.2.3
+    // progress-guard slots (`prog_mark` / `prog_check`).
+    const slots = try gpa.alloc(usize, 2 * program.group_count + program.scratch_count);
     errdefer gpa.free(slots);
 
     var m: Matcher(Unit) = .{
@@ -224,6 +230,25 @@ fn Matcher(comptime Unit: type) type {
                         pc += 1;
                         continue;
                     },
+                    .prog_mark => |slot| {
+                        // §22.2.2.3 — stamp the iteration's start position
+                        // so the matching `prog_check` can tell whether the
+                        // body consumed anything. Logged to `undo`, so a
+                        // backtrack restores the prior mark.
+                        try self.write(undo, slot, sp);
+                        pc += 1;
+                        continue;
+                    },
+                    .prog_check => |slot| {
+                        // §22.2.2.3 step 2.b — the iteration advanced: keep
+                        // looping. It consumed nothing: fall through to the
+                        // backtrack below, which abandons this (empty) path
+                        // and so stops the loop, rolling its captures back.
+                        if (sp != self.slots[slot]) {
+                            pc += 1;
+                            continue;
+                        }
+                    },
                     .assert_start => |multiline| {
                         // `^`: input start, or (multiline) just after a
                         // line terminator.
@@ -311,7 +336,10 @@ fn Matcher(comptime Unit: type) type {
                         // fresh stacks, sharing the capture array. The
                         // assertion is zero-width: `sp` is unchanged
                         // whatever the outcome.
-                        var saved: [2 * compiler.max_groups]usize = undefined;
+                        // Sized for the full slot array: capture slots plus
+                        // the §22.2.2.3 scratch slots a nullable quantifier
+                        // inside the sub-program may use.
+                        var saved: [2 * compiler.max_groups + compiler.max_scratch]usize = undefined;
                         const n = self.slots.len;
                         @memcpy(saved[0..n], self.slots);
                         var sub_bt: std.ArrayListUnmanaged(Frame) = .empty;
