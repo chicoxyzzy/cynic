@@ -1,18 +1,18 @@
 # test262 conformance — Cynic
 
-**Cynic passes 94.56 % of its 45039-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
+**Cynic passes 95.36 % of its 45039-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
-- **38733 pass** at the engine-true level (engine% = 99.98 % — see Legend).
+- **39093 pass** at the engine-true level (engine% = 100.00 % — see Legend).
 - **3858 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
-- **9 real engine failures** — all libregexp Annex B / `/v` grammar carve-outs documented in [AGENTS.md](../AGENTS.md).
-- **2439 skipped** — **tech debt + vendor gaps**. Features Cynic should eventually ship (`explicit-resource-management`) or fixtures blocked on vendored libregexp (`/v` set-difference, `\q{…}`, property-of-strings) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
+- **0 real engine failures** — the former libregexp Annex B / `/v` grammar carve-outs closed when the native Perlex engine took over those patterns and held them to the strict §22.2.1 grammar; see [docs/ROADMAP.md](docs/ROADMAP.md) "Regex".
+- **2088 skipped** — **tech debt + stage-maturity gaps**. Pre-Stage-4 proposals Cynic doesn't yet parse (`decorators`, `import-defer`, `source-phase-imports`) and single-realm Cynic (`$262.createRealm()` cross-realm fixtures). Permanent out-of-scope (Annex B, `intl402/`, `staging/`, browser-era built-ins) is filtered before corpus — those are not counted here.
 
 ## Current scores
 
 | posture | pass% | engine% | passes / corpus | divergent |
 |---|---:|---:|---:|---:|
-| **hardened** (default — `cynic run`) | 94.56 % | 99.98 % | 42591 / 45039 | 3858 |
-| **unhardened** (`cynic --unhardened`) | 94.56 % | 99.98 % | 42591 / 45039 | — |
+| **hardened** (default — `cynic run`) | 95.36 % | 100.00 % | 42951 / 45039 | 3858 |
+| **unhardened** (`cynic --unhardened`) | 95.36 % | 100.00 % | 42951 / 45039 | — |
 
 > **pass%** is the headline — `pass / corpus` (a fixture
 > Cynic doesn't ship counts as a `skip`, lowering this).
@@ -117,14 +117,13 @@ Two-tier skiplist in
   `--enable=<name>` (each has its own phase sweep in
   `## Pre-Stage-4 proposals shipped` below).
 - **In `corpus` as `skip`** — *tech debt*, should
-  eventually pass: Stage-4 features Cynic hasn't shipped
-  yet (`explicit-resource-management`),
-  libregexp `/v` grammar gaps (vendored matcher),
-  cross-realm fixtures (`$262.createRealm()` —
-  single-realm Cynic doesn't expose multi-realm to user
-  JS yet). These count toward `corpus` so `pass%`
-  reflects the actual work left instead of a trimmed-
-  denominator headline.
+  eventually pass: pre-Stage-4 proposals Cynic doesn't
+  yet parse (`decorators`, `import-defer`,
+  `source-phase-imports`), cross-realm fixtures
+  (`$262.createRealm()` — single-realm Cynic doesn't
+  expose multi-realm to user JS yet). These count toward
+  `corpus` so `pass%` reflects the actual work left
+  instead of a trimmed-denominator headline.
 
 Today: test262 ships ~52k fixtures; `corpus` is ~45k.
 ## Where the engine fails (and where SES diverges), by area
@@ -137,13 +136,13 @@ first two path components (`built-ins/Set`,
 **Reading guide:**
 
 - The **top tier** (`1+ fails`) is the engine-work list.
-  Today the only entry is `built-ins/RegExp` with 9
-  libregexp Annex B / `/v` grammar gaps — fixtures that
-  compile patterns the vendored libregexp matcher
-  (QuickJS-NG) doesn't accept. All 9 are documented
-  carve-outs in AGENTS.md ("Acknowledged exception —
-  regex Annex B §B.1.4"). Closing them means patching
-  vendored libregexp or switching matchers.
+  Today it is **empty** — every attempted fixture passes
+  at the spec-literal level (engine% = 100.00 %). The
+  former `built-ins/RegExp` entry (9 libregexp Annex B /
+  `/v` grammar gaps) closed when the native Perlex engine
+  took over those patterns and held them to the strict
+  §22.2.1 grammar; see [docs/ROADMAP.md](docs/ROADMAP.md)
+  "Regex".
 - The **0-fails tier** is sorted by `divergent ↓` so
   SES-hot buckets cluster at the top of the tail — that's
   where Cynic's frozen primordials / locked descriptors /
@@ -159,20 +158,19 @@ first two path components (`built-ins/Set`,
 
 | area | pass | fail | skip | divergent | pass% | engine% |
 |---|---:|---:|---:|---:|---:|---:|
-| **_1–9 fails — engine-work tier (libregexp Annex B carve-outs today)_** | | | | | | |
-| `built-ins/RegExp` | 1492 | 9 | 269 | 101 | 85 % | 99 % |
 | **_0 fails — passing / wholly OOS (sorted by divergent ↓)_** | | | | | | |
 | `built-ins/Temporal` | 3885 | 0 | 0 | 703 | 100 % | 100 % |
 | `built-ins/Array` | 2476 | 0 | 41 | 564 | 99 % | 100 % |
 | `built-ins/Object` | 2783 | 0 | 81 | 536 | 98 % | 100 % |
 | `built-ins/TypedArray` | 1104 | 0 | 8 | 319 | 99 % | 100 % |
-| `built-ins/String` | 1026 | 0 | 6 | 177 | 100 % | 100 % |
+| `built-ins/String` | 1028 | 0 | 4 | 177 | 100 % | 100 % |
 | `built-ins/Date` | 436 | 0 | 3 | 155 | 99 % | 100 % |
 | `built-ins/Math` | 214 | 0 | 0 | 113 | 100 % | 100 % |
 | `built-ins/Promise` | 524 | 0 | 39 | 104 | 94 % | 100 % |
-| `language/expressions` | 9742 | 0 | 905 | 99 | 92 % | 100 % |
+| `built-ins/RegExp` | 1758 | 0 | 12 | 101 | 99 % | 100 % |
+| `language/expressions` | 9747 | 0 | 900 | 99 | 92 % | 100 % |
 | `built-ins/TypedArrayConstructors` | 562 | 0 | 26 | 93 | 96 % | 100 % |
-| `language/statements` | 8516 | 0 | 485 | 89 | 95 % | 100 % |
+| `language/statements` | 8520 | 0 | 481 | 89 | 95 % | 100 % |
 | `built-ins/Set` | 310 | 0 | 2 | 71 | 99 % | 100 % |
 | `built-ins/Iterator` | 367 | 0 | 1 | 64 | 100 % | 100 % |
 | `built-ins/DataView` | 454 | 0 | 12 | 56 | 98 % | 100 % |
@@ -242,7 +240,7 @@ first two path components (`built-ins/Set`,
 | `language/identifiers` | 268 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/keywords` | 25 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/line-terminators` | 32 | 0 | 0 | 0 | 100 % | 100 % |
-| `language/literals` | 384 | 0 | 97 | 0 | 80 % | 100 % |
+| `language/literals` | 467 | 0 | 14 | 0 | 97 % | 100 % |
 | `language/reserved-words` | 27 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/rest-parameters` | 11 | 0 | 0 | 0 | 100 % | 100 % |
 | `language/source-text` | 1 | 0 | 0 | 0 | 100 % | 100 % |
@@ -270,20 +268,20 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` (hardened) | 76 | 0 | 200 | 28 % | 100 % |
-| `joint-iteration` (unhardened) | 76 | 0 | 200 | 28 % | 100 % |
-| `ShadowRealm` (hardened) | 63 | 0 | 200 | 24 % | 100 % |
-| `ShadowRealm` (unhardened) | 63 | 0 | 200 | 24 % | 100 % |
+| `joint-iteration` (hardened) | 76 | 0 | 94 | 45 % | 100 % |
+| `joint-iteration` (unhardened) | 76 | 0 | 94 | 45 % | 100 % |
+| `ShadowRealm` (hardened) | 63 | 0 | 94 | 40 % | 100 % |
+| `ShadowRealm` (unhardened) | 63 | 0 | 94 | 40 % | 100 % |
 
 
 ## History
 
-### 2026-05-30 — cynic `a72bf19`, test262 `d0c1b4555b`
+### 2026-05-30 — cynic `d93e9dc`, test262 `d0c1b455`
 
 |         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
 |---|---|---|---|---|---:|---:|---:|
-| **runtime** | 94.56 % | 99.98 % | 42591 / 45039 | 42591 / 42600 | — | +4596 | 35.5 s |
-| **runtime_hardened** | 94.56 % | 99.98 % | 42591 / 45039 | 38733 / 38742 | 3858 | +4596 | 40.5 s |
+| **runtime** | 95.36 % | 100.00 % | 42951 / 45039 | 42951 / 42951 | — | +4956 | 35.5 s |
+| **runtime_hardened** | 95.36 % | 100.00 % | 42951 / 45039 | 39093 / 39093 | 3858 | +4956 | 35.5 s |
 
 ### 2026-05-29 — cynic `7ce0853`, test262 `d0c1b455`
 
