@@ -366,8 +366,18 @@ score, SES-adjusted score, or witness fidelity fails the
 build — see `.github/workflows/ci.yml`). The harness
 scores against the **Cynic-targeted scope**: paths under
 `harness/`, `staging/`, `intl402/`, Annex B language extensions,
-and the browser-era built-ins Cynic doesn't ship are dropped from
-`total` entirely. (`intl402/` is dropped for the *default* build;
+the browser-era built-ins Cynic doesn't ship, and the feature
+tags for pre-Stage-4 proposals Cynic hasn't implemented yet
+(decorators, import-defer, source-phase-imports, import-bytes,
+immutable-arraybuffer, await-dictionary) are dropped from `total`
+entirely. The pre-Stage-4 trim (reason `pre_stage4`) pins the
+denominator to the published ECMAScript edition: an unimplemented
+proposal's fixtures stay out of `total` until it reaches Stage 4
+(then they re-enter as in-scope counted skips) or Cynic ships it
+(then they move to a dedicated `feature:<name>` phase — like
+today's `joint-iteration` / `ShadowRealm`). This keeps the headline
+from silently decaying as TC39 lands new proposal fixtures upstream.
+(`intl402/` is dropped for the *default* build;
 a future Intl-enabled build flavour — opt-in, linking a CLDR/ICU
 + IANA `tzdata` stack — would bring it back into scope, along
 with named time zones and non-ISO calendars. See

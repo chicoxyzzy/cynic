@@ -1195,11 +1195,13 @@ pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
 }
 
 /// Fixtures Cynic skips **today** but should eventually attempt —
-/// pre-Stage-4 proposals (decorators, import-defer,
-/// source-phase-imports), the cross-realm families (single-realm
-/// host), and eval-dependent fixtures awaiting `--allow=eval`.
-/// These move to the `attempted` column once the proposal advances
-/// or the blocking infra lands.
+/// the cross-realm families (single-realm host) and eval-dependent
+/// fixtures awaiting `--allow=eval`. These move to the `attempted`
+/// column once the blocking infra lands. (Pre-Stage-4 proposals are
+/// *not* path-skipped here: they're recognised by feature tag and
+/// dropped from the corpus as `.pre_stage4` OOS — see
+/// `featureIsUnimplementedProposal`. The path-prefix groups for them
+/// stay empty.)
 /// Separated from `pathIsPermanentlyOutOfScope` so the "what
 /// work is left" signal stays distinct from the "what we refuse
 /// to do" signal.
@@ -1250,25 +1252,53 @@ pub fn featureIsOutOfScope(feature: []const u8) bool {
     return false;
 }
 
-/// Feature tags Cynic skips **today** but should eventually attempt:
-/// pre-Stage-4 proposals whose grammar/semantics aren't shipped
-/// (decorators, import-defer, …) and any vendor-blocked feature.
-/// These stay **in** the corpus as `skip`, so `pass%` reflects the
-/// work left rather than a trimmed-denominator headline.
-pub fn featureIsCurrentlySkipped(feature: []const u8) bool {
-    inline for (.{ stage_maturity_features, vendor_features }) |group| {
-        for (group) |f| {
-            if (std.mem.eql(u8, feature, f)) return true;
-        }
+/// Feature tags for pre-Stage-4 proposals Cynic hasn't implemented
+/// (decorators, import-defer, source-phase-imports, …). These are
+/// **out of scope**: they aren't part of any published ECMA-262
+/// edition, so the harness drops them from the `corpus` denominator
+/// (reason `.pre_stage4`), just like the permanent carve-outs.
+///
+/// The difference from `featureIsOutOfScope` is that these are
+/// *recoverable*, via two distinct gates back into scope:
+///   - the proposal reaches **Stage 4** → it's specced, so it must
+///     leave `stage_maturity_features` and become an in-scope counted
+///     skip (we're on the hook for it in the headline whether or not
+///     Cynic ships it yet); or
+///   - Cynic **implements** it → it graduates to a dedicated
+///     `feature:<name>` phase (a `FeatureFlag`, scored with the flag
+///     on — `joint-iteration`, `ShadowRealm`), excluded from `main`.
+///
+/// Pinning the denominator to the published-edition boundary keeps the
+/// headline from silently decaying as TC39 lands new proposal fixtures
+/// in test262 — score only moves when Cynic does.
+pub fn featureIsUnimplementedProposal(feature: []const u8) bool {
+    for (stage_maturity_features) |f| {
+        if (std.mem.eql(u8, feature, f)) return true;
     }
     return false;
 }
 
-/// Union of the two — any feature tag the engine doesn't currently
-/// run, regardless of whether it's permanently out of scope or just
-/// not-yet-shipped.
+/// Feature tags Cynic skips **today** but still counts in the corpus:
+/// a specced (published-edition) feature blocked on a vendor/infra gap
+/// — the vendored libregexp matcher or unshipped Unicode-property
+/// data. The spec mandates these, so they stay **in** the denominator
+/// as `skip` and `pass%` reflects the work owed. (Currently empty —
+/// Perlex plus the shipped Unicode tables cover today's surface; the
+/// hook stays for the next libregexp/Unicode gap.)
+pub fn featureIsCurrentlySkipped(feature: []const u8) bool {
+    for (vendor_features) |f| {
+        if (std.mem.eql(u8, feature, f)) return true;
+    }
+    return false;
+}
+
+/// Union of all three — any feature tag the engine doesn't currently
+/// run, whether permanently out of scope, an unimplemented pre-Stage-4
+/// proposal, or a vendor-blocked specced feature.
 pub fn featureIsUnsupported(feature: []const u8) bool {
-    return featureIsOutOfScope(feature) or featureIsCurrentlySkipped(feature);
+    return featureIsOutOfScope(feature) or
+        featureIsUnimplementedProposal(feature) or
+        featureIsCurrentlySkipped(feature);
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1536,28 +1566,46 @@ test "skip: Annex B feature flags are hidden via feature filter" {
     try testing.expect(featureIsUnsupported("IsHTMLDDA"));
 }
 
-test "skip: OOS feature tags vs currently-skipped feature tags" {
-    // Annex B (+ SES carve-out) feature tags are permanently out of
-    // scope — the harness drops them from the corpus denominator, so
-    // they classify via `featureIsOutOfScope`, never as in-corpus skip.
+test "skip: OOS feature tags — permanent vs pre-Stage-4 vs vendor-blocked" {
+    // Permanent OOS: Annex B + SES carve-outs. A strict-only,
+    // non-browser, hardened engine never ships these, so the harness
+    // drops them from the corpus denominator (reason `.annex_b`). They
+    // classify via `featureIsOutOfScope` and nothing else.
     try testing.expect(featureIsOutOfScope("__proto__"));
     try testing.expect(featureIsOutOfScope("__getter__"));
     try testing.expect(featureIsOutOfScope("__setter__"));
     try testing.expect(featureIsOutOfScope("legacy-regexp"));
     try testing.expect(featureIsOutOfScope("IsHTMLDDA"));
+    try testing.expect(!featureIsUnimplementedProposal("__proto__"));
     try testing.expect(!featureIsCurrentlySkipped("__proto__"));
-    // Pre-Stage-4 proposals are recoverable work-left — they stay in
-    // the corpus as `skip`, so they classify via
-    // `featureIsCurrentlySkipped`, never as out-of-scope.
-    try testing.expect(featureIsCurrentlySkipped("decorators"));
-    try testing.expect(featureIsCurrentlySkipped("import-defer"));
-    try testing.expect(featureIsCurrentlySkipped("source-phase-imports"));
+
+    // Pre-Stage-4 proposals Cynic hasn't implemented are ALSO dropped
+    // from the corpus (reason `.pre_stage4`) — they aren't in any
+    // published edition, so they're out of scope until they reach
+    // Stage 4 (then in-scope, counted) or Cynic ships them (then a
+    // dedicated `feature:` phase). They classify via
+    // `featureIsUnimplementedProposal`, never as permanent OOS or as a
+    // counted in-corpus skip.
+    try testing.expect(featureIsUnimplementedProposal("decorators"));
+    try testing.expect(featureIsUnimplementedProposal("import-defer"));
+    try testing.expect(featureIsUnimplementedProposal("source-phase-imports"));
+    try testing.expect(featureIsUnimplementedProposal("await-dictionary"));
+    try testing.expect(featureIsUnimplementedProposal("immutable-arraybuffer"));
     try testing.expect(!featureIsOutOfScope("decorators"));
-    // The union recognises both halves.
+    try testing.expect(!featureIsCurrentlySkipped("decorators"));
+
+    // `featureIsCurrentlySkipped` is the in-corpus bucket: a specced
+    // feature blocked on a vendor/infra gap. It's empty today (Perlex
+    // covers the regex surface), so no positive case — but it stays
+    // distinct from the two OOS predicates above.
+
+    // The union recognises all three buckets.
     try testing.expect(featureIsUnsupported("__proto__"));
     try testing.expect(featureIsUnsupported("decorators"));
-    // A feature in neither group is runnable under both predicates.
+
+    // A shipped / specced feature is in none of the buckets — runnable.
     try testing.expect(!featureIsOutOfScope("class"));
+    try testing.expect(!featureIsUnimplementedProposal("class"));
     try testing.expect(!featureIsCurrentlySkipped("class"));
 }
 
