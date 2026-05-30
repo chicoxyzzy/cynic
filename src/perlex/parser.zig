@@ -330,6 +330,16 @@ const Parser = struct {
             // §22.2.1 — a quantifier must follow a quantifiable Atom,
             // not an Assertion. Defer the edge case to the fallback.
             .anchor_start, .anchor_end, .empty, .word_boundary => return error.Unsupported,
+            // §22.2.1 Term: under +UnicodeMode there is no
+            // `Assertion Quantifier` production, so quantifying a lookaround
+            // is a SyntaxError. Under ~UnicodeMode only a *lookahead* is a
+            // QuantifiableAssertion (Annex B §B.1.2) — a quantified
+            // lookbehind is a SyntaxError in every mode. Perlex owns the
+            // SyntaxError directly; the Annex-B-valid non-Unicode lookahead
+            // falls through to the `.repeat` wrap below and is then dropped
+            // by the compiler's nullable-repeat guard (deferred to the
+            // fallback, which still matches it).
+            .lookahead => |la| if (self.unicode or self.unicode_sets or la.behind) return error.SyntaxError,
             else => {},
         }
         return self.makeNode(.{ .repeat = .{ .body = atom, .min = min, .max = max, .greedy = greedy } });
