@@ -1912,9 +1912,10 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return Value.null_;
     }
 
-    // Translate capture pointers to UTF-16 unit indices.
+    // Translate the whole-match end pointer to a UTF-16 unit index for
+    // the lastIndex write; per-capture translation is left to the
+    // shared `CaptureView` builder below.
     const cbuf_addr: usize = @intFromPtr(cbuf);
-    const whole_start: usize = if (captures[0]) |p| (@intFromPtr(p) - cbuf_addr) / 2 else 0;
     const whole_end: usize = if (captures[1]) |p| (@intFromPtr(p) - cbuf_addr) / 2 else 0;
 
     // §22.2.7.2 step 18 — `If global is true or sticky is true,
@@ -1925,244 +1926,302 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
         try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(@intCast(whole_end)));
     }
 
-    // Build the result array per §22.2.7.2 — `[whole,...captures]`
-    // with `index` and `input` properties on the result.
+    // §22.2.7.2 RegExpBuiltinExec steps 22-36 — build the match-result
+    // Array (whole match + captures, plus the `index`, `input`,
+    // `groups`, and — under `/d` — `indices` own properties) through
+    // the shared `CaptureView` builder. `vendoredNames` flattens
+    // libregexp's NUL-terminated name table into the same
+    // group-indexed shape Perlex exposes, so one builder serves both
+    // backends.
+    const names = try vendoredNames(realm, bc, cap_count);
+    defer realm.allocator.free(names);
+    const view = CaptureView{
+        .count = cap_count,
+        .names = names,
+        .spans = .{ .vendored = .{ .caps = captures, .base = cbuf_addr } },
+    };
+    return buildMatchArray(realm, view, input_s, (re_flags & LRE_FLAG_INDICES) != 0);
+}
+
+// ── Shared capture view ─────────────────────────────────────────────
+//
+// Both regex backends produce the same §22.2.7.2 result shape (the
+// match Array, its `groups` object, and the `/d` `indices` array), so
+// the result-builders below work against one neutral `CaptureView`
+// rather than two parallel sets keyed on the backend. The view erases
+// the two capture representations — libregexp's byte pointers into the
+// UTF-16 input buffer vs. Perlex's `usize` code-unit slots — behind a
+// single `span(g)` accessor returning a UTF-16 `[start, end]` pair (or
+// `null` for a group that did not participate). Group names are
+// likewise normalised to a group-indexed `[]?[]const u8` (`null` =
+// anonymous / whole match), the shape Perlex already exposes and
+// `vendoredNames` reshapes libregexp's NUL-terminated table into.
+
+const CaptureView = struct {
+    /// Capture-group count including group 0 (the whole match).
+    count: usize,
+    /// Group-indexed names; `names[g]` is the source-level name for
+    /// capture `g`, or `null` for an anonymous capture / group 0.
+    names: []const ?[]const u8,
+    spans: Spans,
+
+    const Spans = union(enum) {
+        /// Perlex slots: `2 * count` code-unit offsets, with
+        /// `perlex.none` marking a non-participating group.
+        native: []const usize,
+        /// libregexp captures: `2 * count` byte pointers into the
+        /// UTF-16 input buffer (`null` = absent), plus the buffer base
+        /// address for the byte→code-unit division.
+        vendored: struct {
+            caps: []const ?[*]const u8,
+            base: usize,
+        },
+    };
+
+    /// The `[start, end]` UTF-16 code-unit span of capture `g`, or
+    /// `null` when the group did not participate in the match.
+    fn span(self: CaptureView, g: usize) ?[2]usize {
+        switch (self.spans) {
+            .native => |slots| {
+                const cs = slots[2 * g];
+                const ce = slots[2 * g + 1];
+                if (cs == perlex.none or ce == perlex.none) return null;
+                return .{ cs, ce };
+            },
+            .vendored => |v| {
+                const sp = v.caps[2 * g];
+                const ep = v.caps[2 * g + 1];
+                if (sp == null or ep == null) return null;
+                return .{
+                    (@intFromPtr(sp.?) - v.base) / 2,
+                    (@intFromPtr(ep.?) - v.base) / 2,
+                };
+            },
+        }
+    }
+};
+
+/// True when any capture group carries a source-level name.
+fn hasNamedGroup(names: []const ?[]const u8) bool {
+    for (names) |maybe| {
+        if (maybe != null) return true;
+    }
+    return false;
+}
+
+/// Reshape libregexp's name table — the NUL-terminated names appended
+/// after the bytecode body when `LRE_FLAG_NAMED_GROUPS` is set, one
+/// entry per capture index 1..cap_count-1 (empty for anonymous) —
+/// into the group-indexed `[]?[]const u8` Perlex exposes directly.
+/// The caller owns the returned outer slice (free it); each name
+/// sub-slice borrows `bc` and stays valid while the bytecode buffer
+/// lives. An all-`null` slice is returned when the pattern has no
+/// named groups (or the header is malformed).
+fn vendoredNames(realm: *Realm, bc: []const u8, cap_count: usize) NativeError![]const ?[]const u8 {
+    const names = realm.allocator.alloc(?[]const u8, cap_count) catch return error.OutOfMemory;
+    @memset(names, null);
+    const re_flags = c.lre_get_flags(bc.ptr);
+    if ((re_flags & LRE_FLAG_NAMED_GROUPS) == 0) return names;
+    // Header is 8 bytes; `bytecode_len` at offset 4 is the bytecode
+    // body size (excludes the header). Names start right after.
+    const RE_HEADER_LEN: usize = 8;
+    const RE_HEADER_BYTECODE_LEN: usize = 4;
+    if (bc.len < RE_HEADER_LEN) return names;
+    const bc_body_len: usize = @as(usize, bc[RE_HEADER_BYTECODE_LEN]) |
+        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 1]) << 8) |
+        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 2]) << 16) |
+        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 3]) << 24);
+    const names_start = RE_HEADER_LEN + bc_body_len;
+    if (names_start > bc.len) return names;
+    const table = bc[names_start..];
+
+    var p: usize = 0;
+    var g: usize = 1;
+    while (g < cap_count) : (g += 1) {
+        // Walk to the next NUL; every group has an entry (empty for
+        // anonymous captures), so advance positionally.
+        const start = p;
+        while (p < table.len and table[p] != 0) : (p += 1) {}
+        if (p > table.len) break;
+        const name = table[start..p];
+        if (p < table.len) p += 1; // step past the NUL
+        if (name.len == 0) continue; // anonymous capture → stays null
+        names[g] = name;
+    }
+    return names;
+}
+
+/// Index of the first capturing group carrying `name`, in source
+/// order. Used so a duplicated name (only producible by the native
+/// engine — §22.2.1.1) is emitted once, at its first occurrence.
+fn firstNameIndex(names: []const ?[]const u8, name: []const u8) usize {
+    var i: usize = 1;
+    while (i < names.len) : (i += 1) {
+        if (names[i]) |n| {
+            if (std.mem.eql(u8, n, name)) return i;
+        }
+    }
+    return 0;
+}
+
+/// A `[startIndex, endIndex]` pair for the `/d` indices array.
+fn makeIndexPair(realm: *Realm, start: usize, end: usize) NativeError!Value {
+    const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(pair, realm.intrinsics.array_prototype);
+    pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    pair.set(realm.allocator, "0", Value.fromInt32(@intCast(start))) catch return error.OutOfMemory;
+    pair.set(realm.allocator, "1", Value.fromInt32(@intCast(end))) catch return error.OutOfMemory;
+    pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(pair);
+}
+
+/// §22.2.7.2 RegExpBuiltinExec steps 22-36 — assemble the match-result
+/// Array `[whole, ...captures]` with its `index`, `input`, `groups`,
+/// and (when `has_indices`) `indices` own properties, from a neutral
+/// `CaptureView` over either capture backend.
+fn buildMatchArray(realm: *Realm, view: CaptureView, input_s: *JSString, has_indices: bool) NativeError!Value {
+    // Group 0 always participates on a successful match; the `orelse`
+    // is defensive only.
+    const whole = view.span(0) orelse [2]usize{ 0, 0 };
+
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-    const whole_str = try allocMatchString(realm, input_s.flatBytes(), whole_start, whole_end);
+    const whole_str = try allocMatchString(realm, input_s.flatBytes(), whole[0], whole[1]);
     out.set(realm.allocator, "0", Value.fromString(whole_str)) catch return error.OutOfMemory;
 
     var g: usize = 1;
-    while (g < cap_count) : (g += 1) {
+    while (g < view.count) : (g += 1) {
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{g}) catch unreachable;
         const owned_idx = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        const start_ptr = captures[2 * g];
-        const end_ptr = captures[2 * g + 1];
-        if (start_ptr == null or end_ptr == null) {
-            out.set(realm.allocator, owned_idx.flatBytes(), Value.undefined_) catch return error.OutOfMemory;
-        } else {
-            const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
-            const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
-            const cap_str = try allocMatchString(realm, input_s.flatBytes(), u_start, u_end);
+        if (view.span(g)) |sp| {
+            const cap_str = try allocMatchString(realm, input_s.flatBytes(), sp[0], sp[1]);
             out.set(realm.allocator, owned_idx.flatBytes(), Value.fromString(cap_str)) catch return error.OutOfMemory;
+        } else {
+            out.set(realm.allocator, owned_idx.flatBytes(), Value.undefined_) catch return error.OutOfMemory;
         }
     }
-    out.set(realm.allocator, "length", Value.fromInt32(@intCast(cap_count))) catch return error.OutOfMemory;
-    out.set(realm.allocator, "index", Value.fromInt32(@intCast(whole_start))) catch return error.OutOfMemory;
+    out.set(realm.allocator, "length", Value.fromInt32(@intCast(view.count))) catch return error.OutOfMemory;
+    out.set(realm.allocator, "index", Value.fromInt32(@intCast(whole[0]))) catch return error.OutOfMemory;
     out.set(realm.allocator, "input", Value.fromString(input_s)) catch return error.OutOfMemory;
 
-    // §22.2.7.2 RegExpBuiltinExec steps 33-35 — if the pattern
-    // contains any GroupName, `groups` is an OrdinaryObject with
-    // [[Prototype]] = null and a property per named capture set
-    // via CreateDataProperty (so `Object.prototype` setters never
-    // fire). When there are no named captures, `groups` is
-    // `undefined`. Per step 36 the property is always defined on
-    // the result via CreateDataProperty — even the `undefined`
-    // case must be an own own property.
-    const groups_v = try buildGroupsObject(realm, bc, captures, cap_count, cbuf_addr, input_s);
+    // §22.2.7.2 steps 33-35 / 36 — `groups` is always an own property
+    // (CreateDataProperty), `undefined` when the pattern has no named
+    // captures, else a null-prototype Object of name → captured
+    // substring.
+    const groups_v = try buildGroupsObjectView(realm, view, input_s);
     out.set(realm.allocator, "groups", groups_v) catch return error.OutOfMemory;
 
-    // §22.2.7.2 step 8 / step 36 — when `hasIndices` (the `d`
-    // flag), build the match-indices array per §22.2.7.7
-    // MakeIndicesArray and attach it as the `"indices"` own
-    // property via CreateDataProperty. The fixtures under
-    // `built-ins/RegExp/match-indices/` exercise the
-    // shape: each element is either `[startIndex, endIndex]` in
-    // UTF-16 code units or `undefined` for an unmatched capture,
-    // and `indices.groups` mirrors the named-capture map with the
-    // same `[start, end]` pairs (or `undefined`).
-    if ((re_flags & LRE_FLAG_INDICES) != 0) {
-        const indices_v = try buildIndicesArray(realm, bc, captures, cap_count, cbuf_addr);
+    // §22.2.7.2 step 8 / step 36 — under the `/d` flag, attach the
+    // §22.2.7.7 MakeIndicesArray result as the `indices` own property.
+    // The fixtures under `built-ins/RegExp/match-indices/` exercise the
+    // shape: each element is `[startIndex, endIndex]` (UTF-16 units) or
+    // `undefined`, and `indices.groups` mirrors the named-capture map.
+    if (has_indices) {
+        const indices_v = try buildIndicesArrayView(realm, view);
         out.set(realm.allocator, "indices", indices_v) catch return error.OutOfMemory;
     }
 
     return heap_mod.taggedObject(out);
 }
 
-/// §22.2.7.7 MakeIndicesArray ( S, indices, groupNames, hasGroups ).
-/// Builds the array exposed as `result.indices` on the exec result
-/// when the regex has the `/d` flag. Each element is either an
-/// Array `[startIndex, endIndex]` (UTF-16 code-unit positions, the
-/// same space `result.index` lives in) or `undefined` for an
-/// unmatched capture. When the pattern contains any GroupName,
-/// `indices.groups` is a null-prototype Object mirroring the
-/// named-capture map with the same `[start, end]` pairs (or
-/// `undefined`); otherwise `indices.groups` is `undefined` and is
-/// always defined via CreateDataProperty.
-fn buildIndicesArray(
-    realm: *Realm,
-    bc: []const u8,
-    captures: []const ?[*]const u8,
-    cap_count: usize,
-    cbuf_addr: usize,
-) NativeError!Value {
-    // step 6 — `Let A be ! ArrayCreate(n)`. Array-exotic so
-    // `Array.isArray(indices)` is true (`indices-array.js`).
+/// §22.2.7.2 steps 33-35 — the `groups` object: a null-prototype
+/// Object with one own property per named capture (value = the
+/// captured substring, or `undefined` for a non-participating group),
+/// or `undefined` when the pattern has no named groups. Duplicate
+/// names (only producible by the native engine — §22.2.1.1) are
+/// emitted once, at the first source occurrence, carrying whichever
+/// same-named capture participated. A null prototype keeps
+/// `__proto__` a plain own property (`groups-object.js`).
+fn buildGroupsObjectView(realm: *Realm, view: CaptureView, input_s: *JSString) NativeError!Value {
+    if (view.count <= 1) return Value.undefined_;
+    if (!hasNamedGroup(view.names)) return Value.undefined_;
+
+    const groups = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(groups, null);
+
+    var g: usize = 1;
+    while (g < view.count) : (g += 1) {
+        const name = view.names[g] orelse continue;
+        if (firstNameIndex(view.names, name) != g) continue; // emit once
+
+        // The participating capture among all same-named groups (for a
+        // unique name — every libregexp pattern — this is just `g`).
+        var value = Value.undefined_;
+        var i: usize = g;
+        while (i < view.count) : (i += 1) {
+            if (view.names[i]) |n| {
+                if (std.mem.eql(u8, n, name)) {
+                    if (view.span(i)) |sp| {
+                        const s = try allocMatchString(realm, input_s.flatBytes(), sp[0], sp[1]);
+                        value = Value.fromString(s);
+                        break;
+                    }
+                }
+            }
+        }
+        groups.set(realm.allocator, name, value) catch return error.OutOfMemory;
+    }
+    return heap_mod.taggedObject(groups);
+}
+
+/// §22.2.7.7 MakeIndicesArray — the `result.indices` array for the
+/// `/d` flag. Element `g` is `[startIndex, endIndex]` (UTF-16 units,
+/// the same space `result.index` lives in) or `undefined` for an
+/// unmatched capture; `indices.groups` mirrors the named-capture map
+/// (or `undefined`) and is always an own property.
+fn buildIndicesArrayView(realm: *Realm, view: CaptureView) NativeError!Value {
     const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
     arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
     var ibuf: [16]u8 = undefined;
     var g: usize = 0;
-    while (g < cap_count) : (g += 1) {
-        const start_ptr = captures[2 * g];
-        const end_ptr = captures[2 * g + 1];
+    while (g < view.count) : (g += 1) {
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{g}) catch unreachable;
-        // step 13.b — unmatched capture (`null` start / end) → the
-        // entry is `undefined` (`indices-array-unmatched.js`).
-        if (start_ptr == null or end_ptr == null) {
+        if (view.span(g)) |sp| {
+            const pair = try makeIndexPair(realm, sp[0], sp[1]);
+            arr.set(realm.allocator, islice, pair) catch return error.OutOfMemory;
+        } else {
             arr.set(realm.allocator, islice, Value.undefined_) catch return error.OutOfMemory;
-            continue;
         }
-        // step 13.a / §22.2.7.7 GetMatchIndicesArray — a fresh
-        // ordinary Array of `[startIndex, endIndex]`, both
-        // numbers (`indices-array-element.js`).
-        // §22.2.7.7 — the indices array holds UTF-16 code-unit
-        // positions directly, the same space `result.index` lives
-        // in; no byte-offset translation needed.
-        const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
-        const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
-        const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
-        realm.heap.setObjectPrototype(pair, realm.intrinsics.array_prototype);
-        pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-        pair.set(realm.allocator, "0", Value.fromInt32(@intCast(u_start))) catch return error.OutOfMemory;
-        pair.set(realm.allocator, "1", Value.fromInt32(@intCast(u_end))) catch return error.OutOfMemory;
-        pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
-        arr.set(realm.allocator, islice, heap_mod.taggedObject(pair)) catch return error.OutOfMemory;
     }
-    arr.set(realm.allocator, "length", Value.fromInt32(@intCast(cap_count))) catch return error.OutOfMemory;
+    arr.set(realm.allocator, "length", Value.fromInt32(@intCast(view.count))) catch return error.OutOfMemory;
 
-    // step 10-12 — `groups` is unconditionally a property on the
-    // indices array; when the pattern has named captures it's a
-    // null-prototype Object mirroring `result.groups`, else
-    // `undefined` (`indices-groups-object-undefined.js`).
-    const groups_v = try buildIndicesGroupsObject(realm, bc, captures, cap_count, cbuf_addr);
+    const groups_v = try buildIndicesGroupsObjectView(realm, view);
     arr.set(realm.allocator, "groups", groups_v) catch return error.OutOfMemory;
-
     return heap_mod.taggedObject(arr);
 }
 
-/// Mirror of `buildGroupsObject` but emitting `[startIndex,
-/// endIndex]` pairs instead of captured substrings. Walks the
-/// libregexp name table at the tail of the bytecode buffer; an
-/// empty name entry is an anonymous capture (skipped).
-fn buildIndicesGroupsObject(
-    realm: *Realm,
-    bc: []const u8,
-    captures: []const ?[*]const u8,
-    cap_count: usize,
-    cbuf_addr: usize,
-) NativeError!Value {
-    const re_flags = c.lre_get_flags(bc.ptr);
-    if ((re_flags & LRE_FLAG_NAMED_GROUPS) == 0) return Value.undefined_;
-    if (cap_count <= 1) return Value.undefined_;
-    const RE_HEADER_LEN: usize = 8;
-    const RE_HEADER_BYTECODE_LEN: usize = 4;
-    if (bc.len < RE_HEADER_LEN) return Value.undefined_;
-    const bc_body_len: usize = @as(usize, bc[RE_HEADER_BYTECODE_LEN]) |
-        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 1]) << 8) |
-        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 2]) << 16) |
-        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 3]) << 24);
-    const names_start = RE_HEADER_LEN + bc_body_len;
-    if (names_start > bc.len) return Value.undefined_;
-    const names = bc[names_start..];
+/// Mirror of `buildGroupsObjectView` but emitting `[startIndex,
+/// endIndex]` pairs instead of captured substrings, for the
+/// `indices.groups` map under the `/d` flag.
+fn buildIndicesGroupsObjectView(realm: *Realm, view: CaptureView) NativeError!Value {
+    if (view.count <= 1) return Value.undefined_;
+    if (!hasNamedGroup(view.names)) return Value.undefined_;
 
     const groups = realm.heap.allocateObject() catch return error.OutOfMemory;
-    // Null prototype mirrors `result.groups` (§22.2.7.2 step 33.a),
-    // so `__proto__` lands as a plain own property
-    // (`indices-groups-object.js`).
     realm.heap.setObjectPrototype(groups, null);
 
-    var p: usize = 0;
     var g: usize = 1;
-    while (g < cap_count) : (g += 1) {
-        const start = p;
-        while (p < names.len and names[p] != 0) : (p += 1) {}
-        if (p > names.len) break;
-        const name = names[start..p];
-        if (p < names.len) p += 1;
-        if (name.len == 0) continue; // anonymous capture
-        const start_ptr = captures[2 * g];
-        const end_ptr = captures[2 * g + 1];
-        const pair_v: Value = if (start_ptr == null or end_ptr == null) Value.undefined_ else blk: {
-            const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
-            const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
-            const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
-            realm.heap.setObjectPrototype(pair, realm.intrinsics.array_prototype);
-            pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-            pair.set(realm.allocator, "0", Value.fromInt32(@intCast(u_start))) catch return error.OutOfMemory;
-            pair.set(realm.allocator, "1", Value.fromInt32(@intCast(u_end))) catch return error.OutOfMemory;
-            pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
-            break :blk heap_mod.taggedObject(pair);
-        };
-        groups.set(realm.allocator, name, pair_v) catch return error.OutOfMemory;
-    }
-    return heap_mod.taggedObject(groups);
-}
+    while (g < view.count) : (g += 1) {
+        const name = view.names[g] orelse continue;
+        if (firstNameIndex(view.names, name) != g) continue; // emit once
 
-/// Read libregexp's name table appended after the bytecode body
-/// when `LRE_FLAG_NAMED_GROUPS` is set. Each capture index
-/// (1..capture_count-1) has a NUL-terminated entry — empty for
-/// anonymous captures, the source-level name for named ones.
-/// Returns `undefined` when the pattern contains no named groups.
-fn buildGroupsObject(
-    realm: *Realm,
-    bc: []const u8,
-    captures: []const ?[*]const u8,
-    cap_count: usize,
-    cbuf_addr: usize,
-    input_s: *JSString,
-) NativeError!Value {
-    const re_flags = c.lre_get_flags(bc.ptr);
-    if ((re_flags & LRE_FLAG_NAMED_GROUPS) == 0) return Value.undefined_;
-    if (cap_count <= 1) return Value.undefined_;
-    // Header is 8 bytes; `bytecode_len` at offset 4 is the bytecode
-    // body size (excludes the header). Names start right after.
-    const RE_HEADER_LEN: usize = 8;
-    const RE_HEADER_BYTECODE_LEN: usize = 4;
-    if (bc.len < RE_HEADER_LEN) return Value.undefined_;
-    const bc_body_len: usize = @as(usize, bc[RE_HEADER_BYTECODE_LEN]) |
-        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 1]) << 8) |
-        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 2]) << 16) |
-        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 3]) << 24);
-    const names_start = RE_HEADER_LEN + bc_body_len;
-    if (names_start > bc.len) return Value.undefined_;
-    const names = bc[names_start..];
-
-    const groups = realm.heap.allocateObject() catch return error.OutOfMemory;
-    // §22.2.7.2 step 33.a — `OrdinaryObjectCreate(null)`. Groups
-    // object has a null prototype so `__proto__` keys land as
-    // ordinary own properties, not as prototype-chain reads.
-    realm.heap.setObjectPrototype(groups, null);
-
-    var p: usize = 0;
-    var g: usize = 1;
-    while (g < cap_count) : (g += 1) {
-        // Walk to the next NUL.
-        const start = p;
-        while (p < names.len and names[p] != 0) : (p += 1) {}
-        if (p > names.len) break;
-        const name = names[start..p];
-        // Step past the NUL.
-        if (p < names.len) p += 1;
-        if (name.len == 0) continue; // anonymous capture
-        // Per §22.2.7.2 step 33.b.iii — when the capture has no
-        // match, the value is `undefined`; otherwise it's the
-        // captured substring.
-        const start_ptr = captures[2 * g];
-        const end_ptr = captures[2 * g + 1];
-        const cap_v: Value = if (start_ptr == null or end_ptr == null) Value.undefined_ else blk: {
-            const u_start = (@intFromPtr(start_ptr.?) - cbuf_addr) / 2;
-            const u_end = (@intFromPtr(end_ptr.?) - cbuf_addr) / 2;
-            const cap_str = try allocMatchString(realm, input_s.flatBytes(), u_start, u_end);
-            break :blk Value.fromString(cap_str);
-        };
-        // CreateDataProperty (own, writable / enumerable /
-        // configurable). The default `set` lands at all-true,
-        // which matches.
-        groups.set(realm.allocator, name, cap_v) catch return error.OutOfMemory;
+        var value = Value.undefined_;
+        var i: usize = g;
+        while (i < view.count) : (i += 1) {
+            if (view.names[i]) |n| {
+                if (std.mem.eql(u8, n, name)) {
+                    if (view.span(i)) |sp| {
+                        value = try makeIndexPair(realm, sp[0], sp[1]);
+                        break;
+                    }
+                }
+            }
+        }
+        groups.set(realm.allocator, name, value) catch return error.OutOfMemory;
     }
     return heap_mod.taggedObject(groups);
 }
@@ -2170,15 +2229,13 @@ fn buildGroupsObject(
 // ── Perlex (native engine) exec paths ───────────────────────────────
 //
 // Mirror the libregexp `regexpExec` / `regexpBuiltinExecMatchOnly`
-// shape — same §22.2.7.2 `lastIndex` handling and result structure —
-// but drive the native matcher and read its `usize` capture slots
-// (UTF-16 code-unit offsets) directly. The `groups` / `indices.groups`
-// builders additionally de-duplicate by name: with duplicate named
-// groups the property is emitted once, at the first occurrence in
-// source order, carrying whichever same-named capture participated.
-// (A future cleanup can unify these with the libregexp builders behind
-// a neutral capture view; kept separate here to leave the proven
-// vendored path untouched.)
+// shape — same §22.2.7.2 `lastIndex` handling — but drive the native
+// matcher. The match-result Array, its `groups` object and the `/d`
+// `indices` array are assembled by the shared `CaptureView` builders
+// above: these paths just wrap the native `usize` capture slots in a
+// `CaptureView` (`.native` spans, `prog.names` directly) and hand off
+// to `buildMatchArray`, exactly as the libregexp path wraps its
+// byte-pointer captures (`.vendored` spans, `vendoredNames`).
 
 /// §22.2.7.2 RegExpBuiltinExec, driven by Perlex.
 fn execPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Program, input_s: *JSString) NativeError!Value {
@@ -2187,7 +2244,6 @@ fn execPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Program, 
 
     const is_global = prog.flags.global;
     const is_sticky = prog.flags.sticky;
-    const cap_count = prog.group_count;
 
     const last_index_v = try intrinsics.getPropertyChain(realm, regex_obj, "lastIndex");
     const last_index_i64: i64 = try intrinsics.toLengthValue(realm, last_index_v);
@@ -2206,42 +2262,19 @@ fn execPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Program, 
     var m = maybe_match.?;
     defer m.deinit(realm.allocator);
 
-    const whole_start = m.slots[0];
-    const whole_end = m.slots[1];
-    if (is_global or is_sticky) try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(@intCast(whole_end)));
-
-    const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
-    out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-    const whole_str = try allocMatchString(realm, input_s.flatBytes(), whole_start, whole_end);
-    out.set(realm.allocator, "0", Value.fromString(whole_str)) catch return error.OutOfMemory;
-
-    var g: usize = 1;
-    while (g < cap_count) : (g += 1) {
-        var ibuf: [16]u8 = undefined;
-        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{g}) catch unreachable;
-        const owned_idx = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        const cs = m.slots[2 * g];
-        const ce = m.slots[2 * g + 1];
-        if (cs == perlex.none or ce == perlex.none) {
-            out.set(realm.allocator, owned_idx.flatBytes(), Value.undefined_) catch return error.OutOfMemory;
-        } else {
-            const cap_str = try allocMatchString(realm, input_s.flatBytes(), cs, ce);
-            out.set(realm.allocator, owned_idx.flatBytes(), Value.fromString(cap_str)) catch return error.OutOfMemory;
-        }
+    // §22.2.7.2 step 18 — advance lastIndex to the whole-match end on a
+    // global / sticky match (honoring writability — a non-writable own
+    // slot raises TypeError).
+    if (is_global or is_sticky) {
+        try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(@intCast(m.slots[1])));
     }
-    out.set(realm.allocator, "length", Value.fromInt32(@intCast(cap_count))) catch return error.OutOfMemory;
-    out.set(realm.allocator, "index", Value.fromInt32(@intCast(whole_start))) catch return error.OutOfMemory;
-    out.set(realm.allocator, "input", Value.fromString(input_s)) catch return error.OutOfMemory;
 
-    const groups_v = try buildGroupsObjectPerlex(realm, prog, m.slots, input_s);
-    out.set(realm.allocator, "groups", groups_v) catch return error.OutOfMemory;
-
-    if (prog.flags.has_indices) {
-        const indices_v = try buildIndicesPerlex(realm, prog, m.slots);
-        out.set(realm.allocator, "indices", indices_v) catch return error.OutOfMemory;
-    }
-    return heap_mod.taggedObject(out);
+    const view = CaptureView{
+        .count = prog.group_count,
+        .names = prog.names,
+        .spans = .{ .native = m.slots },
+    };
+    return buildMatchArray(realm, view, input_s, prog.flags.has_indices);
 }
 
 /// Allocation-free match check for `RegExp.prototype.test`, Perlex side.
@@ -2272,131 +2305,6 @@ fn matchOnlyPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Prog
         try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(@intCast(m.slots[1])));
     }
     return true;
-}
-
-/// Index of the first capturing group carrying `name`, in source
-/// order. Used so a duplicated name is emitted once, at its first
-/// occurrence.
-fn firstNameIndex(names: []const ?[]const u8, name: []const u8) usize {
-    var i: usize = 1;
-    while (i < names.len) : (i += 1) {
-        if (names[i]) |n| {
-            if (std.mem.eql(u8, n, name)) return i;
-        }
-    }
-    return 0;
-}
-
-fn buildGroupsObjectPerlex(realm: *Realm, prog: *const perlex.Program, slots: []const usize, input_s: *JSString) NativeError!Value {
-    var has_named = false;
-    for (prog.names) |maybe| {
-        if (maybe != null) {
-            has_named = true;
-            break;
-        }
-    }
-    if (!has_named) return Value.undefined_;
-
-    const groups = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(groups, null);
-
-    var g: usize = 1;
-    while (g < prog.group_count) : (g += 1) {
-        const name = prog.names[g] orelse continue;
-        if (firstNameIndex(prog.names, name) != g) continue; // emit once
-
-        // The participating capture among all same-named groups.
-        var value = Value.undefined_;
-        var i: usize = 1;
-        while (i < prog.group_count) : (i += 1) {
-            if (prog.names[i]) |n| {
-                if (std.mem.eql(u8, n, name)) {
-                    const cs = slots[2 * i];
-                    const ce = slots[2 * i + 1];
-                    if (cs != perlex.none and ce != perlex.none) {
-                        const s = try allocMatchString(realm, input_s.flatBytes(), cs, ce);
-                        value = Value.fromString(s);
-                        break;
-                    }
-                }
-            }
-        }
-        groups.set(realm.allocator, name, value) catch return error.OutOfMemory;
-    }
-    return heap_mod.taggedObject(groups);
-}
-
-/// A `[startIndex, endIndex]` pair for the `/d` indices array.
-fn makeIndexPair(realm: *Realm, start: usize, end: usize) NativeError!Value {
-    const pair = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(pair, realm.intrinsics.array_prototype);
-    pair.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-    pair.set(realm.allocator, "0", Value.fromInt32(@intCast(start))) catch return error.OutOfMemory;
-    pair.set(realm.allocator, "1", Value.fromInt32(@intCast(end))) catch return error.OutOfMemory;
-    pair.set(realm.allocator, "length", Value.fromInt32(2)) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(pair);
-}
-
-fn buildIndicesPerlex(realm: *Realm, prog: *const perlex.Program, slots: []const usize) NativeError!Value {
-    const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
-    arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-
-    var ibuf: [16]u8 = undefined;
-    var g: usize = 0;
-    while (g < prog.group_count) : (g += 1) {
-        const islice = std.fmt.bufPrint(&ibuf, "{d}", .{g}) catch unreachable;
-        const cs = slots[2 * g];
-        const ce = slots[2 * g + 1];
-        if (cs == perlex.none or ce == perlex.none) {
-            arr.set(realm.allocator, islice, Value.undefined_) catch return error.OutOfMemory;
-        } else {
-            const pair = try makeIndexPair(realm, cs, ce);
-            arr.set(realm.allocator, islice, pair) catch return error.OutOfMemory;
-        }
-    }
-    arr.set(realm.allocator, "length", Value.fromInt32(@intCast(prog.group_count))) catch return error.OutOfMemory;
-
-    const groups_v = try buildIndicesGroupsObjectPerlex(realm, prog, slots);
-    arr.set(realm.allocator, "groups", groups_v) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(arr);
-}
-
-fn buildIndicesGroupsObjectPerlex(realm: *Realm, prog: *const perlex.Program, slots: []const usize) NativeError!Value {
-    var has_named = false;
-    for (prog.names) |maybe| {
-        if (maybe != null) {
-            has_named = true;
-            break;
-        }
-    }
-    if (!has_named) return Value.undefined_;
-
-    const groups = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(groups, null);
-
-    var g: usize = 1;
-    while (g < prog.group_count) : (g += 1) {
-        const name = prog.names[g] orelse continue;
-        if (firstNameIndex(prog.names, name) != g) continue;
-
-        var value = Value.undefined_;
-        var i: usize = 1;
-        while (i < prog.group_count) : (i += 1) {
-            if (prog.names[i]) |n| {
-                if (std.mem.eql(u8, n, name)) {
-                    const cs = slots[2 * i];
-                    const ce = slots[2 * i + 1];
-                    if (cs != perlex.none and ce != perlex.none) {
-                        value = try makeIndexPair(realm, cs, ce);
-                        break;
-                    }
-                }
-            }
-        }
-        groups.set(realm.allocator, name, value) catch return error.OutOfMemory;
-    }
-    return heap_mod.taggedObject(groups);
 }
 
 /// §22.2.7.2 RegExpBuiltinExec — match-only variant. Runs the
