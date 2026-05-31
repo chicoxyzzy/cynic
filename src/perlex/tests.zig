@@ -576,7 +576,7 @@ test "perlex: a \\k reference to a malformed name is a syntax error" {
 // ── Fallback routing — constructs outside the v1 grammar ─────────────
 
 test "perlex: unsupported constructs fall back" {
-    try expectCompile("[\\D]", .unsupported); // negated class escape in class
+    try expectCompileFlags("[\\D]", uf, .unsupported); // negated class escape under /u (off /u it's owned)
     try expectCompile("\\p{L}", .unsupported); // property escape
     // A nullable body whose empty match comes from an *assertion* stays
     // deferred only in its Annex-B-valid form: `(?=a)*` is a §22.2.1
@@ -1136,14 +1136,17 @@ test "perlex: a class-escape range bound defers without /u (Annex B)" {
     try expectCompile("[a-\\W]", .unsupported);
 }
 
-test "perlex: a standalone negated class escape still defers, not rejected" {
-    // `\D \S \W` standalone is a valid class member the fallback matches;
-    // it must NOT become a SyntaxError under /u just because the range
-    // path now owns class-escape bounds.
+test "perlex: a standalone negated class escape under /u defers, not rejected" {
+    // `\D \S \W` standalone is a valid class member. Under /u Perlex can't
+    // complement it at parse time (it isn't handed `i`, so it can't rule out
+    // the /iu fold orbits), so it defers to the fallback — but it must NOT
+    // become a SyntaxError just because the range path owns class-escape
+    // *bounds* under /u. Off /u the same member is owned (complemented in
+    // place) — see "negated class shorthands \D \S \W owned in non-/u
+    // classes".
     try expectCompileFlags("[\\D]", uf, .unsupported);
     try expectCompileFlags("[\\S]", uf, .unsupported);
     try expectCompileFlags("[\\W]", uf, .unsupported);
-    try expectCompile("[\\D]", .unsupported);
 }
 
 test "perlex: \\d \\s \\w still match standalone and with a trailing dash" {
@@ -1627,6 +1630,61 @@ test "perlex: §22.2.1 capture-group count up to the libregexp ceiling is owned"
         break :blk s;
     };
     try expectCompile(over, .unsupported);
+}
+
+test "perlex: §22.2.1 negated class shorthands \\D \\S \\W owned in non-/u classes" {
+    // A `\D \S \W` inside `[ … ]` is the set complement of `\d \s \w`.
+    // Off `/u` Perlex complements the positive range set at parse time and
+    // appends it as ordinary ranges, so the class is owned rather than
+    // deferred. Every expectation here is engine262-authoritative (the
+    // cross-engine differential agrees — node/JSC/SM/Hermes/QuickJS all
+    // match).
+
+    // Bare shorthand membership (the positive vs negated halves).
+    try expectMatch("[\\D]", "a", "a");
+    try expectNoMatch("[\\D]", "5");
+    try expectMatch("[\\W]", "!", "!");
+    try expectNoMatch("[\\W]", "_"); // `_` is a word char → excluded by \W
+    try expectMatch("[\\S]", "x", "x");
+    try expectNoMatch("[\\S]", " ");
+
+    // `/i` leaves the complement unchanged: complement(\d), complement(\s)
+    // and complement(\w) each contain a letter and its case-swap together
+    // (or neither), so ASCII folding never flips membership. The VM's inline
+    // ASCII fold is therefore a no-op on these sets.
+    try expectNoMatchFlags("[\\W]", .{ .ignore_case = true }, "a");
+    try expectMatchFlags("[\\W]", .{ .ignore_case = true }, "!", "!");
+    try expectNoMatchFlags("[\\W]", .{ .ignore_case = true }, "A");
+    try expectMatchFlags("[\\D]", .{ .ignore_case = true }, "a", "a");
+    try expectNoMatchFlags("[\\D]", .{ .ignore_case = true }, "5");
+    try expectMatchFlags("[\\S]", .{ .ignore_case = true }, "a", "a");
+    try expectNoMatchFlags("[\\S]", .{ .ignore_case = true }, " ");
+
+    // Mixed with a literal, combined shorthands, and double-negated.
+    try expectNoMatch("[a\\S]", " "); // ` ` ∉ {a} ∪ \S
+    try expectMatch("[a\\S]", "a", "a");
+    try expectMatch("[\\D\\S]", " ", " "); // ` ` ∈ \D
+    try expectMatch("[^\\S]", " ", " "); // ^ over \S → whitespace only
+    try expectNoMatch("[^\\S]", "a");
+
+    // The real-world census pattern that drove this increment: a config
+    // line `key␣one␣=␣val` with nested `[\S]+`/whitespace groups. Group 1 is
+    // the LHS run, group 2 the last ` one` repetition.
+    try expectCaps(
+        "([\\S]+([ \\t]+[\\S]+)*)[ \\t]*=[ \\t]*[\\S]+",
+        "key one = val",
+        "'key one = val' 'key one' ' one'",
+    );
+
+    // `/u` still defers. The parser is handed `unicode`/`unicode_sets` but
+    // NOT `ignore_case`, so it can't tell `/u` from `/iu`; and `/iu` pulls
+    // non-ASCII fold orbits (the Kelvin sign U+212A folds with `k`, so it
+    // joins `\W`'s complement) that a parse-time ASCII complement can't
+    // represent. Deferring all of `/u` keeps the fallback authoritative for
+    // the one case that would diverge.
+    try expectCompileFlags("[\\S]", .{ .unicode = true }, .unsupported);
+    try expectCompileFlags("[\\W]", .{ .unicode = true }, .unsupported);
+    try expectCompileFlags("[\\D]", .{ .unicode = true }, .unsupported);
 }
 
 // ── §22.2.1 character classes, `.`, class escapes, boundaries ───────
