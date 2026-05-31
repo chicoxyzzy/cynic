@@ -322,6 +322,18 @@ pub const Heap = struct {
     /// clears it — a full mark already traces every mature object.
     remembered: std.ArrayListUnmanaged(Container) = .empty,
 
+    /// Multi-realm Phase 1 — opt the whole heap out of collection.
+    /// `collectFull` and `collectYoung` early-return when this is
+    /// set. The frozen `IntrinsicsBase` (see
+    /// `docs/multi-realm.md` Phase 1 note (b)) lives on a `Heap`
+    /// flagged `gc_disabled = true`: no per-realm sweep ever
+    /// touches the shared prototype subgraph, and the realms
+    /// referencing it just hold cross-heap `*JSObject` pointers.
+    /// One branch at the top of two collect entry points beats
+    /// scattering `external: bool` checks across every sweep
+    /// kind. Default `false` keeps every existing per-realm
+    /// heap on the normal path.
+    gc_disabled: bool = false,
     /// Allocations (across every kind) since the last `collect`
     /// call. Bumped by each `allocateX`; the interpreter dispatch
     /// loop checks it against `gc_threshold` between opcodes and
@@ -1912,6 +1924,12 @@ pub const Heap = struct {
     /// cleared the remembered set, and the next `collectYoung`
     /// would free that young object out from under it.
     pub fn collectFull(self: *Heap, roots: []const Value) void {
+        // Multi-realm Phase 1: a frozen-intrinsics heap opts out
+        // of collection entirely (see `gc_disabled` doc + Phase 1
+        // note (b) in `docs/multi-realm.md`). Realms referencing
+        // its objects through `IntrinsicsBase` never sweep them.
+        if (self.gc_disabled) return;
+
         // Wall-clock start for the diagnostic pause-time field.
         // Production engines (V8 `--trace-gc`, JSC GC logs, SM
         // `MOZ_GCTIMER`) all surface per-cycle pause distribution
@@ -2110,6 +2128,11 @@ pub const Heap = struct {
     /// every mature object — otherwise the next `collectFull` would
     /// see stale marks and leak.
     pub fn collectYoung(self: *Heap, roots: []const Value) void {
+        // Multi-realm Phase 1: same opt-out as `collectFull`. See
+        // `gc_disabled` doc + `docs/multi-realm.md` Phase 1 note
+        // (b).
+        if (self.gc_disabled) return;
+
         const t_start = monotonicNs();
 
         // Arm the cycle if the caller hasn't yet — same protocol
@@ -3288,6 +3311,31 @@ test "Heap: allocate then collect with empty roots frees the string" {
 
     heap.collect(&.{});
     try testing.expectEqual(@as(usize, 0), heap.stringCount());
+}
+
+test "Heap: gc_disabled short-circuits collectFull and collectYoung" {
+    // Multi-realm Phase 1 substrate (`docs/multi-realm.md` Phase
+    // 1 note (b)): a heap flagged `gc_disabled = true` retains
+    // every allocation across any number of collect calls. This
+    // is the property the eventual `IntrinsicsBase` relies on —
+    // a per-realm sweep traversing into the shared prototype
+    // subgraph would either segfault on already-swept slots or
+    // free objects another realm is still holding.
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+    heap.gc_disabled = true;
+
+    _ = try heap.allocateString("retained-1");
+    _ = try heap.allocateString("retained-2");
+    try testing.expectEqual(@as(usize, 2), heap.stringCount());
+
+    // Both major and minor cycles must be no-ops. `collect`
+    // dispatches to `collectFull` today; call the young entry
+    // point explicitly too so the contract pins both paths.
+    heap.collect(&.{});
+    heap.collectYoung(&.{});
+    heap.collectFull(&.{});
+    try testing.expectEqual(@as(usize, 2), heap.stringCount());
 }
 
 test "Heap: fresh allocations land in the young generation" {
