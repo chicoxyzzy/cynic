@@ -108,20 +108,24 @@ pub fn validateRegexLiteralToken(
     // the libregexp syntax check below. (`OutOfMemory` is treated as
     // "unsupported" so validation still proceeds.)
     //
-    // Inject the same `\p{…}` resolver and `/iu`/`/iv` case folder the
-    // runtime bridge uses (`runtime/builtins/regexp.zig ensureCompiled`)
-    // so the two compilation paths agree on which patterns are valid. A
-    // null resolver here would defer every `\p{…}` to libregexp, which
-    // rejects values Cynic's tables recognise (e.g. `Script=Unknown`,
-    // the §22.2.1.1 @missing complement) — a parse-time false reject of
-    // a pattern the runtime then accepts. A null case folder would, by
-    // the `compileWithHooks` deferral gate, send every `/iu`/`/iv`
-    // pattern straight to libregexp *before* Perlex parses it, so
-    // Perlex's same-Alternative duplicate-name early error (§22.2.1.1)
-    // would go unreported for Unicode-ignore-case literals.
+    // Inject the *same* hooks the runtime bridge uses
+    // (`runtime/builtins/regexp.zig ensureCompiled`) — the `\p{…}`
+    // resolver, the `/iu`/`/iv` case folder, and the non-/u Canonicalize
+    // folder — so the two compilation paths agree on which patterns are
+    // valid and which defer. A null resolver here would defer every
+    // `\p{…}` to libregexp, which rejects values Cynic's tables recognise
+    // (e.g. `Script=Unknown`, the §22.2.1.1 @missing complement) — a
+    // parse-time false reject of a pattern the runtime then accepts. A
+    // null case folder would, by the `compileWithHooks` deferral gate,
+    // send every `/iu`/`/iv` pattern straight to libregexp *before* Perlex
+    // parses it, so Perlex's same-Alternative duplicate-name early error
+    // (§22.2.1.1) would go unreported for Unicode-ignore-case literals; the
+    // non-/u folder closes the same gap for a non-Unicode `i` literal that
+    // carries a non-ASCII unit.
     var perlex_result = perlex.compileWithHooks(allocator, pattern, perlexFlagsFromText(flags_text), .{
         .resolver = perlex_props.resolve,
         .case_folder = perlex_props.caseFold,
+        .nonunicode_fold = perlex_props.nonUnicodeCanonFold,
     }) catch perlex.CompileResult.unsupported;
     switch (perlex_result) {
         .ok => |*program| {
