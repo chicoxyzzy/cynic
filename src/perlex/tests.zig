@@ -907,13 +907,23 @@ test "perlex: \\c not followed by a letter is a /u early error" {
     try expectCompileFlags("[\\c0]", uf, .syntax_error);
 }
 
-test "perlex: \\c not followed by a letter defers without /u (Annex B)" {
-    // Without /u these are Annex B leniency (`\c0` → U+0010, bare `\c` →
-    // literal) that the libregexp fallback still owns.
-    try expectCompile("\\c", .unsupported);
-    try expectCompile("\\c0", .unsupported);
-    try expectCompile("[\\c0]", .unsupported);
-    try expectCompile("[\\c_]", .unsupported);
+test "perlex: \\c not followed by a letter is a SyntaxError in every mode (§22.2.1)" {
+    // §22.2.1 CharacterEscape :: `c` ControlLetter requires a [A-Za-z]; with
+    // no letter the only production left is IdentityEscape, and `c` is
+    // UnicodeIDContinue — excluded under +UnicodeMode (SyntaxCharacter or `/`
+    // only) and, in the main grammar, under ~UnicodeMode too (SourceCharacter
+    // but not UnicodeIDContinue). So `\c<non-letter>` / a bare `\c` is a
+    // §22.2.1.1 early error in every mode. Only Annex B §B.1.4 reread it as a
+    // literal (`\c0` → U+0010, bare `\c` → 'c'); Cynic's strict-only,
+    // non-browser target rejects it (browser V8 / JSC / SpiderMonkey accept
+    // the Annex B form).
+    try expectCompile("\\c", .syntax_error);
+    try expectCompile("\\c0", .syntax_error);
+    try expectCompile("[\\c0]", .syntax_error);
+    try expectCompile("[\\c_]", .syntax_error);
+    // A `\c0` low bound makes the class a SyntaxError before the (separately
+    // invalid, reversed) `d-G` range is even reached.
+    try expectCompile("[\\c0001d-G]", .syntax_error);
 }
 
 // ── §22.2.1.1 incomplete \x / \u escapes ────────────────────────────
