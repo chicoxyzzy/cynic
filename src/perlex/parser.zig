@@ -970,11 +970,15 @@ const Parser = struct {
                         return self.takeEscaped(3, cc % 32);
                     }
                 }
-                // `\c` not followed by [A-Za-z]: a §22.2.1.1 early error
-                // under /u or /v; otherwise Annex B leniency (`\c0` → U+0010,
-                // bare `\c` → literal) the fallback still owns — defer.
-                if (self.unicode or self.unicode_sets) return error.SyntaxError;
-                return error.Unsupported;
+                // `\c` not followed by [A-Za-z]: a §22.2.1.1 early error in
+                // every mode. With no ControlLetter the only production left
+                // is IdentityEscape, and `c` is UnicodeIDContinue — excluded
+                // under +UnicodeMode (SyntaxCharacter or `/` only) and, in the
+                // main grammar, under ~UnicodeMode too (SourceCharacter but
+                // not UnicodeIDContinue). Only Annex B §B.1.4 reread it as a
+                // literal (`\c0` → U+0010, bare `\c` → 'c'), which Cynic's
+                // strict-only, non-browser target rejects.
+                return error.SyntaxError;
             },
             else => {
                 // §22.2.1 IdentityEscape:
