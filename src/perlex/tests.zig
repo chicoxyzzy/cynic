@@ -1255,11 +1255,13 @@ test "perlex: \\p inside [ … ] non-/u is a SyntaxError; an unknown /u property
     try expectCompileProp("[\\p{Nd}]", uflags, .unsupported);
 }
 
-// ── §22.2.1.1 a CharacterClassEscape as a class-range bound (/u) ─────
-// NonemptyClassRanges (+UnicodeMode): it is a Syntax Error for either
-// bound of a `-` range to be a CharacterClassEscape (\d \D \s \S \w \W),
-// e.g. `[\d-a]` / `[a-\d]` / `[\D-\D]`. Without /u the `-` and the
-// shorthand are matched literally (Annex B), which the fallback owns.
+// ── §22.2.1.1 a CharacterClassEscape as a class-range bound ─────────
+// NonemptyClassRanges: it is a Syntax Error for either bound of a `-`
+// range to be a CharacterClassEscape (\d \D \s \S \w \W), e.g. `[\d-a]`
+// / `[a-\d]` / `[\D-\D]`. The early error fires in EVERY mode — only
+// Annex B §B.1.2 rereads it (`[\d-a]` as `\d`, '-', 'a') without /u, and
+// Cynic drops Annex B regex leniency everywhere, so Perlex rejects it
+// with or without /u.
 
 test "perlex: a class-escape low range bound is a /u early error" {
     try expectCompileFlags("[\\d-a]", uf, .syntax_error);
@@ -1288,23 +1290,19 @@ test "perlex: a class escape on both range bounds is a /u early error" {
     try expectCompileFlags("[\\W-\\W]", uf, .syntax_error);
 }
 
-test "perlex: a non-/u class-escape range bound makes the '-' a literal (§22.2.1)" {
-    // A shorthand can't be a range endpoint, so without /u the `-` between it
-    // and the other ClassAtom is a literal '-' (main grammar): `[\d-a]` is
-    // `\d`, '-', 'a'. Perlex owns it directly (the /u early error is the only
-    // thing Annex B would have widened; the non-/u reading is the main grammar).
-    try expectCompile("[\\d-a]", .match);
-    try expectCompile("[a-\\d]", .match);
-    try expectCompile("[\\D-a]", .match);
-    try expectCompile("[a-\\W]", .match);
-    // The three members each match: a digit, the literal '-', and 'a' — but
-    // not 'b' (it is not a range `\d`..a).
-    try expectMatch("[\\d-a]", "5", "5");
-    try expectMatch("[\\d-a]", "-", "-");
-    try expectMatch("[\\d-a]", "a", "a");
-    try expectNoMatch("[\\d-a]", "b");
-    try expectMatch("[a-\\d]", "-", "-"); // the `-` is literal, not a range op
-    try expectMatch("[a-\\d]", "7", "7");
+test "perlex: a non-/u class-escape range bound is a §22.2.1.1 early error" {
+    // §22.2.1.1 NonemptyClassRanges makes a `-` range with a CharacterClass-
+    // Escape bound a Syntax Error in EVERY mode. Only Annex B §B.1.2 rereads
+    // `[\d-a]` as `\d`, '-', 'a'; Cynic drops Annex B regex leniency
+    // everywhere (like the `]`/`{`/`}`, DecimalEscape, and quantifier-brace
+    // rules), so Perlex rejects these without /u too. engine262 rejects them;
+    // only the browser engines accept them (via Annex B).
+    try expectCompile("[\\d-a]", .syntax_error);
+    try expectCompile("[a-\\d]", .syntax_error);
+    try expectCompile("[\\D-a]", .syntax_error);
+    try expectCompile("[a-\\W]", .syntax_error);
+    try expectCompile("[\\w-\\d]", .syntax_error); // both bounds are escapes
+    try expectCompile("[\\s-\\S]", .syntax_error);
 }
 
 test "perlex: a sole negated class shorthand under /u is owned (§22.2.2.7.3)" {
@@ -2123,10 +2121,11 @@ test "perlex: class escapes inside a class" {
 }
 
 test "perlex: a trailing or leading '-' in a class is the literal '-'" {
-    // A `-` that can't form a range — at the class boundary, or adjacent to a
-    // shorthand — is the literal '-'. (The class-escape range-bound forms
-    // `[\d-a]` / `[a-\d]` are owned as `\d`,'-',atom too; see the dedicated
-    // test above. Under /u they remain §22.2.1.1 early errors.)
+    // A `-` at the class boundary can't form a range, so it is the literal
+    // '-': `[\d-]` is `\d` then a final literal `-`, `[-\d]` is a leading
+    // literal `-` then `\d`. (A `-` that *does* sit between a shorthand and
+    // another atom — `[\d-a]` / `[a-\d]` — is a §22.2.1.1 range early error
+    // in every mode; see the dedicated test above.)
     try expectMatch("[\\d-]", "-", "-");
     try expectMatch("[\\d-]", "7", "7");
     try expectMatch("[-\\d]", "-", "-");

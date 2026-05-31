@@ -718,13 +718,15 @@ cases in the String.prototype dispatch.
 **Annex B regex grammar (§B.1.4) — narrowed by Perlex.**
 The §22.2.1 main grammar makes `]`, `{`, `}` SyntaxCharacters
 with no literal reading, treats a DecimalEscape `\N` past the
-capture count as an early error (§22.2.1.1), and requires a
-DecimalDigits lower bound on every Quantifier brace. Annex B
-§B.1.2 relaxes all of these when a pattern is compiled *without*
-the `u` / `v` flag — a stray brace/bracket becomes a literal
-ExtendedPatternCharacter, `\N` rereads as a legacy octal/identity
-escape (e.g. `\1` outside a group → `\001`), and `{,n}` reads as
-literal text.
+capture count as an early error (§22.2.1.1), requires a
+DecimalDigits lower bound on every Quantifier brace, and makes a
+`-` class range with a CharacterClassEscape bound (`[\d-a]` /
+`[a-\d]`) a §22.2.1.1 early error. Annex B §B.1.2 relaxes all of
+these when a pattern is compiled *without* the `u` / `v` flag — a
+stray brace/bracket becomes a literal ExtendedPatternCharacter,
+`\N` rereads as a legacy octal/identity escape (e.g. `\1` outside
+a group → `\001`), `{,n}` reads as literal text, and the `-` in
+`[\d-a]` rereads as a literal (`\d`, `-`, `a`).
 
 Cynic drops every one of these in every mode. **Perlex** — the
 native regex engine, first in dispatch — raises `SyntaxError` for

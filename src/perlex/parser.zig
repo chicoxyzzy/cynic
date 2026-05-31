@@ -1160,15 +1160,13 @@ const Parser = struct {
             switch (member) {
                 .class_added => {
                     // `\d \s \w` (and non-/u `\D \S \W`) — already appended.
-                    // Followed by `- X` the shorthand can't be a range bound:
-                    // under /u that is a §22.2.1.1 early error, but without /u
-                    // the `-` is a literal ClassAtom (main grammar — `[\d-a]`
-                    // is `\d`, '-', 'a'), so own it and let the loop continue.
-                    if (dash_range) {
-                        if (self.unicode or self.unicode_sets) return self.classEscapeRangeBound();
-                        self.pos += 1; // consume the literal '-'
-                        try ranges.append(self.a, .{ .lo = '-', .hi = '-' });
-                    }
+                    // Followed by `- X` (X not `]`) the shorthand is the low
+                    // bound of a range, but a CharacterClassEscape can't be a
+                    // range bound — a §22.2.1.1 early error in every mode
+                    // (only Annex B rereads `[\d-a]` as `\d`, '-', 'a'; Cynic
+                    // drops that). A trailing `-` before `]` keeps dash_range
+                    // false, so it stays a literal via the next iteration.
+                    if (dash_range) return self.classEscapeRangeBound();
                 },
                 .literal_added => |pair| {
                     // A non-/u astral ClassAtom = its two surrogate-unit
@@ -1217,17 +1215,12 @@ const Parser = struct {
                                 try ranges.append(self.a, .{ .lo = lo, .hi = hi });
                             },
                             // A CharacterClassEscape high bound (`[a-\d]` /
-                            // `[a-\D]` / `[a-\p{L}]`): under /u a §22.2.1.1
-                            // early error. Without /u the `-` is a literal
-                            // ClassAtom (`[a-\d]` is 'a', '-', \d) — the
-                            // shorthand already appended its ranges during the
-                            // member parse, so add the low bound and the
-                            // literal '-' and own it.
-                            .class_added, .neg_shorthand, .prop => {
-                                if (self.unicode or self.unicode_sets) return self.classEscapeRangeBound();
-                                try ranges.append(self.a, .{ .lo = lo, .hi = lo });
-                                try ranges.append(self.a, .{ .lo = '-', .hi = '-' });
-                            },
+                            // `[a-\D]` / `[a-\p{L}]`): a range can't have a
+                            // CharacterClassEscape bound, so this is a
+                            // §22.2.1.1 early error in every mode (only Annex
+                            // B rereads `[a-\d]` as 'a', '-', \d; Cynic drops
+                            // that).
+                            .class_added, .neg_shorthand, .prop => return self.classEscapeRangeBound(),
                             // An astral high bound (`[a-𠮷]`): the range runs to
                             // the astral's lead surrogate; its trail surrogate
                             // is a separate literal — `(lo..lead) ∪ {trail}`.
@@ -1332,13 +1325,16 @@ const Parser = struct {
         prop: Node.Property,
     };
 
-    /// §22.2.1.1 NonemptyClassRanges (+UnicodeMode): it is a Syntax Error
-    /// for either bound of a `-` range to be a CharacterClassEscape
-    /// (`\d \D \s \S \w \W`), e.g. `[\d-a]` / `[a-\d]` / `[\D-\D]`. Without
-    /// /u the `-` and the shorthand are matched literally (Annex B), which
-    /// the libregexp fallback owns — so defer there.
+    /// §22.2.1.1 NonemptyClassRanges: it is a Syntax Error for either bound
+    /// of a `-` range to be a CharacterClassEscape (`\d \D \s \S \w \W`),
+    /// e.g. `[\d-a]` / `[a-\d]` / `[\D-\D]`. The early error fires in every
+    /// mode. Only Annex B §B.1.2 rereads `[\d-a]` as `\d`, '-', 'a' without
+    /// /u; Cynic drops Annex B regex leniency everywhere (alongside the
+    /// `]`/`{`/`}`, DecimalEscape, and quantifier-brace rules), so this is a
+    /// SyntaxError with or without /u — never deferred to the fallback.
     fn classEscapeRangeBound(self: *Parser) ParseError {
-        return if (self.unicode or self.unicode_sets) error.SyntaxError else error.Unsupported;
+        _ = self;
+        return error.SyntaxError;
     }
 
     fn parseClassMember(self: *Parser, ranges: *std.ArrayListUnmanaged(Node.ClassRange)) ParseError!ClassMember {
