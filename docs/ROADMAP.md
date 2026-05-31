@@ -680,40 +680,86 @@ hosts are single-agent-per-isolate).
 
 ## Regex
 
-**Done.** Vendored QuickJS-NG `libregexp.c` (MIT, ~3500 LOC C). Full
-ECMA-262 surface — backreferences, named groups, lookahead /
-lookbehind, `u` / `v` flags, sticky / global / multiline / dotAll
-/ ignoreCase. Bridged from Zig with UTF-8 ↔ UTF-16 transcoding so
-match indices land in spec-correct UTF-16 code units. A native Zig
-backtracking engine — **Perlex** (`src/perlex/`) — now sits first in
-regex dispatch and owns most patterns it can compile; libregexp is
-the shrinking fallback for constructs Perlex doesn't yet support.
-Perlex now covers the whole `/v` UnicodeSets grammar (set algebra,
-nested classes, `\q{…}` string disjunctions, `\p{…}` properties of
-strings), `/iu` / `/iv` simple case folding (§22.2.2.9), the ES2024
-inline-modifier groups (`(?ims-ims:…)`), and quantifiers over nullable
-bodies (`(a?)*`, `(a*)*`, via the §22.2.2.3 zero-width progress guard)
-natively — no real engine failures remain in the RegExp corpus.
+**Done.** Vendored QuickJS-NG `libregexp.c` (MIT, ~2600 LOC C)
+provided the initial full ECMA-262 surface, bridged from Zig with
+UTF-8 ↔ UTF-16 transcoding so match indices land in spec-correct
+UTF-16 code units. The native Zig backtracking engine — **Perlex**
+(`src/perlex/`) — now sits first in dispatch and owns **every pattern
+the test262 corpus exercises**: backreferences, named groups (incl.
+duplicate-name early errors), lookahead / lookbehind (with captures,
+backreferences, nested assertions), the whole `/v` UnicodeSets grammar
+(set algebra, nested classes, `\q{…}` string disjunctions, `\p{…}`
+properties of strings), `/iu` / `/iv` and non-`/u` `i` case folding
+(§22.2.2.9 Canonicalize), the ES2024 inline-modifier groups
+(`(?ims-ims:…)`), quantifiers over nullable bodies and over huge /
+unbounded counts, and the §22.2.1.1 strict-grammar early errors (the
+Annex B carve-outs below). No real engine failures remain in the
+RegExp corpus.
 
-**Planned.** Move the remaining libregexp-deferred constructs into
-Perlex so the fallback can be retired. Each works today via fallback,
-so these are footprint-shrinking, not conformance gaps:
+**libregexp is provably unreached.** The fall-through census — every
+pattern that would defer to the vendored fallback at the runtime
+bridge or the parse-time validator — is **0** across the corpus.
+`zig build test262 -Dperlex-only=true` (which disables the fallback
+outright; see AGENTS.md) is byte-identical to the default sweep, so
+the corpus needs Perlex alone. The remaining `error.Unsupported`
+defers are census-invisible: malformed-UTF-8 guards (libregexp would
+reject them too) and the lone pathological `(a?){10^23}` shape
+(bounded by the VM step limit). The only step left is retiring the
+vendored fallback — build wiring + the bridge / validator paths —
+keeping `libunicode.c` for case folding.
 
-- repeat bounds above the inline-expansion cap (`a{2000}`);
-- lookbehind bodies with captures, backreferences, or nested
-  assertions (v1 lookbehind is capture/assertion-free);
-- patterns with more than 64 capturing groups;
-- a nullable quantifier body whose empty match comes from an
-  assertion, backreference, or empty `\q{}` alternative — the
-  §22.2.2.3 guard ships, but these bodies stay deferred (`(?=a)*`
-  is a `/u` SyntaxError yet Annex-B-legal without it, a mode split
-  only the fallback models).
+**Replacement-gate benchmark — Perlex vs libregexp.** In-process,
+ReleaseFast, identical `(pattern, UTF-16 input)` pairs
+(`zig build bench-regex`). Perlex is faster on every case and returns
+the same match on all of them (`agree: yes`). Run 2026-06-01,
+cynic `5090791`:
 
-The ES2024 `regexp-modifiers` feature (inline `(?ims-ims:…)`) now
-ships via Perlex, so no regex *feature* is unshipped. Remaining work
-is integration polish: `RegExp.prototype` properties matching
-V8 / JSC for `lastIndex`, `flags`, `dotAll` accessor; minor edge
-cases in the String.prototype dispatch.
+| Geomean (Perlex-owned cases) | Perlex speedup |
+|---|--:|
+| compile (all) | 1.90× |
+| exec (common patterns) | 2.98× |
+| exec (worst-case) | 3.49× |
+
+Per-case medians (ns/iter; `comp×` / `exec×` = libregexp ÷ Perlex,
+>1 → Perlex faster):
+
+| Case | Cynic comp | lre comp | comp× | Cynic exec | lre exec | exec× |
+|---|--:|--:|--:|--:|--:|--:|
+| literal-hit | 794 ns | 1.21 µs | 1.52 | 277 ns | 674 ns | 2.43 |
+| literal-miss | 291 ns | 479 ns | 1.65 | 472 ns | 1.58 µs | 3.35 |
+| email | 955 ns | 3.47 µs | 3.63 | 526 ns | 2.77 µs | 5.27 |
+| url | 615 ns | 1.56 µs | 2.54 | 312 ns | 793 ns | 2.54 |
+| iso-date | 837 ns | 1.30 µs | 1.55 | 244 ns | 1.04 µs | 4.25 |
+| first-word | 284 ns | 660 ns | 2.32 | 162 ns | 389 ns | 2.40 |
+| integers | 253 ns | 493 ns | 1.95 | 197 ns | 576 ns | 2.93 |
+| lower-run | 275 ns | 514 ns | 1.87 | 87 ns | 197 ns | 2.28 |
+| anchored-num | 289 ns | 525 ns | 1.82 | 217 ns | 346 ns | 1.60 |
+| alternation | 576 ns | 774 ns | 1.34 | 357 ns | 1.64 µs | 4.59 |
+| ci-word | 220 ns | 418 ns | 1.90 | 97 ns | 223 ns | 2.31 |
+| multiline-anchor | 200 ns | 395 ns | 1.97 | 135 ns | 422 ns | 3.13 |
+| backref-dup | 614 ns | 1.28 µs | 2.08 | 95 ns | 246 ns | 2.59 |
+| lookahead-px | 391 ns | 556 ns | 1.42 | 148 ns | 516 ns | 3.50 |
+| prop-letter | 6.59 µs | 20.66 µs | 3.14 | 93 ns | 304 ns | 3.28 |
+| emoji-class | 284 ns | 546 ns | 1.92 | 153 ns | 518 ns | 3.39 |
+| nested-quant (worst) | 366 ns | 634 ns | 1.73 | 1.32 ms | 4.34 ms | 3.30 |
+| alt-overlap | 325 ns | 553 ns | 1.70 | 2.66 ms | 8.76 ms | 3.29 |
+| scan-miss-64k | 237 ns | 437 ns | 1.84 | 435 µs | 1.67 ms | 3.84 |
+| class-scan-64k | 367 ns | 543 ns | 1.48 | 527 µs | 2.92 ms | 5.54 |
+| restart-heavy | 301 ns | 471 ns | 1.56 | 534 µs | 1.88 ms | 3.53 |
+| big-bound-exact | 233 ns | 551 ns | 2.37 | 9.02 µs | 31.73 µs | 3.52 |
+| big-bound-range | 325 ns | 557 ns | 1.71 | 36.1 µs | 78.8 µs | 2.18 |
+
+Memory (RegExp bucket, `--mem-summary`, engine-side counters — also the
+post-removal runtime numbers, since libregexp is unreached): 42 MiB max
+per-fixture engine peak, 5.6 MiB avg, 27 GC cycles / 25 ms total pause,
+0 fail. The heaviest process-RSS fixtures (199 MB on `\S`-over-all-
+Unicode, ~100 MB on the `CharacterClassEscapes` positive-cases) are
+inherent whole-Unicode set-construction tests, engine-agnostic. The
+12 MB binary drops `libregexp.c` (2610 lines C) on removal;
+`libunicode.c` (1746 lines) stays. The ES2024 `regexp-modifiers`
+feature ships via Perlex, so no regex *feature* is unshipped; remaining
+polish is `RegExp.prototype` property edge cases (`lastIndex`, `flags`,
+`dotAll`) and minor String.prototype dispatch corners.
 
 **Annex B regex grammar (§B.1.4) — narrowed by Perlex.**
 The §22.2.1 main grammar makes `]`, `{`, `}` SyntaxCharacters
