@@ -408,6 +408,25 @@ test "perlex: capturing group substring" {
     try expectMatch("(?<a>ab)c", "abc", "abc,ab");
 }
 
+test "perlex: an unmatched `)` is a syntax error (§22.2.1)" {
+    // §22.2.1 — the Pattern grammar has no production for a `)` without a
+    // matching `(`: a balanced group consumes its own `)`, so any `)` left
+    // over after the top-level Disjunction is unmatched. It is a Syntax
+    // Error in every mode — `)` is always a SyntaxCharacter, never an Annex
+    // B ExtendedPatternCharacter — so Perlex owns the verdict directly
+    // rather than deferring the leftover to the fallback.
+    try expectCompile(")", .syntax_error);
+    try expectCompile("a)", .syntax_error);
+    try expectCompile("a)b", .syntax_error);
+    try expectCompile("(a))", .syntax_error); // one closer too many
+    try expectCompileFlags(")", uflags, .syntax_error); // also under /u
+    try expectCompileFlags("(a))", uflags, .syntax_error);
+    try expectCompileFlags(")", .{ .unicode_sets = true }, .syntax_error); // and /v
+    // Balanced groups are unaffected.
+    try expectMatch("(a)", "a", "a,a");
+    try expectMatch("(?:a)b", "ab", "ab");
+}
+
 test "perlex: anchors are input-relative" {
     try expectMatch("^a$", "a", "a");
     try expectNoMatch("^a$", "ab");

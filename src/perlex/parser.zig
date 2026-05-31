@@ -193,9 +193,13 @@ pub fn parse(a: std.mem.Allocator, src: []const u8, unicode: bool, unicode_sets:
 
     const root = try p.parseDisjunction();
     if (p.pos != src.len) {
-        // A stray `)` or other leftover. Let the vendored matcher
-        // render the authoritative verdict rather than guess.
-        return error.Unsupported;
+        // §22.2.1 — parseAlternative consumes every character except `|`
+        // (handled by parseDisjunction) and `)`, and a balanced group
+        // consumes its own `)`. So any leftover here is an unmatched `)`,
+        // for which the Pattern grammar has no production: a Syntax Error
+        // in every mode (`)` is always a SyntaxCharacter, never an Annex B
+        // ExtendedPatternCharacter). Perlex owns the verdict directly.
+        return error.SyntaxError;
     }
     return .{
         .root = root,
