@@ -1289,6 +1289,22 @@ test "perlex: a sole negated class shorthand under /u is owned (§22.2.2.7.3)" {
     try expectFoldMatch("[\\W]", iu, &[_]u16{'!'}, "!");
 }
 
+test "perlex: a sole ^-negated class shorthand under /u is the positive shorthand" {
+    // `[^\D]` = `\d`, `[^\S]` = `\s`, `[^\W]` = `\w` — the `^` cancels the
+    // shorthand's own negation, so Perlex emits the positive standalone class.
+    try expectCompileFlags("[^\\D]", uf, .match);
+    try expectCompileFlags("[^\\S]", uf, .match);
+    try expectCompileFlags("[^\\W]", uf, .match);
+    // `[^\D]/u` matches a digit, not a non-digit.
+    try expectMatchFlags("[^\\D]", uf, "5", "5");
+    try expectNoMatchFlags("[^\\D]", uf, "a");
+    // `[^\W]/iu` = \w/iu, so it *includes* a char that folds to a word char
+    // (the stub folds U+212A KELVIN ↔ k) and `k`, but not a true non-word char.
+    try expectFoldMatch("[^\\W]", iu, &[_]u16{'k'}, "k");
+    try expectFoldMatch("[^\\W]", iu, &[_]u16{0x212A}, "");
+    try expectFoldNoMatch("[^\\W]", iu, &[_]u16{'!'});
+}
+
 test "perlex: \\d \\s \\w still match standalone and with a trailing dash" {
     // No regression for the shorthands Perlex represents as ranges; a
     // trailing `-` before `]` is a literal, not a range bound.
