@@ -4800,6 +4800,52 @@ test "GC: closures keep captured envs alive under gc_threshold=1" {
     , 36);
 }
 
+test "GC: allocating tail-recursive loop paces the collector (PTC safe-point)" {
+    // §15.10 PTC reuses the current frame and re-enters dispatch in
+    // place, crossing neither the runFrames-entry safe point nor a
+    // loop back-edge. Without a safe-point poll on the tail-call
+    // path, an allocating tail-recursive loop never polls the
+    // allocation-pressure GC: `allocs_since_gc` grows by one per
+    // iteration without bound (RSS balloons, GC never fires) until
+    // the realm is torn down. With the poll, the collector fires
+    // periodically and resets the counter, so the residue stays
+    // bounded. Regression guard for the ~193 MB
+    // language/expressions/call/tco-call-args.js process-RSS spike.
+    //
+    // Self-validating in two ways: a 20000-deep recursion can only
+    // return (rather than overflow the native stack) if PTC frame
+    // reuse engaged, and `allocs_since_gc` can only stay bounded if
+    // the tail-call re-entry crossed the safe point.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    // Drain the intrinsic-install residue so the post-run counter
+    // reflects only the loop.
+    realm.collectGarbage();
+    realm.heap.gc_young_threshold = 256;
+    realm.heap.gc_threshold = 1024;
+
+    const v = switch (try evaluateScriptResult(&realm,
+        \\function sum(n, acc) {
+        \\  if (n === 0) return acc;
+        \\  let o = { v: 1 };
+        \\  return sum(n - 1, acc + o.v);
+        \\}
+        \\sum(20000, 0);
+    )) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    // PTC frame reuse held across 20000 frames → correct sum.
+    try testing.expectEqual(@as(i32, 20000), v.asInt32());
+    // The loop allocated >20000 objects. Pre-fix `allocs_since_gc`
+    // would be ~20000 (no collection during the loop); with the
+    // poll, the young collector reset it every 256 allocations, so
+    // the residue is a small remainder well under the per-iteration
+    // total.
+    try testing.expect(realm.heap.allocs_since_gc < 1024);
+}
+
 /// Stress variant — uses `setGcThreshold(1)` instead of just
 /// `gc_threshold = 1`. That sets BOTH the young threshold (1) and
 /// the major threshold (8), so minor cycles fire every allocation

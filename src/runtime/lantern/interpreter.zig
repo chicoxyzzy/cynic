@@ -629,23 +629,29 @@ inline fn reEnterDispatch(
 /// loop top — allocation-pressure GC, step budget, host interrupt.
 ///
 /// A threaded interpreter has no per-opcode loop top, so these move
-/// to the points where running them is *safe*: backward branches
-/// (the only way to build an unbounded loop), call frame pushes,
-/// frame pops on return, and the first opcode of a fresh
-/// `runFrames` invocation (which is how a suspended generator
-/// resumes). GC is stop-the-world and only ever fires here —
-/// between opcodes, never mid-opcode — so a native holding a raw
+/// to the points where running them is *safe* and where an unbounded
+/// iteration is guaranteed to cross one: loop back-edges (a taken
+/// backward branch — the only way to build an unbounded loop in
+/// straight-line code; see `loopSafePoint`), §15.10 proper-tail-call
+/// re-entry (PTC reuses the current frame in place, so a tail-
+/// recursive loop is morally a back-edge that bypasses the branch
+/// dispatcher), and the first opcode of a fresh `runFrames`
+/// invocation (how a suspended generator resumes). A plain `.call`
+/// push and a `.return` pop deliberately do *not* cross a safe point
+/// — they are on the hot path, and non-tail recursion is bounded
+/// separately by `max_call_frames` (a RangeError on overflow), not
+/// by the step budget. GC is stop-the-world and only ever fires here
+/// — between opcodes, never mid-opcode — so a native holding a raw
 /// pointer across a sub-call never sees the heap shift under it.
 ///
 /// The step budget decrements per safe-point crossing rather than
-/// per opcode. Every unbounded loop crosses a backward branch each
-/// iteration and every unbounded recursion crosses a call, so the
-/// budget still bounds any non-terminating fixture; the test262
-/// harness budget kills a `while(true){}` long before it can wedge
-/// the sweep. Returns a non-null `RunResult` when the budget is
-/// exhausted or a host interrupt fired — the caller surfaces it
-/// directly, without a handler walk, matching the pre-threaded
-/// behaviour.
+/// per opcode. An unbounded ordinary loop crosses a back-edge each
+/// iteration and an unbounded tail-recursive loop crosses the PTC
+/// re-entry each call, so the budget bounds both; unbounded non-tail
+/// recursion is instead caught by the frame-count ceiling. Returns a
+/// non-null `RunResult` when the budget is exhausted or a host
+/// interrupt fired — the caller surfaces it directly, without a
+/// handler walk, matching the pre-threaded behaviour.
 inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
     // Allocation-pressure GC — two-tier dispatch. A minor
     // (young-only) collection fires when `allocs_since_gc` crosses
@@ -2569,6 +2575,15 @@ pub fn runFrames(
             f.wrap_return_in_promise = false;
             f.owning_module = callee_fn.owning_module;
             committed = true;
+            // §15.10 PTC re-entry is morally a loop back-edge: it
+            // re-enters dispatch in-place, crossing neither the
+            // runFrames-entry safe point nor a loop back-edge. Poll
+            // here so an allocating tail-recursive loop still paces
+            // the allocation-pressure GC (allocs_since_gc) and
+            // decrements the step budget. f.ip / f.accumulator are
+            // synced above, so a GC fired here sees the reframed
+            // frame (still the top-of-stack slot) as a root.
+            if (try runSafePoint(realm)) |r| return r;
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 
@@ -2795,6 +2810,10 @@ pub fn runFrames(
             f.wrap_return_in_promise = false;
             f.owning_module = callee_fn.owning_module;
             committed = true;
+            // §15.10 PTC re-entry — see the matching poll in
+            // `.tail_call`. A method tail call flattens recursion
+            // the same way, so it must cross the safe point too.
+            if (try runSafePoint(realm)) |r| return r;
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 
