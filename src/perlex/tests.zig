@@ -1161,6 +1161,90 @@ test "perlex: /u treats a supplementary code point as one unit" {
     try testing.expect((try perlex.exec(u16, gpa, &nonu.ok, &input, 0)) == null);
 }
 
+// ── §22.2.1 non-ASCII literal PatternCharacters ─────────────────────
+
+test "perlex: a BMP non-ASCII literal matches its code unit (§22.2.1)" {
+    const gpa = testing.allocator;
+    // U+03BB "λ" — one UTF-16 code unit, identical under code-unit and
+    // code-point semantics, so it matches in every mode.
+    const input = [_]u16{0x03BB};
+    inline for ([_]perlex.Flags{ .{}, uf, .{ .unicode_sets = true } }) |fl| {
+        var r = try perlex.compile(gpa, "λ", fl);
+        try testing.expect(r == .ok);
+        defer r.ok.deinit();
+        var m = (try perlex.exec(u16, gpa, &r.ok, &input, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+}
+
+test "perlex: an astral literal is one code point under /u and /v (§22.2.1)" {
+    const gpa = testing.allocator;
+    // U+20BB7 "𠮷" — surrogate pair [0xD842, 0xDFB7]. Under code-point
+    // semantics the literal spans the whole 2-unit pair.
+    const input = [_]u16{ 0xD842, 0xDFB7 };
+    inline for ([_]perlex.Flags{ uf, .{ .unicode_sets = true } }) |fl| {
+        var r = try perlex.compile(gpa, "𠮷", fl);
+        try testing.expect(r == .ok);
+        defer r.ok.deinit();
+        var m = (try perlex.exec(u16, gpa, &r.ok, &input, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 2), m.slots[1]);
+    }
+}
+
+test "perlex: a quantified astral literal repeats the whole code point under /u" {
+    const gpa = testing.allocator;
+    // U+1D306 "𝌆" = [0xD834, 0xDF06]; `{2}` matches the code point twice
+    // (4 code units), confirming the quantifier binds the whole point.
+    const input = [_]u16{ 0xD834, 0xDF06, 0xD834, 0xDF06 };
+    var r = try perlex.compile(gpa, "𝌆{2}", uf);
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    var m = (try perlex.exec(u16, gpa, &r.ok, &input, 0)) orelse return error.ExpectedMatch;
+    defer m.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), m.slots[0]);
+    try testing.expectEqual(@as(usize, 4), m.slots[1]);
+}
+
+test "perlex: an astral literal is two code units without /u (§22.2.1)" {
+    const gpa = testing.allocator;
+    // Without a flag the source is a UTF-16 code-unit sequence, so "𠮷"
+    // is the two units [0xD842, 0xDFB7] and a following quantifier binds
+    // only the trailing (low) surrogate — `/𠮷+/` is `\uD842(\uDFB7)+`.
+    // Cross-engine differential (engine262 + V8/JSC/SM/Hermes/QuickJS):
+    // /𠮷/ → 2, /𠮷+/ over [hi,lo,lo] → 3, /𠮷/ over [hi] → no match.
+    const pair = [_]u16{ 0xD842, 0xDFB7 };
+    {
+        var r = try perlex.compile(gpa, "𠮷", .{});
+        try testing.expect(r == .ok);
+        defer r.ok.deinit();
+        var m = (try perlex.exec(u16, gpa, &r.ok, &pair, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 2), m.slots[1]);
+    }
+    {
+        // `+` binds the low surrogate: high, then one-or-more lows.
+        const input = [_]u16{ 0xD842, 0xDFB7, 0xDFB7 };
+        var r = try perlex.compile(gpa, "𠮷+", .{});
+        try testing.expect(r == .ok);
+        defer r.ok.deinit();
+        var m = (try perlex.exec(u16, gpa, &r.ok, &input, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 3), m.slots[1]);
+    }
+    {
+        // The lone high surrogate alone is not the two-unit literal.
+        const lone = [_]u16{0xD842};
+        var r = try perlex.compile(gpa, "𠮷", .{});
+        try testing.expect(r == .ok);
+        defer r.ok.deinit();
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &lone, 0)) == null);
+    }
+}
+
 // ── §22.2.1 quantifiers (greedy / lazy / bounded) ───────────────────
 
 test "perlex: greedy quantifiers" {
