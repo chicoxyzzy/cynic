@@ -682,7 +682,11 @@ const Parser = struct {
         const k = self.at(1) orelse return error.SyntaxError; // trailing `\`
         switch (k) {
             'k' => {
-                if (self.at(2) != '<') return error.Unsupported;
+                // §22.2.1 AtomEscape :: \k GroupName. Under /u or /v a `\k`
+                // not followed by `<GroupName>` is an early error; without
+                // either flag the fallback applies Annex B identity-escape
+                // leniency (`\k` → literal 'k'), so defer.
+                if (self.at(2) != '<') return self.malformedEscape();
                 self.pos += 3;
                 const name = try self.parseGroupName();
                 return self.makeNode(.{ .backref_name = name });
@@ -723,21 +727,22 @@ const Parser = struct {
         }
     }
 
-    /// `\p{Name}` / `\p{Name=Value}` / `\P{…}` at `\p`/`\P` with `/u`
-    /// set. Extracts `(key, value)` syntactically; the compiler's resolver
-    /// decides validity, except for the §22.2.1.1 properties of strings,
-    /// whose misuse `scanProperty` rejects directly. Other malformed forms
-    /// defer to the fallback, which is authoritative for the SyntaxError
-    /// verdict.
+    /// `\p{Name}` / `\p{Name=Value}` / `\P{…}` at `\p`/`\P` with `/u` or
+    /// `/v` set. Extracts `(key, value)` syntactically; a well-formed name
+    /// the resolver can't place defers to the fallback, but every ill-formed
+    /// shape — and a §22.2.1.1 misuse of a property of strings — is an early
+    /// error `scanProperty` raises directly.
     fn parsePropertyEscape(self: *Parser, negated: bool) ParseError!*Node {
         return self.makeNode(.{ .prop = try self.scanProperty(negated) });
     }
 
     /// The syntactic core of a `\p{…}` / `\P{…}` escape, returning the
     /// `(negated, key, value)` triple. Shared by the atom path
-    /// (`parsePropertyEscape`) and `/v` class-set operands.
+    /// (`parsePropertyEscape`) and `/v` class-set operands — both gate on
+    /// `/u` or `/v`, so a malformed shape reached here is a §22.2.1.1 early
+    /// error (SyntaxError), never an Annex B deferral.
     fn scanProperty(self: *Parser, negated: bool) ParseError!Node.Property {
-        if (self.at(2) != '{') return error.Unsupported;
+        if (self.at(2) != '{') return error.SyntaxError; // `\p`/`\P` with no `{`
         var i = self.pos + 3;
         const name_start = i;
         var eq: ?usize = null;
@@ -749,9 +754,9 @@ const Parser = struct {
                 continue;
             }
             // UnicodePropertyName / UnicodePropertyValue chars: [A-Za-z0-9_].
-            if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) return error.Unsupported;
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) return error.SyntaxError;
         }
-        if (i >= self.src.len or self.src[i] != '}') return error.Unsupported; // unterminated
+        if (i >= self.src.len or self.src[i] != '}') return error.SyntaxError; // unterminated
         const close = i;
         var key: ?[]const u8 = null;
         const value = blk: {
@@ -761,7 +766,7 @@ const Parser = struct {
             }
             break :blk self.src[name_start..close];
         };
-        if (value.len == 0 or (key != null and key.?.len == 0)) return error.Unsupported;
+        if (value.len == 0 or (key != null and key.?.len == 0)) return error.SyntaxError; // empty key/value
         // §22.2.1.1 properties of strings: valid only as a positive, lone
         // `\p{…}` under `/v`. `\P{…}` of one and any non-`/v` form are early
         // errors (they would match — or complement — strings where the
