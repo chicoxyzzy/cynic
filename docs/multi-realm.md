@@ -13,6 +13,20 @@ sit on top of this), [handbook/environments.md](handbook/environments.md)
 This doc is the durable plan — a fresh session should be able to
 pick up the next phase from here without re-deriving the design.
 
+## Current state (snapshot 2026-05-31)
+
+| Phase | State | Landing commits |
+|---|---|---|
+| 0 — coexisting realms | ✅ pinned | `c174d06` |
+| 1 — D1 intrinsics | ✅ **revised** → per-realm prototypes, shared shapes (Cynic already has the latter via per-`Heap` `ShapeTree` + `Realm.initChild`). The original "shared frozen prototype subgraph" is **forbidden, not deferred** per §6.1.7.4, §9.3.2, §20.1.3.1, §23.1.3.3 + five-engine consensus. | `ae847a8`, `0b4d2c7`, `6a00337` |
+| 2 — D3 modules | ✅ substrate pinned (`Realm.modules` already per-instance); `StaticModuleRecord` deferred to Compartments | `928b4c3` |
+| sibling — cross-realm error attribution | ✅ `CallFrame.running_realm` reads `callee.realm` so error makers attribute to the callee's realm; per-frame thread of attribution. Unblocked several test262 fixtures. | `b95694b` |
+| 3 — D2 RealmStack + per-fn [[Realm]] | ⏳ planned — see "Phase 3 implementation plan" below | — |
+| 4 — D4 endowments | sketched | — |
+| 5 — Compartments | sketched | — |
+
+The cross-realm-error commit `b95694b` reaches partway into D2 — `callee.realm` is already consumed for error attribution and native-callback realm tracking — but `JSFunction.realm` itself remains `null` at every allocation site because `Heap.allocateFunction*` doesn't take a realm parameter. Phase 3 closes that gap.
+
 ## Why now — the position statement
 
 Cynic today exposes a single user-visible `Realm` per engine
@@ -757,6 +771,99 @@ skips in `tools/test262/skip.zig` (currently in
 `single_realm_exact_paths`) can be removed; verify they pass.
 Test262 `ShadowRealm` bucket scores ≥ the current `--enable=ShadowRealm`
 gated row.
+
+### Phase 3 implementation plan (added 2026-05-31)
+
+Pre-plan survey, grounded in the actual code:
+
+- **`JSFunction.realm: ?*Realm = null`** — already declared at
+  `src/runtime/function.zig:177`. The doc comment explicitly
+  flags it as "backward-compat for callers that haven't been
+  threaded through yet."
+- **109 `Heap.allocateFunction*` call sites** across ~30 files.
+  Every one already has a `realm: *Realm` in lexical scope —
+  call sites read `realm.heap.allocateFunction(...)`. The
+  refactor to thread `realm` is mechanical.
+- **`b95694b` already consumes `callee.realm`** in three places
+  (`src/runtime/lantern/call.zig` lines ~800, 874, 960):
+  `Realm.active_native_fn_realm` for native callbacks,
+  `CallFrame.running_realm` for error attribution. Phase 3
+  finishes the consumption side once 3.2 lands the production
+  side.
+- **Tests must use `Realm.initChild`**, not two independent
+  `Realm.init` instances. Cross-realm value sharing without a
+  shared heap is unsound (the value's pointer lives in the
+  source realm's heap; the target realm's GC can't trace it
+  safely). `initChild` is also what `ShadowRealm` uses
+  internally, so the tests double as the spec-correct cross-
+  realm boundary contract. The doc tests above (lines 668-749)
+  predate this realization and use two `Realm.init` — they are
+  retained as historical design sketches; the actual landed
+  tests will mirror `realm_test.zig`'s `initChild` pattern.
+
+#### Commit-by-commit landing order
+
+| # | Title | Files | Test Δ | Risk |
+|---|---|---|---|---|
+| 3.1 | Phase 3 contract tests, gated | `src/runtime/realm_test.zig` | +4 (skipped pending 3.3) | Low — TDD pattern matched in Phase 0/1/2 |
+| 3.2 | Thread `realm` through `Heap.allocateFunction*` | `heap.zig` + `function.zig` + ~28 builtin/class/intrinsic/lantern files | 0 (mechanical) | Bootstrap edge: `Heap.allocateFunction` runs *during* `intrinsics.install` before `realm.heap.function_prototype` is set. Decision (b) below. |
+| 3.3 | Wire `RealmStack` + un-skip tests | `realm.zig` (RealmStack type), `lantern/call.zig`, `builtins/array.zig` (species §23.1.3.34), `builtins/error.zig` (classification §10.2.3) | +4 turn green | The "natives must read `callee.realm`, NOT `RealmStack.top()`" invariant — audit every existing native callback to confirm none consult a global current-realm accessor. |
+| 3.4 | Remove `proto-from-ctor-realm-*` skiplist; refresh score row | `tools/test262/skip.zig`, `test262-results.md` | +N test262 passes (≈40-80 by skiplist comment) | Negative Δ blocks; if any fixture regresses, file a pragmatist finding before unblocking. |
+| 3.5 | Graduate `ShadowRealm` to default-on | `src/runtime/features.zig`, `src/runtime/builtins/shadow_realm.zig` | ShadowRealm fixtures move from gated phase to main phase | Low if 3.3 lands correctly. Recommended to land with Phase 3 since 3.3 is the natural enabling commit. |
+
+Total scope: ~5 commits, the largest (3.2) is purely
+mechanical, the highest-risk (3.3) is bounded by an explicit
+invariant audit.
+
+#### Decisions to ratify before commit 3.1
+
+These are the four open questions the plan rests on. Resolve
+in a session-opening discussion or fold into the first
+commit's design comment:
+
+(a) **`RealmStack` ownership.** Per-engine or per-`Heap`?
+  Recommendation: **per-`Heap`.** Rationale: `Realm.initChild`
+  shares a heap; tying the call stack to the heap matches the
+  structural reality that the realms sharing a stack are the
+  realms that can legitimately exchange Values.
+
+(b) **`Heap.allocateFunction*` signature.** Required `*Realm`
+  or optional `?*Realm` for the bootstrap edge? Recommendation:
+  **`?*Realm`**, with a debug-assert that confirms non-null
+  outside the `intrinsics.install` bootstrap window. The early
+  prototype-creation path inside `intrinsics.install` cannot
+  pass a real realm pointer to `allocateFunction` because the
+  realm's `intrinsics.function_prototype` doesn't exist yet —
+  forcing `*Realm` here would either require a two-pass init
+  or a sentinel realm.
+
+(c) **RED-then-GREEN split.** Single commit (tests + impl
+  together) or gated-then-flip (3.1 lands skipped tests, 3.3
+  unskips)? Recommendation: **gated-then-flip.** Matches the
+  Phase 1 step 1 pattern (`007182c`) — CI bisect cleanly walks
+  the design surface separately from the implementation.
+
+(d) **3.5 timing.** Graduate ShadowRealm in Phase 3's
+  closing commit or split to Phase 5? Recommendation: **with
+  Phase 3.** Commit 3.3 is what makes ShadowRealm
+  spec-conformant; graduating it is the natural exit criterion,
+  not a follow-up.
+
+#### Pragmatist re-audit triggers
+
+The pragmatist MCP (sibling spec-auditing project; see local
+notes) is the right tool to validate cross-engine spec
+behaviour when something looks off. Triggers during Phase 3:
+
+- **Negative test262 Δ in 3.4.** Any fixture that regresses
+  on the `proto-from-ctor-realm-*` skiplist removal should be
+  cross-checked against engine262, V8, JSC, SM before any
+  unblock heuristic.
+- **Cross-realm exception flip outside `Error.prototype`.** If
+  3.3's exception-classification change affects
+  `AggregateError`, `SuppressedError`, or any typed Error
+  subclass differently from `Error` itself, audit
+  §20.5.5–§20.5.8 first.
 
 ## Phase 4 — Compartment constructor (the SES API)
 
