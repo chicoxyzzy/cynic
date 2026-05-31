@@ -223,6 +223,14 @@ const Parser = struct {
     /// Set when an inline modifier group adds the `i` flag (§22.2.1) —
     /// surfaced on `ParseResult.has_ignore_case_modifier`.
     modifier_adds_i: bool = false,
+    /// A trailing UTF-16 code unit left pending by a non-`/u` astral
+    /// literal. Without code-point semantics the source is a code-unit
+    /// sequence, so an astral PatternCharacter is two units: `parseAtom`
+    /// emits the lead (high) surrogate and stashes the trail (low)
+    /// surrogate here. `parseTerm`/`parseAlternative` drain it as the
+    /// next term — and it is the *quantifiable* one, so `𠮷+` binds the
+    /// trailing unit (`\uD842(\uDFB7)+`), matching every browser engine.
+    pending_cu: ?u21 = null,
 
     fn peek(self: *Parser) ?u8 {
         return if (self.pos < self.src.len) self.src[self.pos] else null;
@@ -268,7 +276,16 @@ const Parser = struct {
     /// Alternative :: Term*
     fn parseAlternative(self: *Parser) ParseError!*Node {
         var terms: std.ArrayListUnmanaged(*Node) = .empty;
-        while (self.peek()) |c| {
+        while (true) {
+            // A non-`/u` astral literal leaves its trailing code unit
+            // pending; drain it as its own term before reading more
+            // source, so the loop never breaks (on `|`/`)`/EOF) with a
+            // half-emitted surrogate pair.
+            if (self.pending_cu != null) {
+                try terms.append(self.a, try self.parseTerm());
+                continue;
+            }
+            const c = self.peek() orelse break;
             if (c == '|' or c == ')') break;
             try terms.append(self.a, try self.parseTerm());
         }
@@ -279,7 +296,19 @@ const Parser = struct {
 
     /// Term :: Atom Quantifier?  (Assertions are not quantifiable.)
     fn parseTerm(self: *Parser) ParseError!*Node {
+        if (self.pending_cu) |cu| {
+            // The trailing (low) surrogate of a non-`/u` astral literal.
+            // It *is* quantifiable — a quantifier after the astral source
+            // char binds this rightmost code unit.
+            self.pending_cu = null;
+            return self.maybeQuantify(try self.makeNode(.{ .char = cu }));
+        }
         const atom = try self.parseAtom();
+        // If `parseAtom` decoded a non-`/u` astral literal it emitted the
+        // lead (high) surrogate as `atom` and stashed the trail. The lead
+        // is not itself quantifiable, so return it raw; the next
+        // `parseTerm` drains the pending trail and quantifies *that*.
+        if (self.pending_cu != null) return atom;
         return self.maybeQuantify(atom);
     }
 
@@ -434,13 +463,42 @@ const Parser = struct {
             // is left to the fallback matcher.
             ')', '|' => return error.Unsupported,
             else => {
-                // A plain ASCII literal. Non-ASCII bytes need code-point
-                // decoding the v1 engine doesn't do yet → fall back.
-                if (c >= 0x80) return error.Unsupported;
+                // A non-ASCII byte begins a multi-unit source character;
+                // decode it as a literal PatternCharacter (§22.2.1).
+                if (c >= 0x80) return self.parseLiteralCodePoint();
                 self.pos += 1;
                 return self.makeNode(.{ .char = c });
             },
         }
+    }
+
+    /// Decode the non-ASCII source character at `self.pos` as a literal
+    /// PatternCharacter (§22.2.1) and emit its node. A BMP code point is
+    /// one UTF-16 code unit — identical under code-unit and code-point
+    /// semantics. Under `/u`/`/v` an astral code point matches whole. But
+    /// without a flag the source is a code-unit sequence, so an astral
+    /// character is the two units of its surrogate pair: the lead (high)
+    /// surrogate is returned here and the trail (low) surrogate is stashed
+    /// in `pending_cu`, so a following quantifier binds only the trailing
+    /// unit (`𠮷+` is `\uD842(\uDFB7)+`). A WTF-8 lone surrogate or
+    /// malformed sequence (`utf8Decode` rejects either) defers.
+    fn parseLiteralCodePoint(self: *Parser) ParseError!*Node {
+        const lead = self.src[self.pos];
+        const len = std.unicode.utf8ByteSequenceLength(lead) catch return error.Unsupported;
+        if (self.pos + len > self.src.len) return error.Unsupported;
+        const cp = std.unicode.utf8Decode(self.src[self.pos .. self.pos + len]) catch return error.Unsupported;
+        self.pos += len;
+        // A non-ASCII unit can case-fold to another non-ASCII unit, which
+        // the ASCII-only fold can't model — mirror the `\u`/`\x` decoders
+        // so the non-Unicode `i` gate defers such patterns to the fallback.
+        self.non_ascii = true;
+        if (cp <= 0xFFFF or self.unicode or self.unicode_sets) {
+            return self.makeNode(.{ .char = cp });
+        }
+        // Astral without a flag: split into a UTF-16 surrogate pair.
+        const v = cp - 0x10000;
+        self.pending_cu = 0xDC00 + @as(u21, @intCast(v & 0x3FF));
+        return self.makeNode(.{ .char = 0xD800 + @as(u21, @intCast(v >> 10)) });
     }
 
     fn parseGroup(self: *Parser) ParseError!*Node {
