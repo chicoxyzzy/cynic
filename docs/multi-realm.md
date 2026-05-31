@@ -99,7 +99,7 @@ the implementation can't paper over a wrong call here.
 
 | # | Decision | Choice | Why |
 |---|---|---|---|
-| D1 | **Intrinsics sharing** | **Copy-on-write, with shared frozen base under hardened posture.** Per-realm `intrinsics` struct; the *prototype objects* themselves are shared frozen heap allocations *iff* both realms run hardened (the SES guarantee — no mutation possible). Unhardened realms get full copies. | Memory: 1 KB per realm beats N×500 KB. Correctness: a hardened realm is by definition not mutating Object.prototype, so the prototype object can be physically shared. Unhardened can't share — mutation on one would leak to the other. |
+| D1 | **Intrinsics sharing** | ~~Copy-on-write, with shared frozen base under hardened posture.~~ **REVISED 2026-05-31 → Per-realm prototypes, shared shapes (already done).** Every realm allocates its own `%Object.prototype%` etc., matching V8 / JSC / SpiderMonkey. The shared substrate is the per-`Heap` `ShapeTree` (hidden-class tree), which `Realm.initChild` already shares with the parent. See "D1 revision" sub-section below. | Spec-correct: `Array.prototype.constructor === Array` would diverge under prototype sharing without RealmStack (a §9.4.1.1 violation) — and `.constructor` is a single slot on a single shared JSObject, not realm-aware. Production engines all picked per-realm prototypes for the same reason. Memory: the headline "100 realms ≈ 1 realm" was based on sharing prototype *objects*; the actual per-realm cost is constructors + prototype JSObjects + method JSFunctions, which is smaller than D1's original framing implied. |
 | D2 | **"Current realm" tracking** | **Implicit + on every `JSFunction`.** Every function carries `[[Realm]]`. The "active realm" is `realm_stack.top()` — pushed on call-entry, popped on call-return. Native callbacks see `realm = call_site.callee.realm`, not the active one. | Spec-faithful (§9.4.1.1 `[[Call]]` reads the callee's realm). Implicit beats requiring `realm: *Realm` on every native — that breaks every existing builtin signature. |
 | D3 | **Module graph scope** | **Per-realm by default; embedder can declare shared.** Each realm's `module_loader` callback resolves independently; the embedder *may* return a shared `ModuleRecord` for cross-realm modules (StaticModuleRecord-style), but identity is opt-in, not default. | Compartments want sharing for the SES initial-modules pattern; tenant isolation wants strictness. Both fall out of "the loader decides." |
 | D4 | **Endowment surface** | **Plain `JSObject` passed at realm-construction time, deep-frozen by the engine on entry.** Endowments become installed-on-globalThis at realm init. No special "endowments" type — it's just an object the embedder hands in. | Matches `Compartment({ globals: { fetch: limitedFetch } })` shape. Frozen-on-entry stops the endowment-by-reference leak Bare and Agoric both warn about. |
@@ -418,27 +418,102 @@ the override-mistake fix triggered from realm A against a
 prototype shared with realm B; if the synthetic getter/setter
 is on the shared graph, both realms see the same fix.
 
-**Test scaffold landing order.**
+**Test scaffold landing order — ~~original plan~~ (superseded; see D1 revision below).**
 
-Smallest TDD-red diff first, end-to-end implementation
-second:
+1. ~~Land `src/runtime/intrinsics_phase1_test.zig` with the
+   four ADR tests + override-mistake regression. Stubs for
+   `IntrinsicsBase`, `buildBase`, `installWithBase` go in
+   `intrinsics.zig`; `installWithBase` delegates to today's
+   `install` and ignores `base`. Tests 1 + 4 + 5 go red.~~
+   *(Landed in `007182c`. Steps 2-6 superseded.)*
+2. ~~Wire the separate-heap (`gc_disabled`) machinery.~~
+   *(Landed in `e90d406`. The `gc_disabled` knob remains
+   useful for any future "stable scratch heap" use case.)*
+3. ~~Build the frozen prototype subgraph, return
+   `IntrinsicsBase`.~~ *(Landed in `340438e`. The pre-built
+   subgraph still exists in code but no per-realm install
+   adopts it — it's dead weight pending the D1 revision.)*
+4. ~~Rewrite `installWithBase` to adopt shared pointers
+   under hardened + non-null base.~~ **BLOCKED.** Threading
+   sharing through `install` requires either accepting
+   stale `.constructor` back-edges (off-spec per §22.1.3)
+   or having a `RealmStack` to make `.constructor` a
+   realm-aware accessor. The latter is Phase 3 work. See
+   "D1 revision" below for the resolution.
+5. ~~RSS benchmark.~~ *(Skipped — the memory win disappears
+   once D1 is revised away.)*
+6. ~~Test262 sweep stays unchanged.~~ *(Unchanged but for
+   different reasons — see revision.)*
 
-1. Land `src/runtime/intrinsics_phase1_test.zig` with the
-   four ADR tests **plus** an override-mistake regression
-   test (see (d)). Stubs for `IntrinsicsBase`, `buildBase`,
-   `installWithBase` go in `intrinsics.zig` as the minimum
-   surface to make the file compile; `installWithBase`
-   delegates to today's `install()` and ignores `base`, so
-   tests 1 + 4 + 5 go red on the sharing assertion.
-2. Wire the separate-heap (`gc_disabled`) machinery.
-3. Build the frozen prototype subgraph, return
-   `IntrinsicsBase`.
-4. Rewrite `installWithBase` to adopt shared pointers under
-   hardened + non-null base; allocate fresh otherwise.
-5. Add the N=100-realm RSS benchmark; numbers go in
-   `bench/multi-realm.md` (new file).
-6. Test262 sweep stays unchanged (the default `Realm.init` +
-   `installBuiltins` path uses `installWithBase(null)`).
+### D1 revision — drop prototype sharing, match production engines (added 2026-05-31)
+
+The original D1 promised "100 hardened realms ≈ RSS of 1
+realm" via a shared, frozen prototype subgraph. Implementing
+step 4 surfaced a §22.1.3 spec violation that the original
+plan didn't account for: `Array.prototype.constructor` is a
+single property slot on a single JSObject, so a shared
+`%Array.prototype%` can only resolve `.constructor` to *one*
+constructor — but every realm needs to see *its own*
+`Array`. Making `.constructor` a realm-aware accessor
+requires knowing the *calling* realm at property-read time,
+which is D2's `RealmStack` (originally Phase 3 work, not a
+Phase 1 prerequisite). The original plan had the dependency
+upside-down.
+
+Prior-art check (added retroactively — should have led the
+ADR):
+
+- **V8** — each native context (≈ realm) allocates its own
+  intrinsics. Hidden classes (`Map`) are shared at the isolate
+  level. No prototype sharing across contexts.
+- **JavaScriptCore** — each realm has its own
+  `JSGlobalObject` carrying its intrinsics. `Structure`
+  (hidden class) is shared at the VM level. No prototype
+  sharing.
+- **SpiderMonkey** — same posture. Per-realm prototypes,
+  shared `Shape` trees.
+
+The substrate every shipping engine actually shares is
+*shape information*, not prototype objects. Cynic already
+ships this: `Heap.shapes` is a per-`Heap` `ShapeTree`, and
+`Realm.initChild` shares the heap (`realm.zig:951`) — so
+child realms already share shapes with their parent today.
+The "agent-scoped, like a V8 Isolate's Maps" comment on
+the `shapes` field calls this out explicitly.
+
+**Resolution.** D1 is revised to: **each realm allocates
+its own prototypes; the shared substrate is the per-Heap
+`ShapeTree`.** This matches every production engine, removes
+the spec dependency on RealmStack, and lets Phase 1 close
+with steps 1-3 already landed plus a small follow-up commit
+that removes the now-dead `IntrinsicsBase` / `buildBase` /
+`installWithBase` plumbing.
+
+What changes on `main`:
+
+- `IntrinsicsBase` + `buildBase` + `installWithBase` get
+  retired (the slot snapshot + scratch realm aren't used by
+  anything that escapes the test file).
+- `Heap.gc_disabled` stays — it's a generally useful knob
+  (an embedder pinning a known-immutable subgraph for some
+  other reason; future "snapshot" support).
+- The two skipped tests in `intrinsics_phase1_test.zig`
+  get removed; the three passing ones (hardened+unhardened
+  distinct, two-unhardened distinct, override-mistake fix)
+  fold into `realm_test.zig` because they're now just D1-
+  revised contracts ("per-realm prototypes always") and
+  no longer need their own file.
+- A new Phase 1' goal: confirm shape-tree sharing across
+  `initChild` realms via a regression test (allocate the
+  same object shape in parent + child, assert the shape
+  pointer is identical).
+
+What carries forward unchanged:
+
+- Phases 2-5 still depend on D2 / D3 / D4; their text is
+  unaffected.
+- Phase 0 (coexisting realms) was the real foundation; it
+  stays as-is.
 
 ## Phase 2 — per-realm module graph
 
