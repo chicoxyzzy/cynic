@@ -161,7 +161,7 @@ fn expectCapsFlags(pattern: []const u8, flags: perlex.Flags, input: []const u8, 
 
 const CR = perlex.parser.Node.ClassRange;
 
-fn stubResolver(gpa: std.mem.Allocator, key: ?[]const u8, value: []const u8) std.mem.Allocator.Error!?perlex.ResolvedProperty {
+fn stubResolver(gpa: std.mem.Allocator, key: ?[]const u8, value: []const u8) (std.mem.Allocator.Error || error{SyntaxError})!?perlex.ResolvedProperty {
     // A §22.2.1.1 *property of strings*: a real name ("Basic_Emoji") backed by
     // tiny fake data so the parser's name-based early-error gating fires while
     // the compiler's alternation lowering is exercised without real tables.
