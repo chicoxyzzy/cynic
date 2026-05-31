@@ -900,11 +900,15 @@ pub const ses_features = [_][]const u8{
 
 // ── Single-realm host ───────────────────────────────────────────────
 //
-// Cynic ships a single-realm `Realm.evaluateScript` host hook
-// (used by the test262 harness loader for module-graph evaluation)
-// but doesn't expose `$262.createRealm()` to user JS. Fixtures
-// that need a cross-realm setup all bottom out on that hook.
-// Permanent single-realm carve-out per AGENTS.md.
+// `$262.createRealm()` IS exposed to the test262 harness (a real
+// child `Realm` sharing the parent heap — see `test262CreateRealm`),
+// so the cross-realm *setup* runs. But Cynic resolves errors and
+// identity against the *active* realm, not a per-call-frame realm, so
+// these fixtures stay skipped — each asserts a realm-of-origin
+// property (the thrower's realm on a cross-realm TypeError, per-realm
+// tagged-template caches, `GetFunctionRealm` over a Proxy chain).
+// Production `cynic` exposes no `$262` at all. Permanent realm-
+// attribution carve-out per AGENTS.md.
 
 pub const single_realm_exact_paths = [_][]const u8{
     // §9.3.3 / §9.5.4 — `$262.createRealm()`-using cross-realm
@@ -917,11 +921,11 @@ pub const single_realm_exact_paths = [_][]const u8{
     // bigint-cross-realm`, `Error/isError/errors-other-realm`, and
     // `language/expressions/super/realm.js`. Each is tagged
     // `features: [cross-realm]` and bottoms out on
-    // `$262.createRealm().global` — Cynic ships a single-realm host
-    // (see existing `/cross-realm.` / `/proto-from-ctor-realm`
-    // path-contains entries; these basenames don't match either
-    // pattern, so list them exact). Permanent single-realm carve-out
-    // per AGENTS.md. 17 fixtures.
+    // `$262.createRealm().global` — but Cynic resolves errors /
+    // identity against the active realm (see the `/cross-realm.`
+    // path-contains entry; these basenames don't match it, so list
+    // them exact). Permanent realm-attribution carve-out per
+    // AGENTS.md. 17 fixtures.
     // `non-error-objects-other-realm.js` builds the other realm's
     // object via `new other.Function('')` — runtime code construction,
     // so it stays skipped until `--allow=eval` lands.
@@ -941,10 +945,9 @@ pub const single_realm_exact_paths = [_][]const u8{
     "built-ins/String/prototype/valueOf/non-generic-realm.js",
     "language/expressions/super/realm.js",
     // Scattered single-realm fixtures that don't match the
-    // `/proto-from-ctor-realm` / `/cross-realm.` /
-    // `-realm-function-ctor.` path-contains patterns. Each
-    // bottoms out on `$262.createRealm().global` or asserts a
-    // realm-of-origin TypeError. Same permanent carve-out.
+    // `/cross-realm.` / `-realm-function-ctor.` path-contains
+    // patterns. Each bottoms out on `$262.createRealm().global` or
+    // asserts a realm-of-origin TypeError. Same permanent carve-out.
     "built-ins/Function/call-bind-this-realm-undef.js",
     "built-ins/Function/call-bind-this-realm-value.js",
     "built-ins/Function/internals/Call/class-ctor-realm.js",
@@ -955,16 +958,15 @@ pub const single_realm_exact_paths = [_][]const u8{
     // §13.3.10 tagged-template — the fixture uses
     // `$262.createRealm().evalScript('…')` to build a tag in
     // another realm, then asserts the call-site template object
-    // cache is per-realm. Same single-realm carve-out as the
-    // patterns above; basename doesn't match `/cross-realm.` /
-    // `/proto-from-ctor-realm` either, so listed exactly.
+    // cache is per-realm. Same carve-out as the patterns above;
+    // basename doesn't match `/cross-realm.`, so listed exactly.
     "language/expressions/tagged-template/cache-realm.js",
 };
 
 // NOTE: the path-contains single-realm patterns
-// (`/proto-from-ctor-realm`, `/cross-realm.`,
-// `-realm-function-ctor.`, the Function apply/bind realm
-// fixtures, `Proxy/revocable/tco-fn-realm.`) live under
+// (`/cross-realm.`, `-realm-function-ctor.`, the Function
+// apply/bind realm fixtures, `Proxy/revocable/tco-fn-realm.`)
+// live under
 // CURRENTLY SKIPPED → "Single-realm path-contains" below. The
 // path-contains shape catches generated families spread across
 // many buckets — each fixture's inline comment says we'd lift
@@ -1047,19 +1049,24 @@ pub const vendor_path_contains = [_][]const u8{
 // any plausible future Cynic posture).
 
 pub const single_realm_path_contains = [_][]const u8{
-    // Multi-realm fixtures. Cynic ships a single-realm `Realm.
-    // evaluateScript` host hook (used by the test262 harness loader
-    // for module-graph evaluation) but doesn't expose
-    // `$262.createRealm()` to user JS. Fixtures that need a cross-
-    // realm setup all bottom out on that hook: the
-    // `proto-from-ctor-realm*.js` family (cross-realm
-    // GetPrototypeFromConstructor), the `cross-realm.js` siblings
-    // around RegExp prototype getters, and the
-    // `multiple-evaluations-of-class-realm-function-ctor.js`
-    // private-brand fixtures. ~43 fixtures combined at skip time,
-    // all confirmed reliant on `$262.createRealm` / `new Realm(`.
-    // When multi-realm lands as a real feature, lift these.
-    "/proto-from-ctor-realm",
+    // Cross-realm fixtures that depend on per-realm *error / identity
+    // attribution*. `$262.createRealm()` IS exposed to the test262
+    // harness (a real child `Realm` sharing the parent heap — see
+    // `test262CreateRealm`), so the `proto-from-ctor-realm*.js` family
+    // no longer belongs here: §10.1.14 GetPrototypeFromConstructor now
+    // derives the default prototype from `GetFunctionRealm(newTarget)`'s
+    // intrinsics (`remapDefaultProtoToCtorRealm` in lantern/call.zig),
+    // so a `newTarget` minted by `other.Function` resolves to the
+    // *other* realm's `%X.prototype%`; the eval-gated members of that
+    // family (newTarget / asserted constructor built from a source
+    // string) stay skipped under `eval_dependent_exact_paths` below.
+    // What remains here still bottoms out on a realm-of-origin gap
+    // Cynic hasn't closed: the `cross-realm.js` siblings (RegExp
+    // prototype getters asserting the *thrower's* realm) and the
+    // `multiple-evaluations-of-class-realm-function-ctor.js` private-
+    // brand fixtures. Lift when realm-per-call-frame error attribution
+    // lands (same gap as the Function.prototype apply/bind + Proxy
+    // entries below).
     "/cross-realm.",
     "-realm-function-ctor.",
 
@@ -1140,16 +1147,55 @@ pub const eval_dependent_exact_paths = [_][]const u8{
     "language/statements/variable/12.2.1-10-s.js",
     "language/statements/variable/12.2.1-20-s.js",
     "language/statements/variable/12.2.1-21-s.js",
+    // `proto-from-ctor-realm` cross-realm fixtures whose `newTarget`
+    // (or asserted constructor) is built from a *source string* —
+    // `other.eval('(0, function* () {})')`, `new other.Function(body)`,
+    // or `Reflect.construct(other.Function, [body], nt)`. The §10.1.14
+    // default-proto fix (`remapDefaultProtoToCtorRealm` in
+    // lantern/call.zig) recovered the rest of the family, but these
+    // can't even build their newTarget / asserted constructor without
+    // runtime code construction. Graduate when `--allow=eval` ships.
+    "built-ins/AsyncFunction/proto-from-ctor-realm.js",
+    "built-ins/AsyncGeneratorFunction/proto-from-ctor-realm.js",
+    "built-ins/AsyncGeneratorFunction/proto-from-ctor-realm-prototype.js",
+    "built-ins/Function/proto-from-ctor-realm-prototype.js",
+    "built-ins/GeneratorFunction/proto-from-ctor-realm.js",
+    "built-ins/GeneratorFunction/proto-from-ctor-realm-prototype.js",
 };
 
 // ── Focused refactor pending ────────────────────────────────────────
 //
 // Reserved for fixtures blocked on a small, bounded engine refactor.
-// Currently empty: the one candidate pair (`S13.2.2_A1_T{1,2}`,
-// function-as-prototype) is parked under PERMANENT above — the
-// corpus-denominator math is identical from either bucket.
 
-pub const pending_refactor_exact_paths = [_][]const u8{};
+pub const pending_refactor_exact_paths = [_][]const u8{
+    // §10.1.14 GetPrototypeFromConstructor step 4 with an *ordinary
+    // function* constructor whose `prototype` is non-object: these
+    // three construct `C = new other.Function(); C.prototype = null`
+    // and expect the result's [[Prototype]] to be
+    // `GetFunctionRealm(C)`'s %Object.prototype% (the ordinary-function
+    // fallbackProto, §10.2.2 base-kind OCFC).
+    //   • Array.from/of route `Construct(C)` through the shared
+    //     `constructValue`, which forwards `target.prototype` (null
+    //     here) as `intrinsicDefaultProto` instead of the spec's
+    //     %Object.prototype%, so the cross-realm remap has nothing to
+    //     map and the instance proto resolves to null/parent.
+    //   • bind constructs a bound `D` whose target proto derives the
+    //     same way (§20.2.3.2 → §10.4.1.2 [[Construct]]).
+    // The realm-remap groundwork is in place (lantern/call.zig
+    // `remapDefaultProtoToCtorRealm`); the remaining work is a bounded
+    // but *shared* construct-path change — resolve the forwarded
+    // `intrinsicDefaultProto` to %Object.prototype% when `target`
+    // is an ordinary function and its own `prototype` is not an
+    // object — deferred so it can land with its own regression
+    // coverage rather than riding the §10.1.14 realm-remap change.
+    // (The sibling Array/proto-from-ctor-realm-{zero,one,two}.js and
+    // Function/proto-from-ctor-realm.js, where the *target* is the
+    // Array/Function intrinsic with an object `prototype`, are
+    // recovered and no longer skipped.)
+    "built-ins/Array/from/proto-from-ctor-realm.js",
+    "built-ins/Array/of/proto-from-ctor-realm.js",
+    "built-ins/Function/prototype/bind/proto-from-ctor-realm.js",
+};
 
 // ════════════════════════════════════════════════════════════════════
 //   Lookup

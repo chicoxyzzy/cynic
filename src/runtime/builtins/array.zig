@@ -326,16 +326,29 @@ fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (obj.is_array_exotic) break :blk true;
         // §22.1.1.1 Array(...) construct path — `this_value` is the
         // fresh OrdinaryCreateFromConstructor instance whose
-        // [[Prototype]] is `NewTarget.prototype`. For a subclass
+        // [[Prototype]] is the §10.1.14-resolved proto. For a subclass
         // `class MyArray extends Array {}` (or proxy newTarget that
         // resolves to one), that chain reaches %Array.prototype%
         // but isn't equal to it. Walk the chain so a freshly-built
         // subclass instance still gets `is_array_exotic` punched in
         // and the args populated in-place, instead of allocating a
         // discarded fresh Array with the wrong prototype.
+        //
+        // The match is realm-agnostic: §23.1.3 makes every realm's
+        // %Array.prototype% itself an Array exotic object, so a
+        // cross-realm construct (`Reflect.construct(Array, args,
+        // newTargetFromOtherRealm)`, where §10.1.14 resolved the proto
+        // to *that* realm's %Array.prototype%) is recognised by the
+        // `is_array_exotic` chain marker rather than a pointer-compare
+        // against the active realm's intrinsic — which would miss it
+        // and wrongly allocate a fresh Array with the active realm's
+        // prototype (built-ins/Array/proto-from-ctor-realm-*.js). A
+        // plain object passed via `Array.apply(plainObj, …)` has no
+        // array-exotic ancestor, so it still allocates fresh and
+        // never gets `is_array_exotic` punched onto a user object.
         var cur = obj.prototype;
         while (cur) |p| : (cur = p.prototype) {
-            if (p == realm.intrinsics.array_prototype) break :blk true;
+            if (p.is_array_exotic) break :blk true;
         }
         break :blk false;
     };

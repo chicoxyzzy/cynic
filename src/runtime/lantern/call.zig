@@ -360,12 +360,77 @@ pub fn getPrototypeFromConstructorValue(
     return .{ .proto = intrinsic_default };
 }
 
+/// §10.1.14 GetPrototypeFromConstructor step 4 — when the resolved
+/// `prototype` is not an Object, the spec falls back to the
+/// *constructor's* realm's intrinsic: step 4.a runs
+/// `GetFunctionRealm(constructor)`, step 4.b reads that realm's
+/// intrinsic named `intrinsicDefaultProto`. Callers resolve
+/// `intrinsic_default` from the *active* realm; this remaps it to
+/// the same intrinsic in `ctor_realm`.
+///
+/// Two resolution strategies, in order:
+///   1. Typed intrinsic-slot scan — covers every default proto held
+///      in an `Intrinsics` field (`array_buffer_prototype`,
+///      `promise_prototype`, the Error-family prototypes, …),
+///      including lazily-built ones not reachable as globals.
+///   2. Global-binding scan — the well-known global constructors
+///      whose prototype lives only on the constructor's `.prototype`
+///      slot (`Map`, `Number`, `Date`, the concrete TypedArrays, …)
+///      have no dedicated `Intrinsics` field, so match the active
+///      realm's constructor binding by name and read the same-named
+///      binding from `ctor_realm`.
+///
+/// Returns `intrinsic_default` unchanged when the realms match (the
+/// common single-realm case — a pointer-compare short-circuit) or
+/// when no mapping is found (defensive: a non-intrinsic default, or
+/// an intrinsic the ctor realm hasn't installed yet).
+fn remapDefaultProtoToCtorRealm(
+    active: *Realm,
+    ctor_realm: *Realm,
+    intrinsic_default: ?*JSObject,
+) ?*JSObject {
+    if (active == ctor_realm) return intrinsic_default;
+    const default = intrinsic_default orelse return intrinsic_default;
+
+    // (1) Typed intrinsic-slot scan.
+    inline for (@typeInfo(intrinsics_mod.Intrinsics).@"struct".fields) |field| {
+        if (field.type == ?*JSObject) {
+            if (@field(active.intrinsics, field.name)) |p| {
+                if (p == default) {
+                    return @field(ctor_realm.intrinsics, field.name) orelse intrinsic_default;
+                }
+            }
+        }
+    }
+
+    // (2) Global-constructor scan keyed by binding name.
+    var it = active.globals.iterator();
+    while (it.next()) |entry| {
+        const f = heap_mod.valueAsFunction(entry.value_ptr.*) orelse continue;
+        const fp = f.prototype orelse continue;
+        if (fp == default) {
+            const child_v = ctor_realm.globals.get(entry.key_ptr.*) orelse return intrinsic_default;
+            const child_f = heap_mod.valueAsFunction(child_v) orelse return intrinsic_default;
+            return child_f.prototype orelse intrinsic_default;
+        }
+    }
+
+    return intrinsic_default;
+}
+
 pub fn getPrototypeFromConstructor(
     allocator: std.mem.Allocator,
     realm: *Realm,
     new_target: *JSFunction,
     intrinsic_default: ?*JSObject,
 ) RunError!ProtoLookup {
+    // §10.1.14 step 4 — every non-object fallback below resolves the
+    // default prototype against the *constructor's* realm (step 4.a
+    // GetFunctionRealm + step 4.b's named intrinsic), not the active
+    // realm. Resolve it once up front; in the single-realm case this
+    // is the unchanged `intrinsic_default`.
+    const ctor_realm = new_target.getFunctionRealm() orelse realm;
+    const default_proto = remapDefaultProtoToCtorRealm(realm, ctor_realm, intrinsic_default);
     // §10.1.8.1 OrdinaryGet step 4 — accessor wins.
     if (new_target.ownAccessor("prototype")) |acc_pair| {
         if (acc_pair.getter) |getter| {
@@ -374,13 +439,13 @@ pub fn getPrototypeFromConstructor(
             switch (outcome) {
                 .value, .yielded => |v| {
                     if (heap_mod.valueAsPlainObject(v)) |po| return .{ .proto = po };
-                    return .{ .proto = intrinsic_default };
+                    return .{ .proto = default_proto };
                 },
                 .thrown => |ex| return .{ .thrown = ex },
             }
         }
         // Write-only accessor: getter is undefined → ToObject fails → use default.
-        return .{ .proto = intrinsic_default };
+        return .{ .proto = default_proto };
     }
     // §10.1.14 step 3 — `Get(constructor, "prototype")`. The
     // property bag wins over the dedicated slot so a user
@@ -389,11 +454,11 @@ pub fn getPrototypeFromConstructor(
     // when the value isn't an Object.
     if (new_target.properties.get("prototype")) |v| {
         if (heap_mod.valueAsPlainObject(v)) |po| return .{ .proto = po };
-        return .{ .proto = intrinsic_default };
+        return .{ .proto = default_proto };
     }
     if (new_target.prototype) |p| return .{ .proto = p };
     // No `prototype` at all (arrow, bound without override) — fall back.
-    return .{ .proto = intrinsic_default };
+    return .{ .proto = default_proto };
 }
 
 /// §10.5.14 [[Construct]] dispatcher that accepts a `Value`. Used

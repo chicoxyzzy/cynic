@@ -135,26 +135,51 @@ fn functionConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
         // `language/expressions/import.meta/syntax/goal-*-params-or-body.js`).
         return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
     }
+    // §20.2.1.1 CreateDynamicFunction — the new function's realm is
+    // the *constructor's* realm, not necessarily the active running
+    // realm. `active_native_fn_realm` is set by the dispatcher to the
+    // callee's realm before this native runs, so a cross-realm
+    // `new other.Function()` stamps `other`: §10.1.14 GetFunctionRealm
+    // then resolves the new function to its origin realm (see
+    // `built-ins/*/proto-from-ctor-realm.js`), and the new function's
+    // prototype chain uses that realm's %Function.prototype% /
+    // %Object.prototype%.
+    const ctor_realm = realm.active_native_fn_realm orelse realm;
     // Allocate an empty anonymous function. The native body
     // returns undefined regardless of arguments — matches the
     // spec semantics of `Function()` (a function whose body is
     // the empty string).
     const empty = realm.heap.allocateFunctionNative(emptyFunctionBody, 0, "anonymous") catch return error.OutOfMemory;
-    empty.proto = realm.intrinsics.function_prototype;
+    empty.realm = ctor_realm;
+    // §20.2.1.1.1 step 22 — `proto = ? GetPrototypeFromConstructor(
+    // newTarget, "%Function.prototype%")`. On the construct path the
+    // caller (`constructValue` / `Reflect.construct`) already ran
+    // §10.1.14 and pre-allocated `this_value` as the OCFC instance
+    // whose [[Prototype]] is the realm-correct %Function.prototype%
+    // — i.e. `GetFunctionRealm(newTarget)`'s, remapped for a
+    // cross-realm newTarget (built-ins/Function/proto-from-ctor-realm.js:
+    // `Reflect.construct(Function, [], new other.Function())` →
+    // `other.Function.prototype`). Prefer it; the plain-call path
+    // (`Function()` with `this_value` not an object) falls back to
+    // the constructor realm's %Function.prototype%.
+    empty.proto = if (heap_mod.valueAsPlainObject(this_value)) |ocfc|
+        ocfc.prototype
+    else
+        ctor_realm.intrinsics.function_prototype orelse realm.intrinsics.function_prototype;
     // Wire up a normal `.prototype` object so users can
     // `Reflect.construct(C)` with our function as NewTarget.
     const proto = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(proto, realm.intrinsics.object_prototype);
+    realm.heap.setObjectPrototype(proto, ctor_realm.intrinsics.object_prototype orelse realm.intrinsics.object_prototype);
     proto.setWithFlags(realm.allocator, "constructor", heap_mod.taggedFunction(empty), .{
         .writable = true,
         .enumerable = false,
         .configurable = true,
     }) catch return error.OutOfMemory;
     realm.heap.setFunctionPrototype(empty, proto);
-    // If called via `new`, the interpreter pre-allocated `this`;
+    // If called via `new`, the interpreter pre-allocated `this`
+    // (read above for its realm-correct [[Prototype]]);
     // ConstructResult prefers our return value (the empty fn) per
     // §13.3.5.1.1 when it's an Object. Plain-call returns it too.
-    _ = this_value;
     return heap_mod.taggedFunction(empty);
 }
 

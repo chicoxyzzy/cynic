@@ -6573,6 +6573,177 @@ test "later: GetPrototypeFromConstructor propagates abrupt getter throw" {
     , "abrupt");
 }
 
+test "later: GetPrototypeFromConstructor derives default proto from newTarget's realm" {
+    // §10.1.14 GetPrototypeFromConstructor step 4 — when
+    // `Get(constructor, "prototype")` is not an Object, the default
+    // prototype is the *constructor's* realm's intrinsic, not the
+    // active realm's. Mirrors built-ins/Map/proto-from-ctor-realm.js:
+    //   var C = new other.Function(); C.prototype = null;
+    //   var o = Reflect.construct(Map, [], C);
+    //   assert.sameValue(Object.getPrototypeOf(o), other.Map.prototype);
+    // Map has no dedicated `Intrinsics` field, so the remap must
+    // resolve it through the constructor realm's global binding.
+    const call = @import("call.zig");
+    const heap_mod = @import("../heap.zig");
+    const NativeError = @import("../function.zig").NativeError;
+    const Noop = struct {
+        fn body(r: *Realm, t: Value, a: []const Value) NativeError!Value {
+            _ = r;
+            _ = t;
+            _ = a;
+            return Value.undefined_;
+        }
+    };
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try installBuiltinsAllFeatures(&parent);
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // The default proto the caller forwards is the *active* (parent)
+    // realm's Map.prototype — exactly what `constructValue` passes as
+    // `target.prototype` for `Reflect.construct(Map, …)`.
+    const parent_map = heap_mod.valueAsFunction(parent.globals.get("Map").?).?;
+    const child_map = heap_mod.valueAsFunction(child.globals.get("Map").?).?;
+    const parent_map_proto = parent_map.prototype;
+    const child_map_proto = child_map.prototype;
+    try testing.expect(parent_map_proto != null);
+    try testing.expect(child_map_proto != null);
+    try testing.expect(parent_map_proto != child_map_proto);
+
+    // Mint `C` in the child realm with a non-object `prototype`
+    // (the fixture's `C.prototype = null`).
+    const C = try parent.heap.allocateFunctionNative(Noop.body, 0, "C");
+    C.realm = &child;
+    try C.setWithFlags(testing.allocator, "prototype", Value.null_, .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
+
+    const lookup = try call.getPrototypeFromConstructor(testing.allocator, &parent, C, parent_map_proto);
+    try testing.expect(lookup == .proto);
+    try testing.expectEqual(child_map_proto, lookup.proto);
+}
+
+test "later: Array [[Construct]] derives result proto from newTarget's realm" {
+    // §22.1.1 Array(...) + §10.1.14 — `Reflect.construct(Array, args,
+    // C)` where `C` is a cross-realm function with a non-object
+    // `prototype` must yield an Array exotic object whose
+    // [[Prototype]] is the *child* realm's %Array.prototype% (the
+    // realm of GetFunctionRealm(C)), not the active realm's. Mirrors
+    // built-ins/Array/proto-from-ctor-realm-{zero,one,two}.js. The
+    // construct path pre-allocates `this` with the resolved proto;
+    // arrayConstructor must recognise that cross-realm instance via
+    // the realm-agnostic `is_array_exotic` chain marker and reuse it
+    // in place rather than allocating a fresh Array with the active
+    // realm's prototype.
+    const call = @import("call.zig");
+    const heap_mod = @import("../heap.zig");
+    const NativeError = @import("../function.zig").NativeError;
+    const Noop = struct {
+        fn body(r: *Realm, t: Value, a: []const Value) NativeError!Value {
+            _ = r;
+            _ = t;
+            _ = a;
+            return Value.undefined_;
+        }
+    };
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try installBuiltinsAllFeatures(&parent);
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const parent_array = heap_mod.valueAsFunction(parent.globals.get("Array").?).?;
+    const child_array = heap_mod.valueAsFunction(child.globals.get("Array").?).?;
+    try testing.expect(parent_array.prototype != null);
+    try testing.expect(child_array.prototype != null);
+    try testing.expect(parent_array.prototype != child_array.prototype);
+
+    const C = try parent.heap.allocateFunctionNative(Noop.body, 0, "C");
+    C.realm = &child;
+    try C.setWithFlags(testing.allocator, "prototype", Value.null_, .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
+
+    const res = try call.constructValue(
+        testing.allocator,
+        &parent,
+        heap_mod.taggedFunction(parent_array),
+        &[_]Value{ Value.fromInt32(1), Value.fromInt32(2) },
+        heap_mod.taggedFunction(C),
+    );
+    try testing.expect(res == .value);
+    const obj = heap_mod.valueAsPlainObject(res.value).?;
+    try testing.expect(obj.is_array_exotic);
+    try testing.expectEqual(child_array.prototype, obj.prototype);
+}
+
+test "later: Function [[Construct]] derives result proto from newTarget's realm" {
+    // §20.2.1.1.1 CreateDynamicFunction step 22 + §10.1.14 —
+    // `Reflect.construct(Function, [], C)` with `C` a cross-realm
+    // function whose `prototype` is null must yield a function whose
+    // [[Prototype]] is the *child* realm's %Function.prototype%.
+    // Mirrors built-ins/Function/proto-from-ctor-realm.js.
+    // functionConstructor must read the resolved proto from the
+    // construct path's OCFC `this_value`, not hardcode the active /
+    // constructor realm's %Function.prototype%.
+    const call = @import("call.zig");
+    const heap_mod = @import("../heap.zig");
+    const NativeError = @import("../function.zig").NativeError;
+    const Noop = struct {
+        fn body(r: *Realm, t: Value, a: []const Value) NativeError!Value {
+            _ = r;
+            _ = t;
+            _ = a;
+            return Value.undefined_;
+        }
+    };
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try installBuiltinsAllFeatures(&parent);
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const parent_fn_ctor = heap_mod.valueAsFunction(parent.globals.get("Function").?).?;
+    const parent_fn_proto = parent.intrinsics.function_prototype;
+    const child_fn_proto = child.intrinsics.function_prototype;
+    try testing.expect(parent_fn_proto != null);
+    try testing.expect(child_fn_proto != null);
+    try testing.expect(parent_fn_proto != child_fn_proto);
+
+    const C = try parent.heap.allocateFunctionNative(Noop.body, 0, "C");
+    C.realm = &child;
+    try C.setWithFlags(testing.allocator, "prototype", Value.null_, .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
+
+    const res = try call.constructValue(
+        testing.allocator,
+        &parent,
+        heap_mod.taggedFunction(parent_fn_ctor),
+        &[_]Value{},
+        heap_mod.taggedFunction(C),
+    );
+    try testing.expect(res == .value);
+    const f = heap_mod.valueAsFunction(res.value).?;
+    try testing.expectEqual(child_fn_proto, f.proto);
+}
+
 // ── §20.2.3 Function.prototype own properties ──────────────────────────────
 //
 // Per §20.2.3 the Function prototype object has a `length` of 0 and
