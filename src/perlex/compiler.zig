@@ -915,60 +915,35 @@ fn nullable(node: *const Node) bool {
 }
 
 /// Whether a nullable quantifier body must still defer to the fallback
-/// even though `compileRepeat` can guard it. The §22.2.2.3 progress
-/// guard lets Perlex own most nullable bodies; two kinds stay deferred:
-///   • a *directly*-quantified assertion (`(?=a)?`, `^*`, `$+`, `\b?`) —
-///     a §22.2.1 QuantifiableAssertion, a SyntaxError under `/u` but
-///     Annex-B-legal without it; that mode split is only modelled by the
-///     fallback, so compiling it here would bake in one reading. An
-///     assertion *wrapped in a group* (`(?:(?=a))?`, `($^)?`) is not a
+/// even though `compileRepeat` can guard it. The §22.2.2.3 progress guard
+/// lets Perlex own every nullable body except one: a *directly*-quantified
+/// assertion (`(?=a)?`, `^*`, `$+`, `\b?`) — a §22.2.1 QuantifiableAssertion,
+/// a SyntaxError under `/u` but Annex-B-legal without it. That mode split is
+/// only modelled by the fallback, so compiling it here would bake in one
+/// reading. Everything else is owned:
+///   • an assertion *wrapped in a group* (`(?:(?=a))?`, `($^)?`) is not a
 ///     QuantifiableAssertion — the quantifier binds the group, which is
-///     always legal — so it is owned (the guard handles the zero-width
-///     loop, and the inner capture rolls back on the guarded skip);
-///   • a body whose nullable content is a `/v` set whose membership
-///     includes the empty string (a `\q{}` empty alternative) — left to
-///     the fallback until that path lands. A nullable *backreference*
-///     (`\1*`, `\k<x>+`) is no longer deferred: its matched width is
+///     always legal — so the guard handles the zero-width loop and the inner
+///     capture rolls back on the guarded skip;
+///   • a nullable *backreference* (`\1*`, `\k<x>+`) has a width that is
 ///     participation-dependent but *constant* within one quantifier
 ///     evaluation (the referenced group lies to its left and only
-///     re-captures via its own backtracking), so §22.2.2.3's progress
-///     guard handles the empty-capture iteration like any other repeat.
+///     re-captures via its own backtracking), so the guard handles the
+///     empty-capture iteration like any other repeat;
+///   • a nullable `/v` *set* whose membership includes the empty string (a
+///     `\q{}` empty alternative) lowers to an alternation ending in an empty
+///     branch (`emitResolvedSet`); the guard stops the zero-width loop, and
+///     §22.2.2.3 step 2.b's `min = 0` precondition lets the mandatory
+///     iterations match empty and still participate.
 /// Called only when `nullable(node)` already holds.
 fn deferNullableBody(node: *const Node) bool {
     return switch (node.*) {
         // A bare assertion as the *direct* repeat body is the
-        // QuantifiableAssertion mode split — defer.
+        // QuantifiableAssertion mode split — defer. Anywhere else (wrapped in
+        // a group, sequence, or alternation) the quantifier binds the
+        // wrapper, so the assertion is legal and the body is owned.
         .anchor_start, .anchor_end, .word_boundary, .lookahead => true,
-        // Any other body (group, sequence, alternation, backref, set, …)
-        // defers only for the still-unmodelled kinds below; a nested
-        // assertion no longer counts, since its quantifier binds the
-        // wrapping group.
-        else => containsDeferringNullable(node),
-    };
-}
-
-/// The recursive half of `deferNullableBody`: a wrapped body still defers
-/// only when it contains an empty-matching `/v` set. Nested assertions and
-/// backreferences do *not* defer here — once an assertion is inside a group
-/// the quantifier binds the group, and a nullable backreference's width is
-/// constant within one quantifier evaluation — so in both cases §22.2.2.3
-/// step 2.b's progress guard owns the zero-width loop.
-fn containsDeferringNullable(node: *const Node) bool {
-    return switch (node.*) {
-        .class_set => |cs| classSetMayMatchEmpty(cs),
-        .empty, .char, .class, .dot, .prop, .backref_name, .backref_index, .anchor_start, .anchor_end, .word_boundary, .lookahead => false,
-        .noncapture => |b| containsDeferringNullable(b),
-        .modifier_group => |mg| containsDeferringNullable(mg.body),
-        .capture => |g| containsDeferringNullable(g.body),
-        .repeat => |r| containsDeferringNullable(r.body),
-        .concat => |parts| {
-            for (parts) |p| if (containsDeferringNullable(p)) return true;
-            return false;
-        },
-        .alternate => |alts| {
-            for (alts) |a| if (containsDeferringNullable(a)) return true;
-            return false;
-        },
+        else => false,
     };
 }
 
