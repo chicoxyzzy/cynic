@@ -251,6 +251,19 @@ pub const JSFunction = struct {
     /// Set on ArrayBuffer / DataView constructors per §25.1.4.1
     /// / §25.3.2.1.
     defers_proto_lookup: bool = false,
+    /// §20.2.1.1.1 CreateDynamicFunction — set on the empty function
+    /// produced by `new Function()` (Cynic ships no source-string
+    /// compilation, so the body is the native `emptyFunctionBody`).
+    /// That function is nonetheless an *ordinary* ECMAScript function,
+    /// so its [[Construct]] is the §10.2.2 base kind whose
+    /// intrinsicDefaultProto is `%Object.prototype%` — NOT a built-in
+    /// constructor carrying its own `%X.prototype%`. Lets
+    /// `baseConstructIntrinsicDefaultProto` tell it apart from genuine
+    /// native constructors (Array, Map, …) which DO key off their own
+    /// `.prototype` slot, so a cross-realm `new other.Function()` whose
+    /// `prototype` was nulled falls back to the constructor realm's
+    /// `%Object.prototype%`.
+    native_ordinary_function: bool = false,
     /// `function*` — calling allocates a `JSGenerator` instead
     /// of running the body. The generator's `.next()` method
     /// resumes the body via `lantern.resumeGenerator`.

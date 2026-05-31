@@ -128,6 +128,7 @@ pub const unwrapBoundCall = call.unwrapBoundCall;
 pub const callValue = call.callValue;
 pub const getPrototypeFromConstructorValue = call.getPrototypeFromConstructorValue;
 pub const getPrototypeFromConstructor = call.getPrototypeFromConstructor;
+pub const baseConstructIntrinsicDefaultProto = call.baseConstructIntrinsicDefaultProto;
 pub const constructValue = call.constructValue;
 pub const callJSFunction = call.callJSFunction;
 pub const callJSFunctionAsSuper = call.callJSFunctionAsSuper;
@@ -2897,11 +2898,18 @@ pub fn runFrames(
                 // arg slice; instead, re-enter `callJSFunction`
                 // with the constructor-flavour by allocating a
                 // synthetic instance and forcing the call.
-                // §10.1.14 GetPrototypeFromConstructor on the
-                // *bound* function (callee_fn — that's
-                // NewTarget per §10.4.1.2 step 5), so accessors
-                // on the bound function fire.
-                const proto_lookup = try getPrototypeFromConstructor(allocator, realm, callee_fn, resolved_callee.prototype);
+                // §10.4.1.2 [[Construct]] step 5 — for `new boundFn()`
+                // the original NewTarget *is* `boundFn`, so SameValue
+                // collapses it to the (fully unwrapped) target. The
+                // §10.1.14 GetPrototypeFromConstructor that follows
+                // therefore reads `Get(resolved_callee, "prototype")`
+                // (the collapsed NewTarget), not the bound wrapper's —
+                // which has no own `prototype`. The §10.2.2 base-kind
+                // default is %Object.prototype% for an ordinary target,
+                // its own %X.prototype% for a native; so a target with
+                // `prototype = null` falls back correctly instead of
+                // returning a stale slot.
+                const proto_lookup = try getPrototypeFromConstructor(allocator, realm, resolved_callee, baseConstructIntrinsicDefaultProto(realm, resolved_callee));
                 const resolved_proto: ?*JSObject = switch (proto_lookup) {
                     .proto => |p| p,
                     .thrown => |ex| {
@@ -3001,8 +3009,13 @@ pub fn runFrames(
             // §13.3.5.1.1 OrdinaryCallBindThis with NewTarget=callee.
             // §10.1.14 GetPrototypeFromConstructor — read
             // `prototype` through the accessor path so a
-            // user-installed getter on the constructor fires.
-            const proto_lookup_main = try getPrototypeFromConstructor(allocator, realm, callee_fn, callee_fn.prototype);
+            // user-installed getter on the constructor fires. The
+            // §10.2.2 base-kind default is %Object.prototype% for an
+            // ordinary function (the native ctors that reach here
+            // carry their own %X.prototype%), so `new F()` with
+            // `F.prototype = null` falls back to %Object.prototype%
+            // rather than F's own stale slot.
+            const proto_lookup_main = try getPrototypeFromConstructor(allocator, realm, callee_fn, baseConstructIntrinsicDefaultProto(realm, callee_fn));
             const resolved_proto_main: ?*JSObject = switch (proto_lookup_main) {
                 .proto => |p| p,
                 .thrown => |ex| {

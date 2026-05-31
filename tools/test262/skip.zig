@@ -1168,33 +1168,22 @@ pub const eval_dependent_exact_paths = [_][]const u8{
 // Reserved for fixtures blocked on a small, bounded engine refactor.
 
 pub const pending_refactor_exact_paths = [_][]const u8{
-    // §10.1.14 GetPrototypeFromConstructor step 4 with an *ordinary
-    // function* constructor whose `prototype` is non-object: these
-    // three construct `C = new other.Function(); C.prototype = null`
-    // and expect the result's [[Prototype]] to be
-    // `GetFunctionRealm(C)`'s %Object.prototype% (the ordinary-function
-    // fallbackProto, §10.2.2 base-kind OCFC).
-    //   • Array.from/of route `Construct(C)` through the shared
-    //     `constructValue`, which forwards `target.prototype` (null
-    //     here) as `intrinsicDefaultProto` instead of the spec's
-    //     %Object.prototype%, so the cross-realm remap has nothing to
-    //     map and the instance proto resolves to null/parent.
-    //   • bind constructs a bound `D` whose target proto derives the
-    //     same way (§20.2.3.2 → §10.4.1.2 [[Construct]]).
-    // The realm-remap groundwork is in place (lantern/call.zig
-    // `remapDefaultProtoToCtorRealm`); the remaining work is a bounded
-    // but *shared* construct-path change — resolve the forwarded
-    // `intrinsicDefaultProto` to %Object.prototype% when `target`
-    // is an ordinary function and its own `prototype` is not an
-    // object — deferred so it can land with its own regression
-    // coverage rather than riding the §10.1.14 realm-remap change.
-    // (The sibling Array/proto-from-ctor-realm-{zero,one,two}.js and
-    // Function/proto-from-ctor-realm.js, where the *target* is the
-    // Array/Function intrinsic with an object `prototype`, are
-    // recovered and no longer skipped.)
-    "built-ins/Array/from/proto-from-ctor-realm.js",
-    "built-ins/Array/of/proto-from-ctor-realm.js",
-    "built-ins/Function/prototype/bind/proto-from-ctor-realm.js",
+    // (empty — no fixtures are currently blocked on a bounded engine
+    //  refactor. The cross-realm ordinary-function construct cluster
+    //  that lived here — Array/from, Array/of, Function/prototype/bind
+    //  proto-from-ctor-realm — was closed by two coordinated changes:
+    //  (1) §10.2.2 base-kind [[Construct]] now derives its
+    //  intrinsicDefaultProto as %Object.prototype% (resolved against the
+    //  ctor realm) for ordinary-function targets at every construct site
+    //  — `constructValue` + `Reflect.construct` + the interpreter
+    //  `new_call` opcode (ordinary & bound) — via
+    //  `baseConstructIntrinsicDefaultProto` in lantern/call.zig; and
+    //  (2) the empty function from `new Function()` is flagged
+    //  `native_ordinary_function` so it's treated as the ordinary
+    //  function it is (§20.2.1.1.1) rather than a built-in constructor
+    //  keying off its own `.prototype` slot — the fixtures build their
+    //  cross-realm constructor as `new other.Function()`, which is
+    //  native-implemented in Cynic.)
 };
 
 // ════════════════════════════════════════════════════════════════════

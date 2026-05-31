@@ -6744,6 +6744,70 @@ test "later: Function [[Construct]] derives result proto from newTarget's realm"
     try testing.expectEqual(child_fn_proto, f.proto);
 }
 
+test "later: new F() with non-object prototype falls back to %Object.prototype%" {
+    // §10.2.2 base-kind [[Construct]] → OrdinaryCreateFromConstructor
+    // with intrinsicDefaultProto = "%Object.prototype%". When an
+    // ordinary function's `prototype` is not an Object
+    // (`F.prototype = null`), §10.1.14 step 4 falls back to that
+    // intrinsic — NOT the function's own (now stale) `.prototype`
+    // slot. Exercises the interpreter `new_call` opcode default.
+    try expectScriptStringWithBuiltins(
+        \\function F() {}
+        \\F.prototype = null;
+        \\Object.getPrototypeOf(new F()) === Object.prototype ? "ok" : "bad";
+    , "ok");
+}
+
+test "later: Reflect.construct(T, [], C) with C.prototype null uses %Object.prototype%" {
+    // §28.1.2 Reflect.construct → §10.2.2 base-kind — the result's
+    // [[Prototype]] derives from NewTarget `C`. With `C.prototype =
+    // null` and an ordinary `T`, GetPrototypeFromConstructor falls
+    // back to %Object.prototype%, not `T.prototype`. Exercises the
+    // `reflectConstruct` proto-resolution path (distinct from the
+    // interpreter opcode — Reflect.construct lets target ≠ NewTarget).
+    try expectScriptStringWithBuiltins(
+        \\function C() {}
+        \\C.prototype = null;
+        \\function T() {}
+        \\var r = Reflect.construct(T, [], C);
+        \\Object.getPrototypeOf(r) === Object.prototype ? "ok" : "bad";
+    , "ok");
+}
+
+test "later: Reflect.construct(bound, [], C) with C.prototype null uses %Object.prototype%" {
+    // §10.4.1.2 Bound Function [[Construct]] forwards to the unwrapped
+    // base target with NewTarget preserved; §10.2.2 base-kind then
+    // resolves the proto from `C`. With `C.prototype = null` the
+    // fallback is %Object.prototype% (the unwrapped base target is an
+    // ordinary function, so its own slot is irrelevant). Mirrors
+    // built-ins/Function/prototype/bind/proto-from-ctor-realm.js's
+    // single-realm shape.
+    try expectScriptStringWithBuiltins(
+        \\function C() {}
+        \\C.prototype = null;
+        \\var r = Reflect.construct(function(){}.bind(), [], C);
+        \\Object.getPrototypeOf(r) === Object.prototype ? "ok" : "bad";
+    , "ok");
+}
+
+test "later: new Function() with null prototype falls back to %Object.prototype%" {
+    // §20.2.1.1.1 CreateDynamicFunction — `new Function()` (no source
+    // string) yields an *ordinary* function. Cynic implements its body
+    // natively, but its [[Construct]] is still the §10.2.2 base kind:
+    // with `C.prototype = null`, §10.1.14 step 4 falls back to
+    // %Object.prototype%, NOT the fresh ordinary object Cynic parked in
+    // C's `.prototype` slot at creation. Regression guard for the
+    // `native_ordinary_function` discriminator — without it, a native
+    // function is mistaken for a built-in constructor and returns its
+    // own slot. Single-realm analog of
+    // built-ins/Array/{from,of}/proto-from-ctor-realm.js.
+    try expectScriptStringWithBuiltins(
+        \\var C = new Function();
+        \\C.prototype = null;
+        \\Object.getPrototypeOf(Reflect.construct(C, [])) === Object.prototype ? "ok" : "bad";
+    , "ok");
+}
+
 // ── §20.2.3 Function.prototype own properties ──────────────────────────────
 //
 // Per §20.2.3 the Function prototype object has a `length` of 0 and

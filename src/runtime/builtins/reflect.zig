@@ -1233,8 +1233,29 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // `getPrototypeFromConstructorValue` so the proxy's `get`
     // trap on "prototype" fires (AggregateError/
     // newtarget-proto-custom.js).
-    const new_target_for_proto: Value = if (new_target_v.isUndefined()) heap_mod.taggedFunction(effective_new_target) else new_target_v;
-    const proto_lookup = lantern.getPrototypeFromConstructorValue(realm.allocator, realm, new_target_for_proto, effective_target.prototype) catch |err| switch (err) {
+    //
+    // When the §10.4.1.2 step-5 collapse fired (`effective_new_target
+    // != new_target`), the supplied newTarget was a bound wrapper in
+    // the target's own chain and has no own `prototype` slot — read
+    // the collapsed base target's `prototype` instead, so
+    // `Reflect.construct(C, [], C)` with C=B.bind(), B=A.bind()
+    // resolves against A.prototype. When no collapse happened the
+    // original newTarget may be a callable Proxy whose `get` trap
+    // must fire, so keep the Value form.
+    const new_target_for_proto: Value = if (new_target_v.isUndefined() or effective_new_target != new_target)
+        heap_mod.taggedFunction(effective_new_target)
+    else
+        new_target_v;
+    // §10.2.2 base-kind intrinsicDefaultProto — %Object.prototype% for
+    // an ordinary-function target, the native ctor's own %X.prototype%
+    // for a native. Passing `effective_target.prototype` directly was
+    // only correct for natives: an ordinary target with a non-object
+    // `prototype` (`C.prototype = null`) must fall back to
+    // %Object.prototype% resolved against the ctor realm, not its own
+    // (stale) slot. Mirrors built-ins/Function/prototype/bind/
+    // proto-from-ctor-realm.js.
+    const base_default = lantern.baseConstructIntrinsicDefaultProto(realm, effective_target);
+    const proto_lookup = lantern.getPrototypeFromConstructorValue(realm.allocator, realm, new_target_for_proto, base_default) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };

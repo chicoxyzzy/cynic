@@ -461,6 +461,38 @@ pub fn getPrototypeFromConstructor(
     return .{ .proto = default_proto };
 }
 
+/// §10.2.2 [[Construct]] base-kind intrinsicDefaultProto for `target`.
+/// An ordinary function's constructed object falls back to
+/// `%Object.prototype%` (which `getPrototypeFromConstructor` then
+/// resolves against the constructor's realm when newTarget.prototype
+/// isn't an Object). A native constructor instead carries its own
+/// intrinsic default in its `.prototype` slot (Array → %Array.prototype%,
+/// Error → %Error.prototype%, …), so passing `t.prototype` reproduces
+/// the spec's per-constructor intrinsicDefaultProto generically. A bound
+/// function forwards [[Construct]] to its [[BoundTargetFunction]]
+/// (§10.4.1.2 step 6), so the relevant kind is the unwrapped base
+/// target's, not the bound wrapper's (which has no `prototype`).
+///
+/// Every [[Construct]] dispatch site must derive its fallback proto
+/// through this helper rather than reading `target.prototype` directly
+/// — `constructValue` here, `Reflect.construct`, and the interpreter's
+/// `new_call` opcode (ordinary + bound). Passing `target.prototype`
+/// is only correct for native ctors; for an ordinary function whose
+/// `prototype` is non-object (`F.prototype = null`), the spec mandates
+/// `%Object.prototype%`, not the function's own (possibly stale) slot.
+pub fn baseConstructIntrinsicDefaultProto(realm: *Realm, target: *JSFunction) ?*JSObject {
+    var t = target;
+    while (t.bound_target) |bt| t = bt;
+    // A genuine built-in constructor (Array, Map, Error, …) carries its
+    // per-constructor intrinsicDefaultProto in its own `.prototype`
+    // slot. The empty function from `new Function()` is native too, but
+    // it is an *ordinary* function (§20.2.1.1.1) whose [[Construct]] is
+    // the §10.2.2 base kind — its fallback is `%Object.prototype%`, not
+    // the fresh ordinary object sitting in its `.prototype` slot.
+    if (t.native_callback != null and !t.native_ordinary_function) return t.prototype;
+    return realm.intrinsics.object_prototype;
+}
+
 /// §10.5.14 [[Construct]] dispatcher that accepts a `Value`. Used
 /// by `Reflect.construct` to handle Proxy receivers — fires the
 /// `construct` trap if installed, otherwise falls through to the
@@ -546,9 +578,15 @@ pub fn constructValue(
     // trap revokes the proxy mid-flight, the subsequent
     // GetFunctionRealm(new_target) sees a revoked handler and
     // throws TypeError (§10.5.2 step 1).
+    // §10.2.2 base-kind intrinsicDefaultProto for this construct:
+    // %Object.prototype% for an ordinary-function `target`, its own
+    // %X.prototype% for a native ctor, the unwrapped base target's for
+    // a bound function. Used wherever new_target's `prototype` isn't an
+    // Object and we fall back to the intrinsic default (§10.1.14 step 4).
+    const base_default = baseConstructIntrinsicDefaultProto(realm, target);
     var resolved_proto: ?*JSObject = undefined;
     if (heap_mod.valueAsFunction(new_target)) |new_target_fn| {
-        const proto_lookup = try getPrototypeFromConstructor(allocator, realm, new_target_fn, target.prototype);
+        const proto_lookup = try getPrototypeFromConstructor(allocator, realm, new_target_fn, base_default);
         resolved_proto = switch (proto_lookup) {
             .proto => |p| p,
             .thrown => |ex| return .{ .thrown = ex },
@@ -573,15 +611,15 @@ pub fn constructValue(
                         if (nt_proxy.proxy_revoked or nt_proxy.proxy_handler == null) {
                             return .{ .thrown = try makeTypeError(realm, "Cannot retrieve realm from a revoked Proxy") };
                         }
-                        resolved_proto = target.prototype;
+                        resolved_proto = base_default;
                     }
                 },
             }
         } else {
-            resolved_proto = target.prototype;
+            resolved_proto = base_default;
         }
     } else {
-        resolved_proto = target.prototype;
+        resolved_proto = base_default;
     }
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(instance, resolved_proto);

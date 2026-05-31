@@ -151,6 +151,11 @@ fn functionConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     // the empty string).
     const empty = realm.heap.allocateFunctionNative(emptyFunctionBody, 0, "anonymous") catch return error.OutOfMemory;
     empty.realm = ctor_realm;
+    // §10.2.2 base-kind [[Construct]] — this is an ordinary function
+    // (its body is the empty string), so a nulled `prototype` falls
+    // back to `%Object.prototype%`, not its own `.prototype` slot.
+    // See the field doc in `function.zig`.
+    empty.native_ordinary_function = true;
     // §20.2.1.1.1 step 22 — `proto = ? GetPrototypeFromConstructor(
     // newTarget, "%Function.prototype%")`. On the construct path the
     // caller (`constructValue` / `Reflect.construct`) already ran
