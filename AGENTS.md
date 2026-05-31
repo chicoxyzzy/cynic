@@ -70,16 +70,19 @@ These are project rules — they apply to everyone.
     features list because the fixtures using them parse fine
     — they show as honest runtime-mode failures.
 
-    **Regex Annex B (§B.1.4) — narrowed by Perlex.** Three
+    **Regex Annex B (§B.1.4) — narrowed by Perlex.** Four
     §22.2.1 main-grammar rules that Annex B §B.1.2 relaxes when
     a pattern is compiled without `/u` or `/v`: `]`, `{`, `}` are
     SyntaxCharacters (Annex B's ExtendedPatternCharacter makes a
     stray one literal); a DecimalEscape `\N` past the capture
     count is an early error (§22.2.1.1; Annex B rereads it as a
     legacy octal/identity escape, e.g. `\1` outside a group →
-    `\001`); and every Quantifier brace needs a DecimalDigits
-    lower bound (Annex B reads `{,n}` as literal text). Cynic
-    enforces all three in every mode: Perlex — the native regex
+    `\001`); every Quantifier brace needs a DecimalDigits
+    lower bound (Annex B reads `{,n}` as literal text); and a
+    `-` class range with a CharacterClassEscape bound (`[\d-a]`
+    / `[a-\d]`) is an early error (§22.2.1.1; Annex B rereads
+    the `-` as a literal — `\d`, `-`, `a`). Cynic
+    enforces all four in every mode: Perlex — the native regex
     engine, first in dispatch — raises `SyntaxError`, so any
     pattern it compiles is held to the strict grammar. The
     residual leak is narrow: a pattern that *also* uses a
