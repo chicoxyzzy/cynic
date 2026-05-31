@@ -346,12 +346,46 @@ test "perlex: \\p{} only recognised under /u, else defers to fallback" {
     try expectCompileProp("\\p{Lu}", .{}, .unsupported);
 }
 
-test "perlex: declined or malformed property defers to fallback" {
+test "perlex: a declined (unresolved) property defers to fallback" {
+    // Valid syntax the stub resolver doesn't recognise — the fallback
+    // resolves the property, so these defer rather than reject.
     try expectCompileProp("\\p{Nd}", uflags, .unsupported); // stub doesn't know Nd
     try expectCompileProp("\\p{Script=Greek}", uflags, .unsupported); // non-gc key
-    try expectCompileProp("\\p", uflags, .unsupported); // no brace
-    try expectCompileProp("\\p{", uflags, .unsupported); // unterminated
-    try expectCompileProp("\\p{}", uflags, .unsupported); // empty
+}
+
+test "perlex: a malformed property escape is a /u early error" {
+    // §22.2.1.1 CharacterClassEscape :: \p{ UnicodePropertyValueExpression }.
+    // `scanProperty` is reached only from /u or /v contexts, so every
+    // ill-formed shape — no brace, unterminated, empty, bad name char — is
+    // an early error Perlex owns.
+    try expectCompileProp("\\p", uflags, .syntax_error); // no brace
+    try expectCompileProp("\\p{", uflags, .syntax_error); // unterminated
+    try expectCompileProp("\\p{}", uflags, .syntax_error); // empty
+    try expectCompileProp("\\p{Hex+}", uflags, .syntax_error); // invalid name char
+    try expectCompileProp("\\p{=Lu}", uflags, .syntax_error); // empty key
+    try expectCompileProp("\\p{gc=}", uflags, .syntax_error); // empty value
+    try expectCompileProp("\\P{", uflags, .syntax_error); // negated, unterminated
+}
+
+test "perlex: a malformed property escape defers without /u (Annex B)" {
+    // Without /u or /v the `\p` gate at the atom path never reaches
+    // `scanProperty` — `\p` is Annex B identity-escape territory (→ literal
+    // 'p'), which the fallback owns.
+    try expectCompileProp("\\p", .{}, .unsupported);
+    try expectCompileProp("\\p{", .{}, .unsupported);
+    try expectCompileProp("\\p{}", .{}, .unsupported);
+}
+
+test "perlex: bare \\k (no group name) is a /u early error" {
+    // §22.2.1 AtomEscape :: \k GroupName — under /u or /v, `\k` must be
+    // followed by `<GroupName>`. A bare `\k`, or `\k` before any non-`<`,
+    // is an early error Perlex owns; without /u it is an Annex B identity
+    // escape (→ literal 'k') the fallback still owns.
+    try expectCompileFlags("\\k", uflags, .syntax_error);
+    try expectCompileFlags("\\kab", uflags, .syntax_error);
+    try expectCompileFlags("\\k", vflags, .syntax_error);
+    try expectCompile("\\k", .unsupported); // Annex B identity escape — defer
+    try expectCompile("\\kab", .unsupported);
 }
 
 // ── Plain matching sanity ───────────────────────────────────────────
