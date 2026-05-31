@@ -351,3 +351,35 @@ the corpus under the relevant section's directory before adding.
   positives and reserved-punctuator negatives, but none assert that a
   *third* `&` after a valid `&&` is rejected — the exact spot a
   libregexp-backed engine slips through.
+
+### A backreference number that overflows the engine's integer width compiled
+
+- **Fixed in:** `6d134cc`
+- **Spec:** §22.2.1 DecimalEscape + §22.2.1.1 early errors — a
+  backreference `\N` whose CapturingGroupNumber is strictly greater than
+  the number of capturing groups is an early error (in a strict, non-Annex
+  B engine, in every mode). Annex B §B.1.2 rereads such a `\N` as a
+  legacy octal / identity escape, which Cynic drops.
+- **Reproducer:**
+  ```js
+  new RegExp("(a)\\2");                        // SyntaxError — \2 past 1 group
+  new RegExp("(a)\\99999999999999999999999");  // must ALSO be SyntaxError
+  ```
+- **Before fix:** Cynic strict-rejects every out-of-range backref whose
+  number fits a `usize` (`\2`, `\99`, `(a)(b)\3`, …) — matching engine262
+  + the spec. But a number too large to fit `usize` overflowed the
+  parser's integer parse and fell through to the libregexp fallback, which
+  applies the Annex B reread and *accepts* the pattern. So the second line
+  compiled instead of throwing. engine262 rejects both lines; V8 / JSC /
+  SpiderMonkey / Hermes / QuickJS accept both (Annex B). Cynic was the lone
+  engine that rejected the small form yet accepted the overflowing one — a
+  pure integer-width artifact.
+- **After fix:** a backreference value too large for `usize` is trivially
+  past the capture count, so the parser raises the same §22.2.1.1 early
+  error; both lines throw.
+- **Suggested fixture shape:** negative fixture (parse-phase SyntaxError
+  for the literal, `assert.throws` for `new RegExp`) under
+  `built-ins/RegExp/`, no `features:` tag. The corpus exercises
+  out-of-range backrefs with small numbers; a deliberately huge digit run
+  (more digits than any integer width holds) would catch an engine that
+  rejects the small form but mishandles the overflow boundary.
