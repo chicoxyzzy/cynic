@@ -1061,13 +1061,41 @@ pub const single_realm_path_contains = [_][]const u8{
     // family (newTarget / asserted constructor built from a source
     // string) stay skipped under `eval_dependent_exact_paths` below.
     // What remains here still bottoms out on a realm-of-origin gap
-    // Cynic hasn't closed: the `cross-realm.js` siblings (RegExp
-    // prototype getters asserting the *thrower's* realm) and the
+    // Cynic hasn't closed: the RegExp-prototype-getter `cross-realm.js`
+    // siblings (each asserts the brand-check TypeError comes from the
+    // *other* realm — `assert.throws(other.TypeError, …)`), and the
     // `multiple-evaluations-of-class-realm-function-ctor.js` private-
     // brand fixtures. Lift when realm-per-call-frame error attribution
     // lands (same gap as the Function.prototype apply/bind + Proxy
     // entries below).
-    "/cross-realm.",
+    //
+    // The broader `Symbol/*/cross-realm.js` and
+    // `RegExp/escape/cross-realm.js` fixtures are NOT realm-of-origin
+    // tests — they assert only *identity / functional* invariants
+    // (well-known symbols and the global symbol registry are agent-wide
+    // per §6.1.5.1 / §20.4.2.2, and a cross-realm functional call works
+    // because the child shares the parent heap). `test262CreateRealm`
+    // already calls `shareWellKnownSymbolsWith` and the registry lives
+    // on the shared `heap.symbol_registry`, so those pass — they are
+    // deliberately NOT matched here.
+    //
+    // `BigInt/prototype/valueOf/cross-realm.js` IS still matched: it
+    // boxes a BigInt with the *other* realm's `Object` (§7.1.18 ToObject
+    // → a BigInt wrapper) and then calls the parent realm's
+    // `BigInt.prototype.valueOf` on it (§21.2.3.4 thisBigIntValue). The
+    // single-realm equivalent passes (`Object(BigInt(0))` boxes with a
+    // live `boxed_primitive`), so this is a cross-realm
+    // [[BigIntData]]-slot recognition gap, not a general boxing bug.
+    "BigInt/prototype/valueOf/cross-realm.",
+    "RegExp/prototype/dotAll/cross-realm.",
+    "RegExp/prototype/global/cross-realm.",
+    "RegExp/prototype/hasIndices/cross-realm.",
+    "RegExp/prototype/ignoreCase/cross-realm.",
+    "RegExp/prototype/multiline/cross-realm.",
+    "RegExp/prototype/source/cross-realm.",
+    "RegExp/prototype/sticky/cross-realm.",
+    "RegExp/prototype/unicode/cross-realm.",
+    "RegExp/prototype/unicodeSets/cross-realm.",
     "-realm-function-ctor.",
 
     // `built-ins/Function/prototype/{apply,bind}/*-realm.js` —
