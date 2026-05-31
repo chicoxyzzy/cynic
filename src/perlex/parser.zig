@@ -1403,9 +1403,10 @@ const Parser = struct {
 
             const c = self.peek() orelse return error.SyntaxError; // unterminated
             if (c == ']') return;
-            // A union may not contain `&&` / `--` operators (mixed forms
-            // are SyntaxErrors); defer the verdict to the fallback.
-            if (self.peekDouble('&') or self.peekDouble('-')) return error.Unsupported;
+            // A union may not switch to an `&&` / `--` operator midway —
+            // a mixed ClassSetExpression is a §22.2.1.1 early error Perlex
+            // owns directly.
+            if (self.peekDouble('&') or self.peekDouble('-')) return error.SyntaxError;
             cur = try self.parseSetAtom();
         }
     }
@@ -1433,18 +1434,20 @@ const Parser = struct {
         if (c == '\\') return self.parseSetEscape();
         switch (c) {
             ']' => return error.SyntaxError, // empty operand
-            // ClassSetSyntaxCharacter / operator lead-ins must be escaped;
-            // an unescaped one here is a SyntaxError — defer the verdict.
-            '(', ')', '{', '}', '/', '|', '-' => return error.Unsupported,
+            // §22.2.1 ClassSetCharacter: a ClassSetSyntaxCharacter
+            // (`( ) { } / | -`) must be escaped (`\-`, …); unescaped as a set
+            // atom it is a §22.2.1.1 early error. Only Annex B regex leniency
+            // — dropped in every mode here — would read it as a literal.
+            '(', ')', '{', '}', '/', '|', '-' => return error.SyntaxError,
             else => {},
         }
         // §22.2.1 ClassSetCharacter has `[lookahead ∉
         // ClassSetReservedDoublePunctuator]`: a doubled punctuator
         // (`~~`, `!!`, `::`, …) is reserved and must not be read as two
-        // literals. `&&`/`--` are the set operators (handled by the
-        // operand dispatch); the rest are early errors — defer so the
-        // fallback's double-punctuator table renders the SyntaxError.
-        if (isReservedDoublePunct(c) and self.atIs(1, c)) return error.Unsupported;
+        // literals. `&&`/`--` are the set operators (handled by the operand
+        // dispatch); the rest are §22.2.1.1 early errors Perlex owns
+        // directly (matching the operand-path check below).
+        if (isReservedDoublePunct(c) and self.atIs(1, c)) return error.SyntaxError;
         return .{ .char = try self.nextCodePoint() };
     }
 
