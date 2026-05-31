@@ -738,6 +738,28 @@ test "perlex: large bounded quantifiers lower to a counted loop" {
     try expectMatch("(?:a?){0,5000}b", "aaab", "aaab");
 }
 
+test "perlex: a quantifier bound past usize is clamped to unbounded (§22.2.1)" {
+    // §22.2.1 sets no upper limit on a Quantifier's DecimalDigits. A bound too
+    // large to fit usize is clamped to the unbounded sentinel — observably
+    // identical for any finite input (the length can't approach usize), and
+    // engine262 compiles these too. (Perlex used to defer them to the fallback.)
+    //
+    // Exact huge count: the mandatory counted loop short-circuits the moment
+    // the atom stops matching, so a finite input never reaches the bound.
+    try expectCompile("a{99999999999999999999999}", .match); // 23 nines, > u64
+    try expectNoMatch("a{99999999999999999999999}", "aaa");
+    // A huge upper bound behaves like an unbounded `*` / `+` tail.
+    try expectMatch("a{0,99999999999999999999999}", "aaaa", "aaaa");
+    try expectMatch("a{3,99999999999999999999999}", "aaaaa", "aaaaa");
+    try expectNoMatch("a{3,99999999999999999999999}", "aa"); // still needs >= 3
+    // A reversed range whose (clamped) lower bound exceeds the upper is still
+    // a §22.2.1.1 Syntax Error.
+    try expectCompile("a{99999999999999999999999,5}", .syntax_error);
+    // (A nullable body under a huge *mandatory* count — `(a?){10^23}` — is a
+    // pathological case bounded by the VM step limit, like any runaway
+    // pattern; not asserted here to keep the suite fast.)
+}
+
 // ── §22.2.1 strict-grammar closure of the Annex B regex carve-outs ───
 //
 // Cynic drops Annex B regex leniency (§B.1.2) in every mode, not just

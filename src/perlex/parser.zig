@@ -427,7 +427,13 @@ const Parser = struct {
             if (i < self.src.len and self.src[i] == ',') return error.SyntaxError;
             return error.NotAQuantifier; // `{` then non-digit, non-comma
         }
-        const min = std.fmt.parseInt(usize, self.src[lo_start..i], 10) catch return error.Unsupported;
+        // §22.2.1 puts no upper bound on a Quantifier's DecimalDigits. A value
+        // too large to fit usize is clamped to `unbounded_max`: for any finite
+        // input the input length can never approach usize, so a huge exact /
+        // upper bound is observably identical to "unbounded" (and the mandatory
+        // counted loop short-circuits the instant the atom stops matching, so a
+        // huge *lower* bound just never matches a finite input — never spins).
+        const min = std.fmt.parseInt(usize, self.src[lo_start..i], 10) catch unbounded_max;
         var max: usize = min;
         if (i < self.src.len and self.src[i] == ',') {
             i += 1;
@@ -436,7 +442,7 @@ const Parser = struct {
             if (i == hi_start) {
                 max = unbounded_max; // `{n,}`
             } else {
-                max = std.fmt.parseInt(usize, self.src[hi_start..i], 10) catch return error.Unsupported;
+                max = std.fmt.parseInt(usize, self.src[hi_start..i], 10) catch unbounded_max;
                 if (max < min) return error.SyntaxError; // `{3,1}` is invalid
             }
         }
