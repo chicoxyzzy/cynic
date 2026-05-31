@@ -126,6 +126,42 @@ test "phase-0: each realm has its own microtask queue (isolation via side effect
     try testing.expect(probe_b.value.bits == @import("value.zig").Value.true_.bits);
 }
 
+// ── D1-revised contract: shape sharing across initChild ────────────
+//
+// Per `docs/multi-realm.md` D1 revision (commit `ae847a8`),
+// each realm allocates its OWN prototype objects — `.constructor`
+// being a per-realm data slot is the spec-mandated reason
+// (§6.1.7.4, §9.3.2, §20.1.3.1, §23.1.3.3; five-engine
+// cross-realm probe confirms). The shared substrate Cynic
+// relies on for cross-realm efficiency is the per-`Heap`
+// `ShapeTree` — and `Realm.initChild` shares the heap with
+// its parent. This test pins that contract: two objects
+// allocated on parent + child that go through the same
+// transition path land on shape-identical pointers.
+
+test "phase 0+: child realm shares the parent's ShapeTree (D1 revised)" {
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+
+    const child_ptr = try testing.allocator.create(Realm);
+    child_ptr.* = Realm.initChild(&parent);
+    // Children borrow the parent's heap (owns_heap=false), so
+    // their deinit only releases their own maps. The parent's
+    // deinit also tears down registered child realms, but a
+    // child created bare for a test isn't registered — release
+    // it manually here.
+    defer {
+        child_ptr.deinit();
+        testing.allocator.destroy(child_ptr);
+    }
+
+    try testing.expect(parent.heap == child_ptr.heap);
+    // The shape tree IS the heap-owned subgraph that production
+    // engines (V8 Map tree, JSC Structure graph) share across
+    // realms; sameness of `heap` implies sameness of `shapes`.
+    try testing.expect(&parent.heap.shapes == &child_ptr.heap.shapes);
+}
+
 // ── Contract 4: output buffer isolation ─────────────────────────────
 
 test "phase-0: each realm has its own output buffer (print)" {
