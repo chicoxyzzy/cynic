@@ -1203,7 +1203,7 @@ const Parser = struct {
         }
         // A non-ASCII byte begins a multi-unit source character; decode it
         // as a literal ClassAtom (§22.2.1).
-        if (c >= 0x80) return self.classLiteralCodePoint();
+        if (c >= 0x80) return self.classLiteralCodePoint(ranges);
         self.pos += 1;
         return .{ .ch = c };
     }
@@ -1212,23 +1212,37 @@ const Parser = struct {
     /// ClassAtom (§22.2.1). A BMP code point is one UTF-16 code unit, so it
     /// is one class member in every mode. Under `/u`/`/v` an astral code
     /// point is one member too — a valid (range-capable) endpoint, since
-    /// `ClassRange` bounds are `u21`. Without a flag the source is a
-    /// code-unit sequence, so an astral character would be two single-unit
-    /// members (alternatives of its surrogate pair), which a single
-    /// `ClassMember` can't express — defer that to the fallback. A WTF-8
-    /// lone surrogate or malformed sequence (`utf8Decode` rejects either)
-    /// also defers.
-    fn classLiteralCodePoint(self: *Parser) ParseError!ClassMember {
+    /// `ClassRange` bounds are `u21` — returned as `.ch`. Without a flag the
+    /// source is a code-unit sequence, so an astral ClassAtom is two
+    /// single-unit members — the alternatives of its surrogate pair. A class
+    /// is the union of its members, so append both halves as single-unit
+    /// ranges directly and return `.class_added`; the class then matches a
+    /// code unit equal to either half (it does NOT match the pair as one
+    /// code point — that needs /u). A WTF-8 lone surrogate or malformed
+    /// sequence (`utf8Decode` rejects either) defers to the fallback.
+    fn classLiteralCodePoint(self: *Parser, ranges: *std.ArrayListUnmanaged(Node.ClassRange)) ParseError!ClassMember {
         const lead = self.src[self.pos];
         const len = std.unicode.utf8ByteSequenceLength(lead) catch return error.Unsupported;
         if (self.pos + len > self.src.len) return error.Unsupported;
         const cp = std.unicode.utf8Decode(self.src[self.pos .. self.pos + len]) catch return error.Unsupported;
-        if (cp > 0xFFFF and !self.unicode and !self.unicode_sets) return error.Unsupported;
         self.pos += len;
         // A non-ASCII unit can case-fold to another non-ASCII unit, which
         // the ASCII-only fold can't model — mirror the atom decoder so the
-        // non-Unicode `i` gate defers such patterns to the fallback.
+        // non-Unicode `i` gate (see perlex.zig) defers such patterns to the
+        // fallback. (The surrogate halves below never fold, but a following
+        // BMP member of the same class might, so set it uniformly.)
         self.non_ascii = true;
+        if (cp > 0xFFFF and !self.unicode and !self.unicode_sets) {
+            // §22.2.1 ClassAtom over a non-UnicodeMode SourceCharacter: the
+            // astral code point is its UTF-16 surrogate pair, two single-unit
+            // members of the union.
+            const v: u21 = cp - 0x10000;
+            const high: u21 = 0xD800 + (v >> 10);
+            const low: u21 = 0xDC00 + (v & 0x3FF);
+            try ranges.append(self.a, .{ .lo = high, .hi = high });
+            try ranges.append(self.a, .{ .lo = low, .hi = low });
+            return .class_added;
+        }
         return .{ .ch = cp };
     }
 

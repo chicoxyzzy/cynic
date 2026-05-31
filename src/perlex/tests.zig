@@ -1355,11 +1355,88 @@ test "perlex: a negated astral class excludes its member under /u (§22.2.1)" {
     }
 }
 
-test "perlex: a non-/u astral class member defers to the fallback (§22.2.1)" {
-    // Without /u or /v an astral class member would be two single-unit
-    // alternative members (its surrogate pair), which a single ClassMember
-    // can't express — defer to the fallback rather than mismatch.
-    try expectCompile("[𠮷]", .unsupported);
+test "perlex: a non-/u astral class member matches either surrogate unit (§22.2.1)" {
+    const gpa = testing.allocator;
+    // Without /u or /v the pattern source is a code-unit sequence, so an
+    // astral ClassAtom is two single-unit members — the alternatives of its
+    // surrogate pair. `[𠮷]` (U+20BB7 → D842 DFB7) is the union of those two
+    // members, so it matches a single code unit equal to either half. It
+    // does NOT match the pair as one code point (that needs /u).
+    var r = try perlex.compile(gpa, "[𠮷]", .{});
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    {
+        const lead = [_]u16{0xD842}; // lead surrogate alone — one unit
+        var m = (try perlex.exec(u16, gpa, &r.ok, &lead, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+    {
+        const trail = [_]u16{0xDFB7}; // trail surrogate alone — one unit
+        var m = (try perlex.exec(u16, gpa, &r.ok, &trail, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+    {
+        const other = [_]u16{'x'}; // neither half — no match
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &other, 0)) == null);
+    }
+}
+
+test "perlex: a non-/u astral class member is one code unit, not the pair (§22.2.1)" {
+    const gpa = testing.allocator;
+    // `^[𠮷]$` matches only a one-unit input — a single surrogate half.
+    // Given the whole pair (2 units) the anchored class fails: it consumes
+    // exactly one unit, leaving `$` unsatisfied at index 1.
+    var r = try perlex.compile(gpa, "^[𠮷]$", .{});
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    {
+        const half = [_]u16{0xD842}; // one unit — anchored match
+        var m = (try perlex.exec(u16, gpa, &r.ok, &half, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+    {
+        const pair = [_]u16{ 0xD842, 0xDFB7 }; // two units — no anchored match
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &pair, 0)) == null);
+    }
+}
+
+test "perlex: a non-/u negated astral class excludes both surrogate units (§22.2.1)" {
+    const gpa = testing.allocator;
+    // `[^𠮷]` excludes both D842 and DFB7; any other unit matches.
+    var r = try perlex.compile(gpa, "[^𠮷]", .{});
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    {
+        const x = [_]u16{'x'}; // not excluded
+        var m = (try perlex.exec(u16, gpa, &r.ok, &x, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+    {
+        const lead = [_]u16{0xD842}; // excluded
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &lead, 0)) == null);
+    }
+    {
+        const trail = [_]u16{0xDFB7}; // excluded
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &trail, 0)) == null);
+    }
+}
+
+test "perlex: an astral class member with /i or a range bound still defers (§22.2.1)" {
+    // The owned path is the bare non-/u astral ClassAtom. With `i` the
+    // surrogate units sit on the non-Unicode fold gate (the parser can't
+    // rule out a non-ASCII fold orbit), and as a `-` range bound the source
+    // splits across the dash — both keep deferring to the fallback.
+    try expectCompileFlags("[𠮷]", .{ .ignore_case = true }, .unsupported);
+    try expectCompile("[𠮷-a]", .unsupported);
+    try expectCompile("[a-𠮷]", .unsupported);
 }
 
 // ── §22.2.1 \u surrogate escapes under /u (combine + lone) ──────────
