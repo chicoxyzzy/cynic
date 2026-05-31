@@ -519,14 +519,14 @@
         <h1 class="title">Cynic.</h1>
         <p class="tagline">A JavaScript engine that has <em>heard enough</em>.</p>
         <p class="lede">
-          Aimed at edge runtimes, Workers, and servers — eventually. Today, a lexer, parser, and bytecode interpreter chew through a growing slice of ECMAScript and politely decline everything the language has been trying to forget for the last twenty years. No sloppy mode. No <code>with</code>. No HTML-comment syntax. No DOM apologetics.
+          Aimed at edge runtimes, Workers, and servers — eventually. Today it already parses, compiles, and runs: async and generators, a real module graph, a generational collector, even proper tail calls. Everything the language spent twenty years trying to forget, it forgets on purpose — no <code>with</code>, no sloppy mode. There's no <code>eval</code>, either: code is code here, never strings assembled at runtime. And it starts the day hardened — the primordials freeze before your first line runs, so a dependency can't redefine <code>Array.prototype</code> out from under you.
         </p>
       </div>
 
       <div class="mascot-panel">
         <div class="panel-note">
           <span class="pin"></span>
-          <span><b>Pre-alpha.</b> Lexer + parser + bytecode interpreter ship; the runtime is filling in. Read <code>docs/ROADMAP.md</code> before opening issues. Better yet, don't.</span>
+          <span><b>Pre-alpha.</b> Parser, interpreter, and GC ship; spec coverage is still climbing and there's no JIT yet. Read <code>docs/ROADMAP.md</code> before opening issues. Better yet, don't.</span>
         </div>
         <div class="stage">
           <div class="head mascot-head">
@@ -585,6 +585,14 @@
         </article>
 
         <article class="refuse">
+          <div class="stamp">NEVER</div>
+          <span class="feature">&lt;!-- --&gt;</span>
+          <h3>HTML comments in source</h3>
+          <p>Yes, that's real ECMAScript. Yes, we are pretending it isn't.</p>
+          <div class="quote">SyntaxError: this is a JS file. compose yourself.</div>
+        </article>
+
+        <article class="refuse">
           <div class="stamp">NOPE</div>
           <span class="feature">escape() · unescape()</span>
           <h3>The pre-URI globals</h3>
@@ -606,14 +614,6 @@
           <h3><code>Date.prototype.{getYear, setYear}</code></h3>
           <p>The two-digit-year ones. Cynic keeps the normative aliases (<code>substr</code>, <code>trimLeft</code>, <code>toGMTString</code>) — these don't make the cut.</p>
           <div class="quote">TypeError: 'getYear' is not on this Date.</div>
-        </article>
-
-        <article class="refuse">
-          <div class="stamp">NEVER</div>
-          <span class="feature">&lt;!-- --&gt;</span>
-          <h3>HTML comments in source</h3>
-          <p>Yes, that's real ECMAScript. Yes, we are pretending it isn't.</p>
-          <div class="quote">SyntaxError: this is a JS file. compose yourself.</div>
         </article>
 
         <article class="refuse">
@@ -711,6 +711,24 @@
 
         <div class="compare-row">
           <div>
+            <div class="feature-name"><code>yield*</code> delegation · <code>for await of</code></div>
+            <div class="compare-note">sync + async generators; <code>IteratorClose</code> on every abrupt path the spec describes</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>We learned §15.5.5 by failing it, then we stopped failing it.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">Top-level <code>await</code></div>
+            <div class="compare-note">thenable adoption + suspension across module boundaries</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Async modules suspend. Sibling modules don't block. The spec said so.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
             <div class="feature-name">RegExp · full ECMA-262</div>
             <div class="compare-note">backrefs, named groups, lookaround, <code>u</code>/<code>v</code> flags</div>
           </div>
@@ -747,6 +765,15 @@
 
         <div class="compare-row">
           <div>
+            <div class="feature-name">Real module graph</div>
+            <div class="compare-note">cyclic imports, indirect-binding TDZ, namespace <code>[[Get]]</code> ReferenceError on uninit, dynamic <code>import()</code></div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Cyclic. TDZ on indirect imports. The Namespace <code>[[Get]]</code> ReferenceError the spec asked for.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
             <div class="feature-name">Dynamic <code>import()</code></div>
             <div class="compare-note">host-loader-backed; non-Promise &amp; settled-Promise cases through <code>await</code></div>
           </div>
@@ -756,11 +783,11 @@
 
         <div class="compare-row">
           <div>
-            <div class="feature-name"><code>WeakRef</code> · <code>FinalizationRegistry</code></div>
-            <div class="compare-note">§26.1 / §26.2; real weak references — major sweep clears dead targets and queues registry callbacks</div>
+            <div class="feature-name">Import attributes · <code>with { type: "json" }</code></div>
+            <div class="compare-note">JSON &amp; text module records, attribute-keyed module cache, static + dynamic <code>import()</code></div>
           </div>
           <div class="check">Works.</div>
-          <div>Genuine weakness. The collector finally honours its end of the contract.</div>
+          <div>JSON modules without the assertion-vs-attribute drama. Cache keys on the type.</div>
         </div>
 
         <div class="compare-row">
@@ -774,38 +801,38 @@
 
         <div class="compare-row">
           <div>
-            <div class="feature-name">TC39 Stage 3 · <code>Iterator.zip</code> · <code>Map</code>/<code>WeakMap</code> <code>upsert</code></div>
-            <div class="compare-note">behind <code>--enable=&lt;name&gt;</code> or <code>--enable-experimental</code>; off by default. Each scored as its own isolated test262 sweep.</div>
+            <div class="feature-name"><code>Map</code> / <code>WeakMap</code> <code>getOrInsert</code> (upsert)</div>
+            <div class="compare-note">Stage 4 (2026-05); default-on, no flag</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Graduated to Stage 4 this month — the flag came off, the method stayed.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">Explicit Resource Management · <code>using</code> / <code>await using</code></div>
+            <div class="compare-note"><code>Symbol.dispose</code> / <code>Symbol.asyncDispose</code>, <code>DisposableStack</code> / <code>AsyncDisposableStack</code>, <code>SuppressedError</code>; disposal on every abrupt path</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>Scopes clean up after themselves. The <code>finally</code> you keep forgetting to write.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name">Experimental · <code>Iterator.zip</code> · <code>ShadowRealm</code></div>
+            <div class="compare-note">joint-iteration (Stage 3) + ShadowRealm (Stage 2.7), behind <code>--enable=&lt;name&gt;</code> or <code>--enable-experimental</code>; off by default. Each scored as its own isolated test262 sweep.</div>
           </div>
           <div class="check">Opt-in.</div>
-          <div>Stage 3 means <em>stable enough to ship and unstable enough to break.</em> Cynic takes the trade. Embedders can decline.</div>
+          <div>Pre-Stage-4: shippable, but the committee can still change its mind. Cynic takes the trade; embedders decline by default.</div>
         </div>
 
         <div class="compare-row">
           <div>
-            <div class="feature-name"><code>yield*</code> delegation · <code>for await of</code></div>
-            <div class="compare-note">sync + async generators; <code>IteratorClose</code> on every abrupt path the spec describes</div>
+            <div class="feature-name"><code>WeakRef</code> · <code>FinalizationRegistry</code></div>
+            <div class="compare-note">§26.1 / §26.2; real weak references — major sweep clears dead targets and queues registry callbacks</div>
           </div>
           <div class="check">Works.</div>
-          <div>We learned §15.5.5 by failing it, then we stopped failing it.</div>
-        </div>
-
-        <div class="compare-row">
-          <div>
-            <div class="feature-name">Real module graph</div>
-            <div class="compare-note">cyclic imports, indirect-binding TDZ, namespace <code>[[Get]]</code> ReferenceError on uninit, dynamic <code>import()</code></div>
-          </div>
-          <div class="check">Works.</div>
-          <div>Cyclic. TDZ on indirect imports. The Namespace <code>[[Get]]</code> ReferenceError the spec asked for.</div>
-        </div>
-
-        <div class="compare-row">
-          <div>
-            <div class="feature-name">Top-level <code>await</code></div>
-            <div class="compare-note">thenable adoption + suspension across module boundaries</div>
-          </div>
-          <div class="check">Works.</div>
-          <div>Async modules suspend. Sibling modules don't block. The spec said so.</div>
+          <div>Genuine weakness. The collector finally honours its end of the contract.</div>
         </div>
 
         <div class="compare-row">
