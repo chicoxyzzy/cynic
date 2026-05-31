@@ -120,6 +120,19 @@ pub const Match = struct {
     }
 };
 
+/// §22.2.2.1 AdvanceStringIndex: how far the leftmost scan steps from
+/// `s`. One code unit normally; two when `/u`/`/v` and `s` begins a
+/// UTF-16 surrogate pair, so a start position is never mid-pair. `u8`
+/// inputs are Latin1 (no surrogates), so the stride is always one.
+fn scanStride(comptime Unit: type, unicode: bool, input: []const Unit, s: usize) usize {
+    if (Unit == u16 and unicode and s + 1 < input.len) {
+        const hi = input[s];
+        const lo = input[s + 1];
+        if (hi >= 0xD800 and hi <= 0xDBFF and lo >= 0xDC00 and lo <= 0xDFFF) return 2;
+    }
+    return 1;
+}
+
 /// Find the leftmost match at or after `start`, scanning forward
 /// (sticky patterns match only at `start`). `Unit` is `u8` or `u16`;
 /// capture offsets are in those units. Returns `null` for no match.
@@ -147,7 +160,7 @@ pub fn exec(
     defer m.deinit();
 
     var s = start;
-    while (s <= input.len) : (s += 1) {
+    while (s <= input.len) {
         const matched = m.runFrom(s) catch |e| switch (e) {
             // Backstop tripped — report no match rather than spin. v1
             // patterns never reach it (see `step_limit`).
@@ -159,6 +172,12 @@ pub fn exec(
         };
         if (matched) return Match{ .slots = slots };
         if (program.flags.sticky) break;
+        // §22.2.2.1 AdvanceStringIndex: under `/u`/`/v` the leftmost scan
+        // steps by whole code points, so a start position never lands
+        // between the two halves of a surrogate pair — otherwise a
+        // negated class (`[^𝌆]`) could spuriously match the lone low
+        // surrogate sitting mid-pair.
+        s += scanStride(Unit, m.unicode, input, s);
     }
     gpa.free(slots);
     return null;

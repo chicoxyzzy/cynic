@@ -1245,6 +1245,81 @@ test "perlex: an astral literal is two code units without /u (§22.2.1)" {
     }
 }
 
+// ── §22.2.1 non-ASCII literals inside [ … ] classes ─────────────────
+
+test "perlex: a BMP non-ASCII class member matches its code unit (§22.2.1)" {
+    const gpa = testing.allocator;
+    // U+03BB "λ" is one of three BMP members in `[αλω]`; it matches as a
+    // single code unit, identical under code-unit and code-point semantics.
+    const input = [_]u16{0x03BB};
+    inline for ([_]perlex.Flags{ .{}, uf }) |fl| {
+        var r = try perlex.compile(gpa, "[αλω]", fl);
+        try testing.expect(r == .ok);
+        defer r.ok.deinit();
+        var m = (try perlex.exec(u16, gpa, &r.ok, &input, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+}
+
+test "perlex: an astral class range matches a code point in bounds under /u (§22.2.1)" {
+    const gpa = testing.allocator;
+    // `[💩-💫]` is the range U+1F4A9..U+1F4AB. "💪" U+1F4AA is inside it
+    // and matches as a whole 2-unit code point; "💚" U+1F49A is below it.
+    var r = try perlex.compile(gpa, "[💩-💫]", uf);
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    {
+        const flexed = [_]u16{ 0xD83D, 0xDCAA }; // 💪 U+1F4AA, in range
+        var m = (try perlex.exec(u16, gpa, &r.ok, &flexed, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 2), m.slots[1]);
+    }
+    {
+        const heart = [_]u16{ 0xD83D, 0xDC9A }; // 💚 U+1F49A, below range
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &heart, 0)) == null);
+    }
+}
+
+test "perlex: a negated astral class excludes its member under /u (§22.2.1)" {
+    const gpa = testing.allocator;
+    // `[^𝌆]` excludes U+1D306 and matches any other code point. "𝌆" is
+    // rejected; "💩" U+1F4A9 matches as a whole 2-unit code point.
+    var r = try perlex.compile(gpa, "[^𝌆]", uf);
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    {
+        const tetragram = [_]u16{ 0xD834, 0xDF06 }; // 𝌆 U+1D306, excluded
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &tetragram, 0)) == null);
+    }
+    {
+        const poo = [_]u16{ 0xD83D, 0xDCA9 }; // 💩 U+1F4A9, not excluded
+        var m = (try perlex.exec(u16, gpa, &r.ok, &poo, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 2), m.slots[1]);
+    }
+    {
+        // §22.2.2.1: the scan steps over the excluded pair by a whole
+        // code point (2 units), so a following 'a' matches at index 2 —
+        // the leftmost start never lands on the mid-pair low surrogate.
+        const after = [_]u16{ 0xD834, 0xDF06, 'a' }; // "𝌆a"
+        var m = (try perlex.exec(u16, gpa, &r.ok, &after, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 2), m.slots[0]);
+        try testing.expectEqual(@as(usize, 3), m.slots[1]);
+    }
+}
+
+test "perlex: a non-/u astral class member defers to the fallback (§22.2.1)" {
+    // Without /u or /v an astral class member would be two single-unit
+    // alternative members (its surrogate pair), which a single ClassMember
+    // can't express — defer to the fallback rather than mismatch.
+    try expectCompile("[𠮷]", .unsupported);
+}
+
 // ── §22.2.1 quantifiers (greedy / lazy / bounded) ───────────────────
 
 test "perlex: greedy quantifiers" {
