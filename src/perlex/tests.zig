@@ -597,6 +597,18 @@ test "perlex: a \\k reference to a malformed name is a syntax error" {
     try expectCompileFlags("\\k<🐕>", uf, .syntax_error);
 }
 
+test "perlex: a \\k reference to a name with no matching group is a syntax error" {
+    // §22.2.1.1 — a `\k GroupName` must reference a group that exists in the
+    // pattern; if none does, it is an early error in every mode. Only Annex B
+    // §B.1.4 (when the pattern has *no* GroupName at all) rereads `\k` as a
+    // literal 'k' — dropped here, like the rest of the Annex B regex grammar.
+    try expectCompile("\\k<x>", .syntax_error); // no groups at all
+    try expectCompileFlags("\\k<x>", uf, .syntax_error);
+    try expectCompile("(?<y>a)\\k<x>", .syntax_error); // a group exists, not `x`
+    // A reference that *does* resolve still compiles and matches.
+    try expectMatch("(?<x>a)\\k<x>", "aa", "aa,a");
+}
+
 // ── Fallback routing — constructs outside the v1 grammar ─────────────
 
 test "perlex: unsupported constructs fall back" {
