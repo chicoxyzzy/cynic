@@ -520,13 +520,15 @@ const Compiler = struct {
 
     fn compileRepeat(self: *Compiler, r: Node.Repeat) CompileError!void {
         // A body that can match the empty string would spin a zero-width
-        // loop without the §22.2.2.3 progress guard emitted below. Most
-        // such bodies are guarded here; a few kinds still defer to the
-        // fallback (see `deferNullableBody`). With a non-nullable body
-        // every iteration consumes at least one code unit, so the loops
-        // below terminate without a guard.
+        // loop without the §22.2.2.3 progress guard emitted below; every
+        // such body is guarded here. The one nullable body with no
+        // spec-legal lowering — a *directly*-quantified assertion (`^*`,
+        // `\b?`, `(?=a)*`), a §22.2.1 QuantifiableAssertion accepted only
+        // under Annex B, which Cynic drops — is a SyntaxError the parser
+        // (`applyQuantifier`) already rejects, so it never reaches here.
+        // With a non-nullable body every iteration consumes at least one
+        // code unit, so the loops below terminate without a guard.
         const body_nullable = nullable(r.body);
-        if (body_nullable and deferNullableBody(r.body)) return error.Unsupported;
 
         // §22.2.2.3 step 2.b guards only the *optional* iterations (the
         // unbounded tail, or the `max - min` skippable ones); its `min = 0`
@@ -922,39 +924,6 @@ fn nullable(node: *const Node) bool {
             }
             return false;
         },
-    };
-}
-
-/// Whether a nullable quantifier body must still defer to the fallback
-/// even though `compileRepeat` can guard it. The §22.2.2.3 progress guard
-/// lets Perlex own every nullable body except one: a *directly*-quantified
-/// assertion (`(?=a)?`, `^*`, `$+`, `\b?`) — a §22.2.1 QuantifiableAssertion,
-/// a SyntaxError under `/u` but Annex-B-legal without it. That mode split is
-/// only modelled by the fallback, so compiling it here would bake in one
-/// reading. Everything else is owned:
-///   • an assertion *wrapped in a group* (`(?:(?=a))?`, `($^)?`) is not a
-///     QuantifiableAssertion — the quantifier binds the group, which is
-///     always legal — so the guard handles the zero-width loop and the inner
-///     capture rolls back on the guarded skip;
-///   • a nullable *backreference* (`\1*`, `\k<x>+`) has a width that is
-///     participation-dependent but *constant* within one quantifier
-///     evaluation (the referenced group lies to its left and only
-///     re-captures via its own backtracking), so the guard handles the
-///     empty-capture iteration like any other repeat;
-///   • a nullable `/v` *set* whose membership includes the empty string (a
-///     `\q{}` empty alternative) lowers to an alternation ending in an empty
-///     branch (`emitResolvedSet`); the guard stops the zero-width loop, and
-///     §22.2.2.3 step 2.b's `min = 0` precondition lets the mandatory
-///     iterations match empty and still participate.
-/// Called only when `nullable(node)` already holds.
-fn deferNullableBody(node: *const Node) bool {
-    return switch (node.*) {
-        // A bare assertion as the *direct* repeat body is the
-        // QuantifiableAssertion mode split — defer. Anywhere else (wrapped in
-        // a group, sequence, or alternation) the quantifier binds the
-        // wrapper, so the assertion is legal and the body is owned.
-        .anchor_start, .anchor_end, .word_boundary, .lookahead => true,
-        else => false,
     };
 }
 

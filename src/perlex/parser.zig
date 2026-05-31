@@ -371,16 +371,15 @@ const Parser = struct {
             // reaches here (parseAtom does not produce it), so it is not
             // listed — an empty atom would be a valid nullable repeat anyway.
             .anchor_start, .anchor_end, .word_boundary => return error.SyntaxError,
-            // §22.2.1 Term: under +UnicodeMode there is no
-            // `Assertion Quantifier` production, so quantifying a lookaround
-            // is a SyntaxError. Under ~UnicodeMode only a *lookahead* is a
-            // QuantifiableAssertion (Annex B §B.1.2) — a quantified
-            // lookbehind is a SyntaxError in every mode. Perlex owns the
-            // SyntaxError directly; the Annex-B-valid non-Unicode lookahead
-            // falls through to the `.repeat` wrap below and is then dropped
-            // by the compiler's nullable-repeat guard (deferred to the
-            // fallback, which still matches it).
-            .lookahead => |la| if (self.unicode or self.unicode_sets or la.behind) return error.SyntaxError,
+            // §22.2.1 Term: there is no `Assertion Quantifier` production in
+            // the main grammar, so quantifying a lookaround is a SyntaxError
+            // in every mode. Only Annex B §B.1.2's QuantifiableAssertion lets
+            // a *lookahead* be quantified without /u (a quantified lookbehind
+            // is invalid even there); Cynic's strict-only, non-browser target
+            // drops that leniency, so Perlex rejects every quantified
+            // lookaround directly rather than deferring the non-Unicode
+            // lookahead to the fallback.
+            .lookahead => return error.SyntaxError,
             else => {},
         }
         return self.makeNode(.{ .repeat = .{ .body = atom, .min = min, .max = max, .greedy = greedy } });
