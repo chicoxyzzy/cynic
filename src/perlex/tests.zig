@@ -2239,6 +2239,51 @@ test "perlex/v: quantified may-contain-strings class" {
     try expectNoMatchFlags("^[[0-9]\\q{ab}]+$", vflags, "a");
 }
 
+test "perlex/v: §22.2.2.3 owns quantified empty-matching \\q{} sets" {
+    // A `/v` set whose membership includes the empty string (a `\q{}` empty
+    // alternative, or `\q{|a}` with an empty branch) is nullable — a
+    // quantifier over it would spin a zero-width loop without the §22.2.2.3
+    // progress guard. `compileRepeat` already emits that guard, so Perlex
+    // owns these instead of deferring to the fallback (which can't compile
+    // `\q{}` at all). The guard protects only the *optional* iterations.
+    try expectMatchFlags("[\\q{}a]*", vflags, "aab", "aa");
+    try expectMatchFlags("[\\q{}a]+", vflags, "aab", "aa");
+    // A set whose ONLY member is the empty string: the star matches "" and
+    // the guard stops it after one zero-width pass.
+    try expectMatchFlags("[\\q{}]*", vflags, "abc", "");
+    // `\q{|a}` ≡ {"", "a"}: an empty leading branch is a valid ClassString.
+    try expectMatchFlags("[\\q{|a}]+", vflags, "aaa", "aaa");
+    // The quantified set sits between consuming atoms.
+    try expectMatchFlags("x[\\q{}a]*y", vflags, "xaay", "xaay");
+    // Greedy `{2,3}` fills the optional third iteration (engine262, V8, SM,
+    // Hermes, QuickJS agree on "aaa"; JSC is the lone "a" outlier).
+    try expectMatchFlags("[\\q{}a]{2,3}", vflags, "aaaa", "aaa");
+    // Lazy `*?` over a nullable set takes zero iterations.
+    try expectMatchFlags("[\\q{}a]*?", vflags, "aa", "");
+    // A captured nullable set: the last *participating* iteration before the
+    // guard's zero-width skip wins the capture (the guarded empty pass rolls
+    // its `''` capture back). Full match "aa", group 1 "a".
+    try expectCapsFlags("([\\q{}a])*", vflags, "aa", "'aa' 'a'");
+}
+
+test "perlex/v: §22.2.2.3 mandatory \\q{} empty iterations participate (min > 0)" {
+    // §22.2.2.3 step 2.b gates its zero-width-failure on `min = 0`, so the
+    // mandatory `min` iterations run unconditionally and PARTICIPATE even
+    // when they match empty (Note 4: the empty-match guard applies only once
+    // the minimum is satisfied). engine262 returns `null` on all three of
+    // these — it is the lone outlier; V8, JSC, SpiderMonkey, Hermes and
+    // QuickJS all return the match below, and that is the spec reading.
+    //
+    // `+` (min 1) on "b": "a" can't match, but the one mandatory iteration
+    // matches "" via the empty member — overall match "".
+    try expectMatchFlags("[\\q{}a]+", vflags, "b", "");
+    // `{2,3}` (min 2) on "a": iter 1 takes "a", iter 2 (mandatory) matches
+    // "" at end-of-input — overall match "a".
+    try expectMatchFlags("[\\q{}a]{2,3}", vflags, "a", "a");
+    // `{2,3}` (min 2) on "": both mandatory iterations match "" — match "".
+    try expectMatchFlags("[\\q{}a]{2,3}", vflags, "", "");
+}
+
 test "perlex/v: intersection keeps only shared members" {
     // Strings intersect by sequence equality.
     try expectMatchFlags("[\\q{ab|cd}&&\\q{ab|xy}]", vflags, "ab", "ab");
