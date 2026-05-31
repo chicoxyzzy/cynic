@@ -262,13 +262,22 @@ pub const Intrinsics = struct {
 /// their own. Built once per host process, lifetime-managed by
 /// the host (NOT by any individual realm's `deinit`).
 ///
-/// Today's stub returns an empty struct and `installWithBase`
-/// ignores it. The proper implementation builds the frozen graph
-/// on a separate non-collected `Heap` (see
-/// `docs/multi-realm.md` Phase 1 implementation notes (b)) and
-/// fills these slots with shared pointers. Constructors stay
-/// per-realm — only prototype objects share.
+/// Implementation: `IntrinsicsBase` owns a "background" `Realm`
+/// whose `Heap` is flagged `gc_disabled = true`. `buildBase`
+/// runs today's `install` against that realm in hardened mode
+/// (so primordials get frozen + the override-mistake accessors
+/// land), then snapshots the prototype-object pointers into the
+/// public slots. Keeping the scratch realm alive avoids
+/// dangling references from JSObject property maps into env-
+/// records / synth-accessor cells that `Realm.deinit` would
+/// tear down. Step 4 (`installWithBase` rewrite) adopts those
+/// snapshotted pointers when called with a hardened realm.
 pub const IntrinsicsBase = struct {
+    /// Background scratch realm that owns the heap + every
+    /// auxiliary record the prototype graph references. Lifetime
+    /// matches `IntrinsicsBase` itself.
+    scratch_realm: ?*Realm = null,
+
     object_prototype: ?*JSObject = null,
     function_prototype: ?*JSObject = null,
     array_prototype: ?*JSObject = null,
@@ -282,22 +291,60 @@ pub const IntrinsicsBase = struct {
     eval_error_prototype: ?*JSObject = null,
 
     pub fn deinit(self: *IntrinsicsBase, allocator: std.mem.Allocator) void {
-        // Phase 1 stub: no resources owned yet. The implementation
-        // will own a `Heap` flagged `gc_disabled = true` and free
-        // it here. Allocator parameter pre-shaped to match the
-        // eventual signature so callers don't change later.
-        _ = self;
-        _ = allocator;
+        if (self.scratch_realm) |sr| {
+            sr.deinit();
+            allocator.destroy(sr);
+            self.scratch_realm = null;
+        }
     }
 };
 
-/// Phase 1 stub. Will build the frozen prototype subgraph on its
-/// own non-collected heap. Today returns an empty `IntrinsicsBase`
-/// — the four sharing-policy tests in `intrinsics_phase1_test.zig`
-/// pin the contract this needs to satisfy.
+/// Multi-realm Phase 1 step 3 — build the frozen prototype
+/// subgraph on a non-collected heap and return the
+/// `IntrinsicsBase` snapshot. The shared graph survives until
+/// `IntrinsicsBase.deinit` is called; per-realm `deinit` must
+/// not touch it (the `gc_disabled` heap means a per-realm
+/// sweep can't reach the shared objects, and step 4's
+/// installWithBase rewrite keeps the per-realm intrinsics
+/// pointers pointing into the shared heap without copying
+/// them onto the per-realm heap).
 pub fn buildBase(allocator: std.mem.Allocator) !IntrinsicsBase {
-    _ = allocator;
-    return .{};
+    const sr = try allocator.create(Realm);
+    sr.* = Realm.init(allocator);
+    errdefer {
+        sr.deinit();
+        allocator.destroy(sr);
+    }
+
+    // Frozen subgraph — the SES posture is the whole point.
+    // `freezePrimordials` runs inside `installBuiltins` when
+    // `hardened` is true; that also bakes the override-mistake
+    // accessor pairs onto every prototype slot (see
+    // `docs/multi-realm.md` Phase 1 note (d)).
+    sr.hardened = true;
+
+    // The background heap is *never* swept. Per-realm collectors
+    // referencing prototype objects on this heap through the
+    // future `installWithBase(_, base)` path therefore can't
+    // double-free or stale-pointer them.
+    sr.heap.gc_disabled = true;
+
+    try sr.installBuiltins();
+
+    return .{
+        .scratch_realm = sr,
+        .object_prototype = sr.intrinsics.object_prototype,
+        .function_prototype = sr.intrinsics.function_prototype,
+        .array_prototype = sr.intrinsics.array_prototype,
+        .string_prototype = sr.intrinsics.string_prototype,
+        .error_prototype = sr.intrinsics.error_prototype,
+        .type_error_prototype = sr.intrinsics.type_error_prototype,
+        .range_error_prototype = sr.intrinsics.range_error_prototype,
+        .reference_error_prototype = sr.intrinsics.reference_error_prototype,
+        .syntax_error_prototype = sr.intrinsics.syntax_error_prototype,
+        .uri_error_prototype = sr.intrinsics.uri_error_prototype,
+        .eval_error_prototype = sr.intrinsics.eval_error_prototype,
+    };
 }
 
 /// Phase 1 stub. If `base != null` and `realm.hardened`, the
@@ -1548,6 +1595,26 @@ fn throwTypeErrorThrower(realm: *Realm, this_value: Value, args: []const Value) 
 pub fn throwTypeError(realm: *Realm, msg: []const u8) NativeError {
     const ex = newTypeError(realm, msg) catch return error.OutOfMemory;
     return throwNative(realm, ex);
+}
+
+/// §10.2.5 cross-realm throw. Several abstract operations
+/// (`Function.prototype.{call, apply}` step 2, the
+/// `RegExp.prototype` flag/source getters' step-3.b) throw "a
+/// TypeError exception" *in the running function's own realm*,
+/// not the caller's. A builtin invoked cross-realm
+/// (`other.fn.call(x)`) must therefore build the error from its
+/// own realm's `%TypeError%` intrinsic (`fn_realm`) — but the
+/// exception value still has to land on the slot the *active*
+/// dispatcher drains, which belongs to the running realm
+/// (`running_realm.pending_exception`). Splitting the two realms
+/// is the whole point: `throwTypeError` collapses them, which
+/// silently mis-attributes a cross-realm throw because the
+/// dispatcher reads the running realm's slot, finds it empty, and
+/// synthesises a fallback in the wrong realm. When
+/// `fn_realm == running_realm` this is exactly `throwTypeError`.
+pub fn throwTypeErrorInRealm(running_realm: *Realm, fn_realm: *Realm, msg: []const u8) NativeError {
+    const ex = newTypeError(fn_realm, msg) catch return error.OutOfMemory;
+    return throwNative(running_realm, ex);
 }
 
 pub fn throwRangeError(realm: *Realm, msg: []const u8) NativeError {

@@ -30,6 +30,33 @@ const Realm = @import("realm.zig").Realm;
 const lantern = @import("lantern/interpreter.zig");
 const Value = @import("value.zig").Value;
 
+// ── 0. buildBase populates the snapshot ─────────────────────────
+
+test "phase 1: buildBase populates non-null prototype pointers" {
+    // Step 3 substrate: buildBase runs a scratch hardened realm
+    // on a `gc_disabled` heap, then snapshots its prototype
+    // pointers. The snapshot is what step 4's `installWithBase`
+    // will hand out to per-realm `Intrinsics` under hardened
+    // sharing. If the snapshot is empty, step 4 can't share.
+    var base = try intrinsics.buildBase(testing.allocator);
+    defer base.deinit(testing.allocator);
+
+    try testing.expect(base.scratch_realm != null);
+    try testing.expect(base.object_prototype != null);
+    try testing.expect(base.function_prototype != null);
+    try testing.expect(base.array_prototype != null);
+    try testing.expect(base.error_prototype != null);
+    try testing.expect(base.type_error_prototype != null);
+
+    // The scratch realm's heap must be opted out of collection
+    // so per-realm sweeps can't touch the shared graph.
+    try testing.expect(base.scratch_realm.?.heap.gc_disabled);
+
+    // The shared prototypes are reachable and structurally sound:
+    // %Object.prototype% has `toString` per §20.1.3.6.
+    try testing.expect(base.object_prototype.?.hasOwn("toString"));
+}
+
 // ── 1. Hardened realms sharing one base → identical pointers ────
 
 test "phase 1: two hardened realms share Object.prototype pointer (D1)" {
