@@ -1632,6 +1632,7 @@ fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
     const result = perlex.compileWithHooks(realm.allocator, src_s.flatBytes(), perlexFlags(flag_str), .{
         .resolver = perlex_props.resolve,
         .case_folder = perlex_props.caseFold,
+        .nonunicode_fold = perlex_props.nonUnicodeCanonFold,
     }) catch return error.OutOfMemory;
     switch (result) {
         .ok => |program| {

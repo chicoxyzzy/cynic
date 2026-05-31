@@ -210,6 +210,14 @@ pub const Program = struct {
     /// patterns and for ASCII-`i`, which the VM folds inline. Set by the
     /// caller after `compile`; it is injected data, not derived here.
     case_folder: ?CaseFoldFn = null,
+    /// Non-Unicode Canonicalize orbit resolver, applied at match time for
+    /// a non-`/u`/`/v` `i` pattern that contains a non-ASCII unit
+    /// (§22.2.2.7.3 step 3 — toUppercase with the ASCII-exclusion). Same
+    /// orbit signature as `case_folder` but a *different* mapping (e.g.
+    /// U+212A KELVIN folds to `k` under `/iu` but to itself here). Null
+    /// for ASCII-only `i` (the VM folds those inline via asciiUpper);
+    /// injected by the caller, not derived here.
+    nonu_fold: ?CaseFoldFn = null,
     gpa: std.mem.Allocator,
 
     pub fn deinit(self: *Program) void {
