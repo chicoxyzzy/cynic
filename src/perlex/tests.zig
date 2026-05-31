@@ -668,6 +668,47 @@ test "perlex: stray brace or bracket is a syntax error" {
     try expectMatch("a{2}", "aa", "aa");
 }
 
+test "perlex: a quantifier with no preceding atom is a syntax error (§22.2.1)" {
+    // §22.2.1 Term :: Atom Quantifier — a Quantifier (`*` `+` `?`) must
+    // follow a quantifiable Atom. With nothing to its left there is no
+    // Atom, so a leading quantifier metacharacter is a Syntax Error.
+    // Unlike the stray `{`/`}`/`]` above, these are never literals in any
+    // mode: Annex B §B.1.2's ExtendedPatternCharacter explicitly excludes
+    // `* + ?`, so the fallback would reject them too — Perlex owns the
+    // verdict directly rather than deferring.
+    try expectCompile("*a", .syntax_error);
+    try expectCompile("+a", .syntax_error);
+    try expectCompile("?a", .syntax_error);
+    try expectCompile("**a", .syntax_error);
+    try expectCompile("++a", .syntax_error);
+    try expectCompile("??a", .syntax_error);
+    try expectCompile("??", .syntax_error); // a lazy `?` of nothing
+    // Already a Syntax Error under /u — the verdict is mode-independent.
+    try expectCompileFlags("*", uflags, .syntax_error);
+    try expectCompileFlags("*?", uflags, .syntax_error);
+    try expectCompileFlags("+", uflags, .syntax_error);
+    try expectCompileFlags("+?", uflags, .syntax_error);
+    try expectCompileFlags("?", uflags, .syntax_error);
+    try expectCompileFlags("??", uflags, .syntax_error);
+}
+
+test "perlex: a stacked quantifier is a syntax error (§22.2.1)" {
+    // `a**` parses `a*` as a Term, then meets a second `*` with no Atom
+    // left to quantify — the §22.2.1 nothing-to-repeat early error again.
+    // A lazy marker is a single trailing `?`, so `a??` is the lazy
+    // optional and only the *third* `?` in `a???` is the dangling one.
+    try expectCompile("a**", .syntax_error);
+    try expectCompile("a++", .syntax_error);
+    try expectCompile("a???", .syntax_error);
+    try expectCompile("a????", .syntax_error);
+    try expectCompile("a***", .syntax_error);
+    try expectCompile("a+++", .syntax_error);
+    // The single-quantifier forms these decay from still match.
+    try expectMatch("a*", "aaa", "aaa");
+    try expectMatch("a+?", "aaa", "a"); // lazy: minimum one
+    try expectMatch("a??", "a", ""); // lazy optional: prefers empty
+}
+
 test "perlex: out-of-range numeric backreference is a syntax error" {
     try expectCompile("\\1", .syntax_error); // no capturing groups
     try expectCompile("(a)\\2", .syntax_error); // \2 past the one group

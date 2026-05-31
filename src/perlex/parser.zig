@@ -416,10 +416,19 @@ const Parser = struct {
             // A real quantifier brace is consumed by parseBraceQuantifier
             // and a class-closing `]` by parseCharClass before reaching here.
             ']', '{', '}' => return error.SyntaxError,
-            // Other bare metacharacters in atom position aren't valid here
-            // either, but their authoritative verdict (e.g. `)` balance,
-            // empty `|` alternatives) is left to the fallback matcher.
-            ')', '*', '+', '?', '|' => return error.Unsupported,
+            // §22.2.1 Term :: Atom Quantifier — a Quantifier metacharacter
+            // in atom position has no Atom to its left to repeat, so it is a
+            // Syntax Error. Annex B §B.1.2's ExtendedPatternCharacter
+            // excludes `* + ?`, so these are never literals in any mode;
+            // Perlex owns the verdict directly. (A `{`-quantifier is consumed
+            // by parseBraceQuantifier before reaching here; a stray `{` is
+            // the SyntaxCharacter rejected just above.)
+            '*', '+', '?' => return error.SyntaxError,
+            // A bare `)` (group-balance) or `|` (empty alternative) is also
+            // invalid here, but parseAlternative breaks on both before they
+            // reach parseAtom; if one does arrive its authoritative verdict
+            // is left to the fallback matcher.
+            ')', '|' => return error.Unsupported,
             else => {
                 // A plain ASCII literal. Non-ASCII bytes need code-point
                 // decoding the v1 engine doesn't do yet → fall back.
