@@ -615,8 +615,12 @@ test "perlex: a \\k reference to a name with no matching group is a syntax error
 
 // ── Fallback routing — constructs outside the v1 grammar ─────────────
 
-test "perlex: unsupported constructs fall back" {
-    try expectCompileFlags("[\\D]", uf, .unsupported); // negated class escape under /u (off /u it's owned)
+test "perlex: a multi-member negated-shorthand /u class still falls back" {
+    // The sole-shorthand case (`[\D]`) is owned (see below). A negated
+    // shorthand *unioned* with other members under /u (`[\Wa]`, `[\D\s]`)
+    // still needs the full §22.2.2.7 set-fold machinery — defer for now.
+    try expectCompileFlags("[\\Wa]", uf, .unsupported);
+    try expectCompileFlags("[\\D\\s]", uf, .unsupported);
 }
 
 test "perlex: a quantified lookaround is a syntax error under /u, /v, or for any lookbehind" {
@@ -1266,17 +1270,23 @@ test "perlex: a non-/u class-escape range bound makes the '-' a literal (§22.2.
     try expectMatch("[a-\\d]", "7", "7");
 }
 
-test "perlex: a standalone negated class escape under /u defers, not rejected" {
-    // `\D \S \W` standalone is a valid class member. Under /u Perlex can't
-    // complement it at parse time (it isn't handed `i`, so it can't rule out
-    // the /iu fold orbits), so it defers to the fallback — but it must NOT
-    // become a SyntaxError just because the range path owns class-escape
-    // *bounds* under /u. Off /u the same member is owned (complemented in
-    // place) — see "negated class shorthands \D \S \W owned in non-/u
-    // classes".
-    try expectCompileFlags("[\\D]", uf, .unsupported);
-    try expectCompileFlags("[\\S]", uf, .unsupported);
-    try expectCompileFlags("[\\W]", uf, .unsupported);
+test "perlex: a sole negated class shorthand under /u is owned (§22.2.2.7.3)" {
+    // `[\D]`, `[\S]`, `[\W]` — a class whose sole member is a negated
+    // shorthand — is exactly that shorthand. Perlex emits it as the
+    // standalone negated class, so the VM extends the positive set through
+    // the fold orbit and *then* negates: the correct /iu reading.
+    try expectCompileFlags("[\\D]", uf, .match);
+    try expectCompileFlags("[\\S]", uf, .match);
+    try expectCompileFlags("[\\W]", uf, .match);
+    // `[\D]/u` matches a non-digit (incl. astral via /u code points), not a digit.
+    try expectMatchFlags("[\\D]", uf, "a", "a");
+    try expectNoMatchFlags("[\\D]", uf, "5");
+    // The /iu word-char extension: `[\W]/iu` excludes a char that folds to a
+    // word char (the stub folds U+212A KELVIN ↔ k), and excludes `k` itself;
+    // it still matches a genuine non-word char.
+    try expectFoldNoMatch("[\\W]", iu, &[_]u16{'k'});
+    try expectFoldNoMatch("[\\W]", iu, &[_]u16{0x212A});
+    try expectFoldMatch("[\\W]", iu, &[_]u16{'!'}, "!");
 }
 
 test "perlex: \\d \\s \\w still match standalone and with a trailing dash" {
@@ -1884,15 +1894,12 @@ test "perlex: §22.2.1 negated class shorthands \\D \\S \\W owned in non-/u clas
         "'key one = val' 'key one' ' one'",
     );
 
-    // `/u` still defers. The parser is handed `unicode`/`unicode_sets` but
-    // NOT `ignore_case`, so it can't tell `/u` from `/iu`; and `/iu` pulls
-    // non-ASCII fold orbits (the Kelvin sign U+212A folds with `k`, so it
-    // joins `\W`'s complement) that a parse-time ASCII complement can't
-    // represent. Deferring all of `/u` keeps the fallback authoritative for
-    // the one case that would diverge.
-    try expectCompileFlags("[\\S]", .{ .unicode = true }, .unsupported);
-    try expectCompileFlags("[\\W]", .{ .unicode = true }, .unsupported);
-    try expectCompileFlags("[\\D]", .{ .unicode = true }, .unsupported);
+    // Under /u a *sole* negated shorthand is now owned too — emitted as the
+    // standalone negated class so the VM's match-time fold extension + final
+    // negation give the correct /iu reading (see the dedicated test above).
+    try expectCompileFlags("[\\S]", .{ .unicode = true }, .match);
+    try expectCompileFlags("[\\W]", .{ .unicode = true }, .match);
+    try expectCompileFlags("[\\D]", .{ .unicode = true }, .match);
 }
 
 // ── §22.2.1 character classes, `.`, class escapes, boundaries ───────
