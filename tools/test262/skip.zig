@@ -21,21 +21,24 @@
 //!      Three structural reasons:
 //!        • never-ship policy — Annex B, the strict-only carve-out, the
 //!          SES surface (`eval` / `Function(string)` / `SharedArrayBuffer`
-//!          / `Atomics`). Only a policy reversal moves these.
+//!          / `Atomics`). Only a policy reversal moves these. The eval
+//!          surface is matched both in bulk (`ses_path_prefixes` /
+//!          `ses_substrings` — fixtures that test the eval feature itself)
+//!          and as individual exact paths (`eval_dependent_exact_paths` —
+//!          fixtures that test some *other* feature but reach the
+//!          assertion through `eval`, so they can't be bulk-matched).
 //!          → `pathIsPermanentlyOutOfScope`, `featureIsOutOfScope`.
 //!        • not in the published edition — a pre-Stage-4 proposal. Pinned
 //!          out so the headline can't decay as TC39 lands proposal
 //!          fixtures upstream. Recoverable: at Stage 4 it becomes a
 //!          counted skip (outcome C); when Cynic ships it, it moves to its
 //!          own `feature:<name>` phase. → `featureIsUnimplementedProposal`.
-//!        • scored in a different phase — passes only with a non-default
-//!          flag on. `main` runs the default posture, so these are
-//!          excluded from it and scored in a dedicated `feature:<name>`
-//!          phase. Today: `eval_dependent_exact_paths` (await
-//!          `--allow=eval`). The flag-gated proposals `joint-iteration` /
-//!          `ShadowRealm` reach the same outcome via feature-tag
-//!          detection rather than a path list.
-//!          → `pathIsPermanentlyOutOfScope` (the eval set lives here).
+//!        • scored in a different phase — a feature Cynic ships behind a
+//!          `--enable` flag (`joint-iteration`, `ShadowRealm`). `main`
+//!          runs the default posture, so these are scored in a dedicated
+//!          `feature:<name>` phase, reached via the harness's feature-tag
+//!          mechanism — NOT a skip.zig path list, so they don't appear in
+//!          the predicates below at all.
 //!
 //!   C. COUNTED SKIP — *in* `main`'s scope and would pass once Cynic
 //!      finishes the engineering it owes: a published-edition feature
@@ -45,12 +48,13 @@
 //!      → `pathIsCurrentlySkipped`, `featureIsCurrentlySkipped`.
 //!
 //! "Permanent" in the predicate names is shorthand for "permanently
-//! absent from `main`'s denominator" (outcome B), NOT "Cynic will never
-//! run it" — the `eval_dependent` members run in a future `feature:eval`
-//! phase. The honest wart: `single_realm_exact_paths` sits in B today but
-//! is outcome C in spirit (cross-realm core semantics, no flag needed);
-//! it moves to a counted skip — or straight to passing — when the
-//! in-progress multi-realm work lands.
+//! absent from `main`'s denominator" (outcome B), NOT a claim about any
+//! future opt-in: even if `--allow=eval` ships one day, `main` still runs
+//! eval-off, so the eval surface stays dropped here regardless. The
+//! honest wart: `single_realm_exact_paths` sits in B today but is outcome
+//! C in spirit (cross-realm core semantics, no flag needed); it moves to
+//! a counted skip — or straight to passing — when the in-progress
+//! multi-realm work lands.
 //!
 //! Lookup is `mem.startsWith`, `mem.indexOf`, `mem.endsWith`, or
 //! `mem.eql` over comptime-iterable lists.
@@ -1164,24 +1168,22 @@ pub const deferred_path_prefixes = [_][]const u8{
     // scope` test guards against a subtree regressing back to here.
 };
 
-// ── eval-dependent → out of `main`, scored in a feature phase ───────
+// ── eval-dependent — SES surface, individual-fixture form ───────────
 //
-// Single fixtures that exercise `eval` / `new Function(string)` and
-// pass only with `--allow=eval` on (see [docs/ses-alignment.md]
-// §Phase 4). Distinct from the SES carve-out *paths* and *substrings*
-// above only in shape: those bulk-match fixtures that *test the eval
-// surface itself*, these are individual fixtures whose shape is "wrap
-// the actual assertion in `eval(…)` so it's only reachable via eval."
+// Single fixtures that exercise `eval` / `new Function(string)` and so
+// can't pass under the default eval-off posture. The SES surface
+// (header outcome B, "never-ship policy") — same bucket as the bulk
+// eval `ses_path_prefixes` / `ses_substrings` above, just matched as
+// exact paths because these fixtures don't *test the eval feature*;
+// they test some other feature and merely reach the assertion through
+// `eval` (e.g. wrap a parse-error check in `eval("…")`), so no path or
+// substring rule catches them.
 //
-// Same accounting outcome, though (header outcome B, "scored in a
-// different phase"): `--allow=eval` is a non-default flag, and the
-// `main` phase runs the default eval-off posture, so these can never
-// pass in `main`. Consumed by `pathIsPermanentlyOutOfScope` → dropped
-// from the `corpus` denominator, exactly like the bulk eval surface —
-// NOT a counted skip. When `--allow=eval` ships, a dedicated
-// `feature:eval` phase scores them with the flag on (the way
-// `joint-iteration` / `ShadowRealm` are scored in their own phases),
-// at which point this list moves to that phase's include-set.
+// Consumed by `pathIsPermanentlyOutOfScope` → dropped from the `corpus`
+// denominator, exactly like the bulk eval surface. NOT a counted skip:
+// `main` runs eval-off, and it stays eval-off even if `--allow=eval`
+// ships as an opt-in later (see [docs/ses-alignment.md] §Phase 4), so
+// the eval surface stays permanently out of `main` regardless.
 
 pub const eval_dependent_exact_paths = [_][]const u8{
     // `built-ins/Function/prototype/S15.3.5.2_A1_T2.js` — uses
@@ -1206,8 +1208,8 @@ pub const eval_dependent_exact_paths = [_][]const u8{
     // PerformEval), so `var eval;` / `arguments = 42;` etc. don't throw.
     // Strict-only Cynic parses the eval'd source in strict mode and
     // throws, so they'd fail even with `--allow=eval` — they're a
-    // permanent strict-only carve-out in `strict_only_exact_paths`, not
-    // eval-graduates.
+    // permanent strict-only carve-out in `strict_only_exact_paths`, a
+    // different structural reason than the eval-surface fixtures here.
     // `proto-from-ctor-realm` cross-realm fixtures whose `newTarget`
     // (or asserted constructor) is built from a *source string* —
     // `other.eval('(0, function* () {})')`, `new other.Function(body)`,
@@ -1215,7 +1217,8 @@ pub const eval_dependent_exact_paths = [_][]const u8{
     // default-proto fix (`remapDefaultProtoToCtorRealm` in
     // lantern/call.zig) recovered the rest of the family, but these
     // can't even build their newTarget / asserted constructor without
-    // runtime code construction. Graduate when `--allow=eval` ships.
+    // runtime code construction — permanent eval-surface carve-out,
+    // same as the rest of this list.
     "built-ins/AsyncFunction/proto-from-ctor-realm.js",
     "built-ins/AsyncGeneratorFunction/proto-from-ctor-realm.js",
     "built-ins/AsyncGeneratorFunction/proto-from-ctor-realm-prototype.js",
@@ -1258,22 +1261,28 @@ pub fn pathIsSkipped(rel_path: []const u8) bool {
     return false;
 }
 
-/// Header **outcome B** by path: fixtures that can never pass in the
-/// `main` phase for a structural reason, so the caller drops them from
-/// the `corpus` denominator at walk-time (no false-reject noise in
-/// `test262-results.md`). Two structural reasons live here:
-///   • never-ship policy — Annex B, the strict-only carve-out, the SES
-///     surface (`eval` / `Function(string)` / `SharedArrayBuffer` /
-///     `Atomics`). Deliberate `AGENTS.md` decisions; only a policy
-///     reversal moves them.
-///   • scored in a different phase — `eval_dependent_exact_paths`, which
-///     pass only with the non-default `--allow=eval` flag and so are
-///     scored in a future `feature:eval` phase, not against `main`.
-/// "Permanently" is therefore "permanently absent from `main`", not
-/// "never run". Known wart: `single_realm_exact_paths` is filed here but
-/// is really outcome C (it needs no flag — just the in-progress
-/// multi-realm work); it relocates to `pathIsCurrentlySkipped`, or to
-/// passing, when that lands.
+/// Header **outcome B** by path, "never-ship policy" reason: fixtures
+/// that can never pass in the `main` phase because passing would require
+/// a surface Cynic refuses to ship — Annex B, the strict-only carve-out,
+/// the SES surface (`eval` / `Function(string)` / `SharedArrayBuffer` /
+/// `Atomics`). Deliberate `AGENTS.md` decisions; only a policy reversal
+/// moves them. The caller drops them from the `corpus` denominator at
+/// walk-time (no false-reject noise in `test262-results.md`).
+///
+/// The eval surface is matched two ways: in bulk (`ses_path_prefixes` /
+/// `ses_substrings`, fixtures that test eval itself) and as
+/// `eval_dependent_exact_paths` (fixtures that test another feature but
+/// reach the assertion through `eval`). Both are equally permanent here:
+/// `main` runs eval-off and stays eval-off even if `--allow=eval` ships
+/// as an opt-in later. (The other two outcome-B reasons aren't path-
+/// based: pre-Stage-4 → `featureIsUnimplementedProposal`; the
+/// `--enable`-gated proposals → the harness feature-tag mechanism.)
+///
+/// "Permanently" is "permanently absent from `main`", not "never run".
+/// Known wart: `single_realm_exact_paths` is filed here but is really
+/// outcome C (it needs no flag — just the in-progress multi-realm work);
+/// it relocates to `pathIsCurrentlySkipped`, or to passing, when that
+/// lands.
 pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
     inline for (.{ annex_b_path_prefixes, ses_path_prefixes }) |group| {
         for (group) |prefix| {
@@ -1294,10 +1303,10 @@ pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
         strict_only_exact_paths,
         ses_exact_paths,
         single_realm_exact_paths,
-        // eval-dependent fixtures: pass only with `--allow=eval`, a
-        // non-default flag, so they can't pass in the eval-off `main`
-        // phase. Dropped from the denominator here (header outcome B);
-        // a future `feature:eval` phase scores them with the flag on.
+        // eval-dependent fixtures: the SES eval surface in individual-
+        // fixture form. `main` runs eval-off (and stays so even if
+        // `--allow=eval` ships later), so they're permanently dropped
+        // here, same as the bulk eval paths/substrings above.
         eval_dependent_exact_paths,
     }) |group| {
         for (group) |exact| {
@@ -1538,14 +1547,15 @@ test "skip: ShadowRealm is not path-skipped (feature-gated)" {
 }
 
 test "skip: eval-dependent fixtures are out of `main`, not counted skips" {
-    // Header outcome B ("scored in a different phase"): the
-    // `eval_dependent_exact_paths` pass only with `--allow=eval`, a
-    // non-default flag, so they can never pass in the eval-off `main`
-    // phase. They must be dropped from the denominator (permanent
-    // predicate, walk-time `continue`), NOT counted as `.by_path` skips
-    // that penalise `pass%`. This locks the design decision: eval is
-    // scored in a future `feature:eval` phase, like the bulk eval
-    // surface — `built-ins/eval/`, `built-ins/Function/15.3.2`, etc.
+    // Header outcome B ("never-ship policy", SES surface): the
+    // `eval_dependent_exact_paths` need `eval`, so they can never pass in
+    // the eval-off `main` phase. They must be dropped from the
+    // denominator (permanent predicate, walk-time `continue`), NOT
+    // counted as `.by_path` skips that penalise `pass%`. This locks the
+    // design decision: the eval surface is permanently out of `main`,
+    // same bucket as the bulk eval fixtures — `built-ins/eval/`,
+    // `built-ins/Function/15.3.2`, etc. — and stays so even if
+    // `--allow=eval` ships as an opt-in later.
     const eval_dependent = [_][]const u8{
         "built-ins/Function/prototype/S15.3.5.2_A1_T2.js",
         "language/types/string/S8.4_A7.1.js",
