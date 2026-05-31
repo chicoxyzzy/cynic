@@ -1080,6 +1080,30 @@ const Parser = struct {
             negated = true;
             self.pos += 1;
         }
+        // §22.2.1 — a class whose sole member is a negated shorthand (`[\D]`,
+        // `[\S]`, `[\W]`) is exactly that shorthand. Under /u Perlex can't
+        // fold-complement it inline (the parser isn't told `i`), but a
+        // *standalone* negated class IS owned: at match time the VM extends
+        // the positive set through the case-fold orbit and *then* negates,
+        // which is the correct §22.2.2.7.3 reading (incl. the /iu word-char
+        // extension — `[\W]/iu` excludes U+212A KELVIN). So emit it as the
+        // standalone negated class. (Without /u it is complemented in place
+        // below; a `^`-negated class or any multi-member class with a `\D`
+        // `\S` `\W` still takes the general path — see `parseClassMember`.)
+        if (!negated and (self.unicode or self.unicode_sets) and
+            self.peek() == '\\' and self.at(2) == ']')
+        {
+            const base: ?[]const Node.ClassRange = switch (self.at(1) orelse 0) {
+                'D' => &digit_ranges,
+                'S' => &space_ranges,
+                'W' => &word_ranges,
+                else => null,
+            };
+            if (base) |b| {
+                self.pos += 3; // consume `\D` `]`
+                return self.makeNode(.{ .class = .{ .negated = true, .ranges = b } });
+            }
+        }
         var ranges: std.ArrayListUnmanaged(Node.ClassRange) = .empty;
         // `\p{…}` / `\P{…}` ClassAtoms; the parser can't expand them (the
         // resolver runs at compile time), so a class that has any lowers to
