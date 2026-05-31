@@ -183,3 +183,121 @@ test "phase-0: each realm has its own output buffer (print)" {
     try testing.expect(std.mem.indexOf(u8, ra.output.items, "hello from ra") != null);
     try testing.expectEqual(@as(usize, 0), rb.output.items.len);
 }
+
+// ── Phase 3 — D2: per-`JSFunction` [[Realm]] + RealmStack ───────────
+//
+// These pin §10.2.4 OrdinaryFunctionCreate step 8 (the function's
+// realm slot) + §10.2.3 [[Call]] step 2 (caller-context switches to
+// callee's realm). All four are TDD-RED today: `JSFunction.realm`
+// stays `null` at every `Heap.allocateFunction*` site because the
+// heap layer doesn't take a realm parameter. Commit 3.2 in the
+// `docs/multi-realm.md` Phase 3 plan threads the parameter through
+// the 109 alloc sites; commit 3.3 wires RealmStack + flips these
+// tests from skip-as-pending to green.
+//
+// Cross-realm value sharing uses `Realm.initChild` (shared heap),
+// not two independent `Realm.init` instances — the latter is
+// unsound (cross-heap pointers in another realm's GC root set).
+// initChild is also what `ShadowRealm` uses internally, so these
+// tests double as the ShadowRealm boundary contract.
+
+const Value = @import("value.zig").Value;
+const heap_mod = @import("heap.zig");
+
+test "phase 3: function created in parent realm has parent as [[Realm]] (skip pending 3.3)" {
+    if (true) return error.SkipZigTest;
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // Create a function in parent. After 3.2, its `realm` slot
+    // is set at allocateFunction time.
+    const f_v = (try lantern.evaluateScript(testing.allocator, &parent,
+        "(function f() { return 1; })")).value;
+    const f = heap_mod.valueAsFunction(f_v) orelse return error.TestFailed;
+    try testing.expect(f.realm == &parent);
+
+    // Hand f to child via shared-heap value passing.
+    try child.globals.put(testing.allocator, "fromParent", f_v);
+
+    // Call from child. f's [[Realm]] must still be parent — the
+    // function's realm is fixed at creation, not at call time.
+    _ = try lantern.evaluateScript(testing.allocator, &child, "fromParent();");
+    try testing.expect(f.realm == &parent);
+}
+
+test "phase 3: TypeError thrown by parent's code is parent's Error.prototype chain (skip pending 3.3)" {
+    if (true) return error.SkipZigTest;
+
+    // §10.2.3 / §10.2.4: an Error allocated inside a function whose
+    // [[Realm]] is parent must inherit from parent's %Error.prototype%,
+    // not child's. The b95694b commit already attributes
+    // *engine-thrown* TypeErrors correctly; this test extends that
+    // to *user-thrown* errors from cross-realm-called functions.
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const thrower_v = (try lantern.evaluateScript(testing.allocator, &parent,
+        "(function () { throw new TypeError('from parent'); })")).value;
+    try child.globals.put(testing.allocator, "boom", thrower_v);
+
+    // Catch in child, probe the error's identity. e.constructor
+    // should be parent's TypeError, NOT child's.
+    const probe = (try lantern.evaluateScript(testing.allocator, &child,
+        "let r; try { boom(); } catch (e) { r = e.constructor === TypeError; } r")).value;
+    // child's `TypeError` (the global) is a different JSFunction
+    // than parent's TypeError; the comparison resolves to false.
+    try testing.expect(probe.bits == Value.false_.bits);
+}
+
+test "phase 3: §23.1.3.34 Array.prototype.map uses source realm's %Array% as species (skip pending 3.3)" {
+    if (true) return error.SkipZigTest;
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // Array created in parent.
+    const arr_v = (try lantern.evaluateScript(testing.allocator, &parent, "[1, 2, 3]")).value;
+    try child.globals.put(testing.allocator, "arrFromParent", arr_v);
+
+    // §23.1.3.34 ArraySpeciesCreate reads the source array's realm's
+    // %Array%, NOT the calling realm's. So `m.constructor` is
+    // parent's Array, distinct from child's `Array` global.
+    const probe = (try lantern.evaluateScript(testing.allocator, &child,
+        "const m = arrFromParent.map(x => x * 2); m.constructor === Array")).value;
+    try testing.expect(probe.bits == Value.false_.bits);
+}
+
+test "phase 3: native callback sees its own function's realm via active_native_fn_realm (skip pending 3.3)" {
+    if (true) return error.SkipZigTest;
+
+    // The native-side D2 invariant: a native installed in parent
+    // and called from child reads `realm.active_native_fn_realm`
+    // == &parent (its [[Realm]]). The dispatch loop's `realm`
+    // parameter is the *calling* realm (child); reading it would
+    // resolve intrinsics in the wrong realm.
+    //
+    // After 3.2, `JSFunction.realm` set at allocateFunctionNative
+    // time; lantern/call.zig:806 already stores it into
+    // active_native_fn_realm at native dispatch. The probe shape
+    // (a NativeFn cb that records `realm.active_native_fn_realm`
+    // into a captured cell) lives in commit 3.3 alongside the
+    // un-skip; here the prose-only test pins the invariant in the
+    // contract file so reviewers see it.
+    return;
+}
