@@ -761,10 +761,11 @@ const Parser = struct {
         const k = self.at(1) orelse return error.SyntaxError; // trailing `\`
         switch (k) {
             'k' => {
-                // §22.2.1 AtomEscape :: \k GroupName. Under /u or /v a `\k`
-                // not followed by `<GroupName>` is an early error; without
-                // either flag the fallback applies Annex B identity-escape
-                // leniency (`\k` → literal 'k'), so defer.
+                // §22.2.1 AtomEscape :: \k GroupName. A `\k` not followed by
+                // `<GroupName>` is a §22.2.1.1 early error in every mode: with
+                // no GroupName the only production left is IdentityEscape, and
+                // `k` is UnicodeIDContinue — excluded in both modes. Only
+                // Annex B reread `\k` as a literal 'k', which Cynic rejects.
                 if (self.at(2) != '<') return self.malformedEscape();
                 self.pos += 3;
                 const name = try self.parseGroupName();
@@ -882,7 +883,9 @@ const Parser = struct {
     /// Parse a single-character escape at `\` and return the code unit
     /// it denotes. Class escapes (`\d` …) and `\b`/`\B` are handled by
     /// the callers; this covers control, hex, unicode (BMP), and
-    /// identity escapes. Forms outside that set fall back.
+    /// identity escapes. A form that matches no main-grammar production is
+    /// a §22.2.1.1 early error (`malformedEscape`); the few still-deferred
+    /// shapes (`\p`/`\P`, atom `\-`, non-/u `\u{…}`) return Unsupported.
     fn parseEscapedChar(self: *Parser) ParseError!u21 {
         std.debug.assert(self.src[self.pos] == '\\');
         const k = self.at(1) orelse return error.SyntaxError;
@@ -894,10 +897,10 @@ const Parser = struct {
             'v' => return self.takeEscaped(2, 0x0B),
             '0' => {
                 // §22.2.1.1 `\0` is U+0000 only with [lookahead ∉
-                // DecimalDigit]. `\0` before a digit under /u or /v is an
-                // early error (Unicode mode has no LegacyOctalEscapeSequence);
-                // without a flag it is an Annex B legacy octal / decimal
-                // escape the fallback matches, so defer.
+                // DecimalDigit]. The main grammar has no
+                // LegacyOctalEscapeSequence, so `\0` before a digit is an
+                // early error in every mode; only Annex B reread `\00`…`\09`
+                // as legacy octal, which Cynic's strict-only target rejects.
                 if (self.at(2)) |d| {
                     if (d >= '0' and d <= '9') return self.malformedEscape();
                 }
@@ -1009,9 +1012,9 @@ const Parser = struct {
                 // reaches here (a SyntaxCharacter, handled above). Perlex
                 // owns these directly. The residual cases — an IDContinue
                 // letter (`\X`), a digit (a DecimalEscape), a non-ASCII
-                // escape — defer: under /u each is a §22.2.1.1 early error,
-                // without /u the fallback applies Annex B identity/octal
-                // leniency (`\X` → literal 'X', `\1` → legacy octal).
+                // escape — are a §22.2.1.1 early error in every mode under
+                // the main grammar; only Annex B rereads them (`\X` →
+                // literal 'X', `\1` → legacy octal), which Cynic rejects.
                 if (!self.unicode and !self.unicode_sets and
                     k < 0x80 and !(std.ascii.isAlphanumeric(k) or k == '_'))
                 {
@@ -1045,11 +1048,18 @@ const Parser = struct {
         return null;
     }
 
-    /// §22.2.1.1 — under `/u` or `/v` an incomplete `\x`/`\u` escape is an
-    /// early error; without it the libregexp fallback still applies the
-    /// Annex B identity-escape leniency (`\x` → literal 'x', …), so defer.
+    /// §22.2.1 — a `\` escape that matches no production of the main
+    /// CharacterEscape / AtomEscape grammar: an incomplete `\x`/`\u`, a `\0`
+    /// before a DecimalDigit (no LegacyOctalEscapeSequence), a DecimalEscape
+    /// in a class, a bare `\k`, an IdentityEscape of a UnicodeIDContinue
+    /// letter (`\X`). Each is a §22.2.1.1 early error in *every* mode under
+    /// the main grammar — the only readings that accept them are Annex B
+    /// §B.1.2/§B.1.4 (`\x` → 'x', `\00` → legacy octal, `\X` → 'X'), which
+    /// Cynic's strict-only, non-browser target rejects. (The `self` receiver
+    /// is retained for call-site uniformity with the rest of the decoder.)
     fn malformedEscape(self: *Parser) ParseError {
-        return if (self.unicode or self.unicode_sets) error.SyntaxError else error.Unsupported;
+        _ = self;
+        return error.SyntaxError;
     }
 
     /// `[ClassRanges]` / `[^ClassRanges]` → a single class node.

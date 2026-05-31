@@ -376,16 +376,19 @@ test "perlex: a malformed property escape defers without /u (Annex B)" {
     try expectCompileProp("\\p{}", .{}, .unsupported);
 }
 
-test "perlex: bare \\k (no group name) is a /u early error" {
-    // §22.2.1 AtomEscape :: \k GroupName — under /u or /v, `\k` must be
-    // followed by `<GroupName>`. A bare `\k`, or `\k` before any non-`<`,
-    // is an early error Perlex owns; without /u it is an Annex B identity
-    // escape (→ literal 'k') the fallback still owns.
+test "perlex: bare \\k (no group name) is a SyntaxError in every mode (§22.2.1)" {
+    // §22.2.1 AtomEscape :: \k GroupName — `\k` must be followed by
+    // `<GroupName>`. With no GroupName the only production left is
+    // IdentityEscape, and `k` is UnicodeIDContinue — excluded under
+    // +UnicodeMode (SyntaxCharacter or `/` only) and, in the main grammar,
+    // under ~UnicodeMode too (SourceCharacter but not UnicodeIDContinue).
+    // Only Annex B reread `\k` as a literal 'k', which Cynic's strict-only,
+    // non-browser target rejects.
     try expectCompileFlags("\\k", uflags, .syntax_error);
     try expectCompileFlags("\\kab", uflags, .syntax_error);
     try expectCompileFlags("\\k", vflags, .syntax_error);
-    try expectCompile("\\k", .unsupported); // Annex B identity escape — defer
-    try expectCompile("\\kab", .unsupported);
+    try expectCompile("\\k", .syntax_error);
+    try expectCompile("\\kab", .syntax_error);
 }
 
 // ── Plain matching sanity ───────────────────────────────────────────
@@ -954,12 +957,25 @@ test "perlex: malformed \\u{...} is a /u early error" {
     try expectCompileFlags("[\\u{1]", uf, .syntax_error);
 }
 
-test "perlex: incomplete \\x / \\u escapes defer without /u (Annex B)" {
-    try expectCompile("\\x", .unsupported);
-    try expectCompile("\\x1", .unsupported);
-    try expectCompile("\\u", .unsupported);
-    try expectCompile("\\u12", .unsupported);
-    try expectCompile("\\u{1", .unsupported); // non-/u \u{ is Annex B too
+test "perlex: incomplete \\x / 4-digit \\u escapes are a SyntaxError in every mode (§22.2.1)" {
+    // §22.2.1 main grammar: an incomplete `\x`/`\u` is not a valid
+    // CharacterEscape, and the only remaining production — IdentityEscape —
+    // excludes `x`/`u` (both UnicodeIDContinue) in every mode. Only Annex B
+    // §B.1.2 rereads them as literals (`\x` → 'x'), which Cynic's strict-only,
+    // non-browser target rejects.
+    try expectCompile("\\x", .syntax_error);
+    try expectCompile("\\x1", .syntax_error);
+    try expectCompile("\\u", .syntax_error);
+    try expectCompile("\\u12", .syntax_error);
+}
+
+test "perlex: a non-/u \\u{…} still defers (separate RegExpUnicodeEscapeSequence site)" {
+    // Without /u, `\u{…}` is a §22.2.1 SyntaxError under the main grammar
+    // (RegExpUnicodeEscapeSequence[~UnicodeMode] is only `\u`Hex4Digits) —
+    // Annex B §B.1.2 rereads `\u` as a literal 'u'. That verdict lives at a
+    // separate direct RegExpUnicodeEscapeSequence gate, not the shared
+    // malformedEscape decoder, so it stays deferred for now.
+    try expectCompile("\\u{1", .unsupported);
 }
 
 test "perlex: well-formed \\x / \\u escapes still match under /u" {
@@ -993,13 +1009,18 @@ test "perlex: an invalid IdentityEscape letter is a /u early error" {
     try expectCompileFlags("[\\K]", uf, .syntax_error);
 }
 
-test "perlex: invalid digit / letter escapes defer without /u (Annex B)" {
-    // Legacy octal / identity escapes the libregexp fallback owns.
-    try expectCompile("[\\1]", .unsupported);
-    try expectCompile("[\\8]", .unsupported);
-    try expectCompile("\\X", .unsupported);
-    try expectCompile("[\\X]", .unsupported);
-    try expectCompile("[\\10b-G]", .unsupported); // legacy octal \10 in a class
+test "perlex: invalid digit / letter escapes are a SyntaxError in every mode (§22.2.1)" {
+    // §22.2.1 main grammar: a `\` before an IDContinue letter (`\X`) or a
+    // digit in a class (a DecimalEscape, for which ClassEscape has no
+    // production) is not a valid escape in either mode — IdentityEscape[~U]
+    // is SourceCharacter but not UnicodeIDContinue, IdentityEscape[+U] is a
+    // SyntaxCharacter or `/`. Only Annex B rereads them (`\X` → 'X', `\1` →
+    // legacy octal), which Cynic's strict-only, non-browser target rejects.
+    try expectCompile("[\\1]", .syntax_error);
+    try expectCompile("[\\8]", .syntax_error);
+    try expectCompile("\\X", .syntax_error);
+    try expectCompile("[\\X]", .syntax_error);
+    try expectCompile("[\\10b-G]", .syntax_error); // legacy octal \10 in a class
 }
 
 test "perlex: ASCII-punctuation IdentityEscape matches its literal (§22.2.1 ~U)" {
@@ -1089,12 +1110,15 @@ test "perlex: \\0 before a DecimalDigit is a /u early error" {
     try expectCompileFlags("\\00", .{ .unicode_sets = true }, .syntax_error);
 }
 
-test "perlex: \\0 before a digit defers without /u (Annex B legacy octal)" {
-    // `\00` … `\09` are LegacyOctalEscapeSequence territory the fallback owns.
-    try expectCompile("\\00", .unsupported);
-    try expectCompile("\\07", .unsupported);
-    try expectCompile("[\\00]", .unsupported);
-    try expectCompile("[\\09]", .unsupported);
+test "perlex: \\0 before a digit is a SyntaxError in every mode (§22.2.1.1)" {
+    // §22.2.1.1 `\0` is U+0000 only with [lookahead ∉ DecimalDigit]; the main
+    // grammar has no LegacyOctalEscapeSequence, so `\0` before a digit is an
+    // early error in every mode. Only Annex B rereads `\00`…`\09` as legacy
+    // octal, which Cynic's strict-only, non-browser target rejects.
+    try expectCompile("\\00", .syntax_error);
+    try expectCompile("\\07", .syntax_error);
+    try expectCompile("[\\00]", .syntax_error);
+    try expectCompile("[\\09]", .syntax_error);
 }
 
 test "perlex: a lone \\0 (no trailing digit) is NUL in every mode" {
