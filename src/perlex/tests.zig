@@ -1558,6 +1558,35 @@ test "perlex: a directly-quantified bare assertion still defers (mode split)" {
     try expectCompile("(?=a)*", .unsupported);
 }
 
+test "perlex: §22.2.1 quantified backreference bodies are owned, not deferred" {
+    // A backreference's matched width is participation-dependent, but it is
+    // *constant* for the duration of one quantifier evaluation when the
+    // referenced group lies to its left — it only varies between evaluations
+    // via that group's own backtracking. So `\1+` / `\1*` / `\k<x>+` are
+    // ordinary repeats: the §22.2.2.3 progress guard handles the
+    // empty-capture iteration, and standard backtracking handles the rest.
+    // Captures match engine262.
+    try expectCaps("(a*)b\\1+", "aabaaaa", "'aabaaaa' 'aa'");
+    // Group 1 captured empty, so each `\1` iteration is zero-width: the
+    // guard keeps the repeat from looping, but the literal `b` already
+    // matched, so the whole match is just "b" with group 1 = "".
+    try expectCaps("(a*)b\\1+", "b", "'b' ''");
+    // `(a?)\1+` on "": group 1 = "", `\1+` matches empty once (guarded).
+    try expectCaps("(a?)\\1+", "", "'' ''");
+    try expectCaps("(a*)\\1+", "aaa", "'aaa' 'a'");
+    // Lazy quantified backref.
+    try expectCaps("(a*)b\\1+?", "aabaaaa", "'aabaa' 'aa'");
+    // Named backref, quantified.
+    try expectCaps("(?<x>a*)b\\k<x>+", "aabaaaa", "'aabaaaa' 'aa'");
+    // Anchored, two quantified backrefs.
+    try expectCaps("^(a+)\\1*,\\1+$", "aa,aaaa", "'aa,aaaa' 'aa'");
+    // Self-referential backref inside a quantified group.
+    try expectCaps("(a\\1*)+", "aaa", "'aaa' 'a'");
+    try expectCaps("(\\1a)+", "aaa", "'aaa' 'a'");
+    // A `{2,}` lower bound the input can't satisfy → no match.
+    try expectNoMatch("(x)\\1{2,}", "xx");
+}
+
 // ── §22.2.1 character classes, `.`, class escapes, boundaries ───────
 
 test "perlex: dot matches any non-line-terminator" {

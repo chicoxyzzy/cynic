@@ -923,11 +923,14 @@ fn nullable(node: *const Node) bool {
 ///     QuantifiableAssertion — the quantifier binds the group, which is
 ///     always legal — so it is owned (the guard handles the zero-width
 ///     loop, and the inner capture rolls back on the guarded skip);
-///   • a body containing a *backreference* — its participation-dependent
-///     width interacts with the guard in ways the v1 lowering doesn't
-///     model — or a `/v` set whose membership includes the empty string
-///     (a `\q{}` empty alternative) — left to the fallback until those
-///     paths land.
+///   • a body whose nullable content is a `/v` set whose membership
+///     includes the empty string (a `\q{}` empty alternative) — left to
+///     the fallback until that path lands. A nullable *backreference*
+///     (`\1*`, `\k<x>+`) is no longer deferred: its matched width is
+///     participation-dependent but *constant* within one quantifier
+///     evaluation (the referenced group lies to its left and only
+///     re-captures via its own backtracking), so §22.2.2.3's progress
+///     guard handles the empty-capture iteration like any other repeat.
 /// Called only when `nullable(node)` already holds.
 fn deferNullableBody(node: *const Node) bool {
     return switch (node.*) {
@@ -943,17 +946,15 @@ fn deferNullableBody(node: *const Node) bool {
 }
 
 /// The recursive half of `deferNullableBody`: a wrapped body still defers
-/// when it contains a backreference or an empty-matching `/v` set. Nested
-/// assertions do *not* defer here — once an assertion is inside a group the
-/// quantifier binds the group, so §22.2.2.3 step 2.b's progress guard owns
-/// the zero-width loop. A lookahead is a leaf: a backreference inside it is
-/// matched at zero width from the outer loop's view, so it can't interact
-/// with the outer guard and needn't force a defer.
+/// only when it contains an empty-matching `/v` set. Nested assertions and
+/// backreferences do *not* defer here — once an assertion is inside a group
+/// the quantifier binds the group, and a nullable backreference's width is
+/// constant within one quantifier evaluation — so in both cases §22.2.2.3
+/// step 2.b's progress guard owns the zero-width loop.
 fn containsDeferringNullable(node: *const Node) bool {
     return switch (node.*) {
-        .backref_name, .backref_index => true,
         .class_set => |cs| classSetMayMatchEmpty(cs),
-        .empty, .char, .class, .dot, .prop, .anchor_start, .anchor_end, .word_boundary, .lookahead => false,
+        .empty, .char, .class, .dot, .prop, .backref_name, .backref_index, .anchor_start, .anchor_end, .word_boundary, .lookahead => false,
         .noncapture => |b| containsDeferringNullable(b),
         .modifier_group => |mg| containsDeferringNullable(mg.body),
         .capture => |g| containsDeferringNullable(g.body),
