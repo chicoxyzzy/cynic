@@ -1523,8 +1523,11 @@ const Parser = struct {
             try operands.append(self.a, try self.atomToOperand(first));
             while (self.peekDouble('&')) {
                 self.pos += 2;
-                // §22.2.1 — a third `&` (`&&&`) is a SyntaxError.
-                if (self.peekIs('&')) return error.Unsupported;
+                // §22.2.1.1 — after `&&` the next must be a ClassSetOperand,
+                // which can't begin with `&`, so a third `&` (`&&&`, `&&&&`)
+                // is an early error. Own it: libregexp wrongly accepts it,
+                // but engine262 + V8 / JSC / SpiderMonkey all reject it.
+                if (self.peekIs('&')) return error.SyntaxError;
                 try operands.append(self.a, try self.atomToOperand(try self.parseSetAtom()));
             }
             try self.expect(']');

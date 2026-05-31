@@ -2547,6 +2547,18 @@ test "perlex/v: intersection &&" {
     try expectNoMatchFlags("[[0-9]&&[4-8]]", vflags, "9");
 }
 
+test "perlex/v: a third & after && is a Syntax Error (§22.2.1)" {
+    // ClassIntersection joins operands with `&&`; after it the next must be
+    // a ClassSetOperand, which can't begin with `&` (a reserved double-
+    // punctuator). So `&&&` (and `&&&&`) is a §22.2.1.1 early error, not a
+    // pattern Perlex defers — matching engine262 + V8 / JSC / SpiderMonkey
+    // (libregexp wrongly accepts it).
+    try expectCompileFlags("[a&&&b]", vflags, .syntax_error);
+    try expectCompileFlags("[a&&&&b]", vflags, .syntax_error);
+    // A plain `&&` intersection of two single-char operands stays valid.
+    try expectCompileFlags("[a&&b]", vflags, .match);
+}
+
 test "perlex/v: difference --" {
     try expectMatchFlags("[[0-9]--[3-5]]", vflags, "2", "2");
     try expectMatchFlags("[[0-9]--[3-5]]", vflags, "8", "8");
