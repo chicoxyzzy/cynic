@@ -802,6 +802,20 @@ const Parser = struct {
                 if (!self.unicode and !self.unicode_sets) return error.Unsupported;
                 return self.parsePropertyEscape(k == 'P');
             },
+            '-' => {
+                // §22.2.1 IdentityEscape — `\-` as an *atom*. `-` (U+002D)
+                // is not UnicodeIDContinue, so without /u it is a valid
+                // IdentityEscape[~UnicodeMode] matching '-' (main grammar,
+                // not an Annex B widening). Under /u or /v the atom grammar
+                // shrinks to SyntaxCharacter or `/`, and `-` is neither, so
+                // it is a §22.2.1.1 early error. The shared class-member
+                // decoder (parseEscapedChar) still owns `[\-]`, where `\-`
+                // is the escaped literal '-' in every mode — this atom-only
+                // switch never reaches it.
+                if (self.unicode or self.unicode_sets) return error.SyntaxError;
+                self.pos += 2;
+                return self.makeNode(.{ .char = '-' });
+            },
             else => return self.makeNode(.{ .char = try self.parseEscapedChar() }),
         }
     }

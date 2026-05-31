@@ -1036,10 +1036,30 @@ test "perlex: ASCII-punctuation IdentityEscape is a /u early error" {
     try expectCompileFlags("\\:", .{ .unicode_sets = true }, .syntax_error); // also /v
 }
 
-test "perlex: an escaped hyphen is left to the fallback in every mode" {
-    // `\-` is a valid ClassEscape under +UnicodeMode but an invalid atom
-    // IdentityEscape; parseEscapedChar can't see the context, so it stays
-    // deferred — no false reject of `[\-]/u` — and the fallback decides.
+test "perlex: an escaped hyphen atom matches without /u, is a /u early error (§22.2.1)" {
+    // §22.2.1 IdentityEscape[~UnicodeMode] :: SourceCharacter but not
+    // UnicodeIDContinue. `-` (U+002D) is not UnicodeIDContinue, so as an
+    // *atom* `\-` is a valid IdentityEscape matching '-' — main grammar,
+    // not an Annex B widening. Under /u or /v the atom IdentityEscape
+    // grammar shrinks to SyntaxCharacter or `/`, and `-` is neither, so an
+    // atom `\-` is a §22.2.1.1 early error. (Inside a class `\-` is the
+    // escaped literal '-' in every mode — a different production that still
+    // defers; see the test below.) Confirmed identical across the
+    // production engines.
+    try expectMatch("\\-", "-", "-");
+    try expectMatch("a\\-b", "a-b", "a-b");
+    try expectCompile("\\-", .match);
+    try expectNoMatch("\\-", "x");
+    try expectCompileFlags("\\-", uf, .syntax_error);
+    try expectCompileFlags("\\-", vflags, .syntax_error);
+}
+
+test "perlex: an escaped hyphen inside a class is left to the fallback in every mode" {
+    // Inside `[ … ]`, `\-` is the escaped literal '-' in every mode (a
+    // ClassEscape under +UnicodeMode, an identity escape without it). The
+    // shared class-member decoder (parseEscapedChar) can't see the class
+    // context the atom path now owns, so it stays deferred — no false
+    // reject of `[\-]/u` — and the fallback decides.
     try expectCompile("[\\-]", .unsupported);
     try expectCompileFlags("[\\-]", uf, .unsupported);
 }
