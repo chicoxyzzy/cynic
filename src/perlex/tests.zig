@@ -944,6 +944,50 @@ test "perlex: invalid digit / letter escapes defer without /u (Annex B)" {
     try expectCompile("[\\10b-G]", .unsupported); // legacy octal \10 in a class
 }
 
+test "perlex: ASCII-punctuation IdentityEscape matches its literal (§22.2.1 ~U)" {
+    // §22.2.1 IdentityEscape[~UnicodeMode] :: SourceCharacter but not
+    // UnicodeIDContinue — this is the *main* grammar, not an Annex B
+    // broadening. A `\` before ASCII punctuation that is neither a
+    // SyntaxCharacter nor an identifier char is that literal, so Perlex
+    // owns the whole set rather than deferring. (The Annex B widening that
+    // also makes `\X` for an IDContinue letter a literal stays deferred —
+    // see the test above; `X` is alphanumeric, so it never reaches here.)
+    try expectMatch("\\!", "!", "!");
+    try expectMatch("\\\"", "\"", "\"");
+    try expectMatch("\\#", "#", "#");
+    try expectMatch("\\%", "%", "%");
+    try expectMatch("\\&", "&", "&");
+    try expectMatch("\\'", "'", "'");
+    try expectMatch("\\,", ",", ",");
+    try expectMatch("\\:", ":", ":");
+    try expectMatch("\\;", ";", ";");
+    try expectMatch("\\<", "<", "<");
+    try expectMatch("\\=", "=", "=");
+    try expectMatch("\\>", ">", ">");
+    try expectMatch("\\@", "@", "@");
+    try expectMatch("\\`", "`", "`");
+    try expectMatch("\\~", "~", "~");
+    // `\/` is a valid IdentityEscape in *both* modes: the grammar's
+    // explicit `/` alternative under +UnicodeMode, a non-IDContinue
+    // SourceCharacter under ~UnicodeMode.
+    try expectMatch("\\/", "/", "/");
+    try expectMatchFlags("\\/", uf, "/", "/");
+}
+
+test "perlex: ASCII-punctuation IdentityEscape is a /u early error" {
+    // Under /u or /v the IdentityEscape grammar shrinks to SyntaxCharacter
+    // or `/`; ordinary punctuation is no longer escapable, so each is a
+    // §22.2.1.1 early error — the verdict the /u column already gave, now
+    // owned by Perlex rather than the fallback. (`\/` above is exempt: `/`
+    // is the one non-SyntaxCharacter the +UnicodeMode grammar still admits.)
+    try expectCompileFlags("\\!", uf, .syntax_error);
+    try expectCompileFlags("\\@", uf, .syntax_error);
+    try expectCompileFlags("\\~", uf, .syntax_error);
+    try expectCompileFlags("\\,", uf, .syntax_error);
+    try expectCompileFlags("\\;", uf, .syntax_error);
+    try expectCompileFlags("\\:", .{ .unicode_sets = true }, .syntax_error); // also /v
+}
+
 test "perlex: an escaped hyphen is left to the fallback in every mode" {
     // `\-` is a valid ClassEscape under +UnicodeMode but an invalid atom
     // IdentityEscape; parseEscapedChar can't see the context, so it stays

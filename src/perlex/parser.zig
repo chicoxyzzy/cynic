@@ -880,16 +880,17 @@ const Parser = struct {
                 return error.Unsupported;
             },
             else => {
-                // IdentityEscape: `\` before a SyntaxCharacter or `/` is
-                // that literal — and under /u or /v that is the entire
-                // IdentityEscape grammar (§22.2.1.1). So every other
-                // escaped character under /u or /v — a digit (a
+                // §22.2.1 IdentityEscape:
+                //   [+UnicodeMode] SyntaxCharacter
+                //   [+UnicodeMode] /
+                //   [~UnicodeMode] SourceCharacter but not UnicodeIDContinue
+                // A `\` before a SyntaxCharacter or `/` is that literal in
+                // every mode — and under /u or /v that two-form set is the
+                // *entire* IdentityEscape grammar (§22.2.1.1). So every
+                // other escaped character under /u or /v — a digit (a
                 // DecimalEscape, which a class has no production for), an
-                // arbitrary letter like `\X` — is an early error Perlex
-                // owns. Without /u each is Annex B identity/octal-escape
-                // leniency (`\X` → literal 'X', `\1` → legacy octal) the
-                // fallback still owns, so defer.
-                //
+                // arbitrary letter like `\X` — is an early error Perlex owns.
+                if (isSyntaxChar(k) or k == '/') return self.takeEscaped(2, k);
                 // Three escapes stay deferred in every mode because they
                 // are valid under /u in a context this single-code-point
                 // decoder can't see: `\p` / `\P` are CharacterClassEscapes
@@ -899,8 +900,22 @@ const Parser = struct {
                 // fallback renders their (possibly SyntaxError) verdict —
                 // converting them risks a false reject of `[\p{…}]/u` /
                 // `[\-]/u`.
-                if (isSyntaxChar(k)) return self.takeEscaped(2, k);
                 if (k == 'p' or k == 'P' or k == '-') return error.Unsupported;
+                // Without /u the main grammar's IdentityEscape also covers
+                // any SourceCharacter that is not UnicodeIDContinue — e.g.
+                // ASCII punctuation like `\!` `\@` `` \` `` `\~`. For ASCII,
+                // not-UnicodeIDContinue ⇔ not `[A-Za-z0-9_]`; `$` never
+                // reaches here (a SyntaxCharacter, handled above). Perlex
+                // owns these directly. The residual cases — an IDContinue
+                // letter (`\X`), a digit (a DecimalEscape), a non-ASCII
+                // escape — defer: under /u each is a §22.2.1.1 early error,
+                // without /u the fallback applies Annex B identity/octal
+                // leniency (`\X` → literal 'X', `\1` → legacy octal).
+                if (!self.unicode and !self.unicode_sets and
+                    k < 0x80 and !(std.ascii.isAlphanumeric(k) or k == '_'))
+                {
+                    return self.takeEscaped(2, k);
+                }
                 return self.malformedEscape();
             },
         }
