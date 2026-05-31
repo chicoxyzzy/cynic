@@ -1127,7 +1127,6 @@ test "perlex: /u matches ASCII and \\u{...} escapes" {
 
 test "perlex: /u declines what needs more than code-point matching" {
     try expectCompileFlags("a", .{ .unicode = true, .ignore_case = true }, .unsupported); // /iu folding
-    try expectCompileFlags("\\uD83D", uf, .unsupported); // lone surrogate escape
     try expectCompileFlags("\\p{L}", uf, .unsupported); // property escape (next increment)
 }
 
@@ -1318,6 +1317,66 @@ test "perlex: a non-/u astral class member defers to the fallback (§22.2.1)" {
     // alternative members (its surrogate pair), which a single ClassMember
     // can't express — defer to the fallback rather than mismatch.
     try expectCompile("[𠮷]", .unsupported);
+}
+
+// ── §22.2.1 \u surrogate escapes under /u (combine + lone) ──────────
+
+test "perlex: a lone surrogate \\u escape matches its code unit under /u (§22.2.1)" {
+    const gpa = testing.allocator;
+    // `\uDF06` is a lone low surrogate; under /u it denotes code point
+    // U+DF06 and matches a lone low-surrogate code unit.
+    var r = try perlex.compile(gpa, "\\udf06", uf);
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    {
+        const lone = [_]u16{0xDF06};
+        var m = (try perlex.exec(u16, gpa, &r.ok, &lone, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+    {
+        // After a non-surrogate the scan steps by one unit and matches at 1.
+        const after = [_]u16{ 'a', 0xDF06 };
+        var m = (try perlex.exec(u16, gpa, &r.ok, &after, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 1), m.slots[0]);
+        try testing.expectEqual(@as(usize, 2), m.slots[1]);
+    }
+}
+
+test "perlex: a \\u surrogate pair combines into one code point under /u (§22.2.1)" {
+    const gpa = testing.allocator;
+    // `𝌆` is the surrogate pair for U+1D306; under /u the two
+    // escapes combine into that single supplementary code point (2 units).
+    var r = try perlex.compile(gpa, "\\ud834\\udf06", uf);
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    const tetragram = [_]u16{ 0xD834, 0xDF06 };
+    var m = (try perlex.exec(u16, gpa, &r.ok, &tetragram, 0)) orelse return error.ExpectedMatch;
+    defer m.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), m.slots[0]);
+    try testing.expectEqual(@as(usize, 2), m.slots[1]);
+}
+
+test "perlex: a \\u surrogate pair combines as one class member under /u (§22.2.1)" {
+    const gpa = testing.allocator;
+    // `[𐀀]` combines into the single member U+10000; a lone
+    // surrogate half is not that code point, so it does not match.
+    var r = try perlex.compile(gpa, "[\\ud800\\udc00]", uf);
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    {
+        const supp = [_]u16{ 0xD800, 0xDC00 }; // U+10000
+        var m = (try perlex.exec(u16, gpa, &r.ok, &supp, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 2), m.slots[1]);
+    }
+    {
+        const lone_hi = [_]u16{0xD800};
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &lone_hi, 0)) == null);
+    }
 }
 
 // ── §22.2.1 quantifiers (greedy / lazy / bounded) ───────────────────

@@ -920,10 +920,23 @@ const Parser = struct {
                     const d = hexVal(self.at(i) orelse return self.malformedEscape()) orelse return self.malformedEscape();
                     v = v *% 16 +% @as(u21, d);
                 }
-                // Under `/u` or `/v`, a surrogate-valued `\uHHHH` (lone,
-                // or the first half of a `\uHHHH\uHHHH` pair) needs
-                // code-point combining the v1 engine doesn't do — defer.
-                if ((self.unicode or self.unicode_sets) and v >= 0xD800 and v <= 0xDFFF) return error.Unsupported;
+                // Under `/u` or `/v` (§22.2.1.1 RegExpUnicodeEscapeSequence):
+                // a lead surrogate (`\uD800`–`\uDBFF`) followed by a `\uHHHH`
+                // trail (low) surrogate combines into one supplementary code
+                // point; any other surrogate-valued `\uHHHH` (lone lead or
+                // lone trail) denotes that surrogate code point itself. The
+                // VM decodes the input the same way, matching both.
+                if (self.unicode or self.unicode_sets) {
+                    if (v >= 0xD800 and v <= 0xDBFF) {
+                        if (self.trailSurrogateAt(self.pos + 6)) |lo| {
+                            self.pos += 12; // consume both `\uHHHH` escapes
+                            self.non_ascii = true;
+                            return 0x10000 + ((v - 0xD800) << 10) + (lo - 0xDC00);
+                        }
+                    }
+                    self.non_ascii = true;
+                    return self.takeEscaped(6, v);
+                }
                 if (v >= 0x80) self.non_ascii = true;
                 return self.takeEscaped(6, v);
             },
@@ -986,6 +999,24 @@ const Parser = struct {
     fn takeEscaped(self: *Parser, advance: usize, value: u21) u21 {
         self.pos += advance;
         return value;
+    }
+
+    /// §22.2.1.1: if the six source chars at `at` are a `\uHHHH` escape
+    /// whose value is a trailing (low) surrogate, return that value; else
+    /// null. Lets a `\uHHHH\uHHHH` lead+trail pair combine into one code
+    /// point under `/u`/`/v`. Only the 4-digit form combines — a `\u{…}`
+    /// trail does not (it is its own RegExpUnicodeEscapeSequence production).
+    fn trailSurrogateAt(self: *Parser, off: usize) ?u21 {
+        if (off + 6 > self.src.len) return null;
+        if (self.src[off] != '\\' or self.src[off + 1] != 'u') return null;
+        var v: u21 = 0;
+        var i: usize = 0;
+        while (i < 4) : (i += 1) {
+            const d = hexVal(self.src[off + 2 + i]) orelse return null;
+            v = v * 16 + @as(u21, d);
+        }
+        if (v >= 0xDC00 and v <= 0xDFFF) return v;
+        return null;
     }
 
     /// §22.2.1.1 — under `/u` or `/v` an incomplete `\x`/`\u` escape is an
