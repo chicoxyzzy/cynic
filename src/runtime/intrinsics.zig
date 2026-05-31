@@ -256,6 +256,60 @@ pub const Intrinsics = struct {
     throw_type_error: ?*JSFunction = null,
 };
 
+/// Multi-realm Phase 1 — a pre-built, frozen subgraph of
+/// %Object.prototype% / %Array.prototype% / %Function.prototype% /
+/// etc. that hardened realms can reference instead of allocating
+/// their own. Built once per host process, lifetime-managed by
+/// the host (NOT by any individual realm's `deinit`).
+///
+/// Today's stub returns an empty struct and `installWithBase`
+/// ignores it. The proper implementation builds the frozen graph
+/// on a separate non-collected `Heap` (see
+/// `docs/multi-realm.md` Phase 1 implementation notes (b)) and
+/// fills these slots with shared pointers. Constructors stay
+/// per-realm — only prototype objects share.
+pub const IntrinsicsBase = struct {
+    object_prototype: ?*JSObject = null,
+    function_prototype: ?*JSObject = null,
+    array_prototype: ?*JSObject = null,
+    string_prototype: ?*JSObject = null,
+    error_prototype: ?*JSObject = null,
+    type_error_prototype: ?*JSObject = null,
+    range_error_prototype: ?*JSObject = null,
+    reference_error_prototype: ?*JSObject = null,
+    syntax_error_prototype: ?*JSObject = null,
+    uri_error_prototype: ?*JSObject = null,
+    eval_error_prototype: ?*JSObject = null,
+
+    pub fn deinit(self: *IntrinsicsBase, allocator: std.mem.Allocator) void {
+        // Phase 1 stub: no resources owned yet. The implementation
+        // will own a `Heap` flagged `gc_disabled = true` and free
+        // it here. Allocator parameter pre-shaped to match the
+        // eventual signature so callers don't change later.
+        _ = self;
+        _ = allocator;
+    }
+};
+
+/// Phase 1 stub. Will build the frozen prototype subgraph on its
+/// own non-collected heap. Today returns an empty `IntrinsicsBase`
+/// — the four sharing-policy tests in `intrinsics_phase1_test.zig`
+/// pin the contract this needs to satisfy.
+pub fn buildBase(allocator: std.mem.Allocator) !IntrinsicsBase {
+    _ = allocator;
+    return .{};
+}
+
+/// Phase 1 stub. If `base != null` and `realm.hardened`, the
+/// proper implementation adopts shared pointers from `base`
+/// (D1 fast path); otherwise allocates fresh. Today: delegates
+/// to `install` unconditionally and ignores `base`, so the
+/// hardened-sharing tests go red as the TDD signal.
+pub fn installWithBase(realm: *Realm, base: ?*const IntrinsicsBase) !void {
+    _ = base;
+    try install(realm);
+}
+
 /// Install the later intrinsics on `realm`. Wires the constructor
 /// / prototype objects, exposes them as globals (`Error`, `TypeError`,
 /// …), and stores pointers on `realm.intrinsics` for the runtime
