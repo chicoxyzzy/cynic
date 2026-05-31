@@ -863,12 +863,28 @@ const Parser = struct {
                 return error.Unsupported;
             },
             else => {
-                // IdentityEscape: `\` before a syntax character (or `/`)
-                // is that literal. Other escapes (`\p{…}`, numeric
-                // backrefs, arbitrary-letter Annex B identity escapes)
-                // fall back.
+                // IdentityEscape: `\` before a SyntaxCharacter or `/` is
+                // that literal — and under /u or /v that is the entire
+                // IdentityEscape grammar (§22.2.1.1). So every other
+                // escaped character under /u or /v — a digit (a
+                // DecimalEscape, which a class has no production for), an
+                // arbitrary letter like `\X` — is an early error Perlex
+                // owns. Without /u each is Annex B identity/octal-escape
+                // leniency (`\X` → literal 'X', `\1` → legacy octal) the
+                // fallback still owns, so defer.
+                //
+                // Three escapes stay deferred in every mode because they
+                // are valid under /u in a context this single-code-point
+                // decoder can't see: `\p` / `\P` are CharacterClassEscapes
+                // (a set, reached here only from the class path, which has
+                // no `\p` case), and `\-` is a ClassEscape under
+                // +UnicodeMode but an invalid atom IdentityEscape. The
+                // fallback renders their (possibly SyntaxError) verdict —
+                // converting them risks a false reject of `[\p{…}]/u` /
+                // `[\-]/u`.
                 if (isSyntaxChar(k)) return self.takeEscaped(2, k);
-                return error.Unsupported;
+                if (k == 'p' or k == 'P' or k == '-') return error.Unsupported;
+                return self.malformedEscape();
             },
         }
     }
