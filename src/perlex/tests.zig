@@ -1616,14 +1616,51 @@ test "perlex: a non-/u negated astral class excludes both surrogate units (§22.
     }
 }
 
-test "perlex: an astral class member with /i or a range bound still defers (§22.2.1)" {
+test "perlex: a non-/u astral range high bound splits across its surrogate units (§22.2.1)" {
+    const gpa = testing.allocator;
+    // In non-/u mode the pattern is read as code units, so `𠮷` (U+20BB7 =
+    // D842 DFB7) as the *high* bound of `[a-𠮷]` is the range a..D842 followed
+    // by the standalone trail unit DFB7. So the class is 0x61..0xD842 ∪ {DFB7}.
+    var r = try perlex.compile(gpa, "[a-𠮷]", .{});
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    {
+        const b = [_]u16{'b'}; // 0x62 — inside a..D842
+        var m = (try perlex.exec(u16, gpa, &r.ok, &b, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+    {
+        const lead = [_]u16{0xD842}; // the range's hi unit
+        var m = (try perlex.exec(u16, gpa, &r.ok, &lead, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+    {
+        const trail = [_]u16{0xDFB7}; // the standalone trail unit
+        var m = (try perlex.exec(u16, gpa, &r.ok, &trail, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+    {
+        const above = [_]u16{0xE000}; // > D842 and ≠ DFB7 — excluded
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &above, 0)) == null);
+    }
+}
+
+test "perlex: a non-/u astral range low bound that reverses the range is a Syntax Error (§22.2.1.1)" {
+    // `[𠮷-a]` reads as the standalone D842, then the range DFB7..a. Because
+    // DFB7 (0xDFB7) > 'a' (0x61) the range is reversed — an early error.
+    try expectCompile("[𠮷-a]", .syntax_error);
+}
+
+test "perlex: an astral class member with /i still defers (§22.2.1)" {
     // The owned path is the bare non-/u astral ClassAtom. With `i` the
-    // surrogate units sit on the non-Unicode fold gate (the parser can't
-    // rule out a non-ASCII fold orbit), and as a `-` range bound the source
-    // splits across the dash — both keep deferring to the fallback.
+    // surrogate units sit on the non-Unicode fold gate (a bare compile with
+    // no injected fold hook can't rule out a non-ASCII fold orbit), so this
+    // keeps deferring to the fallback.
     try expectCompileFlags("[𠮷]", .{ .ignore_case = true }, .unsupported);
-    try expectCompile("[𠮷-a]", .unsupported);
-    try expectCompile("[a-𠮷]", .unsupported);
 }
 
 // ── §22.2.1 \u surrogate escapes under /u (combine + lone) ──────────
