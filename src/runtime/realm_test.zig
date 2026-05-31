@@ -38,11 +38,14 @@ test "phase-0: two independent realms have distinct intrinsic pointers" {
     var rb = try freshRealm(true);
     defer rb.deinit();
 
-    // Distinct prototype objects — even under hardened, today's
-    // `installBuiltins` allocates per-realm copies. Phase 1 (D1 in
-    // the ADR) will introduce explicit sharing via `IntrinsicsBase`
-    // for hardened realms; this test will then need to track the
-    // policy. For now: distinct.
+    // Distinct prototype objects: each realm allocates its OWN
+    // %X.prototype% copies, and this is mandatory and permanent —
+    // `.constructor` is a per-realm data slot (§6.1.7.4, §9.3.2,
+    // §20.1.3.1, §23.1.3.3), so two realms must never alias a
+    // prototype. (The reverted D1 "shared frozen prototype
+    // subgraph" is forbidden, not deferred; see
+    // `docs/multi-realm.md`.) Cross-realm sharing is limited to the
+    // per-`Heap` ShapeTree — see the initChild test below.
     try testing.expect(ra.intrinsics.object_prototype != null);
     try testing.expect(rb.intrinsics.object_prototype != null);
     try testing.expect(ra.intrinsics.object_prototype != rb.intrinsics.object_prototype);
