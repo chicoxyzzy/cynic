@@ -1,19 +1,19 @@
 # test262 conformance — Cynic
 
-**Cynic passes 99.78 % of its 43045-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
+**Cynic passes 99.88 % of its 43045-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
-- **39093 pass** at the engine-true level (engine% = 100.00 % — see Legend).
+- **39136 pass** at the engine-true level (engine% = 100.00 % — see Legend).
 - **3858 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
 - **0 real engine failures** — Cynic returns the wrong answer or throws where the spec expects success. (libregexp Annex B / `/v` carve-outs are documented in [AGENTS.md](../AGENTS.md).)
-- **94 skipped** — *in-corpus* skips that should eventually pass: single-realm Cynic (`$262.createRealm()` cross-realm fixtures, which need multi-realm support) plus a handful of eval-dependent fixtures awaiting `--allow=eval`.
+- **51 skipped** — *in-corpus* skips that should eventually pass: single-realm Cynic (`$262.createRealm()` cross-realm fixtures, which need multi-realm support) plus a handful of eval-dependent fixtures awaiting `--allow=eval`.
 - **Out of scope, dropped before `corpus`:** sloppy-mode (`flags: [noStrict]`) fixtures — Cynic is strict-only — the Annex B / browser-era feature tags (`__proto__`, `legacy-regexp`, `IsHTMLDDA`, …), the `annexB/` tree, `intl402/`, `staging/`, SES carve-outs, and the feature tags for pre-Stage-4 proposals Cynic hasn't implemented yet (decorators, import-defer, source-phase-imports, import-bytes, immutable-arraybuffer, await-dictionary). The denominator is pinned to the published ECMAScript edition; an unimplemented proposal's fixtures re-enter `corpus` once it reaches Stage 4. Implemented pre-Stage-4 proposals (joint-iteration, ShadowRealm) are scored separately behind `--enable=`, not here.
 
 ## Current scores
 
 | posture | pass% | engine% | passes / corpus | divergent |
 |---|---:|---:|---:|---:|
-| **hardened** (default — `cynic run`) | 99.78 % | 100.00 % | 42951 / 43045 | 3858 |
-| **unhardened** (`cynic --unhardened`) | 99.78 % | 100.00 % | 42951 / 43045 | — |
+| **hardened** (default — `cynic run`) | 99.88 % | 100.00 % | 42994 / 43045 | 3858 |
+| **unhardened** (`cynic --unhardened`) | 99.88 % | 100.00 % | 42994 / 43045 | — |
 
 > **pass%** is the headline — `pass / corpus` (a fixture
 > Cynic doesn't ship counts as a `skip`, lowering this).
@@ -177,50 +177,50 @@ first two path components (`built-ins/Set`,
 |---|---:|---:|---:|---:|---:|---:|
 | **_0 fails — passing / wholly OOS (sorted by divergent ↓)_** | | | | | | |
 | `built-ins/Temporal` | 3885 | 0 | 0 | 703 | 100 % | 100 % |
-| `built-ins/Array` | 2476 | 0 | 5 | 564 | 100 % | 100 % |
-| `built-ins/Object` | 2783 | 0 | 1 | 536 | 100 % | 100 % |
+| `built-ins/Array` | 2479 | 0 | 2 | 564 | 100 % | 100 % |
+| `built-ins/Object` | 2784 | 0 | 0 | 536 | 100 % | 100 % |
 | `built-ins/TypedArray` | 1104 | 0 | 0 | 319 | 100 % | 100 % |
-| `built-ins/String` | 1028 | 0 | 1 | 177 | 100 % | 100 % |
-| `built-ins/Date` | 436 | 0 | 3 | 155 | 99 % | 100 % |
+| `built-ins/String` | 1029 | 0 | 0 | 177 | 100 % | 100 % |
+| `built-ins/Date` | 439 | 0 | 0 | 155 | 100 % | 100 % |
 | `built-ins/Math` | 214 | 0 | 0 | 113 | 100 % | 100 % |
-| `built-ins/Promise` | 524 | 0 | 1 | 104 | 100 % | 100 % |
-| `built-ins/RegExp` | 1758 | 0 | 11 | 101 | 99 % | 100 % |
+| `built-ins/Promise` | 525 | 0 | 0 | 104 | 100 % | 100 % |
+| `built-ins/RegExp` | 1759 | 0 | 10 | 101 | 99 % | 100 % |
 | `language/expressions` | 9747 | 0 | 0 | 99 | 100 % | 100 % |
-| `built-ins/TypedArrayConstructors` | 562 | 0 | 10 | 93 | 98 % | 100 % |
+| `built-ins/TypedArrayConstructors` | 572 | 0 | 0 | 93 | 100 % | 100 % |
 | `language/statements` | 8520 | 0 | 4 | 89 | 100 % | 100 % |
-| `built-ins/Set` | 310 | 0 | 1 | 71 | 100 % | 100 % |
-| `built-ins/Iterator` | 367 | 0 | 1 | 64 | 100 % | 100 % |
-| `built-ins/DataView` | 454 | 0 | 1 | 56 | 100 % | 100 % |
-| `built-ins/Map` | 150 | 0 | 1 | 52 | 100 % | 100 % |
-| `built-ins/ArrayBuffer` | 132 | 0 | 1 | 50 | 99 % | 100 % |
+| `built-ins/Set` | 311 | 0 | 0 | 71 | 100 % | 100 % |
+| `built-ins/Iterator` | 368 | 0 | 0 | 64 | 100 % | 100 % |
+| `built-ins/DataView` | 455 | 0 | 0 | 56 | 100 % | 100 % |
+| `built-ins/Map` | 151 | 0 | 0 | 52 | 100 % | 100 % |
+| `built-ins/ArrayBuffer` | 133 | 0 | 0 | 50 | 100 % | 100 % |
 | `built-ins/Reflect` | 111 | 0 | 0 | 41 | 100 % | 100 % |
-| `built-ins/Number` | 301 | 0 | 1 | 38 | 100 % | 100 % |
-| `built-ins/NativeErrors` | 52 | 0 | 6 | 36 | 94 % | 100 % |
-| `built-ins/Function` | 227 | 0 | 8 | 29 | 97 % | 100 % |
+| `built-ins/Number` | 302 | 0 | 0 | 38 | 100 % | 100 % |
+| `built-ins/NativeErrors` | 58 | 0 | 0 | 36 | 100 % | 100 % |
+| `built-ins/Function` | 228 | 0 | 7 | 29 | 97 % | 100 % |
 | `built-ins/JSON` | 136 | 0 | 0 | 28 | 100 % | 100 % |
-| `built-ins/WeakMap` | 113 | 0 | 1 | 27 | 99 % | 100 % |
-| `built-ins/AsyncDisposableStack` | 79 | 0 | 1 | 24 | 99 % | 100 % |
-| `built-ins/DisposableStack` | 68 | 0 | 1 | 24 | 99 % | 100 % |
+| `built-ins/WeakMap` | 114 | 0 | 0 | 27 | 100 % | 100 % |
+| `built-ins/AsyncDisposableStack` | 80 | 0 | 0 | 24 | 100 % | 100 % |
+| `built-ins/DisposableStack` | 69 | 0 | 0 | 24 | 100 % | 100 % |
 | `built-ins/Symbol` | 56 | 0 | 17 | 23 | 82 % | 100 % |
-| `built-ins/WeakSet` | 64 | 0 | 1 | 20 | 99 % | 100 % |
+| `built-ins/WeakSet` | 65 | 0 | 0 | 20 | 100 % | 100 % |
 | `built-ins/BigInt` | 58 | 0 | 1 | 18 | 99 % | 100 % |
 | `built-ins/Uint8Array` | 50 | 0 | 0 | 18 | 100 % | 100 % |
-| `built-ins/Error` | 42 | 0 | 1 | 14 | 98 % | 100 % |
+| `built-ins/Error` | 43 | 0 | 0 | 14 | 100 % | 100 % |
 | `language/module-code` | 575 | 0 | 0 | 13 | 100 % | 100 % |
 | `built-ins/RegExpStringIteratorPrototype` | 5 | 0 | 0 | 12 | 100 % | 100 % |
 | `built-ins/AsyncGeneratorPrototype` | 37 | 0 | 0 | 11 | 100 % | 100 % |
-| `built-ins/FinalizationRegistry` | 35 | 0 | 1 | 11 | 98 % | 100 % |
+| `built-ins/FinalizationRegistry` | 36 | 0 | 0 | 11 | 100 % | 100 % |
 | `built-ins/GeneratorPrototype` | 50 | 0 | 0 | 11 | 100 % | 100 % |
-| `built-ins/WeakRef` | 20 | 0 | 1 | 8 | 97 % | 100 % |
+| `built-ins/WeakRef` | 21 | 0 | 0 | 8 | 100 % | 100 % |
 | `language/global-code` | 28 | 0 | 0 | 8 | 100 % | 100 % |
 | `built-ins/AsyncGeneratorFunction` | 2 | 0 | 2 | 7 | 82 % | 100 % |
-| `built-ins/Boolean` | 42 | 0 | 1 | 7 | 98 % | 100 % |
+| `built-ins/Boolean` | 43 | 0 | 0 | 7 | 100 % | 100 % |
 | `built-ins/GeneratorFunction` | 2 | 0 | 2 | 7 | 82 % | 100 % |
 | `language/types` | 90 | 0 | 4 | 7 | 96 % | 100 % |
-| `built-ins/AggregateError` | 17 | 0 | 1 | 6 | 96 % | 100 % |
+| `built-ins/AggregateError` | 18 | 0 | 0 | 6 | 100 % | 100 % |
 | `built-ins/AsyncIteratorPrototype` | 7 | 0 | 0 | 6 | 100 % | 100 % |
 | `built-ins/Proxy` | 287 | 0 | 1 | 6 | 100 % | 100 % |
-| `built-ins/SuppressedError` | 15 | 0 | 1 | 6 | 95 % | 100 % |
+| `built-ins/SuppressedError` | 16 | 0 | 0 | 6 | 100 % | 100 % |
 | `built-ins/AsyncFunction` | 9 | 0 | 1 | 5 | 93 % | 100 % |
 | `built-ins/ArrayIteratorPrototype` | 15 | 0 | 0 | 4 | 100 % | 100 % |
 | `built-ins/MapIteratorPrototype` | 8 | 0 | 0 | 3 | 100 % | 100 % |
@@ -284,13 +284,20 @@ until its features ship in mainline ECMA-262.
 
 | feature | pass | fail | skip | pass% | engine% |
 |---|---:|---:|---:|---:|---:|
-| `joint-iteration` (hardened) | 76 | 0 | 94 | 45 % | 100 % |
-| `joint-iteration` (unhardened) | 76 | 0 | 94 | 45 % | 100 % |
-| `ShadowRealm` (hardened) | 63 | 0 | 94 | 40 % | 100 % |
-| `ShadowRealm` (unhardened) | 63 | 0 | 94 | 40 % | 100 % |
+| `joint-iteration` (hardened) | 76 | 0 | 51 | 60 % | 100 % |
+| `joint-iteration` (unhardened) | 76 | 0 | 51 | 60 % | 100 % |
+| `ShadowRealm` (hardened) | 63 | 0 | 51 | 55 % | 100 % |
+| `ShadowRealm` (unhardened) | 63 | 0 | 51 | 55 % | 100 % |
 
 
 ## History
+
+### 2026-05-31 — cynic `09c45c7`, test262 `d0c1b455`
+
+|         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|---:|
+| **runtime** | 99.88 % | 100.00 % | 42994 / 43045 | 42994 / 42994 | — | +43 | 30.5 s |
+| **runtime_hardened** | 99.88 % | 100.00 % | 42994 / 43045 | 39136 / 39136 | 3858 | +43 | 30.5 s |
 
 ### 2026-05-30 — cynic `ca71b7e`, test262 `d0c1b455`
 
