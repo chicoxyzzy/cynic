@@ -642,17 +642,18 @@ function renderEvalResult(frame) {
   if (frame.status === 0) {
     setEditorErrorRange(null);
     if (frame.value.length > 0) {
-      appendLine((printedAnything ? '\n' : '') + frame.value, 'out-value');
+      // Each segment is its own block (see the .out-* CSS), so the
+      // value sits on its own line under stdout. No leading-"\n"
+      // hack — that put the ::before "⇒ " marker at the tail of the
+      // previous stdout line instead of at the start of this one.
+      appendLine(frame.value, 'out-value');
       printedAnything = true;
     }
   } else {
     // status 1 (throw) or 2 (parse/compile error). Underline the
     // source range the engine fingered, if it surfaced one.
     setEditorErrorRange(frameSpanToEditorRange(frame.errorSpan));
-    appendLine(
-      (printedAnything ? '\n' : '') + (frame.error || 'unknown error'),
-      'out-error',
-    );
+    appendLine(frame.error || 'unknown error', 'out-error');
     printedAnything = true;
   }
 
