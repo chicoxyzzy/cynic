@@ -1079,14 +1079,6 @@ pub const single_realm_path_contains = [_][]const u8{
     // on the shared `heap.symbol_registry`, so those pass — they are
     // deliberately NOT matched here.
     //
-    // `BigInt/prototype/valueOf/cross-realm.js` IS still matched: it
-    // boxes a BigInt with the *other* realm's `Object` (§7.1.18 ToObject
-    // → a BigInt wrapper) and then calls the parent realm's
-    // `BigInt.prototype.valueOf` on it (§21.2.3.4 thisBigIntValue). The
-    // single-realm equivalent passes (`Object(BigInt(0))` boxes with a
-    // live `boxed_primitive`), so this is a cross-realm
-    // [[BigIntData]]-slot recognition gap, not a general boxing bug.
-    "BigInt/prototype/valueOf/cross-realm.",
     "RegExp/prototype/dotAll/cross-realm.",
     "RegExp/prototype/global/cross-realm.",
     "RegExp/prototype/hasIndices/cross-realm.",

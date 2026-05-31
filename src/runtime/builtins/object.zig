@@ -58,13 +58,33 @@ pub fn objectConstructor(realm: *Realm, this_value: Value, args: []const Value) 
     // `this_value` pre-allocated against `O.prototype` (not
     // `%Object.prototype%`) — that pre-allocated instance IS the
     // §10.1.14-derived object the spec asks for. Return it instead
-    // of falling through to step 3's `return arg` (which would
-    // hand back the unrelated user-supplied object and lose the
-    // subclass identity). The interpreter's construct path already
-    // builds `this_value` via `getPrototypeFromConstructor`.
-    if (heap_mod.valueAsPlainObject(this_value)) |this_obj| {
-        if (this_obj.prototype != realm.intrinsics.object_prototype) {
-            return this_value;
+    // of falling through to step 3's box-the-arg path (which would
+    // discard the subclass identity). The interpreter's construct
+    // path already builds `this_value` via `getPrototypeFromConstructor`.
+    //
+    // The native callback can't observe NewTarget directly (the
+    // non-deferred construct path doesn't stash it on the realm),
+    // so the discriminator is structural: fire only when `this_value`
+    // is an Object-derived instance *of this realm* — its
+    // [[Prototype]] chain must reach this realm's %Object.prototype%
+    // (every `extends Object` subclass does, since `O.prototype`'s
+    // proto is %Object.prototype%). A plain *method* call such as
+    // `other.Object(v)` passes the member base as `this_value` — e.g.
+    // another realm's `globalThis`, whose chain bottoms out at the
+    // *other* realm's %Object.prototype%, never this one's. The
+    // earlier `proto != %Object.prototype%` check alone mistook that
+    // foreign receiver for a subclass `this` and returned it verbatim,
+    // so `other.Object(0n)` yielded the child global instead of a
+    // BigInt wrapper and the parent `BigInt.prototype.valueOf` brand
+    // check threw (built-ins/BigInt/prototype/valueOf/cross-realm.js).
+    if (realm.intrinsics.object_prototype) |obj_proto| {
+        if (heap_mod.valueAsPlainObject(this_value)) |this_obj| {
+            if (this_obj.prototype != null and this_obj.prototype != obj_proto) {
+                var cursor: ?*JSObject = this_obj.prototype;
+                while (cursor) |c| : (cursor = c.prototype) {
+                    if (c == obj_proto) return this_value;
+                }
+            }
         }
     }
     // §20.1.1.1 step 3a — `Object(value)` returns the value

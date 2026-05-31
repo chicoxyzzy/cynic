@@ -6744,6 +6744,60 @@ test "later: Function [[Construct]] derives result proto from newTarget's realm"
     try testing.expectEqual(child_fn_proto, f.proto);
 }
 
+test "later: Object(primitive) boxes on a cross-realm method-call receiver" {
+    // §20.1.1.1 Object(value) + §7.1.18 ToObject — a *plain* call
+    // `other.Object(0n)` passes the member base (the other realm's
+    // `globalThis`) as `this_value`. The §20.1.1.1 step-1 subclass
+    // short-circuit ("`this_value` is a pre-allocated subclass
+    // instance → return it") must NOT fire for that foreign receiver:
+    // its [[Prototype]] chain reaches the *child* realm's
+    // %Object.prototype%, never the caller's, so it is not an
+    // Object-derived instance of this realm. Before the chain check,
+    // the bare `proto != %Object.prototype%` test mistook the child
+    // global for a subclass `this` and returned it verbatim, so
+    // `other.Object(0n)` yielded the child global instead of a BigInt
+    // wrapper — and the subsequent `BigInt.prototype.valueOf` brand
+    // check threw. Mirrors built-ins/BigInt/prototype/valueOf/cross-realm.js.
+    const call = @import("call.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try installBuiltinsAllFeatures(&parent);
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // The foreign receiver's proto is the *child* realm's
+    // %Object.prototype%, distinct from the caller (parent) realm's.
+    try testing.expect(parent.intrinsics.object_prototype != child.intrinsics.object_prototype);
+
+    const child_object = heap_mod.valueAsFunction(child.globals.get("Object").?).?;
+    const child_global = child.globals.get("globalThis").?;
+
+    const bi = try parent.heap.allocateBigInt(0);
+    const bi_val = heap_mod.taggedBigInt(bi);
+
+    // `other.Object(0n)` — the native runs in the caller (parent)
+    // realm, with `this_value` = the child globalThis (member base).
+    const res = try call.callJSFunction(
+        testing.allocator,
+        &parent,
+        child_object,
+        child_global,
+        &[_]Value{bi_val},
+    );
+    try testing.expect(res == .value);
+    // A fresh BigInt wrapper, NOT the foreign receiver returned verbatim.
+    try testing.expect(res.value.bits != child_global.bits);
+    const wrapper = heap_mod.valueAsPlainObject(res.value).?;
+    // The boxed primitive is recoverable — exactly what
+    // §21.2.3.4 thisBigIntValue reads in `BigInt.prototype.valueOf`.
+    try testing.expect(wrapper.boxed_primitive != null);
+    try testing.expectEqual(bi_val.bits, wrapper.boxed_primitive.?.bits);
+}
+
 test "later: new F() with non-object prototype falls back to %Object.prototype%" {
     // §10.2.2 base-kind [[Construct]] → OrdinaryCreateFromConstructor
     // with intrinsicDefaultProto = "%Object.prototype%". When an
