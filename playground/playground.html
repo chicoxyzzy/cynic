@@ -187,22 +187,27 @@
     word-break: break-word;
   }
 
-  .out-stdout { color: var(--ink); }
-  .out-value {
-    color: var(--ink-soft);
+  /* Each eval-output segment is its own block (like .bc-line and
+     .out-hint). An inline <span> drops vertical margin/padding and
+     draws border-top only across its line fragments, so the value
+     marker and separator below misrendered until these went block. */
+  .out-stdout { display: block; color: var(--ink); }
+  .out-value { display: block; color: var(--ink-soft); }
+  .out-value::before { content: "⇒ "; color: var(--grass); font-weight: 700; }
+  .out-error { display: block; color: var(--bart); font-weight: 700; }
+  .out-empty { display: block; color: var(--ink-soft); font-style: italic; }
+
+  /* The dashed rule + spacing set the completion value (or a thrown
+     error) off from the stdout above it — so it applies only when
+     the value/error actually follows stdout, never when it is the
+     sole line in the panel. */
+  .out-stdout + .out-value,
+  .out-stdout + .out-error {
     border-top: 2px dashed rgba(0, 0, 0, 0.25);
     padding-top: 10px;
     margin-top: 10px;
   }
-  .out-value::before { content: "⇒ "; color: var(--grass); font-weight: 700; }
-  .out-error {
-    color: var(--bart);
-    font-weight: 700;
-    border-top: 2px dashed rgba(220, 74, 56, 0.4);
-    padding-top: 10px;
-    margin-top: 10px;
-  }
-  .out-empty { color: var(--ink-soft); font-style: italic; }
+  .out-stdout + .out-error { border-top-color: rgba(220, 74, 56, 0.4); }
 
   /* Inspector affordance hint — a one-off muted note at the top of the
      bytecode / AST panels telling the reader the lines are hoverable.
