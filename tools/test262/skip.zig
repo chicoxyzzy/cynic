@@ -108,6 +108,25 @@ pub const strict_only_exact_paths = [_][]const u8{
     // the boundary plumbing. Permanent strict-only carve-out, same
     // class as the hashbang fixture above.
     "built-ins/ShadowRealm/prototype/evaluate/no-conditional-strict-mode.js",
+    // `language/statements/variable/12.2.1-{9,10,20,21}-s.js` — four
+    // `-s` fixtures whose body runs an *indirect* eval:
+    // `var s = eval; s('var eval;')` (plus the `eval = 42;` /
+    // `var arguments;` / `arguments = 42;` siblings). Per §19.2.1.1
+    // PerformEval an indirect eval evaluates its source as *non-strict*
+    // code (strictCaller = false; the source carries no "use strict"
+    // directive), so binding/assigning `eval` / `arguments` is legal
+    // there and the fixtures assert "does not throw". Cynic is
+    // strict-only (no sloppy parser path) per AGENTS.md, so even with
+    // `--allow=eval` the eval'd source is parsed in strict mode, where
+    // those forms are early SyntaxErrors — Cynic throws and the
+    // positive (no-throw) test fails. They can never pass regardless of
+    // the eval opt-in, so they live here, not in
+    // `eval_dependent_exact_paths`. Same class as the ShadowRealm
+    // sloppy-mode fixture above (which likewise rejects `arguments = 42`).
+    "language/statements/variable/12.2.1-9-s.js",
+    "language/statements/variable/12.2.1-10-s.js",
+    "language/statements/variable/12.2.1-20-s.js",
+    "language/statements/variable/12.2.1-21-s.js",
 };
 
 // ── SES surface ─────────────────────────────────────────────────────
@@ -1135,18 +1154,14 @@ pub const eval_dependent_exact_paths = [_][]const u8{
     "language/types/string/S8.4_A7.2.js",
     "language/types/string/S8.4_A7.3.js",
     "language/types/string/S8.4_A7.4.js",
-    // `language/statements/variable/12.2.1-{9,10,20,21}-s.js` —
-    // every fixture builds `var s = eval; s('var eval;')` /
-    // `s('eval = 42;')` / `s('var arguments;')` /
-    // `s('arguments = 42;')` to verify indirect-eval declarations
-    // of `eval` / `arguments` don't throw in strict mode. Without
-    // `eval()` the indirect-call line itself throws TypeError
-    // ("eval is not a function" — Cynic doesn't expose `eval` as
-    // a global).
-    "language/statements/variable/12.2.1-9-s.js",
-    "language/statements/variable/12.2.1-10-s.js",
-    "language/statements/variable/12.2.1-20-s.js",
-    "language/statements/variable/12.2.1-21-s.js",
+    // Not here despite using `eval`: the four indirect-eval fixtures
+    // `language/statements/variable/12.2.1-{9,10,20,21}-s.js` assert
+    // that an *indirect* eval runs its body as sloppy code (§19.2.1.1
+    // PerformEval), so `var eval;` / `arguments = 42;` etc. don't throw.
+    // Strict-only Cynic parses the eval'd source in strict mode and
+    // throws, so they'd fail even with `--allow=eval` — they're a
+    // permanent strict-only carve-out in `strict_only_exact_paths`, not
+    // eval-graduates.
     // `proto-from-ctor-realm` cross-realm fixtures whose `newTarget`
     // (or asserted constructor) is built from a *source string* —
     // `other.eval('(0, function* () {})')`, `new other.Function(body)`,
