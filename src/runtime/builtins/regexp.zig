@@ -23,6 +23,7 @@ const intrinsics = @import("../intrinsics.zig");
 const c_alloc = @import("../c_alloc.zig");
 const perlex = @import("../../perlex/perlex.zig");
 const perlex_props = @import("../../unicode/perlex_props.zig");
+const build_options = @import("build_options");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -1655,6 +1656,16 @@ fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
             return error.NativeThrew;
         },
         .unsupported => {
+            if (build_options.perlex_only) {
+                // `-Dperlex-only`: the libregexp fallback is disabled. A
+                // pattern Perlex doesn't own surfaces loudly instead of
+                // silently falling through, so a corpus run flags any
+                // reached defer (the census is 0 today). Print it and throw.
+                std.debug.print("perlex-only fallthrough (runtime): /{s}/{s}\n", .{ src_s.flatBytes(), flag_str });
+                const ex = intrinsics.newSyntaxError(realm, "perlex-only: pattern not owned by Perlex") catch return error.OutOfMemory;
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            }
             _ = (try compileLibregexp(realm, regex_obj)) orelse return false;
             return true;
         },

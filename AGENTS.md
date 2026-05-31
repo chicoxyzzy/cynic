@@ -413,6 +413,21 @@ and the 0xaa free-poison — all gated on `runtime_safety`, hence
 no-ops in ReleaseFast — while running ~2-3× faster than Debug.
 The right binary for `/gc-stress` use-after-free hunts.
 
+**Perlex-only verification build.** `-Dperlex-only=true` disables
+the vendored libregexp fallback: every regex pattern must be owned
+by Perlex (the native engine) at both the runtime bridge
+(`runtime/builtins/regexp.zig`) and the parse-time validator
+(`parser/regex_validate.zig`). A pattern Perlex defers no longer
+falls through silently — it prints `perlex-only fallthrough …` and
+fails (the bridge throws a SyntaxError; the validator reports a
+parse diagnostic). The corpus census of fall-throughs is **0**, so
+`zig build test262 -Dperlex-only=true` matches the default
+pass counts exactly; a future defer the corpus reaches makes it
+diverge. This is the standing guard for the libregexp-removal
+effort (see [docs/ROADMAP.md](docs/ROADMAP.md) under "Regex").
+Plain `zig build` / `zig build test262` keep the fallback (the
+option defaults off), so production builds are unaffected.
+
 **Leak-check before every full sweep.** Past leaks (e.g. JSString
 bytes pinned in the per-fixture arena before `7a6a0d8`) ballooned
 full sweeps to multi-GB RSS and locked the laptop. The byte-trigger

@@ -23,6 +23,7 @@ const c = @import("c");
 
 const perlex = @import("../perlex/perlex.zig");
 const perlex_props = @import("../unicode/perlex_props.zig");
+const build_options = @import("build_options");
 
 /// Map a flag string to Perlex's flag set for the parse-time check.
 fn perlexFlagsFromText(flags: []const u8) perlex.Flags {
@@ -136,7 +137,19 @@ pub fn validateRegexLiteralToken(
             try report(allocator, diagnostics, .invalid_regex_literal, span);
             return;
         },
-        .unsupported => {},
+        .unsupported => {
+            if (build_options.perlex_only) {
+                // `-Dperlex-only`: the libregexp fallback is disabled, so a
+                // literal Perlex doesn't own can't be validated by it —
+                // surface the fall-through (print + report) instead of
+                // deferring to `validatePattern` below. The census is 0
+                // today, so the corpus stays green; a future reached defer
+                // turns into a parse diagnostic naming the pattern.
+                std.debug.print("perlex-only fallthrough (parse): /{s}/{s}\n", .{ pattern, flags_text });
+                try report(allocator, diagnostics, .invalid_regex_literal, span);
+                return;
+            }
+        },
     }
     if (!validatePattern(allocator, pattern, re_flags)) {
         try report(allocator, diagnostics, .invalid_regex_literal, span);
