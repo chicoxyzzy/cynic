@@ -636,7 +636,7 @@
           <div class="stamp">DENIED</div>
           <span class="feature">SharedArrayBuffer · Atomics</span>
           <h3>Shared-memory primitives</h3>
-          <p>Defeats SES-style isolation. Cynic's edge-runtime hosts are single-agent-per-isolate by design — there's nothing to share memory with.</p>
+          <p>Out by policy, not omission: shared mutable memory and <code>Atomics</code> reintroduce data races and a high-resolution timing side channel — exactly what the hardened (SES) posture exists to rule out.</p>
           <div class="quote">ReferenceError: no shared agents, no Atomics.</div>
         </article>
       </div>
