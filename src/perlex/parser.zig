@@ -1192,17 +1192,14 @@ const Parser = struct {
             }
         }
         if (neg_shorthands.items.len != 0) {
-            // A class containing a `\D`/`\S`/`\W` (negated shorthand) under
-            // /u. A `^`-negated such class is the complement of the union,
-            // which this lowering can't express — defer it (`[\D]` / `[^\D]`
-            // alone are intercepted before the loop). Otherwise lower to an
-            // ordered alternation: each negated shorthand as a *standalone*
+            // A class containing a `\D`/`\S`/`\W` (negated shorthand) under /u
+            // (`[\D]` / `[^\D]` alone are intercepted before the loop). Build
+            // the *positive* union: each negated shorthand as a standalone
             // negated class (the VM extends its positive set through the fold
             // orbit and then negates — correct §22.2.2.7.3, incl. /iu), plus
             // the positive members as one branch (keeping their runtime fold).
             // A class matches one character, so the union of these branches is
-            // exactly the class set.
-            if (negated) return error.Unsupported;
+            // exactly `[ … ]` (without a leading `^`).
             var branches: std.ArrayListUnmanaged(*Node) = .empty;
             for (neg_shorthands.items) |base| {
                 try branches.append(self.a, try self.makeNode(.{ .class = .{ .negated = true, .ranges = base } }));
@@ -1210,7 +1207,22 @@ const Parser = struct {
             if (ranges.items.len != 0 or props.items.len != 0) {
                 try branches.append(self.a, try self.positiveClassNode(false, ranges.items, props.items));
             }
-            return self.makeNode(.{ .alternate = branches.items });
+            const union_node = if (branches.items.len == 1)
+                branches.items[0]
+            else
+                try self.makeNode(.{ .alternate = branches.items });
+            if (!negated) return union_node;
+            // `[^ … ]` is the complement of the union, which an alternation
+            // can't express. A class still matches exactly one character, so
+            // lower to a negative lookahead of the positive union followed by
+            // an any-character class (`[^]`): match one code point that the
+            // union rejects. The lookahead inherits the union's correct fold.
+            const la = try self.makeNode(.{ .lookahead = .{ .negative = true, .behind = false, .body = union_node } });
+            const any = try self.makeNode(.{ .class = .{ .negated = true, .ranges = &.{} } });
+            const seq = try self.a.alloc(*Node, 2);
+            seq[0] = la;
+            seq[1] = any;
+            return self.makeNode(.{ .concat = seq });
         }
         return self.positiveClassNode(negated, ranges.items, props.items);
     }
