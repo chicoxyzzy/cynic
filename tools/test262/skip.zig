@@ -172,6 +172,32 @@ pub const strict_only_exact_paths = [_][]const u8{
     "language/statements/variable/12.2.1-21-s.js",
 };
 
+// ── Annex B regex-grammar carve-out ─────────────────────────────────
+//
+// Main-tree fixtures (outside the `annexB/` subtree) whose body
+// *requires* the Annex B §B.1.2/§B.1.4 regex-grammar leniency that
+// rereads an otherwise-invalid escape as a literal — e.g. `\X` /
+// `\XA0` (an IdentityEscape of a UnicodeIDContinue letter, invalid in
+// the §22.2.1 main grammar) read as the character 'X'. Cynic's
+// strict-only, non-browser target enforces the main grammar in every
+// mode (AGENTS.md "Regex Annex B (§B.1.4)"), so these patterns are
+// §22.2.1.1 early errors. When they appear as a RegularExpressionLiteral
+// they are a §12.9.5 early Syntax Error at script-parse time, which
+// aborts the whole fixture — it can never pass regardless of the
+// behaviour it means to exercise. Same out-of-scope class as the
+// `annexB/` tree; the `total`-set filter drops them so the score
+// carries no false-reject noise.
+pub const annex_b_regex_exact_paths = [_][]const u8{
+    // `built-ins/String/prototype/split/separator-regexp.js` — a
+    // grab-bag of `String.prototype.split` separators that mixes
+    // valid escapes (`\b`, `\d`, `\cY`, …) with Annex-B-only regex
+    // literals: `/\XA0/` and `/\X/` (invalid IdentityEscape — `X` is
+    // UnicodeIDContinue), plus `/\k<x>/` with no group named `x`
+    // (Annex B rereads `\k` as literal 'k'). The first invalid
+    // literal is a §12.9.5 early error, so the script never parses.
+    "built-ins/String/prototype/split/separator-regexp.js",
+};
+
 // ── SES surface ─────────────────────────────────────────────────────
 //
 // No `eval` / `new Function(string)` (runtime code construction
@@ -1301,6 +1327,7 @@ pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
     }
     inline for (.{
         strict_only_exact_paths,
+        annex_b_regex_exact_paths,
         ses_exact_paths,
         single_realm_exact_paths,
         // eval-dependent fixtures: the SES eval surface in individual-
@@ -1449,6 +1476,11 @@ test "skip: Annex B out of scope" {
     try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/Date/prototype/setYear/year-nan.js"));
     try testing.expect(pathIsCynicOutOfScope("annexB/language/comments/single-line-html-open.js"));
     try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/String/prototype/substr/length-undef.js"));
+    // Main-tree fixture that depends on Annex B regex-grammar leniency
+    // (`/\X/`, `/\XA0/`, `/\k<x>/` with no group) — strict-rejected per
+    // AGENTS.md "Regex Annex B", so permanently out of scope.
+    try testing.expect(pathIsCynicOutOfScope("built-ins/String/prototype/split/separator-regexp.js"));
+    try testing.expect(pathIsPermanentlyOutOfScope("built-ins/String/prototype/split/separator-regexp.js"));
 }
 
 test "skip: SES out of scope" {
