@@ -916,26 +916,16 @@ function wireSourceToSpanHover() {
       clearSpanActive();
       return;
     }
-    let firstActive = null;
-    let tightest = null;
-    let tightestWidth = Infinity;
     for (const el of lastSpanLines) {
       const from = Number(el.dataset.from);
       const to = Number(el.dataset.to);
       const inside = pos >= from && pos < to;
       el.classList.toggle('span-active', inside);
-      if (inside && firstActive === null) firstActive = el;
-      // For nested AST nodes the tightest match is the innermost one;
-      // prefer scrolling that into view rather than the outermost.
-      if (inside && to - from < tightestWidth) {
-        tightest = el;
-        tightestWidth = to - from;
-      }
     }
-    // Keep the activated line visible. `block: nearest` is a no-op
-    // when the line is already on-screen.
-    const target = tightest || firstActive;
-    if (target) target.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+    // No autoscroll: hovering the source only highlights the matching
+    // output line(s) in place. Auto-scrolling the panel to reveal an
+    // off-screen match shifted content under the pointer and read as a
+    // jump — the highlight alone is enough of a cross-reference cue.
   });
   els.editorHost.addEventListener('mouseleave', clearSpanActive);
 }
