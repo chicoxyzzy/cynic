@@ -243,3 +243,40 @@ the corpus under the relevant section's directory before adding.
   the combination a robust engine (ASAN / GC-stress) needs to expose
   the freed-receiver read. The same shape recurs for object-receiver
   coercion on `Symbol.prototype.toString` / `valueOf` (§20.4.3).
+
+### A quantified empty-matching `/v` `\q{}` set threw at construction
+
+- **Fixed in:** `fa5445c`
+- **Spec:** §22.2.2.3 RepeatMatcher (the zero-width progress guard) +
+  §22.2.1.4 / §22.2.2.7 ClassSetExpression / `\q{…}` ClassString
+  matching — a `/v` set whose membership includes the empty string is a
+  legal nullable atom, and a quantifier over it is well-defined.
+- **Reproducer:**
+  ```js
+  // `\q{}` contributes the empty string to the set's membership, so
+  // [\q{}a] matches "a" or "". All of these are valid /v patterns.
+  /[\q{}a]*/v.exec("aab")[0];      // must be "aa"
+  /[\q{}a]+/v.exec("b")[0];        // must be ""  (mandatory iter matches empty)
+  /[\q{}a]{2,3}/v.exec("a")[0];    // must be "a"
+  new RegExp("[\\q{}]*", "v");      // must construct, not throw
+  ```
+- **Before fix:** Cynic's native engine deferred any quantifier over a
+  nullable `\q{}` set to its vendored libregexp fallback, which does not
+  implement `\q{…}` at all — so the pattern threw
+  `SyntaxError: invalid escape sequence` at `RegExp` construction
+  instead of compiling. A non-quantified `[\q{}a]` matched fine; only
+  the quantified form tripped the deferral.
+- **After fix:** the set is owned natively; the §22.2.2.3 progress guard
+  stops the zero-width loop and the `min = 0` precondition lets the
+  mandatory iterations match empty and still participate, so the
+  patterns above return their spec results.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/RegExp/unicodeSets/` (or `language/literals/regexp/`),
+  `features: [regexp-v-flag]`. The corpus has `\q{}` set-membership and
+  set-algebra fixtures, but none quantify an empty-matching set — the
+  exact combination that exposes a fallback-shaped engine to a
+  construction-time throw. The mandatory-iteration cases
+  (`[\q{}a]+` on `"b"`, `[\q{}a]{2,3}` on `"a"`) double as a
+  §22.2.2.3-step-2.b regression guard: engine262 currently returns
+  `null` for them (V8 / JSC / SpiderMonkey / Hermes / QuickJS all
+  match), so a fixture asserting the match would also catch that.
