@@ -815,13 +815,16 @@ const Parser = struct {
                 return self.makeNode(.{ .word_boundary = true });
             },
             '1'...'9' => {
-                // §22.2.1 DecimalEscape — a numeric backreference. Parse
-                // all digits greedily; the compiler decides whether the
-                // index is in range (else it's an Annex B octal escape,
-                // deferred to the fallback).
+                // §22.2.1 DecimalEscape — a numeric backreference. Parse all
+                // digits greedily; `compileBackref` raises the §22.2.1.1
+                // early error when the index exceeds the capture count
+                // (Annex B's legacy-octal reread is dropped in every mode).
+                // A value too large to fit usize can't fit the capture count
+                // either, so it is that same early error — own it here rather
+                // than deferring to the Annex B fallback.
                 var i = self.pos + 1;
                 while (i < self.src.len and self.src[i] >= '0' and self.src[i] <= '9') i += 1;
-                const n = std.fmt.parseInt(usize, self.src[self.pos + 1 .. i], 10) catch return error.Unsupported;
+                const n = std.fmt.parseInt(usize, self.src[self.pos + 1 .. i], 10) catch return error.SyntaxError;
                 self.pos = i;
                 return self.makeNode(.{ .backref_index = n });
             },
