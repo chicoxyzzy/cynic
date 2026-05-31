@@ -6,6 +6,19 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // `-Dperlex-only=true` disables the vendored libregexp fallback: every
+    // regex pattern must be owned by Perlex (the native engine), at both the
+    // runtime bridge and the parse-time validator. A pattern Perlex defers
+    // surfaces loudly (prints the pattern; the bridge throws, the validator
+    // reports) instead of silently falling through. A verification build for
+    // the libregexp-removal effort — the corpus census of fall-throughs is 0
+    // today, so `zig build test262 -Dperlex-only=true` stays green; a future
+    // reached defer makes it fail. Exposed to src as `@import("build_options")`.
+    const perlex_only = b.option(bool, "perlex-only", "Disable the libregexp fallback; Perlex must own every pattern (verification build)") orelse false;
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "perlex_only", perlex_only);
+    const build_options_mod = build_options.createModule();
+
     // QuickJS-NG libregexp — the §22.2 RegExp engine. Vendored
     // under `vendor/quickjs/` (MIT). Built as a static library
     // and linked into both the lib and exe modules so unit tests
@@ -63,6 +76,7 @@ pub fn build(b: *std.Build) void {
     lib_mod.linkLibrary(qjs_regex);
     lib_mod.addIncludePath(b.path("vendor/quickjs"));
     lib_mod.addImport("c", c_mod);
+    lib_mod.addImport("build_options", build_options_mod);
 
     // Executable module: the `cynic` CLI. Imports the library as `cynic`.
     const exe_mod = b.createModule(.{
@@ -216,6 +230,7 @@ pub fn build(b: *std.Build) void {
     lib_mod_fast.linkLibrary(qjs_regex);
     lib_mod_fast.addIncludePath(b.path("vendor/quickjs"));
     lib_mod_fast.addImport("c", c_mod);
+    lib_mod_fast.addImport("build_options", build_options_mod);
     const t262_mod = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
@@ -274,6 +289,7 @@ pub fn build(b: *std.Build) void {
     lib_mod_safe.linkLibrary(qjs_regex);
     lib_mod_safe.addIncludePath(b.path("vendor/quickjs"));
     lib_mod_safe.addImport("c", c_mod);
+    lib_mod_safe.addImport("build_options", build_options_mod);
     const t262_mod_safe = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
