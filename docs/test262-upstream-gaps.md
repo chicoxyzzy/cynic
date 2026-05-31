@@ -319,3 +319,35 @@ the corpus under the relevant section's directory before adding.
   `k`/`K`; `/[a-z]/i` rejects ſ). A `match-vs-no-match` table over
   these units would lock down both directions, complementing
   `u-case-mapping.js`'s exclusion-only coverage.
+
+### A third `&` in a `/v` ClassIntersection (`&&&`) compiled instead of throwing
+
+- **Fixed in:** `1dffada`
+- **Spec:** §22.2.1 ClassSetExpression / ClassIntersection + §22.2.1.1
+  early errors — `ClassIntersection :: ClassSetOperand && ClassSetOperand`
+  (with an optional repeated `&& ClassSetOperand` tail). After each `&&`
+  the next token must be a ClassSetOperand, and a ClassSetOperand cannot
+  begin with `&` (it is a ClassSetReservedDoublePunctuator). So `&&&`
+  (and `&&&&`) has no derivation — it is an early error.
+- **Reproducer:**
+  ```js
+  new RegExp("[a&&&b]", "v");   // must throw SyntaxError
+  new RegExp("[a&&&&b]", "v");  // must throw SyntaxError
+  new RegExp("[a&&b]", "v");    // valid intersection — must construct
+  /[a&&&b]/v;                   // literal form: must be a parse SyntaxError
+  ```
+- **Before fix:** Cynic's native engine returned `Unsupported` on the
+  third `&`, deferring to its vendored libregexp fallback, which accepts
+  the pattern (QuickJS — also libregexp — agrees). So `[a&&&b]/v`
+  compiled instead of throwing. engine262 + V8 / JSC / SpiderMonkey all
+  reject it; Cynic and QuickJS were the only acceptors.
+- **After fix:** the third `&` is a §22.2.1.1 early error in the native
+  engine, so both `new RegExp(…, "v")` and the `/…/v` literal throw
+  `SyntaxError` at construction / parse time.
+- **Suggested fixture shape:** negative fixture (`negative: { phase:
+  parse, type: SyntaxError }` for the literal; a runtime `assert.throws`
+  for the `new RegExp` form) under `built-ins/RegExp/unicodeSets/`,
+  `features: [regexp-v-flag]`. The corpus has `&&` intersection
+  positives and reserved-punctuator negatives, but none assert that a
+  *third* `&` after a valid `&&` is rejected — the exact spot a
+  libregexp-backed engine slips through.
