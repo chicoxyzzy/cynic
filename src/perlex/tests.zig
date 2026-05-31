@@ -1663,6 +1663,81 @@ test "perlex: an astral class member with /i still defers (§22.2.1)" {
     try expectCompileFlags("[𠮷]", .{ .ignore_case = true }, .unsupported);
 }
 
+// ── §22.2.1 raw WTF-8 lone-surrogate source characters ──────────────
+//
+// `new RegExp(String.fromCharCode(0xD800))` reaches the bridge as the
+// 3-byte WTF-8 (CESU-8) encoding of a lone surrogate — `0xED 0x[A-B]x
+// 0x[8-B]x`, which `std.unicode.utf8Decode` rejects. The pattern source
+// is a code-unit sequence (§22.2.1), so a lone surrogate is a literal
+// PatternCharacter / ClassAtom matching that single code unit; Perlex
+// owns it instead of deferring to the fallback.
+
+test "perlex: a non-/u WTF-8 lone high surrogate is a literal code-unit PatternCharacter (§22.2.1)" {
+    const gpa = testing.allocator;
+    var r = try perlex.compile(gpa, "\xED\xA0\x80", .{}); // U+D800
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    {
+        const hi = [_]u16{0xD800};
+        var m = (try perlex.exec(u16, gpa, &r.ok, &hi, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), m.slots[0]);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+    {
+        const other = [_]u16{0xD801}; // a different surrogate — no match
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &other, 0)) == null);
+    }
+}
+
+test "perlex: a non-/u WTF-8 lone low surrogate is a literal code-unit PatternCharacter (§22.2.1)" {
+    const gpa = testing.allocator;
+    var r = try perlex.compile(gpa, "\xED\xB0\x80", .{}); // U+DC00
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    const lo = [_]u16{0xDC00};
+    var m = (try perlex.exec(u16, gpa, &r.ok, &lo, 0)) orelse return error.ExpectedMatch;
+    defer m.deinit(gpa);
+    try testing.expectEqual(@as(usize, 1), m.slots[1]);
+}
+
+test "perlex: a /u WTF-8 lone surrogate matches its code unit (§22.2.1)" {
+    const gpa = testing.allocator;
+    // Under /u a lone surrogate is its own code point (not a scalar value),
+    // matching the lone-surrogate code unit — same as the `\uD800` escape.
+    var r = try perlex.compile(gpa, "\xED\xA0\x80", uf); // U+D800
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    const hi = [_]u16{0xD800};
+    var m = (try perlex.exec(u16, gpa, &r.ok, &hi, 0)) orelse return error.ExpectedMatch;
+    defer m.deinit(gpa);
+    try testing.expectEqual(@as(usize, 1), m.slots[1]);
+}
+
+test "perlex: a non-/u WTF-8 lone surrogate is a literal ClassAtom (§22.2.1)" {
+    const gpa = testing.allocator;
+    var r = try perlex.compile(gpa, "[\xED\xA0\x80]", .{}); // [U+D800]
+    try testing.expect(r == .ok);
+    defer r.ok.deinit();
+    {
+        const hi = [_]u16{0xD800};
+        var m = (try perlex.exec(u16, gpa, &r.ok, &hi, 0)) orelse return error.ExpectedMatch;
+        defer m.deinit(gpa);
+        try testing.expectEqual(@as(usize, 1), m.slots[1]);
+    }
+    {
+        const other = [_]u16{0xD801};
+        try testing.expect((try perlex.exec(u16, gpa, &r.ok, &other, 0)) == null);
+    }
+}
+
+test "perlex: a genuinely malformed UTF-8 source byte still defers (§22.2.1)" {
+    // A non-surrogate invalid lead byte is not a code unit Perlex can model —
+    // it keeps deferring to the fallback (it is NOT owned by the lone-
+    // surrogate path, which is restricted to the `0xED 0xA0-0xBF …` form).
+    try expectCompile("\xFF", .unsupported);
+}
+
 // ── §22.2.1 \u surrogate escapes under /u (combine + lone) ──────────
 
 test "perlex: a lone surrogate \\u escape matches its code unit under /u (§22.2.1)" {

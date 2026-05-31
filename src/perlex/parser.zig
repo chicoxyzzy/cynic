@@ -17,6 +17,25 @@ const std = @import("std");
 const charset = @import("charset.zig");
 const idents = @import("../unicode/idents.zig");
 
+/// If `seq` is the 3-byte WTF-8 (CESU-8) encoding of a lone UTF-16
+/// surrogate — `0xED 0x[A0-BF] 0x[80-BF]`, the form Cynic's WTF-8 storage
+/// uses for a code unit in U+D800..U+DFFF — return that surrogate code
+/// unit, else null. `std.unicode.utf8Decode` rejects this sequence
+/// (`error.Utf8EncodesSurrogateHalf`), but a regex source is a code-unit
+/// sequence (§22.2.1), so a lone surrogate is a valid literal that matches
+/// the single code unit. (A *valid* surrogate pair is stored as the 4-byte
+/// UTF-8 form of its supplementary code point, which decodes normally — so
+/// this only ever fires for lone halves.)
+fn wtf8LoneSurrogate(seq: []const u8) ?u21 {
+    if (seq.len == 3 and seq[0] == 0xED and
+        seq[1] >= 0xA0 and seq[1] <= 0xBF and
+        seq[2] >= 0x80 and seq[2] <= 0xBF)
+    {
+        return 0xD000 | (@as(u21, seq[1] & 0x3F) << 6) | @as(u21, seq[2] & 0x3F);
+    }
+    return null;
+}
+
 pub const Node = union(enum) {
     /// Matches the empty string (an empty alternative, e.g. `a|`).
     empty,
@@ -493,7 +512,18 @@ const Parser = struct {
         const lead = self.src[self.pos];
         const len = std.unicode.utf8ByteSequenceLength(lead) catch return error.Unsupported;
         if (self.pos + len > self.src.len) return error.Unsupported;
-        const cp = std.unicode.utf8Decode(self.src[self.pos .. self.pos + len]) catch return error.Unsupported;
+        const seq = self.src[self.pos .. self.pos + len];
+        const cp = std.unicode.utf8Decode(seq) catch {
+            // A WTF-8 lone surrogate is a valid code-unit PatternCharacter
+            // (§22.2.1) — in U+D800..U+DFFF, one unit in every mode, and a
+            // surrogate never case-folds, so no `non_ascii` gate. Other
+            // malformed UTF-8 is not a code unit Perlex models — defer.
+            if (wtf8LoneSurrogate(seq)) |su| {
+                self.pos += len;
+                return self.makeNode(.{ .char = su });
+            }
+            return error.Unsupported;
+        };
         self.pos += len;
         // A non-ASCII unit can case-fold to another non-ASCII unit, which
         // the ASCII-only fold can't model — mirror the `\u`/`\x` decoders
@@ -1395,13 +1425,23 @@ const Parser = struct {
     /// half — never the pair as one code point, which needs /u); as a `-`
     /// range bound the relevant half (lead as a low bound's hi, trail as a
     /// high bound's standalone) joins the surrogate-unit range. A WTF-8 lone
-    /// surrogate or malformed sequence (`utf8Decode` rejects either) defers
-    /// to the fallback.
+    /// surrogate (`utf8Decode` rejects it) is owned as a one-unit `.ch`
+    /// (§22.2.1, see `wtf8LoneSurrogate`); other malformed sequences defer.
     fn classLiteralCodePoint(self: *Parser) ParseError!ClassMember {
         const first_byte = self.src[self.pos];
         const len = std.unicode.utf8ByteSequenceLength(first_byte) catch return error.Unsupported;
         if (self.pos + len > self.src.len) return error.Unsupported;
-        const cp = std.unicode.utf8Decode(self.src[self.pos .. self.pos + len]) catch return error.Unsupported;
+        const seq = self.src[self.pos .. self.pos + len];
+        const cp = std.unicode.utf8Decode(seq) catch {
+            // A WTF-8 lone surrogate is a valid one-unit ClassAtom (§22.2.1,
+            // see `wtf8LoneSurrogate`); it never folds, so no `non_ascii`
+            // gate. Other malformed UTF-8 defers.
+            if (wtf8LoneSurrogate(seq)) |su| {
+                self.pos += len;
+                return .{ .ch = su };
+            }
+            return error.Unsupported;
+        };
         self.pos += len;
         // A non-ASCII unit can case-fold to another non-ASCII unit, which
         // the ASCII-only fold can't model — mirror the atom decoder so the
