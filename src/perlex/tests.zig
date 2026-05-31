@@ -886,6 +886,66 @@ test "perlex: \\p / \\P in a class stays deferred, not rejected, under /u" {
     try expectCompileFlags("[\\p{Hex}\\P{Hex}]", uf, .unsupported);
 }
 
+// ── §22.2.1.1 a CharacterClassEscape as a class-range bound (/u) ─────
+// NonemptyClassRanges (+UnicodeMode): it is a Syntax Error for either
+// bound of a `-` range to be a CharacterClassEscape (\d \D \s \S \w \W),
+// e.g. `[\d-a]` / `[a-\d]` / `[\D-\D]`. Without /u the `-` and the
+// shorthand are matched literally (Annex B), which the fallback owns.
+
+test "perlex: a class-escape low range bound is a /u early error" {
+    try expectCompileFlags("[\\d-a]", uf, .syntax_error);
+    try expectCompileFlags("[\\s-a]", uf, .syntax_error);
+    try expectCompileFlags("[\\w-a]", uf, .syntax_error);
+    try expectCompileFlags("[\\D-a]", uf, .syntax_error);
+    try expectCompileFlags("[\\S-a]", uf, .syntax_error);
+    try expectCompileFlags("[\\W-a]", uf, .syntax_error);
+}
+
+test "perlex: a class-escape high range bound is a /u early error" {
+    try expectCompileFlags("[a-\\d]", uf, .syntax_error);
+    try expectCompileFlags("[a-\\s]", uf, .syntax_error);
+    try expectCompileFlags("[a-\\w]", uf, .syntax_error);
+    try expectCompileFlags("[a-\\D]", uf, .syntax_error);
+    try expectCompileFlags("[a-\\S]", uf, .syntax_error);
+    try expectCompileFlags("[a-\\W]", uf, .syntax_error);
+}
+
+test "perlex: a class escape on both range bounds is a /u early error" {
+    try expectCompileFlags("[\\d-\\d]", uf, .syntax_error);
+    try expectCompileFlags("[\\D-\\D]", uf, .syntax_error);
+    try expectCompileFlags("[\\s-\\s]", uf, .syntax_error);
+    try expectCompileFlags("[\\S-\\S]", uf, .syntax_error);
+    try expectCompileFlags("[\\w-\\w]", uf, .syntax_error);
+    try expectCompileFlags("[\\W-\\W]", uf, .syntax_error);
+}
+
+test "perlex: a class-escape range bound defers without /u (Annex B)" {
+    // The `-` and the shorthand are matched literally; the fallback owns it.
+    try expectCompile("[\\d-a]", .unsupported);
+    try expectCompile("[a-\\d]", .unsupported);
+    try expectCompile("[\\D-a]", .unsupported);
+    try expectCompile("[a-\\W]", .unsupported);
+}
+
+test "perlex: a standalone negated class escape still defers, not rejected" {
+    // `\D \S \W` standalone is a valid class member the fallback matches;
+    // it must NOT become a SyntaxError under /u just because the range
+    // path now owns class-escape bounds.
+    try expectCompileFlags("[\\D]", uf, .unsupported);
+    try expectCompileFlags("[\\S]", uf, .unsupported);
+    try expectCompileFlags("[\\W]", uf, .unsupported);
+    try expectCompile("[\\D]", .unsupported);
+}
+
+test "perlex: \\d \\s \\w still match standalone and with a trailing dash" {
+    // No regression for the shorthands Perlex represents as ranges; a
+    // trailing `-` before `]` is a literal, not a range bound.
+    try expectMatchFlags("[\\d]", uf, "5", "5");
+    try expectMatchFlags("[\\w]", uf, "a", "a");
+    try expectMatch("[\\d-]", "-", "-");
+    try expectMatch("[\\d-]", "7", "7");
+}
+
 // ── §22.2 Unicode mode (/u) — code-point matching ───────────────────
 
 const uf: perlex.Flags = .{ .unicode = true };

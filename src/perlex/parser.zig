@@ -917,28 +917,34 @@ const Parser = struct {
                 self.pos += 1;
                 break;
             }
-            switch (try self.parseClassMember(&ranges)) {
+            const member = try self.parseClassMember(&ranges);
+            // A following `- X` (where X is not the closing `]`) makes the
+            // member the low bound of a range.
+            const dash_range = self.peek() == '-' and self.at(1) != null and self.at(1).? != ']';
+            switch (member) {
                 .class_added => {
-                    // A `-` right after a class escape would form a range
-                    // with a class-escape endpoint (`[\d-a]`): a
-                    // SyntaxError under /u, an Annex B leniency
-                    // otherwise. Implement neither — defer to the
-                    // fallback, which renders the mode-correct verdict.
-                    if (self.peek() == '-' and self.at(1) != null and self.at(1).? != ']') {
-                        return error.Unsupported;
-                    }
+                    // `\d \s \w` — already appended. As a range low bound
+                    // (`[\d-a]`) it is a §22.2.1.1 /u early error.
+                    if (dash_range) return self.classEscapeRangeBound();
+                },
+                .class_escape_unsupported => {
+                    // `\D \S \W` — as a range low bound (`[\D-a]`) the same
+                    // §22.2.1.1 /u early error; standalone, defer to the
+                    // fallback to match it.
+                    if (dash_range) return self.classEscapeRangeBound();
+                    return error.Unsupported;
                 },
                 .ch => |lo| {
-                    if (self.peek() == '-' and self.at(1) != null and self.at(1).? != ']') {
+                    if (dash_range) {
                         self.pos += 1; // consume `-`
                         switch (try self.parseClassMember(&ranges)) {
                             .ch => |hi| {
                                 if (hi < lo) return error.SyntaxError; // reversed range
                                 try ranges.append(self.a, .{ .lo = lo, .hi = hi });
                             },
-                            // Range with a class-escape endpoint (`[a-\d]`)
-                            // — same as above, defer.
-                            .class_added => return error.Unsupported,
+                            // Range with a CharacterClassEscape high bound
+                            // (`[a-\d]` / `[a-\D]`): §22.2.1.1 /u early error.
+                            .class_added, .class_escape_unsupported => return self.classEscapeRangeBound(),
                         }
                     } else {
                         try ranges.append(self.a, .{ .lo = lo, .hi = lo });
@@ -949,7 +955,26 @@ const Parser = struct {
         return self.makeNode(.{ .class = .{ .negated = negated, .ranges = ranges.items } });
     }
 
-    const ClassMember = union(enum) { ch: u21, class_added };
+    const ClassMember = union(enum) {
+        ch: u21,
+        /// A CharacterClassEscape Perlex represents as ranges and has
+        /// already appended (`\d \s \w`); valid as a standalone member.
+        class_added,
+        /// A CharacterClassEscape Perlex does not yet represent as ranges
+        /// (`\D \S \W`, the set complements). Standalone it defers to the
+        /// fallback to match; as a `-` range bound it is a §22.2.1.1 early
+        /// error under /u — the caller decides which.
+        class_escape_unsupported,
+    };
+
+    /// §22.2.1.1 NonemptyClassRanges (+UnicodeMode): it is a Syntax Error
+    /// for either bound of a `-` range to be a CharacterClassEscape
+    /// (`\d \D \s \S \w \W`), e.g. `[\d-a]` / `[a-\d]` / `[\D-\D]`. Without
+    /// /u the `-` and the shorthand are matched literally (Annex B), which
+    /// the libregexp fallback owns — so defer there.
+    fn classEscapeRangeBound(self: *Parser) ParseError {
+        return if (self.unicode or self.unicode_sets) error.SyntaxError else error.Unsupported;
+    }
 
     fn parseClassMember(self: *Parser, ranges: *std.ArrayListUnmanaged(Node.ClassRange)) ParseError!ClassMember {
         const c = self.peek() orelse return error.SyntaxError;
@@ -972,8 +997,13 @@ const Parser = struct {
                     return .class_added;
                 },
                 // Negated escapes inside a class need set complement;
-                // defer to the fallback for now.
-                'D', 'W', 'S' => return error.Unsupported,
+                // Perlex defers their matching to the fallback. Signal
+                // "class escape" so the caller can still raise the
+                // §22.2.1.1 range-bound early error under /u.
+                'D', 'W', 'S' => {
+                    self.pos += 2;
+                    return .class_escape_unsupported;
+                },
                 // `\b` inside a class is backspace, not a word boundary.
                 'b' => {
                     self.pos += 2;
