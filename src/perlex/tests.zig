@@ -911,6 +911,37 @@ test "perlex: an escaped hyphen is left to the fallback in every mode" {
     try expectCompileFlags("[\\-]", uf, .unsupported);
 }
 
+test "perlex: \\0 before a DecimalDigit is a /u early error" {
+    // §22.2.1.1 CharacterEscape: under +UnicodeMode `\0` is valid only with
+    // [lookahead ∉ DecimalDigit], and there is no LegacyOctalEscapeSequence.
+    // So `\0` immediately before a digit is an early error, in both the atom
+    // and the class context, for every digit (8 / 9 aren't octal either).
+    try expectCompileFlags("\\00", uf, .syntax_error);
+    try expectCompileFlags("\\07", uf, .syntax_error);
+    try expectCompileFlags("\\08", uf, .syntax_error);
+    try expectCompileFlags("\\09", uf, .syntax_error);
+    try expectCompileFlags("[\\00]", uf, .syntax_error);
+    try expectCompileFlags("[\\05]", uf, .syntax_error);
+    try expectCompileFlags("[\\09]", uf, .syntax_error);
+    try expectCompileFlags("\\00", .{ .unicode_sets = true }, .syntax_error);
+}
+
+test "perlex: \\0 before a digit defers without /u (Annex B legacy octal)" {
+    // `\00` … `\09` are LegacyOctalEscapeSequence territory the fallback owns.
+    try expectCompile("\\00", .unsupported);
+    try expectCompile("\\07", .unsupported);
+    try expectCompile("[\\00]", .unsupported);
+    try expectCompile("[\\09]", .unsupported);
+}
+
+test "perlex: a lone \\0 (no trailing digit) is NUL in every mode" {
+    // §22.2.1.1 `\0` with [lookahead ∉ DecimalDigit] is U+0000 — unaffected.
+    try expectMatch("\\0", "\x00", "\x00");
+    try expectMatchFlags("\\0", uf, "\x00", "\x00");
+    try expectMatchFlags("\\0a", uf, "\x00a", "\x00a"); // NUL then literal 'a'
+    try expectMatchFlags("[\\0]", uf, "\x00", "\x00");
+}
+
 test "perlex: \\p / \\P in a class stays deferred, not rejected, under /u" {
     // §22.2.1 ClassEscape includes `\p{…}` / `\P{…}` under +UnicodeMode.
     // The class path has no `\p` case yet, so these reach the single-code-

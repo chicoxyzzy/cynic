@@ -800,10 +800,13 @@ const Parser = struct {
             'f' => return self.takeEscaped(2, 0x0C),
             'v' => return self.takeEscaped(2, 0x0B),
             '0' => {
-                // `\0` is NUL only when not the start of a legacy octal
-                // / decimal escape; defer those to the fallback.
+                // §22.2.1.1 `\0` is U+0000 only with [lookahead ∉
+                // DecimalDigit]. `\0` before a digit under /u or /v is an
+                // early error (Unicode mode has no LegacyOctalEscapeSequence);
+                // without a flag it is an Annex B legacy octal / decimal
+                // escape the fallback matches, so defer.
                 if (self.at(2)) |d| {
-                    if (d >= '0' and d <= '9') return error.Unsupported;
+                    if (d >= '0' and d <= '9') return self.malformedEscape();
                 }
                 return self.takeEscaped(2, 0x00);
             },
