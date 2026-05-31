@@ -653,9 +653,12 @@ const Compiler = struct {
         }
         self.regular = false;
         switch (indices.items.len) {
-            // An unresolved `\k<name>` carries Annex-B-tolerant
-            // semantics the v1 grammar doesn't model — defer.
-            0 => return error.Unsupported,
+            // §22.2.1.1 — a `\k GroupName` that references no existing group
+            // is an early error. Only Annex B §B.1.4 (a pattern containing no
+            // GroupName at all) rereads `\k` as a literal 'k'; Cynic drops
+            // that leniency in every mode, so the SyntaxError stands. The
+            // parser already committed to `\k GroupName` on seeing `\k<`.
+            0 => return error.SyntaxError,
             1 => try self.emit(.{ .backref = .{ .index = indices.items[0], .fold = self.fold } }),
             else => try self.emit(.{ .backref_dup = .{ .indices = try indices.toOwnedSlice(self.gpa), .fold = self.fold } }),
         }
