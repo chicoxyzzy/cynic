@@ -1057,9 +1057,10 @@ const Parser = struct {
                     if (dash_range) return self.classEscapeRangeBound();
                 },
                 .class_escape_unsupported => {
-                    // `\D \S \W` — as a range low bound (`[\D-a]`) the same
-                    // §22.2.1.1 /u early error; standalone, defer to the
-                    // fallback to match it.
+                    // `\D \S \W` under /u (off /u they were complemented in
+                    // place and returned `.class_added`). As a range low
+                    // bound (`[\D-a]`) it is a §22.2.1.1 /u early error;
+                    // standalone, defer to the fallback to match it.
                     if (dash_range) return self.classEscapeRangeBound();
                     return error.Unsupported;
                 },
@@ -1111,10 +1112,12 @@ const Parser = struct {
         /// A CharacterClassEscape Perlex represents as ranges and has
         /// already appended (`\d \s \w`); valid as a standalone member.
         class_added,
-        /// A CharacterClassEscape Perlex does not yet represent as ranges
-        /// (`\D \S \W`, the set complements). Standalone it defers to the
-        /// fallback to match; as a `-` range bound it is a §22.2.1.1 early
-        /// error under /u — the caller decides which.
+        /// A `\D \S \W` set complement under /u, where Perlex can't
+        /// complement at parse time (the parser isn't told `i`, so it can't
+        /// rule out the /iu non-ASCII fold orbits). Standalone it defers to
+        /// the fallback to match; as a `-` range bound it is a §22.2.1.1
+        /// early error — the caller decides which. Off /u these are
+        /// complemented in place and returned as `.class_added` instead.
         class_escape_unsupported,
         /// A `\p{…}` / `\P{…}` Unicode property escape (§22.2.1, +UnicodeMode).
         /// The parser can't expand it to ranges (the resolver runs at
@@ -1153,13 +1156,31 @@ const Parser = struct {
                     try appendRanges(self.a, ranges, &space_ranges);
                     return .class_added;
                 },
-                // Negated escapes inside a class need set complement;
-                // Perlex defers their matching to the fallback. Signal
-                // "class escape" so the caller can still raise the
-                // §22.2.1.1 range-bound early error under /u.
+                // `\D \S \W` inside a class is the set complement of the
+                // positive shorthand. Off /u we complement the range set at
+                // parse time and append it as ordinary ranges, so the class
+                // is owned. The complement of `\d`/`\s`/`\w` contains each
+                // ASCII letter together with its case-swap (or neither), so
+                // it is closed under the VM's inline ASCII fold — non-Unicode
+                // `i` matches exactly. Under /u we can't: the parser isn't
+                // told `i`, so it can't distinguish /u from /iu, and /iu
+                // pulls non-ASCII fold orbits (the Kelvin sign U+212A folds
+                // with `k`, joining `\W`'s complement) that a parse-time
+                // ASCII complement can't represent. So under /u keep deferring
+                // — `.class_escape_unsupported` lets the caller still raise
+                // the §22.2.1.1 range-bound early error.
                 'D', 'W', 'S' => {
                     self.pos += 2;
-                    return .class_escape_unsupported;
+                    if (self.unicode) return .class_escape_unsupported;
+                    const base: []const Node.ClassRange = switch (k) {
+                        'D' => &digit_ranges,
+                        'S' => &space_ranges,
+                        'W' => &word_ranges,
+                        else => unreachable,
+                    };
+                    const comp = try charset.complement(self.a, base);
+                    try appendRanges(self.a, ranges, comp);
+                    return .class_added;
                 },
                 // §22.2.1 ClassEscape :: CharacterClassEscape :: `\p{…}` /
                 // `\P{…}` — a Unicode property escape, valid only under /u
