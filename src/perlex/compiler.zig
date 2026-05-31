@@ -914,31 +914,56 @@ fn nullable(node: *const Node) bool {
 
 /// Whether a nullable quantifier body must still defer to the fallback
 /// even though `compileRepeat` can guard it. The §22.2.2.3 progress
-/// guard lets Perlex own most nullable bodies; three kinds stay deferred:
-///   • an *assertion* body (`(?=…)`, `^`, `$`, `\b`) — `(?=a)*` is a
-///     §22.2.1 QuantifiableAssertion, a SyntaxError under `/u` but
+/// guard lets Perlex own most nullable bodies; two kinds stay deferred:
+///   • a *directly*-quantified assertion (`(?=a)?`, `^*`, `$+`, `\b?`) —
+///     a §22.2.1 QuantifiableAssertion, a SyntaxError under `/u` but
 ///     Annex-B-legal without it; that mode split is only modelled by the
-///     fallback, so compiling it here would bake in one reading;
-///   • a *backreference* body — its participation-dependent width
-///     interacts with the guard in ways the v1 lowering doesn't model;
-///   • a `/v` set whose membership includes the empty string (a `\q{}`
-///     empty alternative) — left to the fallback until that path lands.
+///     fallback, so compiling it here would bake in one reading. An
+///     assertion *wrapped in a group* (`(?:(?=a))?`, `($^)?`) is not a
+///     QuantifiableAssertion — the quantifier binds the group, which is
+///     always legal — so it is owned (the guard handles the zero-width
+///     loop, and the inner capture rolls back on the guarded skip);
+///   • a body containing a *backreference* — its participation-dependent
+///     width interacts with the guard in ways the v1 lowering doesn't
+///     model — or a `/v` set whose membership includes the empty string
+///     (a `\q{}` empty alternative) — left to the fallback until those
+///     paths land.
 /// Called only when `nullable(node)` already holds.
 fn deferNullableBody(node: *const Node) bool {
     return switch (node.*) {
-        .anchor_start, .anchor_end, .word_boundary, .lookahead, .backref_name, .backref_index => true,
+        // A bare assertion as the *direct* repeat body is the
+        // QuantifiableAssertion mode split — defer.
+        .anchor_start, .anchor_end, .word_boundary, .lookahead => true,
+        // Any other body (group, sequence, alternation, backref, set, …)
+        // defers only for the still-unmodelled kinds below; a nested
+        // assertion no longer counts, since its quantifier binds the
+        // wrapping group.
+        else => containsDeferringNullable(node),
+    };
+}
+
+/// The recursive half of `deferNullableBody`: a wrapped body still defers
+/// when it contains a backreference or an empty-matching `/v` set. Nested
+/// assertions do *not* defer here — once an assertion is inside a group the
+/// quantifier binds the group, so §22.2.2.3 step 2.b's progress guard owns
+/// the zero-width loop. A lookahead is a leaf: a backreference inside it is
+/// matched at zero width from the outer loop's view, so it can't interact
+/// with the outer guard and needn't force a defer.
+fn containsDeferringNullable(node: *const Node) bool {
+    return switch (node.*) {
+        .backref_name, .backref_index => true,
         .class_set => |cs| classSetMayMatchEmpty(cs),
-        .empty, .char, .class, .dot, .prop => false,
-        .noncapture => |b| deferNullableBody(b),
-        .modifier_group => |mg| deferNullableBody(mg.body),
-        .capture => |g| deferNullableBody(g.body),
-        .repeat => |r| deferNullableBody(r.body),
+        .empty, .char, .class, .dot, .prop, .anchor_start, .anchor_end, .word_boundary, .lookahead => false,
+        .noncapture => |b| containsDeferringNullable(b),
+        .modifier_group => |mg| containsDeferringNullable(mg.body),
+        .capture => |g| containsDeferringNullable(g.body),
+        .repeat => |r| containsDeferringNullable(r.body),
         .concat => |parts| {
-            for (parts) |p| if (deferNullableBody(p)) return true;
+            for (parts) |p| if (containsDeferringNullable(p)) return true;
             return false;
         },
         .alternate => |alts| {
-            for (alts) |a| if (deferNullableBody(a)) return true;
+            for (alts) |a| if (containsDeferringNullable(a)) return true;
             return false;
         },
     };
