@@ -280,3 +280,42 @@ the corpus under the relevant section's directory before adding.
   §22.2.2.3-step-2.b regression guard: engine262 currently returns
   `null` for them (V8 / JSC / SpiderMonkey / Hermes / QuickJS all
   match), so a fixture asserting the match would also catch that.
+
+### Non-`/u` `i` folds a non-ASCII unit to a *different* non-ASCII unit
+
+- **Fixed in:** `6c9a7e6`
+- **Spec:** §22.2.2.7.3 Canonicalize, the non-Unicode path (steps
+  3–10): when neither `u` nor `v` is set, a code unit folds via
+  `toUppercase` (not case-folding), subject to two guards — a
+  multi-code-unit uppercase leaves the unit unchanged (`ß` stays
+  `ß`), and the **ASCII-exclusion**: a unit ≥ 128 whose uppercase is
+  a single ASCII unit stays itself (so `U+212A` KELVIN and `U+017F`
+  ſ are *not* matched by `/[a-z]/i`). A unit whose uppercase is
+  *another non-ASCII unit* does fold to it.
+- **Reproducer:**
+  ```js
+  /à/i.test("À");      // à matches À — must be true
+  /[σ]/i.test("ς");    // [σ] matches ς (both → Σ) — true
+  /[σ]/i.test("Σ");    // [σ] matches Σ — true
+  /µ/i.test("Μ");      // µ matches Μ (µ → Μ) — true
+  ```
+- **Before fix:** A non-browser engine that implements non-`/u` `i`
+  as an *ASCII-only* fold (the common shortcut) returns `false` for
+  every line above yet still passes the entire corpus. The
+  Perlex-only measurement confirmed it: the only two corpus fixtures
+  that reach non-`/u` `i` over a non-ASCII unit are
+  `built-ins/RegExp/S15.10.2.8_A3_T18.js` (whose subject string is
+  pure ASCII, so its `[\x81-\xff]` class never folds) and
+  `language/literals/regexp/u-case-mapping.js` (which asserts only
+  the *exclusion* direction — `/K/i` matches neither `k` nor
+  `K`). Neither asserts a non-ASCII→non-ASCII fold, so the positive
+  direction is unguarded.
+- **After fix:** Each line returns `true`; the matcher canonicalizes
+  non-ASCII units through the full §22.2.2.7.3 toUppercase orbit.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/RegExp/` (no `features:` tag — base regex). Assert the
+  à↔À atom fold, the σ/ς/Σ three-way inside a class, and the µ→Μ
+  case, paired with the exclusion negatives (`/K/i` rejects
+  `k`/`K`; `/[a-z]/i` rejects ſ). A `match-vs-no-match` table over
+  these units would lock down both directions, complementing
+  `u-case-mapping.js`'s exclusion-only coverage.
