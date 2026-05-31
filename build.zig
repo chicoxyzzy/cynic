@@ -491,10 +491,36 @@ pub fn build(b: *std.Build) void {
     wasm_exe.import_memory = false;
     wasm_exe.max_memory = 256 * 1024 * 1024;
 
-    const install_wasm = b.addInstallArtifact(wasm_exe, .{
-        .dest_dir = .{ .override = .{ .custom = "bin" } },
-        .dest_sub_path = "cynic.wasm",
-    });
+    // Optionally post-process with `wasm-opt -Oz` (Binaryen) when it's
+    // on PATH. Zig emits no target-features section, so every feature
+    // the module actually uses must be named explicitly — otherwise
+    // wasm-opt rejects the bulk-memory ops the engine relies on. When
+    // wasm-opt is absent (most dev machines), fall back to the raw
+    // ReleaseSmall binary so `zig build wasm` still works offline. CI
+    // installs Binaryen, so the published artifact is always optimized
+    // (~13% smaller than ReleaseSmall alone).
+    const raw_wasm = wasm_exe.getEmittedBin();
+    const wasm_bin: std.Build.LazyPath = if (b.findProgram(&.{"wasm-opt"}, &.{})) |wasm_opt_path| blk: {
+        const opt = b.addSystemCommand(&.{
+            wasm_opt_path,
+            "-Oz",
+            "--enable-bulk-memory",
+            "--enable-bulk-memory-opt",
+            "--enable-sign-ext",
+            "--enable-nontrapping-float-to-int",
+            "--enable-mutable-globals",
+            "--enable-multivalue",
+        });
+        opt.addFileArg(raw_wasm);
+        opt.addArg("-o");
+        break :blk opt.addOutputFileArg("cynic.wasm");
+    } else |_| raw_wasm;
+
+    const install_wasm = b.addInstallFileWithDir(
+        wasm_bin,
+        .{ .custom = "bin" },
+        "cynic.wasm",
+    );
 
     // Assemble a directly-servable playground directory:
     // zig-out/playground/{playground.html,playground.js,
@@ -502,7 +528,7 @@ pub fn build(b: *std.Build) void {
     // `codemirror.bundle.js` is the committed, offline-vendored
     // CodeMirror 6 editor bundle — see playground/codemirror.bundle.README.md.
     const wasm_into_playground = b.addInstallFileWithDir(
-        wasm_exe.getEmittedBin(),
+        wasm_bin,
         .{ .custom = "playground" },
         "cynic.wasm",
     );

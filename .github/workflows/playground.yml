@@ -3,8 +3,9 @@ name: Deploy playground
 # Rebuilds the WebAssembly playground and republishes it to
 # `gh-pages:/playground/` whenever the engine, the front-end, the
 # vendored regex C, or the build graph changes on `main`. Keeps the
-# 1.6 MB `cynic.wasm` out of tracked branch history — it is
-# regenerated from source on every deploy instead of hand-committed.
+# multi-MB `cynic.wasm` out of tracked branch history — it is
+# regenerated (and `wasm-opt`-minified) from source on every deploy
+# instead of hand-committed.
 #
 # The main-site nav link (`index.html` → `playground/`) is a
 # one-time edit on the `gh-pages` branch; this workflow never
@@ -48,6 +49,17 @@ jobs:
           # Keep in lockstep with `.github/workflows/ci.yml` and
           # `build.zig.zon` (`.minimum_zig_version`) on every bump.
           version: 0.17.0-dev.305+bdfbf432d
+
+      - name: Set up Binaryen (wasm-opt)
+        # `zig build wasm` post-processes the module with `wasm-opt -Oz`
+        # when it is on PATH (build.zig gates on findProgram), shrinking
+        # the published bundle ~13% vs ReleaseSmall alone. Pin a known-
+        # good release so the `--enable-bulk-memory-opt` flag the build
+        # passes is always recognised (added upstream in version_117).
+        run: |
+          BINARYEN_VERSION=version_123
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" | tar xz
+          echo "$PWD/binaryen-${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
 
       - name: Build the playground WASM bundle
         # Emits zig-out/playground/{playground.html,playground.js,cynic.wasm}
