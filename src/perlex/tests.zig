@@ -835,6 +835,57 @@ test "perlex: well-formed \\x / \\u escapes still match under /u" {
     try expectMatchFlags("\\u{61}", uf, "a", "a");
 }
 
+// ── §22.2.1.1 invalid IdentityEscape / DecimalEscape under /u ────────
+// Under /u or /v, IdentityEscape is restricted to a SyntaxCharacter or
+// `/`, and a class admits no DecimalEscape. So a `\` before a digit, or
+// before an arbitrary letter, is an early error. Without /u each is
+// Annex B identity/octal-escape leniency the libregexp fallback owns.
+
+test "perlex: a DecimalEscape in a class is a /u early error" {
+    // §22.2.1 ClassEscape has no DecimalEscape production under +UnicodeMode.
+    try expectCompileFlags("[\\1]", uf, .syntax_error);
+    try expectCompileFlags("[\\7]", uf, .syntax_error);
+    try expectCompileFlags("[\\8]", uf, .syntax_error); // \8 / \9 aren't octal
+    try expectCompileFlags("[\\9]", uf, .syntax_error);
+    try expectCompileFlags("[a\\1b]", uf, .syntax_error);
+}
+
+test "perlex: an invalid IdentityEscape letter is a /u early error" {
+    // `\X` / `\K` — a letter that is neither a recognised escape nor a
+    // SyntaxCharacter is not a valid IdentityEscape under /u or /v, in
+    // either the atom or the class context.
+    try expectCompileFlags("\\X", uf, .syntax_error);
+    try expectCompileFlags("[\\X]", uf, .syntax_error);
+    try expectCompileFlags("\\K", uf, .syntax_error);
+    try expectCompileFlags("[\\K]", uf, .syntax_error);
+}
+
+test "perlex: invalid digit / letter escapes defer without /u (Annex B)" {
+    // Legacy octal / identity escapes the libregexp fallback owns.
+    try expectCompile("[\\1]", .unsupported);
+    try expectCompile("[\\8]", .unsupported);
+    try expectCompile("\\X", .unsupported);
+    try expectCompile("[\\X]", .unsupported);
+    try expectCompile("[\\10b-G]", .unsupported); // legacy octal \10 in a class
+}
+
+test "perlex: an escaped hyphen is left to the fallback in every mode" {
+    // `\-` is a valid ClassEscape under +UnicodeMode but an invalid atom
+    // IdentityEscape; parseEscapedChar can't see the context, so it stays
+    // deferred — no false reject of `[\-]/u` — and the fallback decides.
+    try expectCompile("[\\-]", .unsupported);
+    try expectCompileFlags("[\\-]", uf, .unsupported);
+}
+
+test "perlex: \\p / \\P in a class stays deferred, not rejected, under /u" {
+    // §22.2.1 ClassEscape includes `\p{…}` / `\P{…}` under +UnicodeMode.
+    // The class path has no `\p` case yet, so these reach the single-code-
+    // point escape decoder; it must defer them (the fallback resolves the
+    // property) rather than treat them as invalid IdentityEscapes.
+    try expectCompileFlags("[\\p{Hex}]", uf, .unsupported);
+    try expectCompileFlags("[\\p{Hex}\\P{Hex}]", uf, .unsupported);
+}
+
 // ── §22.2 Unicode mode (/u) — code-point matching ───────────────────
 
 const uf: perlex.Flags = .{ .unicode = true };
