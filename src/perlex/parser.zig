@@ -1002,16 +1002,18 @@ const Parser = struct {
                 // DecimalEscape, which a class has no production for), an
                 // arbitrary letter like `\X` — is an early error Perlex owns.
                 if (isSyntaxChar(k) or k == '/') return self.takeEscaped(2, k);
-                // Three escapes stay deferred in every mode because they
-                // are valid under /u in a context this single-code-point
-                // decoder can't see: `\p` / `\P` are CharacterClassEscapes
-                // (a set, reached here only from the class path, which has
-                // no `\p` case), and `\-` is a ClassEscape under
-                // +UnicodeMode but an invalid atom IdentityEscape. The
-                // fallback renders their (possibly SyntaxError) verdict —
-                // converting them risks a false reject of `[\p{…}]/u` /
-                // `[\-]/u`.
-                if (k == 'p' or k == 'P' or k == '-') return error.Unsupported;
+                // `\-` reaches this shared decoder only as a class member —
+                // the atom path owns the atom `\-` at parseEscape's '-' case
+                // — and inside a class `\-` is the escaped literal '-' in
+                // every mode (§22.2.1 ClassEscape / ClassSetReservedPunctuator).
+                if (k == '-') return self.takeEscaped(2, '-');
+                // `\p` / `\P` are CharacterClassEscapes (a set, not a single
+                // code point). The atom and class-operand paths intercept
+                // them before this decoder; the only caller that reaches here
+                // with `\p` is a `\q{…}` ClassString, where a CharacterClass-
+                // Escape is invalid — that caller turns this Unsupported into
+                // a §22.2.1.1 SyntaxError. So it is never deferred to a fallback.
+                if (k == 'p' or k == 'P') return error.Unsupported;
                 // Without /u the main grammar's IdentityEscape also covers
                 // any SourceCharacter that is not UnicodeIDContinue — e.g.
                 // ASCII punctuation like `\!` `\@` `` \` `` `\~`. For ASCII,

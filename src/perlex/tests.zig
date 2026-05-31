@@ -1114,14 +1114,20 @@ test "perlex: an escaped hyphen atom matches without /u, is a /u early error (§
     try expectCompileFlags("\\-", vflags, .syntax_error);
 }
 
-test "perlex: an escaped hyphen inside a class is left to the fallback in every mode" {
+test "perlex: an escaped hyphen inside a class is the literal '-' in every mode (§22.2.1)" {
     // Inside `[ … ]`, `\-` is the escaped literal '-' in every mode (a
-    // ClassEscape under +UnicodeMode, an identity escape without it). The
-    // shared class-member decoder (parseEscapedChar) can't see the class
-    // context the atom path now owns, so it stays deferred — no false
-    // reject of `[\-]/u` — and the fallback decides.
-    try expectCompile("[\\-]", .unsupported);
-    try expectCompileFlags("[\\-]", uf, .unsupported);
+    // ClassEscape under +UnicodeMode, an identity escape without it; a
+    // ClassSetReservedPunctuator under /v). The shared class-member decoder
+    // (parseEscapedChar) owns it — the atom path intercepts the atom `\-`
+    // before this decoder, so a `\-` reaching it is always a class member.
+    try expectCompile("[\\-]", .match);
+    try expectCompileFlags("[\\-]", uf, .match);
+    try expectCompileFlags("[\\-]", vflags, .match);
+    // …and it matches '-' (only), in every mode.
+    try expectMatch("[\\-]", "-", "-");
+    try expectNoMatch("[\\-]", "a");
+    try expectMatchFlags("[a\\-z]", uf, "-", "-"); // not a range — literal '-'
+    try expectMatchFlags("[\\-]", vflags, "-", "-");
 }
 
 test "perlex: \\0 before a DecimalDigit is a /u early error" {
