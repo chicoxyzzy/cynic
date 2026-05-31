@@ -1046,13 +1046,53 @@ test "perlex: a lone \\0 (no trailing digit) is NUL in every mode" {
     try expectMatchFlags("[\\0]", uf, "\x00", "\x00");
 }
 
-test "perlex: \\p / \\P in a class stays deferred, not rejected, under /u" {
+test "perlex: \\p / \\P in a class defers when no resolver is injected" {
     // §22.2.1 ClassEscape includes `\p{…}` / `\P{…}` under +UnicodeMode.
-    // The class path has no `\p` case yet, so these reach the single-code-
-    // point escape decoder; it must defer them (the fallback resolves the
-    // property) rather than treat them as invalid IdentityEscapes.
+    // The class path resolves these via the injected resolver; with none
+    // (this compile path), the property can't be placed, so the whole
+    // pattern defers to the fallback rather than being rejected.
     try expectCompileFlags("[\\p{Hex}]", uf, .unsupported);
     try expectCompileFlags("[\\p{Hex}\\P{Hex}]", uf, .unsupported);
+}
+
+test "perlex: \\p{} property escapes resolve inside [ … ] under /u" {
+    // §22.2.1 ClassRanges — a `\p{…}` ClassAtom contributes its resolved
+    // code-point set to the union of the class members; `\P{…}` contributes
+    // the complement. The stub resolver knows the gc values Lu / Ll / L.
+    try expectMatchProp("[\\p{Lu}]", "A", "A");
+    try expectNoMatchProp("[\\p{Lu}]", "a");
+    // Union of two properties.
+    try expectMatchProp("[\\p{Lu}\\p{Ll}]", "A", "A");
+    try expectMatchProp("[\\p{Lu}\\p{Ll}]", "a", "a");
+    // A property unioned with a literal range.
+    try expectMatchProp("[\\p{Ll}0-9]", "5", "5");
+    try expectMatchProp("[\\p{Ll}0-9]", "q", "q");
+    try expectNoMatchProp("[\\p{Ll}0-9]", "A");
+    // `\P{…}` (a negated property) inside a class is the complement set.
+    try expectMatchProp("[\\P{Lu}]", "a", "a");
+    try expectNoMatchProp("[\\P{Lu}]", "A");
+    // `[^ … ]` negates the whole union.
+    try expectMatchProp("[^\\p{Lu}]", "a", "a");
+    try expectNoMatchProp("[^\\p{Lu}]", "A");
+}
+
+test "perlex: malformed \\p inside [ … ] under /u is a syntax error" {
+    // A bare `\p`/`\P` with no `{…}` is a §22.2.1.1 early error — scanProperty
+    // owns the verdict at parse time, before any resolver runs.
+    try expectCompileProp("[\\p]", uflags, .syntax_error);
+    try expectCompileProp("[\\P]", uflags, .syntax_error);
+    try expectCompileProp("[\\p{}]", uflags, .syntax_error); // empty value
+    // A `\p{…}` ClassAtom may not be a `-` range bound (§22.2.1.1).
+    try expectCompileProp("[\\p{Lu}-a]", uflags, .syntax_error);
+    try expectCompileProp("[a-\\p{Lu}]", uflags, .syntax_error);
+}
+
+test "perlex: \\p inside [ … ] without /u, or an unknown property, defers" {
+    // Without /u or /v, `\p` is Annex B identity-escape territory the
+    // fallback owns — defer before reaching scanProperty.
+    try expectCompileProp("[\\p{Lu}]", .{}, .unsupported);
+    // A well-formed name the resolver declines defers the whole pattern.
+    try expectCompileProp("[\\p{Nd}]", uflags, .unsupported);
 }
 
 // ── §22.2.1.1 a CharacterClassEscape as a class-range bound (/u) ─────

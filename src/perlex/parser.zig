@@ -1036,6 +1036,10 @@ const Parser = struct {
             self.pos += 1;
         }
         var ranges: std.ArrayListUnmanaged(Node.ClassRange) = .empty;
+        // `\p{…}` / `\P{…}` ClassAtoms; the parser can't expand them (the
+        // resolver runs at compile time), so a class that has any lowers to
+        // a union ClassSet rather than a flat `.class`.
+        var props: std.ArrayListUnmanaged(Node.Property) = .empty;
         while (true) {
             const c = self.peek() orelse return error.SyntaxError; // unterminated
             if (c == ']') {
@@ -1059,6 +1063,13 @@ const Parser = struct {
                     if (dash_range) return self.classEscapeRangeBound();
                     return error.Unsupported;
                 },
+                .prop => |p| {
+                    // `\p{…}` / `\P{…}` — as a range bound (`[\p{L}-a]`) it is
+                    // the same §22.2.1.1 /u early error a shorthand would be;
+                    // standalone it joins the class's union of operands.
+                    if (dash_range) return self.classEscapeRangeBound();
+                    try props.append(self.a, p);
+                },
                 .ch => |lo| {
                     if (dash_range) {
                         self.pos += 1; // consume `-`
@@ -1068,8 +1079,9 @@ const Parser = struct {
                                 try ranges.append(self.a, .{ .lo = lo, .hi = hi });
                             },
                             // Range with a CharacterClassEscape high bound
-                            // (`[a-\d]` / `[a-\D]`): §22.2.1.1 /u early error.
-                            .class_added, .class_escape_unsupported => return self.classEscapeRangeBound(),
+                            // (`[a-\d]` / `[a-\D]` / `[a-\p{L}]`): §22.2.1.1
+                            // /u early error.
+                            .class_added, .class_escape_unsupported, .prop => return self.classEscapeRangeBound(),
                         }
                     } else {
                         try ranges.append(self.a, .{ .lo = lo, .hi = lo });
@@ -1077,7 +1089,21 @@ const Parser = struct {
                 },
             }
         }
-        return self.makeNode(.{ .class = .{ .negated = negated, .ranges = ranges.items } });
+        if (props.items.len == 0) {
+            return self.makeNode(.{ .class = .{ .negated = negated, .ranges = ranges.items } });
+        }
+        // §22.2.1 ClassRanges is the union of its ClassAtoms. With `\p{…}`
+        // members present, lower the class to a union ClassSetExpression so
+        // the compiler resolves each property and unions it with the literal
+        // ranges (and complements the whole set for `[^ … ]`). The /v-only
+        // operators (`&&`, `--`, nested `[…]`, `\q{…}`) never reach here, so
+        // this is a pure union — and scanProperty already rejected the only
+        // string-valued properties, so a negated set can't contain strings.
+        var operands: std.ArrayListUnmanaged(Node.ClassSet.Operand) = .empty;
+        if (ranges.items.len != 0) try operands.append(self.a, .{ .ranges = ranges.items });
+        for (props.items) |p| try operands.append(self.a, .{ .prop = p });
+        const cs = try self.makeClassSet(.{ .negated = negated, .op = .union_, .operands = operands.items });
+        return self.makeNode(.{ .class_set = cs });
     }
 
     const ClassMember = union(enum) {
@@ -1090,6 +1116,12 @@ const Parser = struct {
         /// fallback to match; as a `-` range bound it is a §22.2.1.1 early
         /// error under /u — the caller decides which.
         class_escape_unsupported,
+        /// A `\p{…}` / `\P{…}` Unicode property escape (§22.2.1, +UnicodeMode).
+        /// The parser can't expand it to ranges (the resolver runs at
+        /// compile time), so the class lowers to a union ClassSet whose
+        /// operands carry this property; as a `-` range bound it is the
+        /// same §22.2.1.1 early error a class shorthand would be.
+        prop: Node.Property,
     };
 
     /// §22.2.1.1 NonemptyClassRanges (+UnicodeMode): it is a Syntax Error
@@ -1128,6 +1160,17 @@ const Parser = struct {
                 'D', 'W', 'S' => {
                     self.pos += 2;
                     return .class_escape_unsupported;
+                },
+                // §22.2.1 ClassEscape :: CharacterClassEscape :: `\p{…}` /
+                // `\P{…}` — a Unicode property escape, valid only under /u
+                // (this simple-class path) or /v. Without a flag `\p` is
+                // Annex B identity-escape territory the fallback owns, so
+                // defer. scanProperty owns every malformed shape — a bare
+                // `\p`/`\P` with no `{…}`, an empty/unterminated `{…}`, a
+                // non-/v property of strings — as a §22.2.1.1 early error.
+                'p', 'P' => {
+                    if (!self.unicode and !self.unicode_sets) return error.Unsupported;
+                    return .{ .prop = try self.scanProperty(k == 'P') };
                 },
                 // `\b` inside a class is backspace, not a word boundary.
                 'b' => {
