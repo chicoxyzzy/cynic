@@ -1587,6 +1587,48 @@ test "perlex: §22.2.1 quantified backreference bodies are owned, not deferred" 
     try expectNoMatch("(x)\\1{2,}", "xx");
 }
 
+test "perlex: §22.2.1 capture-group count up to the libregexp ceiling is owned" {
+    @setEvalBranchQuota(100000);
+    // The 64-group cap was a conservative deferral threshold, not a buffer
+    // bound — the slot array and the per-lookaround snapshot are both
+    // heap-sized at runtime. It now matches the vendored fallback's
+    // CAPTURE_COUNT_MAX (255 groups including the implicit group 0, i.e.
+    // ≤ 254 explicit), so any pattern the fallback would accept, Perlex
+    // owns. A deeply-nested 70-group pattern (> the old 64) is owned, and
+    // every group — including group 0 — captures the same span.
+    const ncaps = 70;
+    const pat = comptime blk: {
+        var s: []const u8 = "";
+        for (0..ncaps) |_| s = s ++ "(";
+        s = s ++ "hello";
+        for (0..ncaps) |_| s = s ++ ")";
+        break :blk s;
+    };
+    try expectCompile(pat, .match);
+    // Group 0 plus all 70 explicit groups → 71 captures, every one "hello".
+    const expected = comptime blk: {
+        var s: []const u8 = "'hello'";
+        for (0..ncaps) |_| s = s ++ " 'hello'";
+        break :blk s;
+    };
+    try expectCaps(pat, "hello", expected);
+
+    // Small nested case, captures checked end-to-end.
+    try expectCaps("(((x)))", "x", "'x' 'x' 'x' 'x'");
+
+    // One past the ceiling still defers — 255 explicit groups is 256 total,
+    // which the fallback also rejects ("too many captures"). Matching the
+    // fallback's exact boundary keeps the deferral honest.
+    const over = comptime blk: {
+        var s: []const u8 = "";
+        for (0..255) |_| s = s ++ "(";
+        s = s ++ "x";
+        for (0..255) |_| s = s ++ ")";
+        break :blk s;
+    };
+    try expectCompile(over, .unsupported);
+}
+
 // ── §22.2.1 character classes, `.`, class escapes, boundaries ───────
 
 test "perlex: dot matches any non-line-terminator" {

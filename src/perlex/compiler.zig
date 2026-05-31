@@ -11,14 +11,16 @@ const parser = @import("parser.zig");
 const charset = @import("charset.zig");
 const Node = parser.Node;
 
-/// Upper bound on capturing groups (including the whole match) the v1
-/// VM handles; patterns with more fall back to the vendored matcher.
-/// A conservative deferral threshold: the slot array is heap-sized per
-/// program and the lookaround snapshot spills to the heap past a small
-/// inline size, so this bound is no longer forced by a fixed buffer.
-/// Raising it is a deliberate follow-up gated on differential
-/// verification, not a buffer resize.
-pub const max_groups = 64;
+/// Upper bound on capturing groups (including the whole match) Perlex
+/// handles; patterns with more fall back to the vendored matcher. Set to
+/// match libregexp's CAPTURE_COUNT_MAX (255 groups counting the implicit
+/// group 0 — i.e. ≤ 254 explicit), so every pattern the fallback would
+/// accept Perlex also owns, and a pattern past the ceiling is rejected by
+/// both. This is a deferral threshold, not a buffer bound: the slot array
+/// is heap-sized per program and the lookaround snapshot spills to the
+/// heap past a small inline size, so nothing here is forced by a fixed
+/// buffer.
+pub const max_groups = 255;
 
 /// Inline-vs-counted threshold for a bounded quantifier. At or below
 /// this, each mandatory / optional iteration inlines one body copy — no
