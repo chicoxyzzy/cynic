@@ -1524,6 +1524,40 @@ test "perlex: nested nullable quantifier bodies use independent progress marks" 
     try expectCaps("((a)?)*", "aa", "'aa' 'a' 'a'");
 }
 
+test "perlex: a nullable assertion wrapped in a group is owned, not deferred" {
+    // §22.2.1: a *directly*-quantified assertion (`(?=a)?`) is a
+    // QuantifiableAssertion — a /u-vs-non-/u mode split the fallback owns.
+    // But wrapping it in a group makes the `?` bind the *group*, which is
+    // always legal, and §22.2.2.3 step 2.b's zero-width guard handles the
+    // empty loop. engine262 is the authority for the capture participation.
+
+    // Optional (min = 0): the lookahead succeeds and captures "abc", but
+    // the iteration is zero-width, so step 2.b skips it and group 1 rolls
+    // back to undefined — the capture set inside the assertion must not
+    // survive the guarded skip.
+    try expectCaps("(?:(?=(abc)))?a", "abc", "'a' undef");
+    try expectCaps("(?:(?=(abc))){0,1}a", "abc", "'a' undef");
+    // The lookahead simply fails → group never set, `a` still matches.
+    try expectCaps("(?:(?=(abc)))?a", "ade", "'a' undef");
+    // `{1,1}` is min = 1: the one mandatory iteration is unguarded, so the
+    // lookahead's group 1 *does* participate.
+    try expectCaps("(?:(?=(abc))){1,1}a", "abc", "'a' 'abc'");
+
+    // A group wrapping bare anchors (`($^)`) — same story: optional and
+    // zero-width, so the inner capture rolls back to undefined.
+    try expectCaps("(x)($^)?", "x", "'x' 'x' undef");
+}
+
+test "perlex: a directly-quantified bare assertion still defers (mode split)" {
+    // The §22.2.1 QuantifiableAssertion mode split — SyntaxError under /u,
+    // Annex-B-legal without it — is only modelled by the fallback, so a
+    // *bare* quantified lookahead keeps deferring (Perlex returns
+    // .unsupported, not .ok). Wrapping in a group (above) is what flips it
+    // to owned.
+    try expectCompile("(?=a)?", .unsupported);
+    try expectCompile("(?=a)*", .unsupported);
+}
+
 // ── §22.2.1 character classes, `.`, class escapes, boundaries ───────
 
 test "perlex: dot matches any non-line-terminator" {
