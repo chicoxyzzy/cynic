@@ -617,13 +617,6 @@ test "perlex: a \\k reference to a name with no matching group is a syntax error
 
 test "perlex: unsupported constructs fall back" {
     try expectCompileFlags("[\\D]", uf, .unsupported); // negated class escape under /u (off /u it's owned)
-    // A nullable body whose empty match comes from an *assertion* stays
-    // deferred only in its Annex-B-valid form: `(?=a)*` is a §22.2.1
-    // QuantifiableAssertion, accepted without /u and left to the fallback
-    // to match (Perlex doesn't lower a quantified lookahead yet). Its /u/v
-    // reading — and any quantified lookbehind — is a SyntaxError Perlex now
-    // owns directly (see the dedicated test below).
-    try expectCompile("(?=a)*", .unsupported); // quantified lookahead (Annex B)
 }
 
 test "perlex: a quantified lookaround is a syntax error under /u, /v, or for any lookbehind" {
@@ -669,11 +662,10 @@ test "perlex: a quantified anchor or word boundary is a syntax error in every mo
     try expectCompileFlags("\\b{3}", uf, .syntax_error);
     try expectCompileFlags("$+", vflags, .syntax_error);
     try expectCompileFlags("^{2}", uf, .syntax_error);
-    // Regression guard: the change owns only bare assertions. A non-/u
-    // quantified *lookahead* is a QuantifiableAssertion that still defers to
-    // the fallback to match (not a SyntaxError), and an unquantified anchor
-    // still compiles.
-    try expectCompile("(?=a)*", .unsupported);
+    // A quantified *lookahead* is now also a SyntaxError in every mode
+    // (Annex B's QuantifiableAssertion dropped — see the dedicated test
+    // below); an unquantified anchor still compiles.
+    try expectCompile("(?=a)*", .syntax_error);
     try expectCompile("^$", .match);
     try expectCompile("\\bfoo\\b", .match);
 }
@@ -1749,14 +1741,15 @@ test "perlex: a nullable assertion wrapped in a group is owned, not deferred" {
     try expectCaps("(x)($^)?", "x", "'x' 'x' undef");
 }
 
-test "perlex: a directly-quantified bare assertion still defers (mode split)" {
-    // The §22.2.1 QuantifiableAssertion mode split — SyntaxError under /u,
-    // Annex-B-legal without it — is only modelled by the fallback, so a
-    // *bare* quantified lookahead keeps deferring (Perlex returns
-    // .unsupported, not .ok). Wrapping in a group (above) is what flips it
-    // to owned.
-    try expectCompile("(?=a)?", .unsupported);
-    try expectCompile("(?=a)*", .unsupported);
+test "perlex: a directly-quantified lookahead is a SyntaxError in every mode" {
+    // §22.2.1 has no `Assertion Quantifier` production; only Annex B §B.1.2
+    // (QuantifiableAssertion) let a non-/u *lookahead* be quantified, and
+    // Cynic's strict-only, non-browser target drops that. So a bare
+    // quantified lookahead is a SyntaxError even without /u — wrapping it in
+    // a group (above) is what makes the quantifier legal (it binds the
+    // group, an Atom).
+    try expectCompile("(?=a)?", .syntax_error);
+    try expectCompile("(?=a)*", .syntax_error);
 }
 
 test "perlex: §22.2.1 quantified backreference bodies are owned, not deferred" {
