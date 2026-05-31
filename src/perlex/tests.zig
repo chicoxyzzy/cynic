@@ -1247,12 +1247,23 @@ test "perlex: a class escape on both range bounds is a /u early error" {
     try expectCompileFlags("[\\W-\\W]", uf, .syntax_error);
 }
 
-test "perlex: a class-escape range bound defers without /u (Annex B)" {
-    // The `-` and the shorthand are matched literally; the fallback owns it.
-    try expectCompile("[\\d-a]", .unsupported);
-    try expectCompile("[a-\\d]", .unsupported);
-    try expectCompile("[\\D-a]", .unsupported);
-    try expectCompile("[a-\\W]", .unsupported);
+test "perlex: a non-/u class-escape range bound makes the '-' a literal (§22.2.1)" {
+    // A shorthand can't be a range endpoint, so without /u the `-` between it
+    // and the other ClassAtom is a literal '-' (main grammar): `[\d-a]` is
+    // `\d`, '-', 'a'. Perlex owns it directly (the /u early error is the only
+    // thing Annex B would have widened; the non-/u reading is the main grammar).
+    try expectCompile("[\\d-a]", .match);
+    try expectCompile("[a-\\d]", .match);
+    try expectCompile("[\\D-a]", .match);
+    try expectCompile("[a-\\W]", .match);
+    // The three members each match: a digit, the literal '-', and 'a' — but
+    // not 'b' (it is not a range `\d`..a).
+    try expectMatch("[\\d-a]", "5", "5");
+    try expectMatch("[\\d-a]", "-", "-");
+    try expectMatch("[\\d-a]", "a", "a");
+    try expectNoMatch("[\\d-a]", "b");
+    try expectMatch("[a-\\d]", "-", "-"); // the `-` is literal, not a range op
+    try expectMatch("[a-\\d]", "7", "7");
 }
 
 test "perlex: a standalone negated class escape under /u defers, not rejected" {
@@ -1939,12 +1950,11 @@ test "perlex: class escapes inside a class" {
     try expectNoMatch("[\\d]", "z");
 }
 
-test "perlex: a class escape as a range endpoint falls back (no Annex B)" {
-    // §B.1.4 isn't applied: `[\d-a]` / `[a-\d]` are SyntaxErrors under
-    // /u and an Annex B leniency otherwise — Perlex implements neither.
-    try expectCompile("[\\d-a]", .unsupported);
-    try expectCompile("[a-\\d]", .unsupported);
-    // A `-` not forming such a range stays a literal and is ours.
+test "perlex: a trailing or leading '-' in a class is the literal '-'" {
+    // A `-` that can't form a range — at the class boundary, or adjacent to a
+    // shorthand — is the literal '-'. (The class-escape range-bound forms
+    // `[\d-a]` / `[a-\d]` are owned as `\d`,'-',atom too; see the dedicated
+    // test above. Under /u they remain §22.2.1.1 early errors.)
     try expectMatch("[\\d-]", "-", "-");
     try expectMatch("[\\d-]", "7", "7");
     try expectMatch("[-\\d]", "-", "-");
