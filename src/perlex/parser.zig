@@ -797,10 +797,14 @@ const Parser = struct {
                 return self.makeNode(.{ .backref_index = n });
             },
             'p', 'P' => {
-                // §22.2.1 CharacterClassEscape — Unicode property escape.
-                // Valid under `/u` or `/v`; without either `\p` is Annex B
-                // identity-escape territory, deferred to the fallback.
-                if (!self.unicode and !self.unicode_sets) return error.Unsupported;
+                // §22.2.1 CharacterClassEscape — Unicode property escape,
+                // valid only under `/u` or `/v`. Without either flag `\p`
+                // matches no production: the CharacterClassEscape needs
+                // +UnicodeMode, and `p` is UnicodeIDContinue so it is not a
+                // valid IdentityEscape — a §22.2.1.1 early error. Only Annex B
+                // rereads `\p` as a literal 'p', which Cynic's strict-only,
+                // non-browser target drops.
+                if (!self.unicode and !self.unicode_sets) return error.SyntaxError;
                 return self.parsePropertyEscape(k == 'P');
             },
             '-' => {
@@ -915,9 +919,13 @@ const Parser = struct {
             },
             'u' => {
                 if (self.at(2) == '{') {
-                    // `\u{CodePoint}` — valid only under `/u` or `/v`;
-                    // non-Unicode defers (Annex B identity-escape territory).
-                    if (!self.unicode and !self.unicode_sets) return error.Unsupported;
+                    // `\u{CodePoint}` is a RegExpUnicodeEscapeSequence only
+                    // under `/u` or `/v`. Without either flag `\u{` matches no
+                    // production — RegExpUnicodeEscapeSequence[~UnicodeMode] is
+                    // just `\u`Hex4Digits, and `u` is UnicodeIDContinue so not
+                    // a valid IdentityEscape — a §22.2.1.1 early error. Only
+                    // Annex B rereads `\u` as a literal 'u', which Cynic drops.
+                    if (!self.unicode and !self.unicode_sets) return error.SyntaxError;
                     var i = self.pos + 3;
                     const start = i;
                     // u32 accumulator so an over-long run can't wrap a
@@ -1220,13 +1228,15 @@ const Parser = struct {
                 },
                 // §22.2.1 ClassEscape :: CharacterClassEscape :: `\p{…}` /
                 // `\P{…}` — a Unicode property escape, valid only under /u
-                // (this simple-class path) or /v. Without a flag `\p` is
-                // Annex B identity-escape territory the fallback owns, so
-                // defer. scanProperty owns every malformed shape — a bare
-                // `\p`/`\P` with no `{…}`, an empty/unterminated `{…}`, a
-                // non-/v property of strings — as a §22.2.1.1 early error.
+                // (this simple-class path) or /v. Without a flag `\p` matches
+                // no production (CharacterClassEscape needs +UnicodeMode; `p`
+                // is UnicodeIDContinue, so not a valid IdentityEscape) — a
+                // §22.2.1.1 early error. Only Annex B rereads `\p` as a
+                // literal 'p', which Cynic drops. scanProperty owns every
+                // malformed /u shape — a bare `\p`/`\P` with no `{…}`, an
+                // empty/unterminated `{…}`, a non-/v property of strings.
                 'p', 'P' => {
-                    if (!self.unicode and !self.unicode_sets) return error.Unsupported;
+                    if (!self.unicode and !self.unicode_sets) return error.SyntaxError;
                     return .{ .prop = try self.scanProperty(k == 'P') };
                 },
                 // `\b` inside a class is backspace, not a word boundary.

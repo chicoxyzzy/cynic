@@ -363,8 +363,11 @@ test "perlex: \\p{} group value, quantifier, and captures" {
     try expectMatchProp("(\\p{Lu})(\\p{Ll}+)", "Hello", "Hello,H,ello");
 }
 
-test "perlex: \\p{} only recognised under /u, else defers to fallback" {
-    try expectCompileProp("\\p{Lu}", .{}, .unsupported);
+test "perlex: \\p{} non-/u is a SyntaxError (§22.2.1.1)" {
+    // `\p` needs +UnicodeMode; without it `p` is a UnicodeIDContinue letter,
+    // an invalid IdentityEscape. Only Annex B reads `\p` as a literal 'p',
+    // which Cynic's strict-only, non-browser target drops.
+    try expectCompileProp("\\p{Lu}", .{}, .syntax_error);
 }
 
 test "perlex: a declined (unresolved) property defers to fallback" {
@@ -388,13 +391,14 @@ test "perlex: a malformed property escape is a /u early error" {
     try expectCompileProp("\\P{", uflags, .syntax_error); // negated, unterminated
 }
 
-test "perlex: a malformed property escape defers without /u (Annex B)" {
-    // Without /u or /v the `\p` gate at the atom path never reaches
-    // `scanProperty` — `\p` is Annex B identity-escape territory (→ literal
-    // 'p'), which the fallback owns.
-    try expectCompileProp("\\p", .{}, .unsupported);
-    try expectCompileProp("\\p{", .{}, .unsupported);
-    try expectCompileProp("\\p{}", .{}, .unsupported);
+test "perlex: a \\p escape non-/u is a SyntaxError before scanProperty (§22.2.1.1)" {
+    // Without /u or /v the `\p` gate rejects before `scanProperty` runs:
+    // `\p` matches no main-grammar production (the CharacterClassEscape needs
+    // +UnicodeMode), so what follows is irrelevant — a bare `\p`, `\p{`, or
+    // `\p{}` is the same early error. Only Annex B reads `\p` as literal 'p'.
+    try expectCompileProp("\\p", .{}, .syntax_error);
+    try expectCompileProp("\\p{", .{}, .syntax_error);
+    try expectCompileProp("\\p{}", .{}, .syntax_error);
 }
 
 test "perlex: bare \\k (no group name) is a SyntaxError in every mode (§22.2.1)" {
@@ -613,7 +617,6 @@ test "perlex: a \\k reference to a name with no matching group is a syntax error
 
 test "perlex: unsupported constructs fall back" {
     try expectCompileFlags("[\\D]", uf, .unsupported); // negated class escape under /u (off /u it's owned)
-    try expectCompile("\\p{L}", .unsupported); // property escape
     // A nullable body whose empty match comes from an *assertion* stays
     // deferred only in its Annex-B-valid form: `(?=a)*` is a §22.2.1
     // QuantifiableAssertion, accepted without /u and left to the fallback
@@ -818,9 +821,10 @@ test "perlex: \\u{} code point past 0x10FFFF is a syntax error (§22.2.1.1)" {
     // is `>`, not `>=`).
     try expectCompileFlags("\\u{10FFFF}", uflags, .match); // max valid code point
     try expectCompileFlags("\\u{1F600}", uflags, .match);
-    // Without /u or /v, `\u{…}` is Annex B identity-escape territory — Perlex
-    // defers to the fallback rather than ruling on it.
-    try expectCompile("\\u{200000}", .unsupported);
+    // Without /u or /v, `\u{…}` matches no production (a §22.2.1.1 early
+    // error; only Annex B reads `\u` as a literal 'u'), so it is a
+    // SyntaxError before the code-point value is even examined.
+    try expectCompile("\\u{200000}", .syntax_error);
 }
 
 // ── §22.2.2.4 lookahead ─────────────────────────────────────────────
@@ -1002,13 +1006,13 @@ test "perlex: incomplete \\x / 4-digit \\u escapes are a SyntaxError in every mo
     try expectCompile("\\u12", .syntax_error);
 }
 
-test "perlex: a non-/u \\u{…} still defers (separate RegExpUnicodeEscapeSequence site)" {
-    // Without /u, `\u{…}` is a §22.2.1 SyntaxError under the main grammar
-    // (RegExpUnicodeEscapeSequence[~UnicodeMode] is only `\u`Hex4Digits) —
-    // Annex B §B.1.2 rereads `\u` as a literal 'u'. That verdict lives at a
-    // separate direct RegExpUnicodeEscapeSequence gate, not the shared
-    // malformedEscape decoder, so it stays deferred for now.
-    try expectCompile("\\u{1", .unsupported);
+test "perlex: a non-/u \\u{…} is a SyntaxError (§22.2.1.1)" {
+    // Without /u, `\u{…}` matches no production under the main grammar
+    // (RegExpUnicodeEscapeSequence[~UnicodeMode] is only `\u`Hex4Digits, and
+    // `u` is UnicodeIDContinue so not a valid IdentityEscape). Only Annex B
+    // §B.1.2 rereads `\u` as a literal 'u'; Cynic's strict-only target drops
+    // that, so the `\u{` RegExpUnicodeEscapeSequence gate rejects directly.
+    try expectCompile("\\u{1", .syntax_error);
 }
 
 test "perlex: well-formed \\x / \\u escapes still match under /u" {
@@ -1203,11 +1207,12 @@ test "perlex: malformed \\p inside [ … ] under /u is a syntax error" {
     try expectCompileProp("[a-\\p{Lu}]", uflags, .syntax_error);
 }
 
-test "perlex: \\p inside [ … ] without /u, or an unknown property, defers" {
-    // Without /u or /v, `\p` is Annex B identity-escape territory the
-    // fallback owns — defer before reaching scanProperty.
-    try expectCompileProp("[\\p{Lu}]", .{}, .unsupported);
-    // A well-formed name the resolver declines defers the whole pattern.
+test "perlex: \\p inside [ … ] non-/u is a SyntaxError; an unknown /u property defers" {
+    // Without /u or /v, `\p` matches no production (a §22.2.1.1 early error;
+    // only Annex B reads it as literal 'p') — rejected before scanProperty.
+    try expectCompileProp("[\\p{Lu}]", .{}, .syntax_error);
+    // Under /u, a well-formed name the resolver declines defers the whole
+    // pattern (the production resolver knows it; the stub here does not).
     try expectCompileProp("[\\p{Nd}]", uflags, .unsupported);
 }
 
