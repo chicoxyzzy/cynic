@@ -635,8 +635,23 @@ test "perlex: a negated shorthand unioned with members under /u is owned (altern
     // `[\Wa]/iu` excludes a char that folds to a word char (Kelvin↔k).
     try expectFoldNoMatch("[\\Wb]", iu, &[_]u16{0x212A});
     try expectFoldMatch("[\\Wb]", iu, &[_]u16{'!'}, "!");
-    // The `^`-negated union is the complement of the union — still deferred.
-    try expectCompileFlags("[^\\Wa]", uf, .unsupported);
+}
+
+test "perlex: a ^-negated /u class with a negated shorthand is owned (lookahead lowering)" {
+    // `[^\Wa]` = the complement of the union `\W ∪ {a}` = a word char that
+    // isn't 'a'. Lowered to `(?:(?![\Wa])[^])` — a negative lookahead of the
+    // positive union plus an any-char — so it matches one code point the
+    // union rejects.
+    try expectCompileFlags("[^\\Wa]", uf, .match);
+    try expectMatchFlags("[^\\Wa]", uf, "b", "b"); // word char, not 'a'
+    try expectMatchFlags("[^\\Wa]", uf, "_", "_");
+    try expectNoMatchFlags("[^\\Wa]", uf, "a"); // 'a' ∈ the union
+    try expectNoMatchFlags("[^\\Wa]", uf, "!"); // '!' ∈ \W ⊂ the union
+    // /iu: `[^\Wb]` = \w/iu minus {b,B}, so it includes a char that folds to a
+    // word char (Kelvin↔k) but not '!'.
+    try expectFoldMatch("[^\\Wb]", iu, &[_]u16{0x212A}, "");
+    try expectFoldNoMatch("[^\\Wb]", iu, &[_]u16{'!'});
+    try expectFoldNoMatch("[^\\Wb]", iu, &[_]u16{'b'});
 }
 
 test "perlex: a quantified lookaround is a syntax error under /u, /v, or for any lookbehind" {
