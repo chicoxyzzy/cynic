@@ -964,8 +964,7 @@ pub const single_realm_exact_paths = [_][]const u8{
 };
 
 // NOTE: the path-contains single-realm patterns
-// (`/cross-realm.`, `-realm-function-ctor.`, the Function
-// apply/bind realm fixtures, `Proxy/revocable/tco-fn-realm.`)
+// (`/cross-realm.`, `-realm-function-ctor.`)
 // live under
 // CURRENTLY SKIPPED → "Single-realm path-contains" below. The
 // path-contains shape catches generated families spread across
@@ -1052,22 +1051,28 @@ pub const single_realm_path_contains = [_][]const u8{
     // Cross-realm fixtures that depend on per-realm *error / identity
     // attribution*. `$262.createRealm()` IS exposed to the test262
     // harness (a real child `Realm` sharing the parent heap — see
-    // `test262CreateRealm`), so the `proto-from-ctor-realm*.js` family
-    // no longer belongs here: §10.1.14 GetPrototypeFromConstructor now
-    // derives the default prototype from `GetFunctionRealm(newTarget)`'s
-    // intrinsics (`remapDefaultProtoToCtorRealm` in lantern/call.zig),
-    // so a `newTarget` minted by `other.Function` resolves to the
-    // *other* realm's `%X.prototype%`; the eval-gated members of that
-    // family (newTarget / asserted constructor built from a source
-    // string) stay skipped under `eval_dependent_exact_paths` below.
-    // What remains here still bottoms out on a realm-of-origin gap
-    // Cynic hasn't closed: the RegExp-prototype-getter `cross-realm.js`
-    // siblings (each asserts the brand-check TypeError comes from the
-    // *other* realm — `assert.throws(other.TypeError, …)`), and the
-    // `multiple-evaluations-of-class-realm-function-ctor.js` private-
-    // brand fixtures. Lift when realm-per-call-frame error attribution
-    // lands (same gap as the Function.prototype apply/bind + Proxy
-    // entries below).
+    // `test262CreateRealm`), so three whole families that used to live
+    // here now run:
+    //   • `proto-from-ctor-realm*.js` — §10.1.14
+    //     GetPrototypeFromConstructor derives the default prototype
+    //     from `GetFunctionRealm(newTarget)`'s intrinsics
+    //     (`remapDefaultProtoToCtorRealm` in lantern/call.zig), so a
+    //     `newTarget` minted by `other.Function` resolves to the
+    //     *other* realm's `%X.prototype%`.
+    //   • the RegExp-prototype-getter `cross-realm.js` siblings
+    //     (`dotAll`/`global`/`hasIndices`/`ignoreCase`/`multiline`/
+    //     `source`/`sticky`/`unicode`/`unicodeSets`) — each asserts the
+    //     §22.2.6 brand-check / SameValue TypeError comes from the
+    //     *other* realm. The getters resolve `%RegExpPrototype%` and
+    //     throw via `active_native_fn_realm` (the dispatcher records
+    //     the callee getter's realm before it runs — regexp.zig).
+    //   • `Function.prototype.{apply,bind}/*-realm.js` — apply's
+    //     §20.2.3.1 IsCallable / CreateListFromArrayLike TypeErrors
+    //     route through the callee realm (`active_native_fn_realm`,
+    //     function.zig); bind's §10.2.5 GetFunctionRealm walks the
+    //     `[[BoundTargetFunction]]` chain (`bound.realm = target.realm`
+    //     + `getFunctionRealm()` recursion) so the proto lookup picks
+    //     the innermost target's realm.
     //
     // The broader `Symbol/*/cross-realm.js` and
     // `RegExp/escape/cross-realm.js` fixtures are NOT realm-of-origin
@@ -1079,38 +1084,13 @@ pub const single_realm_path_contains = [_][]const u8{
     // on the shared `heap.symbol_registry`, so those pass — they are
     // deliberately NOT matched here.
     //
-    "RegExp/prototype/dotAll/cross-realm.",
-    "RegExp/prototype/global/cross-realm.",
-    "RegExp/prototype/hasIndices/cross-realm.",
-    "RegExp/prototype/ignoreCase/cross-realm.",
-    "RegExp/prototype/multiline/cross-realm.",
-    "RegExp/prototype/source/cross-realm.",
-    "RegExp/prototype/sticky/cross-realm.",
-    "RegExp/prototype/unicode/cross-realm.",
-    "RegExp/prototype/unicodeSets/cross-realm.",
+    // What still bottoms out on a realm-of-origin gap Cynic hasn't
+    // closed:
+    //   • `-realm-function-ctor.` — the `multiple-evaluations-of-class-
+    //     realm-function-ctor.js` private-brand fixtures build their
+    //     class via `new other.Function(sourceString)`, so they need
+    //     `--allow=eval` first (string-source Function constructor).
     "-realm-function-ctor.",
-
-    // `built-ins/Function/prototype/{apply,bind}/*-realm.js` —
-    // `$262.createRealm()`-using fixtures that probe cross-realm
-    // GetFunctionRealm / TypeError-realm-of-origin. Same single-
-    // realm carve-out as the patterns above. Identified at
-    // skip time: `argarray-not-object-realm.js`,
-    // `this-not-callable-realm.js`, `get-fn-realm.js`,
-    // `get-fn-realm-recursive.js`.
-    "Function/prototype/apply/argarray-not-object-realm.",
-    "Function/prototype/apply/this-not-callable-realm.",
-    "Function/prototype/bind/get-fn-realm.",
-    "Function/prototype/bind/get-fn-realm-recursive.",
-
-    // `built-ins/Proxy/revocable/tco-fn-realm.js` —
-    // `$262.createRealm()`-using fixture that revokes a Proxy in
-    // an "other" realm, then tail-calls it from the parent and
-    // asserts the TypeError comes from `other.global.TypeError`.
-    // Cynic's interpreter uses the *active* realm's TypeError
-    // (parent), not the proxy's realm of allocation (other) —
-    // same realm-per-frame gap as the families above. Lift when
-    // realm-per-call-frame tracking lands.
-    "Proxy/revocable/tco-fn-realm.",
 };
 
 // ── Implementation pending ──────────────────────────────────────────
@@ -1549,13 +1529,17 @@ test "skip: /v unicodeSets generated — Perlex handles code-point set ops" {
     ));
 }
 
-test "skip: Proxy revocable tco-fn-realm carve-out" {
+test "skip: Proxy revocable tco-fn-realm now in scope" {
     // §10.5.12 [[Call]] on a revoked Proxy throws TypeError. The
     // tco-fn-realm fixture asserts the TypeError comes from the
-    // proxy's realm (not the parent's). Cynic's interpreter uses
-    // the active realm's TypeError — same realm-per-frame gap as
-    // the other `*-realm-*` carve-outs.
-    try testing.expect(pathIsCynicOutOfScope(
+    // running execution context's realm — the "other" realm whose
+    // function is on the stack when ValidateNonRevokedProxy fails,
+    // not the parent dispatch loop's active realm. Cynic now tracks
+    // the running-context realm per CallFrame (`running_realm`,
+    // copied from the callee `JSFunction.realm` at frame entry) and
+    // threads it into `callValue` for the revoked-proxy throw, so
+    // the fixture is attempted, not path-skipped.
+    try testing.expect(!pathIsCynicOutOfScope(
         "built-ins/Proxy/revocable/tco-fn-realm.js",
     ));
     // Same-bucket fixtures without `-realm` stay in scope.

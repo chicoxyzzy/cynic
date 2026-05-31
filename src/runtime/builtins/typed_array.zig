@@ -415,7 +415,7 @@ fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value)
     // creation.js) — the byte-block charge fires only if OCFC
     // succeeded.
     const interp = @import("../lantern/interpreter.zig");
-    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.array_buffer_prototype) catch |err| switch (err) {
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.array_buffer_prototype, realm) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -797,7 +797,7 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
 /// brand checks / ToIndex coercions.
 fn allocateTypedArrayInstance(realm: *Realm, new_target: Value, default_proto: ?*JSObject) NativeError!*JSObject {
     const interp = @import("../lantern/interpreter.zig");
-    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, default_proto) catch |err| switch (err) {
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, default_proto, realm) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -2524,7 +2524,7 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
         const method_v = boxed.get("toLocaleString");
         var str_v: Value = undefined;
         if (heap_mod.valueAsFunction(method_v)) |_| {
-            const outcome = lantern.callValue(realm.allocator, realm, method_v, heap_mod.taggedObject(boxed), &.{}) catch |err| switch (err) {
+            const outcome = lantern.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, method_v, heap_mod.taggedObject(boxed), &.{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
@@ -3024,7 +3024,7 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     // checks already passed (byteOffset-validated-against-initial-
     // buffer-length.js).
     const interp = @import("../lantern/interpreter.zig");
-    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.data_view_prototype) catch |err| switch (err) {
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.data_view_prototype, realm) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };

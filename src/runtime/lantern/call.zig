@@ -175,6 +175,15 @@ pub fn unwrapBoundCall(
 pub fn callValue(
     allocator: std.mem.Allocator,
     realm: *Realm,
+    // §9.4 — the running execution context's Realm: the realm of
+    // whatever function is currently executing when this dispatch
+    // happens. Used to attribute the §10.5.12 [[Call]]-on-revoked-
+    // Proxy TypeError, which the spec throws "in the current Realm"
+    // (step 1 ValidateNonRevokedProxy, before any context push).
+    // Allocation/trap dispatch still use the active `realm`; only
+    // the cross-realm-observable throw reads this. Equal to `realm`
+    // in any single-realm program.
+    running_realm: *Realm,
     callee_v: Value,
     this_value: Value,
     args: []const Value,
@@ -184,7 +193,11 @@ pub fn callValue(
     if (heap_mod.valueAsPlainObject(callee_v)) |po| {
         if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
             if (po.proxy_revoked) {
-                const ex = try makeTypeError(realm, "Cannot perform 'apply' on a proxy that has been revoked");
+                // §10.5.12 step 1 ValidateNonRevokedProxy throws in
+                // the running execution context's realm — `running_realm`,
+                // not the active `realm` (they differ when a function
+                // from another realm tail-calls / calls a revoked proxy).
+                const ex = try makeTypeError(running_realm, "Cannot perform 'apply' on a proxy that has been revoked");
                 return .{ .thrown = ex };
             }
             const target_v: Value = if (po.proxy_target_fn) |tfn|
@@ -213,7 +226,7 @@ pub fn callValue(
                 return callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args);
             }
             // Trap missing — fall through to target.
-            return callValue(allocator, realm, target_v, this_value, args);
+            return callValue(allocator, realm, running_realm, target_v, this_value, args);
         }
     }
     // Plain function path.
@@ -337,9 +350,10 @@ pub fn getPrototypeFromConstructorValue(
     realm: *Realm,
     new_target: Value,
     intrinsic_default: ?*JSObject,
+    default_owner_realm: *Realm,
 ) RunError!ProtoLookup {
     if (heap_mod.valueAsFunction(new_target)) |new_target_fn| {
-        return try getPrototypeFromConstructor(allocator, realm, new_target_fn, intrinsic_default);
+        return try getPrototypeFromConstructor(allocator, realm, new_target_fn, intrinsic_default, default_owner_realm);
     }
     if (heap_mod.valueAsPlainObject(new_target)) |nt_proxy| {
         if (nt_proxy.proxy_target_fn != null or nt_proxy.proxy_target != null or nt_proxy.proxy_revoked) {
@@ -364,9 +378,19 @@ pub fn getPrototypeFromConstructorValue(
 /// `prototype` is not an Object, the spec falls back to the
 /// *constructor's* realm's intrinsic: step 4.a runs
 /// `GetFunctionRealm(constructor)`, step 4.b reads that realm's
-/// intrinsic named `intrinsicDefaultProto`. Callers resolve
-/// `intrinsic_default` from the *active* realm; this remaps it to
-/// the same intrinsic in `ctor_realm`.
+/// intrinsic named `intrinsicDefaultProto`. The caller supplies the
+/// concrete fallback object (`intrinsic_default`) plus the realm
+/// that *owns* it (`owner` — the realm whose intrinsic table /
+/// constructor binding the object was read from). This identifies
+/// the object by name in `owner`, then returns the same-named
+/// intrinsic of `ctor_realm`.
+///
+/// `owner` is NOT always the active realm: for a cross-realm
+/// `Reflect.construct(R3.Date, [], R1boundNewTarget)`, the fallback
+/// proto is read from the *target's* realm (R3.Date.prototype) while
+/// the active realm is the caller's — so scanning the active realm
+/// would never identify it. Callers thread the owning realm
+/// explicitly (see `baseConstructDefaultProtoOwner`).
 ///
 /// Two resolution strategies, in order:
 ///   1. Typed intrinsic-slot scan — covers every default proto held
@@ -376,7 +400,7 @@ pub fn getPrototypeFromConstructorValue(
 ///   2. Global-binding scan — the well-known global constructors
 ///      whose prototype lives only on the constructor's `.prototype`
 ///      slot (`Map`, `Number`, `Date`, the concrete TypedArrays, …)
-///      have no dedicated `Intrinsics` field, so match the active
+///      have no dedicated `Intrinsics` field, so match the owner
 ///      realm's constructor binding by name and read the same-named
 ///      binding from `ctor_realm`.
 ///
@@ -385,17 +409,17 @@ pub fn getPrototypeFromConstructorValue(
 /// when no mapping is found (defensive: a non-intrinsic default, or
 /// an intrinsic the ctor realm hasn't installed yet).
 fn remapDefaultProtoToCtorRealm(
-    active: *Realm,
+    owner: *Realm,
     ctor_realm: *Realm,
     intrinsic_default: ?*JSObject,
 ) ?*JSObject {
-    if (active == ctor_realm) return intrinsic_default;
+    if (owner == ctor_realm) return intrinsic_default;
     const default = intrinsic_default orelse return intrinsic_default;
 
     // (1) Typed intrinsic-slot scan.
     inline for (@typeInfo(intrinsics_mod.Intrinsics).@"struct".fields) |field| {
         if (field.type == ?*JSObject) {
-            if (@field(active.intrinsics, field.name)) |p| {
+            if (@field(owner.intrinsics, field.name)) |p| {
                 if (p == default) {
                     return @field(ctor_realm.intrinsics, field.name) orelse intrinsic_default;
                 }
@@ -404,7 +428,7 @@ fn remapDefaultProtoToCtorRealm(
     }
 
     // (2) Global-constructor scan keyed by binding name.
-    var it = active.globals.iterator();
+    var it = owner.globals.iterator();
     while (it.next()) |entry| {
         const f = heap_mod.valueAsFunction(entry.value_ptr.*) orelse continue;
         const fp = f.prototype orelse continue;
@@ -423,14 +447,18 @@ pub fn getPrototypeFromConstructor(
     realm: *Realm,
     new_target: *JSFunction,
     intrinsic_default: ?*JSObject,
+    default_owner_realm: *Realm,
 ) RunError!ProtoLookup {
     // §10.1.14 step 4 — every non-object fallback below resolves the
     // default prototype against the *constructor's* realm (step 4.a
     // GetFunctionRealm + step 4.b's named intrinsic), not the active
-    // realm. Resolve it once up front; in the single-realm case this
-    // is the unchanged `intrinsic_default`.
+    // realm. The remap identifies `intrinsic_default` by name in the
+    // realm that owns it (`default_owner_realm`, threaded by the
+    // caller — not necessarily the active realm in a cross-realm
+    // construct), then re-resolves it against `ctor_realm`. In the
+    // single-realm case this is the unchanged `intrinsic_default`.
     const ctor_realm = new_target.getFunctionRealm() orelse realm;
-    const default_proto = remapDefaultProtoToCtorRealm(realm, ctor_realm, intrinsic_default);
+    const default_proto = remapDefaultProtoToCtorRealm(default_owner_realm, ctor_realm, intrinsic_default);
     // §10.1.8.1 OrdinaryGet step 4 — accessor wins.
     if (new_target.ownAccessor("prototype")) |acc_pair| {
         if (acc_pair.getter) |getter| {
@@ -490,7 +518,23 @@ pub fn baseConstructIntrinsicDefaultProto(realm: *Realm, target: *JSFunction) ?*
     // the §10.2.2 base kind — its fallback is `%Object.prototype%`, not
     // the fresh ordinary object sitting in its `.prototype` slot.
     if (t.native_callback != null and !t.native_ordinary_function) return t.prototype;
-    return realm.intrinsics.object_prototype;
+    // The %Object.prototype% fallback belongs to the *target's* realm so
+    // the §10.1.14 remap can identify it by name there (a cross-realm
+    // ordinary target's fallback isn't owned by the active realm). In
+    // the single-realm case this is `realm.intrinsics.object_prototype`.
+    return (t.getFunctionRealm() orelse realm).intrinsics.object_prototype;
+}
+
+/// Realm that owns the object returned by
+/// `baseConstructIntrinsicDefaultProto` for `target` — the realm whose
+/// intrinsic table / `.prototype` slot the fallback proto was read
+/// from. §10.1.14 step 4 identifies that proto by *name* in this realm
+/// before re-resolving it against the constructor's realm, so the two
+/// helpers must agree on which (bound-unwrapped) function supplied it.
+pub fn baseConstructDefaultProtoOwner(realm: *Realm, target: *JSFunction) *Realm {
+    var t = target;
+    while (t.bound_target) |bt| t = bt;
+    return t.getFunctionRealm() orelse realm;
 }
 
 /// §10.5.14 [[Construct]] dispatcher that accepts a `Value`. Used
@@ -584,9 +628,10 @@ pub fn constructValue(
     // a bound function. Used wherever new_target's `prototype` isn't an
     // Object and we fall back to the intrinsic default (§10.1.14 step 4).
     const base_default = baseConstructIntrinsicDefaultProto(realm, target);
+    const base_default_owner = baseConstructDefaultProtoOwner(realm, target);
     var resolved_proto: ?*JSObject = undefined;
     if (heap_mod.valueAsFunction(new_target)) |new_target_fn| {
-        const proto_lookup = try getPrototypeFromConstructor(allocator, realm, new_target_fn, base_default);
+        const proto_lookup = try getPrototypeFromConstructor(allocator, realm, new_target_fn, base_default, base_default_owner);
         resolved_proto = switch (proto_lookup) {
             .proto => |p| p,
             .thrown => |ex| return .{ .thrown = ex },
@@ -697,6 +742,7 @@ pub fn constructValue(
         .super_called_cell = target.super_called_cell,
         .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
         .wrap_return_in_promise = false,
+        .running_realm = target.realm,
     });
     const outcome = try runFrames(allocator, realm, &frames);
     switch (outcome) {
@@ -825,6 +871,7 @@ pub fn callJSFunction(
         .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
         .wrap_return_in_promise = false,
         .owning_module = callee.owning_module,
+        .running_realm = callee.realm,
     });
 
     return runFrames(allocator, realm, &frames);
@@ -910,6 +957,7 @@ pub fn callJSFunctionAsSuper(
         .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
         .wrap_return_in_promise = false,
         .owning_module = callee.owning_module,
+        .running_realm = callee.realm,
     });
 
     return runFrames(allocator, realm, &frames);

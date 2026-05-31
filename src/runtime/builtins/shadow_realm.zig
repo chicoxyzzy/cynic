@@ -148,7 +148,7 @@ fn shadowRealmConstructor(
     // §3.8.1.1 step 2 — OrdinaryCreateFromConstructor. Read the
     // prototype off newTarget (may throw from a user getter).
     const interp = @import("../lantern/interpreter.zig");
-    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target_v, realm.intrinsics.shadow_realm_prototype) catch |err| switch (err) {
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target_v, realm.intrinsics.shadow_realm_prototype, realm) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -610,7 +610,7 @@ pub fn callWrappedFunction(
     // Step 5 — call target with the marshalled args. `callValue`
     // dispatches through Proxy traps for callable JSObject
     // targets and direct call for JSFunctions.
-    const inner_result = try call_mod.callValue(allocator, target_realm, target_v, Value.undefined_, wrapped_args);
+    const inner_result = try call_mod.callValue(allocator, target_realm, target_realm, target_v, Value.undefined_, wrapped_args);
     switch (inner_result) {
         .thrown => {
             // Step 6 — the target threw; remap to TypeError in

@@ -6670,7 +6670,7 @@ test "later: GetPrototypeFromConstructor derives default proto from newTarget's 
         .configurable = true,
     });
 
-    const lookup = try call.getPrototypeFromConstructor(testing.allocator, &parent, C, parent_map_proto);
+    const lookup = try call.getPrototypeFromConstructor(testing.allocator, &parent, C, parent_map_proto, &parent);
     try testing.expect(lookup == .proto);
     try testing.expectEqual(child_map_proto, lookup.proto);
 }

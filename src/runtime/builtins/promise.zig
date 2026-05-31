@@ -359,7 +359,7 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     // prototype off newTarget (may throw from a user getter) and
     // allocate the instance.
     const interp = @import("../lantern/interpreter.zig");
-    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.promise_prototype) catch |err| switch (err) {
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, realm.intrinsics.promise_prototype, realm) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };

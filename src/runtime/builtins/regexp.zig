@@ -31,6 +31,7 @@ const installNativeGetter = intrinsics.installNativeGetter;
 const argOr = intrinsics.argOr;
 const stringifyArg = intrinsics.stringifyArg;
 const throwTypeError = intrinsics.throwTypeError;
+const throwTypeErrorInRealm = intrinsics.throwTypeErrorInRealm;
 
 // ── libregexp C API ─────────────────────────────────────────────────────────
 
@@ -2539,11 +2540,15 @@ fn escapeRegExpPattern(realm: *Realm, src: []const u8) NativeError!*JSString {
 /// §22.2.6.10 `get RegExp.prototype.source`.
 fn regexpSourceGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    if (isRegExpPrototypeReceiver(realm, this_value)) {
+    // §22.2.6.10 — the `%RegExpPrototype%` SameValue and the
+    // non-RegExp `throw a TypeError` resolve in the getter's own
+    // realm (see `regexpFlagBoolGetter`).
+    const self_realm = realm.active_native_fn_realm orelse realm;
+    if (isRegExpPrototypeReceiver(self_realm, this_value)) {
         const s = realm.heap.allocateString("(?:)") catch return error.OutOfMemory;
         return Value.fromString(s);
     }
-    const src = regexpInternalSource(this_value) orelse return throwTypeError(realm, "RegExp.prototype.source called on non-RegExp");
+    const src = regexpInternalSource(this_value) orelse return throwTypeErrorInRealm(realm, self_realm, "RegExp.prototype.source called on non-RegExp");
     const escaped = try escapeRegExpPattern(realm, src);
     return Value.fromString(escaped);
 }
@@ -2582,11 +2587,18 @@ fn regexpFlagsGetter(realm: *Realm, this_value: Value, args: []const Value) Nati
 }
 
 fn regexpFlagBoolGetter(realm: *Realm, this_value: Value, flag_char: u8, name: []const u8) NativeError!Value {
-    if (isRegExpPrototypeReceiver(realm, this_value)) return Value.undefined_;
+    // §22.2.6 the flag getters resolve `%RegExpPrototype%` (step 3.a
+    // SameValue) and the step-3.b `throw a TypeError` in the getter's
+    // own realm — not the caller's. The dispatcher records the callee
+    // function's realm in `active_native_fn_realm`, so a getter invoked
+    // cross-realm (`other.descriptor.get.call(x)`) compares against the
+    // *other* realm's prototype and throws the *other* realm's TypeError.
+    const self_realm = realm.active_native_fn_realm orelse realm;
+    if (isRegExpPrototypeReceiver(self_realm, this_value)) return Value.undefined_;
     const has = regexpInternalFlagHas(this_value, flag_char) orelse {
         const msg = std.fmt.allocPrint(realm.allocator, "RegExp.prototype.{s} called on non-RegExp", .{name}) catch return error.OutOfMemory;
         defer realm.allocator.free(msg);
-        return throwTypeError(realm, msg);
+        return throwTypeErrorInRealm(realm, self_realm, msg);
     };
     return Value.fromBool(has);
 }

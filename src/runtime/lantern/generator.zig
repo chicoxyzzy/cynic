@@ -359,7 +359,7 @@ fn asyncIteratorSymbolAsyncDispose(realm: *Realm, this_value: Value, args: []con
         return promise_mod.allocatePromiseFor(realm, null, .fulfilled, Value.undefined_) catch return error.OutOfMemory;
     }
     // Step 5.a — Call(return, O, «»).
-    const result = interp.callValue(realm.allocator, realm, return_v, this_value, &.{}) catch |err| switch (err) {
+    const result = interp.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, return_v, this_value, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             const ex = realm.pending_exception orelse Value.undefined_;

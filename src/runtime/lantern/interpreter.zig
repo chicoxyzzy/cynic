@@ -129,6 +129,7 @@ pub const callValue = call.callValue;
 pub const getPrototypeFromConstructorValue = call.getPrototypeFromConstructorValue;
 pub const getPrototypeFromConstructor = call.getPrototypeFromConstructor;
 pub const baseConstructIntrinsicDefaultProto = call.baseConstructIntrinsicDefaultProto;
+pub const baseConstructDefaultProtoOwner = call.baseConstructDefaultProtoOwner;
 pub const constructValue = call.constructValue;
 pub const callJSFunction = call.callJSFunction;
 pub const callJSFunctionAsSuper = call.callJSFunctionAsSuper;
@@ -285,6 +286,20 @@ pub const CallFrame = struct {
     /// `import_meta` op falls back to `realm.current_module`
     /// when this is unset (matches the legacy module-body case).
     owning_module: ?*@import("../module.zig").ModuleRecord = null,
+    /// §9.4 — the [[Realm]] of the function executing in this
+    /// frame, copied from the callee `JSFunction.realm` at frame
+    /// entry. This is the running execution context's Realm Record:
+    /// the dispatch loop's `realm` parameter is fixed for a whole
+    /// `runFrames` session and does NOT switch when a function from
+    /// another realm is invoked inline, so an abstract operation
+    /// that must throw "in the current Realm" (e.g. §10.5.12
+    /// [[Call]] step 1 ValidateNonRevokedProxy, which throws before
+    /// any execution context is pushed) reads it here rather than
+    /// from the active `realm`. `null` for script-goal frames and
+    /// engine-synthesised frames; readers fall back to the active
+    /// `realm` (correct when the running function shares its realm,
+    /// which is every single-realm program).
+    running_realm: ?*@import("../realm.zig").Realm = null,
 };
 
 pub const RunError = error{
@@ -1723,7 +1738,7 @@ pub fn runFrames(
                 if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
                     const args_start = @as(usize, r_callee) + 1;
                     const args_slice = registers[args_start .. args_start + argc];
-                    const cresult = try callValue(allocator, realm, callee_v, Value.undefined_, args_slice);
+                    const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, Value.undefined_, args_slice);
                     switch (cresult) {
                         .value, .yielded => |v| {
                             acc = v;
@@ -2016,6 +2031,7 @@ pub fn runFrames(
                 .argc = argc,
                 .wrap_return_in_promise = false,
                 .owning_module = callee_fn.owning_module,
+                .running_realm = callee_fn.realm,
             }) catch {
                 realm.frame_pool.release(allocator, callee_regs);
                 return error.OutOfMemory;
@@ -2062,7 +2078,7 @@ pub fn runFrames(
                     if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
                         const args_start = @as(usize, r_callee) + 1;
                         const args_slice = registers[args_start .. args_start + argc];
-                        const cresult = try callValue(allocator, realm, callee_v, recv, args_slice);
+                        const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, recv, args_slice);
                         switch (cresult) {
                             .value, .yielded => |v| {
                                 acc = v;
@@ -2286,6 +2302,7 @@ pub fn runFrames(
                 .argc = argc,
                 .wrap_return_in_promise = false,
                 .owning_module = callee_fn.owning_module,
+                .running_realm = callee_fn.realm,
             }) catch {
                 realm.frame_pool.release(allocator, callee_regs);
                 return error.OutOfMemory;
@@ -2328,7 +2345,7 @@ pub fn runFrames(
                 if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
                     const args_start = @as(usize, r_callee) + 1;
                     const args_slice = registers[args_start .. args_start + argc];
-                    const cresult = try callValue(allocator, realm, callee_v, Value.undefined_, args_slice);
+                    const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, Value.undefined_, args_slice);
                     switch (cresult) {
                         .value, .yielded => |v| {
                             acc = v;
@@ -2574,6 +2591,7 @@ pub fn runFrames(
             f.owns_registers = true;
             f.wrap_return_in_promise = false;
             f.owning_module = callee_fn.owning_module;
+            f.running_realm = callee_fn.realm;
             committed = true;
             // §15.10 PTC re-entry is morally a loop back-edge: it
             // re-enters dispatch in-place, crossing neither the
@@ -2608,7 +2626,7 @@ pub fn runFrames(
                 if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
                     const args_start = @as(usize, r_callee) + 1;
                     const args_slice = registers[args_start .. args_start + argc];
-                    const cresult = try callValue(allocator, realm, callee_v, recv, args_slice);
+                    const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, recv, args_slice);
                     switch (cresult) {
                         .value, .yielded => |v| {
                             acc = v;
@@ -2809,6 +2827,7 @@ pub fn runFrames(
             f.owns_registers = true;
             f.wrap_return_in_promise = false;
             f.owning_module = callee_fn.owning_module;
+            f.running_realm = callee_fn.realm;
             committed = true;
             // §15.10 PTC re-entry — see the matching poll in
             // `.tail_call`. A method tail call flattens recursion
@@ -2928,7 +2947,7 @@ pub fn runFrames(
                 // its own %X.prototype% for a native; so a target with
                 // `prototype = null` falls back correctly instead of
                 // returning a stale slot.
-                const proto_lookup = try getPrototypeFromConstructor(allocator, realm, resolved_callee, baseConstructIntrinsicDefaultProto(realm, resolved_callee));
+                const proto_lookup = try getPrototypeFromConstructor(allocator, realm, resolved_callee, baseConstructIntrinsicDefaultProto(realm, resolved_callee), baseConstructDefaultProtoOwner(realm, resolved_callee));
                 const resolved_proto: ?*JSObject = switch (proto_lookup) {
                     .proto => |p| p,
                     .thrown => |ex| {
@@ -3034,7 +3053,7 @@ pub fn runFrames(
             // carry their own %X.prototype%), so `new F()` with
             // `F.prototype = null` falls back to %Object.prototype%
             // rather than F's own stale slot.
-            const proto_lookup_main = try getPrototypeFromConstructor(allocator, realm, callee_fn, baseConstructIntrinsicDefaultProto(realm, callee_fn));
+            const proto_lookup_main = try getPrototypeFromConstructor(allocator, realm, callee_fn, baseConstructIntrinsicDefaultProto(realm, callee_fn), baseConstructDefaultProtoOwner(realm, callee_fn));
             const resolved_proto_main: ?*JSObject = switch (proto_lookup_main) {
                 .proto => |p| p,
                 .thrown => |ex| {
@@ -3143,6 +3162,7 @@ pub fn runFrames(
                 .home_object = callee_fn.home_object,
                 .home_function = callee_fn.home_function,
                 .owning_module = callee_fn.owning_module,
+                .running_realm = callee_fn.realm,
                 .argc = argc,
             }) catch {
                 realm.frame_pool.release(allocator, callee_regs);

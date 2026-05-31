@@ -1095,7 +1095,7 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     }
 
     const lantern = @import("../lantern/interpreter.zig");
-    const outcome = lantern.callValue(realm.allocator, realm, target_v, this_arg, apply_args.items) catch |err| switch (err) {
+    const outcome = lantern.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, target_v, this_arg, apply_args.items) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -1255,7 +1255,8 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // (stale) slot. Mirrors built-ins/Function/prototype/bind/
     // proto-from-ctor-realm.js.
     const base_default = lantern.baseConstructIntrinsicDefaultProto(realm, effective_target);
-    const proto_lookup = lantern.getPrototypeFromConstructorValue(realm.allocator, realm, new_target_for_proto, base_default) catch |err| switch (err) {
+    const base_default_owner = lantern.baseConstructDefaultProtoOwner(realm, effective_target);
+    const proto_lookup = lantern.getPrototypeFromConstructorValue(realm.allocator, realm, new_target_for_proto, base_default, base_default_owner) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };

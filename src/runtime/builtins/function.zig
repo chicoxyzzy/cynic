@@ -26,6 +26,7 @@ const setNonEnumerable = intrinsics.setNonEnumerable;
 const installToStringTag = intrinsics.installToStringTag;
 const argOr = intrinsics.argOr;
 const throwTypeError = intrinsics.throwTypeError;
+const throwTypeErrorInRealm = intrinsics.throwTypeErrorInRealm;
 const lengthOfArray = intrinsics.lengthOfArray;
 const clampArrayLength = intrinsics.clampArrayLength;
 const callJSFunction = lantern.callJSFunction;
@@ -316,17 +317,34 @@ fn functionHasInstance(realm: *Realm, this_value: Value, args: []const Value) Na
 // nesting Zig stack frames per opcode (the inner session uses
 // its own frame stack).
 
+/// §7.2.3 IsCallable — true iff `v` has a `[[Call]]` internal
+/// method. That's a JSFunction (ordinary / built-in / bound) or a
+/// plain object flagged `proxy_callable` (a callable Proxy, or
+/// `%Function.prototype%` which is itself callable). A non-callable
+/// plain object (`{}`, a RegExp instance, …) is rejected — letting
+/// it fall through to `callValue` would surface the dispatcher's own
+/// "not callable" TypeError in the *caller's* realm, defeating the
+/// cross-realm attribution the reflective methods owe (§20.2.3.x
+/// step 2 throws in the function's own realm).
+fn isCallableValue(v: Value) bool {
+    if (heap_mod.valueAsFunction(v) != null) return true;
+    if (heap_mod.valueAsPlainObject(v)) |obj| return obj.proxy_callable;
+    return false;
+}
+
 fn functionCall(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    // §20.2.3.1 — if `this` is a callable Proxy, the apply trap
-    // fires (callValue handles that); otherwise dispatch to the
-    // ordinary function.
-    if (heap_mod.valueAsFunction(this_value) == null and heap_mod.valueAsPlainObject(this_value) == null) {
-        return throwTypeError(realm, "Function.prototype.call requires a callable receiver");
+    // §20.2.3.3 step 2 — IsCallable(func) false ⇒ TypeError, raised
+    // in the callee's own realm (`active_native_fn_realm`). A
+    // callable Proxy passes here so its apply trap fires downstream
+    // in `callValue`.
+    const self_realm = realm.active_native_fn_realm orelse realm;
+    if (!isCallableValue(this_value)) {
+        return throwTypeErrorInRealm(realm, self_realm, "Function.prototype.call requires a callable receiver");
     }
     const this_arg = argOr(args, 0, Value.undefined_);
     const rest: []const Value = if (args.len > 1) args[1..] else &.{};
 
-    const outcome = lantern.callValue(realm.allocator, realm, this_value, this_arg, rest) catch |err| switch (err) {
+    const outcome = lantern.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, this_value, this_arg, rest) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
@@ -343,8 +361,13 @@ fn functionCall(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (heap_mod.valueAsFunction(this_value) == null and heap_mod.valueAsPlainObject(this_value) == null) {
-        return throwTypeError(realm, "Function.prototype.apply requires a callable receiver");
+    // §20.2.3.1 step 2 — IsCallable(func) false ⇒ TypeError, raised
+    // in the callee's own realm so a cross-realm `apply.call(non_fn,
+    // …)` reports the *other* realm's TypeError (step 2 precedes the
+    // step 4 CreateListFromArrayLike on argArray).
+    const self_realm = realm.active_native_fn_realm orelse realm;
+    if (!isCallableValue(this_value)) {
+        return throwTypeErrorInRealm(realm, self_realm, "Function.prototype.apply requires a callable receiver");
     }
     const this_arg = argOr(args, 0, Value.undefined_);
     var apply_args: std.ArrayListUnmanaged(Value) = .empty;
@@ -388,13 +411,15 @@ fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                 apply_args.append(realm.allocator, fn_arr.get(islice)) catch return error.OutOfMemory;
             }
         } else {
-            // §20.2.3.1 step 6 — non-object, non-null/undefined
-            // is a TypeError.
-            return error.NativeThrew;
+            // §20.2.3.1 step 4 → §7.3.18 CreateListFromArrayLike
+            // step 2 — Type(obj) not Object ⇒ TypeError, in the
+            // callee's own realm (cross-realm `fn.apply(null,
+            // primitive)` reports the other realm's TypeError).
+            return throwTypeErrorInRealm(realm, self_realm, "Function.prototype.apply: argArray is not an object");
         }
     }
 
-    const outcome = lantern.callValue(realm.allocator, realm, this_value, this_arg, apply_args.items) catch |err| switch (err) {
+    const outcome = lantern.callValue(realm.allocator, realm, self_realm, this_value, this_arg, apply_args.items) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };

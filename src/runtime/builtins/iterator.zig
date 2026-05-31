@@ -583,7 +583,7 @@ fn iteratorSymbolDispose(realm: *Realm, this_value: Value, args: []const Value) 
     // GetMethod step 4 — the value must be callable; otherwise
     // TypeError. `callValue` performs that check (returns
     // `error.NativeThrew` with realm.pending_exception set).
-    const outcome = lantern.callValue(realm.allocator, realm, return_v, this_value, &.{}) catch |err| switch (err) {
+    const outcome = lantern.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, return_v, this_value, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NativeThrew,
     };
