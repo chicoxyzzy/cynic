@@ -1097,9 +1097,23 @@ const Parser = struct {
             const dash_range = self.peek() == '-' and self.at(1) != null and self.at(1).? != ']';
             switch (member) {
                 .class_added => {
-                    // `\d \s \w` — already appended. As a range low bound
-                    // (`[\d-a]`) it is a §22.2.1.1 /u early error.
-                    if (dash_range) return self.classEscapeRangeBound();
+                    // `\d \s \w` (and non-/u `\D \S \W`) — already appended.
+                    // Followed by `- X` the shorthand can't be a range bound:
+                    // under /u that is a §22.2.1.1 early error, but without /u
+                    // the `-` is a literal ClassAtom (main grammar — `[\d-a]`
+                    // is `\d`, '-', 'a'), so own it and let the loop continue.
+                    if (dash_range) {
+                        if (self.unicode or self.unicode_sets) return self.classEscapeRangeBound();
+                        self.pos += 1; // consume the literal '-'
+                        try ranges.append(self.a, .{ .lo = '-', .hi = '-' });
+                    }
+                },
+                .literal_added => {
+                    // A non-/u astral ClassAtom (its surrogate halves were
+                    // appended). Standalone it is owned; as a `-` range low
+                    // bound the source splits across the dash into a
+                    // surrogate-unit range Perlex doesn't model — defer.
+                    if (dash_range) return error.Unsupported;
                 },
                 .class_escape_unsupported => {
                     // `\D \S \W` under /u (off /u they were complemented in
@@ -1124,10 +1138,22 @@ const Parser = struct {
                                 if (hi < lo) return error.SyntaxError; // reversed range
                                 try ranges.append(self.a, .{ .lo = lo, .hi = hi });
                             },
-                            // Range with a CharacterClassEscape high bound
-                            // (`[a-\d]` / `[a-\D]` / `[a-\p{L}]`): §22.2.1.1
-                            // /u early error.
-                            .class_added, .class_escape_unsupported, .prop => return self.classEscapeRangeBound(),
+                            // A CharacterClassEscape high bound (`[a-\d]` /
+                            // `[a-\D]` / `[a-\p{L}]`): under /u a §22.2.1.1
+                            // early error. Without /u the `-` is a literal
+                            // ClassAtom (`[a-\d]` is 'a', '-', \d) — the
+                            // shorthand already appended its ranges during the
+                            // member parse, so add the low bound and the
+                            // literal '-' and own it.
+                            .class_added, .class_escape_unsupported, .prop => {
+                                if (self.unicode or self.unicode_sets) return self.classEscapeRangeBound();
+                                try ranges.append(self.a, .{ .lo = lo, .hi = lo });
+                                try ranges.append(self.a, .{ .lo = '-', .hi = '-' });
+                            },
+                            // A literal astral high bound (`[a-𠮷]`): the
+                            // source splits across the dash into a
+                            // surrogate-unit range Perlex doesn't model — defer.
+                            .literal_added => return error.Unsupported,
                         }
                     } else {
                         try ranges.append(self.a, .{ .lo = lo, .hi = lo });
@@ -1157,6 +1183,11 @@ const Parser = struct {
         /// A CharacterClassEscape Perlex represents as ranges and has
         /// already appended (`\d \s \w`); valid as a standalone member.
         class_added,
+        /// A literal astral ClassAtom appended as its two surrogate-half
+        /// single-unit ranges (non-/u; see `classLiteralCodePoint`). Valid
+        /// standalone, but as a `-` range bound the source splits across the
+        /// dash (a surrogate-unit range Perlex doesn't model) — defer there.
+        literal_added,
         /// A `\D \S \W` set complement under /u, where Perlex can't
         /// complement at parse time (the parser isn't told `i`, so it can't
         /// rule out the /iu non-ASCII fold orbits). Standalone it defers to
@@ -1288,7 +1319,7 @@ const Parser = struct {
             const low: u21 = 0xDC00 + (v & 0x3FF);
             try ranges.append(self.a, .{ .lo = high, .hi = high });
             try ranges.append(self.a, .{ .lo = low, .hi = low });
-            return .class_added;
+            return .literal_added;
         }
         return .{ .ch = cp };
     }
