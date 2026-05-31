@@ -97,6 +97,18 @@ try {
 }
 frozen.locked;`,
 
+  'Hardened by default': `// Cynic freezes the primordials at realm init — no lockdown()
+// call, no SES import. Monkey-patching a built-in prototype throws
+// on contact; the real method still works.
+"use strict";
+try {
+  Array.prototype.push = () => "hijacked";
+} catch (e) {
+  console.log(e.name + " — Array.prototype is frozen");
+}
+console.log("Object.isFrozen(Array.prototype):", Object.isFrozen(Array.prototype));
+[1, 2, 3].push(4);`,
+
   'BigInt — arbitrary precision': `// BigInt is sign-magnitude with a u64 limb array — same
 // representation V8 / JSC ship. Below: 100! computed exactly,
 // no rounding, no Infinity.
@@ -106,6 +118,25 @@ console.log("100! =");
 console.log(n.toString());
 n.toString().length + " digits";`,
 
+  'RegExp — named groups, lookbehind': `// Full ECMA-262 RegExp (§22.2) — named groups, lookbehind,
+// Unicode property escapes, /v set notation. No Annex B leniency.
+"use strict";
+const m = "2026-05-31".match(/(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})/);
+console.log("named: " + m.groups.year + "-" + m.groups.month + "-" + m.groups.day);
+console.log("lookbehind: " + "total $42.00".match(/(?<=\\$)\\d+/)[0]);
+console.log("script: " + "Δabc".match(/\\p{Script=Greek}/u)[0]);
+"abc".match(/[\\p{Letter}--[b]]/v)[0];`,
+
+  'Temporal — date arithmetic': `// Temporal — date/time math without the Date footguns. Adding
+// a month to May 31 clamps to June 30; there is no June 31 to
+// overflow into.
+"use strict";
+const d = Temporal.PlainDate.from("2026-05-31");
+console.log("date: " + d.toString());
+console.log("plus 1mo: " + d.add({ months: 1 }).toString());
+const dur = Temporal.Duration.from({ hours: 2, minutes: 30 });
+"duration: " + dur.toString();`,
+
   'Iterator helpers': `// Iterator.prototype.{map,filter,take,toArray} — the
 // pre-Stage-4 iterator-helper proposal, lazy by construction.
 function* nats() { let n = 1; while (true) yield n++; }
@@ -114,6 +145,28 @@ nats()
   .filter(n => n % 2 === 1)
   .take(5)
   .toArray();`,
+
+  'Map upsert — getOrInsert': `// Map.prototype.getOrInsertComputed runs the factory only when
+// the key is absent, so building a multimap drops the
+// has()/get()/set() dance. Stage 4 as of 2026-05 (§24.1.3.8).
+"use strict";
+const groups = new Map();
+for (const word of ["ant", "bee", "ark", "bat", "cat"]) {
+  groups.getOrInsertComputed(word[0], () => []).push(word);
+}
+JSON.stringify([...groups]);`,
+
+  'Object.groupBy — bucketing': `// Object.groupBy bins items by a classifier's return value
+// (Object.groupBy / Map.groupBy, ES2024). No reduce(), no
+// manual bucket initialisation.
+"use strict";
+const groups = Object.groupBy([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], (n) => {
+  if (n % 15 === 0) return "fizzbuzz";
+  if (n % 3 === 0) return "fizz";
+  if (n % 5 === 0) return "buzz";
+  return "plain";
+});
+JSON.stringify(groups);`,
 
   'Async + microtasks': `// .then defers; await yields. The log order proves the
 // microtask queue runs spec-correctly (ECMA-262 §9.4).
@@ -135,6 +188,22 @@ class Counter {
 }
 const c = new Counter().inc().inc().inc();
 \`value = \${c.value}\`;`,
+
+  'using — deterministic cleanup': `// Explicit Resource Management — a using declaration runs the
+// value's [Symbol.dispose] when the scope exits, in reverse order.
+// The finally block you keep forgetting to write.
+"use strict";
+const log = [];
+function open(name) {
+  return { [Symbol.dispose]() { log.push("close " + name); } };
+}
+{
+  using a = open("a");
+  using b = open("b");
+  log.push("body runs");
+}
+log.push("scope exited");
+log.join(" -> ");`,
 
   'WeakRef — genuinely weak': `// WeakRef holds a target without keeping it alive. Spec quirk
 // (§9.10): the ctor pins the target until the next job boundary,
@@ -346,6 +415,11 @@ function createEditor(initialDoc) {
         keymap.of([runShortcut, indentWithTab, ...defaultKeymap, ...historyKeymap]),
         cynicTheme,
         EditorState.tabSize.of(2),
+        // Mirror every document edit to localStorage (debounced) so a
+        // reload restores the draft. See scheduleSave / loadSaved.
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) scheduleSave();
+        }),
       ],
     }),
   });
@@ -786,6 +860,11 @@ function renderInspectorResult(frame) {
   }
   setEditorErrorRange(null);
 
+  // A one-line affordance hint: the inspector lines are hoverable in
+  // both directions (line → source, source → line), which isn't
+  // obvious at a glance. Muted so it never competes with the disasm.
+  appendLine('Hover a line to highlight its source — or hover the source to find its line.', 'out-hint');
+
   // The hover-link maps byte offsets in the *source the engine
   // disassembled* — that's the current editor document.
   const byteToCodeUnit = buildByteToCodeUnitMap(getSource());
@@ -885,6 +964,11 @@ function renderAstResult(frame) {
   }
   setEditorErrorRange(null);
 
+  // Same hoverable-lines hint as the bytecode inspector (see
+  // renderInspectorResult). AST nodes nest, so the reverse hover
+  // resolves to the tightest enclosing span.
+  appendLine('Hover a line to highlight its source — or hover the source to find its line.', 'out-hint');
+
   const byteToCodeUnit = buildByteToCodeUnitMap(getSource());
   const docLength = view.state.doc.length;
 
@@ -941,6 +1025,10 @@ function setMode(mode) {
   for (const tab of els.modeTabs) {
     tab.setAttribute('aria-selected', tab.dataset.mode === mode ? 'true' : 'false');
   }
+  // Keep the tabpanel's accessible name pointed at the active tab so a
+  // screen reader announces the right mode when focus enters the
+  // output region. Tab ids are `tab-<mode>` (see playground.html).
+  els.output.setAttribute('aria-labelledby', 'tab-' + mode);
   // Switching modes invalidates any cached span-line state — the
   // output DOM is about to be replaced.
   lastSpanLines = [];
@@ -1001,6 +1089,40 @@ function seedFromHash() {
 }
 
 // --------------------------------------------------------------------------
+// Local autosave — the editor source is mirrored to localStorage so a
+// reload restores the last-edited draft. A shared `#code=` hash (above)
+// still wins on load; this is the fallback when there's no shared link.
+// --------------------------------------------------------------------------
+
+const STORAGE_KEY = 'cynic.playground.source';
+let saveTimer = 0;
+
+// Debounced: every keystroke fires the editor's update listener, but we
+// only touch localStorage ~400ms after typing settles. localStorage
+// writes are synchronous, so coalescing keeps them off the hot path.
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, getSource());
+    } catch (err) {
+      // Private-mode / quota-exceeded / storage-disabled — autosave is
+      // a convenience, never a hard dependency. Swallow and move on.
+      console.warn('autosave write failed:', err);
+    }
+  }, 400);
+}
+
+function loadSaved() {
+  try {
+    return localStorage.getItem(STORAGE_KEY);
+  } catch (err) {
+    console.warn('autosave read failed:', err);
+    return null;
+  }
+}
+
+// --------------------------------------------------------------------------
 // Sample snippets
 // --------------------------------------------------------------------------
 
@@ -1037,7 +1159,10 @@ function wireSnippets() {
 
 function init() {
   els.run.disabled = true;
-  createEditor(seedFromHash() || DEFAULT_SNIPPET);
+  // Load precedence: an explicit shared link wins, then the locally
+  // autosaved draft, then the default snippet. A shared `#code=` URL
+  // must always show exactly what was shared, ignoring local state.
+  createEditor(seedFromHash() || loadSaved() || DEFAULT_SNIPPET);
   wireSnippets();
   wireModeTabs();
   wireInspectorHover();
