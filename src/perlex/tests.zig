@@ -827,6 +827,12 @@ test "perlex: out-of-range numeric backreference is a syntax error" {
     try expectCompile("\\1", .syntax_error); // no capturing groups
     try expectCompile("(a)\\2", .syntax_error); // \2 past the one group
     try expectCompileFlags("\\1", uflags, .syntax_error); // also under /u
+    // A DecimalEscape too large to fit usize is trivially past the capture
+    // count, so it is the same §22.2.1.1 early error — owned by the parser
+    // rather than deferred (Annex B's legacy-octal reread is dropped, and
+    // engine262 rejects it too; the production engines accept only via
+    // Annex B).
+    try expectCompile("(a)\\99999999999999999999999", .syntax_error); // 23 nines, overflows u64
     // In-range references (including a forward reference) still compile.
     try expectMatch("(a)\\1", "aa", "aa,a");
     try expectMatch("\\1(a)", "a", "a,a");
