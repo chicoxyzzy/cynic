@@ -204,6 +204,18 @@
   }
   .out-empty { color: var(--ink-soft); font-style: italic; }
 
+  /* Inspector affordance hint — a one-off muted note at the top of the
+     bytecode / AST panels telling the reader the lines are hoverable.
+     Reuses the muted palette so it never competes with the disasm. */
+  .out-hint {
+    display: block;
+    color: var(--ink-soft);
+    font-style: italic;
+    font-size: 12px;
+    margin-bottom: 8px;
+    opacity: 0.85;
+  }
+
   /* Output-panel span-line decoration. Each disasm instruction or AST
      node line that carries a source `[start..end]` span gets `.span-line`
      and lights up on hover, paired with a CodeMirror range decoration
@@ -294,7 +306,7 @@
         </select>
         <div class="panel-actions">
           <button id="share" type="button" class="btn-secondary">Copy link</button>
-          <button id="run" type="button" class="btn-primary">Run</button>
+          <button id="run" type="button" class="btn-primary" title="Run · Ctrl/Cmd+Enter">Run</button>
         </div>
       </div>
       <div id="editor-host"></div>
@@ -303,13 +315,13 @@
     <div class="panel">
       <div class="panel-head panel-head-tabs">
         <div class="mode-tabs" role="tablist" aria-label="output mode">
-          <button class="mode-tab" data-mode="eval" type="button" role="tab" aria-selected="true">eval</button>
-          <button class="mode-tab" data-mode="bytecode" type="button" role="tab" aria-selected="false">bytecode</button>
-          <button class="mode-tab" data-mode="ast" type="button" role="tab" aria-selected="false">AST</button>
+          <button id="tab-eval" class="mode-tab" data-mode="eval" type="button" role="tab" aria-selected="true" aria-controls="output">eval</button>
+          <button id="tab-bytecode" class="mode-tab" data-mode="bytecode" type="button" role="tab" aria-selected="false" aria-controls="output">bytecode</button>
+          <button id="tab-ast" class="mode-tab" data-mode="ast" type="button" role="tab" aria-selected="false" aria-controls="output">AST</button>
         </div>
-        <span class="status" id="status">loading engine…</span>
+        <span class="status" id="status" aria-live="polite">loading engine…</span>
       </div>
-      <pre class="output" id="output"><span class="out-empty">Run something. Cynic will judge it.</span></pre>
+      <pre class="output" id="output" role="tabpanel" tabindex="0" aria-labelledby="tab-eval"><span class="out-empty">Run something. Cynic will judge it.</span></pre>
     </div>
   </div>
 
