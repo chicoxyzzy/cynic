@@ -73,7 +73,7 @@ pub const PropertyResolver = *const fn (
     gpa: std.mem.Allocator,
     key: ?[]const u8,
     value: []const u8,
-) std.mem.Allocator.Error!?ResolvedProperty;
+) (std.mem.Allocator.Error || error{SyntaxError})!?ResolvedProperty;
 
 /// Resolves a code point to the other members of its §22.2.2.9
 /// Canonicalize equivalence class under Unicode case folding — the

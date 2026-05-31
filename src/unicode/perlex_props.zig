@@ -29,25 +29,30 @@ const ResolvedProperty = perlex.ResolvedProperty;
 /// `\p{NameOrValue}` is a binary property or a General_Category value
 /// (disjoint name spaces); `\p{gc=…}`, `\p{Script=…}` / `\p{sc=…}`, and
 /// `\p{Script_Extensions=…}` / `\p{scx=…}` select the keyed property.
-/// Returns null for names Cynic's tables don't recognise and for the
-/// `/v`-only string properties, so the pattern defers to the libregexp
-/// fallback (authoritative for the SyntaxError verdict). The signature
-/// matches `perlex.PropertyResolver`.
+/// Cynic's tables cover the full ES2025 set of binary properties,
+/// General_Category values, Script / Script_Extensions values, and
+/// properties of strings, so a name/value none of them recognise is an
+/// invalid UnicodePropertyValueExpression: `resolve` raises
+/// `error.SyntaxError` (§22.2.1.1) rather than deferring. It never returns
+/// null — the optional return matches `perlex.PropertyResolver` (a test
+/// stub with partial data does return null, which defers). The /v-only
+/// restriction on properties of strings is enforced by the parser, not
+/// here.
 pub fn resolve(
     gpa: std.mem.Allocator,
     key: ?[]const u8,
     value: []const u8,
-) std.mem.Allocator.Error!?ResolvedProperty {
+) (std.mem.Allocator.Error || error{SyntaxError})!?ResolvedProperty {
     if (key) |k| {
         const ranges: []const properties.Range =
             if (std.mem.eql(u8, k, "gc") or std.mem.eql(u8, k, "General_Category"))
-                (properties.generalCategory(value) orelse return null)
+                (properties.generalCategory(value) orelse return error.SyntaxError)
             else if (std.mem.eql(u8, k, "sc") or std.mem.eql(u8, k, "Script"))
-                (properties.script(value) orelse return null)
+                (properties.script(value) orelse return error.SyntaxError)
             else if (std.mem.eql(u8, k, "scx") or std.mem.eql(u8, k, "Script_Extensions"))
-                (properties.scriptExtensions(value) orelse return null)
+                (properties.scriptExtensions(value) orelse return error.SyntaxError)
             else
-                return null;
+                return error.SyntaxError; // unrecognised property key
         return try rangesOnly(gpa, ranges);
     }
     // Lone form: a binary property or a General_Category value (both
@@ -56,7 +61,11 @@ pub fn resolve(
     // (§22.2.1.1), so the order only decides which lookup finds it.
     if (properties.binaryProperty(value)) |ranges| return try rangesOnly(gpa, ranges);
     if (properties.generalCategory(value)) |ranges| return try rangesOnly(gpa, ranges);
-    return try resolveStringProperty(gpa, value); // null when not a string prop
+    if (try resolveStringProperty(gpa, value)) |sp| return sp;
+    // §22.2.1.1 — the name matches no binary property, General_Category
+    // value, or property of strings Cynic's tables (the full ES set)
+    // recognise, so it is an invalid UnicodePropertyValueExpression.
+    return error.SyntaxError;
 }
 
 /// The other members of `cp`'s §22.2.2.9 simple case-folding orbit (empty
@@ -269,11 +278,9 @@ test "lone property of strings resolves with ranges and sequences" {
     defer freeResolved(be);
     try testing.expect(be.ranges.len > 0);
     try testing.expect(be.strings.len > 0);
-    // A keyed form of the same name is not a property of strings → null.
-    try testing.expectEqual(
-        @as(?ResolvedProperty, null),
-        try resolve(testing.allocator, "gc", "Basic_Emoji"),
-    );
+    // A keyed form of the same name is not a General_Category value, so it
+    // is a §22.2.1.1 SyntaxError (not a deferral).
+    try testing.expectError(error.SyntaxError, resolve(testing.allocator, "gc", "Basic_Emoji"));
 
     // RGI_Emoji (the union) resolves too, with sequence members.
     const rgi = (try resolve(testing.allocator, null, "RGI_Emoji")) orelse
@@ -282,19 +289,14 @@ test "lone property of strings resolves with ranges and sequences" {
     try testing.expect(rgi.strings.len > 0);
 }
 
-test "unknown names and keys defer (null)" {
-    try testing.expectEqual(
-        @as(?ResolvedProperty, null),
-        try resolve(testing.allocator, null, "NotAProperty"),
-    );
-    try testing.expectEqual(
-        @as(?ResolvedProperty, null),
-        try resolve(testing.allocator, "Script", "NotAScript"),
-    );
-    try testing.expectEqual(
-        @as(?ResolvedProperty, null),
-        try resolve(testing.allocator, "boguskey", "Latin"),
-    );
+test "unknown names, values, and keys are a §22.2.1.1 SyntaxError" {
+    // Cynic's tables are the full ES set, so an unrecognised lone name, a
+    // bad keyed value, or an unknown key is an invalid
+    // UnicodePropertyValueExpression — resolve raises SyntaxError directly
+    // rather than deferring (which previously punted the verdict to libregexp).
+    try testing.expectError(error.SyntaxError, resolve(testing.allocator, null, "NotAProperty"));
+    try testing.expectError(error.SyntaxError, resolve(testing.allocator, "Script", "NotAScript"));
+    try testing.expectError(error.SyntaxError, resolve(testing.allocator, "boguskey", "Latin"));
 }
 
 test "produced ranges mirror the source table verbatim" {
