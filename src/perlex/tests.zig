@@ -610,6 +610,35 @@ test "perlex: a quantified lookaround is a syntax error under /u, /v, or for any
     // Non-Unicode quantified *lookahead* stays the Annex-B defer (above).
 }
 
+test "perlex: a quantified anchor or word boundary is a syntax error in every mode (§22.2.1)" {
+    // §22.2.1 Term: an anchor (`^` `$`) or word-boundary (`\b` `\B`) is an
+    // Assertion, never an Atom or a QuantifiableAssertion (only a lookahead
+    // is, in Annex B §B.1.2). So a quantifier on one has nothing to repeat —
+    // a Syntax Error with or without /u, for every quantifier shape. Unlike
+    // the lookahead case there is no Annex-B reading: a brace form such as
+    // `^{2}` is rejected too (the `{` is not re-read as a literal). Confirmed
+    // identical across the production engines.
+    try expectCompile("^*", .syntax_error);
+    try expectCompile("$+", .syntax_error);
+    try expectCompile("\\b?", .syntax_error);
+    try expectCompile("\\B{2,5}", .syntax_error);
+    try expectCompile("^*?", .syntax_error); // lazy marker — still nothing to repeat
+    try expectCompile("$+?", .syntax_error);
+    try expectCompile("^{2}", .syntax_error); // brace form: no Annex-B literal `{`
+    // Under /u and /v — same verdict, every shape.
+    try expectCompileFlags("^*", uf, .syntax_error);
+    try expectCompileFlags("\\b{3}", uf, .syntax_error);
+    try expectCompileFlags("$+", vflags, .syntax_error);
+    try expectCompileFlags("^{2}", uf, .syntax_error);
+    // Regression guard: the change owns only bare assertions. A non-/u
+    // quantified *lookahead* is a QuantifiableAssertion that still defers to
+    // the fallback to match (not a SyntaxError), and an unquantified anchor
+    // still compiles.
+    try expectCompile("(?=a)*", .unsupported);
+    try expectCompile("^$", .match);
+    try expectCompile("\\bfoo\\b", .match);
+}
+
 test "perlex: large bounded quantifiers lower to a counted loop" {
     // §22.2.2.3 RepeatMatcher. Bounds past the inline-expansion cap
     // (`max_repeat_expand`) used to defer to the fallback because inlining

@@ -360,9 +360,17 @@ const Parser = struct {
 
     fn applyQuantifier(self: *Parser, atom: *Node, min: usize, max: usize, greedy: bool) ParseError!*Node {
         switch (atom.*) {
-            // §22.2.1 — a quantifier must follow a quantifiable Atom,
-            // not an Assertion. Defer the edge case to the fallback.
-            .anchor_start, .anchor_end, .empty, .word_boundary => return error.Unsupported,
+            // §22.2.1 Term — a Quantifier must follow a quantifiable Atom.
+            // An anchor (`^` `$`) or word-boundary (`\b` `\B`) is an
+            // Assertion, and (unlike a lookahead, the lone Annex B §B.1.2
+            // QuantifiableAssertion) is never quantifiable: there is no
+            // `Assertion Quantifier` production in any mode. So a quantifier
+            // on one is a Syntax Error with or without /u, for every shape —
+            // including a brace form like `^{2}` (the `{` is not re-read as a
+            // literal; all production engines reject it). `.empty` never
+            // reaches here (parseAtom does not produce it), so it is not
+            // listed — an empty atom would be a valid nullable repeat anyway.
+            .anchor_start, .anchor_end, .word_boundary => return error.SyntaxError,
             // §22.2.1 Term: under +UnicodeMode there is no
             // `Assertion Quantifier` production, so quantifying a lookaround
             // is a SyntaxError. Under ~UnicodeMode only a *lookahead* is a
