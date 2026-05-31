@@ -333,6 +333,113 @@ memory win (a benchmark verifying RSS for N=100 hardened realms is
 roughly RSS(1 realm) + small overhead). Existing single-realm
 test262 sweep unchanged.
 
+### Phase 1 implementation notes (added 2026-05-31)
+
+Surveying today's `intrinsics.zig` (2,292 lines) + `heap.zig`
+(4,031 lines) + `realm.zig` (1,617 lines) before writing code
+turned up four implementation decisions that the high-level
+plan above leaves implicit. Pinning them here so the
+implementation commits can cite this section rather than
+re-relitigating.
+
+**(a) Sharing scope: prototypes only, NOT constructors.**
+
+A constructor object closes over realm-specific state — most
+visibly its `[[Prototype]]` and its `[[Realm]]` slot (§9.3.1),
+but also its `.constructor` back-edge to a prototype that may
+itself share state with the current realm's globals via
+internal slot bookkeeping. Sharing the constructor function
+object across realms would let realm A's `Error` constructor
+observe realm B's globals through the back-edge, which breaks
+both spec literally (each realm gets its own `%Error%`) and
+isolation in practice.
+
+`IntrinsicsBase` therefore shares only the *prototype
+subgraph*: `%Object.prototype%`, `%Array.prototype%`,
+`%Function.prototype%`, `%Error.prototype%`, the four typed-
+error prototypes, `%Iterator.prototype%`, etc. — every slot in
+`Intrinsics` whose Zig type is `?*JSObject`. Constructors
+(`?*JSFunction` slots) are allocated per-realm and their
+`.prototype` is set to the shared base's prototype object;
+their `.constructor` back-edge is the per-realm constructor.
+This matches QuickJS's "context-shared atoms" pattern and
+JavaScriptCore's `JSGlobalObject`-per-realm-with-shared-
+`Structure` design.
+
+**(b) GC lifetime: a separate, non-collected heap.**
+
+The "external" flag on heap allocations approach from the
+original plan adds a per-object branch to Metla's sweep
+walker, and the alternative — refcounting individual shared
+objects — leaks the realm/heap boundary into every native
+that touches a prototype.
+
+Cleaner: `IntrinsicsBase` owns its own `Heap`, but flagged
+`gc_disabled = true` (a single check at the top of
+`Heap.collect`) so the sweep walker on a per-realm heap never
+sees the shared objects in the first place. The shared heap
+is constructed once at process startup via a scratch `Realm`,
+frozen, and persisted for the lifetime of the host. Per-realm
+heaps reference shared `*JSObject` pointers but never own or
+sweep them.
+
+This needs one heap-level change: shape pointers, hidden-
+class transitions, and the (shipped) lazy-property-bag layer
+all need to tolerate a `*JSObject` whose `heap` field points
+to the shared base. Today every code path assumes one heap
+per realm; the audit pass surfaces every site that calls back
+into `obj.heap.<X>` and confirms it's safe across heaps (or
+refactors to take an explicit heap parameter).
+
+**(c) Symbols are shared too.**
+
+Well-known symbols (`Symbol.iterator`, `Symbol.asyncIterator`,
+`Symbol.toPrimitive`, …) are spec-literally per-realm but
+observably interchangeable — they're identity-distinct in
+`a === b` only because §6.1.5 specifies fresh values per
+realm. Production engines vary: V8 ships shared, JSC ships
+shared, SpiderMonkey ships per-realm. Cynic ships shared
+under `IntrinsicsBase` to keep the cross-realm `for…of`
+ergonomic; the spec text doesn't observably differ for any
+code that doesn't reach into two realms' `Symbol.iterator`
+and compare them with `===`, and the practical wins (one
+allocation for the most-used pseudo-private slot key in the
+language) are large.
+
+**(d) Override-mistake accessors travel with the prototype.**
+
+`ses-alignment.md` Phase 3 wires synthetic accessor pairs
+onto every frozen prototype slot so `obj.x = 2` shadows
+instead of throwing. The accessors are *per-slot, per-
+prototype* — not realm-aware — so once they're baked into
+the shared prototypes inside `IntrinsicsBase` they share for
+free. The Phase 1 verification needs a regression test for
+the override-mistake fix triggered from realm A against a
+prototype shared with realm B; if the synthetic getter/setter
+is on the shared graph, both realms see the same fix.
+
+**Test scaffold landing order.**
+
+Smallest TDD-red diff first, end-to-end implementation
+second:
+
+1. Land `src/runtime/intrinsics_phase1_test.zig` with the
+   four ADR tests **plus** an override-mistake regression
+   test (see (d)). Stubs for `IntrinsicsBase`, `buildBase`,
+   `installWithBase` go in `intrinsics.zig` as the minimum
+   surface to make the file compile; `installWithBase`
+   delegates to today's `install()` and ignores `base`, so
+   tests 1 + 4 + 5 go red on the sharing assertion.
+2. Wire the separate-heap (`gc_disabled`) machinery.
+3. Build the frozen prototype subgraph, return
+   `IntrinsicsBase`.
+4. Rewrite `installWithBase` to adopt shared pointers under
+   hardened + non-null base; allocate fresh otherwise.
+5. Add the N=100-realm RSS benchmark; numbers go in
+   `bench/multi-realm.md` (new file).
+6. Test262 sweep stays unchanged (the default `Realm.init` +
+   `installBuiltins` path uses `installWithBase(null)`).
+
 ## Phase 2 — per-realm module graph
 
 **Goal.** Each realm resolves modules through its own
