@@ -1137,12 +1137,27 @@ const Parser = struct {
                         try ranges.append(self.a, .{ .lo = '-', .hi = '-' });
                     }
                 },
-                .literal_added => {
-                    // A non-/u astral ClassAtom (its surrogate halves were
-                    // appended). Standalone it is owned; as a `-` range low
-                    // bound the source splits across the dash into a
-                    // surrogate-unit range Perlex doesn't model — defer.
-                    if (dash_range) return error.Unsupported;
+                .literal_added => |pair| {
+                    // A non-/u astral ClassAtom = its two surrogate-unit
+                    // members. The lead is always a member; standalone the
+                    // trail is too. As a `-` range low bound (`[𠮷-a]`), the
+                    // dash follows the *trail*, so the range is `trail..high`
+                    // (reversed for an ASCII high → SyntaxError) and the lead
+                    // stays a literal.
+                    try ranges.append(self.a, .{ .lo = pair.lead, .hi = pair.lead });
+                    if (!dash_range) {
+                        try ranges.append(self.a, .{ .lo = pair.trail, .hi = pair.trail });
+                    } else {
+                        self.pos += 1; // consume `-`
+                        const hi = switch (try self.parseClassMember(&ranges)) {
+                            .ch => |h| h,
+                            // A class-escape / astral high bound after an astral
+                            // low is a §22.2.1.1 range early error.
+                            else => return error.SyntaxError,
+                        };
+                        if (hi < pair.trail) return error.SyntaxError; // reversed
+                        try ranges.append(self.a, .{ .lo = pair.trail, .hi = hi });
+                    }
                 },
                 .neg_shorthand => |base| {
                     // `\D \S \W` under /u. As a range low bound (`[\D-a]`) it
@@ -1180,10 +1195,14 @@ const Parser = struct {
                                 try ranges.append(self.a, .{ .lo = lo, .hi = lo });
                                 try ranges.append(self.a, .{ .lo = '-', .hi = '-' });
                             },
-                            // A literal astral high bound (`[a-𠮷]`): the
-                            // source splits across the dash into a
-                            // surrogate-unit range Perlex doesn't model — defer.
-                            .literal_added => return error.Unsupported,
+                            // An astral high bound (`[a-𠮷]`): the range runs to
+                            // the astral's lead surrogate; its trail surrogate
+                            // is a separate literal — `(lo..lead) ∪ {trail}`.
+                            .literal_added => |pair| {
+                                if (pair.lead < lo) return error.SyntaxError; // reversed
+                                try ranges.append(self.a, .{ .lo = lo, .hi = pair.lead });
+                                try ranges.append(self.a, .{ .lo = pair.trail, .hi = pair.trail });
+                            },
                         }
                     } else {
                         try ranges.append(self.a, .{ .lo = lo, .hi = lo });
@@ -1255,11 +1274,14 @@ const Parser = struct {
         /// A CharacterClassEscape Perlex represents as ranges and has
         /// already appended (`\d \s \w`); valid as a standalone member.
         class_added,
-        /// A literal astral ClassAtom appended as its two surrogate-half
-        /// single-unit ranges (non-/u; see `classLiteralCodePoint`). Valid
-        /// standalone, but as a `-` range bound the source splits across the
-        /// dash (a surrogate-unit range Perlex doesn't model) — defer there.
-        literal_added,
+        /// A non-/u literal astral ClassAtom, carrying its UTF-16 surrogate
+        /// pair (`lead`, `trail`). Standalone the caller appends both halves
+        /// as single-unit ranges (it matches either half — the union, not the
+        /// pair). As a `-` range bound the source splits across the dash into
+        /// surrogate-unit members: `[a-𠮷]` is the range `a..lead` plus the
+        /// literal `trail`; `[𠮷-a]` is the literal `lead` plus the (reversed)
+        /// range `trail..a`. (See `classLiteralCodePoint`.)
+        literal_added: struct { lead: u21, trail: u21 },
         /// A `\D \S \W` negated shorthand under /u, carrying the *positive*
         /// base ranges (`\d`/`\s`/`\w`). Perlex can't fold-complement it
         /// inline (the parser isn't told `i`, so it can't rule out the /iu
@@ -1356,26 +1378,28 @@ const Parser = struct {
         }
         // A non-ASCII byte begins a multi-unit source character; decode it
         // as a literal ClassAtom (§22.2.1).
-        if (c >= 0x80) return self.classLiteralCodePoint(ranges);
+        if (c >= 0x80) return self.classLiteralCodePoint();
         self.pos += 1;
         return .{ .ch = c };
     }
 
     /// Decode the non-ASCII source character at `self.pos` as a literal
     /// ClassAtom (§22.2.1). A BMP code point is one UTF-16 code unit, so it
-    /// is one class member in every mode. Under `/u`/`/v` an astral code
-    /// point is one member too — a valid (range-capable) endpoint, since
-    /// `ClassRange` bounds are `u21` — returned as `.ch`. Without a flag the
-    /// source is a code-unit sequence, so an astral ClassAtom is two
-    /// single-unit members — the alternatives of its surrogate pair. A class
-    /// is the union of its members, so append both halves as single-unit
-    /// ranges directly and return `.class_added`; the class then matches a
-    /// code unit equal to either half (it does NOT match the pair as one
-    /// code point — that needs /u). A WTF-8 lone surrogate or malformed
-    /// sequence (`utf8Decode` rejects either) defers to the fallback.
-    fn classLiteralCodePoint(self: *Parser, ranges: *std.ArrayListUnmanaged(Node.ClassRange)) ParseError!ClassMember {
-        const lead = self.src[self.pos];
-        const len = std.unicode.utf8ByteSequenceLength(lead) catch return error.Unsupported;
+    /// is one class member in every mode — returned as `.ch`. Under `/u`/`/v`
+    /// an astral code point is one member too — a valid (range-capable)
+    /// endpoint, since `ClassRange` bounds are `u21` — also `.ch`. Without a
+    /// flag the source is a code-unit sequence, so an astral ClassAtom is its
+    /// two surrogate-unit halves; this returns them as `.literal_added` and
+    /// lets `parseClass` place them per context: standalone, both halves are
+    /// single-unit members of the union (matching a unit equal to either
+    /// half — never the pair as one code point, which needs /u); as a `-`
+    /// range bound the relevant half (lead as a low bound's hi, trail as a
+    /// high bound's standalone) joins the surrogate-unit range. A WTF-8 lone
+    /// surrogate or malformed sequence (`utf8Decode` rejects either) defers
+    /// to the fallback.
+    fn classLiteralCodePoint(self: *Parser) ParseError!ClassMember {
+        const first_byte = self.src[self.pos];
+        const len = std.unicode.utf8ByteSequenceLength(first_byte) catch return error.Unsupported;
         if (self.pos + len > self.src.len) return error.Unsupported;
         const cp = std.unicode.utf8Decode(self.src[self.pos .. self.pos + len]) catch return error.Unsupported;
         self.pos += len;
@@ -1390,11 +1414,12 @@ const Parser = struct {
             // astral code point is its UTF-16 surrogate pair, two single-unit
             // members of the union.
             const v: u21 = cp - 0x10000;
-            const high: u21 = 0xD800 + (v >> 10);
-            const low: u21 = 0xDC00 + (v & 0x3FF);
-            try ranges.append(self.a, .{ .lo = high, .hi = high });
-            try ranges.append(self.a, .{ .lo = low, .hi = low });
-            return .literal_added;
+            const lead: u21 = 0xD800 + (v >> 10);
+            const trail: u21 = 0xDC00 + (v & 0x3FF);
+            // The caller decides how to place the two halves: standalone it
+            // appends both as single-unit members; as a `-` range bound it
+            // forms a surrogate-unit range.
+            return .{ .literal_added = .{ .lead = lead, .trail = trail } };
         }
         return .{ .ch = cp };
     }
