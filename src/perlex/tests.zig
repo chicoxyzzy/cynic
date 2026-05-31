@@ -2397,14 +2397,20 @@ test "perlex/v: deeply nested operators" {
     try expectNoMatchFlags("[[[0-9]--[5]]&&[3-8]]", vflags, "2");
 }
 
-test "perlex/v: reserved double punctuators defer to the fallback" {
-    // §22.2.1 ClassSetReservedDoublePunctuator — these are early errors;
-    // Perlex defers so the fallback's table renders the SyntaxError.
-    try expectCompileFlags("[a~~b]", vflags, .unsupported);
-    try expectCompileFlags("[a!!b]", vflags, .unsupported);
-    try expectCompileFlags("[a::b]", vflags, .unsupported);
-    try expectCompileFlags("[a==b]", vflags, .unsupported);
-    try expectCompileFlags("[a..b]", vflags, .unsupported);
+test "perlex/v: reserved double punctuators and unescaped syntax chars are a SyntaxError (§22.2.1.1)" {
+    // §22.2.1 ClassSetReservedDoublePunctuator — a doubled punctuator is an
+    // early error Perlex owns directly (only Annex B regex leniency, dropped
+    // here, would read it as two literals).
+    try expectCompileFlags("[a~~b]", vflags, .syntax_error);
+    try expectCompileFlags("[a!!b]", vflags, .syntax_error);
+    try expectCompileFlags("[a::b]", vflags, .syntax_error);
+    try expectCompileFlags("[a==b]", vflags, .syntax_error);
+    try expectCompileFlags("[a..b]", vflags, .syntax_error);
+    // An unescaped ClassSetSyntaxCharacter (`( ) { } / | -`) is likewise an
+    // early error: in /v it must be escaped (`\-`, `\(`, …).
+    try expectCompileFlags("[-]", vflags, .syntax_error);
+    try expectCompileFlags("[(]", vflags, .syntax_error);
+    try expectCompileFlags("[)]", vflags, .syntax_error);
 }
 
 test "perlex/v: single punctuators are ordinary class characters" {
