@@ -1111,6 +1111,9 @@ const Parser = struct {
         // resolver runs at compile time), so a class that has any lowers to
         // a union ClassSet rather than a flat `.class`.
         var props: std.ArrayListUnmanaged(Node.Property) = .empty;
+        // `\D \S \W` negated shorthands under /u, each carrying its positive
+        // base ranges; a class with any lowers to an alternation (see the tail).
+        var neg_shorthands: std.ArrayListUnmanaged([]const Node.ClassRange) = .empty;
         while (true) {
             const c = self.peek() orelse return error.SyntaxError; // unterminated
             if (c == ']') {
@@ -1141,13 +1144,14 @@ const Parser = struct {
                     // surrogate-unit range Perlex doesn't model — defer.
                     if (dash_range) return error.Unsupported;
                 },
-                .class_escape_unsupported => {
-                    // `\D \S \W` under /u (off /u they were complemented in
-                    // place and returned `.class_added`). As a range low
-                    // bound (`[\D-a]`) it is a §22.2.1.1 /u early error;
-                    // standalone, defer to the fallback to match it.
+                .neg_shorthand => |base| {
+                    // `\D \S \W` under /u. As a range low bound (`[\D-a]`) it
+                    // is a §22.2.1.1 /u early error; standalone, collect its
+                    // positive base — `parseClass` lowers the whole class to an
+                    // alternation so each negated shorthand folds + negates per
+                    // branch (off /u they are complemented in place above).
                     if (dash_range) return self.classEscapeRangeBound();
-                    return error.Unsupported;
+                    try neg_shorthands.append(self.a, base);
                 },
                 .prop => |p| {
                     // `\p{…}` / `\P{…}` — as a range bound (`[\p{L}-a]`) it is
@@ -1171,7 +1175,7 @@ const Parser = struct {
                             // shorthand already appended its ranges during the
                             // member parse, so add the low bound and the
                             // literal '-' and own it.
-                            .class_added, .class_escape_unsupported, .prop => {
+                            .class_added, .neg_shorthand, .prop => {
                                 if (self.unicode or self.unicode_sets) return self.classEscapeRangeBound();
                                 try ranges.append(self.a, .{ .lo = lo, .hi = lo });
                                 try ranges.append(self.a, .{ .lo = '-', .hi = '-' });
@@ -1187,20 +1191,50 @@ const Parser = struct {
                 },
             }
         }
-        if (props.items.len == 0) {
-            return self.makeNode(.{ .class = .{ .negated = negated, .ranges = ranges.items } });
+        if (neg_shorthands.items.len != 0) {
+            // A class containing a `\D`/`\S`/`\W` (negated shorthand) under
+            // /u. A `^`-negated such class is the complement of the union,
+            // which this lowering can't express — defer it (`[\D]` / `[^\D]`
+            // alone are intercepted before the loop). Otherwise lower to an
+            // ordered alternation: each negated shorthand as a *standalone*
+            // negated class (the VM extends its positive set through the fold
+            // orbit and then negates — correct §22.2.2.7.3, incl. /iu), plus
+            // the positive members as one branch (keeping their runtime fold).
+            // A class matches one character, so the union of these branches is
+            // exactly the class set.
+            if (negated) return error.Unsupported;
+            var branches: std.ArrayListUnmanaged(*Node) = .empty;
+            for (neg_shorthands.items) |base| {
+                try branches.append(self.a, try self.makeNode(.{ .class = .{ .negated = true, .ranges = base } }));
+            }
+            if (ranges.items.len != 0 or props.items.len != 0) {
+                try branches.append(self.a, try self.positiveClassNode(false, ranges.items, props.items));
+            }
+            return self.makeNode(.{ .alternate = branches.items });
         }
-        // §22.2.1 ClassRanges is the union of its ClassAtoms. With `\p{…}`
-        // members present, lower the class to a union ClassSetExpression so
-        // the compiler resolves each property and unions it with the literal
-        // ranges (and complements the whole set for `[^ … ]`). The /v-only
-        // operators (`&&`, `--`, nested `[…]`, `\q{…}`) never reach here, so
-        // this is a pure union — and scanProperty already rejected the only
-        // string-valued properties, so a negated set can't contain strings.
+        return self.positiveClassNode(negated, ranges.items, props.items);
+    }
+
+    /// Build the node for a class's positive members — literal `ranges` plus
+    /// any `\p{…}` `props`. With no props it is a flat `.class`; with props it
+    /// lowers to a union `.class_set` the compiler resolves at compile time
+    /// (§22.2.1 ClassRanges is the union of its ClassAtoms). `neg` complements
+    /// the whole set (`[^ … ]`). The /v-only operators never reach here, so it
+    /// is a pure union; scanProperty already rejected string-valued
+    /// properties, so a negated set can't contain strings.
+    fn positiveClassNode(
+        self: *Parser,
+        neg: bool,
+        ranges: []const Node.ClassRange,
+        props: []const Node.Property,
+    ) ParseError!*Node {
+        if (props.len == 0) {
+            return self.makeNode(.{ .class = .{ .negated = neg, .ranges = ranges } });
+        }
         var operands: std.ArrayListUnmanaged(Node.ClassSet.Operand) = .empty;
-        if (ranges.items.len != 0) try operands.append(self.a, .{ .ranges = ranges.items });
-        for (props.items) |p| try operands.append(self.a, .{ .prop = p });
-        const cs = try self.makeClassSet(.{ .negated = negated, .op = .union_, .operands = operands.items });
+        if (ranges.len != 0) try operands.append(self.a, .{ .ranges = ranges });
+        for (props) |p| try operands.append(self.a, .{ .prop = p });
+        const cs = try self.makeClassSet(.{ .negated = neg, .op = .union_, .operands = operands.items });
         return self.makeNode(.{ .class_set = cs });
     }
 
@@ -1214,13 +1248,15 @@ const Parser = struct {
         /// standalone, but as a `-` range bound the source splits across the
         /// dash (a surrogate-unit range Perlex doesn't model) — defer there.
         literal_added,
-        /// A `\D \S \W` set complement under /u, where Perlex can't
-        /// complement at parse time (the parser isn't told `i`, so it can't
-        /// rule out the /iu non-ASCII fold orbits). Standalone it defers to
-        /// the fallback to match; as a `-` range bound it is a §22.2.1.1
-        /// early error — the caller decides which. Off /u these are
-        /// complemented in place and returned as `.class_added` instead.
-        class_escape_unsupported,
+        /// A `\D \S \W` negated shorthand under /u, carrying the *positive*
+        /// base ranges (`\d`/`\s`/`\w`). Perlex can't fold-complement it
+        /// inline (the parser isn't told `i`, so it can't rule out the /iu
+        /// word-char extension), so `parseClass` lowers a class containing one
+        /// to an alternation of standalone negated classes (each negates after
+        /// the match-time fold — correct §22.2.2.7.3) plus the positive
+        /// members. As a `-` range bound it is a §22.2.1.1 /u early error.
+        /// Off /u these are complemented in place and returned as `.class_added`.
+        neg_shorthand: []const Node.ClassRange,
         /// A `\p{…}` / `\P{…}` Unicode property escape (§22.2.1, +UnicodeMode).
         /// The parser can't expand it to ranges (the resolver runs at
         /// compile time), so the class lowers to a union ClassSet whose
@@ -1267,19 +1303,20 @@ const Parser = struct {
                 // `i` matches exactly. Under /u we can't: the parser isn't
                 // told `i`, so it can't distinguish /u from /iu, and /iu
                 // pulls non-ASCII fold orbits (the Kelvin sign U+212A folds
-                // with `k`, joining `\W`'s complement) that a parse-time
-                // ASCII complement can't represent. So under /u keep deferring
-                // — `.class_escape_unsupported` lets the caller still raise
-                // the §22.2.1.1 range-bound early error.
+                // with `k`, joining `\W`'s complement) that a parse-time ASCII
+                // complement can't represent. So under /u hand the positive
+                // base back as `.neg_shorthand`; `parseClass` lowers the class
+                // to an alternation of standalone negated classes (each folds
+                // correctly at match time) plus the positive members.
                 'D', 'W', 'S' => {
                     self.pos += 2;
-                    if (self.unicode) return .class_escape_unsupported;
                     const base: []const Node.ClassRange = switch (k) {
                         'D' => &digit_ranges,
                         'S' => &space_ranges,
                         'W' => &word_ranges,
                         else => unreachable,
                     };
+                    if (self.unicode) return .{ .neg_shorthand = base };
                     const comp = try charset.complement(self.a, base);
                     try appendRanges(self.a, ranges, comp);
                     return .class_added;

@@ -615,12 +615,28 @@ test "perlex: a \\k reference to a name with no matching group is a syntax error
 
 // ── Fallback routing — constructs outside the v1 grammar ─────────────
 
-test "perlex: a multi-member negated-shorthand /u class still falls back" {
-    // The sole-shorthand case (`[\D]`) is owned (see below). A negated
-    // shorthand *unioned* with other members under /u (`[\Wa]`, `[\D\s]`)
-    // still needs the full §22.2.2.7 set-fold machinery — defer for now.
-    try expectCompileFlags("[\\Wa]", uf, .unsupported);
-    try expectCompileFlags("[\\D\\s]", uf, .unsupported);
+test "perlex: a negated shorthand unioned with members under /u is owned (alternation)" {
+    // A negated shorthand unioned with other members (`[\Wa]`, `[\D\s]`) under
+    // /u lowers to an ordered alternation — each negated shorthand as a
+    // standalone negated class (folds + negates correctly), plus the positive
+    // members. Only the `^`-negated form (the complement of the union) still
+    // defers.
+    try expectCompileFlags("[\\Wa]", uf, .match);
+    try expectCompileFlags("[\\D\\s]", uf, .match);
+    // `[\Wa]/u` matches a non-word char OR 'a', not another word char.
+    try expectMatchFlags("[\\Wa]", uf, "!", "!");
+    try expectMatchFlags("[\\Wa]", uf, "a", "a");
+    try expectNoMatchFlags("[\\Wa]", uf, "b");
+    // `[\D\s]/u` = non-digit ∪ whitespace = everything except a digit.
+    try expectMatchFlags("[\\D\\s]", uf, " ", " ");
+    try expectMatchFlags("[\\D\\s]", uf, "x", "x");
+    try expectNoMatchFlags("[\\D\\s]", uf, "5");
+    // The /iu word-char extension still holds through the alternation:
+    // `[\Wa]/iu` excludes a char that folds to a word char (Kelvin↔k).
+    try expectFoldNoMatch("[\\Wb]", iu, &[_]u16{0x212A});
+    try expectFoldMatch("[\\Wb]", iu, &[_]u16{'!'}, "!");
+    // The `^`-negated union is the complement of the union — still deferred.
+    try expectCompileFlags("[^\\Wa]", uf, .unsupported);
 }
 
 test "perlex: a quantified lookaround is a syntax error under /u, /v, or for any lookbehind" {
