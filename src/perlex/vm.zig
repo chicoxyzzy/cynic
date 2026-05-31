@@ -156,6 +156,7 @@ pub fn exec(
         // `/v` (UnicodeSets) matches over code points like `/u`.
         .unicode = program.flags.unicode or program.flags.unicode_sets,
         .folder = program.case_folder,
+        .nonu_fold = program.nonu_fold,
     };
     defer m.deinit();
 
@@ -199,6 +200,11 @@ fn Matcher(comptime Unit: type) type {
         /// §22.2.2.9 case-folding orbits, injected for `/iu`/`/iv`. Null
         /// for ASCII-`i` (folded inline) and non-folding patterns.
         folder: ?compiler.CaseFoldFn,
+        /// §22.2.2.7.3 non-Unicode Canonicalize orbits, injected for a
+        /// non-`/u` `i` pattern with a non-ASCII unit. Distinct mapping
+        /// from `folder`; null when the pattern is ASCII-only `i` (folded
+        /// inline via `asciiUpper`) or non-folding.
+        nonu_fold: ?compiler.CaseFoldFn,
         undo: std.ArrayListUnmanaged(Undo) = .empty,
         backtrack: std.ArrayListUnmanaged(Frame) = .empty,
         steps: u64 = 0,
@@ -352,8 +358,22 @@ fn Matcher(comptime Unit: type) type {
                                             }
                                         }
                                     }
-                                } else {
+                                } else if (c.cp < 128) {
+                                    // Non-Unicode `i`: an ASCII unit has
+                                    // exactly one case partner (§22.2.2.7.3
+                                    // never crosses 0x80, so it can only
+                                    // match an ASCII class member).
                                     inside = classContains(cls.ranges, asciiSwapCase(c.cp));
+                                } else if (self.nonu_fold) |f| {
+                                    // A non-ASCII unit matches if any member
+                                    // of its non-Unicode Canonicalize orbit
+                                    // (à↔À, σ/ς/Σ, …) is in the set.
+                                    for (f(c.cp)) |p| {
+                                        if (classContains(cls.ranges, p)) {
+                                            inside = true;
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                             if (inside != cls.negated) {
@@ -494,7 +514,23 @@ fn Matcher(comptime Unit: type) type {
                 }
                 return false;
             }
-            return asciiUpper(a) == asciiUpper(b);
+            // Non-Unicode `i` (§22.2.2.7.3 Canonicalize). An ASCII unit
+            // canonicalizes by asciiUpper, and the non-Unicode mapping
+            // never crosses the 0x80 boundary in either direction (the
+            // ASCII-exclusion blocks non-ASCII→ASCII; ASCII→non-ASCII
+            // doesn't occur), so a unit on one side of 0x80 can only match
+            // one on the same side. With either operand ASCII, the
+            // asciiUpper compare decides (and a mixed pair never folds).
+            if (a < 128 or b < 128) return asciiUpper(a) == asciiUpper(b);
+            // Both non-ASCII: equal, or sharing a non-Unicode Canonicalize
+            // orbit (à↔À, σ/ς/Σ, …) via the injected folder. Null folder
+            // (ASCII-only `i`) can't reach here — such a pattern has no
+            // non-ASCII unit to compare.
+            if (a == b) return true;
+            if (self.nonu_fold) |f| {
+                for (f(a)) |p| if (p == b) return true;
+            }
+            return false;
         }
 
         /// Whether the code unit at `idx` is a §22.2.2.9.3 WordCharacters
@@ -613,9 +649,13 @@ fn Matcher(comptime Unit: type) type {
                 break :blk sp.*;
             };
             if (fold) {
+                // Non-Unicode `i` folds per code unit (no surrogate
+                // combining — that is the `/iu` path above), so a unit-wise
+                // charEq is exact: ASCII via asciiUpper, non-ASCII via the
+                // injected §22.2.2.7.3 orbit (à↔À, …).
                 var i: usize = 0;
                 while (i < len) : (i += 1) {
-                    if (asciiUpper(self.input[cs + i]) != asciiUpper(self.input[base + i])) return false;
+                    if (!self.charEq(self.input[base + i], self.input[cs + i], true)) return false;
                 }
             } else {
                 if (!std.mem.eql(Unit, self.input[cs..ce], self.input[base .. base + len])) return false;

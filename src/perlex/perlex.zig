@@ -52,6 +52,12 @@ pub const CompileResult = union(enum) {
 pub const Hooks = struct {
     resolver: ?PropertyResolver = null,
     case_folder: ?CaseFoldFn = null,
+    /// §22.2.2.7.3 non-Unicode Canonicalize orbit (toUppercase + the
+    /// ASCII-exclusion), for a non-`/u`/`/v` `i` pattern with a non-ASCII
+    /// unit. Distinct mapping from `case_folder` (Kelvin folds to `k`
+    /// under `/iu` but to itself here). Null defers such patterns to the
+    /// fallback; ASCII-only `i` never needs it (folded inline).
+    nonunicode_fold: ?CaseFoldFn = null,
 };
 
 /// Attempt to compile `pattern` (a regex source string, without the
@@ -108,14 +114,17 @@ pub fn compileWithHooks(
     // Removing `i` (`(?-i:…)`) or adding only `m`/`s` needs no folder.
     if ((flags.unicode or flags.unicode_sets) and parsed.has_ignore_case_modifier and hooks.case_folder == null) return .unsupported;
 
-    // §22.2.2.7.1 — non-Unicode Canonicalize never folds a non-ASCII
-    // unit to ASCII, so ASCII folding is exact for an all-ASCII
-    // pattern. A pattern with an explicit non-ASCII unit could fold to
-    // another non-ASCII unit (e.g. à↔À), which the ASCII fold misses —
-    // defer those non-Unicode `i` patterns to the fallback. An inline
-    // `(?i:…)` group counts too. Under `/iu`/`/iv` the injected folder
-    // handles non-ASCII orbits, so the gate is limited to non-Unicode.
-    if ((flags.ignore_case or parsed.has_ignore_case_modifier) and !(flags.unicode or flags.unicode_sets) and parsed.non_ascii) return .unsupported;
+    // §22.2.2.7.3 — non-Unicode Canonicalize never folds a non-ASCII
+    // unit to ASCII, so ASCII folding is exact for an all-ASCII pattern.
+    // A pattern with an explicit non-ASCII unit could fold to another
+    // non-ASCII unit (e.g. à↔À), which the inline ASCII fold misses: the
+    // VM handles those through the injected `nonunicode_fold` orbit, so
+    // defer only when no such folder is supplied. An inline `(?i:…)`
+    // group counts too. Under `/iu`/`/iv` the separate `case_folder`
+    // covers non-ASCII orbits, so this gate is limited to non-Unicode.
+    if ((flags.ignore_case or parsed.has_ignore_case_modifier) and
+        !(flags.unicode or flags.unicode_sets) and parsed.non_ascii and
+        hooks.nonunicode_fold == null) return .unsupported;
 
     parser.checkDuplicateNames(a, parsed.root) catch |e| switch (e) {
         error.SyntaxError => return .syntax_error,
@@ -128,6 +137,7 @@ pub fn compileWithHooks(
         error.OutOfMemory => return error.OutOfMemory,
     };
     program.case_folder = hooks.case_folder;
+    program.nonu_fold = hooks.nonunicode_fold;
     return .{ .ok = program };
 }
 

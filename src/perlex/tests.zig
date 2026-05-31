@@ -208,12 +208,33 @@ fn stubFolder(cp: u21) []const u21 {
     };
 }
 
+/// A §22.2.2.7.3 *non-Unicode* Canonicalize orbit resolver backed by tiny
+/// fake data, so the VM's non-`/u` `i` folding over non-ASCII units is
+/// exercised without the real toUppercase tables. Returns the orbit
+/// members *excluding* `cp` (the set of units that share its non-Unicode
+/// Canonicalize), mirroring `perlex.CaseFoldFn`. The orbits differ from
+/// `stubFolder` (the `/iu` mapping): U+212A KELVIN has an *empty* orbit
+/// here — toUppercase(U+212A) is ASCII `K`, and the ASCII-exclusion keeps
+/// it itself, so `/K/i` matches only the Kelvin sign. The pairs:
+/// à↔À (U+00E0↔U+00C0); the Greek three-way σ/ς/Σ (U+03C3, U+03C2, U+03A3
+/// all uppercase to Σ).
+fn stubNonUFold(cp: u21) []const u21 {
+    return switch (cp) {
+        0x00E0 => &.{0x00C0}, // à → À
+        0x00C0 => &.{0x00E0}, // À → à
+        0x03C3 => &.{ 0x03C2, 0x03A3 }, // σ → ς, Σ
+        0x03C2 => &.{ 0x03C3, 0x03A3 }, // ς → σ, Σ
+        0x03A3 => &.{ 0x03C3, 0x03C2 }, // Σ → σ, ς
+        else => &.{}, // incl. U+212A KELVIN: empty (ASCII-exclusion)
+    };
+}
+
 /// Compile with both the stub property resolver and the stub case folder,
 /// then run over a UTF-16 `units` input (passed directly so supplementary
 /// code points can be expressed as surrogate pairs). Returns the same
 /// comma-joined capture rendering as `runUnit`/`runProp`.
 fn runHooks(gpa: std.mem.Allocator, pattern: []const u8, flags: perlex.Flags, units: []const u16) !Outcome {
-    var res = try perlex.compileWithHooks(gpa, pattern, flags, .{ .resolver = stubResolver, .case_folder = stubFolder });
+    var res = try perlex.compileWithHooks(gpa, pattern, flags, .{ .resolver = stubResolver, .case_folder = stubFolder, .nonunicode_fold = stubNonUFold });
     switch (res) {
         .unsupported => return .unsupported,
         .syntax_error => return .syntax_error,
@@ -1975,12 +1996,59 @@ test "perlex: i flag leaves non-letters and dot/word unchanged" {
     try expectMatchFlags("\\d+", ci, "42", "42");
 }
 
-test "perlex: i with non-ASCII units falls back" {
-    // ASCII folding can't model à↔À, so these defer to the fallback.
+test "perlex: non-/u i with non-ASCII units defers without an injected folder" {
+    // Inline ASCII folding can't model à↔À, so without a non-Unicode
+    // Canonicalize folder these defer to the fallback. The bridge always
+    // injects one (see the orbit tests below); bare `compile` does not.
     try expectCompileFlags("\\u00e0", ci, .unsupported);
     try expectCompileFlags("[\\u00c0-\\u00ff]", ci, .unsupported);
     // …but the same patterns compile fine without `i`.
     try expectCompileFlags("\\u00e0", .{}, .match);
+}
+
+// ── §22.2.2.7.3 Canonicalize — non-/u i over non-ASCII units ─────────
+// With an injected non-Unicode Canonicalize folder (the bridge supplies
+// one), Perlex owns non-`/u` `i` patterns that carry a non-ASCII unit.
+// The mapping is toUppercase + the ASCII-exclusion, distinct from the
+// `/iu` orbit: U+212A KELVIN folds to `k` under `/iu` but to itself here.
+
+const ci_nonu: perlex.Flags = .{ .ignore_case = true };
+
+test "perlex: non-/u i folds a non-ASCII atom across its orbit (à↔À)" {
+    try expectFoldMatch("\\u00e0", ci_nonu, &[_]u16{0x00C0}, ""); // à matches À
+    try expectFoldMatch("\\u00c0", ci_nonu, &[_]u16{0x00E0}, ""); // À matches à
+    try expectFoldMatch("\\u00e0", ci_nonu, &[_]u16{0x00E0}, ""); // à matches à
+    // …but not an unrelated non-ASCII unit, nor an ASCII one.
+    try expectFoldNoMatch("\\u00e0", ci_nonu, &[_]u16{0x00E1});
+    try expectFoldNoMatch("\\u00e0", ci_nonu, &[_]u16{'a'});
+}
+
+test "perlex: non-/u i applies the §22.2.2.7.3 ASCII-exclusion (Kelvin)" {
+    // toUppercase(U+212A) is ASCII `K`, but the exclusion keeps it itself,
+    // so /K/i matches ONLY the Kelvin sign — not `k`/`K`. (This is
+    // language/literals/regexp/u-case-mapping.js's non-/u assertions.)
+    try expectFoldMatch("\\u212a", ci_nonu, &[_]u16{0x212A}, "");
+    try expectFoldNoMatch("\\u212a", ci_nonu, &[_]u16{'k'});
+    try expectFoldNoMatch("\\u212a", ci_nonu, &[_]u16{'K'});
+}
+
+test "perlex: non-/u i folds a non-ASCII class member three ways (σ/ς/Σ)" {
+    // All three uppercase to Σ, so each matches the others in a class.
+    try expectFoldMatch("[\\u03c3]", ci_nonu, &[_]u16{0x03C2}, ""); // [σ] matches ς
+    try expectFoldMatch("[\\u03c3]", ci_nonu, &[_]u16{0x03A3}, ""); // [σ] matches Σ
+    try expectFoldMatch("[\\u03a3]", ci_nonu, &[_]u16{0x03C2}, ""); // [Σ] matches ς
+    try expectFoldNoMatch("[\\u03c3]", ci_nonu, &[_]u16{0x03B1}); // not α
+}
+
+test "perlex: non-/u i never folds a non-ASCII unit to ASCII (and vice versa)" {
+    // The 0x80 boundary is never crossed: an ASCII pattern unit can't
+    // match a non-ASCII input unit even when one uppercases toward the
+    // other's block. `/[a-z]/i` does not match ſ (U+017F) or KELVIN.
+    try expectFoldNoMatch("[a-z]", ci_nonu, &[_]u16{0x017F});
+    try expectFoldNoMatch("[a-z]", ci_nonu, &[_]u16{0x212A});
+    // An ASCII atom under non-/u i still folds ASCII-only, with a folder
+    // present (the orbit covers non-ASCII; ASCII stays the inline path).
+    try expectFoldMatch("k", ci_nonu, &[_]u16{'K'}, "K");
 }
 
 // ── §22.2.2.9 Canonicalize — /iu and /iv Unicode case folding ────────

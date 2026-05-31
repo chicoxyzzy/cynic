@@ -16,6 +16,7 @@
 
 const std = @import("std");
 
+const c = @import("c");
 const properties = @import("properties.zig");
 const perlex = @import("../perlex/perlex.zig");
 const perlex_parser = perlex.parser;
@@ -66,6 +67,112 @@ pub fn resolve(
 /// static table data — never freed, never mutated.
 pub fn caseFold(cp: u21) []const u21 {
     return properties.caseFoldPartners(cp);
+}
+
+// ── §22.2.2.7.3 non-Unicode Canonicalize orbits ─────────────────────
+//
+// Under a non-`/u`/`/v` `i` pattern, two UTF-16 code units match when
+// their Canonicalize images coincide. Canonicalize here is toUppercase
+// with a length-≠-1 guard and the ASCII-exclusion: a unit ≥ 128 whose
+// uppercase is a single ASCII unit stays *itself* (so U+212A KELVIN and
+// U+017F ſ are not matched by `/[a-z]/i`), and a multi-unit uppercase
+// (ß → "SS") leaves the unit unchanged. Distinct from `caseFold`'s `/iu`
+// orbit (where KELVIN folds to `k`). Perlex carries no case data, so the
+// matcher folds non-ASCII units through this injected resolver. The orbit
+// of a unit is every *other* unit sharing its Canonicalize; it is built
+// once from libunicode's toUppercase — the same primitive backing
+// `String.prototype.toUpperCase`, so the two never diverge — by scanning
+// the BMP and bucketing by Canonicalize value. Singleton orbits (the vast
+// majority) are omitted; a miss returns the empty slice.
+
+/// §22.2.2.7.3 step 3, for a single UTF-16 code unit.
+fn nonUnicodeCanonicalize(cu: u16) u16 {
+    var res: [3]u32 = undefined;
+    const n = c.lre_case_conv(&res, @as(u32, cu), 0); // 0 = to-upper
+    if (n != 1) return cu; // uStr length ≠ 1 (multi-code-point uppercase)
+    const u = res[0];
+    if (u > 0xFFFF) return cu; // a supplementary uppercase is two code units
+    const up: u16 = @intCast(u);
+    if (cu >= 128 and up < 128) return cu; // the ASCII-exclusion
+    return up;
+}
+
+var orbit_arena: std.heap.ArenaAllocator = undefined;
+var orbit_map: std.AutoHashMapUnmanaged(u21, []const u21) = .empty;
+// The map is built once on first use and only read thereafter, so the hot
+// path is a lock-free acquire-load. The one-time build is serialised across
+// the test262 worker pool without a mutex: one thread CAS-claims the build,
+// any racers spin until it publishes `done`.
+const OrbitState = enum(u8) { uninit, building, done };
+var orbit_state = std.atomic.Value(u8).init(@intFromEnum(OrbitState.uninit));
+
+fn buildOrbitMap() void {
+    orbit_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const a = orbit_arena.allocator();
+
+    // Temporary buckets: Canonicalize value → the units that map to it.
+    // Freed once the per-unit orbit slices have been materialised.
+    var tmp = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer tmp.deinit();
+    const ta = tmp.allocator();
+    var buckets: std.AutoHashMapUnmanaged(u16, std.ArrayListUnmanaged(u21)) = .empty;
+
+    var cu: u32 = 0;
+    while (cu <= 0xFFFF) : (cu += 1) {
+        const unit: u16 = @intCast(cu);
+        const k = nonUnicodeCanonicalize(unit);
+        const gop = buckets.getOrPut(ta, k) catch @panic("perlex: non-/u canon orbit OOM");
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        gop.value_ptr.append(ta, @as(u21, unit)) catch @panic("perlex: non-/u canon orbit OOM");
+    }
+
+    var it = buckets.valueIterator();
+    while (it.next()) |members_ptr| {
+        const members = members_ptr.items;
+        if (members.len < 2) continue; // singleton: folds only to itself
+        for (members) |m| {
+            const orbit = a.alloc(u21, members.len - 1) catch @panic("perlex: non-/u canon orbit OOM");
+            var j: usize = 0;
+            for (members) |other| {
+                if (other != m) {
+                    orbit[j] = other;
+                    j += 1;
+                }
+            }
+            orbit_map.put(a, m, orbit) catch @panic("perlex: non-/u canon orbit OOM");
+        }
+    }
+}
+
+/// The non-Unicode Canonicalize orbit of `cp` — every other UTF-16 code
+/// unit that canonicalizes to the same value (§22.2.2.7.3), empty when
+/// `cp` folds only to itself. Non-`/u` matching is per code unit, so `cp`
+/// is always ≤ 0xFFFF here. Signature matches `perlex.CaseFoldFn`; the map
+/// is built lazily (thread-safe via `std.once`) and never freed.
+pub fn nonUnicodeCanonFold(cp: u21) []const u21 {
+    if (cp > 0xFFFF) return &.{};
+    if (orbit_state.load(.acquire) != @intFromEnum(OrbitState.done)) ensureOrbit();
+    return orbit_map.get(cp) orelse &.{};
+}
+
+/// Build the orbit map exactly once across threads. The winner of the CAS
+/// from `uninit`→`building` runs `buildOrbitMap` then publishes `done`;
+/// racers spin until the map is visible (`release`/`acquire` pair the
+/// build's writes to the reading thread).
+fn ensureOrbit() void {
+    if (orbit_state.cmpxchgStrong(
+        @intFromEnum(OrbitState.uninit),
+        @intFromEnum(OrbitState.building),
+        .acq_rel,
+        .acquire,
+    ) == null) {
+        buildOrbitMap();
+        orbit_state.store(@intFromEnum(OrbitState.done), .release);
+        return;
+    }
+    while (orbit_state.load(.acquire) != @intFromEnum(OrbitState.done)) {
+        std.atomic.spinLoopHint();
+    }
 }
 
 /// Wrap source-table `ranges` as a char-only `ResolvedProperty` (no string
