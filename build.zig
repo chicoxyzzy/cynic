@@ -66,6 +66,12 @@ pub fn build(b: *std.Build) void {
     lib_mod.linkLibrary(qjs_unicode);
     lib_mod.addIncludePath(b.path("vendor/quickjs"));
     lib_mod.addImport("c", c_mod);
+    // Embedded only by the normalization unit test (`@embedFile` inside a
+    // `test` block, so no cost to non-test builds): the full UAX #15
+    // conformance suite, asserted against the native normalizer.
+    lib_mod.addAnonymousImport("NormalizationTest.txt", .{
+        .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
+    });
 
     // Executable module: the `cynic` CLI. Imports the library as `cynic`.
     const exe_mod = b.createModule(.{
@@ -138,7 +144,7 @@ pub fn build(b: *std.Build) void {
     const run_gen = b.addRunArtifact(gen_exe);
     run_gen.addFileArg(b.path("vendor/unicode/DerivedCoreProperties.txt"));
     run_gen.addArg(b.pathFromRoot("src/unicode/ident_tables.zig"));
-    const gen_step = b.step("gen-unicode", "Regenerate src/unicode/{ident,property,case_fold,case_conv}_tables.zig from UCD");
+    const gen_step = b.step("gen-unicode", "Regenerate src/unicode/{ident,property,case_fold,case_conv,normalization}_tables.zig from UCD");
     gen_step.dependOn(&run_gen.step);
 
     const gen_props_mod = b.createModule(.{
@@ -200,6 +206,25 @@ pub fn build(b: *std.Build) void {
     run_gen_cc.addFileArg(b.path("vendor/unicode/SpecialCasing.txt"));
     run_gen_cc.addFileArg(b.path("vendor/unicode/DerivedCoreProperties.txt"));
     gen_step.dependOn(&run_gen_cc.step);
+
+    // src/unicode/normalization_tables.zig (String.prototype.normalize
+    // §22.1.3.16 NFC/NFD/NFKC/NFKD + the localeCompare NFD path) from
+    // UnicodeData.txt (combining class + decomposition) and
+    // DerivedNormalizationProps.txt (Full_Composition_Exclusion).
+    const gen_nf_mod = b.createModule(.{
+        .root_source_file = b.path("tools/gen_normalization.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const gen_nf_exe = b.addExecutable(.{
+        .name = "gen_normalization",
+        .root_module = gen_nf_mod,
+    });
+    const run_gen_nf = b.addRunArtifact(gen_nf_exe);
+    run_gen_nf.addArg(b.pathFromRoot("src/unicode/normalization_tables.zig"));
+    run_gen_nf.addFileArg(b.path("vendor/unicode/UnicodeData.txt"));
+    run_gen_nf.addFileArg(b.path("vendor/unicode/DerivedNormalizationProps.txt"));
+    gen_step.dependOn(&run_gen_nf.step);
 
     // `zig build fmt-check` runs `zig fmt --check` over `src/` and
     // `tools/`. Advisory in CI (non-gating) — flags drift on PR

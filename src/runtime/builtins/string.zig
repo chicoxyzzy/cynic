@@ -6,7 +6,6 @@
 //! shared `%RegExpStringIteratorPrototype%` (§22.2.9.2).
 
 const std = @import("std");
-const lib_unicode = @import("c");
 
 const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
@@ -16,11 +15,11 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
-const c_alloc = @import("../c_alloc.zig");
 const lantern = @import("../lantern/interpreter.zig");
 const interpreter_arith = @import("../lantern/arith.zig");
 const utf16 = @import("../utf16.zig");
 const case_conv = @import("../../unicode/case_conv.zig");
+const normalization = @import("../../unicode/normalization.zig");
 
 const arith_toUint32 = interpreter_arith.toUint32;
 
@@ -2548,120 +2547,71 @@ fn stringTrimEnd(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     return Value.fromString(out);
 }
 
-/// Owned output of `normalizeWtf8` — a C-allocator-backed
-/// code-point buffer produced by libunicode's `unicode_normalize`.
-/// Free with `deinit`. `slice` is empty when the input was empty.
-const NormalizedCodepoints = struct {
-    ptr: ?[*]u32,
-    len: usize,
-
-    fn slice(self: NormalizedCodepoints) []const u32 {
-        if (self.ptr) |p| return p[0..self.len];
-        return &.{};
-    }
-
-    fn deinit(self: NormalizedCodepoints) void {
-        if (self.ptr) |p| c_alloc.free(@ptrCast(p));
-    }
-};
-
-/// §3.11 Unicode Normalization — decode `bytes` (WTF-8) into a
-/// u32 code-point buffer and hand it to libunicode's
-/// `unicode_normalize` under the given form. Returns the
-/// normalized code-point list; the caller owns it and must call
-/// `deinit`. Lone surrogates pass through as their 0xD800..0xDFFF
-/// code-point values — §3.11 normalizes on code points and treats
-/// unpaired surrogates as themselves. Shared by
+/// §3.11 Unicode Normalization — decode `bytes` (WTF-8) into a code-point
+/// list and normalize under the given form via the native
+/// `unicode/normalization` tables. Returns an allocator-owned code-point
+/// slice (free with `allocator.free`). Lone surrogates pass through as
+/// their 0xD800..0xDFFF code-point values — §3.11 normalizes on code
+/// points and treats unpaired surrogates as themselves. Shared by
 /// `String.prototype.normalize` (re-encodes to WTF-8) and
-/// `String.prototype.localeCompare` (compares NFD forms for
-/// canonical equivalence).
+/// `String.prototype.localeCompare` (compares NFD forms for canonical
+/// equivalence).
 fn normalizeWtf8(
     allocator: std.mem.Allocator,
     bytes: []const u8,
-    form_kind: lib_unicode.UnicodeNormalizationEnum,
-) std.mem.Allocator.Error!NormalizedCodepoints {
+    form: normalization.Form,
+) std.mem.Allocator.Error![]u32 {
     var cps: std.ArrayListUnmanaged(u32) = .empty;
     defer cps.deinit(allocator);
     try decodeWtf8ToCodepoints(allocator, &cps, bytes);
-
-    // `unicode_normalize` allocates `*pdst` via the supplied
-    // realloc; we hand it `std.c.malloc/free` via the same hook
-    // libregexp uses (`lre_realloc`). On a length-0 input it
-    // returns 0 and leaves `*pdst` untouched, so seed it null.
-    var dst_ptr: ?[*]u32 = null;
-    const src_len: c_int = @intCast(cps.items.len);
-    const src_ptr: ?[*]const u32 = if (cps.items.len == 0) null else cps.items.ptr;
-    const out_len = lib_unicode.unicode_normalize(
-        @ptrCast(&dst_ptr),
-        @ptrCast(src_ptr),
-        src_len,
-        form_kind,
-        null,
-        normalizeRealloc,
-    );
-    if (out_len < 0) {
-        if (dst_ptr) |p| c_alloc.free(@ptrCast(p));
-        return error.OutOfMemory;
-    }
-    return .{ .ptr = dst_ptr, .len = @intCast(out_len) };
+    return normalization.normalize(allocator, cps.items, form);
 }
 
 /// §22.1.3.16 String.prototype.normalize ( [ form ] ). Performs
-/// §3.11 Unicode Normalization (NFC / NFD / NFKC / NFKD) via
-/// libunicode's `unicode_normalize` — decompose into a u32
-/// code-point buffer, hand off to libunicode, re-encode the
-/// result as WTF-8. The default form is NFC (§22.1.3.16 step 4);
-/// unknown forms throw RangeError per step 7.
+/// §3.11 Unicode Normalization (NFC / NFD / NFKC / NFKD) via the
+/// native `unicode/normalization` tables — decompose into a
+/// code-point buffer, normalize, re-encode the result as WTF-8.
+/// The default form is NFC (§22.1.3.16 step 4); unknown forms throw
+/// RangeError per step 7.
 fn stringNormalize(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     const s = try coerceThisStringRooted(realm, this_value, scope);
     const form_v = argOr(args, 0, Value.undefined_);
     // §22.1.3.16 step 4 — defaulting to "NFC".
-    var form_kind: lib_unicode.UnicodeNormalizationEnum = lib_unicode.UNICODE_NFC;
+    var form: normalization.Form = .nfc;
     if (!form_v.isUndefined()) {
         // §22.1.3.16 step 5 — Let f be ? ToString(form).
         const form_s = try intrinsics.stringifyArg(realm, form_v);
         const f = form_s.flatBytes();
         if (std.mem.eql(u8, f, "NFC")) {
-            form_kind = lib_unicode.UNICODE_NFC;
+            form = .nfc;
         } else if (std.mem.eql(u8, f, "NFD")) {
-            form_kind = lib_unicode.UNICODE_NFD;
+            form = .nfd;
         } else if (std.mem.eql(u8, f, "NFKC")) {
-            form_kind = lib_unicode.UNICODE_NFKC;
+            form = .nfkc;
         } else if (std.mem.eql(u8, f, "NFKD")) {
-            form_kind = lib_unicode.UNICODE_NFKD;
+            form = .nfkd;
         } else {
             // §22.1.3.16 step 7 — RangeError on unknown form.
             return intrinsics.throwRangeError(realm, "String.prototype.normalize: invalid form");
         }
     }
 
-    const normalized = normalizeWtf8(realm.allocator, s.flatBytes(), form_kind) catch return error.OutOfMemory;
-    defer normalized.deinit();
+    const normalized = normalizeWtf8(realm.allocator, s.flatBytes(), form) catch return error.OutOfMemory;
+    defer realm.allocator.free(normalized);
 
     // Re-encode the normalized code-point list as WTF-8.
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
-    for (normalized.slice()) |cp| {
-        // `unicode_normalize` returns code points in the valid
-        // range 0..0x10FFFF (including the surrogate values for
-        // unpaired-surrogate inputs).
+    for (normalized) |cp| {
+        // The normalizer returns code points in the valid range
+        // 0..0x10FFFF (including surrogate values for unpaired-
+        // surrogate inputs).
         appendWtf8(realm.allocator, &out, @intCast(cp)) catch return error.OutOfMemory;
     }
     const new_s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
     return Value.fromString(new_s);
-}
-
-/// Realloc shim for `unicode_normalize`. The opaque is unused
-/// (libunicode's only state lives in the output buffer it
-/// reallocs), so we drop it and dispatch through the C allocator —
-/// same pattern as `lre_realloc` in `builtins/regexp.zig`.
-/// `runtime/c_alloc` routes to libc on a hosted target and to the
-/// `wasm_shim.c` allocator on `wasm32-freestanding`.
-fn normalizeRealloc(opaque_ptr: ?*anyopaque, ptr: ?*anyopaque, size: usize) callconv(.c) ?*anyopaque {
-    _ = opaque_ptr;
-    return c_alloc.reallocHook(ptr, size);
 }
 
 /// §22.1.3.4 String.prototype.codePointAt — UTF-16-code-unit-
@@ -2887,12 +2837,12 @@ fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) Na
     // skip the normalization round-trip entirely.
     if (std.mem.eql(u8, s.flatBytes(), other_s.flatBytes())) return Value.fromInt32(0);
 
-    const lhs = normalizeWtf8(realm.allocator, s.flatBytes(), lib_unicode.UNICODE_NFD) catch return error.OutOfMemory;
-    defer lhs.deinit();
-    const rhs = normalizeWtf8(realm.allocator, other_s.flatBytes(), lib_unicode.UNICODE_NFD) catch return error.OutOfMemory;
-    defer rhs.deinit();
+    const lhs = normalizeWtf8(realm.allocator, s.flatBytes(), .nfd) catch return error.OutOfMemory;
+    defer realm.allocator.free(lhs);
+    const rhs = normalizeWtf8(realm.allocator, other_s.flatBytes(), .nfd) catch return error.OutOfMemory;
+    defer realm.allocator.free(rhs);
 
-    const cmp = std.mem.order(u32, lhs.slice(), rhs.slice());
+    const cmp = std.mem.order(u32, lhs, rhs);
     return Value.fromInt32(switch (cmp) {
         .lt => -1,
         .eq => 0,
