@@ -23,13 +23,9 @@
     --paper: #fff8e6;
     --display: 'Bowlby One', sans-serif;
     --mono: 'JetBrains Mono', monospace;
-    --bd: 4px solid var(--ink);
-    --bd-thick: 5px solid var(--ink);
-    --shadow-sm: 6px 6px 0 var(--ink);
-    --shadow-lg: 9px 9px 0 var(--ink);
-    --radius: 16px;
-    --radius-sm: 9px;
-    --bounce: cubic-bezier(.34, 1.56, .64, 1);
+    --bd: 3px solid var(--ink);
+    --bd-thick: 4px solid var(--ink);
+    --shadow-sm: 4px 4px 0 var(--ink);
   }
 
   * { box-sizing: border-box; }
@@ -78,15 +74,12 @@
     color: var(--ink);
     background: #fff;
     border: var(--bd);
-    border-radius: var(--radius-sm);
     box-shadow: var(--shadow-sm);
     padding: 8px 14px;
     cursor: pointer;
-    transition: transform .12s var(--bounce), box-shadow .12s var(--bounce);
   }
-  button:hover { transform: translate(-1px, -1px); box-shadow: var(--shadow-lg); }
   button:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--ink); }
-  button:disabled { opacity: 0.5; cursor: progress; transform: none; box-shadow: var(--shadow-sm); }
+  button:disabled { opacity: 0.5; cursor: progress; }
 
   /* Panel-head buttons are tighter than the page's stand-alone
      buttons so the head row stays compact. Same palette, slimmer
@@ -97,11 +90,6 @@
     border-width: 2px;
     padding: 5px 12px;
     box-shadow: 2px 2px 0 var(--ink);
-  }
-  .panel-head .btn-primary:hover,
-  .panel-head .btn-secondary:hover {
-    transform: translate(-1px, -1px);
-    box-shadow: 4px 4px 0 var(--ink);
   }
   .panel-head .btn-primary:active,
   .panel-head .btn-secondary:active {
@@ -120,7 +108,6 @@
     color: var(--ink);
     background: rgba(255, 255, 255, 0.7);
     border: 2px solid var(--ink);
-    border-radius: var(--radius-sm);
     box-shadow: none;
     padding: 4px 8px;
     max-width: 220px;
@@ -145,19 +132,11 @@
   .panel {
     background: var(--paper);
     border: var(--bd);
-    border-radius: var(--radius);
     box-shadow: var(--shadow-sm);
     display: flex;
     flex-direction: column;
     min-height: 460px;
-    overflow: hidden; /* clip the head bar + editor to the rounded corners */
   }
-  /* A hair of cartoon wobble — the two panels tilt opposite ways, like
-     the marketing site's refusal cards. Straightens on hover. */
-  .columns > .panel:first-child { transform: rotate(-0.4deg); }
-  .columns > .panel:last-child  { transform: rotate(0.4deg); }
-  .columns > .panel { transition: transform .15s var(--bounce); }
-  .columns > .panel:hover { transform: rotate(0deg); }
 
   .panel-head {
     font-family: var(--display);
@@ -300,11 +279,9 @@
     color: var(--ink);
     background: rgba(255, 255, 255, 0.55);
     border: 2px solid var(--ink);
-    border-radius: var(--radius-sm);
     box-shadow: none;
     padding: 4px 12px;
     cursor: pointer;
-    transition: transform .12s var(--bounce), box-shadow .12s var(--bounce);
   }
   .mode-tab[aria-selected="true"] {
     background: #fff;
