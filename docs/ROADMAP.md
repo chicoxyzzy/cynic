@@ -614,9 +614,16 @@ String HTML wrappers, `Date.prototype.{getYear, setYear,
 toGMTString}`, `String.prototype.{substr, trimLeft, trimRight}`,
 `Object.prototype.__proto__` accessor and the `__define*` /
 `__lookup*` family, `RegExp.{$1, input, …}` legacy globals).
-`Intl`; `SharedArrayBuffer` / `Atomics` (path-skipped — shared
-memory defeats SES-style isolation, and Cynic's edge-runtime
-hosts are single-agent-per-isolate).
+`Intl` (the default build skips it — see the contemplated
+Intl-enabled flavour above).
+
+`SharedArrayBuffer` / `Atomics` are **planned, not refused.**
+Shared memory sits in tension with SES-style isolation and
+Cynic's single-agent-per-isolate hosts, so the design — a
+guarded, opt-in shared-memory surface that keeps the isolation
+boundary intact — is still open. The fixtures stay path-skipped
+until it lands, but this is a roadmap item now, not a permanent
+carve-out.
 
 ## Modules
 
