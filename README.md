@@ -35,23 +35,6 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
   Compartments are deferred until multi-realm lands. See
   [`docs/ses-alignment.md`](docs/ses-alignment.md).
 
-## Goals
-
-- Track the spec faithfully — internal function names mirror ECMA-262
-  abstract operations so test262 failures map cleanly to spec sections.
-- Pass the strict subset of [test262](https://github.com/tc39/test262).
-- Draw inspiration from production engines — V8 (Ignition + Sparkplug +
-  Maglev + TurboFan), JavaScriptCore (LLInt + Baseline + DFG + FTL), and
-  SpiderMonkey (Bytecode interp + Baseline Interp + Baseline Compiler +
-  WarpMonkey) — without copying any one of them. Smaller engines like
-  Hermes (AOT bytecode) and QuickJS (compact single-tier) are useful
-  reference points. §22.2 RegExp is **Perlex**, Cynic's own native engine.
-  The plan is a clean bytecode interpreter first — **Lantern** (T0) —
-  then tiered compilation: a baseline JIT (**Bistromath**, T1) and an
-  optimizing JIT (**Ohaimark**, T2). The garbage collector is **Metla**.
-  The exact tier shape stays open until we have working measurements
-  against Lantern.
-
 ## Status
 
 Pre-alpha. Lexer + parser + Lantern (T0 bytecode interpreter) +
