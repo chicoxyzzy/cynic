@@ -160,15 +160,18 @@ so we track upstream: drop the refreshed UCD files into
 
 ## Run
 
+After `zig build`, the CLI is at `zig-out/bin/cynic` — put it on your
+PATH or run `./zig-out/bin/cynic`. The examples use `cynic`:
+
 ```sh
-zig build run -- lex   path/to/file.js              # tokenize and print
-zig build run -- parse path/to/file.js              # parse a Script
-zig build run -- parse --module path/to/file.js     # parse a Module
-zig build run -- parse path/to/file.mjs             # .mjs ⇒ module
-zig build run -- eval  '1 + 2 * 3'                  # evaluate an expression
-zig build run -- run   path/to/file.js              # run a script
-zig build run -- run   a.js b.js c.js               # multiple files share one realm
-zig build run -- repl                               # interactive REPL (persistent realm)
+cynic lex   path/to/file.js              # tokenize and print
+cynic parse path/to/file.js              # parse a Script
+cynic parse --module path/to/file.js     # parse a Module
+cynic parse path/to/file.mjs             # .mjs ⇒ module
+cynic eval  '1 + 2 * 3'                  # evaluate an expression
+cynic run   path/to/file.js              # run a script
+cynic run   a.js b.js c.js               # multiple files share one realm
+cynic repl                               # interactive REPL (persistent realm)
 ```
 
 The `cynic` CLI keeps pre-Stage-4 / experimental TC39 proposals off
