@@ -518,3 +518,35 @@ test "accessor-registration shape: simple installNativeGetter getters aren't con
     const acc: Accessor = ab_ext.accessors.get("byteLength") orelse return error.NoByteLengthAccessor;
     try expectCanonicalAccessorFn(&realm, acc.getter, "get byteLength");
 }
+
+test "constructor-registration shape: Error constructors carry [[Realm]] and the §17 prototype descriptor" {
+    var realm = Realm.init(testing.allocator);
+    realm.hardened = false;
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    // §20.5 — Error and every NativeError / AggregateError /
+    // SuppressedError constructor is callable without `new`
+    // (`is_class_constructor == false`), carries its installing
+    // realm (§10.2.5), inherits `%Function.prototype%` (§20.2.3),
+    // and pins `prototype` as `{ w:false, e:false, c:false }` (§17).
+    const ctors = [_][]const u8{
+        "Error",          "TypeError",      "RangeError",
+        "ReferenceError", "SyntaxError",    "URIError",
+        "EvalError",      "AggregateError", "SuppressedError",
+    };
+    for (ctors) |name| {
+        const v = realm.globals.get(name) orelse {
+            std.debug.print("[ctor-shape] no global {s}\n", .{name});
+            return error.NoCtor;
+        };
+        const fn_obj = heap_mod.valueAsFunction(v) orelse return error.CtorNotFn;
+        try testing.expect(!fn_obj.is_class_constructor);
+        try testing.expect(fn_obj.proto == realm.intrinsics.function_prototype);
+        try testing.expect(fn_obj.realm == &realm);
+        const flags = fn_obj.property_flags.get("prototype") orelse return error.NoPrototypeFlags;
+        try testing.expect(!flags.writable);
+        try testing.expect(!flags.enumerable);
+        try testing.expect(!flags.configurable);
+    }
+}
