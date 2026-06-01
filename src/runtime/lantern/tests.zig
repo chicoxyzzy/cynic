@@ -7974,6 +7974,69 @@ test "Object.prototype.toString: callable Proxy reports [object Function]" {
     , "[object Function]");
 }
 
+test "Proxy [[Call]]: non-callable-target proxy throws on call (§10.5.12)" {
+    // §10.5.1 ProxyCreate step 3 installs a [[Call]] internal method
+    // only when IsCallable(target) is true. A proxy over a plain
+    // object therefore has no [[Call]]: invoking it throws TypeError,
+    // and the installed `apply` trap must NOT fire.
+    try expectScriptThrowsWithBuiltins(
+        \\const p = new Proxy({}, { apply() { return "called"; } });
+        \\p();
+    );
+}
+
+test "Proxy [[Call]]: non-callable-target proxy has typeof object" {
+    // A non-callable proxy is not a function — §14 typeof reports
+    // "object", confirming the absence of [[Call]].
+    try expectScriptStringWithBuiltins(
+        \\typeof new Proxy({}, { apply() {} });
+    , "object");
+}
+
+test "Proxy [[Call]]: callable-target proxy still dispatches apply trap" {
+    // The fix must not disturb the genuine callable path — a proxy
+    // over a function keeps its [[Call]] and fires the apply trap.
+    try expectScriptStringWithBuiltins(
+        \\const p = new Proxy(function () {}, { apply() { return "ok"; } });
+        \\p();
+    , "ok");
+}
+
+test "Proxy [[Call]]: non-callable proxy rejected via Reflect.apply" {
+    // Reflective callers route through the same callValue chokepoint.
+    try expectScriptThrowsWithBuiltins(
+        \\Reflect.apply(new Proxy({}, { apply() { return 1; } }), undefined, []);
+    );
+}
+
+test "Proxy [[GetOwnProperty]]: trap can't report non-configurable target as configurable (§10.5.5)" {
+    // §10.5.5 steps 16-18 IsCompatiblePropertyDescriptor — a
+    // getOwnPropertyDescriptor trap that claims configurable:true for
+    // a non-configurable target property is an invariant violation.
+    try expectScriptThrowsWithBuiltins(
+        \\const t = {};
+        \\Object.defineProperty(t, "x", { value: 1, configurable: false, writable: true });
+        \\const p = new Proxy(t, {
+        \\  getOwnPropertyDescriptor() {
+        \\    return { value: 1, configurable: true, writable: true, enumerable: true };
+        \\  }
+        \\});
+        \\Object.getOwnPropertyDescriptor(p, "x");
+    );
+}
+
+test "Proxy [[GetOwnProperty]]: compatible descriptor passes through" {
+    // A configurable target property whose trap descriptor agrees is
+    // returned unchanged — the new invariant check must not over-reject.
+    try expectScriptStringWithBuiltins(
+        \\const t = { x: 1 };
+        \\const p = new Proxy(t, {
+        \\  getOwnPropertyDescriptor(tt, k) { return Object.getOwnPropertyDescriptor(tt, k); }
+        \\});
+        \\String(Object.getOwnPropertyDescriptor(p, "x").value);
+    , "1");
+}
+
 test "Object.prototype.toString: @@toStringTag getter throw propagates" {
     // §20.1.3.6 step 15 — Get(O, @@toStringTag) can throw.
     try expectScriptThrowsWithBuiltins(
