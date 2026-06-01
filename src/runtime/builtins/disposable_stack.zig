@@ -177,7 +177,7 @@ fn disposableStackAdopt(realm: *Realm, this_value: Value, args: []const Value) N
 
     // §27.3.3.2 step 5-6 — build the wrapper closure as a bound
     // function. `bound_this = undefined`, prefix args `[value]`.
-    const wrapper = realm.heap.allocateFunctionNative(boundAdoptTrampoline, 0, "") catch return error.OutOfMemory;
+    const wrapper = realm.heap.allocateFunctionNative(realm, boundAdoptTrampoline, 0, "") catch return error.OutOfMemory;
     wrapper.proto = realm.intrinsics.function_prototype;
     wrapper.has_construct = false;
     realm.heap.setBoundTarget(wrapper, on_dispose);

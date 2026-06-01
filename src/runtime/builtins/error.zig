@@ -369,11 +369,8 @@ pub fn installError(
     parent_proto: *JSObject,
     arity: u8,
 ) !*JSFunction {
-    const fn_obj = try realm.heap.allocateFunctionNative(native, arity, name);
-    // §10.2.5 — built-in constructors carry their installing realm
-    // so cross-realm identity checks can tell when a constructor's
-    // realm differs from the caller's.
-    fn_obj.realm = realm;
+    // §10.2.5 [[Realm]] is wired inside allocateFunctionNative.
+    const fn_obj = try realm.heap.allocateFunctionNative(realm, native, arity, name);
     // The auto-allocated prototype was given.constructor by
     // allocateFunctionNative-equivalent paths in non-native
     // allocateFunction; native fns don't get a prototype unless

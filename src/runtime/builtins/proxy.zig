@@ -107,7 +107,7 @@ fn proxyRevocable(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // length 0, and is not a constructor. The native body itself
     // is a no-op stub; the interpreter inspects `revocable_proxy`
     // before calling it.
-    const revoke_fn = realm.heap.allocateFunctionNative(proxyRevokeNoop, 0, "") catch return error.OutOfMemory;
+    const revoke_fn = realm.heap.allocateFunctionNative(realm, proxyRevokeNoop, 0, "") catch return error.OutOfMemory;
     revoke_fn.proto = realm.intrinsics.function_prototype;
     revoke_fn.has_construct = false;
     revoke_fn.revocable_proxy = proxy_obj;

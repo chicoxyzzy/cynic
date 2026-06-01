@@ -343,10 +343,9 @@ pub fn install(realm: *Realm) !void {
     // `lda_arguments` opcode can wire the same function into
     // every strict-mode arguments object.
     {
-        const t = try realm.heap.allocateFunctionNative(throwTypeErrorThrower, 0, "");
+        const t = try realm.heap.allocateFunctionNative(realm, throwTypeErrorThrower, 0, "");
         t.proto = realm.intrinsics.function_prototype;
         t.has_construct = false;
-        t.realm = realm;
         // §10.2.4 — non-extensible. `length` and `name` are
         // already non-writable / non-configurable per §17 (set in
         // `installFunctionLengthAndName`); but the spec requires
@@ -473,9 +472,8 @@ pub fn install(realm: *Realm) !void {
     // Wire it as a throwing native (length 1, !construct) so
     // `eval !== null` is true, `eval(...)` raises EvalError, and
     // typeof eval === "function".
-    const eval_fn = try realm.heap.allocateFunctionNative(globalEvalNotSupported, 1, "eval");
+    const eval_fn = try realm.heap.allocateFunctionNative(realm, globalEvalNotSupported, 1, "eval");
     eval_fn.has_construct = false;
-    eval_fn.realm = realm;
     try realm.globals.put(realm.allocator, "eval", heap_mod.taggedFunction(eval_fn));
 
     // §19.1 — `undefined`, `NaN`, `Infinity` are frozen data
@@ -795,16 +793,14 @@ fn installSyntheticAccessorPair(
     // Allocate the getter / setter JSFunctions. The native body
     // is a placeholder — call dispatch short-circuits on
     // `synth_accessor != null` before invoking it.
-    const get_fn = try realm.heap.allocateFunctionNative(synthAccessorPlaceholder, 0, "");
+    const get_fn = try realm.heap.allocateFunctionNative(realm, synthAccessorPlaceholder, 0, "");
     get_fn.synth_accessor = get_cell;
     get_fn.has_construct = false;
     get_fn.extensible = false;
-    get_fn.realm = realm;
-    const set_fn = try realm.heap.allocateFunctionNative(synthAccessorPlaceholder, 1, "");
+    const set_fn = try realm.heap.allocateFunctionNative(realm, synthAccessorPlaceholder, 1, "");
     set_fn.synth_accessor = set_cell;
     set_fn.has_construct = false;
     set_fn.extensible = false;
-    set_fn.realm = realm;
 
     // The shape system only models data properties; an accessor
     // install MUST demote first or the IC's shape lookup would
@@ -855,8 +851,7 @@ fn installStubConstructor(
 ) !*JSObject {
     // §17 — every spec'd stub built-in (Array, String, Number,
     // Boolean, Function) has `length === 1`.
-    const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 1, name);
-    fn_obj.realm = realm;
+    const fn_obj = try realm.heap.allocateFunctionNative(realm, stubConstructorNative, 1, name);
     const proto = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(proto, parent_proto);
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
@@ -884,8 +879,7 @@ fn installStubConstructor(
 /// every plain object chains to.
 fn installCtorReusingProto(realm: *Realm, name: []const u8, proto: *JSObject) !void {
     // §20.1.1 — `Object` constructor's `length` is 1.
-    const fn_obj = try realm.heap.allocateFunctionNative(stubConstructorNative, 1, name);
-    fn_obj.realm = realm;
+    const fn_obj = try realm.heap.allocateFunctionNative(realm, stubConstructorNative, 1, name);
     try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
     realm.heap.setFunctionPrototype(fn_obj, proto);
     // §17 — same non-writable-prototype default as the stub path above.
@@ -928,9 +922,8 @@ fn stubConstructorNative(realm: *Realm, this_value: Value, args: []const Value) 
 ///   - `[[Prototype]]` = `%Function.prototype%` (§20.2.3) — already
 ///     wired by `allocateFunctionNative`.
 pub fn makeNativeFunction(realm: *Realm, native: NativeFn, params: u8, name: []const u8) !*JSFunction {
-    const fn_obj = try realm.heap.allocateFunctionNative(native, params, name);
+    const fn_obj = try realm.heap.allocateFunctionNative(realm, native, params, name);
     fn_obj.has_construct = false;
-    fn_obj.realm = realm;
     return fn_obj;
 }
 
@@ -1013,13 +1006,11 @@ pub const ConstructorSpec = struct {
 /// install methods, accessors, and statics. Replaces ~10
 /// near-identical hand-rolled blocks across `install<Builtin>`.
 pub fn installConstructor(realm: *Realm, spec: ConstructorSpec) !struct { ctor: *JSFunction, proto: *JSObject } {
-    const fn_obj = try realm.heap.allocateFunctionNative(spec.ctor, spec.arity, spec.name);
+    // §10.2.5 [[Realm]] (used by cross-realm species checks,
+    // §23.1.3.34 et al.) is wired inside allocateFunctionNative.
+    const fn_obj = try realm.heap.allocateFunctionNative(realm, spec.ctor, spec.arity, spec.name);
     fn_obj.is_class_constructor = spec.is_class;
     fn_obj.proto = realm.intrinsics.function_prototype;
-    // §10.2.5 — built-in constructors carry their installing realm
-    // so cross-realm species checks (§23.1.3.34 et al.) can detect
-    // when the constructor's `realm` differs from the caller's.
-    fn_obj.realm = realm;
     const proto = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(proto, realm.intrinsics.object_prototype);
     if (spec.install_constructor_property) {
@@ -1582,8 +1573,7 @@ fn replaceGlobalNative(realm: *Realm, name: []const u8, native: NativeFn) !void 
     // at the new function; the prototype keeps its identity.
     const old_v = realm.globals.get(name) orelse return;
     const old_fn = heap_mod.valueAsFunction(old_v) orelse return;
-    const fresh = try realm.heap.allocateFunctionNative(native, 1, name);
-    fresh.realm = realm;
+    const fresh = try realm.heap.allocateFunctionNative(realm, native, 1, name);
     realm.heap.setFunctionPrototype(fresh, old_fn.prototype);
     if (fresh.prototype) |p| {
         try p.set(realm.allocator, "constructor", heap_mod.taggedFunction(fresh));

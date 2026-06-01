@@ -96,7 +96,7 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
     // §20.2.3.6 — Function.prototype[@@hasInstance].
     // Descriptor: `{w:false, e:false, c:false}` (per §17).
     // Function's own `name` is "[Symbol.hasInstance]", `length` is 1.
-    const hi_fn = try realm.heap.allocateFunctionNative(functionHasInstance, 1, "[Symbol.hasInstance]");
+    const hi_fn = try realm.heap.allocateFunctionNative(realm, functionHasInstance, 1, "[Symbol.hasInstance]");
     hi_fn.proto = fn_proto;
     hi_fn.has_construct = false;
     try fn_proto.setWithFlags(realm.allocator, "@@hasInstance", heap_mod.taggedFunction(hi_fn), .{
@@ -150,7 +150,7 @@ fn functionConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     // returns undefined regardless of arguments — matches the
     // spec semantics of `Function()` (a function whose body is
     // the empty string).
-    const empty = realm.heap.allocateFunctionNative(emptyFunctionBody, 0, "anonymous") catch return error.OutOfMemory;
+    const empty = realm.heap.allocateFunctionNative(realm, emptyFunctionBody, 0, "anonymous") catch return error.OutOfMemory;
     empty.realm = ctor_realm;
     // §10.2.2 base-kind [[Construct]] — this is an ordinary function
     // (its body is the empty string), so a nulled `prototype` falls
@@ -509,7 +509,7 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
     // The bound function carries no chunk; call sites detect
     // `bound_target` and route through that.
-    const bound = realm.heap.allocateFunctionNative(boundFunctionTrampoline, 0, "bound") catch return error.OutOfMemory;
+    const bound = realm.heap.allocateFunctionNative(realm, boundFunctionTrampoline, 0, "bound") catch return error.OutOfMemory;
     bound.proto = realm.intrinsics.function_prototype;
     realm.heap.setBoundTarget(bound, target);
     realm.heap.setBoundThis(bound, bound_this);
@@ -628,7 +628,7 @@ pub fn wireVariantInstancePrototypes(realm: *Realm) !void {
 }
 
 fn installVariantCtor(realm: *Realm, name: []const u8) !*JSObject {
-    const fn_obj = try realm.heap.allocateFunctionNative(variantCtorThrows, 1, name);
+    const fn_obj = try realm.heap.allocateFunctionNative(realm, variantCtorThrows, 1, name);
     fn_obj.proto = realm.intrinsics.function_prototype;
     // §27.3.1 / §27.4.1 / §27.7.1 — GeneratorFunction /
     // AsyncGeneratorFunction / AsyncFunction are subclasses of

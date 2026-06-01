@@ -456,10 +456,10 @@ fn runModuleImportJob(
 /// the value, `bound_target` = a `this`-returning native) so no
 /// per-call closure state is needed.
 fn makeReturnThisHandler(realm: *Realm, value: Value) !Value {
-    const impl = try realm.heap.allocateFunctionNative(returnThisValueNative, 1, "");
+    const impl = try realm.heap.allocateFunctionNative(realm, returnThisValueNative, 1, "");
     impl.proto = realm.intrinsics.function_prototype;
     impl.has_construct = false;
-    const bound = try realm.heap.allocateFunctionNative(returnThisValueNative, 1, "");
+    const bound = try realm.heap.allocateFunctionNative(realm, returnThisValueNative, 1, "");
     bound.proto = realm.intrinsics.function_prototype;
     bound.has_construct = false;
     realm.heap.setBoundTarget(bound, impl);
@@ -512,19 +512,19 @@ fn runThenableJob(
     // via `isConstructor(reject)` from `harness/isConstructor.js`, which
     // tries `Reflect.construct(function(){}, [], reject)`).
     const promise_mod = @import("../builtins/promise.zig");
-    const resolve_impl = realm.heap.allocateFunctionNative(promise_mod.promiseResolveImplExported, 1, "") catch return error.OutOfMemory;
+    const resolve_impl = realm.heap.allocateFunctionNative(realm, promise_mod.promiseResolveImplExported, 1, "") catch return error.OutOfMemory;
     resolve_impl.proto = realm.intrinsics.function_prototype;
     resolve_impl.has_construct = false;
-    const resolve_fn = realm.heap.allocateFunctionNative(promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
+    const resolve_fn = realm.heap.allocateFunctionNative(realm, promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
     resolve_fn.proto = realm.intrinsics.function_prototype;
     resolve_fn.has_construct = false;
     realm.heap.setBoundTarget(resolve_fn, resolve_impl);
     realm.heap.setBoundThis(resolve_fn, outer_promise);
 
-    const reject_impl = realm.heap.allocateFunctionNative(promise_mod.promiseRejectImplExported, 1, "") catch return error.OutOfMemory;
+    const reject_impl = realm.heap.allocateFunctionNative(realm, promise_mod.promiseRejectImplExported, 1, "") catch return error.OutOfMemory;
     reject_impl.proto = realm.intrinsics.function_prototype;
     reject_impl.has_construct = false;
-    const reject_fn = realm.heap.allocateFunctionNative(promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
+    const reject_fn = realm.heap.allocateFunctionNative(realm, promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
     reject_fn.proto = realm.intrinsics.function_prototype;
     reject_fn.has_construct = false;
     realm.heap.setBoundTarget(reject_fn, reject_impl);

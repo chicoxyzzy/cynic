@@ -550,3 +550,27 @@ test "constructor-registration shape: Error constructors carry [[Realm]] and the
         try testing.expect(!flags.configurable);
     }
 }
+
+test "native-allocation realm: raw-allocated global functions carry [[Realm]] (§10.2.5)" {
+    var realm = Realm.init(testing.allocator);
+    realm.hardened = false;
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    // §10.2.5 — every native function carries `[[Realm]]`. These
+    // globals are allocated straight via `allocateFunctionNative`
+    // (no makeNativeFunction wrapper), so they exercise the
+    // allocation-time realm wiring rather than a caller fix-up.
+    const fns = [_][]const u8{
+        "encodeURI", "encodeURIComponent",
+        "decodeURI", "decodeURIComponent",
+    };
+    for (fns) |name| {
+        const v = realm.globals.get(name) orelse {
+            std.debug.print("[native-alloc] no global {s}\n", .{name});
+            return error.NoGlobalFn;
+        };
+        const fn_obj = heap_mod.valueAsFunction(v) orelse return error.NotAFunction;
+        try testing.expect(fn_obj.realm == &realm);
+    }
+}

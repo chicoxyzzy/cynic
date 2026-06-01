@@ -261,7 +261,7 @@ pub fn openIteratorOpts(
     const state = realm.allocator.create(object_mod.ArrayLikeIterState) catch return error.OutOfMemory;
     state.* = .{ .target = iterable };
     iter.array_like_iter = state;
-    const next_fn = realm.heap.allocateFunctionNative(arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
+    const next_fn = realm.heap.allocateFunctionNative(realm, arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
     next_fn.proto = realm.intrinsics.function_prototype;
     iter.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(iter);
@@ -610,7 +610,7 @@ pub fn openForInIterator(
     const state = realm.allocator.create(@import("../object.zig").ArrayLikeIterState) catch return error.OutOfMemory;
     state.* = .{ .target = heap_mod.taggedObject(arr), .idx = 0, .done = false, .for_in_source = obj_v };
     iter.array_like_iter = state;
-    const next_fn = realm.heap.allocateFunctionNative(arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
+    const next_fn = realm.heap.allocateFunctionNative(realm, arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
     next_fn.proto = realm.intrinsics.function_prototype;
     iter.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(iter);

@@ -325,9 +325,8 @@ pub fn install(realm: *Realm) !void {
         // Each concrete constructor has the same arity as
         // %TypedArray% itself (signature is up to (buffer,
         // byteOffset, length) or one of the other 3-arg forms).
-        const ctor = try realm.heap.allocateFunctionNative(typedArrayConstructorBuilder(variant.kind, variant.name), 3, variant.name);
+        const ctor = try realm.heap.allocateFunctionNative(realm, typedArrayConstructorBuilder(variant.kind, variant.name), 3, variant.name);
         ctor.is_class_constructor = true;
-        ctor.realm = realm;
         // §23.2.5.1 — argument processing (ToIndex on a length arg,
         // the typed-array / buffer brand checks, the detached-buffer
         // TypeError) all precede AllocateTypedArray, which is the
