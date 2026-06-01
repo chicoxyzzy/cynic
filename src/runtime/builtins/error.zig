@@ -38,12 +38,12 @@ const stringifyArg = intrinsics.stringifyArg;
 /// TypeError / RangeError on bad ctor input via
 /// `realm.intrinsics.type_error_prototype`.
 pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
-    const error_ctor = try installError(realm, "Error", errorNative, obj_proto);
+    const error_ctor = try installError(realm, "Error", errorNative, obj_proto, 1);
     realm.intrinsics.error_constructor = error_ctor;
     const error_proto = error_ctor.prototype.?;
     realm.intrinsics.error_prototype = error_proto;
 
-    realm.intrinsics.type_error_constructor = try installError(realm, "TypeError", typeErrorNative, error_proto);
+    realm.intrinsics.type_error_constructor = try installError(realm, "TypeError", typeErrorNative, error_proto, 1);
     realm.intrinsics.type_error_prototype = realm.intrinsics.type_error_constructor.?.prototype;
     // §20.5.6.1 — each NativeError constructor's [[Prototype]]
     // is %Error% (the Error constructor itself). `static_parent`
@@ -52,23 +52,23 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
     // reads it first.
     realm.intrinsics.type_error_constructor.?.static_parent = error_ctor;
 
-    realm.intrinsics.range_error_constructor = try installError(realm, "RangeError", rangeErrorNative, error_proto);
+    realm.intrinsics.range_error_constructor = try installError(realm, "RangeError", rangeErrorNative, error_proto, 1);
     realm.intrinsics.range_error_prototype = realm.intrinsics.range_error_constructor.?.prototype;
     realm.intrinsics.range_error_constructor.?.static_parent = error_ctor;
 
-    realm.intrinsics.reference_error_constructor = try installError(realm, "ReferenceError", referenceErrorNative, error_proto);
+    realm.intrinsics.reference_error_constructor = try installError(realm, "ReferenceError", referenceErrorNative, error_proto, 1);
     realm.intrinsics.reference_error_prototype = realm.intrinsics.reference_error_constructor.?.prototype;
     realm.intrinsics.reference_error_constructor.?.static_parent = error_ctor;
 
-    realm.intrinsics.syntax_error_constructor = try installError(realm, "SyntaxError", syntaxErrorNative, error_proto);
+    realm.intrinsics.syntax_error_constructor = try installError(realm, "SyntaxError", syntaxErrorNative, error_proto, 1);
     realm.intrinsics.syntax_error_prototype = realm.intrinsics.syntax_error_constructor.?.prototype;
     realm.intrinsics.syntax_error_constructor.?.static_parent = error_ctor;
 
-    realm.intrinsics.uri_error_constructor = try installError(realm, "URIError", uriErrorNative, error_proto);
+    realm.intrinsics.uri_error_constructor = try installError(realm, "URIError", uriErrorNative, error_proto, 1);
     realm.intrinsics.uri_error_prototype = realm.intrinsics.uri_error_constructor.?.prototype;
     realm.intrinsics.uri_error_constructor.?.static_parent = error_ctor;
 
-    realm.intrinsics.eval_error_constructor = try installError(realm, "EvalError", evalErrorNative, error_proto);
+    realm.intrinsics.eval_error_constructor = try installError(realm, "EvalError", evalErrorNative, error_proto, 1);
     realm.intrinsics.eval_error_prototype = realm.intrinsics.eval_error_constructor.?.prototype;
     realm.intrinsics.eval_error_constructor.?.static_parent = error_ctor;
 
@@ -117,27 +117,11 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
 /// out-of-line because its arity is 2 (vs. 1 for the rest) and
 /// the body has to walk the iterable to populate `errors`.
 fn installAggregateError(realm: *Realm, parent_proto: *JSObject) !*JSFunction {
-    const fn_obj = try realm.heap.allocateFunctionNative(aggregateErrorNative, 2, "AggregateError");
-    const proto = try realm.heap.allocateObject();
-    realm.heap.setObjectPrototype(proto, parent_proto);
-    try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
-    const name_str = try realm.heap.allocateString("AggregateError");
-    try setNonEnumerable(proto, realm.allocator, "name", Value.fromString(name_str));
+    // §20.5.7.1.1 arity 2 (errors, message). Shares the Error-ctor
+    // builder; only the `errors`-walking body differs.
+    const fn_obj = try installError(realm, "AggregateError", aggregateErrorNative, parent_proto, 2);
     // §20.5.7.3.2 — the prototype's `message` defaults to "".
-    const empty = try realm.heap.allocateString("");
-    try setNonEnumerable(proto, realm.allocator, "message", Value.fromString(empty));
-    realm.heap.setFunctionPrototype(fn_obj, proto);
-    // §20.5.7.2.1 — AggregateError.prototype is `{ writable:
-    // false, enumerable: false, configurable: false }` (same
-    // shape as other NativeError prototypes). Override the
-    // default `{w:true, e:false, c:false}` from
-    // `JSFunction.flagsForOwn`.
-    try fn_obj.property_flags.put(realm.allocator, "prototype", .{
-        .writable = false,
-        .enumerable = false,
-        .configurable = false,
-    });
-    try realm.globals.put(realm.allocator, "AggregateError", heap_mod.taggedFunction(fn_obj));
+    try installPrototypeMessage(realm, fn_obj.prototype.?);
     return fn_obj;
 }
 
@@ -214,21 +198,10 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
 /// configurable, non-enumerable). `cause` is honoured per
 /// §20.5.8.1 InstallErrorCause when the options object carries it.
 fn installSuppressedError(realm: *Realm, parent_proto: *JSObject) !*JSFunction {
-    const fn_obj = try realm.heap.allocateFunctionNative(suppressedErrorNative, 3, "SuppressedError");
-    const proto = try realm.heap.allocateObject();
-    realm.heap.setObjectPrototype(proto, parent_proto);
-    try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj));
-    const name_str = try realm.heap.allocateString("SuppressedError");
-    try setNonEnumerable(proto, realm.allocator, "name", Value.fromString(name_str));
-    const empty = try realm.heap.allocateString("");
-    try setNonEnumerable(proto, realm.allocator, "message", Value.fromString(empty));
-    realm.heap.setFunctionPrototype(fn_obj, proto);
-    try fn_obj.property_flags.put(realm.allocator, "prototype", .{
-        .writable = false,
-        .enumerable = false,
-        .configurable = false,
-    });
-    try realm.globals.put(realm.allocator, "SuppressedError", heap_mod.taggedFunction(fn_obj));
+    // §20.5.x.1 arity 3 (error, suppressed, message). Shares the
+    // Error-ctor builder; only the slot-stamping body differs.
+    const fn_obj = try installError(realm, "SuppressedError", suppressedErrorNative, parent_proto, 3);
+    try installPrototypeMessage(realm, fn_obj.prototype.?);
     return fn_obj;
 }
 
@@ -379,13 +352,28 @@ fn aggregateErrorMaterialiseErrors(realm: *Realm, errors_v: Value) NativeError!V
     return heap_mod.taggedObject(out);
 }
 
+/// Build an Error-shaped constructor: a callable-without-`new`
+/// function (§20.5; `is_class_constructor` stays false) whose
+/// `.prototype` chains to `parent_proto` and carries own
+/// `constructor` + `name` data properties. `arity` is the
+/// constructor's `length` (1 for Error / the NativeErrors, 2 for
+/// AggregateError, 3 for SuppressedError). Shared by Error, every
+/// NativeError, AggregateError, and SuppressedError so the §10.2.5
+/// `[[Realm]]` wiring and the §17 frozen-`prototype` descriptor
+/// live in exactly one place. The caller installs the prototype's
+/// `message` default via `installPrototypeMessage`.
 pub fn installError(
     realm: *Realm,
     name: []const u8,
     native: NativeFn,
     parent_proto: *JSObject,
+    arity: u8,
 ) !*JSFunction {
-    const fn_obj = try realm.heap.allocateFunctionNative(native, 1, name);
+    const fn_obj = try realm.heap.allocateFunctionNative(native, arity, name);
+    // §10.2.5 — built-in constructors carry their installing realm
+    // so cross-realm identity checks can tell when a constructor's
+    // realm differs from the caller's.
+    fn_obj.realm = realm;
     // The auto-allocated prototype was given.constructor by
     // allocateFunctionNative-equivalent paths in non-native
     // allocateFunction; native fns don't get a prototype unless
