@@ -991,18 +991,12 @@ pub const JSObject = struct {
     /// which rides this same flag (since Cynic represents
     /// `Function.prototype` as a JSObject, not a JSFunction).
     proxy_callable: bool = false,
-    /// §22.2.7 RegExp instance — opaque pointer to the compiled
-    /// libregexp bytecode (vendored QuickJS-NG engine). The first
-    /// call to `.exec`/`.test` parses the `source` + `flags` and
-    /// caches the bytecode here. The runtime owns the allocation.
-    /// Set only when the pattern fell back to the vendored matcher;
-    /// otherwise `regex_perlex` holds the native-engine program.
-    regex_bytecode: ?[]u8 = null,
-    /// §22.2.7 RegExp instance — compiled Perlex (native engine)
-    /// program, when the pattern is within Perlex's grammar. Mutually
-    /// exclusive with `regex_bytecode`. Allocated against the realm
-    /// allocator and freed in `deinitFields` (it holds no GC
-    /// references, so the collector doesn't trace it).
+    /// §22.2.7 RegExp instance — the compiled Perlex (native engine)
+    /// program for this RegExp's [[RegExpMatcher]]. The first call to
+    /// `.exec`/`.test` parses the `source` + `flags` and caches the
+    /// program here. Allocated against the realm allocator and freed in
+    /// `deinitFields` (it holds no GC references, so the collector
+    /// doesn't trace it). Perlex is the sole regex engine.
     regex_perlex: ?*@import("../perlex/perlex.zig").Program = null,
     // (`finalization_cells` + `weak_ref_target` moved to
     // `JSObjectExtension` — only `FinalizationRegistry` /

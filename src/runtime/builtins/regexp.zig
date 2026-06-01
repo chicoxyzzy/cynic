@@ -23,7 +23,6 @@ const intrinsics = @import("../intrinsics.zig");
 const c_alloc = @import("../c_alloc.zig");
 const perlex = @import("../../perlex/perlex.zig");
 const perlex_props = @import("../../unicode/perlex_props.zig");
-const build_options = @import("build_options");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -34,12 +33,12 @@ const stringifyArg = intrinsics.stringifyArg;
 const throwTypeError = intrinsics.throwTypeError;
 const throwTypeErrorInRealm = intrinsics.throwTypeErrorInRealm;
 
-// ── libregexp C API ─────────────────────────────────────────────────────────
-
-// Build-system `translate-c` step (`b.addTranslateC` in build.zig)
-// produces this module from `vendor/quickjs/libregexp.h`. Zig 0.17
-// removed the `@cImport` builtin in favor of this approach.
-const c = @import("c");
+// ── RegExp flag bitmask ─────────────────────────────────────────────────────
+//
+// A compact `c_int` bitmask for the `dgimsuvy` flag set, used by
+// `parseFlagsStrict` to validate a flag string (duplicate / unknown /
+// `u`+`v` conflict). The bit values are arbitrary; the `LRE_FLAG_` names
+// are a historical holdover from the retired libregexp bridge.
 
 const LRE_FLAG_GLOBAL: c_int = 1 << 0;
 const LRE_FLAG_IGNORECASE: c_int = 1 << 1;
@@ -48,7 +47,6 @@ const LRE_FLAG_DOTALL: c_int = 1 << 3;
 const LRE_FLAG_UNICODE: c_int = 1 << 4;
 const LRE_FLAG_STICKY: c_int = 1 << 5;
 const LRE_FLAG_INDICES: c_int = 1 << 6;
-const LRE_FLAG_NAMED_GROUPS: c_int = 1 << 7;
 const LRE_FLAG_UNICODE_SETS: c_int = 1 << 8;
 
 // ── Host hooks called by libregexp ─────────────────────────────────────────
@@ -1152,7 +1150,7 @@ fn speciesConstructor(realm: *Realm, source: *JSObject, default_ctor: *JSFunctio
 /// fixtures pass plain `{ exec: function() { ... } }` shells), so
 /// we always go through the user-`exec` path when one is callable.
 /// When it's not, we fall through to `regexExec` on the JSObject's
-/// own `[[RegExpMatcher]]` (Cynic stores this as `regex_bytecode`).
+/// own `[[RegExpMatcher]]` (Cynic stores this as `regex_perlex`).
 pub fn regExpExecGeneric(realm: *Realm, r: *JSObject, s: *JSString) NativeError!Value {
     const exec_v = try intrinsics.getPropertyChain(realm, r, "exec");
     if (heap_mod.valueAsFunction(exec_v)) |exec_fn| {
@@ -1175,7 +1173,7 @@ pub fn regExpExecGeneric(realm: *Realm, r: *JSObject, s: *JSString) NativeError!
         return v;
     }
     // No callable `exec` — require a [[RegExpMatcher]]-bearing object.
-    if (r.regex_bytecode == null and r.regexp_source == null) {
+    if (r.regexp_source == null) {
         return throwTypeError(realm, "RegExpExec: receiver lacks [[RegExpMatcher]]");
     }
     // §22.2.7.2 RegExpBuiltinExec — invoke the engine-internal
@@ -1576,27 +1574,6 @@ fn parseFlagsStrict(realm: *Realm, s: []const u8) NativeError!c_int {
     return f;
 }
 
-/// Permissive fallback used after the strict validator has
-/// already run on the same string. Same flag-to-bit mapping,
-/// no error reporting, no duplicate / unknown check (won't
-/// trip — the caller validated already).
-fn parseFlags(s: []const u8) c_int {
-    var f: c_int = 0;
-    for (s) |ch| switch (ch) {
-        'g' => f |= LRE_FLAG_GLOBAL,
-        'i' => f |= LRE_FLAG_IGNORECASE,
-        'm' => f |= LRE_FLAG_MULTILINE,
-        's' => f |= LRE_FLAG_DOTALL,
-        'u' => f |= LRE_FLAG_UNICODE,
-        'y' => f |= LRE_FLAG_STICKY,
-        'd' => f |= LRE_FLAG_INDICES,
-        'v' => f |= LRE_FLAG_UNICODE_SETS,
-        else => {},
-    };
-    if ((f & LRE_FLAG_UNICODE_SETS) != 0) f |= LRE_FLAG_UNICODE;
-    return f;
-}
-
 /// Map an `[[OriginalFlags]]` string to Perlex's flag set.
 fn perlexFlags(s: []const u8) perlex.Flags {
     var f: perlex.Flags = .{};
@@ -1626,7 +1603,7 @@ fn perlexFlags(s: []const u8) perlex.Flags {
 /// comes from the same seam, so Perlex folds Unicode patterns at match
 /// time instead of deferring them to libregexp.
 fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
-    if (regex_obj.regex_perlex != null or regex_obj.regex_bytecode != null) return true;
+    if (regex_obj.regex_perlex != null) return true;
     const src_s = regex_obj.regexp_source orelse return false;
     const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.flatBytes() else "";
 
@@ -1656,121 +1633,16 @@ fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
             return error.NativeThrew;
         },
         .unsupported => {
-            if (build_options.perlex_only) {
-                // `-Dperlex-only`: the libregexp fallback is disabled. A
-                // pattern Perlex doesn't own surfaces loudly instead of
-                // silently falling through, so a corpus run flags any
-                // reached defer (the census is 0 today). Print it and throw.
-                std.debug.print("perlex-only fallthrough (runtime): /{s}/{s}\n", .{ src_s.flatBytes(), flag_str });
-                const ex = intrinsics.newSyntaxError(realm, "perlex-only: pattern not owned by Perlex") catch return error.OutOfMemory;
-                realm.pending_exception = ex;
-                return error.NativeThrew;
-            }
-            _ = (try compileLibregexp(realm, regex_obj)) orelse return false;
-            return true;
+            // Perlex is the sole regex engine — the vendored libregexp
+            // fallback has been retired. Perlex owns every pattern the
+            // corpus exercises (the fall-through census is 0); a pattern it
+            // genuinely can't compile (malformed UTF-8, a step-limit-class
+            // pathological shape) has no fallback, so it is rejected here.
+            const ex = intrinsics.newSyntaxError(realm, "Invalid regular expression") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
         },
     }
-}
-
-fn compileLibregexp(realm: *Realm, regex_obj: *JSObject) NativeError!?[]u8 {
-    if (regex_obj.regex_bytecode) |bc| return bc;
-    const src_s = regex_obj.regexp_source orelse return null;
-    const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.flatBytes() else "";
-    const re_flags = parseFlags(flag_str);
-
-    var err_buf: [128]u8 = undefined;
-    @memset(&err_buf, 0);
-    var bc_len: c_int = 0;
-    // §22.2.1 — when the pattern is parsed without `/u` (and
-    // `/v`, which is paired with `/u` by parseFlags above),
-    // ECMA-262 treats the source as a sequence of UTF-16 code
-    // units. libregexp's parser, in that mode, requires the bytes
-    // to be CESU-8 — a non-BMP code point split into the two
-    // surrogate halves, each encoded as a 3-byte UTF-8 sequence.
-    // Cynic stores JSStrings as well-formed UTF-8 (a non-BMP
-    // code point is a single 4-byte sequence), so transcode here
-    // to keep libregexp happy. Under `/u`/`/v` the buffer is
-    // passed through unchanged; libregexp consumes it as UTF-8.
-    const fullUnicode = (re_flags & LRE_FLAG_UNICODE) != 0 or (re_flags & LRE_FLAG_UNICODE_SETS) != 0;
-    const src_bytes = if (fullUnicode) src_s.flatBytes() else try utf8ToCesu8(realm.allocator, src_s.flatBytes());
-    defer if (!fullUnicode and src_bytes.ptr != src_s.flatBytes().ptr) realm.allocator.free(src_bytes);
-    // libregexp's parser checks `*buf_ptr != '\0'` after the
-    // outer disjunction to detect trailing junk, so the input
-    // must be NUL-terminated. Copy into a heap buffer + null.
-    const src_z = realm.allocator.alloc(u8, src_bytes.len + 1) catch return error.OutOfMemory;
-    defer realm.allocator.free(src_z);
-    @memcpy(src_z[0..src_bytes.len], src_bytes);
-    src_z[src_bytes.len] = 0;
-    const bc_ptr = c.lre_compile(
-        &bc_len,
-        &err_buf[0],
-        @intCast(err_buf.len),
-        @ptrCast(src_z.ptr),
-        src_bytes.len,
-        re_flags,
-        @ptrCast(realm),
-    );
-    if (bc_ptr == null or bc_len <= 0) {
-        // §22.2.3.2 step 12 — invalid pattern → SyntaxError.
-        const msg_len = std.mem.indexOfScalar(u8, &err_buf, 0) orelse err_buf.len;
-        const ex = intrinsics.newSyntaxError(realm, err_buf[0..msg_len]) catch return error.OutOfMemory;
-        realm.pending_exception = ex;
-        return error.NativeThrew;
-    }
-    const len_u: usize = @intCast(bc_len);
-    const bc_slice = bc_ptr[0..len_u];
-    regex_obj.regex_bytecode = bc_slice;
-    return bc_slice;
-}
-
-/// Re-encode a UTF-8 string as CESU-8: every supplementary (non-BMP)
-/// code point — a 4-byte UTF-8 sequence — is split into its UTF-16
-/// surrogate pair, each surrogate emitted as a 3-byte UTF-8 sequence.
-/// BMP code points pass through unchanged. The output is *not* well-
-/// formed UTF-8 (the surrogate ranges D800-DFFF are invalid in UTF-8),
-/// but libregexp's non-Unicode parser specifically requires this form
-/// to count pattern positions in UTF-16 code units.
-fn utf8ToCesu8(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.ensureTotalCapacity(allocator, src.len);
-    var i: usize = 0;
-    while (i < src.len) {
-        const b = src[i];
-        if (b < 0x80) {
-            out.appendAssumeCapacity(b);
-            i += 1;
-            continue;
-        }
-        const seq_len: usize = if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
-        if (i + seq_len > src.len) {
-            try out.appendSlice(allocator, src[i..]);
-            break;
-        }
-        if (seq_len != 4) {
-            try out.appendSlice(allocator, src[i .. i + seq_len]);
-            i += seq_len;
-            continue;
-        }
-        // 4-byte sequence — decode to codepoint, split into a
-        // UTF-16 surrogate pair, emit each as 3-byte UTF-8.
-        const cp = (@as(u32, src[i] & 0x07) << 18) |
-            (@as(u32, src[i + 1] & 0x3F) << 12) |
-            (@as(u32, src[i + 2] & 0x3F) << 6) |
-            (@as(u32, src[i + 3] & 0x3F));
-        const adjusted = cp - 0x10000;
-        const hi: u16 = @intCast(0xD800 + (adjusted >> 10));
-        const lo: u16 = @intCast(0xDC00 + (adjusted & 0x3FF));
-        try out.ensureUnusedCapacity(allocator, 6);
-        out.appendAssumeCapacity(@intCast(0xE0 | (hi >> 12)));
-        out.appendAssumeCapacity(@intCast(0x80 | ((hi >> 6) & 0x3F)));
-        out.appendAssumeCapacity(@intCast(0x80 | (hi & 0x3F)));
-        out.appendAssumeCapacity(@intCast(0xE0 | (lo >> 12)));
-        out.appendAssumeCapacity(@intCast(0x80 | ((lo >> 6) & 0x3F)));
-        out.appendAssumeCapacity(@intCast(0x80 | (lo & 0x3F)));
-        i += 4;
-    }
-    return out.toOwnedSlice(allocator);
 }
 
 // ── UTF-8 ↔ UTF-16 transcoding ──────────────────────────────────────────────
@@ -1862,98 +1734,9 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     }
     const input_s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     if (!try ensureCompiled(realm, regex_obj)) return Value.null_;
-    if (regex_obj.regex_perlex) |prog| return execPerlex(realm, regex_obj, prog, input_s);
-    const bc = regex_obj.regex_bytecode.?;
-
-    var input = buildInputBuf(realm.allocator, input_s.flatBytes()) catch return error.OutOfMemory;
-    defer input.deinit();
-
-    const re_flags = c.lre_get_flags(bc.ptr);
-    const cap_count_c = c.lre_get_capture_count(bc.ptr);
-    const cap_count: usize = @intCast(cap_count_c);
-    const is_global = (re_flags & LRE_FLAG_GLOBAL) != 0;
-    const is_sticky = (re_flags & LRE_FLAG_STICKY) != 0;
-
-    // §22.2.7.2 RegExpBuiltinExec step 4 — `lastIndex = ?
-    // ToLength(? Get(R, "lastIndex"))`. Use the accessor-aware
-    // chain walk so a user-installed `lastIndex` getter (or a
-    // shadow data property surfaced through the proto chain)
-    // fires. ToLength coerces strings / valueOf-objects per spec.
-    const last_index_v = try intrinsics.getPropertyChain(realm, regex_obj, "lastIndex");
-    const last_index_i64: i64 = try intrinsics.toLengthValue(realm, last_index_v);
-    var last_index: usize = if (last_index_i64 > 0) @intCast(last_index_i64) else 0;
-    // §22.2.7.2 step 7 — `If global is false and sticky is false,
-    // set lastIndex to 0`.
-    if (!is_global and !is_sticky) last_index = 0;
-    if (last_index > input.units.len) {
-        if (is_global or is_sticky) {
-            try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
-        }
-        return Value.null_;
-    }
-
-    // `capture` is a 2*cap_count array of byte pointers into the
-    // input buffer. Each pair is (start_ptr, end_ptr).
-    const captures = realm.allocator.alloc(?[*]const u8, 2 * cap_count) catch return error.OutOfMemory;
-    defer realm.allocator.free(captures);
-    @memset(captures, null);
-
-    const cbuf: [*]const u8 = @ptrCast(input.units.ptr);
-    const ret = c.lre_exec(
-        @ptrCast(captures.ptr),
-        bc.ptr,
-        cbuf,
-        @intCast(last_index),
-        @intCast(input.units.len),
-        // cbuf_type = 1 → 2-byte units. The engine uses
-        // `clen << cbuf_type` for the end-pointer math, so type
-        // 1 means clen*2 bytes (correct for our u16 buffer).
-        // libregexp internally promotes to 2 (UTF-16 with
-        // surrogate decoding) when the regex has the `u` flag.
-        1,
-        @ptrCast(realm),
-    );
-    if (ret <= 0) {
-        // §22.2.7.2 step 15.c.i (sticky failure) / step 16 — when
-        // global or sticky, write lastIndex = 0 *honoring writable*:
-        // a non-writable `lastIndex` becomes a TypeError. The
-        // fixtures (`builtin-failure-y-set-lastindex-err`,
-        // `builtin-failure-g-set-lastindex-err`) rely on this.
-        if (is_global or is_sticky) {
-            try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
-        }
-        return Value.null_;
-    }
-
-    // Translate the whole-match end pointer to a UTF-16 unit index for
-    // the lastIndex write; per-capture translation is left to the
-    // shared `CaptureView` builder below.
-    const cbuf_addr: usize = @intFromPtr(cbuf);
-    const whole_end: usize = if (captures[1]) |p| (@intFromPtr(p) - cbuf_addr) / 2 else 0;
-
-    // §22.2.7.2 step 18 — `If global is true or sticky is true,
-    // Set(R, "lastIndex", e, true)`. Throw=true → a non-writable
-    // own `lastIndex` raises TypeError (per the `builtin-success-
-    // {y,g}-set-lastindex-err` fixtures).
-    if (is_global or is_sticky) {
-        try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(@intCast(whole_end)));
-    }
-
-    // §22.2.7.2 RegExpBuiltinExec steps 22-36 — build the match-result
-    // Array (whole match + captures, plus the `index`, `input`,
-    // `groups`, and — under `/d` — `indices` own properties) through
-    // the shared `CaptureView` builder. `vendoredNames` flattens
-    // libregexp's NUL-terminated name table into the same
-    // group-indexed shape Perlex exposes, so one builder serves both
-    // backends.
-    const names = try vendoredNames(realm, bc, cap_count);
-    defer realm.allocator.free(names);
-    const view = CaptureView{
-        .count = cap_count,
-        .names = names,
-        .spans = .{ .vendored = .{ .caps = captures, .base = cbuf_addr } },
-    };
-    return buildMatchArray(realm, view, input_s, (re_flags & LRE_FLAG_INDICES) != 0);
+    // Perlex is the sole engine: `ensureCompiled` either set `regex_perlex`
+    // or threw, so the program is always present here.
+    return execPerlex(realm, regex_obj, regex_obj.regex_perlex.?, input_s);
 }
 
 // ── Shared capture view ─────────────────────────────────────────────
@@ -1976,41 +1759,17 @@ const CaptureView = struct {
     /// Group-indexed names; `names[g]` is the source-level name for
     /// capture `g`, or `null` for an anonymous capture / group 0.
     names: []const ?[]const u8,
-    spans: Spans,
-
-    const Spans = union(enum) {
-        /// Perlex slots: `2 * count` code-unit offsets, with
-        /// `perlex.none` marking a non-participating group.
-        native: []const usize,
-        /// libregexp captures: `2 * count` byte pointers into the
-        /// UTF-16 input buffer (`null` = absent), plus the buffer base
-        /// address for the byte→code-unit division.
-        vendored: struct {
-            caps: []const ?[*]const u8,
-            base: usize,
-        },
-    };
+    /// Perlex capture slots: `2 * count` code-unit offsets, with
+    /// `perlex.none` marking a non-participating group.
+    slots: []const usize,
 
     /// The `[start, end]` UTF-16 code-unit span of capture `g`, or
     /// `null` when the group did not participate in the match.
     fn span(self: CaptureView, g: usize) ?[2]usize {
-        switch (self.spans) {
-            .native => |slots| {
-                const cs = slots[2 * g];
-                const ce = slots[2 * g + 1];
-                if (cs == perlex.none or ce == perlex.none) return null;
-                return .{ cs, ce };
-            },
-            .vendored => |v| {
-                const sp = v.caps[2 * g];
-                const ep = v.caps[2 * g + 1];
-                if (sp == null or ep == null) return null;
-                return .{
-                    (@intFromPtr(sp.?) - v.base) / 2,
-                    (@intFromPtr(ep.?) - v.base) / 2,
-                };
-            },
-        }
+        const cs = self.slots[2 * g];
+        const ce = self.slots[2 * g + 1];
+        if (cs == perlex.none or ce == perlex.none) return null;
+        return .{ cs, ce };
     }
 };
 
@@ -2020,48 +1779,6 @@ fn hasNamedGroup(names: []const ?[]const u8) bool {
         if (maybe != null) return true;
     }
     return false;
-}
-
-/// Reshape libregexp's name table — the NUL-terminated names appended
-/// after the bytecode body when `LRE_FLAG_NAMED_GROUPS` is set, one
-/// entry per capture index 1..cap_count-1 (empty for anonymous) —
-/// into the group-indexed `[]?[]const u8` Perlex exposes directly.
-/// The caller owns the returned outer slice (free it); each name
-/// sub-slice borrows `bc` and stays valid while the bytecode buffer
-/// lives. An all-`null` slice is returned when the pattern has no
-/// named groups (or the header is malformed).
-fn vendoredNames(realm: *Realm, bc: []const u8, cap_count: usize) NativeError![]const ?[]const u8 {
-    const names = realm.allocator.alloc(?[]const u8, cap_count) catch return error.OutOfMemory;
-    @memset(names, null);
-    const re_flags = c.lre_get_flags(bc.ptr);
-    if ((re_flags & LRE_FLAG_NAMED_GROUPS) == 0) return names;
-    // Header is 8 bytes; `bytecode_len` at offset 4 is the bytecode
-    // body size (excludes the header). Names start right after.
-    const RE_HEADER_LEN: usize = 8;
-    const RE_HEADER_BYTECODE_LEN: usize = 4;
-    if (bc.len < RE_HEADER_LEN) return names;
-    const bc_body_len: usize = @as(usize, bc[RE_HEADER_BYTECODE_LEN]) |
-        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 1]) << 8) |
-        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 2]) << 16) |
-        (@as(usize, bc[RE_HEADER_BYTECODE_LEN + 3]) << 24);
-    const names_start = RE_HEADER_LEN + bc_body_len;
-    if (names_start > bc.len) return names;
-    const table = bc[names_start..];
-
-    var p: usize = 0;
-    var g: usize = 1;
-    while (g < cap_count) : (g += 1) {
-        // Walk to the next NUL; every group has an entry (empty for
-        // anonymous captures), so advance positionally.
-        const start = p;
-        while (p < table.len and table[p] != 0) : (p += 1) {}
-        if (p > table.len) break;
-        const name = table[start..p];
-        if (p < table.len) p += 1; // step past the NUL
-        if (name.len == 0) continue; // anonymous capture → stays null
-        names[g] = name;
-    }
-    return names;
 }
 
 /// Index of the first capturing group carrying `name`, in source
@@ -2239,16 +1956,13 @@ fn buildIndicesGroupsObjectView(realm: *Realm, view: CaptureView) NativeError!Va
     return heap_mod.taggedObject(groups);
 }
 
-// ── Perlex (native engine) exec paths ───────────────────────────────
+// ── RegExp exec paths ───────────────────────────────────────────────
 //
-// Mirror the libregexp `regexpExec` / `regexpBuiltinExecMatchOnly`
-// shape — same §22.2.7.2 `lastIndex` handling — but drive the native
-// matcher. The match-result Array, its `groups` object and the `/d`
-// `indices` array are assembled by the shared `CaptureView` builders
-// above: these paths just wrap the native `usize` capture slots in a
-// `CaptureView` (`.native` spans, `prog.names` directly) and hand off
-// to `buildMatchArray`, exactly as the libregexp path wraps its
-// byte-pointer captures (`.vendored` spans, `vendoredNames`).
+// §22.2.7.2 `lastIndex` handling around the Perlex matcher. The
+// match-result Array, its `groups` object and the `/d` `indices` array
+// are assembled by the shared `CaptureView` builders above: these paths
+// wrap the matcher's `usize` capture slots + `prog.names` in a
+// `CaptureView` and hand off to `buildMatchArray`.
 
 /// §22.2.7.2 RegExpBuiltinExec, driven by Perlex.
 fn execPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Program, input_s: *JSString) NativeError!Value {
@@ -2285,7 +1999,7 @@ fn execPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Program, 
     const view = CaptureView{
         .count = prog.group_count,
         .names = prog.names,
-        .spans = .{ .native = m.slots },
+        .slots = m.slots,
     };
     return buildMatchArray(realm, view, input_s, prog.flags.has_indices);
 }
@@ -2337,64 +2051,8 @@ fn matchOnlyPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Prog
 /// TypeError), so the result is still `NativeError!bool`.
 fn regexpBuiltinExecMatchOnly(realm: *Realm, regex_obj: *JSObject, input_s: *JSString) NativeError!bool {
     if (!try ensureCompiled(realm, regex_obj)) return false;
-    if (regex_obj.regex_perlex) |prog| return matchOnlyPerlex(realm, regex_obj, prog, input_s);
-    const bc = regex_obj.regex_bytecode.?;
-
-    var input = buildInputBuf(realm.allocator, input_s.flatBytes()) catch return error.OutOfMemory;
-    defer input.deinit();
-
-    const re_flags = c.lre_get_flags(bc.ptr);
-    const cap_count: usize = @intCast(c.lre_get_capture_count(bc.ptr));
-    const is_global = (re_flags & LRE_FLAG_GLOBAL) != 0;
-    const is_sticky = (re_flags & LRE_FLAG_STICKY) != 0;
-
-    // §22.2.7.2 step 4 — `lastIndex = ? ToLength(? Get(R, "lastIndex"))`.
-    const last_index_v = try intrinsics.getPropertyChain(realm, regex_obj, "lastIndex");
-    const last_index_i64: i64 = try intrinsics.toLengthValue(realm, last_index_v);
-    var last_index: usize = if (last_index_i64 > 0) @intCast(last_index_i64) else 0;
-    // §22.2.7.2 step 7 — non-global, non-sticky ⇒ `lastIndex = 0`.
-    if (!is_global and !is_sticky) last_index = 0;
-    if (last_index > input.units.len) {
-        if (is_global or is_sticky) {
-            try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
-        }
-        return false;
-    }
-
-    // `lre_exec` needs the capture-pointer array even though `test`
-    // discards every capture — `capture[0..1]` carry the whole-match
-    // span used to advance `lastIndex` per §22.2.7.2 step 18.
-    const captures = realm.allocator.alloc(?[*]const u8, 2 * cap_count) catch return error.OutOfMemory;
-    defer realm.allocator.free(captures);
-    @memset(captures, null);
-
-    const cbuf: [*]const u8 = @ptrCast(input.units.ptr);
-    const ret = c.lre_exec(
-        @ptrCast(captures.ptr),
-        bc.ptr,
-        cbuf,
-        @intCast(last_index),
-        @intCast(input.units.len),
-        1,
-        @ptrCast(realm),
-    );
-    if (ret <= 0) {
-        // §22.2.7.2 step 15.c.i / step 16 — sticky / global failure
-        // resets `lastIndex` to 0 honoring writability.
-        if (is_global or is_sticky) {
-            try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(0));
-        }
-        return false;
-    }
-
-    // §22.2.7.2 step 18 — on a global / sticky match, advance
-    // `lastIndex` to the end of the whole match (UTF-16 units).
-    if (is_global or is_sticky) {
-        const cbuf_addr: usize = @intFromPtr(cbuf);
-        const whole_end: usize = if (captures[1]) |p| (@intFromPtr(p) - cbuf_addr) / 2 else 0;
-        try setPropertyChainOrThrow(realm, regex_obj, "lastIndex", Value.fromInt32(@intCast(whole_end)));
-    }
-    return true;
+    // Perlex is the sole engine: `ensureCompiled` guarantees the program.
+    return matchOnlyPerlex(realm, regex_obj, regex_obj.regex_perlex.?, input_s);
 }
 
 /// §22.2.6.15 RegExp.prototype.test ( S ).
