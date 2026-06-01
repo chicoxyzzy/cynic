@@ -227,7 +227,8 @@ disabled**, leaving interpreter-tier vs interpreter-tier:
 | Cynic | none needed | pure bytecode interpreter |
 
 The headline peer is **QuickJS-NG** — a non-JIT C interpreter, the
-fairest comparison point (Cynic already vendors its libregexp).
+fairest comparison point (an interpreter-only engine, like Cynic, with
+no JIT tier in the way).
 
 ### Install the engines
 

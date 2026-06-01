@@ -50,10 +50,11 @@ crash mid-bucket doesn't lose prior results:
         echo "$r" | grep -aE "Segmentation|panic|un-barriered|\[" | head -8
       done'
 
-Skip `built-ins/RegExp/property-escapes` — it is pure libregexp +
-plain string concat (no JS re-entry, so no UAF surface), just
-slow. Always wrap in `tools/guarded-run.sh` (caps wall-time + RSS,
-kills the whole tree); never a bare `timeout`.
+Skip `built-ins/RegExp/property-escapes` — it is pure Perlex +
+native property-table set construction + plain string concat (no
+JS re-entry, so no UAF surface), just slow. Always wrap in
+`tools/guarded-run.sh` (caps wall-time + RSS, kills the whole
+tree); never a bare `timeout`.
 
 ## 3. Diff against the default sweep
 
