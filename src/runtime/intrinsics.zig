@@ -1067,10 +1067,10 @@ pub fn installNativeGetter(realm: *Realm, proto: *JSObject, name: []const u8, ge
         std.fmt.allocPrint(realm.classAllocator(), "get [Symbol.{s}]", .{name[2..]}) catch return error.OutOfMemory
     else
         std.fmt.allocPrint(realm.classAllocator(), "get {s}", .{name}) catch return error.OutOfMemory;
-    const getter = try realm.heap.allocateFunctionNative(getter_fn, 0, getter_name);
-    getter.proto = realm.intrinsics.function_prototype;
-    // §10.2.5 — accessor closures carry their installing realm.
-    getter.realm = realm;
+    // §17 — an accessor getter is not a constructor; `makeNativeFunction`
+    // clears `[[Construct]]` and sets `[[Prototype]]` = %Function.prototype%
+    // (§20.2.3) and `[[Realm]]` (§10.2.5).
+    const getter = try makeNativeFunction(realm, getter_fn, 0, getter_name);
     const entry = try proto.getOrPutAccessor(realm.allocator, name);
     entry.value_ptr.* = .{ .getter = getter };
     // §17 — built-in accessor properties are { enumerable: false,

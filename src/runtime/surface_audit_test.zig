@@ -32,6 +32,7 @@ const testing = std.testing;
 
 const Realm = @import("realm.zig").Realm;
 const JSObject = @import("object.zig").JSObject;
+const Accessor = @import("object.zig").Accessor;
 
 /// Collect every own property name on `obj` (data + accessor),
 /// returning a duplicated, sorted slice. Caller frees with
@@ -433,4 +434,87 @@ test "method-registration shape: Set.prototype values/keys/@@iterator are the sa
     const iter = set_proto.lookupOwn("@@iterator").?;
     try testing.expect(heap_mod.valueAsFunction(values).? == heap_mod.valueAsFunction(keys).?);
     try testing.expect(heap_mod.valueAsFunction(values).? == heap_mod.valueAsFunction(iter).?);
+}
+
+/// Assert a built-in accessor function carries the §17 / §10.2.5
+/// shape: it is NOT a constructor (`[[Construct]]` absent —
+/// accessor functions never construct), its `[[Prototype]]` is
+/// `%Function.prototype%`, its `[[Realm]]` is the installing
+/// realm, and its `.name` is the `"get "` / `"set "`-prefixed
+/// form per §10.2.9 SetFunctionName.
+fn expectCanonicalAccessorFn(
+    realm: *Realm,
+    fn_obj_opt: ?*@import("function.zig").JSFunction,
+    expected_name: []const u8,
+) !void {
+    const fn_obj = fn_obj_opt orelse {
+        std.debug.print("[accessor-shape] missing accessor fn \"{s}\"\n", .{expected_name});
+        return error.MissingAccessorFn;
+    };
+    try testing.expect(!fn_obj.has_construct);
+    try testing.expect(fn_obj.proto == realm.intrinsics.function_prototype);
+    try testing.expect(fn_obj.realm == realm);
+    try testing.expect(fn_obj.name != null);
+    try testing.expectEqualStrings(expected_name, fn_obj.name.?);
+}
+
+test "accessor-registration shape: @@species getters aren't constructors and carry [[Realm]]" {
+    var realm = Realm.init(testing.allocator);
+    realm.hardened = false;
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    // §22.1.2.5 / §24.1.2.2 / §27.2.4.10 etc. — `get C[@@species]`
+    // is an accessor; its getter is a non-constructor built-in.
+    const cases = [_][]const u8{ "Array", "Map", "Set", "Promise", "RegExp" };
+    for (cases) |name| {
+        const ctor_v = realm.globals.get(name) orelse {
+            std.debug.print("[accessor-shape] no global {s}\n", .{name});
+            return error.NoCtor;
+        };
+        const ctor = heap_mod.valueAsFunction(ctor_v) orelse return error.CtorNotFn;
+        const acc: Accessor = ctor.accessors.get("@@species") orelse {
+            std.debug.print("[accessor-shape] {s} missing @@species accessor\n", .{name});
+            return error.NoSpeciesAccessor;
+        };
+        try expectCanonicalAccessorFn(&realm, acc.getter, "get [Symbol.species]");
+    }
+}
+
+test "accessor-registration shape: Iterator.prototype accessor pairs aren't constructors" {
+    var realm = Realm.init(testing.allocator);
+    realm.hardened = false;
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const iter_v = realm.globals.get("Iterator") orelse return error.NoIterator;
+    const iter_ctor = heap_mod.valueAsFunction(iter_v) orelse return error.IteratorNotFn;
+    const proto = iter_ctor.prototype orelse return error.NoIteratorProto;
+    const proto_ext = proto.extension orelse return error.NoIteratorProtoExt;
+
+    // §27.1.4.5 / §27.1.4.6 — `constructor` and `@@toStringTag` are
+    // accessor pairs; neither the getter nor the setter constructs.
+    const ctor_acc: Accessor = proto_ext.accessors.get("constructor") orelse return error.NoCtorAccessor;
+    try expectCanonicalAccessorFn(&realm, ctor_acc.getter, "get constructor");
+    try expectCanonicalAccessorFn(&realm, ctor_acc.setter, "set constructor");
+
+    const tag_acc: Accessor = proto_ext.accessors.get("@@toStringTag") orelse return error.NoTagAccessor;
+    try expectCanonicalAccessorFn(&realm, tag_acc.getter, "get [Symbol.toStringTag]");
+    try expectCanonicalAccessorFn(&realm, tag_acc.setter, "set [Symbol.toStringTag]");
+}
+
+test "accessor-registration shape: simple installNativeGetter getters aren't constructors" {
+    var realm = Realm.init(testing.allocator);
+    realm.hardened = false;
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    // §25.1.6 get ArrayBuffer.prototype.byteLength — a plain
+    // `installNativeGetter` accessor; the getter is a non-constructor.
+    const ab_v = realm.globals.get("ArrayBuffer") orelse return error.NoArrayBuffer;
+    const ab_ctor = heap_mod.valueAsFunction(ab_v) orelse return error.ABNotFn;
+    const ab_proto = ab_ctor.prototype orelse return error.NoABProto;
+    const ab_ext = ab_proto.extension orelse return error.NoABProtoExt;
+    const acc: Accessor = ab_ext.accessors.get("byteLength") orelse return error.NoByteLengthAccessor;
+    try expectCanonicalAccessorFn(&realm, acc.getter, "get byteLength");
 }

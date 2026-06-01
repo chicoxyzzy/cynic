@@ -145,9 +145,7 @@ pub fn install(realm: *Realm) !void {
         // §10.2.9 SetFunctionName step 7 — a getter's name is
         // prefixed with `"get "`. `Object.getOwnPropertyDescriptor
         // (Array, Symbol.species).get.name === "get [Symbol.species]"`.
-        const species_getter = try realm.heap.allocateFunctionNative(arraySpeciesGetter, 0, "get [Symbol.species]");
-        species_getter.proto = realm.intrinsics.function_prototype;
-        species_getter.realm = realm;
+        const species_getter = try intrinsics.makeNativeFunction(realm, arraySpeciesGetter, 0, "get [Symbol.species]");
         const entry = try arr_ctor.accessors.getOrPut(realm.allocator, "@@species");
         entry.value_ptr.* = .{ .getter = species_getter };
         try arr_ctor.property_flags.put(realm.allocator, "@@species", .{

@@ -97,10 +97,7 @@ pub fn install(realm: *Realm) !void {
     // §27.2.4.6 — the getter's `name` property is
     // `"get [Symbol.species]"`; the `get ` prefix is required by
     // §10.2.10 SetFunctionName for accessor functions.
-    const species_getter = try realm.heap.allocateFunctionNative(promiseSpeciesGetter, 0, "get [Symbol.species]");
-    species_getter.proto = realm.intrinsics.function_prototype;
-    species_getter.has_construct = false;
-    species_getter.realm = realm;
+    const species_getter = try intrinsics.makeNativeFunction(realm, promiseSpeciesGetter, 0, "get [Symbol.species]");
     const sp_entry = try fn_obj.accessors.getOrPut(realm.allocator, "@@species");
     sp_entry.value_ptr.* = .{ .getter = species_getter };
     try fn_obj.property_flags.put(realm.allocator, "@@species", .{

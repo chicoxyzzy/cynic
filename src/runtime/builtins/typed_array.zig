@@ -98,9 +98,7 @@ pub fn install(realm: *Realm) !void {
         // overridden). `Symbol.species` is the hook every
         // ArrayBuffer.prototype.slice fixture pokes at.
         {
-            const species_getter = try realm.heap.allocateFunctionNative(arrayBufferSpeciesGetter, 0, "get [Symbol.species]");
-            species_getter.proto = realm.intrinsics.function_prototype;
-            species_getter.realm = realm;
+            const species_getter = try intrinsics.makeNativeFunction(realm, arrayBufferSpeciesGetter, 0, "get [Symbol.species]");
             const entry = try ctor.accessors.getOrPut(realm.allocator, "@@species");
             entry.value_ptr.* = .{ .getter = species_getter };
             try ctor.property_flags.put(realm.allocator, "@@species", .{
@@ -272,9 +270,7 @@ pub fn install(realm: *Realm) !void {
     // inherited getter and resolve to the subclass.
     {
         // §10.2.9 step 7 — getter names carry the `"get "` prefix.
-        const species_getter = try realm.heap.allocateFunctionNative(typedArraySpeciesGetter, 0, "get [Symbol.species]");
-        species_getter.proto = realm.intrinsics.function_prototype;
-        species_getter.realm = realm;
+        const species_getter = try intrinsics.makeNativeFunction(realm, typedArraySpeciesGetter, 0, "get [Symbol.species]");
         const entry = try ta_ctor.accessors.getOrPut(realm.allocator, "@@species");
         entry.value_ptr.* = .{ .getter = species_getter };
         try ta_ctor.property_flags.put(realm.allocator, "@@species", .{
