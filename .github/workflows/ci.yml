@@ -14,10 +14,22 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# `mlugg/setup-zig@v2` resolves the Zig version from
+# `build.zig.zon`'s `minimum_zig_version` when `version:` is
+# omitted — so `build.zig.zon` is the single source of truth.
+# It also caches `.zig-cache/` by default; for matrix jobs we set
+# `cache-key:` per matrix entry so each entry gets its own cache
+# (the action can't auto-distinguish jobs in a matrix).
+
 jobs:
   build-and-test:
-    name: Build & unit tests
-    runs-on: ubuntu-latest
+    name: Build & unit tests (${{ matrix.os }})
+    strategy:
+      # Surface every OS's failure, don't short-circuit on first.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         # No submodules: `zig build` / `zig build test` never read
@@ -29,7 +41,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0-dev.305+bdfbf432d
+          cache-key: ${{ matrix.os }}
 
       - name: Show Zig version
         run: zig version
@@ -53,17 +65,48 @@ jobs:
         run: zig build test-ses
 
   fmt-check:
-    name: zig fmt (advisory)
+    name: zig fmt
     runs-on: ubuntu-latest
     # No `needs:` — `zig build fmt-check` compiles nothing, it just
     # runs the formatter. Letting it start immediately surfaces a
     # formatting drift without waiting on a full engine build.
+    # Gating: any drift fails the build. Local fix: `zig build fmt`
+    # rewrites in place. The generators under `tools/gen_unicode_*`
+    # emit fmt-clean output, so a regen via `zig build gen-unicode`
+    # never reintroduces drift.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+
+      - name: zig build fmt-check
+        run: zig build fmt-check
+
+  cross-build:
+    name: Cross-build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    # Build-only sanity check for targets we don't natively execute.
+    # Catches compile breaks on platforms Cynic genuinely deploys
+    # to but the runner pool doesn't cover:
     #
-    # Advisory: a fail means `zig fmt` would rewrite something
-    # under `src/` or `tools/`. Drift slips in from agent edits
-    # and patch-by-bash workarounds; surfacing it in PR review is
-    # enough today. Local fix: `zig build fmt` rewrites in place.
-    # Lift to gating when the source tree is reliably hand-edited.
+    #   aarch64-linux-gnu  — Workers / Deno on ARM64 Linux, a
+    #                        real production target. Cross-compiles
+    #                        cleanly because Zig bundles glibc
+    #                        headers for the standard Linux targets.
+    #
+    # Not added: aarch64-linux-android (needs the Android NDK for
+    # Bionic libc headers — Zig doesn't bundle them) and
+    # aarch64-ios (needs the iOS SDK + `build.zig` plumbing to
+    # thread SDKROOT into the qjs_regex C library compilation).
+    # Both are real porting efforts, tracked separately.
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-linux-gnu
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -71,11 +114,16 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0-dev.305+bdfbf432d
+          cache-key: cross-${{ matrix.target }}
 
-      - name: zig build fmt-check
-        continue-on-error: true
-        run: zig build fmt-check
+      - name: Cross-compile
+        run: zig build -Dtarget=${{ matrix.target }}
+
+      - name: Confirm target architecture
+        # `file zig-out/bin/cynic` should report the cross target —
+        # surfaces a silent fallthrough to the host triple if the
+        # cross-compile didn't actually take.
+        run: file zig-out/bin/cynic
 
   test262:
     name: test262 conformance + RSS smoke (gating)
@@ -95,6 +143,10 @@ jobs:
     # ≥95% across areas. ReleaseFast + 4 workers (matching the
     # GitHub-hosted runner's vCPUs) targets ~1 min wall-time.
     #
+    # Linux-only. macOS would double CI time for marginal signal
+    # — the engine is POSIX-clean across both, and the user runs
+    # test262 locally on darwin constantly.
+    #
     # We deliberately do NOT auto-commit a refreshed scoreboard —
     # that loop is finicky to get right with concurrency policy
     # (the auto-commit triggers a new run that cancels itself,
@@ -111,8 +163,6 @@ jobs:
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.0-dev.305+bdfbf432d
 
       - name: Run test262 (runtime, parallel)
         # Drop `--quiet` so the per-bucket tally lands in the CI
@@ -183,9 +233,10 @@ jobs:
             --filter=language/expressions --top-rss=10
 
   test262-gc-stress:
-    name: test262 GC stress (advisory)
+    name: test262 GC stress / ${{ matrix.bucket }} (advisory)
     runs-on: ubuntu-latest
     needs: build-and-test
+    continue-on-error: true
     # Catches GC rooting / write-barrier regressions that the
     # default `test262` job above CANNOT see: that job builds
     # ReleaseFast, where `Heap.verifyRememberedSet` and the
@@ -207,8 +258,23 @@ jobs:
     # contract and the iterative-marker contract are most often
     # exercised. See docs/handbook/gc.md ("Finding these bugs").
     #
-    # Advisory (`continue-on-error`): a verifier assert or a 0xaa
-    # use-after-free crash should surface in PR review, not gate.
+    # `Iterator` and `generators` were added after the shadow-shape
+    # removal class (9c4b70c) and the recursive-marker overflow
+    # (9ac49ff, f97155a) — both surfaced in those buckets and
+    # would slip past Array / String / TypedArray.
+    #
+    # Matrix-parallelized: each bucket runs as its own job, so a
+    # single regression points at the bucket directly and wall-time
+    # is the slowest bucket, not the sum.
+    strategy:
+      fail-fast: false
+      matrix:
+        bucket:
+          - built-ins/Array
+          - built-ins/String
+          - built-ins/TypedArray
+          - built-ins/Iterator
+          - language/expressions/generators
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -218,25 +284,12 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0-dev.305+bdfbf432d
+          # Every gc-stress job builds the same ReleaseSafe harness,
+          # so share one cache namespace across the matrix.
+          cache-key: gc-stress
 
       - name: GC stress sweep (ReleaseSafe, --gc-threshold=1)
-        # The first invocation builds the ReleaseSafe harness; the
-        # rest reuse it from `.zig-cache` (same `-Doptimize`).
-        # `Iterator` and `generators` were added after the shadow-
-        # shape removal class (9c4b70c) and the recursive-marker
-        # overflow (9ac49ff, f97155a) — both surfaced in those
-        # buckets and would slip past Array / String / TypedArray.
         timeout-minutes: 20
-        continue-on-error: true
         run: |
           zig build test262 -Doptimize=ReleaseSafe -- \
-            --gc-threshold=1 --threads=4 --filter=built-ins/Array
-          zig build test262 -Doptimize=ReleaseSafe -- \
-            --gc-threshold=1 --threads=4 --filter=built-ins/String
-          zig build test262 -Doptimize=ReleaseSafe -- \
-            --gc-threshold=1 --threads=4 --filter=built-ins/TypedArray
-          zig build test262 -Doptimize=ReleaseSafe -- \
-            --gc-threshold=1 --threads=4 --filter=built-ins/Iterator
-          zig build test262 -Doptimize=ReleaseSafe -- \
-            --gc-threshold=1 --threads=4 --filter=language/expressions/generators
+            --gc-threshold=1 --threads=4 --filter=${{ matrix.bucket }}

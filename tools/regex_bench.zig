@@ -468,7 +468,7 @@ pub fn main(init: std.process.Init) !void {
         });
         if (ag.px_owns and !ag.agree) {
             try out.print("    ↳ divergence: perlex matched={} [{d},{d})  libregexp matched={} [{d},{d})\n", .{
-                ag.px_matched, ag.px_start, ag.px_end,
+                ag.px_matched,  ag.px_start,  ag.px_end,
                 ag.lre_matched, ag.lre_start, ag.lre_end,
             });
         }

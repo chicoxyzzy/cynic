@@ -218,8 +218,8 @@ pub const TemporalRecord = union(TemporalKind) {
 /// first non-zero field (date fields take precedence, then time).
 pub fn durationSign(d: DurationRecord) i32 {
     const fields = [_]f64{
-        d.years,    d.months,       d.weeks,        d.days,
-        d.hours,    d.minutes,      d.seconds,      d.milliseconds,
+        d.years,        d.months,      d.weeks,   d.days,
+        d.hours,        d.minutes,     d.seconds, d.milliseconds,
         d.microseconds, d.nanoseconds,
     };
     for (fields) |v| {
@@ -262,8 +262,8 @@ pub fn negateDuration(d: DurationRecord) DurationRecord {
 /// predicate additionally guards against them for safety.
 pub fn isValidDuration(d: DurationRecord) bool {
     const fields = [_]f64{
-        d.years,    d.months,       d.weeks,        d.days,
-        d.hours,    d.minutes,      d.seconds,      d.milliseconds,
+        d.years,        d.months,      d.weeks,   d.days,
+        d.hours,        d.minutes,     d.seconds, d.milliseconds,
         d.microseconds, d.nanoseconds,
     };
     // Single-sign check (§ RejectDuration step 2).
@@ -4459,24 +4459,24 @@ test "parseInstantString: valid forms fold the offset" {
 
 test "parseInstantString: invalid forms reject" {
     const bad = [_][]const u8{
-        "",                          "invalid iso8601",
-        "2020-01-00T00:00Z",         "2020-01-32T00:00Z",
-        "2020-02-30T00:00Z",         "2021-02-29T00:00Z",
-        "2020-00-01T00:00Z",         "2020-13-01T00:00Z",
-        "2020-01-01TZ",              "2020-01-01T25:00:00Z",
-        "2020-01-01T01:60:00Z",      "2020-01-01T00:00Zjunk",
+        "",                              "invalid iso8601",
+        "2020-01-00T00:00Z",             "2020-01-32T00:00Z",
+        "2020-02-30T00:00Z",             "2021-02-29T00:00Z",
+        "2020-00-01T00:00Z",             "2020-13-01T00:00Z",
+        "2020-01-01TZ",                  "2020-01-01T25:00:00Z",
+        "2020-01-01T01:60:00Z",          "2020-01-01T00:00Zjunk",
         "2020-01-01T00:00:00+00:00junk", "2020-01-01T00:00:00+00:00[UTC]junk",
-        "02020-01-01T00:00Z",        "2020-001-01T00:00Z",
-        "2020-01-001T00:00Z",        "2020-01-01T001Z",
-        "2020-01-01T00:00-24:00",    "2020-01-01T00:00+24:00",
-        "2020-W01-1T00:00Z",         "2020-001T00:00Z",
-        "+0002020-01-01T00:00Z",     "2020-01",
-        "01-01",                     "P1Y",
-        "2020-01-01",                "2020-01-01T00",
-        "2020-01-01T00:00",          "2020-01-01T00:00:00",
+        "02020-01-01T00:00Z",            "2020-001-01T00:00Z",
+        "2020-01-001T00:00Z",            "2020-01-01T001Z",
+        "2020-01-01T00:00-24:00",        "2020-01-01T00:00+24:00",
+        "2020-W01-1T00:00Z",             "2020-001T00:00Z",
+        "+0002020-01-01T00:00Z",         "2020-01",
+        "01-01",                         "P1Y",
+        "2020-01-01",                    "2020-01-01T00",
+        "2020-01-01T00:00",              "2020-01-01T00:00:00",
         "2020-01-01T00:00:00.000000000", "-999999-01-01T00:00Z",
-        "+999999-01-01T00:00Z",      "2025-01-01T00:00:00+00:0000",
-        "2022-09-15Z",               "2022-09-15+00:00",
+        "+999999-01-01T00:00Z",          "2025-01-01T00:00:00+00:0000",
+        "2022-09-15Z",                   "2022-09-15+00:00",
     };
     for (bad) |s| {
         try testing.expectError(error.Invalid, parseInstantString(s));

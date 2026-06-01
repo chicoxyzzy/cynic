@@ -664,6 +664,10 @@ fn emitRanges(
     name: []const u8,
     ranges: []const Range,
 ) !void {
+    if (ranges.len == 0) {
+        try buf.print(allocator, "pub const {s}{s} = [_]Range{{}};\n", .{ prefix, name });
+        return;
+    }
     try buf.print(allocator, "pub const {s}{s} = [_]Range{{\n", .{ prefix, name });
     for (ranges) |r| {
         try buf.print(allocator, "    .{{ .start = 0x{X:0>4}, .end = 0x{X:0>4} }},\n", .{ r.start, r.end });
@@ -680,10 +684,14 @@ fn emitStrProp(
     name: []const u8,
     set: *const StrSet,
 ) !void {
-    try buf.print(allocator, "pub const strprop_{s}_ranges = [_]Range{{\n", .{name});
-    for (set.ranges.items) |r|
-        try buf.print(allocator, "    .{{ .start = 0x{X:0>4}, .end = 0x{X:0>4} }},\n", .{ r.start, r.end });
-    try buf.appendSlice(allocator, "};\n");
+    if (set.ranges.items.len == 0) {
+        try buf.print(allocator, "pub const strprop_{s}_ranges = [_]Range{{}};\n", .{name});
+    } else {
+        try buf.print(allocator, "pub const strprop_{s}_ranges = [_]Range{{\n", .{name});
+        for (set.ranges.items) |r|
+            try buf.print(allocator, "    .{{ .start = 0x{X:0>4}, .end = 0x{X:0>4} }},\n", .{ r.start, r.end });
+        try buf.appendSlice(allocator, "};\n");
+    }
     try buf.print(allocator, "pub const strprop_{s}_seqs = [_][]const u21{{\n", .{name});
     for (set.seqs.items) |seq| {
         try buf.appendSlice(allocator, "    &[_]u21{ ");

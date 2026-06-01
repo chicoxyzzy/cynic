@@ -20804,11 +20804,9 @@ pub const scx_Hmnp = [_]Range{
     .{ .start = 0x1E14E, .end = 0x1E14F },
 };
 
-pub const script_Hrkt = [_]Range{
-};
+pub const script_Hrkt = [_]Range{};
 
-pub const scx_Hrkt = [_]Range{
-};
+pub const scx_Hrkt = [_]Range{};
 
 pub const script_Hung = [_]Range{
     .{ .start = 0x10C80, .end = 0x10CB2 },
@@ -24678,8 +24676,7 @@ pub const strprop_Basic_Emoji_seqs = [_][]const u21{
     &[_]u21{ 0x1F6F3, 0xFE0F },
 };
 
-pub const strprop_Emoji_Keycap_Sequence_ranges = [_]Range{
-};
+pub const strprop_Emoji_Keycap_Sequence_ranges = [_]Range{};
 pub const strprop_Emoji_Keycap_Sequence_seqs = [_][]const u21{
     &[_]u21{ 0x23, 0xFE0F, 0x20E3 },
     &[_]u21{ 0x2A, 0xFE0F, 0x20E3 },
@@ -24695,8 +24692,7 @@ pub const strprop_Emoji_Keycap_Sequence_seqs = [_][]const u21{
     &[_]u21{ 0x39, 0xFE0F, 0x20E3 },
 };
 
-pub const strprop_RGI_Emoji_Modifier_Sequence_ranges = [_]Range{
-};
+pub const strprop_RGI_Emoji_Modifier_Sequence_ranges = [_]Range{};
 pub const strprop_RGI_Emoji_Modifier_Sequence_seqs = [_][]const u21{
     &[_]u21{ 0x261D, 0x1F3FB },
     &[_]u21{ 0x261D, 0x1F3FC },
@@ -25365,8 +25361,7 @@ pub const strprop_RGI_Emoji_Modifier_Sequence_seqs = [_][]const u21{
     &[_]u21{ 0x1FAF8, 0x1F3FF },
 };
 
-pub const strprop_RGI_Emoji_Flag_Sequence_ranges = [_]Range{
-};
+pub const strprop_RGI_Emoji_Flag_Sequence_ranges = [_]Range{};
 pub const strprop_RGI_Emoji_Flag_Sequence_seqs = [_][]const u21{
     &[_]u21{ 0x1F1E6, 0x1F1E8 },
     &[_]u21{ 0x1F1E6, 0x1F1E9 },
@@ -25629,16 +25624,14 @@ pub const strprop_RGI_Emoji_Flag_Sequence_seqs = [_][]const u21{
     &[_]u21{ 0x1F1FF, 0x1F1FC },
 };
 
-pub const strprop_RGI_Emoji_Tag_Sequence_ranges = [_]Range{
-};
+pub const strprop_RGI_Emoji_Tag_Sequence_ranges = [_]Range{};
 pub const strprop_RGI_Emoji_Tag_Sequence_seqs = [_][]const u21{
     &[_]u21{ 0x1F3F4, 0xE0067, 0xE0062, 0xE0065, 0xE006E, 0xE0067, 0xE007F },
     &[_]u21{ 0x1F3F4, 0xE0067, 0xE0062, 0xE0073, 0xE0063, 0xE0074, 0xE007F },
     &[_]u21{ 0x1F3F4, 0xE0067, 0xE0062, 0xE0077, 0xE006C, 0xE0073, 0xE007F },
 };
 
-pub const strprop_RGI_Emoji_ZWJ_Sequence_ranges = [_]Range{
-};
+pub const strprop_RGI_Emoji_ZWJ_Sequence_ranges = [_]Range{};
 pub const strprop_RGI_Emoji_ZWJ_Sequence_seqs = [_][]const u21{
     &[_]u21{ 0x1F468, 0x200D, 0x2764, 0xFE0F, 0x200D, 0x1F468 },
     &[_]u21{ 0x1F468, 0x200D, 0x2764, 0xFE0F, 0x200D, 0x1F48B, 0x200D, 0x1F468 },

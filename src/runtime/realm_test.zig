@@ -74,17 +74,14 @@ test "phase-0: mutating ra's Array.prototype does not affect rb (unhardened)" {
     defer rb.deinit();
 
     // Mutate in ra.
-    _ = try lantern.evaluateScript(testing.allocator, &ra,
-        "Array.prototype.fooFromA = 42;");
+    _ = try lantern.evaluateScript(testing.allocator, &ra, "Array.prototype.fooFromA = 42;");
 
     // Confirm ra sees it.
-    const probe_a = try lantern.evaluateScript(testing.allocator, &ra,
-        "Array.prototype.fooFromA === 42");
+    const probe_a = try lantern.evaluateScript(testing.allocator, &ra, "Array.prototype.fooFromA === 42");
     try testing.expect(probe_a.value.bits == @import("value.zig").Value.true_.bits);
 
     // rb must be untouched.
-    const probe_b = try lantern.evaluateScript(testing.allocator, &rb,
-        "Array.prototype.fooFromA === undefined");
+    const probe_b = try lantern.evaluateScript(testing.allocator, &rb, "Array.prototype.fooFromA === undefined");
     try testing.expect(probe_b.value.bits == @import("value.zig").Value.true_.bits);
 }
 
@@ -111,21 +108,18 @@ test "phase-0: each realm has its own microtask queue (isolation via side effect
     // (§27.2.1.5 + §27.2.5.4). `queueMicrotask` isn't installed
     // as a JS global on Cynic's production-shaped realm surface
     // — the Promise route is the spec-canonical way to enqueue.
-    _ = try lantern.evaluateScript(testing.allocator, &ra,
-        "Promise.resolve().then(() => { globalThis.__seenFromRa = true; });");
+    _ = try lantern.evaluateScript(testing.allocator, &ra, "Promise.resolve().then(() => { globalThis.__seenFromRa = true; });");
     try lantern.drainMicrotasks(testing.allocator, &ra);
 
     // ra's globalThis got the side effect: the microtask ran against
     // ra's realm and wrote to ra's global object.
-    const probe_a = try lantern.evaluateScript(testing.allocator, &ra,
-        "globalThis.__seenFromRa === true");
+    const probe_a = try lantern.evaluateScript(testing.allocator, &ra, "globalThis.__seenFromRa === true");
     try testing.expect(probe_a.value.bits == @import("value.zig").Value.true_.bits);
 
     // rb's globalThis must NOT have it — queue isolation means the
     // microtask only fired against ra's realm. If the queues were
     // shared, rb would see `__seenFromRa` too.
-    const probe_b = try lantern.evaluateScript(testing.allocator, &rb,
-        "typeof globalThis.__seenFromRa === 'undefined'");
+    const probe_b = try lantern.evaluateScript(testing.allocator, &rb, "typeof globalThis.__seenFromRa === 'undefined'");
     try testing.expect(probe_b.value.bits == @import("value.zig").Value.true_.bits);
 }
 
@@ -177,8 +171,7 @@ test "phase-0: each realm has its own output buffer (print)" {
     try testing.expectEqual(@as(usize, 0), ra.output.items.len);
     try testing.expectEqual(@as(usize, 0), rb.output.items.len);
 
-    _ = try lantern.evaluateScript(testing.allocator, &ra,
-        "print('hello from ra');");
+    _ = try lantern.evaluateScript(testing.allocator, &ra, "print('hello from ra');");
 
     try testing.expect(std.mem.indexOf(u8, ra.output.items, "hello from ra") != null);
     try testing.expectEqual(@as(usize, 0), rb.output.items.len);
@@ -217,8 +210,7 @@ test "phase 3: function created in parent realm has parent as [[Realm]] (skip pe
 
     // Create a function in parent. After 3.2, its `realm` slot
     // is set at allocateFunction time.
-    const f_v = (try lantern.evaluateScript(testing.allocator, &parent,
-        "(function f() { return 1; })")).value;
+    const f_v = (try lantern.evaluateScript(testing.allocator, &parent, "(function f() { return 1; })")).value;
     const f = heap_mod.valueAsFunction(f_v) orelse return error.TestFailed;
     try testing.expect(f.realm == &parent);
 
@@ -247,14 +239,12 @@ test "phase 3: TypeError thrown by parent's code is parent's Error.prototype cha
     defer child.deinit();
     try child.installBuiltins();
 
-    const thrower_v = (try lantern.evaluateScript(testing.allocator, &parent,
-        "(function () { throw new TypeError('from parent'); })")).value;
+    const thrower_v = (try lantern.evaluateScript(testing.allocator, &parent, "(function () { throw new TypeError('from parent'); })")).value;
     try child.globals.put(testing.allocator, "boom", thrower_v);
 
     // Catch in child, probe the error's identity. e.constructor
     // should be parent's TypeError, NOT child's.
-    const probe = (try lantern.evaluateScript(testing.allocator, &child,
-        "let r; try { boom(); } catch (e) { r = e.constructor === TypeError; } r")).value;
+    const probe = (try lantern.evaluateScript(testing.allocator, &child, "let r; try { boom(); } catch (e) { r = e.constructor === TypeError; } r")).value;
     // child's `TypeError` (the global) is a different JSFunction
     // than parent's TypeError; the comparison resolves to false.
     try testing.expect(probe.bits == Value.false_.bits);
@@ -278,8 +268,7 @@ test "phase 3: §23.1.3.34 Array.prototype.map uses source realm's %Array% as sp
     // §23.1.3.34 ArraySpeciesCreate reads the source array's realm's
     // %Array%, NOT the calling realm's. So `m.constructor` is
     // parent's Array, distinct from child's `Array` global.
-    const probe = (try lantern.evaluateScript(testing.allocator, &child,
-        "const m = arrFromParent.map(x => x * 2); m.constructor === Array")).value;
+    const probe = (try lantern.evaluateScript(testing.allocator, &child, "const m = arrFromParent.map(x => x * 2); m.constructor === Array")).value;
     try testing.expect(probe.bits == Value.false_.bits);
 }
 

@@ -113,7 +113,7 @@ test "charset: normalize sorts and merges adjacent/overlapping" {
     const in = [_]ClassRange{ .{ .lo = 5, .hi = 7 }, .{ .lo = 0, .hi = 2 }, .{ .lo = 3, .hi = 4 }, .{ .lo = 6, .hi = 9 } };
     const got = try normalize(testing.allocator, &in);
     defer testing.allocator.free(got);
-    try expectRanges(got, &.{ .{ .lo = 0, .hi = 9 } });
+    try expectRanges(got, &.{.{ .lo = 0, .hi = 9 }});
 }
 
 test "charset: complement of [0-9]" {
@@ -128,7 +128,7 @@ test "charset: intersect" {
     const y = [_]ClassRange{.{ .lo = '4', .hi = '8' }};
     const got = try intersect(testing.allocator, &x, &y);
     defer testing.allocator.free(got);
-    try expectRanges(got, &.{ .{ .lo = '4', .hi = '8' } });
+    try expectRanges(got, &.{.{ .lo = '4', .hi = '8' }});
 }
 
 test "charset: subtract carves a hole" {

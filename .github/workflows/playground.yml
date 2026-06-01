@@ -45,10 +45,9 @@ jobs:
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
-        with:
-          # Keep in lockstep with `.github/workflows/ci.yml` and
-          # `build.zig.zon` (`.minimum_zig_version`) on every bump.
-          version: 0.17.0-dev.305+bdfbf432d
+        # Version resolved from `build.zig.zon`'s
+        # `minimum_zig_version` — single source of truth across
+        # this workflow and `.github/workflows/ci.yml`.
 
       - name: Set up Binaryen (wasm-opt)
         # `zig build wasm` post-processes the module with `wasm-opt -Oz`
