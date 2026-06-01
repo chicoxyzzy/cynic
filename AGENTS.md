@@ -284,13 +284,14 @@ sweeps.
 
 `zig build test262` accepts forwarded flags after `--`:
 `--filter=<substring>`, `--list-failures=<n>`, `--quiet`, `--verbose`,
-`--phase=<spec>` (`main` runs the headline ECMA-262 sweep with
-pre-Stage-4 fixtures excluded; `feature:<name>` runs only that
-proposal's dedicated isolated sweep — only its realm flag on,
-only its tagged fixtures included. Default: just main, unless
-`--write-results` is set — then main + every tracked feature
-run in sequence), `--no-harness` (disable the
-`sta.js` + `assert.js` preamble in runtime mode),
+`--phase=<spec>` (`main` runs the hardened ECMA-262 sweep with
+pre-Stage-4 fixtures excluded; `unhardened` runs the same
+fixture set with `realm.hardened = false`; `feature:<name>` runs
+only that proposal's dedicated isolated sweep — only its realm
+flag on, only its tagged fixtures included. Default: main +
+unhardened; `--write-results` additionally runs every tracked
+feature in sequence), `--no-harness` (disable the `sta.js` +
+`assert.js` preamble in runtime mode),
 `--write-results` (updates `test262-results.md`),
 `--only-failing` (skip-as-pass any test path listed in
 `.test262-pass-cache.txt` — iterative-dev shortcut; cache is
@@ -352,49 +353,39 @@ fixtures whose wall-time is dominated by GC even when bytes
 look moderate. Forces `--threads=1`),
 `--min-spec-pct=<f>` / `--min-hardened-spec-pct=<f>` /
 `--min-ses-witness-pct=<f>` (per-row floors — the unhardened
-legacy baseline, the SES-posture row, and the SES-witness
-side channel respectively. The first two gate the row's
-headline `spec%` (for hardened that's the SES-adjusted
-`(pass + divergent) / total` per Layout A in
-`docs/handbook/ses-test262-policy.md`); the witness floor
-gates `tools/test262/ses_witnesses.zig`'s curated set —
-every listed path MUST classify as `divergent` under
-`.main`. Exit 2 when any floor trips. Skipped under
-`--filter=`. CI wires all three at the published baselines
-(82.5 / 82.5 / 100) so a regression in any of: unhardened
-score, SES-adjusted score, or witness fidelity fails the
-build — see `.github/workflows/ci.yml`). The harness
-scores against the **Cynic-targeted scope**: paths under
-`harness/`, `staging/`, `intl402/`, Annex B language extensions,
-the browser-era built-ins Cynic doesn't ship, and the feature
-tags for pre-Stage-4 proposals Cynic hasn't implemented yet
-(decorators, import-defer, source-phase-imports, import-bytes,
-immutable-arraybuffer, await-dictionary) are dropped from `total`
-entirely. The pre-Stage-4 trim (reason `pre_stage4`) pins the
-denominator to the published ECMAScript edition: an unimplemented
-proposal's fixtures stay out of `total` until it reaches Stage 4
-(then they re-enter as in-scope counted skips) or Cynic ships it
-(then they move to a dedicated `feature:<name>` phase — like
-today's `joint-iteration` / `ShadowRealm`). This keeps the headline
-from silently decaying as TC39 lands new proposal fixtures upstream.
-(`intl402/` is dropped for the *default* build;
-a future Intl-enabled build flavour — opt-in, linking a CLDR/ICU
-+ IANA `tzdata` stack — would bring it back into scope, along
-with named time zones and non-ISO calendars. See
-[docs/ROADMAP.md](docs/ROADMAP.md) under "Intl".) Re-running for
-the same `(date, mode)` replaces
-that day's row. Each row records `spec%` (pass / total) and
-`attempted%` (pass / (pass + fail)). `test262-results.md` opens
-with a `## Current scores` snapshot, a `## Legend` explaining the
-columns, a `## Where the runtime stands, by area` per-bucket
-scoreboard sorted by raw fail count (so the top of the list is
-where the most fixtures move with the least work), and a
-`## History` section of per-day mini-tables — newest day first.
-Each history row shows the `Δ pass` against the previous run of
-the same mode and the `elapsed` wall-clock time of that run (full
-sweeps only; partial / filtered runs leave it blank). The most
-recent row also gets a "Biggest movers" sub-list naming the
-buckets that shifted most.
+row, the hardened row, and the SES-witness side channel
+respectively. The first two gate the row's headline `pass%`
+(= `(passing + correctly handled) / total` — see the legend
+in `test262-results.md`); the witness floor gates
+`tools/test262/ses_witnesses.zig`'s curated set — every listed
+path MUST classify under the SES policy in the hardened phase.
+Exit 2 when any floor trips. Skipped under `--filter=`. CI
+wires all three at published baselines so a regression in
+either row or in witness fidelity fails the build — see
+`.github/workflows/ci.yml`). The harness scores against the
+**Layout-B corpus**: every test262 fixture except (a) `harness/`
+and `staging/` walk-time skips and (b) pre-Stage-4 proposals
+(both unshipped — decorators, import-defer, source-phase-imports,
+import-bytes, immutable-arraybuffer, await-dictionary — and
+shipped — joint-iteration, ShadowRealm; the shipped ones get
+their own dedicated per-feature scoreboard). Annex B / intl402 /
+eval-dependent / `noStrict` fixtures all RUN; any failure
+classifies as **correctly handled** under the matching policy
+(annex_b > no_strict > intl402 > eval > SES, first match wins;
+SES is hardened-only and matched against the runtime error
+pattern). Re-running for the same `(date, mode)` replaces that
+day's row. Each row records `passing`, `failing`, `correctly
+handled`, `total`, and `pass%`. `test262-results.md` opens with
+a `## Current scores` snapshot (3 rows: `unhardened, --allow=eval`
+as a placeholder until the eval opt-in ships, then `unhardened`,
+then `hardened`), a `## Legend`, a `## Where the engine fails,
+by area` per-bucket scoreboard sourced from the hardened sweep
+and sorted by raw fail count, a `## Pre-Stage-4 proposals
+shipped` table for the per-feature scoreboard, and a `## History`
+section of per-day mini-tables — newest day first. Each history
+row shows `Δ pass` against the previous run of the same mode
+and the `elapsed` wall-clock time of that run (full sweeps only;
+partial / filtered runs leave it blank).
 
 **Build mode.** The test262 harness binary is built `ReleaseFast`
 by default (interpreters are 5-10× slower in Debug; the harness

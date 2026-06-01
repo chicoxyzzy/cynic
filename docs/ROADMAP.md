@@ -153,8 +153,9 @@ code construction (aligns with SES).
   (constructor + `.evaluate` + the §3.8.3.4 callable boundary)
   ship; full Compartments are still deferred. The test262 sweep
   scores both modes — the
-  `runtime` row tracks the legacy ECMAScript baseline (unhardened),
-  the `runtime-hardened` row tracks the SES posture. Brand bet
+  `unhardened` row tracks the legacy ECMAScript baseline (the
+  `--unhardened` opt-out), the `hardened` row tracks the
+  SES posture. Brand bet
   delivered: Cynic ships the SES baseline natively, no
   `@endo/ses` import or `lockdown()` call required. Design +
   phase notes in [docs/ses-alignment.md](ses-alignment.md).

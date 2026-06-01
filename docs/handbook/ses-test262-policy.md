@@ -1,9 +1,22 @@
 # SES + test262 scoring policy
 
+> **Current model (2026-06).** `test262-results.md` runs every
+> fixture except `harness/`, `staging/`, and Stage ≤ 3 proposals
+> (shipped or not). Each failure classifies as **correctly handled**
+> under one of five design policies — `annex_b` > `no_strict` >
+> `intl402` > `eval` > `ses`, first match wins — or stays a plain
+> `failing`. The headline `pass%` is
+> `(passing + correctly_handled) / total`. The SES bucket described
+> below is one of the five policies; the same machinery generalises
+> to the other four (which used to be walked-out skips). This doc
+> still focuses on the SES bucket because it's the only policy with
+> a runtime-error matcher (the rest are path / frontmatter classified
+> by `skip_rules.pathPolicyKind`).
+
 Cynic ships SES posture by default (frozen primordials, override-mistake
 fix, `harden()` global) and runs both modes through every score sweep —
-the `runtime` row tracks the legacy ECMAScript baseline (`--unhardened`),
-the `runtime_hardened` row tracks the SES posture. The two rows share
+the `unhardened` row tracks the legacy ECMAScript baseline (`--unhardened`),
+the `hardened` row tracks the SES posture. The two rows share
 the same test262 corpus, but **the corpus was written against pre-SES
 ECMAScript**: many fixtures assert invariants that SES intentionally
 invalidates (`Math.abs.length` is `configurable: true`,
@@ -12,7 +25,7 @@ invalidates (`Math.abs.length` is `configurable: true`,
 *correct* behaviour, not a bug.
 
 This doc is the durable plan for separating "SES is doing its job" from
-"Cynic has a real bug" in the `runtime_hardened` score. A fresh session
+"Cynic has a real bug" in the `hardened` score. A fresh session
 should be able to pick up the next sub-step from here without re-deriving
 the design. Sister docs:
 
@@ -26,7 +39,7 @@ the design. Sister docs:
 
 ## Problem in one paragraph
 
-The current `runtime_hardened` row at ~84.77% spec% looks ~8 pp worse
+The current `hardened` row at ~84.77% spec% looks ~8 pp worse
 than the unhardened baseline (92.90%). The ~3258-fixture delta isn't
 mostly Cynic bugs — it's intentional SES divergence. Real engine bugs
 under SES are ~9 fixtures (the same Annex B regex divergence the
@@ -38,11 +51,11 @@ reasonable floor, so CI can't catch it cleanly.
 
 ## Goals
 
-1. The `runtime_hardened` headline number reflects **real Cynic
+1. The `hardened` headline number reflects **real Cynic
    bugs**, not intentional SES divergence — directly comparable
-   to `runtime`. **Hardened mode is the primary signal**: Cynic's
+   to `unhardened`. **Hardened mode is the primary signal**: Cynic's
    brand bet is hardened-by-default and that's where engineering
-   effort should go. `runtime` (unhardened) is the continuity /
+   effort should go. The `unhardened` row is the continuity /
    reference baseline, not the optimisation target. A bug fix
    that only moves unhardened doesn't earn the same priority as
    one that moves hardened too.
@@ -192,8 +205,8 @@ way.
 |                    | spec%   | attempted% | pass / total     | pass / attempted | divergent |
 |--------------------|---------|------------|------------------|------------------|----------:|
 | parser             | 73.32 % | 100.00 %   | 30311 / 41339    | 30311 / 30311    |         — |
-| runtime            | 92.90 % | 99.98 %    | 37241 / 40089    | 37241 / 37250    |         — |
-| runtime_hardened   | 92.90 % | 99.97 %    | 37241 / 40089    | 33983 / 33992    |      3258 |
+| unhardened         | 92.90 % | 99.98 %    | 37241 / 40089    | 37241 / 37250    |         — |
+| hardened           | 92.90 % | 99.97 %    | 37241 / 40089    | 33983 / 33992    |      3258 |
 | ses-witness        | 100.00 %| 100.00 %   |    87 / 87       |    87 / 87       |         — |
 | annex-b-rejection  | 100.00 %| 100.00 %   |   142 / 142      |   142 / 142      |         — |
 ```
@@ -211,8 +224,8 @@ Per-day `## History` rows pick up the same five columns plus
 
 |                    | spec%   | attempted% | pass / total     | pass / attempted | divergent | Δ pass | elapsed |
 |--------------------|---------|------------|------------------|------------------|----------:|-------:|--------:|
-| runtime            | 92.90 % | 99.98 %    | 37241 / 40089    | 37241 / 37250    |         — |    ±0  |   35.6s |
-| runtime_hardened   | 92.90 % | 99.97 %    | 37241 / 40089    | 33983 / 33992    |      3258 |    ±0  |   38.4s |
+| unhardened         | 92.90 % | 99.98 %    | 37241 / 40089    | 37241 / 37250    |         — |    ±0  |   35.6s |
+| hardened           | 92.90 % | 99.97 %    | 37241 / 40089    | 33983 / 33992    |      3258 |    ±0  |   38.4s |
 | ses-witness        | 100.00 %| 100.00 %   |    87 / 87       |    87 / 87       |         — |    ±0  |    0.2s |
 | annex-b-rejection  | 100.00 %| 100.00 %   |   142 / 142      |   142 / 142      |         — |    ±0  |    0.5s |
 ```
@@ -234,16 +247,16 @@ shows up in the `divergent` column only.
 
 `## Legend` in `test262-results.md` picks up these entries:
 
-- **divergent** (`runtime_hardened` only) — fixtures whose test262-
+- **divergent** (`hardened` only) — fixtures whose test262-
   written assertion conflicts with SES enforcement (frozen
   primordials, locked descriptors, non-extensible namespaces).
   The engine throws on the offending operation, which is correct
   under SES; the fixture's "expected pass" is invalidated. Counted
   separately from `fail`. See [docs/handbook/ses-test262-policy.md].
-- **spec%** (`runtime_hardened`) — `(pass + divergent) / total`.
+- **spec%** (`hardened`) — `(pass + divergent) / total`.
   Divergent counts as engine-correct because SES is part of the
-  spec Cynic ships. Directly comparable to the `runtime` row.
-- **attempted%** (`runtime_hardened`) — `pass / (pass + fail)`.
+  spec Cynic ships. Directly comparable to the `unhardened` row.
+- **attempted%** (`hardened`) — `pass / (pass + fail)`.
   Excludes divergent from both numerator and denominator. This is
   the real-engine-conformance gauge — drops on any genuine
   failure regardless of SES policy.
@@ -284,13 +297,13 @@ number) with three floors:
   negative-coverage row (per "Annex B negative coverage"
   above). **Hard gate, 100.0.** A drop means Cynic accidentally
   shipped an Annex B feature.
-- `--min-spec-pct=<f>` — floor on `runtime` (unhardened) row.
+- `--min-spec-pct=<f>` — floor on `unhardened` (unhardened) row.
   Continuity gate. Set conservatively so a real catastrophic
   regression still trips it, but don't tighten ahead of
   hardened — engineering effort goes to hardened first.
 
 CI workflow updates in lockstep — `.github/workflows/ci.yml`.
-A PR that improves only `runtime` and leaves `runtime_hardened`
+A PR that improves only `unhardened` and leaves `hardened`
 flat is still mergeable, but reviewers should ask whether the
 fix is portable to hardened mode.
 
@@ -608,7 +621,7 @@ comment) before landing the bump.
 
 - Not a contribution-back to upstream test262. That's a separate
   TC39/SES-working-group effort, on a separate timeline.
-- Not a replacement for the existing `runtime` row. The legacy
+- Not a replacement for the existing `unhardened` row. The legacy
   baseline stays exactly as it is — unchanged column shape,
   unchanged scoring math, unchanged floor.
 - Not blocking on lazy-bag Phase 3 — orthogonal work.
@@ -952,10 +965,10 @@ Final post-Phase-2 numbers:
 
 | metric | pre-Phase 2 | post-Phase 2 |
 |---|---:|---:|
-| `runtime_hardened` headline `spec%` | 86.64 % (raw) | **92.90 % (adj)** |
+| `hardened` headline `spec%` | 86.64 % (raw) | **92.90 % (adj)** |
 | Divergent reclassifications | 0 | **2515** |
 | Real engine fails | 2527 | **12** |
-| Gap vs `runtime` baseline | -6.27 pp | **-0.01 pp** |
+| Gap vs `unhardened` baseline | -6.27 pp | **-0.01 pp** |
 
 Within 0.01 pp of the unhardened headline. The 12 remaining
 real hardened-only failures break down:
@@ -1196,7 +1209,7 @@ the original spec called for. The original Phase 5 sketch
 proposed a dual-mode reshape — two columns per bucket
 (`runtime (pass / fail)` and `hardened (pass / fail /
 divergent)`) plus dual spec% — but with the headlines now
-matching (`runtime` and `runtime_hardened` both at 37313 /
+matching (`unhardened` and `hardened` both at 37313 /
 40161, 92.91 %), the dual columns would duplicate themselves
 across ~60 buckets and the only signal-carrying delta is
 "how many fixtures reclassified as divergent in this bucket."

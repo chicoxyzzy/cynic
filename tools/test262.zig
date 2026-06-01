@@ -51,7 +51,7 @@
 //!   --min-hardened-spec-pct=<f>
 //!                           Companion floor on the **main (hardened)** phase
 //!                           — the SES-posture sweep, scored as the
-//!                           `runtime_hardened` row. Independent of
+//!                           `hardened` row. Independent of
 //!                           `--min-spec-pct` so a hardened regression fails
 //!                           CI even when the legacy baseline is intact.
 //!
@@ -423,15 +423,14 @@ const Outcome = enum {
     fail_false_reject, // we rejected legal code
     fail_false_accept, // we accepted code that should be a parse error
     skip,
-    /// SES-divergent — the test262 fixture's expectation is
-    /// invalidated by Cynic's hardened SES posture (frozen
-    /// primordials, locked descriptors, override-mistake fix).
-    /// Only emitted under `phase == .main` after the thrown
-    /// error message matches a known divergence pattern in
-    /// `tools/test262/ses_divergent.zig`. Counted into the
-    /// `divergent` bucket — neither pass nor fail. See
-    /// `docs/handbook/ses-test262-policy.md`.
-    fail_divergent,
+    /// Fixture failure that hits a Cynic design policy: Annex B
+    /// not shipped, strict-only, no Intl, eval-off, or SES throw
+    /// (the last is hardened-only and matched against the runtime
+    /// error pattern in `tools/test262/ses_divergent.zig`; the rest
+    /// are path / frontmatter classified via `skip_rules.pathPolicyKind`).
+    /// Counted into the `correctly_handled` bucket — neither
+    /// passing nor failing for `pass%` purposes.
+    fail_correctly_handled,
 };
 
 const SkipReason = enum {
@@ -440,22 +439,18 @@ const SkipReason = enum {
     raw_flag,
     has_includes,
     unsupported_feature,
-    /// Fixture is tagged with an Annex B / SES-carve-out feature
-    /// (`skip_rules.featureIsOutOfScope`). Permanently out of scope
-    /// for a strict-only, SES-hardened, non-browser engine — dropped
-    /// from the `corpus` denominator entirely, like the `annexB/`
-    /// path tree, instead of counted as an in-corpus skip. See
-    /// `recordOutcome` and `Stats.oos`.
+    /// Legacy slot — `annex_b` skips are no longer emitted
+    /// (Annex B fixtures run and classify as `correctly
+    /// handled` post-run). Kept in the enum for history-file parser
+    /// compatibility but never produced by the current `classifyAndRun`.
     annex_b,
-    /// Fixture is tagged with a pre-Stage-4 proposal Cynic hasn't
-    /// implemented (`skip_rules.featureIsUnimplementedProposal` —
-    /// decorators, import-defer, …). Not part of any published
-    /// ECMA-262 edition, so out of scope and dropped from the `corpus`
-    /// denominator (like `annex_b`), NOT counted as an in-corpus skip.
-    /// Recoverable, unlike `annex_b`: when the proposal reaches Stage 4
-    /// it becomes an in-scope counted skip, and when Cynic ships it the
-    /// fixtures move to a dedicated `feature:<flag>` phase. See
-    /// `recordOutcome` and `Stats.oos`.
+    /// Fixture is tagged with a pre-Stage-4 proposal — Cynic ships
+    /// shipped ones (joint-iteration, ShadowRealm) only in their
+    /// dedicated feature phases, and unshipped ones (decorators,
+    /// import-defer, …) drop here. Removed from `total` entirely;
+    /// the headline only moves when Cynic does, not when TC39 lands
+    /// new proposal fixtures upstream. Recoverable: a Stage 4
+    /// advance promotes the fixtures back into `total`.
     pre_stage4,
     no_frontmatter,
     malformed_frontmatter,
@@ -476,19 +471,25 @@ const Mode = enum {
     /// Legacy ECMAScript baseline — `realm.hardened = false`,
     /// primordials mutable, globalThis extensible. Opt into via
     /// `cynic --unhardened`. Sweep phase = `.unhardened`.
-    runtime,
+    unhardened,
     /// Default SES posture — `realm.hardened = true`, primordials
     /// frozen + override-mistake fix + locked descriptors. Sweep
     /// phase = `.main`. What `cynic run` ships.
-    runtime_hardened,
+    hardened,
+    /// Unhardened + the eval surface opted in. Placeholder until
+    /// `--allow=eval` ships (see `docs/ses-alignment.md`): no sweep
+    /// populates this row today, so it renders as `n/a` in
+    /// `test262-results.md`. Reserved here so the row layout in
+    /// `## Current scores` stays stable when eval lands.
+    unhardened_allow_eval,
 
     /// Render the mode as it appears in `test262-results.md`
-    /// score rows and headers. Matches the historical labels
-    /// where they exist.
+    /// score rows and headers.
     fn label(self: Mode) []const u8 {
         return switch (self) {
-            .runtime => "runtime",
-            .runtime_hardened => "runtime-hardened",
+            .unhardened => "unhardened",
+            .hardened => "hardened",
+            .unhardened_allow_eval => "unhardened-allow-eval",
         };
     }
 };
@@ -632,11 +633,10 @@ const Options = struct {
     min_spec_pct: f64 = 0.0,
     /// Minimum acceptable `pass%` for the **main (hardened)** phase
     /// — the SES-posture sweep that `test262-results.md`'s
-    /// `runtime_hardened` row tracks. Same enforcement shape as
+    /// `hardened` row tracks. Same enforcement shape as
     /// `min_spec_pct`, distinct flag so both postures gate
-    /// independently. For hardened, `pass%` includes divergent
-    /// reclassifications per Layout A — the math is
-    /// `(pass + divergent) / corpus`.
+    /// independently. `pass%` here is
+    /// `(passing + correctly_handled) / total`.
     ///
     /// Flag name is `--min-hardened-spec-pct` for backwards-compat
     /// with existing CI configs.
@@ -644,7 +644,7 @@ const Options = struct {
     /// Minimum acceptable pass rate on the **SES witness set**
     /// (`tools/test262/ses_witnesses.zig`). Default 0 disables;
     /// CI sets 100 so any drift in a curated witness fixture
-    /// (a previously-divergent witness now passing or failing
+    /// (a previously-correctly_handled witness now passing or failing
     /// for a non-divergence reason) fails the build. Phase 3
     /// of `docs/handbook/ses-test262-policy.md`.
     min_ses_witness_pct: f64 = 0.0,
@@ -663,21 +663,20 @@ const Stats = struct {
     skip: u32 = 0,
     pos_attempted: u32 = 0,
     neg_attempted: u32 = 0,
-    /// SES-divergent fixtures — failures the hardened-mode SES
-    /// posture intentionally produces (descriptor-shape
-    /// mismatches, frozen-primordial mutation rejected, etc.).
-    /// Set only on `.main` phase runs via the divergence-list
-    /// classifier in `tools/test262/ses_divergent.zig`. Counted
-    /// in `total` like `skip`; excluded from `fail()`. See
-    /// `docs/handbook/ses-test262-policy.md` Layout A for how
-    /// this feeds the `runtime_hardened` row's adjusted spec%.
-    divergent: u32 = 0,
+    /// Correctly-handled fixtures — failures Cynic produces by design
+    /// (SES throw, Annex B not shipped, strict-only, no Intl, eval
+    /// off). SES is matched against the thrown-error pattern in
+    /// `tools/test262/ses_divergent.zig`; the rest via
+    /// `skip_rules.pathPolicyKind`. Counted in `total` but neither
+    /// `pass()` nor `fail()`; feeds the headline
+    /// `(passing + correctly_handled) / total`.
+    correctly_handled: u32 = 0,
     /// SES-witness fixture counters — curated subset of paths
     /// (`tools/test262/ses_witnesses.zig`) that MUST classify as
-    /// `divergent` under hardened-mode runs. Drift either way
+    /// `correctly_handled` under hardened-mode runs. Drift either way
     /// (pass / fail) signals an SES enforcement regression and
     /// fails CI via `--min-ses-witness-pct=100`. The witness
-    /// fixtures are still part of the main `total` / `divergent`
+    /// fixtures are still part of the main `total` / `correctly_handled`
     /// counts — these are additional positive-coverage counters
     /// on top, not an alternative classification. Phase 3 of
     /// `docs/handbook/ses-test262-policy.md`.
@@ -690,15 +689,12 @@ const Stats = struct {
     /// roadmap work — `by_path` is policy-set, `unsupported_feature`
     /// is feature-flag-set, the rest are corpus-shape skips.
     skip_by_reason: [skip_reason_count]u32 = std.mem.zeroes([skip_reason_count]u32),
-    /// Fixtures dropped from the `corpus` denominator as out of scope —
-    /// `flags: [noStrict]` (strict-only engine), Annex B / SES-carve-out
-    /// feature tags (permanent), and unimplemented pre-Stage-4 proposal
-    /// tags (recoverable — not in any published edition yet). NOT part
-    /// of `total`, `skip`, or any bucket; tracked here purely so the
-    /// tally can report how much the corpus was trimmed and why. The
-    /// frontmatter analogue of the path-based
-    /// `pathIsPermanentlyOutOfScope` walk filter (those never reach
-    /// `recordOutcome` at all).
+    /// Fixtures dropped from `total` as out of scope. Today only
+    /// unimplemented pre-Stage-4 proposal tags land here (reason
+    /// `.pre_stage4`); the `.no_strict` / `.annex_b` arms are legacy
+    /// (those fixtures now run and classify as `correctly_handled`).
+    /// NOT part of `total`, `skip`, or any bucket; tracked purely so
+    /// the tally can report how much the corpus was trimmed and why.
     oos: u32 = 0,
     /// Per-reason histogram of `oos`. Indexed by `SkipReason`; only
     /// `.no_strict`, `.annex_b`, and `.pre_stage4` are ever non-zero.
@@ -717,7 +713,7 @@ const skip_reason_count: usize = @typeInfo(SkipReason).@"enum".fields.len;
 
 /// What kind of outcome to record for a bucket. Mirrors the
 /// three-way grouping the rolled-up `Stats` already uses.
-const BucketKind = enum { pass, fail, skip, divergent };
+const BucketKind = enum { pass, fail, skip, correctly_handled };
 
 /// Per-area counters. The `name` is the first two path
 /// components of the test262 fixture (e.g. `built-ins/Set`,
@@ -728,13 +724,13 @@ const Bucket = struct {
     pass: u32 = 0,
     fail: u32 = 0,
     skip: u32 = 0,
-    /// SES-divergent count under the hardened phase (Phase 2 of
+    /// SES-correctly_handled count under the hardened phase (Phase 2 of
     /// `docs/handbook/ses-test262-policy.md`). Always zero for
     /// buckets sourced from non-hardened sweeps — only the
-    /// `.main` phase emits divergent classifications. Counted
+    /// `.main` phase emits correctly_handled classifications. Counted
     /// separately from `pass`, `fail`, `skip`; the four together
     /// sum to `total`.
-    divergent: u32 = 0,
+    correctly_handled: u32 = 0,
     total: u32 = 0,
 };
 
@@ -774,7 +770,7 @@ const BucketMap = struct {
             .pass => gop.value_ptr.pass += 1,
             .fail => gop.value_ptr.fail += 1,
             .skip => gop.value_ptr.skip += 1,
-            .divergent => gop.value_ptr.divergent += 1,
+            .correctly_handled => gop.value_ptr.correctly_handled += 1,
         }
         gop.value_ptr.total += 1;
     }
@@ -816,9 +812,9 @@ const BucketMap = struct {
                 // a reader scanning "what does SES enforce?" sees
                 // the hot buckets first. Other tiers stay
                 // alphabetical (engine-bug work follows raw fail
-                // count, not the divergent side-channel).
-                if (ta == 4 and a.divergent != b.divergent) {
-                    return a.divergent > b.divergent;
+                // count, not the correctly_handled side-channel).
+                if (ta == 4 and a.correctly_handled != b.correctly_handled) {
+                    return a.correctly_handled > b.correctly_handled;
                 }
                 return std.mem.order(u8, a.name, b.name) == .lt;
             }
@@ -902,7 +898,7 @@ const PreStage4Stats = struct {
 const Phase = union(enum) {
     main,
     /// A dedicated per-proposal sweep, run twice per tracked flag —
-    /// once hardened (the as-shipped SES posture, with divergent
+    /// once hardened (the as-shipped SES posture, with correctly_handled
     /// classification) and once unhardened (bare ECMA-262) — so each
     /// proposal is measured the same two ways as the headline corpus.
     feature: FeaturePhase,
@@ -940,7 +936,7 @@ const Phase = union(enum) {
     /// default); `.unhardened` is the freeze-off headline sweep;
     /// each `.feature` sweep carries its own posture so a proposal
     /// is scored both hardened (as `--enable=<flag>` ships, with
-    /// divergent classification) and unhardened (bare ECMA-262).
+    /// correctly_handled classification) and unhardened (bare ECMA-262).
     fn realmHardened(self: Phase) bool {
         return switch (self) {
             .unhardened => false,
@@ -1174,8 +1170,8 @@ pub fn main(init: std.process.Init) !void {
     // unhardened path.
     if (opts.write_results) {
         // Per-feature scoreboard: each tracked proposal gets a
-        // hardened row (SES-adjusted — divergent fixtures count
-        // toward pass, same (pass + divergent) headline as the main
+        // hardened row (SES-adjusted — correctly_handled fixtures count
+        // toward pass, same (pass + correctly_handled) headline as the main
         // hardened row) and an unhardened row (bare ECMA-262).
         var pre_stage4_hardened: PreStage4Stats = .{};
         var pre_stage4_unhardened: PreStage4Stats = .{};
@@ -1183,7 +1179,7 @@ pub fn main(init: std.process.Init) !void {
             if (maybe_r) |r| {
                 pre_stage4_hardened.slots[i] = .{
                     .name = tracked_pre_stage4_features[i],
-                    .pass = r.stats.pass() + r.stats.divergent,
+                    .pass = r.stats.pass() + r.stats.correctly_handled,
                     .fail = r.stats.fail(),
                     .skip = r.stats.skip,
                     .total = r.stats.total,
@@ -1205,17 +1201,17 @@ pub fn main(init: std.process.Init) !void {
         const now_ts = std.Io.Clock.now(.real, io);
         // SES-posture (hardened, default) row from the `.main` phase
         // result. The per-feature scoreboard is written only on the
-        // unhardened (`.runtime`) pass below, so the hardened row
+        // unhardened (`.unhardened`) pass below, so the hardened row
         // gets empty per-feature stats to avoid restamping it twice.
         if (main_result) |*mr| {
             const elapsed_for_row: ?u64 = if (is_full and mr.elapsed_ms > 0) @intCast(mr.elapsed_ms) else null;
             const empty_pre_stage4: PreStage4Stats = .{};
-            try writeResults(gpa, io, &mr.stats, &mr.buckets, &empty_pre_stage4, &empty_pre_stage4, now_ts.toSeconds(), .runtime_hardened, elapsed_for_row);
+            try writeResults(gpa, io, &mr.stats, &mr.buckets, &empty_pre_stage4, &empty_pre_stage4, now_ts.toSeconds(), .hardened, elapsed_for_row);
         }
         // Unhardened (legacy) row + the two-row-per-feature scoreboard.
         if (unhardened_result) |*ur| {
             const elapsed_for_row: ?u64 = if (is_full and ur.elapsed_ms > 0) @intCast(ur.elapsed_ms) else null;
-            try writeResults(gpa, io, &ur.stats, &ur.buckets, &pre_stage4_hardened, &pre_stage4_unhardened, now_ts.toSeconds(), .runtime, elapsed_for_row);
+            try writeResults(gpa, io, &ur.stats, &ur.buckets, &pre_stage4_hardened, &pre_stage4_unhardened, now_ts.toSeconds(), .unhardened, elapsed_for_row);
         }
     }
 
@@ -1242,14 +1238,12 @@ pub fn main(init: std.process.Init) !void {
         const evalPhase = struct {
             fn f(below: *bool, pr: *const PhaseResult, floor: f64, flag_name: []const u8) void {
                 if (pr.stats.total == 0) return;
-                // Match the row's headline `spec%` per Layout A
-                // (`docs/handbook/ses-test262-policy.md`): divergent
-                // counts as engine-correct because SES is part of
-                // the spec Cynic ships in hardened mode. Equals
-                // `pass / total` for any phase with no divergence
-                // (parser, unhardened) so the legacy gate semantics
-                // are preserved there.
-                const headline_pass = pr.stats.pass() + pr.stats.divergent;
+                // Headline `pass%` = `(passing + correctly_handled)
+                // / total` — a policy failure (SES throw, Annex B,
+                // strict-only, no Intl, eval off) is the right answer
+                // for the policy Cynic ships, so it counts toward the
+                // floor.
+                const headline_pass = pr.stats.pass() + pr.stats.correctly_handled;
                 const pct = 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(pr.stats.total));
                 if (pct < floor) {
                     std.debug.print(
@@ -1269,7 +1263,7 @@ pub fn main(init: std.process.Init) !void {
         // Witness floor — Phase 3 of the SES policy. The
         // witness set's pass rate must stay above
         // `--min-ses-witness-pct`. CI sets 100 % so any drift
-        // (a witness that stopped being divergent — either
+        // (a witness that stopped being correctly_handled — either
         // it's now passing, signalling SES enforcement
         // weakened, or it's now failing for a non-divergence
         // reason, signalling a pattern miss or engine
@@ -1392,18 +1386,15 @@ fn runSweep(
                 if (std.mem.indexOf(u8, entry.path, needle) == null) continue;
             }
             if (skip_rules.pathIsSkipped(entry.path)) continue;
-            // Walk-time filter: only exclude **permanently** out
-            // of scope (Annex B browser-era extensions, SES
-            // carve-outs like `eval`, etc.) — these Cynic
-            // refuses to ship, so they're not tech debt and
-            // shouldn't inflate the corpus denominator. Planned
-            // / pre-Stage-4 / vendor-gap fixtures
-            // (`pathIsCurrentlySkipped`) DO flow through to
-            // `classifyAndRun`, where they get marked as
-            // `.skip` — they show up in corpus and the skip
-            // count, honestly representing the work left to
-            // close out.
-            if (skip_rules.pathIsPermanentlyOutOfScope(entry.path)) continue;
+            // The only walk-time exclusions are `harness/` and
+            // `staging/` (handled above) plus pre-Stage-4 proposals
+            // (handled in `classifyAndRun` via the `out_of_phase` /
+            // `pre_stage4` skip reasons). Annex B, intl402, eval,
+            // noStrict, SES carve-outs all RUN — their failures
+            // classify as **correctly handled** via the policy
+            // classifier, so the corpus shape reflects the full
+            // ECMA-262 surface Cynic targets and the headline
+            // credits Cynic for the policies it ships.
             try paths.append(gpa, try gpa.dupe(u8, entry.path));
         }
     }
@@ -1773,25 +1764,12 @@ const PhaseResult = struct {
 };
 
 /// Skip reasons that take a fixture *out of the corpus denominator*
-/// rather than counting as an in-corpus skip. These mirror the
-/// path-based `pathIsPermanentlyOutOfScope` filter for frontmatter-
-/// derived exclusions:
-///   - `.no_strict` — `flags: [noStrict]` fixtures exercise sloppy
-///     mode, which Cynic does not implement (strict-only by design).
-///   - `.annex_b`   — feature tags for browser-only Annex B / SES
-///     carve-outs Cynic intentionally omits (`__proto__`,
-///     `legacy-regexp`, `IsHTMLDDA`, …).
-///   - `.pre_stage4` — feature tags for pre-Stage-4 proposals Cynic
-///     hasn't implemented yet (decorators, import-defer, …). Unlike
-///     the first two this is *recoverable*: the denominator is pinned
-///     to the published ECMAScript edition, so a proposal's fixtures
-///     stay out of `total` until it reaches Stage 4 and Cynic ships
-///     it — at which point the tag leaves this set and its fixtures
-///     re-enter the corpus. Keeps the headline from silently decaying
-///     as TC39 lands new proposal fixtures upstream.
-/// `.no_strict` / `.annex_b` are permanent design boundaries; all
-/// three are dropped from `total` like `intl402/` and the `annexB/`
-/// tree.
+/// rather than counting as an in-corpus skip. Only `.pre_stage4` is
+/// emitted today (decorators, import-defer, joint-iteration,
+/// ShadowRealm, …) — `noStrict` and Annex B fixtures now run and
+/// classify as `correctly_handled` post-run. The `.no_strict` /
+/// `.annex_b` arms stay here for backward compatibility with the
+/// rolled-up tally on historical runs.
 fn isOutOfScopeReason(r: SkipReason) bool {
     return switch (r) {
         .no_strict, .annex_b, .pre_stage4 => true,
@@ -1826,14 +1804,11 @@ fn recordOutcome(
             // Out-of-phase fixtures are ignored entirely (phase
             // filtering): no stats, no bucket, no failures, no cache.
             if (reason == .out_of_phase) return;
-            // Out-of-scope frontmatter skips (strict-only
-            // `flags: [noStrict]`, Annex B / SES-carve-out feature
-            // tags, and unimplemented pre-Stage-4 proposal tags) are
-            // dropped from the corpus denominator like the path-based
-            // `pathIsPermanentlyOutOfScope` filter, but tallied under
-            // `oos` so the tally can show the trim. The first two are
-            // permanent; pre-Stage-4 is recoverable (see
-            // `isOutOfScopeReason`).
+            // Out-of-scope frontmatter skips (unimplemented
+            // pre-Stage-4 proposal tags today; the legacy noStrict /
+            // Annex B arms are no longer emitted) are dropped from
+            // `total` but tallied under `oos` so the tally can show
+            // the trim. See `isOutOfScopeReason`.
             if (isOutOfScopeReason(reason)) {
                 stats.oos += 1;
                 stats.oos_by_reason[@intFromEnum(reason)] += 1;
@@ -1847,12 +1822,12 @@ fn recordOutcome(
         .pass_positive, .pass_negative => .pass,
         .fail_false_reject, .fail_false_accept => .fail,
         .skip => .skip,
-        // Phase 5 (`docs/handbook/ses-test262-policy.md`) — divergent
+        // Phase 5 (`docs/handbook/ses-test262-policy.md`) — correctly_handled
         // fixtures get their own bucket column instead of being lumped
         // into `skip`. Visible in the per-area scoreboard as a fourth
         // column so a reader can tell at a glance which buckets
         // accumulate SES reclassification vs which are truly skipped.
-        .fail_divergent => .divergent,
+        .fail_correctly_handled => .correctly_handled,
     };
     switch (outcome.kind) {
         .pass_positive => stats.pass_pos += 1,
@@ -1877,15 +1852,15 @@ fn recordOutcome(
                 stats.skip_by_reason[@intFromEnum(reason)] += 1;
             }
         },
-        .fail_divergent => stats.divergent += 1,
+        .fail_correctly_handled => stats.correctly_handled += 1,
     }
     // SES witness side-channel — curated paths that MUST
-    // classify as `divergent` under hardened-mode runs. Drift
-    // (pass or non-divergent fail) is logged as
-    // `witness_fail`; staying divergent is `witness_pass`.
+    // classify as `correctly_handled` under hardened-mode runs. Drift
+    // (pass or non-correctly_handled fail) is logged as
+    // `witness_fail`; staying correctly_handled is `witness_pass`.
     // Phase 3 of `docs/handbook/ses-test262-policy.md`.
     if (ses_witnesses.isWitness(rel)) {
-        if (outcome.kind == .fail_divergent) {
+        if (outcome.kind == .fail_correctly_handled) {
             stats.witness_pass += 1;
         } else if (outcome.kind == .skip) {
             // Witnessed-but-skipped (e.g. filtered out, or
@@ -1894,12 +1869,10 @@ fn recordOutcome(
             stats.witness_fail += 1;
         }
     }
-    // Bucket as `.skip` for divergent — the per-area scoreboard
-    // doesn't grow a fourth column today; reclassified failures
-    // visually look like "skipped" in the bucket totals, which
-    // is the right shape for Phase 2 (the per-bucket divergence
-    // breakdown is a follow-up). The headline divergent count
-    // sits in `Stats.divergent` for the score-row math.
+    // Bump the per-area bucket (`pass` / `fail` / `skip` /
+    // `correctly_handled`) so the scoreboard reflects this fixture's
+    // outcome. The headline correctly-handled count sits in
+    // `Stats.correctly_handled` for the score-row math.
     if (bucket_kind) |bk| try buckets.bump(bucketName(rel), bk);
     if (outcome.kind == .pass_positive or outcome.kind == .fail_false_reject) {
         stats.pos_attempted += 1;
@@ -2083,7 +2056,7 @@ fn mergeStats(dst: *Stats, src: *const Stats) void {
     dst.skip += src.skip;
     dst.pos_attempted += src.pos_attempted;
     dst.neg_attempted += src.neg_attempted;
-    dst.divergent += src.divergent;
+    dst.correctly_handled += src.correctly_handled;
     dst.witness_pass += src.witness_pass;
     dst.witness_fail += src.witness_fail;
     dst.oos += src.oos;
@@ -2105,7 +2078,7 @@ fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
         gop.value_ptr.pass += v.pass;
         gop.value_ptr.fail += v.fail;
         gop.value_ptr.skip += v.skip;
-        gop.value_ptr.divergent += v.divergent;
+        gop.value_ptr.correctly_handled += v.correctly_handled;
         gop.value_ptr.total += v.total;
     }
 }
@@ -2114,20 +2087,19 @@ fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
 /// (compile error or runtime throw at script eval). When a
 /// hardened phase is running (the headline `.main` sweep or a
 /// hardened per-feature sweep) and the path is in the curated
-/// `ses_divergent.divergent_paths` list, return `.fail_divergent`
-/// so the fixture lands in the divergent bucket instead of being
-/// scored as a real engine bug. Unhardened phases skip this —
+/// `ses_divergent.divergent_paths` list, return `.fail_correctly_handled`
+/// so the fixture lands in the correctly-handled bucket instead of
+/// being scored as a real engine bug. Unhardened phases skip this —
 /// with the freeze pass off, the fixture passes outright.
 ///
 /// Only applied to the test source itself — harness preamble
 /// failures (sta.js, assert.js, $DONE setup, installBuiltins)
-/// stay as `.fail_false_reject` because a divergent-list hit
-/// there would mask a real engine regression in the SES
-/// preamble path.
+/// stay as `.fail_false_reject` because a CH-list hit there would
+/// mask a real engine regression in the SES preamble path.
 fn testSourceFailureOutcome(phase: Phase, rel: []const u8) RunResult {
     if (phase.realmHardened()) {
         if (ses_divergent.classifyByPath(rel) != null) {
-            return .{ .kind = .fail_divergent };
+            return .{ .kind = .fail_correctly_handled };
         }
     }
     return .{ .kind = .fail_false_reject };
@@ -2204,7 +2176,9 @@ fn classifyAndRun(
         return .{ .kind = .skip, .skip_reason = .out_of_phase };
     }
 
-    if (fm.flags.no_strict) return .{ .kind = .skip, .skip_reason = .no_strict };
+    // `flags: [noStrict]` fixtures run; a failure classifies as
+    // `correctly handled` under the no_strict policy via the sticky
+    // policy lookup below.
     // §test262 `flags: [raw]` — the harness MUST NOT prepend any
     // preamble (sta.js + assert.js + includes). The fixture either
     // wants byte 0 to start with its own source (hashbang
@@ -2232,29 +2206,40 @@ fn classifyAndRun(
     // effect: parser `pass%` becomes a real "what fraction of
     // the corpus does the parser handle" gauge instead of a
     // heuristic-skipped underestimate.
-    // Split the feature gate three ways; a tag in none of them falls
-    // through and runs:
-    //   - Out-of-scope tags (Annex B / SES carve-outs Cynic never
-    //     implements) → `.annex_b`; `recordOutcome` drops these from
-    //     the corpus denominator.
-    //   - Unimplemented pre-Stage-4 proposals (decorators, import-defer,
-    //     …) → `.pre_stage4`; also dropped — they aren't in any
-    //     published edition, so they're out of scope until they reach
-    //     Stage 4 (then an in-corpus skip) or Cynic ships them (then a
-    //     dedicated `feature:` phase).
-    //   - Vendor-blocked *specced* tags → `.unsupported_feature`; stay
-    //     in-corpus so they keep dragging `pass%` until the gap closes.
+    // Annex B / SES carve-out feature-tagged fixtures run; a failure
+    // classifies as `correctly handled` under the matching policy via
+    // the sticky policy lookup below.
+    //
+    // Pre-Stage-4 (Stage ≤ 3) proposals stay dropped: shipped ones
+    // (joint-iteration, ShadowRealm) are filtered above via the
+    // `out_of_phase` gate so they only run in their dedicated feature
+    // sweeps; unshipped ones (decorators, import-defer, …) drop here
+    // via `.pre_stage4`. Per the user's scope decision the per-row
+    // total excludes Stage ≤ 3 entirely.
     for (fm.features) |feat| {
-        if (skip_rules.featureIsOutOfScope(feat)) {
-            return .{ .kind = .skip, .skip_reason = .annex_b };
-        }
         if (skip_rules.featureIsUnimplementedProposal(feat)) {
             return .{ .kind = .skip, .skip_reason = .pre_stage4 };
         }
-        if (skip_rules.featureIsCurrentlySkipped(feat)) {
-            return .{ .kind = .skip, .skip_reason = .unsupported_feature };
-        }
     }
+
+    // Sticky policy classification — looked up once from path +
+    // frontmatter, consulted at every `.fail_*` return point so a
+    // policy-induced failure (Annex B / strict-only / Intl absent /
+    // eval-off) classifies as `correctly_handled` instead of `fail`.
+    // SES classification is still post-run (runtime error pattern)
+    // and lives in the throw-handling block below.
+    const path_policy: ?skip_rules.PolicyKind = skip_rules.pathPolicyKind(rel, fm.features, fm.flags.no_strict);
+    // The allow-eval row (when wired) would gate out `.eval` here.
+    // Today both real phases (`.main`, `.unhardened`) admit eval.
+    const sticky_policy: ?skip_rules.PolicyKind = path_policy;
+    const fail_reject_or_ch: RunResult = if (sticky_policy != null)
+        .{ .kind = .fail_correctly_handled }
+    else
+        .{ .kind = .fail_false_reject };
+    const fail_accept_or_ch: RunResult = if (sticky_policy != null)
+        .{ .kind = .fail_correctly_handled }
+    else
+        .{ .kind = .fail_false_accept };
     const expected_negative: ?frontmatter.Negative = blk: {
         if (fm.negative) |n| break :blk n;
         break :blk null;
@@ -2285,11 +2270,11 @@ fn classifyAndRun(
     if (parse_failed) {
         if (expected_negative) |neg| {
             if (neg.type_name.len > 0 and !diagnosticsMatchClass(diags.items, neg.type_name)) {
-                return .{ .kind = .fail_false_accept };
+                return fail_accept_or_ch;
             }
             return .{ .kind = .pass_negative };
         }
-        return .{ .kind = .fail_false_reject };
+        return fail_reject_or_ch;
     }
 
     var realm = cynic.runtime.Realm.initWithBytesAllocator(arena, bytes_allocator);
@@ -2323,12 +2308,12 @@ fn classifyAndRun(
     // even when they regress under the hardened-default main
     // sweep.
     realm.hardened = phase.realmHardened();
-    realm.installBuiltins() catch return .{ .kind = .fail_false_reject };
+    realm.installBuiltins() catch return fail_reject_or_ch;
     // test262 fixtures use `__collectGarbage` / `__clearKeptObjects`
     // / `__drainMicrotasks` for deterministic triggering — debug
     // host hooks `installBuiltins` deliberately doesn't install on
     // production realms.
-    realm.installTestGlobals() catch return .{ .kind = .fail_false_reject };
+    realm.installTestGlobals() catch return fail_reject_or_ch;
     // Cap each test at a generous opcode budget so an
     // infinite-loop fixture (`while(true){}`, recursive yield,
     // a `for(;;)` waiting on an awaitable that never settles)
@@ -2356,9 +2341,9 @@ fn classifyAndRun(
     // the globalThis object's properties, so `globalThis.$DONE`
     // sees the binding without a hand-mirror.
     {
-        const done_fn = realm.heap.allocateFunctionNative(test262Done, 1, "$DONE") catch return .{ .kind = .fail_false_reject };
+        const done_fn = realm.heap.allocateFunctionNative(test262Done, 1, "$DONE") catch return fail_reject_or_ch;
         const done_v = cynic.runtime.heap.taggedFunction(done_fn);
-        realm.globals.put(realm.allocator, "$DONE", done_v) catch return .{ .kind = .fail_false_reject };
+        realm.globals.put(realm.allocator, "$DONE", done_v) catch return fail_reject_or_ch;
     }
 
     // §INTERPRETING.md — `$262` is the test262 host hook
@@ -2366,7 +2351,7 @@ fn classifyAndRun(
     // `detachArrayBuffer`, etc. Tests gated on hooks Cynic
     // doesn't implement (`createRealm`, `agent.*`, `IsHTMLDDA`)
     // skip via the feature filter; the rest get a working shim.
-    install262(&realm) catch return .{ .kind = .fail_false_reject };
+    install262(&realm) catch return fail_reject_or_ch;
 
     // Install the module loader for both `is_module` tests AND
     // script tests that use dynamic `import()` (the `dynamic-import`
@@ -2401,13 +2386,13 @@ fn classifyAndRun(
     const eff_harness: ?harness_mod.HarnessSources = if (raw) null else harness_pair;
     if (eff_harness) |hp| {
         const r1 = cynic.runtime.evaluateScript(arena, &realm, hp.sta) catch {
-            return .{ .kind = .fail_false_reject };
+            return fail_reject_or_ch;
         };
-        if (r1 == .thrown) return .{ .kind = .fail_false_reject };
+        if (r1 == .thrown) return fail_reject_or_ch;
         const r2 = cynic.runtime.evaluateScript(arena, &realm, hp.assert_js) catch {
-            return .{ .kind = .fail_false_reject };
+            return fail_reject_or_ch;
         };
-        if (r2 == .thrown) return .{ .kind = .fail_false_reject };
+        if (r2 == .thrown) return fail_reject_or_ch;
 
         // Each `includes:` name resolves to a `vendor/test262/harness/<name>`
         // file, evaluated as another Script in the same realm.
@@ -2421,9 +2406,9 @@ fn classifyAndRun(
                 return .{ .kind = .skip, .skip_reason = .has_includes };
             };
             const r_inc = cynic.runtime.evaluateScript(arena, &realm, inc_source) catch {
-                return .{ .kind = .fail_false_reject };
+                return fail_reject_or_ch;
             };
-            if (r_inc == .thrown) return .{ .kind = .fail_false_reject };
+            if (r_inc == .thrown) return fail_reject_or_ch;
         }
     }
 
@@ -2542,7 +2527,7 @@ fn classifyAndRun(
     }
 
     if (expected_negative) |_| {
-        return .{ .kind = if (test_threw) .pass_negative else .fail_false_accept };
+        return if (test_threw) .{ .kind = .pass_negative } else fail_accept_or_ch;
     }
 
     // §INTERPRETING.md async-flagged tests pass iff `$DONE()`
@@ -2607,7 +2592,7 @@ fn classifyAndRun(
         // or genuine engine bugs surfaced by SES enforcement.
         //
         // Two-layer lookup: the message-based `classify` catches
-        // the bulk (~99.5 % of divergent fixtures); a smaller
+        // the bulk (~99.5 % of correctly_handled fixtures); a smaller
         // curated `classifyByPath` escape hatch covers fixtures
         // whose generic message (e.g. bare `Expected SameValue(
         // «false», «true») to be true` from non-propertyHelper
@@ -2617,11 +2602,17 @@ fn classifyAndRun(
             const cat = ses_divergent.classify(name_str, msg_str) orelse
                 ses_divergent.classifyByPath(rel);
             if (cat != null) {
-                // Skip the FAIL log line for the divergent
+                // Skip the FAIL log line for the correctly_handled
                 // case — it's not a real failure, and printing
                 // ~2500 of these per sweep is noise.
-                return .{ .kind = .fail_divergent };
+                return .{ .kind = .fail_correctly_handled };
             }
+        }
+
+        // A path/feature-based policy match also routes through
+        // `correctly_handled` and silences the FAIL log.
+        if (sticky_policy != null) {
+            return .{ .kind = .fail_correctly_handled };
         }
 
         // Real-failure FAIL log render.
@@ -2649,16 +2640,16 @@ fn classifyAndRun(
     // enforcement loses tests where the body is implicitly
     // synchronous and just relies on assert() inside it.
     if (fm.flags.async_flag) {
-        if (test_threw) return .{ .kind = .fail_false_reject };
+        if (test_threw) return fail_reject_or_ch;
         if (realm.async_done_called) {
-            if (!realm.async_done_error.isUndefined()) return .{ .kind = .fail_false_reject };
+            if (!realm.async_done_error.isUndefined()) return fail_reject_or_ch;
             return .{ .kind = .pass_positive };
         }
         // No $DONE called. Treat as pass — many fixtures rely on
         // implicit success.
         return .{ .kind = .pass_positive };
     }
-    return .{ .kind = if (test_threw) .fail_false_reject else .pass_positive };
+    return if (test_threw) fail_reject_or_ch else .{ .kind = .pass_positive };
 }
 
 /// True if any error-severity diagnostic in `items` has an
@@ -2907,7 +2898,7 @@ fn printVerbose(io: std.Io, rel: []const u8, r: RunResult) !void {
         .fail_false_reject => "FAIL(reject)",
         .fail_false_accept => "FAIL(accept)",
         .skip => "SKIP",
-        .fail_divergent => "DIVERGENT",
+        .fail_correctly_handled => "DIVERGENT",
     };
     const msg = try std.fmt.bufPrint(&buf, "{s} {s}\n", .{ tag, rel });
     try std.Io.File.stderr().writeStreamingAll(io, msg);
@@ -2916,15 +2907,14 @@ fn printVerbose(io: std.Io, rel: []const u8, r: RunResult) !void {
 fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
     var buf: [1024]u8 = undefined;
     const pass_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(stats.total));
-    // Layout A `spec%` for hardened mode: (pass + divergent) /
-    // total. Divergent counts as "engine behaved correctly"
-    // because SES is part of the spec Cynic ships in hardened
-    // mode. Equals `pass_pct` for non-hardened sweeps because
-    // `stats.divergent` stays zero.
-    const adj_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass() + stats.divergent)) / @as(f64, @floatFromInt(stats.total));
+    // Headline `pass%`: (passing + correctly_handled) / total. A
+    // correctly-handled fixture is one Cynic refuses by design, so
+    // it counts toward the headline. Equals `pass_pct` when there
+    // are no correctly-handled fixtures.
+    const adj_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass() + stats.correctly_handled)) / @as(f64, @floatFromInt(stats.total));
     // Suppress the `adj:` line when there's no divergence — keeps
     // the unhardened phase's tally clean.
-    if (stats.divergent == 0) {
+    if (stats.correctly_handled == 0) {
         const msg = try std.fmt.bufPrint(&buf,
             \\corpus:   {d}
             \\pass:     {d}   ({d:.2}% — pass / corpus)
@@ -2955,8 +2945,8 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
         const msg = try std.fmt.bufPrint(&buf,
             \\corpus:    {d}
             \\pass:      {d}   ({d:.2}% engine-true)
-            \\divergent: {d}
-            \\pass%:     {d:.2}% — (pass + divergent) / corpus under SES policy
+            \\corr-hand: {d}
+            \\pass%:     {d:.2}% — (pass + correctly-handled) / corpus
             \\fail:      {d}
             \\skip:      {d}
             \\oos:       {d}   (dropped from corpus — strict-only, Annex B, pre-Stage-4)
@@ -2968,7 +2958,7 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
             stats.total,
             stats.pass(),
             pass_pct,
-            stats.divergent,
+            stats.correctly_handled,
             adj_pct,
             stats.fail(),
             stats.skip,
@@ -3214,14 +3204,12 @@ const Row = struct {
     attempted: u32,
     spec_pct: f64,
     attempted_pct: f64,
-    /// SES-divergent fixture count for `.runtime_hardened` rows.
-    /// Zero for every other mode. Drives the Layout A score-row
-    /// math from `docs/handbook/ses-test262-policy.md`: hardened
-    /// headline `spec%` is `(pass + divergent) / total`, so the
-    /// raw `spec_pct` field is overridden with the adjusted
-    /// number at write time and the absolute count surfaces in
-    /// a new `divergent` column.
-    divergent: u32 = 0,
+    /// Correctly-handled fixture count for this row. Headline
+    /// `pass%` is `(passing + correctly_handled) / total`; the count
+    /// also surfaces as its own column. Hardened rows carry the
+    /// most (SES throws on top of the path-policy buckets);
+    /// unhardened rows carry the path-policy buckets only.
+    correctly_handled: u32 = 0,
     /// Wall-clock duration of the run that produced this row, in
     /// milliseconds. `null` on rows imported from history files
     /// that predate the `elapsed` column and on partial runs
@@ -3230,7 +3218,7 @@ const Row = struct {
     elapsed_ms: ?u64 = null,
     /// SES-witness side-channel counters (Phase 3 of
     /// `docs/handbook/ses-test262-policy.md`). Populated on
-    /// `.runtime_hardened` rows from the run that produced them.
+    /// `.hardened` rows from the run that produced them.
     /// Zero for parsed-from-history rows that predate the column,
     /// for other modes, and for runs that didn't touch any
     /// witness paths (`--filter` excluded them). Rendered as a
@@ -3244,20 +3232,20 @@ const Row = struct {
 /// Derive `attempted` from `pass` and `attempted_pct` for rows
 /// imported from history files that didn't carry the column.
 /// `attempted_pct = 100 * engine_pass / attempted` where
-/// `engine_pass = pass - divergent` (the spec-literal pass
+/// `engine_pass = pass - correctly_handled` (the spec-literal pass
 /// numerator). Solve for `attempted`. Falls back to `engine_pass`
 /// (≡ 100% attempted ≡ 0 fail) when the percent is zero or
 /// rounding would underflow.
 ///
-/// The `divergent` term is what makes this correct for hardened
-/// rows: their `pass` column includes the SES-divergent count,
+/// The `correctly_handled` term is what makes this correct for hardened
+/// rows: their `pass` column includes the SES-correctly_handled count,
 /// but `attempted_pct` was computed against the engine-true pass
-/// (excluding divergent). A naive solve without subtracting
-/// divergent inflates `attempted` by ~`divergent / engine%` —
-/// e.g. for hardened 37503 / 99.97, omitting divergent gave
+/// (excluding correctly_handled). A naive solve without subtracting
+/// correctly_handled inflates `attempted` by ~`correctly_handled / engine%` —
+/// e.g. for hardened 37503 / 99.97, omitting correctly_handled gave
 /// 37514 instead of the correct 34487.
-fn deriveAttempted(pass: u32, divergent: u32, attempted_pct: f64) u32 {
-    const engine_pass = if (pass >= divergent) pass - divergent else pass;
+fn deriveAttempted(pass: u32, correctly_handled: u32, attempted_pct: f64) u32 {
+    const engine_pass = if (pass >= correctly_handled) pass - correctly_handled else pass;
     if (attempted_pct <= 0.0 or engine_pass == 0) return engine_pass;
     const a = @as(f64, @floatFromInt(engine_pass)) * 100.0 / attempted_pct;
     const rounded: u32 = @intFromFloat(@round(a));
@@ -3354,9 +3342,9 @@ fn writeResults(
     // extracting its raw text so a parser refresh or unhardened-
     // only refresh doesn't wipe the per-bucket signal. The
     // scoreboard regen trigger in `writeFileBody` matches —
-    // `mode_just_run == .runtime_hardened` regenerates;
+    // `mode_just_run == .hardened` regenerates;
     // everything else falls back to `preserved_scoreboard`.
-    const preserved_scoreboard: ?[]const u8 = if (mode == .runtime_hardened)
+    const preserved_scoreboard: ?[]const u8 = if (mode == .hardened)
         null
     else
         extractScoreboardSection(existing);
@@ -3364,7 +3352,7 @@ fn writeResults(
     // dedicated phase sweeps, which run alongside the unhardened
     // path. Preserve verbatim unless the run that just finished
     // is the unhardened one (which feeds the per-feature stats).
-    const preserved_pre_stage4: ?[]const u8 = if (mode == .runtime)
+    const preserved_pre_stage4: ?[]const u8 = if (mode == .unhardened)
         null
     else
         extractPreStage4Section(existing);
@@ -3374,7 +3362,7 @@ fn writeResults(
     // that just finished is NOT hardened, preserve the previous
     // note verbatim so a parser- or unhardened-mode refresh
     // doesn't drop the line from the Current Scores section.
-    const preserved_witness_note: ?[]const u8 = if (mode == .runtime_hardened)
+    const preserved_witness_note: ?[]const u8 = if (mode == .hardened)
         null
     else
         extractWitnessNote(existing);
@@ -3382,7 +3370,7 @@ fn writeResults(
     // Detect the one-time pre→post Phase 5c transition (per-area
     // pass column shifting from unhardened to hardened source).
     // The biggest-movers callout in `writeFileBody` skips when
-    // the previous file's scoreboard had no `divergent` column.
+    // the previous file's scoreboard had no `correctly_handled` column.
     const prev_scoreboard_phase5c = prevScoreboardHasDivergent(existing);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -3400,18 +3388,15 @@ fn makeRow(
     test262_sha: []const u8,
     elapsed_ms: ?u64,
 ) Row {
-    // Layout A from `docs/handbook/ses-test262-policy.md`: the
-    // headline `spec%` for `runtime_hardened` counts the
-    // divergent fixtures as passes (they're SES doing its job,
-    // not engine bugs), so the row is directly comparable to
-    // the unhardened `runtime` baseline. For every other mode
-    // `stats.divergent` is zero and the math collapses back to
-    // the original `pass / total`.
-    const headline_pass: u32 = stats.pass() + stats.divergent;
+    // Headline `pass%` counts correctly-handled fixtures as passes
+    // (Cynic's deliberate "no" is the right answer for the policy it
+    // ships), so all rows are directly comparable. With no
+    // correctly-handled fixtures the math is just `pass / total`.
+    const headline_pass: u32 = stats.pass() + stats.correctly_handled;
     const spec_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(stats.total));
     // `attempted%` deliberately keeps the raw-pass numerator —
     // it's the engine-quality gauge (what fraction of what we
-    // actually ran passed), and a divergent reclassification
+    // actually ran passed), and a correctly_handled reclassification
     // shouldn't move it. Drops on any real failure regardless
     // of SES policy.
     const attempted = stats.pass() + stats.fail();
@@ -3426,7 +3411,7 @@ fn makeRow(
         .attempted = attempted,
         .spec_pct = spec_pct,
         .attempted_pct = att_pct,
-        .divergent = stats.divergent,
+        .correctly_handled = stats.correctly_handled,
         .elapsed_ms = elapsed_ms,
         .witness_pass = stats.witness_pass,
         .witness_total = stats.witness_pass + stats.witness_fail,
@@ -3456,6 +3441,19 @@ fn currentShortSha(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ?[]u8 {
     return gpa.dupe(u8, trimmed) catch null;
 }
 
+/// Parse a Mode label from a history row's first cell, accepting
+/// both the current spellings (`unhardened` / `hardened` /
+/// `unhardened-allow-eval`) and the legacy ones (`runtime` /
+/// `runtime-hardened` / `runtime_hardened`) so a history file
+/// written before the rename re-renders into the new naming on
+/// the next write rather than dropping rows on the floor.
+fn parseModeLabel(s: []const u8) ?Mode {
+    if (std.mem.eql(u8, s, "runtime")) return .unhardened;
+    if (std.mem.eql(u8, s, "runtime-hardened")) return .hardened;
+    if (std.mem.eql(u8, s, "runtime_hardened")) return .hardened;
+    return std.meta.stringToEnum(Mode, s);
+}
+
 /// Read rows from the legacy linear table (`| date | mode |
 /// scope | cynic_sha | test262_sha | total | pass | fail | skip
 /// | spec% | attempted% |`). Only rows with `scope == cynic`
@@ -3477,7 +3475,7 @@ fn parseLinearRows(
         const date = std.mem.trim(u8, it.next() orelse continue, " ");
         const mode_s = std.mem.trim(u8, it.next() orelse continue, " ");
         const scope_s = std.mem.trim(u8, it.next() orelse continue, " ");
-        const mode = std.meta.stringToEnum(Mode, mode_s) orelse continue;
+        const mode = parseModeLabel(mode_s) orelse continue;
         if (!std.mem.eql(u8, scope_s, "cynic")) continue;
         const cynic_sha = std.mem.trim(u8, it.next() orelse continue, " ");
         const t262_sha = std.mem.trim(u8, it.next() orelse continue, " ");
@@ -3561,9 +3559,57 @@ fn parsePerDayRows(
             const scope_part = std.mem.trim(u8, label[comma + 1 ..], " ");
             if (!std.mem.eql(u8, scope_part, "cynic")) continue;
         }
-        const mode = std.meta.stringToEnum(Mode, mode_part) orelse continue;
+        const mode = parseModeLabel(mode_part) orelse continue;
 
-        const spec_cell = std.mem.trim(u8, it.next() orelse continue, " ");
+        // Peek the first data cell to decide between legacy schema
+        // (`pass% | engine% | pass / corpus | pass / engine-attempt
+        // | divergent | Δ pass | elapsed`) and the new Layout-B
+        // schema (`passing | failing | correctly handled | total |
+        // pass% | Δ pass | elapsed`). Legacy ends the first cell
+        // with `%`; the new schema's first cell is a plain integer.
+        const first_data_cell_raw = it.next() orelse continue;
+        const first_data_cell = std.mem.trim(u8, first_data_cell_raw, " ");
+        if (first_data_cell.len > 0 and first_data_cell[first_data_cell.len - 1] != '%') {
+            // New Layout-B schema. Parse as passing | failing |
+            // correctly_handled | total | pass% | Δ pass | elapsed.
+            const passing = std.fmt.parseInt(u32, first_data_cell, 10) catch continue;
+            const failing_cell = std.mem.trim(u8, it.next() orelse continue, " ");
+            const failing = std.fmt.parseInt(u32, failing_cell, 10) catch continue;
+            const ch_cell = std.mem.trim(u8, it.next() orelse continue, " ");
+            const ch = std.fmt.parseInt(u32, ch_cell, 10) catch continue;
+            const total_cell = std.mem.trim(u8, it.next() orelse continue, " ");
+            const total_b = std.fmt.parseInt(u32, total_cell, 10) catch continue;
+            const passpct_cell = std.mem.trim(u8, it.next() orelse continue, " ");
+            const spec_pct_b = std.fmt.parseFloat(f64, trimSuffix(passpct_cell, "%")) catch continue;
+            _ = it.next(); // Δ pass cell — recomputed at render time
+            const elapsed_cell_raw_b = it.next();
+            const elapsed_ms_b: ?u64 = blk: {
+                const cell_raw = elapsed_cell_raw_b orelse break :blk null;
+                const cell = std.mem.trim(u8, cell_raw, " ");
+                if (cell.len == 0) break :blk null;
+                break :blk parseElapsedCell(cell);
+            };
+            try rows.append(gpa, .{
+                .date = date,
+                .mode = mode,
+                .cynic_sha = cynic_sha,
+                .test262_sha = t262_sha,
+                .total = total_b,
+                .pass = passing + ch, // Row.pass = Layout-A-style headline
+                .attempted = passing + failing,
+                .spec_pct = spec_pct_b,
+                .attempted_pct = if (passing + failing == 0)
+                    0
+                else
+                    100.0 * @as(f64, @floatFromInt(passing)) / @as(f64, @floatFromInt(passing + failing)),
+                .correctly_handled = ch,
+                .elapsed_ms = elapsed_ms_b,
+            });
+            continue;
+        }
+
+        // Legacy schema continues here.
+        const spec_cell = first_data_cell;
         const att_cell = std.mem.trim(u8, it.next() orelse continue, " ");
         const pt_cell = std.mem.trim(u8, it.next() orelse continue, " ");
 
@@ -3586,17 +3632,16 @@ fn parsePerDayRows(
             const slash_pa = std.mem.indexOf(u8, cell, "/") orelse break :blk null;
             break :blk std.fmt.parseInt(u32, std.mem.trim(u8, cell[slash_pa + 1 ..], " "), 10) catch null;
         };
-        // `divergent` column (added 2026-05-26 as Layout A in
-        // `docs/handbook/ses-test262-policy.md`). Pre-Layout-A
-        // rows don't have it; the next cell is the Δ-pass cell
+        // The legacy schema's `divergent` column. Older rows don't
+        // have it; the next cell is then the Δ-pass cell
         // (which we always skip — it's computed fresh per
         // render). Distinguish by content: `—` or a plain
-        // integer is the divergent column; anything containing
+        // integer is the correctly_handled column; anything containing
         // `±`, `+`, or `-` (the Δ-pass sign) is the legacy
         // schema's Δ cell.
-        var divergent: u32 = 0;
+        var correctly_handled: u32 = 0;
         const next_cell_raw = it.next();
-        const seen_divergent_cell = blk: {
+        const seen_correctly_handled_cell = blk: {
             if (next_cell_raw) |raw| {
                 const cell = std.mem.trim(u8, raw, " ");
                 if (cell.len == 0) break :blk false;
@@ -3605,7 +3650,7 @@ fn parsePerDayRows(
                 // integer — it always has a sign prefix.
                 if (cell[0] == '+' or cell[0] == '-' or std.mem.startsWith(u8, cell, "±")) break :blk false;
                 if (std.mem.startsWith(u8, cell, "n/a")) break :blk false;
-                divergent = std.fmt.parseInt(u32, cell, 10) catch break :blk false;
+                correctly_handled = std.fmt.parseInt(u32, cell, 10) catch break :blk false;
                 break :blk true;
             }
             break :blk false;
@@ -3616,7 +3661,7 @@ fn parsePerDayRows(
         // and we already consumed the Δ-pass cell into
         // `next_cell_raw`, the elapsed cell is the next iter
         // token.
-        const elapsed_cell_raw = if (seen_divergent_cell) blk: {
+        const elapsed_cell_raw = if (seen_correctly_handled_cell) blk: {
             _ = it.next(); // discard Δ-pass cell
             break :blk it.next();
         } else it.next(); // legacy schema: Δ-pass cell already consumed into next_cell_raw, elapsed is next
@@ -3633,10 +3678,10 @@ fn parsePerDayRows(
             .test262_sha = t262_sha,
             .total = total,
             .pass = pass,
-            .attempted = pa_attempted_override orelse deriveAttempted(pass, divergent, att_pct),
+            .attempted = pa_attempted_override orelse deriveAttempted(pass, correctly_handled, att_pct),
             .spec_pct = spec_pct,
             .attempted_pct = att_pct,
-            .divergent = divergent,
+            .correctly_handled = correctly_handled,
             .elapsed_ms = elapsed_ms,
         });
     }
@@ -3692,7 +3737,7 @@ fn writeFileBody(
     prev_bucket_pass: *const std.StringHashMapUnmanaged(u32),
     mode_just_run: Mode,
     /// Verbatim text of the previous `## Where the runtime …`
-    /// section, used when `mode_just_run != .runtime` so a
+    /// section, used when `mode_just_run != .unhardened` so a
     /// parser refresh doesn't drop the scoreboard from the last
     /// runtime sweep. `null` when no scoreboard exists yet (the
     /// scoreboard appears for the first time only after a
@@ -3710,10 +3755,10 @@ fn writeFileBody(
     /// instead) or when no prior note exists in the file.
     preserved_witness_note: ?[]const u8,
     /// True if the existing file's per-area scoreboard already
-    /// has a `divergent` column (post-Phase-5c shape). Gates the
+    /// has a `correctly_handled` column (post-Phase-5c shape). Gates the
     /// biggest-movers callout: on the one-time pre→post-5c
     /// transition, every bucket's pass count legitimately drops
-    /// by its divergent count (source shifted from unhardened to
+    /// by its correctly_handled count (source shifted from unhardened to
     /// hardened), which would dominate the movers list with
     /// synthetic "regressions." Suppressing the callout once
     /// keeps the signal clean.
@@ -3726,71 +3771,57 @@ fn writeFileBody(
     );
     // TL;DR — derives the headline numbers from the latest
     // hardened-posture row so a casual reader hits the important
-    // breakdown first without parsing the table below. Lists all
-    // four outcome buckets explicitly because conflating
-    // engine-pass with policy-divergent in a single percentage
-    // hides where the work actually is.
-    if (latestRow(rows, .runtime_hardened)) |r| {
-        const engine_pass = r.pass - r.divergent;
-        const real_fails = r.attempted - engine_pass; // r.attempted is engine-true
-        const skip = r.total - r.pass - real_fails;
-        var tb: [2048]u8 = undefined;
+    // breakdown first without parsing the table below.
+    if (latestRow(rows, .hardened)) |r| {
+        const engine_pass = r.pass - r.correctly_handled;
+        const engine_fail = if (r.attempted >= engine_pass) r.attempted - engine_pass else 0;
+        var tb: [1536]u8 = undefined;
         const tldr = try std.fmt.bufPrint(
             &tb,
             "**Cynic passes {d:.2} % of its {d}-fixture test262 corpus** under the " ++
                 "default (hardened SES) posture (`cynic run`). The breakdown:\n\n" ++
-                "- **{d} pass** at the engine-true level (engine% = {d:.2} % — see Legend).\n" ++
-                "- **{d} SES-policy divergences** — Cynic's hardened posture throws by " ++
-                "design where test262 expects the spec-literal success (frozen primordials, " ++
-                "locked descriptors, override-mistake fix). Counted as engine-correct in " ++
-                "the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.\n" ++
-                "- **{d} real engine failures** — Cynic returns the wrong answer or " ++
-                "throws where the spec expects success. (libregexp Annex B / `/v` " ++
-                "carve-outs are documented in [AGENTS.md](../AGENTS.md).)\n" ++
-                "- **{d} skipped** — *in-corpus* skips that should eventually pass: " ++
-                "single-realm Cynic (`$262.createRealm()` cross-realm fixtures, which " ++
-                "need multi-realm support) plus a handful of eval-dependent fixtures " ++
-                "awaiting `--allow=eval`.\n" ++
-                "- **Out of scope, dropped before `corpus`:** sloppy-mode " ++
-                "(`flags: [noStrict]`) fixtures — Cynic is strict-only — the " ++
-                "Annex B / browser-era feature tags (`__proto__`, `legacy-regexp`, " ++
-                "`IsHTMLDDA`, …), the `annexB/` tree, `intl402/`, `staging/`, SES " ++
-                "carve-outs, and the feature tags for pre-Stage-4 proposals Cynic " ++
-                "hasn't implemented yet (decorators, import-defer, source-phase-imports, " ++
-                "import-bytes, immutable-arraybuffer, await-dictionary). The denominator " ++
-                "is pinned to the published ECMAScript edition; an unimplemented " ++
-                "proposal's fixtures re-enter `corpus` once it reaches Stage 4. " ++
-                "Implemented pre-Stage-4 proposals (joint-iteration, ShadowRealm) are " ++
-                "scored separately behind `--enable=`, not here.\n\n",
-            .{ r.spec_pct, r.total, engine_pass, r.attempted_pct, r.divergent, real_fails, skip },
+                "- **{d} passing** — Cynic produced the spec-expected result.\n" ++
+                "- **{d} correctly handled** — failures that hit a Cynic design policy " ++
+                "(Annex B not shipped, strict-only, no Intl, eval-off, SES throw) " ++
+                "rather than an engine bug. Counted as spec-correct in `pass%` because " ++
+                "Cynic's deliberate \"no\" is the right answer for the policy it ships.\n" ++
+                "- **{d} failing** — real engine failures with no policy bucket. Work to do.\n" ++
+                "- **Out of total**, dropped before `corpus`: the upstream `harness/` and " ++
+                "`staging/` paths, and every Stage ≤ 3 proposal (decorators, import-defer, " ++
+                "source-phase-imports, import-bytes, immutable-arraybuffer, " ++
+                "await-dictionary, plus shipped joint-iteration / ShadowRealm — those get " ++
+                "their own dedicated scoreboard).\n\n",
+            .{ r.spec_pct, r.total, engine_pass, r.correctly_handled, engine_fail },
         );
         try out.appendSlice(gpa, tldr);
     }
     try out.appendSlice(gpa,
         \\## Current scores
         \\
-        \\| posture | pass% | engine% | passes / corpus | divergent |
-        \\|---|---:|---:|---:|---:|
+        \\| posture | passing | failing | correctly handled | total | pass% |
+        \\|---|---:|---:|---:|---:|---:|
         \\
     );
-    // Hardened row first (the default Cynic posture, `cynic run`),
-    // unhardened second (`--unhardened` opt-out / legacy
-    // ECMAScript baseline). Same engine path, different SES
-    // posture; the only meaningful delta is the `divergent`
-    // column.
-    inline for (.{ Mode.runtime_hardened, Mode.runtime }) |m| {
+    // Three rows in user-visible order: the `--allow=eval` opt-in
+    // first (currently a placeholder — `--allow=eval` hasn't shipped
+    // yet, see `docs/ses-alignment.md`, so the row reads `n/a` until
+    // the eval surface is wired into a phase sweep), then the
+    // unhardened baseline (`--unhardened` opt-out), then hardened
+    // (the default Cynic posture, `cynic run`). Same engine path,
+    // different policy mask: unhardened counts annex_b + no_strict +
+    // intl402 + eval as correctly handled; hardened adds SES on top.
+    try writeAllowEvalPlaceholderRow(gpa, out);
+    inline for (.{ Mode.unhardened, Mode.hardened }) |m| {
         if (latestRow(rows, m)) |r| try writeMiniRow(gpa, out, r);
     }
     try out.appendSlice(gpa,
         \\
-        \\> **pass%** is the headline — `pass / corpus` (a fixture
-        \\> Cynic doesn't ship counts as a `skip`, lowering this).
-        \\> **engine%** = `pass / (pass + fail)` — of fixtures the
-        \\> engine attempted, the fraction that passed at the
-        \\> spec-literal level (skips and SES divergences drop
-        \\> out). **The engine-quality gauge** — moves only when
-        \\> a real fixture flips engine pass/fail, independent of
-        \\> what's left unimplemented or how SES policy weighs in.
+        \\> **pass%** = `(passing + correctly handled) / total`. A
+        \\> fixture that fails because of a Cynic design policy
+        \\> (Annex B not shipped, strict-only, no Intl, eval-off, SES
+        \\> throw) counts as **correctly handled** rather than a
+        \\> real engine bug. Plain **failing** is what's left over —
+        \\> real engine work to do.
         \\
         \\
     );
@@ -3805,14 +3836,14 @@ fn writeFileBody(
     // hardened runs (parser / unhardened refreshes) preserve the
     // previous note verbatim via `preserved_witness_note` so the
     // line survives across writes.
-    if (mode_just_run == .runtime_hardened) {
-        if (latestRow(rows, .runtime_hardened)) |r| {
+    if (mode_just_run == .hardened) {
+        if (latestRow(rows, .hardened)) |r| {
             if (r.witness_total > 0) {
                 const pct: f64 = 100.0 * @as(f64, @floatFromInt(r.witness_pass)) / @as(f64, @floatFromInt(r.witness_total));
                 var wb: [256]u8 = undefined;
                 const wn = try std.fmt.bufPrint(
                     &wb,
-                    "*SES witness fidelity*: **{d} / {d}** witnesses classify as `divergent` ({d:.2} %). " ++
+                    "*SES witness fidelity*: **{d} / {d}** witnesses classify as SES-correctly-handled ({d:.2} %). " ++
                         "Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. " ++
                         "See `docs/handbook/ses-test262-policy.md`.\n\n",
                     .{ r.witness_pass, r.witness_total, pct },
@@ -3835,60 +3866,50 @@ fn writeFileBody(
         \\
         \\### Rows (postures)
         \\
-        \\Same engine path, different SES posture. Both numbers
+        \\Same engine path, different policy mask. All three rows
         \\refer to the same parse → compile → run sweep.
         \\
-        \\- **hardened** — the default posture (`cynic run`).
-        \\  Primordials frozen, override-mistake fix on, locked
-        \\  descriptors on every built-in `.name` / `.length`.
-        \\  Fixtures that check spec-mandated `configurable: true`
-        \\  on those slots reclassify as **divergent** (the engine
-        \\  throws correctly; the test's expectation is the part
-        \\  invalidated by SES).
-        \\- **unhardened** — `cynic --unhardened` opt-out. Same
-        \\  engine, but `realm.hardened = false` — primordials
-        \\  stay mutable, globalThis extensible, no
-        \\  override-mistake fix. The pre-SES ECMAScript baseline.
-        \\  No fixtures get divergent-reclassified here.
+        \\- **unhardened, `--allow=eval`** — unhardened plus the
+        \\  eval surface (`eval()`, `new Function(string)`, …) opted
+        \\  in. Placeholder today: `--allow=eval` isn't shipped (see
+        \\  `docs/ses-alignment.md`), so no sweep populates this row
+        \\  and every cell reads `n/a`. When the opt-in lands, eval
+        \\  fixtures move from "correctly handled" to plain passing.
+        \\- **unhardened** — `cynic --unhardened` opt-out. Eval off
+        \\  (so eval-dependent fixtures fail and classify as
+        \\  correctly handled), Annex B / Intl / noStrict failures
+        \\  also classify as correctly handled. SES posture off —
+        \\  no SES throws.
+        \\- **hardened** — the default posture (`cynic run`). All
+        \\  the unhardened policies plus SES — primordials frozen,
+        \\  override-mistake fix on, locked descriptors. Fixtures
+        \\  whose expectation conflicts with SES enforcement throw
+        \\  by design and classify as correctly handled.
         \\
         \\### Columns
         \\
-        \\- **`pass%`** — `pass / corpus`. Under **hardened**, the
-        \\  numerator is `(pass + divergent)` per Layout A: divergent
-        \\  fixtures fail by the strict ECMA-262 letter (SES rejects
-        \\  writes the spec allows) but Cynic's default posture
-        \\  ships the SES policy, so they count as engine-correct.
-        \\  **This is what an embedder running `cynic run` sees
-        \\  succeed.** Under **unhardened**, the numerator is plain
-        \\  `pass`.
-        \\- **`engine%`** — `pass / (pass + fail)`. Of fixtures the
-        \\  engine actually attempted, the fraction that passed at
-        \\  the spec-literal engine level (no SES weighting). The
-        \\  pass numerator excludes `divergent`, so a hardened
-        \\  regression that flips a real fixture from pass to fail
-        \\  moves this column even when the divergent count masks
-        \\  the headline `pass%`. **This is the actual engine-
-        \\  quality gauge** — today >99.9 % both rows.
-        \\- **`passes / corpus`** — raw counts for `pass%`. Under
-        \\  hardened, `passes` includes divergent.
-        \\- **`divergent`** (hardened-only) — fixtures whose
-        \\  test262-written assertion conflicts with SES enforcement
-        \\  (frozen primordials, locked descriptors, override-mistake
-        \\  fix). The engine throws on the offending operation; the
-        \\  fixture's "expected pass" is invalidated by Cynic's SES
-        \\  policy. **These are spec-failures by ECMA-262's letter**,
-        \\  accepted as policy-correct under the hardened posture.
-        \\  Counted separately from `fail`. See
-        \\  `docs/handbook/ses-test262-policy.md`.
+        \\- **`passing`** — engine-true successes. Cynic produced
+        \\  the spec-expected result.
+        \\- **`failing`** — engine-true failures that *don't* match
+        \\  any design policy. Real work to do.
+        \\- **`correctly handled`** — failures that hit a Cynic
+        \\  design policy: Annex B not shipped, strict-only,
+        \\  no Intl, eval-off, or SES throw. Counted with passes
+        \\  under `pass%` because Cynic's deliberate "no" is the
+        \\  spec-correct answer for the policy Cynic ships.
+        \\  First-match priority: annex_b > no_strict > intl402 >
+        \\  eval > SES.
+        \\- **`total`** — every fixture except pre-Stage-4
+        \\  proposals (Stage ≤ 3, shipped or not) and the upstream
+        \\  `staging/` / `harness/` paths.
+        \\- **`pass%`** — `(passing + correctly handled) / total`.
+        \\  The headline.
         \\- **SES witness fidelity** (the italic note above) —
-        \\  Phase 3 positive-coverage signal. The curated witness
-        \\  set in `tools/test262/ses_witnesses.zig` is a small
-        \\  list of paths that MUST classify as `divergent` under
-        \\  hardened runs. Drift either way (witness now passes —
-        \\  SES enforcement weakened; or witness fails for a
-        \\  non-divergence reason — pattern miss or engine
-        \\  regression in the SES throw path) is a hard signal.
-        \\  CI gates the floor at 100 %.
+        \\  positive-coverage signal. The curated witness set in
+        \\  `tools/test262/ses_witnesses.zig` is a small list of
+        \\  paths that MUST classify under the SES policy under
+        \\  hardened runs. Drift either way is a hard signal. CI
+        \\  gates the floor at 100 %.
         \\- **`Δ pass`** (history) — change in `pass` versus the
         \\  previous row of the same posture.
         \\- **`elapsed`** (history) — wall-clock time of the run
@@ -3909,56 +3930,34 @@ fn writeFileBody(
         \\a lower bound on spec coverage — a fixture not in
         \\`corpus` doesn't get a verdict either way.
         \\
-        \\### Scope (what's in `corpus`)
+        \\### Scope (what's in `total`)
         \\
-        \\Two-tier skiplist in
-        \\[`tools/test262/skip.zig`](../tools/test262/skip.zig)
-        \\(see the per-group comments there for the full list):
+        \\Every test262 fixture runs except:
         \\
-        \\- **Filtered out** (not in `corpus`): sloppy-mode
-        \\  fixtures (`flags: [noStrict]`) — Cynic is strict-only;
-        \\  Annex B language extensions + browser-era built-ins
-        \\  (both the `annexB/` tree and the `__proto__` /
-        \\  `legacy-regexp` / `IsHTMLDDA` feature tags);
-        \\  `intl402/`, `harness/`, `staging/`, SES carve-outs
-        \\  (`eval()` until `--allow=eval` ships, SharedArrayBuffer
-        \\  / Atomics); and the feature tags for pre-Stage-4
-        \\  proposals Cynic hasn't implemented yet (decorators,
+        \\- the upstream `harness/` and `staging/` paths (helpers
+        \\  and WIP grounds, not portable spec fixtures); and
+        \\- every Stage ≤ 3 proposal — both unshipped (decorators,
         \\  import-defer, source-phase-imports, import-bytes,
-        \\  immutable-arraybuffer, await-dictionary). The
-        \\  denominator is pinned to the published ECMAScript
-        \\  edition: an unimplemented proposal's fixtures stay out
-        \\  of `corpus` (reason `pre_stage4`) until it reaches
-        \\  Stage 4, so the headline only moves when Cynic does, not
-        \\  when TC39 lands new proposal fixtures upstream. Pre-
-        \\  Stage-4 proposals Cynic *has* implemented (joint-
-        \\  iteration, ShadowRealm) ship behind `--enable=<name>`
-        \\  and get their own phase sweep in `## Pre-Stage-4
-        \\  proposals shipped` below. The harness reports the
-        \\  frontmatter-driven trim (`noStrict` + Annex B +
-        \\  pre-Stage-4 feature tags) as `oos` in its per-run tally.
-        \\- **In `corpus` as `skip`** — *tech debt*, should
-        \\  eventually pass: cross-realm fixtures
-        \\  (`$262.createRealm()` — single-realm Cynic doesn't
-        \\  expose multi-realm to user JS yet) and eval-dependent
-        \\  fixtures awaiting `--allow=eval`. (A specced feature
-        \\  blocked on a vendored dependency would land here too;
-        \\  none today — Perlex covers the regex surface.) These
-        \\  count toward `corpus` so `pass%` reflects the actual
-        \\  work left instead of a trimmed-denominator headline.
+        \\  immutable-arraybuffer, await-dictionary) and shipped
+        \\  (joint-iteration, ShadowRealm). Shipped pre-Stage-4
+        \\  proposals get their own scoreboard in `## Pre-Stage-4
+        \\  proposals shipped` below.
         \\
-        \\Today: test262 ships ~52k fixtures; `corpus` is ~44k.
+        \\Annex B / `noStrict` / `intl402/` / the eval surface
+        \\are NOT skipped — they run and any failure classifies
+        \\as **correctly handled** under the matching policy.
+        \\
         \\
     );
 
     // Per-area scoreboard. Sourced from the **hardened (default)**
     // sweep so its numbers match what embedders see at `cynic
-    // run`, and so the `divergent` column carries actual SES-
-    // reclassification data — the unhardened path has no divergent
+    // run`, and so the `correctly_handled` column carries actual SES-
+    // reclassification data — the unhardened path has no correctly_handled
     // classifications by construction. For non-hardened writes
     // (unhardened-only refresh) re-emit the previous scoreboard
     // verbatim so the per-bucket signal survives.
-    if (mode_just_run == .runtime_hardened and buckets.map.count() > 0) {
+    if (mode_just_run == .hardened and buckets.map.count() > 0) {
         try writeScoreboard(gpa, out, buckets);
     } else if (preserved_scoreboard) |s| {
         try out.appendSlice(gpa, s);
@@ -3967,7 +3966,7 @@ fn writeFileBody(
     // Per-feature scoreboard for the pre-Stage-4 proposals Cynic
     // ships ahead of the published edition. Same preservation
     // contract as the per-area scoreboard.
-    if (mode_just_run == .runtime and (preStage4HasData(pre_stage4_hardened) or preStage4HasData(pre_stage4_unhardened))) {
+    if (mode_just_run == .unhardened and (preStage4HasData(pre_stage4_hardened) or preStage4HasData(pre_stage4_unhardened))) {
         try writePreStage4Scoreboard(gpa, out, pre_stage4_hardened, pre_stage4_unhardened);
     } else if (preserved_pre_stage4) |s| {
         try out.appendSlice(gpa, s);
@@ -4002,8 +4001,8 @@ fn writeFileBody(
         }
         try out.appendSlice(gpa, "\n\n");
         try out.appendSlice(gpa,
-            \\|         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
-            \\|---|---|---|---|---|---:|---:|---:|
+            \\|         | passing | failing | correctly handled | total | pass% | Δ pass | elapsed |
+            \\|---|---:|---:|---:|---:|---:|---:|---:|
             \\
         );
 
@@ -4021,11 +4020,11 @@ fn writeFileBody(
         // comparable to the stored hardened baseline (they count
         // parse-positive/negative only) so the deltas would be
         // misleading; unhardened-mode buckets have a slightly
-        // different `pass` total (no divergent reclassification)
+        // different `pass` total (no correctly_handled reclassification)
         // and would show synthetic moves on every alternation.
         // Parser / unhardened refreshes preserve the previous
         // scoreboard verbatim; the callout stays with it.
-        if (first_day and mode_just_run == .runtime_hardened and
+        if (first_day and mode_just_run == .hardened and
             prev_bucket_pass.count() > 0 and prev_scoreboard_phase5c)
         {
             try writeBiggestMovers(gpa, out, buckets, prev_bucket_pass);
@@ -4036,39 +4035,51 @@ fn writeFileBody(
     }
 }
 
-/// Posture label for the `## Current scores` table. Renders the
-/// `runtime` / `runtime_hardened` Mode in user-facing terms:
-/// "hardened (default)" vs "unhardened (`--unhardened`)" so a
-/// reader who doesn't know Cynic's mode naming sees what
-/// matters — which one ships, which one is the opt-out.
+/// Posture label for the `## Current scores` table. Renders each
+/// Mode in user-facing terms so a reader who doesn't know Cynic's
+/// mode naming sees what matters — which one ships, which is the
+/// opt-out, which is the placeholder waiting on `--allow=eval`.
 fn postureLabel(m: Mode) []const u8 {
     return switch (m) {
-        .runtime_hardened => "**hardened** (default — `cynic run`)",
-        .runtime => "**unhardened** (`cynic --unhardened`)",
+        .hardened => "**hardened** (default — `cynic run`)",
+        .unhardened => "**unhardened** (`cynic --unhardened`)",
+        .unhardened_allow_eval => "**unhardened, `--allow=eval`**",
     };
 }
 
+/// Emit the placeholder row for the `--allow=eval` posture. No
+/// sweep populates it yet — `--allow=eval` isn't shipped (see
+/// `docs/ses-alignment.md`) — so every cell renders as `n/a`. The
+/// row exists so the `## Current scores` layout stays stable
+/// when the eval surface lands and starts producing real numbers.
+fn writeAllowEvalPlaceholderRow(
+    gpa: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+) !void {
+    var buf: [256]u8 = undefined;
+    const line = try std.fmt.bufPrint(&buf, "| {s} | n/a | n/a | n/a | n/a | n/a |\n", .{
+        postureLabel(.unhardened_allow_eval),
+    });
+    try out.appendSlice(gpa, line);
+}
+
+/// Column shape: passing | failing | correctly handled | total |
+/// pass%. `r.pass` is stored as `(passing + correctly_handled)`, so we
+/// recover `passing` via subtraction to emit the passing/failing split.
 fn writeMiniRow(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
     r: Row,
 ) !void {
     var buf: [384]u8 = undefined;
-    // Divergent count is the only meaningful per-row delta
-    // between hardened and unhardened. Hardened renders the
-    // count; unhardened renders an em-dash (the SES posture
-    // off → no fixtures get reclassified).
-    if (r.divergent > 0) {
-        const line = try std.fmt.bufPrint(&buf, "| {s} | {d:.2} % | {d:.2} % | {d} / {d} | {d} |\n", .{
-            postureLabel(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, r.divergent,
-        });
-        try out.appendSlice(gpa, line);
-    } else {
-        const line = try std.fmt.bufPrint(&buf, "| {s} | {d:.2} % | {d:.2} % | {d} / {d} | — |\n", .{
-            postureLabel(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total,
-        });
-        try out.appendSlice(gpa, line);
-    }
+    const engine_pass = r.pass - r.correctly_handled; // == passing
+    const engine_fail = if (r.attempted >= engine_pass) r.attempted - engine_pass else 0;
+    const line = try std.fmt.bufPrint(
+        &buf,
+        "| {s} | {d} | {d} | {d} | {d} | {d:.2} % |\n",
+        .{ postureLabel(r.mode), engine_pass, engine_fail, r.correctly_handled, r.total, r.spec_pct },
+    );
+    try out.appendSlice(gpa, line);
 }
 
 /// Render an elapsed-cell. Empty for rows imported from history
@@ -4096,34 +4107,22 @@ fn writeHistoryRow(
     var buf: [512]u8 = undefined;
     var elapsed_buf: [32]u8 = undefined;
     const elapsed_cell = try formatElapsedCell(&elapsed_buf, r.elapsed_ms);
-    // True-engine-pass numerator for the `pass / attempted`
-    // column — divergent reclassifications shouldn't inflate
-    // the engine-quality gauge.
-    const attempted_pass = r.pass - r.divergent;
-    var div_buf: [32]u8 = undefined;
-    const divergent_cell: []const u8 = if (r.divergent > 0)
-        try std.fmt.bufPrint(&div_buf, "{d}", .{r.divergent})
-    else
-        "—";
-    if (prev_pass) |p| {
+    const engine_pass = r.pass - r.correctly_handled; // == passing
+    const engine_fail = if (r.attempted >= engine_pass) r.attempted - engine_pass else 0;
+    const delta_cell: []const u8 = if (prev_pass) |p| blk: {
         const delta: i64 = @as(i64, r.pass) - @as(i64, p);
-        const sign: u8 = if (delta > 0) '+' else if (delta < 0) '-' else 0;
+        if (delta == 0) break :blk "±0";
+        var d_buf: [32]u8 = undefined;
+        const sign: u8 = if (delta > 0) '+' else '-';
         const mag: u64 = @abs(delta);
-        const line = if (sign == 0)
-            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | {s} | ±0 | {s} |\n", .{
-                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, attempted_pass, r.attempted, divergent_cell, elapsed_cell,
-            })
-        else
-            try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | {s} | {c}{d} | {s} |\n", .{
-                @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, attempted_pass, r.attempted, divergent_cell, sign, mag, elapsed_cell,
-            });
-        try out.appendSlice(gpa, line);
-    } else {
-        const line = try std.fmt.bufPrint(&buf, "| **{s}** | {d:.2} % | {d:.2} % | {d} / {d} | {d} / {d} | {s} | n/a | {s} |\n", .{
-            @tagName(r.mode), r.spec_pct, r.attempted_pct, r.pass, r.total, attempted_pass, r.attempted, divergent_cell, elapsed_cell,
-        });
-        try out.appendSlice(gpa, line);
-    }
+        break :blk try std.fmt.bufPrint(&d_buf, "{c}{d}", .{ sign, mag });
+    } else "n/a";
+    const line = try std.fmt.bufPrint(
+        &buf,
+        "| **{s}** | {d} | {d} | {d} | {d} | {d:.2} % | {s} | {s} |\n",
+        .{ @tagName(r.mode), engine_pass, engine_fail, r.correctly_handled, r.total, r.spec_pct, delta_cell, elapsed_cell },
+    );
+    try out.appendSlice(gpa, line);
 }
 
 /// Find the chronologically-previous row of the same mode for
@@ -4148,7 +4147,7 @@ fn writeScoreboard(
 
     try out.appendSlice(gpa,
         \\
-        \\## Where the engine fails (and where SES diverges), by area
+        \\## Where the engine fails, by area
         \\
         \\Per-bucket breakdown sourced from the **hardened (default)**
         \\sweep so the numbers match `cynic run`. Bucketed on the
@@ -4157,29 +4156,24 @@ fn writeScoreboard(
         \\
         \\**Reading guide:**
         \\
-        \\- The **top tier** (`1+ fails`) is the engine-work list.
-        \\  Today the only entry is `built-ins/RegExp` with 9
-        \\  libregexp Annex B / `/v` grammar gaps — fixtures that
-        \\  compile patterns the vendored libregexp matcher
-        \\  (QuickJS-NG) doesn't accept. All 9 are documented
-        \\  carve-outs in AGENTS.md ("Acknowledged exception —
-        \\  regex Annex B §B.1.4"). Closing them means patching
-        \\  vendored libregexp or switching matchers.
-        \\- The **0-fails tier** is sorted by `divergent ↓` so
-        \\  SES-hot buckets cluster at the top of the tail — that's
-        \\  where Cynic's frozen primordials / locked descriptors /
-        \\  override-mistake fix concentrate. `built-ins/Array`,
-        \\  `Object`, `TypedArray`, `String`, `Date`, `Math` are
-        \\  the heaviest — every primordial method's `.length` /
-        \\  `.name` slot SES locks down trips fixtures that read
-        \\  those descriptors back expecting `configurable: true`.
-        \\- ~~Strikethrough~~ rows are buckets we skip wholesale
-        \\  (out of scope per the Cynic-targeted skiplist — Annex B
-        \\  language extensions, `intl402`, `staging`,
-        \\  browser-era built-ins, …).
+        \\- The **`1+ fails` tiers** are the engine-work list — real
+        \\  failures with no policy bucket. Today the bulk is the
+        \\  SAB/Atomics surface (`built-ins/Atomics`,
+        \\  `built-ins/SharedArrayBuffer`, plus the `-sab.js`
+        \\  generated siblings under TypedArrayConstructors / DataView
+        \\  / TypedArray). Cynic doesn't ship shared memory, but
+        \\  could — so these are plain fails, not a policy bucket.
+        \\  The remainder (~13 fixtures) is the
+        \\  cross-realm cluster awaiting `--allow=eval` and multi-realm
+        \\  error attribution.
+        \\- The **0-fails tier** is sorted by `correctly handled ↓` so
+        \\  the heaviest policy buckets cluster first. `intl402/`
+        \\  trees dominate (no Intl), then the SES-hot built-ins
+        \\  (`Array`, `Object`, `TypedArray`, `String`, `Date`,
+        \\  `Math`), then the Annex B / eval / noStrict tails.
         \\
-        \\| area | pass | fail | skip | divergent | pass% | engine% |
-        \\|---|---:|---:|---:|---:|---:|---:|
+        \\| area | passing | failing | correctly handled | total | pass% |
+        \\|---|---:|---:|---:|---:|---:|
         \\
     );
 
@@ -4198,35 +4192,26 @@ fn writeScoreboard(
                 0 => "1000+ fails — engine-work tier",
                 1 => "100–999 fails — engine-work tier",
                 2 => "10–99 fails — engine-work tier",
-                3 => "1–9 fails — engine-work tier (libregexp Annex B carve-outs today)",
-                else => "0 fails — passing / wholly OOS (sorted by divergent ↓)",
+                3 => "1–9 fails — engine-work tier",
+                else => "0 fails — passing / all-policy (sorted by correctly handled ↓)",
             };
-            const hdr = try std.fmt.bufPrint(&buf, "| **_{s}_** | | | | | | |\n", .{label});
+            const hdr = try std.fmt.bufPrint(&buf, "| **_{s}_** | | | | | |\n", .{label});
             try out.appendSlice(gpa, hdr);
             prev_tier = tier;
         }
-        // Layout A: hardened spec% counts divergent as
-        // engine-correct because the throw is SES doing its job.
-        // Matches the `runtime_hardened` headline in `## Current
-        // scores`. The unhardened scoreboard would collapse this
-        // to plain `pass / total`, but we always source from the
-        // hardened sweep.
-        const headline_pass: u32 = b.pass + b.divergent;
+        // pass% = (passing + correctly_handled) / total, matching the
+        // hardened headline in `## Current scores` (this scoreboard is
+        // always sourced from the hardened sweep).
+        const headline_pass: u32 = b.pass + b.correctly_handled;
         const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(b.total));
-        const attempted: u32 = b.pass + b.fail;
-        const att_pct: f64 = if (attempted == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(attempted));
-        // Strikethrough buckets we skip wholesale (every test
-        // filtered out as out-of-scope per the Cynic-targeted
-        // skiplist). Now `pass + fail + divergent == 0` so they
-        // also show no SES enforcement signal.
-        const strike: bool = (b.pass == 0 and b.fail == 0 and b.divergent == 0);
+        const strike: bool = (b.pass == 0 and b.fail == 0 and b.correctly_handled == 0);
         const line = if (strike)
-            try std.fmt.bufPrint(&buf, "| ~~`{s}`~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ | ~~{d:.0} %~~ |\n", .{
-                b.name, b.pass, b.fail, b.skip, b.divergent, pct, att_pct,
+            try std.fmt.bufPrint(&buf, "| ~~`{s}`~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{
+                b.name, b.pass, b.fail, b.correctly_handled, b.total, pct,
             })
         else
-            try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{
-                b.name, b.pass, b.fail, b.skip, b.divergent, pct, att_pct,
+            try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{
+                b.name, b.pass, b.fail, b.correctly_handled, b.total, pct,
             });
         try out.appendSlice(gpa, line);
     }
@@ -4258,22 +4243,15 @@ fn writePreStage4Scoreboard(
         \\
         \\Per-feature scores for the TC39 proposals Cynic ships at
         \\Stage 1–3, ahead of their inclusion in the published
-        \\edition. **Each proposal gets two rows** from dedicated
-        \\phase sweeps that run only the fixtures whose frontmatter
-        \\`features:` list names the proposal, in a realm where only
-        \\that proposal's flag is enabled: a **(hardened)** row — the
-        \\as-shipped SES posture (`--enable=<flag>`), SES-adjusted so
-        \\`pass` counts divergent fixtures the same way the headline
-        \\hardened row does — and an **(unhardened)** row against bare
-        \\ECMA-262, mirroring the main / unhardened split.
-        \\**These fixtures are excluded entirely from the top-line
-        \\`## Current scores` and the per-area scoreboard** — they
-        \\are not in the Cynic corpus and not in any bucket, so the
-        \\headline number tracks stable ECMA-262 conformance only.
-        \\When a proposal advances to Stage 4 the row stays here
-        \\until its features ship in mainline ECMA-262.
+        \\edition. Each proposal gets a **(hardened)** row — the
+        \\as-shipped SES posture under `--enable=<flag>`, with SES
+        \\throws counted as correctly handled — and an
+        \\**(unhardened)** row against bare ECMA-262. Same column
+        \\shape as the main `## Current scores` table:
+        \\`passing | failing | correctly handled | total | pass%`.
+        \\These fixtures are excluded from the top-line score.
         \\
-        \\| feature | pass | fail | skip | pass% | engine% |
+        \\| feature | passing | failing | correctly handled | total | pass% |
         \\|---|---:|---:|---:|---:|---:|
         \\
     );
@@ -4283,17 +4261,17 @@ fn writePreStage4Scoreboard(
         const name = tracked_pre_stage4_features[i];
         const h = pre_stage4_hardened.slots[i];
         if (h.total != 0) {
-            const pct: f64 = 100.0 * @as(f64, @floatFromInt(h.pass)) / @as(f64, @floatFromInt(h.total));
-            const att: u32 = h.pass + h.fail;
-            const att_pct: f64 = if (att == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(h.pass)) / @as(f64, @floatFromInt(att));
-            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (hardened) | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{ name, h.pass, h.fail, h.skip, pct, att_pct }));
+            // PreStage4Stats today uses `skip` for the policy-CH
+            // count under hardened sweeps (no separate ch field);
+            // shipped pre-Stage-4 proposals have fail=0, so the
+            // proxy holds. Same columns as the main scoreboard.
+            const pct: f64 = 100.0 * @as(f64, @floatFromInt(h.pass + h.skip)) / @as(f64, @floatFromInt(h.total));
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (hardened) | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ name, h.pass, h.fail, h.skip, h.total, pct }));
         }
         const u = pre_stage4_unhardened.slots[i];
         if (u.total != 0) {
             const pct: f64 = 100.0 * @as(f64, @floatFromInt(u.pass)) / @as(f64, @floatFromInt(u.total));
-            const att: u32 = u.pass + u.fail;
-            const att_pct: f64 = if (att == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(u.pass)) / @as(f64, @floatFromInt(att));
-            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (unhardened) | {d} | {d} | {d} | {d:.0} % | {d:.0} % |\n", .{ name, u.pass, u.fail, u.skip, pct, att_pct }));
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (unhardened) | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ name, u.pass, u.fail, u.skip, u.total, pct }));
         }
     }
     try out.appendSlice(gpa, "\n");
@@ -4386,13 +4364,13 @@ fn extractWitnessNote(existing: []const u8) ?[]const u8 {
 }
 
 /// True if the existing file's per-area scoreboard already
-/// carries a `divergent` column (i.e. post-Phase-5c shape).
+/// carries a `correctly_handled` column (i.e. post-Phase-5c shape).
 /// Used by `writeFileBody` to gate the "Biggest movers"
 /// callout: on the one-time transition from pre-5c (pass
 /// column sourced from unhardened) to post-5c (pass column
 /// sourced from hardened, slightly lower per-bucket), every
 /// row's `pass` legitimately drops by the per-bucket
-/// divergent count, which would dominate the movers list
+/// correctly_handled count, which would dominate the movers list
 /// with synthetic "regressions." Suppressing the callout on
 /// that single sweep keeps the signal clean.
 /// Locate the per-area scoreboard section by trying both the
@@ -4400,6 +4378,13 @@ fn extractWitnessNote(existing: []const u8) ?[]const u8 {
 /// by area` heading from earlier file generations. Returns the
 /// byte offset of the heading line on success, null otherwise.
 fn findScoreboardHeading(existing: []const u8) ?struct { offset: usize, length: usize } {
+    // Most recent heading first. Each prior render lives in
+    // historical results.md files; the legacy fallbacks below let
+    // a pre-Layout-B file extract its scoreboard section cleanly.
+    const layout_b = "## Where the engine fails, by area";
+    if (std.mem.indexOf(u8, existing, layout_b)) |off| {
+        return .{ .offset = off, .length = layout_b.len };
+    }
     const headings = [_][]const u8{
         "## Where the engine fails (and where SES diverges), by area",
         "## Where the runtime stands, by area",
@@ -4416,7 +4401,7 @@ fn prevScoreboardHasDivergent(existing: []const u8) bool {
     const found = findScoreboardHeading(existing) orelse return false;
     const start = found.offset;
     // Find the column-header line (starts with `| area |`). The
-    // divergent column adds a `| divergent |` cell; pre-5c
+    // correctly_handled column adds a `| correctly_handled |` cell; pre-5c
     // tables didn't have it.
     var cursor = start;
     const cap = @min(existing.len, start + 4096);
@@ -4424,7 +4409,7 @@ fn prevScoreboardHasDivergent(existing: []const u8) bool {
         const eol = std.mem.indexOfScalarPos(u8, existing, cursor, '\n') orelse cap;
         const line = existing[cursor..eol];
         if (std.mem.startsWith(u8, line, "| area |")) {
-            return std.mem.indexOf(u8, line, "| divergent |") != null;
+            return std.mem.indexOf(u8, line, "| correctly_handled |") != null;
         }
         cursor = eol + 1;
     }

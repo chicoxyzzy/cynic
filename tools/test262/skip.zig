@@ -1,63 +1,47 @@
 //! Skip rules for the test262 harness — the single source of truth for
-//! which fixtures Cynic does not run, and *why*. The structure mirrors
-//! the one question that decides a fixture's fate:
+//! which fixtures Cynic does not run, and how a failure is classified.
 //!
-//!     Could this fixture pass in the `main` phase — i.e. under Cynic's
-//!     default production posture (strict-only, SES-hardened, eval-off,
-//!     edge-host), scored against the published ECMA-262 edition?
+//! The harness runs (almost) every fixture and sorts each into one of:
+//! `passing`, `failing`, or `correctly handled` (a failure Cynic
+//! produces *by design* — see `pathPolicyKind`). Only two narrow
+//! categories never run at all. So this file has exactly four jobs,
+//! each a `pub fn` the harness calls:
 //!
-//! That question routes every non-(pass/fail) fixture to exactly one of
-//! three accounting outcomes. The deciding axis is NOT "permanent vs.
-//! recoverable" — it is "out of `main`'s denominator vs. counted in it":
+//!   1. `pathIsSkipped` — corpus-walk exclusions. `harness/` (preamble
+//!      helpers, not fixtures) and `staging/` (upstream WIP). Filtered
+//!      before frontmatter parsing; never enter `total`.
 //!
-//!   A. WALK-EXCLUDED — not engine surface at all (harness helpers,
-//!      staging grounds, the Intl-only `intl402/` tree). Filtered before
-//!      frontmatter parsing; never enters the corpus.
-//!      → `corpus_excluded_prefixes`.
+//!   2. `featureIsUnimplementedProposal` — pre-Stage-4 proposals Cynic
+//!      hasn't implemented (decorators, import-defer, …). Dropped from
+//!      `total` so the headline can't decay as TC39 lands proposal
+//!      fixtures upstream. (Proposals Cynic *has* shipped —
+//!      joint-iteration, ShadowRealm — are kept out of the main rows
+//!      by the harness's per-phase feature-tag gate, not by this file,
+//!      and get their own dedicated `feature:<name>` scoreboard.)
 //!
-//!   B. OUT OF SCOPE — can never pass in `main`, for a *structural*
-//!      reason rather than unfinished engineering. Dropped from the
-//!      `corpus` denominator entirely, so `pass%` is not penalised.
-//!      Three structural reasons:
-//!        • never-ship policy — Annex B, the strict-only carve-out, the
-//!          SES surface (`eval` / `Function(string)` / `SharedArrayBuffer`
-//!          / `Atomics`). Only a policy reversal moves these. The eval
-//!          surface is matched both in bulk (`ses_path_prefixes` /
-//!          `ses_substrings` — fixtures that test the eval feature itself)
-//!          and as individual exact paths (`eval_dependent_exact_paths` —
-//!          fixtures that test some *other* feature but reach the
-//!          assertion through `eval`, so they can't be bulk-matched).
-//!          → `pathIsPermanentlyOutOfScope`, `featureIsOutOfScope`.
-//!        • not in the published edition — a pre-Stage-4 proposal. Pinned
-//!          out so the headline can't decay as TC39 lands proposal
-//!          fixtures upstream. Recoverable: at Stage 4 it becomes a
-//!          counted skip (outcome C); when Cynic ships it, it moves to its
-//!          own `feature:<name>` phase. → `featureIsUnimplementedProposal`.
-//!        • scored in a different phase — a feature Cynic ships behind a
-//!          `--enable` flag (`joint-iteration`, `ShadowRealm`). `main`
-//!          runs the default posture, so these are scored in a dedicated
-//!          `feature:<name>` phase, reached via the harness's feature-tag
-//!          mechanism — NOT a skip.zig path list, so they don't appear in
-//!          the predicates below at all.
+//!   3. `pathIsCurrentlySkipped` — tech-debt skips: in-scope fixtures
+//!      Cynic *should* pass but doesn't yet (cross-realm attribution,
+//!      a vendored-matcher gap). Counted in `total`, lowering `pass%`
+//!      — the live "work left" signal.
 //!
-//!   C. COUNTED SKIP — *in* `main`'s scope and would pass once Cynic
-//!      finishes the engineering it owes: a published-edition feature
-//!      blocked on a vendor/infra gap, or a cross-realm fixture that
-//!      lands when multi-realm support does. Stays in the denominator and
-//!      lowers `pass%` — this is the live "work left" signal.
-//!      → `pathIsCurrentlySkipped`, `featureIsCurrentlySkipped`.
+//!   4. `pathPolicyKind` — the policy classifier. For a fixture that
+//!      ran and FAILED, decide whether the failure is one Cynic makes
+//!      *on purpose* (Annex B not shipped, strict-only, no Intl,
+//!      eval surface off) and therefore counts as "correctly handled"
+//!      rather than a real bug. First match wins, in priority order
+//!      annex_b > no_strict > intl402 > eval. (The fifth policy, SES,
+//!      is matched separately by the harness against the runtime error
+//!      pattern — see `tools/test262/ses_divergent.zig` — because it's
+//!      only knowable after the fixture throws.)
 //!
-//! "Permanent" in the predicate names is shorthand for "permanently
-//! absent from `main`'s denominator" (outcome B), NOT a claim about any
-//! future opt-in: even if `--allow=eval` ships one day, `main` still runs
-//! eval-off, so the eval surface stays dropped here regardless. The
-//! honest wart: `single_realm_exact_paths` sits in B today but is outcome
-//! C in spirit (cross-realm core semantics, no flag needed); it moves to
-//! a counted skip — or straight to passing — when the in-progress
-//! multi-realm work lands.
+//! SharedArrayBuffer / Atomics fixtures are deliberately NOT a policy:
+//! Cynic could ship shared memory, so their failures stay plain
+//! `failing` until it does.
 //!
-//! Lookup is `mem.startsWith`, `mem.indexOf`, `mem.endsWith`, or
-//! `mem.eql` over comptime-iterable lists.
+//! The bulk of this file is the data the four functions read — comptime
+//! string lists, matched via `mem.startsWith` / `mem.indexOf` /
+//! `mem.endsWith` / `mem.eql`. The `ses_*`-prefixed eval lists keep
+//! their historical names; they feed the `eval` policy now.
 
 const std = @import("std");
 
@@ -72,9 +56,18 @@ const std = @import("std");
 // these gate the corpus walk itself.
 
 pub const corpus_excluded_prefixes = [_][]const u8{
+    // Harness helpers (sta.js / assert.js) — preamble files, not test
+    // fixtures. Always filtered before frontmatter parsing.
     "harness/",
+    // Staging ground — upstream-WIP fixtures that aren't required to
+    // be portable; not part of any published edition. Filtered for the
+    // same reason pre-Stage-4 proposals are: scoring stable ECMA-262
+    // shouldn't be dragged by upstream WIP.
     "staging/",
-    "intl402/",
+    // NOTE: `intl402/` used to be filtered here. It now runs, and any
+    // failure classifies as the `intl402` policy in `pathPolicyKind` —
+    // Cynic doesn't ship Intl, so those failures are "correctly
+    // handled" rather than engine bugs.
 };
 
 // Compatibility alias for callers that still reach for the old name.
@@ -198,41 +191,27 @@ pub const annex_b_regex_exact_paths = [_][]const u8{
     "built-ins/String/prototype/split/separator-regexp.js",
 };
 
-// ── SES surface ─────────────────────────────────────────────────────
+// ── eval surface (eval policy) ──────────────────────────────────────
 //
-// No `eval` / `new Function(string)` (runtime code construction
-// breaks SES isolation and is a major optimisation fence). No
-// shared memory (`SharedArrayBuffer` / `Atomics`) — Cynic's
-// edge-runtime hosts are single-agent-per-isolate. Permanent
-// decisions per AGENTS.md "SES-aligned by default".
+// `eval` / `new Function(string)` and friends. Cynic ships no runtime
+// code construction by default (breaks SES isolation, major
+// optimisation fence — AGENTS.md "eval and runtime code construction").
+// A fixture that fails because it reaches its assertion through the
+// eval surface classifies as `correctly handled` under the `eval`
+// policy. (SharedArrayBuffer / Atomics are NOT here — Cynic could ship
+// shared memory, so those failures stay plain `failing`.)
 
-pub const ses_path_prefixes = [_][]const u8{
+/// Whole sub-trees that exist only to test the eval surface.
+pub const eval_path_prefixes = [_][]const u8{
     "language/eval-code/",
     "built-ins/eval/",
-    "built-ins/Atomics/",
-    "built-ins/SharedArrayBuffer/",
-};
-
-/// Basename-suffix skips for fixtures that *exercise* SAB / Atomics
-/// indirectly from another bucket. test262 generates an `-sab.js`
-/// sibling alongside each `-buffer-arg` / `set/` / `DataView/` /
-/// internals fixture (same body, `SharedArrayBuffer` swapped for
-/// `ArrayBuffer`). The non-`-sab` sibling stays attempted and tests
-/// the same behaviour against `ArrayBuffer` — skipping `-sab.js`
-/// removes duplicate coverage of a permanently-OOS host primitive
-/// without losing signal. ~96 fixtures across `built-ins/DataView`,
-/// `built-ins/TypedArray/prototype/set`, and
-/// `built-ins/TypedArrayConstructors/{ctors,ctors-bigint,internals}`.
-pub const ses_path_suffixes = [_][]const u8{
-    "-sab.js",
 };
 
 /// `built-ins/Function/` is a *mixed* bucket — the prototype
-/// methods (`apply`, `call`, `bind`, …) are in scope, but every
-/// test under §15.3.2 / §15.3.5 exercises `Function(string)` /
-/// `new Function(string)` which is a permanent SES carve-out.
-/// Match by basename substring so the prototype-method fixtures
-/// stay attempted.
+/// methods (`apply`, `call`, `bind`, …) are real engine surface, but
+/// every test under §15.3.2 / §15.3.5 exercises `Function(string)` /
+/// `new Function(string)`, the eval surface. Match by basename
+/// substring so the prototype-method fixtures stay attempted.
 pub const ses_substrings = [_][]const u8{
     "built-ins/Function/15.3.2",
     "built-ins/Function/S15.3.2",
@@ -974,18 +953,6 @@ pub const ses_substring_pairs = [_][2][]const u8{
     .{ "built-ins/Promise/", "ctx-non-ctor.js" },
 };
 
-pub const ses_features = [_][]const u8{
-    // SES carve-outs (eval, SharedArrayBuffer, Atomics) skip by
-    // PATH (the `ses_path_prefixes` / `ses_path_suffixes` /
-    // `ses_substrings` rules above), NOT by feature tag.
-    // Feature-tag skipping hides cross-bucket fixtures that only
-    // *use* the surface name (e.g. an `ArrayBuffer` fixture tagged
-    // `[SharedArrayBuffer]` but exercising legitimate non-SAB
-    // ArrayBuffer behaviour). Path/suffix rules are surgical;
-    // feature-tag rules over-fire. See the `runtime-only gaps are
-    // NOT hidden` test below for the asserted policy.
-};
-
 // ── Single-realm host ───────────────────────────────────────────────
 //
 // `$262.createRealm()` IS exposed to the test262 harness (a real
@@ -1194,22 +1161,16 @@ pub const deferred_path_prefixes = [_][]const u8{
     // scope` test guards against a subtree regressing back to here.
 };
 
-// ── eval-dependent — SES surface, individual-fixture form ───────────
+// ── eval-dependent — eval surface, individual-fixture form ──────────
 //
-// Single fixtures that exercise `eval` / `new Function(string)` and so
-// can't pass under the default eval-off posture. The SES surface
-// (header outcome B, "never-ship policy") — same bucket as the bulk
-// eval `ses_path_prefixes` / `ses_substrings` above, just matched as
-// exact paths because these fixtures don't *test the eval feature*;
-// they test some other feature and merely reach the assertion through
-// `eval` (e.g. wrap a parse-error check in `eval("…")`), so no path or
-// substring rule catches them.
-//
-// Consumed by `pathIsPermanentlyOutOfScope` → dropped from the `corpus`
-// denominator, exactly like the bulk eval surface. NOT a counted skip:
-// `main` runs eval-off, and it stays eval-off even if `--allow=eval`
-// ships as an opt-in later (see [docs/ses-alignment.md] §Phase 4), so
-// the eval surface stays permanently out of `main` regardless.
+// Single fixtures that reach their assertion through `eval` /
+// `new Function(string)` but don't *test the eval feature* — they test
+// some other feature and merely wrap it in `eval("…")`, so no prefix
+// or substring rule catches them. Consumed by `pathPolicyKind` as part
+// of the `eval` policy: a failure here classifies as `correctly
+// handled` (eval surface off) rather than a real bug. When
+// `--allow=eval` ships, these would move from correctly-handled to
+// plain passing.
 
 pub const eval_dependent_exact_paths = [_][]const u8{
     // `built-ins/Function/prototype/S15.3.5.2_A1_T2.js` — uses
@@ -1287,80 +1248,19 @@ pub fn pathIsSkipped(rel_path: []const u8) bool {
     return false;
 }
 
-/// Header **outcome B** by path, "never-ship policy" reason: fixtures
-/// that can never pass in the `main` phase because passing would require
-/// a surface Cynic refuses to ship — Annex B, the strict-only carve-out,
-/// the SES surface (`eval` / `Function(string)` / `SharedArrayBuffer` /
-/// `Atomics`). Deliberate `AGENTS.md` decisions; only a policy reversal
-/// moves them. The caller drops them from the `corpus` denominator at
-/// walk-time (no false-reject noise in `test262-results.md`).
-///
-/// The eval surface is matched two ways: in bulk (`ses_path_prefixes` /
-/// `ses_substrings`, fixtures that test eval itself) and as
-/// `eval_dependent_exact_paths` (fixtures that test another feature but
-/// reach the assertion through `eval`). Both are equally permanent here:
-/// `main` runs eval-off and stays eval-off even if `--allow=eval` ships
-/// as an opt-in later. (The other two outcome-B reasons aren't path-
-/// based: pre-Stage-4 → `featureIsUnimplementedProposal`; the
-/// `--enable`-gated proposals → the harness feature-tag mechanism.)
-///
-/// "Permanently" is "permanently absent from `main`", not "never run".
-/// Known wart: `single_realm_exact_paths` is filed here but is really
-/// outcome C (it needs no flag — just the in-progress multi-realm work);
-/// it relocates to `pathIsCurrentlySkipped`, or to passing, when that
-/// lands.
-pub fn pathIsPermanentlyOutOfScope(rel_path: []const u8) bool {
-    inline for (.{ annex_b_path_prefixes, ses_path_prefixes }) |group| {
-        for (group) |prefix| {
-            if (std.mem.startsWith(u8, rel_path, prefix)) return true;
-        }
-    }
-    for (ses_substrings) |needle| {
-        if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
-    }
-    for (ses_substring_pairs) |pair| {
-        if (std.mem.indexOf(u8, rel_path, pair[0]) != null and
-            std.mem.indexOf(u8, rel_path, pair[1]) != null) return true;
-    }
-    for (ses_path_suffixes) |suffix| {
-        if (std.mem.endsWith(u8, rel_path, suffix)) return true;
-    }
-    inline for (.{
-        strict_only_exact_paths,
-        annex_b_regex_exact_paths,
-        ses_exact_paths,
-        single_realm_exact_paths,
-        // eval-dependent fixtures: the SES eval surface in individual-
-        // fixture form. `main` runs eval-off (and stays so even if
-        // `--allow=eval` ships later), so they're permanently dropped
-        // here, same as the bulk eval paths/substrings above.
-        eval_dependent_exact_paths,
-    }) |group| {
-        for (group) |exact| {
-            if (std.mem.eql(u8, rel_path, exact)) return true;
-        }
-    }
-    return false;
-}
-
-/// Header **outcome C** by path: fixtures *in* `main`'s scope that
-/// Cynic skips **today** but would pass once it finishes the
-/// engineering it owes — a published-edition feature blocked on a
-/// vendor/infra gap, or a cross-realm fixture that lands with multi-
-/// realm support. The caller keeps these **in** the `corpus`
-/// denominator and counts them as `skip` (reason `.by_path`), so they
-/// lower `pass%` — the live "work left" signal, kept distinct from
-/// `pathIsPermanentlyOutOfScope`'s "out of `main`" set.
+/// Tech-debt skips by path: fixtures *in* scope that Cynic skips
+/// **today** but should eventually pass once it finishes the
+/// engineering it owes — a cross-realm fixture awaiting multi-realm
+/// error attribution, or a published-edition feature blocked on a
+/// vendor/infra gap. The caller keeps these **in** `total` and counts
+/// them as `skip`, so they lower `pass%` — the live "work left"
+/// signal. (A fixture that simply *fails* a policy Cynic ships by
+/// design is not here — it runs and classifies as `correctly handled`
+/// via `pathPolicyKind`. Pre-Stage-4 proposals aren't here either —
+/// they're recognised by feature tag in `featureIsUnimplementedProposal`.)
 ///
 /// Nearly empty right now: every source array below is empty except
-/// `single_realm_path_contains` (the one `-realm-function-ctor.`
-/// needle). Two non-members worth calling out:
-///   • eval-dependent fixtures are NOT here — they need `--allow=eval`
-///     (a non-default flag), so they're outcome B in
-///     `pathIsPermanentlyOutOfScope`, not work owed against `main`.
-///   • pre-Stage-4 proposals are NOT here — they're recognised by
-///     feature tag and dropped as `.pre_stage4` (see
-///     `featureIsUnimplementedProposal`); their path groups stay empty.
+/// `single_realm_path_contains` (the one `-realm-function-ctor.` needle).
 pub fn pathIsCurrentlySkipped(rel_path: []const u8) bool {
     inline for (.{ stage_maturity_path_prefixes, deferred_path_prefixes }) |group| {
         for (group) |prefix| {
@@ -1379,52 +1279,17 @@ pub fn pathIsCurrentlySkipped(rel_path: []const u8) bool {
     return false;
 }
 
-/// Compatibility wrapper used by the test262 harness at corpus
-/// walk-time. The harness doesn't currently distinguish the two
-/// reasons — both must be filtered out so the rolled-up score
-/// reflects what Cynic actually attempts. Future tooling (e.g.
-/// a "what's the maximum reachable score if we land all the
-/// planned work?" report) can call the two predicates
-/// independently.
-pub fn pathIsCynicOutOfScope(rel_path: []const u8) bool {
-    return pathIsPermanentlyOutOfScope(rel_path) or pathIsCurrentlySkipped(rel_path);
-}
-
-/// Feature tags that put a fixture **permanently out of scope**:
-/// Annex B browser constructs (§B) and the SES carve-outs. A
-/// strict-only, SES-hardened, non-browser engine will never ship
-/// these, so the fixtures can't pass under any plausible Cynic
-/// posture — exactly like the `annexB/` path tree. The harness drops
-/// them from the `corpus` denominator entirely rather than counting
-/// them as in-corpus skips (see `recordOutcome` in `test262.zig`).
-pub fn featureIsOutOfScope(feature: []const u8) bool {
-    inline for (.{ annex_b_features, ses_features }) |group| {
-        for (group) |f| {
-            if (std.mem.eql(u8, feature, f)) return true;
-        }
-    }
-    return false;
-}
-
 /// Feature tags for pre-Stage-4 proposals Cynic hasn't implemented
-/// (decorators, import-defer, source-phase-imports, …). These are
-/// **out of scope**: they aren't part of any published ECMA-262
-/// edition, so the harness drops them from the `corpus` denominator
-/// (reason `.pre_stage4`), just like the permanent carve-outs.
-///
-/// The difference from `featureIsOutOfScope` is that these are
-/// *recoverable*, via two distinct gates back into scope:
-///   - the proposal reaches **Stage 4** → it's specced, so it must
-///     leave `stage_maturity_features` and become an in-scope counted
-///     skip (we're on the hook for it in the headline whether or not
-///     Cynic ships it yet); or
+/// (decorators, import-defer, source-phase-imports, …). Dropped from
+/// `total` (reason `.pre_stage4`): they aren't in any published
+/// ECMA-262 edition, so the headline shouldn't move when TC39 lands
+/// their fixtures upstream. Recoverable two ways:
+///   - the proposal reaches **Stage 4** → it's specced, so it leaves
+///     `stage_maturity_features` and re-enters `total`; or
 ///   - Cynic **implements** it → it graduates to a dedicated
-///     `feature:<name>` phase (a `FeatureFlag`, scored with the flag
-///     on — `joint-iteration`, `ShadowRealm`), excluded from `main`.
-///
-/// Pinning the denominator to the published-edition boundary keeps the
-/// headline from silently decaying as TC39 lands new proposal fixtures
-/// in test262 — score only moves when Cynic does.
+///     `feature:<name>` phase (a `FeatureFlag` — `joint-iteration`,
+///     `ShadowRealm`), kept out of the main rows by the harness's
+///     per-phase feature-tag gate.
 pub fn featureIsUnimplementedProposal(feature: []const u8) bool {
     for (stage_maturity_features) |f| {
         if (std.mem.eql(u8, feature, f)) return true;
@@ -1432,27 +1297,100 @@ pub fn featureIsUnimplementedProposal(feature: []const u8) bool {
     return false;
 }
 
-/// Feature tags Cynic skips **today** but still counts in the corpus:
-/// a specced (published-edition) feature blocked on a vendor/infra gap
-/// — the vendored libregexp matcher or unshipped Unicode-property
-/// data. The spec mandates these, so they stay **in** the denominator
-/// as `skip` and `pass%` reflects the work owed. (Currently empty —
-/// Perlex plus the shipped Unicode tables cover today's surface; the
-/// hook stays for the next libregexp/Unicode gap.)
-pub fn featureIsCurrentlySkipped(feature: []const u8) bool {
-    for (vendor_features) |f| {
-        if (std.mem.eql(u8, feature, f)) return true;
-    }
-    return false;
-}
+// ════════════════════════════════════════════════════════════════════
+//   Policy classification
+// ════════════════════════════════════════════════════════════════════
+//
+// For a fixture that ran and FAILED, decide whether the failure is one
+// Cynic produces *by design* — and therefore counts as "correctly
+// handled" rather than a real bug. Four path/frontmatter-derived
+// policies live here; the fifth (`ses`) is matched by the harness
+// against the runtime error pattern (`tools/test262/ses_divergent.zig`)
+// because it's only knowable after the throw.
+//
+//   annex_b   — Annex B language / built-ins / regex grammar; Cynic is
+//               a strict-only edge target, no Annex B.
+//   no_strict — `flags: [noStrict]` or a strict-only carve-out path.
+//   intl402   — `intl402/` tree or an `Intl`-prefixed feature tag;
+//               Cynic doesn't ship Intl.
+//   eval      — the eval surface (`eval` / `new Function(string)` /
+//               `GeneratorFunction(string)` / …); off unless `--allow=eval`.
+//
+// First match wins, in priority order annex_b > no_strict > intl402 >
+// eval. SharedArrayBuffer / Atomics are NOT a policy — Cynic could ship
+// shared memory, so those failures stay plain `failing`.
 
-/// Union of all three — any feature tag the engine doesn't currently
-/// run, whether permanently out of scope, an unimplemented pre-Stage-4
-/// proposal, or a vendor-blocked specced feature.
-pub fn featureIsUnsupported(feature: []const u8) bool {
-    return featureIsOutOfScope(feature) or
-        featureIsUnimplementedProposal(feature) or
-        featureIsCurrentlySkipped(feature);
+pub const PolicyKind = enum {
+    annex_b,
+    no_strict,
+    intl402,
+    eval,
+    ses,
+};
+
+/// Map a fixture failure to its policy bucket, if any. SES classification
+/// is *not* handled here — the harness runs the SES divergence matcher
+/// against the thrown error after the fixture executes. This returns
+/// the first matching path/frontmatter-derived policy in priority order.
+///
+/// `features` is the fixture's frontmatter `features:` list (may be
+/// empty). `no_strict` is the parsed `flags: [noStrict]` bit.
+pub fn pathPolicyKind(
+    rel_path: []const u8,
+    features: []const []const u8,
+    no_strict: bool,
+) ?PolicyKind {
+    // Priority 1 — annex_b. Path tree first, then exact paths under the
+    // main tree that need Annex B leniency, then feature tags.
+    for (annex_b_path_prefixes) |prefix| {
+        if (std.mem.startsWith(u8, rel_path, prefix)) return .annex_b;
+    }
+    for (annex_b_regex_exact_paths) |exact| {
+        if (std.mem.eql(u8, rel_path, exact)) return .annex_b;
+    }
+    for (annex_b_features) |feat| {
+        for (features) |f| if (std.mem.eql(u8, f, feat)) return .annex_b;
+    }
+
+    // Priority 2 — no_strict.
+    if (no_strict) return .no_strict;
+
+    // Priority 3 — intl402.
+    if (std.mem.startsWith(u8, rel_path, "intl402/")) return .intl402;
+    // Frontmatter feature tags for Intl — `Intl.*`, `Intl-enumeration`,
+    // `IntlPluralRules` historical names. Cheap prefix check covers all
+    // forms in the corpus.
+    for (features) |f| if (std.mem.startsWith(u8, f, "Intl")) return .intl402;
+
+    // Priority 4 — eval surface. Eval prefixes + substrings + exact
+    // paths + eval-dependent exact paths. SAB/Atomics deliberately
+    // excluded (plain fail).
+    for (eval_path_prefixes) |prefix| {
+        if (std.mem.startsWith(u8, rel_path, prefix)) return .eval;
+    }
+    for (ses_substrings) |needle| {
+        if (std.mem.indexOf(u8, rel_path, needle) != null) return .eval;
+    }
+    for (ses_substring_pairs) |pair| {
+        if (std.mem.indexOf(u8, rel_path, pair[0]) != null and
+            std.mem.indexOf(u8, rel_path, pair[1]) != null) return .eval;
+    }
+    inline for (.{ ses_exact_paths, eval_dependent_exact_paths }) |group| {
+        for (group) |exact| {
+            if (std.mem.eql(u8, rel_path, exact)) return .eval;
+        }
+    }
+    // Strict-only carve-out paths — `with` in a strict-only engine and
+    // the four indirect-eval Sputnik fixtures. The latter genuinely
+    // need sloppy mode (per `strict_only_exact_paths`'s comment) so they
+    // classify as no_strict; the hashbang/ShadowRealm strict-mode ones
+    // are also strict-only carve-outs. Conservatively bucket as
+    // `no_strict` since that's the structural reason.
+    for (strict_only_exact_paths) |exact| {
+        if (std.mem.eql(u8, rel_path, exact)) return .no_strict;
+    }
+
+    return null;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1461,368 +1399,126 @@ pub fn featureIsUnsupported(feature: []const u8) bool {
 
 const testing = std.testing;
 
-test "skip: known path prefixes" {
+
+test "skip: corpus-walk exclusions" {
+    // Only `harness/` and `staging/` are walk-excluded now. intl402
+    // RUNS under the new model (failures classify as the intl402
+    // policy), so it must NOT be path-skipped.
     try testing.expect(pathIsSkipped("harness/sta.js"));
-    try testing.expect(pathIsSkipped("intl402/Locale/extensions.js"));
     try testing.expect(pathIsSkipped("staging/explicit-resource-management/foo.js"));
+    try testing.expect(!pathIsSkipped("intl402/Locale/extensions.js"));
     try testing.expect(!pathIsSkipped("language/expressions/optional-chaining/foo.js"));
-    try testing.expect(!pathIsSkipped("built-ins/Array/prototype/at/length.js"));
     try testing.expect(!pathIsSkipped("annexB/B.1.1/legacy-octal.js"));
 }
 
-test "skip: Annex B out of scope" {
-    try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/escape/empty-string.js"));
-    try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/String/prototype/blink/B.2.3.4.js"));
-    try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/Date/prototype/setYear/year-nan.js"));
-    try testing.expect(pathIsCynicOutOfScope("annexB/language/comments/single-line-html-open.js"));
-    try testing.expect(pathIsCynicOutOfScope("annexB/built-ins/String/prototype/substr/length-undef.js"));
-    // Main-tree fixture that depends on Annex B regex-grammar leniency
-    // (`/\X/`, `/\XA0/`, `/\k<x>/` with no group) — strict-rejected per
-    // AGENTS.md "Regex Annex B", so permanently out of scope.
-    try testing.expect(pathIsCynicOutOfScope("built-ins/String/prototype/split/separator-regexp.js"));
-    try testing.expect(pathIsPermanentlyOutOfScope("built-ins/String/prototype/split/separator-regexp.js"));
+test "policy: annex_b" {
+    // The whole annexB/ tree.
+    try testing.expectEqual(PolicyKind.annex_b, pathPolicyKind("annexB/built-ins/escape/empty-string.js", &.{}, false).?);
+    try testing.expectEqual(PolicyKind.annex_b, pathPolicyKind("annexB/language/comments/single-line-html-open.js", &.{}, false).?);
+    // Main-tree fixture needing Annex B regex-grammar leniency.
+    try testing.expectEqual(PolicyKind.annex_b, pathPolicyKind("built-ins/String/prototype/split/separator-regexp.js", &.{}, false).?);
+    // Annex B feature tags (§B.2.2 accessors, legacy regexp, IsHTMLDDA).
+    try testing.expectEqual(PolicyKind.annex_b, pathPolicyKind("x.js", &.{"__proto__"}, false).?);
+    try testing.expectEqual(PolicyKind.annex_b, pathPolicyKind("x.js", &.{"IsHTMLDDA"}, false).?);
 }
 
-test "skip: SES out of scope" {
-    try testing.expect(pathIsCynicOutOfScope("language/eval-code/direct/var.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/eval/length.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Atomics/load/length.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/SharedArrayBuffer/length.js"));
-    // §15.3.2 Function-constructor fixtures (always `Function(string)`).
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Function/S15.3.2.1_A1_T1.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Function/15.3.2.1-11-9-s.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Function/S15.3.5_A2_T2.js"));
-    // …prototype methods stay in scope.
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Function/prototype/apply/length.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Function/prototype/call/length.js"));
-    // SAB-suffix generator siblings — duplicate coverage of a
-    // permanently-OOS host primitive; the `-buffer-arg/byteoffset…`
-    // ArrayBuffer sibling stays attempted.
-    try testing.expect(pathIsCynicOutOfScope(
+test "policy: no_strict" {
+    // `flags: [noStrict]` bit.
+    try testing.expectEqual(PolicyKind.no_strict, pathPolicyKind("language/statements/for-in/x.js", &.{}, true).?);
+    // Strict-only carve-out paths (the `with`-hashbang fixture, the
+    // four indirect-eval Sputnik fixtures, the ShadowRealm sloppy one).
+    try testing.expectEqual(PolicyKind.no_strict, pathPolicyKind("language/comments/hashbang/use-strict.js", &.{}, false).?);
+    try testing.expectEqual(PolicyKind.no_strict, pathPolicyKind("language/statements/variable/12.2.1-9-s.js", &.{}, false).?);
+}
+
+test "policy: intl402" {
+    try testing.expectEqual(PolicyKind.intl402, pathPolicyKind("intl402/NumberFormat/x.js", &.{}, false).?);
+    // Intl-prefixed feature tag on a non-intl402 path.
+    try testing.expectEqual(PolicyKind.intl402, pathPolicyKind("built-ins/x.js", &.{"Intl.Segmenter"}, false).?);
+}
+
+test "policy: eval surface" {
+    // Whole eval sub-trees.
+    try testing.expectEqual(PolicyKind.eval, pathPolicyKind("language/eval-code/direct/var.js", &.{}, false).?);
+    try testing.expectEqual(PolicyKind.eval, pathPolicyKind("built-ins/eval/length.js", &.{}, false).?);
+    // Function(string) substring family.
+    try testing.expectEqual(PolicyKind.eval, pathPolicyKind("built-ins/Function/S15.3.2.1_A1_T1.js", &.{}, false).?);
+    // eval-dependent exact path (tests another feature via eval).
+    try testing.expectEqual(PolicyKind.eval, pathPolicyKind("language/types/string/S8.4_A7.1.js", &.{}, false).?);
+    // Function.prototype methods stay real engine surface (no policy).
+    try testing.expectEqual(@as(?PolicyKind, null), pathPolicyKind("built-ins/Function/prototype/apply/length.js", &.{}, false));
+}
+
+test "policy: SAB / Atomics are NOT a policy (plain fail)" {
+    // Cynic could ship shared memory, so a SAB/Atomics failure stays
+    // `failing`, not `correctly handled`.
+    try testing.expectEqual(@as(?PolicyKind, null), pathPolicyKind("built-ins/Atomics/load/length.js", &.{}, false));
+    try testing.expectEqual(@as(?PolicyKind, null), pathPolicyKind("built-ins/SharedArrayBuffer/length.js", &.{}, false));
+    try testing.expectEqual(@as(?PolicyKind, null), pathPolicyKind(
         "built-ins/TypedArrayConstructors/ctors/buffer-arg/byteoffset-is-negative-throws-sab.js",
-    ));
-    try testing.expect(pathIsCynicOutOfScope(
-        "built-ins/DataView/prototype/getInt32/index-is-out-of-range-sab.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/TypedArrayConstructors/ctors/buffer-arg/byteoffset-is-negative-throws.js",
-    ));
-    // Class field initializer fixtures whose assertion depends on
-    // eval (cluster narrowed via the `class/elements/ + -eval-` pair).
-    try testing.expect(pathIsCynicOutOfScope("language/expressions/class/elements/derived-cls-direct-eval-err-contains-supercall.js"));
-    try testing.expect(pathIsCynicOutOfScope("language/statements/class/elements/arrow-body-direct-eval-err-contains-arguments.js"));
-    // Non-eval class/elements fixtures stay in scope.
-    try testing.expect(!pathIsCynicOutOfScope("language/expressions/class/elements/evaluation-error/computed-name-toprimitive-returns-nonobject.js"));
-    try testing.expect(!pathIsCynicOutOfScope("language/statements/class/elements/private-class-field-initialization-is-visible-to-proxy.js"));
-    // `language/function-code/10.4.3-1-{13,…,65}-s.js` and `gs.js`
-    // — strict-mode `this`-binding via Function(string) / eval(string).
-    try testing.expect(pathIsCynicOutOfScope("language/function-code/10.4.3-1-13-s.js"));
-    try testing.expect(pathIsCynicOutOfScope("language/function-code/10.4.3-1-19-s.js"));
-    try testing.expect(pathIsCynicOutOfScope("language/function-code/10.4.3-1-65gs.js"));
-    // Non-Function/eval siblings in the same bucket stay attempted.
-    try testing.expect(!pathIsCynicOutOfScope("language/function-code/10.4.3-1-103.js"));
-    try testing.expect(!pathIsCynicOutOfScope("language/function-code/10.4.3-1-106.js"));
-    try testing.expect(!pathIsCynicOutOfScope("language/function-code/S10.2.1_A5.2_T1.js"));
-    try testing.expect(!pathIsCynicOutOfScope("language/function-code/block-decl-onlystrict.js"));
-    // `Promise.<m>.call(eval)` ctx-non-ctor cluster — all SES.
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/resolve/ctx-non-ctor.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/all/ctx-non-ctor.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/any/ctx-non-ctor.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/race/ctx-non-ctor.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/try/ctx-non-ctor.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Promise/withResolvers/ctx-non-ctor.js"));
-    // Constructor-arg `ctx-*` siblings stay attempted.
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Promise/try/ctx-ctor.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Promise/try/ctx-ctor-throws.js"));
-    // Iterator.zip/zipKeyed result-is-iterator.js resolve
-    // %IteratorHelperPrototype% via wellKnownIntrinsicObjects.js
-    // (`new Function("return …")`) — SES carve-out. The
-    // iterator-helpers siblings obtain it directly and stay in.
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Iterator/zip/result-is-iterator.js"));
-    try testing.expect(pathIsCynicOutOfScope("built-ins/Iterator/zipKeyed/result-is-iterator.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Iterator/prototype/map/result-is-iterator.js"));
-}
-
-test "skip: main-spec paths not OOS" {
-    try testing.expect(!pathIsCynicOutOfScope("language/expressions/addition/order-of-evaluation.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/String/prototype/substr/length-undef.js"));
-}
-
-test "skip: Temporal fully in scope" {
-    // The whole Temporal namespace now ships — nothing under
-    // `built-ins/Temporal/` is path-skipped. Assert representative
-    // fixtures across every member run, so this test catches a future
-    // regression that re-defers any subtree (as PlainDateTime once did).
-    // `Temporal.Now` (§2) was the last member to land; its clock reads
-    // the host realtime clock and its system time zone is always UTC.
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Temporal/Now/extensible.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Temporal/getOwnPropertyNames.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Temporal/PlainDateTime/prototype/add/branding.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Temporal/PlainYearMonth/prototype/with/branding.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Temporal/PlainMonthDay/prototype/with/branding.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/Temporal/ZonedDateTime/prototype/add/branding.js"));
-}
-
-test "skip: ShadowRealm is not path-skipped (feature-gated)" {
-    // ShadowRealm isn't out-of-scope at the path level — it ships
-    // behind `--enable=ShadowRealm` (Stage 2.7), so the harness's
-    // feature-tag mechanism (not skip.zig) keeps its fixtures out of
-    // the main row and scores them in the feature phase.
-    // pathIsCynicOutOfScope therefore stays false across the tree.
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/ShadowRealm/constructor.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/ShadowRealm/extensibility.js"));
-    try testing.expect(!pathIsCynicOutOfScope("built-ins/ShadowRealm/prototype/evaluate/not-constructor.js"));
-    // One carve-out remains: the sloppy-mode `evaluate` fixture is
-    // permanently OOS under the strict-only policy — it asserts the
-    // child Script runs non-strict, which Cynic never does.
-    try testing.expect(pathIsCynicOutOfScope("built-ins/ShadowRealm/prototype/evaluate/no-conditional-strict-mode.js"));
-}
-
-test "skip: eval-dependent fixtures are out of `main`, not counted skips" {
-    // Header outcome B ("never-ship policy", SES surface): the
-    // `eval_dependent_exact_paths` need `eval`, so they can never pass in
-    // the eval-off `main` phase. They must be dropped from the
-    // denominator (permanent predicate, walk-time `continue`), NOT
-    // counted as `.by_path` skips that penalise `pass%`. This locks the
-    // design decision: the eval surface is permanently out of `main`,
-    // same bucket as the bulk eval fixtures — `built-ins/eval/`,
-    // `built-ins/Function/15.3.2`, etc. — and stays so even if
-    // `--allow=eval` ships as an opt-in later.
-    const eval_dependent = [_][]const u8{
-        "built-ins/Function/prototype/S15.3.5.2_A1_T2.js",
-        "language/types/string/S8.4_A7.1.js",
-        "built-ins/AsyncFunction/proto-from-ctor-realm.js",
-        "built-ins/GeneratorFunction/proto-from-ctor-realm-prototype.js",
-    };
-    for (eval_dependent) |path| {
-        try testing.expect(pathIsPermanentlyOutOfScope(path)); // dropped
-        try testing.expect(!pathIsCurrentlySkipped(path)); // not counted
-        try testing.expect(pathIsCynicOutOfScope(path)); // union holds
-    }
-    // The four indirect-eval fixtures fail even WITH `--allow=eval`
-    // (strict-only parses the eval'd source strict), so they're a
-    // never-ship strict-only carve-out — also permanent, also not a
-    // counted skip, but for a different structural reason.
-    try testing.expect(pathIsPermanentlyOutOfScope("language/statements/variable/12.2.1-9-s.js"));
-    try testing.expect(!pathIsCurrentlySkipped("language/statements/variable/12.2.1-9-s.js"));
-}
-
-test "skip: /v unicodeSets generated — Perlex handles code-point set ops" {
-    // The code-point half of the grammar now compiles natively, so the
-    // char-only set-op fixtures are back in scope (Perlex renders the
-    // verdict). Set-difference (`--`):
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-class-difference-character.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-property-escape-difference-character-property-escape.js",
-    ));
-    // Nested character class as operand (`[[…]op…]` / `[…op[…]]`):
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-class-union-character.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-class-intersection-character-property-escape.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-property-escape-union-character-class.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-class-escape-intersection-character-class.js",
-    ));
-    // Flat union / intersection between supported operands stays in scope.
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-union-character.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-class-escape-union-character.js",
-    ));
-
-    // String-literal escape (`\q{…}`) is now in scope — Perlex lowers a
-    // may-contain-strings class to an alternation (§22.2.2.7):
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/string-literal-intersection-character.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-union-string-literal.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/string-literal-difference-character.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/string-literal-union-string-literal.js",
-    ));
-
-    // Property-of-strings escapes (`\p{RGI_Emoji}`,
-    // `\p{Emoji_Keycap_Sequence}`) are now in scope — the
-    // emoji-sequence tables and the resolver's string members shipped,
-    // so Perlex lowers them to an alternation like any `\q{…}` set:
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/property-of-strings-escape-union-character.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-union-property-of-strings-escape.js",
-    ));
-    // `\p{RGI_Emoji}` matched against the emoji-16.0 data, set-difference
-    // against a property-of-strings operand, and a `\q{…}` unioned with a
-    // property-of-strings escape all resolve through the shipped
-    // emoji-sequence tables — every fixture attempts and passes (verified
-    // against the harness), so none is deferred to libregexp any longer:
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/rgi-emoji-16.0.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/character-property-escape-difference-property-of-strings-escape.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/string-literal-union-property-of-strings-escape.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/unicodeSets/generated/property-of-strings-escape-union-string-literal.js",
+        &.{},
+        false,
     ));
 }
 
-test "skip: Proxy revocable tco-fn-realm now in scope" {
-    // §10.5.12 [[Call]] on a revoked Proxy throws TypeError. The
-    // tco-fn-realm fixture asserts the TypeError comes from the
-    // running execution context's realm — the "other" realm whose
-    // function is on the stack when ValidateNonRevokedProxy fails,
-    // not the parent dispatch loop's active realm. Cynic now tracks
-    // the running-context realm per CallFrame (`running_realm`,
-    // copied from the callee `JSFunction.realm` at frame entry) and
-    // threads it into `callValue` for the revoked-proxy throw, so
-    // the fixture is attempted, not path-skipped.
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/Proxy/revocable/tco-fn-realm.js",
-    ));
-    // Same-bucket fixtures without `-realm` stay in scope.
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/Proxy/revocable/revocation-function-extensible.js",
-    ));
+test "policy: in-scope fixtures have no policy" {
+    // A normal passing fixture isn't policy-classified.
+    try testing.expectEqual(@as(?PolicyKind, null), pathPolicyKind("built-ins/Array/prototype/at/length.js", &.{}, false));
+    try testing.expectEqual(@as(?PolicyKind, null), pathPolicyKind("language/expressions/addition/order-of-evaluation.js", &.{}, false));
+    // Temporal ships — in scope, no policy.
+    try testing.expectEqual(@as(?PolicyKind, null), pathPolicyKind("built-ins/Temporal/PlainDateTime/prototype/add/branding.js", &.{}, false));
 }
 
-test "skip: planned vendor gaps" {
-    // `Script_Extensions=Unknown` (alias `scx=Zzzz`) is no longer a
-    // vendor gap: Perlex resolves `\p{…}` Script / Script_Extensions
-    // escapes through Cynic's own Unicode tables
-    // (`unicode/perlex_props.zig`) at parse and runtime, so the value
-    // never reaches libregexp (whose tables omit the "Unknown" special
-    // value). The fixture is attempted, not path-skipped.
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/property-escapes/special-property-value-Script_Extensions-Unknown.js",
-    ));
-    // The string-property positive form and `-negative-*` siblings
-    // stay in scope — libregexp handles `\p{…}` for property-of-
-    // strings, and Cynic's parse-time validator (§22.2.1.5) rejects
-    // the spec-illegal `\P{StringProperty}` and `[^\p{StringProperty}]`
-    // forms under `/v`.
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji-negative-u.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji-negative-P.js",
-    ));
-    try testing.expect(!pathIsCynicOutOfScope(
-        "built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji-negative-CharacterClass.js",
-    ));
+test "policy: priority — annex_b before eval" {
+    // A path that is both Annex B and reaches through eval resolves to
+    // annex_b (higher priority).
+    try testing.expectEqual(PolicyKind.annex_b, pathPolicyKind("annexB/built-ins/escape/eval.js", &.{}, false).?);
 }
 
-test "skip: unsupported features — stage maturity + planned" {
-    // Stage 3 syntax — parser would choke.
-    try testing.expect(featureIsUnsupported("decorators"));
-    try testing.expect(featureIsUnsupported("import-defer"));
-    try testing.expect(featureIsUnsupported("source-phase-imports"));
-    // regexp-modifiers is supported (Perlex compiles `(?ims-ims:…)`);
-    // it must NOT be flagged unsupported.
-    try testing.expect(!featureIsUnsupported("regexp-modifiers"));
-    // explicit-resource-management is supported (full surface
-    // shipped); it must NOT be flagged unsupported.
-    try testing.expect(!featureIsUnsupported("explicit-resource-management"));
-}
-
-test "skip: Annex B feature flags are hidden via feature filter" {
-    // Object.prototype.__proto__ accessor (§B.2.2.1), the four
-    // accessor methods (§B.2.2.{2,3,4,5}), the RegExp legacy
-    // statics (§B.2.{4,5}), and the IsHTMLDDA host primitive
-    // (§B.2.7) all live in annex_b_features. Cynic doesn't
-    // ship them per "Annex B in its entirety — out"; their
-    // fixtures would otherwise show as honest runtime fails for
-    // a permanent carve-out.
-    try testing.expect(featureIsUnsupported("__proto__"));
-    try testing.expect(featureIsUnsupported("__getter__"));
-    try testing.expect(featureIsUnsupported("__setter__"));
-    try testing.expect(featureIsUnsupported("legacy-regexp"));
-    try testing.expect(featureIsUnsupported("IsHTMLDDA"));
-}
-
-test "skip: OOS feature tags — permanent vs pre-Stage-4 vs vendor-blocked" {
-    // Permanent OOS: Annex B + SES carve-outs. A strict-only,
-    // non-browser, hardened engine never ships these, so the harness
-    // drops them from the corpus denominator (reason `.annex_b`). They
-    // classify via `featureIsOutOfScope` and nothing else.
-    try testing.expect(featureIsOutOfScope("__proto__"));
-    try testing.expect(featureIsOutOfScope("__getter__"));
-    try testing.expect(featureIsOutOfScope("__setter__"));
-    try testing.expect(featureIsOutOfScope("legacy-regexp"));
-    try testing.expect(featureIsOutOfScope("IsHTMLDDA"));
-    try testing.expect(!featureIsUnimplementedProposal("__proto__"));
-    try testing.expect(!featureIsCurrentlySkipped("__proto__"));
-
-    // Pre-Stage-4 proposals Cynic hasn't implemented are ALSO dropped
-    // from the corpus (reason `.pre_stage4`) — they aren't in any
-    // published edition, so they're out of scope until they reach
-    // Stage 4 (then in-scope, counted) or Cynic ships them (then a
-    // dedicated `feature:` phase). They classify via
-    // `featureIsUnimplementedProposal`, never as permanent OOS or as a
-    // counted in-corpus skip.
+test "skip: pre-Stage-4 proposals dropped from total" {
+    // Unshipped Stage <= 3 proposals — dropped via feature tag.
     try testing.expect(featureIsUnimplementedProposal("decorators"));
     try testing.expect(featureIsUnimplementedProposal("import-defer"));
     try testing.expect(featureIsUnimplementedProposal("source-phase-imports"));
     try testing.expect(featureIsUnimplementedProposal("await-dictionary"));
     try testing.expect(featureIsUnimplementedProposal("immutable-arraybuffer"));
-    try testing.expect(!featureIsOutOfScope("decorators"));
-    try testing.expect(!featureIsCurrentlySkipped("decorators"));
-
-    // `featureIsCurrentlySkipped` is the in-corpus bucket: a specced
-    // feature blocked on a vendor/infra gap. It's empty today (Perlex
-    // covers the regex surface), so no positive case — but it stays
-    // distinct from the two OOS predicates above.
-
-    // The union recognises all three buckets.
-    try testing.expect(featureIsUnsupported("__proto__"));
-    try testing.expect(featureIsUnsupported("decorators"));
-
-    // A shipped / specced feature is in none of the buckets — runnable.
-    try testing.expect(!featureIsOutOfScope("class"));
+    // Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) are
+    // NOT here — the harness keeps them out of the main rows via the
+    // per-phase feature-tag gate, and scores them in dedicated phases.
+    try testing.expect(!featureIsUnimplementedProposal("ShadowRealm"));
+    try testing.expect(!featureIsUnimplementedProposal("joint-iteration"));
+    // Shipped, specced features are runnable.
     try testing.expect(!featureIsUnimplementedProposal("class"));
-    try testing.expect(!featureIsCurrentlySkipped("class"));
+    try testing.expect(!featureIsUnimplementedProposal("regexp-modifiers"));
+    try testing.expect(!featureIsUnimplementedProposal("explicit-resource-management"));
 }
 
-test "skip: runtime-only gaps are NOT hidden" {
-    // SES-policy and Stage 3+ runtime features all parse fine;
-    // their fixtures show as honest runtime fails. Path-skipped
-    // OOS surfaces (eval, SharedArrayBuffer, Atomics) match by
-    // path, not by feature tag — the feature tag stays runnable
-    // so non-OOS callers don't get over-filtered.
-    try testing.expect(!featureIsUnsupported("Reflect.parse"));
-    try testing.expect(!featureIsUnsupported("ShadowRealm"));
-    try testing.expect(!featureIsUnsupported("SharedArrayBuffer"));
-    try testing.expect(!featureIsUnsupported("Atomics"));
-    try testing.expect(!featureIsUnsupported("eval"));
-    try testing.expect(!featureIsUnsupported("Array.fromAsync"));
-    try testing.expect(!featureIsUnsupported("Math.sumPrecise"));
-    try testing.expect(!featureIsUnsupported("async-iterator-helpers"));
+test "skip: tech-debt path skips (counted in total, lower pass%)" {
+    // Cross-realm fixtures awaiting multi-realm error attribution.
+    try testing.expect(pathIsCurrentlySkipped(
+        "language/expressions/class/elements/private-method-multiple-evaluations-of-class-realm-function-ctor.js",
+    ));
+    // Temporal fully ships — not a tech-debt skip.
+    try testing.expect(!pathIsCurrentlySkipped("built-ins/Temporal/Now/extensible.js"));
+    try testing.expect(!pathIsCurrentlySkipped("built-ins/Temporal/PlainDateTime/prototype/add/branding.js"));
+    // RegExp /v and property-escape surfaces ship via Perlex — not skipped.
+    try testing.expect(!pathIsCurrentlySkipped(
+        "built-ins/RegExp/property-escapes/special-property-value-Script_Extensions-Unknown.js",
+    ));
+    try testing.expect(!pathIsCurrentlySkipped(
+        "built-ins/RegExp/unicodeSets/generated/character-class-difference-character.js",
+    ));
 }
 
-test "skip: shipping features not flagged unsupported" {
-    try testing.expect(!featureIsUnsupported("regexp-v-flag")); // libregexp partial; positive forms ship
-    try testing.expect(!featureIsUnsupported("regexp-named-groups"));
-    try testing.expect(!featureIsUnsupported("regexp-duplicate-named-groups")); // native Perlex engine
-
-    try testing.expect(!featureIsUnsupported("class"));
-    try testing.expect(!featureIsUnsupported("optional-chaining"));
-    try testing.expect(!featureIsUnsupported("async-functions"));
+test "skip: ShadowRealm is not path-skipped (feature-gated)" {
+    // ShadowRealm ships behind `--enable=ShadowRealm`; the harness's
+    // per-phase feature-tag gate keeps it out of the main rows, not a
+    // skip.zig path list. So neither walk-skip nor tech-debt-skip fires.
+    try testing.expect(!pathIsSkipped("built-ins/ShadowRealm/constructor.js"));
+    try testing.expect(!pathIsCurrentlySkipped("built-ins/ShadowRealm/constructor.js"));
+    // The sloppy-mode `evaluate` fixture classifies as no_strict policy.
+    try testing.expectEqual(
+        PolicyKind.no_strict,
+        pathPolicyKind("built-ins/ShadowRealm/prototype/evaluate/no-conditional-strict-mode.js", &.{}, false).?,
+    );
 }

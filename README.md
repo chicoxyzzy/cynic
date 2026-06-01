@@ -48,9 +48,11 @@ Ohaimark) and generational GC are future work. See
 ### Conformance
 
 Current scores, history, and per-bucket breakdown live in
-[`test262-results.md`](test262-results.md). `spec%` is coverage
-of the (Cynic-targeted) corpus; `attempted%` is the quality of
-what's shipped, ignoring skips. The unit-test suite (`zig build
+[`test262-results.md`](test262-results.md). `pass%` is
+`(passing + correctly handled) / total` — a "correctly handled"
+fixture is one Cynic refuses *by design* (Annex B not shipped,
+strict-only, no Intl, eval-off, or SES throw). The `failing`
+column is real engine work left. The unit-test suite (`zig build
 test`) runs alongside.
 
 ### Build targets
