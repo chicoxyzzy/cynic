@@ -23,6 +23,17 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
 - **No runtime code construction.** `eval`, `new Function(string)`,
   `new GeneratorFunction(string)`, `new AsyncFunction(string)`. Aligns
   with [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses).
+- **SES-hardened by default.** Every modern edge runtime is
+  "SES-friendly" — meaning user code can call `lockdown()` to harden
+  primordials. Cynic skips the call. Realms boot with every intrinsic
+  frozen (`[[Extensible]] = false`, non-writable / non-configurable
+  descriptors), `harden()` shipped as a native global (recursive deep
+  freeze, matches `@endo/ses`), and the override-mistake fix in place
+  (`obj.x = 2` shadows a frozen prototype's data slot instead of
+  throwing TypeError). `--unhardened` opts the whole posture out
+  atomically for code that genuinely needs `OrdinarySet` semantics.
+  Compartments are deferred until multi-realm lands. See
+  [`docs/ses-alignment.md`](docs/ses-alignment.md).
 
 ## Goals
 
@@ -40,27 +51,39 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
   optimizing JIT (**Ohaimark**, T2). The garbage collector is **Metla**.
   The exact tier shape stays open until we have working measurements
   against Lantern.
-- Stay friendly to [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses)
-  and the [Compartments](https://github.com/tc39/proposal-compartments) direction
-  — strict-only and no Annex B *language* extensions already align Cynic
-  with that world (the few normative Annex B *built-ins* we ship are
-  trivial to omit per-realm); runtime design will keep tamper-proof
-  primordials and Compartment-style isolation in mind.
 
 ## Status
 
-Pre-alpha. Lexer + parser + Lantern (the T0 bytecode interpreter) ship,
-with Metla (mark-sweep GC) underneath; the runtime is filling in.
-The JIT tiers (Bistromath, Ohaimark) and generational GC are future
-work. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
+Pre-alpha. Lexer + parser + Lantern (T0 bytecode interpreter) +
+Metla (mark-sweep GC) ship, alongside Perlex (the native §22.2
+RegExp engine; libregexp was retired), native §3 Unicode tables
+(no vendored C), and the hardened-by-default realm-boot pipeline.
+The runtime is filling in §19-§28 one bucket at a time. The JIT
+tiers (Bistromath, Ohaimark) and generational GC are future work.
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance
 
 Current scores, history, and per-bucket breakdown live in
 [`test262-results.md`](test262-results.md). `spec%` is coverage
 of the (Cynic-targeted) corpus; `attempted%` is the quality of
-what's shipped, ignoring skips. Plus 700+ unit tests
-(`zig build test`).
+what's shipped, ignoring skips. The unit-test suite (`zig build
+test`) runs alongside.
+
+### Build targets
+
+- **Native CI (gating):** `x86_64-linux-gnu`,
+  `aarch64-apple-darwin` (Apple Silicon). Full battery — build +
+  unit tests + SES coverage.
+- **Cross-compile CI (build-only, gating):** `aarch64-linux-gnu`,
+  `x86_64-linux-musl`, `aarch64-apple-darwin` from Linux. Catches
+  platform-specific compile breaks pre-merge.
+- **WASM:** `wasm32-freestanding` powers the
+  [playground](https://chicoxyzzy.github.io/cynic/playground/).
+  Native Zig, no libc, no `wasm_shim`.
+- **Not yet:** Windows (POSIX carve-outs in `src/runtime/heap.zig` +
+  `tools/test262.zig`), Android (NDK + `build.zig` sysroot plumbing),
+  iOS (Xcode SDK forwarding). Tracked separately.
 
 ### What works today
 
