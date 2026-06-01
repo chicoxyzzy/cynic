@@ -7,15 +7,16 @@ name: CodeQL
 # source files and exit 1. The explicit matrix here pins the
 # language list and skips c-cpp cleanly.
 #
-# To finish the migration, disable the default-setup once via the
-# Security tab (Settings → Code security → Code scanning →
-# "Set up" → switch from "Default" to "Advanced") or:
+# Default-setup has been disabled (done at codeql.yml landing time).
+# To re-disable if it ever gets re-enabled accidentally, run:
 #
-#     gh api -X DELETE \
-#         repos/chicoxyzzy/cynic/code-scanning/default-setup
+#     gh api -X PATCH \
+#         repos/chicoxyzzy/cynic/code-scanning/default-setup \
+#         -f state=not-configured
 #
-# Otherwise both jobs run in parallel and the default-setup one
-# stays broken.
+# (Or Security tab → Code scanning → switch from Default to
+# Advanced.) The DELETE verb returns 404 on this endpoint — only
+# PATCH with `state=not-configured` works.
 
 on:
   push:
