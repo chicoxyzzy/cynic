@@ -14,20 +14,24 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Opt the JavaScript actions (mlugg/setup-zig@v2, github/codeql-action,
-# step-security/harden-runner, …) into Node 24 now. GitHub forces this
-# on 2026-06-16; until upstream actions ship `using: node24` we set the
-# env var here to clear the deprecation warning. Drop the env block
-# once every action used here advertises node24 natively.
+# Opt the JavaScript actions (github/codeql-action, step-security/
+# harden-runner, …) into Node 24 now. GitHub forces this on
+# 2026-06-16; until upstream actions ship `using: node24` we set the
+# env var here to clear the deprecation warning. xyzzylabs/setup-zig
+# is already node24-native and doesn't need this — but the var is
+# harmless on actions that have migrated. Drop the env block once
+# every action used here advertises node24 natively.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
-# `mlugg/setup-zig@v2` resolves the Zig version from
-# `build.zig.zon`'s `minimum_zig_version` when `version:` is
-# omitted — so `build.zig.zon` is the single source of truth.
-# It also caches `.zig-cache/` by default; for matrix jobs we set
-# `cache-key:` per matrix entry so each entry gets its own cache
-# (the action can't auto-distinguish jobs in a matrix).
+# `xyzzylabs/setup-zig` (Cynic-org fork of mlugg/setup-zig, rewritten
+# in TypeScript on Node 24) resolves the Zig version from
+# `build.zig.zon`'s `minimum_zig_version` when `version:` is omitted
+# — so `build.zig.zon` is the single source of truth. It also caches
+# `.zig-cache/` by default; for matrix jobs we set `cache-key:` per
+# matrix entry so each entry gets its own cache (the action can't
+# auto-distinguish jobs in a matrix). SHA-pinned to v1.0.0;
+# dependabot rotates the SHA on bump.
 
 jobs:
   build-and-test:
@@ -59,7 +63,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v2
+        uses: xyzzylabs/setup-zig@58626e899b126520afe59a875fb2848cf0774c59  # v1.0.0
         with:
           cache-key: ${{ matrix.os }}
 
@@ -118,7 +122,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v2
+        uses: xyzzylabs/setup-zig@58626e899b126520afe59a875fb2848cf0774c59  # v1.0.0
 
       - name: zig build fmt-check
         run: zig build fmt-check
@@ -170,7 +174,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v2
+        uses: xyzzylabs/setup-zig@58626e899b126520afe59a875fb2848cf0774c59  # v1.0.0
         with:
           cache-key: wasm
 
@@ -227,7 +231,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v2
+        uses: xyzzylabs/setup-zig@58626e899b126520afe59a875fb2848cf0774c59  # v1.0.0
         with:
           cache-key: cross-${{ matrix.target }}
 
@@ -283,7 +287,7 @@ jobs:
           submodules: recursive
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v2
+        uses: xyzzylabs/setup-zig@58626e899b126520afe59a875fb2848cf0774c59  # v1.0.0
 
       - name: Run test262 (runtime, parallel)
         # Drop `--quiet` so the per-bucket tally lands in the CI
@@ -408,7 +412,7 @@ jobs:
           submodules: recursive
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v2
+        uses: xyzzylabs/setup-zig@58626e899b126520afe59a875fb2848cf0774c59  # v1.0.0
         with:
           # Every gc-stress job builds the same ReleaseSafe harness,
           # so share one cache namespace across the matrix.
