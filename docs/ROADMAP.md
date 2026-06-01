@@ -498,9 +498,8 @@ feature flag — `Realm.feature_flags`, defined in
 `src/runtime/features.zig`. The `cynic` CLI defaults to all-off
 (embedder-friendly default) and exposes flags to opt in:
 
-- `--enable=<name>` / `--disable=<name>` — toggle one feature.
-- `--enable-experimental` / `--disable-experimental` — toggle the
-  whole tracked set.
+- `--enable=<name>` — enable one feature.
+- `--enable-experimental` — enable the whole tracked set.
 - `--list-features` — print the available set with descriptions.
 
 Each shipped proposal carries a `PRE-STAGE-4 PROPOSAL` comment at

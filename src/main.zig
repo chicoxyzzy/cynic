@@ -191,12 +191,9 @@ fn printUsage(io: std.Io) !void {
         \\Top-level options (consumed before the subcommand):
         \\  --enable=<name>                  Enable a pre-Stage-4 TC39 proposal.
         \\                                   Repeatable. See --list-features.
-        \\  --disable=<name>                 Disable a pre-Stage-4 TC39 proposal.
-        \\                                   Repeatable.
         \\  --enable-experimental            Enable every tracked pre-Stage-4
-        \\                                   proposal (group toggle).
-        \\  --disable-experimental           Disable every tracked pre-Stage-4
-        \\                                   proposal (the default).
+        \\                                   proposal (group toggle). All
+        \\                                   proposals are off by default.
         \\  --list-features                  Print available pre-Stage-4 proposals
         \\                                   and exit.
         \\  --gc-threshold=<n>               Allocation-pressure GC threshold.
@@ -379,9 +376,6 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
         } else if (std.mem.eql(u8, a, "--enable-experimental")) {
             rest = rest[1..];
             out.feature_flags = FeatureSet.initFull();
-        } else if (std.mem.eql(u8, a, "--disable-experimental")) {
-            rest = rest[1..];
-            out.feature_flags = FeatureSet.initEmpty();
         } else if (std.mem.startsWith(u8, a, "--enable=")) {
             const name = a["--enable=".len..];
             const flag = FeatureFlag.fromName(name) orelse {
@@ -391,16 +385,6 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
                 return out;
             };
             out.feature_flags.insert(flag);
-            rest = rest[1..];
-        } else if (std.mem.startsWith(u8, a, "--disable=")) {
-            const name = a["--disable=".len..];
-            const flag = FeatureFlag.fromName(name) orelse {
-                out.err = .unknown_feature;
-                out.bad_token = name;
-                out.remaining = rest;
-                return out;
-            };
-            out.feature_flags.remove(flag);
             rest = rest[1..];
         } else if (std.mem.eql(u8, a, "--unhardened")) {
             out.unhardened = true;

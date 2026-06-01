@@ -128,32 +128,12 @@ git submodule update --init vendor/test262   # one-time; needed for `zig build t
 zig build              # build cynic into zig-out/bin/
 zig build test         # run all unit tests
 zig build test262      # test262 conformance (parse + compile + execute; --write-results also runs each pre-Stage-4 feature phase)
-zig build run -- lex   path/to/file.js              # tokenize and print
-zig build run -- parse path/to/file.js              # parse a Script
-zig build run -- parse --module path/to/file.js     # parse a Module
-zig build run -- parse path/to/file.mjs             # .mjs ⇒ module
-zig build run -- eval  '1 + 2 * 3'                  # compile + run an expression
-zig build run -- run   path/to/file.js              # compile + run a script
-zig build run -- run   a.js b.js c.js               # multiple files share one realm
 ```
 
 Requires Zig **0.17-dev** (master). The Zig project skipped a stable
 0.16, so CI tracks `master` via
 [`xyzzylabs/setup-zig`](https://github.com/xyzzylabs/setup-zig). If
 your local `zig version` reports an older dev tag, bump it.
-
-The `cynic` CLI keeps pre-Stage-4 / experimental TC39 proposals off
-by default — embedders see only stable ECMA-262. Opt in:
-
-```sh
-cynic --list-features                       # show available proposals
-cynic --enable=joint-iteration eval '...'   # one feature
-cynic --enable-experimental run foo.js      # all tracked features
-cynic --disable=upsert eval '...'           # repeatable; later flags win
-```
-
-See `src/runtime/features.zig` for the set and
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for what each proposal ships.
 
 `zig build test262` accepts forwarded flags after `--`:
 
@@ -177,6 +157,31 @@ The Unicode tables under `src/unicode/` are generated and committed:
 Unicode 17.0. ECMA-262 §3 references `unicode.org/versions/latest`,
 so we track upstream: drop the refreshed UCD files into
 `vendor/unicode/` and run `zig build gen-unicode` to regenerate.
+
+## Run
+
+```sh
+zig build run -- lex   path/to/file.js              # tokenize and print
+zig build run -- parse path/to/file.js              # parse a Script
+zig build run -- parse --module path/to/file.js     # parse a Module
+zig build run -- parse path/to/file.mjs             # .mjs ⇒ module
+zig build run -- eval  '1 + 2 * 3'                  # evaluate an expression
+zig build run -- run   path/to/file.js              # run a script
+zig build run -- run   a.js b.js c.js               # multiple files share one realm
+zig build run -- repl                               # interactive REPL (persistent realm)
+```
+
+The `cynic` CLI keeps pre-Stage-4 / experimental TC39 proposals off
+by default — embedders see only stable ECMA-262. Opt in:
+
+```sh
+cynic --list-features                       # show available proposals
+cynic --enable=joint-iteration eval '...'   # one feature
+cynic --enable-experimental run foo.js      # all tracked features
+```
+
+See `src/runtime/features.zig` for the set and
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for what each proposal ships.
 
 ## Working on Cynic
 
