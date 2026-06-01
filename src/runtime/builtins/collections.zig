@@ -56,8 +56,7 @@ fn installSpeciesGetter(realm: *Realm, ctor: *@import("../function.zig").JSFunct
     // `"get [Symbol.species]"` per §15.7.4 (well-known-symbol
     // accessor formatting). Matches what `Symbol.species/symbol-
     // species-name.js` reads via `Object.getOwnPropertyDescriptor`.
-    const getter = try realm.heap.allocateFunctionNative(speciesReturnsThis, 0, "get [Symbol.species]");
-    getter.proto = realm.intrinsics.function_prototype;
+    const getter = try intrinsics.makeNativeFunction(realm, speciesReturnsThis, 0, "get [Symbol.species]");
     const entry = try ctor.accessors.getOrPut(realm.allocator, "@@species");
     entry.value_ptr.* = .{ .getter = getter };
     try ctor.property_flags.put(realm.allocator, "@@species", .{

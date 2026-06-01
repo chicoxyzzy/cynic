@@ -114,8 +114,7 @@ pub fn install(realm: *Realm) !void {
     // built-in name is `"get [Symbol.species]"` (§22.2.4.2),
     // descriptor `{ get, set: undefined, enumerable: false,
     // configurable: true }`.
-    const species_getter = try realm.heap.allocateFunctionNative(regexpSpeciesGetter, 0, "get [Symbol.species]");
-    species_getter.proto = realm.intrinsics.function_prototype;
+    const species_getter = try intrinsics.makeNativeFunction(realm, regexpSpeciesGetter, 0, "get [Symbol.species]");
     const species_entry = try fn_obj.accessors.getOrPut(realm.allocator, "@@species");
     species_entry.value_ptr.* = .{ .getter = species_getter };
     try fn_obj.property_flags.put(realm.allocator, "@@species", .{
