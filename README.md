@@ -56,11 +56,11 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
 
 Pre-alpha. Lexer + parser + Lantern (T0 bytecode interpreter) +
 Metla (mark-sweep GC) ship, alongside Perlex (the native §22.2
-RegExp engine; libregexp was retired), native §3 Unicode tables
-(no vendored C), and the hardened-by-default realm-boot pipeline.
-The runtime is filling in §19-§28 one bucket at a time. The JIT
-tiers (Bistromath, Ohaimark) and generational GC are future work.
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
+RegExp engine), the native §3 Unicode tables, and the
+hardened-by-default realm-boot pipeline. The runtime is filling
+in §19-§28 one bucket at a time. The JIT tiers (Bistromath,
+Ohaimark) and generational GC are future work. See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance
 
@@ -80,7 +80,6 @@ test`) runs alongside.
   platform-specific compile breaks pre-merge.
 - **WASM:** `wasm32-freestanding` powers the
   [playground](https://chicoxyzzy.github.io/cynic/playground/).
-  Native Zig, no libc, no `wasm_shim`.
 - **Not yet:** Windows (POSIX carve-outs in `src/runtime/heap.zig` +
   `tools/test262.zig`), Android (NDK + `build.zig` sysroot plumbing),
   iOS (Xcode SDK forwarding). Tracked separately.
@@ -135,20 +134,6 @@ allocation pressure (the heap stays bounded under any allocating
 loop / recursion / promise chain — see
 [`docs/handbook/gc.md`](docs/handbook/gc.md) for the trigger and
 the `HandleScope` contract for natives).
-
-### Known gaps
-
-The big shaped items: top-level `await` in modules; the multi-file
-module graph beyond single-file evaluation (cyclic imports, namespace
-exotic, live mutable bindings — dynamic `import()` itself works);
-async-generator yield-star resume-arg forwarding + `AsyncIteratorClose`
-with `await`; resizable-ArrayBuffer length-tracking view semantics
-across the TypedArray prototype; generational GC; `Temporal` (the
-namespace installs, but the calendars / timezones / arithmetic
-underneath are still filling in — `Date` stays UTC-only in the
-meantime). Each takes a swing at the runtime score as it lands;
-the scoreboard in [`test262-results.md`](test262-results.md) is the
-source of truth.
 
 ## Build
 
