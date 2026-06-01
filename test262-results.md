@@ -1,8 +1,8 @@
 # test262 conformance — Cynic
 
-**Cynic passes 100.00 % of its 43030-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
+**Cynic passes 100.00 % of its 43029-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
-- **39172 pass** at the engine-true level (engine% = 100.00 % — see Legend).
+- **39171 pass** at the engine-true level (engine% = 100.00 % — see Legend).
 - **3858 SES-policy divergences** — Cynic's hardened posture throws by design where test262 expects the spec-literal success (frozen primordials, locked descriptors, override-mistake fix). Counted as engine-correct in the headline `pass%` per Layout A; see `docs/handbook/ses-test262-policy.md`.
 - **0 real engine failures** — Cynic returns the wrong answer or throws where the spec expects success. (libregexp Annex B / `/v` carve-outs are documented in [AGENTS.md](../AGENTS.md).)
 - **0 skipped** — *in-corpus* skips that should eventually pass: single-realm Cynic (`$262.createRealm()` cross-realm fixtures, which need multi-realm support) plus a handful of eval-dependent fixtures awaiting `--allow=eval`.
@@ -12,8 +12,8 @@
 
 | posture | pass% | engine% | passes / corpus | divergent |
 |---|---:|---:|---:|---:|
-| **hardened** (default — `cynic run`) | 100.00 % | 100.00 % | 43030 / 43030 | 3858 |
-| **unhardened** (`cynic --unhardened`) | 100.00 % | 100.00 % | 43030 / 43030 | — |
+| **hardened** (default — `cynic run`) | 100.00 % | 100.00 % | 43029 / 43029 | 3858 |
+| **unhardened** (`cynic --unhardened`) | 100.00 % | 100.00 % | 43029 / 43029 | — |
 
 > **pass%** is the headline — `pass / corpus` (a fixture
 > Cynic doesn't ship counts as a `skip`, lowering this).
@@ -180,7 +180,7 @@ first two path components (`built-ins/Set`,
 | `built-ins/Array` | 2481 | 0 | 0 | 564 | 100 % | 100 % |
 | `built-ins/Object` | 2784 | 0 | 0 | 536 | 100 % | 100 % |
 | `built-ins/TypedArray` | 1104 | 0 | 0 | 319 | 100 % | 100 % |
-| `built-ins/String` | 1029 | 0 | 0 | 177 | 100 % | 100 % |
+| `built-ins/String` | 1028 | 0 | 0 | 177 | 100 % | 100 % |
 | `built-ins/Date` | 439 | 0 | 0 | 155 | 100 % | 100 % |
 | `built-ins/Math` | 214 | 0 | 0 | 113 | 100 % | 100 % |
 | `built-ins/Promise` | 525 | 0 | 0 | 104 | 100 % | 100 % |
@@ -291,6 +291,13 @@ until its features ship in mainline ECMA-262.
 
 
 ## History
+
+### 2026-06-01 — cynic `7f012dd`, test262 `d0c1b4555b`
+
+|         | pass% | engine% | pass / corpus | pass / engine-attempt | divergent | Δ pass | elapsed |
+|---|---|---|---|---|---:|---:|---:|
+| **runtime** | 100.00 % | 100.00 % | 43029 / 43029 | 43029 / 43029 | — | -1 | 30.5 s |
+| **runtime_hardened** | 100.00 % | 100.00 % | 43029 / 43029 | 39171 / 39171 | 3858 | -1 | 30.5 s |
 
 ### 2026-05-31 — cynic `5343638`, test262 `d0c1b455`
 
