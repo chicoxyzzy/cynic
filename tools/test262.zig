@@ -2944,12 +2944,12 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
     } else {
         const msg = try std.fmt.bufPrint(&buf,
             \\corpus:    {d}
-            \\pass:      {d}   ({d:.2}% engine-true)
-            \\corr-hand: {d}
-            \\pass%:     {d:.2}% — (pass + correctly-handled) / corpus
-            \\fail:      {d}
+            \\passing:   {d}   ({d:.2}% engine-true)
+            \\corr-hand: {d}   (correctly handled fails)
+            \\pass%:     {d:.2}% — (passing + correctly-handled fails) / corpus
+            \\failing:   {d}
             \\skip:      {d}
-            \\oos:       {d}   (dropped from corpus — strict-only, Annex B, pre-Stage-4)
+            \\oos:       {d}   (dropped from corpus — pre-Stage-4)
             \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
             \\  parse-negative: {d} attempted, {d} pass, {d} fail (false-accept)
             \\elapsed:   {d}ms
@@ -3561,16 +3561,17 @@ fn parsePerDayRows(
         }
         const mode = parseModeLabel(mode_part) orelse continue;
 
-        // Peek the first data cell to decide between legacy schema
-        // (`pass% | engine% | pass / corpus | pass / engine-attempt
-        // | divergent | Δ pass | elapsed`) and the new Layout-B
-        // schema (`passing | failing | correctly handled | total |
-        // pass% | Δ pass | elapsed`). Legacy ends the first cell
-        // with `%`; the new schema's first cell is a plain integer.
+        // Peek the first data cell to decide between the legacy
+        // schema (`pass% | engine% | pass / corpus | pass /
+        // engine-attempt | divergent | Δ pass | elapsed`) and the
+        // current schema (`passing | failing | correctly handled
+        // fails | total | pass% | Δ pass | elapsed`). Legacy ends the
+        // first cell with `%`; the current schema's first cell is a
+        // plain integer.
         const first_data_cell_raw = it.next() orelse continue;
         const first_data_cell = std.mem.trim(u8, first_data_cell_raw, " ");
         if (first_data_cell.len > 0 and first_data_cell[first_data_cell.len - 1] != '%') {
-            // New Layout-B schema. Parse as passing | failing |
+            // Current schema. Parse as passing | failing |
             // correctly_handled | total | pass% | Δ pass | elapsed.
             const passing = std.fmt.parseInt(u32, first_data_cell, 10) catch continue;
             const failing_cell = std.mem.trim(u8, it.next() orelse continue, " ");
@@ -3595,7 +3596,7 @@ fn parsePerDayRows(
                 .cynic_sha = cynic_sha,
                 .test262_sha = t262_sha,
                 .total = total_b,
-                .pass = passing + ch, // Row.pass = Layout-A-style headline
+                .pass = passing + ch, // Row.pass stores (passing + ch)
                 .attempted = passing + failing,
                 .spec_pct = spec_pct_b,
                 .attempted_pct = if (passing + failing == 0)
@@ -3621,11 +3622,9 @@ fn parsePerDayRows(
         // Parse the raw `pass / attempted` cell — earlier code
         // derived attempted from `att_pct` via the inverse
         // formula, but the 2-decimal % is lossy: hardened rows
-        // round-tripped 34487 → 34488 (off-by-one), which
-        // propagated into the TL;DR's "real engine failures"
-        // count. Reading the raw integer fixes this for any row
-        // post-Layout-A; pre-Layout-A rows hit the deriveAttempted
-        // fallback below when the cell shape doesn't match.
+        // round-tripped 34487 → 34488 (off-by-one). Reading the raw
+        // integer fixes this; rows old enough to lack the cell hit
+        // the deriveAttempted fallback below.
         const pa_attempted_override: ?u32 = blk: {
             const cell_raw = it.next() orelse break :blk null;
             const cell = std.mem.trim(u8, cell_raw, " ");
@@ -3781,8 +3780,8 @@ fn writeFileBody(
             "**Cynic passes {d:.2} % of its {d}-fixture test262 corpus** under the " ++
                 "default (hardened SES) posture (`cynic run`). The breakdown:\n\n" ++
                 "- **{d} passing** — Cynic produced the spec-expected result.\n" ++
-                "- **{d} correctly handled** — failures that hit a Cynic design policy " ++
-                "(Annex B not shipped, strict-only, no Intl, eval-off, SES throw) " ++
+                "- **{d} correctly handled fails** — failures that hit a Cynic design " ++
+                "policy (Annex B not shipped, strict-only, no Intl, eval-off, SES throw) " ++
                 "rather than an engine bug. Counted as spec-correct in `pass%` because " ++
                 "Cynic's deliberate \"no\" is the right answer for the policy it ships.\n" ++
                 "- **{d} failing** — real engine failures with no policy bucket. Work to do.\n" ++
@@ -3798,30 +3797,31 @@ fn writeFileBody(
     try out.appendSlice(gpa,
         \\## Current scores
         \\
-        \\| posture | passing | failing | correctly handled | total | pass% |
+        \\| posture | passing | failing | correctly handled fails | total | pass% |
         \\|---|---:|---:|---:|---:|---:|
         \\
     );
     // Three rows in user-visible order: the `--allow=eval` opt-in
-    // first (currently a placeholder — `--allow=eval` hasn't shipped
-    // yet, see `docs/ses-alignment.md`, so the row reads `n/a` until
-    // the eval surface is wired into a phase sweep), then the
-    // unhardened baseline (`--unhardened` opt-out), then hardened
-    // (the default Cynic posture, `cynic run`). Same engine path,
-    // different policy mask: unhardened counts annex_b + no_strict +
-    // intl402 + eval as correctly handled; hardened adds SES on top.
+    // first (always `n/a` — `--allow=eval` doesn't exist as a runtime
+    // flag yet; the row is reserved so the layout is stable when it
+    // ships), then the unhardened baseline (`--unhardened` opt-out),
+    // then hardened (the default Cynic posture, `cynic run`). Same
+    // engine path, different policy mask: unhardened counts annex_b +
+    // no_strict + intl402 + eval as correctly handled fails; hardened
+    // adds SES on top.
     try writeAllowEvalPlaceholderRow(gpa, out);
     inline for (.{ Mode.unhardened, Mode.hardened }) |m| {
         if (latestRow(rows, m)) |r| try writeMiniRow(gpa, out, r);
     }
     try out.appendSlice(gpa,
         \\
-        \\> **pass%** = `(passing + correctly handled) / total`. A
-        \\> fixture that fails because of a Cynic design policy
+        \\> **pass%** = `(passing + correctly handled fails) / total`.
+        \\> A fixture that fails because of a Cynic design policy
         \\> (Annex B not shipped, strict-only, no Intl, eval-off, SES
-        \\> throw) counts as **correctly handled** rather than a
-        \\> real engine bug. Plain **failing** is what's left over —
-        \\> real engine work to do.
+        \\> throw) is a **correctly handled fail** rather than a real
+        \\> engine bug. Plain **failing** is what's left over — real
+        \\> engine work to do. The `--allow=eval` row is always `n/a`
+        \\> until that opt-in ships.
         \\
         \\
     );
@@ -3871,20 +3871,19 @@ fn writeFileBody(
         \\
         \\- **unhardened, `--allow=eval`** — unhardened plus the
         \\  eval surface (`eval()`, `new Function(string)`, …) opted
-        \\  in. Placeholder today: `--allow=eval` isn't shipped (see
-        \\  `docs/ses-alignment.md`), so no sweep populates this row
-        \\  and every cell reads `n/a`. When the opt-in lands, eval
-        \\  fixtures move from "correctly handled" to plain passing.
+        \\  in. **Always `n/a`**: `--allow=eval` isn't shipped (see
+        \\  `docs/ses-alignment.md`), so no sweep populates this row.
+        \\  The row is reserved so the layout stays stable when the
+        \\  opt-in lands (eval fails would then become passes).
         \\- **unhardened** — `cynic --unhardened` opt-out. Eval off
-        \\  (so eval-dependent fixtures fail and classify as
-        \\  correctly handled), Annex B / Intl / noStrict failures
-        \\  also classify as correctly handled. SES posture off —
-        \\  no SES throws.
+        \\  (so eval-dependent fixtures fail and count as correctly
+        \\  handled fails), Annex B / Intl / noStrict failures too.
+        \\  SES posture off — no SES throws.
         \\- **hardened** — the default posture (`cynic run`). All
         \\  the unhardened policies plus SES — primordials frozen,
         \\  override-mistake fix on, locked descriptors. Fixtures
         \\  whose expectation conflicts with SES enforcement throw
-        \\  by design and classify as correctly handled.
+        \\  by design and count as correctly handled fails.
         \\
         \\### Columns
         \\
@@ -3892,7 +3891,7 @@ fn writeFileBody(
         \\  the spec-expected result.
         \\- **`failing`** — engine-true failures that *don't* match
         \\  any design policy. Real work to do.
-        \\- **`correctly handled`** — failures that hit a Cynic
+        \\- **`correctly handled fails`** — failures that hit a Cynic
         \\  design policy: Annex B not shipped, strict-only,
         \\  no Intl, eval-off, or SES throw. Counted with passes
         \\  under `pass%` because Cynic's deliberate "no" is the
@@ -3902,7 +3901,7 @@ fn writeFileBody(
         \\- **`total`** — every fixture except pre-Stage-4
         \\  proposals (Stage ≤ 3, shipped or not) and the upstream
         \\  `staging/` / `harness/` paths.
-        \\- **`pass%`** — `(passing + correctly handled) / total`.
+        \\- **`pass%`** — `(passing + correctly handled fails) / total`.
         \\  The headline.
         \\- **SES witness fidelity** (the italic note above) —
         \\  positive-coverage signal. The curated witness set in
@@ -4001,7 +4000,7 @@ fn writeFileBody(
         }
         try out.appendSlice(gpa, "\n\n");
         try out.appendSlice(gpa,
-            \\|         | passing | failing | correctly handled | total | pass% | Δ pass | elapsed |
+            \\|         | passing | failing | correctly handled fails | total | pass% | Δ pass | elapsed |
             \\|---|---:|---:|---:|---:|---:|---:|---:|
             \\
         );
@@ -4047,11 +4046,12 @@ fn postureLabel(m: Mode) []const u8 {
     };
 }
 
-/// Emit the placeholder row for the `--allow=eval` posture. No
-/// sweep populates it yet — `--allow=eval` isn't shipped (see
-/// `docs/ses-alignment.md`) — so every cell renders as `n/a`. The
-/// row exists so the `## Current scores` layout stays stable
-/// when the eval surface lands and starts producing real numbers.
+/// Emit the `--allow=eval` posture row. This row is **always** all
+/// `n/a`: `--allow=eval` isn't a shipped runtime flag (see
+/// `docs/ses-alignment.md`), so no sweep ever populates it. The row
+/// exists only to keep the `## Current scores` layout stable for when
+/// the opt-in lands. No `Mode.unhardened_allow_eval` history row is
+/// ever written, so there's nothing to read back — it's hardcoded here.
 fn writeAllowEvalPlaceholderRow(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -4166,13 +4166,13 @@ fn writeScoreboard(
         \\  The remainder (~13 fixtures) is the
         \\  cross-realm cluster awaiting `--allow=eval` and multi-realm
         \\  error attribution.
-        \\- The **0-fails tier** is sorted by `correctly handled ↓` so
+        \\- The **0-fails tier** is sorted by `correctly handled fails ↓` so
         \\  the heaviest policy buckets cluster first. `intl402/`
         \\  trees dominate (no Intl), then the SES-hot built-ins
         \\  (`Array`, `Object`, `TypedArray`, `String`, `Date`,
         \\  `Math`), then the Annex B / eval / noStrict tails.
         \\
-        \\| area | passing | failing | correctly handled | total | pass% |
+        \\| area | passing | failing | correctly handled fails | total | pass% |
         \\|---|---:|---:|---:|---:|---:|
         \\
     );
@@ -4193,7 +4193,7 @@ fn writeScoreboard(
                 1 => "100–999 fails — engine-work tier",
                 2 => "10–99 fails — engine-work tier",
                 3 => "1–9 fails — engine-work tier",
-                else => "0 fails — passing / all-policy (sorted by correctly handled ↓)",
+                else => "0 fails — passing / all-policy (sorted by correctly handled fails ↓)",
             };
             const hdr = try std.fmt.bufPrint(&buf, "| **_{s}_** | | | | | |\n", .{label});
             try out.appendSlice(gpa, hdr);
@@ -4245,13 +4245,13 @@ fn writePreStage4Scoreboard(
         \\Stage 1–3, ahead of their inclusion in the published
         \\edition. Each proposal gets a **(hardened)** row — the
         \\as-shipped SES posture under `--enable=<flag>`, with SES
-        \\throws counted as correctly handled — and an
+        \\throws counted as correctly handled fails — and an
         \\**(unhardened)** row against bare ECMA-262. Same column
         \\shape as the main `## Current scores` table:
-        \\`passing | failing | correctly handled | total | pass%`.
+        \\`passing | failing | correctly handled fails | total | pass%`.
         \\These fixtures are excluded from the top-line score.
         \\
-        \\| feature | passing | failing | correctly handled | total | pass% |
+        \\| feature | passing | failing | correctly handled fails | total | pass% |
         \\|---|---:|---:|---:|---:|---:|
         \\
     );
@@ -4378,12 +4378,11 @@ fn extractWitnessNote(existing: []const u8) ?[]const u8 {
 /// by area` heading from earlier file generations. Returns the
 /// byte offset of the heading line on success, null otherwise.
 fn findScoreboardHeading(existing: []const u8) ?struct { offset: usize, length: usize } {
-    // Most recent heading first. Each prior render lives in
-    // historical results.md files; the legacy fallbacks below let
-    // a pre-Layout-B file extract its scoreboard section cleanly.
-    const layout_b = "## Where the engine fails, by area";
-    if (std.mem.indexOf(u8, existing, layout_b)) |off| {
-        return .{ .offset = off, .length = layout_b.len };
+    // Current heading first; the legacy fallbacks below let an older
+    // results.md file extract its scoreboard section cleanly.
+    const current = "## Where the engine fails, by area";
+    if (std.mem.indexOf(u8, existing, current)) |off| {
+        return .{ .offset = off, .length = current.len };
     }
     const headings = [_][]const u8{
         "## Where the engine fails (and where SES diverges), by area",

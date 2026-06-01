@@ -355,27 +355,27 @@ look moderate. Forces `--threads=1`),
 `--min-ses-witness-pct=<f>` (per-row floors — the unhardened
 row, the hardened row, and the SES-witness side channel
 respectively. The first two gate the row's headline `pass%`
-(= `(passing + correctly handled) / total` — see the legend
-in `test262-results.md`); the witness floor gates
+(= `(passing + correctly handled fails) / total` — see the
+legend in `test262-results.md`); the witness floor gates
 `tools/test262/ses_witnesses.zig`'s curated set — every listed
 path MUST classify under the SES policy in the hardened phase.
 Exit 2 when any floor trips. Skipped under `--filter=`. CI
 wires all three at published baselines so a regression in
 either row or in witness fidelity fails the build — see
-`.github/workflows/ci.yml`). The harness scores against the
-**Layout-B corpus**: every test262 fixture except (a) `harness/`
-and `staging/` walk-time skips and (b) pre-Stage-4 proposals
-(both unshipped — decorators, import-defer, source-phase-imports,
-import-bytes, immutable-arraybuffer, await-dictionary — and
-shipped — joint-iteration, ShadowRealm; the shipped ones get
-their own dedicated per-feature scoreboard). Annex B / intl402 /
-eval-dependent / `noStrict` fixtures all RUN; any failure
-classifies as **correctly handled** under the matching policy
-(annex_b > no_strict > intl402 > eval > SES, first match wins;
-SES is hardened-only and matched against the runtime error
-pattern). Re-running for the same `(date, mode)` replaces that
-day's row. Each row records `passing`, `failing`, `correctly
-handled`, `total`, and `pass%`. `test262-results.md` opens with
+`.github/workflows/ci.yml`). The harness scores every test262
+fixture except (a) `harness/` and `staging/` walk-time skips and
+(b) pre-Stage-4 proposals (both unshipped — decorators,
+import-defer, source-phase-imports, import-bytes,
+immutable-arraybuffer, await-dictionary — and shipped —
+joint-iteration, ShadowRealm; the shipped ones get their own
+dedicated per-feature scoreboard). Annex B / intl402 /
+eval-dependent / `noStrict` fixtures all RUN; any failure is a
+**correctly handled fail** under the matching policy (annex_b >
+no_strict > intl402 > eval > SES, first match wins; SES is
+hardened-only and matched against the runtime error pattern).
+Re-running for the same `(date, mode)` replaces that day's row.
+Each row records `passing`, `failing`, `correctly handled
+fails`, `total`, and `pass%`. `test262-results.md` opens with
 a `## Current scores` snapshot (3 rows: `unhardened, --allow=eval`
 as a placeholder until the eval opt-in ships, then `unhardened`,
 then `hardened`), a `## Legend`, a `## Where the engine fails,
