@@ -24,6 +24,22 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
     });
 
+    // `-Dexhaustive-tests=true` flips on the two whole-range Unicode
+    // invariant tests (case_conv whole-range + NormalizationTest.txt
+    // UAX #15 conformance). Off by default because under Debug +
+    // `testing.allocator` they dominate `zig build test` wall-time
+    // (~15 min on Apple Silicon); CI runs them on Linux only, where
+    // the same code paths are POSIX-clean and the allocator penalty
+    // is half as bad.
+    const exhaustive_tests = b.option(
+        bool,
+        "exhaustive-tests",
+        "Enable the whole-range Unicode invariant tests (slow under Debug+testing.allocator). Default: false.",
+    ) orelse false;
+    const lib_build_options = b.addOptions();
+    lib_build_options.addOption(bool, "exhaustive_tests", exhaustive_tests);
+    lib_mod.addOptions("build_options", lib_build_options);
+
     // Executable module: the `cynic` CLI. Imports the library as `cynic`.
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

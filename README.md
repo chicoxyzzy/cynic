@@ -1,5 +1,9 @@
 # Cynic
 
+[![CI](https://github.com/chicoxyzzy/cynic/actions/workflows/ci.yml/badge.svg)](https://github.com/chicoxyzzy/cynic/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/chicoxyzzy/cynic/actions/workflows/codeql.yml/badge.svg)](https://github.com/chicoxyzzy/cynic/actions/workflows/codeql.yml)
+[![Playground](https://github.com/chicoxyzzy/cynic/actions/workflows/playground.yml/badge.svg)](https://github.com/chicoxyzzy/cynic/actions/workflows/playground.yml)
+
 A strict-only ECMAScript engine, written from scratch in Zig.
 
 Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS

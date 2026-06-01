@@ -177,6 +177,11 @@ test "convert + properties are total and well-formed over the whole range" {
     // fields of every emitted MapEntry against a bad table regen — the
     // exhaustive libunicode cross-check that proved the values is gone
     // (libunicode was removed), so this is the standing structural net.
+    //
+    // ~4.4M operations under Debug + `testing.allocator`; gated behind
+    // `-Dexhaustive-tests=true` so the default `zig build test` stays
+    // fast (CI runs this on Linux only).
+    if (!@import("build_options").exhaustive_tests) return error.SkipZigTest;
     var cp: u21 = 0;
     while (cp <= 0x10FFFF) : (cp += 1) {
         inline for (.{ true, false }) |to_upper| {

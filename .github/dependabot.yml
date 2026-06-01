@@ -1,0 +1,28 @@
+# Auto-bump GitHub Action versions weekly so pinned dependencies
+# (mlugg/setup-zig, actions/checkout, peaceiris/actions-gh-pages, …)
+# don't quietly fall behind. Grouped into a single PR per week to
+# keep review surface low.
+#
+# Paired with the upcoming SHA-pinning effort: once actions are
+# pinned by commit SHA, Dependabot rewrites the SHA + comment tag in
+# lockstep, so the security posture stays current without manual
+# rotation.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns:
+          - '*'
+    commit-message:
+      prefix: ci
+      include: scope
+    labels:
+      - ci
+      - dependencies

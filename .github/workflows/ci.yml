@@ -14,6 +14,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Opt the JavaScript actions (mlugg/setup-zig@v2, github/codeql-action,
+# step-security/harden-runner, …) into Node 24 now. GitHub forces this
+# on 2026-06-16; until upstream actions ship `using: node24` we set the
+# env var here to clear the deprecation warning. Drop the env block
+# once every action used here advertises node24 natively.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 # `mlugg/setup-zig@v2` resolves the Zig version from
 # `build.zig.zon`'s `minimum_zig_version` when `version:` is
 # omitted — so `build.zig.zon` is the single source of truth.
@@ -24,6 +32,7 @@ concurrency:
 jobs:
   build-and-test:
     name: Build & unit tests (${{ matrix.os }})
+    timeout-minutes: 45
     strategy:
       # Surface every OS's failure, don't short-circuit on first.
       fail-fast: false
@@ -31,6 +40,17 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Audit egress (advisory)
+        # `step-security/harden-runner` records every outbound
+        # network call from the runner. In `audit` mode it just
+        # logs to the run; flip to `block` after a few weeks of
+        # baseline data, with the observed hosts in `allowed-endpoints`.
+        # Defense in depth against a compromised transitive
+        # dependency exfiltrating source or credentials.
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout
         # No submodules: `zig build` / `zig build test` never read
         # the test262 corpus (the only submodule). The inline
@@ -50,7 +70,20 @@ jobs:
         run: zig build
 
       - name: Unit tests
-        run: zig build test --summary all
+        # Linux runs the exhaustive Unicode invariants (whole-range
+        # case conversion in `src/unicode/case_conv.zig`,
+        # NormalizationTest.txt UAX #15 conformance in
+        # `src/unicode/normalization.zig`). macOS skips them — same
+        # code paths are POSIX-clean across both, and the macOS
+        # Debug allocator makes those tests dominate wall-time
+        # (~18 min vs ~3 min). Gated via `-Dexhaustive-tests=true`;
+        # see the `b.option(...)` block in `build.zig`.
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            zig build test --summary all -Dexhaustive-tests=true
+          else
+            zig build test --summary all
+          fi
 
       - name: SES positive-coverage tests
         # Phase 4 of `docs/handbook/ses-test262-policy.md`. Runs
@@ -67,6 +100,7 @@ jobs:
   fmt-check:
     name: zig fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     # No `needs:` — `zig build fmt-check` compiles nothing, it just
     # runs the formatter. Letting it start immediately surfaces a
     # formatting drift without waiting on a full engine build.
@@ -75,6 +109,11 @@ jobs:
     # emit fmt-clean output, so a regen via `zig build gen-unicode`
     # never reintroduces drift.
     steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@v6
 
@@ -84,30 +123,106 @@ jobs:
       - name: zig build fmt-check
         run: zig build fmt-check
 
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Static linter for `.github/workflows/*.yml`. Catches the
+    # things YAML parsing misses: typoed `runs-on`, wrong
+    # shell, undeclared matrix variables, expressions that
+    # reference non-existent contexts. ~5s; gating, so a workflow
+    # regression can't ship.
+    steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run actionlint
+        # The official docker image pins a release; safer than
+        # `curl | bash` and faster than checking out the action's
+        # source on every run.
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            -w /repo \
+            rhysd/actionlint:latest -color
+
+  wasm-build:
+    name: WASM build smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Catches freestanding-incompatible regressions before they
+    # hit `gh-pages` on merge. Builds without `wasm-opt` (no
+    # Binaryen download, ~6 min cold → ~3 min); the post-merge
+    # `playground.yml` re-builds with `wasm-opt -Oz` for the
+    # deploy. We just want the compile signal.
+    steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          cache-key: wasm
+
+      - name: zig build wasm
+        run: zig build wasm
+
   cross-build:
     name: Cross-build (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: build-and-test
     # Build-only sanity check for targets we don't natively execute.
-    # Catches compile breaks on platforms Cynic genuinely deploys
-    # to but the runner pool doesn't cover:
+    # Catches compile breaks on platforms Cynic deploys to but the
+    # GitHub runner pool doesn't cover, plus catches macOS-vs-Linux
+    # libc divergence (the recent `std.c.clock_gettime` libc-link
+    # break would have shown up here pre-push if a contributor on
+    # darwin ran `zig build -Dtarget=x86_64-linux-gnu`).
     #
-    #   aarch64-linux-gnu  — Workers / Deno on ARM64 Linux, a
-    #                        real production target. Cross-compiles
-    #                        cleanly because Zig bundles glibc
-    #                        headers for the standard Linux targets.
+    #   aarch64-linux-gnu   — Workers / Deno on ARM64 Linux.
+    #   x86_64-linux-gnu    — Workers / Deno on x86_64 Linux (the
+    #                         primary production target). Linux
+    #                         cross-from-Linux is essentially a
+    #                         host build, but exposing it as a
+    #                         distinct matrix entry forces the
+    #                         build-graph to run cleanly under the
+    #                         explicit triple.
+    #   x86_64-linux-musl   — Catches static-link / libc-symbol-set
+    #                         regressions. Workers' v8-isolate edge
+    #                         runners run under musl.
+    #   aarch64-macos       — Apple Silicon cross-from-Linux; lets a
+    #                         Linux contributor catch macOS-only
+    #                         compile breaks before pushing.
     #
     # Not added: aarch64-linux-android (needs the Android NDK for
     # Bionic libc headers — Zig doesn't bundle them) and
     # aarch64-ios (needs the iOS SDK + `build.zig` plumbing to
-    # thread SDKROOT into the qjs_regex C library compilation).
+    # thread SDKROOT into the libc link step on the native modules).
     # Both are real porting efforts, tracked separately.
     strategy:
       fail-fast: false
       matrix:
         target:
           - aarch64-linux-gnu
+          - x86_64-linux-gnu
+          - x86_64-linux-musl
+          - aarch64-macos
     steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@v6
 
@@ -128,6 +243,7 @@ jobs:
   test262:
     name: test262 conformance + RSS smoke (gating)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: build-and-test
     # One job builds the ReleaseFast harness once, then runs both
     # the full runtime sweep and the filtered RSS smoke against it —
@@ -156,6 +272,11 @@ jobs:
     # --mode=runtime --write-results` and commit it like any
     # other source change.
     steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -175,8 +296,7 @@ jobs:
         #                                Today 83.16 % under the
         #                                tech-debt-honest corpus
         #                                (planned-feature paths
-        #                                — Temporal, libregexp
-        #                                `/v` gaps, cross-realm,
+        #                                — Temporal, cross-realm,
         #                                etc. — now register as
         #                                `skip` instead of being
         #                                excluded). ~0.6pp
@@ -235,6 +355,7 @@ jobs:
   test262-gc-stress:
     name: test262 GC stress / ${{ matrix.bucket }} (advisory)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     needs: build-and-test
     continue-on-error: true
     # Catches GC rooting / write-barrier regressions that the
@@ -276,6 +397,11 @@ jobs:
           - built-ins/Iterator
           - language/expressions/generators
     steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@v6
         with:

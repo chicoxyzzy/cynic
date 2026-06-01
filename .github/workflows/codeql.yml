@@ -1,0 +1,72 @@
+name: CodeQL
+
+# Replaces GitHub's default-setup CodeQL. The default-setup
+# autodetector kept spinning up the c-cpp extractor (cached from
+# when the repo had vendored QuickJS-NG C in `vendor/quickjs/`),
+# even after every .c / .h file was removed — it would index 0
+# source files and exit 1. The explicit matrix here pins the
+# language list and skips c-cpp cleanly.
+#
+# To finish the migration, disable the default-setup once via the
+# Security tab (Settings → Code security → Code scanning →
+# "Set up" → switch from "Default" to "Advanced") or:
+#
+#     gh api -X DELETE \
+#         repos/chicoxyzzy/cynic/code-scanning/default-setup
+#
+# Otherwise both jobs run in parallel and the default-setup one
+# stays broken.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly Tuesday 06:23 UTC — picks up new CodeQL queries
+    # (Anthropic's, GitHub's, the security community's) without
+    # needing a code change to trigger them.
+    - cron: '23 6 * * 2'
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # GitHub forces Node 24 on JavaScript actions on 2026-06-16.
+  # Opt in early; clears the deprecation warning from CodeQL's
+  # own actions (which still ship `using: node20`).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # No c-cpp, no python, no java — Cynic is Zig + a small JS
+        # playground front-end. `actions` covers workflow files
+        # (catches the same kind of YAML injection the harden-runner
+        # step audits at runtime).
+        language:
+          - actions
+          - javascript-typescript
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:${{ matrix.language }}'

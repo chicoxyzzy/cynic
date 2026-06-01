@@ -1,11 +1,11 @@
 name: Deploy playground
 
 # Rebuilds the WebAssembly playground and republishes it to
-# `gh-pages:/playground/` whenever the engine, the front-end, the
-# vendored regex C, or the build graph changes on `main`. Keeps the
-# multi-MB `cynic.wasm` out of tracked branch history — it is
-# regenerated (and `wasm-opt`-minified) from source on every deploy
-# instead of hand-committed.
+# `gh-pages:/playground/` whenever the engine, the front-end, or
+# the build graph changes on `main`. Keeps the multi-MB
+# `cynic.wasm` out of tracked branch history — it is regenerated
+# (and `wasm-opt`-minified) from source on every deploy instead of
+# hand-committed.
 #
 # The main-site nav link (`index.html` → `playground/`) is a
 # one-time edit on the `gh-pages` branch; this workflow never
@@ -17,7 +17,6 @@ on:
     paths:
       - 'src/**'
       - 'playground/**'
-      - 'vendor/quickjs/**'
       - 'build.zig'
       - 'build.zig.zon'
       - '.github/workflows/playground.yml'
@@ -33,15 +32,32 @@ concurrency:
   group: deploy-playground
   cancel-in-progress: true
 
+# Opt JavaScript actions into Node 24 ahead of GitHub's 2026-06-16
+# forced cutover. Mirrors the env block in `ci.yml`.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   build-and-deploy:
     name: Build WASM + publish to gh-pages
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
+      - name: Audit egress (advisory)
+        # Defense-in-depth for the one workflow that has
+        # `contents: write` — observes outbound network calls so
+        # a future compromised transitive can't exfiltrate the
+        # GITHUB_TOKEN silently. Audit mode for now; can flip to
+        # block once `allowed-endpoints` is baselined.
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@v6
-        # No submodules: the wasm build is the engine + vendored
-        # QuickJS-NG (in-tree), not test262.
+        # No submodules: the WASM build is pure Zig (Perlex regex
+        # engine + native Unicode tables); the only submodule is
+        # the test262 corpus, which the deploy doesn't need.
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2

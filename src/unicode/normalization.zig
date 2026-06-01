@@ -276,7 +276,12 @@ fn parseHexCps(allocator: std.mem.Allocator, s: []const u8) ![]u32 {
 // NFKD` row, the UAX #15 invariants must hold for every form (e.g. column 2
 // == toNFC of columns 1/2/3; column 5 == toNFKD of all five). ~20k rows
 // spanning every script, Hangul, ligatures, ordering, and exclusions.
+//
+// ~320k normalize calls through `testing.allocator`; gated behind
+// `-Dexhaustive-tests=true` so the default `zig build test` stays fast
+// (CI runs this on Linux only).
 test "NormalizationTest.txt conformance (UAX #15 invariants)" {
+    if (!@import("build_options").exhaustive_tests) return error.SkipZigTest;
     const data = @embedFile("NormalizationTest.txt");
     const a = testing.allocator;
     var lines: usize = 0;
