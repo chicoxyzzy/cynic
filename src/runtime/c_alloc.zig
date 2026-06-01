@@ -1,19 +1,19 @@
-//! Target-aware C allocator access for the vendored QuickJS host
-//! hooks (`lre_realloc`, `normalizeRealloc`).
+//! Target-aware C allocator access for the vendored libunicode host
+//! hook (`normalizeRealloc` in `builtins/string.zig`, backing
+//! `unicode_normalize`).
 //!
-//! libregexp / libunicode allocate through a caller-supplied
-//! `realloc`-style callback. On a hosted target the natural choice
-//! is libc's `malloc` / `free` / `realloc` via `std.c`. But the
-//! `wasm32-freestanding` playground build has no libc — `std.c`
-//! exposes no allocator there. For that target the C `malloc`
-//! family is instead provided by `src/wasm_shim.c`, which forwards
-//! to the module's Zig `WasmAllocator`.
+//! libunicode allocates the normalization output through a
+//! caller-supplied `realloc`-style callback. On a hosted target the
+//! natural choice is libc's `malloc` / `free` / `realloc` via `std.c`.
+//! But the `wasm32-freestanding` playground build has no libc — `std.c`
+//! exposes no allocator there. For that target the C `malloc` family is
+//! instead provided by `src/wasm_shim.c`, which forwards to the
+//! module's Zig `WasmAllocator`.
 //!
 //! This module hides the split: `malloc` / `free` / `realloc` here
-//! resolve to `std.c` on a hosted target and to the shim's C
-//! symbols (bound via `extern`) on freestanding. The two QuickJS
-//! host hooks call through here so a single allocator backs every
-//! byte regardless of target.
+//! resolve to `std.c` on a hosted target and to the shim's C symbols
+//! (bound via `extern`) on freestanding, so a single allocator backs
+//! every byte regardless of target.
 
 const std = @import("std");
 

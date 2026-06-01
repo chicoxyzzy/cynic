@@ -1,8 +1,8 @@
-//! §22.2 RegExp — bridges to QuickJS-NG's `libregexp.c` (vendored
-//! under `vendor/quickjs/`). The vendored code is pure-C, MIT-
-//! licensed, ~3500 LOC. This file owns the JS-visible surface
-//! (constructor, prototype, statics) and translates between
-//! Cynic UTF-8 strings and `lre_*` UTF-16 buffers.
+//! §22.2 RegExp — the JS-visible surface (constructor, prototype,
+//! statics) over **Perlex** (`src/perlex/`), Cynic's native Zig regex
+//! engine and the sole matcher. This file compiles each pattern with
+//! Perlex, drives `.exec` / `.test`, and translates between Cynic
+//! UTF-8 strings and the UTF-16 buffers Perlex matches over.
 //!
 //! ECMA-262 specifies regex indices in UTF-16 code units, so we
 //! transcode the JS input string to UTF-16 for matching, then
@@ -20,7 +20,6 @@ const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
-const c_alloc = @import("../c_alloc.zig");
 const perlex = @import("../../perlex/perlex.zig");
 const perlex_props = @import("../../unicode/perlex_props.zig");
 
@@ -48,38 +47,6 @@ const LRE_FLAG_UNICODE: c_int = 1 << 4;
 const LRE_FLAG_STICKY: c_int = 1 << 5;
 const LRE_FLAG_INDICES: c_int = 1 << 6;
 const LRE_FLAG_UNICODE_SETS: c_int = 1 << 8;
-
-// ── Host hooks called by libregexp ─────────────────────────────────────────
-
-/// libregexp uses this for memory allocation. The `opaque`
-/// pointer passed through `lre_compile` / `lre_exec` is our
-/// `*Realm`, but libregexp's allocations are not realm-scoped, so
-/// the hook dispatches straight to the C allocator. On a hosted
-/// target that is libc; on `wasm32-freestanding` (the playground
-/// build) it is the `wasm_shim.c` allocator — see `runtime/c_alloc`.
-export fn lre_realloc(opaque_ptr: ?*anyopaque, ptr: ?*anyopaque, size: usize) ?*anyopaque {
-    _ = opaque_ptr;
-    return c_alloc.reallocHook(ptr, size);
-}
-
-/// libregexp calls this from `lre_exec` — we can refuse a deep
-/// alloca by returning true. Cynic doesn't enforce a stack
-/// budget on regex execution today; report "no overflow" so
-/// matching always proceeds. Pathological patterns are bounded
-/// by the engine's interrupt counter (~5 million ops).
-export fn lre_check_stack_overflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
-    _ = opaque_ptr;
-    _ = alloca_size;
-    return false;
-}
-
-/// libregexp's interrupt callback — returning non-zero aborts
-/// the match with `LRE_RET_TIMEOUT`. We don't enforce timeouts
-/// yet; let every match run to completion.
-export fn lre_check_timeout(opaque_ptr: ?*anyopaque) c_int {
-    _ = opaque_ptr;
-    return 0;
-}
 
 // ── §22.2 RegExp install ────────────────────────────────────────────────────
 
@@ -1512,8 +1479,8 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // §22.2.3.2 RegExpInitialize step 12 — compile the pattern
     // eagerly so syntactic errors raise SyntaxError at
     // construction time rather than on the first match. The
-    // compiled matcher (Perlex program or libregexp bytecode) is
-    // cached on the instance and reused by the exec paths.
+    // compiled Perlex program is cached on the instance and
+    // reused by the exec paths.
     _ = try ensureCompiled(realm, inst);
     return heap_mod.taggedObject(inst);
 }
@@ -1561,16 +1528,6 @@ fn parseFlagsStrict(realm: *Realm, s: []const u8) NativeError!c_int {
         realm.pending_exception = ex;
         return error.NativeThrew;
     }
-    // §22.2.1.5 — `/v` (UnicodeSetsMode) is a Unicode mode: the
-    // pattern is interpreted as a sequence of Unicode code points,
-    // and matching is surrogate-pair-aware. libregexp gates both
-    // of those behaviours on its internal `is_unicode` flag (driven
-    // by `LRE_FLAG_UNICODE`), so pair `/v` with `/u` when handing
-    // flags to lre_compile / lre_exec — otherwise `new RegExp('𠮷',
-    // 'v')` rejects the non-BMP code point at parse time, and even
-    // when the pattern is purely BMP the matcher walks the UTF-16
-    // input as if non-Unicode, surfacing surrogate halves.
-    if ((f & LRE_FLAG_UNICODE_SETS) != 0) f |= LRE_FLAG_UNICODE;
     return f;
 }
 
@@ -1591,17 +1548,15 @@ fn perlexFlags(s: []const u8) perlex.Flags {
     return f;
 }
 
-/// Ensure the regex has a compiled matcher — Perlex when the pattern
-/// is within its grammar, otherwise the vendored libregexp. Returns
-/// false when the object has no source (caller treats as no match).
-/// Throws SyntaxError for a pattern Perlex is authoritative about
-/// (e.g. a group name reused within one Alternative, §22.2.1.1). The
-/// `\p{…}` property escapes (§22.2.1.1) resolve through the shared
-/// `unicode/perlex_props.zig` seam — the same resolver the parse-time
-/// validator injects, so both paths agree on which escapes are valid.
-/// The matching case folder for `/iu`/`/iv` (§22.2.2.9 Canonicalize)
-/// comes from the same seam, so Perlex folds Unicode patterns at match
-/// time instead of deferring them to libregexp.
+/// Ensure the regex has a compiled matcher — Perlex compiles every
+/// pattern (it is the sole engine). Returns false when the object has
+/// no source (caller treats as no match); throws SyntaxError for an
+/// invalid pattern (a group name reused within one Alternative, a
+/// negated set that may contain strings, §22.2.1.1, etc.). The `\p{…}`
+/// property escapes resolve through the shared `unicode/perlex_props.zig`
+/// seam — the same resolver the parse-time validator injects, so both
+/// paths agree on which escapes are valid — and the `/iu`/`/iv`
+/// (§22.2.2.9 Canonicalize) case folder comes from that same seam.
 fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
     if (regex_obj.regex_perlex != null) return true;
     const src_s = regex_obj.regexp_source orelse return false;
@@ -1657,9 +1612,9 @@ const InputBuf = struct {
     }
 };
 
-/// Transcode a WTF-8 string into the `[]u16` UTF-16 buffer
-/// libregexp's `lre_exec` expects. ECMA-262's regex index space is
-/// UTF-16 code units (§22.2.7.2), so each unit must be one entry.
+/// Transcode a WTF-8 string into the `[]u16` UTF-16 buffer Perlex
+/// matches over. ECMA-262's regex index space is UTF-16 code units
+/// (§22.2.7.2), so each unit must be one entry.
 ///
 /// Cynic stores a lone surrogate (U+D800..DFFF — legal JS string
 /// content per §6.1.4) as a 3-byte CESU-8 escape
@@ -1739,19 +1694,14 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     return execPerlex(realm, regex_obj, regex_obj.regex_perlex.?, input_s);
 }
 
-// ── Shared capture view ─────────────────────────────────────────────
+// ── Capture view ────────────────────────────────────────────────────
 //
-// Both regex backends produce the same §22.2.7.2 result shape (the
-// match Array, its `groups` object, and the `/d` `indices` array), so
-// the result-builders below work against one neutral `CaptureView`
-// rather than two parallel sets keyed on the backend. The view erases
-// the two capture representations — libregexp's byte pointers into the
-// UTF-16 input buffer vs. Perlex's `usize` code-unit slots — behind a
-// single `span(g)` accessor returning a UTF-16 `[start, end]` pair (or
-// `null` for a group that did not participate). Group names are
-// likewise normalised to a group-indexed `[]?[]const u8` (`null` =
-// anonymous / whole match), the shape Perlex already exposes and
-// `vendoredNames` reshapes libregexp's NUL-terminated table into.
+// The §22.2.7.2 result-builders (the match Array, its `groups` object,
+// the `/d` `indices` array) work against one neutral `CaptureView`
+// wrapping Perlex's `usize` code-unit capture slots behind a `span(g)`
+// accessor returning a UTF-16 `[start, end]` pair (or `null` for a
+// group that did not participate), plus the group-indexed `[]?[]const
+// u8` names Perlex exposes directly.
 
 const CaptureView = struct {
     /// Capture-group count including group 0 (the whole match).
@@ -1877,7 +1827,7 @@ fn buildGroupsObjectView(realm: *Realm, view: CaptureView, input_s: *JSString) N
         if (firstNameIndex(view.names, name) != g) continue; // emit once
 
         // The participating capture among all same-named groups (for a
-        // unique name — every libregexp pattern — this is just `g`).
+        // unique name — the common case — this is just `g`).
         var value = Value.undefined_;
         var i: usize = g;
         while (i < view.count) : (i += 1) {
@@ -2035,7 +1985,7 @@ fn matchOnlyPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Prog
 }
 
 /// §22.2.7.2 RegExpBuiltinExec — match-only variant. Runs the
-/// libregexp matcher and updates `lastIndex` exactly as the full
+/// Perlex matcher and updates `lastIndex` exactly as the full
 /// `regexpExec` does, but returns just a boolean instead of
 /// materialising the match-result Array, the per-capture
 /// substrings (`allocMatchString`), the `groups` object, the
