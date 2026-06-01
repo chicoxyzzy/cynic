@@ -458,7 +458,7 @@ code construction (aligns with SES).
 - `Proxy` with `get`, `set`, `has`, `deleteProperty`,
   `defineProperty`, `getOwnPropertyDescriptor`, `ownKeys` traps;
   callable proxies (function-target forwarding).
-- `RegExp` backed by vendored QuickJS-NG `libregexp.c` (full
+- `RegExp` backed by **Perlex**, Cynic's native Zig engine (full
   ECMA-262 conformance — flags, captures, lookaround, named
   groups, `u` / `v` flags). String methods (`match`, `matchAll`,
   `replace`, `replaceAll`, `search`, `split`) all dispatch
@@ -696,23 +696,25 @@ unbounded counts, and the §22.2.1.1 strict-grammar early errors (the
 Annex B carve-outs below). No real engine failures remain in the
 RegExp corpus.
 
-**libregexp is provably unreached.** The fall-through census — every
-pattern that would defer to the vendored fallback at the runtime
-bridge or the parse-time validator — is **0** across the corpus.
-`zig build test262 -Dperlex-only=true` (which disables the fallback
-outright; see AGENTS.md) is byte-identical to the default sweep, so
-the corpus needs Perlex alone. The remaining `error.Unsupported`
-defers are census-invisible: malformed-UTF-8 guards (libregexp would
-reject them too) and the lone pathological `(a?){10^23}` shape
-(bounded by the VM step limit). The only step left is retiring the
-vendored fallback — build wiring + the bridge / validator paths —
-keeping `libunicode.c` for case folding.
+**libregexp is gone.** The vendored matcher (`libregexp.c`), its
+runtime bridge, the parse-time validator fallback, and the build
+wiring have all been removed — Perlex is the sole regex engine. The
+removal was gated on a fall-through census of **0** (no corpus pattern
+ever reached the fallback, on either the runtime or the parse path)
+and a head-to-head benchmark (Perlex is 1.9–3.5× faster, see above).
+A pattern Perlex can't compile now throws `SyntaxError` with no
+fallback; the only `error.Unsupported` residuals are census-invisible
+(malformed UTF-8, the pathological `(a?){10^23}` bounded by the VM
+step limit). `libunicode.c` stays — String case conversion +
+normalization + Perlex case folding still call it (its own removal is
+tracked separately).
 
-**Replacement-gate benchmark — Perlex vs libregexp.** In-process,
-ReleaseFast, identical `(pattern, UTF-16 input)` pairs
-(`zig build bench-regex`). Perlex is faster on every case and returns
-the same match on all of them (`agree: yes`). Run 2026-06-01,
-cynic `5090791`:
+**Replacement-gate benchmark — Perlex vs libregexp.** The final
+pre-removal snapshot (the `bench-regex` harness that produced it was
+retired alongside libregexp — there is no second engine to compare
+against now). In-process, ReleaseFast, identical `(pattern, UTF-16
+input)` pairs; Perlex was faster on every case and returned the same
+match on all of them (`agree: yes`). Run 2026-06-01, cynic `5090791`:
 
 | Geomean (Perlex-owned cases) | Perlex speedup |
 |---|--:|
@@ -755,7 +757,7 @@ per-fixture engine peak, 5.6 MiB avg, 27 GC cycles / 25 ms total pause,
 0 fail. The heaviest process-RSS fixtures (199 MB on `\S`-over-all-
 Unicode, ~100 MB on the `CharacterClassEscapes` positive-cases) are
 inherent whole-Unicode set-construction tests, engine-agnostic. The
-12 MB binary drops `libregexp.c` (2610 lines C) on removal;
+removal dropped `libregexp.c` (2610 lines C) from the build;
 `libunicode.c` (1746 lines) stays. The ES2024 `regexp-modifiers`
 feature ships via Perlex, so no regex *feature* is unshipped; remaining
 polish is `RegExp.prototype` property edge cases (`lastIndex`, `flags`,
@@ -775,15 +777,12 @@ a group → `\001`), `{,n}` reads as literal text, and the `-` in
 `[\d-a]` rereads as a literal (`\d`, `-`, `a`).
 
 Cynic drops every one of these in every mode. **Perlex** — the
-native regex engine, first in dispatch — raises `SyntaxError` for
-all of them, so any pattern Perlex compiles is held to the strict
-main grammar (`u` / `v` already rejected them; now non-Unicode
-mode does too). The residual is narrow: a pattern that *also*
-uses a construct Perlex doesn't yet support falls through to the
-vendored libregexp fallback, which still applies the Annex B
-leniency — so as Perlex's coverage grows the residual shrinks
-toward zero. Every shipping browser engine (V8 / JSC /
-SpiderMonkey) accepts the Annex B forms; Cynic's non-browser
+native regex engine and now the sole one — raises `SyntaxError` for
+all of them, so every pattern is held to the strict main grammar
+(`u` / `v` already rejected them; non-Unicode mode does too) with no
+fallback to leak the Annex B leniency (the vendored libregexp matcher
+that once did has been removed). Every shipping browser engine (V8 /
+JSC / SpiderMonkey) accepts the Annex B forms; Cynic's non-browser
 target is why it doesn't. Everywhere else the "no Annex B" stance
 from AGENTS.md is enforced (language extensions, browser-era
 built-ins, accessor / legacy-global aliases), and the

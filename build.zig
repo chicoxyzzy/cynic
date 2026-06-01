@@ -6,24 +6,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // `-Dperlex-only=true` disables the vendored libregexp fallback: every
-    // regex pattern must be owned by Perlex (the native engine), at both the
-    // runtime bridge and the parse-time validator. A pattern Perlex defers
-    // surfaces loudly (prints the pattern; the bridge throws, the validator
-    // reports) instead of silently falling through. A verification build for
-    // the libregexp-removal effort — the corpus census of fall-throughs is 0
-    // today, so `zig build test262 -Dperlex-only=true` stays green; a future
-    // reached defer makes it fail. Exposed to src as `@import("build_options")`.
-    const perlex_only = b.option(bool, "perlex-only", "Disable the libregexp fallback; Perlex must own every pattern (verification build)") orelse false;
-    const build_options = b.addOptions();
-    build_options.addOption(bool, "perlex_only", perlex_only);
-    const build_options_mod = build_options.createModule();
-
-    // QuickJS-NG libregexp — the §22.2 RegExp engine. Vendored
-    // under `vendor/quickjs/` (MIT). Built as a static library
-    // and linked into both the lib and exe modules so unit tests
-    // and the CLI can run regex code. The C side calls back into
-    // `lre_*` host hooks defined in `src/runtime/builtins/regexp.zig`.
+    // QuickJS-NG libunicode — the vendored Unicode case-conversion +
+    // normalization tables (MIT, `vendor/quickjs/libunicode.c`). Built as
+    // a static library and linked into the lib + exe modules; it backs
+    // `String.prototype.normalize` / `to{Lower,Upper}Case` and Perlex's
+    // case folding via the `c` translate-c view of `libunicode.h`. (The
+    // libregexp matcher it was vendored alongside has been retired —
+    // Perlex, the native engine, owns regex outright.)
     const qjs_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -31,7 +20,6 @@ pub fn build(b: *std.Build) void {
     });
     qjs_mod.addCSourceFiles(.{
         .files = &.{
-            "vendor/quickjs/libregexp.c",
             "vendor/quickjs/libunicode.c",
         },
         .flags = &.{
@@ -50,17 +38,19 @@ pub fn build(b: *std.Build) void {
         },
     });
     qjs_mod.addIncludePath(b.path("vendor/quickjs"));
-    const qjs_regex = b.addLibrary(.{
+    const qjs_unicode = b.addLibrary(.{
         .linkage = .static,
-        .name = "qjs_regex",
+        .name = "qjs_unicode",
         .root_module = qjs_mod,
     });
 
-    // Translate libregexp.h once; expose it as the `c` import. Cheaper
-    // and forward-compatible vs `@cImport` in source (which Zig 0.17+
-    // removed in favor of build-system translate-c).
+    // Translate libunicode.h once; expose it as the `c` import (the
+    // `lre_case_conv` / `lre_canonicalize` / `lre_is_cased` /
+    // `unicode_normalize` surface that String.prototype + Perlex case
+    // folding call). Cheaper and forward-compatible vs `@cImport` in
+    // source (which Zig 0.17+ removed in favor of build-system translate-c).
     const translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("vendor/quickjs/libregexp.h"),
+        .root_source_file = b.path("vendor/quickjs/libunicode.h"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -73,10 +63,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    lib_mod.linkLibrary(qjs_regex);
+    lib_mod.linkLibrary(qjs_unicode);
     lib_mod.addIncludePath(b.path("vendor/quickjs"));
     lib_mod.addImport("c", c_mod);
-    lib_mod.addImport("build_options", build_options_mod);
 
     // Executable module: the `cynic` CLI. Imports the library as `cynic`.
     const exe_mod = b.createModule(.{
@@ -85,7 +74,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.addImport("cynic", lib_mod);
-    exe_mod.linkLibrary(qjs_regex);
+    exe_mod.linkLibrary(qjs_unicode);
     exe_mod.addIncludePath(b.path("vendor/quickjs"));
     exe_mod.addImport("c", c_mod);
 
@@ -227,10 +216,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = t262_optimize,
     });
-    lib_mod_fast.linkLibrary(qjs_regex);
+    lib_mod_fast.linkLibrary(qjs_unicode);
     lib_mod_fast.addIncludePath(b.path("vendor/quickjs"));
     lib_mod_fast.addImport("c", c_mod);
-    lib_mod_fast.addImport("build_options", build_options_mod);
     const t262_mod = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
@@ -286,10 +274,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
-    lib_mod_safe.linkLibrary(qjs_regex);
+    lib_mod_safe.linkLibrary(qjs_unicode);
     lib_mod_safe.addIncludePath(b.path("vendor/quickjs"));
     lib_mod_safe.addImport("c", c_mod);
-    lib_mod_safe.addImport("build_options", build_options_mod);
     const t262_mod_safe = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
@@ -324,7 +311,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
     });
     cynic_fast_mod.addImport("cynic", lib_mod_fast);
-    cynic_fast_mod.linkLibrary(qjs_regex);
+    cynic_fast_mod.linkLibrary(qjs_unicode);
     cynic_fast_mod.addIncludePath(b.path("vendor/quickjs"));
     cynic_fast_mod.addImport("c", c_mod);
     const cynic_fast = b.addExecutable(.{
@@ -350,42 +337,10 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run the micro-bench suite (p50 + spread + outliers; --runs=N for tail percentiles)");
     bench_step.dependOn(&run_bench.step);
 
-    // `zig build bench-regex` — in-process Perlex-vs-libregexp matcher
-    // benchmark (tools/regex_bench.zig). Links both engines into one
-    // ReleaseFast binary and times compile + exec on identical
-    // (pattern, UTF-16 input) pairs — the decision gate for retiring
-    // the vendored fallback. The bench imports perlex and perlex_props
-    // via relative path so they share ONE perlex module instance (the
-    // injected resolver / case-folder function types must match
-    // `compileWithHooks`'s `Hooks`). It links the qjs_regex static lib
-    // and the `c` translate-c view of libregexp.h; the lre_* host hooks
-    // are defined inside the bench itself, and `link_libc` backs both
-    // those hooks' `std.c.*` calls and libregexp.
-    const regex_bench_mod = b.createModule(.{
-        .root_source_file = b.path("tools/regex_bench.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-        .link_libc = true,
-    });
-    // Perlex + its `\p{…}` resolver, bundled from one module so the
-    // injected hook types match (see src/regex_engines.zig).
-    const regex_engines_mod = b.createModule(.{
-        .root_source_file = b.path("src/regex_engines.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-    });
-    regex_bench_mod.addImport("engine", regex_engines_mod);
-    regex_bench_mod.linkLibrary(qjs_regex);
-    regex_bench_mod.addIncludePath(b.path("vendor/quickjs"));
-    regex_bench_mod.addImport("c", c_mod);
-    const regex_bench_exe = b.addExecutable(.{
-        .name = "regex-bench",
-        .root_module = regex_bench_mod,
-    });
-    const run_regex_bench = b.addRunArtifact(regex_bench_exe);
-    if (b.args) |args| run_regex_bench.addArgs(args);
-    const regex_bench_step = b.step("bench-regex", "Run the in-process Perlex-vs-libregexp matcher benchmark (compile + exec; --filter=, --quick, --batches=N, --target-us=N)");
-    regex_bench_step.dependOn(&run_regex_bench.step);
+    // (The `bench-regex` Perlex-vs-libregexp matcher benchmark — the
+    // decision gate for retiring the vendored fallback — was removed
+    // with libregexp itself; there is no second engine to compare
+    // against. Its final numbers live in docs/ROADMAP.md under "Regex".)
 
     // -----------------------------------------------------------------
     // `zig build wasm` — the browser-playground WebAssembly module.
@@ -418,7 +373,6 @@ pub fn build(b: *std.Build) void {
     });
     wasm_qjs_mod.addCSourceFiles(.{
         .files = &.{
-            "vendor/quickjs/libregexp.c",
             "vendor/quickjs/libunicode.c",
             "src/wasm_shim.c",
         },
@@ -439,7 +393,7 @@ pub fn build(b: *std.Build) void {
     wasm_qjs_mod.addIncludePath(b.path("vendor/quickjs"));
     const wasm_qjs = b.addLibrary(.{
         .linkage = .static,
-        .name = "qjs_regex_wasm",
+        .name = "qjs_unicode_wasm",
         .root_module = wasm_qjs_mod,
     });
 
@@ -447,7 +401,7 @@ pub fn build(b: *std.Build) void {
     // ABI. Kept separate from the native `c_mod` because the
     // generated bindings are target-specific.
     const wasm_translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("vendor/quickjs/libregexp.h"),
+        .root_source_file = b.path("vendor/quickjs/libunicode.h"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
         // freestanding has no libc — `addTranslateC` defaults this

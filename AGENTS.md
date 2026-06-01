@@ -83,13 +83,10 @@ These are project rules — they apply to everyone.
     / `[a-\d]`) is an early error (§22.2.1.1; Annex B rereads
     the `-` as a literal — `\d`, `-`, `a`). Cynic
     enforces all four in every mode: Perlex — the native regex
-    engine, first in dispatch — raises `SyntaxError`, so any
-    pattern it compiles is held to the strict grammar. The
-    residual leak is narrow: a pattern that *also* uses a
-    construct Perlex doesn't yet support falls through to the
-    vendored libregexp fallback, which still applies the Annex B
-    leniency; as Perlex's coverage grows that residual shrinks
-    toward zero. (Every shipping browser engine — V8 / JSC /
+    engine, and now the *sole* one (the vendored libregexp matcher
+    has been retired) — raises `SyntaxError`, so every pattern is
+    held to the strict grammar with no fallback to leak the Annex B
+    leniency. (Every shipping browser engine — V8 / JSC /
     SpiderMonkey — accepts the Annex B forms; Cynic's non-browser
     target is why it doesn't.) See
     [docs/ROADMAP.md](docs/ROADMAP.md) under "Regex".
@@ -213,7 +210,7 @@ These are project rules — they apply to everyone.
   WTF-8; `localeCompare` shares that pipeline for its NFD
   fast path. Symbol-dispatched methods (`split`, `replace`,
   `replaceAll`, `match`, `matchAll`, `search`) route into
-  libregexp via the bridge, which has its own UTF-16 view
+  Perlex via the regexp bridge, which has its own UTF-16 view
   built in — don't reinvent code-unit arithmetic there.
 
   When adding or fixing a String.prototype method, cite the
@@ -412,21 +409,6 @@ the GC verifiers (`verifyRememberedSet` / `verifyShapeInvariant`)
 and the 0xaa free-poison — all gated on `runtime_safety`, hence
 no-ops in ReleaseFast — while running ~2-3× faster than Debug.
 The right binary for `/gc-stress` use-after-free hunts.
-
-**Perlex-only verification build.** `-Dperlex-only=true` disables
-the vendored libregexp fallback: every regex pattern must be owned
-by Perlex (the native engine) at both the runtime bridge
-(`runtime/builtins/regexp.zig`) and the parse-time validator
-(`parser/regex_validate.zig`). A pattern Perlex defers no longer
-falls through silently — it prints `perlex-only fallthrough …` and
-fails (the bridge throws a SyntaxError; the validator reports a
-parse diagnostic). The corpus census of fall-throughs is **0**, so
-`zig build test262 -Dperlex-only=true` matches the default
-pass counts exactly; a future defer the corpus reaches makes it
-diverge. This is the standing guard for the libregexp-removal
-effort (see [docs/ROADMAP.md](docs/ROADMAP.md) under "Regex").
-Plain `zig build` / `zig build test262` keep the fallback (the
-option defaults off), so production builds are unaffected.
 
 **Leak-check before every full sweep.** Past leaks (e.g. JSString
 bytes pinned in the per-fixture arena before `7a6a0d8`) ballooned
