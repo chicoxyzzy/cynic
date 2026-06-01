@@ -346,23 +346,8 @@ fn ensureWrapForValidIteratorPrototype(realm: *Realm) !*JSObject {
     const proto = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(proto, ctor.prototype); // %Iterator.prototype%
 
-    const next_fn = try realm.heap.allocateFunctionNative(wrappedNext, 0, "next");
-    next_fn.has_construct = false;
-    next_fn.proto = realm.intrinsics.function_prototype;
-    try proto.setWithFlags(realm.allocator, "next", heap_mod.taggedFunction(next_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    });
-
-    const return_fn = try realm.heap.allocateFunctionNative(wrappedReturn, 0, "return");
-    return_fn.has_construct = false;
-    return_fn.proto = realm.intrinsics.function_prototype;
-    try proto.setWithFlags(realm.allocator, "return", heap_mod.taggedFunction(return_fn), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    });
+    try intrinsics.installNativeMethodOnProto(realm, proto, "next", wrappedNext, 0);
+    try intrinsics.installNativeMethodOnProto(realm, proto, "return", wrappedReturn, 0);
 
     realm.intrinsics.wrap_for_valid_iterator_prototype = proto;
     // SES: lock the lazy proto so user JS can't monkey-patch its

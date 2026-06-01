@@ -330,3 +330,107 @@ test "surface audit: intrinsic prototypes expose only spec-defined names" {
 
     try testing.expect(all_ok);
 }
+
+const heap_mod = @import("heap.zig");
+
+/// Assert that `target[key]` is a built-in *method* with the
+/// canonical §17 / §10.2.5 shape that the shared
+/// `intrinsics.installNativeMethod*` helpers produce:
+///
+///   - the value is a callable function object;
+///   - `[[Construct]]` is absent (`has_construct == false`) — §17
+///     built-in methods are not constructors;
+///   - `[[Prototype]]` is `%Function.prototype%` (§20.2.3);
+///   - `[[Realm]]` is the installing realm (§10.2.5) — the raw
+///     `allocateFunctionNative` + manual-flag sites this audit
+///     guards historically *forgot* to set this, leaving cross-
+///     realm species/brand checks to read `null`;
+///   - the own data descriptor is `{ w:true, e:false, c:true }`.
+///
+/// `expected_name` pins the function's `name` slot (for symbol-keyed
+/// methods the spec form is `"[Symbol.<descr>]"`, not the `@@<descr>`
+/// storage key).
+fn expectCanonicalMethod(
+    realm: *Realm,
+    target: *JSObject,
+    key: []const u8,
+    expected_name: []const u8,
+) !void {
+    const v = target.lookupOwn(key) orelse {
+        std.debug.print("[method-shape] missing own method \"{s}\"\n", .{key});
+        return error.MissingMethod;
+    };
+    const fn_obj = heap_mod.valueAsFunction(v) orelse {
+        std.debug.print("[method-shape] \"{s}\" is not a function\n", .{key});
+        return error.NotAFunction;
+    };
+
+    try testing.expect(!fn_obj.has_construct);
+    // Pointer identity via `==` (not `expectEqual`) so a mismatch
+    // doesn't dump the entire Realm / JSObject struct to stderr.
+    try testing.expect(fn_obj.proto == realm.intrinsics.function_prototype);
+    try testing.expect(fn_obj.realm == realm);
+
+    const flags = target.flagsFor(key);
+    try testing.expect(flags.writable);
+    try testing.expect(!flags.enumerable);
+    try testing.expect(flags.configurable);
+
+    try testing.expect(fn_obj.name != null);
+    try testing.expectEqualStrings(expected_name, fn_obj.name.?);
+}
+
+test "method-registration shape: built-in object methods carry the canonical §17/§10.2.5 descriptor" {
+    // Unhardened so the SES freeze pass doesn't rewrite the
+    // descriptors out from under the audit — this pins the shape
+    // the install helpers *produce*, before any hardening.
+    var realm = Realm.init(testing.allocator);
+    realm.hardened = false;
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const json_v = realm.globals.get("JSON") orelse return error.NoJSON;
+    const json_obj = heap_mod.valueAsPlainObject(json_v) orelse return error.JSONNotObject;
+
+    try expectCanonicalMethod(&realm, json_obj, "stringify", "stringify");
+    try expectCanonicalMethod(&realm, json_obj, "parse", "parse");
+    try expectCanonicalMethod(&realm, json_obj, "rawJSON", "rawJSON");
+    try expectCanonicalMethod(&realm, json_obj, "isRawJSON", "isRawJSON");
+}
+
+test "method-registration shape: global built-in functions carry [[Realm]] and aren't constructors" {
+    var realm = Realm.init(testing.allocator);
+    realm.hardened = false;
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    // §19.2 — `parseInt` / `parseFloat` / `isNaN` / `isFinite` are
+    // ordinary built-in functions installed straight onto the global
+    // object, allocated via `makeNativeFunction`.
+    const target: *JSObject = realm.globals.target.?;
+    try expectCanonicalMethod(&realm, target, "parseInt", "parseInt");
+    try expectCanonicalMethod(&realm, target, "parseFloat", "parseFloat");
+    try expectCanonicalMethod(&realm, target, "isNaN", "isNaN");
+    try expectCanonicalMethod(&realm, target, "isFinite", "isFinite");
+}
+
+test "method-registration shape: Set.prototype values/keys/@@iterator are the same function object" {
+    var realm = Realm.init(testing.allocator);
+    realm.hardened = false;
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const set_v = realm.globals.get("Set") orelse return error.NoSet;
+    const set_ctor = heap_mod.valueAsFunction(set_v) orelse return error.SetNotFn;
+    const set_proto = set_ctor.prototype orelse return error.NoSetProto;
+
+    // §24.2.3 — `Set.prototype.values`, `.keys`, and `@@iterator` are
+    // required to be the *same* function object. The migration to
+    // `makeNativeFunction` must preserve that identity.
+    try expectCanonicalMethod(&realm, set_proto, "values", "values");
+    const values = set_proto.lookupOwn("values").?;
+    const keys = set_proto.lookupOwn("keys").?;
+    const iter = set_proto.lookupOwn("@@iterator").?;
+    try testing.expect(heap_mod.valueAsFunction(values).? == heap_mod.valueAsFunction(keys).?);
+    try testing.expect(heap_mod.valueAsFunction(values).? == heap_mod.valueAsFunction(iter).?);
+}

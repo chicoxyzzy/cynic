@@ -911,16 +911,31 @@ fn stubConstructorNative(realm: *Realm, this_value: Value, args: []const Value) 
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-pub fn installNativeMethod(realm: *Realm, target: *JSFunction, name: []const u8, native: NativeFn, params: u8) !void {
+/// Allocate a built-in callable with the shape every §17 built-in
+/// function shares, but install it nowhere. The caller decides
+/// where the resulting object lives — a global binding, a
+/// constructor static, a prototype method, or several of those at
+/// once (e.g. `parseInt === Number.parseInt`, or the single
+/// `Set.prototype.values` function aliased onto `keys` and
+/// `@@iterator`). Use `installNativeMethod` /
+/// `installNativeMethodOnProto` when the function lands on exactly
+/// one target with the standard `{w:t,e:f,c:t}` data descriptor.
+///
+///   - `[[Construct]]` absent — §17 built-ins aren't constructors
+///     unless explicitly identified as such; `new parseInt()` throws.
+///   - `[[Realm]]` = the installing realm (§10.2.5) — the cross-realm
+///     species / brand carve-outs read this back.
+///   - `[[Prototype]]` = `%Function.prototype%` (§20.2.3) — already
+///     wired by `allocateFunctionNative`.
+pub fn makeNativeFunction(realm: *Realm, native: NativeFn, params: u8, name: []const u8) !*JSFunction {
     const fn_obj = try realm.heap.allocateFunctionNative(native, params, name);
-    // §17 — these are built-in static methods (e.g. `Object.keys`,
-    // `Promise.all`); spec says they don't have `[[Construct]]`
-    // unless explicitly identified as constructors.
     fn_obj.has_construct = false;
-    // §10.2.5 — the function's realm is the one whose intrinsics
-    // it was installed into. ArraySpeciesCreate and the rest of
-    // the cross-realm carve-outs read this back.
     fn_obj.realm = realm;
+    return fn_obj;
+}
+
+pub fn installNativeMethod(realm: *Realm, target: *JSFunction, name: []const u8, native: NativeFn, params: u8) !void {
+    const fn_obj = try makeNativeFunction(realm, native, params, name);
     // §17 — built-in own data property descriptors are non-
     // enumerable by default. Enumerable methods cause the
     // test262 `prop-desc.js` and `not-a-constructor.js` checks
@@ -1086,13 +1101,7 @@ pub fn installNativeMethodOnProto(realm: *Realm, proto: *JSObject, name: []const
         std.fmt.allocPrint(realm.classAllocator(), "[Symbol.{s}]", .{name[2..]}) catch return error.OutOfMemory
     else
         name;
-    const fn_obj = try realm.heap.allocateFunctionNative(native, params, fn_name);
-    // §17 — built-in prototype methods are not constructors.
-    fn_obj.has_construct = false;
-    // §10.2.5 — proto methods carry the realm they were installed
-    // into (e.g. `Array.prototype.map` installed on Realm A always
-    // returns Realm A's `%Array%` from ArraySpeciesCreate).
-    fn_obj.realm = realm;
+    const fn_obj = try makeNativeFunction(realm, native, params, fn_name);
     // §17 — built-in methods install with `enumerable: false`
     // so they don't surface in `for-in` over user objects that
     // inherit from these prototypes. `writable` and

@@ -93,17 +93,11 @@ pub fn install(realm: *Realm) !void {
         // summation over an iterable of Numbers.
         .{ .name = "sumPrecise", .fn_ptr = mathSumPrecise, .params = 1 },
     };
-    // §17 — built-in methods are `[[Writable]]: true`,
-    // `[[Enumerable]]: false`, `[[Configurable]]: true`.
-    const method_flags: @import("../object.zig").PropertyFlags = .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    };
+    // §17 — built-in methods install non-enumerable, non-
+    // constructor, `[[Realm]]`-stamped; the shared helper spells
+    // that canonical shape once.
     for (methods) |m| {
-        const fn_obj = try realm.heap.allocateFunctionNative(m.fn_ptr, m.params, m.name);
-        fn_obj.has_construct = false; // §17 — Math.* aren't constructors.
-        try math_obj.setWithFlags(realm.allocator, m.name, heap_mod.taggedFunction(fn_obj), method_flags);
+        try intrinsics.installNativeMethodOnProto(realm, math_obj, m.name, m.fn_ptr, m.params);
     }
     try realm.globals.put(realm.allocator, "Math", heap_mod.taggedObject(math_obj));
 }
