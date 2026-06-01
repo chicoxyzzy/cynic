@@ -49,11 +49,11 @@ Ohaimark) and generational GC are future work. See
 
 Current scores, history, and per-bucket breakdown live in
 [`test262-results.md`](test262-results.md). `pass%` is
-`(passing + correctly handled) / total` — a "correctly handled"
-fixture is one Cynic refuses *by design* (Annex B not shipped,
-strict-only, no Intl, eval-off, or SES throw). The `failing`
-column is real engine work left. The unit-test suite (`zig build
-test`) runs alongside.
+`(passing + correctly handled fails) / total` — a "correctly
+handled fail" is a fixture Cynic fails *by design* (Annex B not
+shipped, strict-only, no Intl, eval-off, or SES throw). The
+`failing` column is real engine work left. The unit-test suite
+(`zig build test`) runs alongside.
 
 ### Build targets
 

@@ -2,11 +2,11 @@
 
 > **Current model (2026-06).** `test262-results.md` runs every
 > fixture except `harness/`, `staging/`, and Stage ≤ 3 proposals
-> (shipped or not). Each failure classifies as **correctly handled**
+> (shipped or not). A failure is either a **correctly handled fail**
 > under one of five design policies — `annex_b` > `no_strict` >
-> `intl402` > `eval` > `ses`, first match wins — or stays a plain
-> `failing`. The headline `pass%` is
-> `(passing + correctly_handled) / total`. The SES bucket described
+> `intl402` > `eval` > `ses`, first match wins — or a plain
+> `failing` (real engine work). The headline `pass%` is
+> `(passing + correctly handled fails) / total`. The SES bucket described
 > below is one of the five policies; the same machinery generalises
 > to the other four (which used to be walked-out skips). This doc
 > still focuses on the SES bucket because it's the only policy with
