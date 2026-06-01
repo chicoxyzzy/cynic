@@ -624,21 +624,6 @@
           <div class="quote">EvalError: not even once.</div>
         </article>
 
-        <article class="refuse">
-          <div class="stamp">NOT IN DEFAULT</div>
-          <span class="feature">Intl.*</span>
-          <h3>The internationalization API</h3>
-          <p>Not in the default build — it'd drag in a CLDR/ICU + tzdata stack. A separate opt-in <code>Intl</code> build is planned; the default uses ISO / C locale.</p>
-          <div class="quote">ReferenceError: Intl is not shipped here (yet).</div>
-        </article>
-
-        <article class="refuse">
-          <div class="stamp">DENIED</div>
-          <span class="feature">SharedArrayBuffer · Atomics</span>
-          <h3>Shared-memory primitives</h3>
-          <p>Out by policy, not omission: shared mutable memory and <code>Atomics</code> reintroduce data races and a high-resolution timing side channel — exactly what the hardened (SES) posture exists to rule out.</p>
-          <div class="quote">ReferenceError: no shared agents, no Atomics.</div>
-        </article>
       </div>
     </section>
 
@@ -733,7 +718,7 @@
             <div class="compare-note">backrefs, named groups, lookaround, <code>u</code>/<code>v</code> flags</div>
           </div>
           <div class="check">Works.</div>
-          <div>Bridged from QuickJS-NG. Credit where due.</div>
+          <div>Perlex — Cynic's own matcher. The vendored regex engine got retired.</div>
         </div>
 
         <div class="compare-row">
@@ -864,6 +849,24 @@
 
         <div class="compare-row">
           <div>
+            <div class="feature-name"><code>Intl</code> · the internationalization API</div>
+            <div class="compare-note">a separate opt-in build — CLDR/ICU + IANA tzdata, named time zones, non-ISO calendars; the default stays ISO / C locale</div>
+          </div>
+          <div class="cross">Future Cynic's problem.</div>
+          <div>Not refused — just heavy. A locale database is a lot of bytes to ship by default.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
+            <div class="feature-name"><code>SharedArrayBuffer</code> · <code>Atomics</code></div>
+            <div class="compare-note">shared-memory primitives; needs a multi-agent story that keeps the SES isolation boundary intact</div>
+          </div>
+          <div class="cross">Future Cynic's problem.</div>
+          <div>Was out by policy. Now it's a design problem on the list, not a closed door.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
             <div class="feature-name">JIT tiers</div>
             <div class="compare-note">bytecode interpreter today; baseline / optimising tiers on the long road</div>
           </div>
@@ -886,7 +889,6 @@
       <div class="credits">
         Cynic is <a href="https://github.com/chicoxyzzy/cynic/blob/main/LICENSE">MIT</a>. Strict only. Always was.
         <br />
-        RegExp by <a href="https://github.com/quickjs-ng/quickjs" target="_blank" rel="noopener">QuickJS-NG</a> (MIT) ·
         Unicode tables from the <a href="https://www.unicode.org/license.txt" target="_blank" rel="noopener">UCD</a> ·
         Conformance via <a href="https://github.com/tc39/test262" target="_blank" rel="noopener">tc39/test262</a> (BSD)
       </div>
