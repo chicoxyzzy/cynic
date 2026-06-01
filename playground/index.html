@@ -102,24 +102,15 @@
   /* Snippet picker is a quiet, contextual control — no shadow, just
      a 2px ink border so it sits inside the panel head without
      competing with the action buttons. */
-  /* Custom-styled to match the toolbar buttons: solid white, a hand-
-     drawn chevron (the native arrow is hidden via appearance:none), and
-     the same 2px ink border + offset shadow. The *open* option list is
-     still OS-native — CSS can't restyle that without a JS component. */
   .snippets-select {
-    appearance: none;
-    -webkit-appearance: none;
     font-family: var(--mono);
     font-size: 13px;
     color: var(--ink);
-    background-color: #fff;
-    background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><path d="M2 4l4 4 4-4" stroke="%230c0c0c" stroke-width="2" fill="none"/></svg>');
-    background-repeat: no-repeat;
-    background-position: right 8px center;
+    background: rgba(255, 255, 255, 0.7);
     border: 2px solid var(--ink);
-    box-shadow: 2px 2px 0 var(--ink);
-    padding: 5px 26px 5px 10px;
-    max-width: 240px;
+    box-shadow: none;
+    padding: 4px 8px;
+    max-width: 220px;
     cursor: pointer;
   }
 
