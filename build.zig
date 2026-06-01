@@ -6,66 +6,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // QuickJS-NG libunicode — the vendored Unicode case-conversion +
-    // normalization tables (MIT, `vendor/quickjs/libunicode.c`). Built as
-    // a static library and linked into the lib + exe modules; it backs
-    // `String.prototype.normalize` / `to{Lower,Upper}Case` and Perlex's
-    // case folding via the `c` translate-c view of `libunicode.h`. (The
-    // libregexp matcher it was vendored alongside has been retired —
-    // Perlex, the native engine, owns regex outright.)
-    const qjs_mod = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    qjs_mod.addCSourceFiles(.{
-        .files = &.{
-            "vendor/quickjs/libunicode.c",
-        },
-        .flags = &.{
-            "-std=c11",
-            // _GNU_SOURCE exposes the POSIX symbols cutils.h reaches
-            // for (`clock_gettime` / `CLOCK_MONOTONIC`, `readlink`,
-            // `pthread_condattr_setclock`, `alloca` via stdlib.h)
-            // under glibc's `-std=c11` feature gating. No-op on
-            // Darwin/BSD where these are visible by default.
-            "-D_GNU_SOURCE",
-            "-Wno-unused-parameter",
-            "-Wno-implicit-fallthrough",
-            "-Wno-sign-compare",
-            "-Wno-format-truncation",
-            "-fno-sanitize=undefined",
-        },
-    });
-    qjs_mod.addIncludePath(b.path("vendor/quickjs"));
-    const qjs_unicode = b.addLibrary(.{
-        .linkage = .static,
-        .name = "qjs_unicode",
-        .root_module = qjs_mod,
-    });
-
-    // Translate libunicode.h once; expose it as the `c` import (the
-    // `lre_case_conv` / `lre_canonicalize` / `lre_is_cased` /
-    // `unicode_normalize` surface that String.prototype + Perlex case
-    // folding call). Cheaper and forward-compatible vs `@cImport` in
-    // source (which Zig 0.17+ removed in favor of build-system translate-c).
-    const translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("vendor/quickjs/libunicode.h"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    const c_mod = translate_c.createModule();
-
     // Library module: everything except the CLI.
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    lib_mod.linkLibrary(qjs_unicode);
-    lib_mod.addIncludePath(b.path("vendor/quickjs"));
-    lib_mod.addImport("c", c_mod);
     // Embedded only by the normalization unit test (`@embedFile` inside a
     // `test` block, so no cost to non-test builds): the full UAX #15
     // conformance suite, asserted against the native normalizer.
@@ -80,9 +26,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.addImport("cynic", lib_mod);
-    exe_mod.linkLibrary(qjs_unicode);
-    exe_mod.addIncludePath(b.path("vendor/quickjs"));
-    exe_mod.addImport("c", c_mod);
 
     const exe = b.addExecutable(.{
         .name = "cynic",
@@ -261,9 +204,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = t262_optimize,
     });
-    lib_mod_fast.linkLibrary(qjs_unicode);
-    lib_mod_fast.addIncludePath(b.path("vendor/quickjs"));
-    lib_mod_fast.addImport("c", c_mod);
     const t262_mod = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
@@ -319,9 +259,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
-    lib_mod_safe.linkLibrary(qjs_unicode);
-    lib_mod_safe.addIncludePath(b.path("vendor/quickjs"));
-    lib_mod_safe.addImport("c", c_mod);
     const t262_mod_safe = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
@@ -356,9 +293,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
     });
     cynic_fast_mod.addImport("cynic", lib_mod_fast);
-    cynic_fast_mod.linkLibrary(qjs_unicode);
-    cynic_fast_mod.addIncludePath(b.path("vendor/quickjs"));
-    cynic_fast_mod.addImport("c", c_mod);
     const cynic_fast = b.addExecutable(.{
         .name = "cynic-bench",
         .root_module = cynic_fast_mod,
@@ -390,12 +324,10 @@ pub fn build(b: *std.Build) void {
     // -----------------------------------------------------------------
     // `zig build wasm` — the browser-playground WebAssembly module.
     //
-    // Builds `src/wasm.zig` + the vendored QuickJS C into a single
-    // `wasm32-freestanding` `ReleaseSmall` module (download size
-    // matters for a playground). Freestanding WASM has no libc, so
-    // the C is paired with `src/wasm_shim.c`, a hand-written shim
-    // routing `malloc` / `free` / `realloc` back into the Zig
-    // `WasmAllocator` and providing the `mem*` / `str*` family.
+    // Builds `src/wasm.zig` into a single `wasm32-freestanding`
+    // `ReleaseSmall` module (download size matters for a playground).
+    // Pure Zig now that Perlex + the native Unicode tables replaced the
+    // vendored QuickJS C — no libc shim, no C sources to link.
     //
     // The artifact is installed to `zig-out/bin/cynic.wasm`. The
     // step then copies it next to the front-end into
@@ -406,69 +338,12 @@ pub fn build(b: *std.Build) void {
         .os_tag = .freestanding,
     });
 
-    // QuickJS C for WASM — compiled with NDEBUG (drop `assert`) and
-    // pointed at the freestanding shim's headers via the source
-    // tree's own `vendor/quickjs` include path. No `-D_GNU_SOURCE`:
-    // there is no glibc to feature-gate.
-    const wasm_qjs_mod = b.createModule(.{
-        .target = wasm_target,
-        .optimize = .ReleaseSmall,
-        // freestanding: no libc — the shim below supplies the C
-        // runtime symbols the QuickJS sources reference.
-    });
-    wasm_qjs_mod.addCSourceFiles(.{
-        .files = &.{
-            "vendor/quickjs/libunicode.c",
-            "src/wasm_shim.c",
-        },
-        .flags = &.{
-            "-std=c11",
-            "-DNDEBUG",
-            "-Wno-unused-parameter",
-            "-Wno-implicit-fallthrough",
-            "-Wno-sign-compare",
-            "-Wno-format-truncation",
-            "-fno-sanitize=undefined",
-        },
-    });
-    // The libc stub headers must come BEFORE vendor/quickjs so a
-    // freestanding `#include <stdlib.h>` resolves to the stub, not
-    // a (missing) system header. See vendor/quickjs/wasm-libc/.
-    wasm_qjs_mod.addIncludePath(b.path("vendor/quickjs/wasm-libc"));
-    wasm_qjs_mod.addIncludePath(b.path("vendor/quickjs"));
-    const wasm_qjs = b.addLibrary(.{
-        .linkage = .static,
-        .name = "qjs_unicode_wasm",
-        .root_module = wasm_qjs_mod,
-    });
-
-    // translate-c for the WASM target — same header, freestanding
-    // ABI. Kept separate from the native `c_mod` because the
-    // generated bindings are target-specific.
-    const wasm_translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("vendor/quickjs/libunicode.h"),
-        .target = wasm_target,
-        .optimize = .ReleaseSmall,
-        // freestanding has no libc — `addTranslateC` defaults this
-        // to true and would otherwise propagate `-lc` to the final
-        // link, which has no libc to provide.
-        .link_libc = false,
-    });
-    // libregexp.h pulls in libunicode.h → <inttypes.h>; point
-    // translate-c at the freestanding stub headers, stubs first.
-    wasm_translate_c.addIncludePath(b.path("vendor/quickjs/wasm-libc"));
-    wasm_translate_c.addIncludePath(b.path("vendor/quickjs"));
-    const wasm_c_mod = wasm_translate_c.createModule();
-
-    // Cynic library, built for WASM.
+    // Cynic library, built for WASM. Pure Zig — no C to link.
     const wasm_lib_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
-    wasm_lib_mod.linkLibrary(wasm_qjs);
-    wasm_lib_mod.addIncludePath(b.path("vendor/quickjs"));
-    wasm_lib_mod.addImport("c", wasm_c_mod);
 
     // The WASM entry module — C-ABI exports for the JS front-end.
     const wasm_mod = b.createModule(.{
@@ -477,9 +352,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSmall,
     });
     wasm_mod.addImport("cynic", wasm_lib_mod);
-    wasm_mod.linkLibrary(wasm_qjs);
-    wasm_mod.addIncludePath(b.path("vendor/quickjs"));
-    wasm_mod.addImport("c", wasm_c_mod);
 
     // Stamp the build's git short-SHA into the module so the
     // playground footer names the exact commit. `build.zig`'s

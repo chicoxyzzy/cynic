@@ -30,7 +30,7 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
   SpiderMonkey (Bytecode interp + Baseline Interp + Baseline Compiler +
   WarpMonkey) — without copying any one of them. Smaller engines like
   Hermes (AOT bytecode) and QuickJS (compact single-tier) are useful
-  reference points; we vendor QuickJS-NG's `libregexp.c` for §22.2 RegExp.
+  reference points. §22.2 RegExp is **Perlex**, Cynic's own native engine.
   The plan is a clean bytecode interpreter first — **Lantern** (T0) —
   then tiered compilation: a baseline JIT (**Bistromath**, T1) and an
   optimizing JIT (**Ohaimark**, T2). The garbage collector is **Metla**.
@@ -86,8 +86,8 @@ The shape, in broad strokes — the per-bucket numbers live in the
   standard error hierarchy with `error-cause`.
 - **TypedArrays** — `ArrayBuffer`, `DataView`, the typed-array
   family backed by the canonical `%TypedArray%.prototype`.
-- **RegExp** — full ECMA-262 via vendored QuickJS-NG `libregexp.c`
-  (named groups, lookbehind, `u` / `v` flags, indices). String
+- **RegExp** — full ECMA-262 via **Perlex**, Cynic's own native
+  engine (named groups, lookbehind, `u` / `v` flags, indices). String
   methods dispatch through it.
 - **Promises & async/await** — full chaining (settled and pending),
   pending-await suspension via `JSGenerator` capture, async
@@ -189,9 +189,6 @@ engineering handbook under [`docs/handbook/`](docs/handbook/).
 Cynic is [MIT-licensed](LICENSE). Bundled third-party code under
 `vendor/` keeps its own license:
 
-- `vendor/quickjs/` — QuickJS-NG (`libregexp` + `libunicode`), MIT,
-  © 2017–2018 Fabrice Bellard, © 2023+ QuickJS-NG contributors.
-  Upstream: <https://github.com/quickjs-ng/quickjs>.
 - `vendor/unicode/` — Unicode Character Database
   (`DerivedCoreProperties.txt`), under the Unicode, Inc. License
   Agreement. Upstream: <https://www.unicode.org/license.txt>.

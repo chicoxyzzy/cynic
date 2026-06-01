@@ -129,11 +129,13 @@ strict. Practical consequences:
 - Functions don't expose `arguments.callee` / `arguments.caller`.
 - Annex B §B.3 grammar additions are not implemented.
 
-One acknowledged Annex B exception: regex grammar §B.1.4 (`\1`
-outside a capturing group as octal, the lower-bound-elided
-quantifier `{,n}`). The vendored libregexp accepts these forms
-without `/u` or `/v`; every shipping engine does the same, so
-Cynic lives with the leak. See AGENTS.md for the rationale.
+One spec area where Cynic deliberately diverges from browsers:
+regex grammar §B.1.4 (`\1` outside a capturing group as octal, the
+lower-bound-elided quantifier `{,n}`, and two more). Every shipping
+browser engine relaxes these without `/u` or `/v`; Perlex — Cynic's
+native regex engine — rejects all of them in every mode, since the
+non-browser target has no reason to carry the Annex B leniency. See
+AGENTS.md for the rationale.
 
 This narrows the surface and sharpens the spec-conformance
 target — Cynic is at ~89 % spec / ~96 % attempted on the
