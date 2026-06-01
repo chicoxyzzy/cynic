@@ -15,11 +15,11 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
   Annex B *language* extensions (sloppy-mode-only function-in-block,
   `for-in` initializer, …) are baked in at the language level.
 - **No browser-era built-ins.** `escape` / `unescape`, the 13
-  `String.prototype` HTML wrappers (`anchor`, `bold`, …), and
-  `Date.prototype.{getYear, setYear}` aren't shipped. The normative
-  aliases real-world code actually uses
-  (`String.prototype.{substr, trimLeft, trimRight}`,
-  `Date.prototype.toGMTString`) are kept.
+  `String.prototype` HTML wrappers (`anchor`, `bold`, …),
+  `Date.prototype.{getYear, setYear, toGMTString}`, and the
+  `String.prototype.{substr, trimLeft, trimRight}` aliases aren't
+  shipped. The canonical modern names (`trimStart` / `trimEnd`,
+  `toUTCString`) are the only spelling.
 - **No runtime code construction.** `eval`, `new Function(string)`,
   `new GeneratorFunction(string)`, `new AsyncFunction(string)`. Aligns
   with [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses).
@@ -73,10 +73,10 @@ test`) runs alongside.
 ### Build targets
 
 - **Native CI (gating):** `x86_64-linux-gnu`,
-  `aarch64-apple-darwin` (Apple Silicon). Full battery — build +
+  `aarch64-macos` (Apple Silicon). Full battery — build +
   unit tests + SES coverage.
 - **Cross-compile CI (build-only, gating):** `aarch64-linux-gnu`,
-  `x86_64-linux-musl`, `aarch64-apple-darwin` from Linux. Catches
+  `x86_64-linux-musl`, `aarch64-macos` from Linux. Catches
   platform-specific compile breaks pre-merge.
 - **WASM:** `wasm32-freestanding` powers the
   [playground](https://chicoxyzzy.github.io/cynic/playground/).
@@ -142,11 +142,13 @@ The big shaped items: top-level `await` in modules; the multi-file
 module graph beyond single-file evaluation (cyclic imports, namespace
 exotic, live mutable bindings — dynamic `import()` itself works);
 async-generator yield-star resume-arg forwarding + `AsyncIteratorClose`
-with `await`; `Array.fromAsync`; resizable-ArrayBuffer length-tracking
-view semantics across the TypedArray prototype; generational GC; the
-timezone story behind `Date` (UTC-only today). Each
-takes a swing at the runtime score as it lands; the scoreboard in
-[`test262-results.md`](test262-results.md) is the source of truth.
+with `await`; resizable-ArrayBuffer length-tracking view semantics
+across the TypedArray prototype; generational GC; `Temporal` (the
+namespace installs, but the calendars / timezones / arithmetic
+underneath are still filling in — `Date` stays UTC-only in the
+meantime). Each takes a swing at the runtime score as it lands;
+the scoreboard in [`test262-results.md`](test262-results.md) is the
+source of truth.
 
 ## Build
 
@@ -155,7 +157,7 @@ git submodule update --init vendor/test262   # one-time; needed for `zig build t
 
 zig build              # build cynic into zig-out/bin/
 zig build test         # run all unit tests
-zig build test262      # test262 conformance (runtime mode by default; main + every pre-Stage-4 feature phase when --write-results is set)
+zig build test262      # test262 conformance (parse + compile + execute; --write-results also runs each pre-Stage-4 feature phase)
 zig build run -- lex   path/to/file.js              # tokenize and print
 zig build run -- parse path/to/file.js              # parse a Script
 zig build run -- parse --module path/to/file.js     # parse a Module
@@ -166,8 +168,9 @@ zig build run -- run   a.js b.js c.js               # multiple files share one r
 ```
 
 Requires Zig **0.17-dev** (master). The Zig project skipped a stable
-0.16, so CI tracks `master` via `mlugg/setup-zig`. If your local
-`zig version` reports an older dev tag, bump it.
+0.16, so CI tracks `master` via
+[`xyzzylabs/setup-zig`](https://github.com/xyzzylabs/setup-zig). If
+your local `zig version` reports an older dev tag, bump it.
 
 The `cynic` CLI keeps pre-Stage-4 / experimental TC39 proposals off
 by default — embedders see only stable ECMA-262. Opt in:
@@ -186,21 +189,24 @@ See `src/runtime/features.zig` for the set and
 
 - `--filter=<substring>` — run only matching paths.
 - `--list-failures=<n>` — print the first `n` failing paths after the tally.
-- `--mode={runtime,parser}` — full parse → compile → execute (default), or parser-only.
 - `--phase=<spec>` — pin the harness to a single sweep. `--phase=main` is the headline ECMA-262 sweep (pre-Stage-4 fixtures excluded); `--phase=feature:<name>` (e.g. `feature:joint-iteration`, `feature:upsert`) runs only that proposal's dedicated isolated sweep. Default: just main, unless `--write-results` is set — then main + every tracked feature run in sequence.
 - `--quiet` / `--verbose` — progress noise dial.
-- `--no-harness` — skip the `sta.js` + `assert.js` preamble in runtime mode (for measuring the floor).
+- `--no-harness` — skip the `sta.js` + `assert.js` preamble (for measuring the no-harness floor).
 - `--threads=<n>` — worker count (`0` = auto, `1` = sequential, `>1` = pool).
 - `--only-failing` — skip-as-pass any path in `.test262-pass-cache.txt`. After a full sweep populates the cache, the next iteration runs only the ~7 k failing/skipped fixtures — ≤ 30 s vs ≤ 100 s. Don't use for score rows; use it for per-fix verification.
 - `--gc-threshold=<n>` — per-fixture allocation-pressure GC threshold (default 32,768; engine default 16,384). `0` falls through to the engine default. The engine also has a 16 MiB byte trigger so allocate-and-discard patterns GC promptly regardless of count.
-- `--write-results` — update `test262-results.md` with today's row for the given mode. Re-running the same `(date, mode)` replaces that day's row rather than appending. The default run never touches that file.
+- `--write-results` — update `test262-results.md` with today's row. Re-running on the same date replaces that day's row rather than appending. The default run never touches that file.
 - **Memory / leak instrumentation:** `--gc-stats` (per-cycle pool counts + bytes), `--mem-summary` (end-of-sweep totals: cumulative bytes, max charged peak, GC cycles), `--top-rss=<n>` (top-N fixtures by process RSS delta ≥ 8 MiB), `--top-alloc=<n>` (top-N by cumulative bytes allocated ≥ 64 KiB — catches GC-cleaned thrash that RSS hides), `--leak-check` (route per-fixture bytes allocator through `std.heap.DebugAllocator`; stack trace per unfreed allocation), `--max-rss=<mb>` (abort with the offending path when RSS crosses budget).
 
-The Unicode `ID_Start` / `ID_Continue` tables are committed under
-`src/unicode/ident_tables.zig` (currently Unicode 17.0). ECMA-262 §3
-references `unicode.org/versions/latest`, so we track upstream:
-drop a refreshed `DerivedCoreProperties.txt` into `vendor/unicode/`
-and run `zig build gen-unicode` to regenerate.
+The Unicode tables under `src/unicode/` are generated and committed:
+`ident_tables.zig` (lexer `ID_Start` / `ID_Continue`),
+`property_tables.zig` (RegExp `\p{…}` property escapes),
+`case_fold_tables.zig` (RegExp `/iu` / `/iv` case folding),
+`case_conv_tables.zig` (`String.prototype.toLowerCase` / `toUpperCase`),
+`normalization_tables.zig` (UAX #15 NF{C,D,KC,KD}). Currently
+Unicode 17.0. ECMA-262 §3 references `unicode.org/versions/latest`,
+so we track upstream: drop the refreshed UCD files into
+`vendor/unicode/` and run `zig build gen-unicode` to regenerate.
 
 ## Working on Cynic
 
@@ -211,12 +217,14 @@ engineering handbook under [`docs/handbook/`](docs/handbook/).
 
 ## License
 
-Cynic is [MIT-licensed](LICENSE). Bundled third-party code under
+Cynic is [MIT-licensed](LICENSE). Bundled third-party data under
 `vendor/` keeps its own license:
 
-- `vendor/unicode/` — Unicode Character Database
-  (`DerivedCoreProperties.txt`), under the Unicode, Inc. License
+- `vendor/unicode/` — Unicode Character Database files
+  (`UnicodeData.txt`, `SpecialCasing.txt`, `CaseFolding.txt`, the
+  Derived / PropList / Scripts / emoji set, and `NormalizationTest.txt`
+  for the conformance test). All under the Unicode, Inc. License
   Agreement. Upstream: <https://www.unicode.org/license.txt>.
 - `vendor/test262/` — ECMAScript Test Suite, BSD-3-Clause (with
-  Ecma International notices). git submodule pinned to
-  `tc39/test262`. Upstream: <https://github.com/tc39/test262>.
+  Ecma International notices). Git submodule pinned to
+  [`tc39/test262`](https://github.com/tc39/test262).
