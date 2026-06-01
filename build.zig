@@ -138,7 +138,7 @@ pub fn build(b: *std.Build) void {
     const run_gen = b.addRunArtifact(gen_exe);
     run_gen.addFileArg(b.path("vendor/unicode/DerivedCoreProperties.txt"));
     run_gen.addArg(b.pathFromRoot("src/unicode/ident_tables.zig"));
-    const gen_step = b.step("gen-unicode", "Regenerate src/unicode/{ident,property,case_fold}_tables.zig from UCD");
+    const gen_step = b.step("gen-unicode", "Regenerate src/unicode/{ident,property,case_fold,case_conv}_tables.zig from UCD");
     gen_step.dependOn(&run_gen.step);
 
     const gen_props_mod = b.createModule(.{
@@ -180,6 +180,26 @@ pub fn build(b: *std.Build) void {
     run_gen_cf.addArg(b.pathFromRoot("src/unicode/case_fold_tables.zig"));
     run_gen_cf.addFileArg(b.path("vendor/unicode/CaseFolding.txt"));
     gen_step.dependOn(&run_gen_cf.step);
+
+    // src/unicode/case_conv_tables.zig (String.prototype.to{Lower,Upper}Case
+    // §22.1.3.26/27 + the non-/u RegExp Canonicalize §22.2.2.7.3) from
+    // UnicodeData.txt (simple mappings) + SpecialCasing.txt (unconditional
+    // full mappings) + DerivedCoreProperties.txt (Cased / Case_Ignorable).
+    const gen_cc_mod = b.createModule(.{
+        .root_source_file = b.path("tools/gen_case_conv.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const gen_cc_exe = b.addExecutable(.{
+        .name = "gen_case_conv",
+        .root_module = gen_cc_mod,
+    });
+    const run_gen_cc = b.addRunArtifact(gen_cc_exe);
+    run_gen_cc.addArg(b.pathFromRoot("src/unicode/case_conv_tables.zig"));
+    run_gen_cc.addFileArg(b.path("vendor/unicode/UnicodeData.txt"));
+    run_gen_cc.addFileArg(b.path("vendor/unicode/SpecialCasing.txt"));
+    run_gen_cc.addFileArg(b.path("vendor/unicode/DerivedCoreProperties.txt"));
+    gen_step.dependOn(&run_gen_cc.step);
 
     // `zig build fmt-check` runs `zig fmt --check` over `src/` and
     // `tools/`. Advisory in CI (non-gating) — flags drift on PR

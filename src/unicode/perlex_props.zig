@@ -16,7 +16,7 @@
 
 const std = @import("std");
 
-const c = @import("c");
+const case_conv = @import("case_conv.zig");
 const properties = @import("properties.zig");
 const perlex = @import("../perlex/perlex.zig");
 const perlex_parser = perlex.parser;
@@ -89,15 +89,15 @@ pub fn caseFold(cp: u21) []const u21 {
 // orbit (where KELVIN folds to `k`). Perlex carries no case data, so the
 // matcher folds non-ASCII units through this injected resolver. The orbit
 // of a unit is every *other* unit sharing its Canonicalize; it is built
-// once from libunicode's toUppercase — the same primitive backing
-// `String.prototype.toUpperCase`, so the two never diverge — by scanning
+// once from the native case-conversion toUppercase — the same primitive
+// backing `String.prototype.toUpperCase`, so the two never diverge — by scanning
 // the BMP and bucketing by Canonicalize value. Singleton orbits (the vast
 // majority) are omitted; a miss returns the empty slice.
 
 /// §22.2.2.7.3 step 3, for a single UTF-16 code unit.
 fn nonUnicodeCanonicalize(cu: u16) u16 {
-    var res: [3]u32 = undefined;
-    const n = c.lre_case_conv(&res, @as(u32, cu), 0); // 0 = to-upper
+    var res: [3]u21 = undefined;
+    const n = case_conv.convert(&res, @as(u21, cu), true); // to-upper
     if (n != 1) return cu; // uStr length ≠ 1 (multi-code-point uppercase)
     const u = res[0];
     if (u > 0xFFFF) return cu; // a supplementary uppercase is two code units
