@@ -321,7 +321,7 @@ remember the captured value at the call site so the hot
 function `.name` / `.length` descriptors as `configurable: true`
 per §17 regress because the freeze locks them
 non-configurable. These are the dominant cluster of regressions
-under the `runtime-hardened` score row; the `runtime` row
+under the `hardened` score row; the `unhardened` row
 recovers them in full.
 
 ### Phase 4 — `--unhardened` flag wiring
