@@ -3,27 +3,27 @@
 **Cynic passes 98.83 % of its 50894-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
 - **40178 passing** — Cynic produced the spec-expected result.
-- **10120 correctly handled fails** — failures that hit a Cynic design policy (Annex B not shipped, strict-only, no Intl, eval-off, SES throw) rather than an engine bug. Counted as spec-correct in `pass%` because Cynic's deliberate "no" is the right answer for the policy it ships.
+- **10120 expected fails** — failures that hit a Cynic design policy (Annex B not shipped, strict-only, no Intl, eval-off, SES throw) rather than an engine bug. Counted as spec-correct in `pass%` because Cynic's deliberate "no" is the right answer for the policy it ships.
 - **593 failing** — real engine failures with no policy bucket. Work to do.
 - **Out of total**, dropped before `corpus`: the upstream `harness/` and `staging/` paths, and every Stage ≤ 3 proposal (decorators, import-defer, source-phase-imports, import-bytes, immutable-arraybuffer, await-dictionary, plus shipped joint-iteration / ShadowRealm — those get their own dedicated scoreboard).
 
 ## Current scores
 
-| posture | passing | failing | correctly handled fails | total | pass% |
+| posture | passing | failing | expected fails | total | pass% |
 |---|---:|---:|---:|---:|---:|
 | **unhardened, `--allow=eval`** | n/a | n/a | n/a | n/a | n/a |
 | **unhardened** (`cynic --unhardened`) | 44074 | 600 | 6217 | 50894 | 98.82 % |
 | **hardened** (default — `cynic run`) | 40178 | 593 | 10120 | 50894 | 98.83 % |
 
-> **pass%** = `(passing + correctly handled fails) / total`.
+> **pass%** = `(passing + expected fails) / total`.
 > A fixture that fails because of a Cynic design policy
 > (Annex B not shipped, strict-only, no Intl, eval-off, SES
-> throw) is a **correctly handled fail** rather than a real
+> throw) is a **expected fail** rather than a real
 > engine bug. Plain **failing** is what's left over — real
 > engine work to do. The `--allow=eval` row is always `n/a`
 > until that opt-in ships.
 
-*SES witness fidelity*: **10 / 10** witnesses classify as SES-correctly-handled (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
+*SES witness fidelity*: **10 / 10** witnesses are SES expected fails (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
 ## Legend
 
@@ -46,7 +46,7 @@ refer to the same parse → compile → run sweep.
   the unhardened policies plus SES — primordials frozen,
   override-mistake fix on, locked descriptors. Fixtures
   whose expectation conflicts with SES enforcement throw
-  by design and count as correctly handled fails.
+  by design and count as expected fails.
 
 ### Columns
 
@@ -54,7 +54,7 @@ refer to the same parse → compile → run sweep.
   the spec-expected result.
 - **`failing`** — engine-true failures that *don't* match
   any design policy. Real work to do.
-- **`correctly handled fails`** — failures that hit a Cynic
+- **`expected fails`** — failures that hit a Cynic
   design policy: Annex B not shipped, strict-only,
   no Intl, eval-off, or SES throw. Counted with passes
   under `pass%` because Cynic's deliberate "no" is the
@@ -64,7 +64,7 @@ refer to the same parse → compile → run sweep.
 - **`total`** — every fixture except pre-Stage-4
   proposals (Stage ≤ 3, shipped or not) and the upstream
   `staging/` / `harness/` paths.
-- **`pass%`** — `(passing + correctly handled fails) / total`.
+- **`pass%`** — `(passing + expected fails) / total`.
   The headline.
 - **SES witness fidelity** (the italic note above) —
   positive-coverage signal. The curated witness set in
@@ -107,7 +107,7 @@ Every test262 fixture runs except:
 
 Annex B / `noStrict` / `intl402/` / the eval surface
 are NOT skipped — they run and any failure classifies
-as **correctly handled** under the matching policy.
+as an **expected fail** under the matching policy.
 
 ## Where the engine fails, by area
 
@@ -128,13 +128,13 @@ first two path components (`built-ins/Set`,
   The remainder (~13 fixtures) is the
   cross-realm cluster awaiting `--allow=eval` and multi-realm
   error attribution.
-- The **0-fails tier** is sorted by `correctly handled fails ↓` so
+- The **0-fails tier** is sorted by `expected fails ↓` so
   the heaviest policy buckets cluster first. `intl402/`
   trees dominate (no Intl), then the SES-hot built-ins
   (`Array`, `Object`, `TypedArray`, `String`, `Date`,
   `Math`), then the Annex B / eval / noStrict tails.
 
-| area | passing | failing | correctly handled fails | total | pass% |
+| area | passing | failing | expected fails | total | pass% |
 |---|---:|---:|---:|---:|---:|
 | **_100–999 fails — engine-work tier_** | | | | | |
 | `built-ins/Atomics` | 0 | 382 | 0 | 382 | 0 % |
@@ -150,7 +150,7 @@ first two path components (`built-ins/Set`,
 | `built-ins/ThrowTypeError` | 13 | 1 | 0 | 14 | 93 % |
 | `built-ins/TypedArray` | 1104 | 7 | 327 | 1438 | 100 % |
 | `language/expressions` | 10017 | 1 | 661 | 10682 | 100 % |
-| **_0 fails — passing / all-policy (sorted by correctly handled fails ↓)_** | | | | | |
+| **_0 fails — passing / all-policy (sorted by expected fails ↓)_** | | | | | |
 | `intl402/Temporal` | 48 | 0 | 1958 | 2006 | 100 % |
 | `annexB/language` | 82 | 0 | 763 | 845 | 100 % |
 | `built-ins/Temporal` | 3885 | 0 | 703 | 4588 | 100 % |
@@ -258,13 +258,13 @@ Per-feature scores for the TC39 proposals Cynic ships at
 Stage 1–3, ahead of their inclusion in the published
 edition. Each proposal gets a **(hardened)** row — the
 as-shipped SES posture under `--enable=<flag>`, with SES
-throws counted as correctly handled fails — and an
+throws counted as expected fails — and an
 **(unhardened)** row against bare ECMA-262. Same column
 shape as the main `## Current scores` table:
-`passing | failing | correctly handled fails | total | pass%`.
+`passing | failing | expected fails | total | pass%`.
 These fixtures are excluded from the top-line score.
 
-| feature | passing | failing | correctly handled fails | total | pass% |
+| feature | passing | failing | expected fails | total | pass% |
 |---|---:|---:|---:|---:|---:|
 | `joint-iteration` (hardened) | 78 | 0 | 3 | 81 | 100 % |
 | `joint-iteration` (unhardened) | 76 | 0 | 3 | 81 | 94 % |
@@ -274,10 +274,10 @@ These fixtures are excluded from the top-line score.
 
 ## History
 
-### 2026-06-01 — cynic `3de4345`, test262 `d0c1b4555b`
+### 2026-06-01 — cynic `fed859f`, test262 `d0c1b4555b`
 
-|         | passing | failing | correctly handled fails | total | pass% | Δ pass | elapsed |
+|         | passing | failing | expected fails | total | pass% | Δ pass | elapsed |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **unhardened** | 44074 | 600 | 6217 | 50894 | 98.82 % | n/a | 35.1 s |
-| **hardened** | 40178 | 593 | 10120 | 50894 | 98.83 % | n/a | 40.1 s |
+| **unhardened** | 44074 | 600 | 6217 | 50894 | 98.82 % | n/a | 1m 30s |
+| **hardened** | 40178 | 593 | 10120 | 50894 | 98.83 % | n/a | 1m 25s |
 
