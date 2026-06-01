@@ -41,8 +41,23 @@ import {
   tags as t,
 } from './codemirror.bundle.js';
 
+// The engine half — the WASM ABI binding. Built + published alongside
+// `cynic.wasm` by the engine's CI; this UI only sees the stable API.
+import {
+  loadEngine,
+  engineVersion,
+  evalSource,
+  parseSource,
+  parseAst,
+} from './cynic-engine.js';
+
 // ES modules are strict by definition — no `'use strict'` directive
 // needed (and it would be invalid after the import statements).
+
+// UI-side codecs for byte ↔ code-unit span mapping (disasm / AST
+// hover). Independent of the engine glue's own encoder/decoder.
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 const SAMPLES = {
   'Hello, strict world': `// Cynic is strict-only — every script runs in strict mode.
@@ -254,7 +269,6 @@ const els = {
   modeTabs: Array.from(document.querySelectorAll('.mode-tab')),
 };
 
-let wasm = null;   // { instance, exports, memory }
 let view = null;   // the CodeMirror EditorView
 let currentMode = 'eval'; // 'eval' | 'bytecode' | 'ast' — driven by the right-panel tabs
 
@@ -469,20 +483,14 @@ function frameSpanToEditorRange(errorSpan) {
 // WASM loading
 // --------------------------------------------------------------------------
 
+// Load the engine (the WASM ABI lives in `cynic-engine.js`) and wire
+// the load result into the UI. Pure engine plumbing stays in the glue
+// module; this only owns the status / version / run-button display.
 async function loadWasm() {
   setStatus('loading engine…');
-  // The freestanding module imports nothing — the C shim routes
-  // allocation back into the module itself. An empty import object
-  // is all `instantiateStreaming` needs.
-  const importObject = {};
   try {
-    const result = await instantiateWasm(importObject);
-    wasm = {
-      instance: result.instance,
-      exports: result.instance.exports,
-      memory: result.instance.exports.memory,
-    };
-    els.version.textContent = readVersion();
+    await loadEngine();
+    els.version.textContent = engineVersion();
     setStatus('ready');
     els.run.disabled = false;
   } catch (err) {
@@ -490,119 +498,6 @@ async function loadWasm() {
     renderError('Could not load cynic.wasm: ' + err);
     console.error(err);
   }
-}
-
-// Instantiate `cynic.wasm`. Prefer streaming compile, but fall
-// back to a buffered fetch on ANY streaming failure — not just a
-// missing `instantiateStreaming`. `instantiateStreaming` rejects
-// when the server sends the wrong `Content-Type` (anything other
-// than `application/wasm`), which happens on local static servers
-// that don't know the `.wasm` MIME type. GitHub Pages serves it
-// correctly, so the fallback is purely local-dev insurance.
-async function instantiateWasm(importObject) {
-  if (WebAssembly.instantiateStreaming) {
-    try {
-      return await WebAssembly.instantiateStreaming(
-        fetch('cynic.wasm'),
-        importObject,
-      );
-    } catch (err) {
-      console.warn(
-        'instantiateStreaming failed (likely a Content-Type other ' +
-          'than application/wasm); retrying with a buffered fetch.',
-        err,
-      );
-    }
-  }
-  const bytes = await (await fetch('cynic.wasm')).arrayBuffer();
-  return WebAssembly.instantiate(bytes, importObject);
-}
-
-function readVersion() {
-  const ex = wasm.exports;
-  if (!ex.cynic_version_ptr || !ex.cynic_version_len) return 'cynic-wasm';
-  const ptr = ex.cynic_version_ptr();
-  const len = ex.cynic_version_len();
-  return new TextDecoder().decode(
-    new Uint8Array(wasm.memory.buffer, ptr, len),
-  );
-}
-
-// --------------------------------------------------------------------------
-// Calling into the engine
-// --------------------------------------------------------------------------
-
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-
-// Run `source` through one of the engine's two entry points and
-// return the parsed result frame.
-function callEngine(exportName, source, ...extraArgs) {
-  const ex = wasm.exports;
-  const bytes = encoder.encode(source);
-  const ptr = ex.cynic_alloc(bytes.length);
-  if (ptr === 0) throw new Error('cynic_alloc returned null');
-
-  try {
-    // Re-view memory each time — `memory.grow` inside the call can
-    // detach the previous ArrayBuffer.
-    new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
-    // `extraArgs` carries export-specific trailing params, e.g.
-    // `cynic_eval`'s `hardened` flag (1 = frozen primordials,
-    // 0 = `--unhardened`). Parse/AST exports pass none.
-    ex[exportName](ptr, bytes.length, ...extraArgs);
-    return readFrame();
-  } finally {
-    ex.cynic_free(ptr, bytes.length);
-  }
-}
-
-// Decode the framed result buffer the engine left behind.
-function readFrame() {
-  const ex = wasm.exports;
-  const framePtr = ex.cynic_result_ptr();
-  const frameLen = ex.cynic_result_len();
-  if (framePtr === 0 || frameLen === 0) {
-    return {
-      status: -1,
-      stdout: '',
-      value: '',
-      error: 'engine returned no result',
-      errorSpan: null,
-    };
-  }
-  const view = new DataView(wasm.memory.buffer, framePtr, frameLen);
-  let off = 0;
-  const status = view.getUint8(off); off += 1;
-
-  const section = () => {
-    const len = view.getUint32(off, false); off += 4;
-    const text = decoder.decode(
-      new Uint8Array(wasm.memory.buffer, framePtr + off, len),
-    );
-    off += len;
-    return text;
-  };
-
-  const stdout = section();
-  const value = section();
-  const error = section();
-
-  // The engine appends an 8-byte error_span (start:u32 + end:u32, big-
-  // endian byte offsets into source) past the textual error section.
-  // `start == end` is the wire sentinel for "no source range"; null
-  // here so the renderer skips the wavy-underline decoration. Older
-  // WASM bundles without the span tail still parse cleanly because
-  // the section lengths are explicit — `off` simply stops before the
-  // missing bytes.
-  let errorSpan = null;
-  if (off + 8 <= frameLen) {
-    const start = view.getUint32(off, false); off += 4;
-    const end = view.getUint32(off, false); off += 4;
-    if (end > start) errorSpan = { startByte: start, endByte: end };
-  }
-
-  return { status, stdout, value, error, errorSpan };
 }
 
 // --------------------------------------------------------------------------
@@ -993,16 +888,16 @@ function run() {
     setEditorHotRange(null);
     switch (currentMode) {
       case 'bytecode':
-        renderInspectorResult(callEngine('cynic_parse', source));
+        renderInspectorResult(parseSource(source));
         break;
       case 'ast':
-        renderAstResult(callEngine('cynic_parse_ast', source));
+        renderAstResult(parseAst(source));
         break;
       case 'eval':
       default:
         // `hardened` defaults on; the toolbar toggle flips it off
         // (the `--unhardened` posture — mutable primordials).
-        renderEvalResult(callEngine('cynic_eval', source, els.unhardened?.checked ? 0 : 1));
+        renderEvalResult(evalSource(source, { hardened: !els.unhardened?.checked }));
         break;
     }
     setStatus('ready');
