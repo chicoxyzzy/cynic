@@ -168,3 +168,25 @@ test "generated tables are sorted (binary-search invariant)" {
         }
     }
 }
+
+test "convert + properties are total and well-formed over the whole range" {
+    // Every code point (surrogates and the unassigned tail included)
+    // must convert without tripping a bounds check: 1-3 result code
+    // points, each a valid scalar value, and the property predicates
+    // are total. Guards the binary-search accessors and the off/len
+    // fields of every emitted MapEntry against a bad table regen — the
+    // exhaustive libunicode cross-check that proved the values is gone
+    // (libunicode was removed), so this is the standing structural net.
+    var cp: u21 = 0;
+    while (cp <= 0x10FFFF) : (cp += 1) {
+        inline for (.{ true, false }) |to_upper| {
+            var res: [3]u21 = undefined;
+            const n = convert(&res, cp, to_upper);
+            try testing.expect(n >= 1 and n <= 3);
+            for (res[0..n]) |r| try testing.expect(r <= 0x10FFFF);
+        }
+        // Total predicates — must not panic on any input.
+        _ = isCased(cp);
+        _ = isCaseIgnorable(cp);
+    }
+}

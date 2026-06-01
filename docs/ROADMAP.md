@@ -705,9 +705,15 @@ and a head-to-head benchmark (Perlex is 1.9–3.5× faster, see above).
 A pattern Perlex can't compile now throws `SyntaxError` with no
 fallback; the only `error.Unsupported` residuals are census-invisible
 (malformed UTF-8, the pathological `(a?){10^23}` bounded by the VM
-step limit). `libunicode.c` stays — String case conversion +
-normalization + Perlex case folding still call it (its own removal is
-tracked separately).
+step limit). `libunicode.c` is gone too — String case conversion
+(`src/unicode/case_conv.zig`), normalization
+(`src/unicode/normalization.zig`, NFC/NFD/NFKC/NFKD per §3.11 / UAX#15),
+and Perlex case folding all run on native Zig tables now. With both
+matchers retired, the entire `vendor/quickjs/` directory was deleted
+(`libregexp.c`, `libunicode.c`, `cutils.c`) — Cynic vendors **zero C**.
+The WASM glue went with it: `src/wasm_shim.c` and `src/runtime/c_alloc.zig`
+are gone, so the WASM build is pure Zig (optional `wasm-opt -Oz`
+minification step).
 
 **Replacement-gate benchmark — Perlex vs libregexp.** The final
 pre-removal snapshot (the `bench-regex` harness that produced it was
@@ -752,13 +758,14 @@ Per-case medians (ns/iter; `comp×` / `exec×` = libregexp ÷ Perlex,
 | big-bound-range | 325 ns | 557 ns | 1.71 | 36.1 µs | 78.8 µs | 2.18 |
 
 Memory (RegExp bucket, `--mem-summary`, engine-side counters — also the
-post-removal runtime numbers, since libregexp is unreached): 42 MiB max
+post-removal runtime numbers): 42 MiB max
 per-fixture engine peak, 5.6 MiB avg, 27 GC cycles / 25 ms total pause,
 0 fail. The heaviest process-RSS fixtures (199 MB on `\S`-over-all-
 Unicode, ~100 MB on the `CharacterClassEscapes` positive-cases) are
 inherent whole-Unicode set-construction tests, engine-agnostic. The
-removal dropped `libregexp.c` (2610 lines C) from the build;
-`libunicode.c` (1746 lines) stays. The ES2024 `regexp-modifiers`
+regex removal dropped `libregexp.c` (2610 lines C) from the build, and
+the subsequent native-Unicode work dropped `libunicode.c` (1746 lines)
+and the rest of `vendor/quickjs/` with it. The ES2024 `regexp-modifiers`
 feature ships via Perlex, so no regex *feature* is unshipped; remaining
 polish is `RegExp.prototype` property edge cases (`lastIndex`, `flags`,
 `dotAll`) and minor String.prototype dispatch corners.

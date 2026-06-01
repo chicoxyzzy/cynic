@@ -25,7 +25,6 @@ make sure the target is actually hot.
 Do **not** commit. The `profile.json` is a local artifact.
 
 Tip: a hot function is only actionable if it's something we can
-change. Builtins backed by vendored C (libregexp) and Zig std
-library hot paths (`ArrayHashMap.getOrPut`, etc.) point at
-*indirect* targets — usually a caller is hitting them more than
-expected.
+change. Zig std library hot paths (`ArrayHashMap.getOrPut`, etc.)
+point at *indirect* targets — usually a caller is hitting them
+more than expected.

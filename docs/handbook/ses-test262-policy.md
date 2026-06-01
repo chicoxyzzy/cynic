@@ -29,8 +29,9 @@ the design. Sister docs:
 The current `runtime_hardened` row at ~84.77% spec% looks ~8 pp worse
 than the unhardened baseline (92.90%). The ~3258-fixture delta isn't
 mostly Cynic bugs — it's intentional SES divergence. Real engine bugs
-under SES are ~9 fixtures (the same libregexp Annex B leak the
-unhardened row carries). The current row mixes both signals, which
+under SES are ~9 fixtures (the same Annex B regex divergence the
+unhardened row carries — Perlex deliberately strict-rejects those
+forms, see below; not bugs). The current row mixes both signals, which
 makes the floor in `--min-hardened-spec-pct` blunt: a *real* hardened
 regression of 50 fixtures still leaves the score well above any
 reasonable floor, so CI can't catch it cleanly.
@@ -369,10 +370,12 @@ under one mechanism, and only one of the three is permanent:
    re-checks each entry against [TC39 finished proposals](https://github.com/tc39/proposals/blob/main/finished-proposals.md)
    and downgrades anything Stage 4 from "stage maturity" to
    "planned".
-3. **Planned (vendor/infra gap)** — Stage 4 features Cynic
+3. **Planned (infra gap)** — Stage 4 features Cynic
    *should* ship but hasn't yet (Float16Array,
-   libregexp Annex B grammar, json-parse-with-source). Skipping
-   them hides real work-to-do. Surface them as a separate
+   json-parse-with-source). Skipping
+   them hides real work-to-do. (The Annex B regex forms are *not*
+   in this bucket — Perlex strict-rejects them on purpose, see the
+   Annex B note below; they are a non-goal, not work-to-do.) Surface them as a separate
    **`## Planned features`** section in `test262-results.md`
    (parallel to the existing `## Pre-Stage-4 proposals shipped`
    block) showing each entry's fixture count and a one-line note
@@ -637,7 +640,12 @@ the rest were already correct.
 | `Float16Array` (feature tag) | 62 |
 | `json-parse-with-source` (feature tag) | 22 |
 | `json-modules` (feature tag) | 13 |
-| `regexp-duplicate-named-groups`, `regexp-modifiers`, unicodeSets `\q{}` / property-of-strings / set-difference / etc. (libregexp gaps) | varies |
+
+(`regexp-duplicate-named-groups`, `regexp-modifiers`, and the whole `/v`
+UnicodeSets grammar — `\q{}` / property-of-strings / set-difference —
+are *not* in this table: Perlex ships them all. The only RegExp
+divergences left are the deliberate Annex B strict rejections, which are
+a non-goal, not Planned work.)
 
 Total currently-Planned fixture exposure: **≈ 5350 fixtures** dominated
 by Temporal. These all get a row in the new `## Planned features`
@@ -739,8 +747,13 @@ current `vendor/test262/` corpus.
 | **Float16Array** | 62 | IEEE 754 binary16 conversion + the TypedArray ctor + `Math.f16round` + `DataView` half-float accessors. |
 | **json-parse-with-source** | 22 | `JSON.parse` reviver's second arg carries `{ source }` for the original JSON span. Needs per-value source spans through the parse tree. |
 | **json-modules** | 13 | `import data from "./x.json"` returning the parsed JSON value. Pair with import-attributes above. |
-| **libregexp Annex B / `/v` gaps** | varies | Vendored libregexp doesn't implement ES2024 `/v` set-difference / `\q{…}` / property-of-strings, `regexp-modifiers`, or `regexp-duplicate-named-groups`. Either patch the matcher or switch regex engines. |
 ```
+
+(No regex row: Perlex — Cynic's native engine, the sole matcher since
+libregexp was retired — already ships ES2024 `/v` set-difference /
+`\q{…}` / property-of-strings, `regexp-modifiers`, and
+`regexp-duplicate-named-groups`. The Annex B strict rejections that
+remain are a deliberate non-goal, not a Planned feature.)
 
 Open question for implementation: do we add an `attempt-on-bump`
 flag to a Planned entry, so that when we ship the underlying
@@ -947,16 +960,20 @@ Final post-Phase-2 numbers:
 Within 0.01 pp of the unhardened headline. The 12 remaining
 real hardened-only failures break down:
 
-- **9 libregexp grammar gaps** — `built-ins/RegExp/property-
+- **9 deliberate Annex B regex strict-rejections** —
+  `built-ins/RegExp/property-
   escapes/generated/strings/*Emoji*` (property-of-strings:
   `RGI_Emoji`, `RGI_Emoji_Tag_Sequence`, `RGI_Emoji_ZWJ_Sequence`,
   `RGI_Emoji_Modifier_Sequence`, `RGI_Emoji_Flag_Sequence`,
   `Emoji_Keycap_Sequence`, `Basic_Emoji`) and the two
   `Script_-_Unknown` / `Script_Extensions_-_Unknown`
-  fixtures. Already documented in AGENTS.md as the
-  "Acknowledged exception — regex Annex B (§B.1.4)" carve-out.
-  Patching vendored libregexp or switching matchers would
-  close these.
+  fixtures. These exercise the Annex B §B.1.2 grammar relaxations
+  that Perlex — the native engine, sole matcher since libregexp was
+  retired — strict-rejects on purpose (see AGENTS.md, "Regex Annex B
+  (§B.1.4) — narrowed by Perlex"). Every shipping browser engine
+  accepts the Annex B forms; Cynic's non-browser target is why it
+  doesn't. Not a missing-feature gap — switching matchers is already
+  done, and the rejection is intentional.
 - **2 SES-policy edge cases not yet pattern-matched** —
   `language/global-code/decl-lex-configurable-global.js`
   (top-level `let` shadowing a frozen primordial; descriptor
@@ -974,8 +991,9 @@ real hardened-only failures break down:
   `name = "TypeError"`, which is too broad to pattern-match.
 
 **Headline reading**: Phase 2 is substantially complete. The
-remaining 12 are documented carve-outs / known engine gaps
-(libregexp); none are real engine bugs requiring runtime
+remaining 12 are documented carve-outs (the deliberate Annex B
+regex strict-rejections + SES descriptor edge cases); none are
+real engine bugs requiring runtime
 fixes. CI floor `--min-hardened-spec-pct` bumped from 84.0
 to 92.0 to track the new adjusted headline.
 

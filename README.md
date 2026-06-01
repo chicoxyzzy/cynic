@@ -117,9 +117,7 @@ exotic, live mutable bindings — dynamic `import()` itself works);
 async-generator yield-star resume-arg forwarding + `AsyncIteratorClose`
 with `await`; `Array.fromAsync`; resizable-ArrayBuffer length-tracking
 view semantics across the TypedArray prototype; generational GC; the
-timezone story behind `Date` (UTC-only today);
-`String.prototype.normalize` (passthrough — needs UCD tables);
-`Set.prototype.{union, intersection, difference, …}` (ES2025). Each
+timezone story behind `Date` (UTC-only today). Each
 takes a swing at the runtime score as it lands; the scoreboard in
 [`test262-results.md`](test262-results.md) is the source of truth.
 
