@@ -22,20 +22,17 @@ THE SOFTWARE.
 
 ---
 
-Cynic is MIT-licensed. Bundled third-party code under vendor/ retains its
+Cynic is MIT-licensed. Bundled third-party data under vendor/ retains its
 own license:
 
-  vendor/quickjs/   QuickJS-NG (libregexp + libunicode), MIT,
-                    (c) 2017-2018 Fabrice Bellard, (c) 2023+ QuickJS-NG
-                    contributors. https://github.com/quickjs-ng/quickjs
-
-  vendor/unicode/   Unicode Character Database (DerivedCoreProperties.txt),
-                    Unicode, Inc. License Agreement.
+  vendor/unicode/   Unicode Character Database (UCD data files), Unicode,
+                    Inc. License Agreement.
                     https://www.unicode.org/license.txt
 
   vendor/test262/   ECMAScript Test Suite, BSD-3-Clause (with Ecma
                     International notices). git submodule pinned to
                     tc39/test262. https://github.com/tc39/test262
 
-Build-time only; no vendored code is shipped in user JS visible to the
-runtime, except where explicitly noted (libregexp powers RegExp).
+The vendored data is build-time only (the UCD files generate the Unicode
+tables; test262 is the conformance suite) — none of it is shipped as
+code visible to user JS.

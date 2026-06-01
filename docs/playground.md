@@ -32,7 +32,7 @@ zig build wasm
 This:
 
 1. compiles the Cynic library + `src/wasm.zig` for
-   `wasm32-freestanding`, `ReleaseSmall` (pure Zig — no C);
+   `wasm32-freestanding`, `ReleaseSmall` (no C sources to compile);
 2. links into `zig-out/bin/cynic.wasm`;
 3. assembles a directly-servable directory at
    `zig-out/playground/` containing `playground.html`,
@@ -53,10 +53,10 @@ The current module is ~3.4 MB (`ReleaseSmall`, unstripped). It is
 a complete ECMAScript engine — lexer, parser, bytecode compiler,
 register interpreter, garbage collector, the full built-in surface
 (Object / Array / String / Map / Set / Promise / TypedArray /
-Proxy / RegExp / …) — entirely native Zig, with no vendored C. The
-native Unicode tables (case conversion, normalization, properties,
-case folding) that replaced libunicode's bit-packed C tables are the
-bulk of the size and an obvious target for later compression.
+Proxy / RegExp / …) — with no vendored C. The native Unicode tables
+(case conversion, normalization, properties, case folding) that
+replaced libunicode's bit-packed C tables are the bulk of the size
+and an obvious target for later compression.
 
 ## Why `wasm32-freestanding` (not WASI)
 
@@ -65,10 +65,9 @@ engine needs no filesystem, no clock-of-record, no environment,
 and no stdio at runtime — `console.log` is captured into an
 in-module buffer, not written to a host stream. A WASI module
 would drag in an unused syscall surface and a larger import
-object for no functional gain. And the engine is pure Zig, so
-freestanding costs nothing extra: there is no libc shim to carry
-and no C to satisfy — regex (Perlex) and the Unicode algorithms
-are all native.
+object for no functional gain. And with no C in the build,
+freestanding costs nothing extra: there is no libc shim to carry —
+regex (Perlex) and the Unicode algorithms are native.
 
 ## Freestanding target guards
 

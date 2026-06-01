@@ -458,7 +458,7 @@ code construction (aligns with SES).
 - `Proxy` with `get`, `set`, `has`, `deleteProperty`,
   `defineProperty`, `getOwnPropertyDescriptor`, `ownKeys` traps;
   callable proxies (function-target forwarding).
-- `RegExp` backed by **Perlex**, Cynic's native Zig engine (full
+- `RegExp` backed by **Perlex**, Cynic's own regex engine (full
   ECMA-262 conformance — flags, captures, lookaround, named
   groups, `u` / `v` flags). String methods (`match`, `matchAll`,
   `replace`, `replaceAll`, `search`, `split`) all dispatch
@@ -683,7 +683,7 @@ hosts are single-agent-per-isolate).
 **Done.** Vendored QuickJS-NG `libregexp.c` (MIT, ~2600 LOC C)
 provided the initial full ECMA-262 surface, bridged from Zig with
 UTF-8 ↔ UTF-16 transcoding so match indices land in spec-correct
-UTF-16 code units. The native Zig backtracking engine — **Perlex**
+UTF-16 code units. The native backtracking engine — **Perlex**
 (`src/perlex/`) — now sits first in dispatch and owns **every pattern
 the test262 corpus exercises**: backreferences, named groups (incl.
 duplicate-name early errors), lookahead / lookbehind (with captures,
@@ -708,11 +708,11 @@ fallback; the only `error.Unsupported` residuals are census-invisible
 step limit). `libunicode.c` is gone too — String case conversion
 (`src/unicode/case_conv.zig`), normalization
 (`src/unicode/normalization.zig`, NFC/NFD/NFKC/NFKD per §3.11 / UAX#15),
-and Perlex case folding all run on native Zig tables now. With both
+and Perlex case folding all run on native tables now. With both
 matchers retired, the entire `vendor/quickjs/` directory was deleted
-(`libregexp.c`, `libunicode.c`, `cutils.c`) — Cynic vendors **zero C**.
+(`libregexp.c`, `libunicode.c`, `cutils.c`) — Cynic vendors no C.
 The WASM glue went with it: `src/wasm_shim.c` and `src/runtime/c_alloc.zig`
-are gone, so the WASM build is pure Zig (optional `wasm-opt -Oz`
+are gone, so the WASM build has no C either (optional `wasm-opt -Oz`
 minification step).
 
 **Replacement-gate benchmark — Perlex vs libregexp.** The final
