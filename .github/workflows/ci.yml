@@ -3,7 +3,28 @@ name: CI
 on:
   push:
     branches: [main]
+    # Skip CI when only docs / scoreboard / git plumbing changed.
+    # `paths-ignore` is a union — a commit that touches *both* a
+    # `.md` and a `.zig` still triggers (only suppressed when
+    # *every* changed path matches). README / docs / scoreboard /
+    # pass-cache touch nothing the engine builds against.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'test262-results.md'
+      - '.test262-pass-cache.txt'
+      - '.gitignore'
+      - 'gh-pages/**'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'test262-results.md'
+      - '.test262-pass-cache.txt'
+      - '.gitignore'
+      - 'gh-pages/**'
 
 permissions:
   contents: read
@@ -194,19 +215,17 @@ jobs:
     # darwin ran `zig build -Dtarget=x86_64-linux-gnu`).
     #
     #   aarch64-linux-gnu   — Workers / Deno on ARM64 Linux.
-    #   x86_64-linux-gnu    — Workers / Deno on x86_64 Linux (the
-    #                         primary production target). Linux
-    #                         cross-from-Linux is essentially a
-    #                         host build, but exposing it as a
-    #                         distinct matrix entry forces the
-    #                         build-graph to run cleanly under the
-    #                         explicit triple.
     #   x86_64-linux-musl   — Catches static-link / libc-symbol-set
     #                         regressions. Workers' v8-isolate edge
     #                         runners run under musl.
     #   aarch64-macos       — Apple Silicon cross-from-Linux; lets a
     #                         Linux contributor catch macOS-only
     #                         compile breaks before pushing.
+    #
+    # `x86_64-linux-gnu` deliberately NOT in the matrix — it's the
+    # host triple of `ubuntu-latest`, so `build-and-test` already
+    # exercises it natively (and at higher coverage). Adding a
+    # cross-from-self entry was a 36s no-op.
     #
     # Not added: aarch64-linux-android (needs the Android NDK for
     # Bionic libc headers — Zig doesn't bundle them) and
@@ -218,7 +237,6 @@ jobs:
       matrix:
         target:
           - aarch64-linux-gnu
-          - x86_64-linux-gnu
           - x86_64-linux-musl
           - aarch64-macos
     steps:
@@ -358,6 +376,13 @@ jobs:
 
   test262-gc-stress:
     name: test262 GC stress / ${{ matrix.bucket }} (advisory)
+    # Advisory + main-only: gc-stress is a 5-bucket ReleaseSafe build
+    # plus a slow `--gc-threshold=1` sweep — too expensive to run on
+    # every PR for a non-gating signal. Catch GC rooting / write-
+    # barrier regressions post-merge; bisect from there. The default
+    # `test262` job (gating, ReleaseFast, every PR) is the front-line
+    # check; gc-stress is the deeper net.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: build-and-test
