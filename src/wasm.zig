@@ -13,10 +13,9 @@
 //!   cynic_result_len()          -> u32     last result frame length
 //!   cynic_version_ptr/len()              the engine version string
 //!
-//! There is no libc. Allocation routes through a single
-//! `std.heap.WasmAllocator`; the vendored QuickJS C calls back into
-//! `cynic_host_alloc` / `cynic_host_free` / `cynic_host_realloc`
-//! (see `src/wasm_shim.c`) so one allocator owns every byte.
+//! There is no libc, and no C: Cynic is pure Zig, so allocation is
+//! simply a single `std.heap.WasmAllocator` behind the guest-buffer
+//! ABI below.
 //!
 //! Result framing — `cynic_eval` returns a self-describing buffer
 //! so the JS side needs no struct layout knowledge beyond the
@@ -86,40 +85,6 @@ fn rawFree(ptr: [*]u8) void {
     const base = ptr - alloc_header;
     const total = std.mem.readInt(usize, base[0..@sizeOf(usize)], .little);
     gpa.free(base[0..total]);
-}
-
-fn rawSize(ptr: [*]u8) usize {
-    const base = ptr - alloc_header;
-    return std.mem.readInt(usize, base[0..@sizeOf(usize)], .little) - alloc_header;
-}
-
-// ---------------------------------------------------------------------------
-// C-ABI allocator hooks — called from src/wasm_shim.c
-// ---------------------------------------------------------------------------
-
-/// `malloc` for the vendored QuickJS C. Returns null on failure,
-/// matching C semantics.
-export fn cynic_host_alloc(n: usize) ?[*]u8 {
-    if (n == 0) return rawAlloc(1);
-    return rawAlloc(n);
-}
-
-export fn cynic_host_free(p: ?[*]u8) void {
-    if (p) |ptr| rawFree(ptr);
-}
-
-export fn cynic_host_realloc(p: ?[*]u8, n: usize) ?[*]u8 {
-    const old = p orelse return cynic_host_alloc(n);
-    if (n == 0) {
-        rawFree(old);
-        return null;
-    }
-    const old_len = rawSize(old);
-    const fresh = rawAlloc(n) orelse return null;
-    const copy = @min(old_len, n);
-    @memcpy(fresh[0..copy], old[0..copy]);
-    rawFree(old);
-    return fresh;
 }
 
 // ---------------------------------------------------------------------------

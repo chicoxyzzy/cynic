@@ -205,9 +205,9 @@ These are project rules — they apply to everyone.
   `toLowerCase`, `toUpperCase`, `trim*`, `repeat` — pass WTF-8
   bytes through unchanged (case-conversion still walks code
   points, but doesn't need positional helpers). `normalize`
-  decodes through `lib_unicode.unicode_normalize` (vendored
-  QuickJS-NG) into a u32 code-point buffer and re-encodes to
-  WTF-8; `localeCompare` shares that pipeline for its NFD
+  decodes through the native `unicode/normalization` tables
+  (§3.11 / UAX #15) into a u32 code-point buffer and re-encodes
+  to WTF-8; `localeCompare` shares that pipeline for its NFD
   fast path. Symbol-dispatched methods (`split`, `replace`,
   `replaceAll`, `match`, `matchAll`, `search`) route into
   Perlex via the regexp bridge, which has its own UTF-16 view

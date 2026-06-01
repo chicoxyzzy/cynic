@@ -15,8 +15,6 @@ point of the demo.
 
 ```
 src/wasm.zig                       WASM entry module — C-ABI exports
-src/wasm_shim.c                    freestanding libc shim (mem*/str*/malloc)
-vendor/quickjs/wasm-libc/          stub <stdlib.h> / <string.h> / … headers
 playground/playground.html         two-column front-end
 playground/playground.js           WASM loader + marshalling + CM6 editor
 playground/codemirror.bundle.js    vendored CodeMirror 6 (committed artifact)
@@ -33,12 +31,10 @@ zig build wasm
 
 This:
 
-1. compiles `vendor/quickjs/libregexp.c` + `libunicode.c` +
-   `src/wasm_shim.c` for `wasm32-freestanding`, `ReleaseSmall`;
-2. compiles the Cynic library + `src/wasm.zig` for the same
-   target;
-3. links them into `zig-out/bin/cynic.wasm`;
-4. assembles a directly-servable directory at
+1. compiles the Cynic library + `src/wasm.zig` for
+   `wasm32-freestanding`, `ReleaseSmall` (pure Zig — no C);
+2. links into `zig-out/bin/cynic.wasm`;
+3. assembles a directly-servable directory at
    `zig-out/playground/` containing `playground.html`,
    `playground.js`, `codemirror.bundle.js`, and `cynic.wasm`.
 
@@ -53,11 +49,14 @@ cd zig-out/playground && python3 -m http.server 8080
 `playground/build.sh` runs `zig build wasm` and prints the
 resulting module size.
 
-The current module is ~1.6 MB (`ReleaseSmall`, unstripped). It is
+The current module is ~3.4 MB (`ReleaseSmall`, unstripped). It is
 a complete ECMAScript engine — lexer, parser, bytecode compiler,
 register interpreter, garbage collector, the full built-in surface
 (Object / Array / String / Map / Set / Promise / TypedArray /
-Proxy / RegExp / …) — plus the vendored QuickJS-NG regex engine.
+Proxy / RegExp / …) — entirely native Zig, with no vendored C. The
+native Unicode tables (case conversion, normalization, properties,
+case folding) that replaced libunicode's bit-packed C tables are the
+bulk of the size and an obvious target for later compression.
 
 ## Why `wasm32-freestanding` (not WASI)
 
@@ -66,51 +65,19 @@ engine needs no filesystem, no clock-of-record, no environment,
 and no stdio at runtime — `console.log` is captured into an
 in-module buffer, not written to a host stream. A WASI module
 would drag in an unused syscall surface and a larger import
-object for no functional gain. The only freestanding cost is a
-hand-written libc shim, which is small and fully contained here.
+object for no functional gain. And the engine is pure Zig, so
+freestanding costs nothing extra: there is no libc shim to carry
+and no C to satisfy — regex (Perlex) and the Unicode algorithms
+are all native.
 
-## The freestanding C shim
+## Freestanding target guards
 
-`wasm32-freestanding` has no libc. The vendored QuickJS C
-(`libregexp.c` / `libunicode.c`, and the header-only `cutils.h`)
-`#include`s `<stdlib.h>`, `<string.h>`, `<stdio.h>`,
-`<inttypes.h>`, `<math.h>`, `<assert.h>`, `<time.h>`,
-`<pthread.h>`, and friends, and references `malloc` / `free` /
-`realloc`, the `mem*` / `str*` family, and a few stdio symbols.
-
-Two pieces close that gap:
-
-- **`vendor/quickjs/wasm-libc/`** — minimal stub headers placed
-  *first* on the C include path for the WASM build only. They
-  declare the symbols QuickJS references; the native build keeps
-  using the real system libc. `<math.h>` maps everything to
-  compiler builtins (`__builtin_*`), so no libm link is needed.
-  `<pthread.h>` provides opaque types — the inline thread helpers
-  in `cutils.h` are never called and are dropped by the compiler.
-
-- **`src/wasm_shim.c`** — the implementations. `malloc` / `free` /
-  `realloc` / `calloc` forward to three C-ABI hooks exported from
-  `src/wasm.zig` (`cynic_host_alloc` / `cynic_host_free` /
-  `cynic_host_realloc`), which route into a single Zig
-  `std.heap.WasmAllocator`. The `mem*` / `str*` family is written
-  from scratch. `printf` / `fprintf` are no-ops (their only caller
-  is libregexp's `DUMP_REOP` bytecode dumper — debug output with
-  nowhere to go in a sandbox). `vsnprintf` / `snprintf` get a
-  small real implementation because libregexp formats a
-  diagnostic string through them.
-
-So one allocator — the Zig `WasmAllocator` — owns every byte,
-native Zig and vendored C alike.
-
-A handful of Zig-side sites needed a target guard because they
+A handful of Zig-side sites need a target guard because they
 assume a hosted platform: `clock_gettime` in `runtime/heap.zig`
 and `runtime/builtins/date.zig` (no monotonic / wall clock on
-freestanding — GC pause-time and `Date.now()` degrade to 0), and
-the `std.c` allocator in the QuickJS host hooks
-(`runtime/c_alloc.zig` routes to libc on a hosted target, to the
-shim on freestanding). `Value`'s NaN-boxed pointer extraction
-also gained a `usize` `@intCast` so it is correct on a 32-bit
-target (`wasm32`).
+freestanding — GC pause-time and `Date.now()` degrade to 0).
+`Value`'s NaN-boxed pointer extraction also gained a `usize`
+`@intCast` so it is correct on a 32-bit target (`wasm32`).
 
 ## Export ABI
 
@@ -126,7 +93,6 @@ byte offsets into the module's linear memory.
 | `cynic_result_ptr` | `() -> ptr` | address of the last result frame |
 | `cynic_result_len` | `() -> u32` | length of the last result frame |
 | `cynic_version_ptr` / `cynic_version_len` | `() -> ptr / u32` | the engine version string |
-| `cynic_host_alloc` / `cynic_host_free` / `cynic_host_realloc` | C-ABI | allocator hooks for `wasm_shim.c` (not called from JS) |
 
 `cynic_eval` and `cynic_parse` both return a **result frame** — a
 self-describing buffer so the JS side needs no struct-layout
