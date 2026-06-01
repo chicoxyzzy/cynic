@@ -21,7 +21,28 @@ name: CodeQL
 on:
   push:
     branches: [main]
+    # Mirror ci.yml's paths-ignore: a docs/scoreboard/LICENSE/
+    # gh-pages commit doesn't change any code CodeQL scans. The
+    # weekly schedule below still runs against the live tree, so
+    # query-base updates / new rules still trigger fresh
+    # analyses against latest main without needing a code push.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'test262-results.md'
+      - '.test262-pass-cache.txt'
+      - '.gitignore'
+      - 'gh-pages/**'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'test262-results.md'
+      - '.test262-pass-cache.txt'
+      - '.gitignore'
+      - 'gh-pages/**'
   schedule:
     # Weekly Tuesday 06:23 UTC — picks up new CodeQL queries
     # (Anthropic's, GitHub's, the security community's) without
