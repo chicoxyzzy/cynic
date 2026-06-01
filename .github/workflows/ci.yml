@@ -291,8 +291,7 @@ jobs:
     # plus paths-ignore on the bot push doesn't always interact
     # cleanly with concurrency: cancel-in-progress). Refresh
     # `test262-results.md` locally with `zig build test262 --
-    # --mode=runtime --write-results` and commit it like any
-    # other source change.
+    # --write-results` and commit it like any other source change.
     steps:
       - name: Audit egress (advisory)
         uses: step-security/harden-runner@v2
@@ -311,37 +310,27 @@ jobs:
         # Drop `--quiet` so the per-bucket tally lands in the CI
         # log. Step timeout caps it in case the harness wedges.
         #
-        # Three floors gate the job — two per-phase score floors
-        # plus the SES-witness floor.
+        # Three floors gate the job — two per-row `pass%` floors plus
+        # the SES-witness floor. `pass%` = (passing + correctly handled
+        # fails) / total; see the legend in `test262-results.md`.
         #
-        #   --min-spec-pct=82.5          unhardened `pass%` floor.
-        #                                Today 83.16 % under the
-        #                                tech-debt-honest corpus
-        #                                (planned-feature paths
-        #                                — Temporal, cross-realm,
-        #                                etc. — now register as
-        #                                `skip` instead of being
-        #                                excluded). ~0.6pp
-        #                                headroom.
-        #   --min-hardened-spec-pct=82.5 SES-posture `runtime_hardened`
-        #                                `pass%` (the row's
-        #                                `(pass + divergent) /
-        #                                corpus` per Layout A in
-        #                                `docs/handbook/ses-test262-policy.md`).
-        #                                Today 83.16 %, same as
-        #                                unhardened.
-        #   --min-ses-witness-pct=100    Phase 3 witness inversion.
-        #                                Every fixture in
+        #   --min-spec-pct=98.2          unhardened `pass%` floor.
+        #                                Today 98.82 %; ~0.6pp headroom.
+        #   --min-hardened-spec-pct=98.2 hardened `pass%` floor. Today
+        #                                98.83 %; same headroom. Both
+        #                                count correctly-handled fails
+        #                                toward the numerator.
+        #   --min-ses-witness-pct=100    Every fixture in
         #                                `tools/test262/ses_witnesses.zig`
-        #                                MUST classify as divergent
-        #                                under the hardened phase.
+        #                                MUST classify under the SES
+        #                                policy in the hardened phase.
         #                                Drift either way (a witness
         #                                now passes — SES enforcement
         #                                weakened; or a witness fails
-        #                                for a non-divergence reason
-        #                                — pattern miss or engine
-        #                                regression in the SES throw
-        #                                path) fails the build.
+        #                                for a non-SES reason — pattern
+        #                                miss or engine regression in
+        #                                the SES throw path) fails the
+        #                                build.
         #
         # Any floor tripping exits 2 — see the per-phase diagnostic
         # block in `tools/test262.zig` for the failure report.
@@ -352,9 +341,9 @@ jobs:
         timeout-minutes: 8
         run: |
           zig build test262 -- \
-            --mode=runtime --threads=4 --top-rss=20 \
-            --min-spec-pct=82.5 \
-            --min-hardened-spec-pct=82.5 \
+            --threads=4 --top-rss=20 \
+            --min-spec-pct=98.2 \
+            --min-hardened-spec-pct=98.2 \
             --min-ses-witness-pct=100
 
       - name: Filtered sweep with top-rss
@@ -371,7 +360,7 @@ jobs:
         timeout-minutes: 5
         continue-on-error: true
         run: |
-          zig build test262 -- --quiet --mode=runtime --threads=4 \
+          zig build test262 -- --quiet --threads=4 \
             --filter=language/expressions --top-rss=10
 
   test262-gc-stress:

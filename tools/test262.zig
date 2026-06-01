@@ -663,12 +663,12 @@ const Stats = struct {
     skip: u32 = 0,
     pos_attempted: u32 = 0,
     neg_attempted: u32 = 0,
-    /// Correctly-handled fixtures — failures Cynic produces by design
-    /// (SES throw, Annex B not shipped, strict-only, no Intl, eval
-    /// off). SES is matched against the thrown-error pattern in
-    /// `tools/test262/ses_divergent.zig`; the rest via
-    /// `skip_rules.pathPolicyKind`. Counted in `total` but neither
-    /// `pass()` nor `fail()`; feeds the headline
+    /// Failures Cynic produces by design (SES throw, Annex B not
+    /// shipped, strict-only, no Intl, eval off) — rendered as the
+    /// **`expected fails`** column. SES is matched against the
+    /// thrown-error pattern in `tools/test262/ses_divergent.zig`; the
+    /// rest via `skip_rules.pathPolicyKind`. Counted in `total` but
+    /// neither `pass()` nor `fail()`; feeds the headline
     /// `(passing + correctly_handled) / total`.
     correctly_handled: u32 = 0,
     /// SES-witness fixture counters — curated subset of paths
@@ -1391,7 +1391,7 @@ fn runSweep(
             // (handled in `classifyAndRun` via the `out_of_phase` /
             // `pre_stage4` skip reasons). Annex B, intl402, eval,
             // noStrict, SES carve-outs all RUN — their failures
-            // classify as **correctly handled** via the policy
+            // classify as an **expected fail** via the policy
             // classifier, so the corpus shape reflects the full
             // ECMA-262 surface Cynic targets and the headline
             // credits Cynic for the policies it ships.
@@ -1871,7 +1871,7 @@ fn recordOutcome(
     }
     // Bump the per-area bucket (`pass` / `fail` / `skip` /
     // `correctly_handled`) so the scoreboard reflects this fixture's
-    // outcome. The headline correctly-handled count sits in
+    // outcome. The headline expected-fails count sits in
     // `Stats.correctly_handled` for the score-row math.
     if (bucket_kind) |bk| try buckets.bump(bucketName(rel), bk);
     if (outcome.kind == .pass_positive or outcome.kind == .fail_false_reject) {
@@ -2088,7 +2088,7 @@ fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
 /// hardened phase is running (the headline `.main` sweep or a
 /// hardened per-feature sweep) and the path is in the curated
 /// `ses_divergent.divergent_paths` list, return `.fail_correctly_handled`
-/// so the fixture lands in the correctly-handled bucket instead of
+/// so the fixture lands in the expected-fails bucket instead of
 /// being scored as a real engine bug. Unhardened phases skip this —
 /// with the freeze pass off, the fixture passes outright.
 ///
@@ -2177,7 +2177,7 @@ fn classifyAndRun(
     }
 
     // `flags: [noStrict]` fixtures run; a failure classifies as
-    // `correctly handled` under the no_strict policy via the sticky
+    // an expected fail under the no_strict policy via the sticky
     // policy lookup below.
     // §test262 `flags: [raw]` — the harness MUST NOT prepend any
     // preamble (sta.js + assert.js + includes). The fixture either
@@ -2207,7 +2207,7 @@ fn classifyAndRun(
     // the corpus does the parser handle" gauge instead of a
     // heuristic-skipped underestimate.
     // Annex B / SES carve-out feature-tagged fixtures run; a failure
-    // classifies as `correctly handled` under the matching policy via
+    // classifies as an expected fail under the matching policy via
     // the sticky policy lookup below.
     //
     // Pre-Stage-4 (Stage ≤ 3) proposals stay dropped: shipped ones
@@ -2908,9 +2908,9 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
     var buf: [1024]u8 = undefined;
     const pass_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(stats.total));
     // Headline `pass%`: (passing + correctly_handled) / total. A
-    // correctly-handled fixture is one Cynic refuses by design, so
+    // an expected fail is one Cynic refuses by design, so
     // it counts toward the headline. Equals `pass_pct` when there
-    // are no correctly-handled fixtures.
+    // are no expected fails.
     const adj_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass() + stats.correctly_handled)) / @as(f64, @floatFromInt(stats.total));
     // Suppress the `adj:` line when there's no divergence — keeps
     // the unhardened phase's tally clean.
@@ -2945,8 +2945,8 @@ fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
         const msg = try std.fmt.bufPrint(&buf,
             \\corpus:    {d}
             \\passing:   {d}   ({d:.2}% engine-true)
-            \\corr-hand: {d}   (correctly handled fails)
-            \\pass%:     {d:.2}% — (passing + correctly-handled fails) / corpus
+            \\corr-hand: {d}   (expected fails)
+            \\pass%:     {d:.2}% — (passing + expected fails) / corpus
             \\failing:   {d}
             \\skip:      {d}
             \\oos:       {d}   (dropped from corpus — pre-Stage-4)
@@ -3204,10 +3204,10 @@ const Row = struct {
     attempted: u32,
     spec_pct: f64,
     attempted_pct: f64,
-    /// Correctly-handled fixture count for this row. Headline
-    /// `pass%` is `(passing + correctly_handled) / total`; the count
-    /// also surfaces as its own column. Hardened rows carry the
-    /// most (SES throws on top of the path-policy buckets);
+    /// Expected-fails count for this row (the `expected fails`
+    /// column). Headline `pass%` is
+    /// `(passing + correctly_handled) / total`. Hardened rows carry
+    /// the most (SES throws on top of the path-policy buckets);
     /// unhardened rows carry the path-policy buckets only.
     correctly_handled: u32 = 0,
     /// Wall-clock duration of the run that produced this row, in
@@ -3388,10 +3388,10 @@ fn makeRow(
     test262_sha: []const u8,
     elapsed_ms: ?u64,
 ) Row {
-    // Headline `pass%` counts correctly-handled fixtures as passes
+    // Headline `pass%` counts expected fails as passes
     // (Cynic's deliberate "no" is the right answer for the policy it
     // ships), so all rows are directly comparable. With no
-    // correctly-handled fixtures the math is just `pass / total`.
+    // expected fails the math is just `pass / total`.
     const headline_pass: u32 = stats.pass() + stats.correctly_handled;
     const spec_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(stats.total));
     // `attempted%` deliberately keeps the raw-pass numerator —
@@ -3564,8 +3564,8 @@ fn parsePerDayRows(
         // Peek the first data cell to decide between the legacy
         // schema (`pass% | engine% | pass / corpus | pass /
         // engine-attempt | divergent | Δ pass | elapsed`) and the
-        // current schema (`passing | failing | correctly handled
-        // fails | total | pass% | Δ pass | elapsed`). Legacy ends the
+        // current schema (`passing | failing | expected fails |
+        // total | pass% | Δ pass | elapsed`). Legacy ends the
         // first cell with `%`; the current schema's first cell is a
         // plain integer.
         const first_data_cell_raw = it.next() orelse continue;
@@ -3780,7 +3780,7 @@ fn writeFileBody(
             "**Cynic passes {d:.2} % of its {d}-fixture test262 corpus** under the " ++
                 "default (hardened SES) posture (`cynic run`). The breakdown:\n\n" ++
                 "- **{d} passing** — Cynic produced the spec-expected result.\n" ++
-                "- **{d} correctly handled fails** — failures that hit a Cynic design " ++
+                "- **{d} expected fails** — failures that hit a Cynic design " ++
                 "policy (Annex B not shipped, strict-only, no Intl, eval-off, SES throw) " ++
                 "rather than an engine bug. Counted as spec-correct in `pass%` because " ++
                 "Cynic's deliberate \"no\" is the right answer for the policy it ships.\n" ++
@@ -3797,7 +3797,7 @@ fn writeFileBody(
     try out.appendSlice(gpa,
         \\## Current scores
         \\
-        \\| posture | passing | failing | correctly handled fails | total | pass% |
+        \\| posture | passing | failing | expected fails | total | pass% |
         \\|---|---:|---:|---:|---:|---:|
         \\
     );
@@ -3807,7 +3807,7 @@ fn writeFileBody(
     // ships), then the unhardened baseline (`--unhardened` opt-out),
     // then hardened (the default Cynic posture, `cynic run`). Same
     // engine path, different policy mask: unhardened counts annex_b +
-    // no_strict + intl402 + eval as correctly handled fails; hardened
+    // no_strict + intl402 + eval as expected fails; hardened
     // adds SES on top.
     try writeAllowEvalPlaceholderRow(gpa, out);
     inline for (.{ Mode.unhardened, Mode.hardened }) |m| {
@@ -3815,10 +3815,10 @@ fn writeFileBody(
     }
     try out.appendSlice(gpa,
         \\
-        \\> **pass%** = `(passing + correctly handled fails) / total`.
+        \\> **pass%** = `(passing + expected fails) / total`.
         \\> A fixture that fails because of a Cynic design policy
         \\> (Annex B not shipped, strict-only, no Intl, eval-off, SES
-        \\> throw) is a **correctly handled fail** rather than a real
+        \\> throw) is a **expected fail** rather than a real
         \\> engine bug. Plain **failing** is what's left over — real
         \\> engine work to do. The `--allow=eval` row is always `n/a`
         \\> until that opt-in ships.
@@ -3843,7 +3843,7 @@ fn writeFileBody(
                 var wb: [256]u8 = undefined;
                 const wn = try std.fmt.bufPrint(
                     &wb,
-                    "*SES witness fidelity*: **{d} / {d}** witnesses classify as SES-correctly-handled ({d:.2} %). " ++
+                    "*SES witness fidelity*: **{d} / {d}** witnesses are SES expected fails ({d:.2} %). " ++
                         "Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. " ++
                         "See `docs/handbook/ses-test262-policy.md`.\n\n",
                     .{ r.witness_pass, r.witness_total, pct },
@@ -3883,7 +3883,7 @@ fn writeFileBody(
         \\  the unhardened policies plus SES — primordials frozen,
         \\  override-mistake fix on, locked descriptors. Fixtures
         \\  whose expectation conflicts with SES enforcement throw
-        \\  by design and count as correctly handled fails.
+        \\  by design and count as expected fails.
         \\
         \\### Columns
         \\
@@ -3891,7 +3891,7 @@ fn writeFileBody(
         \\  the spec-expected result.
         \\- **`failing`** — engine-true failures that *don't* match
         \\  any design policy. Real work to do.
-        \\- **`correctly handled fails`** — failures that hit a Cynic
+        \\- **`expected fails`** — failures that hit a Cynic
         \\  design policy: Annex B not shipped, strict-only,
         \\  no Intl, eval-off, or SES throw. Counted with passes
         \\  under `pass%` because Cynic's deliberate "no" is the
@@ -3901,7 +3901,7 @@ fn writeFileBody(
         \\- **`total`** — every fixture except pre-Stage-4
         \\  proposals (Stage ≤ 3, shipped or not) and the upstream
         \\  `staging/` / `harness/` paths.
-        \\- **`pass%`** — `(passing + correctly handled fails) / total`.
+        \\- **`pass%`** — `(passing + expected fails) / total`.
         \\  The headline.
         \\- **SES witness fidelity** (the italic note above) —
         \\  positive-coverage signal. The curated witness set in
@@ -3944,7 +3944,7 @@ fn writeFileBody(
         \\
         \\Annex B / `noStrict` / `intl402/` / the eval surface
         \\are NOT skipped — they run and any failure classifies
-        \\as **correctly handled** under the matching policy.
+        \\as an **expected fail** under the matching policy.
         \\
         \\
     );
@@ -4000,7 +4000,7 @@ fn writeFileBody(
         }
         try out.appendSlice(gpa, "\n\n");
         try out.appendSlice(gpa,
-            \\|         | passing | failing | correctly handled fails | total | pass% | Δ pass | elapsed |
+            \\|         | passing | failing | expected fails | total | pass% | Δ pass | elapsed |
             \\|---|---:|---:|---:|---:|---:|---:|---:|
             \\
         );
@@ -4063,7 +4063,7 @@ fn writeAllowEvalPlaceholderRow(
     try out.appendSlice(gpa, line);
 }
 
-/// Column shape: passing | failing | correctly handled | total |
+/// Column shape: passing | failing | expected fails | total |
 /// pass%. `r.pass` is stored as `(passing + correctly_handled)`, so we
 /// recover `passing` via subtraction to emit the passing/failing split.
 fn writeMiniRow(
@@ -4166,13 +4166,13 @@ fn writeScoreboard(
         \\  The remainder (~13 fixtures) is the
         \\  cross-realm cluster awaiting `--allow=eval` and multi-realm
         \\  error attribution.
-        \\- The **0-fails tier** is sorted by `correctly handled fails ↓` so
+        \\- The **0-fails tier** is sorted by `expected fails ↓` so
         \\  the heaviest policy buckets cluster first. `intl402/`
         \\  trees dominate (no Intl), then the SES-hot built-ins
         \\  (`Array`, `Object`, `TypedArray`, `String`, `Date`,
         \\  `Math`), then the Annex B / eval / noStrict tails.
         \\
-        \\| area | passing | failing | correctly handled fails | total | pass% |
+        \\| area | passing | failing | expected fails | total | pass% |
         \\|---|---:|---:|---:|---:|---:|
         \\
     );
@@ -4193,7 +4193,7 @@ fn writeScoreboard(
                 1 => "100–999 fails — engine-work tier",
                 2 => "10–99 fails — engine-work tier",
                 3 => "1–9 fails — engine-work tier",
-                else => "0 fails — passing / all-policy (sorted by correctly handled fails ↓)",
+                else => "0 fails — passing / all-policy (sorted by expected fails ↓)",
             };
             const hdr = try std.fmt.bufPrint(&buf, "| **_{s}_** | | | | | |\n", .{label});
             try out.appendSlice(gpa, hdr);
@@ -4245,13 +4245,13 @@ fn writePreStage4Scoreboard(
         \\Stage 1–3, ahead of their inclusion in the published
         \\edition. Each proposal gets a **(hardened)** row — the
         \\as-shipped SES posture under `--enable=<flag>`, with SES
-        \\throws counted as correctly handled fails — and an
+        \\throws counted as expected fails — and an
         \\**(unhardened)** row against bare ECMA-262. Same column
         \\shape as the main `## Current scores` table:
-        \\`passing | failing | correctly handled fails | total | pass%`.
+        \\`passing | failing | expected fails | total | pass%`.
         \\These fixtures are excluded from the top-line score.
         \\
-        \\| feature | passing | failing | correctly handled fails | total | pass% |
+        \\| feature | passing | failing | expected fails | total | pass% |
         \\|---|---:|---:|---:|---:|---:|
         \\
     );
