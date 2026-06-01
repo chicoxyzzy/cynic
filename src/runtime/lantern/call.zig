@@ -188,10 +188,23 @@ pub fn callValue(
     this_value: Value,
     args: []const Value,
 ) RunError!RunResult {
-    // Proxy of fn — dispatch through `apply` trap if present;
-    // otherwise unwrap to the target function.
+    // §10.5.12 Proxy [[Call]] — a proxy exposes a [[Call]] internal
+    // method ONLY when its target was callable at creation: §10.5.1
+    // ProxyCreate step 3 gates installing [[Call]] on
+    // IsCallable(target). `proxy_callable` records that gate (set in
+    // proxyConstructor for function / callable-proxy targets, and
+    // preserved across revocation). Enter this block only for an
+    // object that is BOTH a proxy (a live target slot, or revoked)
+    // AND callable. The callability clause excludes a proxy over a
+    // non-callable target — `new Proxy({}, { apply() {} })` has no
+    // [[Call]], so invoking it must fall through to the ordinary
+    // "not a function" TypeError with the `apply` trap never firing.
+    // The proxy-identity clause is equally load-bearing:
+    // %Function.prototype% also carries `proxy_callable` (its
+    // callability marker, so `typeof` reports "function") yet is not
+    // a proxy, and must reach the identity check below — not here.
     if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-        if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+        if ((po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) and po.proxy_callable) {
             if (po.proxy_revoked) {
                 // §10.5.12 step 1 ValidateNonRevokedProxy throws in
                 // the running execution context's realm — `running_realm`,

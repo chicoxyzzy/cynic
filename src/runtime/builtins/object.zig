@@ -2185,6 +2185,32 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
                     if (!target_had and !proxy_target.extensible) {
                         return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy returned a descriptor for an absent property of a non-extensible target");
                     }
+                    // §10.5.5 steps 16-18 — IsCompatiblePropertyDescriptor
+                    // (extensibleTarget, resultDesc, targetDesc). When the
+                    // target owns the property, the trap's descriptor must be
+                    // compatible with the target's current one. Reuse the
+                    // shared §10.1.6.3 ValidateAndApplyPropertyDescriptor
+                    // guard `isCompatibleRedefine`: against a non-configurable
+                    // target property it rejects a trap that claims
+                    // `configurable: true`, toggles `enumerable`, flips
+                    // data<->accessor, or mutates a non-writable data slot's
+                    // value/writable. (The configurable→non-configurable and
+                    // writable specials below are §10.5.5 steps 19-21, which
+                    // that guard does not cover.)
+                    if (target_had) {
+                        const t_flags = proxy_target.flagsFor(key);
+                        const t_is_acc = proxy_target.hasAccessor(key);
+                        const t_value = proxy_target.lookupOwn(key) orelse Value.undefined_;
+                        var t_getter: ?*JSFunction = null;
+                        var t_setter: ?*JSFunction = null;
+                        if (proxy_target.getAccessor(key)) |acc| {
+                            t_getter = acc.getter;
+                            t_setter = acc.setter;
+                        }
+                        if (!isCompatibleRedefine(t_is_acc, t_flags, t_value, t_getter, t_setter, parsed_inv)) {
+                            return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy returned a descriptor incompatible with the non-configurable target property");
+                        }
+                    }
                     if (parsed_inv.has_configurable and !parsed_inv.configurable) {
                         if (!target_had) {
                             return throwTypeError(realm, "'getOwnPropertyDescriptor' on proxy reported non-configurable for an absent target property");
