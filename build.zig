@@ -434,38 +434,28 @@ pub fn build(b: *std.Build) void {
         "cynic.wasm",
     );
 
-    // Assemble a directly-servable playground directory:
-    // zig-out/playground/{playground.html,playground.js,
-    //                     codemirror.bundle.js,cynic.wasm}.
-    // `codemirror.bundle.js` is the committed, offline-vendored
-    // CodeMirror 6 editor bundle — see playground/codemirror.bundle.README.md.
+    // Assemble the *engine half* of the playground into
+    // zig-out/playground/{cynic.wasm, cynic-engine.js}. These are the
+    // two artifacts the engine owns and CI publishes to
+    // `gh-pages:/playground/`; the website half (index.html, app.js,
+    // codemirror.bundle.js) lives on the `gh-pages` branch and imports
+    // `cynic-engine.js` — the stable ABI binding that tracks
+    // `src/wasm.zig`. See docs/playground.md.
     const wasm_into_playground = b.addInstallFileWithDir(
         wasm_bin,
         .{ .custom = "playground" },
         "cynic.wasm",
     );
-    const html_into_playground = b.addInstallFileWithDir(
-        b.path("playground/playground.html"),
+    const engine_js_into_playground = b.addInstallFileWithDir(
+        b.path("playground/cynic-engine.js"),
         .{ .custom = "playground" },
-        "playground.html",
-    );
-    const js_into_playground = b.addInstallFileWithDir(
-        b.path("playground/playground.js"),
-        .{ .custom = "playground" },
-        "playground.js",
-    );
-    const cm_into_playground = b.addInstallFileWithDir(
-        b.path("playground/codemirror.bundle.js"),
-        .{ .custom = "playground" },
-        "codemirror.bundle.js",
+        "cynic-engine.js",
     );
 
-    const wasm_step = b.step("wasm", "Build the playground WASM module + assemble zig-out/playground/");
+    const wasm_step = b.step("wasm", "Build the playground WASM module + glue into zig-out/playground/");
     wasm_step.dependOn(&install_wasm.step);
     wasm_step.dependOn(&wasm_into_playground.step);
-    wasm_step.dependOn(&html_into_playground.step);
-    wasm_step.dependOn(&js_into_playground.step);
-    wasm_step.dependOn(&cm_into_playground.step);
+    wasm_step.dependOn(&engine_js_into_playground.step);
 }
 
 /// `git rev-parse --short HEAD` at configure time. Returns

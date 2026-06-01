@@ -76,25 +76,24 @@ jobs:
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" | tar xz
           echo "$PWD/binaryen-${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
 
-      - name: Build the playground WASM bundle
-        # Emits zig-out/playground/{playground.html,playground.js,cynic.wasm}
-        # — the wasm version string is stamped with this commit's SHA.
+      - name: Build the playground engine artifacts
+        # Emits zig-out/playground/{cynic.wasm, cynic-engine.js} — the
+        # engine half of the playground. The website half (index.html,
+        # app.js, codemirror.bundle.js) lives committed on the
+        # `gh-pages` branch under /playground/ and is preserved across
+        # this deploy by `keep_files: true`. The wasm version string is
+        # stamped with this commit's SHA.
         run: zig build wasm
 
-      - name: Stage the publish directory
-        # The playground page must be `index.html` so the deployed
-        # URL is `/playground/` — what the main-site nav link points
-        # at.
-        run: mv zig-out/playground/playground.html zig-out/playground/index.html
-
-      - name: Publish to gh-pages/playground
+      - name: Publish engine artifacts to gh-pages/playground
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./zig-out/playground
-          # Scope the publish to the subdir — `index.html`, the
-          # icons, and the rest of the site at the branch root are
-          # never touched. `keep_files` is belt-and-suspenders.
+          # Scope to the subdir and KEEP existing files: this deploy
+          # only refreshes `cynic.wasm` + `cynic-engine.js`; the
+          # gh-pages-owned UI (index.html, app.js, codemirror) and the
+          # rest of the site are never touched.
           destination_dir: playground
           keep_files: true
-          commit_message: 'playground: redeploy WASM bundle from ${{ github.sha }}'
+          commit_message: 'playground: redeploy engine artifacts from ${{ github.sha }}'

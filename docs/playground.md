@@ -13,15 +13,35 @@ point of the demo.
 
 ## Layout
 
+The playground is split along the **engine / website** seam. The
+engine half is built from `main` and published by CI; the website half
+lives on the `gh-pages` branch and imports the engine's stable ABI
+binding.
+
 ```
-src/wasm.zig                       WASM entry module — C-ABI exports
-playground/playground.html         two-column front-end
-playground/playground.js           WASM loader + marshalling + CM6 editor
-playground/codemirror.bundle.js    vendored CodeMirror 6 (committed artifact)
-playground/codemirror-entry.mjs    bundle source — re-exports the CM6 surface
-playground/codemirror.bundle.README.md  pinned versions + regenerate steps
-playground/build.sh                convenience wrapper over `zig build wasm`
+ENGINE HALF (main, built + published by CI)
+  src/wasm.zig               WASM entry module — C-ABI exports
+  playground/cynic-engine.js the stable ABI binding the UI imports
+                             (loadEngine / evalSource / parseSource /
+                             parseAst / engineVersion); tracks the
+                             src/wasm.zig exports, so an ABI change is
+                             absorbed here, not in the UI
+  playground/build.sh        convenience wrapper over `zig build wasm`
+
+WEBSITE HALF (gh-pages:/playground/, hand-maintained)
+  index.html                 two-column front-end
+  app.js                     the UI — CM6 editor, render, modes, the
+                             --unhardened toggle; imports cynic-engine.js
+  codemirror.bundle.js       vendored CodeMirror 6 (committed artifact)
+  codemirror-entry.mjs       bundle source — re-exports the CM6 surface
+  codemirror.bundle.README.md  pinned versions + regenerate steps
 ```
+
+`cynic.wasm` + `cynic-engine.js` are deployed into
+`gh-pages:/playground/` by `.github/workflows/playground.yml` on every
+push to `main` touching `src/**` / `playground/**` / `build.zig*`; the
+publish uses `keep_files: true`, so the hand-maintained UI is preserved
+across deploys.
 
 ## Building
 
@@ -34,16 +54,17 @@ This:
 1. compiles the Cynic library + `src/wasm.zig` for
    `wasm32-freestanding`, `ReleaseSmall` (no C sources to compile);
 2. links into `zig-out/bin/cynic.wasm`;
-3. assembles a directly-servable directory at
-   `zig-out/playground/` containing `playground.html`,
-   `playground.js`, `codemirror.bundle.js`, and `cynic.wasm`.
+3. assembles the engine half at `zig-out/playground/` containing
+   `cynic.wasm` and `cynic-engine.js`.
 
-Serve `zig-out/playground/` over HTTP (a `file://` origin will not
-satisfy `WebAssembly.instantiateStreaming` / `fetch`):
+To preview the *whole* playground locally, drop those two artifacts
+next to a checkout of the `gh-pages` UI (`index.html`, `app.js`,
+`codemirror.bundle.js`) and serve that directory over HTTP (a `file://`
+origin will not satisfy `WebAssembly.instantiateStreaming` / `fetch`):
 
 ```
-cd zig-out/playground && python3 -m http.server 8080
-# open http://localhost:8080/playground.html
+python3 -m http.server 8080   # from the assembled directory
+# open http://localhost:8080/
 ```
 
 `playground/build.sh` runs `zig build wasm` and prints the
@@ -121,13 +142,15 @@ returns a hard error for fatal cases.
 
 ## Front-end
 
-`playground/playground.js` streams the module with
-`WebAssembly.instantiateStreaming` (falling back to `fetch` +
+`playground/cynic-engine.js` (the engine half) streams the module
+with `WebAssembly.instantiateStreaming` (falling back to `fetch` +
 `arrayBuffer` on older browsers), copies editor source in via
-`cynic_alloc`, calls `cynic_eval` (or `cynic_parse` when the
-bytecode-inspector toggle is on), and decodes the result frame.
-The import object is empty — the freestanding module imports
-nothing.
+`cynic_alloc`, calls `cynic_eval` / `cynic_parse` / `cynic_parse_ast`,
+and decodes the result frame — exposing all of that to the UI as
+`loadEngine` / `evalSource` / `parseSource` / `parseAst` /
+`engineVersion`. The import object is empty — the freestanding module
+imports nothing. The website-side `app.js` (on `gh-pages`) imports
+those functions and never touches the raw exports.
 
 The page is a full-width toolbar over a two-column grid (editor
 left, output right; it collapses to a single stacked column under
@@ -164,20 +187,23 @@ the matching source range via a `StateField`-backed
 `Decoration.mark` — a focus-independent highlight that never
 touches the user's real selection.
 
-## Rebuilding and deploying to the project site
+## Deploying
 
-The playground is developed under `playground/` on the main
-branch — a clean, reviewable location. The public site lives on
-the `gh-pages` branch. To publish:
+Deployment is automatic and split along the engine / website seam:
 
-1. `zig build wasm` — produces `zig-out/playground/` with all
-   four files.
-2. Copy `playground.html`, `playground.js`,
-   `codemirror.bundle.js`, and `cynic.wasm` onto the `gh-pages`
-   branch (e.g. into a `playground/` subdirectory there).
-3. Ensure the host serves `.wasm` with
-   `Content-Type: application/wasm` so
-   `instantiateStreaming` works — GitHub Pages already does.
+- **Engine half** — `.github/workflows/playground.yml` runs
+  `zig build wasm` on every push to `main` touching `src/**` /
+  `playground/**` / `build.zig*`, then publishes
+  `zig-out/playground/{cynic.wasm, cynic-engine.js}` into
+  `gh-pages:/playground/` with `keep_files: true`. No manual copy.
+- **Website half** — `index.html`, `app.js`, and the CodeMirror
+  bundle are committed directly on the `gh-pages` branch under
+  `/playground/`. Edit them there; the engine deploy never
+  overwrites them (`keep_files`). They import the published
+  `cynic-engine.js` and load `./cynic.wasm`.
+
+GitHub Pages serves `.wasm` with `Content-Type: application/wasm`, so
+`instantiateStreaming` works without extra configuration.
 
 The front-end links back to `../` for the project site; adjust
 the relative paths if the deploy location differs.
