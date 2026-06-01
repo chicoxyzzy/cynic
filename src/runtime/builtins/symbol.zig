@@ -96,7 +96,7 @@ pub fn install(realm: *Realm) !void {
     // returns the underlying Symbol primitive regardless of
     // hint. Descriptor `{ w:false, e:false, c:true }` per the
     // spec; `.length === 1` because it accepts the hint arg.
-    const to_prim = try realm.heap.allocateFunctionNative(symbolToPrimitive, 1, "[Symbol.toPrimitive]");
+    const to_prim = try realm.heap.allocateFunctionNative(realm, symbolToPrimitive, 1, "[Symbol.toPrimitive]");
     to_prim.proto = realm.intrinsics.function_prototype;
     to_prim.has_construct = false;
     try proto.setWithFlags(realm.allocator, "@@toPrimitive", heap_mod.taggedFunction(to_prim), .{

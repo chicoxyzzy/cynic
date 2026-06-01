@@ -6662,7 +6662,7 @@ test "later: GetPrototypeFromConstructor derives default proto from newTarget's 
 
     // Mint `C` in the child realm with a non-object `prototype`
     // (the fixture's `C.prototype = null`).
-    const C = try parent.heap.allocateFunctionNative(Noop.body, 0, "C");
+    const C = try parent.heap.allocateFunctionNative(&parent, Noop.body, 0, "C");
     C.realm = &child;
     try C.setWithFlags(testing.allocator, "prototype", Value.null_, .{
         .writable = true,
@@ -6713,7 +6713,7 @@ test "later: Array [[Construct]] derives result proto from newTarget's realm" {
     try testing.expect(child_array.prototype != null);
     try testing.expect(parent_array.prototype != child_array.prototype);
 
-    const C = try parent.heap.allocateFunctionNative(Noop.body, 0, "C");
+    const C = try parent.heap.allocateFunctionNative(&parent, Noop.body, 0, "C");
     C.realm = &child;
     try C.setWithFlags(testing.allocator, "prototype", Value.null_, .{
         .writable = true,
@@ -6770,7 +6770,7 @@ test "later: Function [[Construct]] derives result proto from newTarget's realm"
     try testing.expect(child_fn_proto != null);
     try testing.expect(parent_fn_proto != child_fn_proto);
 
-    const C = try parent.heap.allocateFunctionNative(Noop.body, 0, "C");
+    const C = try parent.heap.allocateFunctionNative(&parent, Noop.body, 0, "C");
     C.realm = &child;
     try C.setWithFlags(testing.allocator, "prototype", Value.null_, .{
         .writable = true,

@@ -71,7 +71,7 @@ pub fn freezeLazyIntrinsic(realm: *Realm, obj: *@import("../object.zig").JSObjec
 }
 
 pub fn install(realm: *Realm) !void {
-    const harden_fn = try realm.heap.allocateFunctionNative(hardenNative, 1, "harden");
+    const harden_fn = try realm.heap.allocateFunctionNative(realm, hardenNative, 1, "harden");
     try realm.globals.put(realm.allocator, "harden", heap_mod.taggedFunction(harden_fn));
 }
 

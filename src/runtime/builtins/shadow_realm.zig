@@ -391,7 +391,7 @@ fn wrappedFunctionCreate(caller_realm: *Realm, target: Value) NativeError!*JSFun
     // Use a trampoline native that never actually runs — call
     // dispatch detects `!wrapped_target.isUndefined()` and short-
     // circuits before reaching the native body.
-    const wrapped = caller_realm.heap.allocateFunctionNative(wrappedTrampoline, 0, "") catch return error.OutOfMemory;
+    const wrapped = caller_realm.heap.allocateFunctionNative(caller_realm, wrappedTrampoline, 0, "") catch return error.OutOfMemory;
     wrapped.proto = caller_realm.intrinsics.function_prototype;
     wrapped.realm = caller_realm;
     wrapped.wrapped_target = target;

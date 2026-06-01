@@ -250,7 +250,7 @@ pub fn ensureGeneratorPrototype(realm: *Realm) !*JSObject {
     // Stored under the well-known-Symbol's stringified key
     // `"@@iterator"`. Our property-access path looks up by
     // string, so this coexists with future Symbol-typed keys.
-    const sym_iter_fn = try realm.heap.allocateFunctionNative(genSymbolIterator, 0, "[Symbol.iterator]");
+    const sym_iter_fn = try realm.heap.allocateFunctionNative(realm, genSymbolIterator, 0, "[Symbol.iterator]");
     sym_iter_fn.proto = realm.intrinsics.function_prototype;
     try proto.set(realm.allocator, "@@iterator", heap_mod.taggedFunction(sym_iter_fn));
 
@@ -291,7 +291,7 @@ pub fn ensureAsyncIteratorPrototype(realm: *Realm) !*JSObject {
     if (realm.intrinsics.async_iterator_prototype) |p| return p;
     const proto = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(proto, realm.intrinsics.object_prototype);
-    const sym_iter_fn = try realm.heap.allocateFunctionNative(genSymbolIterator, 0, "[Symbol.asyncIterator]");
+    const sym_iter_fn = try realm.heap.allocateFunctionNative(realm, genSymbolIterator, 0, "[Symbol.asyncIterator]");
     sym_iter_fn.proto = realm.intrinsics.function_prototype;
     try proto.setWithFlags(realm.allocator, "@@asyncIterator", heap_mod.taggedFunction(sym_iter_fn), .{
         .writable = true,
@@ -303,7 +303,7 @@ pub fn ensureAsyncIteratorPrototype(realm: *Realm) !*JSObject {
     // calls `return()` if present, and unwraps the result to
     // `undefined`. The `await using` declaration awaits this Promise
     // when its bound async iterator goes out of scope.
-    const sym_disp_fn = try realm.heap.allocateFunctionNative(asyncIteratorSymbolAsyncDispose, 0, "[Symbol.asyncDispose]");
+    const sym_disp_fn = try realm.heap.allocateFunctionNative(realm, asyncIteratorSymbolAsyncDispose, 0, "[Symbol.asyncDispose]");
     sym_disp_fn.proto = realm.intrinsics.function_prototype;
     try proto.setWithFlags(realm.allocator, "@@asyncDispose", heap_mod.taggedFunction(sym_disp_fn), .{
         .writable = true,
@@ -389,7 +389,7 @@ fn asyncIteratorSymbolAsyncDispose(realm: *Realm, this_value: Value, args: []con
         };
         break :blk r;
     };
-    const unwrap_fn = try realm.heap.allocateFunctionNative(asyncDisposeUnwrap, 1, "");
+    const unwrap_fn = try realm.heap.allocateFunctionNative(realm, asyncDisposeUnwrap, 1, "");
     unwrap_fn.proto = realm.intrinsics.function_prototype;
     const then_args = [_]Value{ heap_mod.taggedFunction(unwrap_fn), Value.undefined_ };
     return promise_mod.promiseThenExported(realm, wrapped, &then_args) catch |err| switch (err) {
@@ -963,6 +963,7 @@ pub fn wrapAsyncGenResult(realm: *Realm, raw: Value, done: bool) @import("../fun
     // constructor-lookup.js` counts on that tick.
     const outer = intrinsics_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_) catch return error.OutOfMemory;
     const wrap_fn = realm.heap.allocateFunctionNative(
+        realm,
         if (done) iterResultDoneTrue else iterResultDoneFalse,
         1,
         "asyncGenYield",

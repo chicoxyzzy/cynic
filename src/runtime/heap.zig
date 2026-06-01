@@ -30,6 +30,7 @@ const utf16 = @import("utf16.zig");
 const JSFunction = @import("function.zig").JSFunction;
 const HeapKind = @import("function.zig").HeapKind;
 const JSObject = @import("object.zig").JSObject;
+const Realm = @import("realm.zig").Realm;
 const ShapeTree = @import("shape.zig").ShapeTree;
 const Environment = @import("environment.zig").Environment;
 const Chunk = @import("../bytecode/chunk.zig").Chunk;
@@ -794,6 +795,7 @@ pub const Heap = struct {
     /// chunk; the Call opcode dispatches to it directly.
     pub fn allocateFunctionNative(
         self: *Heap,
+        realm: *Realm,
         callback: @import("function.zig").NativeFn,
         param_count: u8,
         name: []const u8,
@@ -801,6 +803,13 @@ pub const Heap = struct {
         const f = try JSFunction.initNative(self.allocator, callback, param_count, name);
         errdefer f.deinit(self.allocator);
         f.heap = self;
+        // §10.2.5 — every native function carries `[[Realm]]`, the
+        // realm that allocated it. Set at allocation time (rather
+        // than left to each caller) so cross-realm identity checks
+        // never see a null realm; for a shared heap (a ShadowRealm
+        // child) this is the *allocating* realm, which the caller
+        // passes — the heap can't infer it.
+        f.realm = realm;
         // §20.2.3 — a native function's `[[Prototype]]` is
         // %Function.prototype%. Wire it here so it holds for
         // functions allocated lazily after realm init (the init

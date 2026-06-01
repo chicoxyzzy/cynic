@@ -190,7 +190,7 @@ fn asyncDisposableStackAdopt(realm: *Realm, this_value: Value, args: []const Val
 
     // §27.4.3.2 step 5-6 — build the wrapper closure as a bound
     // function. `bound_this = undefined`, prefix args `[value]`.
-    const wrapper = realm.heap.allocateFunctionNative(boundAdoptTrampoline, 0, "") catch return error.OutOfMemory;
+    const wrapper = realm.heap.allocateFunctionNative(realm, boundAdoptTrampoline, 0, "") catch return error.OutOfMemory;
     wrapper.proto = realm.intrinsics.function_prototype;
     wrapper.has_construct = false;
     realm.heap.setBoundTarget(wrapper, on_dispose);
@@ -525,10 +525,10 @@ fn allocateStepBound(
     impl: NativeFn,
     name: []const u8,
 ) NativeError!*JSFunction {
-    const inner = realm.heap.allocateFunctionNative(impl, 1, name) catch return error.OutOfMemory;
+    const inner = realm.heap.allocateFunctionNative(realm, impl, 1, name) catch return error.OutOfMemory;
     inner.proto = realm.intrinsics.function_prototype;
     inner.has_construct = false;
-    const outer = realm.heap.allocateFunctionNative(boundAdoptTrampoline, 1, name) catch return error.OutOfMemory;
+    const outer = realm.heap.allocateFunctionNative(realm, boundAdoptTrampoline, 1, name) catch return error.OutOfMemory;
     outer.proto = realm.intrinsics.function_prototype;
     outer.has_construct = false;
     realm.heap.setBoundTarget(outer, inner);

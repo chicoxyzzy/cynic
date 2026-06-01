@@ -1422,7 +1422,7 @@ pub const Realm = struct {
         // queued and any realm sharing the heap can drain it.
         self.heap.setFinalizationEnqueue(self, finalizationEnqueueJob);
 
-        const print_fn = try self.heap.allocateFunctionNative(printNative, 1, "print");
+        const print_fn = try self.heap.allocateFunctionNative(self, printNative, 1, "print");
         try self.globals.put(self.allocator, "print", heap_mod.taggedFunction(print_fn));
 
         // Minimal `console` object with a `log` method bound to
@@ -1462,7 +1462,7 @@ pub const Realm = struct {
         // way to ask for a deterministic GC trigger from
         // `built-ins/WeakRef` / `built-ins/FinalizationRegistry`
         // fixtures and inline tests with the same shape.
-        const gc_fn = try self.heap.allocateFunctionNative(collectGarbageNative, 0, "__collectGarbage");
+        const gc_fn = try self.heap.allocateFunctionNative(self, collectGarbageNative, 0, "__collectGarbage");
         try self.globals.put(self.allocator, "__collectGarbage", heap_mod.taggedFunction(gc_fn));
 
         // Companion to `__collectGarbage`: synchronously runs
@@ -1472,7 +1472,7 @@ pub const Realm = struct {
         // drop of the per-job kept-alive list so a follow-up
         // `__collectGarbage()` can actually weak-clear a WeakRef
         // target the constructor / `deref()` pinned.
-        const ck_fn = try self.heap.allocateFunctionNative(clearKeptObjectsNative, 0, "__clearKeptObjects");
+        const ck_fn = try self.heap.allocateFunctionNative(self, clearKeptObjectsNative, 0, "__clearKeptObjects");
         try self.globals.put(self.allocator, "__clearKeptObjects", heap_mod.taggedFunction(ck_fn));
 
         // Forces a microtask-queue drain. Real ECMAScript hosts
@@ -1480,7 +1480,7 @@ pub const Realm = struct {
         // CLI does the same around `cynic eval` / `cynic run`,
         // but inline tests asserting microtask ordering need
         // direct access. Lives on `globalThis.__drainMicrotasks`.
-        const drain_fn = try self.heap.allocateFunctionNative(@import("builtins/promise.zig").microtaskDrainNative, 0, "__drainMicrotasks");
+        const drain_fn = try self.heap.allocateFunctionNative(self, @import("builtins/promise.zig").microtaskDrainNative, 0, "__drainMicrotasks");
         try self.globals.put(self.allocator, "__drainMicrotasks", heap_mod.taggedFunction(drain_fn));
 
         // Re-stamp the freeze contract over the just-installed

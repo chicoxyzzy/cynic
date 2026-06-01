@@ -300,9 +300,9 @@ fn wrapAsyncGenResultWithClose(
             // rejection reaction calls IteratorClose before
             // rejecting the outer Promise (§27.6.1.6 step 13).
             const outer = intrinsics_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_) catch return error.OutOfMemory;
-            const fulfill_fn = realm.heap.allocateFunctionNative(if (done) iterResultDoneTrue else iterResultDoneFalse, 1, "asyncGenYield") catch return error.OutOfMemory;
+            const fulfill_fn = realm.heap.allocateFunctionNative(realm, if (done) iterResultDoneTrue else iterResultDoneFalse, 1, "asyncGenYield") catch return error.OutOfMemory;
             fulfill_fn.has_construct = false;
-            const reject_fn = realm.heap.allocateFunctionNative(closeIteratorOnReject, 1, "closeIterator") catch return error.OutOfMemory;
+            const reject_fn = realm.heap.allocateFunctionNative(realm, closeIteratorOnReject, 1, "closeIterator") catch return error.OutOfMemory;
             reject_fn.has_construct = false;
             reject_fn.properties.put(realm.allocator, "__cynic_sync_iter__", sync_iter_v) catch return error.OutOfMemory;
             const p_reactions = p.promiseReactionsPtr(realm.allocator) catch return error.OutOfMemory;

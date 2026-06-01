@@ -126,7 +126,7 @@ pub fn install(realm: *Realm) !void {
     // from the `installNativeMethodOnProto` default of writable: true.
     // The function's own `.name` is `"[Symbol.toPrimitive]"`, not
     // the raw `@@toPrimitive` slot key.
-    const tp_fn = try realm.heap.allocateFunctionNative(dateToPrimitive, 1, "[Symbol.toPrimitive]");
+    const tp_fn = try realm.heap.allocateFunctionNative(realm, dateToPrimitive, 1, "[Symbol.toPrimitive]");
     tp_fn.has_construct = false;
     try proto.setWithFlags(realm.allocator, "@@toPrimitive", heap_mod.taggedFunction(tp_fn), .{
         .writable = false,

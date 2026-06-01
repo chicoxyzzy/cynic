@@ -3891,7 +3891,7 @@ fn makeBoundCb(
     state: *JSObject,
     sc: *heap_mod.HandleScope,
 ) NativeError!*JSFunction {
-    const impl_fn = realm.heap.allocateFunctionNative(impl, 1, "") catch return error.OutOfMemory;
+    const impl_fn = realm.heap.allocateFunctionNative(realm, impl, 1, "") catch return error.OutOfMemory;
     impl_fn.proto = realm.intrinsics.function_prototype;
     impl_fn.has_construct = false;
     // Root `impl_fn` across the `bound` allocation below — otherwise
@@ -3900,7 +3900,7 @@ fn makeBoundCb(
     // dangling pointer that surfaces as "value is not callable" when
     // the trampoline later dereferences `bound_target`.
     sc.push(heap_mod.taggedFunction(impl_fn)) catch return error.OutOfMemory;
-    const bound = realm.heap.allocateFunctionNative(promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
+    const bound = realm.heap.allocateFunctionNative(realm, promise_mod.boundResolveTrampolineExported, 1, "") catch return error.OutOfMemory;
     bound.proto = realm.intrinsics.function_prototype;
     bound.has_construct = false;
     realm.heap.setBoundTarget(bound, impl_fn);
