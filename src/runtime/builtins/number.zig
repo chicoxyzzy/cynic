@@ -60,13 +60,12 @@ pub fn install(realm: *Realm) !void {
     // `Number.parseFloat === parseFloat`: the SAME function
     // object on both bindings. Install once, then alias on
     // Number with the spec-mandated `{ w, !e, c }` flags.
-    const pi = try realm.heap.allocateFunctionNative(parseIntNative, 2, "parseInt");
-    // §20.1.1 — built-in function objects don't implement [[Construct]]
-    // unless explicitly specified. `new parseInt(...)` must throw.
-    pi.has_construct = false;
+    // §20.1.1 — built-in function objects don't implement
+    // [[Construct]] unless explicitly specified (`new parseInt(...)`
+    // throws); `makeNativeFunction` stamps that shape plus [[Realm]].
+    const pi = try intrinsics.makeNativeFunction(realm, parseIntNative, 2, "parseInt");
     try realm.globals.put(realm.allocator, "parseInt", heap_mod.taggedFunction(pi));
-    const pf = try realm.heap.allocateFunctionNative(parseFloatNative, 1, "parseFloat");
-    pf.has_construct = false;
+    const pf = try intrinsics.makeNativeFunction(realm, parseFloatNative, 1, "parseFloat");
     try realm.globals.put(realm.allocator, "parseFloat", heap_mod.taggedFunction(pf));
     if (heap_mod.valueAsFunction(realm.globals.get("Number").?)) |num_ctor| {
         try num_ctor.setWithFlags(realm.allocator, "parseInt", heap_mod.taggedFunction(pi), .{
@@ -80,11 +79,9 @@ pub fn install(realm: *Realm) !void {
             .configurable = true,
         });
     }
-    const inn = try realm.heap.allocateFunctionNative(globalIsNaN, 1, "isNaN");
-    inn.has_construct = false;
+    const inn = try intrinsics.makeNativeFunction(realm, globalIsNaN, 1, "isNaN");
     try realm.globals.put(realm.allocator, "isNaN", heap_mod.taggedFunction(inn));
-    const ifn = try realm.heap.allocateFunctionNative(globalIsFinite, 1, "isFinite");
-    ifn.has_construct = false;
+    const ifn = try intrinsics.makeNativeFunction(realm, globalIsFinite, 1, "isFinite");
     try realm.globals.put(realm.allocator, "isFinite", heap_mod.taggedFunction(ifn));
 }
 

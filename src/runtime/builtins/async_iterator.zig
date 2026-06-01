@@ -34,24 +34,13 @@ pub fn ensureAsyncFromSyncIteratorPrototype(realm: *Realm) !*JSObject {
     const proto = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(proto, try lantern.ensureAsyncIteratorPrototype(realm));
 
-    try installMethod(realm, proto, "next", afsiNext, 1);
-    try installMethod(realm, proto, "return", afsiReturn, 1);
-    try installMethod(realm, proto, "throw", afsiThrow, 1);
+    try intrinsics_mod.installNativeMethodOnProto(realm, proto, "next", afsiNext, 1);
+    try intrinsics_mod.installNativeMethodOnProto(realm, proto, "return", afsiReturn, 1);
+    try intrinsics_mod.installNativeMethodOnProto(realm, proto, "throw", afsiThrow, 1);
 
     realm.intrinsics.async_from_sync_iterator_prototype = proto;
     @import("harden.zig").freezeLazyIntrinsic(realm, proto) catch return error.OutOfMemory;
     return proto;
-}
-
-fn installMethod(realm: *Realm, proto: *JSObject, name: []const u8, native: anytype, params: u8) !void {
-    const fn_obj = try realm.heap.allocateFunctionNative(native, params, name);
-    fn_obj.has_construct = false;
-    fn_obj.proto = realm.intrinsics.function_prototype;
-    try proto.setWithFlags(realm.allocator, name, heap_mod.taggedFunction(fn_obj), .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    });
 }
 
 /// §27.6.1.1 CreateAsyncFromSyncIterator — wrap `sync_iter` in a

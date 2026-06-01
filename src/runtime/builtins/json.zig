@@ -118,28 +118,15 @@ pub fn install(realm: *Realm) !void {
     const json_obj = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(json_obj, realm.intrinsics.object_prototype);
     try installToStringTag(realm, json_obj, "JSON");
-    // §17 — built-in methods are non-enumerable (writable +
-    // configurable). The default `set` would mark them
-    // enumerable, which the prop-desc tests reject.
-    const method_flags: @import("../object.zig").PropertyFlags = .{
-        .writable = true,
-        .enumerable = false,
-        .configurable = true,
-    };
-    const stringify_fn = try realm.heap.allocateFunctionNative(jsonStringify, 3, "stringify");
-    stringify_fn.has_construct = false;
-    try json_obj.setWithFlags(realm.allocator, "stringify", heap_mod.taggedFunction(stringify_fn), method_flags);
-    const parse_fn = try realm.heap.allocateFunctionNative(jsonParse, 2, "parse");
-    parse_fn.has_construct = false;
-    try json_obj.setWithFlags(realm.allocator, "parse", heap_mod.taggedFunction(parse_fn), method_flags);
+    // §17 — built-in methods install non-enumerable, non-
+    // constructor, with `[[Realm]]` set; `installNativeMethodOnProto`
+    // stamps that canonical shape so each site doesn't re-spell it.
+    try intrinsics.installNativeMethodOnProto(realm, json_obj, "stringify", jsonStringify, 3);
+    try intrinsics.installNativeMethodOnProto(realm, json_obj, "parse", jsonParse, 2);
     // §25.5.4 / §25.5.3 — JSON.rawJSON / JSON.isRawJSON
     // (json-parse-with-source, Stage 4 ES2025).
-    const raw_json_fn = try realm.heap.allocateFunctionNative(jsonRawJSON, 1, "rawJSON");
-    raw_json_fn.has_construct = false;
-    try json_obj.setWithFlags(realm.allocator, "rawJSON", heap_mod.taggedFunction(raw_json_fn), method_flags);
-    const is_raw_json_fn = try realm.heap.allocateFunctionNative(jsonIsRawJSON, 1, "isRawJSON");
-    is_raw_json_fn.has_construct = false;
-    try json_obj.setWithFlags(realm.allocator, "isRawJSON", heap_mod.taggedFunction(is_raw_json_fn), method_flags);
+    try intrinsics.installNativeMethodOnProto(realm, json_obj, "rawJSON", jsonRawJSON, 1);
+    try intrinsics.installNativeMethodOnProto(realm, json_obj, "isRawJSON", jsonIsRawJSON, 1);
     try realm.globals.put(realm.allocator, "JSON", heap_mod.taggedObject(json_obj));
 }
 

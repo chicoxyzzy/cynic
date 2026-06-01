@@ -1538,9 +1538,7 @@ pub fn installSet(realm: *Realm) !void {
     // §24.2.3 — `Set.prototype.values`, `.keys`, and `@@iterator`
     // are required to be the *same* function object. Allocate
     // once and install it under all three names.
-    const values_fn = try realm.heap.allocateFunctionNative(setValuesMethod, 0, "values");
-    values_fn.has_construct = false;
-    values_fn.proto = realm.intrinsics.function_prototype;
+    const values_fn = try intrinsics.makeNativeFunction(realm, setValuesMethod, 0, "values");
     const values_v = heap_mod.taggedFunction(values_fn);
     try proto.setWithFlags(realm.allocator, "values", values_v, .{ .writable = true, .enumerable = false, .configurable = true });
     try proto.setWithFlags(realm.allocator, "keys", values_v, .{ .writable = true, .enumerable = false, .configurable = true });
