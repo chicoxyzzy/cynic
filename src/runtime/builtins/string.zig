@@ -20,6 +20,7 @@ const c_alloc = @import("../c_alloc.zig");
 const lantern = @import("../lantern/interpreter.zig");
 const interpreter_arith = @import("../lantern/arith.zig");
 const utf16 = @import("../utf16.zig");
+const case_conv = @import("../../unicode/case_conv.zig");
 
 const arith_toUint32 = interpreter_arith.toUint32;
 
@@ -1121,20 +1122,20 @@ fn stringToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
 }
 
 /// §22.1.3.27 String.prototype.toUpperCase — full Unicode case
-/// conversion via libunicode's `lre_case_conv` (UCD-derived
-/// tables, conv_type 0 = upper). Decode each WTF-8 codepoint,
-/// apply the language-insensitive mapping (1-3 result code
-/// points per input), re-encode as WTF-8. Lone surrogates pass
-/// through unchanged — `lre_case_conv` returns the input
-/// code point for non-cased values.
+/// conversion via the native `case_conv` tables (Default Case
+/// Conversion, Unicode §3.13, conv_type 0 = upper). Decode each
+/// WTF-8 codepoint, apply the language-insensitive mapping (1-3
+/// result code points per input), re-encode as WTF-8. Lone
+/// surrogates pass through unchanged — `convert` returns the
+/// input code point for non-cased values.
 fn stringToUpperCase(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
     return caseConvertString(realm, s.flatBytes(), 0);
 }
 
-/// §22.1.3.26 String.prototype.toLowerCase. Uses libunicode's
-/// `lre_case_conv` (conv_type 1 = lower) plus a §22.1.3.26
+/// §22.1.3.26 String.prototype.toLowerCase. Uses the native
+/// `case_conv` tables (conv_type 1 = lower) plus a §22.1.3.26
 /// step 4.a Final_Sigma rule on U+03A3 GREEK CAPITAL LETTER
 /// SIGMA: Sigma maps to U+03C2 SMALL FINAL SIGMA when the
 /// preceding context (zero+ Case_Ignorable then Cased) is set
@@ -1148,7 +1149,7 @@ fn stringToLowerCase(realm: *Realm, this_value: Value, args: []const Value) Nati
 }
 
 /// Shared body for §22.1.3.{26, 27, 28, 29}. `conv_type` is the
-/// libunicode tag: 0 = to-upper, 1 = to-lower (the toLocale*
+/// case-conversion tag: 0 = to-upper, 1 = to-lower (the toLocale*
 /// variants share the same table for default/`en` locales —
 /// Turkish dotless-i lives in intl402/, out of scope per
 /// AGENTS.md). The Final_Sigma adjustment is gated on
@@ -1172,14 +1173,14 @@ fn caseConvertString(realm: *Realm, bytes: []const u8, conv_type: c_int) NativeE
             appendWtf8(realm.allocator, &out, 0x03C2) catch return error.OutOfMemory;
             continue;
         }
-        var res: [3]u32 = undefined;
-        const len = lib_unicode.lre_case_conv(&res, cp, conv_type);
+        var res: [3]u21 = undefined;
+        // §22.1.3.{26,27} — language-independent Default Case Conversion
+        // (1-3 result code points per input). `conv_type == 0` selects
+        // uppercase; an uncased code point maps to itself.
+        const len = case_conv.convert(&res, @intCast(cp), conv_type == 0);
         var k: usize = 0;
-        while (k < @as(usize, @intCast(len))) : (k += 1) {
-            const r = res[k];
-            // `lre_case_conv` returns code points up to 0x10FFFF;
-            // narrow back to u21 for `appendWtf8`.
-            appendWtf8(realm.allocator, &out, @intCast(r)) catch return error.OutOfMemory;
+        while (k < len) : (k += 1) {
+            appendWtf8(realm.allocator, &out, res[k]) catch return error.OutOfMemory;
         }
     }
     const new_s = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
@@ -1226,8 +1227,8 @@ fn decodeWtf8ToCodepoints(
 /// Cased code point with zero or more Case_Ignorable code
 /// points between, and *not* followed by zero or more
 /// Case_Ignorable code points then a Cased code point. Uses
-/// libunicode's `lre_is_cased` / `lre_is_case_ignorable`
-/// which mirror DerivedCoreProperties' Cased and
+/// the native `case_conv.isCased` / `isCaseIgnorable`,
+/// generated from DerivedCoreProperties' Cased and
 /// Case_Ignorable.
 fn isFinalSigmaContext(cps: []const u32, idx: usize) bool {
     // Before: walk backwards skipping Case_Ignorable; first
@@ -1238,8 +1239,8 @@ fn isFinalSigmaContext(cps: []const u32, idx: usize) bool {
         while (j > 0) {
             j -= 1;
             const p = cps[j];
-            if (lib_unicode.lre_is_case_ignorable(p)) continue;
-            before_cased = lib_unicode.lre_is_cased(p);
+            if (case_conv.isCaseIgnorable(@intCast(p))) continue;
+            before_cased = case_conv.isCased(@intCast(p));
             break;
         }
     }
@@ -1249,8 +1250,8 @@ fn isFinalSigmaContext(cps: []const u32, idx: usize) bool {
     var j: usize = idx + 1;
     while (j < cps.len) : (j += 1) {
         const p = cps[j];
-        if (lib_unicode.lre_is_case_ignorable(p)) continue;
-        return !lib_unicode.lre_is_cased(p);
+        if (case_conv.isCaseIgnorable(@intCast(p))) continue;
+        return !case_conv.isCased(@intCast(p));
     }
     return true;
 }
@@ -2897,4 +2898,36 @@ fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) Na
         .eq => 0,
         .gt => 1,
     });
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "isFinalSigmaContext — §22.1.3.26 step 4.a" {
+    const O: u32 = 0x039F; // GREEK CAPITAL LETTER OMICRON (Cased)
+    const S: u32 = 0x03A3; // GREEK CAPITAL LETTER SIGMA (the unit at `idx`)
+    const apos: u32 = 0x0027; // APOSTROPHE (Case_Ignorable)
+    const sp: u32 = 0x0020; // SPACE (neither Cased nor Case_Ignorable)
+
+    // Preceded by Cased, nothing after → final (Σ would lower to ς).
+    try testing.expect(isFinalSigmaContext(&.{ O, S }, 1));
+    // Preceded AND followed by Cased → not final (Σ stays σ).
+    try testing.expect(!isFinalSigmaContext(&.{ O, S, O }, 1));
+    // No preceding Cased at all → not final.
+    try testing.expect(!isFinalSigmaContext(&.{S}, 0));
+    // Preceded only by a non-Cased non-ignorable → not final.
+    try testing.expect(!isFinalSigmaContext(&.{ sp, S }, 1));
+
+    // Case_Ignorable is skipped on the *before* walk: Ο ' Σ → final.
+    try testing.expect(isFinalSigmaContext(&.{ O, apos, S }, 2));
+    // …but a non-ignorable between breaks the Cased chain: Ο ␠ Σ → not.
+    try testing.expect(!isFinalSigmaContext(&.{ O, sp, S }, 2));
+
+    // Case_Ignorable is skipped on the *after* walk too: trailing ' → final.
+    try testing.expect(isFinalSigmaContext(&.{ O, S, apos }, 1));
+    // …and a Cased after the ignorable makes it non-final: Ο Σ ' Ο → not.
+    try testing.expect(!isFinalSigmaContext(&.{ O, S, apos, O }, 1));
 }
