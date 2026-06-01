@@ -250,6 +250,7 @@ const els = {
   output: document.getElementById('output'),
   snippets: document.getElementById('snippets'),
   version: document.getElementById('version'),
+  unhardened: document.getElementById('unhardened'),
   modeTabs: Array.from(document.querySelectorAll('.mode-tab')),
 };
 
@@ -536,7 +537,7 @@ const decoder = new TextDecoder();
 
 // Run `source` through one of the engine's two entry points and
 // return the parsed result frame.
-function callEngine(exportName, source) {
+function callEngine(exportName, source, ...extraArgs) {
   const ex = wasm.exports;
   const bytes = encoder.encode(source);
   const ptr = ex.cynic_alloc(bytes.length);
@@ -546,7 +547,10 @@ function callEngine(exportName, source) {
     // Re-view memory each time — `memory.grow` inside the call can
     // detach the previous ArrayBuffer.
     new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
-    ex[exportName](ptr, bytes.length);
+    // `extraArgs` carries export-specific trailing params, e.g.
+    // `cynic_eval`'s `hardened` flag (1 = frozen primordials,
+    // 0 = `--unhardened`). Parse/AST exports pass none.
+    ex[exportName](ptr, bytes.length, ...extraArgs);
     return readFrame();
   } finally {
     ex.cynic_free(ptr, bytes.length);
@@ -996,7 +1000,9 @@ function run() {
         break;
       case 'eval':
       default:
-        renderEvalResult(callEngine('cynic_eval', source));
+        // `hardened` defaults on; the toolbar toggle flips it off
+        // (the `--unhardened` posture — mutable primordials).
+        renderEvalResult(callEngine('cynic_eval', source, els.unhardened?.checked ? 0 : 1));
         break;
     }
     setStatus('ready');

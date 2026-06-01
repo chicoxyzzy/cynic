@@ -191,7 +191,12 @@ const empty_span: cynic.source.Span = .{ .start = 0, .end = 0 };
 /// `cynic_result_ptr`). Captured `console.log` / `print` output,
 /// the completion value's string form, and any uncaught exception
 /// all land in the frame.
-export fn cynic_eval(src: [*]const u8, len: u32) [*]u8 {
+///
+/// `hardened` mirrors the CLI's SES posture: non-zero (the default)
+/// freezes the primordials at realm init; `0` is the `--unhardened`
+/// opt-out, leaving intrinsics mutable so a snippet can monkey-patch
+/// `Array.prototype.X = …` or reassign `globalThis` without throwing.
+export fn cynic_eval(src: [*]const u8, len: u32, hardened: u32) [*]u8 {
     const source = src[0..len];
 
     // The whole pipeline shares one Diagnostics buffer so both
@@ -226,6 +231,9 @@ export fn cynic_eval(src: [*]const u8, len: u32) [*]u8 {
 
     var realm = Realm.init(gpa);
     defer realm.deinit();
+    // Set the SES posture before `installBuiltins` — the freeze pass
+    // runs at the end of install and only fires when `hardened`.
+    realm.hardened = hardened != 0;
     realm.installBuiltins() catch {
         return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
     };

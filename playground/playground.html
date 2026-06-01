@@ -161,6 +161,19 @@
     margin-left: auto;
   }
 
+  /* --unhardened toggle: a muted checkbox + label that reads as a
+     dev switch, not a primary action. */
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font: 13px/1 var(--mono, monospace);
+    color: var(--ink-soft, #666);
+    cursor: pointer;
+    user-select: none;
+  }
+  .toggle input { margin: 0; cursor: pointer; }
+
   /* The CodeMirror editor host fills the left panel body. */
   #editor-host {
     flex: 1 1 auto;
@@ -310,6 +323,10 @@
           <option value="">— sample snippets —</option>
         </select>
         <div class="panel-actions">
+          <label class="toggle" title="Run with --unhardened — mutable primordials, no frozen globalThis. eval mode only.">
+            <input type="checkbox" id="unhardened">
+            <span>unhardened</span>
+          </label>
           <button id="share" type="button" class="btn-secondary">Copy link</button>
           <button id="run" type="button" class="btn-primary" title="Run · Ctrl/Cmd+Enter">Run</button>
         </div>
