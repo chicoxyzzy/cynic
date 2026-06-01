@@ -6,11 +6,16 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Library module: everything except the CLI.
+    // Library module: everything except the CLI. Links libc on hosted
+    // targets — `std.c.clock_gettime` backs GC pause timing (heap.zig) and
+    // `Date.now` (date/temporal); the freestanding WASM build guards those
+    // off. (libc used to come transitively via the vendored QuickJS lib,
+    // which is gone now.)
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     // Embedded only by the normalization unit test (`@embedFile` inside a
     // `test` block, so no cost to non-test builds): the full UAX #15
@@ -24,6 +29,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     exe_mod.addImport("cynic", lib_mod);
 
@@ -203,6 +209,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = t262_optimize,
+        .link_libc = true,
     });
     const t262_mod = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
@@ -258,6 +265,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
+        .link_libc = true,
     });
     const t262_mod_safe = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
@@ -291,6 +299,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .link_libc = true,
     });
     cynic_fast_mod.addImport("cynic", lib_mod_fast);
     const cynic_fast = b.addExecutable(.{
