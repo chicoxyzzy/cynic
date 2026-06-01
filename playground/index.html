@@ -102,15 +102,24 @@
   /* Snippet picker is a quiet, contextual control — no shadow, just
      a 2px ink border so it sits inside the panel head without
      competing with the action buttons. */
+  /* Custom-styled to match the toolbar buttons: solid white, a hand-
+     drawn chevron (the native arrow is hidden via appearance:none), and
+     the same 2px ink border + offset shadow. The *open* option list is
+     still OS-native — CSS can't restyle that without a JS component. */
   .snippets-select {
+    appearance: none;
+    -webkit-appearance: none;
     font-family: var(--mono);
     font-size: 13px;
     color: var(--ink);
-    background: rgba(255, 255, 255, 0.7);
+    background-color: #fff;
+    background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><path d="M2 4l4 4 4-4" stroke="%230c0c0c" stroke-width="2" fill="none"/></svg>');
+    background-repeat: no-repeat;
+    background-position: right 8px center;
     border: 2px solid var(--ink);
-    box-shadow: none;
-    padding: 4px 8px;
-    max-width: 220px;
+    box-shadow: 2px 2px 0 var(--ink);
+    padding: 5px 26px 5px 10px;
+    max-width: 240px;
     cursor: pointer;
   }
 
@@ -172,7 +181,34 @@
     cursor: pointer;
     user-select: none;
   }
-  .toggle input { margin: 0; cursor: pointer; }
+  /* Custom checkbox: an 18px ink-bordered square that fills green with
+     a black checkmark when on (the native box is hidden via
+     appearance:none). */
+  .toggle input {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    flex: none;
+    border: 2px solid var(--ink);
+    background: #fff;
+    cursor: pointer;
+    position: relative;
+  }
+  .toggle input:hover { box-shadow: 2px 2px 0 var(--ink); }
+  .toggle input:checked { background: var(--grass); }
+  .toggle input:checked::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 1px;
+    width: 5px;
+    height: 9px;
+    border: solid var(--ink);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
 
   /* The CodeMirror editor host fills the left panel body. */
   #editor-host {
