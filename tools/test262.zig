@@ -806,14 +806,18 @@ const BucketMap = struct {
                 const ta = tier(a.fail);
                 const tb = tier(b.fail);
                 if (ta != tb) return ta < tb;
-                // Within the 0-fail tier, surface buckets with the
-                // most SES divergence at the top — this is where
-                // hardened-mode reclassification concentrates, so
-                // a reader scanning "what does SES enforce?" sees
-                // the hot buckets first. Other tiers stay
-                // alphabetical (engine-bug work follows raw fail
-                // count, not the correctly_handled side-channel).
-                if (ta == 4 and a.correctly_handled != b.correctly_handled) {
+                // Within a tier, sort by hardened pass% ascending —
+                // lowest first — so the whole scoreboard reads
+                // low → high pass% top to bottom (the tiers are
+                // already ordered most-fails-first). Compare the
+                // ratios (pass + correctly_handled) / total by
+                // cross-multiplying in u64 to avoid float rounding.
+                const a_num: u64 = @as(u64, a.pass + a.correctly_handled) * @as(u64, b.total);
+                const b_num: u64 = @as(u64, b.pass + b.correctly_handled) * @as(u64, a.total);
+                if (a_num != b_num) return a_num < b_num;
+                // Tiebreaker: most SES divergence first (meaningful
+                // in the all-100% 0-fail tier), then alphabetical.
+                if (a.correctly_handled != b.correctly_handled) {
                     return a.correctly_handled > b.correctly_handled;
                 }
                 return std.mem.order(u8, a.name, b.name) == .lt;
@@ -4189,8 +4193,11 @@ fn writeScoreboard(
         \\  `--allow=eval` row in `## Current scores`).
         \\- The **`1+ fails` tiers** are the engine-work list — today
         \\  mostly the SAB/Atomics surface plus the ~13-fixture
-        \\  cross-realm cluster. The **0-fails tier** is sorted by
-        \\  hardened `expected fails ↓`.
+        \\  cross-realm cluster.
+        \\- Within every tier, areas are sorted by **hardened pass%
+        \\  ascending** (lowest first), so the whole scoreboard reads
+        \\  low → high pass% top to bottom. Ties break on SES
+        \\  divergence, then name.
         \\
         \\
     );
