@@ -21,9 +21,10 @@ pick up the next phase from here without re-deriving the design.
 | 1 — D1 intrinsics | ✅ **revised** → per-realm prototypes, shared shapes (Cynic already has the latter via per-`Heap` `ShapeTree` + `Realm.initChild`). The original "shared frozen prototype subgraph" is **forbidden, not deferred** per §6.1.7.4, §9.3.2, §20.1.3.1, §23.1.3.3 + five-engine consensus. | `ae847a8`, `0b4d2c7`, `6a00337` |
 | 2 — D3 modules | ✅ substrate pinned (`Realm.modules` already per-instance); `StaticModuleRecord` deferred to Compartments | `928b4c3` |
 | sibling — cross-realm error attribution | ✅ `CallFrame.running_realm` reads `callee.realm` so error makers attribute to the callee's realm; per-frame thread of attribution. Unblocked several test262 fixtures. | `b95694b` |
-| 3 — D2 RealmStack + per-fn [[Realm]] | ⏳ planned — see "Phase 3 implementation plan" below | — |
+| 3 — D2 RealmStack + per-fn [[Realm]] | ✅ shipped — `[[Realm]]` set at native + ordinary function allocation; free-global resolution (read **and** write), Error-constructor intrinsics, and §23.1.3.34 ArraySpeciesCreate resolve via the executing function's realm (its `CallFrame.running_realm` / `active_native_fn_realm`), not the dispatch realm. All four Phase-3 contract tests in `realm_test.zig` green. | (multi-realm consumption effort) |
 | 4 — D4 endowments | sketched | — |
 | 5 — Compartments | sketched | — |
+| 6 — per-realm teardown (memory lifecycle) | ⏳ planned — see "Phase 6 — per-realm teardown" below | — |
 
 The cross-realm-error commit `b95694b` reaches partway into D2 — `callee.realm` is already consumed for error attribution and native-callback realm tracking — but `JSFunction.realm` itself remains `null` at every allocation site because `Heap.allocateFunction*` doesn't take a realm parameter. Phase 3 closes that gap.
 
@@ -1013,6 +1014,78 @@ sweep gains ~N fixtures (count TBD per submodule version).
   introduces externally-owned heap objects the sweep must respect.
 - [handbook/tdd.md](handbook/tdd.md) — every phase opens with the
   failing tests above; production code follows.
+
+## Phase 6 — per-realm teardown (memory lifecycle)
+
+Phases 0–3 make multiple realms *coexist and interoperate*
+correctly on a shared `Heap`. They do not address what happens
+to a child realm's memory when it dies. Two distinct problems,
+both real, surfaced while validating Phase 3:
+
+1. **Child-realm lifecycle isn't tied to its owning object.**
+   A child `Realm` (`$262.createRealm()` / `new ShadowRealm()`)
+   is appended to `parent.child_realms` at creation and freed
+   only in the parent's `deinit` — i.e. at program end. There is
+   no finalizer when the owning `ShadowRealm` JS object is
+   collected. A long-running host that mints a ShadowRealm
+   per request therefore accumulates child `Realm` records —
+   each carrying its own intrinsics + globals maps — **without
+   bound**. This is a genuine leak, not just delayed reclamation.
+
+2. **Child heap objects aren't eagerly reclaimed.** Children
+   borrow the parent's `Heap` (`initChild`: `owns_heap = false`),
+   whose object pools (`objects_young` / `objects_mature`) are
+   **flat and untagged by realm**. A dead child's objects persist
+   until the next parent GC sweeps them as unreachable — bounded
+   bloat between collections, not a permanent leak.
+
+**Why this is its own phase (not a quick fix).** Eagerly
+reclaiming a child's objects is not "free every object the child
+allocated": a child object can be legitimately reachable from the
+parent — a `WrappedFunction` over a child callable (§3.8.3.4), or
+an `importValue` result crossed the callable boundary. Blindly
+sweeping child-tagged objects on teardown is a use-after-free,
+exactly the hazard the ReleaseSafe GC verifiers
+(`verifyRememberedSet` / `verifyShapeInvariant`, see
+[handbook/gc.md](handbook/gc.md)) exist to catch. Correct
+teardown is therefore a *scoped GC pass*: mark from the parent's
+roots, then sweep only the child-owned objects that remain
+unreachable.
+
+**Plan.**
+
+1. **Realm-tag heap objects.** Give each `JSObject` (and the
+   other pooled cells) an owning-realm id, threaded at allocation
+   the same way `JSFunction.realm` now is — the allocator already
+   receives the realm (Phase 3.2). Cheapest form: a small integer
+   realm id rather than a back-pointer, to keep the cell compact.
+2. **ShadowRealm finalizer.** On collection of a `ShadowRealm`
+   instance, drop its child `Realm` from `parent.child_realms`
+   and free that realm's intrinsics + globals maps. Reuses the
+   §9.10 KeptDuringJob / WeakRef finalization machinery already in
+   `Realm` rather than inventing a new hook.
+3. **Scoped reclamation sweep.** On child teardown, run a mark
+   from the *parent's* roots, then sweep only objects tagged with
+   the dying child's id that are still white. Gate it behind the
+   existing verifier build so a cross-realm-live object that is
+   wrongly swept trips an assertion in `test262-safe`.
+4. **Bench the workload.** Add a "N short-lived ShadowRealms in a
+   loop" bench; the success criterion is that steady-state RSS is
+   flat across iterations rather than monotonically climbing.
+
+**Test-first contracts** (gated, like every other phase):
+
+- A `ShadowRealm` created, used, then dropped and GC'd frees its
+  child `Realm` record (probe: `parent.child_realms.items.len`
+  returns to baseline after collection).
+- A child value still referenced by the parent (a wrapped
+  function) survives the child's teardown sweep — no
+  use-after-free under `test262-safe`.
+- Steady-state RSS over a create/drop loop is bounded.
+
+**Dependency note.** This phase is orthogonal to Compartments
+(Phase 5) but shares the realm-id tagging; landing it first gives
+Compartments a teardown story for free.
 
 ## Verification cadence
 
