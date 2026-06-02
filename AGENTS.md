@@ -381,7 +381,9 @@ as a placeholder until the eval opt-in ships, then `unhardened`,
 then `hardened`), a `## Legend`, a `## Where the engine fails,
 by area` per-bucket scoreboard sourced from the hardened sweep
 and sorted by raw fail count, a `## Pre-Stage-4 proposals
-shipped` table for the per-feature scoreboard, and a `## History`
+shipped` section with one per-proposal table (a `### <feature>`
+table per shipped proposal, hardened + unhardened posture rows),
+and a `## History`
 section of per-day mini-tables — newest day first. Each history
 row shows `Δ pass` against the previous run of the same mode
 and the `elapsed` wall-clock time of that run (full sweeps only;

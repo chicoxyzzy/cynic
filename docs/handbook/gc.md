@@ -102,6 +102,22 @@ function metadata, Map / Set entries, generator references, and class
 field initialisers — `Heap.markValue` and `Heap.markChunk` do the
 work; `Realm.collectGarbage` only seeds the roots.
 
+### Multiple realms on one heap
+
+A child realm created with `Realm.initChild` (`$262.createRealm`,
+`ShadowRealm`) shares the parent's `Heap` and its flat object pools.
+The sweep frees every unmarked object regardless of which realm
+allocated it, so a collection must seed roots from **every** realm
+sharing the heap — marking only the running realm's roots would
+reclaim a sibling realm's live objects (a cross-realm use-after-free).
+The `Heap.realms` list holds the coexisting realms (each registers at
+`installBuiltins`, deregisters at `deinit`), and
+`Realm.markAllSharingRealmRoots` runs the per-realm walk above for each
+before the single sweep — the same model as V8's global GC marking
+every live Context. (This is also the hook for future per-realm
+teardown: dropping a realm from the list lets the next GC reclaim its
+now-unreachable objects.)
+
 Each per-kind heap is split `_young` / `_mature`. `promoteYoungList`
 runs at the end of the mark phase: it walks the young half,
 `swapRemove`s any unmarked entry (freed via the kind's `deinit`),

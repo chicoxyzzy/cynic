@@ -148,10 +148,17 @@ code construction (aligns with SES).
   (`Array = …`, `Math.PI = 4`) still throws. The whole SES
   posture toggles atomically with `--unhardened`; `--allow=eval`
   stays separate because it carries compile-time optimization-
-  fence cost. Multi-realm is partial — cross-realm species
-  (§23.1.3.34 `GetFunctionRealm` carve-out) and `ShadowRealm`
-  (constructor + `.evaluate` + the §3.8.3.4 callable boundary)
-  ship; full Compartments are still deferred. The test262 sweep
+  fence cost. Multi-realm is partial but solid — per-function
+  `[[Realm]]` (set at allocation), realm-aware resolution (a
+  running function resolves its free globals — read + write —,
+  its Error-constructor and §23.1.3.34 species intrinsics, and
+  primitive boxing through its OWN realm, not the caller's),
+  cross-realm species, and `ShadowRealm` (constructor +
+  `.evaluate` + `.importValue` + the §3.8.3.4 callable boundary)
+  all ship, and the shared-heap GC marks every coexisting realm's
+  roots (closing a cross-realm use-after-free). Still deferred:
+  per-realm teardown (freeing a child realm's record when its
+  `ShadowRealm` is collected) and full Compartments. The test262 sweep
   scores both modes — the
   `unhardened` row tracks the legacy ECMAScript baseline (the
   `--unhardened` opt-out), the `hardened` row tracks the

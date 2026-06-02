@@ -73,6 +73,25 @@ SetMutableBinding at runtime via the Hole sentinel is
 spec-equivalent and simpler than threading an `is_init` flag
 through every destructuring helper.
 
+### Cross-realm: resolve against the executing function's realm
+
+All the global opcodes above (`lda_global` / `lda_global_or_undef`,
+`sta_global` / `sta_global_strict`, the `capture_unresolved_global`
+resolvability snapshot, and the slot-indexed `lda_global_slot` /
+`sta_global_slot{,_init}`) resolve against the **executing function's
+realm**, not the realm the dispatch loop was entered with. With a
+shared heap (a `ShadowRealm` / `$262.createRealm` child via
+`Realm.initChild`) those differ: a function created in one realm and
+called from another must reach its OWN realm's `GlobalBindings`
+(§8.3 / §9.1 — a function resolves its free globals through its
+[[Realm]]'s global environment). The opcodes read
+`f.running_realm orelse realm` (the active `CallFrame`'s realm, set to
+the callee's `[[Realm]]` at each JS call); in a single realm
+`running_realm == realm`, so the hot path is unchanged. The same
+home-realm routing applies to shared-builtin intrinsics — Error
+constructors, `ArraySpeciesCreate`, and primitive boxing read
+`active_native_fn_realm` (§10.2.3).
+
 ## Early errors for global declarations
 
 §16.1.7 GlobalDeclarationInstantiation steps 5–7 mandate four
