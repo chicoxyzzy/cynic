@@ -400,6 +400,16 @@ fn wrappedFunctionCreate(caller_realm: *Realm, target: Value) NativeError!*JSFun
     // §3.8.3.5 step 4 — wrapped functions have no [[Construct]].
     wrapped.has_construct = false;
 
+    // Anchor `wrapped` (and the target, which CopyNameAndLength reads
+    // through possibly-user accessors) across the next step: its
+    // `setWithFlags` writes re-allocate, and at high GC pressure a
+    // collection there would sweep this freshly-allocated, not-yet-
+    // rooted function — a use-after-free. See handbook/gc.md.
+    const scope = caller_realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedFunction(wrapped)) catch return error.OutOfMemory;
+    scope.push(target) catch return error.OutOfMemory;
+
     // §3.8.3.5 step 6 + §3.8.3.5.1 CopyNameAndLength. The spec
     // catches abrupt completions and rethrows them AS a fresh
     // TypeError in callerRealm.
