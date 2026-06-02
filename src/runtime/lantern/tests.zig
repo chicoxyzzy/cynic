@@ -4602,6 +4602,33 @@ test "later: Promise.withResolvers().reject(e) settles promise to rejected" {
     , "caught:nope");
 }
 
+test "Promise.withResolvers.call(function(){}) throws TypeError — executor never set resolvers (§27.2.1.5)" {
+    // §27.2.1.5 NewPromiseCapability steps 7-8 — a constructor whose
+    // executor is never invoked leaves [[Resolve]]/[[Reject]] undefined,
+    // so withResolvers (§27.2.4.6 step 2) must throw a TypeError.
+    try expectScriptStringWithBuiltins(
+        \\try { Promise.withResolvers.call(function () {}); "NO-THROW"; }
+        \\catch (e) { e.constructor.name; }
+    , "TypeError");
+}
+
+test "Promise.withResolvers.call(C) honors a constructor that invokes its executor" {
+    try expectScriptStringWithBuiltins(
+        \\const w = Promise.withResolvers.call(function (ex) { ex(function () {}, function () {}); });
+        \\typeof w.resolve + "," + typeof w.reject;
+    , "function,function");
+}
+
+test "Promise subclass withResolvers() runs the subclass constructor" {
+    // §27.2.4.6 step 2 routes through NewPromiseCapability(C), so the
+    // subclass constructor runs and the bundled promise is its instance.
+    try expectScriptStringWithBuiltins(
+        \\class P extends Promise {}
+        \\const w = P.withResolvers();
+        \\String(w.promise instanceof P) + "," + typeof w.resolve;
+    , "true,function");
+}
+
 // ── §24.2.4.x Set ES2025 methods ──────────────────────────────────────────
 
 test "later: Set.prototype.union returns the merged set" {
@@ -4610,6 +4637,15 @@ test "later: Set.prototype.union returns the merged set" {
         \\const b = new Set([2, 3]);
         \\Array.from(a.union(b)).sort().join(",");
     , "1,2,3");
+}
+
+test "Set.prototype.union rejects a set-like with negative size as RangeError (§24.2.1.2 step 3.f)" {
+    // §24.2.1.2 GetSetRecord step 3.f — a negative `.size` is a
+    // RangeError, distinct from the NaN-size TypeError of step 3.e.
+    try expectScriptStringWithBuiltins(
+        \\const bad = { size: -1, has() { return false; }, keys() { return [].values(); } };
+        \\try { new Set([1]).union(bad); "NO-THROW"; } catch (e) { e.constructor.name; }
+    , "RangeError");
 }
 
 test "later: Set.prototype.intersection returns elements present in both" {
