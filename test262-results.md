@@ -2,8 +2,8 @@
 
 **Cynic passes 98.83 % of its 50894-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
-- **40178 passing** — Cynic produced the spec-expected result.
-- **10123 expected fails** — failures that hit a Cynic design policy (Annex B not shipped, strict-only, no Intl, eval-off, SES throw) rather than an engine bug. Counted as spec-correct in `pass%` because Cynic's deliberate "no" is the right answer for the policy it ships.
+- **39880 passing** — Cynic produced the spec-expected result.
+- **10421 expected fails** — failures that hit a Cynic design policy (Annex B not shipped, strict-only, no Intl, eval-off, SES throw) rather than an engine bug. Counted as spec-correct in `pass%` because Cynic's deliberate "no" is the right answer for the policy it ships.
 - **593 failing** — real engine failures with no policy bucket. Work to do.
 - **Out of total**, dropped before `corpus`: the upstream `harness/` and `staging/` paths, and every Stage ≤ 3 proposal (decorators, import-defer, source-phase-imports, import-bytes, immutable-arraybuffer, await-dictionary, plus shipped joint-iteration / ShadowRealm — those get their own dedicated scoreboard).
 
@@ -11,9 +11,9 @@
 
 | posture | passing | failing | expected fails | skip | total | pass% |
 |---|---:|---:|---:|---:|---:|---:|
-| **unhardened, `--allow=eval`** | 44617 | 920 | 5357 | 0 | 50894 | 98.19 % |
-| **unhardened** (`cynic --unhardened`) | 44074 | 600 | 6220 | 0 | 50894 | 98.82 % |
-| **hardened** (default — `cynic run`) | 40178 | 593 | 10123 | 0 | 50894 | 98.83 % |
+| **unhardened, `--allow=eval`** | 44593 | 912 | 5389 | 0 | 50894 | 98.21 % |
+| **unhardened** (`cynic --unhardened`) | 43776 | 600 | 6518 | 0 | 50894 | 98.82 % |
+| **hardened** (default — `cynic run`) | 39880 | 593 | 10421 | 0 | 50894 | 98.83 % |
 
 > **pass%** = `(passing + expected fails) / total`.
 > A fixture that fails because of a Cynic design policy
@@ -195,9 +195,9 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · unhardened | 57 | 1 | 0 | 0 | 58 | 98 % |
 | · +eval | 57 | 1 | 0 | 0 | 58 | 98 % |
 | **`built-ins/Function`** | | | | | | |
-| · hardened | 315 | 5 | 189 | 0 | 509 | 99 % |
-| · unhardened | 344 | 5 | 160 | 0 | 509 | 99 % |
-| · +eval | 344 | 5 | 160 | 0 | 509 | 99 % |
+| · hardened | 302 | 5 | 202 | 0 | 509 | 99 % |
+| · unhardened | 331 | 5 | 173 | 0 | 509 | 99 % |
+| · +eval | 331 | 5 | 173 | 0 | 509 | 99 % |
 | **`built-ins/Proxy`** | | | | | | |
 | · hardened | 290 | 3 | 18 | 0 | 311 | 99 % |
 | · unhardened | 296 | 4 | 11 | 0 | 311 | 99 % |
@@ -211,9 +211,9 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · unhardened | 1206 | 2 | 15 | 0 | 1223 | 100 % |
 | · +eval | 1206 | 2 | 15 | 0 | 1223 | 100 % |
 | **`language/expressions`** | | | | | | |
-| · hardened | 10017 | 1 | 664 | 0 | 10682 | 100 % |
-| · unhardened | 10132 | 1 | 549 | 0 | 10682 | 100 % |
-| · +eval | 10132 | 1 | 549 | 0 | 10682 | 100 % |
+| · hardened | 9935 | 1 | 746 | 0 | 10682 | 100 % |
+| · unhardened | 10050 | 1 | 631 | 0 | 10682 | 100 % |
+| · +eval | 10050 | 1 | 631 | 0 | 10682 | 100 % |
 
 **0 fails — passing / all-policy (sorted by expected fails ↓)**
 
@@ -231,6 +231,10 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 3885 | 0 | 703 | 0 | 4588 | 100 % |
 | · unhardened | 4588 | 0 | 0 | 0 | 4588 | 100 % |
 | · +eval | 4588 | 0 | 0 | 0 | 4588 | 100 % |
+| **`language/statements`** | | | | | | |
+| · hardened | 8641 | 0 | 682 | 0 | 9323 | 100 % |
+| · unhardened | 8730 | 0 | 593 | 0 | 9323 | 100 % |
+| · +eval | 8730 | 0 | 593 | 0 | 9323 | 100 % |
 | **`built-ins/Object`** | | | | | | |
 | · hardened | 2785 | 0 | 626 | 0 | 3411 | 100 % |
 | · unhardened | 3322 | 0 | 89 | 0 | 3411 | 100 % |
@@ -239,14 +243,10 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 2490 | 0 | 591 | 0 | 3081 | 100 % |
 | · unhardened | 3054 | 0 | 27 | 0 | 3081 | 100 % |
 | · +eval | 3054 | 0 | 27 | 0 | 3081 | 100 % |
-| **`language/statements`** | | | | | | |
-| · hardened | 8753 | 0 | 570 | 0 | 9323 | 100 % |
-| · unhardened | 8842 | 0 | 481 | 0 | 9323 | 100 % |
-| · +eval | 8842 | 0 | 481 | 0 | 9323 | 100 % |
 | **`language/eval-code`** | | | | | | |
-| · hardened | 73 | 0 | 274 | 0 | 347 | 100 % |
-| · unhardened | 73 | 0 | 274 | 0 | 347 | 100 % |
-| · +eval | 73 | 0 | 274 | 0 | 347 | 100 % |
+| · hardened | 12 | 0 | 335 | 0 | 347 | 100 % |
+| · unhardened | 12 | 0 | 335 | 0 | 347 | 100 % |
+| · +eval | 12 | 0 | 335 | 0 | 347 | 100 % |
 | **`intl402/NumberFormat`** | | | | | | |
 | · hardened | 0 | 0 | 253 | 0 | 253 | 100 % |
 | · unhardened | 0 | 0 | 253 | 0 | 253 | 100 % |
@@ -256,9 +256,9 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · unhardened | 0 | 0 | 248 | 0 | 248 | 100 % |
 | · +eval | 0 | 0 | 248 | 0 | 248 | 100 % |
 | **`annexB/built-ins`** | | | | | | |
-| · hardened | 3 | 0 | 238 | 0 | 241 | 100 % |
-| · unhardened | 3 | 0 | 238 | 0 | 241 | 100 % |
-| · +eval | 3 | 0 | 238 | 0 | 241 | 100 % |
+| · hardened | 2 | 0 | 239 | 0 | 241 | 100 % |
+| · unhardened | 2 | 0 | 239 | 0 | 241 | 100 % |
+| · +eval | 2 | 0 | 239 | 0 | 241 | 100 % |
 | **`built-ins/Date`** | | | | | | |
 | · hardened | 439 | 0 | 155 | 0 | 594 | 100 % |
 | · unhardened | 594 | 0 | 0 | 0 | 594 | 100 % |
@@ -276,9 +276,9 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · unhardened | 0 | 0 | 111 | 0 | 111 | 100 % |
 | · +eval | 0 | 0 | 111 | 0 | 111 | 100 % |
 | **`built-ins/RegExp`** | | | | | | |
-| · hardened | 1770 | 0 | 109 | 0 | 1879 | 100 % |
-| · unhardened | 1871 | 1 | 7 | 0 | 1879 | 100 % |
-| · +eval | 1871 | 1 | 7 | 0 | 1879 | 100 % |
+| · hardened | 1769 | 0 | 110 | 0 | 1879 | 100 % |
+| · unhardened | 1870 | 1 | 8 | 0 | 1879 | 100 % |
+| · +eval | 1870 | 1 | 8 | 0 | 1879 | 100 % |
 | **`built-ins/Promise`** | | | | | | |
 | · hardened | 533 | 0 | 107 | 0 | 640 | 100 % |
 | · unhardened | 637 | 0 | 3 | 0 | 640 | 100 % |
@@ -336,9 +336,9 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · unhardened | 152 | 0 | 1 | 0 | 153 | 100 % |
 | · +eval | 152 | 0 | 1 | 0 | 153 | 100 % |
 | **`language/arguments-object`** | | | | | | |
-| · hardened | 223 | 0 | 40 | 0 | 263 | 100 % |
-| · unhardened | 225 | 0 | 38 | 0 | 263 | 100 % |
-| · +eval | 225 | 0 | 38 | 0 | 263 | 100 % |
+| · hardened | 221 | 0 | 42 | 0 | 263 | 100 % |
+| · unhardened | 223 | 0 | 40 | 0 | 263 | 100 % |
+| · +eval | 223 | 0 | 40 | 0 | 263 | 100 % |
 | **`language/statementList`** | | | | | | |
 | · hardened | 40 | 0 | 40 | 0 | 80 | 100 % |
 | · unhardened | 40 | 0 | 40 | 0 | 80 | 100 % |
@@ -351,10 +351,18 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 58 | 0 | 36 | 0 | 94 | 100 % |
 | · unhardened | 94 | 0 | 0 | 0 | 94 | 100 % |
 | · +eval | 94 | 0 | 0 | 0 | 94 | 100 % |
+| **`language/literals`** | | | | | | |
+| · hardened | 502 | 0 | 32 | 0 | 534 | 100 % |
+| · unhardened | 502 | 0 | 32 | 0 | 534 | 100 % |
+| · +eval | 502 | 0 | 32 | 0 | 534 | 100 % |
 | **`built-ins/JSON`** | | | | | | |
 | · hardened | 136 | 0 | 29 | 0 | 165 | 100 % |
 | · unhardened | 164 | 1 | 0 | 0 | 165 | 99 % |
 | · +eval | 164 | 1 | 0 | 0 | 165 | 99 % |
+| **`language/directive-prologue`** | | | | | | |
+| · hardened | 33 | 0 | 29 | 0 | 62 | 100 % |
+| · unhardened | 33 | 0 | 29 | 0 | 62 | 100 % |
+| · +eval | 33 | 0 | 29 | 0 | 62 | 100 % |
 | **`built-ins/WeakMap`** | | | | | | |
 | · hardened | 114 | 0 | 27 | 0 | 141 | 100 % |
 | · unhardened | 141 | 0 | 0 | 0 | 141 | 100 % |
@@ -363,10 +371,6 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 73 | 0 | 25 | 0 | 98 | 100 % |
 | · unhardened | 96 | 0 | 2 | 0 | 98 | 100 % |
 | · +eval | 96 | 0 | 2 | 0 | 98 | 100 % |
-| **`language/directive-prologue`** | | | | | | |
-| · hardened | 37 | 0 | 25 | 0 | 62 | 100 % |
-| · unhardened | 37 | 0 | 25 | 0 | 62 | 100 % |
-| · +eval | 37 | 0 | 25 | 0 | 62 | 100 % |
 | **`built-ins/AsyncDisposableStack`** | | | | | | |
 | · hardened | 80 | 0 | 24 | 0 | 104 | 100 % |
 | · unhardened | 104 | 0 | 0 | 0 | 104 | 100 % |
@@ -408,9 +412,9 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · unhardened | 68 | 0 | 0 | 0 | 68 | 100 % |
 | · +eval | 68 | 0 | 0 | 0 | 68 | 100 % |
 | **`language/white-space`** | | | | | | |
-| · hardened | 52 | 0 | 15 | 0 | 67 | 100 % |
-| · unhardened | 52 | 0 | 15 | 0 | 67 | 100 % |
-| · +eval | 52 | 0 | 15 | 0 | 67 | 100 % |
+| · hardened | 51 | 0 | 16 | 0 | 67 | 100 % |
+| · unhardened | 51 | 0 | 16 | 0 | 67 | 100 % |
+| · +eval | 51 | 0 | 16 | 0 | 67 | 100 % |
 | **`intl402/String`** | | | | | | |
 | · hardened | 5 | 0 | 14 | 0 | 19 | 100 % |
 | · unhardened | 7 | 0 | 12 | 0 | 19 | 100 % |
@@ -419,10 +423,6 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 28 | 0 | 14 | 0 | 42 | 100 % |
 | · unhardened | 36 | 0 | 6 | 0 | 42 | 100 % |
 | · +eval | 36 | 0 | 6 | 0 | 42 | 100 % |
-| **`language/literals`** | | | | | | |
-| · hardened | 521 | 0 | 13 | 0 | 534 | 100 % |
-| · unhardened | 521 | 0 | 13 | 0 | 534 | 100 % |
-| · +eval | 521 | 0 | 13 | 0 | 534 | 100 % |
 | **`built-ins/RegExpStringIteratorPrototype`** | | | | | | |
 | · hardened | 5 | 0 | 12 | 0 | 17 | 100 % |
 | · unhardened | 17 | 0 | 0 | 0 | 17 | 100 % |
@@ -468,9 +468,9 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · unhardened | 29 | 0 | 0 | 0 | 29 | 100 % |
 | · +eval | 29 | 0 | 0 | 0 | 29 | 100 % |
 | **`language/comments`** | | | | | | |
-| · hardened | 45 | 0 | 7 | 0 | 52 | 100 % |
-| · unhardened | 45 | 0 | 7 | 0 | 52 | 100 % |
-| · +eval | 45 | 0 | 7 | 0 | 52 | 100 % |
+| · hardened | 44 | 0 | 8 | 0 | 52 | 100 % |
+| · unhardened | 44 | 0 | 8 | 0 | 52 | 100 % |
+| · +eval | 44 | 0 | 8 | 0 | 52 | 100 % |
 | **`language/future-reserved-words`** | | | | | | |
 | · hardened | 48 | 0 | 7 | 0 | 55 | 100 % |
 | · unhardened | 48 | 0 | 7 | 0 | 55 | 100 % |
@@ -499,6 +499,10 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 23 | 0 | 4 | 0 | 27 | 100 % |
 | · unhardened | 27 | 0 | 0 | 0 | 27 | 100 % |
 | · +eval | 27 | 0 | 0 | 0 | 27 | 100 % |
+| **`built-ins/eval`** | | | | | | |
+| · hardened | 6 | 0 | 4 | 0 | 10 | 100 % |
+| · unhardened | 9 | 0 | 1 | 0 | 10 | 100 % |
+| · +eval | 9 | 0 | 1 | 0 | 10 | 100 % |
 | **`built-ins/undefined`** | | | | | | |
 | · hardened | 4 | 0 | 4 | 0 | 8 | 100 % |
 | · unhardened | 4 | 0 | 4 | 0 | 8 | 100 % |
@@ -531,10 +535,6 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 28 | 0 | 3 | 0 | 31 | 100 % |
 | · unhardened | 31 | 0 | 0 | 0 | 31 | 100 % |
 | · +eval | 31 | 0 | 0 | 0 | 31 | 100 % |
-| **`built-ins/eval`** | | | | | | |
-| · hardened | 7 | 0 | 3 | 0 | 10 | 100 % |
-| · unhardened | 10 | 0 | 0 | 0 | 10 | 100 % |
-| · +eval | 10 | 0 | 0 | 0 | 10 | 100 % |
 | **`built-ins/Infinity`** | | | | | | |
 | · hardened | 4 | 0 | 2 | 0 | 6 | 100 % |
 | · unhardened | 4 | 0 | 2 | 0 | 6 | 100 % |
@@ -647,13 +647,13 @@ These fixtures are excluded from the top-line score.
 
 ## History
 
-### 2026-06-02 — cynic `8bf5d61`, test262 `d0c1b4555b`
+### 2026-06-02 — cynic `6a72b62`, test262 `d0c1b4555b`
 
 |         | passing | failing | expected fails | total | pass% | Δ pass | elapsed |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **unhardened** | 44074 | 600 | 6220 | 50894 | 98.82 % | +3 | 30.1 s |
-| **hardened** | 40178 | 593 | 10123 | 50894 | 98.83 % | +3 | 30.3 s |
-| **unhardened_allow_eval** | 44617 | 920 | 5357 | 50894 | 98.19 % | n/a | 30.1 s |
+| **unhardened** | 43776 | 600 | 6518 | 50894 | 98.82 % | +3 | 30.1 s |
+| **hardened** | 39880 | 593 | 10421 | 50894 | 98.83 % | +3 | 30.1 s |
+| **unhardened_allow_eval** | 44593 | 912 | 5389 | 50894 | 98.21 % | n/a | 30.1 s |
 
 ### 2026-06-01 — cynic `fed859f`, test262 `d0c1b4555b`
 
