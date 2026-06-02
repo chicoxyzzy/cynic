@@ -6929,6 +6929,7 @@ pub fn runFrames(
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+            const gr = f.running_realm orelse realm;
             // §13.15.2 step 1.f.i — strict-mode assignment to a
             // truly-unresolvable reference throws ReferenceError
             // at PutValue. Top-level `var x` / `let x` / `const x`
@@ -6937,8 +6938,8 @@ pub fn runFrames(
             // key is present. Anything missing here is a bare
             // `x = 1` for some `x` that was never declared
             // anywhere — strict mode forbids the implicit global.
-            if (!realm.globals.contains(key_s.flatBytes())) {
-                const ex = try makeReferenceError(realm, key_s.flatBytes());
+            if (!gr.globals.contains(key_s.flatBytes())) {
+                const ex = try makeReferenceError(gr, key_s.flatBytes());
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
@@ -6959,10 +6960,10 @@ pub fn runFrames(
             // PutValue (§6.2.5.5) and must surface the §13.3.1
             // TDZ ReferenceError when the slot still holds the
             // Hole sentinel.
-            if (realm.globals.hasLexicalDeclaration(key_s.flatBytes())) {
-                const cur = realm.globals.getDecl(key_s.flatBytes()) orelse Value.hole_;
+            if (gr.globals.hasLexicalDeclaration(key_s.flatBytes())) {
+                const cur = gr.globals.getDecl(key_s.flatBytes()) orelse Value.hole_;
                 if (cur.isHole()) {
-                    const ex = try makeReferenceError(realm, "Cannot access binding before initialisation");
+                    const ex = try makeReferenceError(gr, "Cannot access binding before initialisation");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -6971,8 +6972,8 @@ pub fn runFrames(
                     }
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
-                if (realm.globals.isLexConst(key_s.flatBytes())) {
-                    const ex = try makeTypeError(realm, "Assignment to constant variable");
+                if (gr.globals.isLexConst(key_s.flatBytes())) {
+                    const ex = try makeTypeError(gr, "Assignment to constant variable");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -6981,7 +6982,7 @@ pub fn runFrames(
                     }
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
-                try realm.globals.putDecl(realm.allocator, key_s.flatBytes(), acc);
+                try gr.globals.putDecl(realm.allocator, key_s.flatBytes(), acc);
             } else {
                 // §10.1.9.1 OrdinarySet step 3 — a write to a
                 // non-writable own data property of the global
@@ -6990,10 +6991,10 @@ pub fn runFrames(
                 // TypeError. Covers the §19.1 frozen globals
                 // (`undefined = 1`, `NaN = 1`, `Infinity = 1`)
                 // and any host-installed read-only data slot.
-                if (realm.globals.target) |gt| {
+                if (gr.globals.target) |gt| {
                     if (gt.property_flags.get(key_s.flatBytes())) |flags| {
                         if (!flags.writable) {
-                            const ex = try makeTypeError(realm, "Cannot assign to read-only property on globalThis");
+                            const ex = try makeTypeError(gr, "Cannot assign to read-only property on globalThis");
                             f.ip = ip;
                             f.accumulator = acc;
                             committed = true;
@@ -7004,11 +7005,11 @@ pub fn runFrames(
                         }
                     }
                 }
-                try realm.globals.put(realm.allocator, key_s.flatBytes(), acc);
+                try gr.globals.put(realm.allocator, key_s.flatBytes(), acc);
                 // Generational write barrier — a top-level `var`
                 // store can land a young value into the (mature)
                 // global object; record the old→young edge.
-                if (realm.globals.target) |gt| realm.heap.writeBarrier(.{ .object = gt }, acc);
+                if (gr.globals.target) |gt| realm.heap.writeBarrier(.{ .object = gt }, acc);
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -7031,7 +7032,12 @@ pub fn runFrames(
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-            registers[r] = if (realm.globals.contains(key_s.flatBytes()))
+            // Resolvability is judged against the executing function's
+            // home realm (same routing as `lda_global` / `sta_global`),
+            // not the dispatch realm — a free global assigned by a
+            // cross-realm-called function resolves in its own realm.
+            const gr = f.running_realm orelse realm;
+            registers[r] = if (gr.globals.contains(key_s.flatBytes()))
                 Value.fromBool(false)
             else
                 Value.fromBool(true);
@@ -7057,10 +7063,11 @@ pub fn runFrames(
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+            const gr = f.running_realm orelse realm;
             const flag = registers[r];
             const was_unresolved = flag.isBool() and flag.asBool();
             if (was_unresolved) {
-                const ex = try makeReferenceError(realm, key_s.flatBytes());
+                const ex = try makeReferenceError(gr, key_s.flatBytes());
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
@@ -7075,16 +7082,16 @@ pub fn runFrames(
             // both records); a name that was lex-declared
             // after the capture but before the store still
             // routes correctly to the declarative record here.
-            if (realm.globals.hasLexicalDeclaration(key_s.flatBytes())) {
+            if (gr.globals.hasLexicalDeclaration(key_s.flatBytes())) {
                 // §13.3.1 — `sta_global_strict` is reached only
                 // from assignment-expression code paths (never
                 // a declarator init), so a Hole-valued slot
                 // here is a §13.3.1 TDZ ReferenceError, not a
                 // first-init. Mirrors the matching check in
                 // `sta_global` above.
-                const cur = realm.globals.getDecl(key_s.flatBytes()) orelse Value.hole_;
+                const cur = gr.globals.getDecl(key_s.flatBytes()) orelse Value.hole_;
                 if (cur.isHole()) {
-                    const ex = try makeReferenceError(realm, "Cannot access binding before initialisation");
+                    const ex = try makeReferenceError(gr, "Cannot access binding before initialisation");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -7093,8 +7100,8 @@ pub fn runFrames(
                     }
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
-                if (realm.globals.isLexConst(key_s.flatBytes())) {
-                    const ex = try makeTypeError(realm, "Assignment to constant variable");
+                if (gr.globals.isLexConst(key_s.flatBytes())) {
+                    const ex = try makeTypeError(gr, "Assignment to constant variable");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -7103,7 +7110,7 @@ pub fn runFrames(
                     }
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
-                try realm.globals.putDecl(realm.allocator, key_s.flatBytes(), acc);
+                try gr.globals.putDecl(realm.allocator, key_s.flatBytes(), acc);
             } else {
                 // §10.1.9.1 OrdinarySet step 3 — same writable
                 // gate as `sta_global`. `sta_global_strict` is
@@ -7111,10 +7118,10 @@ pub fn runFrames(
                 // mode (Cynic's only mode) a non-writable own
                 // data property of the global object refuses
                 // the write with TypeError.
-                if (realm.globals.target) |gt| {
+                if (gr.globals.target) |gt| {
                     if (gt.property_flags.get(key_s.flatBytes())) |flags| {
                         if (!flags.writable) {
-                            const ex = try makeTypeError(realm, "Cannot assign to read-only property on globalThis");
+                            const ex = try makeTypeError(gr, "Cannot assign to read-only property on globalThis");
                             f.ip = ip;
                             f.accumulator = acc;
                             committed = true;
@@ -7125,11 +7132,11 @@ pub fn runFrames(
                         }
                     }
                 }
-                try realm.globals.put(realm.allocator, key_s.flatBytes(), acc);
+                try gr.globals.put(realm.allocator, key_s.flatBytes(), acc);
                 // Generational write barrier — a top-level `var`
                 // store can land a young value into the (mature)
                 // global object; record the old→young edge.
-                if (realm.globals.target) |gt| realm.heap.writeBarrier(.{ .object = gt }, acc);
+                if (gr.globals.target) |gt| realm.heap.writeBarrier(.{ .object = gt }, acc);
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
