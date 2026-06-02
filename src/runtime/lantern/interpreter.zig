@@ -465,26 +465,37 @@ pub fn evaluateScript(
     realm: *Realm,
     source: []const u8,
 ) EvaluateError!RunResult {
-    return evaluateSource(allocator, realm, source, false);
+    return evaluateSource(allocator, realm, source, false, false);
 }
 
-/// Evaluate `source` as eval code against `realm` (§3.8.3.7
-/// PerformShadowRealmEval; the indirect-`eval` path when `eval`
-/// ships). Like `evaluateScript`, but top-level lexical declarations
-/// (`let` / `const` / `class`) bind in a fresh per-call declarative
-/// environment rather than the realm's shared global env-record (see
-/// `compileEvalAsChunk`). Repeated calls against one realm are
-/// therefore independent: a later evaluation redeclaring a top-level
-/// `let` / `const` a prior evaluation used does not collide. Top-level
-/// `var` / function declarations still bind on the realm's global env
-/// and persist across calls. Free references resolve against the
-/// realm's globals.
+/// §3.8.3.7 PerformShadowRealmEval — evaluate `source` as **Script**
+/// code against `realm` (used by `ShadowRealm.prototype.evaluate`).
+/// Like `evaluateScript`, but top-level lexical declarations bind in a
+/// fresh per-call declarative environment so repeated calls don't
+/// collide. Top-level `var` / function declarations still bind on the
+/// shadow realm's global env and persist across `evaluate` calls
+/// (varEnv = [[GlobalEnv]]). NOT strict-eval var isolation — that's
+/// `evaluateIndirectEval`. Free references resolve against the realm's
+/// globals.
 pub fn evaluateEval(
     allocator: std.mem.Allocator,
     realm: *Realm,
     source: []const u8,
 ) EvaluateError!RunResult {
-    return evaluateSource(allocator, realm, source, true);
+    return evaluateSource(allocator, realm, source, true, false);
+}
+
+/// §19.2.1.1 — evaluate `source` as **indirect eval** code against
+/// `realm`. Like `evaluateEval`, but a strict eval (§19.2.1.3): the
+/// eval body gets its own variable environment, so top-level `var` /
+/// function declarations bind eval-locally and do NOT leak to the
+/// global env. Free references resolve against the realm's globals.
+pub fn evaluateIndirectEval(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    source: []const u8,
+) EvaluateError!RunResult {
+    return evaluateSource(allocator, realm, source, true, true);
 }
 
 /// §19.2.1 direct eval — the caller-frame context the `direct_eval`
@@ -607,6 +618,10 @@ fn evaluateSource(
     realm: *Realm,
     source: []const u8,
     eval_scope: bool,
+    /// §19.2.1.3 — when `eval_scope` is set, whether this is a strict
+    /// eval (var / function bind eval-locally) vs ShadowRealm-style
+    /// Script evaluation (var → global). Ignored when `!eval_scope`.
+    eval_local: bool,
 ) EvaluateError!RunResult {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -631,7 +646,7 @@ fn evaluateSource(
     // across `script_chunks` array growth.
     const chunk_ptr = try realm.allocator.create(Chunk);
     chunk_ptr.* = (if (eval_scope)
-        compiler_mod.compileEvalAsChunk(realm.allocator, realm, &program, source, null)
+        compiler_mod.compileEvalAsChunk(realm.allocator, realm, &program, source, null, eval_local)
     else
         compiler_mod.compileScriptAsChunk(realm.allocator, realm, &program, source, null)) catch {
         realm.allocator.destroy(chunk_ptr);

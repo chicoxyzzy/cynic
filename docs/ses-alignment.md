@@ -452,11 +452,17 @@ open the following run for real:
   the new function's scope is the global environment per spec.
 
 **Strict-only simplification.** Cynic parses all source as strict, so
-every eval is a strict eval (§19.2.1.3): direct eval reads the
-caller's scope but never injects `var` / function bindings into it.
-Corollary: test262 fixtures asserting *indirect* eval runs as sloppy
-can never pass and stay permanently out of scope
-(`strict_only_exact_paths` in `tools/test262/skip.zig`).
+every eval is a strict eval (§19.2.1.3): the eval body gets its own
+variable environment, so top-level `var` / function declarations bind
+eval-locally and never leak to the global env (indirect eval) or the
+caller's scope (direct eval). Direct eval still *reads* the caller's
+scope for free identifiers. Implemented via the compiler's `eval_local`
+mode, which routes the eval body's top-level bindings through the same
+non-global path module bodies use; `ShadowRealm.prototype.evaluate`
+stays on Script evaluation (var → the shadow realm's global env,
+§3.8.3.7) and is unaffected. Corollary: test262 fixtures asserting
+*indirect* eval runs as sloppy can never pass and stay permanently out
+of scope (`strict_only_exact_paths` in `tools/test262/skip.zig`).
 
 **Posture interaction.** The eval engine is posture-agnostic; the
 realm's existing freeze state does the confinement. Under the hardened
@@ -466,13 +472,6 @@ fix — so `eval("Array.prototype.push = 1")` throws, and that freeze
 `--unhardened` the same eval'd code sees mutable primordials. No fake
 endowment / confinement layer is built; full SES Compartment
 confinement is deferred (see "Out of scope").
-
-**Known limitation.** Indirect/direct strict eval that declares a
-top-level `var` currently binds it on the global environment rather
-than an eval-local variable environment — an observable §19.2.1.3 gap
-for the rare fixture that probes post-eval `var` isolation, not a
-crash. The completion-value and free-reference semantics that the bulk
-of the eval corpus exercises are correct.
 
 **test262.** The eval surface (~2,100 fixtures) runs in every phase.
 Eval-off phases (`main` / `unhardened`) classify an eval-surface

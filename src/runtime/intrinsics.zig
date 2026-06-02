@@ -2372,7 +2372,11 @@ pub fn performIndirectEval(realm: *Realm, source: []const u8) NativeError!Value 
     // for `Function.prototype.toString`, but `source` may be a
     // transient heap JSString that GC can reclaim.
     const stable = realm.retainEvalSource(source) catch return error.OutOfMemory;
-    const result = interp.evaluateEval(realm.allocator, realm, stable) catch |err| switch (err) {
+    // §19.2.1.1 indirect eval is a strict eval (§19.2.1.3): top-level
+    // `var` / function bind in the eval's own variable environment, not
+    // the global env. (Distinct from `evaluateEval`, which ShadowRealm
+    // uses for Script evaluation where var → the realm's global env.)
+    const result = interp.evaluateIndirectEval(realm.allocator, realm, stable) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // §19.2.1 step 11 — a SyntaxError from parsing the program.
         error.ParseError, error.CompileError => return throwSyntaxError(realm, "eval: SyntaxError in evaluated source"),
