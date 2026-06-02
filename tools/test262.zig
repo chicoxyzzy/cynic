@@ -4192,22 +4192,18 @@ fn writeScoreboard(
         \\  cross-realm cluster. The **0-fails tier** is sorted by
         \\  hardened `expected fails ↓`.
         \\
-        \\| area · posture | passing | failing | expected fails | total | pass% |
-        \\|---|---:|---:|---:|---:|---:|
         \\
     );
 
-    var buf: [384]u8 = undefined;
+    var buf: [512]u8 = undefined;
     var prev_tier: u8 = 255;
     for (sorted) |b| {
         const tier: u8 = if (b.fail == 0) 4 else if (b.fail < 10) 3 else if (b.fail < 100) 2 else if (b.fail < 1000) 1 else 0;
         if (tier != prev_tier) {
-            // Insert a tier label as a single-cell row spanning
-            // the table — keeps the header visible at the
-            // boundary instead of relying on the reader to spot
-            // the magnitude shift on their own. GitHub renders
-            // colspan via leading bold cell + filler dashes
-            // poorly, so we use a plain italic row.
+            // Each fail-tier is its own sub-table under a bold heading
+            // that spans the full width. Markdown pipe tables can't
+            // colspan, so a heading line (not a one-cell-plus-empties
+            // row) is the clean full-width separator.
             const label: []const u8 = switch (tier) {
                 0 => "1000+ fails — engine-work tier",
                 1 => "100–999 fails — engine-work tier",
@@ -4215,7 +4211,7 @@ fn writeScoreboard(
                 3 => "1–9 fails — engine-work tier",
                 else => "0 fails — passing / all-policy (sorted by expected fails ↓)",
             };
-            const hdr = try std.fmt.bufPrint(&buf, "| **_{s}_** | | | | | |\n", .{label});
+            const hdr = try std.fmt.bufPrint(&buf, "\n**{s}**\n\n| area · posture | passing | failing | expected fails | total | pass% |\n|---|---:|---:|---:|---:|---:|\n", .{label});
             try out.appendSlice(gpa, hdr);
             prev_tier = tier;
         }
