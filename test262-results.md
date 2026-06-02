@@ -27,18 +27,24 @@
 > `passing + failing + expected fails + skip = total`.
 >
 > **† the `--allow=eval` row is a projection**, not a measured
-> sweep — the opt-in isn't shipped (see `docs/ses-alignment.md`).
-> Turning eval on makes the eval-dependent fixtures (today
-> counted as expected fails) attempt to run; most would pass,
-> but that relabel stays inside the pass-counted numerator, so
-> it never moves pass%. The *only* score-affecting change is the
-> **4 indirect-eval Sputnik fixtures** — they fail even with
-> eval on (strict-mode PerformEval throws the wrong error
-> class), so they move from expected fail to real failing. The
-> projected row is the unhardened row with those 4 shifted:
-> `failing` 600 → 604, `expected fails` 6217 → 6213, pass%
-> 98.82 → 98.81. (Re-applied by hand after each `--write-results`
-> sweep, which regenerates this table to `n/a`.)
+> sweep. The `--allow=eval` *flag* ships (`Realm.allow_eval` plus
+> the CLI verb), but the eval *engine* does not — the flag only
+> swaps the refusal class (SyntaxError → EvalError), so
+> eval-dependent fixtures still don't execute. This row therefore
+> projects the score for when the eval **engine** lands (see
+> `docs/ses-alignment.md` §Phase 4), not the current flag-only
+> state. At that point, turning eval on makes the eval-dependent
+> fixtures (today counted as expected fails) attempt to run; most
+> would pass, but that relabel stays inside the pass-counted
+> numerator, so it never moves pass%. The *only* score-affecting
+> change is the **4 indirect-eval Sputnik fixtures** — they fail
+> even with eval on (strict-only parses the eval'd source strict,
+> so PerformEval throws the wrong error class), so they move from
+> expected fail to real failing. The projected row is the
+> unhardened row with those 4 shifted: `failing` 600 → 604,
+> `expected fails` 6217 → 6213, pass% 98.82 → 98.81. (Re-applied
+> by hand after each `--write-results` sweep, which regenerates
+> this table to `n/a`.)
 
 *SES witness fidelity*: **10 / 10** witnesses are SES expected fails (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
@@ -51,10 +57,12 @@ refer to the same parse → compile → run sweep.
 
 - **unhardened, `--allow=eval`** — unhardened plus the
   eval surface (`eval()`, `new Function(string)`, …) opted
-  in. **Projected, not measured** (†): `--allow=eval` isn't
-  shipped yet (see `docs/ses-alignment.md`); this row is
-  derived from the unhardened sweep — see the † note under
-  the table. A real opt-in sweep replaces it when eval lands.
+  in. **Projected, not measured** (†): the `--allow=eval`
+  flag ships, but the eval *engine* doesn't yet (see
+  `docs/ses-alignment.md` §Phase 4), so the flag only changes
+  the refusal class and this row stays derived from the
+  unhardened sweep — see the † note under the table. A real
+  opt-in sweep replaces it when the eval engine lands.
 - **unhardened** — `cynic --unhardened` opt-out. Eval off
   (so eval-dependent fixtures fail and count as correctly
   handled fails), Annex B / Intl / noStrict failures too.
