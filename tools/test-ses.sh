@@ -16,9 +16,10 @@
 #                              extensible). The "round-trip" check
 #                              that --unhardened means what it says.
 #
-# Used by `zig build test-ses` and CI. Phase 4 of
-# `docs/handbook/ses-test262-policy.md` — the positive coverage
-# dual of `tools/test262/ses_witnesses.zig`.
+# Used by `zig build test-ses` and CI. Positive-coverage proof
+# that the hardened-by-default posture enables what it should
+# (the dual of the test262 sweep, which now scores binary
+# pass/fail under `--unhardened --allow=eval`).
 
 set -u
 

@@ -8392,13 +8392,10 @@ pub const Compiler = struct {
     /// otherwise contains no user code, so any reachable observation
     /// from script source is suppressed.
     ///
-    /// The message names the rejected identifier — both for end-user
+    /// The message names the rejected identifier for end-user
     /// diagnostics (V8 / SpiderMonkey both name the binding in their
-    /// `Cannot redeclare …` errors) and so the test262 hardened-mode
-    /// divergence classifier can pattern-match the throw via
-    /// `ses_divergent.zig`. Without a message the harness saw only
-    /// `name = "TypeError"`, which is too broad to add as a
-    /// divergence pattern.
+    /// `Cannot redeclare …` errors); a bare `name = "TypeError"` with
+    /// no message is uninformative.
     fn emitGlobalDeclThrow(self: *Compiler, name: []const u8, span: Span) CompileError!void {
         const k_type_error = try self.internString("TypeError");
         try self.builder.emitOp(.lda_global, span);

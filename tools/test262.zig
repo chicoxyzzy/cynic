@@ -3,10 +3,12 @@
 //! Walks a test262 corpus (defaults to `vendor/test262/test/`), reads
 //! the YAML frontmatter from each `.js` file, applies skip rules, and
 //! either parses or executes each fixture against a fresh Realm.
-//! Tallies pass / fail / skip and prints a final report.
+//! Every fixture is scored a plain pass or fail under one posture
+//! (`--unhardened --allow=eval`); prints a final report.
 //!
-//! Pre-Stage-4 TC39 proposals Cynic ships (joint-iteration, upsert)
-//! are scored as their own dedicated phase sweeps — see `--phase`.
+//! Pre-Stage-4 TC39 proposals Cynic ships (joint-iteration,
+//! ShadowRealm) are scored as their own dedicated phase sweeps — see
+//! `--phase`.
 //!
 //! Usage:
 //!   zig build test262 -- [flags]
@@ -22,38 +24,27 @@
 //!
 //! Phasing:
 //!   --phase=<spec>          Pin the harness to one sweep instead of the default.
-//!                           `--phase=main` runs only the main ECMA-262 sweep
-//!                           (pre-Stage-4 fixtures excluded). `--phase=feature:<name>`
+//!                           `--phase=main` runs only the headline ECMA-262 sweep
+//!                           under the single posture (`--unhardened --allow=eval`;
+//!                           pre-Stage-4 fixtures excluded). `--phase=feature:<name>`
 //!                           runs only that proposal's dedicated sweep (only its
 //!                           realm flag on, only its tagged fixtures included).
-//!                           `--phase=unhardened` runs the main fixture set against
-//!                           a realm with `realm.hardened = false` — confirms the
-//!                           `--unhardened` opt-out keeps fixtures alive that
-//!                           regress under the hardened-default freeze pass.
 //!                           Default: just main, unless `--write-results` is set —
 //!                           then main + every tracked feature in sequence.
 //!
 //! Output:
 //!   --quiet                 Suppress live progress on stderr.
 //!   --verbose               Per-file outcome on stderr.
-//!   --write-results         Replace today's row (per `mode`) in
-//!                           `test262-results.md` with this run's stats.
-//!                           Implies running every phase.
+//!   --write-results         Replace today's row in `test262-results.md`
+//!                           with this run's stats. Implies running the main
+//!                           phase + every tracked feature phase.
 //!   --list-failures=<n>     After the tally, print up to N failing test paths
 //!                           (main phase only).
-//!   --min-spec-pct=<f>      Floor on the **unhardened** phase (legacy
-//!                           ECMAScript baseline — the `runtime` row in
-//!                           `test262-results.md`). Exit 2 if that phase's
-//!                           pass-percentage falls below <f>. Ignored when
-//!                           `--filter=` narrows the corpus. Used by CI to
-//!                           gate on test262 regressions — see
+//!   --min-pass-pct=<f>      Headline floor. Exit 2 if `pass%`
+//!                           (= passing / (passing + failing)) falls below <f>.
+//!                           Ignored when `--filter=` narrows the corpus. Used
+//!                           by CI to gate on test262 regressions — see
 //!                           `.github/workflows/ci.yml`.
-//!   --min-hardened-spec-pct=<f>
-//!                           Companion floor on the **main (hardened)** phase
-//!                           — the SES-posture sweep, scored as the
-//!                           `hardened` row. Independent of
-//!                           `--min-spec-pct` so a hardened regression fails
-//!                           CI even when the legacy baseline is intact.
 //!
 //! Iteration / parallelism:
 //!   --only-failing          Skip-as-pass any fixture listed in
@@ -98,8 +89,6 @@ const cynic = @import("cynic");
 const frontmatter = @import("test262/frontmatter.zig");
 const skip_rules = @import("test262/skip.zig");
 const harness_mod = @import("test262/harness.zig");
-const ses_divergent = @import("test262/ses_divergent.zig");
-const ses_witnesses = @import("test262/ses_witnesses.zig");
 
 /// Per-worker loader state. Set by `classifyAndRun` before
 /// running a module-flagged test; consulted by
@@ -423,14 +412,6 @@ const Outcome = enum {
     fail_false_reject, // we rejected legal code
     fail_false_accept, // we accepted code that should be a parse error
     skip,
-    /// Fixture failure that hits a Cynic design policy: Annex B
-    /// not shipped, strict-only, no Intl, eval-off, or SES throw
-    /// (the last is hardened-only and matched against the runtime
-    /// error pattern in `tools/test262/ses_divergent.zig`; the rest
-    /// are path / frontmatter classified via `skip_rules.pathPolicyKind`).
-    /// Counted into the `correctly_handled` bucket — neither
-    /// passing nor failing for `pass%` purposes.
-    fail_correctly_handled,
 };
 
 const SkipReason = enum {
@@ -463,35 +444,6 @@ const SkipReason = enum {
     /// per-feature scoreboard is sourced from dedicated phase
     /// sweeps, each with only its one flag enabled.
     out_of_phase,
-};
-
-/// Mode identifies the SES posture the runtime sweep used —
-/// the score-row identity in `test262-results.md`.
-const Mode = enum {
-    /// Legacy ECMAScript baseline — `realm.hardened = false`,
-    /// primordials mutable, globalThis extensible. Opt into via
-    /// `cynic --unhardened`. Sweep phase = `.unhardened`.
-    unhardened,
-    /// Default SES posture — `realm.hardened = true`, primordials
-    /// frozen + override-mistake fix + locked descriptors. Sweep
-    /// phase = `.main`. What `cynic run` ships.
-    hardened,
-    /// Unhardened + the eval surface opted in. Placeholder until
-    /// `--allow=eval` ships (see `docs/ses-alignment.md`): no sweep
-    /// populates this row today, so it renders as `n/a` in
-    /// `test262-results.md`. Reserved here so the row layout in
-    /// `## Current scores` stays stable when eval lands.
-    unhardened_allow_eval,
-
-    /// Render the mode as it appears in `test262-results.md`
-    /// score rows and headers.
-    fn label(self: Mode) []const u8 {
-        return switch (self) {
-            .unhardened => "unhardened",
-            .hardened => "hardened",
-            .unhardened_allow_eval => "unhardened-allow-eval",
-        };
-    }
 };
 
 const Options = struct {
@@ -613,41 +565,14 @@ const Options = struct {
     /// phase regardless of `--write-results`. Accepted spellings:
     /// `--phase=main`, `--phase=feature:<flag>` (e.g. `feature:joint-iteration`).
     phase: ?Phase = null,
-    /// Minimum acceptable `pass%` (= `pass / corpus`) for the
-    /// **unhardened** phase — the legacy ECMAScript baseline that
-    /// `test262-results.md`'s `runtime` row tracks. When >0 and
-    /// the unhardened phase runs, a pass-percentage below this
-    /// threshold prints a diagnostic and exits 2. `0.0` (default)
-    /// disables.
-    ///
-    /// Scoped to the unhardened phase so CI can gate on the
-    /// historical baseline without false-positiving on the
-    /// hardened phase (separately guarded by
-    /// `min_hardened_spec_pct`). Filtered runs and runs that don't
-    /// include the phase skip the check.
-    ///
-    /// Flag name is `--min-spec-pct` for backwards-compat with
-    /// existing CI configs; the column it gates is now labelled
-    /// `pass%` in `test262-results.md` (it isn't actual ECMA-262
-    /// spec conformance — see the Legend in that file).
-    min_spec_pct: f64 = 0.0,
-    /// Minimum acceptable `pass%` for the **main (hardened)** phase
-    /// — the SES-posture sweep that `test262-results.md`'s
-    /// `hardened` row tracks. Same enforcement shape as
-    /// `min_spec_pct`, distinct flag so both postures gate
-    /// independently. `pass%` here is
-    /// `(passing + correctly_handled) / total`.
-    ///
-    /// Flag name is `--min-hardened-spec-pct` for backwards-compat
-    /// with existing CI configs.
-    min_hardened_spec_pct: f64 = 0.0,
-    /// Minimum acceptable pass rate on the **SES witness set**
-    /// (`tools/test262/ses_witnesses.zig`). Default 0 disables;
-    /// CI sets 100 so any drift in a curated witness fixture
-    /// (a previously-correctly_handled witness now passing or failing
-    /// for a non-divergence reason) fails the build. Phase 3
-    /// of `docs/handbook/ses-test262-policy.md`.
-    min_ses_witness_pct: f64 = 0.0,
+    /// Minimum acceptable `pass%` (= `passing / (passing + failing)`)
+    /// for the headline sweep. When >0 and the run is unfiltered, a
+    /// pass-percentage below this threshold prints a diagnostic and
+    /// exits 2. `0.0` (default) disables. Filtered runs skip the
+    /// check (a `--filter=` narrows the corpus to a sliver whose
+    /// pass% has no meaningful relation to the published row). Flag:
+    /// `--min-pass-pct`.
+    min_pass_pct: f64 = 0.0,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -663,25 +588,6 @@ const Stats = struct {
     skip: u32 = 0,
     pos_attempted: u32 = 0,
     neg_attempted: u32 = 0,
-    /// Failures Cynic produces by design (SES throw, Annex B not
-    /// shipped, strict-only, no Intl, eval off) — rendered as the
-    /// **`expected fails`** column. SES is matched against the
-    /// thrown-error pattern in `tools/test262/ses_divergent.zig`; the
-    /// rest via `skip_rules.pathPolicyKind`. Counted in `total` but
-    /// neither `pass()` nor `fail()`; feeds the headline
-    /// `(passing + correctly_handled) / total`.
-    correctly_handled: u32 = 0,
-    /// SES-witness fixture counters — curated subset of paths
-    /// (`tools/test262/ses_witnesses.zig`) that MUST classify as
-    /// `correctly_handled` under hardened-mode runs. Drift either way
-    /// (pass / fail) signals an SES enforcement regression and
-    /// fails CI via `--min-ses-witness-pct=100`. The witness
-    /// fixtures are still part of the main `total` / `correctly_handled`
-    /// counts — these are additional positive-coverage counters
-    /// on top, not an alternative classification. Phase 3 of
-    /// `docs/handbook/ses-test262-policy.md`.
-    witness_pass: u32 = 0,
-    witness_fail: u32 = 0,
     /// Per-reason histogram of the `skip` count. Indexed by the
     /// underlying `SkipReason` enum value so callers can sum any
     /// subset (e.g. "what's the by_path total alone?") without
@@ -692,7 +598,7 @@ const Stats = struct {
     /// Fixtures dropped from `total` as out of scope. Today only
     /// unimplemented pre-Stage-4 proposal tags land here (reason
     /// `.pre_stage4`); the `.no_strict` / `.annex_b` arms are legacy
-    /// (those fixtures now run and classify as `correctly_handled`).
+    /// (those fixtures now run and are scored as plain pass/fail).
     /// NOT part of `total`, `skip`, or any bucket; tracked purely so
     /// the tally can report how much the corpus was trimmed and why.
     oos: u32 = 0,
@@ -712,8 +618,8 @@ const Stats = struct {
 const skip_reason_count: usize = @typeInfo(SkipReason).@"enum".fields.len;
 
 /// What kind of outcome to record for a bucket. Mirrors the
-/// three-way grouping the rolled-up `Stats` already uses.
-const BucketKind = enum { pass, fail, skip, correctly_handled };
+/// grouping the rolled-up `Stats` already uses.
+const BucketKind = enum { pass, fail, skip };
 
 /// Per-area counters. The `name` is the first two path
 /// components of the test262 fixture (e.g. `built-ins/Set`,
@@ -724,13 +630,6 @@ const Bucket = struct {
     pass: u32 = 0,
     fail: u32 = 0,
     skip: u32 = 0,
-    /// SES-correctly_handled count under the hardened phase (Phase 2 of
-    /// `docs/handbook/ses-test262-policy.md`). Always zero for
-    /// buckets sourced from non-hardened sweeps — only the
-    /// `.main` phase emits correctly_handled classifications. Counted
-    /// separately from `pass`, `fail`, `skip`; the four together
-    /// sum to `total`.
-    correctly_handled: u32 = 0,
     total: u32 = 0,
 };
 
@@ -770,7 +669,6 @@ const BucketMap = struct {
             .pass => gop.value_ptr.pass += 1,
             .fail => gop.value_ptr.fail += 1,
             .skip => gop.value_ptr.skip += 1,
-            .correctly_handled => gop.value_ptr.correctly_handled += 1,
         }
         gop.value_ptr.total += 1;
     }
@@ -806,20 +704,16 @@ const BucketMap = struct {
                 const ta = tier(a.fail);
                 const tb = tier(b.fail);
                 if (ta != tb) return ta < tb;
-                // Within a tier, sort by hardened pass% ascending —
-                // lowest first — so the whole scoreboard reads
-                // low → high pass% top to bottom (the tiers are
-                // already ordered most-fails-first). Compare the
-                // ratios (pass + correctly_handled) / total by
-                // cross-multiplying in u64 to avoid float rounding.
-                const a_num: u64 = @as(u64, a.pass + a.correctly_handled) * @as(u64, b.total);
-                const b_num: u64 = @as(u64, b.pass + b.correctly_handled) * @as(u64, a.total);
+                // Within a tier, sort by pass% ascending — lowest
+                // first — so the whole scoreboard reads low → high
+                // pass% top to bottom (the tiers are already ordered
+                // most-fails-first). pass% = pass / (pass + fail);
+                // cross-multiply in u64 to avoid float rounding.
+                const a_den: u32 = a.pass + a.fail;
+                const b_den: u32 = b.pass + b.fail;
+                const a_num: u64 = @as(u64, a.pass) * @as(u64, b_den);
+                const b_num: u64 = @as(u64, b.pass) * @as(u64, a_den);
                 if (a_num != b_num) return a_num < b_num;
-                // Tiebreaker: most SES divergence first (meaningful
-                // in the all-100% 0-fail tier), then alphabetical.
-                if (a.correctly_handled != b.correctly_handled) {
-                    return a.correctly_handled > b.correctly_handled;
-                }
                 return std.mem.order(u8, a.name, b.name) == .lt;
             }
         }.lt);
@@ -900,41 +794,28 @@ const PreStage4Stats = struct {
 /// `joint-iteration` fixture runs in a realm where
 /// `Map.prototype.getOrInsert` is undefined, and vice versa).
 const Phase = union(enum) {
+    /// The headline sweep — runs every in-scope fixture under the
+    /// single scored posture (`--unhardened --allow=eval`):
+    /// `realm.hardened = false`, `realm.allow_eval = true`. Excludes
+    /// any fixture tagged with a tracked pre-Stage-4 proposal (those
+    /// run only in their dedicated `.feature` sweeps).
     main,
-    /// A dedicated per-proposal sweep, run twice per tracked flag —
-    /// once hardened (the as-shipped SES posture, with correctly_handled
-    /// classification) and once unhardened (bare ECMA-262) — so each
-    /// proposal is measured the same two ways as the headline corpus.
+    /// A dedicated per-proposal sweep — one per tracked flag, run
+    /// under the same single posture as `.main` but with only that
+    /// one proposal flag enabled, so each shipped pre-Stage-4
+    /// proposal is scored binary pass/fail in isolation.
     feature: FeaturePhase,
-    /// SES relaxation sweep. Runs the main-phase fixture set against
-    /// a realm with `realm.hardened = false` so the freeze pass is
-    /// skipped — confirms fixtures that monkey-patch primordials (and
-    /// therefore regress under the hardened default) come back to
-    /// life with the single `--unhardened` opt-out. Selected via
-    /// `--phase=unhardened`.
-    unhardened,
-    /// `--allow=eval` sweep. Runs the main-phase fixture set against
-    /// a realm with `realm.allow_eval = true` (and `hardened = false`,
-    /// matching the published `unhardened, --allow=eval` row). The
-    /// `.eval` policy classification is dropped in this phase, so the
-    /// ~2,100 eval-surface fixtures run for real and their failures
-    /// count as genuine failures — the live "what eval work remains"
-    /// signal. Selected via `--phase=eval`.
-    eval,
 
     const FeaturePhase = struct {
         flag: cynic.runtime.FeatureFlag,
-        /// Each tracked proposal is swept once with `hardened = true`
-        /// (as `--enable=<flag>` ships) and once `false` (SES off).
-        hardened: bool,
     };
 
-    /// FeatureSet to install on the per-fixture realm. Main +
-    /// unhardened return empty (no proposals); a feature phase
-    /// returns a singleton set with only its flag.
+    /// FeatureSet to install on the per-fixture realm. Main returns
+    /// empty (no proposals); a feature phase returns a singleton set
+    /// with only its flag.
     fn realmFeatures(self: Phase) cynic.runtime.FeatureSet {
         return switch (self) {
-            .main, .unhardened, .eval => cynic.runtime.FeatureSet.initEmpty(),
+            .main => cynic.runtime.FeatureSet.initEmpty(),
             .feature => |f| blk: {
                 var s = cynic.runtime.FeatureSet.initEmpty();
                 s.insert(f.flag);
@@ -943,39 +824,13 @@ const Phase = union(enum) {
         };
     }
 
-    /// Whether per-fixture realms open the `--allow=eval` gate
-    /// (§19.2.1 / §20.2.1.1.1). Only the `.eval` phase does; every
-    /// other phase keeps the default SES refusal so eval-surface
-    /// failures classify as `correctly_handled`.
-    fn realmAllowEval(self: Phase) bool {
-        return self == .eval;
-    }
-
-    /// Whether per-fixture realms run under the hardened SES
-    /// posture. `.main` is hardened (as embedders see it by
-    /// default); `.unhardened` is the freeze-off headline sweep;
-    /// each `.feature` sweep carries its own posture so a proposal
-    /// is scored both hardened (as `--enable=<flag>` ships, with
-    /// correctly_handled classification) and unhardened (bare ECMA-262).
-    fn realmHardened(self: Phase) bool {
-        return switch (self) {
-            // The eval sweep runs unhardened so it maps onto the
-            // published `unhardened, --allow=eval` row and the freeze
-            // doesn't confound the eval-surface signal.
-            .unhardened, .eval => false,
-            .main => true,
-            .feature => |f| f.hardened,
-        };
-    }
-
     /// Phase membership predicate for a fixture, given its
-    /// pre-Stage-4 frontmatter bitmask. Main + unhardened admit
-    /// only fixtures that reference no tracked proposal
-    /// (mask == 0); a feature phase admits only fixtures whose
-    /// mask has the matching bit (regardless of posture).
+    /// pre-Stage-4 frontmatter bitmask. Main admits only fixtures
+    /// that reference no tracked proposal (mask == 0); a feature
+    /// phase admits only fixtures whose mask has the matching bit.
     fn includesFixture(self: Phase, pre_stage4_mask: PreStage4Mask) bool {
         return switch (self) {
-            .main, .unhardened, .eval => pre_stage4_mask == 0,
+            .main => pre_stage4_mask == 0,
             .feature => |f| has: {
                 const idx: usize = @intFromEnum(f.flag);
                 const bit = @as(PreStage4Mask, 1) << @intCast(idx);
@@ -987,14 +842,11 @@ const Phase = union(enum) {
     /// Short label for progress prefixes and the per-phase tally
     /// banner. `"main"` for the headline sweep; the feature's
     /// `name()` (same string as the test262 frontmatter `features:`
-    /// tag) for proposal sweeps — the banner appends the SES
-    /// posture; `"unhardened"` for the SES-relaxation sweep.
+    /// tag) for proposal sweeps.
     fn label(self: Phase) []const u8 {
         return switch (self) {
             .main => "main",
             .feature => |f| f.flag.name(),
-            .unhardened => "unhardened",
-            .eval => "eval",
         };
     }
 };
@@ -1113,60 +965,37 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    // Phase plan. Default: main (hardened) + unhardened — both
-    // SES postures get scored on every sweep so
-    // `test262-results.md` shows the engine's compliance with
-    // both the SES-by-default position and the unhardened
-    // baseline. With `--write-results` (and no explicit
-    // `--phase`), additionally populate every row of the per-
-    // feature scoreboard by running each tracked proposal in
-    // its own sweep. An explicit `--phase` pins us to that one.
-    //
-    // Per-feature phases run under the unhardened path so the
-    // proposal scoreboard isn't dragged down by SES descriptor-
-    // shape regressions — each proposal is scored against bare
-    // ECMA-262 with only its one flag enabled, mirroring how an
-    // embedder would evaluate the feature in isolation.
+    // Phase plan. The headline sweep is a single posture
+    // (`--unhardened --allow=eval`), scored binary pass/fail. Default:
+    // just the main phase. With `--write-results` (and no explicit
+    // `--phase`), additionally run each tracked pre-Stage-4 proposal
+    // in its own sweep (only that one flag enabled) to populate the
+    // per-feature scoreboard. An explicit `--phase` pins us to that
+    // one.
     const tracked_count = @typeInfo(cynic.runtime.FeatureFlag).@"enum".fields.len;
-    // Each tracked proposal contributes two sweeps (hardened +
-    // unhardened), plus the three headline phases (main, unhardened,
-    // eval).
-    var phases_buf: [tracked_count * 2 + 3]Phase = undefined;
+    // One sweep per tracked proposal, plus the main phase.
+    var phases_buf: [tracked_count + 1]Phase = undefined;
     var phases_len: usize = 0;
     if (opts.phase) |p| {
         phases_buf[0] = p;
         phases_len = 1;
     } else if (opts.write_results) {
         phases_buf[0] = .main;
-        phases_buf[1] = .unhardened;
-        // §19.2.1 / §20.2.1.1.1 — the `--allow=eval` row: the eval
-        // surface runs for real so its failures are measured, not
-        // projected.
-        phases_buf[2] = .eval;
-        phases_len = 3;
+        phases_len = 1;
         inline for (@typeInfo(cynic.runtime.FeatureFlag).@"enum".fields) |f| {
             const flag: cynic.runtime.FeatureFlag = @enumFromInt(f.value);
-            phases_buf[phases_len] = .{ .feature = .{ .flag = flag, .hardened = true } };
-            phases_len += 1;
-            phases_buf[phases_len] = .{ .feature = .{ .flag = flag, .hardened = false } };
+            phases_buf[phases_len] = .{ .feature = .{ .flag = flag } };
             phases_len += 1;
         }
     } else {
         phases_buf[0] = .main;
-        phases_buf[1] = .unhardened;
-        phases_len = 2;
+        phases_len = 1;
     }
 
     var main_result: ?PhaseResult = null;
     defer if (main_result) |*r| r.deinit(gpa);
-    var unhardened_result: ?PhaseResult = null;
-    defer if (unhardened_result) |*r| r.deinit(gpa);
-    var eval_result: ?PhaseResult = null;
-    defer if (eval_result) |*r| r.deinit(gpa);
-    var feature_results_hardened: [tracked_count]?PhaseResult = @splat(null);
-    var feature_results_unhardened: [tracked_count]?PhaseResult = @splat(null);
-    defer for (&feature_results_hardened) |*slot| if (slot.*) |*pr| pr.deinit(gpa);
-    defer for (&feature_results_unhardened) |*slot| if (slot.*) |*pr| pr.deinit(gpa);
+    var feature_results: [tracked_count]?PhaseResult = @splat(null);
+    defer for (&feature_results) |*slot| if (slot.*) |*pr| pr.deinit(gpa);
 
     for (phases_buf[0..phases_len]) |phase| {
         const res = try runSweep(gpa, io, cwd, corpus, harness_sources, &opts, phase);
@@ -1177,88 +1006,33 @@ pub fn main(init: std.process.Init) !void {
             },
             .feature => |f| {
                 const idx: usize = @intFromEnum(f.flag);
-                const slot = if (f.hardened)
-                    &feature_results_hardened[idx]
-                else
-                    &feature_results_unhardened[idx];
+                const slot = &feature_results[idx];
                 if (slot.*) |*old| old.deinit(gpa);
                 slot.* = res;
-            },
-            .unhardened => {
-                if (unhardened_result) |*old| old.deinit(gpa);
-                unhardened_result = res;
-            },
-            .eval => {
-                if (eval_result) |*old| old.deinit(gpa);
-                eval_result = res;
             },
         }
     }
 
-    // Score-row write: both runtime modes (SES posture and the
-    // unhardened legacy baseline) get their own rows on every
-    // write. Pre-Stage-4 per-feature rows come from the dedicated
-    // phase sweeps we just ran (each in a realm with only its one
-    // flag enabled), folded into a `PreStage4Stats` for
-    // `writeResults`. The per-feature scoreboard belongs with the
-    // unhardened row since the feature phases run on the
-    // unhardened path.
+    // Score-row write: one row (single posture), plus the per-feature
+    // scoreboard built from the dedicated proposal sweeps we just ran.
     if (opts.write_results) {
-        // Per-feature scoreboard: each tracked proposal gets a
-        // hardened row (SES-adjusted — correctly_handled fixtures count
-        // toward pass, same (pass + correctly_handled) headline as the main
-        // hardened row) and an unhardened row (bare ECMA-262).
-        var pre_stage4_hardened: PreStage4Stats = .{};
-        var pre_stage4_unhardened: PreStage4Stats = .{};
-        for (feature_results_hardened, 0..) |maybe_r, i| {
+        var pre_stage4: PreStage4Stats = .{};
+        for (feature_results, 0..) |maybe_r, i| {
             if (maybe_r) |r| {
-                pre_stage4_hardened.slots[i] = .{
+                pre_stage4.slots[i] = .{
                     .name = tracked_pre_stage4_features[i],
                     .pass = r.stats.pass(),
                     .fail = r.stats.fail(),
                     .skip = r.stats.skip,
-                    .correctly_handled = r.stats.correctly_handled,
-                    .total = r.stats.total,
-                };
-            }
-        }
-        for (feature_results_unhardened, 0..) |maybe_r, i| {
-            if (maybe_r) |r| {
-                pre_stage4_unhardened.slots[i] = .{
-                    .name = tracked_pre_stage4_features[i],
-                    .pass = r.stats.pass(),
-                    .fail = r.stats.fail(),
-                    .skip = r.stats.skip,
-                    .correctly_handled = r.stats.correctly_handled,
                     .total = r.stats.total,
                 };
             }
         }
         const is_full = opts.filter == null and !opts.only_failing;
         const now_ts = std.Io.Clock.now(.real, io);
-        // SES-posture (hardened, default) row from the `.main` phase
-        // result. The per-feature scoreboard is written only on the
-        // unhardened (`.unhardened`) pass below, so the hardened row
-        // gets empty per-feature stats to avoid restamping it twice.
         if (main_result) |*mr| {
             const elapsed_for_row: ?u64 = if (is_full and mr.elapsed_ms > 0) @intCast(mr.elapsed_ms) else null;
-            const empty_pre_stage4: PreStage4Stats = .{};
-            const unhardened_buckets: ?*const BucketMap = if (unhardened_result) |*ur| &ur.buckets else null;
-            try writeResults(gpa, io, &mr.stats, &mr.buckets, unhardened_buckets, &empty_pre_stage4, &empty_pre_stage4, now_ts.toSeconds(), .hardened, elapsed_for_row);
-        }
-        // Unhardened (legacy) row + the two-row-per-feature scoreboard.
-        if (unhardened_result) |*ur| {
-            const elapsed_for_row: ?u64 = if (is_full and ur.elapsed_ms > 0) @intCast(ur.elapsed_ms) else null;
-            try writeResults(gpa, io, &ur.stats, &ur.buckets, null, &pre_stage4_hardened, &pre_stage4_unhardened, now_ts.toSeconds(), .unhardened, elapsed_for_row);
-        }
-        // §19.2.1 / §20.2.1.1.1 — `unhardened, --allow=eval` row from
-        // the measured eval sweep (the eval surface ran for real, so
-        // its failures are counted, not projected). Written last so
-        // the regenerated snapshot reflects all three measured rows.
-        if (eval_result) |*er| {
-            const elapsed_for_row: ?u64 = if (is_full and er.elapsed_ms > 0) @intCast(er.elapsed_ms) else null;
-            const empty_pre_stage4: PreStage4Stats = .{};
-            try writeResults(gpa, io, &er.stats, &er.buckets, null, &empty_pre_stage4, &empty_pre_stage4, now_ts.toSeconds(), .unhardened_allow_eval, elapsed_for_row);
+            try writeResults(gpa, io, &mr.stats, &mr.buckets, &pre_stage4, now_ts.toSeconds(), elapsed_for_row);
         }
     }
 
@@ -1271,67 +1045,25 @@ pub fn main(init: std.process.Init) !void {
         if (is_full) try writePassCache(gpa, io, cwd, mr.pass_paths.items);
     }
 
-    // `--min-spec-pct{,-hardened}` — gate the run on per-row
-    // spec% floors. Flips the previously-advisory test262 job to
-    // gating: a regression below either floor exits non-zero. The
-    // two flags map cleanly onto the two `runtime` rows in
-    // `test262-results.md`: `--min-spec-pct` floors the legacy
-    // (unhardened) baseline, `--min-hardened-spec-pct` floors the
-    // SES-posture mode. Filtered runs leave both floors wide-open
-    // because a `--filter=` narrows the corpus to a sliver whose
-    // spec% has no meaningful relation to the published row.
-    if (opts.filter == null) {
-        var below_floor = false;
-        const evalPhase = struct {
-            fn f(below: *bool, pr: *const PhaseResult, floor: f64, flag_name: []const u8) void {
-                if (pr.stats.total == 0) return;
-                // Headline `pass%` = `(passing + correctly_handled)
-                // / total` — a policy failure (SES throw, Annex B,
-                // strict-only, no Intl, eval off) is the right answer
-                // for the policy Cynic ships, so it counts toward the
-                // floor.
-                const headline_pass = pr.stats.pass() + pr.stats.correctly_handled;
-                const pct = 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(pr.stats.total));
-                if (pct < floor) {
+    // `--min-pass-pct` — gate the run on the headline pass% floor.
+    // A regression below the floor exits non-zero. Filtered runs
+    // leave the floor wide-open because a `--filter=` narrows the
+    // corpus to a sliver whose pass% has no meaningful relation to
+    // the published row.
+    if (opts.filter == null and opts.min_pass_pct > 0.0) {
+        if (main_result) |*mr| {
+            const attempted = mr.stats.pass() + mr.stats.fail();
+            if (attempted > 0) {
+                const pct = 100.0 * @as(f64, @floatFromInt(mr.stats.pass())) / @as(f64, @floatFromInt(attempted));
+                if (pct < opts.min_pass_pct) {
                     std.debug.print(
-                        "test262: phase '{s}' pass% {d:.2} below {s} floor {d:.2} (pass {d} / corpus {d})\n",
-                        .{ pr.phase.label(), pct, flag_name, floor, headline_pass, pr.stats.total },
+                        "test262: pass% {d:.2} below --min-pass-pct floor {d:.2} (pass {d} / {d})\n",
+                        .{ pct, opts.min_pass_pct, mr.stats.pass(), attempted },
                     );
-                    below.* = true;
-                }
-            }
-        }.f;
-        if (opts.min_spec_pct > 0.0) {
-            if (unhardened_result) |*ur| evalPhase(&below_floor, ur, opts.min_spec_pct, "--min-spec-pct");
-        }
-        if (opts.min_hardened_spec_pct > 0.0) {
-            if (main_result) |*mr| evalPhase(&below_floor, mr, opts.min_hardened_spec_pct, "--min-hardened-spec-pct");
-        }
-        // Witness floor — Phase 3 of the SES policy. The
-        // witness set's pass rate must stay above
-        // `--min-ses-witness-pct`. CI sets 100 % so any drift
-        // (a witness that stopped being correctly_handled — either
-        // it's now passing, signalling SES enforcement
-        // weakened, or it's now failing for a non-divergence
-        // reason, signalling a pattern miss or engine
-        // regression) fails the build. Only meaningful for
-        // the hardened (`.main`) phase.
-        if (opts.min_ses_witness_pct > 0.0) {
-            if (main_result) |*mr| {
-                const total = mr.stats.witness_pass + mr.stats.witness_fail;
-                if (total > 0) {
-                    const pct = 100.0 * @as(f64, @floatFromInt(mr.stats.witness_pass)) / @as(f64, @floatFromInt(total));
-                    if (pct < opts.min_ses_witness_pct) {
-                        std.debug.print(
-                            "test262: ses-witness pct {d:.2} below --min-ses-witness-pct floor {d:.2} (pass {d} / total {d})\n",
-                            .{ pct, opts.min_ses_witness_pct, mr.stats.witness_pass, total },
-                        );
-                        below_floor = true;
-                    }
+                    std.process.exit(2);
                 }
             }
         }
-        if (below_floor) std.process.exit(2);
     }
 }
 
@@ -1635,11 +1367,7 @@ fn runSweep(
     // distinctly in the log.
     if (!opts.quiet) {
         var label_buf: [80]u8 = undefined;
-        const posture: []const u8 = switch (phase) {
-            .feature => |f| if (f.hardened) " hardened" else " unhardened",
-            else => "",
-        };
-        const banner = try std.fmt.bufPrint(&label_buf, "\n[{s}{s}] ", .{ phase.label(), posture });
+        const banner = try std.fmt.bufPrint(&label_buf, "\n[{s}] ", .{phase.label()});
         try std.Io.File.stdout().writeStreamingAll(io, banner);
     }
     try printTally(io, &stats, elapsed);
@@ -1812,11 +1540,10 @@ const PhaseResult = struct {
 
 /// Skip reasons that take a fixture *out of the corpus denominator*
 /// rather than counting as an in-corpus skip. Only `.pre_stage4` is
-/// emitted today (decorators, import-defer, joint-iteration,
-/// ShadowRealm, …) — `noStrict` and Annex B fixtures now run and
-/// classify as `correctly_handled` post-run. The `.no_strict` /
-/// `.annex_b` arms stay here for backward compatibility with the
-/// rolled-up tally on historical runs.
+/// emitted today (decorators, import-defer, …) — `noStrict` and Annex
+/// B fixtures now run and are scored as plain pass/fail. The
+/// `.no_strict` / `.annex_b` arms stay here for backward
+/// compatibility with the rolled-up tally on historical runs.
 fn isOutOfScopeReason(r: SkipReason) bool {
     return switch (r) {
         .no_strict, .annex_b, .pre_stage4 => true,
@@ -1865,16 +1592,10 @@ fn recordOutcome(
     }
     stats.total += 1;
 
-    const bucket_kind: ?BucketKind = switch (outcome.kind) {
+    const bucket_kind: BucketKind = switch (outcome.kind) {
         .pass_positive, .pass_negative => .pass,
         .fail_false_reject, .fail_false_accept => .fail,
         .skip => .skip,
-        // Phase 5 (`docs/handbook/ses-test262-policy.md`) — correctly_handled
-        // fixtures get their own bucket column instead of being lumped
-        // into `skip`. Visible in the per-area scoreboard as a fourth
-        // column so a reader can tell at a glance which buckets
-        // accumulate SES reclassification vs which are truly skipped.
-        .fail_correctly_handled => .correctly_handled,
     };
     switch (outcome.kind) {
         .pass_positive => stats.pass_pos += 1,
@@ -1899,28 +1620,10 @@ fn recordOutcome(
                 stats.skip_by_reason[@intFromEnum(reason)] += 1;
             }
         },
-        .fail_correctly_handled => stats.correctly_handled += 1,
     }
-    // SES witness side-channel — curated paths that MUST
-    // classify as `correctly_handled` under hardened-mode runs. Drift
-    // (pass or non-correctly_handled fail) is logged as
-    // `witness_fail`; staying correctly_handled is `witness_pass`.
-    // Phase 3 of `docs/handbook/ses-test262-policy.md`.
-    if (ses_witnesses.isWitness(rel)) {
-        if (outcome.kind == .fail_correctly_handled) {
-            stats.witness_pass += 1;
-        } else if (outcome.kind == .skip) {
-            // Witnessed-but-skipped (e.g. filtered out, or
-            // out-of-phase) doesn't move either counter.
-        } else {
-            stats.witness_fail += 1;
-        }
-    }
-    // Bump the per-area bucket (`pass` / `fail` / `skip` /
-    // `correctly_handled`) so the scoreboard reflects this fixture's
-    // outcome. The headline expected-fails count sits in
-    // `Stats.correctly_handled` for the score-row math.
-    if (bucket_kind) |bk| try buckets.bump(bucketName(rel), bk);
+    // Bump the per-area bucket (`pass` / `fail` / `skip`) so the
+    // scoreboard reflects this fixture's outcome.
+    try buckets.bump(bucketName(rel), bucket_kind);
     if (outcome.kind == .pass_positive or outcome.kind == .fail_false_reject) {
         stats.pos_attempted += 1;
     } else if (outcome.kind == .pass_negative or outcome.kind == .fail_false_accept) {
@@ -2103,9 +1806,6 @@ fn mergeStats(dst: *Stats, src: *const Stats) void {
     dst.skip += src.skip;
     dst.pos_attempted += src.pos_attempted;
     dst.neg_attempted += src.neg_attempted;
-    dst.correctly_handled += src.correctly_handled;
-    dst.witness_pass += src.witness_pass;
-    dst.witness_fail += src.witness_fail;
     dst.oos += src.oos;
     inline for (0..skip_reason_count) |i| {
         dst.skip_by_reason[i] += src.skip_by_reason[i];
@@ -2125,31 +1825,8 @@ fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
         gop.value_ptr.pass += v.pass;
         gop.value_ptr.fail += v.fail;
         gop.value_ptr.skip += v.skip;
-        gop.value_ptr.correctly_handled += v.correctly_handled;
         gop.value_ptr.total += v.total;
     }
-}
-
-/// Outcome for a failure in the test SOURCE evaluation path
-/// (compile error or runtime throw at script eval). When a
-/// hardened phase is running (the headline `.main` sweep or a
-/// hardened per-feature sweep) and the path is in the curated
-/// `ses_divergent.divergent_paths` list, return `.fail_correctly_handled`
-/// so the fixture lands in the expected-fails bucket instead of
-/// being scored as a real engine bug. Unhardened phases skip this —
-/// with the freeze pass off, the fixture passes outright.
-///
-/// Only applied to the test source itself — harness preamble
-/// failures (sta.js, assert.js, $DONE setup, installBuiltins)
-/// stay as `.fail_false_reject` because a CH-list hit there would
-/// mask a real engine regression in the SES preamble path.
-fn testSourceFailureOutcome(phase: Phase, rel: []const u8) RunResult {
-    if (phase.realmHardened()) {
-        if (ses_divergent.classifyByPath(rel) != null) {
-            return .{ .kind = .fail_correctly_handled };
-        }
-    }
-    return .{ .kind = .fail_false_reject };
 }
 
 fn classifyAndRun(
@@ -2238,47 +1915,24 @@ fn classifyAndRun(
     // effect: parser `pass%` becomes a real "what fraction of
     // the corpus does the parser handle" gauge instead of a
     // heuristic-skipped underestimate.
-    // Annex B / SES carve-out feature-tagged fixtures run; a failure
-    // classifies as an expected fail under the matching policy via
-    // the sticky policy lookup below.
+    // Every fixture is scored binary pass/fail under the single
+    // posture. A fixture that fails — Annex B, no Intl, strict-only,
+    // SES, eval, whatever — counts as a plain fail; there is no
+    // policy reclassification.
     //
     // Pre-Stage-4 (Stage ≤ 3) proposals stay dropped: shipped ones
     // (joint-iteration, ShadowRealm) are filtered above via the
     // `out_of_phase` gate so they only run in their dedicated feature
     // sweeps; unshipped ones (decorators, import-defer, …) drop here
-    // via `.pre_stage4`. Per the user's scope decision the per-row
-    // total excludes Stage ≤ 3 entirely.
+    // via `.pre_stage4` — excluded from the corpus denominator.
     for (fm.features) |feat| {
         if (skip_rules.featureIsUnimplementedProposal(feat)) {
             return .{ .kind = .skip, .skip_reason = .pre_stage4 };
         }
     }
 
-    // Sticky policy classification — looked up once from path +
-    // frontmatter, consulted at every `.fail_*` return point so a
-    // policy-induced failure (Annex B / strict-only / Intl absent /
-    // eval-off) classifies as `correctly_handled` instead of `fail`.
-    // SES classification is still post-run (runtime error pattern)
-    // and lives in the throw-handling block below.
-    const path_policy: ?skip_rules.PolicyKind = skip_rules.pathPolicyKind(rel, fm.features, fm.flags.no_strict);
-    // The `.eval` phase opens the `--allow=eval` gate, so the eval
-    // surface runs for real and an eval-policy failure is a genuine
-    // failure (the "what eval work remains" signal) rather than a
-    // by-design refusal. Drop the `.eval` classification in that phase
-    // only; every other policy (Annex B / Intl / no_strict) still
-    // applies, and the eval-off phases keep `.eval` → correctly_handled.
-    const sticky_policy: ?skip_rules.PolicyKind = if (phase.realmAllowEval() and path_policy == .eval)
-        null
-    else
-        path_policy;
-    const fail_reject_or_ch: RunResult = if (sticky_policy != null)
-        .{ .kind = .fail_correctly_handled }
-    else
-        .{ .kind = .fail_false_reject };
-    const fail_accept_or_ch: RunResult = if (sticky_policy != null)
-        .{ .kind = .fail_correctly_handled }
-    else
-        .{ .kind = .fail_false_accept };
+    const fail_reject_or_ch: RunResult = .{ .kind = .fail_false_reject };
+    const fail_accept_or_ch: RunResult = .{ .kind = .fail_false_accept };
     const expected_negative: ?frontmatter.Negative = blk: {
         if (fm.negative) |n| break :blk n;
         break :blk null;
@@ -2341,16 +1995,12 @@ fn classifyAndRun(
     // that one flag, so the per-feature scoreboard reflects each
     // proposal honestly in isolation.
     realm.feature_flags = phase.realmFeatures();
-    // The `unhardened` phase flips the SES posture before
-    // intrinsic install so the Phase 1 freeze pass is skipped —
-    // fixtures that monkey-patch primordials should pass here
-    // even when they regress under the hardened-default main
-    // sweep.
-    realm.hardened = phase.realmHardened();
-    // The `eval` phase opens the `--allow=eval` gate so the eval
-    // surface (§19.2.1 / §20.2.1.1.1) runs for real; every other
-    // phase keeps the default refusal.
-    realm.allow_eval = phase.realmAllowEval();
+    // The single scored posture is `--unhardened --allow=eval`:
+    // the SES freeze pass is skipped (so fixtures that monkey-patch
+    // primordials run unhindered) and the eval surface (§19.2.1 /
+    // §20.2.1.1.1) is opened so eval-dependent fixtures run for real.
+    realm.hardened = false;
+    realm.allow_eval = true;
     realm.installBuiltins() catch return fail_reject_or_ch;
     // test262 fixtures use `__collectGarbage` / `__clearKeptObjects`
     // / `__drainMicrotasks` for deterministic triggering — debug
@@ -2470,7 +2120,7 @@ fn classifyAndRun(
                 std.debug.print("\nCOMPILE-FAIL {s}: {t}\n", .{ rel, err });
                 realm.allocator.destroy(chunk_ptr);
                 if (expected_negative) |_| return .{ .kind = .pass_negative };
-                return testSourceFailureOutcome(phase, rel);
+                return .{ .kind = .fail_false_reject };
             };
             entry_chunk_async = chunk_ptr.is_async_module;
             try realm.script_chunks.append(realm.allocator, chunk_ptr);
@@ -2497,7 +2147,7 @@ fn classifyAndRun(
             const mod_outcome = cynic.runtime.run(arena, &realm, chunk_ptr) catch {
                 entry_mod.state = .errored;
                 if (expected_negative) |_| return .{ .kind = .pass_negative };
-                return testSourceFailureOutcome(phase, rel);
+                return .{ .kind = .fail_false_reject };
             };
             entry_mod.state = switch (mod_outcome) {
                 .value, .yielded => .evaluated,
@@ -2516,7 +2166,7 @@ fn classifyAndRun(
         // here outlives this call.
         break :blk cynic.runtime.evaluateScript(arena, &realm, test_source) catch {
             if (expected_negative) |_| return .{ .kind = .pass_negative };
-            return testSourceFailureOutcome(phase, rel);
+            return .{ .kind = .fail_false_reject };
         };
     };
 
@@ -2583,14 +2233,9 @@ fn classifyAndRun(
     // synchronous and just relies on assert() inside it.
     // Pull a renderable `name` / `message` pair off the thrown
     // value (sync throw) OR the async-done error (async-flagged
-    // test that completed with an argument). Either feeds both
-    // the SES divergence classifier and the FAIL log. The async
-    // path was previously a separate early-return that skipped
-    // the classifier; consolidating here so a Promise fixture
-    // that throws "Cannot assign to read-only property" (from
-    // `Promise.resolve = ...` rejecting under SES) reclassifies
-    // the same way a sync fixture would. See Phase 2 follow-up
-    // in `docs/handbook/ses-test262-policy.md`.
+    // test that completed with an argument) to render the FAIL log
+    // line. Consolidated here so a sync throw and an async-done
+    // rejection render the same way.
     var msg_str: ?[]const u8 = null;
     var name_str: ?[]const u8 = null;
     const ex_value: cynic.runtime.Value = blk: {
@@ -2625,37 +2270,6 @@ fn classifyAndRun(
         } else if (ex_value.isString()) {
             const s: *cynic.runtime.JSString = @ptrCast(@alignCast(ex_value.asString()));
             msg_str = s.flatBytes();
-        }
-
-        // Hardened phase divergence reclassification. The
-        // patterns + categorisation live in
-        // `tools/test262/ses_divergent.zig`. Coverage target
-        // ≥80% per Phase 2 of the policy doc; the remainder is
-        // either category-misses (add a pattern on next bump)
-        // or genuine engine bugs surfaced by SES enforcement.
-        //
-        // Two-layer lookup: the message-based `classify` catches
-        // the bulk (~99.5 % of correctly_handled fixtures); a smaller
-        // curated `classifyByPath` escape hatch covers fixtures
-        // whose generic message (e.g. bare `Expected SameValue(
-        // «false», «true») to be true` from non-propertyHelper
-        // asserts) is too broad to add as a pattern without
-        // over-firing on real engine bugs.
-        if (phase.realmHardened()) {
-            const cat = ses_divergent.classify(name_str, msg_str) orelse
-                ses_divergent.classifyByPath(rel);
-            if (cat != null) {
-                // Skip the FAIL log line for the correctly_handled
-                // case — it's not a real failure, and printing
-                // ~2500 of these per sweep is noise.
-                return .{ .kind = .fail_correctly_handled };
-            }
-        }
-
-        // A path/feature-based policy match also routes through
-        // `correctly_handled` and silences the FAIL log.
-        if (sticky_policy != null) {
-            return .{ .kind = .fail_correctly_handled };
         }
 
         // Real-failure FAIL log render.
@@ -2941,7 +2555,6 @@ fn printVerbose(io: std.Io, rel: []const u8, r: RunResult) !void {
         .fail_false_reject => "FAIL(reject)",
         .fail_false_accept => "FAIL(accept)",
         .skip => "SKIP",
-        .fail_correctly_handled => "DIVERGENT",
     };
     const msg = try std.fmt.bufPrint(&buf, "{s} {s}\n", .{ tag, rel });
     try std.Io.File.stderr().writeStreamingAll(io, msg);
@@ -2949,88 +2562,37 @@ fn printVerbose(io: std.Io, rel: []const u8, r: RunResult) !void {
 
 fn printTally(io: std.Io, stats: *const Stats, elapsed_ms: i64) !void {
     var buf: [1024]u8 = undefined;
-    const pass_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(stats.total));
-    // Headline `pass%`: (passing + correctly_handled) / total. A
-    // an expected fail is one Cynic refuses by design, so
-    // it counts toward the headline. Equals `pass_pct` when there
-    // are no expected fails.
-    const adj_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass() + stats.correctly_handled)) / @as(f64, @floatFromInt(stats.total));
-    // Suppress the `adj:` line when there's no divergence — keeps
-    // the unhardened phase's tally clean.
-    if (stats.correctly_handled == 0) {
-        const msg = try std.fmt.bufPrint(&buf,
-            \\corpus:   {d}
-            \\pass:     {d}   ({d:.2}% — pass / corpus)
-            \\fail:     {d}
-            \\skip:     {d}
-            \\oos:      {d}   (dropped from corpus — strict-only, Annex B, pre-Stage-4)
-            \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
-            \\  parse-negative: {d} attempted, {d} pass, {d} fail (false-accept)
-            \\elapsed:  {d}ms
-            \\
-        , .{
-            stats.total,
-            stats.pass(),
-            pass_pct,
-            stats.fail(),
-            stats.skip,
-            stats.oos,
-            stats.pos_attempted,
-            stats.pass_pos,
-            stats.fail_reject,
-            stats.neg_attempted,
-            stats.pass_neg,
-            stats.fail_accept,
-            elapsed_ms,
-        });
-        try std.Io.File.stdout().writeStreamingAll(io, msg);
-    } else {
-        const msg = try std.fmt.bufPrint(&buf,
-            \\corpus:    {d}
-            \\passing:   {d}   ({d:.2}% engine-true)
-            \\corr-hand: {d}   (expected fails)
-            \\pass%:     {d:.2}% — (passing + expected fails) / corpus
-            \\failing:   {d}
-            \\skip:      {d}
-            \\oos:       {d}   (dropped from corpus — pre-Stage-4)
-            \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
-            \\  parse-negative: {d} attempted, {d} pass, {d} fail (false-accept)
-            \\elapsed:   {d}ms
-            \\
-        , .{
-            stats.total,
-            stats.pass(),
-            pass_pct,
-            stats.correctly_handled,
-            adj_pct,
-            stats.fail(),
-            stats.skip,
-            stats.oos,
-            stats.pos_attempted,
-            stats.pass_pos,
-            stats.fail_reject,
-            stats.neg_attempted,
-            stats.pass_neg,
-            stats.fail_accept,
-            elapsed_ms,
-        });
-        try std.Io.File.stdout().writeStreamingAll(io, msg);
-    }
-    // Witness-set signal — Phase 3 of
-    // `docs/handbook/ses-test262-policy.md`. Only emitted when
-    // the run actually swept witnesses (counters > 0); a
-    // filtered run that didn't touch the witness paths stays
-    // silent.
-    const witness_total = stats.witness_pass + stats.witness_fail;
-    if (witness_total > 0) {
-        const witness_pct: f64 = 100.0 * @as(f64, @floatFromInt(stats.witness_pass)) / @as(f64, @floatFromInt(witness_total));
-        var wb: [256]u8 = undefined;
-        const wm = try std.fmt.bufPrint(&wb,
-            \\  ses-witness: {d} / {d} pass ({d:.2}%)
-            \\
-        , .{ stats.witness_pass, witness_total, witness_pct });
-        try std.Io.File.stdout().writeStreamingAll(io, wm);
-    }
+    // Binary headline: pass% = passing / (passing + failing). Skips
+    // (structurally unrunnable fixtures) and pre-Stage-4 OOS drops
+    // are excluded from the denominator — every scored fixture is a
+    // plain pass or fail.
+    const attempted = stats.pass() + stats.fail();
+    const pass_pct: f64 = if (attempted == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(attempted));
+    const msg = try std.fmt.bufPrint(&buf,
+        \\passing:  {d}
+        \\failing:  {d}
+        \\pass%:    {d:.2}% — passing / (passing + failing)
+        \\skip:     {d}   (unrunnable — not scored)
+        \\oos:      {d}   (dropped from corpus — pre-Stage-4 proposals)
+        \\  parse-positive: {d} attempted, {d} pass, {d} fail (false-reject)
+        \\  parse-negative: {d} attempted, {d} pass, {d} fail (false-accept)
+        \\elapsed:  {d}ms
+        \\
+    , .{
+        stats.pass(),
+        stats.fail(),
+        pass_pct,
+        stats.skip,
+        stats.oos,
+        stats.pos_attempted,
+        stats.pass_pos,
+        stats.fail_reject,
+        stats.neg_attempted,
+        stats.pass_neg,
+        stats.fail_accept,
+        elapsed_ms,
+    });
+    try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
 /// `--skip-breakdown` output: two histograms.
@@ -3228,243 +2790,28 @@ fn printMemSummary(io: std.Io, agg: *const MemAggregate, stats: *const Stats) !v
 }
 
 /// One score-row in memory. The on-disk format groups these by
-/// `date` into per-day "Current scores"-style mini-tables; the
-/// reader supports the legacy linear table and the older
-/// per-day-with-scope format too so existing files migrate
-/// transparently on the next write.
+/// `date` into a `## History` section of per-day mini-tables, newest
+/// first. The reader parses only the current binary format; rows from
+/// older multi-posture formats fall off the table on the next write.
 const Row = struct {
     date: []const u8, // borrowed from the input history
-    mode: Mode,
     cynic_sha: []const u8,
     test262_sha: []const u8,
+    /// Engine-true passes — Cynic produced the spec-expected result.
+    passing: u32,
+    /// Engine-true failures. Every non-pass scored fixture lands here;
+    /// there is no "expected fail" reclassification.
+    failing: u32,
+    /// `passing + failing` — the scored corpus. Structurally-unrunnable
+    /// skips and pre-Stage-4 proposals are excluded.
     total: u32,
-    pass: u32,
-    /// `pass + fail`. Stored alongside `total` so the table can
-    /// surface raw counts for both `spec%` (pass/total) and
-    /// `attempted%` (pass/attempted). For rows imported from
-    /// pre-attempted-column history, derived from `attempted_pct`
-    /// (rounded; matches the original integer division to within 1).
-    attempted: u32,
-    spec_pct: f64,
-    attempted_pct: f64,
-    /// Expected-fails count for this row (the `expected fails`
-    /// column). Headline `pass%` is
-    /// `(passing + correctly_handled) / total`. Hardened rows carry
-    /// the most (SES throws on top of the path-policy buckets);
-    /// unhardened rows carry the path-policy buckets only.
-    correctly_handled: u32 = 0,
+    /// `100 * passing / total`.
+    pass_pct: f64,
     /// Wall-clock duration of the run that produced this row, in
-    /// milliseconds. `null` on rows imported from history files
-    /// that predate the `elapsed` column and on partial runs
-    /// (filtered / `--only-failing`) where the number wouldn't be
-    /// comparable to a full sweep.
+    /// milliseconds. `null` on rows imported from history that predate
+    /// the column and on partial (filtered / `--only-failing`) runs.
     elapsed_ms: ?u64 = null,
-    /// SES-witness side-channel counters (Phase 3 of
-    /// `docs/handbook/ses-test262-policy.md`). Populated on
-    /// `.hardened` rows from the run that produced them.
-    /// Zero for parsed-from-history rows that predate the column,
-    /// for other modes, and for runs that didn't touch any
-    /// witness paths (`--filter` excluded them). Rendered as a
-    /// "SES witness fidelity" note under `## Current scores` —
-    /// not persisted to per-day history tables to keep their
-    /// column shape stable.
-    witness_pass: u32 = 0,
-    witness_total: u32 = 0,
 };
-
-/// Derive `attempted` from `pass` and `attempted_pct` for rows
-/// imported from history files that didn't carry the column.
-/// `attempted_pct = 100 * engine_pass / attempted` where
-/// `engine_pass = pass - correctly_handled` (the spec-literal pass
-/// numerator). Solve for `attempted`. Falls back to `engine_pass`
-/// (≡ 100% attempted ≡ 0 fail) when the percent is zero or
-/// rounding would underflow.
-///
-/// The `correctly_handled` term is what makes this correct for hardened
-/// rows: their `pass` column includes the SES-correctly_handled count,
-/// but `attempted_pct` was computed against the engine-true pass
-/// (excluding correctly_handled). A naive solve without subtracting
-/// correctly_handled inflates `attempted` by ~`correctly_handled / engine%` —
-/// e.g. for hardened 37503 / 99.97, omitting correctly_handled gave
-/// 37514 instead of the correct 34487.
-fn deriveAttempted(pass: u32, correctly_handled: u32, attempted_pct: f64) u32 {
-    const engine_pass = if (pass >= correctly_handled) pass - correctly_handled else pass;
-    if (attempted_pct <= 0.0 or engine_pass == 0) return engine_pass;
-    const a = @as(f64, @floatFromInt(engine_pass)) * 100.0 / attempted_pct;
-    const rounded: u32 = @intFromFloat(@round(a));
-    return if (rounded < engine_pass) engine_pass else rounded;
-}
-
-/// Update test262-results.md with today's row for the run that
-/// just finished.
-///
-/// Layout: a `## Current scores` snapshot at the top (latest
-/// value per `mode`), a `## Legend` explaining the rows and
-/// columns, then a `## History` section with one mini-table per
-/// date — newest day first. One row per `(date, mode)`:
-/// re-running the same mode on the same date replaces that day's
-/// row.
-fn writeResults(
-    gpa: std.mem.Allocator,
-    io: std.Io,
-    stats: *const Stats,
-    buckets: *const BucketMap,
-    /// Per-area buckets from the unhardened sweep, for the
-    /// SES-off column in the per-area scoreboard. `null` on a
-    /// non-hardened or partial write — the scoreboard then falls
-    /// back to dashes in the unhardened / +eval cells.
-    unhardened_buckets: ?*const BucketMap,
-    pre_stage4_hardened: *const PreStage4Stats,
-    pre_stage4_unhardened: *const PreStage4Stats,
-    epoch_seconds: i64,
-    mode: Mode,
-    elapsed_ms: ?u64,
-) !void {
-    const cwd = std.Io.Dir.cwd();
-    const path = "test262-results.md";
-
-    const existing = cwd.readFileAlloc(io, path, gpa, .limited(1024 * 1024)) catch |err| switch (err) {
-        error.FileNotFound => "",
-        else => return err,
-    };
-    defer if (existing.len > 0) gpa.free(existing);
-
-    var rows: std.ArrayListUnmanaged(Row) = .empty;
-    defer rows.deinit(gpa);
-
-    // Read every prior format we've shipped: the original
-    // linear table, the per-day-with-scope intermediate, and the
-    // current per-day-mode-only format. Each reader filters to
-    // cynic-scope rows only — historical full-scope rows fall
-    // off the table since we no longer report against the full
-    // corpus.
-    try parseLinearRows(gpa, &rows, existing);
-    try parsePerDayRows(gpa, &rows, existing);
-
-    // Previous run's bucket pass counts — used to compute the
-    // "biggest movers" callout on the freshly-written latest row.
-    // Only the previous run is parsed (older runs lose bucket
-    // data when their row scrolls out of the snapshot).
-    var prev_bucket_pass: std.StringHashMapUnmanaged(u32) = .empty;
-    defer {
-        var it = prev_bucket_pass.iterator();
-        while (it.next()) |e| gpa.free(e.key_ptr.*);
-        prev_bucket_pass.deinit(gpa);
-    }
-    try parsePrevBucketPass(gpa, &prev_bucket_pass, existing);
-
-    // Capture the SHAs at write time (not build time): Zig's build
-    // cache reuses the previous configure when nothing in the build
-    // graph changes, so a build-time `git rev-parse` would happily
-    // bake in a stale SHA across new commits. Shelling out here keeps
-    // the row honest.
-    const cynic_sha_owned = currentShortSha(gpa, io, ".");
-    defer if (cynic_sha_owned) |s| gpa.free(s);
-    const test262_sha_owned = currentShortSha(gpa, io, "vendor/test262");
-    defer if (test262_sha_owned) |s| gpa.free(s);
-    const cynic_sha: []const u8 = cynic_sha_owned orelse "unknown";
-    const test262_sha: []const u8 = test262_sha_owned orelse "unknown";
-
-    var line_buf: [32]u8 = undefined;
-    const date = formatDateUtc(epoch_seconds, &line_buf);
-
-    // Drop any existing row for today's `mode` — the fresh
-    // stats below replace it. Other modes for today are kept
-    // intact (e.g. parser-run today shouldn't clobber a runtime
-    // row written earlier).
-    var i: usize = 0;
-    while (i < rows.items.len) {
-        const r = rows.items[i];
-        if (std.mem.eql(u8, r.date, date) and r.mode == mode) {
-            _ = rows.orderedRemove(i);
-        } else {
-            i += 1;
-        }
-    }
-
-    try rows.append(gpa, makeRow(date, mode, stats, cynic_sha, test262_sha, elapsed_ms));
-
-    // When this run was NOT the hardened-mode runtime sweep, we
-    // don't have fresh per-bucket data for the hardened
-    // scoreboard. Preserve the one already in the file by
-    // extracting its raw text so a parser refresh or unhardened-
-    // only refresh doesn't wipe the per-bucket signal. The
-    // scoreboard regen trigger in `writeFileBody` matches —
-    // `mode_just_run == .hardened` regenerates;
-    // everything else falls back to `preserved_scoreboard`.
-    const preserved_scoreboard: ?[]const u8 = if (mode == .hardened)
-        null
-    else
-        extractScoreboardSection(existing);
-    // The per-feature table tracks pre-Stage-4 proposals via
-    // dedicated phase sweeps, which run alongside the unhardened
-    // path. Preserve verbatim unless the run that just finished
-    // is the unhardened one (which feeds the per-feature stats).
-    const preserved_pre_stage4: ?[]const u8 = if (mode == .unhardened)
-        null
-    else
-        extractPreStage4Section(existing);
-
-    // SES-witness fidelity note — produced only by hardened-mode
-    // runs (only they populate `stats.witness_*`). When the run
-    // that just finished is NOT hardened, preserve the previous
-    // note verbatim so a parser- or unhardened-mode refresh
-    // doesn't drop the line from the Current Scores section.
-    const preserved_witness_note: ?[]const u8 = if (mode == .hardened)
-        null
-    else
-        extractWitnessNote(existing);
-
-    // Detect the one-time pre→post Phase 5c transition (per-area
-    // pass column shifting from unhardened to hardened source).
-    // The biggest-movers callout in `writeFileBody` skips when
-    // the previous file's scoreboard had no `correctly_handled` column.
-    const prev_scoreboard_phase5c = prevScoreboardHasDivergent(existing);
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(gpa);
-    try writeFileBody(gpa, &buf, rows.items, buckets, unhardened_buckets, pre_stage4_hardened, pre_stage4_unhardened, &prev_bucket_pass, mode, preserved_scoreboard, preserved_pre_stage4, preserved_witness_note, prev_scoreboard_phase5c);
-
-    try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
-}
-
-fn makeRow(
-    date: []const u8,
-    mode: Mode,
-    stats: *const Stats,
-    cynic_sha: []const u8,
-    test262_sha: []const u8,
-    elapsed_ms: ?u64,
-) Row {
-    // Headline `pass%` counts expected fails as passes
-    // (Cynic's deliberate "no" is the right answer for the policy it
-    // ships), so all rows are directly comparable. With no
-    // expected fails the math is just `pass / total`.
-    const headline_pass: u32 = stats.pass() + stats.correctly_handled;
-    const spec_pct: f64 = if (stats.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(stats.total));
-    // `attempted%` deliberately keeps the raw-pass numerator —
-    // it's the engine-quality gauge (what fraction of what we
-    // actually ran passed), and a correctly_handled reclassification
-    // shouldn't move it. Drops on any real failure regardless
-    // of SES policy.
-    const attempted = stats.pass() + stats.fail();
-    const att_pct: f64 = if (attempted == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(stats.pass())) / @as(f64, @floatFromInt(attempted));
-    return .{
-        .date = date,
-        .mode = mode,
-        .cynic_sha = cynic_sha,
-        .test262_sha = test262_sha,
-        .total = stats.total,
-        .pass = headline_pass,
-        .attempted = attempted,
-        .spec_pct = spec_pct,
-        .attempted_pct = att_pct,
-        .correctly_handled = stats.correctly_handled,
-        .elapsed_ms = elapsed_ms,
-        .witness_pass = stats.witness_pass,
-        .witness_total = stats.witness_pass + stats.witness_fail,
-    };
-}
 
 /// Best-effort short git SHA for the working tree (or submodule)
 /// at `dir`. Returns null if git isn't available, the path isn't
@@ -3489,76 +2836,103 @@ fn currentShortSha(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ?[]u8 {
     return gpa.dupe(u8, trimmed) catch null;
 }
 
-/// Parse a Mode label from a history row's first cell, accepting
-/// both the current spellings (`unhardened` / `hardened` /
-/// `unhardened-allow-eval`) and the legacy ones (`runtime` /
-/// `runtime-hardened` / `runtime_hardened`) so a history file
-/// written before the rename re-renders into the new naming on
-/// the next write rather than dropping rows on the floor.
-fn parseModeLabel(s: []const u8) ?Mode {
-    if (std.mem.eql(u8, s, "runtime")) return .unhardened;
-    if (std.mem.eql(u8, s, "runtime-hardened")) return .hardened;
-    if (std.mem.eql(u8, s, "runtime_hardened")) return .hardened;
-    return std.meta.stringToEnum(Mode, s);
+fn makeRow(
+    date: []const u8,
+    stats: *const Stats,
+    cynic_sha: []const u8,
+    test262_sha: []const u8,
+    elapsed_ms: ?u64,
+) Row {
+    const passing = stats.pass();
+    const failing = stats.fail();
+    const total = passing + failing;
+    const pass_pct: f64 = if (total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(passing)) / @as(f64, @floatFromInt(total));
+    return .{
+        .date = date,
+        .cynic_sha = cynic_sha,
+        .test262_sha = test262_sha,
+        .passing = passing,
+        .failing = failing,
+        .total = total,
+        .pass_pct = pass_pct,
+        .elapsed_ms = elapsed_ms,
+    };
 }
 
-/// Read rows from the legacy linear table (`| date | mode |
-/// scope | cynic_sha | test262_sha | total | pass | fail | skip
-/// | spec% | attempted% |`). Only rows with `scope == cynic`
-/// are kept; the old `full`-scope numbers used the entire
-/// corpus as the denominator and are no longer comparable.
-fn parseLinearRows(
+/// Update test262-results.md with today's row for the run that just
+/// finished. Single posture (`--unhardened --allow=eval`), binary
+/// pass/fail. Layout: `## Current scores` (one row), `## Legend`,
+/// `## Where the engine fails, by area`, `## Pre-Stage-4 proposals
+/// shipped`, then `## History` (one mini-table per date, newest first).
+/// Re-running on the same date replaces that day's row.
+fn writeResults(
     gpa: std.mem.Allocator,
-    rows: *std.ArrayListUnmanaged(Row),
-    existing: []const u8,
+    io: std.Io,
+    stats: *const Stats,
+    buckets: *const BucketMap,
+    pre_stage4: *const PreStage4Stats,
+    epoch_seconds: i64,
+    elapsed_ms: ?u64,
 ) !void {
-    var i: usize = 0;
-    while (i < existing.len) {
-        const end = std.mem.indexOfScalarPos(u8, existing, i, '\n') orelse existing.len;
-        defer i = if (end < existing.len) end + 1 else end;
-        if (!std.mem.startsWith(u8, existing[i..], "| 20")) continue;
-        const line = existing[i..end];
+    const cwd = std.Io.Dir.cwd();
+    const path = "test262-results.md";
 
-        var it = std.mem.tokenizeAny(u8, line, "|");
-        const date = std.mem.trim(u8, it.next() orelse continue, " ");
-        const mode_s = std.mem.trim(u8, it.next() orelse continue, " ");
-        const scope_s = std.mem.trim(u8, it.next() orelse continue, " ");
-        const mode = parseModeLabel(mode_s) orelse continue;
-        if (!std.mem.eql(u8, scope_s, "cynic")) continue;
-        const cynic_sha = std.mem.trim(u8, it.next() orelse continue, " ");
-        const t262_sha = std.mem.trim(u8, it.next() orelse continue, " ");
-        const total_s = std.mem.trim(u8, it.next() orelse continue, " ");
-        const pass_s = std.mem.trim(u8, it.next() orelse continue, " ");
-        _ = it.next() orelse continue; // fail
-        _ = it.next() orelse continue; // skip
-        const spec_s = std.mem.trim(u8, it.next() orelse continue, " ");
-        const att_s = std.mem.trim(u8, it.next() orelse continue, " ");
-        const total = std.fmt.parseInt(u32, total_s, 10) catch continue;
-        const pass = std.fmt.parseInt(u32, pass_s, 10) catch continue;
-        const spec_pct = std.fmt.parseFloat(f64, spec_s) catch continue;
-        const att_pct = std.fmt.parseFloat(f64, att_s) catch continue;
-        try rows.append(gpa, .{
-            .date = date,
-            .mode = mode,
-            .cynic_sha = cynic_sha,
-            .test262_sha = t262_sha,
-            .total = total,
-            .pass = pass,
-            .attempted = deriveAttempted(pass, 0, att_pct),
-            .spec_pct = spec_pct,
-            .attempted_pct = att_pct,
-        });
+    const existing = cwd.readFileAlloc(io, path, gpa, .limited(1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => return err,
+    };
+    defer if (existing.len > 0) gpa.free(existing);
+
+    var rows: std.ArrayListUnmanaged(Row) = .empty;
+    defer rows.deinit(gpa);
+    try parseHistoryRows(gpa, &rows, existing);
+
+    // Previous run's per-area passing counts — for the "biggest
+    // movers" callout on the freshly-written latest row.
+    var prev_bucket_pass: std.StringHashMapUnmanaged(u32) = .empty;
+    defer {
+        var it = prev_bucket_pass.iterator();
+        while (it.next()) |e| gpa.free(e.key_ptr.*);
+        prev_bucket_pass.deinit(gpa);
     }
+    try parsePrevBucketPass(gpa, &prev_bucket_pass, existing);
+
+    const cynic_sha_owned = currentShortSha(gpa, io, ".");
+    defer if (cynic_sha_owned) |s| gpa.free(s);
+    const test262_sha_owned = currentShortSha(gpa, io, "vendor/test262");
+    defer if (test262_sha_owned) |s| gpa.free(s);
+    const cynic_sha: []const u8 = cynic_sha_owned orelse "unknown";
+    const test262_sha: []const u8 = test262_sha_owned orelse "unknown";
+
+    var line_buf: [32]u8 = undefined;
+    const date = formatDateUtc(epoch_seconds, &line_buf);
+
+    // Drop any existing row for today — the fresh stats replace it.
+    var i: usize = 0;
+    while (i < rows.items.len) {
+        if (std.mem.eql(u8, rows.items[i].date, date)) {
+            _ = rows.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    try rows.append(gpa, makeRow(date, stats, cynic_sha, test262_sha, elapsed_ms));
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(gpa);
+    try writeFileBody(gpa, &buf, rows.items, buckets, pre_stage4, &prev_bucket_pass);
+
+    try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
 
-/// Read rows from the per-day format. Day blocks are introduced
-/// by `### YYYY-MM-DD — cynic <sha>, test262 <sha>` and contain
-/// lines that look like one of:
-/// `| **mode** | spec% | attempted% | pass / total |`
-/// `| **mode, scope** | spec% | attempted% | pass / total |`
-/// (the second form is from the previous schema; only `cynic`
-/// scope is retained).
-fn parsePerDayRows(
+/// Read rows from the current per-day binary format. Day blocks are
+/// introduced by `### YYYY-MM-DD — cynic <sha>, test262 <sha>` and
+/// carry a single data row `| {passing} | {failing} | {total} |
+/// {pass%} % | {Δ pass} | {elapsed} |`. Rows from older multi-posture
+/// formats (which started a data row with `| **mode**`) don't match
+/// and are dropped.
+fn parseHistoryRows(
     gpa: std.mem.Allocator,
     rows: *std.ArrayListUnmanaged(Row),
     existing: []const u8,
@@ -3572,7 +2946,6 @@ fn parsePerDayRows(
         defer i = if (end < existing.len) end + 1 else end;
         const line = existing[i..end];
         if (std.mem.startsWith(u8, line, "### ") and line.len > 4 and line[4] == '2') {
-            // `### 2026-05-07 — cynic <sha>, test262 <sha>`
             const after = line[4..];
             const date_end = std.mem.indexOfScalar(u8, after, ' ') orelse after.len;
             date = after[0..date_end];
@@ -3591,144 +2964,32 @@ fn parsePerDayRows(
             continue;
         }
         if (date.len == 0) continue;
-        if (!std.mem.startsWith(u8, line, "| **")) continue;
-
+        // Data rows start with `| ` and a digit; skip the header
+        // (`| passing |`) and separator (`|---`) rows.
+        if (!std.mem.startsWith(u8, line, "| ")) continue;
         var it = std.mem.tokenizeAny(u8, line, "|");
-        const label_raw = std.mem.trim(u8, it.next() orelse continue, " ");
-        // Strip ** … ** wrapping.
-        if (!(std.mem.startsWith(u8, label_raw, "**") and std.mem.endsWith(u8, label_raw, "**"))) continue;
-        const label = label_raw[2 .. label_raw.len - 2];
-
-        // Accept either `mode` or `mode, scope`. For the latter,
-        // keep only `scope == cynic`.
-        var mode_part: []const u8 = label;
-        if (std.mem.indexOfScalar(u8, label, ',')) |comma| {
-            mode_part = std.mem.trim(u8, label[0..comma], " ");
-            const scope_part = std.mem.trim(u8, label[comma + 1 ..], " ");
-            if (!std.mem.eql(u8, scope_part, "cynic")) continue;
-        }
-        const mode = parseModeLabel(mode_part) orelse continue;
-
-        // Peek the first data cell to decide between the legacy
-        // schema (`pass% | engine% | pass / corpus | pass /
-        // engine-attempt | divergent | Δ pass | elapsed`) and the
-        // current schema (`passing | failing | expected fails |
-        // total | pass% | Δ pass | elapsed`). Legacy ends the
-        // first cell with `%`; the current schema's first cell is a
-        // plain integer.
-        const first_data_cell_raw = it.next() orelse continue;
-        const first_data_cell = std.mem.trim(u8, first_data_cell_raw, " ");
-        if (first_data_cell.len > 0 and first_data_cell[first_data_cell.len - 1] != '%') {
-            // Current schema. Parse as passing | failing |
-            // correctly_handled | total | pass% | Δ pass | elapsed.
-            const passing = std.fmt.parseInt(u32, first_data_cell, 10) catch continue;
-            const failing_cell = std.mem.trim(u8, it.next() orelse continue, " ");
-            const failing = std.fmt.parseInt(u32, failing_cell, 10) catch continue;
-            const ch_cell = std.mem.trim(u8, it.next() orelse continue, " ");
-            const ch = std.fmt.parseInt(u32, ch_cell, 10) catch continue;
-            const total_cell = std.mem.trim(u8, it.next() orelse continue, " ");
-            const total_b = std.fmt.parseInt(u32, total_cell, 10) catch continue;
-            const passpct_cell = std.mem.trim(u8, it.next() orelse continue, " ");
-            const spec_pct_b = std.fmt.parseFloat(f64, trimSuffix(passpct_cell, "%")) catch continue;
-            _ = it.next(); // Δ pass cell — recomputed at render time
-            const elapsed_cell_raw_b = it.next();
-            const elapsed_ms_b: ?u64 = blk: {
-                const cell_raw = elapsed_cell_raw_b orelse break :blk null;
-                const cell = std.mem.trim(u8, cell_raw, " ");
-                if (cell.len == 0) break :blk null;
-                break :blk parseElapsedCell(cell);
-            };
-            try rows.append(gpa, .{
-                .date = date,
-                .mode = mode,
-                .cynic_sha = cynic_sha,
-                .test262_sha = t262_sha,
-                .total = total_b,
-                .pass = passing + ch, // Row.pass stores (passing + ch)
-                .attempted = passing + failing,
-                .spec_pct = spec_pct_b,
-                .attempted_pct = if (passing + failing == 0)
-                    0
-                else
-                    100.0 * @as(f64, @floatFromInt(passing)) / @as(f64, @floatFromInt(passing + failing)),
-                .correctly_handled = ch,
-                .elapsed_ms = elapsed_ms_b,
-            });
-            continue;
-        }
-
-        // Legacy schema continues here.
-        const spec_cell = first_data_cell;
-        const att_cell = std.mem.trim(u8, it.next() orelse continue, " ");
-        const pt_cell = std.mem.trim(u8, it.next() orelse continue, " ");
-
-        const spec_pct = std.fmt.parseFloat(f64, trimSuffix(spec_cell, "%")) catch continue;
-        const att_pct = std.fmt.parseFloat(f64, trimSuffix(att_cell, "%")) catch continue;
-        const slash = std.mem.indexOf(u8, pt_cell, "/") orelse continue;
-        const pass = std.fmt.parseInt(u32, std.mem.trim(u8, pt_cell[0..slash], " "), 10) catch continue;
-        const total = std.fmt.parseInt(u32, std.mem.trim(u8, pt_cell[slash + 1 ..], " "), 10) catch continue;
-        // Parse the raw `pass / attempted` cell — earlier code
-        // derived attempted from `att_pct` via the inverse
-        // formula, but the 2-decimal % is lossy: hardened rows
-        // round-tripped 34487 → 34488 (off-by-one). Reading the raw
-        // integer fixes this; rows old enough to lack the cell hit
-        // the deriveAttempted fallback below.
-        const pa_attempted_override: ?u32 = blk: {
-            const cell_raw = it.next() orelse break :blk null;
-            const cell = std.mem.trim(u8, cell_raw, " ");
-            const slash_pa = std.mem.indexOf(u8, cell, "/") orelse break :blk null;
-            break :blk std.fmt.parseInt(u32, std.mem.trim(u8, cell[slash_pa + 1 ..], " "), 10) catch null;
-        };
-        // The legacy schema's `divergent` column. Older rows don't
-        // have it; the next cell is then the Δ-pass cell
-        // (which we always skip — it's computed fresh per
-        // render). Distinguish by content: `—` or a plain
-        // integer is the correctly_handled column; anything containing
-        // `±`, `+`, or `-` (the Δ-pass sign) is the legacy
-        // schema's Δ cell.
-        var correctly_handled: u32 = 0;
-        const next_cell_raw = it.next();
-        const seen_correctly_handled_cell = blk: {
-            if (next_cell_raw) |raw| {
-                const cell = std.mem.trim(u8, raw, " ");
-                if (cell.len == 0) break :blk false;
-                if (std.mem.eql(u8, cell, "—")) break :blk true;
-                // Legacy schema's Δ cell never holds a bare
-                // integer — it always has a sign prefix.
-                if (cell[0] == '+' or cell[0] == '-' or std.mem.startsWith(u8, cell, "±")) break :blk false;
-                if (std.mem.startsWith(u8, cell, "n/a")) break :blk false;
-                correctly_handled = std.fmt.parseInt(u32, cell, 10) catch break :blk false;
-                break :blk true;
-            }
-            break :blk false;
-        };
-        // Now consume / discard the next two cells (Δ-pass and
-        // elapsed) — the first is skipped, the second is
-        // parsed for `elapsed_ms`. If the row was legacy schema
-        // and we already consumed the Δ-pass cell into
-        // `next_cell_raw`, the elapsed cell is the next iter
-        // token.
-        const elapsed_cell_raw = if (seen_correctly_handled_cell) blk: {
-            _ = it.next(); // discard Δ-pass cell
-            break :blk it.next();
-        } else it.next(); // legacy schema: Δ-pass cell already consumed into next_cell_raw, elapsed is next
+        const c0 = std.mem.trim(u8, it.next() orelse continue, " ");
+        if (c0.len == 0 or c0[0] < '0' or c0[0] > '9') continue;
+        const passing = std.fmt.parseInt(u32, c0, 10) catch continue;
+        const failing = std.fmt.parseInt(u32, std.mem.trim(u8, it.next() orelse continue, " "), 10) catch continue;
+        const total = std.fmt.parseInt(u32, std.mem.trim(u8, it.next() orelse continue, " "), 10) catch continue;
+        const pct_cell = std.mem.trim(u8, it.next() orelse continue, " ");
+        const pass_pct = std.fmt.parseFloat(f64, trimSuffix(pct_cell, "%")) catch continue;
+        _ = it.next(); // Δ pass — recomputed at render time
         const elapsed_ms: ?u64 = blk: {
-            const cell_raw = elapsed_cell_raw orelse break :blk null;
+            const cell_raw = it.next() orelse break :blk null;
             const cell = std.mem.trim(u8, cell_raw, " ");
             if (cell.len == 0) break :blk null;
             break :blk parseElapsedCell(cell);
         };
         try rows.append(gpa, .{
             .date = date,
-            .mode = mode,
             .cynic_sha = cynic_sha,
             .test262_sha = t262_sha,
+            .passing = passing,
+            .failing = failing,
             .total = total,
-            .pass = pass,
-            .attempted = pa_attempted_override orelse deriveAttempted(pass, correctly_handled, att_pct),
-            .spec_pct = spec_pct,
-            .attempted_pct = att_pct,
-            .correctly_handled = correctly_handled,
+            .pass_pct = pass_pct,
             .elapsed_ms = elapsed_ms,
         });
     }
@@ -3740,7 +3001,6 @@ fn parsePerDayRows(
 /// of a future format extension.
 fn parseElapsedCell(cell: []const u8) ?u64 {
     if (std.mem.indexOfScalar(u8, cell, 'm')) |m_off| {
-        // `Xm YYs` form.
         const mins_part = std.mem.trim(u8, cell[0..m_off], " ");
         const mins = std.fmt.parseInt(u64, mins_part, 10) catch return null;
         const rest = std.mem.trim(u8, cell[m_off + 1 ..], " ");
@@ -3748,7 +3008,6 @@ fn parseElapsedCell(cell: []const u8) ?u64 {
         const secs = std.fmt.parseInt(u64, rest[0..s_off], 10) catch return null;
         return (mins * 60 + secs) * 1000;
     }
-    // `12.3 s` form.
     const s_off = std.mem.indexOfScalar(u8, cell, 's') orelse return null;
     const num_part = std.mem.trim(u8, cell[0..s_off], " ");
     const secs = std.fmt.parseFloat(f64, num_part) catch return null;
@@ -3768,271 +3027,111 @@ fn trimSuffix(s: []const u8, suffix: []const u8) []const u8 {
     return t;
 }
 
-/// Compose the full file body: header, `## Current scores`
-/// snapshot, the `## Where the runtime stands, by area`
-/// scoreboard (runtime mode only), `## Legend`, then `## History`
-/// with per-day mini-tables (newest day first). The latest row
-/// in `## History` carries a `Δ pass` column and a "Biggest
-/// movers" sub-list computed against `prev_bucket_pass`.
+/// Compose the full file body: header, TL;DR, `## Current scores`
+/// (one row), `## Legend`, the per-area scoreboard, the pre-Stage-4
+/// per-feature scoreboard, then `## History` (newest day first; the
+/// latest row carries a `Δ pass` column and a "Biggest movers"
+/// sub-list against `prev_bucket_pass`).
 fn writeFileBody(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
     rows: []Row,
     buckets: *const BucketMap,
-    /// Per-area buckets from the unhardened sweep — threaded to
-    /// `writeScoreboard` for the SES-off column. `null` falls back
-    /// to dashes in the unhardened / +eval cells.
-    unhardened_buckets: ?*const BucketMap,
-    pre_stage4_hardened: *const PreStage4Stats,
-    pre_stage4_unhardened: *const PreStage4Stats,
+    pre_stage4: *const PreStage4Stats,
     prev_bucket_pass: *const std.StringHashMapUnmanaged(u32),
-    mode_just_run: Mode,
-    /// Verbatim text of the previous `## Where the runtime …`
-    /// section, used when `mode_just_run != .unhardened` so a
-    /// parser refresh doesn't drop the scoreboard from the last
-    /// runtime sweep. `null` when no scoreboard exists yet (the
-    /// scoreboard appears for the first time only after a
-    /// runtime run).
-    preserved_scoreboard: ?[]const u8,
-    /// Same preservation contract as `preserved_scoreboard`, but
-    /// for the per-feature table that tracks Cynic's shipped
-    /// pre-Stage-4 proposals.
-    preserved_pre_stage4: ?[]const u8,
-    /// Same preservation contract as `preserved_scoreboard`, but
-    /// for the one-line `*SES witness fidelity*: …` note that
-    /// only hardened sweeps regenerate. `null` when the run that
-    /// just finished was hardened (the fresh value is rendered
-    /// from the latest hardened row's `witness_*` fields
-    /// instead) or when no prior note exists in the file.
-    preserved_witness_note: ?[]const u8,
-    /// True if the existing file's per-area scoreboard already
-    /// has a `correctly_handled` column (post-Phase-5c shape). Gates the
-    /// biggest-movers callout: on the one-time pre→post-5c
-    /// transition, every bucket's pass count legitimately drops
-    /// by its correctly_handled count (source shifted from unhardened to
-    /// hardened), which would dominate the movers list with
-    /// synthetic "regressions." Suppressing the callout once
-    /// keeps the signal clean.
-    prev_scoreboard_phase5c: bool,
 ) !void {
     try out.appendSlice(gpa,
         \\# test262 conformance — Cynic
         \\
         \\
     );
-    // TL;DR — derives the headline numbers from the latest
-    // hardened-posture row so a casual reader hits the important
-    // breakdown first without parsing the table below.
-    if (latestRow(rows, .hardened)) |r| {
-        const engine_pass = r.pass - r.correctly_handled;
-        const engine_fail = if (r.attempted >= engine_pass) r.attempted - engine_pass else 0;
-        var tb: [1536]u8 = undefined;
+    if (latestRow(rows)) |r| {
+        var tb: [1024]u8 = undefined;
         const tldr = try std.fmt.bufPrint(
             &tb,
-            "**Cynic passes {d:.2} % of its {d}-fixture test262 corpus** under the " ++
-                "default (hardened SES) posture (`cynic run`). The breakdown:\n\n" ++
+            "**Cynic passes {d:.2} % of the {d} test262 fixtures it runs**, scored " ++
+                "binary pass/fail under a single posture (`--unhardened --allow=eval`):\n\n" ++
                 "- **{d} passing** — Cynic produced the spec-expected result.\n" ++
-                "- **{d} expected fails** — failures that hit a Cynic design " ++
-                "policy (Annex B not shipped, strict-only, no Intl, eval-off, SES throw) " ++
-                "rather than an engine bug. Counted as spec-correct in `pass%` because " ++
-                "Cynic's deliberate \"no\" is the right answer for the policy it ships.\n" ++
-                "- **{d} failing** — real engine failures with no policy bucket. Work to do.\n" ++
-                "- **Out of total**, dropped before `corpus`: the upstream `harness/` and " ++
-                "`staging/` paths, and every Stage ≤ 3 proposal (decorators, import-defer, " ++
-                "source-phase-imports, import-bytes, immutable-arraybuffer, " ++
-                "await-dictionary, plus shipped joint-iteration / ShadowRealm — those get " ++
-                "their own dedicated scoreboard).\n\n",
-            .{ r.spec_pct, r.total, engine_pass, r.correctly_handled, engine_fail },
+                "- **{d} failing** — every other scored fixture. No \"expected fail\" " ++
+                "category: an Annex-B / no-Intl / strict-only / SES / eval miss counts " ++
+                "as a plain fail, same as an engine bug. Honest, not flattering.\n" ++
+                "- **Excluded from the denominator**: the upstream `harness/` and " ++
+                "`staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal " ++
+                "(decorators, import-defer, …), and structurally-unrunnable fixtures " ++
+                "(no / malformed frontmatter). Shipped pre-Stage-4 proposals " ++
+                "(joint-iteration, ShadowRealm) get their own scoreboard below.\n\n",
+            .{ r.pass_pct, r.total, r.passing, r.failing },
         );
         try out.appendSlice(gpa, tldr);
     }
     try out.appendSlice(gpa,
         \\## Current scores
         \\
-        \\| posture | passing | failing | expected fails | skip | total | pass% |
-        \\|---|---:|---:|---:|---:|---:|---:|
+        \\| posture | passing | failing | total | pass% |
+        \\|---|---:|---:|---:|---:|
         \\
     );
-    // Three rows in user-visible order: the `--allow=eval` opt-in
-    // first, then the unhardened baseline (`--unhardened` opt-out),
-    // then hardened (the default Cynic posture, `cynic run`). Same
-    // engine path, different policy mask: unhardened counts annex_b +
-    // no_strict + intl402 + eval as expected fails; hardened adds SES
-    // on top; `--allow=eval` lifts the eval-off policy so the eval
-    // surface is measured for real. The eval row is now sourced from a
-    // measured sweep (`--phase=eval`); it falls back to the reserved
-    // `n/a` placeholder only until the first such sweep has run.
-    if (latestRow(rows, .unhardened_allow_eval)) |r|
-        try writeMiniRow(gpa, out, r)
-    else
-        try writeAllowEvalPlaceholderRow(gpa, out);
-    inline for (.{ Mode.unhardened, Mode.hardened }) |m| {
-        if (latestRow(rows, m)) |r| try writeMiniRow(gpa, out, r);
+    if (latestRow(rows)) |r| {
+        var rb: [256]u8 = undefined;
+        const line = try std.fmt.bufPrint(
+            &rb,
+            "| **`--unhardened --allow=eval`** | {d} | {d} | {d} | {d:.2} % |\n",
+            .{ r.passing, r.failing, r.total, r.pass_pct },
+        );
+        try out.appendSlice(gpa, line);
     }
     try out.appendSlice(gpa,
         \\
-        \\> **pass%** = `(passing + expected fails) / total`.
-        \\> A fixture that fails because of a Cynic design policy
-        \\> (Annex B not shipped, strict-only, no Intl, eval-off, SES
-        \\> throw) is a **expected fail** rather than a real
-        \\> engine bug. Plain **failing** is what's left over — real
-        \\> engine work to do. **skip** is in-corpus fixtures Cynic
-        \\> doesn't run (capability / host gaps), excluded from the
-        \\> pass% numerator; the columns decompose exactly as
-        \\> `passing + failing + expected fails + skip = total`. The
-        \\> `--allow=eval` row is a measured sweep (`--phase=eval`):
-        \\> the eval surface runs for real, so its failures are real
-        \\> engine work, not expected fails.
+        \\> **pass%** = `passing / (passing + failing)`. Every scored
+        \\> fixture is a plain pass or fail — there is no "expected
+        \\> fail" reclassification and no in-corpus "skip" column.
         \\
         \\
     );
-
-    // SES-witness fidelity note — Phase 3 of
-    // `docs/handbook/ses-test262-policy.md`. Surfaces the latest
-    // hardened sweep's witness counters as a one-line signal
-    // beneath the Current Scores table. The data flow has two
-    // paths because the markdown row format doesn't carry
-    // witness counters (would bloat history mini-tables): fresh
-    // hardened runs render from the latest hardened Row; non-
-    // hardened runs (parser / unhardened refreshes) preserve the
-    // previous note verbatim via `preserved_witness_note` so the
-    // line survives across writes.
-    if (mode_just_run == .hardened) {
-        if (latestRow(rows, .hardened)) |r| {
-            if (r.witness_total > 0) {
-                const pct: f64 = 100.0 * @as(f64, @floatFromInt(r.witness_pass)) / @as(f64, @floatFromInt(r.witness_total));
-                var wb: [256]u8 = undefined;
-                const wn = try std.fmt.bufPrint(
-                    &wb,
-                    "*SES witness fidelity*: **{d} / {d}** witnesses are SES expected fails ({d:.2} %). " ++
-                        "Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. " ++
-                        "See `docs/handbook/ses-test262-policy.md`.\n\n",
-                    .{ r.witness_pass, r.witness_total, pct },
-                );
-                try out.appendSlice(gpa, wn);
-            }
-        }
-    } else if (preserved_witness_note) |note| {
-        try out.appendSlice(gpa, note);
-    }
-
-    // Legend moved up — comes RIGHT after Current Scores + the
-    // witness fidelity note so a reader sees the column / row
-    // definitions before scrolling into the per-area breakdown.
-    // The previous layout buried it at the bottom past the
-    // scoreboard, which forced readers to either guess at column
-    // meanings or jump back and forth.
     try out.appendSlice(gpa,
         \\## Legend
         \\
-        \\### Rows (postures)
+        \\### Posture
         \\
-        \\Same engine path, different policy mask. All three rows
-        \\refer to the same parse → compile → run sweep.
-        \\
-        \\- **unhardened, `--allow=eval`** — unhardened plus the
-        \\  eval surface (`eval()`, `new Function(string)`, …) opted
-        \\  in. A **measured** sweep (`--phase=eval`,
-        \\  `realm.allow_eval = true`): the eval surface runs for real,
-        \\  so its remaining gaps count as plain `failing` (real work)
-        \\  rather than eval-off `expected fails`. That's why this row
-        \\  has more `failing` and fewer `expected fails` than the
-        \\  unhardened row — the eval-off → eval-on split made visible.
-        \\- **unhardened** — `cynic --unhardened` opt-out. Eval off
-        \\  (so eval-dependent fixtures fail and count as correctly
-        \\  handled fails), Annex B / Intl / noStrict failures too.
-        \\  SES posture off — no SES throws.
-        \\- **hardened** — the default posture (`cynic run`). All
-        \\  the unhardened policies plus SES — primordials frozen,
-        \\  override-mistake fix on, locked descriptors. Fixtures
-        \\  whose expectation conflicts with SES enforcement throw
-        \\  by design and count as expected fails.
+        \\One scored posture: **`--unhardened --allow=eval`**. The SES
+        \\freeze pass is off (so fixtures that monkey-patch primordials
+        \\run unhindered) and the eval surface (`eval()`,
+        \\`new Function(string)`, …) is opened so eval-dependent
+        \\fixtures run for real. The default `cynic run` posture
+        \\(hardened, eval off) is stricter; this row measures the
+        \\engine's spec coverage with the policy knobs out of the way.
         \\
         \\### Columns
         \\
-        \\- **`passing`** — engine-true successes. Cynic produced
-        \\  the spec-expected result.
-        \\- **`failing`** — engine-true failures that *don't* match
-        \\  any design policy. Real work to do.
-        \\- **`expected fails`** — failures that hit a Cynic
-        \\  design policy: Annex B not shipped, strict-only,
-        \\  no Intl, eval-off, or SES throw. Counted with passes
-        \\  under `pass%` because Cynic's deliberate "no" is the
-        \\  spec-correct answer for the policy Cynic ships.
-        \\  First-match priority: annex_b > no_strict > intl402 >
-        \\  eval > SES.
-        \\- **`total`** — every fixture except pre-Stage-4
-        \\  proposals (Stage ≤ 3, shipped or not) and the upstream
-        \\  `staging/` / `harness/` paths.
-        \\- **`pass%`** — `(passing + expected fails) / total`.
-        \\  The headline.
-        \\- **SES witness fidelity** (the italic note above) —
-        \\  positive-coverage signal. The curated witness set in
-        \\  `tools/test262/ses_witnesses.zig` is a small list of
-        \\  paths that MUST classify under the SES policy under
-        \\  hardened runs. Drift either way is a hard signal. CI
-        \\  gates the floor at 100 %.
-        \\- **`Δ pass`** (history) — change in `pass` versus the
-        \\  previous row of the same posture.
-        \\- **`elapsed`** (history) — wall-clock time of the run
-        \\  that produced the row. Recorded only for full sweeps
-        \\  (no `--filter`, no `--only-failing`); partial runs
-        \\  leave it blank. Sub-minute as `12.3 s`, minute+ as
-        \\  `2m 40s`.
+        \\- **`passing`** — Cynic produced the spec-expected result.
+        \\- **`failing`** — every other scored fixture. An Annex B,
+        \\  no-Intl, strict-only, SES, or eval miss counts as a plain
+        \\  fail, same as an engine bug.
+        \\- **`total`** — `passing + failing`. Excludes the upstream
+        \\  `harness/` / `staging/` / `annexB/` paths, Stage ≤ 3
+        \\  proposals, and structurally-unrunnable fixtures.
+        \\- **`pass%`** — `passing / total`. The headline.
+        \\- **`Δ pass`** (history) — change in `passing` versus the
+        \\  previous row.
+        \\- **`elapsed`** (history) — wall-clock time of the run.
+        \\  Recorded only for full sweeps; partial runs leave it blank.
         \\
         \\### Why we don't claim "spec%"
         \\
-        \\The percentages here are **not** ECMA-262 spec
-        \\conformance. Spec conformance would require running every
-        \\normative requirement in the spec — there's no such
-        \\enumerable set. test262 is one community attempt at
-        \\covering the spec via concrete fixtures, and we run a
-        \\**filtered subset** of that (the `corpus`). So `pass%`
-        \\is right for "did anything regress?" tracking, but it's
-        \\a lower bound on spec coverage — a fixture not in
-        \\`corpus` doesn't get a verdict either way.
-        \\
-        \\### Scope (what's in `total`)
-        \\
-        \\Every test262 fixture runs except:
-        \\
-        \\- the upstream `harness/` and `staging/` paths (helpers
-        \\  and WIP grounds, not portable spec fixtures); and
-        \\- every Stage ≤ 3 proposal — both unshipped (decorators,
-        \\  import-defer, source-phase-imports, import-bytes,
-        \\  immutable-arraybuffer, await-dictionary) and shipped
-        \\  (joint-iteration, ShadowRealm). Shipped pre-Stage-4
-        \\  proposals get their own scoreboard in `## Pre-Stage-4
-        \\  proposals shipped` below.
-        \\
-        \\Annex B / `noStrict` / `intl402/` / the eval surface
-        \\are NOT skipped — they run and any failure classifies
-        \\as an **expected fail** under the matching policy.
+        \\These percentages are **not** ECMA-262 spec conformance.
+        \\test262 is one community attempt at covering the spec via
+        \\concrete fixtures, and we run a filtered subset of it. So
+        \\`pass%` is right for "did anything regress?" tracking, but
+        \\it's a lower bound on spec coverage.
         \\
         \\
     );
 
-    // Per-area scoreboard. The row iteration + tiering is driven by
-    // the **hardened (default)** sweep so the engine-work signal
-    // (`failing`) and ordering match what embedders see at `cynic
-    // run`; the per-posture pass% columns pull hardened from
-    // `buckets` and unhardened from `unhardened_buckets` (looked up
-    // by area name). For non-hardened writes (unhardened-only
-    // refresh) re-emit the previous scoreboard verbatim so the
-    // per-bucket signal survives.
-    if (mode_just_run == .hardened and buckets.map.count() > 0) {
-        try writeScoreboard(gpa, out, buckets, unhardened_buckets);
-    } else if (preserved_scoreboard) |s| {
-        try out.appendSlice(gpa, s);
+    if (buckets.map.count() > 0) {
+        try writeScoreboard(gpa, out, buckets);
     }
-
-    // Per-feature scoreboard for the pre-Stage-4 proposals Cynic
-    // ships ahead of the published edition. Same preservation
-    // contract as the per-area scoreboard.
-    if (mode_just_run == .unhardened and (preStage4HasData(pre_stage4_hardened) or preStage4HasData(pre_stage4_unhardened))) {
-        try writePreStage4Scoreboard(gpa, out, pre_stage4_hardened, pre_stage4_unhardened);
-    } else if (preserved_pre_stage4) |s| {
-        try out.appendSlice(gpa, s);
+    if (preStage4HasData(pre_stage4)) {
+        try writePreStage4Scoreboard(gpa, out, pre_stage4);
     }
 
     try out.appendSlice(gpa,
@@ -4042,7 +3141,6 @@ fn writeFileBody(
         \\
     );
 
-    // Sort rows: date desc; within a day parser before runtime.
     std.mem.sort(Row, rows, {}, rowLess);
 
     var idx: usize = 0;
@@ -4051,8 +3149,6 @@ fn writeFileBody(
         const day_date = rows[idx].date;
         try out.appendSlice(gpa, "### ");
         try out.appendSlice(gpa, day_date);
-        // SHAs from this day's first row; realistically uniform
-        // across a day. Skipped if both blank.
         const sha_cynic = rows[idx].cynic_sha;
         const sha_t262 = rows[idx].test262_sha;
         if (sha_cynic.len > 0 or sha_t262.len > 0) {
@@ -4064,8 +3160,8 @@ fn writeFileBody(
         }
         try out.appendSlice(gpa, "\n\n");
         try out.appendSlice(gpa,
-            \\|         | passing | failing | expected fails | total | pass% | Δ pass | elapsed |
-            \\|---|---:|---:|---:|---:|---:|---:|---:|
+            \\| passing | failing | total | pass% | Δ pass | elapsed |
+            \\|---:|---:|---:|---:|---:|---:|
             \\
         );
 
@@ -4076,20 +3172,7 @@ fn writeFileBody(
         }
         try out.appendSlice(gpa, "\n");
 
-        // Biggest movers callout — only on the topmost (most
-        // recent) day, AND only when the run that just finished
-        // was the hardened sweep (the same source as the
-        // scoreboard regen above). Parser-mode buckets aren't
-        // comparable to the stored hardened baseline (they count
-        // parse-positive/negative only) so the deltas would be
-        // misleading; unhardened-mode buckets have a slightly
-        // different `pass` total (no correctly_handled reclassification)
-        // and would show synthetic moves on every alternation.
-        // Parser / unhardened refreshes preserve the previous
-        // scoreboard verbatim; the callout stays with it.
-        if (first_day and mode_just_run == .hardened and
-            prev_bucket_pass.count() > 0 and prev_scoreboard_phase5c)
-        {
+        if (first_day and prev_bucket_pass.count() > 0) {
             try writeBiggestMovers(gpa, out, buckets, prev_bucket_pass);
         }
 
@@ -4098,59 +3181,8 @@ fn writeFileBody(
     }
 }
 
-/// Posture label for the `## Current scores` table. Renders each
-/// Mode in user-facing terms so a reader who doesn't know Cynic's
-/// mode naming sees what matters — which one ships by default, which
-/// is the SES opt-out, which is the `--allow=eval` opt-in.
-fn postureLabel(m: Mode) []const u8 {
-    return switch (m) {
-        .hardened => "**hardened** (default — `cynic run`)",
-        .unhardened => "**unhardened** (`cynic --unhardened`)",
-        .unhardened_allow_eval => "**unhardened, `--allow=eval`**",
-    };
-}
-
-/// Emit a placeholder (all-`n/a`) `--allow=eval` row. Used ONLY as a
-/// fallback before the first measured `--phase=eval` sweep has written
-/// a `Mode.unhardened_allow_eval` history row — once one exists, the
-/// `## Current scores` snapshot renders the measured row instead (see
-/// `writeFileBody`). Keeps the table layout stable on a fresh file.
-fn writeAllowEvalPlaceholderRow(
-    gpa: std.mem.Allocator,
-    out: *std.ArrayListUnmanaged(u8),
-) !void {
-    var buf: [256]u8 = undefined;
-    const line = try std.fmt.bufPrint(&buf, "| {s} | n/a | n/a | n/a | n/a | n/a | n/a |\n", .{
-        postureLabel(.unhardened_allow_eval),
-    });
-    try out.appendSlice(gpa, line);
-}
-
-/// Column shape: passing | failing | expected fails | skip | total |
-/// pass%. `r.pass` is stored as `(passing + correctly_handled)`, so we
-/// recover `passing` via subtraction to emit the passing/failing split.
-/// `skip` is what's left of `total` once the other three are removed.
-fn writeMiniRow(
-    gpa: std.mem.Allocator,
-    out: *std.ArrayListUnmanaged(u8),
-    r: Row,
-) !void {
-    var buf: [384]u8 = undefined;
-    const engine_pass = r.pass - r.correctly_handled; // == passing
-    const engine_fail = if (r.attempted >= engine_pass) r.attempted - engine_pass else 0;
-    const skip = r.total - engine_pass - engine_fail - r.correctly_handled;
-    const line = try std.fmt.bufPrint(
-        &buf,
-        "| {s} | {d} | {d} | {d} | {d} | {d} | {d:.2} % |\n",
-        .{ postureLabel(r.mode), engine_pass, engine_fail, r.correctly_handled, skip, r.total, r.spec_pct },
-    );
-    try out.appendSlice(gpa, line);
-}
-
-/// Render an elapsed-cell. Empty for rows imported from history
-/// files that predate the column. Sub-minute runs print as
-/// `12.3 s`; longer runs use `2m 40s` so the regression-glance
-/// scale is intuitive.
+/// Render an elapsed-cell. Empty for rows imported from history files
+/// that predate the column. Sub-minute as `12.3 s`; longer as `2m 40s`.
 fn formatElapsedCell(buf: []u8, elapsed_ms: ?u64) ![]const u8 {
     const ms = elapsed_ms orelse return "";
     if (ms < 60_000) {
@@ -4169,13 +3201,11 @@ fn writeHistoryRow(
     r: Row,
     prev_pass: ?u32,
 ) !void {
-    var buf: [512]u8 = undefined;
+    var buf: [256]u8 = undefined;
     var elapsed_buf: [32]u8 = undefined;
     const elapsed_cell = try formatElapsedCell(&elapsed_buf, r.elapsed_ms);
-    const engine_pass = r.pass - r.correctly_handled; // == passing
-    const engine_fail = if (r.attempted >= engine_pass) r.attempted - engine_pass else 0;
     const delta_cell: []const u8 = if (prev_pass) |p| blk: {
-        const delta: i64 = @as(i64, r.pass) - @as(i64, p);
+        const delta: i64 = @as(i64, r.passing) - @as(i64, p);
         if (delta == 0) break :blk "±0";
         var d_buf: [32]u8 = undefined;
         const sign: u8 = if (delta > 0) '+' else '-';
@@ -4184,21 +3214,16 @@ fn writeHistoryRow(
     } else "n/a";
     const line = try std.fmt.bufPrint(
         &buf,
-        "| **{s}** | {d} | {d} | {d} | {d} | {d:.2} % | {s} | {s} |\n",
-        .{ @tagName(r.mode), engine_pass, engine_fail, r.correctly_handled, r.total, r.spec_pct, delta_cell, elapsed_cell },
+        "| {d} | {d} | {d} | {d:.2} % | {s} | {s} |\n",
+        .{ r.passing, r.failing, r.total, r.pass_pct, delta_cell, elapsed_cell },
     );
     try out.appendSlice(gpa, line);
 }
 
-/// Find the chronologically-previous row of the same mode for
-/// `rows[idx]`. `rows` is assumed pre-sorted by `rowLess`
-/// (date desc, parser-before-runtime within a day).
+/// Find the chronologically-previous row for `rows[idx]`. `rows` is
+/// assumed pre-sorted by `rowLess` (date desc).
 fn priorRowPass(rows: []const Row, idx: usize) ?u32 {
-    const cur = rows[idx];
-    var k = idx + 1;
-    while (k < rows.len) : (k += 1) {
-        if (rows[k].mode == cur.mode) return rows[k].pass;
-    }
+    if (idx + 1 < rows.len) return rows[idx + 1].passing;
     return null;
 }
 
@@ -4206,10 +3231,6 @@ fn writeScoreboard(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
     buckets: *const BucketMap,
-    /// Per-area buckets from the unhardened sweep. `null` (partial
-    /// or non-hardened write) renders the unhardened / +eval cells
-    /// as dashes.
-    unhardened_buckets: ?*const BucketMap,
 ) !void {
     const sorted = try buckets.sortedByFailTiered(gpa);
     defer gpa.free(sorted);
@@ -4218,42 +3239,12 @@ fn writeScoreboard(
         \\
         \\## Where the engine fails, by area
         \\
-        \\Each area gets three rows — one per runtime posture
-        \\(hardened / unhardened / +eval) — mirroring the three rows in
-        \\`## Current scores`. Row ordering + the tier grouping are
-        \\driven by the **hardened (default)** sweep's `failing` count.
+        \\Areas are grouped into fail-magnitude tiers (most fails
+        \\first); within a tier they're sorted by pass% ascending.
         \\Bucketed on the first two path components (`built-ins/Set`,
-        \\`language/expressions`, …).
-        \\
-        \\**Reading guide:**
-        \\
-        \\- **`failing`** is the real engine-work signal — failures with
-        \\  no policy bucket. Nearly posture-invariant: the policies
-        \\  relabel expected fails, they don't create engine bugs.
-        \\- **`skip`** is in-corpus fixtures Cynic doesn't run (capability
-        \\  / host gaps); excluded from the `pass%` numerator. The four
-        \\  columns decompose exactly:
-        \\  `passing + failing + expected fails + skip = total`.
-        \\- **hardened** matches `cynic run`; SES-divergent fixtures are
-        \\  expected fails. **unhardened** turns SES off, so those flip
-        \\  from `expected fails` to `passing`. `pass%` barely moves (it
-        \\  counts expected fails as pass), but the **passing ↔ expected
-        \\  fails split** shifts — that's the real per-posture signal,
-        \\  heaviest in the SES-hot built-ins (`Array`, `Object`,
-        \\  `TypedArray`, `String`, …).
-        \\- **+eval** here is a per-area *approximation* — these rows
-        \\  reuse the unhardened buckets, so they don't reflect the eval
-        \\  surface running for real. The **measured** `--allow=eval`
-        \\  totals (eval fixtures run, failures counted as real work)
-        \\  are the `unhardened, --allow=eval` row in `## Current
-        \\  scores`, sourced from the `--phase=eval` sweep.
-        \\- The **`1+ fails` tiers** are the engine-work list — today
-        \\  mostly the SAB/Atomics surface plus the ~13-fixture
-        \\  cross-realm cluster.
-        \\- Within every tier, areas are sorted by **hardened pass%
-        \\  ascending** (lowest first), so the whole scoreboard reads
-        \\  low → high pass% top to bottom. Ties break on SES
-        \\  divergence, then name.
+        \\`language/expressions`, …). `pass%` = `passing / (passing +
+        \\failing)` per area. The `1+ fails` tiers are the engine-work
+        \\list.
         \\
         \\
     );
@@ -4263,65 +3254,21 @@ fn writeScoreboard(
     for (sorted) |b| {
         const tier: u8 = if (b.fail == 0) 4 else if (b.fail < 10) 3 else if (b.fail < 100) 2 else if (b.fail < 1000) 1 else 0;
         if (tier != prev_tier) {
-            // Each fail-tier is its own sub-table under a bold heading
-            // that spans the full width. Markdown pipe tables can't
-            // colspan, so a heading line (not a one-cell-plus-empties
-            // row) is the clean full-width separator.
             const label: []const u8 = switch (tier) {
-                0 => "1000+ fails — engine-work tier",
-                1 => "100–999 fails — engine-work tier",
-                2 => "10–99 fails — engine-work tier",
-                3 => "1–9 fails — engine-work tier",
-                else => "0 fails — passing / all-policy (sorted by expected fails ↓)",
+                0 => "1000+ fails",
+                1 => "100–999 fails",
+                2 => "10–99 fails",
+                3 => "1–9 fails",
+                else => "0 fails — fully passing",
             };
-            const hdr = try std.fmt.bufPrint(&buf, "\n**{s}**\n\n| area · posture | passing | failing | expected fails | skip | total | pass% |\n|---|---:|---:|---:|---:|---:|---:|\n", .{label});
+            const hdr = try std.fmt.bufPrint(&buf, "\n**{s}**\n\n| area | passing | failing | pass% |\n|---|---:|---:|---:|\n", .{label});
             try out.appendSlice(gpa, hdr);
             prev_tier = tier;
         }
-        // Three sub-rows per area, one per posture — same shape as
-        // `## Current scores`. `pass%` = `(passing + expected fails) /
-        // total` per posture. hardened reads this (hardened) sweep's
-        // bucket; unhardened / +eval read the unhardened sweep's
-        // matching bucket (by name). +eval ≡ unhardened per area.
-        const strike: bool = (b.pass == 0 and b.fail == 0 and b.correctly_handled == 0);
-        var row_buf: [384]u8 = undefined;
-
-        // Area header row — the area name spans the table; the three
-        // posture rows below carry only the posture label.
-        {
-            const hdr = if (strike)
-                try std.fmt.bufPrint(&row_buf, "| ~~**`{s}`**~~ | | | | | | |\n", .{b.name})
-            else
-                try std.fmt.bufPrint(&row_buf, "| **`{s}`** | | | | | | |\n", .{b.name});
-            try out.appendSlice(gpa, hdr);
-        }
-
-        // hardened sub-row.
-        {
-            const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass + b.correctly_handled)) / @as(f64, @floatFromInt(b.total));
-            const line = if (strike)
-                try std.fmt.bufPrint(&row_buf, "| ~~· hardened~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{ b.pass, b.fail, b.correctly_handled, b.skip, b.total, pct })
-            else
-                try std.fmt.bufPrint(&row_buf, "| · hardened | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ b.pass, b.fail, b.correctly_handled, b.skip, b.total, pct });
-            try out.appendSlice(gpa, line);
-        }
-
-        // unhardened + eval sub-rows (both from the unhardened bucket).
-        const u_opt: ?Bucket = if (unhardened_buckets) |ub| ub.map.get(b.name) else null;
-        inline for (.{ "unhardened", "+eval" }) |posture| {
-            if (u_opt) |u| {
-                const pct: f64 = if (u.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(u.pass + u.correctly_handled)) / @as(f64, @floatFromInt(u.total));
-                const line = if (strike)
-                    try std.fmt.bufPrint(&row_buf, "| ~~· {s}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{ posture, u.pass, u.fail, u.correctly_handled, u.skip, u.total, pct })
-                else
-                    try std.fmt.bufPrint(&row_buf, "| · {s} | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ posture, u.pass, u.fail, u.correctly_handled, u.skip, u.total, pct });
-                try out.appendSlice(gpa, line);
-            } else {
-                // No unhardened data (null map / filtered run).
-                const line = try std.fmt.bufPrint(&row_buf, "| · {s} | — | — | — | — | — | — |\n", .{posture});
-                try out.appendSlice(gpa, line);
-            }
-        }
+        const den: u32 = b.pass + b.fail;
+        const pct: f64 = if (den == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(den));
+        const line = try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d:.0} % |\n", .{ b.name, b.pass, b.fail, pct });
+        try out.appendSlice(gpa, line);
     }
     try out.appendSlice(gpa, "\n");
 }
@@ -4334,81 +3281,39 @@ fn preStage4HasData(pre_stage4: *const PreStage4Stats) bool {
 }
 
 /// Render the per-feature scoreboard for the pre-Stage-4 proposals
-/// Cynic ships ahead of the published edition. Mirrors
-/// `writeScoreboard` in column layout so the two tables read the
-/// same; the heading is distinct so the section can be located /
-/// preserved verbatim across parser-mode refreshes via
-/// `extractPreStage4Section`.
+/// Cynic ships ahead of the published edition. Single posture, binary
+/// pass/fail — one row per proposal.
 fn writePreStage4Scoreboard(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
-    pre_stage4_hardened: *const PreStage4Stats,
-    pre_stage4_unhardened: *const PreStage4Stats,
+    pre_stage4: *const PreStage4Stats,
 ) !void {
     try out.appendSlice(gpa,
         \\
         \\## Pre-Stage-4 proposals shipped
         \\
         \\Per-feature scores for the TC39 proposals Cynic ships at
-        \\Stage 1–3, ahead of their inclusion in the published
-        \\edition. Each proposal gets its **own table** with two
-        \\posture rows: **hardened** — the as-shipped SES posture
-        \\under `--enable=<flag>`, with SES throws counted as
-        \\expected fails — and **unhardened**, against bare
-        \\ECMA-262. Same columns as the main `## Current scores`
-        \\table: `passing | failing | expected fails | skip | total | pass%`.
-        \\These fixtures are excluded from the top-line score.
+        \\Stage 1–3, ahead of their inclusion in the published edition.
+        \\Each proposal is swept in isolation (only its own
+        \\`--enable=<flag>` on) under the same single posture, scored
+        \\binary pass/fail. These fixtures are excluded from the
+        \\top-line score.
+        \\
+        \\| feature | passing | failing | total | pass% |
+        \\|---|---:|---:|---:|---:|
         \\
     );
 
-    var buf: [320]u8 = undefined;
+    var buf: [256]u8 = undefined;
     for (0..tracked_pre_stage4_features.len) |i| {
         const name = tracked_pre_stage4_features[i];
-        const h = pre_stage4_hardened.slots[i];
-        const u = pre_stage4_unhardened.slots[i];
-        // Skip a proposal with no fixtures in either posture (e.g.
-        // not exercised this run) — no empty per-feature table.
-        if (h.total == 0 and u.total == 0) continue;
-
-        // One table per proposal, with a `### ` sub-heading. The
-        // `## `-prefixed section extractor stops at the next `## `,
-        // so these `### ` headings stay inside the section.
-        try out.appendSlice(gpa, try std.fmt.bufPrint(&buf,
-            \\
-            \\### `{s}`
-            \\
-            \\| posture | passing | failing | expected fails | skip | total | pass% |
-            \\|---|---:|---:|---:|---:|---:|---:|
-            \\
-        , .{name}));
-
-        if (h.total != 0) {
-            // pass% = (passing + expected fails) / total, matching the
-            // main `## Current scores` table; `correctly_handled` is the
-            // policy-expected-fail count, `skip` a separate column.
-            const pct: f64 = 100.0 * @as(f64, @floatFromInt(h.pass + h.correctly_handled)) / @as(f64, @floatFromInt(h.total));
-            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| hardened | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ h.pass, h.fail, h.correctly_handled, h.skip, h.total, pct }));
-        }
-        if (u.total != 0) {
-            const pct: f64 = 100.0 * @as(f64, @floatFromInt(u.pass + u.correctly_handled)) / @as(f64, @floatFromInt(u.total));
-            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| unhardened | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ u.pass, u.fail, u.correctly_handled, u.skip, u.total, pct }));
-        }
+        const s = pre_stage4.slots[i];
+        const den: u32 = s.pass + s.fail;
+        if (den == 0) continue;
+        const pct: f64 = 100.0 * @as(f64, @floatFromInt(s.pass)) / @as(f64, @floatFromInt(den));
+        try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.0} % |\n", .{ name, s.pass, s.fail, den, pct }));
     }
     try out.appendSlice(gpa, "\n");
-}
-
-/// Return the raw text of the `## Pre-Stage-4 proposals shipped`
-/// section so a parser-mode refresh can re-emit it verbatim
-/// instead of dropping the table.
-fn extractPreStage4Section(existing: []const u8) ?[]const u8 {
-    const heading = "## Pre-Stage-4 proposals shipped";
-    const start = std.mem.indexOf(u8, existing, heading) orelse return null;
-    const stop_marker = "\n## ";
-    const stop = std.mem.indexOfPos(u8, existing, start + heading.len, stop_marker) orelse return null;
-    var end = stop;
-    while (end > start and existing[end - 1] == '\n') end -= 1;
-    end += 1;
-    return existing[start..end];
 }
 
 fn writeBiggestMovers(
@@ -4421,8 +3326,6 @@ fn writeBiggestMovers(
     var movers: std.ArrayListUnmanaged(Mover) = .empty;
     defer movers.deinit(gpa);
 
-    // Current buckets: any with a delta vs prev (positive or
-    // negative). New buckets count as full delta from 0.
     var it = buckets.map.iterator();
     while (it.next()) |entry| {
         const cur = entry.value_ptr.*;
@@ -4431,8 +3334,6 @@ fn writeBiggestMovers(
         if (d == 0) continue;
         try movers.append(gpa, .{ .name = entry.key_ptr.*, .delta = d });
     }
-    // Buckets that vanished from this run but had pass>0 last
-    // time — record as negative deltas.
     var pit = prev_bucket_pass.iterator();
     while (pit.next()) |entry| {
         if (buckets.map.contains(entry.key_ptr.*)) continue;
@@ -4452,7 +3353,7 @@ fn writeBiggestMovers(
     }.lt);
 
     const top_n = @min(movers.items.len, 5);
-    try out.appendSlice(gpa, "Biggest movers (runtime):\n\n");
+    try out.appendSlice(gpa, "Biggest movers:\n\n");
     var buf: [256]u8 = undefined;
     for (movers.items[0..top_n]) |m| {
         const sign: u8 = if (m.delta > 0) '+' else '-';
@@ -4463,139 +3364,40 @@ fn writeBiggestMovers(
     try out.appendSlice(gpa, "\n");
 }
 
-/// Return the raw text of the `*SES witness fidelity*: …` note
-/// (the one-line italic callout under `## Current scores`). Used
-/// to preserve the line verbatim across writes from non-hardened
-/// modes (parser / runtime), which would otherwise re-render the
-/// Current Scores section without the witness data because the
-/// markdown row format doesn't carry witness counters and
-/// `parsePerDayRows` recovers them as zero. Returns `null` when
-/// the file doesn't have the note yet (first-ever write, or
-/// the latest hardened sweep predated Phase 3).
-fn extractWitnessNote(existing: []const u8) ?[]const u8 {
-    const marker = "*SES witness fidelity*:";
-    const start = std.mem.indexOf(u8, existing, marker) orelse return null;
-    const line_end = std.mem.indexOfScalarPos(u8, existing, start, '\n') orelse existing.len;
-    // Include the trailing blank line so the spacing matches a
-    // fresh render. Look one char past the newline.
-    var end = line_end + 1;
-    if (end < existing.len and existing[end] == '\n') end += 1;
-    return existing[start..end];
-}
-
-/// True if the existing file's per-area scoreboard already
-/// carries a `correctly_handled` column (i.e. post-Phase-5c shape).
-/// Used by `writeFileBody` to gate the "Biggest movers"
-/// callout: on the one-time transition from pre-5c (pass
-/// column sourced from unhardened) to post-5c (pass column
-/// sourced from hardened, slightly lower per-bucket), every
-/// row's `pass` legitimately drops by the per-bucket
-/// correctly_handled count, which would dominate the movers list
-/// with synthetic "regressions." Suppressing the callout on
-/// that single sweep keeps the signal clean.
-/// Locate the per-area scoreboard section by trying both the
-/// current heading and the legacy `## Where the runtime stands,
-/// by area` heading from earlier file generations. Returns the
-/// byte offset of the heading line on success, null otherwise.
-fn findScoreboardHeading(existing: []const u8) ?struct { offset: usize, length: usize } {
-    // Current heading first; the legacy fallbacks below let an older
-    // results.md file extract its scoreboard section cleanly.
-    const current = "## Where the engine fails, by area";
-    if (std.mem.indexOf(u8, existing, current)) |off| {
-        return .{ .offset = off, .length = current.len };
-    }
-    const headings = [_][]const u8{
-        "## Where the engine fails (and where SES diverges), by area",
-        "## Where the runtime stands, by area",
-    };
-    for (headings) |h| {
-        if (std.mem.indexOf(u8, existing, h)) |off| {
-            return .{ .offset = off, .length = h.len };
-        }
-    }
-    return null;
-}
-
-fn prevScoreboardHasDivergent(existing: []const u8) bool {
-    const found = findScoreboardHeading(existing) orelse return false;
-    const start = found.offset;
-    // Find the column-header line (starts with `| area |`). The
-    // correctly_handled column adds a `| correctly_handled |` cell; pre-5c
-    // tables didn't have it.
-    var cursor = start;
-    const cap = @min(existing.len, start + 4096);
-    while (cursor < cap) {
-        const eol = std.mem.indexOfScalarPos(u8, existing, cursor, '\n') orelse cap;
-        const line = existing[cursor..eol];
-        if (std.mem.startsWith(u8, line, "| area |")) {
-            return std.mem.indexOf(u8, line, "| correctly_handled |") != null;
-        }
-        cursor = eol + 1;
-    }
-    return false;
-}
-
-/// Return the raw text of the `## Where the runtime stands,
-/// by area` section (heading + blurb + table), including the
-/// trailing blank line. Used to preserve the scoreboard
-/// verbatim across parser-mode refreshes that don't regenerate
-/// per-bucket data. Returns `null` when the file doesn't have
-/// the section yet.
-fn extractScoreboardSection(existing: []const u8) ?[]const u8 {
-    const found = findScoreboardHeading(existing) orelse return null;
-    const start = found.offset;
-    const stop_marker = "\n## ";
-    const stop = std.mem.indexOfPos(u8, existing, start + found.length, stop_marker) orelse return null;
-    // Trim trailing blank line(s) before the next `## `.
-    var end = stop;
-    while (end > start and existing[end - 1] == '\n') end -= 1;
-    end += 1; // keep exactly one trailing newline
-    return existing[start..end];
-}
-
-/// Read pass counts from the most recent `## Where the runtime
-/// stands, by area` section, keyed by area name. Earlier
-/// versions of the file (without this section) yield an empty
-/// map, which makes "biggest movers" a no-op.
+/// Read per-area passing counts from the most recent
+/// `## Where the engine fails, by area` section, keyed by area name.
+/// Earlier file versions without the section yield an empty map,
+/// making "biggest movers" a no-op.
 fn parsePrevBucketPass(
     gpa: std.mem.Allocator,
     out: *std.StringHashMapUnmanaged(u32),
     existing: []const u8,
 ) !void {
-    const found = findScoreboardHeading(existing) orelse return;
-    const start = found.offset;
-    var cursor = start + found.length;
-    // Stop at the next `## ` heading.
-    const stop_marker = "\n## ";
-    const stop = std.mem.indexOfPos(u8, existing, cursor, stop_marker) orelse existing.len;
+    const heading = "## Where the engine fails, by area";
+    const start = std.mem.indexOf(u8, existing, heading) orelse return;
+    var cursor = start + heading.len;
+    const stop = std.mem.indexOfPos(u8, existing, cursor, "\n## ") orelse existing.len;
 
     while (cursor < stop) {
         const end = std.mem.indexOfScalarPos(u8, existing, cursor, '\n') orelse stop;
         defer cursor = if (end < stop) end + 1 else stop;
         const line = existing[cursor..end];
         if (!std.mem.startsWith(u8, line, "| `")) continue;
-
-        // Parse `| `name` | pass | fail | skip | pct % |`.
         var it = std.mem.tokenizeAny(u8, line, "|");
         const name_raw = std.mem.trim(u8, it.next() orelse continue, " ");
         if (!(std.mem.startsWith(u8, name_raw, "`") and std.mem.endsWith(u8, name_raw, "`"))) continue;
         const name = name_raw[1 .. name_raw.len - 1];
-        const pass_s = std.mem.trim(u8, it.next() orelse continue, " ");
-        const pass = std.fmt.parseInt(u32, pass_s, 10) catch continue;
-
+        const pass = std.fmt.parseInt(u32, std.mem.trim(u8, it.next() orelse continue, " "), 10) catch continue;
         const gop = try out.getOrPut(gpa, name);
-        if (!gop.found_existing) {
-            gop.key_ptr.* = try gpa.dupe(u8, name);
-        }
+        if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, name);
         gop.value_ptr.* = pass;
     }
 }
 
-/// Find the row with the latest date for the given mode.
-fn latestRow(rows: []const Row, mode: Mode) ?Row {
+/// Find the row with the latest date.
+fn latestRow(rows: []const Row) ?Row {
     var best: ?Row = null;
     for (rows) |r| {
-        if (r.mode != mode) continue;
         if (best) |b| {
             if (std.mem.order(u8, r.date, b.date) == .gt) best = r;
         } else best = r;
@@ -4605,11 +3407,7 @@ fn latestRow(rows: []const Row, mode: Mode) ?Row {
 
 fn rowLess(_: void, a: Row, b: Row) bool {
     // Date desc.
-    const cmp = std.mem.order(u8, a.date, b.date);
-    if (cmp == .gt) return true;
-    if (cmp == .lt) return false;
-    // Same date: parser before runtime.
-    return @intFromEnum(a.mode) < @intFromEnum(b.mode);
+    return std.mem.order(u8, a.date, b.date) == .gt;
 }
 
 fn formatDateUtc(epoch_seconds: i64, buf: []u8) []const u8 {
@@ -4644,9 +3442,7 @@ fn ymdFromEpochDays(epoch_days: i64) YMD {
 }
 
 /// Parse a `--<name>=<float>` percent value (range `[0, 100]`)
-/// or exit with a diagnostic. Shared between the unhardened and
-/// hardened spec% floor flags so the two stay in lockstep on
-/// validation + error wording.
+/// or exit with a diagnostic. Used by the `--min-pass-pct` floor.
 fn parsePctOrExit(arg: []const u8, flag_prefix: []const u8, raw: []const u8) f64 {
     const v = std.fmt.parseFloat(f64, raw) catch {
         std.debug.print("error: {s} expects a float, got '{s}'\n", .{ flag_prefix, raw });
@@ -4706,39 +3502,21 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.top_alloc = std.fmt.parseInt(u32, arg["--top-alloc=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--top-gc-time=")) {
             opts.top_gc_time = std.fmt.parseInt(u32, arg["--top-gc-time=".len..], 10) catch 0;
-        } else if (std.mem.startsWith(u8, arg, "--min-spec-pct=")) {
-            opts.min_spec_pct = parsePctOrExit(arg, "--min-spec-pct=", arg["--min-spec-pct=".len..]);
-        } else if (std.mem.startsWith(u8, arg, "--min-hardened-spec-pct=")) {
-            opts.min_hardened_spec_pct = parsePctOrExit(arg, "--min-hardened-spec-pct=", arg["--min-hardened-spec-pct=".len..]);
-        } else if (std.mem.startsWith(u8, arg, "--min-ses-witness-pct=")) {
-            opts.min_ses_witness_pct = parsePctOrExit(arg, "--min-ses-witness-pct=", arg["--min-ses-witness-pct=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--min-pass-pct=")) {
+            opts.min_pass_pct = parsePctOrExit(arg, "--min-pass-pct=", arg["--min-pass-pct=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--phase=")) {
             const spec = arg["--phase=".len..];
             if (std.mem.eql(u8, spec, "main")) {
                 opts.phase = .main;
-            } else if (std.mem.eql(u8, spec, "unhardened")) {
-                opts.phase = .unhardened;
-            } else if (std.mem.eql(u8, spec, "eval")) {
-                opts.phase = .eval;
             } else if (std.mem.startsWith(u8, spec, "feature:")) {
-                // `feature:<name>` defaults to the hardened
-                // (as-shipped) sweep; append `:unhardened` /
-                // `:hardened` to pin the posture explicitly.
-                var fname: []const u8 = spec["feature:".len..];
-                var hardened = true;
-                if (std.mem.endsWith(u8, fname, ":unhardened")) {
-                    hardened = false;
-                    fname = fname[0 .. fname.len - ":unhardened".len];
-                } else if (std.mem.endsWith(u8, fname, ":hardened")) {
-                    fname = fname[0 .. fname.len - ":hardened".len];
-                }
+                const fname: []const u8 = spec["feature:".len..];
                 const flag = cynic.runtime.FeatureFlag.fromName(fname) orelse {
                     std.debug.print("error: unknown --phase feature: '{s}'\n", .{fname});
                     std.process.exit(1);
                 };
-                opts.phase = .{ .feature = .{ .flag = flag, .hardened = hardened } };
+                opts.phase = .{ .feature = .{ .flag = flag } };
             } else {
-                std.debug.print("error: --phase expects 'main', 'unhardened', 'eval', or 'feature:<name>', got '{s}'\n", .{spec});
+                std.debug.print("error: --phase expects 'main' or 'feature:<name>', got '{s}'\n", .{spec});
                 std.process.exit(1);
             }
         }

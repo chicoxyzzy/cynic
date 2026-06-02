@@ -1,664 +1,222 @@
 # test262 conformance — Cynic
 
-**Cynic passes 98.83 % of its 50894-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
+**Cynic passes 89.19 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **39880 passing** — Cynic produced the spec-expected result.
-- **10421 expected fails** — failures that hit a Cynic design policy (Annex B not shipped, strict-only, no Intl, eval-off, SES throw) rather than an engine bug. Counted as spec-correct in `pass%` because Cynic's deliberate "no" is the right answer for the policy it ships.
-- **593 failing** — real engine failures with no policy bucket. Work to do.
-- **Out of total**, dropped before `corpus`: the upstream `harness/` and `staging/` paths, and every Stage ≤ 3 proposal (decorators, import-defer, source-phase-imports, import-bytes, immutable-arraybuffer, await-dictionary, plus shipped joint-iteration / ShadowRealm — those get their own dedicated scoreboard).
+- **44422 passing** — Cynic produced the spec-expected result.
+- **5386 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
-| posture | passing | failing | expected fails | skip | total | pass% |
-|---|---:|---:|---:|---:|---:|---:|
-| **unhardened, `--allow=eval`** | 44593 | 912 | 5389 | 0 | 50894 | 98.21 % |
-| **unhardened** (`cynic --unhardened`) | 43776 | 600 | 6518 | 0 | 50894 | 98.82 % |
-| **hardened** (default — `cynic run`) | 39880 | 593 | 10421 | 0 | 50894 | 98.83 % |
+| posture | passing | failing | total | pass% |
+|---|---:|---:|---:|---:|
+| **`--unhardened --allow=eval`** | 44422 | 5386 | 49808 | 89.19 % |
 
-> **pass%** = `(passing + expected fails) / total`.
-> A fixture that fails because of a Cynic design policy
-> (Annex B not shipped, strict-only, no Intl, eval-off, SES
-> throw) is a **expected fail** rather than a real
-> engine bug. Plain **failing** is what's left over — real
-> engine work to do. **skip** is in-corpus fixtures Cynic
-> doesn't run (capability / host gaps), excluded from the
-> pass% numerator; the columns decompose exactly as
-> `passing + failing + expected fails + skip = total`. The
-> `--allow=eval` row is a measured sweep (`--phase=eval`):
-> the eval surface runs for real, so its failures are real
-> engine work, not expected fails.
-
-*SES witness fidelity*: **10 / 10** witnesses are SES expected fails (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
+> **pass%** = `passing / (passing + failing)`. Every scored
+> fixture is a plain pass or fail — there is no "expected
+> fail" reclassification and no in-corpus "skip" column.
 
 ## Legend
 
-### Rows (postures)
+### Posture
 
-Same engine path, different policy mask. All three rows
-refer to the same parse → compile → run sweep.
-
-- **unhardened, `--allow=eval`** — unhardened plus the
-  eval surface (`eval()`, `new Function(string)`, …) opted
-  in. A **measured** sweep (`--phase=eval`,
-  `realm.allow_eval = true`): the eval surface runs for real,
-  so its remaining gaps count as plain `failing` (real work)
-  rather than eval-off `expected fails`. That's why this row
-  has more `failing` and fewer `expected fails` than the
-  unhardened row — the eval-off → eval-on split made visible.
-- **unhardened** — `cynic --unhardened` opt-out. Eval off
-  (so eval-dependent fixtures fail and count as correctly
-  handled fails), Annex B / Intl / noStrict failures too.
-  SES posture off — no SES throws.
-- **hardened** — the default posture (`cynic run`). All
-  the unhardened policies plus SES — primordials frozen,
-  override-mistake fix on, locked descriptors. Fixtures
-  whose expectation conflicts with SES enforcement throw
-  by design and count as expected fails.
+One scored posture: **`--unhardened --allow=eval`**. The SES
+freeze pass is off (so fixtures that monkey-patch primordials
+run unhindered) and the eval surface (`eval()`,
+`new Function(string)`, …) is opened so eval-dependent
+fixtures run for real. The default `cynic run` posture
+(hardened, eval off) is stricter; this row measures the
+engine's spec coverage with the policy knobs out of the way.
 
 ### Columns
 
-- **`passing`** — engine-true successes. Cynic produced
-  the spec-expected result.
-- **`failing`** — engine-true failures that *don't* match
-  any design policy. Real work to do.
-- **`expected fails`** — failures that hit a Cynic
-  design policy: Annex B not shipped, strict-only,
-  no Intl, eval-off, or SES throw. Counted with passes
-  under `pass%` because Cynic's deliberate "no" is the
-  spec-correct answer for the policy Cynic ships.
-  First-match priority: annex_b > no_strict > intl402 >
-  eval > SES.
-- **`total`** — every fixture except pre-Stage-4
-  proposals (Stage ≤ 3, shipped or not) and the upstream
-  `staging/` / `harness/` paths.
-- **`pass%`** — `(passing + expected fails) / total`.
-  The headline.
-- **SES witness fidelity** (the italic note above) —
-  positive-coverage signal. The curated witness set in
-  `tools/test262/ses_witnesses.zig` is a small list of
-  paths that MUST classify under the SES policy under
-  hardened runs. Drift either way is a hard signal. CI
-  gates the floor at 100 %.
-- **`Δ pass`** (history) — change in `pass` versus the
-  previous row of the same posture.
-- **`elapsed`** (history) — wall-clock time of the run
-  that produced the row. Recorded only for full sweeps
-  (no `--filter`, no `--only-failing`); partial runs
-  leave it blank. Sub-minute as `12.3 s`, minute+ as
-  `2m 40s`.
+- **`passing`** — Cynic produced the spec-expected result.
+- **`failing`** — every other scored fixture. An Annex B,
+  no-Intl, strict-only, SES, or eval miss counts as a plain
+  fail, same as an engine bug.
+- **`total`** — `passing + failing`. Excludes the upstream
+  `harness/` / `staging/` / `annexB/` paths, Stage ≤ 3
+  proposals, and structurally-unrunnable fixtures.
+- **`pass%`** — `passing / total`. The headline.
+- **`Δ pass`** (history) — change in `passing` versus the
+  previous row.
+- **`elapsed`** (history) — wall-clock time of the run.
+  Recorded only for full sweeps; partial runs leave it blank.
 
 ### Why we don't claim "spec%"
 
-The percentages here are **not** ECMA-262 spec
-conformance. Spec conformance would require running every
-normative requirement in the spec — there's no such
-enumerable set. test262 is one community attempt at
-covering the spec via concrete fixtures, and we run a
-**filtered subset** of that (the `corpus`). So `pass%`
-is right for "did anything regress?" tracking, but it's
-a lower bound on spec coverage — a fixture not in
-`corpus` doesn't get a verdict either way.
+These percentages are **not** ECMA-262 spec conformance.
+test262 is one community attempt at covering the spec via
+concrete fixtures, and we run a filtered subset of it. So
+`pass%` is right for "did anything regress?" tracking, but
+it's a lower bound on spec coverage.
 
-### Scope (what's in `total`)
-
-Every test262 fixture runs except:
-
-- the upstream `harness/` and `staging/` paths (helpers
-  and WIP grounds, not portable spec fixtures); and
-- every Stage ≤ 3 proposal — both unshipped (decorators,
-  import-defer, source-phase-imports, import-bytes,
-  immutable-arraybuffer, await-dictionary) and shipped
-  (joint-iteration, ShadowRealm). Shipped pre-Stage-4
-  proposals get their own scoreboard in `## Pre-Stage-4
-  proposals shipped` below.
-
-Annex B / `noStrict` / `intl402/` / the eval surface
-are NOT skipped — they run and any failure classifies
-as an **expected fail** under the matching policy.
 
 ## Where the engine fails, by area
 
-Each area gets three rows — one per runtime posture
-(hardened / unhardened / +eval) — mirroring the three rows in
-`## Current scores`. Row ordering + the tier grouping are
-driven by the **hardened (default)** sweep's `failing` count.
+Areas are grouped into fail-magnitude tiers (most fails
+first); within a tier they're sorted by pass% ascending.
 Bucketed on the first two path components (`built-ins/Set`,
-`language/expressions`, …).
-
-**Reading guide:**
-
-- **`failing`** is the real engine-work signal — failures with
-  no policy bucket. Nearly posture-invariant: the policies
-  relabel expected fails, they don't create engine bugs.
-- **`skip`** is in-corpus fixtures Cynic doesn't run (capability
-  / host gaps); excluded from the `pass%` numerator. The four
-  columns decompose exactly:
-  `passing + failing + expected fails + skip = total`.
-- **hardened** matches `cynic run`; SES-divergent fixtures are
-  expected fails. **unhardened** turns SES off, so those flip
-  from `expected fails` to `passing`. `pass%` barely moves (it
-  counts expected fails as pass), but the **passing ↔ expected
-  fails split** shifts — that's the real per-posture signal,
-  heaviest in the SES-hot built-ins (`Array`, `Object`,
-  `TypedArray`, `String`, …).
-- **+eval** here is a per-area *approximation* — these rows
-  reuse the unhardened buckets, so they don't reflect the eval
-  surface running for real. The **measured** `--allow=eval`
-  totals (eval fixtures run, failures counted as real work)
-  are the `unhardened, --allow=eval` row in `## Current
-  scores`, sourced from the `--phase=eval` sweep.
-- The **`1+ fails` tiers** are the engine-work list — today
-  mostly the SAB/Atomics surface plus the ~13-fixture
-  cross-realm cluster.
-- Within every tier, areas are sorted by **hardened pass%
-  ascending** (lowest first), so the whole scoreboard reads
-  low → high pass% top to bottom. Ties break on SES
-  divergence, then name.
+`language/expressions`, …). `pass%` = `passing / (passing +
+failing)` per area. The `1+ fails` tiers are the engine-work
+list.
 
 
-**100–999 fails — engine-work tier**
+**1000+ fails**
 
-| area · posture | passing | failing | expected fails | skip | total | pass% |
-|---|---:|---:|---:|---:|---:|---:|
-| **`built-ins/Atomics`** | | | | | | |
-| · hardened | 0 | 382 | 0 | 0 | 382 | 0 % |
-| · unhardened | 0 | 382 | 0 | 0 | 382 | 0 % |
-| · +eval | 0 | 382 | 0 | 0 | 382 | 0 % |
-| **`built-ins/SharedArrayBuffer`** | | | | | | |
-| · hardened | 0 | 104 | 0 | 0 | 104 | 0 % |
-| · unhardened | 0 | 104 | 0 | 0 | 104 | 0 % |
-| · +eval | 0 | 104 | 0 | 0 | 104 | 0 % |
+| area | passing | failing | pass% |
+|---|---:|---:|---:|
+| `intl402/Temporal` | 49 | 1957 | 2 % |
 
-**10–99 fails — engine-work tier**
+**100–999 fails**
 
-| area · posture | passing | failing | expected fails | skip | total | pass% |
-|---|---:|---:|---:|---:|---:|---:|
-| **`built-ins/DataView`** | | | | | | |
-| · hardened | 455 | 39 | 56 | 0 | 550 | 93 % |
-| · unhardened | 511 | 39 | 0 | 0 | 550 | 93 % |
-| · +eval | 511 | 39 | 0 | 0 | 550 | 93 % |
-| **`built-ins/TypedArrayConstructors`** | | | | | | |
-| · hardened | 572 | 48 | 116 | 0 | 736 | 93 % |
-| · unhardened | 665 | 50 | 21 | 0 | 736 | 93 % |
-| · +eval | 665 | 50 | 21 | 0 | 736 | 93 % |
+| area | passing | failing | pass% |
+|---|---:|---:|---:|
+| `built-ins/Atomics` | 0 | 382 | 0 % |
+| `built-ins/SharedArrayBuffer` | 0 | 104 | 0 % |
+| `intl402/DateTimeFormat` | 0 | 248 | 0 % |
+| `intl402/DurationFormat` | 0 | 111 | 0 % |
+| `intl402/Locale` | 0 | 152 | 0 % |
+| `intl402/NumberFormat` | 0 | 253 | 0 % |
+| `language/eval-code` | 141 | 206 | 41 % |
+| `language/statements` | 8879 | 444 | 95 % |
+| `language/expressions` | 10226 | 456 | 96 % |
 
-**1–9 fails — engine-work tier**
+**10–99 fails**
 
-| area · posture | passing | failing | expected fails | skip | total | pass% |
-|---|---:|---:|---:|---:|---:|---:|
-| **`built-ins/ThrowTypeError`** | | | | | | |
-| · hardened | 13 | 1 | 0 | 0 | 14 | 93 % |
-| · unhardened | 13 | 1 | 0 | 0 | 14 | 93 % |
-| · +eval | 13 | 1 | 0 | 0 | 14 | 93 % |
-| **`built-ins/Error`** | | | | | | |
-| · hardened | 43 | 1 | 14 | 0 | 58 | 98 % |
-| · unhardened | 57 | 1 | 0 | 0 | 58 | 98 % |
-| · +eval | 57 | 1 | 0 | 0 | 58 | 98 % |
-| **`built-ins/Function`** | | | | | | |
-| · hardened | 302 | 5 | 202 | 0 | 509 | 99 % |
-| · unhardened | 331 | 5 | 173 | 0 | 509 | 99 % |
-| · +eval | 331 | 5 | 173 | 0 | 509 | 99 % |
-| **`built-ins/Proxy`** | | | | | | |
-| · hardened | 290 | 3 | 18 | 0 | 311 | 99 % |
-| · unhardened | 296 | 4 | 11 | 0 | 311 | 99 % |
-| · +eval | 296 | 4 | 11 | 0 | 311 | 99 % |
-| **`built-ins/TypedArray`** | | | | | | |
-| · hardened | 1104 | 7 | 327 | 0 | 1438 | 100 % |
-| · unhardened | 1423 | 7 | 8 | 0 | 1438 | 100 % |
-| · +eval | 1423 | 7 | 8 | 0 | 1438 | 100 % |
-| **`built-ins/String`** | | | | | | |
-| · hardened | 1029 | 2 | 192 | 0 | 1223 | 100 % |
-| · unhardened | 1206 | 2 | 15 | 0 | 1223 | 100 % |
-| · +eval | 1206 | 2 | 15 | 0 | 1223 | 100 % |
-| **`language/expressions`** | | | | | | |
-| · hardened | 9935 | 1 | 746 | 0 | 10682 | 100 % |
-| · unhardened | 10050 | 1 | 631 | 0 | 10682 | 100 % |
-| · +eval | 10050 | 1 | 631 | 0 | 10682 | 100 % |
+| area | passing | failing | pass% |
+|---|---:|---:|---:|
+| `intl402` | 0 | 22 | 0 % |
+| `intl402/Collator` | 0 | 65 | 0 % |
+| `intl402/DisplayNames` | 0 | 57 | 0 % |
+| `intl402/Intl` | 0 | 66 | 0 % |
+| `intl402/ListFormat` | 0 | 81 | 0 % |
+| `intl402/PluralRules` | 0 | 52 | 0 % |
+| `intl402/RelativeTimeFormat` | 0 | 80 | 0 % |
+| `intl402/Segmenter` | 0 | 79 | 0 % |
+| `intl402/String` | 7 | 12 | 37 % |
+| `language/directive-prologue` | 37 | 25 | 60 % |
+| `language/function-code` | 155 | 62 | 71 % |
+| `built-ins/Function` | 421 | 88 | 83 % |
+| `language/arguments-object` | 225 | 38 | 86 % |
+| `language/types` | 102 | 11 | 90 % |
+| `built-ins/TypedArrayConstructors` | 665 | 71 | 90 % |
+| `built-ins/DataView` | 511 | 39 | 93 % |
+| `built-ins/Proxy` | 298 | 13 | 96 % |
+| `built-ins/Object` | 3328 | 83 | 98 % |
+| `built-ins/TypedArray` | 1423 | 15 | 99 % |
+| `built-ins/Array` | 3054 | 27 | 99 % |
 
-**0 fails — passing / all-policy (sorted by expected fails ↓)**
+**1–9 fails**
 
-| area · posture | passing | failing | expected fails | skip | total | pass% |
-|---|---:|---:|---:|---:|---:|---:|
-| **`intl402/Temporal`** | | | | | | |
-| · hardened | 48 | 0 | 1958 | 0 | 2006 | 100 % |
-| · unhardened | 49 | 0 | 1957 | 0 | 2006 | 100 % |
-| · +eval | 49 | 0 | 1957 | 0 | 2006 | 100 % |
-| **`annexB/language`** | | | | | | |
-| · hardened | 82 | 0 | 763 | 0 | 845 | 100 % |
-| · unhardened | 85 | 0 | 760 | 0 | 845 | 100 % |
-| · +eval | 85 | 0 | 760 | 0 | 845 | 100 % |
-| **`built-ins/Temporal`** | | | | | | |
-| · hardened | 3885 | 0 | 703 | 0 | 4588 | 100 % |
-| · unhardened | 4588 | 0 | 0 | 0 | 4588 | 100 % |
-| · +eval | 4588 | 0 | 0 | 0 | 4588 | 100 % |
-| **`language/statements`** | | | | | | |
-| · hardened | 8641 | 0 | 682 | 0 | 9323 | 100 % |
-| · unhardened | 8730 | 0 | 593 | 0 | 9323 | 100 % |
-| · +eval | 8730 | 0 | 593 | 0 | 9323 | 100 % |
-| **`built-ins/Object`** | | | | | | |
-| · hardened | 2785 | 0 | 626 | 0 | 3411 | 100 % |
-| · unhardened | 3322 | 0 | 89 | 0 | 3411 | 100 % |
-| · +eval | 3322 | 0 | 89 | 0 | 3411 | 100 % |
-| **`built-ins/Array`** | | | | | | |
-| · hardened | 2490 | 0 | 591 | 0 | 3081 | 100 % |
-| · unhardened | 3054 | 0 | 27 | 0 | 3081 | 100 % |
-| · +eval | 3054 | 0 | 27 | 0 | 3081 | 100 % |
-| **`language/eval-code`** | | | | | | |
-| · hardened | 12 | 0 | 335 | 0 | 347 | 100 % |
-| · unhardened | 12 | 0 | 335 | 0 | 347 | 100 % |
-| · +eval | 12 | 0 | 335 | 0 | 347 | 100 % |
-| **`intl402/NumberFormat`** | | | | | | |
-| · hardened | 0 | 0 | 253 | 0 | 253 | 100 % |
-| · unhardened | 0 | 0 | 253 | 0 | 253 | 100 % |
-| · +eval | 0 | 0 | 253 | 0 | 253 | 100 % |
-| **`intl402/DateTimeFormat`** | | | | | | |
-| · hardened | 0 | 0 | 248 | 0 | 248 | 100 % |
-| · unhardened | 0 | 0 | 248 | 0 | 248 | 100 % |
-| · +eval | 0 | 0 | 248 | 0 | 248 | 100 % |
-| **`annexB/built-ins`** | | | | | | |
-| · hardened | 2 | 0 | 239 | 0 | 241 | 100 % |
-| · unhardened | 2 | 0 | 239 | 0 | 241 | 100 % |
-| · +eval | 2 | 0 | 239 | 0 | 241 | 100 % |
-| **`built-ins/Date`** | | | | | | |
-| · hardened | 439 | 0 | 155 | 0 | 594 | 100 % |
-| · unhardened | 594 | 0 | 0 | 0 | 594 | 100 % |
-| · +eval | 594 | 0 | 0 | 0 | 594 | 100 % |
-| **`intl402/Locale`** | | | | | | |
-| · hardened | 0 | 0 | 152 | 0 | 152 | 100 % |
-| · unhardened | 0 | 0 | 152 | 0 | 152 | 100 % |
-| · +eval | 0 | 0 | 152 | 0 | 152 | 100 % |
-| **`built-ins/Math`** | | | | | | |
-| · hardened | 214 | 0 | 113 | 0 | 327 | 100 % |
-| · unhardened | 327 | 0 | 0 | 0 | 327 | 100 % |
-| · +eval | 327 | 0 | 0 | 0 | 327 | 100 % |
-| **`intl402/DurationFormat`** | | | | | | |
-| · hardened | 0 | 0 | 111 | 0 | 111 | 100 % |
-| · unhardened | 0 | 0 | 111 | 0 | 111 | 100 % |
-| · +eval | 0 | 0 | 111 | 0 | 111 | 100 % |
-| **`built-ins/RegExp`** | | | | | | |
-| · hardened | 1769 | 0 | 110 | 0 | 1879 | 100 % |
-| · unhardened | 1870 | 1 | 8 | 0 | 1879 | 100 % |
-| · +eval | 1870 | 1 | 8 | 0 | 1879 | 100 % |
-| **`built-ins/Promise`** | | | | | | |
-| · hardened | 533 | 0 | 107 | 0 | 640 | 100 % |
-| · unhardened | 637 | 0 | 3 | 0 | 640 | 100 % |
-| · +eval | 637 | 0 | 3 | 0 | 640 | 100 % |
-| **`intl402/ListFormat`** | | | | | | |
-| · hardened | 0 | 0 | 81 | 0 | 81 | 100 % |
-| · unhardened | 0 | 0 | 81 | 0 | 81 | 100 % |
-| · +eval | 0 | 0 | 81 | 0 | 81 | 100 % |
-| **`language/function-code`** | | | | | | |
-| · hardened | 136 | 0 | 81 | 0 | 217 | 100 % |
-| · unhardened | 139 | 0 | 78 | 0 | 217 | 100 % |
-| · +eval | 139 | 0 | 78 | 0 | 217 | 100 % |
-| **`intl402/RelativeTimeFormat`** | | | | | | |
-| · hardened | 0 | 0 | 80 | 0 | 80 | 100 % |
-| · unhardened | 0 | 0 | 80 | 0 | 80 | 100 % |
-| · +eval | 0 | 0 | 80 | 0 | 80 | 100 % |
-| **`intl402/Segmenter`** | | | | | | |
-| · hardened | 0 | 0 | 79 | 0 | 79 | 100 % |
-| · unhardened | 0 | 0 | 79 | 0 | 79 | 100 % |
-| · +eval | 0 | 0 | 79 | 0 | 79 | 100 % |
-| **`built-ins/Set`** | | | | | | |
-| · hardened | 311 | 0 | 72 | 0 | 383 | 100 % |
-| · unhardened | 382 | 0 | 1 | 0 | 383 | 100 % |
-| · +eval | 382 | 0 | 1 | 0 | 383 | 100 % |
-| **`intl402/Intl`** | | | | | | |
-| · hardened | 0 | 0 | 66 | 0 | 66 | 100 % |
-| · unhardened | 0 | 0 | 66 | 0 | 66 | 100 % |
-| · +eval | 0 | 0 | 66 | 0 | 66 | 100 % |
-| **`intl402/Collator`** | | | | | | |
-| · hardened | 0 | 0 | 65 | 0 | 65 | 100 % |
-| · unhardened | 0 | 0 | 65 | 0 | 65 | 100 % |
-| · +eval | 0 | 0 | 65 | 0 | 65 | 100 % |
-| **`built-ins/Iterator`** | | | | | | |
-| · hardened | 368 | 0 | 64 | 0 | 432 | 100 % |
-| · unhardened | 432 | 0 | 0 | 0 | 432 | 100 % |
-| · +eval | 432 | 0 | 0 | 0 | 432 | 100 % |
-| **`built-ins/ArrayBuffer`** | | | | | | |
-| · hardened | 133 | 0 | 59 | 0 | 192 | 100 % |
-| · unhardened | 183 | 0 | 9 | 0 | 192 | 100 % |
-| · +eval | 183 | 0 | 9 | 0 | 192 | 100 % |
-| **`intl402/DisplayNames`** | | | | | | |
-| · hardened | 0 | 0 | 57 | 0 | 57 | 100 % |
-| · unhardened | 0 | 0 | 57 | 0 | 57 | 100 % |
-| · +eval | 0 | 0 | 57 | 0 | 57 | 100 % |
-| **`built-ins/Map`** | | | | | | |
-| · hardened | 151 | 0 | 53 | 0 | 204 | 100 % |
-| · unhardened | 203 | 0 | 1 | 0 | 204 | 100 % |
-| · +eval | 203 | 0 | 1 | 0 | 204 | 100 % |
-| **`intl402/PluralRules`** | | | | | | |
-| · hardened | 0 | 0 | 52 | 0 | 52 | 100 % |
-| · unhardened | 0 | 0 | 52 | 0 | 52 | 100 % |
-| · +eval | 0 | 0 | 52 | 0 | 52 | 100 % |
-| **`built-ins/Reflect`** | | | | | | |
-| · hardened | 111 | 0 | 42 | 0 | 153 | 100 % |
-| · unhardened | 152 | 0 | 1 | 0 | 153 | 100 % |
-| · +eval | 152 | 0 | 1 | 0 | 153 | 100 % |
-| **`language/arguments-object`** | | | | | | |
-| · hardened | 221 | 0 | 42 | 0 | 263 | 100 % |
-| · unhardened | 223 | 0 | 40 | 0 | 263 | 100 % |
-| · +eval | 223 | 0 | 40 | 0 | 263 | 100 % |
-| **`language/statementList`** | | | | | | |
-| · hardened | 40 | 0 | 40 | 0 | 80 | 100 % |
-| · unhardened | 40 | 0 | 40 | 0 | 80 | 100 % |
-| · +eval | 40 | 0 | 40 | 0 | 80 | 100 % |
-| **`built-ins/Number`** | | | | | | |
-| · hardened | 302 | 0 | 38 | 0 | 340 | 100 % |
-| · unhardened | 340 | 0 | 0 | 0 | 340 | 100 % |
-| · +eval | 340 | 0 | 0 | 0 | 340 | 100 % |
-| **`built-ins/NativeErrors`** | | | | | | |
-| · hardened | 58 | 0 | 36 | 0 | 94 | 100 % |
-| · unhardened | 94 | 0 | 0 | 0 | 94 | 100 % |
-| · +eval | 94 | 0 | 0 | 0 | 94 | 100 % |
-| **`language/literals`** | | | | | | |
-| · hardened | 502 | 0 | 32 | 0 | 534 | 100 % |
-| · unhardened | 502 | 0 | 32 | 0 | 534 | 100 % |
-| · +eval | 502 | 0 | 32 | 0 | 534 | 100 % |
-| **`built-ins/JSON`** | | | | | | |
-| · hardened | 136 | 0 | 29 | 0 | 165 | 100 % |
-| · unhardened | 164 | 1 | 0 | 0 | 165 | 99 % |
-| · +eval | 164 | 1 | 0 | 0 | 165 | 99 % |
-| **`language/directive-prologue`** | | | | | | |
-| · hardened | 33 | 0 | 29 | 0 | 62 | 100 % |
-| · unhardened | 33 | 0 | 29 | 0 | 62 | 100 % |
-| · +eval | 33 | 0 | 29 | 0 | 62 | 100 % |
-| **`built-ins/WeakMap`** | | | | | | |
-| · hardened | 114 | 0 | 27 | 0 | 141 | 100 % |
-| · unhardened | 141 | 0 | 0 | 0 | 141 | 100 % |
-| · +eval | 141 | 0 | 0 | 0 | 141 | 100 % |
-| **`built-ins/Symbol`** | | | | | | |
-| · hardened | 73 | 0 | 25 | 0 | 98 | 100 % |
-| · unhardened | 96 | 0 | 2 | 0 | 98 | 100 % |
-| · +eval | 96 | 0 | 2 | 0 | 98 | 100 % |
-| **`built-ins/AsyncDisposableStack`** | | | | | | |
-| · hardened | 80 | 0 | 24 | 0 | 104 | 100 % |
-| · unhardened | 104 | 0 | 0 | 0 | 104 | 100 % |
-| · +eval | 104 | 0 | 0 | 0 | 104 | 100 % |
-| **`built-ins/DisposableStack`** | | | | | | |
-| · hardened | 69 | 0 | 24 | 0 | 93 | 100 % |
-| · unhardened | 93 | 0 | 0 | 0 | 93 | 100 % |
-| · +eval | 93 | 0 | 0 | 0 | 93 | 100 % |
-| **`language/types`** | | | | | | |
-| · hardened | 90 | 0 | 23 | 0 | 113 | 100 % |
-| · unhardened | 97 | 2 | 14 | 0 | 113 | 98 % |
-| · +eval | 97 | 2 | 14 | 0 | 113 | 98 % |
-| **`intl402`** | | | | | | |
-| · hardened | 0 | 0 | 22 | 0 | 22 | 100 % |
-| · unhardened | 0 | 0 | 22 | 0 | 22 | 100 % |
-| · +eval | 0 | 0 | 22 | 0 | 22 | 100 % |
-| **`built-ins/AsyncGeneratorFunction`** | | | | | | |
-| · hardened | 2 | 0 | 21 | 0 | 23 | 100 % |
-| · unhardened | 9 | 0 | 14 | 0 | 23 | 100 % |
-| · +eval | 9 | 0 | 14 | 0 | 23 | 100 % |
-| **`built-ins/GeneratorFunction`** | | | | | | |
-| · hardened | 2 | 0 | 21 | 0 | 23 | 100 % |
-| · unhardened | 9 | 0 | 14 | 0 | 23 | 100 % |
-| · +eval | 9 | 0 | 14 | 0 | 23 | 100 % |
-| **`built-ins/WeakSet`** | | | | | | |
-| · hardened | 65 | 0 | 20 | 0 | 85 | 100 % |
-| · unhardened | 85 | 0 | 0 | 0 | 85 | 100 % |
-| · +eval | 85 | 0 | 0 | 0 | 85 | 100 % |
-| **`language/module-code`** | | | | | | |
-| · hardened | 576 | 0 | 19 | 0 | 595 | 100 % |
-| · unhardened | 589 | 0 | 6 | 0 | 595 | 100 % |
-| · +eval | 589 | 0 | 6 | 0 | 595 | 100 % |
-| **`built-ins/BigInt`** | | | | | | |
-| · hardened | 59 | 0 | 18 | 0 | 77 | 100 % |
-| · unhardened | 77 | 0 | 0 | 0 | 77 | 100 % |
-| · +eval | 77 | 0 | 0 | 0 | 77 | 100 % |
-| **`built-ins/Uint8Array`** | | | | | | |
-| · hardened | 50 | 0 | 18 | 0 | 68 | 100 % |
-| · unhardened | 68 | 0 | 0 | 0 | 68 | 100 % |
-| · +eval | 68 | 0 | 0 | 0 | 68 | 100 % |
-| **`language/white-space`** | | | | | | |
-| · hardened | 51 | 0 | 16 | 0 | 67 | 100 % |
-| · unhardened | 51 | 0 | 16 | 0 | 67 | 100 % |
-| · +eval | 51 | 0 | 16 | 0 | 67 | 100 % |
-| **`intl402/String`** | | | | | | |
-| · hardened | 5 | 0 | 14 | 0 | 19 | 100 % |
-| · unhardened | 7 | 0 | 12 | 0 | 19 | 100 % |
-| · +eval | 7 | 0 | 12 | 0 | 19 | 100 % |
-| **`language/global-code`** | | | | | | |
-| · hardened | 28 | 0 | 14 | 0 | 42 | 100 % |
-| · unhardened | 36 | 0 | 6 | 0 | 42 | 100 % |
-| · +eval | 36 | 0 | 6 | 0 | 42 | 100 % |
-| **`built-ins/RegExpStringIteratorPrototype`** | | | | | | |
-| · hardened | 5 | 0 | 12 | 0 | 17 | 100 % |
-| · unhardened | 17 | 0 | 0 | 0 | 17 | 100 % |
-| · +eval | 17 | 0 | 0 | 0 | 17 | 100 % |
-| **`built-ins/AsyncGeneratorPrototype`** | | | | | | |
-| · hardened | 37 | 0 | 11 | 0 | 48 | 100 % |
-| · unhardened | 48 | 0 | 0 | 0 | 48 | 100 % |
-| · +eval | 48 | 0 | 0 | 0 | 48 | 100 % |
-| **`built-ins/FinalizationRegistry`** | | | | | | |
-| · hardened | 36 | 0 | 11 | 0 | 47 | 100 % |
-| · unhardened | 47 | 0 | 0 | 0 | 47 | 100 % |
-| · +eval | 47 | 0 | 0 | 0 | 47 | 100 % |
-| **`built-ins/GeneratorPrototype`** | | | | | | |
-| · hardened | 50 | 0 | 11 | 0 | 61 | 100 % |
-| · unhardened | 61 | 0 | 0 | 0 | 61 | 100 % |
-| · +eval | 61 | 0 | 0 | 0 | 61 | 100 % |
-| **`built-ins/global`** | | | | | | |
-| · hardened | 18 | 0 | 11 | 0 | 29 | 100 % |
-| · unhardened | 21 | 0 | 8 | 0 | 29 | 100 % |
-| · +eval | 21 | 0 | 8 | 0 | 29 | 100 % |
-| **`intl402/BigInt`** | | | | | | |
-| · hardened | 1 | 0 | 10 | 0 | 11 | 100 % |
-| · unhardened | 5 | 0 | 6 | 0 | 11 | 100 % |
-| · +eval | 5 | 0 | 6 | 0 | 11 | 100 % |
-| **`intl402/Date`** | | | | | | |
-| · hardened | 2 | 0 | 10 | 0 | 12 | 100 % |
-| · unhardened | 8 | 0 | 4 | 0 | 12 | 100 % |
-| · +eval | 8 | 0 | 4 | 0 | 12 | 100 % |
-| **`built-ins/AsyncFunction`** | | | | | | |
-| · hardened | 9 | 0 | 9 | 0 | 18 | 100 % |
-| · unhardened | 14 | 0 | 4 | 0 | 18 | 100 % |
-| · +eval | 14 | 0 | 4 | 0 | 18 | 100 % |
-| **`language/line-terminators`** | | | | | | |
-| · hardened | 32 | 0 | 9 | 0 | 41 | 100 % |
-| · unhardened | 32 | 0 | 9 | 0 | 41 | 100 % |
-| · +eval | 32 | 0 | 9 | 0 | 41 | 100 % |
-| **`built-ins/Boolean`** | | | | | | |
-| · hardened | 43 | 0 | 8 | 0 | 51 | 100 % |
-| · unhardened | 50 | 0 | 1 | 0 | 51 | 100 % |
-| · +eval | 50 | 0 | 1 | 0 | 51 | 100 % |
-| **`built-ins/WeakRef`** | | | | | | |
-| · hardened | 21 | 0 | 8 | 0 | 29 | 100 % |
-| · unhardened | 29 | 0 | 0 | 0 | 29 | 100 % |
-| · +eval | 29 | 0 | 0 | 0 | 29 | 100 % |
-| **`language/comments`** | | | | | | |
-| · hardened | 44 | 0 | 8 | 0 | 52 | 100 % |
-| · unhardened | 44 | 0 | 8 | 0 | 52 | 100 % |
-| · +eval | 44 | 0 | 8 | 0 | 52 | 100 % |
-| **`language/future-reserved-words`** | | | | | | |
-| · hardened | 48 | 0 | 7 | 0 | 55 | 100 % |
-| · unhardened | 48 | 0 | 7 | 0 | 55 | 100 % |
-| · +eval | 48 | 0 | 7 | 0 | 55 | 100 % |
-| **`language/identifier-resolution`** | | | | | | |
-| · hardened | 7 | 0 | 7 | 0 | 14 | 100 % |
-| · unhardened | 9 | 0 | 5 | 0 | 14 | 100 % |
-| · +eval | 9 | 0 | 5 | 0 | 14 | 100 % |
-| **`built-ins/AggregateError`** | | | | | | |
-| · hardened | 19 | 0 | 6 | 0 | 25 | 100 % |
-| · unhardened | 25 | 0 | 0 | 0 | 25 | 100 % |
-| · +eval | 25 | 0 | 0 | 0 | 25 | 100 % |
-| **`built-ins/AsyncIteratorPrototype`** | | | | | | |
-| · hardened | 7 | 0 | 6 | 0 | 13 | 100 % |
-| · unhardened | 13 | 0 | 0 | 0 | 13 | 100 % |
-| · +eval | 13 | 0 | 0 | 0 | 13 | 100 % |
-| **`built-ins/SuppressedError`** | | | | | | |
-| · hardened | 16 | 0 | 6 | 0 | 22 | 100 % |
-| · unhardened | 22 | 0 | 0 | 0 | 22 | 100 % |
-| · +eval | 22 | 0 | 0 | 0 | 22 | 100 % |
-| **`intl402/Number`** | | | | | | |
-| · hardened | 1 | 0 | 6 | 0 | 7 | 100 % |
-| · unhardened | 3 | 0 | 4 | 0 | 7 | 100 % |
-| · +eval | 3 | 0 | 4 | 0 | 7 | 100 % |
-| **`built-ins/ArrayIteratorPrototype`** | | | | | | |
-| · hardened | 23 | 0 | 4 | 0 | 27 | 100 % |
-| · unhardened | 27 | 0 | 0 | 0 | 27 | 100 % |
-| · +eval | 27 | 0 | 0 | 0 | 27 | 100 % |
-| **`built-ins/eval`** | | | | | | |
-| · hardened | 6 | 0 | 4 | 0 | 10 | 100 % |
-| · unhardened | 9 | 0 | 1 | 0 | 10 | 100 % |
-| · +eval | 9 | 0 | 1 | 0 | 10 | 100 % |
-| **`built-ins/undefined`** | | | | | | |
-| · hardened | 4 | 0 | 4 | 0 | 8 | 100 % |
-| · unhardened | 4 | 0 | 4 | 0 | 8 | 100 % |
-| · +eval | 4 | 0 | 4 | 0 | 8 | 100 % |
-| **`built-ins/MapIteratorPrototype`** | | | | | | |
-| · hardened | 8 | 0 | 3 | 0 | 11 | 100 % |
-| · unhardened | 11 | 0 | 0 | 0 | 11 | 100 % |
-| · +eval | 11 | 0 | 0 | 0 | 11 | 100 % |
-| **`built-ins/SetIteratorPrototype`** | | | | | | |
-| · hardened | 8 | 0 | 3 | 0 | 11 | 100 % |
-| · unhardened | 11 | 0 | 0 | 0 | 11 | 100 % |
-| · +eval | 11 | 0 | 0 | 0 | 11 | 100 % |
-| **`built-ins/StringIteratorPrototype`** | | | | | | |
-| · hardened | 4 | 0 | 3 | 0 | 7 | 100 % |
-| · unhardened | 7 | 0 | 0 | 0 | 7 | 100 % |
-| · +eval | 7 | 0 | 0 | 0 | 7 | 100 % |
-| **`built-ins/decodeURI`** | | | | | | |
-| · hardened | 52 | 0 | 3 | 0 | 55 | 100 % |
-| · unhardened | 55 | 0 | 0 | 0 | 55 | 100 % |
-| · +eval | 55 | 0 | 0 | 0 | 55 | 100 % |
-| **`built-ins/decodeURIComponent`** | | | | | | |
-| · hardened | 53 | 0 | 3 | 0 | 56 | 100 % |
-| · unhardened | 56 | 0 | 0 | 0 | 56 | 100 % |
-| · +eval | 56 | 0 | 0 | 0 | 56 | 100 % |
-| **`built-ins/encodeURI`** | | | | | | |
-| · hardened | 28 | 0 | 3 | 0 | 31 | 100 % |
-| · unhardened | 31 | 0 | 0 | 0 | 31 | 100 % |
-| · +eval | 31 | 0 | 0 | 0 | 31 | 100 % |
-| **`built-ins/encodeURIComponent`** | | | | | | |
-| · hardened | 28 | 0 | 3 | 0 | 31 | 100 % |
-| · unhardened | 31 | 0 | 0 | 0 | 31 | 100 % |
-| · +eval | 31 | 0 | 0 | 0 | 31 | 100 % |
-| **`built-ins/Infinity`** | | | | | | |
-| · hardened | 4 | 0 | 2 | 0 | 6 | 100 % |
-| · unhardened | 4 | 0 | 2 | 0 | 6 | 100 % |
-| · +eval | 4 | 0 | 2 | 0 | 6 | 100 % |
-| **`built-ins/NaN`** | | | | | | |
-| · hardened | 4 | 0 | 2 | 0 | 6 | 100 % |
-| · unhardened | 4 | 0 | 2 | 0 | 6 | 100 % |
-| · +eval | 4 | 0 | 2 | 0 | 6 | 100 % |
-| **`built-ins/isFinite`** | | | | | | |
-| · hardened | 14 | 0 | 1 | 0 | 15 | 100 % |
-| · unhardened | 15 | 0 | 0 | 0 | 15 | 100 % |
-| · +eval | 15 | 0 | 0 | 0 | 15 | 100 % |
-| **`built-ins/isNaN`** | | | | | | |
-| · hardened | 14 | 0 | 1 | 0 | 15 | 100 % |
-| · unhardened | 15 | 0 | 0 | 0 | 15 | 100 % |
-| · +eval | 15 | 0 | 0 | 0 | 15 | 100 % |
-| **`built-ins/parseFloat`** | | | | | | |
-| · hardened | 53 | 0 | 1 | 0 | 54 | 100 % |
-| · unhardened | 54 | 0 | 0 | 0 | 54 | 100 % |
-| · +eval | 54 | 0 | 0 | 0 | 54 | 100 % |
-| **`built-ins/parseInt`** | | | | | | |
-| · hardened | 54 | 0 | 1 | 0 | 55 | 100 % |
-| · unhardened | 55 | 0 | 0 | 0 | 55 | 100 % |
-| · +eval | 55 | 0 | 0 | 0 | 55 | 100 % |
-| **`intl402/Array`** | | | | | | |
-| · hardened | 1 | 0 | 1 | 0 | 2 | 100 % |
-| · unhardened | 1 | 0 | 1 | 0 | 2 | 100 % |
-| · +eval | 1 | 0 | 1 | 0 | 2 | 100 % |
-| **`language/destructuring`** | | | | | | |
-| · hardened | 18 | 0 | 1 | 0 | 19 | 100 % |
-| · unhardened | 18 | 0 | 1 | 0 | 19 | 100 % |
-| · +eval | 18 | 0 | 1 | 0 | 19 | 100 % |
-| **`language/import`** | | | | | | |
-| · hardened | 20 | 0 | 1 | 0 | 21 | 100 % |
-| · unhardened | 21 | 0 | 0 | 0 | 21 | 100 % |
-| · +eval | 21 | 0 | 0 | 0 | 21 | 100 % |
-| **`language/punctuators`** | | | | | | |
-| · hardened | 10 | 0 | 1 | 0 | 11 | 100 % |
-| · unhardened | 11 | 0 | 0 | 0 | 11 | 100 % |
-| · +eval | 11 | 0 | 0 | 0 | 11 | 100 % |
-| **`built-ins/AsyncFromSyncIteratorPrototype`** | | | | | | |
-| · hardened | 38 | 0 | 0 | 0 | 38 | 100 % |
-| · unhardened | 38 | 0 | 0 | 0 | 38 | 100 % |
-| · +eval | 38 | 0 | 0 | 0 | 38 | 100 % |
-| **`intl402/TypedArray`** | | | | | | |
-| · hardened | 1 | 0 | 0 | 0 | 1 | 100 % |
-| · unhardened | 1 | 0 | 0 | 0 | 1 | 100 % |
-| · +eval | 1 | 0 | 0 | 0 | 1 | 100 % |
-| **`language/asi`** | | | | | | |
-| · hardened | 102 | 0 | 0 | 0 | 102 | 100 % |
-| · unhardened | 102 | 0 | 0 | 0 | 102 | 100 % |
-| · +eval | 102 | 0 | 0 | 0 | 102 | 100 % |
-| **`language/block-scope`** | | | | | | |
-| · hardened | 145 | 0 | 0 | 0 | 145 | 100 % |
-| · unhardened | 145 | 0 | 0 | 0 | 145 | 100 % |
-| · +eval | 145 | 0 | 0 | 0 | 145 | 100 % |
-| **`language/computed-property-names`** | | | | | | |
-| · hardened | 48 | 0 | 0 | 0 | 48 | 100 % |
-| · unhardened | 48 | 0 | 0 | 0 | 48 | 100 % |
-| · +eval | 48 | 0 | 0 | 0 | 48 | 100 % |
-| **`language/export`** | | | | | | |
-| · hardened | 3 | 0 | 0 | 0 | 3 | 100 % |
-| · unhardened | 3 | 0 | 0 | 0 | 3 | 100 % |
-| · +eval | 3 | 0 | 0 | 0 | 3 | 100 % |
-| **`language/identifiers`** | | | | | | |
-| · hardened | 268 | 0 | 0 | 0 | 268 | 100 % |
-| · unhardened | 268 | 0 | 0 | 0 | 268 | 100 % |
-| · +eval | 268 | 0 | 0 | 0 | 268 | 100 % |
-| **`language/keywords`** | | | | | | |
-| · hardened | 25 | 0 | 0 | 0 | 25 | 100 % |
-| · unhardened | 25 | 0 | 0 | 0 | 25 | 100 % |
-| · +eval | 25 | 0 | 0 | 0 | 25 | 100 % |
-| **`language/reserved-words`** | | | | | | |
-| · hardened | 27 | 0 | 0 | 0 | 27 | 100 % |
-| · unhardened | 27 | 0 | 0 | 0 | 27 | 100 % |
-| · +eval | 27 | 0 | 0 | 0 | 27 | 100 % |
-| **`language/rest-parameters`** | | | | | | |
-| · hardened | 11 | 0 | 0 | 0 | 11 | 100 % |
-| · unhardened | 11 | 0 | 0 | 0 | 11 | 100 % |
-| · +eval | 11 | 0 | 0 | 0 | 11 | 100 % |
-| **`language/source-text`** | | | | | | |
-| · hardened | 1 | 0 | 0 | 0 | 1 | 100 % |
-| · unhardened | 1 | 0 | 0 | 0 | 1 | 100 % |
-| · +eval | 1 | 0 | 0 | 0 | 1 | 100 % |
+| area | passing | failing | pass% |
+|---|---:|---:|---:|
+| `intl402/Number` | 3 | 4 | 43 % |
+| `intl402/BigInt` | 5 | 6 | 45 % |
+| `intl402/Array` | 1 | 1 | 50 % |
+| `built-ins/undefined` | 5 | 3 | 63 % |
+| `language/identifier-resolution` | 9 | 5 | 64 % |
+| `built-ins/Infinity` | 4 | 2 | 67 % |
+| `built-ins/NaN` | 4 | 2 | 67 % |
+| `intl402/Date` | 8 | 4 | 67 % |
+| `language/future-reserved-words` | 48 | 7 | 87 % |
+| `language/global-code` | 37 | 5 | 88 % |
+| `built-ins/ThrowTypeError` | 13 | 1 | 93 % |
+| `language/statementList` | 75 | 5 | 94 % |
+| `language/destructuring` | 18 | 1 | 95 % |
+| `built-ins/ArrayBuffer` | 183 | 9 | 95 % |
+| `built-ins/AsyncGeneratorFunction` | 22 | 1 | 96 % |
+| `built-ins/GeneratorFunction` | 22 | 1 | 96 % |
+| `built-ins/Symbol` | 96 | 2 | 98 % |
+| `language/comments` | 51 | 1 | 98 % |
+| `language/literals` | 527 | 7 | 99 % |
+| `language/module-code` | 589 | 6 | 99 % |
+| `built-ins/Reflect` | 152 | 1 | 99 % |
+| `built-ins/JSON` | 164 | 1 | 99 % |
+| `built-ins/String` | 1217 | 6 | 100 % |
+| `built-ins/Map` | 203 | 1 | 100 % |
+| `built-ins/Promise` | 637 | 3 | 100 % |
+| `built-ins/Set` | 382 | 1 | 100 % |
+| `built-ins/RegExp` | 1878 | 1 | 100 % |
+
+**0 fails — fully passing**
+
+| area | passing | failing | pass% |
+|---|---:|---:|---:|
+| `built-ins/AggregateError` | 25 | 0 | 100 % |
+| `built-ins/ArrayIteratorPrototype` | 27 | 0 | 100 % |
+| `built-ins/AsyncDisposableStack` | 104 | 0 | 100 % |
+| `built-ins/AsyncFromSyncIteratorPrototype` | 38 | 0 | 100 % |
+| `built-ins/AsyncFunction` | 18 | 0 | 100 % |
+| `built-ins/AsyncGeneratorPrototype` | 48 | 0 | 100 % |
+| `built-ins/AsyncIteratorPrototype` | 13 | 0 | 100 % |
+| `built-ins/BigInt` | 77 | 0 | 100 % |
+| `built-ins/Boolean` | 51 | 0 | 100 % |
+| `built-ins/Date` | 594 | 0 | 100 % |
+| `built-ins/DisposableStack` | 93 | 0 | 100 % |
+| `built-ins/Error` | 58 | 0 | 100 % |
+| `built-ins/FinalizationRegistry` | 47 | 0 | 100 % |
+| `built-ins/GeneratorPrototype` | 61 | 0 | 100 % |
+| `built-ins/Iterator` | 432 | 0 | 100 % |
+| `built-ins/MapIteratorPrototype` | 11 | 0 | 100 % |
+| `built-ins/Math` | 327 | 0 | 100 % |
+| `built-ins/NativeErrors` | 94 | 0 | 100 % |
+| `built-ins/Number` | 340 | 0 | 100 % |
+| `built-ins/RegExpStringIteratorPrototype` | 17 | 0 | 100 % |
+| `built-ins/SetIteratorPrototype` | 11 | 0 | 100 % |
+| `built-ins/StringIteratorPrototype` | 7 | 0 | 100 % |
+| `built-ins/SuppressedError` | 22 | 0 | 100 % |
+| `built-ins/Temporal` | 4588 | 0 | 100 % |
+| `built-ins/Uint8Array` | 68 | 0 | 100 % |
+| `built-ins/WeakMap` | 141 | 0 | 100 % |
+| `built-ins/WeakRef` | 29 | 0 | 100 % |
+| `built-ins/WeakSet` | 85 | 0 | 100 % |
+| `built-ins/decodeURI` | 55 | 0 | 100 % |
+| `built-ins/decodeURIComponent` | 56 | 0 | 100 % |
+| `built-ins/encodeURI` | 31 | 0 | 100 % |
+| `built-ins/encodeURIComponent` | 31 | 0 | 100 % |
+| `built-ins/eval` | 10 | 0 | 100 % |
+| `built-ins/global` | 29 | 0 | 100 % |
+| `built-ins/isFinite` | 15 | 0 | 100 % |
+| `built-ins/isNaN` | 15 | 0 | 100 % |
+| `built-ins/parseFloat` | 54 | 0 | 100 % |
+| `built-ins/parseInt` | 55 | 0 | 100 % |
+| `intl402/TypedArray` | 1 | 0 | 100 % |
+| `language/asi` | 102 | 0 | 100 % |
+| `language/block-scope` | 145 | 0 | 100 % |
+| `language/computed-property-names` | 48 | 0 | 100 % |
+| `language/export` | 3 | 0 | 100 % |
+| `language/identifiers` | 268 | 0 | 100 % |
+| `language/import` | 21 | 0 | 100 % |
+| `language/keywords` | 25 | 0 | 100 % |
+| `language/line-terminators` | 41 | 0 | 100 % |
+| `language/punctuators` | 11 | 0 | 100 % |
+| `language/reserved-words` | 27 | 0 | 100 % |
+| `language/rest-parameters` | 11 | 0 | 100 % |
+| `language/source-text` | 1 | 0 | 100 % |
+| `language/white-space` | 67 | 0 | 100 % |
+
+
 ## Pre-Stage-4 proposals shipped
 
 Per-feature scores for the TC39 proposals Cynic ships at
-Stage 1–3, ahead of their inclusion in the published
-edition. Each proposal gets its **own table** with two
-posture rows: **hardened** — the as-shipped SES posture
-under `--enable=<flag>`, with SES throws counted as
-expected fails — and **unhardened**, against bare
-ECMA-262. Same columns as the main `## Current scores`
-table: `passing | failing | expected fails | skip | total | pass%`.
-These fixtures are excluded from the top-line score.
+Stage 1–3, ahead of their inclusion in the published edition.
+Each proposal is swept in isolation (only its own
+`--enable=<flag>` on) under the same single posture, scored
+binary pass/fail. These fixtures are excluded from the
+top-line score.
 
-### `joint-iteration`
+| feature | passing | failing | total | pass% |
+|---|---:|---:|---:|---:|
+| `joint-iteration` | 78 | 0 | 78 | 100 % |
+| `ShadowRealm` | 63 | 1 | 64 | 98 % |
 
-| posture | passing | failing | expected fails | skip | total | pass% |
-|---|---:|---:|---:|---:|---:|---:|
-| hardened | 70 | 0 | 8 | 0 | 78 | 100 % |
-| unhardened | 76 | 0 | 2 | 0 | 78 | 100 % |
-
-### `ShadowRealm`
-
-| posture | passing | failing | expected fails | skip | total | pass% |
-|---|---:|---:|---:|---:|---:|---:|
-| hardened | 43 | 0 | 21 | 0 | 64 | 100 % |
-| unhardened | 63 | 0 | 1 | 0 | 64 | 100 % |
 
 ## History
 
-### 2026-06-02 — cynic `6a72b62`, test262 `d0c1b4555b`
+### 2026-06-02 — cynic `bd0337e`, test262 `d0c1b455`
 
-|         | passing | failing | expected fails | total | pass% | Δ pass | elapsed |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| **unhardened** | 43776 | 600 | 6518 | 50894 | 98.82 % | +3 | 30.1 s |
-| **hardened** | 39880 | 593 | 10421 | 50894 | 98.83 % | +3 | 30.1 s |
-| **unhardened_allow_eval** | 44593 | 912 | 5389 | 50894 | 98.21 % | n/a | 30.1 s |
-
-### 2026-06-01 — cynic `fed859f`, test262 `d0c1b4555b`
-
-|         | passing | failing | expected fails | total | pass% | Δ pass | elapsed |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| **unhardened** | 44074 | 600 | 6217 | 50894 | 98.82 % | n/a | 1m 30s |
-| **hardened** | 40178 | 593 | 10120 | 50894 | 98.83 % | n/a | 1m 25s |
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 44422 | 5386 | 49808 | 89.19 % | n/a | 25.2 s |
 

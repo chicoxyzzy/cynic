@@ -294,16 +294,13 @@ sweeps.
 
 `zig build test262` accepts forwarded flags after `--`:
 `--filter=<substring>`, `--list-failures=<n>`, `--quiet`, `--verbose`,
-`--phase=<spec>` (`main` runs the hardened ECMA-262 sweep with
-pre-Stage-4 fixtures excluded; `unhardened` runs the same
-fixture set with `realm.hardened = false`; `eval` runs it with
-`realm.allow_eval = true` (unhardened) so the eval surface
-(§19.2.1 / §20.2.1.1.1) runs for real and eval-policy failures
-count as real failures — the "what eval work remains" signal;
-`feature:<name>` runs only that proposal's dedicated isolated
-sweep — only its realm flag on, only its tagged fixtures
-included. Default: main + unhardened; `--write-results`
-additionally runs the eval phase and every tracked feature in
+`--phase=<spec>` (`main` runs the headline ECMA-262 sweep under
+the single scored posture — `--unhardened --allow=eval`
+(`realm.hardened = false`, `realm.allow_eval = true`) — with
+pre-Stage-4 fixtures excluded; `feature:<name>` runs only that
+proposal's dedicated isolated sweep — only its one realm flag
+on, only its tagged fixtures included. Default: main;
+`--write-results` additionally runs every tracked feature in
 sequence), `--no-harness` (disable the `sta.js` +
 `assert.js` preamble in runtime mode),
 `--write-results` (updates `test262-results.md`),
@@ -365,43 +362,35 @@ RSS but obvious here. Forces `--threads=1`),
 time ≥ 1 ms. Different signal from `--top-alloc` — surfaces
 fixtures whose wall-time is dominated by GC even when bytes
 look moderate. Forces `--threads=1`),
-`--min-spec-pct=<f>` / `--min-hardened-spec-pct=<f>` /
-`--min-ses-witness-pct=<f>` (per-row floors — the unhardened
-row, the hardened row, and the SES-witness side channel
-respectively. The first two gate the row's headline `pass%`
-(= `(passing + expected fails) / total` — see the
-legend in `test262-results.md`); the witness floor gates
-`tools/test262/ses_witnesses.zig`'s curated set — every listed
-path MUST classify under the SES policy in the hardened phase.
-Exit 2 when any floor trips. Skipped under `--filter=`. CI
-wires all three at published baselines so a regression in
-either row or in witness fidelity fails the build — see
-`.github/workflows/ci.yml`). The harness scores every test262
-fixture except (a) `harness/` and `staging/` walk-time skips and
-(b) pre-Stage-4 proposals (both unshipped — decorators,
+`--min-pass-pct=<f>` (the single headline floor — gates `pass%`
+(= `passing / (passing + failing)` — see the legend in
+`test262-results.md`). Exit 2 when it trips. Skipped under
+`--filter=`. CI wires it at the published baseline so a score
+regression fails the build — see `.github/workflows/ci.yml`).
+
+**Binary scoring, single posture.** The harness scores every
+test262 fixture as a plain **pass** or **fail** under one posture
+(`--unhardened --allow=eval`). There is no "expected fail" /
+policy reclassification and no in-corpus "skip" bucket: an
+Annex B, no-Intl, strict-only, SES, or eval miss counts as a
+plain fail, same as an engine bug. Excluded from the denominator
+are only (a) the `harness/`, `staging/`, and `annexB/` walk-time
+prefixes; (b) pre-Stage-4 proposals (unshipped — decorators,
 import-defer, source-phase-imports, import-bytes,
 immutable-arraybuffer, await-dictionary — and shipped —
 joint-iteration, ShadowRealm; the shipped ones get their own
-dedicated per-feature scoreboard). Annex B / intl402 /
-eval-dependent / `noStrict` fixtures all RUN; any failure is a
-**expected fail** under the matching policy (annex_b >
-no_strict > intl402 > eval > SES, first match wins; SES is
-hardened-only and matched against the runtime error pattern).
-Re-running for the same `(date, mode)` replaces that day's row.
-Each row records `passing`, `failing`, `expected fails`,
-`total`, and `pass%`. `test262-results.md` opens with
-a `## Current scores` snapshot (3 rows: `unhardened, --allow=eval`
-— now a measured `--phase=eval` sweep, not a placeholder — then
-`unhardened`, then `hardened`), a `## Legend`, a `## Where the engine fails,
-by area` per-bucket scoreboard sourced from the hardened sweep
-and sorted by raw fail count, a `## Pre-Stage-4 proposals
-shipped` section with one per-proposal table (a `### <feature>`
-table per shipped proposal, hardened + unhardened posture rows),
-and a `## History`
-section of per-day mini-tables — newest day first. Each history
-row shows `Δ pass` against the previous run of the same mode
-and the `elapsed` wall-clock time of that run (full sweeps only;
-partial / filtered runs leave it blank).
+dedicated per-feature scoreboard); and (c) structurally-unrunnable
+fixtures (no / malformed frontmatter). Re-running for the same
+date replaces that day's row. Each row records `passing`,
+`failing`, `total`, and `pass%`. `test262-results.md` opens with
+a `## Current scores` snapshot (one row — the single posture), a
+`## Legend`, a `## Where the engine fails, by area` per-bucket
+scoreboard (`area | passing | failing | pass%`, fail-tiered), a
+`## Pre-Stage-4 proposals shipped` section (one binary row per
+shipped proposal), and a `## History` section of per-day
+mini-tables — newest first. Each history row shows `Δ pass`
+against the previous run and the `elapsed` wall-clock time (full
+sweeps only; partial / filtered runs leave it blank).
 
 **Build mode.** The test262 harness binary is built `ReleaseFast`
 by default (interpreters are 5-10× slower in Debug; the harness

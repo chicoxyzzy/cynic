@@ -75,17 +75,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
-    // `zig build test-ses` — Phase 4 of
-    // docs/handbook/ses-test262-policy.md. Hand-written SES
-    // positive-coverage tests in `tests/ses/`. Each fixture is a
-    // standalone JS file that throws on assertion failure; the
-    // runner (`tools/test-ses.sh`) executes each via the installed
-    // cynic CLI (hardened by default) and reports pass / fail by
-    // exit code. The dual of the Phase 3 witness-inversion set
-    // in `tools/test262/ses_witnesses.zig` — that one proves SES
-    // breaks the spec where it should; this one proves SES
-    // *enables* what it should (override-mistake shadowing,
-    // `harden()` traversal, frozen-globalThis carve-outs).
+    // `zig build test-ses` — hand-written SES positive-coverage
+    // tests in `tests/ses/`. Each fixture is a standalone JS file
+    // that throws on assertion failure; the runner
+    // (`tools/test-ses.sh`) executes each via the installed cynic
+    // CLI (hardened by default) and reports pass / fail by exit
+    // code. Proves SES *enables* what it should (override-mistake
+    // shadowing, `harden()` traversal, frozen-globalThis carve-outs).
     const ses_runner = b.addSystemCommand(&.{ "bash", "tools/test-ses.sh" });
     ses_runner.step.dependOn(b.getInstallStep());
     const ses_step = b.step("test-ses", "Run the Cynic-authored SES positive-coverage tests");

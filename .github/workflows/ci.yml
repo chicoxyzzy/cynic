@@ -111,15 +111,12 @@ jobs:
           fi
 
       - name: SES positive-coverage tests
-        # Phase 4 of `docs/handbook/ses-test262-policy.md`. Runs
-        # the hand-written tests under `tests/ses/` against the
+        # Runs the hand-written tests under `tests/ses/` against the
         # installed cynic CLI (hardened by default). Each fixture
         # asserts a piece of SES behaviour the engine is supposed
         # to enable (override-mistake shadowing, `harden()`
-        # traversal, frozen-globalThis carve-outs) — the dual of
-        # the witness-inversion set in
-        # `tools/test262/ses_witnesses.zig`. Gating: any failure
-        # exits 1.
+        # traversal, frozen-globalThis carve-outs). Gating: any
+        # failure exits 1.
         run: zig build test-ses
 
   fmt-check:
@@ -272,10 +269,10 @@ jobs:
     # the second `zig build test262` reuses the first's `.zig-cache`,
     # so the harness compiles a single time.
     #
-    # The runtime sweep is gating via `--min-spec-pct`: a score
-    # regression below the per-phase floor exits 2 and fails the
-    # job. The filtered RSS smoke stays advisory because it
-    # surfaces leak signals as numbers in the log, not pass/fail.
+    # The runtime sweep is gating via `--min-pass-pct`: a score
+    # regression below the floor exits 2 and fails the job. The
+    # filtered RSS smoke stays advisory because it surfaces leak
+    # signals as numbers in the log, not pass/fail.
     #
     # Runtime mode is the meaningful signal — parser is uniformly
     # ≥95% across areas. ReleaseFast + 4 workers (matching the
@@ -310,30 +307,16 @@ jobs:
         # Drop `--quiet` so the per-bucket tally lands in the CI
         # log. Step timeout caps it in case the harness wedges.
         #
-        # Three floors gate the job — two per-row `pass%` floors plus
-        # the SES-witness floor. `pass%` = (passing + correctly handled
-        # fails) / total; see the legend in `test262-results.md`.
+        # One floor gates the job. The harness scores every fixture
+        # binary pass/fail under a single posture
+        # (`--unhardened --allow=eval`); `pass%` = `passing /
+        # (passing + failing)`. See the legend in
+        # `test262-results.md`.
         #
-        #   --min-spec-pct=98.2          unhardened `pass%` floor.
-        #                                Today 98.82 %; ~0.6pp headroom.
-        #   --min-hardened-spec-pct=98.2 hardened `pass%` floor. Today
-        #                                98.83 %; same headroom. Both
-        #                                count correctly-handled fails
-        #                                toward the numerator.
-        #   --min-ses-witness-pct=100    Every fixture in
-        #                                `tools/test262/ses_witnesses.zig`
-        #                                MUST classify under the SES
-        #                                policy in the hardened phase.
-        #                                Drift either way (a witness
-        #                                now passes — SES enforcement
-        #                                weakened; or a witness fails
-        #                                for a non-SES reason — pattern
-        #                                miss or engine regression in
-        #                                the SES throw path) fails the
-        #                                build.
-        #
-        # Any floor tripping exits 2 — see the per-phase diagnostic
-        # block in `tools/test262.zig` for the failure report.
+        #   --min-pass-pct=88.5   Headline pass% floor. Today
+        #                         ~89.2 %; ~0.7pp headroom. A score
+        #                         regression below it exits 2 — see
+        #                         the diagnostic in `tools/test262.zig`.
         #
         # `--top-rss=20` surfaces the memory-heaviest fixtures
         # after the tally; pair with the filtered RSS smoke step
@@ -342,9 +325,7 @@ jobs:
         run: |
           zig build test262 -- \
             --threads=4 --top-rss=20 \
-            --min-spec-pct=98.2 \
-            --min-hardened-spec-pct=98.2 \
-            --min-ses-witness-pct=100
+            --min-pass-pct=88.5
 
       - name: Filtered sweep with top-rss
         # Advisory leak guard: a filtered runtime sweep reports the

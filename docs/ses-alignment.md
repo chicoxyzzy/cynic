@@ -473,14 +473,14 @@ fix — so `eval("Array.prototype.push = 1")` throws, and that freeze
 endowment / confinement layer is built; full SES Compartment
 confinement is deferred (see "Out of scope").
 
-**test262.** The eval surface (~2,100 fixtures) runs in every phase.
-Eval-off phases (`main` / `unhardened`) classify an eval-surface
-failure as `correctly_handled` (a by-design refusal) via
-`skip_rules.pathPolicyKind`'s `.eval` policy. A dedicated `--phase=eval`
-sweep (unhardened + `realm.allow_eval = true`) drops that policy so the
-eval fixtures run for real and their failures count as genuine
-failures — the live "what eval work remains" signal, surfaced as the
-`unhardened, --allow=eval` row in `test262-results.md`.
+**test262.** The harness scores every fixture binary pass/fail under
+a single posture — `--unhardened --allow=eval` (`realm.hardened =
+false`, `realm.allow_eval = true`) — so the eval surface (~2,100
+fixtures) runs for real and any eval-surface miss counts as a plain
+`failing`, same as an engine bug. There is no eval-off "correctly
+handled" reclassification. See `test262-results.md` and
+[handbook/ses-test262-policy.md](handbook/ses-test262-policy.md)
+(retired policy model) for the full picture.
 
 ## Verification
 
