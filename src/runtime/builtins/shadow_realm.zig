@@ -22,10 +22,12 @@
 //! the instance's owner realm rides `shadow_realm_owner` in the
 //! cold-field extension.
 //!
-//! `.evaluate` is fully wired (callable boundary + owner-realm
-//! error tagging). `.importValue` still throws "not yet
-//! implemented" — it needs the child realm's module loader, which
-//! isn't wired here yet.
+//! Both methods are fully wired. `.evaluate` runs the callable
+//! boundary with owner-realm error tagging; `.importValue` loads
+//! the specifier through the child realm's module loader, resolves
+//! the named export, and passes it across the same boundary, with
+//! the caller-realm Promise settling on a job. A missing loader,
+//! an evaluation throw, or an absent export rejects that Promise.
 
 const std = @import("std");
 

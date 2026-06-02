@@ -202,12 +202,20 @@ fn getFunctionMember(realm: *Realm, fn_obj: *JSFunction, key: []const u8) Native
 ///
 /// Returns the freshly created array-shaped object.
 pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) NativeError!Value {
+    // §23.1.3.34 step 6 / step 4.b — "thisRealm" is the realm of the
+    // running execution context (the Array method's [[Realm]]), and
+    // a defaulted ArrayCreate uses that realm's %Array.prototype%.
+    // The dispatch loop stamps the executing native's realm into
+    // `active_native_fn_realm`; with a shared heap (a ShadowRealm
+    // child) it differs from the dispatch `realm`, so resolve the
+    // home realm here. In a single realm `home == realm`.
+    const home = realm.active_native_fn_realm orelse realm;
     // Step 2 — IsArray(originalArray). Per §7.2.2 step 3, a Proxy
     // unwraps to its target; a revoked proxy throws. Non-array
     // receivers fall through to ArrayCreate (Step 2 → ArrayCreate
     // with the default %Array% intrinsic).
     const is_arr = try isArrayProxyAware(realm, heap_mod.taggedObject(original));
-    if (!is_arr) return defaultArrayCreate(realm, length);
+    if (!is_arr) return defaultArrayCreate(home, length);
     // Step 3 — Get(originalArray, "constructor"). Use the Proxy-
     // and accessor-aware path so a poisoned getter or proxy `get`
     // trap propagates per spec (create-proxy.js et al.).
@@ -226,7 +234,7 @@ pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) Nativ
     if (heap_mod.valueAsFunction(ctor_v)) |ctor_fn| {
         if (ctor_fn.has_construct and !ctor_fn.is_arrow) {
             if (ctor_fn.getFunctionRealm()) |realm_c| {
-                if (realm_c != realm) {
+                if (realm_c != home) {
                     if (realm_c.globals.get("Array")) |arr_ctor_v| {
                         if (heap_mod.valueAsFunction(arr_ctor_v)) |realm_c_array| {
                             if (realm_c_array == ctor_fn) {
@@ -249,7 +257,7 @@ pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) Nativ
         if (c_v.isNull()) c_v = Value.undefined_;
     }
     // Step 6 — if C is undefined, return ArrayCreate(length).
-    if (c_v.isUndefined()) return defaultArrayCreate(realm, length);
+    if (c_v.isUndefined()) return defaultArrayCreate(home, length);
     // Step 7 — if IsConstructor(C) is false, throw a TypeError. A
     // primitive constructor (e.g. `a.constructor = null` or `= 1`)
     // lands here; so does an object/function without [[Construct]].
@@ -264,7 +272,7 @@ pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) Nativ
     // call and allocate directly.
     if (realm.globals.get("Array")) |array_global| {
         if (heap_mod.valueAsFunction(array_global)) |array_ctor| {
-            if (array_ctor == species_fn) return defaultArrayCreate(realm, length);
+            if (array_ctor == species_fn) return defaultArrayCreate(home, length);
         }
     }
     // Construct(species, [length]) — go through the public path so a

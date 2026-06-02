@@ -197,9 +197,11 @@ test "phase-0: each realm has its own output buffer (print)" {
 const Value = @import("value.zig").Value;
 const heap_mod = @import("heap.zig");
 
-test "phase 3: function created in parent realm has parent as [[Realm]] (skip pending 3.3)" {
-    if (true) return error.SkipZigTest;
-
+test "phase 3: function created in parent realm has parent as [[Realm]]" {
+    // Live since the realm is threaded through native + ordinary
+    // function allocation (`Heap.allocateFunction*` takes the
+    // allocating realm); a function's [[Realm]] is fixed at
+    // creation and survives a cross-realm call.
     var parent = Realm.init(testing.allocator);
     defer parent.deinit();
     try parent.installBuiltins();
@@ -208,8 +210,8 @@ test "phase 3: function created in parent realm has parent as [[Realm]] (skip pe
     defer child.deinit();
     try child.installBuiltins();
 
-    // Create a function in parent. After 3.2, its `realm` slot
-    // is set at allocateFunction time.
+    // Create a function in parent; its `realm` slot is set at
+    // allocateFunction time.
     const f_v = (try lantern.evaluateScript(testing.allocator, &parent, "(function f() { return 1; })")).value;
     const f = heap_mod.valueAsFunction(f_v) orelse return error.TestFailed;
     try testing.expect(f.realm == &parent);
@@ -223,8 +225,24 @@ test "phase 3: function created in parent realm has parent as [[Realm]] (skip pe
     try testing.expect(f.realm == &parent);
 }
 
-test "phase 3: TypeError thrown by parent's code is parent's Error.prototype chain (skip pending 3.3)" {
-    if (true) return error.SkipZigTest;
+test "phase 3: TypeError thrown by parent's code is parent's Error.prototype chain (skip pending 3.3 consumption)" {
+    // PENDING 3.3 consumption side. [[Realm]] is set on every
+    // function (3.2), and call.zig/interpreter.zig record the
+    // callee's realm as `active_native_fn_realm` /
+    // `CallFrame.running_realm`. The remaining gap is the deepest
+    // piece: free *global identifier resolution*. When parent's
+    // `thrower` runs after being called from child, `new TypeError`
+    // resolves the `TypeError` binding through the global-load
+    // opcodes, which read `realm.globals` — the *running* (child)
+    // realm — not the function's lexical home-realm global
+    // environment, so it constructs with child's TypeError and the
+    // probe sees `e.constructor === (child) TypeError`. Fixing it
+    // means routing global loads/stores through the executing
+    // frame's `running_realm.globals` (the RealmStack consumption).
+    // A smaller follow-on then makes the error natives resolve
+    // their prototype via `active_native_fn_realm` (§10.2.3) —
+    // necessary but not sufficient alone (verified: that change in
+    // isolation leaves this test red).
 
     // §10.2.3 / §10.2.4: an Error allocated inside a function whose
     // [[Realm]] is parent must inherit from parent's %Error.prototype%,
@@ -250,8 +268,15 @@ test "phase 3: TypeError thrown by parent's code is parent's Error.prototype cha
     try testing.expect(probe.bits == Value.false_.bits);
 }
 
-test "phase 3: §23.1.3.34 Array.prototype.map uses source realm's %Array% as species (skip pending 3.3)" {
-    if (true) return error.SkipZigTest;
+test "phase 3: §23.1.3.34 Array.prototype.map uses source realm's %Array% as species (skip pending 3.3 consumption)" {
+    // PENDING 3.3 consumption side. The Array.prototype.map native
+    // builds its result through the *calling* realm's %Array%
+    // instead of the source array's realm. ArraySpeciesCreate
+    // (§23.1.3.34) must default `C` to the source object's realm's
+    // %Array% — resolve via `realm.active_native_fn_realm orelse
+    // realm` at the array.zig species site, mirroring the error-
+    // native fix. [[Realm]] is already in place (3.2); only the
+    // consumption is missing.
 
     var parent = Realm.init(testing.allocator);
     defer parent.deinit();
@@ -273,7 +298,6 @@ test "phase 3: §23.1.3.34 Array.prototype.map uses source realm's %Array% as sp
 }
 
 test "phase 3: native callback sees its own function's realm via active_native_fn_realm (skip pending 3.3)" {
-    if (true) return error.SkipZigTest;
 
     // The native-side D2 invariant: a native installed in parent
     // and called from child reads `realm.active_native_fn_realm`
