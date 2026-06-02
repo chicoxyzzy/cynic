@@ -125,18 +125,15 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
 /// source compilation — aligns with SES / Hardened JavaScript.
 fn functionConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     if (args.len > 0) {
-        // §20.2.1.1.1 CreateDynamicFunction parses the source
-        // string and surfaces every early-error class — most
-        // notably §16.2.1.7 ImportMeta (`import.meta` outside a
-        // Module goal). Cynic permanently does not ship runtime
-        // source compilation (AGENTS.md), so we throw at the
-        // entry — but as a SyntaxError, matching the spec's
-        // observable completion when CreateDynamicFunction fails
-        // its parse step (test262
-        // `language/expressions/import.meta/syntax/goal-*-params-or-body.js`).
-        // Gated by `--allow=eval`: closed → policy SyntaxError; open →
-        // EvalError (enabled-but-unimplemented).
-        return @import("../intrinsics.zig").throwEvalUnsupported(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
+        // §20.2.1.1.1 CreateDynamicFunction. Gated by `--allow=eval`:
+        // closed → SES policy SyntaxError (the spec-observable
+        // completion of a failed parse — test262
+        // `language/expressions/import.meta/syntax/goal-*-params-or-body.js`
+        // expects a SyntaxError); open → parse + build the function.
+        if (!realm.allow_eval) {
+            return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
+        }
+        return createDynamicFunction(realm, this_value, args, .normal);
     }
     // §20.2.1.1 CreateDynamicFunction — the new function's realm is
     // the *constructor's* realm, not necessarily the active running
@@ -574,9 +571,9 @@ fn boundFunctionTrampoline(realm: *Realm, this_value: Value, args: []const Value
 /// would compile a string source — that's later); the
 /// intrinsics exist so introspection tests pass.
 pub fn installVariantPrototypes(realm: *Realm) !void {
-    realm.intrinsics.generator_function_prototype = try installVariantCtor(realm, "GeneratorFunction");
-    realm.intrinsics.async_function_prototype = try installVariantCtor(realm, "AsyncFunction");
-    realm.intrinsics.async_generator_function_prototype = try installVariantCtor(realm, "AsyncGeneratorFunction");
+    realm.intrinsics.generator_function_prototype = try installVariantCtor(realm, "GeneratorFunction", generatorFunctionConstructor);
+    realm.intrinsics.async_function_prototype = try installVariantCtor(realm, "AsyncFunction", asyncFunctionConstructor);
+    realm.intrinsics.async_generator_function_prototype = try installVariantCtor(realm, "AsyncGeneratorFunction", asyncGeneratorFunctionConstructor);
 }
 
 /// §27.3.4.3 GeneratorFunction.prototype.prototype = %GeneratorPrototype%
@@ -629,8 +626,8 @@ pub fn wireVariantInstancePrototypes(realm: *Realm) !void {
     }
 }
 
-fn installVariantCtor(realm: *Realm, name: []const u8) !*JSObject {
-    const fn_obj = try realm.heap.allocateFunctionNative(realm, variantCtorThrows, 1, name);
+fn installVariantCtor(realm: *Realm, name: []const u8, native: @import("../function.zig").NativeFn) !*JSObject {
+    const fn_obj = try realm.heap.allocateFunctionNative(realm, native, 1, name);
     fn_obj.proto = realm.intrinsics.function_prototype;
     // §27.3.1 / §27.4.1 / §27.7.1 — GeneratorFunction /
     // AsyncGeneratorFunction / AsyncFunction are subclasses of
@@ -681,21 +678,133 @@ fn installVariantCtor(realm: *Realm, name: []const u8) !*JSObject {
     return proto;
 }
 
-fn variantCtorThrows(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+/// §20.2.1.1.1 step 1 — the four function flavours CreateDynamicFunction
+/// builds, distinguished by the source-prefix keyword and the parse
+/// goal. Each variant constructor (`GeneratorFunction` etc.) routes to
+/// `createDynamicFunction` with its kind so the synthesized source uses
+/// the right `function` / `function*` / `async function` /
+/// `async function*` prefix.
+const DynamicFunctionKind = enum {
+    normal,
+    generator,
+    async_,
+    async_generator,
+
+    /// The leading keyword(s) for the synthesized
+    /// `(<prefix> anonymous(P) {B})` wrapper.
+    fn sourcePrefix(self: DynamicFunctionKind) []const u8 {
+        return switch (self) {
+            .normal => "function",
+            .generator => "function*",
+            .async_ => "async function",
+            .async_generator => "async function*",
+        };
+    }
+};
+
+fn generatorFunctionConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return variantConstructor(realm, this_value, args, .generator);
+}
+fn asyncFunctionConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return variantConstructor(realm, this_value, args, .async_);
+}
+fn asyncGeneratorFunctionConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return variantConstructor(realm, this_value, args, .async_generator);
+}
+
+/// Shared body for the `GeneratorFunction` / `AsyncFunction` /
+/// `AsyncGeneratorFunction` string constructors (§27.3.2 / §27.7.2 /
+/// §27.4.2 — each defers to §20.2.1.1.1 CreateDynamicFunction). Gated
+/// by `--allow=eval`: closed → SES policy SyntaxError (matching the
+/// spec-observable completion of the failed parse step, incl. §16.2.1.7
+/// ImportMeta outside a Module goal — test262
+/// `language/expressions/import.meta/syntax/goal-{generator,async-function,async-generator}-params-or-body.js`);
+/// open → parse + build the function.
+fn variantConstructor(realm: *Realm, this_value: Value, args: []const Value, kind: DynamicFunctionKind) NativeError!Value {
+    if (!realm.allow_eval) {
+        return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
+    }
+    return createDynamicFunction(realm, this_value, args, kind);
+}
+
+/// §20.2.1.1.1 CreateDynamicFunction ( constructor, newTarget, kind,
+/// args ). Cynic implements the spec by *source synthesis*: it joins
+/// the parameter strings, appends the body, wraps them in a
+/// parenthesized function expression with the kind's prefix, and runs
+/// the wrapper through the eval pipeline (`evaluateEval`) — whose
+/// completion value is the function object. The new function's scope
+/// is therefore the global environment (§20.2.1.1.1 step 30: scope =
+/// realm.[[GlobalEnv]]), which is exactly what eval-as-global-code
+/// produces. Cynic is strict-only, so the body parses as strict code.
+///
+/// Caller has already confirmed `realm.allow_eval`. A parse failure
+/// surfaces as the SyntaxError CreateDynamicFunction's Parse step
+/// raises (§20.2.1.1.1 step 25/27). The function's [[Realm]] is the
+/// constructor's realm (cross-realm `new other.Function(...)`), tracked
+/// via `active_native_fn_realm`.
+fn createDynamicFunction(realm: *Realm, this_value: Value, args: []const Value, kind: DynamicFunctionKind) NativeError!Value {
     _ = this_value;
-    _ = args;
-    // Calling `GeneratorFunction("…")` / `AsyncFunction("…")` /
-    // `AsyncGeneratorFunction("…")` would invoke
-    // CreateDynamicFunction (§20.2.1.1.1) to parse the source,
-    // which surfaces every early-error class as a SyntaxError —
-    // including §16.2.1.7 ImportMeta outside a Module goal
-    // (test262
-    // `language/expressions/import.meta/syntax/goal-{generator,async-function,async-generator}-params-or-body.js`).
-    // Cynic ships no runtime source compilation; gated by
-    // `--allow=eval` (`realm.allow_eval`): closed → policy
-    // SyntaxError (matches the spec-observable completion of the
-    // failed parse step); open → EvalError (enabled-but-unimplemented).
-    return @import("../intrinsics.zig").throwEvalUnsupported(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
+    const ctor_realm = realm.active_native_fn_realm orelse realm;
+
+    // §20.2.1.1.1 steps 8-16 — split args into parameter strings (all
+    // but the last) and the body (the last, or "" when no args). Each
+    // is coerced via §7.1.17 ToString (`stringifyArg`), which throws
+    // TypeError on a Symbol and fires a user `toString` per spec.
+    const body_str: []const u8 = if (args.len == 0)
+        ""
+    else
+        (try intrinsics.stringifyArg(realm, args[args.len - 1])).flatBytes();
+
+    // Build the comma-joined parameter list from args[0 .. len-1].
+    var params_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer params_buf.deinit(realm.allocator);
+    if (args.len > 1) {
+        for (args[0 .. args.len - 1], 0..) |p, i| {
+            if (i > 0) params_buf.append(realm.allocator, ',') catch return error.OutOfMemory;
+            const ps = try intrinsics.stringifyArg(realm, p);
+            params_buf.appendSlice(realm.allocator, ps.flatBytes()) catch return error.OutOfMemory;
+        }
+    }
+
+    // §20.2.1.1.1 step 22 — assemble the source. The wrapping parens
+    // make it an expression whose completion value is the function.
+    // Newlines isolate a `// line comment` or unterminated token in
+    // the param list / body from the surrounding braces, matching the
+    // spec's exact bracketing (`function anonymous(<P>\n) {\n<B>\n}`).
+    // The buffer must outlive the function (its template borrows a
+    // slice for `Function.prototype.toString`), so it's handed to the
+    // realm's `eval_sources` for teardown rather than freed here.
+    const wrapper = std.fmt.allocPrint(
+        ctor_realm.allocator,
+        "({s} anonymous({s}\n) {{\n{s}\n}})",
+        .{ kind.sourcePrefix(), params_buf.items, body_str },
+    ) catch return error.OutOfMemory;
+    defer ctor_realm.allocator.free(wrapper);
+    const source = ctor_realm.retainEvalSource(wrapper) catch return error.OutOfMemory;
+
+    // §20.2.1.1.1 steps 24-29 — Parse + evaluate the wrapper in the
+    // constructor's realm. A parse failure is a SyntaxError.
+    const result = lantern.evaluateEval(ctor_realm.allocator, ctor_realm, source) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ParseError, error.CompileError => return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor: SyntaxError in synthesized source"),
+        error.InvalidOpcode => return error.OutOfMemory,
+    };
+    const fn_val = switch (result) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+
+    // The wrapper's completion is the function expression's value.
+    // Defensive: a non-function completion would be an engine bug.
+    const fn_obj = heap_mod.valueAsFunction(fn_val) orelse {
+        return throwTypeError(realm, "Function constructor: synthesized source did not produce a function");
+    };
+    // §20.2.1.1.1 step 28 — the function's name is "anonymous". The
+    // `function anonymous` form already named it; nothing more to do.
+    return heap_mod.taggedFunction(fn_obj);
 }
 
 // ── Function.prototype.toString ─────────────────────────────────────────────

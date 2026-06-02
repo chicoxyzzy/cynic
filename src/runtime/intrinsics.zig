@@ -49,6 +49,11 @@ pub const Intrinsics = struct {
     function_prototype: ?*JSObject = null,
     array_prototype: ?*JSObject = null,
     string_prototype: ?*JSObject = null,
+    /// §19.2.1 %eval% — the global `eval` function object. Recorded
+    /// so the `direct_eval` opcode can check whether the call's
+    /// resolved callee IS the intrinsic (a direct eval) or a user
+    /// value that shadowed `globalThis.eval` (an ordinary call).
+    eval_function: ?*JSFunction = null,
 
     error_constructor: ?*JSFunction = null,
     error_prototype: ?*JSObject = null,
@@ -469,12 +474,17 @@ pub fn install(realm: *Realm) !void {
     // globalThis though — Sputnik fixtures (S10.2.3_*) and the
     // strict-mode global-property tests do `eval === null` etc.,
     // which fail with ReferenceError if `eval` is not a property.
-    // Wire it as a throwing native (length 1, !construct) so
-    // `eval !== null` is true, `eval(...)` raises EvalError, and
-    // typeof eval === "function".
-    const eval_fn = try realm.heap.allocateFunctionNative(realm, globalEvalNotSupported, 1, "eval");
+    // Wire it as a native (length 1, !construct) so `eval !== null`
+    // is true and typeof eval === "function". Its String-argument
+    // behaviour is posture-gated (`--allow=eval`): closed → policy
+    // SyntaxError, open → indirect eval (§19.2.1.1). See `globalEval`.
+    const eval_fn = try realm.heap.allocateFunctionNative(realm, globalEval, 1, "eval");
     eval_fn.has_construct = false;
     try realm.globals.put(realm.allocator, "eval", heap_mod.taggedFunction(eval_fn));
+    // §19.2.1 — record the %eval% identity so the `direct_eval`
+    // opcode can distinguish a genuine direct eval from a call to a
+    // reassigned `globalThis.eval`.
+    realm.intrinsics.eval_function = eval_fn;
 
     // §19.1 — `undefined`, `NaN`, `Infinity` are frozen data
     // properties: `{ w:false, e:false, c:false }`. They were just
@@ -1526,33 +1536,15 @@ pub fn throwSyntaxError(realm: *Realm, msg: []const u8) NativeError {
     return throwNative(realm, ex);
 }
 
+/// Throw a real `EvalError(msg)` (§20.5.5.2) from a native. Parallel
+/// to `throwSyntaxError` / `throwRangeError`. The runtime-code-
+/// construction gate no longer routes through here — `eval` /
+/// `Function(string)` now check `realm.allow_eval` directly and either
+/// run (gate open) or raise the SES policy `SyntaxError` (gate closed)
+/// — but the thrower is retained as standard error-type infrastructure.
 pub fn throwEvalError(realm: *Realm, msg: []const u8) NativeError {
     const ex = newEvalError(realm, msg) catch return error.OutOfMemory;
     return throwNative(realm, ex);
-}
-
-/// Gate for the runtime-code-construction surface — `eval(string)`
-/// and the `Function` / `Generator…Function` / `Async…Function`
-/// string-source constructors. Cynic ships no eval engine; this
-/// decides *which* failure the caller observes based on the
-/// `--allow=eval` posture (`realm.allow_eval`):
-///
-///   - default (gate closed) → a `SyntaxError` with `disabled_msg`:
-///     the SES-aligned policy refusal (AGENTS.md "eval and runtime
-///     code construction"). Spec-flavored so probes that expect a
-///     parse-time failure see the right shape.
-///   - `--allow=eval` (gate open) → an `EvalError` flagging the
-///     capability as enabled-but-unimplemented. The posture flag
-///     wires up here; the actual eval engine is a separate effort
-///     (docs/ses-alignment.md §Phase 4), so the call still can't
-///     execute source — it just fails for a *different* reason,
-///     which the test262 harness scores as a real failure rather
-///     than a by-design refusal.
-pub fn throwEvalUnsupported(realm: *Realm, disabled_msg: []const u8) NativeError {
-    if (realm.allow_eval) {
-        return throwEvalError(realm, "runtime code construction is enabled (--allow=eval) but not implemented in this build");
-    }
-    return throwSyntaxError(realm, disabled_msg);
 }
 
 /// Convenience: throw a real `ReferenceError(msg)` from a native.
@@ -2324,20 +2316,63 @@ pub const newEvalError = @import("builtins/error.zig").newEvalError;
 pub const PromiseState = @import("builtins/promise.zig").PromiseState;
 pub const allocatePromiseFor = @import("builtins/promise.zig").allocatePromiseFor;
 
-/// §19.2.1 eval(x). Cynic is strict-only and explicitly does NOT
-/// ship runtime code construction (per AGENTS.md — `eval()`,
-/// `new Function(string)`, etc. are out permanently). The binding
-/// must exist on globalThis though so `typeof eval === "function"`
-/// and `eval === null` (Sputnik S10.2.3_* uses both shapes) don't
-/// fall through to ReferenceError. Returns the argument unchanged
-/// for non-string operands per §19.2.1 step 1; throws SyntaxError
-/// on String operands so callers see a spec-flavored failure
-/// rather than silent success.
-fn globalEvalNotSupported(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+/// §19.2.1 eval(x) — the global `eval` function object. The binding
+/// always exists on globalThis (so `typeof eval === "function"` and
+/// `eval === null` probes resolve), but its behaviour depends on the
+/// `--allow=eval` posture (`realm.allow_eval`):
+///
+///   • non-String argument → returned unchanged (§19.2.1 step 2),
+///     regardless of posture.
+///   • gate closed (default) → a String argument is the SES policy
+///     refusal: SyntaxError (AGENTS.md "eval and runtime code
+///     construction").
+///   • gate open (`--allow=eval`) → a String argument is evaluated.
+///
+/// This native is reached only for an **indirect** eval — the
+/// syntactic direct `eval(...)` form compiles to a dedicated
+/// `direct_eval` opcode that captures the caller's scope. §19.2.1.1
+/// EvalDeclarationInstantiation for an indirect eval uses the global
+/// environment as the variable + lexical environment, which is
+/// exactly what `evaluateEval` produces (free references resolve via
+/// `lda_global`; the per-call declarative env isolates top-level
+/// `let` / `const`). Cynic is strict-only, so this is always a strict
+/// eval (§19.2.1.3).
+fn globalEval(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const arg = if (args.len > 0) args[0] else Value.undefined_;
+    // §19.2.1 step 2 — a non-String operand is returned unchanged.
     if (!arg.isString()) return arg;
-    // Gated by `--allow=eval` (`realm.allow_eval`): closed → policy
-    // SyntaxError; open → EvalError (enabled-but-unimplemented).
-    return throwEvalUnsupported(realm, "Cynic does not support eval() of source strings");
+    if (!realm.allow_eval) {
+        // Gate closed → SES policy refusal (unchanged default).
+        return throwSyntaxError(realm, "Cynic does not support eval() of source strings");
+    }
+    const s: *JSString = @ptrCast(@alignCast(arg.asString()));
+    return performIndirectEval(realm, s.flatBytes());
+}
+
+/// §19.2.1.1 — run `source` as indirect eval code (global scope) in
+/// `realm`. Shared by the global `eval` native and any other
+/// indirect-eval entry. Parse / compile failures surface as a
+/// SyntaxError; a thrown completion is re-raised on the realm; a
+/// normal completion is returned as the eval result value.
+pub fn performIndirectEval(realm: *Realm, source: []const u8) NativeError!Value {
+    const interp = @import("lantern/interpreter.zig");
+    // Retain a realm-lifetime copy: the chunk compiled here lands in
+    // `script_chunks` and its function templates borrow source slices
+    // for `Function.prototype.toString`, but `source` may be a
+    // transient heap JSString that GC can reclaim.
+    const stable = realm.retainEvalSource(source) catch return error.OutOfMemory;
+    const result = interp.evaluateEval(realm.allocator, realm, stable) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // §19.2.1 step 11 — a SyntaxError from parsing the program.
+        error.ParseError, error.CompileError => return throwSyntaxError(realm, "eval: SyntaxError in evaluated source"),
+        error.InvalidOpcode => return error.OutOfMemory,
+    };
+    return switch (result) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
 }

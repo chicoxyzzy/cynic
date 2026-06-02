@@ -24,6 +24,7 @@ const Op = @import("op.zig").Op;
 const Span = @import("../source.zig").Span;
 const Value = @import("../runtime/value.zig").Value;
 const Shape = @import("../runtime/shape.zig").Shape;
+const BindingKind = @import("scope.zig").BindingKind;
 
 /// Inline-cache cell — one per property-access callsite. The
 /// interpreter records the last receiver's `(shape, slot)` after a
@@ -347,6 +348,40 @@ pub const FieldTemplate = struct {
     computed_key_index: i16 = -1,
 };
 
+/// §19.2.1 direct eval — one enclosing env-slot binding visible at a
+/// direct-`eval(...)` call site, captured at compile time so the
+/// eval'd source can resolve it against the caller's runtime
+/// environment. Only *env-slot* bindings are captured: a free name
+/// the eval body doesn't find here falls through to `lda_global`
+/// (which resolves top-level `let` / `const` / `var` and builtins by
+/// name), so globals need no snapshot entry. `name` borrows from the
+/// chunk's source text (realm-lifetime).
+pub const DirectEvalBinding = struct {
+    name: []const u8,
+    /// Compile-time function-nesting depth of the binding (as in
+    /// `scope.Binding.env_depth`). The eval compiler emits
+    /// `lda_env [caller_env_depth + 1 - env_depth] [env_slot]` — the
+    /// `+1` accounts for the eval body's own environment sitting one
+    /// level below the caller's innermost env at runtime.
+    env_depth: u8,
+    env_slot: u8,
+    kind: BindingKind,
+    is_fn_expr_name: bool = false,
+    is_using: bool = false,
+};
+
+/// §19.2.1 direct eval — the lexical snapshot captured at one
+/// direct-`eval(...)` call site. Indexed by the `direct_eval` opcode's
+/// scope operand.
+pub const DirectEvalScope = struct {
+    /// Visible env-slot bindings, innermost-first (so the first match
+    /// per name shadows correctly when reconstructed).
+    bindings: []const DirectEvalBinding,
+    /// The caller's compile-time `env_depth` at the eval call site —
+    /// drives the runtime depth offset (see `DirectEvalBinding`).
+    caller_env_depth: u8,
+};
+
 pub const Chunk = struct {
     code: []const u8,
     constants: []const Value,
@@ -354,6 +389,11 @@ pub const Chunk = struct {
     handlers: []const Handler,
     function_templates: []FunctionTemplate,
     class_templates: []ClassTemplate,
+    /// §19.2.1 direct-eval scope snapshots — one per `direct_eval`
+    /// opcode emit, indexed by its scope operand. Empty for chunks
+    /// with no direct `eval(...)` call sites (the overwhelming
+    /// majority). See `DirectEvalScope`.
+    direct_eval_scopes: []const DirectEvalScope = &.{},
     register_count: u8,
     /// Module base URL. Used by `module_load` to
     /// resolve relative specifiers. `null` for non-module
@@ -416,6 +456,11 @@ pub const Chunk = struct {
         allocator.free(self.function_templates);
         for (self.class_templates) |*t| t.deinit(allocator);
         allocator.free(self.class_templates);
+        // §19.2.1 — free the per-call-site direct-eval snapshots. The
+        // `name` slices inside each binding borrow source text (not
+        // owned); only the binding slices + the outer slice are freed.
+        for (self.direct_eval_scopes) |s| allocator.free(s.bindings);
+        allocator.free(self.direct_eval_scopes);
         allocator.free(self.inline_caches);
         allocator.free(self.inline_call_caches);
         for (self.literal_shape_templates) |*t| allocator.free(t.keys);
@@ -435,6 +480,9 @@ pub const Builder = struct {
     function_templates: std.ArrayListUnmanaged(FunctionTemplate) = .empty,
     class_templates: std.ArrayListUnmanaged(ClassTemplate) = .empty,
     literal_shape_templates: std.ArrayListUnmanaged(LiteralShapeTemplate) = .empty,
+    /// §19.2.1 direct-eval scope snapshots, surfaced on the finished
+    /// `Chunk` as `.direct_eval_scopes`. See `DirectEvalScope`.
+    direct_eval_scopes: std.ArrayListUnmanaged(DirectEvalScope) = .empty,
     register_count: u8 = 0,
     /// Surfaced on the finished `Chunk` as `.is_async_module`.
     /// Set by `compileModuleAsChunk` after walking the body's
@@ -473,6 +521,8 @@ pub const Builder = struct {
         self.class_templates.deinit(self.allocator);
         for (self.literal_shape_templates.items) |*t| self.allocator.free(t.keys);
         self.literal_shape_templates.deinit(self.allocator);
+        for (self.direct_eval_scopes.items) |s| self.allocator.free(s.bindings);
+        self.direct_eval_scopes.deinit(self.allocator);
     }
 
     pub fn addHandler(self: *Builder, h: Handler) !void {
@@ -488,6 +538,18 @@ pub const Builder = struct {
         }
         const k: u16 = @intCast(self.function_templates.items.len);
         try self.function_templates.append(self.allocator, t);
+        return k;
+    }
+
+    /// §19.2.1 — register a direct-eval scope snapshot, returning its
+    /// index for the `direct_eval` opcode's scope operand. Takes
+    /// ownership of `s.bindings` (freed at chunk/builder teardown).
+    pub fn addDirectEvalScope(self: *Builder, s: DirectEvalScope) !u16 {
+        if (self.direct_eval_scopes.items.len == std.math.maxInt(u16)) {
+            return error.TooManyFunctions;
+        }
+        const k: u16 = @intCast(self.direct_eval_scopes.items.len);
+        try self.direct_eval_scopes.append(self.allocator, s);
         return k;
     }
 
@@ -748,6 +810,7 @@ pub const Builder = struct {
             .function_templates = try self.function_templates.toOwnedSlice(self.allocator),
             .class_templates = try self.class_templates.toOwnedSlice(self.allocator),
             .literal_shape_templates = try self.literal_shape_templates.toOwnedSlice(self.allocator),
+            .direct_eval_scopes = try self.direct_eval_scopes.toOwnedSlice(self.allocator),
             .register_count = self.register_count,
             .is_async_module = self.is_async_module,
             .global_lexical_base = self.global_lexical_base,

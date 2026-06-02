@@ -90,18 +90,24 @@ These are project rules — they apply to everyone.
     SpiderMonkey — accepts the Annex B forms; Cynic's non-browser
     target is why it doesn't.) See
     [docs/ROADMAP.md](docs/ROADMAP.md) under "Regex".
-  - **`eval` and runtime code construction** — out by
-    default. `eval()` itself, `new Function(string)` /
-    `new GeneratorFunction(string)` / `new AsyncFunction(string)`,
-    and dynamic-code-from-string generally aren't shipped.
-    Aligns with [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses)
-    and removes a major optimization fence. Cynic's host-level
-    `Realm.evaluateScript` (powering multi-file `cynic run`,
-    the test262 harness loader, and a future REPL) is a
-    different mechanism — it's not exposed to user JS.
-    Opt back in with `--allow=eval` (the implementation lands
-    in a separate effort — see
-    [docs/ses-alignment.md](docs/ses-alignment.md)).
+  - **`eval` and runtime code construction** — off by
+    default, opt in with `--allow=eval`. `eval()` itself,
+    `new Function(string)` / `new GeneratorFunction(string)` /
+    `new AsyncFunction(string)`, and dynamic-code-from-string
+    generally refuse by SES policy (a `SyntaxError`) unless the
+    gate is open. Aligns with [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses).
+    Cynic's host-level `Realm.evaluateScript` (powering multi-file
+    `cynic run`, the test262 harness loader, and a future REPL) is
+    a different mechanism — it's not exposed to user JS.
+    **With `--allow=eval` the engine ships** (§19.2.1 PerformEval —
+    direct + indirect; §20.2.1.1.1 CreateDynamicFunction): eval'd
+    code runs *in the realm*, so the hardened-default frozen
+    primordials confine it (`eval("Array.prototype.push=1")` throws);
+    `--unhardened` gives it mutable primordials. Cynic is strict-only,
+    so every eval is a strict eval (§19.2.1.3) — direct eval reads the
+    caller's scope but never injects `var` / function bindings into it.
+    Full SES Compartment confinement is deferred. See
+    [docs/ses-alignment.md](docs/ses-alignment.md) "The eval engine".
 - **SES-aligned by default; `--unhardened` opts out.** Cynic
   isn't just "SES-friendly" (every modern edge runtime is that);
   Cynic ships **hardened by default**:
@@ -130,11 +136,12 @@ These are project rules — they apply to everyone.
     SES is a coherent package — atomic toggle matches how users
     decide, vs the granular per-piece flags an earlier design
     iteration sketched.
-  - **`--allow=eval`** stays separate (when eval ships) because
-    it's a compile-time optimization fence (per-function escape
-    analysis + conservative bytecode); bundling with
-    `--unhardened` would impose that cost on users who just want
-    mutable primordials.
+  - **`--allow=eval`** stays separate from `--unhardened` because
+    the two are orthogonal capabilities (a build can be unhardened
+    yet eval-off, or hardened yet eval-on); bundling them would
+    force the eval surface on users who just want mutable
+    primordials. Now shipped (§19.2.1 / §20.2.1.1.1) — see the
+    `eval` bullet above and `docs/ses-alignment.md`.
   Three distinct CLI verbs to keep separate: **`--enable=<name>`**
   turns on a not-yet-stable spec feature (`joint-iteration` is
   the only one shipping today; `upsert` graduated to default-on
@@ -286,11 +293,15 @@ sweeps.
 `--filter=<substring>`, `--list-failures=<n>`, `--quiet`, `--verbose`,
 `--phase=<spec>` (`main` runs the hardened ECMA-262 sweep with
 pre-Stage-4 fixtures excluded; `unhardened` runs the same
-fixture set with `realm.hardened = false`; `feature:<name>` runs
-only that proposal's dedicated isolated sweep — only its realm
-flag on, only its tagged fixtures included. Default: main +
-unhardened; `--write-results` additionally runs every tracked
-feature in sequence), `--no-harness` (disable the `sta.js` +
+fixture set with `realm.hardened = false`; `eval` runs it with
+`realm.allow_eval = true` (unhardened) so the eval surface
+(§19.2.1 / §20.2.1.1.1) runs for real and eval-policy failures
+count as real failures — the "what eval work remains" signal;
+`feature:<name>` runs only that proposal's dedicated isolated
+sweep — only its realm flag on, only its tagged fixtures
+included. Default: main + unhardened; `--write-results`
+additionally runs the eval phase and every tracked feature in
+sequence), `--no-harness` (disable the `sta.js` +
 `assert.js` preamble in runtime mode),
 `--write-results` (updates `test262-results.md`),
 `--only-failing` (skip-as-pass any test path listed in
@@ -377,8 +388,8 @@ Re-running for the same `(date, mode)` replaces that day's row.
 Each row records `passing`, `failing`, `expected fails`,
 `total`, and `pass%`. `test262-results.md` opens with
 a `## Current scores` snapshot (3 rows: `unhardened, --allow=eval`
-as a placeholder until the eval opt-in ships, then `unhardened`,
-then `hardened`), a `## Legend`, a `## Where the engine fails,
+— now a measured `--phase=eval` sweep, not a placeholder — then
+`unhardened`, then `hardened`), a `## Legend`, a `## Where the engine fails,
 by area` per-bucket scoreboard sourced from the hardened sweep
 and sorted by raw fail count, a `## Pre-Stage-4 proposals
 shipped` section with one per-proposal table (a `### <feature>`

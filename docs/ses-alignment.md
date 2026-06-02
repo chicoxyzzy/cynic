@@ -41,7 +41,7 @@ guarantee against Cynic's status:
 
 | # | SES requirement | Cynic today | This doc covers |
 |---|---|---|---|
-| 1 | Ban `eval` / `new Function(string)` family | ✅ permanent | — |
+| 1 | Ban `eval` / `new Function(string)` family | ✅ default (gated by `--allow=eval`) | Phase 4 |
 | 2 | Strict mode only, no sloppy code paths | ✅ permanent | — |
 | 3 | No Annex B (HTML comments, legacy octal, `with`, etc.) | ✅ permanent | — |
 | 4 | **Freeze all primordials at realm init** | ✅ shipped | Phase 1 |
@@ -169,7 +169,7 @@ is intentionally minimal:
 | Flag | Effect |
 |---|---|
 | `--unhardened` | Disables the **entire SES posture** atomically: primordials stay mutable (Phase 1 skipped), `globalThis` stays extensible, the `harden()` global is not installed (Phase 2), the override-mistake fix is skipped (Phase 3). Spec-literal `OrdinarySetWithOwnDescriptor` semantics. The single switch a user flips for full compatibility with general-purpose JS that monkey-patches `Array.prototype.X`, polyfills missing methods, or relies on the spec's "assign-to-frozen-proto throws" behaviour. |
-| `--allow=eval` | Independent opt-in for `eval`, `new Function(string)`, and the `GeneratorFunction` / `AsyncFunction` / `AsyncGeneratorFunction` constructors. **Not bundled** with `--unhardened` because eval is a compile-time optimization fence — every function eval-reachable gets per-function escape analysis + a conservative bytecode variant. Users who want mutable primordials WITHOUT paying the eval-taint compile cost stay on `--unhardened` alone. Requires the full eval implementation (deferred — see notes below). |
+| `--allow=eval` | Independent opt-in for `eval`, `new Function(string)`, and the `GeneratorFunction` / `AsyncFunction` / `AsyncGeneratorFunction` constructors. **Not bundled** with `--unhardened` because the two are orthogonal capabilities (a build can be unhardened yet eval-off, or hardened yet eval-on). **Shipped** — see "The eval engine" below. |
 
 Why one umbrella switch instead of per-constraint flags:
 
@@ -410,15 +410,74 @@ Revisit Compartments when:
   Compartments there's nothing to tame against.
 - **Enforcing `lockdown()`-style intrinsic shape restrictions
   beyond freezing** — SES does extra work to remove "powerful"
-  intrinsics. Cynic doesn't ship most of them anyway (no `eval`,
-  no `Function(string)`, no `RegExp` legacy globals).
+  intrinsics. Cynic doesn't ship most of them anyway (`eval` /
+  `Function(string)` are off unless `--allow=eval`; no `RegExp`
+  legacy globals).
 - **`StaticModuleRecord` / `SyntheticModuleRecord`** — module API
   for Compartments. Deferred with Compartments.
-- **The full eval-implementation work** for `--allow=eval` — this
-  is its own multi-month project (see the design conversation in
-  session history; eval is a major optimization fence and needs
-  per-function escape analysis). The flag is reserved here; the
-  implementation lands in a separate effort.
+- **Compartment confinement of eval'd code** — `--allow=eval` runs
+  eval'd source in the realm itself, not a sandbox (see "The eval
+  engine"). True SES Compartment confinement (endowment-only globals)
+  is deferred with Compartments.
+
+## The eval engine (`--allow=eval`)
+
+Shipped behind the `--allow=eval` gate (`realm.allow_eval`, default
+false). With the gate closed Cynic refuses runtime code construction
+by SES policy (a `SyntaxError`) exactly as before; with it open the
+following run for real:
+
+- **`eval(x)` — §19.2.1.** Indirect eval (`(0, eval)(s)`,
+  `globalThis.eval(s)`) evaluates `s` as global-scope code through the
+  existing `evaluateEval` pipeline. Direct eval (the syntactic
+  `eval(...)` form) is detected at compile time and lowered to a
+  dedicated `direct_eval` opcode that captures a snapshot of the
+  caller's visible env-slot bindings; at runtime the eval'd source is
+  compiled against a synthetic outer scope rebuilt from that snapshot
+  and run in a frame whose environment is parented to the caller's, so
+  free identifiers resolve against the caller's locals and the eval
+  inherits the caller's `this` / `new.target` / home object. A
+  non-string argument is returned unchanged (§19.2.1 step 2). The
+  runtime re-checks that the callee is actually `%eval%`, so a
+  reassigned `globalThis.eval` is an ordinary call, not a direct eval.
+- **`Function` / `GeneratorFunction` / `AsyncFunction` /
+  `AsyncGeneratorFunction` string constructors — §20.2.1.1.1
+  CreateDynamicFunction.** Implemented by source synthesis: the
+  parameter strings + body are wrapped in a parenthesized function
+  expression with the kind's prefix and run through `evaluateEval`, so
+  the new function's scope is the global environment per spec.
+
+**Strict-only simplification.** Cynic parses all source as strict, so
+every eval is a strict eval (§19.2.1.3): direct eval reads the
+caller's scope but never injects `var` / function bindings into it.
+Corollary: test262 fixtures asserting *indirect* eval runs as sloppy
+can never pass and stay permanently out of scope
+(`strict_only_exact_paths` in `tools/test262/skip.zig`).
+
+**Posture interaction.** The eval engine is posture-agnostic; the
+realm's existing freeze state does the confinement. Under the hardened
+default, eval'd code sees the frozen primordials + override-mistake
+fix — so `eval("Array.prototype.push = 1")` throws, and that freeze
+*is* the confinement Cynic can offer pre-Compartments. Under
+`--unhardened` the same eval'd code sees mutable primordials. No fake
+endowment / confinement layer is built; full SES Compartment
+confinement is deferred (see "Out of scope").
+
+**Known limitation.** Indirect/direct strict eval that declares a
+top-level `var` currently binds it on the global environment rather
+than an eval-local variable environment — an observable §19.2.1.3 gap
+for the rare fixture that probes post-eval `var` isolation, not a
+crash. The completion-value and free-reference semantics that the bulk
+of the eval corpus exercises are correct.
+
+**test262.** The eval surface (~2,100 fixtures) runs in every phase.
+Eval-off phases (`main` / `unhardened`) classify an eval-surface
+failure as `correctly_handled` (a by-design refusal) via
+`skip_rules.pathPolicyKind`'s `.eval` policy. A dedicated `--phase=eval`
+sweep (unhardened + `realm.allow_eval = true`) drops that policy so the
+eval fixtures run for real and their failures count as genuine
+failures — the live "what eval work remains" signal, surfaced as the
+`unhardened, --allow=eval` row in `test262-results.md`.
 
 ## Verification
 
