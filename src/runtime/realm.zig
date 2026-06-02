@@ -1027,6 +1027,10 @@ pub const Realm = struct {
     }
 
     pub fn deinit(self: *Realm) void {
+        // Drop out of the shared heap's realm set first, so a
+        // collection during the rest of teardown never marks (or a
+        // later sibling GC never touches) this dying realm.
+        self.deregisterFromHeap();
         self.frame_pool.deinit(self.allocator);
         self.globals.deinit(self.allocator);
         self.output.deinit(self.allocator);
@@ -1301,11 +1305,50 @@ pub const Realm = struct {
         // already be in place. `collectFull` sees `cycle_started`
         // and skips its own arm-cycle.
         self.heap.beginMajorCycle();
-        self.markRoots();
+        self.markAllSharingRealmRoots();
         // Hand off to `heap.collectFull` for the handle-scope walk
         // and the actual sweep. The empty roots slice is fine —
         // every root above is already marked.
         self.heap.collectFull(&.{});
+    }
+
+    /// Mark roots from EVERY realm sharing this heap, not just
+    /// `self`. With `Realm.initChild` (`$262.createRealm` /
+    /// `ShadowRealm`) several realms share one heap and one set of
+    /// object pools; the sweep frees every unmarked object, so
+    /// marking only the running realm's roots would reclaim a
+    /// sibling realm's live objects — a cross-realm use-after-free.
+    /// Mirrors V8's global GC, which marks every live Context's
+    /// roots. Falls back to `self` if the heap's realm set is empty
+    /// (a realm collecting before it registered at `installBuiltins`).
+    fn markAllSharingRealmRoots(self: *Realm) void {
+        if (self.heap.realms.items.len == 0) {
+            self.markRoots();
+            return;
+        }
+        for (self.heap.realms.items) |r| r.markRoots();
+    }
+
+    /// Register `self` in the shared heap's realm set so the
+    /// collector marks its roots. Idempotent. Call once `self` is at
+    /// its final address (`installBuiltins`).
+    pub fn registerWithHeap(self: *Realm) !void {
+        for (self.heap.realms.items) |r| if (r == self) return;
+        try self.heap.realms.append(self.allocator, self);
+    }
+
+    /// Remove `self` from the shared heap's realm set — its roots
+    /// stop being marked, so its now-unreachable objects are
+    /// reclaimed by the next collection. Used at `deinit` and by the
+    /// ShadowRealm finalizer (per-realm teardown).
+    pub fn deregisterFromHeap(self: *Realm) void {
+        const items = self.heap.realms.items;
+        for (items, 0..) |r, i| {
+            if (r == self) {
+                _ = self.heap.realms.swapRemove(i);
+                return;
+            }
+        }
     }
 
     /// Run a minor (young-generation) collection. Marks exactly the
@@ -1323,7 +1366,7 @@ pub const Realm = struct {
         // flip precedes any `markValue` call. `collectYoung` sees
         // `cycle_started` and skips its own arm-cycle.
         self.heap.beginMinorCycle();
-        self.markRoots();
+        self.markAllSharingRealmRoots();
         self.heap.collectYoung(&.{});
     }
 
@@ -1442,6 +1485,12 @@ pub const Realm = struct {
         // last installer wins, which is fine: a cleanup job is host-
         // queued and any realm sharing the heap can drain it.
         self.heap.setFinalizationEnqueue(self, finalizationEnqueueJob);
+
+        // Register with the shared heap's realm set so the collector
+        // marks this realm's roots (see `Heap.realms`). `self` is at
+        // its final address here. Idempotent: skip if already present
+        // (installBuiltins is normally called once per realm).
+        try self.registerWithHeap();
 
         const print_fn = try self.heap.allocateFunctionNative(self, printNative, 1, "print");
         try self.globals.put(self.allocator, "print", heap_mod.taggedFunction(print_fn));

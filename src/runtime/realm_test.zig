@@ -402,3 +402,33 @@ test "phase 3: primitive boxing in a cross-realm-called function uses its home r
     const same = (try lantern.evaluateScript(testing.allocator, &child, "boxCtor() === Number")).value;
     try testing.expect(same.bits == Value.false_.bits);
 }
+
+test "gc-probe: a child realm GC must not sweep the parent realm's live objects (shared heap)" {
+    // Diagnostic: parent + child share one Heap (initChild). GC is
+    // triggered on the *running* realm and `markRoots` marks only
+    // that realm's roots. If a GC fires while the child is running
+    // (here: an explicit child.collectGarbage(), as the allocation-
+    // pressure trigger would do mid-evaluate), does it sweep the
+    // parent's objects — which the child never marks?
+    var parent = Realm.init(testing.allocator);
+    parent.hardened = false;
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    child.hardened = false;
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // An object reachable ONLY from parent's global object.
+    _ = try lantern.evaluateScript(testing.allocator, &parent, "globalThis.keep = { tag: 'parent-live' };");
+
+    // GC as the child realm — marks child roots only, sweeps the
+    // shared heap. If parent's `keep` is unmarked it gets freed.
+    child.collectGarbage();
+
+    // Parent's object must survive. A swept object → use-after-free
+    // / wrong value here.
+    const r = (try lantern.evaluateScript(testing.allocator, &parent, "globalThis.keep.tag === 'parent-live'")).value;
+    try testing.expect(r.bits == Value.true_.bits);
+}
