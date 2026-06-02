@@ -640,20 +640,27 @@ Bucketed on the first two path components (`built-ins/Set`,
 
 Per-feature scores for the TC39 proposals Cynic ships at
 Stage 1–3, ahead of their inclusion in the published
-edition. Each proposal gets a **(hardened)** row — the
-as-shipped SES posture under `--enable=<flag>`, with SES
-throws counted as expected fails — and an
-**(unhardened)** row against bare ECMA-262. Same column
-shape as the main `## Current scores` table:
-`passing | failing | expected fails | skip | total | pass%`.
+edition. Each proposal gets its **own table** with two
+posture rows: **hardened** — the as-shipped SES posture
+under `--enable=<flag>`, with SES throws counted as
+expected fails — and **unhardened**, against bare
+ECMA-262. Same columns as the main `## Current scores`
+table: `passing | failing | expected fails | skip | total | pass%`.
 These fixtures are excluded from the top-line score.
 
-| feature | passing | failing | expected fails | skip | total | pass% |
+### `joint-iteration`
+
+| posture | passing | failing | expected fails | skip | total | pass% |
 |---|---:|---:|---:|---:|---:|---:|
-| `joint-iteration` (hardened) | 70 | 0 | 8 | 3 | 81 | 96 % |
-| `joint-iteration` (unhardened) | 76 | 0 | 2 | 3 | 81 | 96 % |
-| `ShadowRealm` (hardened) | 43 | 0 | 21 | 3 | 67 | 96 % |
-| `ShadowRealm` (unhardened) | 63 | 0 | 1 | 3 | 67 | 96 % |
+| hardened | 70 | 0 | 8 | 3 | 81 | 96 % |
+| unhardened | 76 | 0 | 2 | 3 | 81 | 96 % |
+
+### `ShadowRealm`
+
+| posture | passing | failing | expected fails | skip | total | pass% |
+|---|---:|---:|---:|---:|---:|---:|
+| hardened | 43 | 0 | 21 | 3 | 67 | 96 % |
+| unhardened | 63 | 0 | 1 | 3 | 67 | 96 % |
 
 
 ## History

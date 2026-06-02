@@ -4306,16 +4306,13 @@ fn writePreStage4Scoreboard(
         \\
         \\Per-feature scores for the TC39 proposals Cynic ships at
         \\Stage 1–3, ahead of their inclusion in the published
-        \\edition. Each proposal gets a **(hardened)** row — the
-        \\as-shipped SES posture under `--enable=<flag>`, with SES
-        \\throws counted as expected fails — and an
-        \\**(unhardened)** row against bare ECMA-262. Same column
-        \\shape as the main `## Current scores` table:
-        \\`passing | failing | expected fails | skip | total | pass%`.
+        \\edition. Each proposal gets its **own table** with two
+        \\posture rows: **hardened** — the as-shipped SES posture
+        \\under `--enable=<flag>`, with SES throws counted as
+        \\expected fails — and **unhardened**, against bare
+        \\ECMA-262. Same columns as the main `## Current scores`
+        \\table: `passing | failing | expected fails | skip | total | pass%`.
         \\These fixtures are excluded from the top-line score.
-        \\
-        \\| feature | passing | failing | expected fails | skip | total | pass% |
-        \\|---|---:|---:|---:|---:|---:|---:|
         \\
     );
 
@@ -4323,14 +4320,33 @@ fn writePreStage4Scoreboard(
     for (0..tracked_pre_stage4_features.len) |i| {
         const name = tracked_pre_stage4_features[i];
         const h = pre_stage4_hardened.slots[i];
-        if (h.total != 0) {
-            const pct: f64 = 100.0 * @as(f64, @floatFromInt(h.pass + h.correctly_handled)) / @as(f64, @floatFromInt(h.total));
-            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (hardened) | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ name, h.pass, h.fail, h.correctly_handled, h.skip, h.total, pct }));
-        }
         const u = pre_stage4_unhardened.slots[i];
+        // Skip a proposal with no fixtures in either posture (e.g.
+        // not exercised this run) — no empty per-feature table.
+        if (h.total == 0 and u.total == 0) continue;
+
+        // One table per proposal, with a `### ` sub-heading. The
+        // `## `-prefixed section extractor stops at the next `## `,
+        // so these `### ` headings stay inside the section.
+        try out.appendSlice(gpa, try std.fmt.bufPrint(&buf,
+            \\
+            \\### `{s}`
+            \\
+            \\| posture | passing | failing | expected fails | skip | total | pass% |
+            \\|---|---:|---:|---:|---:|---:|---:|
+            \\
+        , .{name}));
+
+        if (h.total != 0) {
+            // pass% = (passing + expected fails) / total, matching the
+            // main `## Current scores` table; `correctly_handled` is the
+            // policy-expected-fail count, `skip` a separate column.
+            const pct: f64 = 100.0 * @as(f64, @floatFromInt(h.pass + h.correctly_handled)) / @as(f64, @floatFromInt(h.total));
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| hardened | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ h.pass, h.fail, h.correctly_handled, h.skip, h.total, pct }));
+        }
         if (u.total != 0) {
             const pct: f64 = 100.0 * @as(f64, @floatFromInt(u.pass + u.correctly_handled)) / @as(f64, @floatFromInt(u.total));
-            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (unhardened) | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ name, u.pass, u.fail, u.correctly_handled, u.skip, u.total, pct }));
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| unhardened | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ u.pass, u.fail, u.correctly_handled, u.skip, u.total, pct }));
         }
     }
     try out.appendSlice(gpa, "\n");
