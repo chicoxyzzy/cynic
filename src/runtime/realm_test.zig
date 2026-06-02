@@ -1,18 +1,20 @@
-//! Phase 0 multi-realm contracts — see `docs/multi-realm.md`.
+//! Multi-realm contracts — see `docs/multi-realm.md`.
 //!
-//! The four assertions in this file are the contract for "two `Realm`
-//! instances coexist in one process without interference." If they
-//! pass on `main` today, the foundation for the multi-realm phase
-//! plan is solid and Phase 1 can land its sharing-policy work without
-//! a structural refactor. If they fail, the failure mode pins the
-//! remaining single-realm assumption that has to come out first.
+//! Two groups:
 //!
-//! TDD discipline: these tests ship before the production code they
-//! pin. Today's `Realm` already has `initChild` (used by ShadowRealm)
-//! plus a parameterised `installBuiltins`, so Phase 0's contracts
-//! plausibly already hold for two independent `Realm.init` instances.
-//! The tests below verify that hypothesis empirically rather than
-//! by reading the code.
+//!   - **realm coexistence** — two `Realm` instances run in one
+//!     process without interference: distinct intrinsics, distinct
+//!     `globalThis`, mutation / microtask-queue / output isolation,
+//!     and a shared per-`Heap` `ShapeTree` across `initChild`.
+//!   - **cross-realm** — a function created in one realm and called
+//!     from another (shared-heap child via `initChild`, as
+//!     `ShadowRealm` / `$262.createRealm` do) resolves its free
+//!     bindings and intrinsics through its OWN realm, and a GC over
+//!     the shared heap never sweeps a sibling realm's live objects.
+//!
+//! Cross-realm value sharing uses `initChild` (shared heap), not two
+//! independent `Realm.init` instances — the latter is unsound
+//! (cross-heap pointers in another realm's GC root set).
 
 const std = @import("std");
 const testing = std.testing;
@@ -32,7 +34,7 @@ fn freshRealm(hardened: bool) !Realm {
 
 // ── Contract 1: two realms have distinct intrinsics ─────────────────
 
-test "phase-0: two independent realms have distinct intrinsic pointers" {
+test "realm coexistence: two independent realms have distinct intrinsic pointers" {
     var ra = try freshRealm(true);
     defer ra.deinit();
     var rb = try freshRealm(true);
@@ -53,7 +55,7 @@ test "phase-0: two independent realms have distinct intrinsic pointers" {
     try testing.expect(ra.intrinsics.function_prototype != rb.intrinsics.function_prototype);
 }
 
-test "phase-0: each realm has its own globalThis" {
+test "realm coexistence: each realm has its own globalThis" {
     var ra = try freshRealm(true);
     defer ra.deinit();
     var rb = try freshRealm(true);
@@ -67,7 +69,7 @@ test "phase-0: each realm has its own globalThis" {
 
 // ── Contract 2: mutation isolation (unhardened) ─────────────────────
 
-test "phase-0: mutating ra's Array.prototype does not affect rb (unhardened)" {
+test "realm coexistence: mutating ra's Array.prototype does not affect rb (unhardened)" {
     var ra = try freshRealm(false);
     defer ra.deinit();
     var rb = try freshRealm(false);
@@ -87,7 +89,7 @@ test "phase-0: mutating ra's Array.prototype does not affect rb (unhardened)" {
 
 // ── Contract 3: microtask isolation ─────────────────────────────────
 
-test "phase-0: each realm has its own microtask queue (isolation via side effect)" {
+test "realm coexistence: each realm has its own microtask queue (isolation via side effect)" {
     // Unhardened: the side-effect probe writes to `globalThis`,
     // which under hardened is frozen (§ SES position in
     // `docs/ses-alignment.md`). The contract being verified
@@ -136,7 +138,7 @@ test "phase-0: each realm has its own microtask queue (isolation via side effect
 // allocated on parent + child that go through the same
 // transition path land on shape-identical pointers.
 
-test "phase 0+: child realm shares the parent's ShapeTree (D1 revised)" {
+test "realm coexistence: child realm shares the parent's ShapeTree (D1 revised)" {
     var parent = Realm.init(testing.allocator);
     defer parent.deinit();
 
@@ -161,7 +163,7 @@ test "phase 0+: child realm shares the parent's ShapeTree (D1 revised)" {
 
 // ── Contract 4: output buffer isolation ─────────────────────────────
 
-test "phase-0: each realm has its own output buffer (print)" {
+test "realm coexistence: each realm has its own output buffer (print)" {
     var ra = try freshRealm(true);
     defer ra.deinit();
     var rb = try freshRealm(true);
@@ -177,16 +179,14 @@ test "phase-0: each realm has its own output buffer (print)" {
     try testing.expectEqual(@as(usize, 0), rb.output.items.len);
 }
 
-// ── Phase 3 — D2: per-`JSFunction` [[Realm]] + RealmStack ───────────
+// ── cross-realm: per-`JSFunction` [[Realm]] + home-realm resolution ──
 //
 // These pin §10.2.4 OrdinaryFunctionCreate step 8 (the function's
-// realm slot) + §10.2.3 [[Call]] step 2 (caller-context switches to
-// callee's realm). All four are TDD-RED today: `JSFunction.realm`
-// stays `null` at every `Heap.allocateFunction*` site because the
-// heap layer doesn't take a realm parameter. Commit 3.2 in the
-// `docs/multi-realm.md` Phase 3 plan threads the parameter through
-// the 109 alloc sites; commit 3.3 wires RealmStack + flips these
-// tests from skip-as-pending to green.
+// realm slot) + §10.2.3 [[Call]] step 2 (the running execution
+// context's realm follows the callee). `JSFunction.realm` is set at
+// every `Heap.allocateFunction*` site, and the interpreter resolves a
+// running function's free bindings + shared-builtin intrinsics through
+// its own realm rather than the dispatch realm.
 //
 // Cross-realm value sharing uses `Realm.initChild` (shared heap),
 // not two independent `Realm.init` instances — the latter is
@@ -197,7 +197,7 @@ test "phase-0: each realm has its own output buffer (print)" {
 const Value = @import("value.zig").Value;
 const heap_mod = @import("heap.zig");
 
-test "phase 3: function created in parent realm has parent as [[Realm]]" {
+test "cross-realm: function created in parent realm has parent as [[Realm]]" {
     // Live since the realm is threaded through native + ordinary
     // function allocation (`Heap.allocateFunction*` takes the
     // allocating realm); a function's [[Realm]] is fixed at
@@ -225,24 +225,13 @@ test "phase 3: function created in parent realm has parent as [[Realm]]" {
     try testing.expect(f.realm == &parent);
 }
 
-test "phase 3: TypeError thrown by parent's code is parent's Error.prototype chain (skip pending 3.3 consumption)" {
-    // PENDING 3.3 consumption side. [[Realm]] is set on every
-    // function (3.2), and call.zig/interpreter.zig record the
-    // callee's realm as `active_native_fn_realm` /
-    // `CallFrame.running_realm`. The remaining gap is the deepest
-    // piece: free *global identifier resolution*. When parent's
-    // `thrower` runs after being called from child, `new TypeError`
-    // resolves the `TypeError` binding through the global-load
-    // opcodes, which read `realm.globals` — the *running* (child)
-    // realm — not the function's lexical home-realm global
-    // environment, so it constructs with child's TypeError and the
-    // probe sees `e.constructor === (child) TypeError`. Fixing it
-    // means routing global loads/stores through the executing
-    // frame's `running_realm.globals` (the RealmStack consumption).
-    // A smaller follow-on then makes the error natives resolve
-    // their prototype via `active_native_fn_realm` (§10.2.3) —
-    // necessary but not sufficient alone (verified: that change in
-    // isolation leaves this test red).
+test "cross-realm: TypeError thrown by parent's code is parent's Error.prototype chain" {
+    // When parent's `thrower` runs after being called from child,
+    // `new TypeError` must resolve the `TypeError` binding through
+    // the function's home-realm global environment (not the running
+    // child realm's globals), and the Error native must build the
+    // instance from that realm's `%TypeError.prototype%` (§10.2.3) —
+    // so `e.constructor` is parent's TypeError, distinct from child's.
 
     // §10.2.3 / §10.2.4: an Error allocated inside a function whose
     // [[Realm]] is parent must inherit from parent's %Error.prototype%,
@@ -268,16 +257,13 @@ test "phase 3: TypeError thrown by parent's code is parent's Error.prototype cha
     try testing.expect(probe.bits == Value.false_.bits);
 }
 
-test "phase 3: §23.1.3.34 Array.prototype.map uses source realm's %Array% as species (skip pending 3.3 consumption)" {
-    // PENDING 3.3 consumption side. The Array.prototype.map native
-    // builds its result through the *calling* realm's %Array%
-    // instead of the source array's realm. ArraySpeciesCreate
-    // (§23.1.3.34) must default `C` to the source object's realm's
-    // %Array% — resolve via `realm.active_native_fn_realm orelse
-    // realm` at the array.zig species site, mirroring the error-
-    // native fix. [[Realm]] is already in place (3.2); only the
-    // consumption is missing.
-
+test "cross-realm: §23.1.3.34 Array.prototype.map uses source realm's %Array% as species" {
+    // §23.1.3.34 ArraySpeciesCreate defaults the species constructor
+    // `C` to the *source* array's realm's %Array%, not the calling
+    // realm's — so `arrFromParent.map(...)` invoked from child yields
+    // an array whose `constructor` is parent's Array, distinct from
+    // child's `Array`. The species site resolves through the executing
+    // native's home realm.
     var parent = Realm.init(testing.allocator);
     defer parent.deinit();
     try parent.installBuiltins();
@@ -297,25 +283,21 @@ test "phase 3: §23.1.3.34 Array.prototype.map uses source realm's %Array% as sp
     try testing.expect(probe.bits == Value.false_.bits);
 }
 
-test "phase 3: native callback sees its own function's realm via active_native_fn_realm (skip pending 3.3)" {
+test "cross-realm: native callback sees its own function's realm via active_native_fn_realm" {
 
-    // The native-side D2 invariant: a native installed in parent
-    // and called from child reads `realm.active_native_fn_realm`
-    // == &parent (its [[Realm]]). The dispatch loop's `realm`
-    // parameter is the *calling* realm (child); reading it would
-    // resolve intrinsics in the wrong realm.
-    //
-    // After 3.2, `JSFunction.realm` set at allocateFunctionNative
-    // time; lantern/call.zig:806 already stores it into
-    // active_native_fn_realm at native dispatch. The probe shape
-    // (a NativeFn cb that records `realm.active_native_fn_realm`
-    // into a captured cell) lives in commit 3.3 alongside the
-    // un-skip; here the prose-only test pins the invariant in the
-    // contract file so reviewers see it.
+    // A native installed in parent and called from child must read
+    // its OWN realm via `realm.active_native_fn_realm` (== &parent),
+    // not the dispatch loop's `realm` parameter (the calling child
+    // realm) — reading the latter resolves intrinsics in the wrong
+    // realm. The dispatch loop stamps the callee's realm into
+    // `active_native_fn_realm` before each native call. This
+    // invariant is exercised concretely by the TypeError and
+    // ArraySpeciesCreate tests above, which both consume it; this is
+    // a prose-only marker so the contract is visible here.
     return;
 }
 
-test "phase 3: a global write from a cross-realm-called function targets its home realm" {
+test "cross-realm: a global write from a cross-realm-called function targets its home realm" {
     // §6.2.5.5 PutValue / §9.1.1.4 SetMutableBinding — a function
     // assigns its free globals through its own [[Realm]]'s global
     // environment. A writer defined in parent, called from a child
@@ -350,7 +332,7 @@ test "phase 3: a global write from a cross-realm-called function targets its hom
     try testing.expect(in_child.bits == Value.true_.bits);
 }
 
-test "phase 3: slot-indexed top-level let read from a cross-realm-called function targets its home realm" {
+test "cross-realm: slot-indexed top-level let read from a cross-realm-called function targets its home realm" {
     // §9.1.1.4 — a top-level `let` / `const` resolves to a
     // slot-indexed declarative-env-record read (`lda_global_slot`),
     // with the slot relative to the realm the function was compiled
@@ -378,7 +360,7 @@ test "phase 3: slot-indexed top-level let read from a cross-realm-called functio
     try testing.expect(result.numberToDouble() == 42);
 }
 
-test "phase 3: primitive boxing in a cross-realm-called function uses its home realm's wrapper prototype" {
+test "cross-realm: primitive boxing in a cross-realm-called function uses its home realm's wrapper prototype" {
     // §7.1.1 ToObject — a method/property access on a primitive
     // boxes through the *running* realm's wrapper prototype
     // (%Number.prototype% etc.). A function defined in parent and
@@ -431,4 +413,69 @@ test "gc-probe: a child realm GC must not sweep the parent realm's live objects 
     // / wrong value here.
     const r = (try lantern.evaluateScript(testing.allocator, &parent, "globalThis.keep.tag === 'parent-live'")).value;
     try testing.expect(r.bits == Value.true_.bits);
+}
+
+test "gc-probe: a parent realm GC must not sweep a child realm's live objects (shared heap)" {
+    // The mirror of the child→parent probe: a GC triggered on the
+    // parent must mark the child's roots too (the child shares the
+    // heap and is registered in `heap.realms`), or it sweeps the
+    // child's live objects.
+    var parent = Realm.init(testing.allocator);
+    parent.hardened = false;
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    child.hardened = false;
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // Reachable only from the CHILD's global object.
+    _ = try lantern.evaluateScript(testing.allocator, &child, "globalThis.kept = { tag: 'child-live' };");
+    parent.collectGarbage();
+    const r = (try lantern.evaluateScript(testing.allocator, &child, "globalThis.kept.tag === 'child-live'")).value;
+    try testing.expect(r.bits == Value.true_.bits);
+}
+
+test "cross-realm: boolean and symbol boxing in a cross-realm-called function use the home realm's wrappers" {
+    // Broadens the `(5).constructor` Number case to the other
+    // ToObject wrapper prototypes the fix touched (§7.1.1).
+    var parent = Realm.init(testing.allocator);
+    parent.hardened = false;
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    child.hardened = false;
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const bool_ctor_v = (try lantern.evaluateScript(testing.allocator, &parent, "(function () { return (true).constructor; })")).value;
+    try child.globals.put(testing.allocator, "boolCtor", bool_ctor_v);
+    const r1 = (try lantern.evaluateScript(testing.allocator, &child, "boolCtor() === Boolean")).value;
+    try testing.expect(r1.bits == Value.false_.bits);
+
+    const sym_ctor_v = (try lantern.evaluateScript(testing.allocator, &parent, "(function () { return Symbol().constructor; })")).value;
+    try child.globals.put(testing.allocator, "symCtor", sym_ctor_v);
+    const r2 = (try lantern.evaluateScript(testing.allocator, &child, "symCtor() === Symbol")).value;
+    try testing.expect(r2.bits == Value.false_.bits);
+}
+
+test "cross-realm: a RangeError thrown by parent's code is parent's RangeError.prototype chain" {
+    // Second NativeError subclass beyond the TypeError case, exercising
+    // the home-realm intrinsics resolution in the error natives.
+    var parent = Realm.init(testing.allocator);
+    parent.hardened = false;
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    child.hardened = false;
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const thrower_v = (try lantern.evaluateScript(testing.allocator, &parent, "(function () { throw new RangeError('from parent'); })")).value;
+    try child.globals.put(testing.allocator, "boomRange", thrower_v);
+    const probe = (try lantern.evaluateScript(testing.allocator, &child, "let r; try { boomRange(); } catch (e) { r = e.constructor === RangeError; } r")).value;
+    try testing.expect(probe.bits == Value.false_.bits);
 }
