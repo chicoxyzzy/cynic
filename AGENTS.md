@@ -107,14 +107,16 @@ These are project rules — they apply to everyone.
     code runs *in the realm*, so the hardened-default frozen
     primordials confine it (`eval("Array.prototype.push=1")` throws);
     `--unhardened` gives it mutable primordials. Cynic is strict-only,
-    so it runs every eval as strict code — spec-conformant for direct
-    eval (the caller is strict, so §19.2.1.1 `strictEval` is true), a
-    deliberate divergence for indirect eval (spec-sloppy by default;
-    no sloppy parser, so Cynic runs it strict like every shipping engine
-    runs it sloppy). The eval body gets its own variable environment
-    (§19.2.1.3) — direct eval reads the caller's scope but never injects
-    `var` / function bindings into it. Full SES Compartment confinement
-    is deferred. See
+    so it *parses* every eval as strict code (no sloppy parser) — but
+    the §19.2.1.3 variable-environment target still follows the body's
+    `strictEval`: direct eval and a Use-Strict-Directive indirect body
+    bind top-level `var` / function in the eval's own variable
+    environment (direct eval reads the caller's scope but never injects
+    bindings into it); a **non-strict indirect eval** (`(0,eval)("var
+    x=1")`) binds them on the realm's global env, gated by §9.1.1.4.15/
+    .16 CanDeclareGlobalVar / CanDeclareGlobalFunction (a TypeError when
+    the global is non-extensible or the name is a non-configurable
+    property). Full SES Compartment confinement is deferred. See
     [docs/ses-alignment.md](docs/ses-alignment.md) "The eval engine".
 - **SES-aligned by default; `--unhardened` opts out.** Cynic
   isn't just "SES-friendly" (every modern edge runtime is that);

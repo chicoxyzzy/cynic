@@ -47,6 +47,32 @@ fn expectIntAllow(source: []const u8, want: i32) !void {
     try testing.expectEqual(want, v.asInt32());
 }
 
+/// Like `evalAllow`, but unhardened (mutable / extensible primordials)
+/// — the posture the test262 sweep scores under and the one in which
+/// §9.1.1.4.15/.16 CanDeclareGlobalVar / CanDeclareGlobalFunction can
+/// fail (a hardened realm bypasses the extensibility check).
+fn evalUnhardenedAllow(source: []const u8) !Value {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    realm.allow_eval = true;
+    try realm.installBuiltins();
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, source);
+    return switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => error.EvalThrewUnexpectedly,
+    };
+}
+
+fn expectIntUnhardened(source: []const u8, want: i32) !void {
+    const v = try evalUnhardenedAllow(source);
+    if (!v.isInt32()) {
+        std.debug.print("expected int32 {d}, got non-int value\n", .{want});
+        return error.EvalResultNotInt;
+    }
+    try testing.expectEqual(want, v.asInt32());
+}
+
 // ── §19.2.1 indirect eval ───────────────────────────────────────────
 
 test "eval: indirect (0,eval) evaluates as global code" {
@@ -78,12 +104,13 @@ test "eval: strict eval var does not leak to the global env (direct)" {
     , 1);
 }
 
-test "eval: strict eval var does not leak to the global env (indirect)" {
+test "eval: indirect eval runs as global code" {
+    // §19.2.1.1 — indirect eval is global code. The top-level `var b`
+    // binds on the global env and the body's `b * b` reads it back.
+    // (Whether a non-strict indirect `var` is observable on globalThis,
+    // and that a strict-body indirect eval keeps it local, is pinned by
+    // the unhardened §19.2.1.3 tests below.)
     try expectIntAllow("(0, eval)('var b = 4; b * b')", 16);
-    try expectIntAllow(
-        \\(0, eval)('var leaked2 = 1;');
-        \\(typeof globalThis.leaked2 === 'undefined') ? 1 : 0;
-    , 1);
 }
 
 test "eval: function declared in eval does not leak to the global env" {
@@ -299,6 +326,52 @@ test "eval completion: block yields its last statement value" {
 test "eval completion: trailing declaration leaves prior value" {
     // `5; var x = 99;` → 5 (the var declaration has empty completion).
     try expectIntAllow("eval('5; var x = 99;')", 5);
+}
+
+// ── §19.2.1.1 / §19.2.1.3 indirect-eval var environment ─────────────
+//
+// Indirect eval (`(0, eval)(src)`) is global code: a non-strict body's
+// top-level `var` / function declarations bind on the realm's GLOBAL
+// environment (§19.2.1 step 6 + §19.2.1.3), and §9.1.1.4.15/.16
+// CanDeclareGlobalVar / CanDeclareGlobalFunction gate them (TypeError
+// on failure). A body with a Use Strict Directive is a strict eval —
+// its declarations stay in the eval's own variable environment. These
+// guard the indirect-eval-var-env reversal. Mirrors test262
+// `language/eval-code/indirect/{var-env-*,non-definable-global-*}`.
+
+test "indirect eval: non-strict var binds on the global env" {
+    try expectIntUnhardened("(0, eval)('var ieGlobalVar = 5'); ieGlobalVar", 5);
+}
+
+test "indirect eval: non-strict function binds on the global env" {
+    try expectIntUnhardened("(0, eval)('function ieGlobalFn(){ return 7 }'); ieGlobalFn()", 7);
+}
+
+test "indirect eval: strict (use-strict) body keeps var eval-local" {
+    // `ieStrictVar` must NOT leak to the global; reading it would be a
+    // ReferenceError, so probe via `typeof`.
+    try expectIntUnhardened(
+        "(0, eval)(\"'use strict'; var ieStrictVar = 9\"); typeof ieStrictVar === 'undefined' ? 1 : 0",
+        1,
+    );
+}
+
+test "indirect eval: TypeError declaring a non-definable global function" {
+    // §9.1.1.4.16 — `NaN` is a non-configurable, non-writable global,
+    // so CanDeclareGlobalFunction('NaN') is false.
+    try expectIntUnhardened(
+        "var c = 'none'; try { (0, eval)('function NaN(){}'); } catch (e) { c = e.constructor.name; } c === 'TypeError' ? 1 : 0",
+        1,
+    );
+}
+
+test "indirect eval: TypeError declaring a var on a non-extensible global" {
+    // §9.1.1.4.15 — a fresh var name on a non-extensible global object
+    // is not definable.
+    try expectIntUnhardened(
+        "Object.preventExtensions(globalThis); var c = 'none'; try { (0, eval)('var ieUndefinable;'); } catch (e) { c = e.constructor.name; } c === 'TypeError' ? 1 : 0",
+        1,
+    );
 }
 
 test "eval: gate OPEN, genuine parse error still throws SyntaxError" {

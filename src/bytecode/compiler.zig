@@ -8151,7 +8151,15 @@ pub const Compiler = struct {
     /// recurses through Block / If / While / DoWhile / For /
     /// ForInOf / Try / Switch / ExportDecl — but doesn't follow into
     /// nested function / class bodies (those have their own scopes).
-    fn validateGlobalDeclarations(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
+    /// `eval_global` — when true, the caller is an `eval` whose
+    /// top-level `var` / function declarations bind on the global env
+    /// (indirect non-strict eval / `ShadowRealm.evaluate`). Per
+    /// §19.2.1.3 EvalDeclarationInstantiation, eval runs only the
+    /// CanDeclareGlobalVar / CanDeclareGlobalFunction gate — NOT the
+    /// §16.1.7 lexical-collision checks (eval's top-level lexical
+    /// bindings live in a fresh per-eval declarative env, so they
+    /// don't collide with the realm's global lex env).
+    fn validateGlobalDeclarations(self: *Compiler, body: []ast.statement.Statement, eval_global: bool) CompileError!void {
         if (self.is_module) return;
 
         // Collected names. Both sets are small in practice (a handful
@@ -8166,64 +8174,70 @@ pub const Compiler = struct {
 
         try collectScriptDeclNames(self, body, &lex_names, &var_names, &fn_names, false);
 
-        // §16.1.7 step 5.b — lex-vs-lex duplicates. (lex-vs-var
-        // covered by step 5.a below.) Tracked separately so a
-        // pre-existing realm lex binding from a prior `evalScript`
-        // also flags the duplicate per §9.1.1.4.18.
-        for (lex_names.items, 0..) |a, i| {
-            for (lex_names.items[i + 1 ..]) |b| {
-                if (std.mem.eql(u8, a.name, b.name)) {
-                    try self.report(.duplicate_lexical_binding, b.span);
+        // §16.1.7 GlobalDeclarationInstantiation lexical-collision
+        // checks — Script-only. Eval (§19.2.1.3) skips them: its
+        // top-level lexical bindings live in a fresh per-eval
+        // declarative env, not the realm's global lex env.
+        if (!eval_global) {
+            // §16.1.7 step 5.b — lex-vs-lex duplicates. (lex-vs-var
+            // covered by step 5.a below.) Tracked separately so a
+            // pre-existing realm lex binding from a prior `evalScript`
+            // also flags the duplicate per §9.1.1.4.18.
+            for (lex_names.items, 0..) |a, i| {
+                for (lex_names.items[i + 1 ..]) |b| {
+                    if (std.mem.eql(u8, a.name, b.name)) {
+                        try self.report(.duplicate_lexical_binding, b.span);
+                        return error.DuplicateBinding;
+                    }
+                }
+            }
+            for (lex_names.items) |ln| {
+                // §16.1.7 step 5.a — HasVarDeclaration: lex vs var on the
+                // realm. The realm only tracks names through the object
+                // env-record, so any prior `var` / `function` collides.
+                if (self.realm.globals.hasVarDeclaration(ln.name)) {
+                    try self.report(.duplicate_lexical_binding, ln.span);
+                    return error.DuplicateBinding;
+                }
+                // §16.1.7 step 5.b — HasLexicalDeclaration: lex vs prior
+                // lex on the realm.
+                if (self.realm.globals.hasLexicalDeclaration(ln.name)) {
+                    try self.report(.duplicate_lexical_binding, ln.span);
+                    return error.DuplicateBinding;
+                }
+                // §16.1.7 step 5.c — HasRestrictedGlobalProperty: lex vs
+                // non-configurable global property (e.g. `undefined`,
+                // `NaN`, host-installed `Object.defineProperty(this, …,
+                // {configurable:false})`).
+                if (self.realm.globals.hasRestrictedGlobalProperty(ln.name) or
+                    isRestrictedGlobalName(ln.name))
+                {
+                    try self.report(.duplicate_lexical_binding, ln.span);
+                    return error.DuplicateBinding;
+                }
+                // lex vs same-script var / function.
+                for (var_names.items) |vn| if (std.mem.eql(u8, ln.name, vn.name)) {
+                    try self.report(.duplicate_lexical_binding, vn.span);
+                    return error.DuplicateBinding;
+                };
+                for (fn_names.items) |fn_n| if (std.mem.eql(u8, ln.name, fn_n.name)) {
+                    try self.report(.duplicate_lexical_binding, fn_n.span);
+                    return error.DuplicateBinding;
+                };
+            }
+
+            // §16.1.7 step 6.a — vars (and function names) vs realm lex.
+            for (var_names.items) |vn| {
+                if (self.realm.globals.hasLexicalDeclaration(vn.name)) {
+                    try self.report(.duplicate_lexical_binding, vn.span);
                     return error.DuplicateBinding;
                 }
             }
-        }
-        for (lex_names.items) |ln| {
-            // §16.1.7 step 5.a — HasVarDeclaration: lex vs var on the
-            // realm. The realm only tracks names through the object
-            // env-record, so any prior `var` / `function` collides.
-            if (self.realm.globals.hasVarDeclaration(ln.name)) {
-                try self.report(.duplicate_lexical_binding, ln.span);
-                return error.DuplicateBinding;
-            }
-            // §16.1.7 step 5.b — HasLexicalDeclaration: lex vs prior
-            // lex on the realm.
-            if (self.realm.globals.hasLexicalDeclaration(ln.name)) {
-                try self.report(.duplicate_lexical_binding, ln.span);
-                return error.DuplicateBinding;
-            }
-            // §16.1.7 step 5.c — HasRestrictedGlobalProperty: lex vs
-            // non-configurable global property (e.g. `undefined`,
-            // `NaN`, host-installed `Object.defineProperty(this, …,
-            // {configurable:false})`).
-            if (self.realm.globals.hasRestrictedGlobalProperty(ln.name) or
-                isRestrictedGlobalName(ln.name))
-            {
-                try self.report(.duplicate_lexical_binding, ln.span);
-                return error.DuplicateBinding;
-            }
-            // lex vs same-script var / function.
-            for (var_names.items) |vn| if (std.mem.eql(u8, ln.name, vn.name)) {
-                try self.report(.duplicate_lexical_binding, vn.span);
-                return error.DuplicateBinding;
-            };
-            for (fn_names.items) |fn_n| if (std.mem.eql(u8, ln.name, fn_n.name)) {
-                try self.report(.duplicate_lexical_binding, fn_n.span);
-                return error.DuplicateBinding;
-            };
-        }
-
-        // §16.1.7 step 6.a — vars (and function names) vs realm lex.
-        for (var_names.items) |vn| {
-            if (self.realm.globals.hasLexicalDeclaration(vn.name)) {
-                try self.report(.duplicate_lexical_binding, vn.span);
-                return error.DuplicateBinding;
-            }
-        }
-        for (fn_names.items) |fn_n| {
-            if (self.realm.globals.hasLexicalDeclaration(fn_n.name)) {
-                try self.report(.duplicate_lexical_binding, fn_n.span);
-                return error.DuplicateBinding;
+            for (fn_names.items) |fn_n| {
+                if (self.realm.globals.hasLexicalDeclaration(fn_n.name)) {
+                    try self.report(.duplicate_lexical_binding, fn_n.span);
+                    return error.DuplicateBinding;
+                }
             }
         }
 
@@ -12770,7 +12784,18 @@ fn compileScriptLikeChunk(
     // idempotently on the global. §19.2.1.3 EvalDeclarationInstantiation
     // does its own, narrower checks; `declareBinding` still catches
     // within-body duplicates.
-    if (!eval_scope) try c.validateGlobalDeclarations(program.body);
+    // §16.1.7 GlobalDeclarationInstantiation (Script) runs the full
+    // validation; §19.2.1.3 EvalDeclarationInstantiation runs only the
+    // CanDeclareGlobalVar / CanDeclareGlobalFunction gate, and only
+    // when the eval's var / function declarations bind on the global
+    // env (`!eval_local` — indirect non-strict eval / ShadowRealm).
+    // Direct + strict eval (`eval_local`) bind eval-locally, so no
+    // global check applies.
+    if (!eval_scope) {
+        try c.validateGlobalDeclarations(program.body, false);
+    } else if (!eval_local) {
+        try c.validateGlobalDeclarations(program.body, true);
+    }
 
     const start_span: Span = .{ .start = 0, .end = 0 };
     try c.builder.emitOp(.make_environment, start_span);

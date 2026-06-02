@@ -465,7 +465,7 @@ pub fn evaluateScript(
     realm: *Realm,
     source: []const u8,
 ) EvaluateError!RunResult {
-    return evaluateSource(allocator, realm, source, false, false);
+    return evaluateSource(allocator, realm, source, false, false, false);
 }
 
 /// §3.8.3.7 PerformShadowRealmEval — evaluate `source` as **Script**
@@ -482,20 +482,24 @@ pub fn evaluateEval(
     realm: *Realm,
     source: []const u8,
 ) EvaluateError!RunResult {
-    return evaluateSource(allocator, realm, source, true, false);
+    return evaluateSource(allocator, realm, source, true, false, false);
 }
 
 /// §19.2.1.1 — evaluate `source` as **indirect eval** code against
-/// `realm`. Like `evaluateEval`, but a strict eval (§19.2.1.3): the
-/// eval body gets its own variable environment, so top-level `var` /
-/// function declarations bind eval-locally and do NOT leak to the
-/// global env. Free references resolve against the realm's globals.
+/// `realm`. strictEval is determined by the body (§19.2.1): a body
+/// with a Use Strict Directive is a strict eval whose top-level `var` /
+/// function declarations bind in the eval's own variable environment;
+/// a non-strict body binds them on the realm's GLOBAL env (subject to
+/// §9.1.1.4.15/.16 CanDeclareGlobalVar / CanDeclareGlobalFunction).
+/// Free references resolve against the realm's globals either way.
 pub fn evaluateIndirectEval(
     allocator: std.mem.Allocator,
     realm: *Realm,
     source: []const u8,
 ) EvaluateError!RunResult {
-    return evaluateSource(allocator, realm, source, true, true);
+    // Indirect eval: `eval_local` is recomputed from the body's
+    // strictness inside `evaluateSource` (the `indirect` flag).
+    return evaluateSource(allocator, realm, source, true, true, true);
 }
 
 /// §19.2.1 direct eval — the caller-frame context the `direct_eval`
@@ -613,6 +617,27 @@ pub fn evaluateDirectEval(
     return runFrames(allocator, realm, &frames);
 }
 
+/// True when `program`'s directive prologue contains a Use Strict
+/// Directive — §11.2.2 / the body of an indirect eval is a strict eval
+/// (§19.2.1) iff this holds. `source` is the text the directive spans
+/// index into.
+fn programHasUseStrict(program: anytype, source: []const u8) bool {
+    for (program.body) |s| {
+        switch (s) {
+            .expression => |es| {
+                // A directive is an ExpressionStatement whose sole
+                // expression is a StringLiteral; the prologue ends at
+                // the first non-directive statement.
+                const dir = es.directive orelse return false;
+                const text = std.mem.trim(u8, source[dir.start..dir.end], "\"'");
+                if (std.mem.eql(u8, text, "use strict")) return true;
+            },
+            else => return false,
+        }
+    }
+    return false;
+}
+
 fn evaluateSource(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -621,7 +646,14 @@ fn evaluateSource(
     /// §19.2.1.3 — when `eval_scope` is set, whether this is a strict
     /// eval (var / function bind eval-locally) vs ShadowRealm-style
     /// Script evaluation (var → global). Ignored when `!eval_scope`.
+    /// For an indirect eval (`indirect`), this is recomputed from the
+    /// body's strictness after parsing.
     eval_local: bool,
+    /// §19.2.1 indirect eval: strictEval is determined by the body's
+    /// Use Strict Directive, not the caller. A non-strict body's
+    /// top-level `var` / function declarations bind on the global env
+    /// (`eval_local = false`); a strict body keeps them eval-local.
+    indirect: bool,
 ) EvaluateError!RunResult {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -638,6 +670,11 @@ fn evaluateSource(
     var diags: diag_mod.Diagnostics = .empty;
     const program = parser_mod.parseScript(aa, source, &diags) catch return error.ParseError;
     for (diags.items) |d| if (d.severity == .err) return error.ParseError;
+    // §19.2.1 — an indirect eval is a strict eval iff its body carries
+    // a Use Strict Directive. A non-strict body binds top-level `var` /
+    // function on the global env (`eval_local = false`); a strict body
+    // keeps them eval-local.
+    const effective_local = if (indirect) programHasUseStrict(&program, source) else eval_local;
     // The chunk is owned by the realm so that any `JSFunction`
     // declared by this script (which keeps a pointer into the
     // chunk's `function_templates`) outlives the call and stays
@@ -646,7 +683,7 @@ fn evaluateSource(
     // across `script_chunks` array growth.
     const chunk_ptr = try realm.allocator.create(Chunk);
     chunk_ptr.* = (if (eval_scope)
-        compiler_mod.compileEvalAsChunk(realm.allocator, realm, &program, source, null, eval_local)
+        compiler_mod.compileEvalAsChunk(realm.allocator, realm, &program, source, null, effective_local)
     else
         compiler_mod.compileScriptAsChunk(realm.allocator, realm, &program, source, null)) catch {
         realm.allocator.destroy(chunk_ptr);
