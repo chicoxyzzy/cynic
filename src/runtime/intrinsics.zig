@@ -2316,6 +2316,11 @@ pub const newEvalError = @import("builtins/error.zig").newEvalError;
 pub const PromiseState = @import("builtins/promise.zig").PromiseState;
 pub const allocatePromiseFor = @import("builtins/promise.zig").allocatePromiseFor;
 
+/// Host-refusal message shared by every gate-closed runtime-code-
+/// construction site (`eval`, the dynamic `Function` family, direct
+/// eval). Phrased like Node's `--disallow-code-generation-from-strings`.
+pub const eval_disabled_msg = "code generation from strings disallowed: eval is off (pass --allow=eval to enable)";
+
 /// §19.2.1 eval(x) — the global `eval` function object. The binding
 /// always exists on globalThis (so `typeof eval === "function"` and
 /// `eval === null` probes resolve), but its behaviour depends on the
@@ -2323,10 +2328,12 @@ pub const allocatePromiseFor = @import("builtins/promise.zig").allocatePromiseFo
 ///
 ///   • non-String argument → returned unchanged (§19.2.1 step 2),
 ///     regardless of posture.
-///   • gate closed (default) → a String argument is the SES policy
-///     refusal: SyntaxError (AGENTS.md "eval and runtime code
+///   • gate closed (default) → a String argument is the host refusal
+///     (§19.2.1.2 HostEnsureCanCompileStrings): EvalError, matching
+///     Node + browser CSP (AGENTS.md "eval and runtime code
 ///     construction").
-///   • gate open (`--allow=eval`) → a String argument is evaluated.
+///   • gate open (`--allow=eval`) → a String argument is evaluated;
+///     a genuine parse failure is then a SyntaxError (§19.2.1 step 11).
 ///
 /// This native is reached only for an **indirect** eval — the
 /// syntactic direct `eval(...)` form compiles to a dedicated
@@ -2343,8 +2350,11 @@ fn globalEval(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // §19.2.1 step 2 — a non-String operand is returned unchanged.
     if (!arg.isString()) return arg;
     if (!realm.allow_eval) {
-        // Gate closed → SES policy refusal (unchanged default).
-        return throwSyntaxError(realm, "Cynic does not support eval() of source strings");
+        // §19.2.1.2 HostEnsureCanCompileStrings — the host refuses code
+        // generation from strings (default SES posture). The thrown
+        // value is host-defined; Cynic raises EvalError, matching Node's
+        // `--disallow-code-generation-from-strings` and browser CSP.
+        return throwEvalError(realm, eval_disabled_msg);
     }
     const s: *JSString = @ptrCast(@alignCast(arg.asString()));
     return performIndirectEval(realm, s.flatBytes());

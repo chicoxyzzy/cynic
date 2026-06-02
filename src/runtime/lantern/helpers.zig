@@ -426,3 +426,7 @@ pub fn makeRangeError(realm: *Realm, msg: []const u8) RunError!Value {
 pub fn makeSyntaxError(realm: *Realm, msg: []const u8) RunError!Value {
     return intrinsics_mod.newSyntaxError(realm, msg) catch return error.OutOfMemory;
 }
+
+pub fn makeEvalError(realm: *Realm, msg: []const u8) RunError!Value {
+    return intrinsics_mod.newEvalError(realm, msg) catch return error.OutOfMemory;
+}

@@ -77,11 +77,11 @@ test "ses-eval: new Function(string) throws" {
     // `Function` IS shipped as a constructor for the
     // binding-friendly bound-function shape (so `Function.
     // prototype.bind(...)` and friends work), but the string-
-    // body construction path is the SES carve-out per
-    // AGENTS.md. The throw class is currently SyntaxError (the
-    // CreateDynamicFunction parse step fails before the spec's
-    // TypeError gate runs); the observable guarantee for the
-    // policy commitment is just "the call does not return".
+    // body construction path is gated by `--allow=eval` per
+    // AGENTS.md. With the gate closed the throw class is EvalError
+    // (§19.2.1.2 HostEnsureCanCompileStrings host refusal — see
+    // `eval_test.zig` for the type-pinning tests); the guarantee
+    // for the policy commitment is just "the call does not return".
     try expectAbsent(
         \\let ok = 0;
         \\try {

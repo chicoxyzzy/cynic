@@ -85,6 +85,7 @@ pub const TruncateResult = helpers.TruncateResult;
 pub const makeTypeError = helpers.makeTypeError;
 pub const makeRangeError = helpers.makeRangeError;
 pub const makeSyntaxError = helpers.makeSyntaxError;
+pub const makeEvalError = helpers.makeEvalError;
 
 // Generator + async-generator machinery lives in `generator.zig`.
 // Re-export the public entry points so the dispatch loop and
@@ -1888,10 +1889,11 @@ pub fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
 
-            // Gate closed → SES policy refusal (SyntaxError), matching
-            // the indirect `eval` native and the default posture.
+            // Gate closed → host refusal (EvalError, §19.2.1.2
+            // HostEnsureCanCompileStrings), matching the indirect
+            // `eval` native and the default posture.
             if (!realm.allow_eval) {
-                const ex = try makeSyntaxError(realm, "Cynic does not support eval() of source strings");
+                const ex = try makeEvalError(realm, intrinsics_mod.eval_disabled_msg);
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;

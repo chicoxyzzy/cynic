@@ -125,13 +125,13 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
 /// source compilation — aligns with SES / Hardened JavaScript.
 fn functionConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     if (args.len > 0) {
-        // §20.2.1.1.1 CreateDynamicFunction. Gated by `--allow=eval`:
-        // closed → SES policy SyntaxError (the spec-observable
-        // completion of a failed parse — test262
-        // `language/expressions/import.meta/syntax/goal-*-params-or-body.js`
-        // expects a SyntaxError); open → parse + build the function.
+        // §20.2.1.1.1 CreateDynamicFunction step 3 calls
+        // HostEnsureCanCompileStrings BEFORE the Parse step. Gated by
+        // `--allow=eval`: closed → host refusal (EvalError, matching
+        // Node + browser CSP); open → parse + build the function (a
+        // genuine parse failure is then a SyntaxError).
         if (!realm.allow_eval) {
-            return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
+            return @import("../intrinsics.zig").throwEvalError(realm, @import("../intrinsics.zig").eval_disabled_msg);
         }
         return createDynamicFunction(realm, this_value, args, .normal);
     }
@@ -715,14 +715,13 @@ fn asyncGeneratorFunctionConstructor(realm: *Realm, this_value: Value, args: []c
 /// Shared body for the `GeneratorFunction` / `AsyncFunction` /
 /// `AsyncGeneratorFunction` string constructors (§27.3.2 / §27.7.2 /
 /// §27.4.2 — each defers to §20.2.1.1.1 CreateDynamicFunction). Gated
-/// by `--allow=eval`: closed → SES policy SyntaxError (matching the
-/// spec-observable completion of the failed parse step, incl. §16.2.1.7
-/// ImportMeta outside a Module goal — test262
-/// `language/expressions/import.meta/syntax/goal-{generator,async-function,async-generator}-params-or-body.js`);
-/// open → parse + build the function.
+/// by `--allow=eval`: closed → host refusal (EvalError, §19.2.1.2
+/// HostEnsureCanCompileStrings, matching Node + browser CSP); open →
+/// parse + build the function (a genuine parse failure — e.g. §16.2.1.7
+/// ImportMeta outside a Module goal — is then a SyntaxError).
 fn variantConstructor(realm: *Realm, this_value: Value, args: []const Value, kind: DynamicFunctionKind) NativeError!Value {
     if (!realm.allow_eval) {
-        return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
+        return @import("../intrinsics.zig").throwEvalError(realm, @import("../intrinsics.zig").eval_disabled_msg);
     }
     return createDynamicFunction(realm, this_value, args, kind);
 }

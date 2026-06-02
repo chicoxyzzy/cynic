@@ -171,7 +171,13 @@ test "eval: reassigned globalThis.eval is an ordinary call, not direct" {
 
 // ── posture: gate stays closed by default (regression guard) ─────────
 
-test "eval: gate closed (default) still throws SyntaxError" {
+test "eval: gate closed (default) throws EvalError (host refusal)" {
+    // §19.2.1.2 HostEnsureCanCompileStrings — when the host refuses
+    // code generation from strings (eval off by default), the thrown
+    // value is host-defined. Cynic raises EvalError, matching Node's
+    // `--disallow-code-generation-from-strings` and browser CSP
+    // (`unsafe-eval` blocked). The refusal happens BEFORE parsing, so
+    // a non-string operand still returns unchanged (covered above).
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
     // allow_eval defaults to false — no flip.
@@ -179,11 +185,48 @@ test "eval: gate closed (default) still throws SyntaxError" {
     const outcome = try lantern.evaluateScript(testing.allocator, &realm,
         \\let cls = 'none';
         \\try { eval('1'); } catch (e) { cls = e.constructor.name; }
-        \\cls === 'SyntaxError' ? 1 : 0;
+        \\cls === 'EvalError' ? 1 : 0;
     );
     const v = switch (outcome) {
         .value, .yielded => |val| val,
         .thrown => return error.EvalGateClosedThrew,
+    };
+    try testing.expect(v.isInt32() and v.asInt32() == 1);
+}
+
+test "eval: gate closed Function(string) throws EvalError too" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm,
+        \\let cls = 'none';
+        \\try { new Function('return 1'); } catch (e) { cls = e.constructor.name; }
+        \\cls === 'EvalError' ? 1 : 0;
+    );
+    const v = switch (outcome) {
+        .value, .yielded => |val| val,
+        .thrown => return error.EvalGateClosedThrew,
+    };
+    try testing.expect(v.isInt32() and v.asInt32() == 1);
+}
+
+test "eval: gate OPEN, genuine parse error still throws SyntaxError" {
+    // §19.2.1 step 11 — once the gate is open and compilation proceeds,
+    // a real parse failure in the evaluated source is a SyntaxError
+    // (NOT the EvalError host refusal). The two are distinct: refusal
+    // is a capability gate, SyntaxError is a parse outcome.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_eval = true;
+    try realm.installBuiltins();
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm,
+        \\let cls = 'none';
+        \\try { eval('var = ;'); } catch (e) { cls = e.constructor.name; }
+        \\cls === 'SyntaxError' ? 1 : 0;
+    );
+    const v = switch (outcome) {
+        .value, .yielded => |val| val,
+        .thrown => return error.EvalGateOpenParseThrew,
     };
     try testing.expect(v.isInt32() and v.asInt32() == 1);
 }
