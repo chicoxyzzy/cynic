@@ -24,7 +24,7 @@ pick up the next phase from here without re-deriving the design.
 | 3 — D2 RealmStack + per-fn [[Realm]] | ✅ shipped — `[[Realm]]` set at native + ordinary function allocation; free-global resolution (read **and** write), Error-constructor intrinsics, and §23.1.3.34 ArraySpeciesCreate resolve via the executing function's realm (its `CallFrame.running_realm` / `active_native_fn_realm`), not the dispatch realm. All four Phase-3 contract tests in `realm_test.zig` green. | (multi-realm consumption effort) |
 | 4 — D4 endowments | sketched | — |
 | 5 — Compartments | sketched | — |
-| 6 — per-realm teardown (memory lifecycle) | 🟡 foundation shipped — `Heap.realms` + `markAllSharingRealmRoots` (the global GC marks every sharing realm's roots; this was also a latent cross-realm UAF fix) + a ShadowRealm `HandleScope` fix; ShadowRealm runs clean under `test262-safe --gc-threshold=1`. Remaining: the deferred ShadowRealm finalizer to free the child `Realm` struct (problem #1). Prior art revised the design — see "Phase 6" below. | (multi-realm teardown effort) |
+| 6 — per-realm teardown (memory lifecycle) | ✅ shipped — `Heap.realms` + `markAllSharingRealmRoots` (the global GC marks every sharing realm's roots; also a latent cross-realm UAF fix) + a ShadowRealm `HandleScope` fix, then the teardown finalizer: a collected `ShadowRealm` wrapper queues its child realm on `Heap.pending_realm_teardown` during the sweep and `Realm.drainRealmTeardown` frees it afterward (deferred; `created_by` back-link unlinks it from the owner's `child_realms`). Clean under `test262-safe --gc-threshold=1`. Compartments remain the only deferred piece. | (multi-realm teardown effort) |
 
 The cross-realm-error commit `b95694b` reaches partway into D2 — `callee.realm` is already consumed for error attribution and native-callback realm tracking — but `JSFunction.realm` itself remains `null` at every allocation site because `Heap.allocateFunction*` doesn't take a realm parameter. Phase 3 closes that gap.
 
@@ -1081,42 +1081,30 @@ This **dissolves problem #2**: once a dead child is deregistered,
 its now-unreachable objects are reclaimed by the next ordinary GC —
 the V8/JSC behaviour, no per-object tag, no scoped sweep.
 
-**Remaining plan (problem #1 only — the child-`Realm` struct leak).**
+**ShadowRealm finalizer — shipped.** When the sweep frees a
+`is_shadow_realm` object, `Heap.queueShadowRealmTeardown` reads its
+`host_data` child realm (before `deinitFields` drops the extension) and
+queues it on `Heap.pending_realm_teardown`; `Realm.drainRealmTeardown`
+empties that queue *after* `collectFull` / `collectYoung` return —
+deferred, because freeing a `Realm` (its globals/intrinsics maps point at
+heap objects the sweep is mid-walk over) is reentrant heap mutation. The
+drain unlinks the child from its `created_by.child_realms` (so the
+eventual parent `deinit` doesn't double-free), then `deinit` + `destroy`.
+Both object free paths are hooked (`sweepList` for mature,
+`promoteYoungList` for young); a failed enqueue (OOM) falls back to the
+parent-`deinit` free. The child's heap objects survived this cycle (it
+was still registered when roots were marked); once `deinit` deregisters
+it, the next GC reclaims them.
 
-1. **ShadowRealm finalizer.** When the `ShadowRealm` instance is
-   collected, tear its child `Realm` down: `deregisterFromHeap`,
-   remove it from the creating realm's `child_realms` (needs a
-   `created_by` back-link, since the child sits in that list and
-   `parent.deinit` would otherwise double-free), then `deinit` +
-   `destroy`. **Must be deferred, not inline in the sweep** —
-   freeing a realm's globals/intrinsics maps (which reference heap
-   objects mid-sweep) from the collector is reentrant heap mutation.
+Of the two candidate designs originally weighed — the sweep-hook + drain
+above vs. reusing the `FinalizationRegistry` job machinery — the
+sweep-hook one shipped: self-contained, no entanglement with the
+user-facing FR code, and verified clean under `test262-safe
+--gc-threshold=1`. `$262.createRealm` children (no wrapper object) are
+never enqueued and keep their parent-`deinit` lifetime.
 
-   Two implementation paths, both delicate (this is a bounded leak,
-   not a safety bug — scope accordingly):
-   - **Sweep-hook + post-sweep drain.** Detect a dying
-     `is_shadow_realm` object and enqueue its `host_data` child onto
-     `Heap.pending_realm_teardown`, drained after `collectFull` /
-     `collectYoung` return. Caveat: young and mature objects free
-     through *two* routines — `promoteYoungList` AND `sweepList` —
-     so both need the hook, and the enqueue must tolerate OOM
-     mid-sweep (fall back to the parent-deinit free).
-   - **Reuse the finalization-job machinery (recommended).**
-     Register the ShadowRealm wrapper as an internal weak target via
-     the `FinalizationRegistry` / `setFinalizationEnqueue`
-     plumbing (the engine already detects weak-target death,
-     §26.2 / `finalization_registries_seen`), with an engine
-     callback that runs the teardown at the next job boundary. No
-     new sweep hooks, no OOM-in-sweep, reuses tested death
-     detection — at the cost of threading an engine-internal
-     finalizer through user-facing FR code.
-
-   Either way the child's heap objects are reclaimed by the
-   following GC once it is deregistered (problem #2, already
-   handled). Do this as its own focused, `test262-safe`-gated
-   change — not bundled with unrelated work.
-2. **Bench the workload.** Add a "N short-lived ShadowRealms in a
-   loop" bench; success = steady-state RSS flat across iterations.
+**Still open (optional):** a "N short-lived ShadowRealms in a loop"
+bench asserting steady-state RSS is flat across iterations.
 
 The per-object realm tag and scoped sweep from the original sketch
 are **dropped** — over-engineering vs. what V8/JSC do. SpiderMonkey-

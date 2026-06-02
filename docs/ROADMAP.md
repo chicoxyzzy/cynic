@@ -155,10 +155,10 @@ code construction (aligns with SES).
   primitive boxing through its OWN realm, not the caller's),
   cross-realm species, and `ShadowRealm` (constructor +
   `.evaluate` + `.importValue` + the §3.8.3.4 callable boundary)
-  all ship, and the shared-heap GC marks every coexisting realm's
-  roots (closing a cross-realm use-after-free). Still deferred:
-  per-realm teardown (freeing a child realm's record when its
-  `ShadowRealm` is collected) and full Compartments. The test262 sweep
+  all ship, the shared-heap GC marks every coexisting realm's
+  roots (closing a cross-realm use-after-free), and a collected
+  `ShadowRealm` frees its child realm record (per-realm teardown).
+  Still deferred: full Compartments. The test262 sweep
   scores both modes — the
   `unhardened` row tracks the legacy ECMAScript baseline (the
   `--unhardened` opt-out), the `hardened` row tracks the
