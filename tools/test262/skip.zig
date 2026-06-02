@@ -55,18 +55,15 @@ pub const corpus_excluded_prefixes = [_][]const u8{
     // fixtures. Always filtered before frontmatter parsing.
     "harness/",
     // Staging ground — upstream-WIP fixtures that aren't required to
-    // be portable; not part of any published edition. Filtered for the
-    // same reason pre-Stage-4 proposals are: scoring stable ECMA-262
-    // shouldn't be dragged by upstream WIP.
+    // be portable; not part of any published edition.
     "staging/",
-    // NOTE: `intl402/` used to be filtered here. It now runs, and any
-    // failure classifies as the `intl402` policy in `pathPolicyKind` —
-    // Cynic doesn't ship Intl, so those failures are "correctly
-    // handled" rather than engine bugs.
+    // Annex B — Cynic targets edge runtimes (Workers / Deno / server
+    // JS), not browsers, so the whole `annexB/` tree is out of scope
+    // per AGENTS.md / ROADMAP.md (it's duplicate coverage of main-spec
+    // items already tested via the main path). Excluded from the
+    // corpus rather than run-and-failed.
+    "annexB/",
 };
-
-// Compatibility alias for callers that still reach for the old name.
-pub const skip_path_prefixes = corpus_excluded_prefixes;
 
 // ════════════════════════════════════════════════════════════════════
 // ░░░░░░░░░░░░░░░░░░░░  PERMANENTLY OUT OF SCOPE  ░░░░░░░░░░░░░░░░░░░░
@@ -82,12 +79,9 @@ pub const skip_path_prefixes = corpus_excluded_prefixes;
 // Cynic targets edge runtimes (Workers / Deno / server JS), not
 // browsers. Annex B in its entirety — language extensions *and*
 // browser-era built-ins — is out of scope per AGENTS.md / ROADMAP.md.
-// The `annexB/` test262 tree is duplicate coverage of main-spec
-// items we already test via the main path.
-
-pub const annex_b_path_prefixes = [_][]const u8{
-    "annexB/",
-};
+// The `annexB/` test262 tree is excluded via `corpus_excluded_prefixes`
+// above; the feature-tagged Annex B built-ins (`__proto__`,
+// `__getter__`, …) sit under the main tree and are caught here.
 
 pub const annex_b_features = [_][]const u8{
     // Object.prototype's Annex B accessor methods — `__defineGetter__`,
@@ -1205,11 +1199,10 @@ pub fn pathPolicyKind(
     features: []const []const u8,
     no_strict: bool,
 ) ?PolicyKind {
-    // Priority 1 — annex_b. Path tree first, then exact paths under the
-    // main tree that need Annex B leniency, then feature tags.
-    for (annex_b_path_prefixes) |prefix| {
-        if (std.mem.startsWith(u8, rel_path, prefix)) return .annex_b;
-    }
+    // Priority 1 — annex_b. The `annexB/` tree is excluded from the
+    // corpus entirely (`corpus_excluded_prefixes`), so it never reaches
+    // here; what remains are exact paths under the main tree that need
+    // Annex B leniency, then feature tags.
     for (annex_b_regex_exact_paths) |exact| {
         if (std.mem.eql(u8, rel_path, exact)) return .annex_b;
     }
@@ -1272,13 +1265,11 @@ test "skip: corpus-walk exclusions" {
     try testing.expect(pathIsSkipped("staging/explicit-resource-management/foo.js"));
     try testing.expect(!pathIsSkipped("intl402/Locale/extensions.js"));
     try testing.expect(!pathIsSkipped("language/expressions/optional-chaining/foo.js"));
-    try testing.expect(!pathIsSkipped("annexB/B.1.1/legacy-octal.js"));
+    // The whole annexB/ tree is excluded from the corpus.
+    try testing.expect(pathIsSkipped("annexB/B.1.1/legacy-octal.js"));
 }
 
 test "policy: annex_b" {
-    // The whole annexB/ tree.
-    try testing.expectEqual(PolicyKind.annex_b, pathPolicyKind("annexB/built-ins/escape/empty-string.js", &.{}, false).?);
-    try testing.expectEqual(PolicyKind.annex_b, pathPolicyKind("annexB/language/comments/single-line-html-open.js", &.{}, false).?);
     // Main-tree fixture needing Annex B regex-grammar leniency.
     try testing.expectEqual(PolicyKind.annex_b, pathPolicyKind("built-ins/String/prototype/split/separator-regexp.js", &.{}, false).?);
     // Annex B feature tags (§B.2.2 accessors, legacy regexp, IsHTMLDDA).
@@ -1331,12 +1322,6 @@ test "policy: in-scope fixtures have no policy" {
     try testing.expectEqual(@as(?PolicyKind, null), pathPolicyKind("language/expressions/addition/order-of-evaluation.js", &.{}, false));
     // Temporal ships — in scope, no policy.
     try testing.expectEqual(@as(?PolicyKind, null), pathPolicyKind("built-ins/Temporal/PlainDateTime/prototype/add/branding.js", &.{}, false));
-}
-
-test "policy: priority — annex_b before eval" {
-    // A path that is both Annex B and reaches through eval resolves to
-    // annex_b (higher priority).
-    try testing.expectEqual(PolicyKind.annex_b, pathPolicyKind("annexB/built-ins/escape/eval.js", &.{}, false).?);
 }
 
 test "skip: pre-Stage-4 proposals dropped from total" {
