@@ -380,27 +380,35 @@ const c = new Compartment({ globals: { fetch: limitedFetch } });
 c.evaluate('await fetch("/api")');  // only sees limitedFetch
 ```
 
-This requires **multi-realm support** at the engine level. Cynic
-explicitly punts multi-realm today (see `tools/test262/skip.zig`
-for the `proto-from-ctor-realm*` skips and the note explaining
-single-realm is permanent until that changes).
+**Primary reason it's postponed: `Compartment` is a TC39 *Stage 1*
+proposal** ([tc39/proposal-compartments](https://github.com/tc39/proposal-compartments)).
+Stage 1 means the shape is still being explored — the constructor
+options, the module-descriptor design, and the `import` hook are all
+subject to change. Cynic's policy is to not ship pre-Stage-4 proposals
+by default (see [ROADMAP.md](ROADMAP.md) "Pre-Stage-4 proposals
+shipped" — only stabilising proposals graduate in), and an unstable,
+churning API is the wrong thing to bake into the engine's
+confinement boundary. So Compartments waits on the proposal, not on
+Cynic.
 
-To ship Compartments, Cynic would need:
-- Multiple realms per engine instance, user-visible
-- Per-realm intrinsic installation (could share intrinsics across
-  compartments — SES does this for memory efficiency)
-- Per-compartment module loader (StaticModuleRecord /
-  SyntheticModuleRecord)
-- Endowment plumbing (what powers cross the boundary)
-
-That's a **months-scale** project. Phases 1-3 above ship "the
-useful 80%" of SES alignment without it.
+The engine substrate they need has, in fact, largely landed (see
+[multi-realm.md](multi-realm.md)): multiple coexisting realms with
+per-realm intrinsics + globals, realm-aware free-binding / intrinsic
+resolution, a shared-heap GC that marks every realm's roots, and
+`ShadowRealm` (constructor + `.evaluate` + `.importValue` + the
+callable boundary) with per-realm teardown. What a `Compartment`
+constructor would still add on top:
+- the user-visible `Compartment` class + its options object,
+- a per-compartment module loader (the proposal's module
+  descriptors / virtual modules — themselves Stage 1 and in flux),
+- endowment plumbing (deep-frozen globals handed in at construction).
 
 Revisit Compartments when:
-1. A real Compartment user shows up (Agoric-style high-integrity
-   computation, hardened plugin system, etc.), OR
-2. Multi-realm becomes necessary for another reason (e.g. a host
-   embedding that needs per-tenant realms)
+1. **The proposal advances** (Stage 2+), so the API surface is stable
+   enough to commit to; AND/OR
+2. A real Compartment user shows up (Agoric-style high-integrity
+   computation, a hardened plugin system, a host needing per-tenant
+   confinement).
 
 ## Out of scope (deferred or rejected)
 

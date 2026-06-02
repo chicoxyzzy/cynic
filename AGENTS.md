@@ -134,8 +134,15 @@ These are project rules — they apply to everyone.
     is frozen-non-writable) succeeds as instance shadowing
     instead of throwing TypeError. Spec-conforming via
     synthetic accessor pairs on each frozen prototype slot.
-  - **Compartments deferred** — the full SES sandboxing API
-    needs multi-realm support, which Cynic still punts.
+  - **Compartments postponed** — the `Compartment` API is a TC39
+    **Stage 1** proposal
+    ([tc39/proposal-compartments](https://github.com/tc39/proposal-compartments)),
+    so its surface is still in flux and Cynic won't bake pre-Stage-4
+    API into its confinement boundary. The multi-realm substrate it
+    needs largely ships now (per-realm intrinsics/globals, realm-aware
+    resolution, `ShadowRealm` + per-realm teardown); revisit when the
+    proposal advances. See [docs/multi-realm.md](docs/multi-realm.md)
+    and [docs/ses-alignment.md](docs/ses-alignment.md).
   - **`--unhardened`** — single flag that disables the whole
     SES posture atomically. Primordials stay mutable, `harden()`
     isn't installed, override-mistake fix skipped. For code

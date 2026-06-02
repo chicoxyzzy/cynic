@@ -158,7 +158,11 @@ code construction (aligns with SES).
   all ship, the shared-heap GC marks every coexisting realm's
   roots (closing a cross-realm use-after-free), and a collected
   `ShadowRealm` frees its child realm record (per-realm teardown).
-  Still deferred: full Compartments. The test262 sweep
+  Full Compartments are **postponed pending the TC39 proposal**: it's
+  Stage 1 ([tc39/proposal-compartments](https://github.com/tc39/proposal-compartments)),
+  so the API is still in flux and Cynic doesn't bake pre-Stage-4
+  surface into its confinement boundary — the multi-realm substrate
+  Compartments stand on already largely ships. The test262 sweep
   scores both modes — the
   `unhardened` row tracks the legacy ECMAScript baseline (the
   `--unhardened` opt-out), the `hardened` row tracks the
