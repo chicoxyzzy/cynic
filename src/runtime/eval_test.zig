@@ -67,6 +67,36 @@ test "eval: completion value is the last expression" {
     try expectIntAllow("eval('var a = 3; a * a')", 9);
 }
 
+test "eval: strict eval var does not leak to the global env (direct)" {
+    // §19.2.1.3 — strict eval gets its own variable environment, so a
+    // top-level `var` binds locally and never escapes to the caller /
+    // global. It works inside the eval, then is gone afterward.
+    try expectIntAllow("eval('var a = 3; a * a')", 9);
+    try expectIntAllow(
+        \\eval('var leaked = 1;');
+        \\(typeof globalThis.leaked === 'undefined' && !('leaked' in globalThis)) ? 1 : 0;
+    , 1);
+}
+
+test "eval: strict eval var does not leak to the global env (indirect)" {
+    try expectIntAllow("(0, eval)('var b = 4; b * b')", 16);
+    try expectIntAllow(
+        \\(0, eval)('var leaked2 = 1;');
+        \\(typeof globalThis.leaked2 === 'undefined') ? 1 : 0;
+    , 1);
+}
+
+test "eval: function declared in eval does not leak to the global env" {
+    // A top-level function declaration in eval'd code is part of the
+    // eval's own variable environment, callable within the eval but
+    // not installed on globalThis (§19.2.1.3 strict eval).
+    try expectIntAllow("eval('function f(){ return 7; } f()')", 7);
+    try expectIntAllow(
+        \\eval('function g(){}');
+        \\(typeof globalThis.g === 'undefined') ? 1 : 0;
+    , 1);
+}
+
 test "eval: non-string argument returns unchanged" {
     // §19.2.1 step 2 — a non-String argument is returned as-is even
     // with the gate open.

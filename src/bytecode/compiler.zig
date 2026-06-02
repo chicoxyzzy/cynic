@@ -225,6 +225,16 @@ pub const Compiler = struct {
     /// production engine. Free references resolve via `lda_global`
     /// regardless.
     eval_scope: bool = false,
+    /// §19.2.1.3 strict eval — when true, the eval body binds ALL its
+    /// top-level declarations in its own environment (var / function
+    /// included, not only let / const), so eval'd `var x` /
+    /// `function f` never escape to the global env. Set for indirect +
+    /// direct eval (both strict, since Cynic is strict-only). NOT set
+    /// for `ShadowRealm.prototype.evaluate` (that's Script evaluation —
+    /// var DOES target the shadow realm's global env and persists
+    /// across calls, §3.8.3.7) or for ordinary scripts. Reuses the
+    /// same non-global binding path modules already take.
+    eval_local: bool = false,
     /// §9.4.6.7 Module Namespace [[Get]] live binding propagation —
     /// maps a module-local binding name to the namespace key(s) it
     /// is exported under. Populated by `compileModuleAsChunk` from
@@ -476,7 +486,10 @@ pub const Compiler = struct {
         // (step 6, varEnv = [[GlobalEnv]]), so they persist across
         // evaluations and surface on globalThis. So `eval_scope`
         // suppresses the global path only for the lexical kinds.
-        const is_global = target.kind == .script and !self.is_module and
+        // §19.2.1.3 — strict eval (`eval_local`) binds every top-level
+        // kind in its own environment, so var / function are non-global
+        // too (not just the lex kinds `eval_scope` already localizes).
+        const is_global = target.kind == .script and !self.is_module and !self.eval_local and
             !(self.eval_scope and kind != .var_);
         const slot: u8 = if (is_global) 0 else try self.newEnvSlot();
         // Slot-indexed global-lexical access: a top-level script
@@ -12610,7 +12623,7 @@ pub fn compileScriptAsChunk(
     source: []const u8,
     diagnostics: ?*Diagnostics,
 ) CompileError!Chunk {
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, false, null, 0);
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, false, null, 0, false);
 }
 
 /// Compile eval code (§3.8.3.7 PerformShadowRealmEval today; the
@@ -12634,8 +12647,12 @@ pub fn compileEvalAsChunk(
     program: *const ast.program.Program,
     source: []const u8,
     diagnostics: ?*Diagnostics,
+    /// §19.2.1.3 — `true` for real indirect `eval` (strict eval: var /
+    /// function bind eval-locally); `false` for `ShadowRealm.evaluate`
+    /// (Script evaluation: var → the shadow realm's global env).
+    eval_local: bool,
 ) CompileError!Chunk {
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, null, 0);
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, null, 0, eval_local);
 }
 
 /// §19.2.1 direct eval — compile `program` as eval code whose free
@@ -12657,7 +12674,9 @@ pub fn compileDirectEvalAsChunk(
     caller_scope: ?*Scope,
     start_env_depth: u8,
 ) CompileError!Chunk {
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, caller_scope, start_env_depth);
+    // Direct eval is always strict eval (§19.2.1.3): top-level var /
+    // function bind in the eval body's own env, not the caller's.
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, caller_scope, start_env_depth, true);
 }
 
 fn compileScriptLikeChunk(
@@ -12674,12 +12693,17 @@ fn compileScriptLikeChunk(
     /// §19.2.1 direct eval — the eval body's starting env_depth
     /// (`caller_env_depth + 1`). `0` for scripts / indirect eval.
     start_env_depth: u8,
+    /// §19.2.1.3 strict eval — bind top-level var / function in the
+    /// eval body's own env (no leak to global). `false` for scripts
+    /// and ShadowRealm-style script evaluation.
+    eval_local: bool,
 ) CompileError!Chunk {
     var c = Compiler.init(allocator, realm, source);
     errdefer c.deinit();
     defer c.class_stack.deinit(c.allocator);
     defer c.pending_labels.deinit(c.allocator);
     c.diagnostics = diagnostics;
+    c.eval_local = eval_local;
     c.eval_scope = eval_scope;
 
     var script_scope: Scope = .{ .parent = direct_eval_parent, .kind = .script };
