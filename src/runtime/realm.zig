@@ -806,6 +806,19 @@ pub const Realm = struct {
     /// be revisited with a per-script arena later if it
     /// matters.
     script_chunks: std.ArrayListUnmanaged(*@import("../bytecode/chunk.zig").Chunk) = .empty,
+    /// Source buffers retained for `--allow=eval` runtime code
+    /// construction. Two producers:
+    ///   • §19.2.1 eval(string) — a copy of the eval source (the
+    ///     user's argument may be a transient heap JSString that GC
+    ///     can reclaim, but the compiled chunk lives in `script_chunks`
+    ///     and its function templates borrow slices of the source for
+    ///     `Function.prototype.toString`).
+    ///   • §20.2.1.1.1 CreateDynamicFunction — the synthesized
+    ///     `(function anonymous(P){B})` wrapper.
+    /// Both must outlive the chunks that borrow them, so they're owned
+    /// here and freed at realm teardown alongside `script_chunks`.
+    /// Only populated under `--allow=eval`.
+    eval_sources: std.ArrayListUnmanaged([]const u8) = .empty,
     /// Cooperative interpreter step budget. Decremented once per
     /// opcode in `runFrames`; on reaching zero the dispatch loop
     /// raises a synthetic `RangeError("step budget exhausted")`
@@ -1047,6 +1060,12 @@ pub const Realm = struct {
             self.allocator.destroy(ch);
         }
         self.script_chunks.deinit(self.allocator);
+        // Free the retained `--allow=eval` source buffers (a chunk's
+        // function templates borrow slices for
+        // `Function.prototype.toString`; the chunks were torn down
+        // just above). See `eval_sources`.
+        for (self.eval_sources.items) |buf| self.allocator.free(buf);
+        self.eval_sources.deinit(self.allocator);
         self.frame_stacks.deinit(self.allocator);
         // Free the derived-ctor `super_called` cells handed out
         // across this realm's lifetime. JSFunctions holding cell
@@ -1099,6 +1118,20 @@ pub const Realm = struct {
 
     pub fn enqueueMicrotask(self: *Realm, callback: Value, arg: Value) !void {
         try self.microtask_queue.append(self.allocator, .{ .kind = .callback, .callback = callback, .arg = arg });
+    }
+
+    /// Copy `source` into a realm-owned buffer and return the copy.
+    /// Used by the `--allow=eval` paths so a chunk compiled from
+    /// transient source text (a user eval string, a synthesized
+    /// `Function` wrapper) can safely borrow slices for the lifetime
+    /// of the realm. Freed at teardown — see `eval_sources`.
+    pub fn retainEvalSource(self: *Realm, source: []const u8) ![]const u8 {
+        const copy = try self.allocator.dupe(u8, source);
+        self.eval_sources.append(self.allocator, copy) catch |err| {
+            self.allocator.free(copy);
+            return err;
+        };
+        return copy;
     }
 
     /// §9.10.4.1 AddToKeptObjects — pin `value` alive for the

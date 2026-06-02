@@ -125,30 +125,21 @@ fn expectAbsentAllowEval(source: []const u8) !void {
     if (v.asInt32() != 1) return error.EvalPolicyFeatureUnexpectedlyPresent;
 }
 
-test "ses-eval: --allow=eval opens the gate but eval still throws (unimplemented)" {
-    // The `--allow=eval` flag wires the *posture*, not an eval
-    // engine: Cynic deliberately ships no runtime code construction
-    // (see AGENTS.md / docs/ses-alignment.md). With the gate open,
-    // `eval("1")` no longer refuses by SES policy — it throws an
-    // EvalError flagging the capability as enabled-but-unimplemented.
-    // The observable guarantee is still "the call does not return
-    // normally", so no string source ever executes regardless of the
-    // flag. (When the eval engine lands, this test flips to assert a
-    // real result.)
+test "ses-eval: --allow=eval opens the gate and eval evaluates" {
+    // `--allow=eval` opens the SES policy gate AND the eval engine is
+    // now implemented (§19.2.1), so `eval("1")` returns 1 rather than
+    // refusing. The positive engine behaviour is covered in depth by
+    // `eval_test.zig`; this pins the policy *transition* — the same
+    // realm that refuses with the gate closed (above) now runs source.
     try expectAbsentAllowEval(
-        \\let ok = 0;
-        \\try { eval("1"); } catch (e) { ok = (e instanceof EvalError) ? 1 : 0; }
-        \\ok;
+        \\eval("1");
     );
 }
 
-test "ses-eval: --allow=eval gate is still closed for Function(string)" {
-    // Same posture for the dynamic Function constructor: the gate
-    // opens but the string-body path is unimplemented, so it throws
-    // (EvalError) rather than compiling source.
+test "ses-eval: --allow=eval enables the dynamic Function constructor" {
+    // §20.2.1.1.1 CreateDynamicFunction — with the gate open,
+    // `new Function("return 1")()` builds + invokes a real function.
     try expectAbsentAllowEval(
-        \\let ok = 0;
-        \\try { new Function("return 1"); } catch (e) { ok = (e instanceof EvalError) ? 1 : 0; }
-        \\ok;
+        \\new Function("return 1")();
     );
 }

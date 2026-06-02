@@ -46,6 +46,7 @@ const Span = @import("../source.zig").Span;
 const Op = @import("op.zig").Op;
 const Builder = @import("chunk.zig").Builder;
 const Chunk = @import("chunk.zig").Chunk;
+const chunk_mod = @import("chunk.zig");
 const Handler = @import("chunk.zig").Handler;
 const scope_mod = @import("scope.zig");
 const Scope = scope_mod.Scope;
@@ -3656,6 +3657,23 @@ pub const Compiler = struct {
             return self.compileSpreadCall(c);
         }
 
+        // §19.2.1 direct eval — the callee is the bare identifier
+        // `eval` resolving to no in-scope binding (so it names the
+        // global %eval%, not a user shadow). Emit `direct_eval` with a
+        // snapshot of the enclosing env-slot bindings so the eval'd
+        // source can read the caller's locals. A non-optional call
+        // only — `eval?.(x)` / `eval(...x)` fall through to an ordinary
+        // (indirect) call, which is the spec-observable result anyway
+        // when those forms don't produce the direct-eval reference.
+        if (!c.optional and c.callee.* == .identifier_reference) {
+            const id_span = c.callee.identifier_reference.span;
+            const callee_name = self.source[id_span.start..id_span.end];
+            if (std.mem.eql(u8, callee_name, "eval")) {
+                const shadowed = if (self.scope) |s| s.resolve("eval") != null else false;
+                if (!shadowed) return self.compileDirectEvalCall(c);
+            }
+        }
+
         // Compile callee → acc, save in a temp.
         try self.compileExpression(c.callee);
         // §13.5.5 — `f?.(args)` short-circuits when `f` is nullish.
@@ -3685,6 +3703,71 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_callee);
         try self.builder.emitU8(@intCast(c.arguments.len));
 
+        var j: u8 = 0;
+        while (j < reserved) : (j += 1) self.releaseTemp();
+        self.releaseTemp(); // r_callee
+    }
+
+    /// §19.2.1 direct eval — emit the `direct_eval` opcode with a
+    /// snapshot of the enclosing env-slot bindings. Called from
+    /// `compileCall` when the callee is the bare identifier `eval`
+    /// resolving to no in-scope binding. The runtime re-checks the
+    /// callee value is actually this realm's %eval% and otherwise
+    /// falls back to an ordinary call.
+    fn compileDirectEvalCall(self: *Compiler, c: ast.expression.CallExpr) CompileError!void {
+        // Capture visible env-slot bindings, innermost-first, deduped
+        // by name (innermost shadows). Globals / register-promoted /
+        // import bindings are skipped — a free name the eval body
+        // can't find here falls through to `lda_global`, which
+        // resolves top-level `let` / `const` / `var` and builtins.
+        var snap: std.ArrayListUnmanaged(chunk_mod.DirectEvalBinding) = .empty;
+        defer snap.deinit(self.allocator);
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(self.allocator);
+        var cursor: ?*Scope = self.scope;
+        while (cursor) |s| : (cursor = s.parent) {
+            for (s.bindings.items) |b| {
+                if (b.is_global or b.is_register or b.is_import) continue;
+                const gop = try seen.getOrPut(self.allocator, b.name);
+                if (gop.found_existing) continue;
+                try snap.append(self.allocator, .{
+                    .name = b.name,
+                    .env_depth = b.env_depth,
+                    .env_slot = b.env_slot,
+                    .kind = b.kind,
+                    .is_fn_expr_name = b.is_fn_expr_name,
+                    .is_using = b.is_using,
+                });
+            }
+        }
+        const bindings = try self.allocator.dupe(chunk_mod.DirectEvalBinding, snap.items);
+        const scope_k = self.builder.addDirectEvalScope(.{
+            .bindings = bindings,
+            .caller_env_depth = self.env_depth,
+        }) catch |err| {
+            self.allocator.free(bindings);
+            return err;
+        };
+
+        // Stage the callee + args exactly like `call`: compile the
+        // `eval` reference (→ `lda_global "eval"`) into r_callee, then
+        // each arg into consecutive temps `r_callee+1 ..`.
+        try self.compileExpression(c.callee);
+        const r_callee = try self.reserveTemp();
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_callee);
+        var reserved: u8 = 0;
+        for (c.arguments) |*arg| {
+            try self.compileExpression(arg);
+            const r = try self.reserveTemp();
+            reserved += 1;
+            try self.builder.emitOp(.star, c.span);
+            try self.builder.emitU8(r);
+        }
+        try self.builder.emitOp(.direct_eval, c.span);
+        try self.builder.emitU16(scope_k);
+        try self.builder.emitU8(r_callee);
+        try self.builder.emitU8(@intCast(c.arguments.len));
         var j: u8 = 0;
         while (j < reserved) : (j += 1) self.releaseTemp();
         self.releaseTemp(); // r_callee
@@ -12527,7 +12610,7 @@ pub fn compileScriptAsChunk(
     source: []const u8,
     diagnostics: ?*Diagnostics,
 ) CompileError!Chunk {
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, false);
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, false, null, 0);
 }
 
 /// Compile eval code (§3.8.3.7 PerformShadowRealmEval today; the
@@ -12552,7 +12635,29 @@ pub fn compileEvalAsChunk(
     source: []const u8,
     diagnostics: ?*Diagnostics,
 ) CompileError!Chunk {
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true);
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, null, 0);
+}
+
+/// §19.2.1 direct eval — compile `program` as eval code whose free
+/// references resolve against the caller's lexical environment.
+/// `caller_scope` is a synthetic outer scope reconstructed from the
+/// `direct_eval` snapshot (its bindings carry the caller's env_depths
+/// / env_slots); `start_env_depth` is `caller_env_depth + 1` so the
+/// eval body's own environment sits one level below the caller's
+/// innermost env at runtime (the eval frame's env is parented to the
+/// caller's — see the `direct_eval` opcode handler). Free names absent
+/// from `caller_scope` fall through to `lda_global` (top-level
+/// `let` / `const` / `var` + builtins).
+pub fn compileDirectEvalAsChunk(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    program: *const ast.program.Program,
+    source: []const u8,
+    diagnostics: ?*Diagnostics,
+    caller_scope: ?*Scope,
+    start_env_depth: u8,
+) CompileError!Chunk {
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, caller_scope, start_env_depth);
 }
 
 fn compileScriptLikeChunk(
@@ -12562,6 +12667,13 @@ fn compileScriptLikeChunk(
     source: []const u8,
     diagnostics: ?*Diagnostics,
     eval_scope: bool,
+    /// §19.2.1 direct eval — synthetic outer scope (the caller's
+    /// captured bindings) parented under the eval body, or `null` for
+    /// scripts and indirect eval (whose free refs resolve to globals).
+    direct_eval_parent: ?*Scope,
+    /// §19.2.1 direct eval — the eval body's starting env_depth
+    /// (`caller_env_depth + 1`). `0` for scripts / indirect eval.
+    start_env_depth: u8,
 ) CompileError!Chunk {
     var c = Compiler.init(allocator, realm, source);
     errdefer c.deinit();
@@ -12570,10 +12682,10 @@ fn compileScriptLikeChunk(
     c.diagnostics = diagnostics;
     c.eval_scope = eval_scope;
 
-    var script_scope: Scope = .{ .parent = null, .kind = .script };
+    var script_scope: Scope = .{ .parent = direct_eval_parent, .kind = .script };
     defer script_scope.deinit(c.allocator);
     c.scope = &script_scope;
-    c.env_depth = 0;
+    c.env_depth = start_env_depth;
     c.env_slot_count = 0;
 
     // §16.1.7 GlobalDeclarationInstantiation step 5-7 — validate

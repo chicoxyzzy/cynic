@@ -233,6 +233,25 @@ pub const Op = enum(u8) {
     /// extra IC isn't load-bearing. Falls back to ordinary
     /// `call_method` for exotic callees, same as `tail_call`.
     tail_call_method,
+    /// `[op] [scope:u16] [r_callee:u8] [argc:u8]` — §19.2.1 direct
+    /// eval. Emitted in place of `call` when the callee is the bare
+    /// syntactic identifier `eval` that resolves to no in-scope
+    /// binding (so it names the global %eval%). `scope` indexes
+    /// `Chunk.direct_eval_scopes` (the caller's captured env-slot
+    /// bindings); `r_callee` holds the resolved `eval` value, with
+    /// args at `r_callee+1 .. r_callee+argc`.
+    ///
+    /// Runtime: if the callee is NOT this realm's %eval% intrinsic
+    /// (e.g. `globalThis.eval` was reassigned), fall back to an
+    /// ordinary call. Otherwise §19.2.1: a non-String arg[0] is
+    /// returned unchanged; with the gate closed (`!allow_eval`) a
+    /// String arg is the SES policy SyntaxError; with the gate open
+    /// the source is compiled against a synthetic outer scope rebuilt
+    /// from `scope` and run in a fresh frame whose environment is
+    /// parented to the caller's, inheriting the caller's `this` /
+    /// `new.target` / home object (Cynic is strict-only, so eval'd
+    /// `var` / `let` stay in the eval body's own env per §19.2.1.3).
+    direct_eval,
     /// Load `this` from the current call frame into acc. Top-level
     /// `this` is `undefined` in strict mode (§10.2.1.2). Arrow
     /// functions inherit `this` from their captured frame; the
@@ -1135,6 +1154,7 @@ pub const Op = enum(u8) {
             .sta_env,
             => 2, // u8 + u8
             .tail_call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
+            .direct_eval => 4, // scope:u16 + r_callee:u8 + argc:u8
             .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
             .sta_property => 5, // k:u16 + r_obj:u8 + ic:u16 (inline-cache slot)
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
@@ -1211,6 +1231,7 @@ pub const Op = enum(u8) {
             .new_call => "NewCall",
             .tail_call => "TailCall",
             .tail_call_method => "TailCallMethod",
+            .direct_eval => "DirectEval",
             .lda_this => "LdaThis",
             .lda_new_target => "LdaNewTarget",
             .instanceof_ => "InstanceOf",

@@ -84,6 +84,7 @@ test {
     _ = @import("runtime/surface_audit_test.zig");
     _ = @import("runtime/annex_b_rejection_test.zig");
     _ = @import("runtime/eval_policy_test.zig");
+    _ = @import("runtime/eval_test.zig");
     _ = @import("runtime/realm_test.zig");
     _ = @import("runtime/module_test.zig");
     _ = @import("runtime/builtins/iterator.zig");

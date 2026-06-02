@@ -55,6 +55,7 @@ const Op = @import("../../bytecode/op.zig").Op;
 const chunk_mod = @import("../../bytecode/chunk.zig");
 const Chunk = chunk_mod.Chunk;
 const Handler = chunk_mod.Handler;
+const scope_mod = @import("../../bytecode/scope.zig");
 const parser_mod = @import("../../parser/parser.zig");
 const compiler_mod = @import("../../bytecode/compiler.zig");
 const module_mod = @import("../module.zig");
@@ -483,6 +484,121 @@ pub fn evaluateEval(
     source: []const u8,
 ) EvaluateError!RunResult {
     return evaluateSource(allocator, realm, source, true);
+}
+
+/// §19.2.1 direct eval — the caller-frame context the `direct_eval`
+/// opcode hands to `evaluateDirectEval` so the eval'd code inherits
+/// the running execution context (§19.2.1 steps 6-13): the caller's
+/// `this`, `new.target`, home object, and — via `parent_env` — its
+/// lexical environment, so free identifiers resolve against the
+/// caller's locals.
+pub const DirectEvalContext = struct {
+    this_value: Value,
+    new_target: Value,
+    home_object: ?*JSObject,
+    home_function: ?*JSFunction,
+    running_realm: ?*Realm,
+    owning_module: ?*module_mod.ModuleRecord,
+    /// The caller's innermost lexical environment. The eval body's
+    /// own environment (its leading `make_environment`) is allocated
+    /// as a child of this, so `lda_env [depth]` from eval'd code
+    /// walks into the caller's env chain.
+    parent_env: ?*Environment,
+    is_derived_ctor: bool,
+    super_called_cell: ?*bool,
+};
+
+/// §19.2.1 PerformEval for a *direct* eval. Compiles `source` as eval
+/// code whose free references resolve against the caller's lexical
+/// environment (reconstructed from `snapshot`), then runs it in a
+/// fresh frame that inherits the caller's `this` / `new.target` / home
+/// and whose environment is parented to the caller's (`ctx.parent_env`).
+/// Cynic is strict-only, so this is always a strict eval (§19.2.1.3):
+/// the eval body's own `var` / `let` bind in its own environment and
+/// don't leak into the caller's scope.
+pub fn evaluateDirectEval(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    source: []const u8,
+    snapshot: *const chunk_mod.DirectEvalScope,
+    ctx: DirectEvalContext,
+) EvaluateError!RunResult {
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    // Retain a realm-lifetime copy of the source — the compiled chunk
+    // lands in `script_chunks` and its function templates borrow
+    // slices for `Function.prototype.toString`.
+    const stable = try realm.retainEvalSource(source);
+
+    const diag_mod = @import("../../diagnostic.zig");
+    var diags: diag_mod.Diagnostics = .empty;
+    const program = parser_mod.parseScript(aa, stable, &diags) catch return error.ParseError;
+    for (diags.items) |d| if (d.severity == .err) return error.ParseError;
+
+    // Rebuild the caller's visible env-slot bindings as a synthetic
+    // outer scope (parent = null). Each binding keeps its original
+    // env_depth / env_slot so `lda_env`'s depth arithmetic reaches the
+    // right runtime environment. Allocated on the parse arena — only
+    // needed during compilation, not at runtime.
+    var caller_scope: scope_mod.Scope = .{ .parent = null, .kind = .function };
+    for (snapshot.bindings) |b| {
+        caller_scope.bindings.append(aa, .{
+            .name = b.name,
+            .env_slot = b.env_slot,
+            .env_depth = b.env_depth,
+            .kind = b.kind,
+            .span = .{ .start = 0, .end = 0 },
+            .is_fn_expr_name = b.is_fn_expr_name,
+            .is_using = b.is_using,
+        }) catch return error.OutOfMemory;
+    }
+
+    const chunk_ptr = try realm.allocator.create(Chunk);
+    chunk_ptr.* = compiler_mod.compileDirectEvalAsChunk(
+        realm.allocator,
+        realm,
+        &program,
+        stable,
+        null,
+        &caller_scope,
+        // The eval body's env sits one level below the caller's
+        // innermost env at runtime. Saturating add guards the
+        // pathological 255-deep nesting case.
+        snapshot.caller_env_depth +| 1,
+    ) catch {
+        realm.allocator.destroy(chunk_ptr);
+        return error.CompileError;
+    };
+    try realm.script_chunks.append(realm.allocator, chunk_ptr);
+
+    var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
+    defer {
+        for (frames.items) |*fr| if (fr.owns_registers) realm.frame_pool.release(allocator, fr.registers);
+        frames.deinit(allocator);
+    }
+    const main_regs = try realm.frame_pool.acquire(allocator, chunk_ptr.register_count);
+    @memset(main_regs, Value.undefined_);
+    try frames.append(allocator, .{
+        .chunk = chunk_ptr,
+        .ip = 0,
+        .accumulator = Value.undefined_,
+        .registers = main_regs,
+        // Pre-seed the caller's env so the eval body's leading
+        // `make_environment` chains its fresh env to the caller's.
+        .env = ctx.parent_env,
+        .this_value = ctx.this_value,
+        .new_target = ctx.new_target,
+        .home_object = ctx.home_object,
+        .home_function = ctx.home_function,
+        .running_realm = ctx.running_realm,
+        .owning_module = ctx.owning_module,
+        .is_derived_ctor = ctx.is_derived_ctor,
+        .super_called_cell = ctx.super_called_cell,
+        .argc = 0,
+    });
+    return runFrames(allocator, realm, &frames);
 }
 
 fn evaluateSource(
@@ -1724,6 +1840,117 @@ pub fn runFrames(
                 realm.intrinsics.function_prototype;
             acc = heap_mod.taggedFunction(fn_obj);
             continue :dispatch try decodeNext(code, &ip, &committed);
+        },
+        .direct_eval => {
+            // §19.2.1 direct eval. Operands: scope:u16, r_callee:u8,
+            // argc:u8. Args are at `r_callee+1 .. r_callee+argc`.
+            const scope_idx = readU16(code, ip);
+            const r_callee = code[ip + 2];
+            const argc = code[ip + 3];
+            ip += 4;
+
+            const callee_v = registers[r_callee];
+            const args_start = @as(usize, r_callee) + 1;
+            const args_slice = registers[args_start .. args_start + argc];
+
+            // §19.2.1.1 — the call is a direct eval only when the
+            // callee is this realm's %eval% intrinsic. Otherwise (a
+            // reassigned `globalThis.eval`, a cross-realm eval) it's
+            // an ordinary call.
+            const is_intrinsic_eval = blk: {
+                const fnobj = heap_mod.valueAsFunction(callee_v) orelse break :blk false;
+                break :blk realm.intrinsics.eval_function == fnobj;
+            };
+            if (!is_intrinsic_eval) {
+                const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, Value.undefined_, args_slice);
+                switch (cresult) {
+                    .value, .yielded => |v| {
+                        acc = v;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    },
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                }
+            }
+
+            // §19.2.1 step 2 — a non-String argument is returned
+            // unchanged (no source is evaluated).
+            const arg0 = if (argc > 0) registers[args_start] else Value.undefined_;
+            if (!arg0.isString()) {
+                acc = arg0;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+
+            // Gate closed → SES policy refusal (SyntaxError), matching
+            // the indirect `eval` native and the default posture.
+            if (!realm.allow_eval) {
+                const ex = try makeSyntaxError(realm, "Cynic does not support eval() of source strings");
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .thrown = ex };
+                }
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+
+            // Direct eval — compile against the caller's scope snapshot
+            // and run with the caller's `this` / env inherited. Flush
+            // ip/acc onto the frame first: `evaluateDirectEval`
+            // allocates + runs JS, so a GC during it must see the
+            // current frame state.
+            const src_str: *JSString = @ptrCast(@alignCast(arg0.asString()));
+            const snapshot = &local_chunk.direct_eval_scopes[scope_idx];
+            const ctx: DirectEvalContext = .{
+                .this_value = f.this_value,
+                .new_target = f.new_target,
+                .home_object = f.home_object,
+                .home_function = f.home_function,
+                .running_realm = f.running_realm,
+                .owning_module = f.owning_module,
+                .parent_env = f.env,
+                .is_derived_ctor = f.is_derived_ctor,
+                .super_called_cell = f.super_called_cell,
+            };
+            f.ip = ip;
+            f.accumulator = acc;
+            committed = true;
+            const eresult = evaluateDirectEval(allocator, realm, src_str.flatBytes(), snapshot, ctx) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidOpcode => return error.InvalidOpcode,
+                // §19.2.1 step 11 — a parse / compile failure is a
+                // SyntaxError raised in the caller.
+                error.ParseError, error.CompileError => {
+                    const ex = try makeSyntaxError(realm, "eval: SyntaxError in evaluated source");
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
+            };
+            switch (eresult) {
+                .value, .yielded => |v| {
+                    // The eval ran in its own `runFrames` re-entry — no
+                    // frame was pushed onto this stack, so reload the
+                    // (unchanged) active frame and continue past the op.
+                    acc = v;
+                    f.accumulator = v;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
+                .thrown => |ex| {
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
+            }
         },
         .call => {
             const r_callee = code[ip];

@@ -913,6 +913,14 @@ const Phase = union(enum) {
     /// life with the single `--unhardened` opt-out. Selected via
     /// `--phase=unhardened`.
     unhardened,
+    /// `--allow=eval` sweep. Runs the main-phase fixture set against
+    /// a realm with `realm.allow_eval = true` (and `hardened = false`,
+    /// matching the published `unhardened, --allow=eval` row). The
+    /// `.eval` policy classification is dropped in this phase, so the
+    /// ~2,100 eval-surface fixtures run for real and their failures
+    /// count as genuine failures — the live "what eval work remains"
+    /// signal. Selected via `--phase=eval`.
+    eval,
 
     const FeaturePhase = struct {
         flag: cynic.runtime.FeatureFlag,
@@ -926,13 +934,21 @@ const Phase = union(enum) {
     /// returns a singleton set with only its flag.
     fn realmFeatures(self: Phase) cynic.runtime.FeatureSet {
         return switch (self) {
-            .main, .unhardened => cynic.runtime.FeatureSet.initEmpty(),
+            .main, .unhardened, .eval => cynic.runtime.FeatureSet.initEmpty(),
             .feature => |f| blk: {
                 var s = cynic.runtime.FeatureSet.initEmpty();
                 s.insert(f.flag);
                 break :blk s;
             },
         };
+    }
+
+    /// Whether per-fixture realms open the `--allow=eval` gate
+    /// (§19.2.1 / §20.2.1.1.1). Only the `.eval` phase does; every
+    /// other phase keeps the default SES refusal so eval-surface
+    /// failures classify as `correctly_handled`.
+    fn realmAllowEval(self: Phase) bool {
+        return self == .eval;
     }
 
     /// Whether per-fixture realms run under the hardened SES
@@ -943,7 +959,10 @@ const Phase = union(enum) {
     /// correctly_handled classification) and unhardened (bare ECMA-262).
     fn realmHardened(self: Phase) bool {
         return switch (self) {
-            .unhardened => false,
+            // The eval sweep runs unhardened so it maps onto the
+            // published `unhardened, --allow=eval` row and the freeze
+            // doesn't confound the eval-surface signal.
+            .unhardened, .eval => false,
             .main => true,
             .feature => |f| f.hardened,
         };
@@ -956,7 +975,7 @@ const Phase = union(enum) {
     /// mask has the matching bit (regardless of posture).
     fn includesFixture(self: Phase, pre_stage4_mask: PreStage4Mask) bool {
         return switch (self) {
-            .main, .unhardened => pre_stage4_mask == 0,
+            .main, .unhardened, .eval => pre_stage4_mask == 0,
             .feature => |f| has: {
                 const idx: usize = @intFromEnum(f.flag);
                 const bit = @as(PreStage4Mask, 1) << @intCast(idx);
@@ -975,6 +994,7 @@ const Phase = union(enum) {
             .main => "main",
             .feature => |f| f.flag.name(),
             .unhardened => "unhardened",
+            .eval => "eval",
         };
     }
 };
@@ -1109,8 +1129,9 @@ pub fn main(init: std.process.Init) !void {
     // embedder would evaluate the feature in isolation.
     const tracked_count = @typeInfo(cynic.runtime.FeatureFlag).@"enum".fields.len;
     // Each tracked proposal contributes two sweeps (hardened +
-    // unhardened), plus the two headline phases (main, unhardened).
-    var phases_buf: [tracked_count * 2 + 2]Phase = undefined;
+    // unhardened), plus the three headline phases (main, unhardened,
+    // eval).
+    var phases_buf: [tracked_count * 2 + 3]Phase = undefined;
     var phases_len: usize = 0;
     if (opts.phase) |p| {
         phases_buf[0] = p;
@@ -1118,7 +1139,11 @@ pub fn main(init: std.process.Init) !void {
     } else if (opts.write_results) {
         phases_buf[0] = .main;
         phases_buf[1] = .unhardened;
-        phases_len = 2;
+        // §19.2.1 / §20.2.1.1.1 — the `--allow=eval` row: the eval
+        // surface runs for real so its failures are measured, not
+        // projected.
+        phases_buf[2] = .eval;
+        phases_len = 3;
         inline for (@typeInfo(cynic.runtime.FeatureFlag).@"enum".fields) |f| {
             const flag: cynic.runtime.FeatureFlag = @enumFromInt(f.value);
             phases_buf[phases_len] = .{ .feature = .{ .flag = flag, .hardened = true } };
@@ -1136,6 +1161,8 @@ pub fn main(init: std.process.Init) !void {
     defer if (main_result) |*r| r.deinit(gpa);
     var unhardened_result: ?PhaseResult = null;
     defer if (unhardened_result) |*r| r.deinit(gpa);
+    var eval_result: ?PhaseResult = null;
+    defer if (eval_result) |*r| r.deinit(gpa);
     var feature_results_hardened: [tracked_count]?PhaseResult = @splat(null);
     var feature_results_unhardened: [tracked_count]?PhaseResult = @splat(null);
     defer for (&feature_results_hardened) |*slot| if (slot.*) |*pr| pr.deinit(gpa);
@@ -1160,6 +1187,10 @@ pub fn main(init: std.process.Init) !void {
             .unhardened => {
                 if (unhardened_result) |*old| old.deinit(gpa);
                 unhardened_result = res;
+            },
+            .eval => {
+                if (eval_result) |*old| old.deinit(gpa);
+                eval_result = res;
             },
         }
     }
@@ -1219,6 +1250,15 @@ pub fn main(init: std.process.Init) !void {
         if (unhardened_result) |*ur| {
             const elapsed_for_row: ?u64 = if (is_full and ur.elapsed_ms > 0) @intCast(ur.elapsed_ms) else null;
             try writeResults(gpa, io, &ur.stats, &ur.buckets, null, &pre_stage4_hardened, &pre_stage4_unhardened, now_ts.toSeconds(), .unhardened, elapsed_for_row);
+        }
+        // §19.2.1 / §20.2.1.1.1 — `unhardened, --allow=eval` row from
+        // the measured eval sweep (the eval surface ran for real, so
+        // its failures are counted, not projected). Written last so
+        // the regenerated snapshot reflects all three measured rows.
+        if (eval_result) |*er| {
+            const elapsed_for_row: ?u64 = if (is_full and er.elapsed_ms > 0) @intCast(er.elapsed_ms) else null;
+            const empty_pre_stage4: PreStage4Stats = .{};
+            try writeResults(gpa, io, &er.stats, &er.buckets, null, &empty_pre_stage4, &empty_pre_stage4, now_ts.toSeconds(), .unhardened_allow_eval, elapsed_for_row);
         }
     }
 
@@ -2221,9 +2261,16 @@ fn classifyAndRun(
     // SES classification is still post-run (runtime error pattern)
     // and lives in the throw-handling block below.
     const path_policy: ?skip_rules.PolicyKind = skip_rules.pathPolicyKind(rel, fm.features, fm.flags.no_strict);
-    // The allow-eval row (when wired) would gate out `.eval` here.
-    // Today both real phases (`.main`, `.unhardened`) admit eval.
-    const sticky_policy: ?skip_rules.PolicyKind = path_policy;
+    // The `.eval` phase opens the `--allow=eval` gate, so the eval
+    // surface runs for real and an eval-policy failure is a genuine
+    // failure (the "what eval work remains" signal) rather than a
+    // by-design refusal. Drop the `.eval` classification in that phase
+    // only; every other policy (Annex B / Intl / no_strict) still
+    // applies, and the eval-off phases keep `.eval` → correctly_handled.
+    const sticky_policy: ?skip_rules.PolicyKind = if (phase.realmAllowEval() and path_policy == .eval)
+        null
+    else
+        path_policy;
     const fail_reject_or_ch: RunResult = if (sticky_policy != null)
         .{ .kind = .fail_correctly_handled }
     else
@@ -2300,6 +2347,10 @@ fn classifyAndRun(
     // even when they regress under the hardened-default main
     // sweep.
     realm.hardened = phase.realmHardened();
+    // The `eval` phase opens the `--allow=eval` gate so the eval
+    // surface (§19.2.1 / §20.2.1.1.1) runs for real; every other
+    // phase keeps the default refusal.
+    realm.allow_eval = phase.realmAllowEval();
     realm.installBuiltins() catch return fail_reject_or_ch;
     // test262 fixtures use `__collectGarbage` / `__clearKeptObjects`
     // / `__drainMicrotasks` for deterministic triggering — debug
@@ -3803,14 +3854,18 @@ fn writeFileBody(
         \\
     );
     // Three rows in user-visible order: the `--allow=eval` opt-in
-    // first (always `n/a` — `--allow=eval` doesn't exist as a runtime
-    // flag yet; the row is reserved so the layout is stable when it
-    // ships), then the unhardened baseline (`--unhardened` opt-out),
+    // first, then the unhardened baseline (`--unhardened` opt-out),
     // then hardened (the default Cynic posture, `cynic run`). Same
     // engine path, different policy mask: unhardened counts annex_b +
-    // no_strict + intl402 + eval as expected fails; hardened
-    // adds SES on top.
-    try writeAllowEvalPlaceholderRow(gpa, out);
+    // no_strict + intl402 + eval as expected fails; hardened adds SES
+    // on top; `--allow=eval` lifts the eval-off policy so the eval
+    // surface is measured for real. The eval row is now sourced from a
+    // measured sweep (`--phase=eval`); it falls back to the reserved
+    // `n/a` placeholder only until the first such sweep has run.
+    if (latestRow(rows, .unhardened_allow_eval)) |r|
+        try writeMiniRow(gpa, out, r)
+    else
+        try writeAllowEvalPlaceholderRow(gpa, out);
     inline for (.{ Mode.unhardened, Mode.hardened }) |m| {
         if (latestRow(rows, m)) |r| try writeMiniRow(gpa, out, r);
     }
@@ -3825,7 +3880,9 @@ fn writeFileBody(
         \\> doesn't run (capability / host gaps), excluded from the
         \\> pass% numerator; the columns decompose exactly as
         \\> `passing + failing + expected fails + skip = total`. The
-        \\> `--allow=eval` row is always `n/a` until that opt-in ships.
+        \\> `--allow=eval` row is a measured sweep (`--phase=eval`):
+        \\> the eval surface runs for real, so its failures are real
+        \\> engine work, not expected fails.
         \\
         \\
     );
@@ -3875,10 +3932,12 @@ fn writeFileBody(
         \\
         \\- **unhardened, `--allow=eval`** — unhardened plus the
         \\  eval surface (`eval()`, `new Function(string)`, …) opted
-        \\  in. **Always `n/a`**: `--allow=eval` isn't shipped (see
-        \\  `docs/ses-alignment.md`), so no sweep populates this row.
-        \\  The row is reserved so the layout stays stable when the
-        \\  opt-in lands (eval fails would then become passes).
+        \\  in. A **measured** sweep (`--phase=eval`,
+        \\  `realm.allow_eval = true`): the eval surface runs for real,
+        \\  so its remaining gaps count as plain `failing` (real work)
+        \\  rather than eval-off `expected fails`. That's why this row
+        \\  has more `failing` and fewer `expected fails` than the
+        \\  unhardened row — the eval-off → eval-on split made visible.
         \\- **unhardened** — `cynic --unhardened` opt-out. Eval off
         \\  (so eval-dependent fixtures fail and count as correctly
         \\  handled fails), Annex B / Intl / noStrict failures too.
@@ -4041,8 +4100,8 @@ fn writeFileBody(
 
 /// Posture label for the `## Current scores` table. Renders each
 /// Mode in user-facing terms so a reader who doesn't know Cynic's
-/// mode naming sees what matters — which one ships, which is the
-/// opt-out, which is the placeholder waiting on `--allow=eval`.
+/// mode naming sees what matters — which one ships by default, which
+/// is the SES opt-out, which is the `--allow=eval` opt-in.
 fn postureLabel(m: Mode) []const u8 {
     return switch (m) {
         .hardened => "**hardened** (default — `cynic run`)",
@@ -4051,12 +4110,11 @@ fn postureLabel(m: Mode) []const u8 {
     };
 }
 
-/// Emit the `--allow=eval` posture row. This row is **always** all
-/// `n/a`: `--allow=eval` isn't a shipped runtime flag (see
-/// `docs/ses-alignment.md`), so no sweep ever populates it. The row
-/// exists only to keep the `## Current scores` layout stable for when
-/// the opt-in lands. No `Mode.unhardened_allow_eval` history row is
-/// ever written, so there's nothing to read back — it's hardcoded here.
+/// Emit a placeholder (all-`n/a`) `--allow=eval` row. Used ONLY as a
+/// fallback before the first measured `--phase=eval` sweep has written
+/// a `Mode.unhardened_allow_eval` history row — once one exists, the
+/// `## Current scores` snapshot renders the measured row instead (see
+/// `writeFileBody`). Keeps the table layout stable on a fresh file.
 fn writeAllowEvalPlaceholderRow(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -4183,10 +4241,12 @@ fn writeScoreboard(
         \\  fails split** shifts — that's the real per-posture signal,
         \\  heaviest in the SES-hot built-ins (`Array`, `Object`,
         \\  `TypedArray`, `String`, …).
-        \\- **+eval** is the `--allow=eval` projection; per area it
-        \\  equals the unhardened row (the 4 indirect-eval fixtures that
-        \\  distinguish them globally don't localize — see the
-        \\  `--allow=eval` row in `## Current scores`).
+        \\- **+eval** here is a per-area *approximation* — these rows
+        \\  reuse the unhardened buckets, so they don't reflect the eval
+        \\  surface running for real. The **measured** `--allow=eval`
+        \\  totals (eval fixtures run, failures counted as real work)
+        \\  are the `unhardened, --allow=eval` row in `## Current
+        \\  scores`, sourced from the `--phase=eval` sweep.
         \\- The **`1+ fails` tiers** are the engine-work list — today
         \\  mostly the SAB/Atomics surface plus the ~13-fixture
         \\  cross-realm cluster.
@@ -4658,6 +4718,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
                 opts.phase = .main;
             } else if (std.mem.eql(u8, spec, "unhardened")) {
                 opts.phase = .unhardened;
+            } else if (std.mem.eql(u8, spec, "eval")) {
+                opts.phase = .eval;
             } else if (std.mem.startsWith(u8, spec, "feature:")) {
                 // `feature:<name>` defaults to the hardened
                 // (as-shipped) sweep; append `:unhardened` /
@@ -4676,7 +4738,7 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
                 };
                 opts.phase = .{ .feature = .{ .flag = flag, .hardened = hardened } };
             } else {
-                std.debug.print("error: --phase expects 'main', 'unhardened', or 'feature:<name>', got '{s}'\n", .{spec});
+                std.debug.print("error: --phase expects 'main', 'unhardened', 'eval', or 'feature:<name>', got '{s}'\n", .{spec});
                 std.process.exit(1);
             }
         }
