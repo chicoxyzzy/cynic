@@ -6752,9 +6752,17 @@ pub fn runFrames(
             // that order; `throw_if_hole` (emitted by the
             // compiler when the binding is `let`/`const`/
             // `class`) catches the TDZ case.
-            if (realm.globals.get(key_s.flatBytes())) |v| {
+            //
+            // §8.3 / §9.1: free globals resolve through the
+            // *executing* function's global environment, which is
+            // its [[Realm]]'s. With a shared heap (a ShadowRealm
+            // child) the running realm differs from the dispatch
+            // realm, so route the lookup through the active frame's
+            // `running_realm` rather than the top-level `realm`.
+            const gr = f.running_realm orelse realm;
+            if (gr.globals.get(key_s.flatBytes())) |v| {
                 acc = v;
-            } else switch (try lookupGlobalAccessor(allocator, realm, key_s.flatBytes())) {
+            } else switch (try lookupGlobalAccessor(allocator, gr, key_s.flatBytes())) {
                 .value => |v| acc = v,
                 .thrown => |ex| {
                     f.ip = ip;
@@ -6766,7 +6774,7 @@ pub fn runFrames(
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 },
                 .none => {
-                    const ex = try makeReferenceError(realm, key_s.flatBytes());
+                    const ex = try makeReferenceError(gr, key_s.flatBytes());
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -6794,9 +6802,11 @@ pub fn runFrames(
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-            if (realm.globals.get(key_s.flatBytes())) |v| {
+            // Same home-realm routing as `lda_global` (see note there).
+            const gr = f.running_realm orelse realm;
+            if (gr.globals.get(key_s.flatBytes())) |v| {
                 acc = v;
-            } else switch (try lookupGlobalAccessor(allocator, realm, key_s.flatBytes())) {
+            } else switch (try lookupGlobalAccessor(allocator, gr, key_s.flatBytes())) {
                 .value => |v| acc = v,
                 .thrown => |ex| {
                     f.ip = ip;

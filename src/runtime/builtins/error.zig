@@ -126,7 +126,7 @@ fn installAggregateError(realm: *Realm, parent_proto: *JSObject) !*JSFunction {
 }
 
 fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const proto = realm.intrinsics.aggregate_error_prototype.?;
+    const proto = homeRealm(realm).intrinsics.aggregate_error_prototype.?;
     // §20.5.7.1.1 — Error subclass-aware: if `this_value` is an
     // already-allocated object (via `new` or `super(...)`),
     // initialise it in-place; otherwise allocate fresh.
@@ -206,7 +206,7 @@ fn installSuppressedError(realm: *Realm, parent_proto: *JSObject) !*JSFunction {
 }
 
 fn suppressedErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const proto = realm.intrinsics.suppressed_error_prototype.?;
+    const proto = homeRealm(realm).intrinsics.suppressed_error_prototype.?;
     const instance = if (heap_mod.valueAsPlainObject(this_value)) |o| o else blk: {
         const fresh = realm.heap.allocateObject() catch return error.OutOfMemory;
         realm.heap.setObjectPrototype(fresh, proto);
@@ -407,32 +407,43 @@ pub fn installError(
 // allocate a fresh instance and return it. §13.3.5.1.1 ConstructResult
 // will let an explicit object return win when used with `new`.
 
+/// §10.2.5 — a built-in shared across realms resolves its OWN
+/// realm's intrinsics, not the calling realm's. The dispatch loop
+/// stamps the callee's [[Realm]] into `active_native_fn_realm`
+/// before invoking the native (lantern/call.zig, interpreter.zig);
+/// read it so `new parentRealm.TypeError()` invoked from a child
+/// realm inherits parent's `%TypeError.prototype%`, per §10.2.3.
+/// Never consult a global current-realm accessor here.
+inline fn homeRealm(realm: *Realm) *Realm {
+    return realm.active_native_fn_realm orelse realm;
+}
+
 fn errorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    return constructErrorInstance(realm, this_value, realm.intrinsics.error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, homeRealm(realm).intrinsics.error_prototype.?, args);
 }
 
 fn typeErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    return constructErrorInstance(realm, this_value, realm.intrinsics.type_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, homeRealm(realm).intrinsics.type_error_prototype.?, args);
 }
 
 fn rangeErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    return constructErrorInstance(realm, this_value, realm.intrinsics.range_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, homeRealm(realm).intrinsics.range_error_prototype.?, args);
 }
 
 fn referenceErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    return constructErrorInstance(realm, this_value, realm.intrinsics.reference_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, homeRealm(realm).intrinsics.reference_error_prototype.?, args);
 }
 
 fn syntaxErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    return constructErrorInstance(realm, this_value, realm.intrinsics.syntax_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, homeRealm(realm).intrinsics.syntax_error_prototype.?, args);
 }
 
 fn uriErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    return constructErrorInstance(realm, this_value, realm.intrinsics.uri_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, homeRealm(realm).intrinsics.uri_error_prototype.?, args);
 }
 
 fn evalErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    return constructErrorInstance(realm, this_value, realm.intrinsics.eval_error_prototype.?, args);
+    return constructErrorInstance(realm, this_value, homeRealm(realm).intrinsics.eval_error_prototype.?, args);
 }
 
 /// §20.5.6.3.2 — initial value of `<NativeError>.prototype.message`
