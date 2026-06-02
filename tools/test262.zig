@@ -1206,12 +1206,13 @@ pub fn main(init: std.process.Init) !void {
         if (main_result) |*mr| {
             const elapsed_for_row: ?u64 = if (is_full and mr.elapsed_ms > 0) @intCast(mr.elapsed_ms) else null;
             const empty_pre_stage4: PreStage4Stats = .{};
-            try writeResults(gpa, io, &mr.stats, &mr.buckets, &empty_pre_stage4, &empty_pre_stage4, now_ts.toSeconds(), .hardened, elapsed_for_row);
+            const unhardened_buckets: ?*const BucketMap = if (unhardened_result) |*ur| &ur.buckets else null;
+            try writeResults(gpa, io, &mr.stats, &mr.buckets, unhardened_buckets, &empty_pre_stage4, &empty_pre_stage4, now_ts.toSeconds(), .hardened, elapsed_for_row);
         }
         // Unhardened (legacy) row + the two-row-per-feature scoreboard.
         if (unhardened_result) |*ur| {
             const elapsed_for_row: ?u64 = if (is_full and ur.elapsed_ms > 0) @intCast(ur.elapsed_ms) else null;
-            try writeResults(gpa, io, &ur.stats, &ur.buckets, &pre_stage4_hardened, &pre_stage4_unhardened, now_ts.toSeconds(), .unhardened, elapsed_for_row);
+            try writeResults(gpa, io, &ur.stats, &ur.buckets, null, &pre_stage4_hardened, &pre_stage4_unhardened, now_ts.toSeconds(), .unhardened, elapsed_for_row);
         }
     }
 
@@ -3266,6 +3267,11 @@ fn writeResults(
     io: std.Io,
     stats: *const Stats,
     buckets: *const BucketMap,
+    /// Per-area buckets from the unhardened sweep, for the
+    /// SES-off column in the per-area scoreboard. `null` on a
+    /// non-hardened or partial write — the scoreboard then falls
+    /// back to dashes in the unhardened / +eval cells.
+    unhardened_buckets: ?*const BucketMap,
     pre_stage4_hardened: *const PreStage4Stats,
     pre_stage4_unhardened: *const PreStage4Stats,
     epoch_seconds: i64,
@@ -3375,7 +3381,7 @@ fn writeResults(
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
-    try writeFileBody(gpa, &buf, rows.items, buckets, pre_stage4_hardened, pre_stage4_unhardened, &prev_bucket_pass, mode, preserved_scoreboard, preserved_pre_stage4, preserved_witness_note, prev_scoreboard_phase5c);
+    try writeFileBody(gpa, &buf, rows.items, buckets, unhardened_buckets, pre_stage4_hardened, pre_stage4_unhardened, &prev_bucket_pass, mode, preserved_scoreboard, preserved_pre_stage4, preserved_witness_note, prev_scoreboard_phase5c);
 
     try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
@@ -3731,6 +3737,10 @@ fn writeFileBody(
     out: *std.ArrayListUnmanaged(u8),
     rows: []Row,
     buckets: *const BucketMap,
+    /// Per-area buckets from the unhardened sweep — threaded to
+    /// `writeScoreboard` for the SES-off column. `null` falls back
+    /// to dashes in the unhardened / +eval cells.
+    unhardened_buckets: ?*const BucketMap,
     pre_stage4_hardened: *const PreStage4Stats,
     pre_stage4_unhardened: *const PreStage4Stats,
     prev_bucket_pass: *const std.StringHashMapUnmanaged(u32),
@@ -3949,15 +3959,16 @@ fn writeFileBody(
         \\
     );
 
-    // Per-area scoreboard. Sourced from the **hardened (default)**
-    // sweep so its numbers match what embedders see at `cynic
-    // run`, and so the `correctly_handled` column carries actual SES-
-    // reclassification data — the unhardened path has no correctly_handled
-    // classifications by construction. For non-hardened writes
-    // (unhardened-only refresh) re-emit the previous scoreboard
-    // verbatim so the per-bucket signal survives.
+    // Per-area scoreboard. The row iteration + tiering is driven by
+    // the **hardened (default)** sweep so the engine-work signal
+    // (`failing`) and ordering match what embedders see at `cynic
+    // run`; the per-posture pass% columns pull hardened from
+    // `buckets` and unhardened from `unhardened_buckets` (looked up
+    // by area name). For non-hardened writes (unhardened-only
+    // refresh) re-emit the previous scoreboard verbatim so the
+    // per-bucket signal survives.
     if (mode_just_run == .hardened and buckets.map.count() > 0) {
-        try writeScoreboard(gpa, out, buckets);
+        try writeScoreboard(gpa, out, buckets, unhardened_buckets);
     } else if (preserved_scoreboard) |s| {
         try out.appendSlice(gpa, s);
     }
@@ -4141,6 +4152,10 @@ fn writeScoreboard(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
     buckets: *const BucketMap,
+    /// Per-area buckets from the unhardened sweep. `null` (partial
+    /// or non-hardened write) renders the unhardened / +eval cells
+    /// as dashes.
+    unhardened_buckets: ?*const BucketMap,
 ) !void {
     const sorted = try buckets.sortedByFailTiered(gpa);
     defer gpa.free(sorted);
@@ -4149,30 +4164,35 @@ fn writeScoreboard(
         \\
         \\## Where the engine fails, by area
         \\
-        \\Per-bucket breakdown sourced from the **hardened (default)**
-        \\sweep so the numbers match `cynic run`. Bucketed on the
-        \\first two path components (`built-ins/Set`,
+        \\Each area gets three rows — one per runtime posture
+        \\(hardened / unhardened / +eval) — mirroring the three rows in
+        \\`## Current scores`. Row ordering + the tier grouping are
+        \\driven by the **hardened (default)** sweep's `failing` count.
+        \\Bucketed on the first two path components (`built-ins/Set`,
         \\`language/expressions`, …).
         \\
         \\**Reading guide:**
         \\
-        \\- The **`1+ fails` tiers** are the engine-work list — real
-        \\  failures with no policy bucket. Today the bulk is the
-        \\  SAB/Atomics surface (`built-ins/Atomics`,
-        \\  `built-ins/SharedArrayBuffer`, plus the `-sab.js`
-        \\  generated siblings under TypedArrayConstructors / DataView
-        \\  / TypedArray). Cynic doesn't ship shared memory, but
-        \\  could — so these are plain fails, not a policy bucket.
-        \\  The remainder (~13 fixtures) is the
-        \\  cross-realm cluster awaiting `--allow=eval` and multi-realm
-        \\  error attribution.
-        \\- The **0-fails tier** is sorted by `expected fails ↓` so
-        \\  the heaviest policy buckets cluster first. `intl402/`
-        \\  trees dominate (no Intl), then the SES-hot built-ins
-        \\  (`Array`, `Object`, `TypedArray`, `String`, `Date`,
-        \\  `Math`), then the Annex B / eval / noStrict tails.
+        \\- **`failing`** is the real engine-work signal — failures with
+        \\  no policy bucket. Nearly posture-invariant: the policies
+        \\  relabel expected fails, they don't create engine bugs.
+        \\- **hardened** matches `cynic run`; SES-divergent fixtures are
+        \\  expected fails. **unhardened** turns SES off, so those flip
+        \\  from `expected fails` to `passing`. `pass%` barely moves (it
+        \\  counts expected fails as pass), but the **passing ↔ expected
+        \\  fails split** shifts — that's the real per-posture signal,
+        \\  heaviest in the SES-hot built-ins (`Array`, `Object`,
+        \\  `TypedArray`, `String`, …).
+        \\- **+eval** is the `--allow=eval` projection; per area it
+        \\  equals the unhardened row (the 4 indirect-eval fixtures that
+        \\  distinguish them globally don't localize — see the
+        \\  `--allow=eval` row in `## Current scores`).
+        \\- The **`1+ fails` tiers** are the engine-work list — today
+        \\  mostly the SAB/Atomics surface plus the ~13-fixture
+        \\  cross-realm cluster. The **0-fails tier** is sorted by
+        \\  hardened `expected fails ↓`.
         \\
-        \\| area | passing | failing | expected fails | total | pass% |
+        \\| area · posture | passing | failing | expected fails | total | pass% |
         \\|---|---:|---:|---:|---:|---:|
         \\
     );
@@ -4199,21 +4219,40 @@ fn writeScoreboard(
             try out.appendSlice(gpa, hdr);
             prev_tier = tier;
         }
-        // pass% = (passing + correctly_handled) / total, matching the
-        // hardened headline in `## Current scores` (this scoreboard is
-        // always sourced from the hardened sweep).
-        const headline_pass: u32 = b.pass + b.correctly_handled;
-        const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(headline_pass)) / @as(f64, @floatFromInt(b.total));
+        // Three sub-rows per area, one per posture — same shape as
+        // `## Current scores`. `pass%` = `(passing + expected fails) /
+        // total` per posture. hardened reads this (hardened) sweep's
+        // bucket; unhardened / +eval read the unhardened sweep's
+        // matching bucket (by name). +eval ≡ unhardened per area.
         const strike: bool = (b.pass == 0 and b.fail == 0 and b.correctly_handled == 0);
-        const line = if (strike)
-            try std.fmt.bufPrint(&buf, "| ~~`{s}`~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{
-                b.name, b.pass, b.fail, b.correctly_handled, b.total, pct,
-            })
-        else
-            try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{
-                b.name, b.pass, b.fail, b.correctly_handled, b.total, pct,
-            });
-        try out.appendSlice(gpa, line);
+        var row_buf: [384]u8 = undefined;
+
+        // hardened sub-row — carries the area name.
+        {
+            const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass + b.correctly_handled)) / @as(f64, @floatFromInt(b.total));
+            const line = if (strike)
+                try std.fmt.bufPrint(&row_buf, "| ~~`{s}` · hardened~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{ b.name, b.pass, b.fail, b.correctly_handled, b.total, pct })
+            else
+                try std.fmt.bufPrint(&row_buf, "| `{s}` · hardened | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ b.name, b.pass, b.fail, b.correctly_handled, b.total, pct });
+            try out.appendSlice(gpa, line);
+        }
+
+        // unhardened + eval sub-rows (both from the unhardened bucket).
+        const u_opt: ?Bucket = if (unhardened_buckets) |ub| ub.map.get(b.name) else null;
+        inline for (.{ "unhardened", "+eval" }) |posture| {
+            if (u_opt) |u| {
+                const pct: f64 = if (u.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(u.pass + u.correctly_handled)) / @as(f64, @floatFromInt(u.total));
+                const line = if (strike)
+                    try std.fmt.bufPrint(&row_buf, "| ~~· {s}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{ posture, u.pass, u.fail, u.correctly_handled, u.total, pct })
+                else
+                    try std.fmt.bufPrint(&row_buf, "| · {s} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ posture, u.pass, u.fail, u.correctly_handled, u.total, pct });
+                try out.appendSlice(gpa, line);
+            } else {
+                // No unhardened data (null map / filtered run).
+                const line = try std.fmt.bufPrint(&row_buf, "| · {s} | — | — | — | — | — |\n", .{posture});
+                try out.appendSlice(gpa, line);
+            }
+        }
     }
     try out.appendSlice(gpa, "\n");
 }
