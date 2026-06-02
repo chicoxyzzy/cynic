@@ -245,6 +245,16 @@ pub const Heap = struct {
     /// caught by that init pass instead. Borrowed — the object is
     /// rooted via the realm's intrinsics and outlives the heap.
     function_prototype: ?*JSObject = null,
+    /// Every `Realm` that shares this heap — the heap-owning realm
+    /// plus any child realms created via `Realm.initChild`
+    /// (`$262.createRealm` / `ShadowRealm`). The collector marks
+    /// roots from ALL of them before sweeping, because objects of
+    /// any sharing realm live in the same pools; marking only the
+    /// running realm's roots would sweep a sibling realm's live
+    /// objects (a cross-realm use-after-free). Realms register at
+    /// `installBuiltins` (stable-address) and deregister at
+    /// `deinit`.
+    realms: std.ArrayListUnmanaged(*Realm) = .empty,
     /// Young plain `JSObject` instances (object literals,
     /// prototypes, built-in constructors' return values).
     objects_young: std.ArrayListUnmanaged(*JSObject) = .empty,
@@ -589,6 +599,7 @@ pub const Heap = struct {
         for (self.objects_mature.items) |o| o.deinitFields(self.allocator);
         self.objects_young.deinit(self.allocator);
         self.objects_mature.deinit(self.allocator);
+        self.realms.deinit(self.allocator);
         self.object_pool.deinit(self.allocator);
         for (self.environments_young.items) |e| e.deinit(self.allocator);
         for (self.environments_mature.items) |e| e.deinit(self.allocator);
