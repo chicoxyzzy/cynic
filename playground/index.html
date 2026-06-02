@@ -136,6 +136,11 @@
     display: flex;
     flex-direction: column;
     min-height: 460px;
+    /* Grid items default to min-width:auto, which lets long output
+       lines / wide editor content blow the 1fr track past 50%. Pin
+       to 0 so the two columns stay an even, stable half each and
+       content scrolls inside the panel instead of resizing it. */
+    min-width: 0;
   }
 
   .panel-head {
