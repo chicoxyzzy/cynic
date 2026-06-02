@@ -314,3 +314,38 @@ test "phase 3: native callback sees its own function's realm via active_native_f
     // contract file so reviewers see it.
     return;
 }
+
+test "phase 3: a global write from a cross-realm-called function targets its home realm" {
+    // §6.2.5.5 PutValue / §9.1.1.4 SetMutableBinding — a function
+    // assigns its free globals through its own [[Realm]]'s global
+    // environment. A writer defined in parent, called from a child
+    // that shares the heap, must store into parent's global, never
+    // the calling (child) realm's. Strict mode (Cynic's only mode)
+    // means an undeclared target throws ReferenceError, so the
+    // pre-fix behaviour was a *throw* against child's globals, not a
+    // silent mis-store — either way the write never reached parent.
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // `var crossWrite` lives in parent's global declarative record;
+    // the writer is captured as the script's completion value (the
+    // §16.1.7 last-statement value), mirroring the cross-realm hand-
+    // off in the tests above. Avoid `globalThis.x =` + bare read,
+    // which is an object-env-record property, not a binding.
+    _ = try lantern.evaluateScript(testing.allocator, &parent, "var crossWrite = 'init';");
+    const writer_v = (try lantern.evaluateScript(testing.allocator, &parent, "(function () { crossWrite = 'from-call'; })")).value;
+    try child.globals.put(testing.allocator, "callIt", writer_v);
+    _ = try lantern.evaluateScript(testing.allocator, &child, "callIt();");
+
+    // The store landed in parent's global, not child's.
+    const in_parent = (try lantern.evaluateScript(testing.allocator, &parent, "crossWrite === 'from-call'")).value;
+    try testing.expect(in_parent.bits == Value.true_.bits);
+    // child never declared crossWrite — it stays unbound there.
+    const in_child = (try lantern.evaluateScript(testing.allocator, &child, "typeof crossWrite === 'undefined'")).value;
+    try testing.expect(in_child.bits == Value.true_.bits);
+}
