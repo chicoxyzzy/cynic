@@ -513,3 +513,26 @@ test "cross-realm: typeof of a free global resolves the home realm (lda_global_o
     const u = (try lantern.evaluateScript(testing.allocator, &child, "undefProbe() === 'undefined'")).value;
     try testing.expect(u.bits == Value.true_.bits);
 }
+
+test "cross-realm teardown: a collected ShadowRealm frees its child realm record" {
+    // The child `Realm` created by `new ShadowRealm()` is appended to
+    // the creating realm's `child_realms` and (pre-fix) freed only at
+    // parent deinit — a wrapper object that becomes unreachable leaks
+    // its child realm until program end. With the teardown finalizer,
+    // collecting the unreferenced ShadowRealm wrapper drops its child
+    // from `child_realms` and frees it.
+    var parent = Realm.init(testing.allocator);
+    parent.hardened = false;
+    parent.feature_flags.insert(.shadow_realm);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    const before = parent.child_realms.items.len;
+    // Create a ShadowRealm and discard it (completion value is undefined).
+    _ = try lantern.evaluateScript(testing.allocator, &parent, "new ShadowRealm(); undefined;");
+    try testing.expectEqual(before + 1, parent.child_realms.items.len);
+
+    // The wrapper is now unreachable; collecting it tears the child down.
+    parent.collectGarbage();
+    try testing.expectEqual(before, parent.child_realms.items.len);
+}

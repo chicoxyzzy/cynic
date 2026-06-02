@@ -622,6 +622,11 @@ pub const Realm = struct {
     /// `new ShadowRealm()`. Owned by the parent; deinit walks
     /// the list and tears each down before tearing itself down.
     child_realms: std.ArrayListUnmanaged(*Realm) = .empty,
+    /// For a child realm: the realm whose `child_realms` holds it.
+    /// The teardown finalizer removes the child from this list before
+    /// freeing it, so the eventual parent `deinit` doesn't double-free.
+    /// `null` for a top-level realm (not in any `child_realms`).
+    created_by: ?*Realm = null,
     /// Host-installed global bindings — `print`, `console`,
     /// `globalThis`, etc. Looked up by `lda_global` when an
     /// identifier reference doesn't resolve in any user scope.
@@ -1343,6 +1348,7 @@ pub const Realm = struct {
         // and the actual sweep. The empty roots slice is fine —
         // every root above is already marked.
         self.heap.collectFull(&.{});
+        self.drainRealmTeardown();
     }
 
     /// Mark roots from EVERY realm sharing this heap, not just
@@ -1401,6 +1407,35 @@ pub const Realm = struct {
         self.heap.beginMinorCycle();
         self.markAllSharingRealmRoots();
         self.heap.collectYoung(&.{});
+        self.drainRealmTeardown();
+    }
+
+    /// Tear down the child realms whose `ShadowRealm` wrapper objects
+    /// were found dead during the sweep just completed (queued on
+    /// `heap.pending_realm_teardown` by `queueShadowRealmTeardown`).
+    /// Runs post-sweep so freeing a `Realm` — which re-enters the
+    /// allocator and frees its globals / intrinsics maps — never
+    /// happens mid-walk. The child's own heap objects survived this
+    /// cycle (the child was still registered when roots were marked);
+    /// once `child.deinit` deregisters it, the next GC reclaims them.
+    fn drainRealmTeardown(self: *Realm) void {
+        const pending = &self.heap.pending_realm_teardown;
+        while (pending.items.len > 0) {
+            const child = pending.pop().?;
+            // Unlink from the owner's `child_realms` so the eventual
+            // parent `deinit` doesn't double-free this child.
+            if (child.created_by) |owner| {
+                for (owner.child_realms.items, 0..) |c, i| {
+                    if (c == child) {
+                        _ = owner.child_realms.swapRemove(i);
+                        break;
+                    }
+                }
+            }
+            // `deinit` also deregisters the child from `heap.realms`.
+            child.deinit();
+            self.allocator.destroy(child);
+        }
     }
 
     /// Mark every realm-level root reachable for a GC cycle. Shared

@@ -179,6 +179,9 @@ fn shadowRealmConstructor(
     // Register the child on the parent's list so it lives as long
     // as the parent and gets torn down with it.
     realm.child_realms.append(realm.allocator, child_ptr) catch return error.OutOfMemory;
+    // Back-link for the teardown finalizer: when this instance is
+    // collected, the child is unlinked from THIS realm's `child_realms`.
+    child_ptr.created_by = realm;
 
     // Brand + stash slots: child realm (host_data) + owner realm
     // (both ride the cold-field extension; ShadowRealm instances

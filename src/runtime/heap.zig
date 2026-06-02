@@ -255,6 +255,13 @@ pub const Heap = struct {
     /// `installBuiltins` (stable-address) and deregister at
     /// `deinit`.
     realms: std.ArrayListUnmanaged(*Realm) = .empty,
+    /// Child realms whose owning `ShadowRealm` object was found dead
+    /// during the current sweep — torn down (freed) *after* the sweep
+    /// completes, never inline, since freeing a `Realm` re-enters the
+    /// allocator and touches maps the sweep is mid-walk over. Drained
+    /// by `Realm.drainRealmTeardown` once `collectFull` / `collectYoung`
+    /// return. See docs/multi-realm.md "per-realm teardown".
+    pending_realm_teardown: std.ArrayListUnmanaged(*Realm) = .empty,
     /// Young plain `JSObject` instances (object literals,
     /// prototypes, built-in constructors' return values).
     objects_young: std.ArrayListUnmanaged(*JSObject) = .empty,
@@ -600,6 +607,7 @@ pub const Heap = struct {
         self.objects_young.deinit(self.allocator);
         self.objects_mature.deinit(self.allocator);
         self.realms.deinit(self.allocator);
+        self.pending_realm_teardown.deinit(self.allocator);
         self.object_pool.deinit(self.allocator);
         for (self.environments_young.items) |e| e.deinit(self.allocator);
         for (self.environments_mature.items) |e| e.deinit(self.allocator);
@@ -1800,6 +1808,18 @@ pub const Heap = struct {
     /// just the struct allocator). `list` is `*ArrayListUnmanaged(*T)`;
     /// passed as `anytype` because Zig has no way to spell a list
     /// generic over the element type at a non-generic call site.
+    /// When a dying object is a `ShadowRealm` wrapper, queue its child
+    /// `Realm` (carried in the `host_data` slot) for post-sweep
+    /// teardown. MUST run before `deinitFields` frees the extension
+    /// that holds `host_data`. A failed enqueue (OOM) falls back to
+    /// freeing the child at parent `deinit` — never worse than the
+    /// pre-finalizer behaviour.
+    fn queueShadowRealmTeardown(obj: *JSObject, pending: *std.ArrayListUnmanaged(*Realm), allocator: std.mem.Allocator) void {
+        if (!obj.is_shadow_realm) return;
+        const hd = obj.getHostData() orelse return;
+        pending.append(allocator, @ptrCast(@alignCast(hd))) catch {};
+    }
+
     fn sweepList(list: anytype, live_color: u1, deinit_args: anytype) void {
         var i: usize = list.items.len;
         while (i > 0) {
@@ -1827,8 +1847,9 @@ pub const Heap = struct {
                 _ = list.swapRemove(i);
                 if (comptime EntryT == JSObject) {
                     // Slab pool path — see promoteYoungList for the
-                    // matching logic; `deinit_args` is
-                    // `.{allocator, &heap.object_pool}` here.
+                    // matching logic; for JSObject `deinit_args` is
+                    // `.{allocator, &heap.object_pool, &pending_realm_teardown}`.
+                    queueShadowRealmTeardown(entry, deinit_args[2], deinit_args[0]);
                     entry.deinitFields(deinit_args[0]);
                     deinit_args[1].destroy(entry);
                 } else {
@@ -2014,14 +2035,14 @@ pub const Heap = struct {
         const lc = self.live_color;
         sweepList(&self.strings_mature, lc, ba);
         sweepList(&self.functions_mature, lc, sa);
-        sweepList(&self.objects_mature, lc, .{ self.allocator, &self.object_pool });
+        sweepList(&self.objects_mature, lc, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
         sweepList(&self.environments_mature, lc, sa);
         sweepList(&self.generators_mature, lc, sa);
         sweepList(&self.symbols_mature, lc, sa);
         sweepList(&self.bigints_mature, lc, sa);
         promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, ba);
         promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, sa);
-        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool });
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
         promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, sa);
         promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, sa);
         promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, sa);
@@ -2207,7 +2228,7 @@ pub const Heap = struct {
         const lc = self.live_color;
         promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, .{ self.allocator, self.bytes_allocator });
         promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, .{self.allocator});
-        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool });
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
         promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, .{self.allocator});
         promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, .{self.allocator});
         promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, .{self.allocator});
@@ -2312,10 +2333,11 @@ pub const Heap = struct {
                     // Slab pool path — drop sub-fields, then
                     // return the header to the free-list instead
                     // of dropping it through the GP allocator.
-                    // `deinit_args` is `.{allocator, &heap.object_pool}`
-                    // for JSObject specifically; the comptime
-                    // branch keeps the generic call shape unchanged
-                    // for every other heap type.
+                    // `deinit_args` is `.{allocator, &heap.object_pool,
+                    // &pending_realm_teardown}` for JSObject; the
+                    // comptime branch keeps the generic call shape
+                    // unchanged for every other heap type.
+                    queueShadowRealmTeardown(entry, deinit_args[2], deinit_args[0]);
                     entry.deinitFields(deinit_args[0]);
                     deinit_args[1].destroy(entry);
                 } else {
