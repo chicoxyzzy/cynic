@@ -152,9 +152,11 @@ Bucketed on the first two path components (`built-ins/Set`,
   cross-realm cluster. The **0-fails tier** is sorted by
   hardened `expected fails ↓`.
 
+
+**100–999 fails — engine-work tier**
+
 | area · posture | passing | failing | expected fails | total | pass% |
 |---|---:|---:|---:|---:|---:|
-| **_100–999 fails — engine-work tier_** | | | | | |
 | **`built-ins/Atomics`** | | | | | |
 | · hardened | 0 | 382 | 0 | 382 | 0 % |
 | · unhardened | 0 | 382 | 0 | 382 | 0 % |
@@ -163,7 +165,11 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 0 | 104 | 0 | 104 | 0 % |
 | · unhardened | 0 | 104 | 0 | 104 | 0 % |
 | · +eval | 0 | 104 | 0 | 104 | 0 % |
-| **_10–99 fails — engine-work tier_** | | | | | |
+
+**10–99 fails — engine-work tier**
+
+| area · posture | passing | failing | expected fails | total | pass% |
+|---|---:|---:|---:|---:|---:|
 | **`built-ins/DataView`** | | | | | |
 | · hardened | 455 | 39 | 56 | 550 | 93 % |
 | · unhardened | 511 | 39 | 0 | 550 | 93 % |
@@ -172,7 +178,11 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 572 | 48 | 116 | 736 | 93 % |
 | · unhardened | 665 | 50 | 21 | 736 | 93 % |
 | · +eval | 665 | 50 | 21 | 736 | 93 % |
-| **_1–9 fails — engine-work tier_** | | | | | |
+
+**1–9 fails — engine-work tier**
+
+| area · posture | passing | failing | expected fails | total | pass% |
+|---|---:|---:|---:|---:|---:|
 | **`built-ins/Error`** | | | | | |
 | · hardened | 43 | 1 | 14 | 58 | 98 % |
 | · unhardened | 57 | 1 | 0 | 58 | 98 % |
@@ -201,7 +211,11 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 10017 | 1 | 661 | 10682 | 100 % |
 | · unhardened | 10132 | 1 | 546 | 10682 | 100 % |
 | · +eval | 10132 | 1 | 546 | 10682 | 100 % |
-| **_0 fails — passing / all-policy (sorted by expected fails ↓)_** | | | | | |
+
+**0 fails — passing / all-policy (sorted by expected fails ↓)**
+
+| area · posture | passing | failing | expected fails | total | pass% |
+|---|---:|---:|---:|---:|---:|
 | **`intl402/Temporal`** | | | | | |
 | · hardened | 48 | 0 | 1958 | 2006 | 100 % |
 | · unhardened | 49 | 0 | 1957 | 2006 | 100 % |
@@ -625,12 +639,12 @@ These fixtures are excluded from the top-line score.
 
 ## History
 
-### 2026-06-02 — cynic `b743627`, test262 `d0c1b4555b`
+### 2026-06-02 — cynic `de9e11a`, test262 `d0c1b4555b`
 
 |         | passing | failing | expected fails | total | pass% | Δ pass | elapsed |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **unhardened** | 44074 | 600 | 6217 | 50894 | 98.82 % | ±0 | 35.1 s |
-| **hardened** | 40178 | 593 | 10120 | 50894 | 98.83 % | ±0 | 35.1 s |
+| **unhardened** | 44074 | 600 | 6217 | 50894 | 98.82 % | ±0 | 30.1 s |
+| **hardened** | 40178 | 593 | 10120 | 50894 | 98.83 % | ±0 | 40.1 s |
 
 ### 2026-06-01 — cynic `fed859f`, test262 `d0c1b4555b`
 
