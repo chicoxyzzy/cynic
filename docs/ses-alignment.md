@@ -451,18 +451,35 @@ open the following run for real:
   expression with the kind's prefix and run through `evaluateEval`, so
   the new function's scope is the global environment per spec.
 
-**Strict-only simplification.** Cynic parses all source as strict, so
-every eval is a strict eval (§19.2.1.3): the eval body gets its own
-variable environment, so top-level `var` / function declarations bind
-eval-locally and never leak to the global env (indirect eval) or the
-caller's scope (direct eval). Direct eval still *reads* the caller's
-scope for free identifiers. Implemented via the compiler's `eval_local`
-mode, which routes the eval body's top-level bindings through the same
-non-global path module bodies use; `ShadowRealm.prototype.evaluate`
-stays on Script evaluation (var → the shadow realm's global env,
-§3.8.3.7) and is unaffected. Corollary: test262 fixtures asserting
-*indirect* eval runs as sloppy can never pass and stay permanently out
-of scope (`strict_only_exact_paths` in `tools/test262/skip.zig`).
+**Strict-only — conformant for direct eval, a deliberate divergence
+for indirect.** Cynic parses all source as strict, so it runs *every*
+eval as strict code. For **direct** eval this is spec-conformant:
+§19.2.1.1 PerformEval sets `strictEval = strictCaller OR IsStrict(body)`,
+and every Cynic caller is strict, so `strictCaller` (hence `strictEval`)
+is always true. For **indirect** eval it is a divergence: there
+`strictCaller` is false (§19.2.1.1 step 1), so `strictEval = IsStrict(body)`
+— a source with no `"use strict"` directive is *sloppy*, and engine262
+(the reference) plus every shipping engine (V8 / JSC / SpiderMonkey /
+QuickJS) run it sloppy. Cynic has no sloppy parser, so it runs indirect
+eval strict like all its other code: strict-compatible source evaluates
+correctly, while sloppy-only behaviour — `with`, `delete unqualifiedName`,
+an undeclared assignment creating a global — is rejected or runs strict,
+the same strict-only divergence Cynic carries for any script. (Nearest
+prior art: Hermes also rejects `with` in eval'd source, though it keeps
+other sloppy semantics. No shipping engine runs indirect eval strict —
+that posture is unique to a strict-only engine.)
+
+Either way the eval body gets its own variable environment (§19.2.1.3),
+so top-level `var` / function declarations bind eval-locally and never
+leak to the global env (indirect eval) or the caller's scope (direct
+eval). Direct eval still *reads* the caller's scope for free
+identifiers. Implemented via the compiler's `eval_local` mode, which
+routes the eval body's top-level bindings through the same non-global
+path module bodies use; `ShadowRealm.prototype.evaluate` stays on Script
+evaluation (var → the shadow realm's global env, §3.8.3.7) and is
+unaffected. Corollary: test262 fixtures asserting *indirect* eval runs
+as sloppy can never pass and stay permanently out of scope
+(`strict_only_exact_paths` in `tools/test262/skip.zig`).
 
 **Posture interaction.** The eval engine is posture-agnostic; the
 realm's existing freeze state does the confinement. Under the hardened
