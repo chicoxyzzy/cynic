@@ -149,8 +149,11 @@ Bucketed on the first two path components (`built-ins/Set`,
   `--allow=eval` row in `## Current scores`).
 - The **`1+ fails` tiers** are the engine-work list — today
   mostly the SAB/Atomics surface plus the ~13-fixture
-  cross-realm cluster. The **0-fails tier** is sorted by
-  hardened `expected fails ↓`.
+  cross-realm cluster.
+- Within every tier, areas are sorted by **hardened pass%
+  ascending** (lowest first), so the whole scoreboard reads
+  low → high pass% top to bottom. Ties break on SES
+  divergence, then name.
 
 
 **100–999 fails — engine-work tier**
@@ -183,6 +186,10 @@ Bucketed on the first two path components (`built-ins/Set`,
 
 | area · posture | passing | failing | expected fails | total | pass% |
 |---|---:|---:|---:|---:|---:|
+| **`built-ins/ThrowTypeError`** | | | | | |
+| · hardened | 13 | 1 | 0 | 14 | 93 % |
+| · unhardened | 13 | 1 | 0 | 14 | 93 % |
+| · +eval | 13 | 1 | 0 | 14 | 93 % |
 | **`built-ins/Error`** | | | | | |
 | · hardened | 43 | 1 | 14 | 58 | 98 % |
 | · unhardened | 57 | 1 | 0 | 58 | 98 % |
@@ -195,18 +202,14 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 290 | 3 | 18 | 311 | 99 % |
 | · unhardened | 296 | 4 | 11 | 311 | 99 % |
 | · +eval | 296 | 4 | 11 | 311 | 99 % |
-| **`built-ins/String`** | | | | | |
-| · hardened | 1029 | 2 | 192 | 1223 | 100 % |
-| · unhardened | 1206 | 2 | 15 | 1223 | 100 % |
-| · +eval | 1206 | 2 | 15 | 1223 | 100 % |
-| **`built-ins/ThrowTypeError`** | | | | | |
-| · hardened | 13 | 1 | 0 | 14 | 93 % |
-| · unhardened | 13 | 1 | 0 | 14 | 93 % |
-| · +eval | 13 | 1 | 0 | 14 | 93 % |
 | **`built-ins/TypedArray`** | | | | | |
 | · hardened | 1104 | 7 | 327 | 1438 | 100 % |
 | · unhardened | 1423 | 7 | 8 | 1438 | 100 % |
 | · +eval | 1423 | 7 | 8 | 1438 | 100 % |
+| **`built-ins/String`** | | | | | |
+| · hardened | 1029 | 2 | 192 | 1223 | 100 % |
+| · unhardened | 1206 | 2 | 15 | 1223 | 100 % |
+| · +eval | 1206 | 2 | 15 | 1223 | 100 % |
 | **`language/expressions`** | | | | | |
 | · hardened | 10017 | 1 | 661 | 10682 | 100 % |
 | · unhardened | 10132 | 1 | 546 | 10682 | 100 % |
@@ -639,12 +642,12 @@ These fixtures are excluded from the top-line score.
 
 ## History
 
-### 2026-06-02 — cynic `de9e11a`, test262 `d0c1b4555b`
+### 2026-06-02 — cynic `78c203f`, test262 `d0c1b4555b`
 
 |         | passing | failing | expected fails | total | pass% | Δ pass | elapsed |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | **unhardened** | 44074 | 600 | 6217 | 50894 | 98.82 % | ±0 | 30.1 s |
-| **hardened** | 40178 | 593 | 10120 | 50894 | 98.83 % | ±0 | 40.1 s |
+| **hardened** | 40178 | 593 | 10120 | 50894 | 98.83 % | ±0 | 30.1 s |
 
 ### 2026-06-01 — cynic `fed859f`, test262 `d0c1b4555b`
 
