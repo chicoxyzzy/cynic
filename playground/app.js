@@ -271,6 +271,7 @@ const els = {
 
 let view = null;   // the CodeMirror EditorView
 let currentMode = 'eval'; // 'eval' | 'bytecode' | 'ast' — driven by the right-panel tabs
+let engineReady = false;  // set once cynic-engine.js's loadEngine() resolves
 
 // --------------------------------------------------------------------------
 // CodeMirror editor
@@ -490,6 +491,7 @@ async function loadWasm() {
   setStatus('loading engine…');
   try {
     await loadEngine();
+    engineReady = true;
     els.version.textContent = engineVersion();
     setStatus('ready');
     els.run.disabled = false;
@@ -878,7 +880,7 @@ function renderAstResult(frame) {
 // --------------------------------------------------------------------------
 
 function run() {
-  if (!wasm) return;
+  if (!engineReady) return;
   const source = getSource();
   setStatus('running…');
   try {
@@ -924,7 +926,7 @@ function setMode(mode) {
   // Switching modes invalidates any cached span-line state — the
   // output DOM is about to be replaced.
   lastSpanLines = [];
-  if (wasm) run();
+  if (engineReady) run();
 }
 
 function wireModeTabs() {
