@@ -1116,6 +1116,21 @@ pub const eval_dependent_exact_paths = [_][]const u8{
     "built-ins/Function/proto-from-ctor-realm-prototype.js",
     "built-ins/GeneratorFunction/proto-from-ctor-realm.js",
     "built-ins/GeneratorFunction/proto-from-ctor-realm-prototype.js",
+    // Eval-dependent negatives: each calls the dynamic-function family
+    // or indirect eval and expects a SyntaxError from the *evaluated*
+    // source (`import.meta` outside a Module goal; `using` / `await
+    // using` at the top level of eval; `var arguments` in a strict
+    // indirect eval). On an eval-disabled engine §19.2.1.2
+    // HostEnsureCanCompileStrings refuses BEFORE parsing, so the host
+    // EvalError is thrown instead of the expected SyntaxError — they
+    // can only pass with `--allow=eval`. (Node + browser CSP behave
+    // the same: EvalError when code-gen from strings is off.)
+    "language/expressions/import.meta/syntax/goal-async-function-params-or-body.js",
+    "language/expressions/import.meta/syntax/goal-async-generator-params-or-body.js",
+    "language/expressions/import.meta/syntax/goal-generator-params-or-body.js",
+    "language/statements/await-using/syntax/await-using-not-allowed-at-top-level-of-eval.js",
+    "language/statements/using/syntax/using-not-allowed-at-top-level-of-eval.js",
+    "language/statements/variable/12.2.1-22-s.js",
 };
 
 // ════════════════════════════════════════════════════════════════════

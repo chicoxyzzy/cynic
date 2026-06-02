@@ -423,9 +423,13 @@ Revisit Compartments when:
 ## The eval engine (`--allow=eval`)
 
 Shipped behind the `--allow=eval` gate (`realm.allow_eval`, default
-false). With the gate closed Cynic refuses runtime code construction
-by SES policy (a `SyntaxError`) exactly as before; with it open the
-following run for real:
+false). With the gate closed Cynic refuses runtime code construction:
+§19.2.1.2 HostEnsureCanCompileStrings throws an `EvalError` (the spec
+leaves the error type host-defined; `EvalError` matches Node's
+`--disallow-code-generation-from-strings` and browser CSP). A genuine
+parse failure *after* the gate opens is a `SyntaxError` instead — the
+two are distinct (capability refusal vs parse outcome). With the gate
+open the following run for real:
 
 - **`eval(x)` — §19.2.1.** Indirect eval (`(0, eval)(s)`,
   `globalThis.eval(s)`) evaluates `s` as global-scope code through the

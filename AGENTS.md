@@ -94,8 +94,11 @@ These are project rules — they apply to everyone.
     default, opt in with `--allow=eval`. `eval()` itself,
     `new Function(string)` / `new GeneratorFunction(string)` /
     `new AsyncFunction(string)`, and dynamic-code-from-string
-    generally refuse by SES policy (a `SyntaxError`) unless the
-    gate is open. Aligns with [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses).
+    generally refuse unless the gate is open — §19.2.1.2
+    HostEnsureCanCompileStrings throws an `EvalError` (the
+    host-refusal type Node's `--disallow-code-generation-from-strings`
+    and browser CSP use; the spec leaves the error type host-defined).
+    Aligns with [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses).
     Cynic's host-level `Realm.evaluateScript` (powering multi-file
     `cynic run`, the test262 harness loader, and a future REPL) is
     a different mechanism — it's not exposed to user JS.
