@@ -6867,10 +6867,15 @@ pub fn runFrames(
             // compiler) catches the uninitialised slot.
             const slot = readU32(code, ip);
             ip += 4;
+            // The slot index is relative to the realm the running
+            // chunk was compiled in (its [[Realm]]'s decl_env), which
+            // with a shared heap differs from the dispatch realm —
+            // route through the active frame's `running_realm`.
+            const gr = f.running_realm orelse realm;
             const idx = local_chunk.global_lexical_base + slot;
-            const vals = realm.globals.decl_env.values();
+            const vals = gr.globals.decl_env.values();
             std.debug.assert(idx < vals.len);
-            std.debug.assert(realm.globals.decl_consts.count() == realm.globals.decl_env.count());
+            std.debug.assert(gr.globals.decl_consts.count() == gr.globals.decl_env.count());
             acc = vals[idx];
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -6881,10 +6886,11 @@ pub fn runFrames(
             // check (this IS the initialization step).
             const slot = readU32(code, ip);
             ip += 4;
+            const gr = f.running_realm orelse realm;
             const idx = local_chunk.global_lexical_base + slot;
-            const vals = realm.globals.decl_env.values();
+            const vals = gr.globals.decl_env.values();
             std.debug.assert(idx < vals.len);
-            std.debug.assert(realm.globals.decl_consts.count() == realm.globals.decl_env.count());
+            std.debug.assert(gr.globals.decl_consts.count() == gr.globals.decl_env.count());
             vals[idx] = acc;
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -6895,12 +6901,13 @@ pub fn runFrames(
             // `const` → TypeError; else write.
             const slot = readU32(code, ip);
             ip += 4;
+            const gr = f.running_realm orelse realm;
             const idx = local_chunk.global_lexical_base + slot;
-            const vals = realm.globals.decl_env.values();
+            const vals = gr.globals.decl_env.values();
             std.debug.assert(idx < vals.len);
-            std.debug.assert(realm.globals.decl_consts.count() == realm.globals.decl_env.count());
+            std.debug.assert(gr.globals.decl_consts.count() == gr.globals.decl_env.count());
             if (vals[idx].isHole()) {
-                const ex = try makeReferenceError(realm, "Cannot access binding before initialisation");
+                const ex = try makeReferenceError(gr, "Cannot access binding before initialisation");
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
@@ -6909,8 +6916,8 @@ pub fn runFrames(
                 }
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
-            if (realm.globals.decl_consts.values()[idx]) {
-                const ex = try makeTypeError(realm, "Assignment to constant variable");
+            if (gr.globals.decl_consts.values()[idx]) {
+                const ex = try makeTypeError(gr, "Assignment to constant variable");
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
