@@ -349,3 +349,31 @@ test "phase 3: a global write from a cross-realm-called function targets its hom
     const in_child = (try lantern.evaluateScript(testing.allocator, &child, "typeof crossWrite === 'undefined'")).value;
     try testing.expect(in_child.bits == Value.true_.bits);
 }
+
+test "phase 3: slot-indexed top-level let read from a cross-realm-called function targets its home realm" {
+    // §9.1.1.4 — a top-level `let` / `const` resolves to a
+    // slot-indexed declarative-env-record read (`lda_global_slot`),
+    // with the slot relative to the realm the function was compiled
+    // in. A reader defined in parent (closing over parent's `let`),
+    // called from a child that shares the heap, must index PARENT's
+    // decl_env — not the child's, whose slot N holds a different
+    // binding or is out of range. Pre-fix this indexed the dispatch
+    // (child) realm: a `std.debug.assert(idx < vals.len)` panic in
+    // safe builds, a wrong value in release.
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // `let secret` + the reader compiled in one parent script so the
+    // reader resolves `secret` to a global-lexical slot.
+    const reader_v = (try lantern.evaluateScript(testing.allocator, &parent, "let secret = 42; (function () { return secret; })")).value;
+    try child.globals.put(testing.allocator, "readSecret", reader_v);
+
+    const result = (try lantern.evaluateScript(testing.allocator, &child, "readSecret()")).value;
+    try testing.expect(result.isNumber());
+    try testing.expect(result.numberToDouble() == 42);
+}
