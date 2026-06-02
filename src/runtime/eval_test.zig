@@ -240,6 +240,67 @@ test "eval: gate closed Function(string) throws EvalError too" {
     try testing.expect(v.isInt32() and v.asInt32() == 1);
 }
 
+// ── §13.2 / §14.x statement completion value ────────────────────────
+//
+// `eval(src)` returns the completion value of the evaluated
+// StatementList (§19.2.1.3). Per §14.x runtime semantics + UpdateEmpty,
+// a no-iteration loop / empty statement / `switch` with no executed
+// clause yields `undefined` — NOT the leftover loop condition or
+// `switch` discriminant. A value-producing body statement yields its
+// value, and an empty statement after a value-producing one keeps the
+// prior value (UpdateEmpty). Regression guard for the completion-
+// register fix in the compiler. Mirrors test262
+// `language/eval-code/*/cptn-nrml-empty-*`.
+
+fn expectUndefinedAllow(source: []const u8) !void {
+    const v = try evalAllow(source);
+    if (!v.isUndefined()) {
+        std.debug.print("expected undefined completion\n", .{});
+        return error.EvalResultNotUndefined;
+    }
+}
+
+test "eval completion: no-iteration while is undefined" {
+    try expectUndefinedAllow("eval('while(false);')");
+}
+
+test "eval completion: no-iteration do-while is undefined" {
+    try expectUndefinedAllow("eval('do ; while(false)')");
+}
+
+test "eval completion: untaken if is undefined" {
+    try expectUndefinedAllow("eval('if (false) ;')");
+}
+
+test "eval completion: no-clause switch is undefined (not the discriminant)" {
+    try expectUndefinedAllow("eval('switch(1){}')");
+}
+
+test "eval completion: no-iteration for is undefined" {
+    try expectUndefinedAllow("eval('for(false;false;false);')");
+}
+
+test "eval completion: empty statement keeps prior value (UpdateEmpty)" {
+    try expectIntAllow("eval('1; ;')", 1);
+}
+
+test "eval completion: loop body value, not the condition" {
+    try expectIntAllow("eval('for (var i = 0; i < 1; i++) 42;')", 42);
+}
+
+test "eval completion: taken if yields its consequent value" {
+    try expectIntAllow("eval('if (true) 7;')", 7);
+}
+
+test "eval completion: block yields its last statement value" {
+    try expectIntAllow("eval('{ 9; }')", 9);
+}
+
+test "eval completion: trailing declaration leaves prior value" {
+    // `5; var x = 99;` → 5 (the var declaration has empty completion).
+    try expectIntAllow("eval('5; var x = 99;')", 5);
+}
+
 test "eval: gate OPEN, genuine parse error still throws SyntaxError" {
     // §19.2.1 step 11 — once the gate is open and compilation proceeds,
     // a real parse failure in the evaluated source is a SyntaxError

@@ -168,6 +168,19 @@ pub const Compiler = struct {
     /// to find their patch lists / continue target. Nesting is
     /// handled by save/restore in each loop's compile routine.
     current_loop: ?*LoopContext = null,
+    /// §13.2 / §14.x completion-value register, set only while
+    /// compiling a top-level **script / eval** statement list (null
+    /// inside every function body — like `current_loop`, it's
+    /// function-scoped and saved/nulled/restored at each function
+    /// boundary). When non-null, each ExpressionStatement stores its
+    /// value here (`star`), and the chunk tail returns it (`ldar`).
+    /// This implements StatementList completion + UpdateEmpty: only
+    /// value-producing statements move the result, so a no-iteration
+    /// loop / empty statement / declaration / `switch` with no clause
+    /// yields the prior value (or `undefined`), never the leftover
+    /// loop condition or `switch` discriminant. §19.2.1.3 PerformEval
+    /// returns this for `eval`.
+    completion_reg: ?u8 = null,
     /// True when the enclosing function is `async function` /
     /// `async function*` / async arrow / async method. `yield*`
     /// uses this to decide whether to emit an `await` on each
@@ -5003,9 +5016,18 @@ pub const Compiler = struct {
         switch (stmt.*) {
             .expression => |es| {
                 try self.compileExpression(&es.expression);
-                // The expression's value lands in acc and stays there
-                // until the next statement overwrites it. Top-level
-                // `Return` reads whatever the last statement leaves.
+                // §13.2 ExpressionStatement completion value. In a
+                // top-level script / eval statement list, capture the
+                // value into the completion register so the chunk tail
+                // returns it (§19.2.1.3 PerformEval / §16.1.6). Only
+                // value-producing statements move it, so a trailing
+                // loop / empty / declaration leaves the prior value.
+                // Null inside function bodies — they return `undefined`
+                // (or an explicit `return`), not a completion value.
+                if (self.completion_reg) |r| {
+                    try self.builder.emitOp(.star, es.span);
+                    try self.builder.emitU8(r);
+                }
             },
             .empty => {},
             .block => |b| try self.compileBlock(b.body, b.span),
@@ -7353,6 +7375,7 @@ pub const Compiler = struct {
         const saved_temps_in_use = self.temps_in_use;
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
+        const saved_completion_reg = self.completion_reg;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -7361,6 +7384,7 @@ pub const Compiler = struct {
         self.temps_in_use = 0;
         self.env_depth = saved_env_depth + 1;
         self.current_loop = null;
+        self.completion_reg = null;
 
         var inner_finished = false;
         defer {
@@ -7373,6 +7397,7 @@ pub const Compiler = struct {
                 self.temps_in_use = saved_temps_in_use;
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
+                self.completion_reg = saved_completion_reg;
             }
         }
 
@@ -7396,6 +7421,7 @@ pub const Compiler = struct {
         self.temps_in_use = saved_temps_in_use;
         self.env_depth = saved_env_depth;
         self.current_loop = saved_current_loop;
+        self.completion_reg = saved_completion_reg;
 
         return inner_chunk;
     }
@@ -7414,6 +7440,7 @@ pub const Compiler = struct {
         const saved_temps_in_use = self.temps_in_use;
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
+        const saved_completion_reg = self.completion_reg;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -7422,6 +7449,7 @@ pub const Compiler = struct {
         self.temps_in_use = 0;
         self.env_depth = saved_env_depth + 1;
         self.current_loop = null;
+        self.completion_reg = null;
 
         var inner_finished = false;
         defer {
@@ -7434,6 +7462,7 @@ pub const Compiler = struct {
                 self.temps_in_use = saved_temps_in_use;
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
+                self.completion_reg = saved_completion_reg;
             }
         }
 
@@ -7459,6 +7488,7 @@ pub const Compiler = struct {
         self.temps_in_use = saved_temps_in_use;
         self.env_depth = saved_env_depth;
         self.current_loop = saved_current_loop;
+        self.completion_reg = saved_completion_reg;
 
         return inner_chunk;
     }
@@ -7482,6 +7512,7 @@ pub const Compiler = struct {
         const saved_temps_in_use = self.temps_in_use;
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
+        const saved_completion_reg = self.completion_reg;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -7490,6 +7521,7 @@ pub const Compiler = struct {
         self.temps_in_use = 0;
         self.env_depth = saved_env_depth + 1;
         self.current_loop = null;
+        self.completion_reg = null;
 
         var inner_finished = false;
         defer {
@@ -7502,6 +7534,7 @@ pub const Compiler = struct {
                 self.temps_in_use = saved_temps_in_use;
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
+                self.completion_reg = saved_completion_reg;
             }
         }
 
@@ -7577,6 +7610,7 @@ pub const Compiler = struct {
         self.temps_in_use = saved_temps_in_use;
         self.env_depth = saved_env_depth;
         self.current_loop = saved_current_loop;
+        self.completion_reg = saved_completion_reg;
 
         return inner_chunk;
     }
@@ -7609,6 +7643,7 @@ pub const Compiler = struct {
         const saved_temps_in_use = self.temps_in_use;
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
+        const saved_completion_reg = self.completion_reg;
         const saved_is_async = self.current_is_async;
 
         self.builder = self.freshSubBuilder();
@@ -7618,6 +7653,7 @@ pub const Compiler = struct {
         self.temps_in_use = 0;
         self.env_depth = saved_env_depth + 1;
         self.current_loop = null;
+        self.completion_reg = null;
         self.current_is_async = is_async;
 
         var inner_finished = false;
@@ -7631,6 +7667,7 @@ pub const Compiler = struct {
                 self.temps_in_use = saved_temps_in_use;
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
+                self.completion_reg = saved_completion_reg;
             }
         }
 
@@ -7696,6 +7733,7 @@ pub const Compiler = struct {
         self.temps_in_use = saved_temps_in_use;
         self.env_depth = saved_env_depth;
         self.current_loop = saved_current_loop;
+        self.completion_reg = saved_completion_reg;
         self.current_is_async = saved_is_async;
 
         return inner_chunk;
@@ -7718,6 +7756,7 @@ pub const Compiler = struct {
         const saved_temps_in_use = self.temps_in_use;
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
+        const saved_completion_reg = self.completion_reg;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -7726,6 +7765,7 @@ pub const Compiler = struct {
         self.temps_in_use = 0;
         self.env_depth = saved_env_depth + 1;
         self.current_loop = null;
+        self.completion_reg = null;
 
         var inner_finished = false;
         defer {
@@ -7738,6 +7778,7 @@ pub const Compiler = struct {
                 self.temps_in_use = saved_temps_in_use;
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
+                self.completion_reg = saved_completion_reg;
             }
         }
 
@@ -7762,6 +7803,7 @@ pub const Compiler = struct {
         self.temps_in_use = saved_temps_in_use;
         self.env_depth = saved_env_depth;
         self.current_loop = saved_current_loop;
+        self.completion_reg = saved_completion_reg;
 
         return inner_chunk;
     }
@@ -12363,6 +12405,7 @@ fn compileFunctionTemplateExtNamed(
     const saved_temps_in_use = self.temps_in_use;
     const saved_env_depth = self.env_depth;
     const saved_current_loop = self.current_loop;
+    const saved_completion_reg = self.completion_reg;
     const saved_is_async = self.current_is_async;
     const saved_is_generator = self.current_is_generator;
     // §15.10 PTC — `in_tail_position` must reset across a
@@ -12434,6 +12477,7 @@ fn compileFunctionTemplateExtNamed(
     self.temps_in_use = 0;
     self.env_depth = saved_env_depth + 1 + (if (has_fn_name_env) @as(u8, 1) else @as(u8, 0));
     self.current_loop = null;
+    self.completion_reg = null;
     self.current_is_async = is_async;
     self.current_is_generator = is_generator;
 
@@ -12450,6 +12494,7 @@ fn compileFunctionTemplateExtNamed(
             self.temps_in_use = saved_temps_in_use;
             self.env_depth = saved_env_depth;
             self.current_loop = saved_current_loop;
+            self.completion_reg = saved_completion_reg;
             self.current_is_async = saved_is_async;
             self.current_is_generator = saved_is_generator;
             self.in_tail_position = saved_in_tail_position;
@@ -12576,6 +12621,7 @@ fn compileFunctionTemplateExtNamed(
     self.temps_in_use = saved_temps_in_use;
     self.env_depth = saved_env_depth;
     self.current_loop = saved_current_loop;
+    self.completion_reg = saved_completion_reg;
     self.current_is_async = saved_is_async;
     self.current_is_generator = saved_is_generator;
     self.in_tail_position = saved_in_tail_position;
@@ -12751,6 +12797,19 @@ fn compileScriptLikeChunk(
         // `freshSubBuilder` so the whole tree shares one base.
         c.global_lexical_base = @intCast(c.realm.globals.decl_env.count());
         c.builder.global_lexical_base = c.global_lexical_base;
+        // §13.2 / §19.2.1.3 — reserve the script/eval completion
+        // register (held for the whole top-level statement list) and
+        // seed it with `undefined`, so an empty program, a trailing
+        // declaration, or a no-iteration loop yields `undefined`
+        // rather than a leftover loop condition / `switch`
+        // discriminant. Each top-level ExpressionStatement updates it
+        // (`star`); the chunk tail returns it (`ldar`). Reserved
+        // first (index 0 in the top-level frame), never released —
+        // expression temps allocate above it.
+        c.completion_reg = try c.reserveTemp();
+        try c.builder.emitOp(.lda_undefined, start_span);
+        try c.builder.emitOp(.star, start_span);
+        try c.builder.emitU8(c.completion_reg.?);
         try c.hoistLetConst(program.body);
         try c.hoistVarAndFunctions(program.body);
         try c.emitVarInits(start_span);
@@ -12767,25 +12826,18 @@ fn compileScriptLikeChunk(
         .start = if (program.body.len > 0) program.body[program.body.len - 1].span().end else 0,
         .end = if (program.body.len > 0) program.body[program.body.len - 1].span().end else 0,
     };
-    // §16.1.6 ScriptEvaluation step 11 + §13.2 UpdateEmpty —
-    // declarations have **empty** completion. Today the
-    // accumulator carries whatever residue the last statement
-    // left (a `let x = 42;` initializer would leak `42`); reset
-    // to `undefined` when the trailing statement is unambiguously
-    // empty-completion so the REPL, `cynic run`, and embedder
-    // `evaluateScript` see the spec-aligned value. The full
-    // walk-and-stash needed for `42; let x = 99;` → 42 is
-    // deferred; declarations-trailing is the surface that
-    // actually mattered in REPL smoke-testing. d8 / Node REPL
-    // arrive at the same observable behaviour through their own
-    // shortcuts (V8's bytecode emits a literal `LdaUndefined`
-    // before `Return` for `let x = 42;`).
-    if (program.body.len > 0) {
-        const trailing_empty_completion = switch (program.body[program.body.len - 1]) {
-            .lexical, .function_decl, .class_decl, .import_decl, .export_decl, .empty, .debugger_ => true,
-            else => false,
-        };
-        if (trailing_empty_completion) try c.builder.emitOp(.lda_undefined, end_span);
+    // §16.1.6 ScriptEvaluation step 11 + §13.2 UpdateEmpty — the
+    // script / eval completion value is whatever the completion
+    // register holds: only value-producing ExpressionStatements
+    // moved it, so declarations, empty statements, and no-iteration
+    // loops correctly leave the prior value (seeded `undefined`).
+    // Load it back into the accumulator for `return_`. The error
+    // branch (`pending_global_decl_error`) never sets the register
+    // — it already emitted an unconditional throw, so the trailing
+    // `return_` there is dead code.
+    if (c.completion_reg) |r| {
+        try c.builder.emitOp(.ldar, end_span);
+        try c.builder.emitU8(r);
     }
     try c.builder.emitOp(.return_, end_span);
 
