@@ -383,3 +383,61 @@ the corpus under the relevant section's directory before adding.
   out-of-range backrefs with small numbers; a deliberately huge digit run
   (more digits than any integer width holds) would catch an engine that
   rejects the small form but mishandles the overflow boundary.
+
+### `Promise.withResolvers` skipped the NewPromiseCapability executor gate
+
+- **Fixed in:** `080d127`
+- **Spec:** §27.2.4.6 Promise.withResolvers + §27.2.1.5
+  NewPromiseCapability steps 7-8 (after `Construct(C, « executor »)`,
+  `[[Resolve]]` and `[[Reject]]` must each be callable).
+- **Reproducer:**
+  ```js
+  // A constructor that never invokes its executor leaves the
+  // capability's resolve/reject undefined — §27.2.1.5 must throw.
+  Promise.withResolvers.call(function () {});   // → TypeError
+
+  // And a Promise subclass's own constructor must run:
+  class P extends Promise {}
+  P.withResolvers().promise instanceof P;        // → true
+  ```
+- **Before fix:** `withResolvers` inlined a `%Promise%`-only
+  construction that never ran `Construct(C, « executor »)`, so the
+  bogus constructor yielded a `{ promise, resolve, reject }` object with
+  working-looking resolvers instead of throwing, and `P.withResolvers()`
+  produced a base Promise (subclass constructor skipped). node / JSC /
+  SpiderMonkey / QuickJS / engine262 all throw TypeError for the first
+  line.
+- **After fix:** routes through the shared `NewPromiseCapability(C)`,
+  which runs the `Construct` and enforces steps 7-8 — the first line
+  throws TypeError, and the subclass constructor runs.
+- **Suggested fixture shape:** positive runtime fixtures under
+  `built-ins/Promise/withResolvers/` — one
+  `assert.throws(TypeError, () => Promise.withResolvers.call(function(){}))`,
+  one asserting `class P extends Promise {};
+  P.withResolvers().promise instanceof P`. The existing `ctx-ctor.js`
+  exercises a well-behaved custom constructor; neither the
+  executor-never-invoked case nor the subclass-instance case is covered.
+
+### `GetSetRecord` accepted a Set-like with a negative `size`
+
+- **Fixed in:** `080d127`
+- **Spec:** §24.2.1.2 GetSetRecord step 3.f — if `numSize` < 0, throw a
+  RangeError. (Step 3.e already throws TypeError for NaN.)
+- **Reproducer:**
+  ```js
+  const bad = { size: -1, has() { return false; }, keys() { return [].values(); } };
+  new Set([1]).union(bad);   // → RangeError
+  ```
+- **Before fix:** `validateSetLike` clamped a negative size to 0 and
+  proceeded, so all seven ES2025 Set methods (union, intersection,
+  difference, symmetricDifference, isSubsetOf, isSupersetOf,
+  isDisjointFrom) accepted the malformed record. node / JSC /
+  SpiderMonkey / QuickJS / engine262 all throw RangeError.
+- **After fix:** a negative size throws RangeError, after the existing
+  step-3.e NaN→TypeError check.
+- **Suggested fixture shape:** negative-path runtime fixture under
+  `built-ins/Set/prototype/union/` (and the sibling methods) —
+  `assert.throws(RangeError, () => new Set([1]).union({ size: -1,
+  has(){…}, keys(){…} }))`. The corpus covers NaN-size (TypeError),
+  missing / non-callable has/keys, and a non-object receiver, but not the
+  negative-size RangeError of step 3.f.
