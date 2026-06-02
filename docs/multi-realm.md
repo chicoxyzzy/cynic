@@ -1085,15 +1085,36 @@ the V8/JSC behaviour, no per-object tag, no scoped sweep.
 
 1. **ShadowRealm finalizer.** When the `ShadowRealm` instance is
    collected, tear its child `Realm` down: `deregisterFromHeap`,
-   remove it from the owner's `child_realms`, then `deinit` +
+   remove it from the creating realm's `child_realms` (needs a
+   `created_by` back-link, since the child sits in that list and
+   `parent.deinit` would otherwise double-free), then `deinit` +
    `destroy`. **Must be deferred, not inline in the sweep** —
    freeing a realm's globals/intrinsics maps (which reference heap
-   objects mid-sweep) from inside `deinitFields` is reentrant heap
-   mutation. Enqueue the dying child onto a post-sweep teardown
-   queue (drained after `collectFull` returns), or route it through
-   the existing `setFinalizationEnqueue` job machinery. The child's
-   heap objects are then reclaimed by the following GC (problem #2,
-   already handled).
+   objects mid-sweep) from the collector is reentrant heap mutation.
+
+   Two implementation paths, both delicate (this is a bounded leak,
+   not a safety bug — scope accordingly):
+   - **Sweep-hook + post-sweep drain.** Detect a dying
+     `is_shadow_realm` object and enqueue its `host_data` child onto
+     `Heap.pending_realm_teardown`, drained after `collectFull` /
+     `collectYoung` return. Caveat: young and mature objects free
+     through *two* routines — `promoteYoungList` AND `sweepList` —
+     so both need the hook, and the enqueue must tolerate OOM
+     mid-sweep (fall back to the parent-deinit free).
+   - **Reuse the finalization-job machinery (recommended).**
+     Register the ShadowRealm wrapper as an internal weak target via
+     the `FinalizationRegistry` / `setFinalizationEnqueue`
+     plumbing (the engine already detects weak-target death,
+     §26.2 / `finalization_registries_seen`), with an engine
+     callback that runs the teardown at the next job boundary. No
+     new sweep hooks, no OOM-in-sweep, reuses tested death
+     detection — at the cost of threading an engine-internal
+     finalizer through user-facing FR code.
+
+   Either way the child's heap objects are reclaimed by the
+   following GC once it is deregistered (problem #2, already
+   handled). Do this as its own focused, `test262-safe`-gated
+   change — not bundled with unrelated work.
 2. **Bench the workload.** Add a "N short-lived ShadowRealms in a
    loop" bench; success = steady-state RSS flat across iterations.
 
