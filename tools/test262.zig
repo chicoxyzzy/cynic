@@ -1183,9 +1183,10 @@ pub fn main(init: std.process.Init) !void {
             if (maybe_r) |r| {
                 pre_stage4_hardened.slots[i] = .{
                     .name = tracked_pre_stage4_features[i],
-                    .pass = r.stats.pass() + r.stats.correctly_handled,
+                    .pass = r.stats.pass(),
                     .fail = r.stats.fail(),
                     .skip = r.stats.skip,
+                    .correctly_handled = r.stats.correctly_handled,
                     .total = r.stats.total,
                 };
             }
@@ -1197,6 +1198,7 @@ pub fn main(init: std.process.Init) !void {
                     .pass = r.stats.pass(),
                     .fail = r.stats.fail(),
                     .skip = r.stats.skip,
+                    .correctly_handled = r.stats.correctly_handled,
                     .total = r.stats.total,
                 };
             }
@@ -3811,8 +3813,8 @@ fn writeFileBody(
     try out.appendSlice(gpa,
         \\## Current scores
         \\
-        \\| posture | passing | failing | expected fails | total | pass% |
-        \\|---|---:|---:|---:|---:|---:|
+        \\| posture | passing | failing | expected fails | skip | total | pass% |
+        \\|---|---:|---:|---:|---:|---:|---:|
         \\
     );
     // Three rows in user-visible order: the `--allow=eval` opt-in
@@ -3834,8 +3836,11 @@ fn writeFileBody(
         \\> (Annex B not shipped, strict-only, no Intl, eval-off, SES
         \\> throw) is a **expected fail** rather than a real
         \\> engine bug. Plain **failing** is what's left over — real
-        \\> engine work to do. The `--allow=eval` row is always `n/a`
-        \\> until that opt-in ships.
+        \\> engine work to do. **skip** is in-corpus fixtures Cynic
+        \\> doesn't run (capability / host gaps), excluded from the
+        \\> pass% numerator; the columns decompose exactly as
+        \\> `passing + failing + expected fails + skip = total`. The
+        \\> `--allow=eval` row is always `n/a` until that opt-in ships.
         \\
         \\
     );
@@ -4072,15 +4077,16 @@ fn writeAllowEvalPlaceholderRow(
     out: *std.ArrayListUnmanaged(u8),
 ) !void {
     var buf: [256]u8 = undefined;
-    const line = try std.fmt.bufPrint(&buf, "| {s} | n/a | n/a | n/a | n/a | n/a |\n", .{
+    const line = try std.fmt.bufPrint(&buf, "| {s} | n/a | n/a | n/a | n/a | n/a | n/a |\n", .{
         postureLabel(.unhardened_allow_eval),
     });
     try out.appendSlice(gpa, line);
 }
 
-/// Column shape: passing | failing | expected fails | total |
+/// Column shape: passing | failing | expected fails | skip | total |
 /// pass%. `r.pass` is stored as `(passing + correctly_handled)`, so we
 /// recover `passing` via subtraction to emit the passing/failing split.
+/// `skip` is what's left of `total` once the other three are removed.
 fn writeMiniRow(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -4089,10 +4095,11 @@ fn writeMiniRow(
     var buf: [384]u8 = undefined;
     const engine_pass = r.pass - r.correctly_handled; // == passing
     const engine_fail = if (r.attempted >= engine_pass) r.attempted - engine_pass else 0;
+    const skip = r.total - engine_pass - engine_fail - r.correctly_handled;
     const line = try std.fmt.bufPrint(
         &buf,
-        "| {s} | {d} | {d} | {d} | {d} | {d:.2} % |\n",
-        .{ postureLabel(r.mode), engine_pass, engine_fail, r.correctly_handled, r.total, r.spec_pct },
+        "| {s} | {d} | {d} | {d} | {d} | {d} | {d:.2} % |\n",
+        .{ postureLabel(r.mode), engine_pass, engine_fail, r.correctly_handled, skip, r.total, r.spec_pct },
     );
     try out.appendSlice(gpa, line);
 }
@@ -4180,6 +4187,10 @@ fn writeScoreboard(
         \\- **`failing`** is the real engine-work signal — failures with
         \\  no policy bucket. Nearly posture-invariant: the policies
         \\  relabel expected fails, they don't create engine bugs.
+        \\- **`skip`** is in-corpus fixtures Cynic doesn't run (capability
+        \\  / host gaps); excluded from the `pass%` numerator. The four
+        \\  columns decompose exactly:
+        \\  `passing + failing + expected fails + skip = total`.
         \\- **hardened** matches `cynic run`; SES-divergent fixtures are
         \\  expected fails. **unhardened** turns SES off, so those flip
         \\  from `expected fails` to `passing`. `pass%` barely moves (it
@@ -4218,7 +4229,7 @@ fn writeScoreboard(
                 3 => "1–9 fails — engine-work tier",
                 else => "0 fails — passing / all-policy (sorted by expected fails ↓)",
             };
-            const hdr = try std.fmt.bufPrint(&buf, "\n**{s}**\n\n| area · posture | passing | failing | expected fails | total | pass% |\n|---|---:|---:|---:|---:|---:|\n", .{label});
+            const hdr = try std.fmt.bufPrint(&buf, "\n**{s}**\n\n| area · posture | passing | failing | expected fails | skip | total | pass% |\n|---|---:|---:|---:|---:|---:|---:|\n", .{label});
             try out.appendSlice(gpa, hdr);
             prev_tier = tier;
         }
@@ -4234,9 +4245,9 @@ fn writeScoreboard(
         // posture rows below carry only the posture label.
         {
             const hdr = if (strike)
-                try std.fmt.bufPrint(&row_buf, "| ~~**`{s}`**~~ | | | | | |\n", .{b.name})
+                try std.fmt.bufPrint(&row_buf, "| ~~**`{s}`**~~ | | | | | | |\n", .{b.name})
             else
-                try std.fmt.bufPrint(&row_buf, "| **`{s}`** | | | | | |\n", .{b.name});
+                try std.fmt.bufPrint(&row_buf, "| **`{s}`** | | | | | | |\n", .{b.name});
             try out.appendSlice(gpa, hdr);
         }
 
@@ -4244,9 +4255,9 @@ fn writeScoreboard(
         {
             const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass + b.correctly_handled)) / @as(f64, @floatFromInt(b.total));
             const line = if (strike)
-                try std.fmt.bufPrint(&row_buf, "| ~~· hardened~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{ b.pass, b.fail, b.correctly_handled, b.total, pct })
+                try std.fmt.bufPrint(&row_buf, "| ~~· hardened~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{ b.pass, b.fail, b.correctly_handled, b.skip, b.total, pct })
             else
-                try std.fmt.bufPrint(&row_buf, "| · hardened | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ b.pass, b.fail, b.correctly_handled, b.total, pct });
+                try std.fmt.bufPrint(&row_buf, "| · hardened | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ b.pass, b.fail, b.correctly_handled, b.skip, b.total, pct });
             try out.appendSlice(gpa, line);
         }
 
@@ -4256,13 +4267,13 @@ fn writeScoreboard(
             if (u_opt) |u| {
                 const pct: f64 = if (u.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(u.pass + u.correctly_handled)) / @as(f64, @floatFromInt(u.total));
                 const line = if (strike)
-                    try std.fmt.bufPrint(&row_buf, "| ~~· {s}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{ posture, u.pass, u.fail, u.correctly_handled, u.total, pct })
+                    try std.fmt.bufPrint(&row_buf, "| ~~· {s}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{ posture, u.pass, u.fail, u.correctly_handled, u.skip, u.total, pct })
                 else
-                    try std.fmt.bufPrint(&row_buf, "| · {s} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ posture, u.pass, u.fail, u.correctly_handled, u.total, pct });
+                    try std.fmt.bufPrint(&row_buf, "| · {s} | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ posture, u.pass, u.fail, u.correctly_handled, u.skip, u.total, pct });
                 try out.appendSlice(gpa, line);
             } else {
                 // No unhardened data (null map / filtered run).
-                const line = try std.fmt.bufPrint(&row_buf, "| · {s} | — | — | — | — | — |\n", .{posture});
+                const line = try std.fmt.bufPrint(&row_buf, "| · {s} | — | — | — | — | — | — |\n", .{posture});
                 try out.appendSlice(gpa, line);
             }
         }
@@ -4300,11 +4311,11 @@ fn writePreStage4Scoreboard(
         \\throws counted as expected fails — and an
         \\**(unhardened)** row against bare ECMA-262. Same column
         \\shape as the main `## Current scores` table:
-        \\`passing | failing | expected fails | total | pass%`.
+        \\`passing | failing | expected fails | skip | total | pass%`.
         \\These fixtures are excluded from the top-line score.
         \\
-        \\| feature | passing | failing | expected fails | total | pass% |
-        \\|---|---:|---:|---:|---:|---:|
+        \\| feature | passing | failing | expected fails | skip | total | pass% |
+        \\|---|---:|---:|---:|---:|---:|---:|
         \\
     );
 
@@ -4313,17 +4324,13 @@ fn writePreStage4Scoreboard(
         const name = tracked_pre_stage4_features[i];
         const h = pre_stage4_hardened.slots[i];
         if (h.total != 0) {
-            // PreStage4Stats today uses `skip` for the policy-CH
-            // count under hardened sweeps (no separate ch field);
-            // shipped pre-Stage-4 proposals have fail=0, so the
-            // proxy holds. Same columns as the main scoreboard.
-            const pct: f64 = 100.0 * @as(f64, @floatFromInt(h.pass + h.skip)) / @as(f64, @floatFromInt(h.total));
-            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (hardened) | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ name, h.pass, h.fail, h.skip, h.total, pct }));
+            const pct: f64 = 100.0 * @as(f64, @floatFromInt(h.pass + h.correctly_handled)) / @as(f64, @floatFromInt(h.total));
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (hardened) | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ name, h.pass, h.fail, h.correctly_handled, h.skip, h.total, pct }));
         }
         const u = pre_stage4_unhardened.slots[i];
         if (u.total != 0) {
-            const pct: f64 = 100.0 * @as(f64, @floatFromInt(u.pass)) / @as(f64, @floatFromInt(u.total));
-            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (unhardened) | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ name, u.pass, u.fail, u.skip, u.total, pct }));
+            const pct: f64 = 100.0 * @as(f64, @floatFromInt(u.pass + u.correctly_handled)) / @as(f64, @floatFromInt(u.total));
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` (unhardened) | {d} | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ name, u.pass, u.fail, u.correctly_handled, u.skip, u.total, pct }));
         }
     }
     try out.appendSlice(gpa, "\n");
