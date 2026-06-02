@@ -1895,9 +1895,15 @@ fn validateSetLike(realm: *Realm, op: []const u8, value: Value) NativeError!SetL
         const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (size is NaN)", .{op}) catch op;
         return throwTypeError(realm, msg);
     }
-    const size_usize: usize = if (size_d < 0)
-        0
-    else if (std.math.isInf(size_d))
+    // §24.2.1.2 GetSetRecord step 3.f — a negative `size` is a
+    // RangeError, not a silently-clamped zero. (Step 3.e already
+    // rejected NaN as a TypeError above.)
+    if (size_d < 0) {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (size is negative)", .{op}) catch op;
+        return intrinsics.throwRangeError(realm, msg);
+    }
+    const size_usize: usize = if (std.math.isInf(size_d))
         std.math.maxInt(usize)
     else
         @intFromFloat(@trunc(size_d));

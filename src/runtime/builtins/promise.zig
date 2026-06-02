@@ -2071,35 +2071,33 @@ fn promiseTry(realm: *Realm, this_value: Value, args: []const Value) NativeError
 /// path.
 fn promiseWithResolvers(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    // §27.2.4.6 step 1 — Let C be the this value.
     const ctor = try thisAsPromiseCtor(realm, this_value, "withResolvers");
-    const promise_v = allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
+    // §27.2.4.6 step 2 — Let promiseCapability be ? NewPromiseCapability(C).
+    // Route through the shared helper rather than inlining a
+    // %Promise%-only construction: NewPromiseCapability runs
+    // Construct(C, «executor») and enforces §27.2.1.5 steps 7-8
+    // (resolve/reject must be callable). A constructor that never
+    // invokes its executor — e.g. `Promise.withResolvers.call(function(){})`
+    // — leaves them undefined and must throw a TypeError; a Promise
+    // subclass runs its real constructor through this path too.
+    const cap = try newPromiseCapability(realm, ctor);
+    // `cap` lives only in this native frame (the GC does not scan it),
+    // so root the promise + resolving functions across the result-object
+    // allocation and property writes below.
+    const wr_sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer wr_sc.close();
+    wr_sc.push(cap.promise) catch return error.OutOfMemory;
+    wr_sc.push(heap_mod.taggedFunction(cap.resolve)) catch return error.OutOfMemory;
+    wr_sc.push(heap_mod.taggedFunction(cap.reject)) catch return error.OutOfMemory;
 
-    // Per §27.2.1.5 NewPromiseCapability, the Resolve and Reject
-    // functions have name = "" and are not constructors. The
-    // 1-arg `length` matches spec (single (resolution) / (reason)
-    // parameter).
-    const resolve_impl = realm.heap.allocateFunctionNative(realm, promiseResolveImpl, 1, "") catch return error.OutOfMemory;
-    resolve_impl.proto = realm.intrinsics.function_prototype;
-    resolve_impl.has_construct = false;
-    const resolve_fn = realm.heap.allocateFunctionNative(realm, boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
-    resolve_fn.proto = realm.intrinsics.function_prototype;
-    resolve_fn.has_construct = false;
-    realm.heap.setBoundTarget(resolve_fn, resolve_impl);
-    realm.heap.setBoundThis(resolve_fn, promise_v);
-
-    const reject_impl = realm.heap.allocateFunctionNative(realm, promiseRejectImpl, 1, "") catch return error.OutOfMemory;
-    reject_impl.proto = realm.intrinsics.function_prototype;
-    reject_impl.has_construct = false;
-    const reject_fn = realm.heap.allocateFunctionNative(realm, boundResolveTrampoline, 1, "") catch return error.OutOfMemory;
-    reject_fn.proto = realm.intrinsics.function_prototype;
-    reject_fn.has_construct = false;
-    realm.heap.setBoundTarget(reject_fn, reject_impl);
-    realm.heap.setBoundThis(reject_fn, promise_v);
-
+    // §27.2.4.6 steps 3-7 — wrap { promise, resolve, reject } in an
+    // ordinary object created from %Object.prototype%.
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    wr_sc.push(heap_mod.taggedObject(obj)) catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
-    obj.set(realm.allocator, "promise", promise_v) catch return error.OutOfMemory;
-    obj.set(realm.allocator, "resolve", heap_mod.taggedFunction(resolve_fn)) catch return error.OutOfMemory;
-    obj.set(realm.allocator, "reject", heap_mod.taggedFunction(reject_fn)) catch return error.OutOfMemory;
+    obj.set(realm.allocator, "promise", cap.promise) catch return error.OutOfMemory;
+    obj.set(realm.allocator, "resolve", heap_mod.taggedFunction(cap.resolve)) catch return error.OutOfMemory;
+    obj.set(realm.allocator, "reject", heap_mod.taggedFunction(cap.reject)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(obj);
 }
