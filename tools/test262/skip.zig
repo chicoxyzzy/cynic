@@ -19,12 +19,7 @@
 //!      by the harness's per-phase feature-tag gate, not by this file,
 //!      and get their own dedicated `feature:<name>` scoreboard.)
 //!
-//!   3. `pathIsCurrentlySkipped` — tech-debt skips: in-scope fixtures
-//!      Cynic *should* pass but doesn't yet (cross-realm attribution,
-//!      a vendored-matcher gap). Counted in `total`, lowering `pass%`
-//!      — the live "work left" signal.
-//!
-//!   4. `pathPolicyKind` — the policy classifier. For a fixture that
+//!   3. `pathPolicyKind` — the policy classifier. For a fixture that
 //!      ran and FAILED, decide whether the failure is one Cynic makes
 //!      *on purpose* (Annex B not shipped, strict-only, no Intl,
 //!      eval surface off) and therefore counts as "correctly handled"
@@ -506,9 +501,7 @@ pub const ses_substrings = [_][]const u8{
     // proto adapter, both bigger than the surface this fixture
     // exercises. Skip until that lands. Tracked as a *pending
     // engine refactor* — listed here under PERMANENT so the
-    // corpus denominator stays exact; the
-    // `pending_refactor_exact_paths` list in CURRENTLY SKIPPED
-    // collects the originally-deferred stragglers.
+    // corpus denominator stays exact.
     "language/statements/function/S13.2.2_A1_T1.js",
     "language/statements/function/S13.2.2_A1_T2.js",
 
@@ -1061,17 +1054,6 @@ pub const stage_maturity_features = [_][]const u8{
     "await-dictionary",
 };
 
-/// Path-prefix skips for pre-Stage-4 proposals whose entire
-/// fixture sub-tree would otherwise score as 0 / N noise. Same
-/// stage-maturity rationale as `stage_maturity_features`: the
-/// proposal hasn't reached a published edition yet, so shipping
-/// conformance against it isn't the point.
-pub const stage_maturity_path_prefixes = [_][]const u8{
-    // Empty: ShadowRealm — the one Stage-2.7 surface that might live
-    // here — ships behind `--enable=ShadowRealm`, so the harness scores
-    // it in the `feature:ShadowRealm` phase rather than skipping by path.
-};
-
 // ── Vendor gaps ─────────────────────────────────────────────────────
 //
 // Standardised features blocked on the vendored libregexp matcher
@@ -1081,81 +1063,6 @@ pub const stage_maturity_path_prefixes = [_][]const u8{
 pub const vendor_features = [_][]const u8{
     // Empty: no feature-tagged proposal is currently blocked on the
     // vendored libregexp matcher or on unshipped Unicode-property data.
-};
-
-pub const vendor_path_contains = [_][]const u8{
-    // Empty: the native Perlex engine now owns the `\p{…}` property
-    // escapes and the whole `/v` UnicodeSets grammar, so no RegExp path
-    // bottoms out on a libregexp gap today.
-};
-
-// ── Single-realm path-contains ──────────────────────────────────────
-//
-// Cross-realm fixture families spread across many buckets. Each
-// bottoms out on `$262.createRealm()` / `new Realm(`. Tracked as
-// deferred because per the inline comments we'd lift these if
-// multi-realm landed; the *exact*-path single-realm siblings
-// live in PERMANENT above (their spec story doesn't move under
-// any plausible future Cynic posture).
-
-pub const single_realm_path_contains = [_][]const u8{
-    // Cross-realm fixtures that depend on per-realm *error / identity
-    // attribution*. `$262.createRealm()` IS exposed to the test262
-    // harness (a real child `Realm` sharing the parent heap — see
-    // `test262CreateRealm`), so three whole families that used to live
-    // here now run:
-    //   • `proto-from-ctor-realm*.js` — §10.1.14
-    //     GetPrototypeFromConstructor derives the default prototype
-    //     from `GetFunctionRealm(newTarget)`'s intrinsics
-    //     (`remapDefaultProtoToCtorRealm` in lantern/call.zig), so a
-    //     `newTarget` minted by `other.Function` resolves to the
-    //     *other* realm's `%X.prototype%`.
-    //   • the RegExp-prototype-getter `cross-realm.js` siblings
-    //     (`dotAll`/`global`/`hasIndices`/`ignoreCase`/`multiline`/
-    //     `source`/`sticky`/`unicode`/`unicodeSets`) — each asserts the
-    //     §22.2.6 brand-check / SameValue TypeError comes from the
-    //     *other* realm. The getters resolve `%RegExpPrototype%` and
-    //     throw via `active_native_fn_realm` (the dispatcher records
-    //     the callee getter's realm before it runs — regexp.zig).
-    //   • `Function.prototype.{apply,bind}/*-realm.js` — apply's
-    //     §20.2.3.1 IsCallable / CreateListFromArrayLike TypeErrors
-    //     route through the callee realm (`active_native_fn_realm`,
-    //     function.zig); bind's §10.2.5 GetFunctionRealm walks the
-    //     `[[BoundTargetFunction]]` chain (`bound.realm = target.realm`
-    //     + `getFunctionRealm()` recursion) so the proto lookup picks
-    //     the innermost target's realm.
-    //
-    // The broader `Symbol/*/cross-realm.js` and
-    // `RegExp/escape/cross-realm.js` fixtures are NOT realm-of-origin
-    // tests — they assert only *identity / functional* invariants
-    // (well-known symbols and the global symbol registry are agent-wide
-    // per §6.1.5.1 / §20.4.2.2, and a cross-realm functional call works
-    // because the child shares the parent heap). `test262CreateRealm`
-    // already calls `shareWellKnownSymbolsWith` and the registry lives
-    // on the shared `heap.symbol_registry`, so those pass — they are
-    // deliberately NOT matched here.
-    //
-    // The one straggler — the `-multiple-evaluations-of-class-realm-
-    // function-ctor.js` private-brand fixtures — builds its class via
-    // `new other.Function(sourceString)`, i.e. the eval surface. That's
-    // an eval refusal by design, so it classifies as an **expected
-    // fail** via the `eval` policy (`pathPolicyKind` matches the
-    // `-multiple-evaluations-of-class-realm-function-ctor` needle in
-    // `ses_substrings`), NOT an in-corpus skip. So this list is empty:
-    // no cross-realm family is a counted skip today.
-};
-
-// ── Implementation pending ──────────────────────────────────────────
-//
-// Standardised surfaces Cynic hasn't gotten to yet. Multi-week
-// projects path-skipped wholesale so they don't drown the
-// scoreboard in 0 / N noise.
-
-pub const deferred_path_prefixes = [_][]const u8{
-    // Empty: the whole Temporal namespace ships (ISO calendar only,
-    // offset-only/UTC time zones — no IANA tzdata), so nothing under
-    // `built-ins/Temporal/` is deferred. The `skip: Temporal fully in
-    // scope` test guards against a subtree regressing back to here.
 };
 
 // ── eval-dependent — eval surface, individual-fixture form ──────────
@@ -1211,29 +1118,6 @@ pub const eval_dependent_exact_paths = [_][]const u8{
     "built-ins/GeneratorFunction/proto-from-ctor-realm-prototype.js",
 };
 
-// ── Focused refactor pending ────────────────────────────────────────
-//
-// Reserved for fixtures blocked on a small, bounded engine refactor.
-
-pub const pending_refactor_exact_paths = [_][]const u8{
-    // (empty — no fixtures are currently blocked on a bounded engine
-    //  refactor. The cross-realm ordinary-function construct cluster
-    //  that lived here — Array/from, Array/of, Function/prototype/bind
-    //  proto-from-ctor-realm — was closed by two coordinated changes:
-    //  (1) §10.2.2 base-kind [[Construct]] now derives its
-    //  intrinsicDefaultProto as %Object.prototype% (resolved against the
-    //  ctor realm) for ordinary-function targets at every construct site
-    //  — `constructValue` + `Reflect.construct` + the interpreter
-    //  `new_call` opcode (ordinary & bound) — via
-    //  `baseConstructIntrinsicDefaultProto` in lantern/call.zig; and
-    //  (2) the empty function from `new Function()` is flagged
-    //  `native_ordinary_function` so it's treated as the ordinary
-    //  function it is (§20.2.1.1.1) rather than a built-in constructor
-    //  keying off its own `.prototype` slot — the fixtures build their
-    //  cross-realm constructor as `new other.Function()`, which is
-    //  native-implemented in Cynic.)
-};
-
 // ════════════════════════════════════════════════════════════════════
 //   Lookup
 // ════════════════════════════════════════════════════════════════════
@@ -1241,40 +1125,6 @@ pub const pending_refactor_exact_paths = [_][]const u8{
 pub fn pathIsSkipped(rel_path: []const u8) bool {
     for (corpus_excluded_prefixes) |prefix| {
         if (std.mem.startsWith(u8, rel_path, prefix)) return true;
-    }
-    return false;
-}
-
-/// Tech-debt skips by path: fixtures *in* scope that Cynic skips
-/// **today** but should eventually pass once it finishes the
-/// engineering it owes — a cross-realm fixture awaiting multi-realm
-/// error attribution, or a published-edition feature blocked on a
-/// vendor/infra gap. The caller keeps these **in** `total` and counts
-/// them as `skip`, so they lower `pass%` — the live "work left"
-/// signal. (A fixture that simply *fails* a policy Cynic ships by
-/// design is not here — it runs and classifies as `correctly handled`
-/// via `pathPolicyKind`. Pre-Stage-4 proposals aren't here either —
-/// they're recognised by feature tag in `featureIsUnimplementedProposal`.)
-///
-/// Empty right now: every source array below is empty, so this returns
-/// false for every path today. (The `-realm-function-ctor.` private-
-/// brand fixtures that were the one needle here are eval-surface
-/// refusals — they now classify as `expected fails` via the `eval`
-/// policy in `pathPolicyKind`, not as counted skips.)
-pub fn pathIsCurrentlySkipped(rel_path: []const u8) bool {
-    inline for (.{ stage_maturity_path_prefixes, deferred_path_prefixes }) |group| {
-        for (group) |prefix| {
-            if (std.mem.startsWith(u8, rel_path, prefix)) return true;
-        }
-    }
-    for (vendor_path_contains) |needle| {
-        if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
-    }
-    for (single_realm_path_contains) |needle| {
-        if (std.mem.indexOf(u8, rel_path, needle) != null) return true;
-    }
-    for (pending_refactor_exact_paths) |exact| {
-        if (std.mem.eql(u8, rel_path, exact)) return true;
     }
     return false;
 }
@@ -1492,32 +1342,16 @@ test "skip: pre-Stage-4 proposals dropped from total" {
     try testing.expect(!featureIsUnimplementedProposal("explicit-resource-management"));
 }
 
-test "skip: tech-debt path skips (counted in total, lower pass%)" {
-    // No tech-debt path skips today — every source array is empty.
-    // The `-realm-function-ctor.` private-brand fixtures that used to
-    // sit here are eval refusals: they classify as `expected fails`
-    // via the `eval` policy in `pathPolicyKind`, not as counted skips.
+test "policy: -realm-function-ctor. fixtures are an eval expected-fail" {
     const rfc = "language/expressions/class/private-method-brand-check-multiple-evaluations-of-class-realm-function-ctor.js";
-    try testing.expect(!pathIsCurrentlySkipped(rfc));
     try testing.expectEqual(PolicyKind.eval, pathPolicyKind(rfc, &.{}, false).?);
-    // Temporal fully ships — not a tech-debt skip.
-    try testing.expect(!pathIsCurrentlySkipped("built-ins/Temporal/Now/extensible.js"));
-    try testing.expect(!pathIsCurrentlySkipped("built-ins/Temporal/PlainDateTime/prototype/add/branding.js"));
-    // RegExp /v and property-escape surfaces ship via Perlex — not skipped.
-    try testing.expect(!pathIsCurrentlySkipped(
-        "built-ins/RegExp/property-escapes/special-property-value-Script_Extensions-Unknown.js",
-    ));
-    try testing.expect(!pathIsCurrentlySkipped(
-        "built-ins/RegExp/unicodeSets/generated/character-class-difference-character.js",
-    ));
 }
 
 test "skip: ShadowRealm is not path-skipped (feature-gated)" {
     // ShadowRealm ships behind `--enable=ShadowRealm`; the harness's
     // per-phase feature-tag gate keeps it out of the main rows, not a
-    // skip.zig path list. So neither walk-skip nor tech-debt-skip fires.
+    // skip.zig path list. So the corpus walk-skip doesn't fire.
     try testing.expect(!pathIsSkipped("built-ins/ShadowRealm/constructor.js"));
-    try testing.expect(!pathIsCurrentlySkipped("built-ins/ShadowRealm/constructor.js"));
     // The sloppy-mode `evaluate` fixture classifies as no_strict policy.
     try testing.expectEqual(
         PolicyKind.no_strict,

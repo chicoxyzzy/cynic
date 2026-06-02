@@ -2143,21 +2143,6 @@ fn classifyAndRun(
         return .{ .kind = .skip, .skip_reason = .by_path };
     }
 
-    // Currently-skipped paths: Temporal, libregexp `/v` gaps,
-    // cross-realm fixtures, the `dynamic-import 2nd-param-*`
-    // options-arg cluster, etc. Tech debt — Cynic SHOULD
-    // eventually attempt these, so they stay in corpus
-    // (registering as `.skip`, not `.fail`). Trying to actually
-    // run them would either crash (Temporal globals missing,
-    // libregexp parse errors) or produce false-rejects with no
-    // diagnostic value. Track them honestly as "yes we should
-    // do this; no, not today" — that's what makes pass% an
-    // honest progress metric instead of a denominator-trimmed
-    // headline.
-    if (skip_rules.pathIsCurrentlySkipped(rel)) {
-        return .{ .kind = .skip, .skip_reason = .by_path };
-    }
-
     // Read the file. Cap at a generous 8 MiB — far above any real
     // test262 fixture.
     const test_source = corpus.readFileAlloc(io, rel, arena, .limited(8 * 1024 * 1024)) catch {
