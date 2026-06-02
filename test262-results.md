@@ -3,7 +3,7 @@
 **Cynic passes 98.83 % of its 50894-fixture test262 corpus** under the default (hardened SES) posture (`cynic run`). The breakdown:
 
 - **40178 passing** — Cynic produced the spec-expected result.
-- **10120 expected fails** — failures that hit a Cynic design policy (Annex B not shipped, strict-only, no Intl, eval-off, SES throw) rather than an engine bug. Counted as spec-correct in `pass%` because Cynic's deliberate "no" is the right answer for the policy it ships.
+- **10123 expected fails** — failures that hit a Cynic design policy (Annex B not shipped, strict-only, no Intl, eval-off, SES throw) rather than an engine bug. Counted as spec-correct in `pass%` because Cynic's deliberate "no" is the right answer for the policy it ships.
 - **593 failing** — real engine failures with no policy bucket. Work to do.
 - **Out of total**, dropped before `corpus`: the upstream `harness/` and `staging/` paths, and every Stage ≤ 3 proposal (decorators, import-defer, source-phase-imports, import-bytes, immutable-arraybuffer, await-dictionary, plus shipped joint-iteration / ShadowRealm — those get their own dedicated scoreboard).
 
@@ -11,40 +11,22 @@
 
 | posture | passing | failing | expected fails | skip | total | pass% |
 |---|---:|---:|---:|---:|---:|---:|
-| **unhardened, `--allow=eval`** † | 44074 | 604 | 6213 | 3 | 50894 | 98.81 % |
-| **unhardened** (`cynic --unhardened`) | 44074 | 600 | 6217 | 3 | 50894 | 98.82 % |
-| **hardened** (default — `cynic run`) | 40178 | 593 | 10120 | 3 | 50894 | 98.83 % |
+| **unhardened, `--allow=eval`** | 44617 | 920 | 5357 | 0 | 50894 | 98.19 % |
+| **unhardened** (`cynic --unhardened`) | 44074 | 600 | 6220 | 0 | 50894 | 98.82 % |
+| **hardened** (default — `cynic run`) | 40178 | 593 | 10123 | 0 | 50894 | 98.83 % |
 
 > **pass%** = `(passing + expected fails) / total`.
 > A fixture that fails because of a Cynic design policy
 > (Annex B not shipped, strict-only, no Intl, eval-off, SES
-> throw) is an **expected fail** rather than a real
+> throw) is a **expected fail** rather than a real
 > engine bug. Plain **failing** is what's left over — real
 > engine work to do. **skip** is in-corpus fixtures Cynic
-> doesn't run (capability / host gaps — cross-realm,
-> eval-helper), excluded from the pass% numerator; the
-> columns decompose exactly as
-> `passing + failing + expected fails + skip = total`.
->
-> **† the `--allow=eval` row is a projection**, not a measured
-> sweep. The `--allow=eval` *flag* ships (`Realm.allow_eval` plus
-> the CLI verb), but the eval *engine* does not — the flag only
-> swaps the refusal class (SyntaxError → EvalError), so
-> eval-dependent fixtures still don't execute. This row therefore
-> projects the score for when the eval **engine** lands (see
-> `docs/ses-alignment.md` §Phase 4), not the current flag-only
-> state. At that point, turning eval on makes the eval-dependent
-> fixtures (today counted as expected fails) attempt to run; most
-> would pass, but that relabel stays inside the pass-counted
-> numerator, so it never moves pass%. The *only* score-affecting
-> change is the **4 indirect-eval Sputnik fixtures** — they fail
-> even with eval on (strict-only parses the eval'd source strict,
-> so PerformEval throws the wrong error class), so they move from
-> expected fail to real failing. The projected row is the
-> unhardened row with those 4 shifted: `failing` 600 → 604,
-> `expected fails` 6217 → 6213, pass% 98.82 → 98.81. (Re-applied
-> by hand after each `--write-results` sweep, which regenerates
-> this table to `n/a`.)
+> doesn't run (capability / host gaps), excluded from the
+> pass% numerator; the columns decompose exactly as
+> `passing + failing + expected fails + skip = total`. The
+> `--allow=eval` row is a measured sweep (`--phase=eval`):
+> the eval surface runs for real, so its failures are real
+> engine work, not expected fails.
 
 *SES witness fidelity*: **10 / 10** witnesses are SES expected fails (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
@@ -57,12 +39,12 @@ refer to the same parse → compile → run sweep.
 
 - **unhardened, `--allow=eval`** — unhardened plus the
   eval surface (`eval()`, `new Function(string)`, …) opted
-  in. **Projected, not measured** (†): the `--allow=eval`
-  flag ships, but the eval *engine* doesn't yet (see
-  `docs/ses-alignment.md` §Phase 4), so the flag only changes
-  the refusal class and this row stays derived from the
-  unhardened sweep — see the † note under the table. A real
-  opt-in sweep replaces it when the eval engine lands.
+  in. A **measured** sweep (`--phase=eval`,
+  `realm.allow_eval = true`): the eval surface runs for real,
+  so its remaining gaps count as plain `failing` (real work)
+  rather than eval-off `expected fails`. That's why this row
+  has more `failing` and fewer `expected fails` than the
+  unhardened row — the eval-off → eval-on split made visible.
 - **unhardened** — `cynic --unhardened` opt-out. Eval off
   (so eval-dependent fixtures fail and count as correctly
   handled fails), Annex B / Intl / noStrict failures too.
@@ -159,10 +141,12 @@ Bucketed on the first two path components (`built-ins/Set`,
   fails split** shifts — that's the real per-posture signal,
   heaviest in the SES-hot built-ins (`Array`, `Object`,
   `TypedArray`, `String`, …).
-- **+eval** is the `--allow=eval` projection; per area it
-  equals the unhardened row (the 4 indirect-eval fixtures that
-  distinguish them globally don't localize — see the
-  `--allow=eval` row in `## Current scores`).
+- **+eval** here is a per-area *approximation* — these rows
+  reuse the unhardened buckets, so they don't reflect the eval
+  surface running for real. The **measured** `--allow=eval`
+  totals (eval fixtures run, failures counted as real work)
+  are the `unhardened, --allow=eval` row in `## Current
+  scores`, sourced from the `--phase=eval` sweep.
 - The **`1+ fails` tiers** are the engine-work list — today
   mostly the SAB/Atomics surface plus the ~13-fixture
   cross-realm cluster.
@@ -227,9 +211,9 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · unhardened | 1206 | 2 | 15 | 0 | 1223 | 100 % |
 | · +eval | 1206 | 2 | 15 | 0 | 1223 | 100 % |
 | **`language/expressions`** | | | | | | |
-| · hardened | 10017 | 1 | 661 | 3 | 10682 | 100 % |
-| · unhardened | 10132 | 1 | 546 | 3 | 10682 | 100 % |
-| · +eval | 10132 | 1 | 546 | 3 | 10682 | 100 % |
+| · hardened | 10017 | 1 | 664 | 0 | 10682 | 100 % |
+| · unhardened | 10132 | 1 | 549 | 0 | 10682 | 100 % |
+| · +eval | 10132 | 1 | 549 | 0 | 10682 | 100 % |
 
 **0 fails — passing / all-policy (sorted by expected fails ↓)**
 
@@ -635,7 +619,6 @@ Bucketed on the first two path components (`built-ins/Set`,
 | · hardened | 1 | 0 | 0 | 0 | 1 | 100 % |
 | · unhardened | 1 | 0 | 0 | 0 | 1 | 100 % |
 | · +eval | 1 | 0 | 0 | 0 | 1 | 100 % |
-
 ## Pre-Stage-4 proposals shipped
 
 Per-feature scores for the TC39 proposals Cynic ships at
@@ -652,25 +635,25 @@ These fixtures are excluded from the top-line score.
 
 | posture | passing | failing | expected fails | skip | total | pass% |
 |---|---:|---:|---:|---:|---:|---:|
-| hardened | 70 | 0 | 8 | 3 | 81 | 96 % |
-| unhardened | 76 | 0 | 2 | 3 | 81 | 96 % |
+| hardened | 70 | 0 | 8 | 0 | 78 | 100 % |
+| unhardened | 76 | 0 | 2 | 0 | 78 | 100 % |
 
 ### `ShadowRealm`
 
 | posture | passing | failing | expected fails | skip | total | pass% |
 |---|---:|---:|---:|---:|---:|---:|
-| hardened | 43 | 0 | 21 | 3 | 67 | 96 % |
-| unhardened | 63 | 0 | 1 | 3 | 67 | 96 % |
-
+| hardened | 43 | 0 | 21 | 0 | 64 | 100 % |
+| unhardened | 63 | 0 | 1 | 0 | 64 | 100 % |
 
 ## History
 
-### 2026-06-02 — cynic `5a82671`, test262 `d0c1b4555b`
+### 2026-06-02 — cynic `8bf5d61`, test262 `d0c1b4555b`
 
 |         | passing | failing | expected fails | total | pass% | Δ pass | elapsed |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **unhardened** | 44074 | 600 | 6217 | 50894 | 98.82 % | ±0 | 30.1 s |
-| **hardened** | 40178 | 593 | 10120 | 50894 | 98.83 % | ±0 | 30.1 s |
+| **unhardened** | 44074 | 600 | 6220 | 50894 | 98.82 % | +3 | 30.1 s |
+| **hardened** | 40178 | 593 | 10123 | 50894 | 98.83 % | +3 | 30.3 s |
+| **unhardened_allow_eval** | 44617 | 920 | 5357 | 50894 | 98.19 % | n/a | 30.1 s |
 
 ### 2026-06-01 — cynic `fed859f`, test262 `d0c1b4555b`
 
