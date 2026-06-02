@@ -4227,13 +4227,23 @@ fn writeScoreboard(
         const strike: bool = (b.pass == 0 and b.fail == 0 and b.correctly_handled == 0);
         var row_buf: [384]u8 = undefined;
 
-        // hardened sub-row — carries the area name.
+        // Area header row — the area name spans the table; the three
+        // posture rows below carry only the posture label.
+        {
+            const hdr = if (strike)
+                try std.fmt.bufPrint(&row_buf, "| ~~**`{s}`**~~ | | | | | |\n", .{b.name})
+            else
+                try std.fmt.bufPrint(&row_buf, "| **`{s}`** | | | | | |\n", .{b.name});
+            try out.appendSlice(gpa, hdr);
+        }
+
+        // hardened sub-row.
         {
             const pct: f64 = if (b.total == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass + b.correctly_handled)) / @as(f64, @floatFromInt(b.total));
             const line = if (strike)
-                try std.fmt.bufPrint(&row_buf, "| ~~`{s}` · hardened~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{ b.name, b.pass, b.fail, b.correctly_handled, b.total, pct })
+                try std.fmt.bufPrint(&row_buf, "| ~~· hardened~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d}~~ | ~~{d:.0} %~~ |\n", .{ b.pass, b.fail, b.correctly_handled, b.total, pct })
             else
-                try std.fmt.bufPrint(&row_buf, "| `{s}` · hardened | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ b.name, b.pass, b.fail, b.correctly_handled, b.total, pct });
+                try std.fmt.bufPrint(&row_buf, "| · hardened | {d} | {d} | {d} | {d} | {d:.0} % |\n", .{ b.pass, b.fail, b.correctly_handled, b.total, pct });
             try out.appendSlice(gpa, line);
         }
 
