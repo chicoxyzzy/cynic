@@ -24,7 +24,7 @@ pick up the next phase from here without re-deriving the design.
 | 3 — D2 RealmStack + per-fn [[Realm]] | ✅ shipped — `[[Realm]]` set at native + ordinary function allocation; free-global resolution (read **and** write), Error-constructor intrinsics, and §23.1.3.34 ArraySpeciesCreate resolve via the executing function's realm (its `CallFrame.running_realm` / `active_native_fn_realm`), not the dispatch realm. All four Phase-3 contract tests in `realm_test.zig` green. | (multi-realm consumption effort) |
 | 4 — D4 endowments | sketched | — |
 | 5 — Compartments | sketched | — |
-| 6 — per-realm teardown (memory lifecycle) | ⏳ planned — see "Phase 6 — per-realm teardown" below | — |
+| 6 — per-realm teardown (memory lifecycle) | 🟡 foundation shipped — `Heap.realms` + `markAllSharingRealmRoots` (the global GC marks every sharing realm's roots; this was also a latent cross-realm UAF fix) + a ShadowRealm `HandleScope` fix; ShadowRealm runs clean under `test262-safe --gc-threshold=1`. Remaining: the deferred ShadowRealm finalizer to free the child `Realm` struct (problem #1). Prior art revised the design — see "Phase 6" below. | (multi-realm teardown effort) |
 
 The cross-realm-error commit `b95694b` reaches partway into D2 — `callee.realm` is already consumed for error attribution and native-callback realm tracking — but `JSFunction.realm` itself remains `null` at every allocation site because `Heap.allocateFunction*` doesn't take a realm parameter. Phase 3 closes that gap.
 
@@ -1039,39 +1039,69 @@ both real, surfaced while validating Phase 3:
    until the next parent GC sweeps them as unreachable — bounded
    bloat between collections, not a permanent leak.
 
-**Why this is its own phase (not a quick fix).** Eagerly
-reclaiming a child's objects is not "free every object the child
-allocated": a child object can be legitimately reachable from the
-parent — a `WrappedFunction` over a child callable (§3.8.3.4), or
-an `importValue` result crossed the callable boundary. Blindly
-sweeping child-tagged objects on teardown is a use-after-free,
-exactly the hazard the ReleaseSafe GC verifiers
-(`verifyRememberedSet` / `verifyShapeInvariant`, see
-[handbook/gc.md](handbook/gc.md)) exist to catch. Correct
-teardown is therefore a *scoped GC pass*: mark from the parent's
-roots, then sweep only the child-owned objects that remain
-unreachable.
+**Prior-art survey (2026-06) revised the design.** No major
+engine uses a per-object realm tag + a scoped per-realm sweep:
 
-**Plan.**
+- **V8** — one heap per Isolate shared across Contexts; a single
+  global GC marks every live Context's roots and reclaims a dead
+  Context's objects when they become unreachable. No per-object
+  realm field; detached-context *leaks* are a diagnostics concern,
+  not eagerly swept.
+- **JavaScriptCore** — one heap per VM; an object's realm is found
+  via its (shared) Structure's `globalObject()`, not a per-object
+  field; single global GC.
+- **SpiderMonkey** — the only engine with genuine per-realm GC,
+  achieved by **zone-partitioned allocation**: the object's
+  arena/chunk header identifies its Zone, so realm is O(1) from the
+  address (zero per-object cost) and a zone-local GC sweeps only
+  that zone's arenas.
 
-1. **Realm-tag heap objects.** Give each `JSObject` (and the
-   other pooled cells) an owning-realm id, threaded at allocation
-   the same way `JSFunction.realm` now is — the allocator already
-   receives the realm (Phase 3.2). Cheapest form: a small integer
-   realm id rather than a back-pointer, to keep the cell compact.
-2. **ShadowRealm finalizer.** On collection of a `ShadowRealm`
-   instance, drop its child `Realm` from `parent.child_realms`
-   and free that realm's intrinsics + globals maps. Reuses the
-   §9.10 KeptDuringJob / WeakRef finalization machinery already in
-   `Realm` rather than inventing a new hook.
-3. **Scoped reclamation sweep.** On child teardown, run a mark
-   from the *parent's* roots, then sweep only objects tagged with
-   the dying child's id that are still white. Gate it behind the
-   existing verifier build so a cross-realm-live object that is
-   wrongly swept trips an assertion in `test262-safe`.
-4. **Bench the workload.** Add a "N short-lived ShadowRealms in a
-   loop" bench; the success criterion is that steady-state RSS is
-   flat across iterations rather than monotonically climbing.
+Cynic's shared flat-pool heap already matches the **V8/JSC shape**,
+so the right design is the V8/JSC one — *not* the per-object-tag +
+scoped-sweep this section originally sketched (which matches no
+engine). That means problem #2 needs **no** new mechanism beyond
+making the global GC mark every sharing realm's roots.
+
+**Foundation — shipped (and it was a latent UAF fix, not just a
+teardown prerequisite).** The collector triggered on the *running*
+realm and marked only its roots, but all sharing realms put objects
+in the same pools — so a GC during a child realm's execution swept
+the parent's live objects (and vice-versa): a cross-realm
+use-after-free, confirmed by the 0xaa free-poison under
+`test262-safe`. Fixed by `Heap.realms` (the set of realms sharing
+the heap) + `markAllSharingRealmRoots`, which marks every sharing
+realm's roots before the single sweep — V8's global-GC model.
+Realms register at `installBuiltins` and deregister at `deinit`
+(`Realm.registerWithHeap` / `deregisterFromHeap`). A companion fix
+anchors the ShadowRealm wrapped function across CopyNameAndLength
+(a separate missing `HandleScope`). With both, the ShadowRealm
+phase runs clean under `test262-safe --gc-threshold=1`.
+
+This **dissolves problem #2**: once a dead child is deregistered,
+its now-unreachable objects are reclaimed by the next ordinary GC —
+the V8/JSC behaviour, no per-object tag, no scoped sweep.
+
+**Remaining plan (problem #1 only — the child-`Realm` struct leak).**
+
+1. **ShadowRealm finalizer.** When the `ShadowRealm` instance is
+   collected, tear its child `Realm` down: `deregisterFromHeap`,
+   remove it from the owner's `child_realms`, then `deinit` +
+   `destroy`. **Must be deferred, not inline in the sweep** —
+   freeing a realm's globals/intrinsics maps (which reference heap
+   objects mid-sweep) from inside `deinitFields` is reentrant heap
+   mutation. Enqueue the dying child onto a post-sweep teardown
+   queue (drained after `collectFull` returns), or route it through
+   the existing `setFinalizationEnqueue` job machinery. The child's
+   heap objects are then reclaimed by the following GC (problem #2,
+   already handled).
+2. **Bench the workload.** Add a "N short-lived ShadowRealms in a
+   loop" bench; success = steady-state RSS flat across iterations.
+
+The per-object realm tag and scoped sweep from the original sketch
+are **dropped** — over-engineering vs. what V8/JSC do. SpiderMonkey-
+style zone-partitioned allocation remains a "someday, if per-realm
+GC *latency* ever matters" option; it is a large allocator
+restructure, not warranted now.
 
 **Test-first contracts** (gated, like every other phase):
 
