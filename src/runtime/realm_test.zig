@@ -377,3 +377,28 @@ test "phase 3: slot-indexed top-level let read from a cross-realm-called functio
     try testing.expect(result.isNumber());
     try testing.expect(result.numberToDouble() == 42);
 }
+
+test "phase 3: primitive boxing in a cross-realm-called function uses its home realm's wrapper prototype" {
+    // §7.1.1 ToObject — a method/property access on a primitive
+    // boxes through the *running* realm's wrapper prototype
+    // (%Number.prototype% etc.). A function defined in parent and
+    // called from a child sharing the heap must box via parent's
+    // %Number%, so `(5).constructor` is parent's Number — distinct
+    // from the child's `Number` global. Pre-fix the boxing resolved
+    // the wrapper ctor via the dispatch (child) realm.
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const box_v = (try lantern.evaluateScript(testing.allocator, &parent, "(function () { return (5).constructor; })")).value;
+    try child.globals.put(testing.allocator, "boxCtor", box_v);
+
+    // boxCtor() returns parent's Number; child's `Number` is a
+    // different JSFunction, so the comparison is false.
+    const same = (try lantern.evaluateScript(testing.allocator, &child, "boxCtor() === Number")).value;
+    try testing.expect(same.bits == Value.false_.bits);
+}

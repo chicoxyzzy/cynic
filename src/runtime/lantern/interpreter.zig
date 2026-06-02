@@ -7826,7 +7826,7 @@ pub fn runFrames(
                 // { get })`) wins over the data-property fast
                 // path (§10.1.8.1); the getter is called with
                 // `this = <number primitive>` in strict mode.
-                if (heap_mod.valueAsFunction(realm.globals.get("Number") orelse Value.undefined_)) |num_ctor| {
+                if (heap_mod.valueAsFunction((f.running_realm orelse realm).globals.get("Number") orelse Value.undefined_)) |num_ctor| {
                     if (num_ctor.prototype) |np| {
                         if (lookupAccessor(np, key_s.flatBytes())) |acc_pair| {
                             if (acc_pair.getter) |getter| {
@@ -7855,7 +7855,7 @@ pub fn runFrames(
             } else if (acc.isBool()) {
                 // §7.1.1 ToObject(Boolean). Same accessor-aware
                 // chain walk as the Number arm above.
-                if (heap_mod.valueAsFunction(realm.globals.get("Boolean") orelse Value.undefined_)) |bool_ctor| {
+                if (heap_mod.valueAsFunction((f.running_realm orelse realm).globals.get("Boolean") orelse Value.undefined_)) |bool_ctor| {
                     if (bool_ctor.prototype) |bp| {
                         if (lookupAccessor(bp, key_s.flatBytes())) |acc_pair| {
                             if (acc_pair.getter) |getter| {
@@ -7884,7 +7884,7 @@ pub fn runFrames(
             } else if (heap_mod.isBigInt(acc)) {
                 // §7.1.1 ToObject(BigInt). Same accessor-aware
                 // chain walk as the Number arm above.
-                if (heap_mod.valueAsFunction(realm.globals.get("BigInt") orelse Value.undefined_)) |bi_ctor| {
+                if (heap_mod.valueAsFunction((f.running_realm orelse realm).globals.get("BigInt") orelse Value.undefined_)) |bi_ctor| {
                     if (bi_ctor.prototype) |bp| {
                         if (lookupAccessor(bp, key_s.flatBytes())) |acc_pair| {
                             if (acc_pair.getter) |getter| {
@@ -7915,7 +7915,7 @@ pub fn runFrames(
                 // symbol method lookups resolve via
                 // %Symbol.prototype%, with `this` reading
                 // the symbol primitive directly.
-                if (heap_mod.valueAsFunction(realm.globals.get("Symbol") orelse Value.undefined_)) |sym_ctor| {
+                if (heap_mod.valueAsFunction((f.running_realm orelse realm).globals.get("Symbol") orelse Value.undefined_)) |sym_ctor| {
                     if (sym_ctor.prototype) |sp| {
                         // Accessor descriptors (e.g. `description`)
                         // win over property-bag entries.
