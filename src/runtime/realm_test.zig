@@ -479,3 +479,37 @@ test "cross-realm: a RangeError thrown by parent's code is parent's RangeError.p
     const probe = (try lantern.evaluateScript(testing.allocator, &child, "let r; try { boomRange(); } catch (e) { r = e.constructor === RangeError; } r")).value;
     try testing.expect(probe.bits == Value.false_.bits);
 }
+
+test "cross-realm: typeof of a free global resolves the home realm (lda_global_or_undef)" {
+    // §13.5.3 typeof — a free global compiles to `lda_global_or_undef`
+    // (an unresolvable reference yields "undefined", not a throw). It
+    // must resolve against the executing function's realm, like the
+    // throwing `lda_global` read. A function defined in parent that
+    // does `typeof <a parent-only global>` must see parent's binding
+    // even when called from a child where that name is undeclared —
+    // returning "number", not "undefined".
+    var parent = Realm.init(testing.allocator);
+    parent.hardened = false;
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    child.hardened = false;
+    defer child.deinit();
+    try child.installBuiltins();
+
+    _ = try lantern.evaluateScript(testing.allocator, &parent, "var onlyInParent = 1;");
+    const probe_fn = (try lantern.evaluateScript(testing.allocator, &parent, "(function () { return typeof onlyInParent; })")).value;
+    try child.globals.put(testing.allocator, "typeProbe", probe_fn);
+
+    // Resolves parent's `onlyInParent` (→ "number"); child never
+    // declared it, so a dispatch-realm lookup would yield "undefined".
+    const r = (try lantern.evaluateScript(testing.allocator, &child, "typeProbe() === 'number'")).value;
+    try testing.expect(r.bits == Value.true_.bits);
+
+    // And a name absent in BOTH realms is still "undefined" (no throw).
+    const probe_undef = (try lantern.evaluateScript(testing.allocator, &parent, "(function () { return typeof neverDeclaredAnywhere; })")).value;
+    try child.globals.put(testing.allocator, "undefProbe", probe_undef);
+    const u = (try lantern.evaluateScript(testing.allocator, &child, "undefProbe() === 'undefined'")).value;
+    try testing.expect(u.bits == Value.true_.bits);
+}
