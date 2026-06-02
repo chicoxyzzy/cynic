@@ -610,6 +610,11 @@ pub fn newURIError(realm: *Realm, message: []const u8) !Value {
     return makeError(realm, proto, message);
 }
 
+pub fn newEvalError(realm: *Realm, message: []const u8) !Value {
+    const proto = realm.intrinsics.eval_error_prototype orelse return makeStringFallback(realm, message);
+    return makeError(realm, proto, message);
+}
+
 fn makeError(realm: *Realm, proto: *JSObject, message: []const u8) !Value {
     const instance = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(instance, proto);

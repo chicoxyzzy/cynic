@@ -107,3 +107,48 @@ test "ses-eval: Function call form rejects string body too" {
         \\ok;
     );
 }
+
+/// Evaluate `source` against a realm with `--allow=eval` set
+/// (`realm.allow_eval = true`) and assert the completion is `1`.
+fn expectAbsentAllowEval(source: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    // `--allow=eval` opens the policy gate before install.
+    realm.allow_eval = true;
+    try realm.installBuiltins();
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, source);
+    const v = switch (outcome) {
+        .value, .yielded => |val| val,
+        .thrown => return error.EvalPolicyFeatureUnexpectedlyPresent,
+    };
+    if (!v.isInt32()) return error.EvalPolicyAssertionMisformed;
+    if (v.asInt32() != 1) return error.EvalPolicyFeatureUnexpectedlyPresent;
+}
+
+test "ses-eval: --allow=eval opens the gate but eval still throws (unimplemented)" {
+    // The `--allow=eval` flag wires the *posture*, not an eval
+    // engine: Cynic deliberately ships no runtime code construction
+    // (see AGENTS.md / docs/ses-alignment.md). With the gate open,
+    // `eval("1")` no longer refuses by SES policy — it throws an
+    // EvalError flagging the capability as enabled-but-unimplemented.
+    // The observable guarantee is still "the call does not return
+    // normally", so no string source ever executes regardless of the
+    // flag. (When the eval engine lands, this test flips to assert a
+    // real result.)
+    try expectAbsentAllowEval(
+        \\let ok = 0;
+        \\try { eval("1"); } catch (e) { ok = (e instanceof EvalError) ? 1 : 0; }
+        \\ok;
+    );
+}
+
+test "ses-eval: --allow=eval gate is still closed for Function(string)" {
+    // Same posture for the dynamic Function constructor: the gate
+    // opens but the string-body path is unimplemented, so it throws
+    // (EvalError) rather than compiling source.
+    try expectAbsentAllowEval(
+        \\let ok = 0;
+        \\try { new Function("return 1"); } catch (e) { ok = (e instanceof EvalError) ? 1 : 0; }
+        \\ok;
+    );
+}

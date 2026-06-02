@@ -884,6 +884,22 @@ pub const Realm = struct {
     ///
     /// See [docs/ses-alignment.md](../../docs/ses-alignment.md).
     hardened: bool = true,
+    /// `--allow=eval` posture toggle. When `false` (the default)
+    /// Cynic ships no runtime code construction: the `eval` stub
+    /// and the `Function` / `Generator…Function` / `Async…Function`
+    /// string-source constructors refuse by policy (SES-aligned —
+    /// see AGENTS.md "eval and runtime code construction"). Setting
+    /// it `true` opens the policy gate so the eval surface is no
+    /// longer a deliberate refusal.
+    ///
+    /// NOTE: this flag wires the *posture* only. Cynic still has no
+    /// eval engine — when the gate is open the eval paths throw an
+    /// `EvalError("…not implemented…")` rather than executing source,
+    /// because the actual runtime-compile implementation is a
+    /// separate effort (docs/ses-alignment.md §Phase 4). Distinct
+    /// from `hardened`: a build can be unhardened yet eval-off, or
+    /// hardened yet eval-on — they're orthogonal capabilities.
+    allow_eval: bool = false,
     /// Phase 3 SES override-mistake fix — `freezePrimordials`
     /// installs a `SyntheticAccessor` pair (getter + setter
     /// JSFunctions sharing one capture cell) for every data
@@ -956,6 +972,11 @@ pub const Realm = struct {
             // mutable-primordials surface to `$262.createRealm()`
             // and vice versa.
             .hardened = parent.hardened,
+            // The eval posture is an agent-wide capability — a child
+            // realm inherits the parent's `--allow=eval` setting so a
+            // cross-realm `new other.Function(src)` is gated the same
+            // way as a same-realm one.
+            .allow_eval = parent.allow_eval,
             // Children inherit the host module loader so a child
             // realm can resolve module specifiers — required by
             // `ShadowRealm.prototype.importValue`, which loads a

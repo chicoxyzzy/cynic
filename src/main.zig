@@ -37,6 +37,10 @@ pub fn main(init: std.process.Init) !void {
             try invalidGcThreshold(io, parsed.bad_token.?);
             std.process.exit(1);
         },
+        .unknown_allow => {
+            try unknownAllow(io, parsed.bad_token.?);
+            std.process.exit(1);
+        },
     };
     if (parsed.list_features) {
         try listFeatures(io);
@@ -54,6 +58,7 @@ pub fn main(init: std.process.Init) !void {
     args = args[1..];
 
     const unhardened = parsed.unhardened;
+    const allow_eval = parsed.allow_eval;
 
     if (std.mem.eql(u8, sub, "lex")) {
         if (args.len != 1) {
@@ -98,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened);
+        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened, allow_eval);
     } else if (std.mem.eql(u8, sub, "run")) {
         // `cynic run a.js b.js c.js` evaluates each file in order
         // against one realm — the same shape every other engine's
@@ -125,7 +130,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals, unhardened);
+        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals, unhardened, allow_eval);
     } else if (std.mem.eql(u8, sub, "repl")) {
         // `cynic repl [--debug-globals]` — interactive read-eval-print
         // loop with a persistent realm. Same `--debug-globals` opt-in
@@ -147,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.UnexpectedArgument;
         }
-        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened);
+        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened, allow_eval);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage(io);
     } else {
@@ -205,6 +210,12 @@ fn printUsage(io: std.Io) !void {
         \\                                   and direct globalThis assignment throw.
         \\                                   Use this for code that monkey-patches
         \\                                   intrinsics or polyfills primordials.
+        \\  --allow=eval                     Open the eval / Function(string) policy
+        \\                                   gate. Cynic ships no eval engine yet, so
+        \\                                   the call throws EvalError ("not
+        \\                                   implemented") instead of the default SES
+        \\                                   policy SyntaxError. The implementation is
+        \\                                   a separate effort (docs/ses-alignment.md).
         \\
     );
 }
@@ -231,6 +242,16 @@ fn unknownFeature(io: std.Io, name: []const u8) !void {
     const msg = try std.fmt.bufPrint(
         &buf,
         "error: unknown feature '{s}'. Run `cynic --list-features` for the available set.\n",
+        .{name},
+    );
+    try std.Io.File.stderr().writeStreamingAll(io, msg);
+}
+
+fn unknownAllow(io: std.Io, name: []const u8) !void {
+    var buf: [256]u8 = undefined;
+    const msg = try std.fmt.bufPrint(
+        &buf,
+        "error: unknown --allow target '{s}'. The only relaxation is `--allow=eval`.\n",
         .{name},
     );
     try std.Io.File.stderr().writeStreamingAll(io, msg);
@@ -325,6 +346,7 @@ fn cmdParse(allocator: std.mem.Allocator, io: std.Io, path: []const u8, mode: Pa
 pub const FlagError = enum {
     unknown_feature,
     invalid_gc_threshold,
+    unknown_allow,
 };
 
 pub const ParsedFlags = struct {
@@ -344,6 +366,15 @@ pub const ParsedFlags = struct {
     /// mutable (legacy ECMAScript behaviour). See
     /// [docs/ses-alignment.md](../docs/ses-alignment.md).
     unhardened: bool = false,
+    /// `--allow=eval` — open the runtime-code-construction policy
+    /// gate. When set, `realm.allow_eval` is flipped to `true`
+    /// before `installBuiltins`. Cynic ships no eval engine, so this
+    /// only changes *which* failure the eval / `Function(string)`
+    /// paths produce (EvalError "not implemented" instead of the
+    /// default SES policy SyntaxError) — the actual implementation
+    /// is a separate effort. See
+    /// [docs/ses-alignment.md](../docs/ses-alignment.md) §Phase 4.
+    allow_eval: bool = false,
     /// The unconsumed tail of the argv slice (subcommand + its
     /// arguments). Empty when no subcommand was supplied — the
     /// caller prints usage in that case.
@@ -389,6 +420,20 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
         } else if (std.mem.eql(u8, a, "--unhardened")) {
             out.unhardened = true;
             rest = rest[1..];
+        } else if (std.mem.startsWith(u8, a, "--allow=")) {
+            // `--allow=<name>` relaxes a default-on restriction. Only
+            // `--allow=eval` exists today (AGENTS.md). An unknown name
+            // is rejected rather than silently ignored.
+            const name = a["--allow=".len..];
+            if (std.mem.eql(u8, name, "eval")) {
+                out.allow_eval = true;
+                rest = rest[1..];
+            } else {
+                out.err = .unknown_allow;
+                out.bad_token = name;
+                out.remaining = rest;
+                return out;
+            }
         } else if (std.mem.startsWith(u8, a, "--gc-threshold=")) {
             const raw = a["--gc-threshold=".len..];
             const n = std.fmt.parseInt(u32, raw, 10) catch {
@@ -444,6 +489,28 @@ test "parseTopLevelFlags: --gc-threshold accepts the documented default" {
     const args = [_][]const u8{ "--gc-threshold=16384", "run", "foo.js" };
     const parsed = parseTopLevelFlags(&args);
     try testing.expectEqual(@as(?u32, 16384), parsed.gc_threshold);
+}
+
+test "parseTopLevelFlags: --allow=eval opens the eval gate" {
+    const args = [_][]const u8{ "--allow=eval", "run", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?FlagError, null), parsed.err);
+    try testing.expect(parsed.allow_eval);
+    try testing.expectEqual(@as(usize, 2), parsed.remaining.len);
+    try testing.expectEqualStrings("run", parsed.remaining[0]);
+}
+
+test "parseTopLevelFlags: --allow=eval defaults to false when absent" {
+    const args = [_][]const u8{ "run", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expect(!parsed.allow_eval);
+}
+
+test "parseTopLevelFlags: an unknown --allow=<target> is rejected" {
+    const args = [_][]const u8{"--allow=bogus"};
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?FlagError, .unknown_allow), parsed.err);
+    try testing.expectEqualStrings("bogus", parsed.bad_token.?);
 }
 
 test "parseTopLevelFlags: --gc-threshold=0 is rejected" {

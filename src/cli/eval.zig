@@ -17,6 +17,7 @@ pub fn run(
     feature_flags: FeatureSet,
     gc_threshold: ?u32,
     unhardened: bool,
+    allow_eval: bool,
 ) !void {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -44,6 +45,10 @@ pub fn run(
     // `--unhardened` — drop the SES posture before
     // `installBuiltins` so the Phase 1 freeze pass is skipped.
     if (unhardened) realm.hardened = false;
+    // `--allow=eval` — open the runtime-code-construction gate. Cynic
+    // ships no eval engine, so this only changes which error the eval
+    // paths throw; see `Realm.allow_eval`.
+    if (allow_eval) realm.allow_eval = true;
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
 

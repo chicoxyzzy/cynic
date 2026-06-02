@@ -1526,6 +1526,35 @@ pub fn throwSyntaxError(realm: *Realm, msg: []const u8) NativeError {
     return throwNative(realm, ex);
 }
 
+pub fn throwEvalError(realm: *Realm, msg: []const u8) NativeError {
+    const ex = newEvalError(realm, msg) catch return error.OutOfMemory;
+    return throwNative(realm, ex);
+}
+
+/// Gate for the runtime-code-construction surface — `eval(string)`
+/// and the `Function` / `Generator…Function` / `Async…Function`
+/// string-source constructors. Cynic ships no eval engine; this
+/// decides *which* failure the caller observes based on the
+/// `--allow=eval` posture (`realm.allow_eval`):
+///
+///   - default (gate closed) → a `SyntaxError` with `disabled_msg`:
+///     the SES-aligned policy refusal (AGENTS.md "eval and runtime
+///     code construction"). Spec-flavored so probes that expect a
+///     parse-time failure see the right shape.
+///   - `--allow=eval` (gate open) → an `EvalError` flagging the
+///     capability as enabled-but-unimplemented. The posture flag
+///     wires up here; the actual eval engine is a separate effort
+///     (docs/ses-alignment.md §Phase 4), so the call still can't
+///     execute source — it just fails for a *different* reason,
+///     which the test262 harness scores as a real failure rather
+///     than a by-design refusal.
+pub fn throwEvalUnsupported(realm: *Realm, disabled_msg: []const u8) NativeError {
+    if (realm.allow_eval) {
+        return throwEvalError(realm, "runtime code construction is enabled (--allow=eval) but not implemented in this build");
+    }
+    return throwSyntaxError(realm, disabled_msg);
+}
+
 /// Convenience: throw a real `ReferenceError(msg)` from a native.
 /// Used by §9.4.6.7 Module Namespace [[Get]] when the source-module
 /// binding is still uninitialised — `GetBindingValue(N, true)`
@@ -2290,6 +2319,7 @@ pub const newRangeError = @import("builtins/error.zig").newRangeError;
 pub const newReferenceError = @import("builtins/error.zig").newReferenceError;
 pub const newSyntaxError = @import("builtins/error.zig").newSyntaxError;
 pub const newURIError = @import("builtins/error.zig").newURIError;
+pub const newEvalError = @import("builtins/error.zig").newEvalError;
 
 pub const PromiseState = @import("builtins/promise.zig").PromiseState;
 pub const allocatePromiseFor = @import("builtins/promise.zig").allocatePromiseFor;
@@ -2307,5 +2337,7 @@ fn globalEvalNotSupported(realm: *Realm, this_value: Value, args: []const Value)
     _ = this_value;
     const arg = if (args.len > 0) args[0] else Value.undefined_;
     if (!arg.isString()) return arg;
-    return throwSyntaxError(realm, "Cynic does not support eval() of source strings");
+    // Gated by `--allow=eval` (`realm.allow_eval`): closed → policy
+    // SyntaxError; open → EvalError (enabled-but-unimplemented).
+    return throwEvalUnsupported(realm, "Cynic does not support eval() of source strings");
 }

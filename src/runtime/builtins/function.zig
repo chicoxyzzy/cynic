@@ -134,7 +134,9 @@ fn functionConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
         // observable completion when CreateDynamicFunction fails
         // its parse step (test262
         // `language/expressions/import.meta/syntax/goal-*-params-or-body.js`).
-        return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
+        // Gated by `--allow=eval`: closed → policy SyntaxError; open →
+        // EvalError (enabled-but-unimplemented).
+        return @import("../intrinsics.zig").throwEvalUnsupported(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
     }
     // §20.2.1.1 CreateDynamicFunction — the new function's realm is
     // the *constructor's* realm, not necessarily the active running
@@ -689,10 +691,11 @@ fn variantCtorThrows(realm: *Realm, this_value: Value, args: []const Value) Nati
     // including §16.2.1.7 ImportMeta outside a Module goal
     // (test262
     // `language/expressions/import.meta/syntax/goal-{generator,async-function,async-generator}-params-or-body.js`).
-    // Cynic permanently bans runtime source compilation
-    // (AGENTS.md); throwing SyntaxError here matches the
-    // spec-observable completion of the failed parse step.
-    return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
+    // Cynic ships no runtime source compilation; gated by
+    // `--allow=eval` (`realm.allow_eval`): closed → policy
+    // SyntaxError (matches the spec-observable completion of the
+    // failed parse step); open → EvalError (enabled-but-unimplemented).
+    return @import("../intrinsics.zig").throwEvalUnsupported(realm, "Function constructor from source string is not supported (Cynic ships no eval / runtime code construction)");
 }
 
 // ── Function.prototype.toString ─────────────────────────────────────────────
