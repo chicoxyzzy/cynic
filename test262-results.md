@@ -11,17 +11,31 @@
 
 | posture | passing | failing | expected fails | total | pass% |
 |---|---:|---:|---:|---:|---:|
-| **unhardened, `--allow=eval`** | n/a | n/a | n/a | n/a | n/a |
+| **unhardened, `--allow=eval`** † | 44074 | 604 | 6213 | 50894 | 98.81 % |
 | **unhardened** (`cynic --unhardened`) | 44074 | 600 | 6217 | 50894 | 98.82 % |
 | **hardened** (default — `cynic run`) | 40178 | 593 | 10120 | 50894 | 98.83 % |
 
 > **pass%** = `(passing + expected fails) / total`.
 > A fixture that fails because of a Cynic design policy
 > (Annex B not shipped, strict-only, no Intl, eval-off, SES
-> throw) is a **expected fail** rather than a real
+> throw) is an **expected fail** rather than a real
 > engine bug. Plain **failing** is what's left over — real
-> engine work to do. The `--allow=eval` row is always `n/a`
-> until that opt-in ships.
+> engine work to do.
+>
+> **† the `--allow=eval` row is a projection**, not a measured
+> sweep — the opt-in isn't shipped (see `docs/ses-alignment.md`).
+> Turning eval on makes the eval-dependent fixtures (today
+> counted as expected fails) attempt to run; most would pass,
+> but that relabel stays inside the pass-counted numerator, so
+> it never moves pass%. The *only* score-affecting change is the
+> **4 indirect-eval Sputnik fixtures** — they fail even with
+> eval on (strict-mode PerformEval throws the wrong error
+> class), so they move from expected fail to real failing. The
+> projected row is the unhardened row with those 4 shifted:
+> `failing` 600 → 604, `expected fails` 6217 → 6213, pass%
+> 98.82 → 98.81. A real `--allow=eval` sweep will replace it
+> (and split the eval-dependent relabel into the passing
+> column).
 
 *SES witness fidelity*: **10 / 10** witnesses are SES expected fails (100.00 %). Curated set in `tools/test262/ses_witnesses.zig`; CI gates at 100 %. See `docs/handbook/ses-test262-policy.md`.
 
@@ -34,10 +48,10 @@ refer to the same parse → compile → run sweep.
 
 - **unhardened, `--allow=eval`** — unhardened plus the
   eval surface (`eval()`, `new Function(string)`, …) opted
-  in. **Always `n/a`**: `--allow=eval` isn't shipped (see
-  `docs/ses-alignment.md`), so no sweep populates this row.
-  The row is reserved so the layout stays stable when the
-  opt-in lands (eval fails would then become passes).
+  in. **Projected, not measured** (†): `--allow=eval` isn't
+  shipped yet (see `docs/ses-alignment.md`), so this row is
+  derived from the unhardened sweep — see the † note under
+  the table. A real opt-in sweep replaces it when eval lands.
 - **unhardened** — `cynic --unhardened` opt-out. Eval off
   (so eval-dependent fixtures fail and count as correctly
   handled fails), Annex B / Intl / noStrict failures too.
