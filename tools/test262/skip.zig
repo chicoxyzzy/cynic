@@ -999,10 +999,9 @@ pub const single_realm_exact_paths = [_][]const u8{
     "built-ins/String/prototype/toString/non-generic-realm.js",
     "built-ins/String/prototype/valueOf/non-generic-realm.js",
     "language/expressions/super/realm.js",
-    // Scattered single-realm fixtures that don't match the
-    // `/cross-realm.` / `-realm-function-ctor.` path-contains
-    // patterns. Each bottoms out on `$262.createRealm().global` or
-    // asserts a realm-of-origin TypeError. Same permanent carve-out.
+    // Scattered single-realm fixtures with no bulk pattern to match,
+    // so listed exact. Each bottoms out on `$262.createRealm().global`
+    // or asserts a realm-of-origin TypeError. Same permanent carve-out.
     "built-ins/Function/call-bind-this-realm-undef.js",
     "built-ins/Function/call-bind-this-realm-value.js",
     "built-ins/Function/internals/Call/class-ctor-realm.js",
@@ -1018,17 +1017,14 @@ pub const single_realm_exact_paths = [_][]const u8{
     "language/expressions/tagged-template/cache-realm.js",
 };
 
-// NOTE: the path-contains single-realm patterns
-// (`/cross-realm.`, `-realm-function-ctor.`)
-// live under
-// CURRENTLY SKIPPED → "Single-realm path-contains" below. The
-// path-contains shape catches generated families spread across
-// many buckets — each fixture's inline comment says we'd lift
-// it if multi-realm landed, so they're tracked as deferred
-// alongside the rest of the "would attempt once unblocked"
-// work. The exact-path siblings here are listed as PERMANENT
-// because their spec story doesn't move under any plausible
-// future Cynic posture.
+// NOTE: there is no longer a single-realm *path-contains* needle.
+// The `/cross-realm.` families now run and pass (multi-realm error /
+// identity attribution landed for them), and the `-realm-function-ctor.`
+// straggler is an eval refusal — it classifies as an `expected fail`
+// via the `eval` policy (`pathPolicyKind` / `ses_substrings`), not a
+// counted skip. The exact-path siblings here stay PERMANENT because
+// their spec story doesn't move under any plausible future Cynic
+// posture.
 
 // ════════════════════════════════════════════════════════════════════
 // ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  CURRENTLY SKIPPED  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
@@ -1139,13 +1135,14 @@ pub const single_realm_path_contains = [_][]const u8{
     // on the shared `heap.symbol_registry`, so those pass — they are
     // deliberately NOT matched here.
     //
-    // What still bottoms out on a realm-of-origin gap Cynic hasn't
-    // closed:
-    //   • `-realm-function-ctor.` — the `multiple-evaluations-of-class-
-    //     realm-function-ctor.js` private-brand fixtures build their
-    //     class via `new other.Function(sourceString)`, so they need
-    //     `--allow=eval` first (string-source Function constructor).
-    "-realm-function-ctor.",
+    // The one straggler — the `-multiple-evaluations-of-class-realm-
+    // function-ctor.js` private-brand fixtures — builds its class via
+    // `new other.Function(sourceString)`, i.e. the eval surface. That's
+    // an eval refusal by design, so it classifies as an **expected
+    // fail** via the `eval` policy (`pathPolicyKind` matches the
+    // `-multiple-evaluations-of-class-realm-function-ctor` needle in
+    // `ses_substrings`), NOT an in-corpus skip. So this list is empty:
+    // no cross-realm family is a counted skip today.
 };
 
 // ── Implementation pending ──────────────────────────────────────────
@@ -1259,8 +1256,11 @@ pub fn pathIsSkipped(rel_path: []const u8) bool {
 /// via `pathPolicyKind`. Pre-Stage-4 proposals aren't here either —
 /// they're recognised by feature tag in `featureIsUnimplementedProposal`.)
 ///
-/// Nearly empty right now: every source array below is empty except
-/// `single_realm_path_contains` (the one `-realm-function-ctor.` needle).
+/// Empty right now: every source array below is empty, so this returns
+/// false for every path today. (The `-realm-function-ctor.` private-
+/// brand fixtures that were the one needle here are eval-surface
+/// refusals — they now classify as `expected fails` via the `eval`
+/// policy in `pathPolicyKind`, not as counted skips.)
 pub fn pathIsCurrentlySkipped(rel_path: []const u8) bool {
     inline for (.{ stage_maturity_path_prefixes, deferred_path_prefixes }) |group| {
         for (group) |prefix| {
@@ -1493,10 +1493,13 @@ test "skip: pre-Stage-4 proposals dropped from total" {
 }
 
 test "skip: tech-debt path skips (counted in total, lower pass%)" {
-    // Cross-realm fixtures awaiting multi-realm error attribution.
-    try testing.expect(pathIsCurrentlySkipped(
-        "language/expressions/class/elements/private-method-multiple-evaluations-of-class-realm-function-ctor.js",
-    ));
+    // No tech-debt path skips today — every source array is empty.
+    // The `-realm-function-ctor.` private-brand fixtures that used to
+    // sit here are eval refusals: they classify as `expected fails`
+    // via the `eval` policy in `pathPolicyKind`, not as counted skips.
+    const rfc = "language/expressions/class/private-method-brand-check-multiple-evaluations-of-class-realm-function-ctor.js";
+    try testing.expect(!pathIsCurrentlySkipped(rfc));
+    try testing.expectEqual(PolicyKind.eval, pathPolicyKind(rfc, &.{}, false).?);
     // Temporal fully ships — not a tech-debt skip.
     try testing.expect(!pathIsCurrentlySkipped("built-ins/Temporal/Now/extensible.js"));
     try testing.expect(!pathIsCurrentlySkipped("built-ins/Temporal/PlainDateTime/prototype/add/branding.js"));
