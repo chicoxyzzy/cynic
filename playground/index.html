@@ -32,7 +32,7 @@
 
   html, body {
     margin: 0;
-    min-height: 100%;
+    height: 100%;
   }
 
   body {
@@ -41,12 +41,25 @@
     background: var(--sky);
     background-attachment: fixed;
     padding: 28px 20px 60px;
+    /* Full-height app shell: header pinned top, footer bottom, the
+       working columns fill everything between and scroll internally. */
+    display: flex;
+    flex-direction: column;
   }
 
-  .wrap { max-width: 1160px; margin: 0 auto; }
+  .wrap {
+    max-width: 1160px;
+    width: 100%;
+    margin: 0 auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
 
   header {
     margin-bottom: 22px;
+    flex: 0 0 auto;
   }
 
   .brand {
@@ -125,8 +138,11 @@
   .columns {
     display: grid;
     grid-template-columns: 1fr 1fr;
+    grid-template-rows: minmax(0, 1fr);
     gap: 22px;
     align-items: stretch;
+    flex: 1 1 auto;
+    min-height: 0;
   }
 
   .panel {
@@ -135,12 +151,12 @@
     box-shadow: var(--shadow-sm);
     display: flex;
     flex-direction: column;
-    min-height: 460px;
-    /* Grid items default to min-width:auto, which lets long output
-       lines / wide editor content blow the 1fr track past 50%. Pin
-       to 0 so the two columns stay an even, stable half each and
-       content scrolls inside the panel instead of resizing it. */
+    /* Grid items default to min-width/height:auto, which lets long
+       output lines / tall content blow a track past its share. Pin
+       both to 0 so the two columns stay even halves that fill the
+       grid row and scroll inside the panel instead of resizing it. */
     min-width: 0;
+    min-height: 0;
   }
 
   .panel-head {
@@ -328,12 +344,16 @@
     background: rgba(255, 255, 255, 0.55);
     padding: 8px 10px;
     display: inline-block;
+    flex: 0 0 auto;
+    align-self: flex-start;
   }
   footer a { color: var(--ink); }
 
-  /* Narrow viewports: collapse to a single stacked column. */
+  /* Narrow viewports: collapse to a single stacked column and let the
+     page scroll naturally — two full-height stacked panels don't fit. */
   @media (max-width: 760px) {
-    .columns { grid-template-columns: 1fr; }
+    html, body { height: auto; }
+    .columns { grid-template-columns: 1fr; grid-template-rows: none; }
     .panel { min-height: 320px; }
   }
 </style>
