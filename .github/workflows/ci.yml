@@ -95,19 +95,27 @@ jobs:
         run: zig build
 
       - name: Unit tests
-        # Linux runs the exhaustive Unicode invariants (whole-range
-        # case conversion in `src/unicode/case_conv.zig`,
+        # `test-fast` builds the unit-test binaries ReleaseSafe rather
+        # than Debug. Most tests eval JS through the engine, where Debug
+        # is 5-10× slower, so the full Debug suite is run-bound (can
+        # exceed ten minutes); ReleaseSafe finishes in ~3 with the same
+        # safety checks, GC verifiers, 0xaa free-poison, and
+        # testing.allocator leak detection — a faithful gate. See
+        # build.zig + AGENTS.md "test vs test-fast". `zig build test`
+        # (Debug) stays the local stack-trace-on-panic path.
+        #
+        # Linux additionally runs the exhaustive Unicode invariants
+        # (whole-range case conversion in `src/unicode/case_conv.zig`,
         # NormalizationTest.txt UAX #15 conformance in
-        # `src/unicode/normalization.zig`). macOS skips them — same
-        # code paths are POSIX-clean across both, and the macOS
-        # Debug allocator makes those tests dominate wall-time
-        # (~18 min vs ~3 min). Gated via `-Dexhaustive-tests=true`;
+        # `src/unicode/normalization.zig`). macOS skips them — same code
+        # paths are POSIX-clean across both, and they dominate wall-time
+        # under testing.allocator. Gated via `-Dexhaustive-tests=true`;
         # see the `b.option(...)` block in `build.zig`.
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            zig build test --summary all -Dexhaustive-tests=true
+            zig build test-fast --summary all -Dexhaustive-tests=true
           else
-            zig build test --summary all
+            zig build test-fast --summary all
           fi
 
       - name: SES positive-coverage tests

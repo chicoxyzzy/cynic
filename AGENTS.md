@@ -506,7 +506,7 @@ a previously-passing fixture to fail outside the touched bucket
 — a session-end full sweep is the safety net. Don't use
 `--only-failing` for score rows; they must be authoritative.
 
-CI runs `zig build` and `zig build test` as gating jobs, plus
+CI runs `zig build` and `zig build test-fast` as gating jobs, plus
 `zig build test262 -- --quiet` as an advisory job
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)). A
 test262 score regression isn't a CI failure today — that's
