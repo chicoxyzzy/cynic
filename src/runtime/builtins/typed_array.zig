@@ -903,7 +903,7 @@ pub fn wrapSharedBlock(realm: *Realm, block: *@import("../shared_data_block.zig"
     inst.has_array_buffer_data = true;
     inst.array_buffer_shared = true;
     // Preserve the growable bit: a growable block has spare capacity.
-    if (block.max_byte_length > block.byte_length)
+    if (block.max_byte_length > block.byte_length.load(.acquire))
         try inst.setArrayBufferMaxByteLength(realm.allocator, block.max_byte_length);
     return heap_mod.taggedObject(inst);
 }
@@ -954,13 +954,15 @@ fn sharedArrayBufferGrow(realm: *Realm, this_value: Value, args: []const Value) 
     // §25.2.4.4 — grow-only, bounded by maxByteLength. The store was
     // pre-allocated to the cap, so growth is an in-place length bump:
     // the data block never moves, so every agent's view (reading the
-    // block's live slice) sees the new length. Under the block lock so
-    // a concurrent grow / Atomics op observes a consistent length.
+    // block's live slice) sees the new length. The length is atomic —
+    // a release-store here pairs with the acquire-loads in `live()` and
+    // the length-tracking-view length so a concurrent agent observes a
+    // coherent value.
     const block = obj.getSharedBlock() orelse
         return throwTypeError(realm, "SharedArrayBuffer.prototype.grow requires a growable SharedArrayBuffer receiver");
-    if (new_len < block.byte_length or new_len > block.max_byte_length)
+    if (new_len < block.byte_length.load(.acquire) or new_len > block.max_byte_length)
         return throwRangeError(realm, "SharedArrayBuffer.prototype.grow newLength out of range");
-    block.byte_length = new_len;
+    block.byte_length.store(new_len, .release);
     return Value.undefined_;
 }
 

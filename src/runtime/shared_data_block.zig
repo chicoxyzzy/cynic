@@ -21,8 +21,12 @@ pub const SharedDataBlock = struct {
     /// `bytes[0..byte_length]`.
     bytes: []u8,
     /// §25.2.x [[ArrayBufferByteLength]] — current length. Grows
-    /// monotonically (grow-only) up to `max_byte_length`.
-    byte_length: usize,
+    /// monotonically (grow-only) up to `max_byte_length`. Atomic so a
+    /// cross-agent `grow` is observed coherently: the `grow` does a
+    /// release-store and every reader (length-tracking view length,
+    /// `byteLength`, `live()`) an acquire-load, so an agent that sees
+    /// the new length also sees the (pre-zeroed) capacity behind it.
+    byte_length: std.atomic.Value(usize),
     /// §25.2.x [[ArrayBufferMaxByteLength]] — capacity. Equals
     /// `byte_length` for a non-growable buffer.
     max_byte_length: usize,
@@ -61,7 +65,7 @@ pub const SharedDataBlock = struct {
         for (notify_seq) |*w| w.* = std.atomic.Value(u32).init(0);
         self.* = .{
             .bytes = bytes,
-            .byte_length = byte_length,
+            .byte_length = std.atomic.Value(usize).init(byte_length),
             .max_byte_length = max_byte_length,
             .refcount = std.atomic.Value(usize).init(1),
             .waiters = waiters,
@@ -93,6 +97,6 @@ pub const SharedDataBlock = struct {
 
     /// The live data slice (`bytes[0..byte_length]`).
     pub fn live(self: *SharedDataBlock) []u8 {
-        return self.bytes[0..self.byte_length];
+        return self.bytes[0..self.byte_length.load(.acquire)];
     }
 };

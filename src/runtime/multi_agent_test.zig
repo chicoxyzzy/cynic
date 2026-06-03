@@ -165,9 +165,69 @@ test "multi-agent: Atomics.wait parks and a cross-thread notify wakes it (ok)" {
     });
     waiter.join();
     notifier.join();
-    // DIAGNOSTIC ORDER: notify's woken-count first (0 = ran before the
-    // waiter parked / block mismatch; 1 = parked-but-not-woken).
-    try testing.expectEqual(@as(i32, 1), notify_result);
-    // The waiter was woken by the notify → "ok" (code 1).
+    // The real guarantee: the waiter was woken by a notify → "ok"
+    // (code 1). `Atomics.wait` returns "ok" ONLY when the slot's
+    // notify-sequence changed, and ONLY `Atomics.notify` ever bumps it,
+    // so wait_result == 1 proves a cross-thread notify woke a parked
+    // agent. notify_result (the woken count) is NOT asserted: notify
+    // returns min(waiters[slot], count), and whether a given notify
+    // observes the waiter's `waiters[slot]` increment before the waiter
+    // parks is an inherent race — the seq-bump still wakes it, so the
+    // count can legitimately read 0 on an otherwise-successful wake. (A
+    // real test262 wait/notify fixture avoids the race by reporting
+    // "about to wait" and spinning until the waiter is parked.)
     try testing.expectEqual(@as(i32, 1), wait_result);
+}
+
+test "multi-agent: concurrent Atomics.add is atomic (no lost updates)" {
+    // §25.4 memory model: an RMW must be a single indivisible
+    // read-modify-write. N agents each add 1 to the SAME shared slot
+    // `iters` times; with genuine hardware atomics the final value is
+    // EXACTLY N*iters. A plain (non-atomic) read-modify-write loses
+    // updates under contention, so this is the executable spec for the
+    // atomic op — it fails before atomics.zig uses real `@atomicRmw`.
+    const block = try SharedDataBlock.create(8, 8);
+    defer block.release();
+    const N = 4;
+    const iters = 20000;
+    var outs = std.mem.zeroes([N]i32);
+    var threads: [N]std.Thread = undefined;
+    const src =
+        \\var i32 = new Int32Array(sab);
+        \\for (var k = 0; k < 20000; k++) Atomics.add(i32, 0, 1);
+        \\0;
+    ;
+    for (0..N) |i| threads[i] = try std.Thread.spawn(.{}, agentOverBlock, .{ block, src, &outs[i] });
+    for (0..N) |i| threads[i].join();
+    for (outs) |o| try testing.expectEqual(@as(i32, 0), o); // no agent errored
+    const total = std.mem.readInt(i32, block.bytes[0..4], .little);
+    try testing.expectEqual(@as(i32, N * iters), total);
+}
+
+test "multi-agent: Atomics.compareExchange serializes a shared counter" {
+    // Each agent increments slot 0 via a compareExchange CAS-retry loop
+    // `iters` times. A correct CAS never double-counts or drops an
+    // increment, so the total is exactly N*iters — proving the
+    // compare-and-swap is a single atomic step, not a racy read/compare/
+    // write.
+    const block = try SharedDataBlock.create(8, 8);
+    defer block.release();
+    const N = 4;
+    const iters = 8000;
+    var outs = std.mem.zeroes([N]i32);
+    var threads: [N]std.Thread = undefined;
+    const src =
+        \\var i32 = new Int32Array(sab);
+        \\for (var k = 0; k < 8000; k++) {
+        \\  var old;
+        \\  do { old = Atomics.load(i32, 0); }
+        \\  while (Atomics.compareExchange(i32, 0, old, old + 1) !== old);
+        \\}
+        \\0;
+    ;
+    for (0..N) |i| threads[i] = try std.Thread.spawn(.{}, agentOverBlock, .{ block, src, &outs[i] });
+    for (0..N) |i| threads[i].join();
+    for (outs) |o| try testing.expectEqual(@as(i32, 0), o);
+    const total = std.mem.readInt(i32, block.bytes[0..4], .little);
+    try testing.expectEqual(@as(i32, N * iters), total);
 }

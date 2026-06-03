@@ -177,6 +177,107 @@ fn rmwBits(size: u8, op: RmwOp, old: u64, arg: u64) u64 {
     };
 }
 
+// ── atomic element ops on a shared block (§25.4 memory model) ────────
+//
+// A SharedArrayBuffer's bytes are reachable from several agents, so a
+// read-modify-write / load / store / compareExchange must be a single
+// indivisible hardware-atomic operation, SeqCst — a plain
+// read-then-write loses updates under contention. These run only for a
+// shared buffer: its block is page-allocated (page-aligned base) and a
+// TypedArray's byteOffset is always a multiple of its element size, so
+// `byte_pos` is naturally aligned for the element type and the
+// `@alignCast` can never fault. A non-shared buffer can't be observed
+// by another agent, so it keeps the plain (single-agent) path — its
+// GC-heap backing carries no alignment guarantee.
+
+// A naturally-aligned `*T` view of `buf[byte_pos]`. The explicit local
+// type gives `@ptrCast` / `@alignCast` their required result type. For
+// a shared block the alignment is guaranteed (see the note above), so
+// `@alignCast` never faults.
+fn elemPtr(comptime T: type, buf: []u8, byte_pos: usize) *T {
+    return @ptrCast(@alignCast(&buf[byte_pos]));
+}
+fn elemPtrConst(comptime T: type, buf: []const u8, byte_pos: usize) *const T {
+    return @ptrCast(@alignCast(&buf[byte_pos]));
+}
+
+fn atomicLoadT(comptime T: type, buf: []const u8, byte_pos: usize) u64 {
+    return @atomicLoad(T, elemPtrConst(T, buf, byte_pos), .seq_cst);
+}
+fn atomicLoadBits(buf: []const u8, size: u8, byte_pos: usize) u64 {
+    return switch (size) {
+        1 => atomicLoadT(u8, buf, byte_pos),
+        2 => atomicLoadT(u16, buf, byte_pos),
+        4 => atomicLoadT(u32, buf, byte_pos),
+        8 => atomicLoadT(u64, buf, byte_pos),
+        else => unreachable,
+    };
+}
+
+fn atomicStoreT(comptime T: type, buf: []u8, byte_pos: usize, bits: u64) void {
+    @atomicStore(T, elemPtr(T, buf, byte_pos), @truncate(bits), .seq_cst);
+}
+fn atomicStoreBits(buf: []u8, size: u8, byte_pos: usize, bits: u64) void {
+    switch (size) {
+        1 => atomicStoreT(u8, buf, byte_pos, bits),
+        2 => atomicStoreT(u16, buf, byte_pos, bits),
+        4 => atomicStoreT(u32, buf, byte_pos, bits),
+        8 => atomicStoreT(u64, buf, byte_pos, bits),
+        else => unreachable,
+    }
+}
+
+fn atomicRmwT(comptime T: type, comptime aop: std.builtin.AtomicRmwOp, buf: []u8, byte_pos: usize, arg: u64) u64 {
+    return @atomicRmw(T, elemPtr(T, buf, byte_pos), aop, @truncate(arg), .seq_cst);
+}
+/// Atomic read-modify-write; returns the OLD bits zero-extended to u64.
+fn atomicRmwBits(buf: []u8, size: u8, byte_pos: usize, op: RmwOp, arg: u64) u64 {
+    switch (op) {
+        inline else => |o| {
+            const aop: std.builtin.AtomicRmwOp = comptime switch (o) {
+                .add => .Add,
+                .sub => .Sub,
+                .and_ => .And,
+                .or_ => .Or,
+                .xor => .Xor,
+                .exchange => .Xchg,
+            };
+            return switch (size) {
+                1 => atomicRmwT(u8, aop, buf, byte_pos, arg),
+                2 => atomicRmwT(u16, aop, buf, byte_pos, arg),
+                4 => atomicRmwT(u32, aop, buf, byte_pos, arg),
+                8 => atomicRmwT(u64, aop, buf, byte_pos, arg),
+                else => unreachable,
+            };
+        },
+    }
+}
+
+fn atomicCasT(comptime T: type, buf: []u8, byte_pos: usize, expected: u64, replacement: u64) u64 {
+    const exp: T = @truncate(expected);
+    return @cmpxchgStrong(T, elemPtr(T, buf, byte_pos), exp, @truncate(replacement), .seq_cst, .seq_cst) orelse exp;
+}
+/// Atomic compare-and-swap; returns the OLD bits (always), like the
+/// spec's compareExchange. `@cmpxchgStrong` returns null when the swap
+/// happened (old == expected), else the current value.
+fn atomicCompareExchangeBits(buf: []u8, size: u8, byte_pos: usize, expected: u64, replacement: u64) u64 {
+    return switch (size) {
+        1 => atomicCasT(u8, buf, byte_pos, expected, replacement),
+        2 => atomicCasT(u16, buf, byte_pos, expected, replacement),
+        4 => atomicCasT(u32, buf, byte_pos, expected, replacement),
+        8 => atomicCasT(u64, buf, byte_pos, expected, replacement),
+        else => unreachable,
+    };
+}
+
+/// Decode raw element bits back to the JS Value for `kind` (sign
+/// extension / BigInt allocation), reusing the TypedArray read path.
+fn bitsToValue(realm: *Realm, kind: TypedKind, bits: u64) Value {
+    var scratch = std.mem.zeroes([8]u8);
+    writeRawBits(&scratch, kind.elementSize(), 0, bits);
+    return ta_mod.readTypedElement(realm, &scratch, kind, 0);
+}
+
 /// §25.4.{6,8} AtomicReadModifyWrite shared body.
 fn atomicRmw(realm: *Realm, args: []const Value, op: RmwOp) NativeError!Value {
     const obj = try validateIntegerTypedArray(realm, argOr(args, 0, Value.undefined_), false);
@@ -192,6 +293,11 @@ fn atomicRmw(realm: *Realm, args: []const Value, op: RmwOp) NativeError!Value {
     const buf = tv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "Atomics: buffer detached during coercion");
     const byte_pos = tv.byte_offset + idx * size;
     if (byte_pos + size > buf.len) return throwRangeError(realm, "Atomics: access index out of bounds");
+    // A shared buffer requires a real atomic RMW (other agents may touch
+    // this slot concurrently); a non-shared buffer is single-agent, so a
+    // plain read-then-write is observably atomic.
+    if (tv.viewed.isSharedArrayBuffer())
+        return bitsToValue(realm, kind, atomicRmwBits(buf, size, byte_pos, op, arg_bits));
     // Read the old value (the return) before overwriting.
     const old_val = ta_mod.readTypedElement(realm, buf, kind, byte_pos);
     const old_bits = readRawBits(buf, size, byte_pos);
@@ -231,6 +337,9 @@ fn atomicsCompareExchange(realm: *Realm, _: Value, args: []const Value) NativeEr
     const buf = tv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "Atomics: buffer detached during coercion");
     const byte_pos = tv.byte_offset + idx * size;
     if (byte_pos + size > buf.len) return throwRangeError(realm, "Atomics: access index out of bounds");
+    // Shared → single atomic compare-and-swap; non-shared → plain.
+    if (tv.viewed.isSharedArrayBuffer())
+        return bitsToValue(realm, kind, atomicCompareExchangeBits(buf, size, byte_pos, expected_bits, replacement_bits));
     const old_val = ta_mod.readTypedElement(realm, buf, kind, byte_pos);
     const old_bits = readRawBits(buf, size, byte_pos);
     // Compare the width-truncated bit patterns.
@@ -249,6 +358,8 @@ fn atomicsLoad(realm: *Realm, _: Value, args: []const Value) NativeError!Value {
     const idx = try validateAtomicAccess(realm, tv, buf, argOr(args, 1, Value.undefined_));
     const size = tv.kind.elementSize();
     const byte_pos = tv.byte_offset + idx * size;
+    if (tv.viewed.isSharedArrayBuffer())
+        return bitsToValue(realm, tv.kind, atomicLoadBits(buf, size, byte_pos));
     return ta_mod.readTypedElement(realm, buf, tv.kind, byte_pos);
 }
 
@@ -264,7 +375,14 @@ fn atomicsStore(realm: *Realm, _: Value, args: []const Value) NativeError!Value 
     const buf = tv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "Atomics: buffer detached during coercion");
     const byte_pos = tv.byte_offset + idx * size;
     if (byte_pos + size > buf.len) return throwRangeError(realm, "Atomics: access index out of bounds");
-    ta_mod.writeTypedElement(buf, kind, byte_pos, coerced);
+    if (tv.viewed.isSharedArrayBuffer()) {
+        // Extract the coerced element's raw bits, then store atomically.
+        var scratch = std.mem.zeroes([8]u8);
+        ta_mod.writeTypedElement(&scratch, kind, 0, coerced);
+        atomicStoreBits(buf, size, byte_pos, readRawBits(&scratch, size, 0));
+    } else {
+        ta_mod.writeTypedElement(buf, kind, byte_pos, coerced);
+    }
     // §25.4.13 step — store returns ToIntegerOrInfinity(value) for
     // non-BigInt element types (normalizing -0 → +0 and truncating the
     // fraction), NOT the width-truncated stored bits.
