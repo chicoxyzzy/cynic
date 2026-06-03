@@ -3,7 +3,7 @@
 **Cynic passes 90.25 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
 - **44950 passing** — Cynic produced the spec-expected result.
-- **4858 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **4858 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only miss counts as a plain fail, same as an engine bug. Honest, not flattering. (This posture has SES off and eval on, so neither is a failure source here.)
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
@@ -32,8 +32,9 @@ engine's spec coverage with the policy knobs out of the way.
 
 - **`passing`** — Cynic produced the spec-expected result.
 - **`failing`** — every other scored fixture. An Annex B,
-  no-Intl, strict-only, SES, or eval miss counts as a plain
-  fail, same as an engine bug.
+  no-Intl, or strict-only miss counts as a plain fail, same
+  as an engine bug. (Under this posture SES is off and eval
+  is on, so neither produces a failure.)
 - **`total`** — `passing + failing`. Excludes the upstream
   `harness/` / `staging/` / `annexB/` paths, Stage ≤ 3
   proposals, and structurally-unrunnable fixtures.
