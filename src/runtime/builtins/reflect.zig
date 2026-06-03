@@ -1070,24 +1070,24 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const args_v = argOr(args, 2, Value.undefined_);
 
     // §28.1.1 step 4 — `CreateListFromArrayLike(argumentsList)`.
-    // The list source must be an Object; primitives (null,
-    // undefined, false, NaN, …) throw TypeError synchronously,
-    // before any function invocation. The `length` lookup must
-    // fire any accessor (so a `{get length() { throw }}` source
-    // propagates the throw before the call dispatches), and
-    // `ToLength(length)` runs through `getPropertyChain` so
-    // inherited / proxy-trapped lengths participate.
+    // §7.3.18 step 2 requires `argumentsList` to be an Object;
+    // primitives (null, undefined, false, NaN, …) throw TypeError
+    // synchronously, before any function invocation. §6.1.7: a
+    // function IS an Object, so a callable array-like is valid too
+    // — `getPropertyChainOnValue` accepts either a plain object or
+    // a function and fires accessors on both (a `{get length() {
+    // throw }}` source must propagate the throw before the call
+    // dispatches); inherited / proxy-trapped lengths participate.
     var apply_args: std.ArrayListUnmanaged(Value) = .empty;
     defer apply_args.deinit(realm.allocator);
-    if (heap_mod.valueAsPlainObject(args_v)) |arr| {
-        const len_v = try intrinsics.getPropertyChain(realm, arr, "length");
+    if (try intrinsics.getPropertyChainOnValue(realm, args_v, "length")) |len_v| {
         const len_i = try intrinsics.toLengthValue(realm, len_v);
         const len = try clampArrayLength(len_i);
         var i: i64 = 0;
         while (i < len) : (i += 1) {
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-            const elt = try intrinsics.getPropertyChain(realm, arr, islice);
+            const elt = (try intrinsics.getPropertyChainOnValue(realm, args_v, islice)) orelse Value.undefined_;
             apply_args.append(realm.allocator, elt) catch return error.OutOfMemory;
         }
     } else {
@@ -1116,22 +1116,23 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const lantern = @import("../lantern/interpreter.zig");
 
     // §28.1.2 step 3 — `CreateListFromArrayLike(argumentsList)`.
-    // Reject non-object argumentsList per §7.3.18 step 2. Read
-    // `length` and each indexed slot via `getPropertyChain` so
-    // user-defined accessors / proxy `get` traps participate
-    // (an `argumentsList = {get length() { throw }}` must
-    // propagate the throw before the constructor runs).
+    // §7.3.18 step 2 rejects a non-Object argumentsList; §6.1.7
+    // makes a function an Object, so a callable array-like is
+    // valid. `getPropertyChainOnValue` accepts a plain object or a
+    // function and fires accessors / proxy `get` traps on both (an
+    // `argumentsList = {get length() { throw }}` — object or
+    // function — must propagate the throw before the constructor
+    // runs).
     var ctor_args: std.ArrayListUnmanaged(Value) = .empty;
     defer ctor_args.deinit(realm.allocator);
-    if (heap_mod.valueAsPlainObject(args_v)) |arr| {
-        const len_v = try intrinsics.getPropertyChain(realm, arr, "length");
+    if (try intrinsics.getPropertyChainOnValue(realm, args_v, "length")) |len_v| {
         const len_i = try intrinsics.toLengthValue(realm, len_v);
         const len = try clampArrayLength(len_i);
         var i: i64 = 0;
         while (i < len) : (i += 1) {
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-            const elt = try intrinsics.getPropertyChain(realm, arr, islice);
+            const elt = (try intrinsics.getPropertyChainOnValue(realm, args_v, islice)) orelse Value.undefined_;
             ctor_args.append(realm.allocator, elt) catch return error.OutOfMemory;
         }
     } else {

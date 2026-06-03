@@ -375,39 +375,23 @@ fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         const arg_array = args[1];
         if (arg_array.isUndefined() or arg_array.isNull()) {
             // No extra args.
-        } else if (heap_mod.valueAsPlainObject(arg_array)) |arr| {
+        } else if (try intrinsics.getPropertyChainOnValue(realm, arg_array, "length")) |len_v| {
             // §20.2.3.1 step 4 → §7.3.18 CreateListFromArrayLike:
             // both `Get(O, "length")` and `Get(O, ! ToString(i))`
-            // are `?`-prefixed (abrupt). Use accessor-aware reads
-            // so a getter that throws propagates instead of being
-            // silently squashed to `undefined`.
-            const len = try clampArrayLength(try intrinsics.toLengthOf(realm, arr));
+            // are `?`-prefixed (abrupt). §6.1.7: a function IS an
+            // Object, so `fn.apply(x, someFunction)` is a valid
+            // array-like (e.g. reads `Array.length` == 1).
+            // `getPropertyChainOnValue` handles either kind and
+            // fires accessors on both — a `length` getter installed
+            // via `Object.defineProperty(fn, …)` runs, and a getter
+            // that throws propagates instead of being squashed.
+            const len = try clampArrayLength(try intrinsics.toLengthValue(realm, len_v));
             var i: i64 = 0;
             while (i < len) : (i += 1) {
                 var ibuf: [24]u8 = undefined;
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-                const v = try intrinsics.getPropertyChain(realm, arr, islice);
+                const v = (try intrinsics.getPropertyChainOnValue(realm, arg_array, islice)) orelse Value.undefined_;
                 apply_args.append(realm.allocator, v) catch return error.OutOfMemory;
-            }
-        } else if (heap_mod.valueAsFunction(arg_array)) |fn_arr| {
-            // §20.2.3.1 / §7.3.18 CreateListFromArrayLike — any
-            // object with a `length` and indexed properties is a
-            // valid argArray. Functions count: e.g.
-            // `fn.apply(x, Array)` reads `Array.length` (== 1).
-            // No accessors on JSFunction's own length/indices, so
-            // plain `.get` is fine here.
-            const len_v = fn_arr.get("length");
-            const raw_len: i64 = if (len_v.isInt32()) len_v.asInt32() else if (len_v.isDouble()) blk: {
-                const d = len_v.asDouble();
-                if (std.math.isNan(d)) break :blk 0;
-                break :blk @intFromFloat(@max(0.0, @min(d, @as(f64, @floatFromInt(@as(i64, std.math.maxInt(i64)))))));
-            } else 0;
-            const len = try clampArrayLength(raw_len);
-            var i: i64 = 0;
-            while (i < len) : (i += 1) {
-                var ibuf: [24]u8 = undefined;
-                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-                apply_args.append(realm.allocator, fn_arr.get(islice)) catch return error.OutOfMemory;
             }
         } else {
             // §20.2.3.1 step 4 → §7.3.18 CreateListFromArrayLike

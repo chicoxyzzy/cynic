@@ -1385,6 +1385,51 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
     return Value.undefined_;
 }
 
+/// §7.3.2 Get(O, P) polymorphic over the two heap object kinds
+/// Cynic models distinctly — `JSObject` and `JSFunction`. §6.1.7:
+/// a function IS an Object, so any abstract operation that takes
+/// an Object (§7.3.18 CreateListFromArrayLike, §20.2.3.{1,2})
+/// must accept a callable receiver too. `valueAsPlainObject`
+/// returns null for a `JSFunction`, so callers that gate on it
+/// alone would wrongly reject a function array-like; route them
+/// through here instead. Fires accessors on both kinds (a
+/// `length` getter installed via `Object.defineProperty(fn, …)`
+/// must run), walking each one's full prototype chain.
+///
+/// Returns `null` when `value` is a primitive (Type(value) is not
+/// Object) — the caller raises the §7.3.18 step 2 TypeError.
+pub fn getPropertyChainOnValue(realm: *Realm, value: Value, key: []const u8) NativeError!?Value {
+    if (heap_mod.valueAsPlainObject(value)) |obj| {
+        return try getPropertyChain(realm, obj, key);
+    }
+    if (heap_mod.valueAsFunction(value)) |fn_obj| {
+        // §10.1.8.1 OrdinaryGet on a callable — `lookupFunctionAccessor`
+        // walks own → static_parent → proto, returning the live
+        // accessor so a user-installed `length` / index getter fires.
+        const helpers = @import("lantern/helpers.zig");
+        if (helpers.lookupFunctionAccessor(fn_obj, key)) |acc| {
+            if (acc.getter) |getter| {
+                const lantern = @import("lantern/interpreter.zig");
+                const outcome = lantern.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(fn_obj), &[_]Value{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| return v,
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+            // Setter-only accessor — read returns undefined.
+            return Value.undefined_;
+        }
+        return fn_obj.get(key);
+    }
+    return null;
+}
+
 /// Spec §7.1.20 ToLength on the receiver's `length` property.
 /// Uses `getPropertyChain` so accessor `length` getters fire,
 /// and `Object.defineProperty(obj, "length", {get: …})` style

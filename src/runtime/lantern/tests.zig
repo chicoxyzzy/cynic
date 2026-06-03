@@ -3637,6 +3637,58 @@ test "later: Reflect.construct(BoundFn, args, NT) threads explicit newTarget (§
     , "ok");
 }
 
+test "later: Reflect.apply accepts a callable argumentsList with a length getter (§7.3.18 / §6.1.7)" {
+    // built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js:
+    // §7.3.18 CreateListFromArrayLike requires `argumentsList` to be
+    // an Object — and §6.1.7 a function IS an Object. A function with
+    // a `length` getter returning 1 is a valid array-like; the call
+    // receives `[undefined]`.
+    try expectScriptIntWithBuiltins(
+        \\function fn(...a) { return a.length; }
+        \\let f = function () {};
+        \\Object.defineProperty(f, "length", { get() { return 1; } });
+        \\Reflect.apply(fn, null, f);
+    , 1);
+}
+
+test "later: Reflect.apply callable argumentsList getter delivers undefined slot (§7.3.18)" {
+    // The single indexed read on the function array-like is absent, so
+    // CreateListFromArrayLike yields `[undefined]`.
+    try expectScriptStringWithBuiltins(
+        \\function fn(...a) { return (a.length === 1 && a[0] === undefined) ? "ok" : "no"; }
+        \\let f = function () {};
+        \\Object.defineProperty(f, "length", { get() { return 1; } });
+        \\Reflect.apply(fn, null, f);
+    , "ok");
+}
+
+test "later: Reflect.construct accepts a callable argumentsList with a length getter (§7.3.18 / §6.1.7)" {
+    try expectScriptIntWithBuiltins(
+        \\let received;
+        \\function C(...a) { received = a; }
+        \\let f = function () {};
+        \\Object.defineProperty(f, "length", { get() { return 1; } });
+        \\Reflect.construct(C, f);
+        \\received.length;
+    , 1);
+}
+
+test "later: Reflect.apply primitive argumentsList still throws TypeError (§7.3.18 step 2)" {
+    // Type(argumentsList) is not Object — a number is a primitive, so
+    // the negative guard must remain: TypeError, no over-loosening.
+    try expectScriptThrowsWithBuiltins(
+        \\function fn() {}
+        \\Reflect.apply(fn, null, 42);
+    );
+}
+
+test "later: Reflect.construct primitive argumentsList still throws TypeError (§7.3.18 step 2)" {
+    try expectScriptThrowsWithBuiltins(
+        \\function C() {}
+        \\Reflect.construct(C, 42);
+    );
+}
+
 test "later: for-in walks own properties" {
     try expectScriptStringWithBuiltins(
         \\const o = { a: 1, b: 2, c: 3 };
