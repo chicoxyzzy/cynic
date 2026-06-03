@@ -484,6 +484,94 @@ test "indirect eval: TypeError declaring a var on a non-extensible global" {
     );
 }
 
+// ── §sec-performeval-rules-in-initializer — eval inside an initializer
+//
+//   ScriptBody : StatementList
+//     It is a Syntax Error if ContainsArguments of StatementList is
+//     true.
+//
+// These Additional Early Error Rules apply only when a direct eval's
+// call site is inside a class field initializer or a class static
+// block. A direct eval whose body lexically contains an `arguments`
+// IdentifierReference (anywhere not crossing into a nested ordinary
+// function — arrows DO count) must be a SyntaxError at PerformEval
+// time, even where the reference would otherwise be a runtime
+// ReferenceError. Outside an initializer the rule does not apply.
+
+test "eval: arguments in a field-initializer direct eval is a SyntaxError" {
+    // §sec-performeval-rules-in-initializer — `eval('arguments')` whose
+    // call site is a field initializer must reject at parse time as a
+    // SyntaxError, not surface the would-be runtime ReferenceError.
+    try expectIntAllow(
+        \\let c = 'none';
+        \\class C { x = (() => { try { eval('arguments'); } catch (e) { c = e.constructor.name; } })(); }
+        \\new C();
+        \\c === 'SyntaxError' ? 1 : 0;
+    , 1);
+}
+
+test "eval: arrow-wrapped arguments in a field-init direct eval is a SyntaxError" {
+    // ContainsArguments recurses into arrow bodies (an arrow has no own
+    // `arguments`), so `eval('()=>arguments')` is still an early error.
+    try expectIntAllow(
+        \\let c = 'none';
+        \\class C { x = (() => { try { eval('()=>arguments'); } catch (e) { c = e.constructor.name; } })(); }
+        \\new C();
+        \\c === 'SyntaxError' ? 1 : 0;
+    , 1);
+}
+
+test "eval: arguments in a static-block direct eval is a SyntaxError" {
+    try expectIntAllow(
+        \\let c = 'none';
+        \\class C { static { try { eval('arguments'); } catch (e) { c = e.constructor.name; } } }
+        \\c === 'SyntaxError' ? 1 : 0;
+    , 1);
+}
+
+test "eval: arrow-wrapped arguments in a static-block direct eval is a SyntaxError" {
+    try expectIntAllow(
+        \\let c = 'none';
+        \\class C { static { try { eval('()=>arguments'); } catch (e) { c = e.constructor.name; } } }
+        \\c === 'SyntaxError' ? 1 : 0;
+    , 1);
+}
+
+test "eval: arguments in a method direct eval is NOT a SyntaxError (guard)" {
+    // The Additional Early Error Rules apply only to initializers. A
+    // direct eval inside a normal method is ordinary code — `arguments`
+    // there is NOT an early SyntaxError. Probe with `typeof` so the
+    // result is a string regardless of whether the method materialised
+    // an `arguments` binding; the point is that the parse succeeds and
+    // no SyntaxError is raised.
+    try expectIntAllow(
+        \\let c = 'ok';
+        \\class C { m() { try { return eval('typeof arguments'), 1; } catch (e) { c = e.constructor.name; return 0; } } }
+        \\const r = new C().m();
+        \\(r === 1 && c === 'ok') ? 1 : 0;
+    , 1);
+}
+
+test "eval: top-level arguments eval is a ReferenceError, not SyntaxError (guard)" {
+    // Outside any initializer the rule does not apply: `eval('arguments')`
+    // is ordinary code, and with no `arguments` binding in scope it's a
+    // runtime ReferenceError — NOT an early SyntaxError.
+    try expectIntAllow(
+        \\let c = 'none';
+        \\try { eval('arguments'); } catch (e) { c = e.constructor.name; }
+        \\c === 'ReferenceError' ? 1 : 0;
+    , 1);
+}
+
+test "eval: field-initializer eval without arguments still works (guard)" {
+    // The rule must not over-apply: an initializer direct eval whose body
+    // has no `arguments` reference evaluates normally.
+    try expectIntAllow(
+        \\class C { x = eval('1 + 1'); }
+        \\new C().x;
+    , 2);
+}
+
 test "eval: gate OPEN, genuine parse error still throws SyntaxError" {
     // §19.2.1 step 11 — once the gate is open and compilation proceeds,
     // a real parse failure in the evaluated source is a SyntaxError

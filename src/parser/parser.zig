@@ -76,6 +76,16 @@ pub const DirectEvalOptions = struct {
     allow_new_target: bool = false,
     /// Decoded `#name`s of every enclosing ClassBody (borrowed).
     private_names: []const []const u8 = &.{},
+    /// §sec-performeval-rules-in-initializer — true when the direct
+    /// eval's call site is inside a class field initializer or static
+    /// block. The Additional Early Error Rules then apply:
+    ///   ScriptBody : StatementList
+    ///     It is a Syntax Error if ContainsArguments of StatementList
+    ///     is true.
+    /// so the eval body must reject (`SyntaxError`) any `arguments`
+    /// IdentifierReference reachable without crossing an ordinary
+    /// (non-arrow) function boundary.
+    in_field_initializer: bool = false,
 };
 
 pub const Parser = struct {
@@ -254,7 +264,28 @@ pub const Parser = struct {
         self.allow_super_call = opts.allow_super_call;
         self.allow_new_target = opts.allow_new_target;
         self.direct_eval_private_names = opts.private_names;
-        return self.parseProgramBody(.script);
+        const program = try self.parseProgramBody(.script);
+
+        // §sec-performeval-rules-in-initializer — when the call site is a
+        // class field initializer / static block:
+        //   ScriptBody : StatementList
+        //     It is a Syntax Error if ContainsArguments of StatementList
+        //     is true.
+        // ContainsArguments walks every nested production but stops at an
+        // ordinary (non-arrow) function boundary — arrows recurse, since
+        // they have no own `arguments`. `stmtContainsArguments` already
+        // implements exactly that recursion (it's the §15.7.1 field-init
+        // early-error walker).
+        if (opts.in_field_initializer) {
+            for (program.body) |*s| {
+                if (self.stmtContainsArguments(s)) {
+                    try self.report(.invalid_class_element, program.span);
+                    break;
+                }
+            }
+        }
+
+        return program;
     }
 
     /// §16.2 ParseModule. Same statement-list shape as ParseScript but

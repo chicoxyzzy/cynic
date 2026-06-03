@@ -223,6 +223,18 @@ pub const Compiler = struct {
     /// `false` for scripts and inline-test compiles, where
     /// import/export still parse but compile as no-ops.
     is_module: bool = false,
+    /// True while compiling a class field initializer or a class
+    /// static block body (§15.7 / §15.7.11). Captured into the
+    /// `DirectEvalScope` so a *direct* eval whose call site sits in
+    /// such a context applies the §sec-performeval-rules-in-initializer
+    /// Additional Early Error Rules: the eval body is a `SyntaxError`
+    /// if ContainsArguments of its StatementList is true. Saved/restored
+    /// at each field-init / static-block boundary, and reset to false
+    /// across an ordinary (non-arrow) function / method boundary that
+    /// introduces its own `arguments` — but kept across an arrow (which
+    /// has no own `arguments`), matching the spec's ContainsArguments
+    /// recursion.
+    in_field_initializer: bool = false,
     /// True when compiling eval code (§3.8.3.7 PerformShadowRealmEval
     /// today; §19.2.1.1 PerformEval when `eval` ships). Top-level
     /// **lexical** declarations (`let` / `const` / `class`) then bind
@@ -3801,6 +3813,11 @@ pub const Compiler = struct {
             .bindings = bindings,
             .caller_env_depth = self.env_depth,
             .class_contexts = class_contexts,
+            // §sec-performeval-rules-in-initializer — capture whether this
+            // direct-eval call site is inside a field initializer / static
+            // block so the eval body applies the ContainsArguments early
+            // error.
+            .in_field_initializer = self.in_field_initializer,
         }) catch |err| {
             self.allocator.free(bindings);
             return err;
@@ -7407,6 +7424,10 @@ pub const Compiler = struct {
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
         const saved_completion_reg = self.completion_reg;
+        // §sec-performeval-rules-in-initializer — a direct eval inside
+        // this field initializer applies the ContainsArguments early
+        // error. Set the flag for the whole sub-compile.
+        const saved_in_field_initializer = self.in_field_initializer;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -7416,6 +7437,7 @@ pub const Compiler = struct {
         self.env_depth = saved_env_depth + 1;
         self.current_loop = null;
         self.completion_reg = null;
+        self.in_field_initializer = true;
 
         var inner_finished = false;
         defer {
@@ -7429,6 +7451,7 @@ pub const Compiler = struct {
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
                 self.completion_reg = saved_completion_reg;
+                self.in_field_initializer = saved_in_field_initializer;
             }
         }
 
@@ -7453,6 +7476,7 @@ pub const Compiler = struct {
         self.env_depth = saved_env_depth;
         self.current_loop = saved_current_loop;
         self.completion_reg = saved_completion_reg;
+        self.in_field_initializer = saved_in_field_initializer;
 
         return inner_chunk;
     }
@@ -7472,6 +7496,9 @@ pub const Compiler = struct {
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
         const saved_completion_reg = self.completion_reg;
+        // §sec-performeval-rules-in-initializer — a direct eval inside
+        // this static block applies the ContainsArguments early error.
+        const saved_in_field_initializer = self.in_field_initializer;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -7481,6 +7508,7 @@ pub const Compiler = struct {
         self.env_depth = saved_env_depth + 1;
         self.current_loop = null;
         self.completion_reg = null;
+        self.in_field_initializer = true;
 
         var inner_finished = false;
         defer {
@@ -7494,6 +7522,7 @@ pub const Compiler = struct {
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
                 self.completion_reg = saved_completion_reg;
+                self.in_field_initializer = saved_in_field_initializer;
             }
         }
 
@@ -7520,6 +7549,7 @@ pub const Compiler = struct {
         self.env_depth = saved_env_depth;
         self.current_loop = saved_current_loop;
         self.completion_reg = saved_completion_reg;
+        self.in_field_initializer = saved_in_field_initializer;
 
         return inner_chunk;
     }
@@ -7676,6 +7706,10 @@ pub const Compiler = struct {
         const saved_current_loop = self.current_loop;
         const saved_completion_reg = self.completion_reg;
         const saved_is_async = self.current_is_async;
+        // §sec-performeval-rules-in-initializer / ContainsArguments — a
+        // method body introduces its own `arguments`, so the "eval inside
+        // an initializer" early error does not reach into it.
+        const saved_in_field_initializer = self.in_field_initializer;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -7686,6 +7720,7 @@ pub const Compiler = struct {
         self.current_loop = null;
         self.completion_reg = null;
         self.current_is_async = is_async;
+        self.in_field_initializer = false;
 
         var inner_finished = false;
         defer {
@@ -7699,6 +7734,7 @@ pub const Compiler = struct {
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
                 self.completion_reg = saved_completion_reg;
+                self.in_field_initializer = saved_in_field_initializer;
             }
         }
 
@@ -7766,6 +7802,7 @@ pub const Compiler = struct {
         self.current_loop = saved_current_loop;
         self.completion_reg = saved_completion_reg;
         self.current_is_async = saved_is_async;
+        self.in_field_initializer = saved_in_field_initializer;
 
         return inner_chunk;
     }
@@ -12563,6 +12600,14 @@ fn compileFunctionTemplateExtNamed(
     self.finally_chain = null;
     const saved_dispose_stack = self.current_dispose_stack;
     self.current_dispose_stack = null;
+    // §sec-performeval-rules-in-initializer / ContainsArguments — the
+    // "eval inside a class field initializer / static block" early
+    // error stops at an ordinary (non-arrow) function boundary, which
+    // introduces its own `arguments`. An ARROW inherits the surrounding
+    // initializer context (it has no own `arguments`), so it keeps the
+    // flag and a direct eval inside the arrow still applies the rule.
+    const saved_in_field_initializer = self.in_field_initializer;
+    if (!is_arrow) self.in_field_initializer = false;
 
     // Reset to a fresh inner state.
     self.builder = self.freshSubBuilder();
@@ -12622,6 +12667,7 @@ fn compileFunctionTemplateExtNamed(
             self.pending_labels = saved_pending_labels;
             self.finally_chain = saved_finally_chain;
             self.current_dispose_stack = saved_dispose_stack;
+            self.in_field_initializer = saved_in_field_initializer;
         }
     }
 
@@ -12749,6 +12795,7 @@ fn compileFunctionTemplateExtNamed(
     self.pending_labels = saved_pending_labels;
     self.finally_chain = saved_finally_chain;
     self.current_dispose_stack = saved_dispose_stack;
+    self.in_field_initializer = saved_in_field_initializer;
 
     const sp_len = computeSpecLength(params);
     return self.builder.addFunctionTemplate(.{

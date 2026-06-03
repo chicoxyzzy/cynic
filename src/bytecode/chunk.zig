@@ -401,6 +401,15 @@ pub const DirectEvalScope = struct {
     /// enclosing method used. Empty when the `eval(...)` call site is
     /// outside any class body. Borrowed from the realm's class arena.
     class_contexts: []const DirectEvalClassContext = &.{},
+    /// §sec-performeval-rules-in-initializer — true when the `eval(...)`
+    /// call site is inside a class field initializer or a class static
+    /// block. The eval body then applies the Additional Early Error
+    /// Rules for Eval Inside Initializer: `ScriptBody : StatementList`
+    /// is a Syntax Error if ContainsArguments of StatementList is true.
+    /// False everywhere else — the rule does not apply, so an
+    /// `arguments` reference stays ordinary code (a runtime
+    /// ReferenceError at worst, never an early SyntaxError).
+    in_field_initializer: bool = false,
 };
 
 pub const Chunk = struct {

@@ -577,6 +577,10 @@ pub fn evaluateDirectEval(
         .allow_super_call = ctx.is_derived_ctor,
         .allow_new_target = has_home or ctx.is_derived_ctor,
         .private_names = private_names_buf.items,
+        // §sec-performeval-rules-in-initializer — when the call site is a
+        // class field initializer / static block, the eval body rejects
+        // (SyntaxError) if ContainsArguments of its StatementList is true.
+        .in_field_initializer = snapshot.in_field_initializer,
     }) catch return error.ParseError;
     for (diags.items) |d| if (d.severity == .err) return error.ParseError;
 
