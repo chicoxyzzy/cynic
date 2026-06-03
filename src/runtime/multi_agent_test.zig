@@ -145,13 +145,19 @@ test "multi-agent: Atomics.wait parks and a cross-thread notify wakes it (ok)" {
         // Spin until RUNNING, then RETRY notify until the waiter signals
         // DONE — robust against the notify-before-park race: once the
         // waiter is parked, the next notify's seq-bump wakes it. Returns
-        // 1 if any notify woke a parked agent.
+        // 1 if any notify woke a parked agent. Both loops carry a large
+        // but finite backstop so that a waiter thread that never starts
+        // (or never parks) makes this test FAIL fast instead of spinning
+        // forever and hanging the whole `zig build test` run — a test
+        // must never be able to wedge the suite.
         \\var i32 = new Int32Array(sab);
-        \\while (Atomics.load(i32, 1) !== 1) {}
-        \\var woke = 0;
+        \\var guard = 0;
+        \\while (Atomics.load(i32, 1) !== 1) { if (++guard > 500000000) break; }
+        \\var woke = 0, tries = 0;
         \\while (Atomics.load(i32, 2) !== 1) {
         \\  woke += Atomics.notify(i32, 0, 1);
         \\  for (var k = 0; k < 200000; k++) {}
+        \\  if (++tries > 1000000) break;
         \\}
         \\woke > 0 ? 1 : 0;
         ,

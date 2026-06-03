@@ -280,7 +280,9 @@ One-time setup:
 Common commands:
 
     zig build                                       # build cynic into zig-out/bin/
-    zig build test                                  # all unit tests
+    zig build test                                  # all unit tests (Debug; canonical, stack-trace path)
+    zig build test-fast                             # all unit tests, ReleaseSafe (~3 min vs 10+; safety checks + GC verifiers + leak detection kept)
+    zig build test -Dtest-filter=<name>             # run only unit tests whose name matches (also works on test-fast)
     zig build test-ses                              # hand-written SES positive-coverage tests
     zig build test262                               # full conformance run (runtime mode)
     zig build test262-safe                          # same harness, ReleaseSafe (GC verifiers + poison live)
@@ -419,6 +421,21 @@ the GC verifiers (`verifyRememberedSet` / `verifyShapeInvariant`)
 and the 0xaa free-poison — all gated on `runtime_safety`, hence
 no-ops in ReleaseFast — while running ~2-3× faster than Debug.
 The right binary for `/gc-stress` use-after-free hunts.
+
+**Unit tests: `test` vs `test-fast`.** The same Debug penalty
+hits the unit suite — most tests `eval` JS through the engine, so
+a full Debug `zig build test` is *run-bound* and can exceed ten
+minutes. `zig build test-fast` builds the same lib + exe test
+binaries `ReleaseSafe` and finishes in ~3 min, keeping every
+safety check, the GC verifiers, the 0xaa free-poison, and
+`std.testing.allocator` leak detection — a faithful gate, not a
+weaker one. Use `test-fast` for the inner loop; keep `test`
+(Debug) for a stack-trace-on-panic. Both honour
+`-Dtest-filter=<name>` to run a single bucket in seconds once
+compiled (e.g. `zig build test-fast -Dtest-filter=Atomics`).
+Thread/concurrency tests must never busy-spin unbounded — give
+every wait loop a finite backstop so a regression fails the test
+fast instead of wedging the whole suite.
 
 **Leak-check before every full sweep.** Past leaks (e.g. JSString
 bytes pinned in the per-fixture arena before `7a6a0d8`) ballooned

@@ -261,6 +261,43 @@ pub fn build(b: *std.Build) void {
     const run_t262_tests = b.addRunArtifact(t262_tests);
     test_step.dependOn(&run_t262_tests.step);
 
+    // `zig build test-fast` — the same unit tests as `test`, but the
+    // lib + exe binaries are built ReleaseSafe instead of Debug. Most
+    // of the unit suite eval's JS through the engine, and Debug-mode
+    // JS execution is 5-10× slower (the same reason the test262 harness
+    // is never Debug) — so a full Debug `test` run is run-bound and can
+    // exceed ten minutes, while ReleaseSafe finishes in ~3. ReleaseSafe
+    // keeps every safety check, arms the GC verifiers
+    // (`verifyRememberedSet` / `verifyShapeInvariant`) + the 0xaa
+    // free-poison (all gated on `runtime_safety`, hence no-ops in
+    // ReleaseFast), and `std.testing.allocator` leak detection still
+    // fires — so it is a faithful gate, not a weaker one. `test`
+    // (Debug) stays the canonical stack-trace-on-panic path. Both
+    // honour `-Dtest-filter=<name>`.
+    const lib_mod_test_safe = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    lib_mod_test_safe.addAnonymousImport("NormalizationTest.txt", .{
+        .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
+    });
+    lib_mod_test_safe.addOptions("build_options", lib_build_options);
+    const exe_mod_test_safe = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    exe_mod_test_safe.addImport("cynic", lib_mod_test_safe);
+    const safe_lib_tests = b.addTest(.{ .root_module = lib_mod_test_safe, .filters = test_filters });
+    const safe_exe_tests = b.addTest(.{ .root_module = exe_mod_test_safe, .filters = test_filters });
+    const test_fast_step = b.step("test-fast", "Run all unit tests built ReleaseSafe — finishes in ~3 min vs the Debug `test` step's 10+; keeps safety checks, GC verifiers, leak detection");
+    test_fast_step.dependOn(&b.addRunArtifact(safe_lib_tests).step);
+    test_fast_step.dependOn(&b.addRunArtifact(safe_exe_tests).step);
+    test_fast_step.dependOn(&run_t262_tests.step);
+
     // A second harness binary, built ReleaseSafe and installed under
     // a DISTINCT name (`cynic-test262-safe`) so it coexists with the
     // ReleaseFast `cynic-test262` — build each once and invoke either
