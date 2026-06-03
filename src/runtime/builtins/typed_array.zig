@@ -865,16 +865,22 @@ fn sharedArrayBufferConstructor(realm: *Realm, this_value: Value, args: []const 
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(inst, proto);
 
-    // §25.2.1.1 step 5 — CreateSharedByteDataBlock(byteLength).
+    // §25.2.1.1 step 5 — CreateSharedByteDataBlock(byteLength). The
+    // bytes live in a refcounted, non-GC shared block (see
+    // shared_data_block.zig); growable buffers pre-allocate the cap so
+    // `grow` never moves the store. `getArrayBuffer` returns the
+    // block's live slice.
     const capacity = max_byte_length_opt orelse len;
     if (capacity > @as(usize, std.math.maxInt(u32))) {
         return throwRangeError(realm, "SharedArrayBuffer allocation exceeds host limit");
     }
     realm.heap.charge(capacity) catch
         return throwRangeError(realm, "SharedArrayBuffer length exceeds heap ceiling");
-    const buf = realm.allocator.alloc(u8, len) catch return error.OutOfMemory;
-    @memset(buf, 0);
-    inst.setArrayBuffer(realm.allocator, buf) catch return error.OutOfMemory;
+    const block = @import("../shared_data_block.zig").SharedDataBlock.create(len, capacity) catch return error.OutOfMemory;
+    inst.setSharedBlock(realm.allocator, block) catch {
+        block.release();
+        return error.OutOfMemory;
+    };
     inst.has_array_buffer_data = true;
     inst.array_buffer_shared = true;
     inst.setArrayBufferMaxByteLength(realm.allocator, max_byte_length_opt) catch return error.OutOfMemory;
@@ -924,15 +930,16 @@ fn sharedArrayBufferGrow(realm: *Realm, this_value: Value, args: []const Value) 
         return throwTypeError(realm, "SharedArrayBuffer.prototype.grow requires a growable SharedArrayBuffer receiver");
     // Step 4 — `Let newByteLength be ? ToIndex(newLength)`.
     const new_len = try toIndex(realm, argOr(args, 0, Value.undefined_));
-    const max = obj.getArrayBufferMaxByteLength().?;
-    const old = obj.getArrayBuffer().?;
-    // §25.2.4.4 — grow-only and bounded by maxByteLength.
-    if (new_len < old.len or new_len > max)
+    // §25.2.4.4 — grow-only, bounded by maxByteLength. The store was
+    // pre-allocated to the cap, so growth is an in-place length bump:
+    // the data block never moves, so every agent's view (reading the
+    // block's live slice) sees the new length. Under the block lock so
+    // a concurrent grow / Atomics op observes a consistent length.
+    const block = obj.getSharedBlock() orelse
+        return throwTypeError(realm, "SharedArrayBuffer.prototype.grow requires a growable SharedArrayBuffer receiver");
+    if (new_len < block.byte_length or new_len > block.max_byte_length)
         return throwRangeError(realm, "SharedArrayBuffer.prototype.grow newLength out of range");
-    if (new_len == old.len) return Value.undefined_;
-    const new_bytes = realm.allocator.realloc(old, new_len) catch return error.OutOfMemory;
-    @memset(new_bytes[old.len..], 0);
-    obj.setArrayBuffer(realm.allocator, new_bytes) catch return error.OutOfMemory;
+    block.byte_length = new_len;
     return Value.undefined_;
 }
 

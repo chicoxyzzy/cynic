@@ -581,6 +581,12 @@ pub const JSObjectExtension = struct {
     /// ArrayBuffer(n)` / `.transfer()` / `.slice()` instances
     /// populate this. Heap-allocated slice; freed in deinit.
     array_buffer: ?[]u8 = null,
+    /// §25.2 SharedArrayBuffer backing store — a refcounted, non-GC
+    /// block shared across agents. Present (and `array_buffer` null)
+    /// on `SharedArrayBuffer` instances; `getArrayBuffer` returns the
+    /// block's live slice. The object's `deinit` `release`s it (the
+    /// block frees when its last cross-agent reference is gone).
+    shared_block: ?*@import("shared_data_block.zig").SharedDataBlock = null,
     /// §25.1 [[ArrayBufferMaxByteLength]] — resizable buffer
     /// upper bound. `null` on fixed-length buffers.
     array_buffer_max_byte_length: ?usize = null,
@@ -659,7 +665,10 @@ pub const JSObjectExtension = struct {
         self.promise_waiters.deinit(allocator);
         self.promise_reactions.deinit(allocator);
         if (self.finalization_cells) |fc| fc.deinit(allocator);
-        if (self.array_buffer) |ab| allocator.free(ab);
+        // §25.2 — a SharedArrayBuffer's bytes belong to the refcounted
+        // shared block (not this realm's allocator); drop our reference
+        // instead of freeing. A plain ArrayBuffer frees its own slice.
+        if (self.shared_block) |blk| blk.release() else if (self.array_buffer) |ab| allocator.free(ab);
         self.disposable_resources.deinit(allocator);
         if (self.async_dispose_walk) |w| w.deinit(allocator);
         if (self.temporal_record) |tr| {
@@ -1536,7 +1545,14 @@ pub const JSObject = struct {
     // object skips the allocation.
 
     pub fn getArrayBuffer(self: *const JSObject) ?[]u8 {
-        if (self.extension) |ext| return ext.array_buffer;
+        if (self.extension) |ext| {
+            // §25.2 — a SharedArrayBuffer's bytes are the shared
+            // block's live slice (`bytes[0..byte_length]`), computed
+            // fresh so a `grow` (which bumps `byte_length` in place) is
+            // visible to every agent's view without re-caching.
+            if (ext.shared_block) |blk| return blk.live();
+            return ext.array_buffer;
+        }
         return null;
     }
 
@@ -1544,6 +1560,16 @@ pub const JSObject = struct {
     /// data block that belongs to a `SharedArrayBuffer`.
     pub fn isSharedArrayBuffer(self: *const JSObject) bool {
         return self.has_array_buffer_data and self.array_buffer_shared;
+    }
+
+    pub fn getSharedBlock(self: *const JSObject) ?*@import("shared_data_block.zig").SharedDataBlock {
+        if (self.extension) |ext| return ext.shared_block;
+        return null;
+    }
+
+    pub fn setSharedBlock(self: *JSObject, allocator: std.mem.Allocator, blk: ?*@import("shared_data_block.zig").SharedDataBlock) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.shared_block = blk;
     }
 
     pub fn setArrayBuffer(self: *JSObject, allocator: std.mem.Allocator, bytes: ?[]u8) !void {
