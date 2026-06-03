@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 90.14 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 90.25 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **44895 passing** — Cynic produced the spec-expected result.
-- **4913 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **44950 passing** — Cynic produced the spec-expected result.
+- **4858 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 44895 | 4913 | 49808 | 90.14 % |
+| **`--unhardened --allow=eval`** | 44950 | 4858 | 49808 | 90.25 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -77,7 +77,7 @@ list.
 | `intl402/Locale` | 0 | 152 | 0 % |
 | `intl402/NumberFormat` | 0 | 253 | 0 % |
 | `language/eval-code` | 158 | 189 | 46 % |
-| `built-ins/Atomics` | 213 | 169 | 56 % |
+| `built-ins/Atomics` | 268 | 114 | 70 % |
 | `language/statements` | 8902 | 421 | 95 % |
 | `language/expressions` | 10227 | 455 | 96 % |
 
@@ -214,19 +214,15 @@ top-line score.
 
 ## History
 
-### 2026-06-03 — cynic `5cca7d9`, test262 `d0c1b455`
+### 2026-06-03 — cynic `51dc5d2`, test262 `d0c1b455`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 44895 | 4913 | 49808 | 90.14 % | +473 | 25.2 s |
+| 44950 | 4858 | 49808 | 90.25 % | +528 | 25.1 s |
 
 Biggest movers:
 
-- `built-ins/Atomics` +213
-- `built-ins/SharedArrayBuffer` +104
-- `built-ins/TypedArrayConstructors` +54
-- `built-ins/DataView` +39
-- `built-ins/ArrayBuffer` +9
+- `built-ins/Atomics` +55
 
 ### 2026-06-02 — cynic `bd0337e`, test262 `d0c1b455`
 
