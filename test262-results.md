@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 89.27 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 90.14 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **44466 passing** — Cynic produced the spec-expected result.
-- **5342 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **44895 passing** — Cynic produced the spec-expected result.
+- **4913 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 44466 | 5342 | 49808 | 89.27 % |
+| **`--unhardened --allow=eval`** | 44895 | 4913 | 49808 | 90.14 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -72,15 +72,14 @@ list.
 
 | area | passing | failing | pass% |
 |---|---:|---:|---:|
-| `built-ins/Atomics` | 0 | 382 | 0 % |
-| `built-ins/SharedArrayBuffer` | 0 | 104 | 0 % |
 | `intl402/DateTimeFormat` | 0 | 248 | 0 % |
 | `intl402/DurationFormat` | 0 | 111 | 0 % |
 | `intl402/Locale` | 0 | 152 | 0 % |
 | `intl402/NumberFormat` | 0 | 253 | 0 % |
 | `language/eval-code` | 158 | 189 | 46 % |
-| `language/statements` | 8901 | 422 | 95 % |
-| `language/expressions` | 10226 | 456 | 96 % |
+| `built-ins/Atomics` | 213 | 169 | 56 % |
+| `language/statements` | 8902 | 421 | 95 % |
+| `language/expressions` | 10227 | 455 | 96 % |
 
 **10–99 fails**
 
@@ -100,11 +99,9 @@ list.
 | `built-ins/Function` | 421 | 88 | 83 % |
 | `language/arguments-object` | 225 | 38 | 86 % |
 | `language/types` | 102 | 11 | 90 % |
-| `built-ins/TypedArrayConstructors` | 665 | 71 | 90 % |
-| `built-ins/DataView` | 511 | 39 | 93 % |
 | `built-ins/Proxy` | 298 | 13 | 96 % |
-| `built-ins/Object` | 3328 | 83 | 98 % |
-| `built-ins/TypedArray` | 1423 | 15 | 99 % |
+| `built-ins/Object` | 3329 | 82 | 98 % |
+| `built-ins/TypedArrayConstructors` | 719 | 17 | 98 % |
 | `built-ins/Array` | 3054 | 27 | 99 % |
 
 **1–9 fails**
@@ -123,7 +120,6 @@ list.
 | `language/global-code` | 37 | 5 | 88 % |
 | `built-ins/ThrowTypeError` | 13 | 1 | 93 % |
 | `language/destructuring` | 18 | 1 | 95 % |
-| `built-ins/ArrayBuffer` | 183 | 9 | 95 % |
 | `built-ins/AsyncGeneratorFunction` | 22 | 1 | 96 % |
 | `built-ins/GeneratorFunction` | 22 | 1 | 96 % |
 | `built-ins/Symbol` | 96 | 2 | 98 % |
@@ -132,6 +128,7 @@ list.
 | `language/module-code` | 589 | 6 | 99 % |
 | `built-ins/Reflect` | 152 | 1 | 99 % |
 | `built-ins/JSON` | 164 | 1 | 99 % |
+| `built-ins/TypedArray` | 1430 | 8 | 99 % |
 | `built-ins/String` | 1217 | 6 | 100 % |
 | `built-ins/Map` | 203 | 1 | 100 % |
 | `built-ins/Promise` | 637 | 3 | 100 % |
@@ -143,6 +140,7 @@ list.
 | area | passing | failing | pass% |
 |---|---:|---:|---:|
 | `built-ins/AggregateError` | 25 | 0 | 100 % |
+| `built-ins/ArrayBuffer` | 192 | 0 | 100 % |
 | `built-ins/ArrayIteratorPrototype` | 27 | 0 | 100 % |
 | `built-ins/AsyncDisposableStack` | 104 | 0 | 100 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 38 | 0 | 100 % |
@@ -151,6 +149,7 @@ list.
 | `built-ins/AsyncIteratorPrototype` | 13 | 0 | 100 % |
 | `built-ins/BigInt` | 77 | 0 | 100 % |
 | `built-ins/Boolean` | 51 | 0 | 100 % |
+| `built-ins/DataView` | 550 | 0 | 100 % |
 | `built-ins/Date` | 594 | 0 | 100 % |
 | `built-ins/DisposableStack` | 93 | 0 | 100 % |
 | `built-ins/Error` | 58 | 0 | 100 % |
@@ -163,6 +162,7 @@ list.
 | `built-ins/Number` | 340 | 0 | 100 % |
 | `built-ins/RegExpStringIteratorPrototype` | 17 | 0 | 100 % |
 | `built-ins/SetIteratorPrototype` | 11 | 0 | 100 % |
+| `built-ins/SharedArrayBuffer` | 104 | 0 | 100 % |
 | `built-ins/StringIteratorPrototype` | 7 | 0 | 100 % |
 | `built-ins/SuppressedError` | 22 | 0 | 100 % |
 | `built-ins/Temporal` | 4588 | 0 | 100 % |
@@ -214,17 +214,19 @@ top-line score.
 
 ## History
 
-### 2026-06-03 — cynic `63b6502`, test262 `d0c1b455`
+### 2026-06-03 — cynic `5cca7d9`, test262 `d0c1b455`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 44466 | 5342 | 49808 | 89.27 % | +44 | 35.2 s |
+| 44895 | 4913 | 49808 | 90.14 % | +473 | 25.2 s |
 
 Biggest movers:
 
-- `language/statements` +22
-- `language/eval-code` +17
-- `language/statementList` +5
+- `built-ins/Atomics` +213
+- `built-ins/SharedArrayBuffer` +104
+- `built-ins/TypedArrayConstructors` +54
+- `built-ins/DataView` +39
+- `built-ins/ArrayBuffer` +9
 
 ### 2026-06-02 — cynic `bd0337e`, test262 `d0c1b455`
 
