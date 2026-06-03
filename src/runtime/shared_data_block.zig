@@ -30,10 +30,18 @@ pub const SharedDataBlock = struct {
     /// objects (in any agent). Atomic so cross-thread broadcast /
     /// sweep is race-free.
     refcount: std.atomic.Value(usize),
-    // NOTE: the futex state (mutex/cond) for cross-thread
-    // `Atomics.wait` / `notify` is added in Phase B (see
-    // docs/multi-agent-atomics.md) using the `std.Io` concurrency
-    // model the engine/harness already use. Phase A is thread-free.
+    /// §25.4.11/.12 — per-4-byte-slot count of agents currently parked
+    /// in `Atomics.wait` on that slot. `wait` bumps its slot before
+    /// parking and clears it after; `notify` reads it to return the
+    /// number it woke (`std.Thread.Futex` itself reports no count). One
+    /// entry per i32 slot (`max_byte_length / 4`).
+    waiters: []std.atomic.Value(u32),
+    /// Per-slot notify-sequence word that `std.Thread.Futex` parks on.
+    /// `notify` bumps it (and wakes); `wait` parks while it's unchanged.
+    /// Crucially this is NOT the data element — a plain `Atomics.store`
+    /// / `xor` mutates the element but must NOT wake a waiter (only a
+    /// `notify` does), so the wait list is keyed on this separate word.
+    notify_seq: []std.atomic.Value(u32),
 
     /// Allocate a zeroed block of `max_byte_length` bytes (≥
     /// `byte_length`), refcount 1. Uses the process-global page
@@ -43,12 +51,21 @@ pub const SharedDataBlock = struct {
         const self = try gpa.create(SharedDataBlock);
         errdefer gpa.destroy(self);
         const bytes = try gpa.alloc(u8, max_byte_length);
+        errdefer gpa.free(bytes);
         @memset(bytes, 0);
+        const slots = max_byte_length / 4;
+        const waiters = try gpa.alloc(std.atomic.Value(u32), slots);
+        errdefer gpa.free(waiters);
+        for (waiters) |*w| w.* = std.atomic.Value(u32).init(0);
+        const notify_seq = try gpa.alloc(std.atomic.Value(u32), slots);
+        for (notify_seq) |*w| w.* = std.atomic.Value(u32).init(0);
         self.* = .{
             .bytes = bytes,
             .byte_length = byte_length,
             .max_byte_length = max_byte_length,
             .refcount = std.atomic.Value(usize).init(1),
+            .waiters = waiters,
+            .notify_seq = notify_seq,
         };
         return self;
     }
@@ -67,6 +84,8 @@ pub const SharedDataBlock = struct {
         // release across threads before we free.
         if (self.refcount.fetchSub(1, .acq_rel) == 1) {
             const gpa = std.heap.page_allocator;
+            gpa.free(self.notify_seq);
+            gpa.free(self.waiters);
             gpa.free(self.bytes);
             gpa.destroy(self);
         }

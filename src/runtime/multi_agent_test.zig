@@ -15,6 +15,8 @@ const testing = std.testing;
 const Realm = @import("realm.zig").Realm;
 const lantern = @import("lantern/interpreter.zig");
 const SharedDataBlock = @import("shared_data_block.zig").SharedDataBlock;
+const ta = @import("builtins/typed_array.zig");
+const heap_mod = @import("heap.zig");
 
 /// Each agent: a fresh Realm on its own thread, doing real allocating
 /// work (objects + arrays + GC pressure) to shake out cross-thread
@@ -89,4 +91,77 @@ test "multi-agent: a SharedDataBlock is coherent across threads" {
     for (0..N) |i| try testing.expectEqual(@as(i32, @intCast(i * 100 + 7)), results[i]);
     // The block saw every agent's write.
     for (0..N) |i| try testing.expectEqual(@as(i32, @intCast(i * 100 + 7)), std.mem.readInt(i32, block.bytes[i * 4 ..][0..4], .little));
+}
+
+/// Build a fresh Realm whose `globalThis.sab` wraps `block`, evaluate
+/// `src` (which references `sab`), and store the int completion in `out`.
+fn agentOverBlock(block: *SharedDataBlock, src: []const u8, out: *i32) void {
+    var realm = Realm.init(std.heap.page_allocator);
+    defer realm.deinit();
+    realm.installBuiltins() catch {
+        out.* = -1;
+        return;
+    };
+    const sab = ta.wrapSharedBlock(&realm, block) catch {
+        out.* = -2;
+        return;
+    };
+    realm.globals.put(realm.allocator, "sab", sab) catch {
+        out.* = -3;
+        return;
+    };
+    const outcome = lantern.evaluateScript(std.heap.page_allocator, &realm, src) catch {
+        out.* = -4;
+        return;
+    };
+    out.* = switch (outcome) {
+        .value, .yielded => |v| if (v.isInt32()) v.asInt32() else -5,
+        .thrown => -6,
+    };
+}
+
+test "multi-agent: Atomics.wait parks and a cross-thread notify wakes it (ok)" {
+    // Slot 0 is the wait location; slot 1 is a RUNNING handshake flag.
+    // The waiter sets RUNNING then waits on slot 0; the notifier spins
+    // until RUNNING, then notifies slot 0 — the test262 wait/notify
+    // pattern. The 5s timeout bounds the test if notify never lands.
+    const block = try SharedDataBlock.create(16, 16);
+    defer block.release();
+
+    var wait_result: i32 = 0;
+    var notify_result: i32 = 0;
+    const waiter = try std.Thread.spawn(.{}, agentOverBlock, .{
+        block,
+        \\var i32 = new Int32Array(sab);
+        \\Atomics.store(i32, 1, 1);          // RUNNING
+        \\var r = Atomics.wait(i32, 0, 0, 10000);
+        \\Atomics.store(i32, 2, 1);          // DONE (woke / timed out)
+        \\r === 'ok' ? 1 : (r === 'timed-out' ? 2 : (r === 'not-equal' ? 3 : 9));
+        ,
+        &wait_result,
+    });
+    const notifier = try std.Thread.spawn(.{}, agentOverBlock, .{
+        block,
+        // Spin until RUNNING, then RETRY notify until the waiter signals
+        // DONE — robust against the notify-before-park race: once the
+        // waiter is parked, the next notify's seq-bump wakes it. Returns
+        // 1 if any notify woke a parked agent.
+        \\var i32 = new Int32Array(sab);
+        \\while (Atomics.load(i32, 1) !== 1) {}
+        \\var woke = 0;
+        \\while (Atomics.load(i32, 2) !== 1) {
+        \\  woke += Atomics.notify(i32, 0, 1);
+        \\  for (var k = 0; k < 200000; k++) {}
+        \\}
+        \\woke > 0 ? 1 : 0;
+        ,
+        &notify_result,
+    });
+    waiter.join();
+    notifier.join();
+    // DIAGNOSTIC ORDER: notify's woken-count first (0 = ran before the
+    // waiter parked / block mismatch; 1 = parked-but-not-woken).
+    try testing.expectEqual(@as(i32, 1), notify_result);
+    // The waiter was woken by the notify → "ok" (code 1).
+    try testing.expectEqual(@as(i32, 1), wait_result);
 }

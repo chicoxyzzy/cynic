@@ -887,6 +887,27 @@ fn sharedArrayBufferConstructor(realm: *Realm, this_value: Value, args: []const 
     return heap_mod.taggedObject(inst);
 }
 
+/// Wrap an existing `SharedDataBlock` as a fresh `SharedArrayBuffer`
+/// object in `realm` (retaining the block). This is how a buffer is
+/// handed to another agent — `$262.agent.broadcast` / `receiveBroadcast`
+/// construct a SAB in the receiving realm over the same shared bytes.
+pub fn wrapSharedBlock(realm: *Realm, block: *@import("../shared_data_block.zig").SharedDataBlock) !Value {
+    const inst = try realm.heap.allocateObject();
+    const proto: ?*JSObject = blk: {
+        if (heap_mod.valueAsFunction(realm.globals.get("SharedArrayBuffer") orelse Value.undefined_)) |c| break :blk c.prototype;
+        break :blk realm.intrinsics.object_prototype;
+    };
+    realm.heap.setObjectPrototype(inst, proto);
+    block.retain();
+    try inst.setSharedBlock(realm.allocator, block);
+    inst.has_array_buffer_data = true;
+    inst.array_buffer_shared = true;
+    // Preserve the growable bit: a growable block has spare capacity.
+    if (block.max_byte_length > block.byte_length)
+        try inst.setArrayBufferMaxByteLength(realm.allocator, block.max_byte_length);
+    return heap_mod.taggedObject(inst);
+}
+
 /// Brand check shared by every `SharedArrayBuffer.prototype` accessor:
 /// §25.2.4.x RequireInternalSlot(O, [[ArrayBufferData]]) + the
 /// IsSharedArrayBuffer gate. Returns the receiver object on success.

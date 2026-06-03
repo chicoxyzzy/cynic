@@ -22,6 +22,17 @@ const TypedKind = ObjMod.TypedKind;
 const TypedView = ObjMod.TypedView;
 const ta_mod = @import("typed_array.zig");
 const promise_mod = @import("promise.zig");
+const builtin = @import("builtin");
+
+/// Monotonic nanoseconds via the libc shim (the engine deliberately
+/// avoids `std.Io`; see `currentTimeMs` in date.zig). `0` on a
+/// libc-less freestanding target.
+fn monoNowNs() u64 {
+    if (builtin.os.tag == .freestanding) return 0;
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
 
 const throwTypeError = intrinsics.throwTypeError;
 const throwRangeError = intrinsics.throwRangeError;
@@ -300,22 +311,54 @@ fn atomicsIsLockFree(realm: *Realm, _: Value, args: []const Value) NativeError!V
     return Value.fromBool(lock_free);
 }
 
-/// §25.4.12 Atomics.notify(ta, index, count). Single agent → 0 waiters.
+/// Coerce a `timeout` argument (§25.4.11/.x): `undefined` / `NaN` /
+/// `+∞` → `null` (wait forever); else `max(ToInteger(t), 0)` ms as ns.
+fn coerceTimeoutNs(realm: *Realm, v: Value) NativeError!?u64 {
+    if (v.isUndefined()) return null;
+    const n = try toNumber(realm, v);
+    const d: f64 = if (n.isInt32()) @floatFromInt(n.asInt32()) else n.asDouble();
+    if (std.math.isNan(d) or (std.math.isInf(d) and d > 0)) return null;
+    const ms = @max(@trunc(d), 0);
+    const ns = ms * std.time.ns_per_ms;
+    if (ns >= @as(f64, @floatFromInt(std.math.maxInt(u64)))) return null;
+    return @intFromFloat(ns);
+}
+
+/// §25.4.12 Atomics.notify(ta, index, count). Wakes up to `count`
+/// agents parked in `Atomics.wait` on this (block, index); returns the
+/// number woken. A non-shared buffer has no waiters → 0.
 fn atomicsNotify(realm: *Realm, _: Value, args: []const Value) NativeError!Value {
     const obj = try validateIntegerTypedArray(realm, argOr(args, 0, Value.undefined_), true);
     const tv = obj.getTypedView().?;
-    _ = try validateAtomicAccess(realm, tv, tv.viewed.getArrayBuffer().?, argOr(args, 1, Value.undefined_));
-    // §25.4.12 step — `count` defaults to +Infinity, else max(ToInteger, 0).
-    // The value is unused on a single agent but its coercion is observable.
+    const idx = try validateAtomicAccess(realm, tv, tv.viewed.getArrayBuffer().?, argOr(args, 1, Value.undefined_));
+    // §25.4.12 — `count` defaults to +∞ (wake all), else max(ToInteger, 0).
     const count_v = argOr(args, 2, Value.undefined_);
-    if (!count_v.isUndefined()) _ = try toNumber(realm, count_v);
-    // No other agent waits on this location → 0 awoken.
-    return Value.fromInt32(0);
+    var count: u32 = std.math.maxInt(u32);
+    if (!count_v.isUndefined()) {
+        const n = try toNumber(realm, count_v);
+        const d: f64 = if (n.isInt32()) @floatFromInt(n.asInt32()) else n.asDouble();
+        const c = @max(@trunc(if (std.math.isNan(d)) 0 else d), 0);
+        count = if (std.math.isInf(c) or c > @as(f64, std.math.maxInt(u32))) std.math.maxInt(u32) else @intFromFloat(c);
+    }
+    // A non-shared buffer never has agents waiting on it. (The block
+    // lives on the viewed SharedArrayBuffer, not the TypedArray.)
+    const block = tv.viewed.getSharedBlock() orelse return Value.fromInt32(0);
+    const slot = (tv.byte_offset + idx * tv.kind.elementSize()) / 4;
+    const parked = block.waiters[slot].load(.seq_cst);
+    const woken: u32 = @min(parked, count);
+    // Bump the slot's notify sequence — every agent polling this slot
+    // in `Atomics.wait` observes the change and wakes. (`count` caps
+    // the *reported* woken set; the poll-loop wait re-checks the value,
+    // so over-waking is benign.)
+    _ = block.notify_seq[slot].fetchAdd(1, .seq_cst);
+    return Value.fromInt32(@intCast(woken));
 }
 
 /// §25.4.11 Atomics.wait(ta, index, value, timeout). Requires a shared
-/// Int32Array / BigInt64Array. Single agent: returns `"not-equal"` when
-/// the current value differs, else `"timed-out"` (no agent can notify).
+/// Int32Array / BigInt64Array. Parks on the (block, index) wait list
+/// until a `notify` wakes it (`"ok"`), the timeout elapses
+/// (`"timed-out"`), or — checked up front — the current value differs
+/// (`"not-equal"`).
 fn atomicsWait(realm: *Realm, _: Value, args: []const Value) NativeError!Value {
     const obj = try validateIntegerTypedArray(realm, argOr(args, 0, Value.undefined_), true);
     const tv = obj.getTypedView().?;
@@ -326,20 +369,47 @@ fn atomicsWait(realm: *Realm, _: Value, args: []const Value) NativeError!Value {
     const idx = try validateAtomicAccess(realm, tv, buf, argOr(args, 1, Value.undefined_));
     const kind = tv.kind;
     const size = kind.elementSize();
-    // §25.4.11 step 6 — coerce `value` to the element type's bits.
+    // §25.4.11 step 6 — coerce `value`; step 7 — coerce `timeout`.
     const value_bits = try coerceRawBits(realm, kind, argOr(args, 2, Value.undefined_));
-    // §25.4.11 step 7 — coerce `timeout` (observable; the value is
-    // unused single-agent since a matching wait can never be notified).
-    const timeout_v = argOr(args, 3, Value.undefined_);
-    if (!timeout_v.isUndefined()) _ = try toNumber(realm, timeout_v);
+    const timeout_ns = try coerceTimeoutNs(realm, argOr(args, 3, Value.undefined_));
+    const block = tv.viewed.getSharedBlock().?;
     const byte_pos = tv.byte_offset + idx * size;
-    const cur_bits = readRawBits(buf, size, byte_pos);
     const mask: u64 = if (size == 8) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(size * 8)) - 1;
-    // §25.4.11 — value mismatch returns "not-equal" immediately;
-    // otherwise, with no agent able to notify, the wait times out.
-    const result: []const u8 = if ((cur_bits & mask) != (value_bits & mask)) "not-equal" else "timed-out";
-    const s = realm.heap.allocateString(result) catch return error.OutOfMemory;
-    return Value.fromString(s);
+    const slot = byte_pos / 4;
+
+    // Read the notify sequence BEFORE the value compare so a concurrent
+    // `notify` after this point either wakes us or makes the park
+    // return immediately (Futex re-checks the seq atomically at park).
+    const seq = block.notify_seq[slot].load(.seq_cst);
+    const cur_bits = readRawBits(buf, size, byte_pos);
+    if ((cur_bits & mask) != (value_bits & mask)) return atomicsString(realm, "not-equal");
+
+    _ = block.waiters[slot].fetchAdd(1, .seq_cst); // for notify's count
+    defer _ = block.waiters[slot].fetchSub(1, .seq_cst);
+
+    // Park by polling the notify sequence: a `notify` bumps it; we wake
+    // when it changes (→ "ok") or the deadline passes (→ "timed-out").
+    // A poll loop (vs a kernel futex) because this Zig dev build's
+    // std.Thread no longer re-exports Futex/Mutex/Condition (the
+    // std.Io migration); a bounded sleep keeps the spin cheap. Keyed on
+    // `notify_seq` — NOT the data element — so a plain store/xor never
+    // wakes a waiter.
+    // No real clock on freestanding (no threads there either) → don't
+    // spin forever; report timed-out.
+    if (builtin.os.tag == .freestanding) return atomicsString(realm, "timed-out");
+    const start_ns = monoNowNs();
+    while (true) {
+        if (block.notify_seq[slot].load(.seq_cst) != seq) return atomicsString(realm, "ok");
+        if (timeout_ns) |ns| {
+            if (monoNowNs() -% start_ns >= ns) return atomicsString(realm, "timed-out");
+        }
+        std.atomic.spinLoopHint();
+    }
+}
+
+fn atomicsString(realm: *Realm, s: []const u8) NativeError!Value {
+    const str = realm.heap.allocateString(s) catch return error.OutOfMemory;
+    return Value.fromString(str);
 }
 
 /// §25.4.x Atomics.waitAsync(ta, index, value, timeout). Like `wait`
