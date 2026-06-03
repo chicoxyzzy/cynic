@@ -11728,6 +11728,16 @@ pub const Compiler = struct {
         if (self.finally_chain == anchor) return;
         const saved_chain = self.finally_chain;
         defer self.finally_chain = saved_chain;
+        // §14.15.3 step 3 — these finally bodies run on the
+        // normal-completion arm of an abrupt transfer (break /
+        // continue / return); a normal finally completion is
+        // discarded, so its trailing ExpressionStatement must not
+        // `star` into the shared completion register. (The abrupt
+        // value itself is stashed in a temp by the caller, separate
+        // from this register.)
+        const saved_completion_walk = self.completion_reg;
+        self.completion_reg = null;
+        defer self.completion_reg = saved_completion_walk;
         var fctx = self.finally_chain;
         while (fctx) |f| : (fctx = f.parent) {
             if (f == anchor) break;
@@ -12081,6 +12091,22 @@ pub const Compiler = struct {
         // push: `fctx_storage` is `undefined` in that case.)
         defer if (pushed_finally) fctx_storage.deinit(self.allocator);
 
+        // §14.15.3 + §6.2.4.x UpdateEmpty — the TryStatement's
+        // completion is UpdateEmpty(B, undefined), where B is the
+        // Block's (or Catch's) completion. Seed the shared
+        // completion register with `undefined` so an empty Block
+        // (`try { } finally { 5 }`) yields `undefined`, not the
+        // value left by the statement before the `try`. A
+        // value-producing Block statement overwrites it via `star`;
+        // an empty completion leaves the seeded `undefined`. Only
+        // matters when a completion register is live (top-level
+        // script / eval statement list); null inside function bodies.
+        if (self.completion_reg) |r| {
+            try self.builder.emitOp(.lda_undefined, s.span);
+            try self.builder.emitOp(.star, s.span);
+            try self.builder.emitU8(r);
+        }
+
         const start_pc = self.builder.here();
         // §15.10.1 — calls inside the try BLOCK are NOT in tail
         // position when a catch (in this same chunk) would
@@ -12187,7 +12213,48 @@ pub const Compiler = struct {
             // `return` inside fb won't recurse.
             const merge_pc = self.builder.here();
             try self.builder.patchI16(skip_handler_patch, merge_pc);
-            try self.compileBlock(fb.body, fb.span);
+            // §14.15.3 step 3 — Let B be the Block (or Catch)
+            // completion. Let F be the Finally completion. "If
+            // F.[[Type]] is normal, set F to B." So a NORMAL finally
+            // discards its own value and the statement's completion is
+            // UpdateEmpty(B, undefined); an ABRUPT finally (break /
+            // continue / return / throw) overrides with its own value
+            // — and for break / continue that value is whatever the
+            // finally body accumulated *before* the transfer (e.g.
+            // `finally { 42; break; }` completes with 42).
+            //
+            // Realise both arms over the shared completion register:
+            //   1. Save the live Block value (B) into a temp.
+            //   2. Reset the register to `undefined` so the finally
+            //      body's own statements update it (an abrupt
+            //      break / continue then carries the finally's
+            //      accumulated value; an empty finally stays undefined).
+            //   3. Compile the finally body — a break / continue inside
+            //      jumps away with the register holding F's value.
+            //   4. On NORMAL fall-through, restore B from the temp so
+            //      §14.15.3 step 3's "set F to B" holds and the finally
+            //      value is dropped.
+            // Only needed when a completion register is live (top-level
+            // script / eval statement list).
+            if (self.completion_reg) |cr| {
+                const r_block = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.ldar, fb.span);
+                try self.builder.emitU8(cr);
+                try self.builder.emitOp(.star, fb.span);
+                try self.builder.emitU8(r_block);
+                try self.builder.emitOp(.lda_undefined, fb.span);
+                try self.builder.emitOp(.star, fb.span);
+                try self.builder.emitU8(cr);
+                try self.compileBlock(fb.body, fb.span);
+                // Normal fall-through: restore B (discard F's value).
+                try self.builder.emitOp(.ldar, fb.span);
+                try self.builder.emitU8(r_block);
+                try self.builder.emitOp(.star, fb.span);
+                try self.builder.emitU8(cr);
+            } else {
+                try self.compileBlock(fb.body, fb.span);
+            }
             try self.builder.emitOp(.jmp, s.span);
             const skip_synth_patch = self.builder.here();
             try self.builder.emitI16(0);
@@ -12206,7 +12273,15 @@ pub const Compiler = struct {
             const slot = try self.declareBinding("__cynic_finally_ex__", .let_, s.span);
             // The handler dispatch deposits the thrown value via
             // `catch_register` (an env slot at depth 0).
+            // §14.15.3 step 3 — same value-discard as the normal path:
+            // a normal finally completion here falls through to the
+            // re-`throw` of the saved abrupt value, so the finally
+            // body's own ExpressionStatement value must not leak into
+            // the shared completion register.
+            const saved_completion_synth = self.completion_reg;
+            self.completion_reg = null;
             try self.compileBlock(fb.body, fb.span);
+            self.completion_reg = saved_completion_synth;
             try self.builder.emitOp(.lda_env, s.span);
             try self.builder.emitU8(0);
             try self.builder.emitU8(slot);

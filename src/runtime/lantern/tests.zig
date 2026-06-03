@@ -4347,6 +4347,143 @@ test "script completion: expression-trailing carries its value through" {
     try testing.expectEqual(@as(i32, 43), v.asInt32());
 }
 
+test "script completion: normal finally does not override the block value (§14.15.3)" {
+    // §14.15.3 TryStatement : try Block Finally — let B = Block's
+    // completion, F = Finally's completion; if F.[[Type]] is normal,
+    // F is set to B, then UpdateEmpty(F, undefined) is returned. So a
+    // finally that completes normally DISCARDS its own value; the
+    // statement's completion is the Block's, UpdateEmpty'd. Pre-fix
+    // the finally body's trailing ExpressionStatement `star`'d the
+    // shared completion register, leaking the finally value as the
+    // statement result.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+
+    // Non-empty block, non-empty finally → block value wins.
+    {
+        const r = try evaluateScript(testing.allocator, &realm, "7; try { 7; } finally { 8; }");
+        const v = switch (r) {
+            .value, .yielded => |val| val,
+            .thrown => return error.UnexpectedThrow,
+        };
+        try testing.expectEqual(@as(i32, 7), v.asInt32());
+    }
+    // Empty block, non-empty finally → UpdateEmpty(empty, undefined).
+    {
+        const r = try evaluateScript(testing.allocator, &realm, "4; try { } finally { 5; }");
+        const v = switch (r) {
+            .value, .yielded => |val| val,
+            .thrown => return error.UnexpectedThrow,
+        };
+        try testing.expect(v.isUndefined());
+    }
+    // Non-empty block, empty finally → block value already correct
+    // (guard against a regression).
+    {
+        const r = try evaluateScript(testing.allocator, &realm, "2; try { 3; } finally { }");
+        const v = switch (r) {
+            .value, .yielded => |val| val,
+            .thrown => return error.UnexpectedThrow,
+        };
+        try testing.expectEqual(@as(i32, 3), v.asInt32());
+    }
+}
+
+test "script completion: normal finally with catch keeps the caught/block value (§14.15.3)" {
+    // §14.15.3 TryStatement : try Block Catch Finally — B is the
+    // Block (or, if it threw, the Catch result); a NORMAL Finally is
+    // discarded, B (UpdateEmpty'd) is the completion.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+
+    // Block throws → Catch result is B → normal finally discarded.
+    {
+        const r = try evaluateScript(testing.allocator, &realm, "9; try { throw 0; } catch { 7; } finally { 8; }");
+        const v = switch (r) {
+            .value, .yielded => |val| val,
+            .thrown => return error.UnexpectedThrow,
+        };
+        try testing.expectEqual(@as(i32, 7), v.asInt32());
+    }
+    // Block completes normally → Catch skipped, B is the block →
+    // normal finally discarded.
+    {
+        const r = try evaluateScript(testing.allocator, &realm, "9; try { 6; } catch { 7; } finally { 8; }");
+        const v = switch (r) {
+            .value, .yielded => |val| val,
+            .thrown => return error.UnexpectedThrow,
+        };
+        try testing.expectEqual(@as(i32, 6), v.asInt32());
+    }
+}
+
+test "abrupt finally still overrides the block completion (§14.15.3)" {
+    // §14.15.3 step 3 only swaps in the block value when the finally
+    // is NORMAL. An abrupt finally (return / throw / break /
+    // continue) overrides — pin those so the value-discard fix
+    // doesn't over-reach.
+
+    // finally { return 2 } overrides try { return 1 }.
+    try expectScriptInt("(() => { try { return 1; } finally { return 2; } })();", 2);
+    // finally { break } drops out of the loop with the loop's
+    // completion, not the try block's body value.
+    try expectScriptInt(
+        "let n = 0; for (;;) { try { n = 1; } finally { break; } } n;",
+        1,
+    );
+    // finally { continue } resumes the loop; here it bounds the loop.
+    try expectScriptInt(
+        "let c = 0; for (let i = 0; i < 3; i++) { try { c += 1; } finally { continue; } c += 100; } c;",
+        3,
+    );
+    // A throwing finally overrides a normal block.
+    try expectScriptThrows("try { 1; } finally { throw 2; }");
+}
+
+test "script completion: abrupt finally carries its pre-transfer value (§14.15.3)" {
+    // §14.15.3 — when the Finally completes ABRUPTLY via break /
+    // continue, F is the finally's own completion, whose value is the
+    // last value-producing statement evaluated *before* the transfer
+    // (StatementListEvaluation). It overrides B. Mirrors test262
+    // language/statements/try/completion-values.js.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+
+    const cases = .{
+        // finally { 42; break } → break carries 42, overrides block 39.
+        .{ "99; do { -99; try { 39 } catch (e) { -1 } finally { 42; break; -2 }; } while (false);", @as(i32, 42) },
+        // finally { 42; continue } → continue carries 42.
+        .{ "99; do { -99; try { 39 } catch (e) { -1 } finally { 42; continue; -3 }; } while (false);", @as(i32, 42) },
+        // catch-then-finally with a value before break.
+        .{ "99; do { -99; try { [].x.x } catch (e) { -1; } finally { 42; break; -3 }; } while (false);", @as(i32, 42) },
+    };
+    inline for (cases) |c| {
+        const r = try evaluateScript(testing.allocator, &realm, c[0]);
+        const v = switch (r) {
+            .value, .yielded => |val| val,
+            .thrown => return error.UnexpectedThrow,
+        };
+        try testing.expectEqual(c[1], v.asInt32());
+    }
+
+    // finally { break } with no prior value → empty completion →
+    // UpdateEmpty(empty, undefined).
+    inline for (.{
+        "99; do { -99; try { 39 } catch (e) { -1 } finally { break; -2 }; } while (false);",
+        "99; do { -99; try { [].x.x } catch (e) { -1; } finally { break; -3 }; } while (false);",
+    }) |src| {
+        const r = try evaluateScript(testing.allocator, &realm, src);
+        const v = switch (r) {
+            .value, .yielded => |val| val,
+            .thrown => return error.UnexpectedThrow,
+        };
+        try testing.expect(v.isUndefined());
+    }
+}
+
 test "later: top-level function declaration visible across scripts" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
