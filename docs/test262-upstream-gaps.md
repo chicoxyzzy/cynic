@@ -441,3 +441,46 @@ the corpus under the relevant section's directory before adding.
   has(){…}, keys(){…} }))`. The corpus covers NaN-size (TypeError),
   missing / non-callable has/keys, and a non-object receiver, but not the
   negative-size RangeError of step 3.f.
+
+### `Function.prototype.apply` ignored a `length` getter on a *callable* argArray
+
+- **Fixed in:** see working-tree fix to `functionApply` in
+  `src/runtime/builtins/function.zig` (SHA to be filled at commit time)
+- **Spec:** §20.2.3.1 Function.prototype.apply → §7.3.18
+  CreateListFromArrayLike → §7.3.2 Get(O, P) — the `length` read and each
+  indexed slot read are accessor-aware. §6.1.7: a function *is* an Object,
+  so a callable used as the array-like is read through the same
+  accessor-firing `Get`.
+- **Reproducer:**
+  ```js
+  let received;
+  function fn(...a) { received = a; }
+  let f = function () {};            // a callable used as the array-like
+  Object.defineProperty(f, "length", { get() { return 1; } });
+  fn.apply(null, f);
+  // expected: received.length === 1 (the length getter fired, one undefined arg)
+  // observed pre-fix: received.length === 0 (getter ignored, plain slot
+  //   read saw the function's own arity 0)
+  ```
+- **Before fix:** `apply` handled a function used as `argArray`, but read
+  its `length` and indexed slots with a plain `JSFunction.get(...)` slot
+  read that does not fire accessors. A `length` getter installed via
+  `Object.defineProperty(someFunction, "length", { get() { return 1 } })`
+  was ignored — `length` was treated as the function's own arity (0) — so
+  no arguments were forwarded.
+- **After fix:** the read routes through the polymorphic
+  `intrinsics.getPropertyChainOnValue(realm, value, key)`, which fires
+  accessors on both `JSObject` and `JSFunction` receivers; the getter runs
+  and `received.length === 1`.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/Function/prototype/apply/` (and a sibling under
+  `built-ins/Function/prototype/call/`, which shares the argArray /
+  argument-list shape), no `features:` tag. The §28.1.x Reflect sibling of
+  this bug *is* covered —
+  `built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js`
+  passes `new Function()`, `new Object()`, `new Number()`, `new Boolean()`
+  each with a `length` getter — but there is no equivalent fixture for
+  `Function.prototype.apply` / `.call` accepting a *callable* array-like
+  whose `length` is an accessor. A fixture mirroring the Reflect one but
+  targeting `apply` would catch an engine that special-cases callable
+  array-likes with a non-accessor-firing slot read.
