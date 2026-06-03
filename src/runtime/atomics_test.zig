@@ -141,6 +141,34 @@ test "Atomics out-of-range index throws RangeError" {
     );
 }
 
+// ── Atomics.pause ───────────────────────────────────────────────────
+
+test "Atomics.pause returns undefined" {
+    try expectTrue("Atomics.pause() === undefined ? 1 : 0");
+    try expectTrue("Atomics.pause(0) === undefined && Atomics.pause(42) === undefined ? 1 : 0");
+}
+
+test "Atomics.pause has name 'pause' and length 0" {
+    try expectTrue("Atomics.pause.name === 'pause' && Atomics.pause.length === 0 ? 1 : 0");
+}
+
+test "Atomics.pause throws TypeError on a non-integral argument" {
+    try expectTrue(
+        "var c='none'; try { Atomics.pause(1.5); } catch(e){ c=e.constructor.name; } c==='TypeError' ? 1 : 0",
+    );
+}
+
+// ── store -0 normalization ──────────────────────────────────────────
+
+test "Atomics.store normalizes -0 to +0 in its return value" {
+    // §25.4.13 — store returns ToIntegerOrInfinity(value); Object.is(-0,+0)
+    // is false, so the return must be +0.
+    try expectTrue(
+        \\var ta = new Int32Array(new SharedArrayBuffer(8));
+        \\Object.is(Atomics.store(ta, 0, -0), +0) ? 1 : 0;
+    );
+}
+
 // ── wait / notify ───────────────────────────────────────────────────
 
 test "Atomics.notify returns 0 (no waiters, single agent)" {
@@ -167,5 +195,39 @@ test "Atomics.wait returns 'timed-out' on a zero timeout with matching value" {
     try expectTrue(
         \\var ta = new Int32Array(new SharedArrayBuffer(8));
         \\Atomics.wait(ta, 0, 0, 0) === 'timed-out' ? 1 : 0;
+    );
+}
+
+// ── waitAsync ───────────────────────────────────────────────────────
+
+test "Atomics.waitAsync is a function with name/length" {
+    try expectTrue("typeof Atomics.waitAsync === 'function' && Atomics.waitAsync.name === 'waitAsync' && Atomics.waitAsync.length === 4 ? 1 : 0");
+}
+
+test "Atomics.waitAsync requires a shared buffer" {
+    try expectTrue(
+        \\var c='none'; try { Atomics.waitAsync(new Int32Array(8), 0, 0); } catch(e){ c=e.constructor.name; }
+        \\c === 'TypeError' ? 1 : 0;
+    );
+}
+
+test "Atomics.waitAsync returns {async:false, value:'not-equal'} on mismatch" {
+    try expectTrue(
+        \\var r = Atomics.waitAsync(new Int32Array(new SharedArrayBuffer(8)), 0, 123);
+        \\r.async === false && r.value === 'not-equal' ? 1 : 0;
+    );
+}
+
+test "Atomics.waitAsync returns {async:false, value:'timed-out'} on zero timeout" {
+    try expectTrue(
+        \\var r = Atomics.waitAsync(new Int32Array(new SharedArrayBuffer(8)), 0, 0, 0);
+        \\r.async === false && r.value === 'timed-out' ? 1 : 0;
+    );
+}
+
+test "Atomics.waitAsync returns {async:true, value:<promise>} when it would block" {
+    try expectTrue(
+        \\var r = Atomics.waitAsync(new Int32Array(new SharedArrayBuffer(8)), 0, 0);
+        \\r.async === true && (r.value instanceof Promise) ? 1 : 0;
     );
 }

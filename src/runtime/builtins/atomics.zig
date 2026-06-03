@@ -21,6 +21,7 @@ const JSObject = ObjMod.JSObject;
 const TypedKind = ObjMod.TypedKind;
 const TypedView = ObjMod.TypedView;
 const ta_mod = @import("typed_array.zig");
+const promise_mod = @import("promise.zig");
 
 const throwTypeError = intrinsics.throwTypeError;
 const throwRangeError = intrinsics.throwRangeError;
@@ -45,6 +46,8 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, atomics, "isLockFree", atomicsIsLockFree, 1);
     try installNativeMethodOnProto(realm, atomics, "notify", atomicsNotify, 3);
     try installNativeMethodOnProto(realm, atomics, "wait", atomicsWait, 4);
+    try installNativeMethodOnProto(realm, atomics, "waitAsync", atomicsWaitAsync, 4);
+    try installNativeMethodOnProto(realm, atomics, "pause", atomicsPause, 0);
     try realm.globals.put(realm.allocator, "Atomics", heap_mod.taggedObject(atomics));
 }
 
@@ -251,7 +254,41 @@ fn atomicsStore(realm: *Realm, _: Value, args: []const Value) NativeError!Value 
     const byte_pos = tv.byte_offset + idx * size;
     if (byte_pos + size > buf.len) return throwRangeError(realm, "Atomics: access index out of bounds");
     ta_mod.writeTypedElement(buf, kind, byte_pos, coerced);
-    return coerced;
+    // §25.4.13 step — store returns ToIntegerOrInfinity(value) for
+    // non-BigInt element types (normalizing -0 → +0 and truncating the
+    // fraction), NOT the width-truncated stored bits.
+    if (kind.isBigInt()) return coerced;
+    return integerNormalize(coerced);
+}
+
+/// ToIntegerOrInfinity applied to an already-ToNumber'd value:
+/// truncate the fraction toward zero and normalize -0 to +0.
+fn integerNormalize(v: Value) Value {
+    const d: f64 = if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
+    if (std.math.isNan(d)) return Value.fromInt32(0);
+    if (std.math.isInf(d)) return Value.fromDouble(d);
+    const t = @trunc(d);
+    if (t == 0) return Value.fromInt32(0); // -0 → +0
+    if (t >= -2147483648.0 and t <= 2147483647.0) return Value.fromInt32(@intFromFloat(t));
+    return Value.fromDouble(t);
+}
+
+/// Atomics.pause(iterationNumber) — a microarchitectural hint
+/// (TC39 proposal). Validates an optional integral argument and
+/// returns undefined; Cynic has no spin-wait to hint, so it's a no-op.
+fn atomicsPause(realm: *Realm, _: Value, args: []const Value) NativeError!Value {
+    const arg = argOr(args, 0, Value.undefined_);
+    if (!arg.isUndefined()) {
+        // The argument must already be an integral Number (no coercion).
+        const integral = blk: {
+            if (arg.isInt32()) break :blk true;
+            if (!arg.isDouble()) break :blk false;
+            const d = arg.asDouble();
+            break :blk std.math.isFinite(d) and @trunc(d) == d;
+        };
+        if (!integral) return throwTypeError(realm, "Atomics.pause: argument must be an integral Number");
+    }
+    return Value.undefined_;
 }
 
 /// §25.4.9 Atomics.isLockFree(size). Lock-free for the platform's
@@ -303,4 +340,59 @@ fn atomicsWait(realm: *Realm, _: Value, args: []const Value) NativeError!Value {
     const result: []const u8 = if ((cur_bits & mask) != (value_bits & mask)) "not-equal" else "timed-out";
     const s = realm.heap.allocateString(result) catch return error.OutOfMemory;
     return Value.fromString(s);
+}
+
+/// §25.4.x Atomics.waitAsync(ta, index, value, timeout). Like `wait`
+/// but never blocks: returns a result record `{ async, value }`. A
+/// value mismatch → `{ async:false, value:"not-equal" }`; a zero
+/// timeout with a matching value → `{ async:false, value:"timed-out" }`;
+/// otherwise → `{ async:true, value:<Promise> }`. Single agent: nothing
+/// can notify, so the async Promise stays pending (it would resolve
+/// `"timed-out"` after the timeout; the cross-agent resolution path is
+/// deferred — see docs/sab-atomics.md).
+fn atomicsWaitAsync(realm: *Realm, _: Value, args: []const Value) NativeError!Value {
+    const obj = try validateIntegerTypedArray(realm, argOr(args, 0, Value.undefined_), true);
+    const tv = obj.getTypedView().?;
+    if (!tv.viewed.isSharedArrayBuffer())
+        return throwTypeError(realm, "Atomics.waitAsync requires a shared Int32Array / BigInt64Array");
+    const buf = tv.viewed.getArrayBuffer().?;
+    const idx = try validateAtomicAccess(realm, tv, buf, argOr(args, 1, Value.undefined_));
+    const kind = tv.kind;
+    const size = kind.elementSize();
+    const value_bits = try coerceRawBits(realm, kind, argOr(args, 2, Value.undefined_));
+    // Timeout: undefined → +∞; NaN → +∞; else max(ToInteger, 0).
+    var timeout_zero = false;
+    const timeout_v = argOr(args, 3, Value.undefined_);
+    if (!timeout_v.isUndefined()) {
+        const n = try toNumber(realm, timeout_v);
+        const d: f64 = if (n.isInt32()) @floatFromInt(n.asInt32()) else n.asDouble();
+        if (!std.math.isNan(d) and !std.math.isInf(d)) timeout_zero = (@max(@trunc(d), 0) == 0);
+    }
+    const byte_pos = tv.byte_offset + idx * size;
+    const cur_bits = readRawBits(buf, size, byte_pos);
+    const mask: u64 = if (size == 8) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(size * 8)) - 1;
+
+    // Root the result object across the Promise-capability allocation.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    const result = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(result, realm.intrinsics.object_prototype);
+    scope.push(heap_mod.taggedObject(result)) catch {};
+
+    if ((cur_bits & mask) != (value_bits & mask)) {
+        try result.set(realm.allocator, "async", Value.false_);
+        const s = realm.heap.allocateString("not-equal") catch return error.OutOfMemory;
+        try result.set(realm.allocator, "value", Value.fromString(s));
+    } else if (timeout_zero) {
+        try result.set(realm.allocator, "async", Value.false_);
+        const s = realm.heap.allocateString("timed-out") catch return error.OutOfMemory;
+        try result.set(realm.allocator, "value", Value.fromString(s));
+    } else {
+        const promise_ctor = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_) orelse
+            return throwTypeError(realm, "Atomics.waitAsync: %Promise% missing");
+        const cap = try promise_mod.newPromiseCapability(realm, promise_ctor);
+        try result.set(realm.allocator, "async", Value.true_);
+        try result.set(realm.allocator, "value", cap.promise);
+    }
+    return heap_mod.taggedObject(result);
 }

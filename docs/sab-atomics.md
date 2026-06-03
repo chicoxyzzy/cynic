@@ -142,20 +142,22 @@ plain object; SAB reuses the ArrayBuffer slot).
 
 Yield estimate: ~270 single-agent Atomics fixtures (213 landed).
 
-**Single-agent follow-ups (small, not yet done):**
+**Single-agent follow-ups — shipped** (Atomics now 268 / ~270):
 
-- `Atomics.waitAsync` (§25.4, ES2024) — ~48 fixtures. Needs a Promise
-  result; single-agent it resolves `"timed-out"`. Deferred only because
-  the would-block case wants a (resolved-immediately) Promise and most
-  of its corpus is `$262.agent`-based.
-- `Atomics.pause` (TC39 proposal) — ~6 fixtures. A no-op hint returning
-  `undefined`, not a constructor; trivial to add.
-- `Atomics.store` return value should be `ToIntegerOrInfinity` (so `-0`
-  → `+0`), not `ToNumber` — 1 fixture (`store/expected-return-value-
-  negative-zero.js`).
+- `Atomics.waitAsync` (§25.4, ES2024) — returns the `{ async, value }`
+  record; sync `"not-equal"` / `"timed-out"` paths plus a pending
+  Promise for the would-block case (cross-agent resolution deferred).
+- `Atomics.pause` (TC39 proposal) — no-op hint, validates an optional
+  integral argument, returns `undefined`.
+- `Atomics.store` return value is `ToIntegerOrInfinity` (normalizes
+  `-0` → `+0`).
+
+**Still deferred** (tied to the multi-agent phase):
+
+- `wait` / `waitAsync` cross-agent resolution + the memory-model litmus
+  tests (~112 `$262.agent` fixtures).
 - `wait` with `[[CanBlock]] = false` (browser-main-thread semantics) —
-  2 fixtures; needs an agent CanBlock model, tied to the multi-agent
-  phase.
+  2 fixtures; needs an agent CanBlock model.
 
 **Phase 1 + 2 combined ≈ ~500 fixtures** → headline ~89.3 % → ~90.3 %+.
 
