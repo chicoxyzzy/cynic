@@ -161,7 +161,11 @@ Yield estimate: ~270 single-agent Atomics fixtures (213 landed).
 
 **Phase 1 + 2 combined ≈ ~500 fixtures** → headline ~89.3 % → ~90.3 %+.
 
-## Phase 3 — multi-agent (deferred)
+## Phase 3 — multi-agent (real threads)
+
+> Greenlit as a separate initiative — full design in
+> [multi-agent-atomics.md](multi-agent-atomics.md). Summary below.
+
 
 The ~112 `$262.agent`-using Atomics fixtures + the memory-model litmus
 tests need a real agent cluster: `$262.agent.start/broadcast/sleep/
