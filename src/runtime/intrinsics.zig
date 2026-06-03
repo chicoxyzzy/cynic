@@ -568,6 +568,9 @@ pub fn install(realm: *Realm) !void {
     try @import("builtins/promise.zig").install(realm);
     try @import("builtins/bigint.zig").install(realm);
     try @import("builtins/typed_array.zig").install(realm);
+    // §25.4 Atomics — installed after typed_array (it references the
+    // TypedArray / SharedArrayBuffer surface that block sets up).
+    try @import("builtins/atomics.zig").install(realm);
     try @import("builtins/function.zig").installVariantPrototypes(realm);
     try @import("builtins/regexp.zig").install(realm);
     try @import("builtins/json.zig").install(realm);

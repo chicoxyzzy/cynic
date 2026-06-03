@@ -140,7 +140,22 @@ typed-array element read/write helpers in `typed_array.zig` are reused
 for the per-kind load/store. No GC-visible new heap types (Atomics is a
 plain object; SAB reuses the ArrayBuffer slot).
 
-Yield estimate: ~270 single-agent Atomics fixtures.
+Yield estimate: ~270 single-agent Atomics fixtures (213 landed).
+
+**Single-agent follow-ups (small, not yet done):**
+
+- `Atomics.waitAsync` (§25.4, ES2024) — ~48 fixtures. Needs a Promise
+  result; single-agent it resolves `"timed-out"`. Deferred only because
+  the would-block case wants a (resolved-immediately) Promise and most
+  of its corpus is `$262.agent`-based.
+- `Atomics.pause` (TC39 proposal) — ~6 fixtures. A no-op hint returning
+  `undefined`, not a constructor; trivial to add.
+- `Atomics.store` return value should be `ToIntegerOrInfinity` (so `-0`
+  → `+0`), not `ToNumber` — 1 fixture (`store/expected-return-value-
+  negative-zero.js`).
+- `wait` with `[[CanBlock]] = false` (browser-main-thread semantics) —
+  2 fixtures; needs an agent CanBlock model, tied to the multi-agent
+  phase.
 
 **Phase 1 + 2 combined ≈ ~500 fixtures** → headline ~89.3 % → ~90.3 %+.
 
