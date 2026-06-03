@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 89.19 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 89.27 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **44422 passing** — Cynic produced the spec-expected result.
-- **5386 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **44466 passing** — Cynic produced the spec-expected result.
+- **5342 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 44422 | 5386 | 49808 | 89.19 % |
+| **`--unhardened --allow=eval`** | 44466 | 5342 | 49808 | 89.27 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -78,8 +78,8 @@ list.
 | `intl402/DurationFormat` | 0 | 111 | 0 % |
 | `intl402/Locale` | 0 | 152 | 0 % |
 | `intl402/NumberFormat` | 0 | 253 | 0 % |
-| `language/eval-code` | 141 | 206 | 41 % |
-| `language/statements` | 8879 | 444 | 95 % |
+| `language/eval-code` | 158 | 189 | 46 % |
+| `language/statements` | 8901 | 422 | 95 % |
 | `language/expressions` | 10226 | 456 | 96 % |
 
 **10–99 fails**
@@ -122,7 +122,6 @@ list.
 | `language/future-reserved-words` | 48 | 7 | 87 % |
 | `language/global-code` | 37 | 5 | 88 % |
 | `built-ins/ThrowTypeError` | 13 | 1 | 93 % |
-| `language/statementList` | 75 | 5 | 94 % |
 | `language/destructuring` | 18 | 1 | 95 % |
 | `built-ins/ArrayBuffer` | 183 | 9 | 95 % |
 | `built-ins/AsyncGeneratorFunction` | 22 | 1 | 96 % |
@@ -194,6 +193,7 @@ list.
 | `language/reserved-words` | 27 | 0 | 100 % |
 | `language/rest-parameters` | 11 | 0 | 100 % |
 | `language/source-text` | 1 | 0 | 100 % |
+| `language/statementList` | 80 | 0 | 100 % |
 | `language/white-space` | 67 | 0 | 100 % |
 
 
@@ -213,6 +213,18 @@ top-line score.
 
 
 ## History
+
+### 2026-06-03 — cynic `63b6502`, test262 `d0c1b455`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 44466 | 5342 | 49808 | 89.27 % | +44 | 35.2 s |
+
+Biggest movers:
+
+- `language/statements` +22
+- `language/eval-code` +17
+- `language/statementList` +5
 
 ### 2026-06-02 — cynic `bd0337e`, test262 `d0c1b455`
 
