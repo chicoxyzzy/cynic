@@ -22,6 +22,8 @@ const TypedKind = ObjMod.TypedKind;
 const TypedView = ObjMod.TypedView;
 const ta_mod = @import("typed_array.zig");
 const promise_mod = @import("promise.zig");
+const SharedDataBlock = @import("../shared_data_block.zig").SharedDataBlock;
+const Waiter = @import("../shared_data_block.zig").Waiter;
 const builtin = @import("builtin");
 
 /// Monotonic nanoseconds via the libc shim (the engine deliberately
@@ -480,14 +482,12 @@ fn atomicsNotify(realm: *Realm, _: Value, args: []const Value) NativeError!Value
     // A non-shared buffer never has agents waiting on it. (The block
     // lives on the viewed SharedArrayBuffer, not the TypedArray.)
     const block = tv.viewed.getSharedBlock() orelse return Value.fromInt32(0);
-    const slot = (tv.byte_offset + idx * tv.kind.elementSize()) / 4;
-    const parked = block.waiters[slot].load(.seq_cst);
-    const woken: u32 = @min(parked, count);
-    // Bump the slot's notify sequence — every agent polling this slot
-    // in `Atomics.wait` observes the change and wakes. (`count` caps
-    // the *reported* woken set; the poll-loop wait re-checks the value,
-    // so over-waking is benign.)
-    _ = block.notify_seq[slot].fetchAdd(1, .seq_cst);
+    const byte_pos = tv.byte_offset + idx * tv.kind.elementSize();
+    // Wake EXACTLY up to `count` waiters parked on this byte index and
+    // report how many, under the wait-list lock.
+    block.lockWaiters();
+    const woken = block.wakeWaiters(byte_pos, count);
+    block.unlockWaiters();
     return Value.fromInt32(@intCast(woken));
 }
 
@@ -512,39 +512,55 @@ fn atomicsWait(realm: *Realm, _: Value, args: []const Value) NativeError!Value {
     const block = tv.viewed.getSharedBlock().?;
     const byte_pos = tv.byte_offset + idx * size;
     const mask: u64 = if (size == 8) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(size * 8)) - 1;
-    const slot = byte_pos / 4;
 
-    // Read the notify sequence BEFORE the value compare so a concurrent
-    // `notify` after this point either wakes us or makes the park
-    // return immediately (Futex re-checks the seq atomically at park).
-    const seq = block.notify_seq[slot].load(.seq_cst);
-    const cur_bits = readRawBits(buf, size, byte_pos);
-    if ((cur_bits & mask) != (value_bits & mask)) return atomicsString(realm, "not-equal");
+    // §25.4.11 EnterCriticalSection: test the value and add the waiter
+    // atomically w.r.t. `notify`, so a `notify` can't slip between the
+    // test and the park (lost wakeup). The value read is the SeqCst
+    // atomic load (another agent may store concurrently).
+    block.lockWaiters();
+    if ((atomicLoadBits(buf, size, byte_pos) & mask) != (value_bits & mask)) {
+        block.unlockWaiters();
+        return atomicsString(realm, "not-equal");
+    }
+    var w: Waiter = .{ .byte_pos = byte_pos };
+    block.addWaiter(&w);
+    block.unlockWaiters();
 
-    _ = block.waiters[slot].fetchAdd(1, .seq_cst); // for notify's count
-    defer _ = block.waiters[slot].fetchSub(1, .seq_cst);
+    // No real clock / no other threads on a freestanding target → don't
+    // spin forever; unlink and report timed-out.
+    if (builtin.os.tag == .freestanding) {
+        block.lockWaiters();
+        block.removeWaiter(&w);
+        block.unlockWaiters();
+        return atomicsString(realm, "timed-out");
+    }
 
-    // Park by polling the notify sequence: a `notify` bumps it; we wake
-    // when it changes (→ "ok") or the deadline passes (→ "timed-out").
-    // A poll loop (vs a kernel futex) because this Zig dev build's
-    // std.Thread no longer re-exports Futex/Mutex/Condition (the
-    // std.Io migration); a bounded sleep keeps the spin cheap. Keyed on
-    // `notify_seq` — NOT the data element — so a plain store/xor never
-    // wakes a waiter.
-    // No real clock on freestanding (no threads there either) → don't
-    // spin forever; report timed-out.
-    if (builtin.os.tag == .freestanding) return atomicsString(realm, "timed-out");
+    // Park by polling our own `woken` flag (raised by `notify` under
+    // the lock — so it wakes EXACTLY the agents notify chose). A poll
+    // loop with a bounded sleep, because this Zig dev build's
+    // std.Thread no longer re-exports Futex/Mutex/Condition; the sleep
+    // keeps a parked agent off the CPU.
     const start_ns = monoNowNs();
     while (true) {
-        if (block.notify_seq[slot].load(.seq_cst) != seq) return atomicsString(realm, "ok");
-        if (timeout_ns) |ns| {
-            if (monoNowNs() -% start_ns >= ns) return atomicsString(realm, "timed-out");
+        if (w.woken.load(.acquire)) {
+            block.lockWaiters();
+            block.removeWaiter(&w);
+            block.unlockWaiters();
+            return atomicsString(realm, "ok");
         }
-        // Sleep between polls rather than busy-spin: a parked agent must
-        // not peg a core (several waiters would otherwise saturate the
-        // machine). The notify-sequence check above runs first each
-        // iteration, so a notify that already landed wakes us with no
-        // added latency.
+        if (timeout_ns) |ns| {
+            if (monoNowNs() -% start_ns >= ns) {
+                // Settle the timeout under the lock: a `notify` racing
+                // our deadline either already raised `woken` (→ "ok") or
+                // will never find us again (we unlink here), so the
+                // woken count and our result can't disagree.
+                block.lockWaiters();
+                const woken_now = w.woken.load(.acquire);
+                block.removeWaiter(&w);
+                block.unlockWaiters();
+                return atomicsString(realm, if (woken_now) "ok" else "timed-out");
+            }
+        }
         napNs(wait_poll_ns);
     }
 }

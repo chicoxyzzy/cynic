@@ -8,11 +8,26 @@
 //! refcounted, freed only when the last referencing `SharedArrayBuffer`
 //! object — across all agents — is gone.
 //!
-//! The block also carries the futex state (`mutex` / `cond`) that
-//! cross-thread `Atomics.wait` / `Atomics.notify` park on
-//! (see `docs/multi-agent-atomics.md`).
+//! The block also carries the §25.4 wait list that cross-thread
+//! `Atomics.wait` / `Atomics.notify` park on (see
+//! `docs/multi-agent-atomics.md`).
 
 const std = @import("std");
+
+/// One parked `Atomics.wait`. The node lives on the *waiting thread's
+/// stack* and is linked into its block's wait list for the duration of
+/// the wait — the list owns no memory. A waiter unlinks itself (under
+/// `wait_lock`) before its frame returns, so `notify` (which only walks
+/// the list under the same lock) can never touch a dead node.
+pub const Waiter = struct {
+    /// §25.4 keys the wait list on the byte index within the block, so
+    /// two views over the same block waiting on the same byte share a
+    /// key while different indices don't collide.
+    byte_pos: usize,
+    /// Raised by `notify` (under `wait_lock`); the waiter polls it.
+    woken: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    next: ?*Waiter = null,
+};
 
 pub const SharedDataBlock = struct {
     /// The shared bytes, allocated to `max_byte_length` up front so a
@@ -34,18 +49,13 @@ pub const SharedDataBlock = struct {
     /// objects (in any agent). Atomic so cross-thread broadcast /
     /// sweep is race-free.
     refcount: std.atomic.Value(usize),
-    /// §25.4.11/.12 — per-4-byte-slot count of agents currently parked
-    /// in `Atomics.wait` on that slot. `wait` bumps its slot before
-    /// parking and clears it after; `notify` reads it to return the
-    /// number it woke (`std.Thread.Futex` itself reports no count). One
-    /// entry per i32 slot (`max_byte_length / 4`).
-    waiters: []std.atomic.Value(u32),
-    /// Per-slot notify-sequence word that `std.Thread.Futex` parks on.
-    /// `notify` bumps it (and wakes); `wait` parks while it's unchanged.
-    /// Crucially this is NOT the data element — a plain `Atomics.store`
-    /// / `xor` mutates the element but must NOT wake a waiter (only a
-    /// `notify` does), so the wait list is keyed on this separate word.
-    notify_seq: []std.atomic.Value(u32),
+    /// §25.4.11/.12 wait-list spinlock — the spec's "critical section"
+    /// guarding the list (and the wait-time value compare) against
+    /// concurrent `wait` / `notify` across agents.
+    wait_lock: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Head of the intrusive list of parked waiters (stack-allocated
+    /// nodes; see `Waiter`). Touched only under `wait_lock`.
+    wait_head: ?*Waiter = null,
 
     /// Allocate a zeroed block of `max_byte_length` bytes (≥
     /// `byte_length`), refcount 1. Uses the process-global page
@@ -57,19 +67,11 @@ pub const SharedDataBlock = struct {
         const bytes = try gpa.alloc(u8, max_byte_length);
         errdefer gpa.free(bytes);
         @memset(bytes, 0);
-        const slots = max_byte_length / 4;
-        const waiters = try gpa.alloc(std.atomic.Value(u32), slots);
-        errdefer gpa.free(waiters);
-        for (waiters) |*w| w.* = std.atomic.Value(u32).init(0);
-        const notify_seq = try gpa.alloc(std.atomic.Value(u32), slots);
-        for (notify_seq) |*w| w.* = std.atomic.Value(u32).init(0);
         self.* = .{
             .bytes = bytes,
             .byte_length = std.atomic.Value(usize).init(byte_length),
             .max_byte_length = max_byte_length,
             .refcount = std.atomic.Value(usize).init(1),
-            .waiters = waiters,
-            .notify_seq = notify_seq,
         };
         return self;
     }
@@ -88,8 +90,6 @@ pub const SharedDataBlock = struct {
         // release across threads before we free.
         if (self.refcount.fetchSub(1, .acq_rel) == 1) {
             const gpa = std.heap.page_allocator;
-            gpa.free(self.notify_seq);
-            gpa.free(self.waiters);
             gpa.free(self.bytes);
             gpa.destroy(self);
         }
@@ -98,5 +98,57 @@ pub const SharedDataBlock = struct {
     /// The live data slice (`bytes[0..byte_length]`).
     pub fn live(self: *SharedDataBlock) []u8 {
         return self.bytes[0..self.byte_length.load(.acquire)];
+    }
+
+    // ── §25.4 wait list ─────────────────────────────────────────────
+    // The lock makes the wait-time value-compare + AddWaiter atomic
+    // w.r.t. notify (the spec's EnterCriticalSection), and lets notify
+    // wake EXACTLY `count` waiters on a byte index — a per-slot
+    // sequence word can only wake-all, which fails `notify(ta, i, 1)`
+    // against several parked agents.
+
+    pub fn lockWaiters(self: *SharedDataBlock) void {
+        while (self.wait_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+    }
+    pub fn unlockWaiters(self: *SharedDataBlock) void {
+        self.wait_lock.store(false, .release);
+    }
+
+    /// Append `w` at the tail. Caller holds `wait_lock`. §25.4.11.13
+    /// AddWaiter adds to the END of the list and §25.4.12 Notify wakes
+    /// from the FRONT, so a head-first walk in `wakeWaiters` wakes the
+    /// oldest waiter first (FIFO), which `notify-in-order` asserts.
+    pub fn addWaiter(self: *SharedDataBlock, w: *Waiter) void {
+        w.next = null;
+        var pp: *?*Waiter = &self.wait_head;
+        while (pp.*) |cur| pp = &cur.next;
+        pp.* = w;
+    }
+
+    /// Unlink `w` if present. Caller holds `wait_lock`.
+    pub fn removeWaiter(self: *SharedDataBlock, w: *Waiter) void {
+        var pp: *?*Waiter = &self.wait_head;
+        while (pp.*) |cur| {
+            if (cur == w) {
+                pp.* = cur.next;
+                return;
+            }
+            pp = &cur.next;
+        }
+    }
+
+    /// Wake up to `count` not-yet-woken waiters parked on `byte_pos`;
+    /// return how many were woken. Caller holds `wait_lock`.
+    pub fn wakeWaiters(self: *SharedDataBlock, byte_pos: usize, count: u32) u32 {
+        var n: u32 = 0;
+        var cur = self.wait_head;
+        while (cur) |w| : (cur = w.next) {
+            if (n >= count) break;
+            if (w.byte_pos == byte_pos and !w.woken.load(.monotonic)) {
+                w.woken.store(true, .release);
+                n += 1;
+            }
+        }
+        return n;
     }
 };
