@@ -34,6 +34,25 @@ fn monoNowNs() u64 {
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
+/// Sleep ~`ns` nanoseconds via the libc shim (this Zig build's
+/// `std.Thread` no longer re-exports `sleep`/`Futex`; see the
+/// `Atomics.wait` poll loop). No-op on a libc-less freestanding target.
+fn napNs(ns: u64) void {
+    if (builtin.os.tag == .freestanding) return;
+    var req: std.c.timespec = .{
+        .sec = @intCast(ns / std.time.ns_per_s),
+        .nsec = @intCast(ns % std.time.ns_per_s),
+    };
+    var rem: std.c.timespec = undefined;
+    _ = std.c.nanosleep(&req, &rem);
+}
+
+/// `Atomics.wait` poll interval: re-check the notify sequence every
+/// ~100 µs. Bounds the wake latency (imperceptible to a JS waiter)
+/// while keeping a parked agent off the CPU — a pure spin pegged a
+/// core and saturated the machine when several agents waited at once.
+const wait_poll_ns: u64 = 100 * std.time.ns_per_us;
+
 const throwTypeError = intrinsics.throwTypeError;
 const throwRangeError = intrinsics.throwRangeError;
 const toNumber = intrinsics.toNumber;
@@ -521,7 +540,12 @@ fn atomicsWait(realm: *Realm, _: Value, args: []const Value) NativeError!Value {
         if (timeout_ns) |ns| {
             if (monoNowNs() -% start_ns >= ns) return atomicsString(realm, "timed-out");
         }
-        std.atomic.spinLoopHint();
+        // Sleep between polls rather than busy-spin: a parked agent must
+        // not peg a core (several waiters would otherwise saturate the
+        // machine). The notify-sequence check above runs first each
+        // iteration, so a notify that already landed wakes us with no
+        // added latency.
+        napNs(wait_poll_ns);
     }
 }
 
