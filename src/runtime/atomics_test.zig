@@ -117,6 +117,43 @@ test "Atomics on a BigInt64Array" {
     );
 }
 
+// ── element-width dispatch ──────────────────────────────────────────
+
+test "Atomics.add wraps at the element width (Int8Array)" {
+    // 127 +% 1 → -128 (two's-complement 8-bit wrap); old returned.
+    try expectTrue(
+        \\var ta = new Int8Array(new SharedArrayBuffer(4));
+        \\ta[0] = 127;
+        \\(Atomics.add(ta, 0, 1) === 127) && (ta[0] === -128) ? 1 : 0;
+    );
+}
+
+test "Atomics on Uint16Array (load/store/and)" {
+    try expectTrue(
+        \\var ta = new Uint16Array(new SharedArrayBuffer(8));
+        \\(Atomics.store(ta, 1, 0xBEEF) === 0xBEEF) &&
+        \\(Atomics.load(ta, 1) === 0xBEEF) &&
+        \\(Atomics.and(ta, 1, 0x0FF0) === 0xBEEF) && (ta[1] === 0x0EE0) ? 1 : 0;
+    );
+}
+
+test "Atomics.compareExchange on Uint32Array with a high-bit value" {
+    // 0x80000000 round-trips as an unsigned Uint32 element.
+    try expectTrue(
+        \\var ta = new Uint32Array(new SharedArrayBuffer(4));
+        \\ta[0] = 0x80000000;
+        \\(Atomics.compareExchange(ta, 0, 0x80000000, 1) === 0x80000000) && (ta[0] === 1) ? 1 : 0;
+    );
+}
+
+test "Atomics.exchange on a non-shared Uint8Array" {
+    try expectTrue(
+        \\var ta = new Uint8Array(4);
+        \\ta[2] = 9;
+        \\(Atomics.exchange(ta, 2, 250) === 9) && (ta[2] === 250) ? 1 : 0;
+    );
+}
+
 // ── validation ──────────────────────────────────────────────────────
 
 test "Atomics on a Float array throws TypeError" {

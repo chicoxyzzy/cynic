@@ -107,6 +107,28 @@ test "SharedArrayBuffer: grow beyond max throws RangeError" {
     );
 }
 
+test "SharedArrayBuffer: grow is visible to an existing view" {
+    // The block grows in place, so a view created before the grow sees
+    // the new length (length-tracking) and the new bytes are zeroed.
+    try expectTrue(
+        \\var sab = new SharedArrayBuffer(4, { maxByteLength: 16 });
+        \\var ta = new Uint8Array(sab);
+        \\var before = ta.length;
+        \\sab.grow(12);
+        \\(before === 4) && (ta.length === 12) && (ta[8] === 0) ? 1 : 0;
+    );
+}
+
+test "SharedArrayBuffer: grow on a non-growable buffer throws TypeError" {
+    // §25.2.4.4 — no [[ArrayBufferMaxByteLength]] → RequireInternalSlot
+    // fails → TypeError (not RangeError).
+    try expectTrue(
+        \\var sab = new SharedArrayBuffer(8);
+        \\var c='none'; try { sab.grow(8); } catch(e){ c=e.constructor.name; }
+        \\c === 'TypeError' ? 1 : 0;
+    );
+}
+
 // ── slice ───────────────────────────────────────────────────────────
 
 test "SharedArrayBuffer: slice returns a SharedArrayBuffer" {
