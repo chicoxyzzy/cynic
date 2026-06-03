@@ -925,6 +925,15 @@ pub const JSObject = struct {
     /// is the detached state. Plain objects keep the default `false`
     /// so the prototype-method brand checks `TypeError` correctly.
     has_array_buffer_data: bool = false,
+    /// §25.2 — true iff the byte data block belongs to a
+    /// `SharedArrayBuffer` (vs a plain `ArrayBuffer`). Both carry
+    /// `[[ArrayBufferData]]` (`has_array_buffer_data`), so this flag
+    /// is the `IsSharedArrayBuffer(O)` discriminator: it drives the
+    /// §25.1.5.x "If IsSharedArrayBuffer(O) throw TypeError" guards on
+    /// `ArrayBuffer.prototype.*`, and the brand checks on
+    /// `SharedArrayBuffer.prototype.*`. A shared buffer never detaches
+    /// and is grow-only. Flat alongside the brand for the hot path.
+    array_buffer_shared: bool = false,
     // (`boxed_string` moved to `JSObjectExtension` — only
     // `new String(v)` / String-wrapper boxing populates it.
     // Access via `getBoxedString` / `setBoxedString` helpers.)
@@ -1529,6 +1538,12 @@ pub const JSObject = struct {
     pub fn getArrayBuffer(self: *const JSObject) ?[]u8 {
         if (self.extension) |ext| return ext.array_buffer;
         return null;
+    }
+
+    /// §25.1.6 IsSharedArrayBuffer(O) — true iff `O` carries a byte
+    /// data block that belongs to a `SharedArrayBuffer`.
+    pub fn isSharedArrayBuffer(self: *const JSObject) bool {
+        return self.has_array_buffer_data and self.array_buffer_shared;
     }
 
     pub fn setArrayBuffer(self: *JSObject, allocator: std.mem.Allocator, bytes: ?[]u8) !void {

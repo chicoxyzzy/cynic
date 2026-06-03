@@ -109,6 +109,39 @@ pub fn install(realm: *Realm) !void {
         }
     }
 
+    // §25.2 SharedArrayBuffer constructor + prototype. Single-agent:
+    // a non-detachable, grow-only ArrayBuffer. No `detached` /
+    // `transfer` / `resize` / `isView` surface.
+    {
+        const r = try installConstructor(realm, .{
+            .name = "SharedArrayBuffer",
+            .ctor = sharedArrayBufferConstructor,
+            .arity = 1,
+            .set_home_object = false,
+            .to_string_tag = "SharedArrayBuffer",
+        });
+        const ctor = r.ctor;
+        const proto = r.proto;
+        // §25.2.1.1 — byteLength / maxByteLength validated before OCFC.
+        ctor.defers_proto_lookup = true;
+        try installNativeGetter(realm, proto, "byteLength", sharedArrayBufferByteLength);
+        try installNativeGetter(realm, proto, "maxByteLength", sharedArrayBufferMaxByteLength);
+        try installNativeGetter(realm, proto, "growable", sharedArrayBufferGrowable);
+        try installNativeMethodOnProto(realm, proto, "grow", sharedArrayBufferGrow, 1);
+        try installNativeMethodOnProto(realm, proto, "slice", sharedArrayBufferSlice, 2);
+        // §25.2.3.2 `get SharedArrayBuffer [ @@species ]` returns `this`.
+        {
+            const species_getter = try intrinsics.makeNativeFunction(realm, arrayBufferSpeciesGetter, 0, "get [Symbol.species]");
+            const entry = try ctor.accessors.getOrPut(realm.allocator, "@@species");
+            entry.value_ptr.* = .{ .getter = species_getter };
+            try ctor.property_flags.put(realm.allocator, "@@species", .{
+                .writable = false,
+                .enumerable = false,
+                .configurable = true,
+            });
+        }
+    }
+
     // §25.3 DataView constructor + prototype.
     {
         const r = try installConstructor(realm, .{
@@ -505,7 +538,7 @@ fn arrayBufferByteLength(realm: *Realm, this_value: Value, args: []const Value) 
     // when `this` is not an ArrayBuffer instance.
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "get ArrayBuffer.prototype.byteLength requires an ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data)
+    if (!obj.has_array_buffer_data or obj.isSharedArrayBuffer())
         return throwTypeError(realm, "get ArrayBuffer.prototype.byteLength requires an ArrayBuffer receiver");
     if (obj.getArrayBuffer()) |ab| return Value.fromInt32(@intCast(ab.len));
     // Detached buffer — §25.1.5.1 step 5 says return 0 (the
@@ -520,7 +553,7 @@ fn arrayBufferDetached(realm: *Realm, this_value: Value, args: []const Value) Na
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "get ArrayBuffer.prototype.detached requires an ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data)
+    if (!obj.has_array_buffer_data or obj.isSharedArrayBuffer())
         return throwTypeError(realm, "get ArrayBuffer.prototype.detached requires an ArrayBuffer receiver");
     return Value.fromBool(obj.getArrayBuffer() == null);
 }
@@ -532,7 +565,7 @@ fn arrayBufferMaxByteLength(realm: *Realm, this_value: Value, args: []const Valu
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "get ArrayBuffer.prototype.maxByteLength requires an ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data)
+    if (!obj.has_array_buffer_data or obj.isSharedArrayBuffer())
         return throwTypeError(realm, "get ArrayBuffer.prototype.maxByteLength requires an ArrayBuffer receiver");
     if (obj.getArrayBuffer() == null) return Value.fromInt32(0);
     const max = obj.getArrayBufferMaxByteLength() orelse obj.getArrayBuffer().?.len;
@@ -544,7 +577,7 @@ fn arrayBufferResizable(realm: *Realm, this_value: Value, args: []const Value) N
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "get ArrayBuffer.prototype.resizable requires an ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data)
+    if (!obj.has_array_buffer_data or obj.isSharedArrayBuffer())
         return throwTypeError(realm, "get ArrayBuffer.prototype.resizable requires an ArrayBuffer receiver");
     return Value.fromBool(obj.getArrayBufferMaxByteLength() != null);
 }
@@ -556,7 +589,7 @@ fn arrayBufferResize(realm: *Realm, this_value: Value, args: []const Value) Nati
     // A fixed buffer doesn't carry the slot at all.
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.resize requires a resizable ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data or obj.getArrayBufferMaxByteLength() == null)
+    if (!obj.has_array_buffer_data or obj.isSharedArrayBuffer() or obj.getArrayBufferMaxByteLength() == null)
         return throwTypeError(realm, "ArrayBuffer.prototype.resize requires a resizable ArrayBuffer receiver");
     // Step 5 — `Let newByteLength be ? ToIntegerOrInfinity(newLength)`.
     // The `coerced-new-length-detach.js` fixture asserts that
@@ -598,7 +631,7 @@ fn numberFromUsize(n: usize) Value {
 fn arrayBufferTransferImpl(realm: *Realm, this_value: Value, args: []const Value, preserve_resizability: bool) NativeError!Value {
     const src = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.transfer requires an ArrayBuffer receiver");
-    if (!src.has_array_buffer_data)
+    if (!src.has_array_buffer_data or src.isSharedArrayBuffer())
         return throwTypeError(realm, "ArrayBuffer.prototype.transfer requires an ArrayBuffer receiver");
 
     // newLength defaults to source byteLength (or maxByteLength
@@ -700,6 +733,9 @@ fn arrayBufferSpeciesConstructor(realm: *Realm, exemplar: *JSObject, default_cto
 
 fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const src = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "slice on non-ArrayBuffer");
+    // §25.1.5.5 step 3 — "If IsSharedArrayBuffer(O) is true, throw a
+    // TypeError exception."
+    if (src.isSharedArrayBuffer()) return throwTypeError(realm, "ArrayBuffer.prototype.slice: receiver is a SharedArrayBuffer");
     const src_buf = src.getArrayBuffer() orelse return throwTypeError(realm, "slice on non-ArrayBuffer");
     const total: i64 = @intCast(src_buf.len);
     // §25.1.5.5 ArrayBuffer.prototype.slice step 5-9 — start / end
@@ -778,6 +814,189 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
     if (result_buf.len < new_len)
         return throwTypeError(realm, "ArrayBuffer.prototype.slice: species ctor returned too-short ArrayBuffer");
     // §25.1.5.5 step 22 — CopyDataBlockBytes(result, 0, O, first, newLen).
+    if (new_len > 0) {
+        @memcpy(result_buf[0..new_len], src_buf[@intCast(start_i)..@intCast(end_i)]);
+    }
+    return heap_mod.taggedObject(result_obj);
+}
+
+// ════════════════════════════════════════════════════════════════════
+//   §25.2 SharedArrayBuffer
+// ════════════════════════════════════════════════════════════════════
+//
+// Cynic is single-agent-per-isolate, so a SharedArrayBuffer is an
+// ArrayBuffer that is never detachable and grow-only. It reuses the
+// `array_buffer` byte-slice + `has_array_buffer_data` brand;
+// `array_buffer_shared` is the `IsSharedArrayBuffer(O)` discriminator.
+
+/// §25.2.1.1 SharedArrayBuffer(length [, options]).
+fn sharedArrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const new_target = realm.pending_native_new_target;
+    if (new_target.isUndefined()) {
+        return throwTypeError(realm, "SharedArrayBuffer constructor requires 'new'");
+    }
+    // §25.2.1.1 step 2 — `Let byteLength be ? ToIndex(length)`.
+    const len = try toIndex(realm, argOr(args, 0, Value.fromInt32(0)));
+    // §25.2.1.1 step 3 — GetArrayBufferMaxByteLengthOption(options).
+    const max_byte_length_opt = try getMaxByteLengthOption(realm, argOr(args, 1, Value.undefined_));
+    if (max_byte_length_opt) |max_len| {
+        if (len > max_len) return throwRangeError(realm, "SharedArrayBuffer length exceeds maxByteLength");
+    }
+
+    // Default proto = %SharedArrayBuffer.prototype% (resolved off the
+    // installed global, mirroring the ArrayBuffer constructor).
+    const default_proto: ?*JSObject = blk: {
+        if (heap_mod.valueAsFunction(realm.globals.get("SharedArrayBuffer") orelse Value.undefined_)) |c| break :blk c.prototype;
+        break :blk realm.intrinsics.object_prototype;
+    };
+    const interp = @import("../lantern/interpreter.zig");
+    const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, default_proto, realm) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const proto: ?*JSObject = switch (proto_lookup) {
+        .proto => |p| p,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+    };
+    const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(inst, proto);
+
+    // §25.2.1.1 step 5 — CreateSharedByteDataBlock(byteLength).
+    const capacity = max_byte_length_opt orelse len;
+    if (capacity > @as(usize, std.math.maxInt(u32))) {
+        return throwRangeError(realm, "SharedArrayBuffer allocation exceeds host limit");
+    }
+    realm.heap.charge(capacity) catch
+        return throwRangeError(realm, "SharedArrayBuffer length exceeds heap ceiling");
+    const buf = realm.allocator.alloc(u8, len) catch return error.OutOfMemory;
+    @memset(buf, 0);
+    inst.setArrayBuffer(realm.allocator, buf) catch return error.OutOfMemory;
+    inst.has_array_buffer_data = true;
+    inst.array_buffer_shared = true;
+    inst.setArrayBufferMaxByteLength(realm.allocator, max_byte_length_opt) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(inst);
+}
+
+/// Brand check shared by every `SharedArrayBuffer.prototype` accessor:
+/// §25.2.4.x RequireInternalSlot(O, [[ArrayBufferData]]) + the
+/// IsSharedArrayBuffer gate. Returns the receiver object on success.
+fn requireSharedArrayBuffer(realm: *Realm, this_value: Value, who: []const u8) NativeError!*JSObject {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, who);
+    if (!obj.isSharedArrayBuffer())
+        return throwTypeError(realm, who);
+    return obj;
+}
+
+/// §25.2.4.1 `get SharedArrayBuffer.prototype.byteLength`.
+fn sharedArrayBufferByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = try requireSharedArrayBuffer(realm, this_value, "get SharedArrayBuffer.prototype.byteLength requires a SharedArrayBuffer receiver");
+    return numberFromUsize(obj.getArrayBuffer().?.len);
+}
+
+/// §25.2.4.x `get SharedArrayBuffer.prototype.maxByteLength`.
+fn sharedArrayBufferMaxByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = try requireSharedArrayBuffer(realm, this_value, "get SharedArrayBuffer.prototype.maxByteLength requires a SharedArrayBuffer receiver");
+    const max = obj.getArrayBufferMaxByteLength() orelse obj.getArrayBuffer().?.len;
+    return numberFromUsize(max);
+}
+
+/// §25.2.4.x `get SharedArrayBuffer.prototype.growable`.
+fn sharedArrayBufferGrowable(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const obj = try requireSharedArrayBuffer(realm, this_value, "get SharedArrayBuffer.prototype.growable requires a SharedArrayBuffer receiver");
+    return Value.fromBool(obj.getArrayBufferMaxByteLength() != null);
+}
+
+/// §25.2.4.4 SharedArrayBuffer.prototype.grow(newLength). Grow-only:
+/// `newByteLength` must be in `[currentByteLength, maxByteLength]`.
+fn sharedArrayBufferGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return throwTypeError(realm, "SharedArrayBuffer.prototype.grow requires a growable SharedArrayBuffer receiver");
+    // Step 2-3 — RequireInternalSlot + IsSharedArrayBuffer + growable.
+    if (!obj.isSharedArrayBuffer() or obj.getArrayBufferMaxByteLength() == null)
+        return throwTypeError(realm, "SharedArrayBuffer.prototype.grow requires a growable SharedArrayBuffer receiver");
+    // Step 4 — `Let newByteLength be ? ToIndex(newLength)`.
+    const new_len = try toIndex(realm, argOr(args, 0, Value.undefined_));
+    const max = obj.getArrayBufferMaxByteLength().?;
+    const old = obj.getArrayBuffer().?;
+    // §25.2.4.4 — grow-only and bounded by maxByteLength.
+    if (new_len < old.len or new_len > max)
+        return throwRangeError(realm, "SharedArrayBuffer.prototype.grow newLength out of range");
+    if (new_len == old.len) return Value.undefined_;
+    const new_bytes = realm.allocator.realloc(old, new_len) catch return error.OutOfMemory;
+    @memset(new_bytes[old.len..], 0);
+    obj.setArrayBuffer(realm.allocator, new_bytes) catch return error.OutOfMemory;
+    return Value.undefined_;
+}
+
+/// §25.2.4.3 SharedArrayBuffer.prototype.slice(start, end) — like
+/// `ArrayBuffer.prototype.slice` but SpeciesConstructor defaults to
+/// %SharedArrayBuffer% and the result is itself a shared buffer (no
+/// detach checks — a SharedArrayBuffer never detaches).
+fn sharedArrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const src = try requireSharedArrayBuffer(realm, this_value, "SharedArrayBuffer.prototype.slice requires a SharedArrayBuffer receiver");
+    const src_buf = src.getArrayBuffer().?;
+    const total: i64 = @intCast(src_buf.len);
+    var start_d: f64 = 0;
+    if (args.len > 0) start_d = try taSetToIntegerOrInfinity(realm, args[0]);
+    var end_d: f64 = @floatFromInt(total);
+    if (args.len > 1 and !args[1].isUndefined()) end_d = try taSetToIntegerOrInfinity(realm, args[1]);
+    const total_f: f64 = @floatFromInt(total);
+    const start_f: f64 = if (start_d < 0) @max(total_f + start_d, 0) else @min(start_d, total_f);
+    const end_f: f64 = if (end_d < 0) @max(total_f + end_d, 0) else @min(end_d, total_f);
+    const start_i: i64 = @intFromFloat(start_f);
+    const end_i: i64 = @intFromFloat(end_f);
+    const new_len: usize = if (end_i > start_i) @intCast(end_i - start_i) else 0;
+
+    const default_ctor = heap_mod.valueAsFunction(realm.globals.get("SharedArrayBuffer") orelse Value.undefined_);
+    const ctor_fn = try arrayBufferSpeciesConstructor(realm, src, default_ctor);
+
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+
+    const ctor_args = [_]Value{numberFromI64(@intCast(new_len))};
+    const lantern = @import("../lantern/interpreter.zig");
+    const result_v = if (ctor_fn) |cf| blk: {
+        const callee_v = heap_mod.taggedFunction(cf);
+        const outcome = lantern.constructValue(realm.allocator, realm, callee_v, &ctor_args, callee_v) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        };
+        break :blk switch (outcome) {
+            .value, .yielded => |v| v,
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+        };
+    } else err: {
+        const out = realm.heap.allocateObject() catch return error.OutOfMemory;
+        const new_buf = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
+        @memset(new_buf, 0);
+        out.setArrayBuffer(realm.allocator, new_buf) catch return error.OutOfMemory;
+        out.has_array_buffer_data = true;
+        out.array_buffer_shared = true;
+        break :err heap_mod.taggedObject(out);
+    };
+
+    // §25.2.4.3 — the result must be a (non-same) SharedArrayBuffer at
+    // least `newLen` bytes long.
+    const result_obj = heap_mod.valueAsPlainObject(result_v) orelse
+        return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: species ctor returned non-object");
+    if (!result_obj.isSharedArrayBuffer())
+        return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: species ctor did not return a SharedArrayBuffer");
+    if (result_obj == src)
+        return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: species ctor returned the receiver");
+    const result_buf = result_obj.getArrayBuffer().?;
+    if (result_buf.len < new_len)
+        return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: species ctor returned too-short SharedArrayBuffer");
     if (new_len > 0) {
         @memcpy(result_buf[0..new_len], src_buf[@intCast(start_i)..@intCast(end_i)]);
     }

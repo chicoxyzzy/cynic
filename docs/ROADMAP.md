@@ -628,13 +628,18 @@ toGMTString}`, `String.prototype.{substr, trimLeft, trimRight}`,
 `Intl` (the default build skips it — see the contemplated
 Intl-enabled flavour above).
 
-`SharedArrayBuffer` / `Atomics` are **planned, not refused.**
-Shared memory sits in tension with SES-style isolation and
-Cynic's single-agent-per-isolate hosts, so the design — a
-guarded, opt-in shared-memory surface that keeps the isolation
-boundary intact — is still open. The fixtures stay path-skipped
-until it lands, but this is a roadmap item now, not a permanent
-carve-out.
+`SharedArrayBuffer` / `Atomics` are **planned, not refused** — the
+single largest engine-true gap in the binary-scored corpus (~486
+`built-ins/{Atomics,SharedArrayBuffer}` fixtures, plus ~148
+SAB-referencing view fixtures). The scoping insight: most of it needs
+no real concurrency. Cynic is single-agent-per-isolate, so `Atomics`
+read-modify-write / load / store / compareExchange / isLockFree are
+sequential ops on the backing store and SAB is an ArrayBuffer minus
+detach plus grow — a single-agent phase reaches ~500 fixtures; only the
+~112 `$262.agent` cross-agent fixtures need a later multi-agent phase.
+Full phased plan in [sab-atomics.md](sab-atomics.md). (No longer
+path-skipped — under binary scoring the fixtures count as plain fails
+until it lands.)
 
 ## Modules
 
