@@ -3767,9 +3767,40 @@ pub const Compiler = struct {
             }
         }
         const bindings = try self.allocator.dupe(chunk_mod.DirectEvalBinding, snap.items);
+
+        // §19.2.1.1 — capture the enclosing ClassBodies' PrivateEnvironment
+        // chain so the eval body can resolve `this.#x` against the same
+        // mangle prefixes the enclosing method uses. The prefixes / names
+        // already live in the realm's class arena (realm-lifetime), so the
+        // snapshot slice (also class-arena) borrows them. Outermost-first,
+        // mirroring `class_stack`. Empty when the call site is outside any
+        // class body.
+        const class_arena = self.realm.classAllocator();
+        const class_contexts: []chunk_mod.DirectEvalClassContext =
+            if (self.class_stack.items.len == 0)
+                &.{}
+            else
+                class_arena.alloc(chunk_mod.DirectEvalClassContext, self.class_stack.items.len) catch {
+                    self.allocator.free(bindings);
+                    return error.OutOfMemory;
+                };
+        for (self.class_stack.items, 0..) |ctx, i| {
+            class_contexts[i] = .{
+                .private_prefix = ctx.private_prefix,
+                .private_names = ctx.private_names,
+                .is_derived = ctx.is_derived,
+            };
+        }
+
+        // §13.3.7 / §13.3.1 — whether super.x / super(...) / new.target are
+        // valid in the eval body is derived at runtime from the caller
+        // frame's [[HomeObject]] / derived-ctor state (see the
+        // `direct_eval` opcode handler), so the scope snapshot only needs
+        // the compile-time PrivateEnvironment chain.
         const scope_k = self.builder.addDirectEvalScope(.{
             .bindings = bindings,
             .caller_env_depth = self.env_depth,
+            .class_contexts = class_contexts,
         }) catch |err| {
             self.allocator.free(bindings);
             return err;
@@ -12755,7 +12786,7 @@ pub fn compileScriptAsChunk(
     source: []const u8,
     diagnostics: ?*Diagnostics,
 ) CompileError!Chunk {
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, false, null, 0, false);
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, false, null, 0, false, &.{});
 }
 
 /// Compile eval code (§3.8.3.7 PerformShadowRealmEval today; the
@@ -12784,7 +12815,9 @@ pub fn compileEvalAsChunk(
     /// (Script evaluation: var → the shadow realm's global env).
     eval_local: bool,
 ) CompileError!Chunk {
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, null, 0, eval_local);
+    // Indirect eval has a null PrivateEnvironment (§19.2.1.1): no
+    // enclosing-class private names are reachable.
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, null, 0, eval_local, &.{});
 }
 
 /// §19.2.1 direct eval — compile `program` as eval code whose free
@@ -12805,10 +12838,15 @@ pub fn compileDirectEvalAsChunk(
     diagnostics: ?*Diagnostics,
     caller_scope: ?*Scope,
     start_env_depth: u8,
+    /// §19.2.1.1 — the enclosing ClassBodies' PrivateEnvironment chain
+    /// (outermost-first), so `this.#x` mangles against the same prefixes
+    /// the enclosing method used. Empty when the call site is outside any
+    /// class. Borrowed from the realm's class arena.
+    class_contexts: []const @import("chunk.zig").DirectEvalClassContext,
 ) CompileError!Chunk {
     // Direct eval is always strict eval (§19.2.1.3): top-level var /
     // function bind in the eval body's own env, not the caller's.
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, caller_scope, start_env_depth, true);
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, caller_scope, start_env_depth, true, class_contexts);
 }
 
 fn compileScriptLikeChunk(
@@ -12829,6 +12867,11 @@ fn compileScriptLikeChunk(
     /// eval body's own env (no leak to global). `false` for scripts
     /// and ShadowRealm-style script evaluation.
     eval_local: bool,
+    /// §19.2.1.1 direct eval — the enclosing ClassBodies' PrivateEnvironment
+    /// chain (outermost-first) so `this.#x` mangles against the same
+    /// prefixes the enclosing method used. Empty for scripts / indirect
+    /// eval (null PrivateEnvironment). Borrowed from the realm's class arena.
+    class_contexts: []const @import("chunk.zig").DirectEvalClassContext,
 ) CompileError!Chunk {
     var c = Compiler.init(allocator, realm, source);
     errdefer c.deinit();
@@ -12837,6 +12880,18 @@ fn compileScriptLikeChunk(
     c.diagnostics = diagnostics;
     c.eval_local = eval_local;
     c.eval_scope = eval_scope;
+
+    // §19.2.1.1 — seed the compiler's class_stack with the inherited
+    // PrivateEnvironment chain so `manglePrivateRef` reconstructs the
+    // enclosing method's private-name prefixes. The contexts carry the
+    // declaring classes' realm-arena prefixes / names verbatim.
+    for (class_contexts) |cc| {
+        c.class_stack.append(c.allocator, .{
+            .private_prefix = cc.private_prefix,
+            .is_derived = cc.is_derived,
+            .private_names = cc.private_names,
+        }) catch return error.OutOfMemory;
+    }
 
     var script_scope: Scope = .{ .parent = direct_eval_parent, .kind = .script };
     defer script_scope.deinit(c.allocator);

@@ -548,9 +548,36 @@ pub fn evaluateDirectEval(
     // slices for `Function.prototype.toString`.
     const stable = try realm.retainEvalSource(source);
 
+    // §19.2.1.1 — mirror the running execution context's super /
+    // new.target permission and PrivateEnvironment into the eval-body
+    // parse. `super.x` is grammatically valid iff the caller frame has a
+    // [[HomeObject]] (a class method / field / static block, or an object-
+    // literal method); `super(...)` iff it's a derived constructor;
+    // `new.target` iff inside a function-like body — detected here via the
+    // home / derived-ctor state (a plain function direct eval keeps the
+    // pre-existing behavior of disallowing `new.target`). The inherited
+    // PrivateEnvironment names come from the compile-time class-context
+    // snapshot.
+    const has_home = ctx.home_object != null or ctx.home_function != null;
+    // §15.8.1 — the AllPrivateNamesValid pass compares PrivateIdentifier
+    // references by their full `#name` StringValue, so re-attach the `#`
+    // the compiler's stored prefix-stripped names dropped.
+    var private_names_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (snapshot.class_contexts) |cc| {
+        for (cc.private_names) |n| {
+            const hashed = std.fmt.allocPrint(aa, "#{s}", .{n}) catch return error.OutOfMemory;
+            private_names_buf.append(aa, hashed) catch return error.OutOfMemory;
+        }
+    }
+
     const diag_mod = @import("../../diagnostic.zig");
     var diags: diag_mod.Diagnostics = .empty;
-    const program = parser_mod.parseScript(aa, stable, &diags) catch return error.ParseError;
+    const program = parser_mod.parseDirectEval(aa, stable, &diags, .{
+        .allow_super_property = has_home,
+        .allow_super_call = ctx.is_derived_ctor,
+        .allow_new_target = has_home or ctx.is_derived_ctor,
+        .private_names = private_names_buf.items,
+    }) catch return error.ParseError;
     for (diags.items) |d| if (d.severity == .err) return error.ParseError;
 
     // Rebuild the caller's visible env-slot bindings as a synthetic
@@ -583,6 +610,9 @@ pub fn evaluateDirectEval(
         // innermost env at runtime. Saturating add guards the
         // pathological 255-deep nesting case.
         snapshot.caller_env_depth +| 1,
+        // §19.2.1.1 — the inherited PrivateEnvironment chain so
+        // `this.#x` mangles against the enclosing method's prefixes.
+        snapshot.class_contexts,
     ) catch {
         realm.allocator.destroy(chunk_ptr);
         return error.CompileError;

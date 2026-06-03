@@ -65,6 +65,19 @@ fn isUsingBindingStart(kind: TokenKind) bool {
     return kind == .identifier or kind == .kw_yield or kind == .kw_await;
 }
 
+/// §19.2.1.1 PerformEval (direct) — the parts of the running execution
+/// context a direct eval's *parse* needs to mirror: whether `super` /
+/// `new.target` are grammatically permitted, and the inherited
+/// PrivateEnvironment's names. Assembled by the `direct_eval` opcode
+/// handler from the caller frame.
+pub const DirectEvalOptions = struct {
+    allow_super_property: bool = false,
+    allow_super_call: bool = false,
+    allow_new_target: bool = false,
+    /// Decoded `#name`s of every enclosing ClassBody (borrowed).
+    private_names: []const []const u8 = &.{},
+};
+
 pub const Parser = struct {
     /// Arena-style allocator for all AST allocations.
     arena: std.mem.Allocator,
@@ -134,6 +147,14 @@ pub const Parser = struct {
     /// class field initializers, and class static blocks. Arrow
     /// bodies inherit (they don't introduce their own [[NewTarget]]).
     allow_new_target: bool = false,
+    /// §19.2.1.1 / §15.8.1 — for a *direct* eval, the running execution
+    /// context's PrivateEnvironment names (every enclosing ClassBody's
+    /// PrivateBoundIdentifiers). The §15.8.1 AllPrivateNamesValid pass
+    /// seeds its base scope with these so `this.#x` referencing a name
+    /// declared by an enclosing class is NOT an early error. Empty for a
+    /// script, a module, or an indirect eval (whose PrivateEnvironment
+    /// is null). Borrowed; lifetime is the caller's.
+    direct_eval_private_names: []const []const u8 = &.{},
 
     pub fn init(arena: std.mem.Allocator, source: []const u8, diagnostics: ?*Diagnostics) ParseError!Parser {
         return Parser.initWith(arena, source, diagnostics, false);
@@ -220,6 +241,22 @@ pub const Parser = struct {
         return self.parseProgramBody(.script);
     }
 
+    /// §19.2.1.1 PerformEval (direct) — parse `source` as eval code that
+    /// inherits the running execution context. Unlike a plain script
+    /// parse, the body may reference `super` (§13.3.7) and `new.target`
+    /// (§13.3.1) when the call site sits in a HomeObject-bearing / function
+    /// body, and may reference private names from the inherited
+    /// PrivateEnvironment (§19.2.1.1 / §15.8.1). The flags + private-name
+    /// seed are supplied by the caller (the `direct_eval` opcode handler)
+    /// from the live caller frame.
+    pub fn parseDirectEval(self: *Parser, opts: DirectEvalOptions) ParseError!Program {
+        self.allow_super_property = opts.allow_super_property;
+        self.allow_super_call = opts.allow_super_call;
+        self.allow_new_target = opts.allow_new_target;
+        self.direct_eval_private_names = opts.private_names;
+        return self.parseProgramBody(.script);
+    }
+
     /// §16.2 ParseModule. Same statement-list shape as ParseScript but
     /// permits `ImportDeclaration` and `ExportDeclaration` at top level
     /// and runs the body with `[+Await]` (ES2022 top-level await,
@@ -291,6 +328,9 @@ pub const Parser = struct {
             .arena = self.arena,
             .diagnostics = self.diagnostics,
             .source = self.source,
+            // §19.2.1.1 — a direct eval inherits the caller's
+            // PrivateEnvironment; seed its names so `this.#x` resolves.
+            .outer_private_names = self.direct_eval_private_names,
         };
         try priv_validator.run(&program);
         // §13.13 / §14.13 / §14.15 LabelledStatement & break/continue
@@ -3950,6 +3990,20 @@ pub const Parser = struct {
 pub fn parseScript(arena: std.mem.Allocator, source: []const u8, diagnostics: ?*Diagnostics) ParseError!Program {
     var parser = try Parser.init(arena, source, diagnostics);
     return parser.parseScript();
+}
+
+/// §19.2.1.1 PerformEval (direct) — top-level convenience wrapper that
+/// parses `source` as direct-eval code under the supplied execution-
+/// context mirror (`super` / `new.target` permission + inherited
+/// PrivateEnvironment names).
+pub fn parseDirectEval(
+    arena: std.mem.Allocator,
+    source: []const u8,
+    diagnostics: ?*Diagnostics,
+    opts: DirectEvalOptions,
+) ParseError!Program {
+    var parser = try Parser.init(arena, source, diagnostics);
+    return parser.parseDirectEval(opts);
 }
 
 /// Top-level convenience wrapper for §16.2 Module.

@@ -226,6 +226,116 @@ test "eval: reassigned globalThis.eval is an ordinary call, not direct" {
     try testing.expect(v.isInt32() and v.asInt32() == 99);
 }
 
+// ── §19.2.1.1 direct eval inherits PrivateEnvironment + HomeObject ───
+//
+// PerformEval with `direct == true` (§19.2.1.1) runs the eval'd code
+// with the running execution context's PrivateEnvironment and, through
+// the enclosing method's function environment, its [[HomeObject]]. So a
+// direct eval inside a class method can resolve the class's private
+// names (`this.#x`) and `super` exactly as the method body would. An
+// *indirect* eval (`(0,eval)(...)`) gets neither — its PrivateEnvironment
+// is null and it has no HomeObject — so `this.#x` / `super` there is a
+// SyntaxError.
+
+/// Evaluate `source` and assert it throws (any completion-thrown value).
+/// Used to pin the indirect-eval guard: private/super access there must
+/// NOT resolve.
+fn expectThrowsAllow(source: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_eval = true;
+    try realm.installBuiltins();
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, source);
+    switch (outcome) {
+        .value, .yielded => return error.EvalDidNotThrow,
+        .thrown => {},
+    }
+}
+
+test "eval: direct reads a private instance field (this.#x)" {
+    // §19.2.1.1 — the eval inherits the method's PrivateEnvironment, so
+    // `#x` resolves against the class's private name.
+    try expectIntAllow(
+        \\class C { #x = 5; get() { return eval('this.#x'); } }
+        \\new C().get();
+    , 5);
+}
+
+test "eval: direct reads a private field through a getter accessor" {
+    try expectIntAllow(
+        \\class C { #x = 7; get v() { return eval('this.#x'); } }
+        \\new C().v;
+    , 7);
+}
+
+test "eval: direct writes a private field through a setter accessor" {
+    try expectIntAllow(
+        \\class C { #x = 0; set v(n) { eval('this.#x = n'); } read() { return this.#x; } }
+        \\const c = new C(); c.v = 9; c.read();
+    , 9);
+}
+
+test "eval: direct calls a private method (this.#m())" {
+    try expectIntAllow(
+        \\class C { #m() { return 11; } go() { return eval('this.#m()'); } }
+        \\new C().go();
+    , 11);
+}
+
+test "eval: direct uses #x-in-obj brand check" {
+    // §13.10.2 — `#x in obj` cover form must also resolve through the
+    // inherited PrivateEnvironment.
+    try expectIntAllow(
+        \\class C { #x = 1; has(o) { return eval('#x in o') ? 1 : 0; } }
+        \\const c = new C(); c.has(c);
+    , 1);
+}
+
+test "eval: direct in a static method resolves a static private field" {
+    try expectIntAllow(
+        \\class C { static #s = 13; static go() { return eval('C.#s'); } }
+        \\C.go();
+    , 13);
+}
+
+test "eval: direct calls super.m() in a derived method" {
+    // §19.2.1.1 — the eval inherits the method's [[HomeObject]], so
+    // `super.foo()` walks the home object's prototype.
+    try expectIntAllow(
+        \\class B { foo() { return 1; } }
+        \\class D extends B { m() { return eval('super.foo()'); } }
+        \\new D().m();
+    , 1);
+}
+
+test "eval: direct reads a super property in a derived method" {
+    try expectIntAllow(
+        \\class B { get p() { return 21; } }
+        \\class D extends B { m() { return eval('super.p'); } }
+        \\new D().m();
+    , 21);
+}
+
+test "eval: indirect eval cannot see private names (guard)" {
+    // §19.2.1.1 — an indirect eval's PrivateEnvironment is null; `this.#x`
+    // is an AllPrivateNamesValid early error → SyntaxError, surfaced as a
+    // thrown completion.
+    try expectThrowsAllow(
+        \\class C { #x = 5; get() { return (0, eval)('this.#x'); } }
+        \\new C().get();
+    );
+}
+
+test "eval: indirect eval cannot use super (guard)" {
+    // §13.3.7 — `super` outside a HomeObject body is a SyntaxError, and an
+    // indirect eval has no HomeObject.
+    try expectThrowsAllow(
+        \\class B { foo() { return 1; } }
+        \\class D extends B { m() { return (0, eval)('super.foo()'); } }
+        \\new D().m();
+    );
+}
+
 // ── posture: gate stays closed by default (regression guard) ─────────
 
 test "eval: gate closed (default) throws EvalError (host refusal)" {

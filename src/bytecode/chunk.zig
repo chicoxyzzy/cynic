@@ -370,6 +370,21 @@ pub const DirectEvalBinding = struct {
     is_using: bool = false,
 };
 
+/// §19.2.1.1 direct eval — one enclosing ClassBody's PrivateEnvironment
+/// captured at a direct-`eval(...)` call site so the eval'd source can
+/// resolve the class's private names. PerformEval with `direct == true`
+/// inherits the running execution context's PrivateEnvironment; Cynic
+/// resolves private names at compile time by mangling `#name` with the
+/// declaring class's unique `private_prefix`, so the eval compiler must
+/// reconstruct the enclosing classes' contexts with the SAME prefixes.
+/// All slices are realm-lifetime (the class arena owns the prefix /
+/// names), so the chunk borrows them without copying.
+pub const DirectEvalClassContext = struct {
+    private_prefix: []const u8,
+    private_names: []const []const u8,
+    is_derived: bool,
+};
+
 /// §19.2.1 direct eval — the lexical snapshot captured at one
 /// direct-`eval(...)` call site. Indexed by the `direct_eval` opcode's
 /// scope operand.
@@ -380,6 +395,12 @@ pub const DirectEvalScope = struct {
     /// The caller's compile-time `env_depth` at the eval call site —
     /// drives the runtime depth offset (see `DirectEvalBinding`).
     caller_env_depth: u8,
+    /// §19.2.1.1 — the enclosing ClassBodies' PrivateEnvironment chain,
+    /// outermost-first (mirrors the compiler's `class_stack`), so the
+    /// eval compiler can mangle `this.#x` against the same prefixes the
+    /// enclosing method used. Empty when the `eval(...)` call site is
+    /// outside any class body. Borrowed from the realm's class arena.
+    class_contexts: []const DirectEvalClassContext = &.{},
 };
 
 pub const Chunk = struct {

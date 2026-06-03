@@ -79,11 +79,25 @@ pub const Validator = struct {
     diagnostics: ?*Diagnostics,
     source: []const u8,
     scopes: std.ArrayListUnmanaged(Scope) = .empty,
+    /// §19.2.1.1 — for a direct eval, the inherited PrivateEnvironment's
+    /// names (decoded `#name`s of every enclosing ClassBody). Seeded as
+    /// the outermost scope so `this.#x` referencing an enclosing class's
+    /// private name is in scope. Empty for non-eval / indirect-eval
+    /// parses, where the PrivateEnvironment is null. Borrowed.
+    outer_private_names: []const []const u8 = &.{},
 
     pub fn run(self: *Validator, program: *const Program) !void {
         defer {
             for (self.scopes.items) |*s| s.deinit(self.arena);
             self.scopes.deinit(self.arena);
+        }
+        // §19.2.1.1 — push the inherited PrivateEnvironment first so it
+        // sits beneath the program's own ClassBody scopes (`inScope`
+        // walks innermost-first; an inner re-declaration still shadows).
+        if (self.outer_private_names.len > 0) {
+            var base: Scope = .empty;
+            for (self.outer_private_names) |n| try base.append(self.arena, n);
+            try self.scopes.append(self.arena, base);
         }
         for (program.body) |*s| try self.visitStmt(s);
     }
