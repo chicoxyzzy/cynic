@@ -129,6 +129,20 @@ code construction (aligns with SES).
   `collectYoung` with promotion-by-relink — has shipped (see the
   Performance section); incremental marking of the mature set is
   the remaining GC step.
+- **GC trigger at every safe-point, not only JS loop back-edges.**
+  The allocation-pressure check (`gc_threshold` / `gc_byte_threshold`)
+  runs at bytecode loop back-edges, so a microtask-driven or
+  pure-native allocation storm — e.g. a promise chain that re-defers
+  itself and never returns to a JS loop — crosses no back-edge and
+  never triggers GC. V8 / SpiderMonkey / JSC scavenge when the nursery
+  fills regardless of context; checking allocation pressure on the
+  microtask-drain boundary (and other native re-entry points) would
+  self-throttle such storms instead of relying on a later loop. A
+  companion harness fix: a real timer queue in `tools/test262.zig` so
+  the test262 `setTimeout` polyfill resolves a delay by wall-clock
+  instead of busy-spinning (what `d8` / `jsc` / Node give the runner).
+  Both were surfaced landing the `$262.agent` cross-agent `waitAsync`
+  fixtures, whose parent busy-loops on exactly this pattern.
 
 **Recently landed (was in progress; now done).**
 

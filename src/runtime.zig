@@ -22,6 +22,12 @@ pub const Environment = environment.Environment;
 pub const object = @import("runtime/object.zig");
 pub const JSObject = object.JSObject;
 
+// §25.2 SharedArrayBuffer backing store + the `wrapSharedBlock`
+// primitive — exposed so a host (the test262 `$262.agent` harness)
+// can hand one shared block to another agent's realm.
+pub const shared_data_block = @import("runtime/shared_data_block.zig");
+pub const typed_array_builtin = @import("runtime/builtins/typed_array.zig");
+
 pub const heap = @import("runtime/heap.zig");
 pub const Heap = heap.Heap;
 pub const HandleScope = heap.HandleScope;

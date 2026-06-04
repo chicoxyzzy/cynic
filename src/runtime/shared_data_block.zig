@@ -14,6 +14,14 @@
 
 const std = @import("std");
 
+/// Process-global count of currently-live shared data blocks (created
+/// minus freed). A diagnostic hook: a host that creates and destroys
+/// many short-lived blocks can assert this returns to its baseline to
+/// catch a block that was never released (a leaked reference pinning
+/// shared memory). Bumped in `create`, dropped when the final reference
+/// is released and the block is freed.
+pub var live_blocks: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
+
 /// One parked `Atomics.wait`. The node lives on the *waiting thread's
 /// stack* and is linked into its block's wait list for the duration of
 /// the wait — the list owns no memory. A waiter unlinks itself (under
@@ -73,6 +81,7 @@ pub const SharedDataBlock = struct {
             .max_byte_length = max_byte_length,
             .refcount = std.atomic.Value(usize).init(1),
         };
+        _ = live_blocks.fetchAdd(1, .monotonic);
         return self;
     }
 
@@ -92,6 +101,7 @@ pub const SharedDataBlock = struct {
             const gpa = std.heap.page_allocator;
             gpa.free(self.bytes);
             gpa.destroy(self);
+            _ = live_blocks.fetchSub(1, .monotonic);
         }
     }
 

@@ -365,6 +365,602 @@ fn throwTest262SyntaxError(realm: *cynic.runtime.Realm, msg: []const u8) cynic.r
 
 /// Install the `$262` host object on `realm.globals`. Idempotent
 /// per realm (caller invokes once, before evaluating user code).
+// ════════════════════════════════════════════════════════════════════
+//   §INTERPRETING.md `$262.agent` — multi-agent harness (real threads)
+// ════════════════════════════════════════════════════════════════════
+//
+// Each agent runs on its own OS thread with its own Realm + heap;
+// agents share ONLY a SharedArrayBuffer's bytes (a refcounted
+// SharedDataBlock) plus the channels below. `atomicsHelper.js`
+// (auto-loaded as an `includes:`) builds waitUntil / tryYield /
+// safeBroadcast / getReportAsync / timeouts on top of these host
+// primitives. See docs/multi-agent-atomics.md.
+
+const AgentSDB = cynic.runtime.shared_data_block.SharedDataBlock;
+const AgentVal = cynic.runtime.Value;
+const max_agents = 16;
+
+/// One agent task — `$262.agent.start(src)` enqueues it. It is run
+/// either by a persistent pool worker (the common path) or, when the
+/// pool is momentarily saturated, by a private one-shot thread. Its
+/// channels (broadcast in, reports out via `group`) are the only shared
+/// surface; the realm it runs in is the worker's, never touched here.
+const AgentThreadState = struct {
+    group: *AgentGroup,
+    /// parent → agent: the broadcast block (set by `$262.agent.broadcast`).
+    bcast: std.atomic.Value(?*AgentSDB) = std.atomic.Value(?*AgentSDB).init(null),
+    /// owned copy of the agent source (page_allocator). The compiled
+    /// chunk borrows slices of it (function / binding names for
+    /// `Function.prototype.toString`), and a pool worker's realm keeps
+    /// chunks across tasks — so a pool worker takes ownership and frees
+    /// it only at worker shutdown; a private thread frees it at teardown.
+    src: []u8,
+    /// set on the running thread by `$262.agent.receiveBroadcast`.
+    callback: ?AgentVal = null,
+    /// the private OS thread, when the pool was saturated — joined (not
+    /// detached) at fixture teardown. Null for a pooled task.
+    thread: ?std.Thread = null,
+    /// Raised by the running thread when the task is fully complete (the
+    /// agent reported + its realm was reset). `reapAgents` waits on this
+    /// for pooled tasks (pool threads persist; they aren't joined).
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+
+const AgentGroup = struct {
+    states: [max_agents]?*AgentThreadState = @splat(null),
+    count: usize = 0,
+    reg_lock: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// agent → parent: report queue (owned strings, page_allocator).
+    reports: std.ArrayListUnmanaged([]u8) = .empty,
+    reports_lock: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Set at fixture teardown to release any agent still parked in the
+    /// broadcast-wait loop so `reapAgents` can join it.
+    should_exit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+
+/// The fixture's top-level `AgentGroup`, set by `installAgent` on the
+/// runner thread (never on a spawned agent). `reapAgents` joins its
+/// threads + frees it at teardown. Threadlocal so each test262 worker
+/// reaps only its own fixture's agents.
+threadlocal var reap_group: ?*AgentGroup = null;
+
+/// Wait for every agent the fixture spawned to finish, then free
+/// per-agent state + the group. Agents complete on their own (the
+/// fixture notifies them or their wait times out); a never-broadcast
+/// agent bails via `should_exit`. A pooled task's persistent worker
+/// thread is NOT joined — we wait on its `done` flag instead (the
+/// worker lives on, reset, for the next task); a private fallback
+/// thread is joined. The agent's source stays owned by its runner
+/// (the pool worker, or the private thread) — never freed here.
+fn reapAgents(group: *AgentGroup) void {
+    group.should_exit.store(true, .release);
+    for (group.states[0..group.count]) |maybe| {
+        if (maybe) |st| {
+            if (st.thread) |t| {
+                t.join();
+            } else {
+                // Pooled task — wait for the worker to signal completion.
+                while (!st.done.load(.acquire)) agentNapNs(100 * std.time.ns_per_us);
+            }
+            std.heap.page_allocator.destroy(st);
+        }
+    }
+    for (group.reports.items) |m| std.heap.page_allocator.free(m);
+    group.reports.deinit(std.heap.page_allocator);
+    std.heap.page_allocator.destroy(group);
+}
+
+/// Per-agent-thread state, read by the child-side `$262.agent.*`
+/// natives (receiveBroadcast / report). Null on the main agent.
+threadlocal var current_agent: ?*AgentThreadState = null;
+
+fn agentSpinLock(l: *std.atomic.Value(bool)) void {
+    while (l.swap(true, .acquire)) std.atomic.spinLoopHint();
+}
+fn agentSpinUnlock(l: *std.atomic.Value(bool)) void {
+    l.store(false, .release);
+}
+
+// ── persistent agent-Realm pool ─────────────────────────────────────
+// Each agent runs in its own Realm — but building one (`installBuiltins`
+// constructs the whole intrinsic set + heap pools) is the dominant cost,
+// and a concentrated cross-agent sweep spawns ~hundreds of them, so
+// create-and-destroy churn pinned multi-GB of RSS no allocator could
+// reclaim. Instead a fixed pool of `pool_size` persistent worker threads
+// each own ONE persistent Realm (so `installBuiltins` runs `pool_size`
+// times total, not once per agent). A task dispatches to a free worker,
+// which runs the agent's whole life on it, then RESETS the realm to its
+// post-install state before the next task. The realm uses a FREEING
+// allocator (`c_allocator`) so the per-task GC actually reclaims each
+// agent's garbage and malloc reuses the pages — bounded, churn-free.
+//
+// `pool_size` >= the max agents live at once across all harness workers
+// (`--threads=N` x max-agents-per-fixture). When momentarily saturated,
+// `agentStart` falls back to a private one-shot thread + realm.
+const pool_size = 32;
+const agent_stack = 2 << 20; // 2 MiB — agents run tiny scripts.
+const agent_step_budget: u64 = 50_000_000; // bound a runaway agent script.
+
+const PoolWorker = struct {
+    /// The task assigned to this worker, or null when idle. Set by
+    /// `agentStart` (CAS null->task), cleared by the worker once the task
+    /// is fully complete. A non-null slot is never reassigned.
+    task: std.atomic.Value(?*AgentThreadState) = std.atomic.Value(?*AgentThreadState).init(null),
+};
+
+var pool_workers: [pool_size]PoolWorker = undefined;
+var pool_threads: [pool_size]std.Thread = undefined;
+var pool_n: usize = 0; // workers that actually spawned (<= pool_size).
+var pool_started = std.atomic.Value(bool).init(false);
+var pool_start_lock = std.atomic.Value(bool).init(false);
+var pool_shutdown = std.atomic.Value(bool).init(false);
+
+/// Lazily spawn the worker pool on the first `$262.agent.start`. Under a
+/// lock so concurrent harness workers race-safely start it exactly once.
+fn ensurePoolStarted() void {
+    if (pool_started.load(.acquire)) return;
+    agentSpinLock(&pool_start_lock);
+    defer agentSpinUnlock(&pool_start_lock);
+    if (pool_started.load(.acquire)) return;
+    var n: usize = 0;
+    for (0..pool_size) |_| {
+        pool_workers[n] = .{};
+        pool_threads[n] = std.Thread.spawn(.{ .stack_size = agent_stack }, poolWorkerMain, .{&pool_workers[n]}) catch continue;
+        n += 1;
+    }
+    pool_n = n;
+    pool_started.store(true, .release);
+}
+
+/// Hand `state` to a free pool worker. Returns true on success. A
+/// strong CAS null->state claims a slot; a non-null slot (busy, or a
+/// just-finished slot the worker hasn't cleared yet) is skipped.
+fn tryDispatchToPool(state: *AgentThreadState) bool {
+    for (pool_workers[0..pool_n]) |*w| {
+        if (w.task.cmpxchgStrong(null, state, .acq_rel, .acquire) == null) return true;
+    }
+    return false;
+}
+
+/// Signal every pool worker to exit and join them. Called once at
+/// process teardown (after every fixture has reaped its agents, so no
+/// worker is mid-task). No-op if the pool never started.
+fn shutdownPool() void {
+    if (!pool_started.load(.acquire)) return;
+    pool_shutdown.store(true, .release);
+    for (pool_threads[0..pool_n]) |t| t.join();
+}
+
+// ── persistent-realm reset (cross-agent isolation) ──────────────────
+// A pool worker reuses one realm across many agents, so between tasks it
+// must scrub every trace of the prior agent — both for correctness
+// (agent B must not see agent A's globals) and for memory (a lingering
+// global holding a `SharedArrayBuffer` would pin its shared block).
+
+/// Snapshot the post-install globalThis key set so `resetRealm` can tell
+/// a task-added binding from an intrinsic. Keys are duped into `alloc`
+/// (the worker frees them at shutdown via `freeSnapshotKeys`).
+fn snapshotGlobals(realm: *cynic.runtime.Realm, alloc: std.mem.Allocator) std.StringArrayHashMapUnmanaged(void) {
+    var set: std.StringArrayHashMapUnmanaged(void) = .empty;
+    const gt = realm.globals.target orelse return set;
+    var it = gt.iterOwnNamedKeys();
+    while (it.next()) |e| {
+        const dup = alloc.dupe(u8, e.key_ptr.*) catch continue;
+        set.put(alloc, dup, {}) catch alloc.free(dup);
+    }
+    return set;
+}
+
+fn freeSnapshotKeys(set: *std.StringArrayHashMapUnmanaged(void), alloc: std.mem.Allocator) void {
+    for (set.keys()) |k| alloc.free(k);
+}
+
+/// Return the worker's realm to its post-`install262` state so the next
+/// agent starts clean. `scratch` is a reusable key buffer.
+fn resetRealm(
+    realm: *cynic.runtime.Realm,
+    snapshot: *const std.StringArrayHashMapUnmanaged(void),
+    scratch: *std.ArrayListUnmanaged([]const u8),
+) void {
+    // Drain any microtasks the agent queued so async state doesn't bleed
+    // into the next one, and drop any pending exception.
+    cynic.runtime.lantern.drainMicrotasks(realm.allocator, realm) catch {};
+    realm.pending_exception = null;
+
+    // Overwrite every binding the task added to globalThis with
+    // `undefined` (lower-risk than delete — no shape-machinery churn).
+    // Collect first so we don't mutate the property map mid-iteration.
+    scratch.clearRetainingCapacity();
+    if (realm.globals.target) |gt| {
+        var it = gt.iterOwnNamedKeys();
+        while (it.next()) |e| {
+            if (!snapshot.contains(e.key_ptr.*))
+                scratch.append(realm.allocator, e.key_ptr.*) catch {};
+        }
+    }
+    for (scratch.items) |key| {
+        realm.globals.put(realm.allocator, key, AgentVal.undefined_) catch {};
+    }
+
+    // Drop the task's lexical (let / const / class) and var bindings so
+    // the next agent re-declares from a clean slate.
+    realm.globals.decl_env.clearRetainingCapacity();
+    realm.globals.decl_consts.clearRetainingCapacity();
+    realm.globals.var_names.clearRetainingCapacity();
+    // Drop any waitAsync the prior agent left pending (e.g. an untimed
+    // wait that never fired) so its capability doesn't pin memory or
+    // resolve into the next agent.
+    realm.pending_async_waits.clearRetainingCapacity();
+
+    // Reclaim the task's objects — releasing the refcounted shared-block
+    // references its SharedArrayBuffers held, so a reused realm never
+    // pins shared memory across agents.
+    realm.collectGarbage();
+}
+
+/// Monotonic milliseconds via the libc shim (the engine avoids std.Io).
+fn agentMonoMs() f64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) / 1_000_000.0;
+}
+
+/// Yield the CPU for `ns` (libc `nanosleep`) — agents sleep rather than
+/// spin, so a corpus full of waiting agents doesn't saturate the host.
+fn agentNapNs(ns: u64) void {
+    var req: std.c.timespec = .{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
+    _ = std.c.nanosleep(&req, null);
+}
+
+fn agentGroupOf(this_value: AgentVal) ?*AgentGroup {
+    const obj = cynic.runtime.heap.valueAsPlainObject(this_value) orelse return null;
+    const hd = obj.getHostData() orelse return null;
+    return @ptrCast(@alignCast(hd));
+}
+
+/// Run one agent's whole life in `realm`: evaluate its source (which
+/// registers a `receiveBroadcast` callback), wait for the parent's
+/// broadcast, then invoke the callback with a SharedArrayBuffer over the
+/// broadcast block (the callback does the `Atomics.wait` / `report`).
+/// `current_agent` must already point at `state` (so the child-side
+/// `report` / `receiveBroadcast` natives find it). Does NOT free
+/// `state.src` — the caller owns the source's lifetime (the compiled
+/// chunk borrows slices of it).
+fn runAgentTask(realm: *cynic.runtime.Realm, state: *AgentThreadState) void {
+    realm.step_budget = agent_step_budget;
+    _ = cynic.runtime.lantern.evaluateScript(realm.allocator, realm, state.src) catch {};
+    const cb_v = state.callback orelse return;
+    // Wait for the parent's broadcast (bounded, and released early on
+    // fixture teardown / pool shutdown, so a never-broadcast agent can't
+    // hold its worker past the fixture's watchdog).
+    const start_ms = agentMonoMs();
+    var block: ?*AgentSDB = null;
+    while (block == null) {
+        if (state.group.should_exit.load(.acquire)) return;
+        if (pool_shutdown.load(.acquire)) return;
+        block = state.bcast.load(.acquire);
+        if (block != null) break;
+        if (agentMonoMs() - start_ms > 60000) return;
+        agentNapNs(200 * std.time.ns_per_us);
+    }
+    // Root the callback across the (allocating) wrap + call.
+    const scope = realm.heap.openScope() catch return;
+    defer scope.close();
+    scope.push(cb_v) catch {};
+    const sab = cynic.runtime.typed_array_builtin.wrapSharedBlock(realm, block.?) catch return;
+    scope.push(sab) catch {};
+    const cb_fn = cynic.runtime.heap.valueAsFunction(cb_v) orelse return;
+    _ = cynic.runtime.lantern.callJSFunction(realm.allocator, realm, cb_fn, AgentVal.undefined_, &.{sab}) catch {};
+
+    // The callback may be an `async` function suspended on
+    // `await Atomics.waitAsync(...)`. Drive it to completion.
+    driveAsyncAgent(realm, state);
+}
+
+/// Drive an async agent to completion. The agent's callback may park on
+/// `await Atomics.waitAsync(...)`; the spec fires that wait's timeout
+/// "in parallel" (§25.4.1.4 TriggerTimeout) — with no real event loop
+/// the host does it here: drain microtasks, resolve any waitAsync whose
+/// monotonic deadline has passed with `"timed-out"`, and repeat until
+/// the agent settles (empty queue + no pending waits) or a backstop.
+/// Cross-agent notify isn't wired, so an untimed wait just runs the
+/// backstop out; `should_exit` lets a reaped fixture release the worker.
+fn driveAsyncAgent(realm: *cynic.runtime.Realm, state: *AgentThreadState) void {
+    const backstop_ms = agentMonoMs() + 30000;
+    while (true) {
+        cynic.runtime.lantern.drainMicrotasks(realm.allocator, realm) catch {};
+        const now = agentMonoMs();
+        var fired = false;
+        var i: usize = 0;
+        while (i < realm.pending_async_waits.items.len) {
+            if (now >= realm.pending_async_waits.items[i].deadline_ms) {
+                const w = realm.pending_async_waits.orderedRemove(i);
+                const resolve_fn = cynic.runtime.heap.valueAsFunction(w.resolve) orelse continue;
+                // Root the result string across the resolve call (it may GC).
+                const scope = realm.heap.openScope() catch break;
+                defer scope.close();
+                const str = realm.heap.allocateString("timed-out") catch continue;
+                const arg = AgentVal.fromString(str);
+                scope.push(arg) catch {};
+                _ = cynic.runtime.lantern.callJSFunction(realm.allocator, realm, resolve_fn, AgentVal.undefined_, &.{arg}) catch {};
+                fired = true;
+            } else {
+                i += 1;
+            }
+        }
+        if (fired) continue; // re-drain so the resolution propagates
+        if (realm.microtask_queue.items.len == 0 and realm.pending_async_waits.items.len == 0) break;
+        if (agentMonoMs() >= backstop_ms) break;
+        if (state.group.should_exit.load(.acquire) or pool_shutdown.load(.acquire)) break;
+        agentNapNs(1 * std.time.ns_per_ms);
+    }
+}
+
+/// A pool worker: build one persistent realm (freeing allocator), then
+/// loop pulling tasks, running each on it, and resetting between tasks.
+fn poolWorkerMain(slot: *PoolWorker) void {
+    var realm = cynic.runtime.Realm.init(std.heap.c_allocator);
+    defer realm.deinit();
+    // Match the scored posture so the agent's SAB / Atomics / eval work.
+    realm.hardened = false;
+    realm.allow_eval = true;
+    realm.installBuiltins() catch return;
+    // `install262` (no `current_agent` here) records its `$262.agent`
+    // group as this thread's `reap_group`; the worker never reaps, so
+    // capture + clear it and free it at shutdown.
+    reap_group = null;
+    install262(&realm) catch return;
+    const own_group = reap_group;
+    reap_group = null;
+    defer if (own_group) |g| reapAgents(g);
+
+    var snapshot = snapshotGlobals(&realm, realm.allocator);
+    defer {
+        freeSnapshotKeys(&snapshot, realm.allocator);
+        snapshot.deinit(realm.allocator);
+    }
+    var scratch: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer scratch.deinit(realm.allocator);
+    // Sources of tasks run on this realm — the chunks borrow them and
+    // outlive the tasks, so the worker owns them until shutdown.
+    var owned_srcs: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (owned_srcs.items) |s| std.heap.page_allocator.free(s);
+        owned_srcs.deinit(realm.allocator);
+    }
+
+    while (!pool_shutdown.load(.acquire)) {
+        const state = slot.task.load(.acquire) orelse {
+            agentNapNs(100 * std.time.ns_per_us);
+            continue;
+        };
+        // Take ownership of the source for this realm's lifetime.
+        owned_srcs.append(realm.allocator, state.src) catch {};
+        current_agent = state;
+        runAgentTask(&realm, state);
+        resetRealm(&realm, &snapshot, &scratch);
+        current_agent = null;
+        // Signal completion (so `reapAgents` can free the task), THEN
+        // release the slot for reuse. After `done` the task may be freed,
+        // so it must not be touched again.
+        state.done.store(true, .release);
+        slot.task.store(null, .release);
+    }
+}
+
+/// The private one-shot fallback when the pool is saturated: a fresh
+/// realm runs exactly one task, then tears down. Rare under realistic
+/// concurrency, so its create/destroy cost doesn't matter.
+fn agentMainPrivate(state: *AgentThreadState) void {
+    var realm = cynic.runtime.Realm.init(std.heap.c_allocator);
+    realm.hardened = false;
+    realm.allow_eval = true;
+    if (realm.installBuiltins()) |_| {} else |_| {
+        realm.deinit();
+        std.heap.page_allocator.free(state.src);
+        state.done.store(true, .release);
+        return;
+    }
+    reap_group = null;
+    if (install262(&realm)) |_| {} else |_| {
+        realm.deinit();
+        std.heap.page_allocator.free(state.src);
+        state.done.store(true, .release);
+        return;
+    }
+    const own_group = reap_group;
+    reap_group = null;
+    current_agent = state;
+    runAgentTask(&realm, state);
+    current_agent = null;
+    if (own_group) |g| reapAgents(g);
+    // The realm (and its chunks borrowing `state.src`) is gone — now the
+    // source can be freed.
+    realm.deinit();
+    std.heap.page_allocator.free(state.src);
+    state.done.store(true, .release);
+}
+
+fn agentStart(realm: *cynic.runtime.Realm, this_value: AgentVal, args: []const AgentVal) cynic.runtime.function.NativeError!AgentVal {
+    _ = realm;
+    const group = agentGroupOf(this_value) orelse return AgentVal.undefined_;
+    if (args.len == 0 or !args[0].isString()) return AgentVal.undefined_;
+    const s: *cynic.runtime.JSString = @ptrCast(@alignCast(args[0].asString()));
+    const src_copy = std.heap.page_allocator.dupe(u8, s.flatBytes()) catch return error.OutOfMemory;
+    const state = std.heap.page_allocator.create(AgentThreadState) catch {
+        std.heap.page_allocator.free(src_copy);
+        return error.OutOfMemory;
+    };
+    state.* = .{ .group = group, .src = src_copy };
+
+    // Register the task with the fixture's group (under the lock) so
+    // `reapAgents` waits on it, BEFORE dispatching it to run.
+    {
+        agentSpinLock(&group.reg_lock);
+        defer agentSpinUnlock(&group.reg_lock);
+        if (group.count >= max_agents) {
+            std.heap.page_allocator.free(src_copy);
+            std.heap.page_allocator.destroy(state);
+            return AgentVal.undefined_;
+        }
+        group.states[group.count] = state;
+        group.count += 1;
+    }
+
+    // Dispatch to a persistent pool worker (the common, RSS-bounded
+    // path). If the pool is momentarily saturated, fall back to a
+    // private one-shot thread.
+    ensurePoolStarted();
+    if (tryDispatchToPool(state)) return AgentVal.undefined_;
+
+    const t = std.Thread.spawn(.{ .stack_size = agent_stack }, agentMainPrivate, .{state}) catch {
+        // No worker free and no thread — the agent can't run. Free its
+        // source and mark it done so `reapAgents` doesn't wait forever
+        // (the fixture's own watchdog handles the never-incrementing
+        // agent). The task struct itself is freed by `reapAgents`.
+        std.heap.page_allocator.free(src_copy);
+        state.done.store(true, .release);
+        return AgentVal.undefined_;
+    };
+    state.thread = t;
+    return AgentVal.undefined_;
+}
+
+fn agentBroadcast(realm: *cynic.runtime.Realm, this_value: AgentVal, args: []const AgentVal) cynic.runtime.function.NativeError!AgentVal {
+    _ = realm;
+    const group = agentGroupOf(this_value) orelse return AgentVal.undefined_;
+    if (args.len == 0) return AgentVal.undefined_;
+    const sab = cynic.runtime.heap.valueAsPlainObject(args[0]) orelse return AgentVal.undefined_;
+    const block = sab.getSharedBlock() orelse return AgentVal.undefined_;
+    agentSpinLock(&group.reg_lock);
+    defer agentSpinUnlock(&group.reg_lock);
+    for (group.states[0..group.count]) |maybe| {
+        if (maybe) |st| st.bcast.store(block, .release);
+    }
+    return AgentVal.undefined_;
+}
+
+fn agentGetReport(realm: *cynic.runtime.Realm, this_value: AgentVal, args: []const AgentVal) cynic.runtime.function.NativeError!AgentVal {
+    _ = args;
+    const group = agentGroupOf(this_value) orelse return AgentVal.undefined_;
+    agentSpinLock(&group.reports_lock);
+    var msg: ?[]u8 = null;
+    if (group.reports.items.len > 0) msg = group.reports.orderedRemove(0);
+    agentSpinUnlock(&group.reports_lock);
+    // No report yet → null (atomicsHelper's getReport wrapper loops on
+    // `== null` with a sleep). `undefined == null` is true in JS, so
+    // undefined serves.
+    const m = msg orelse return AgentVal.undefined_;
+    defer std.heap.page_allocator.free(m);
+    const js = realm.heap.allocateString(m) catch return error.OutOfMemory;
+    return AgentVal.fromString(js);
+}
+
+fn agentReport(realm: *cynic.runtime.Realm, this_value: AgentVal, args: []const AgentVal) cynic.runtime.function.NativeError!AgentVal {
+    _ = realm;
+    _ = this_value;
+    const st = current_agent orelse return AgentVal.undefined_;
+    const v = if (args.len > 0) args[0] else AgentVal.undefined_;
+    // ToString the reported value (strings + numbers + BigInt cover the
+    // corpus; the bigint TypedArray wait/notify fixtures report e.g.
+    // `Atomics.store(i64a, 0, 42n)` → the BigInt 42n, ToString "42").
+    if (cynic.runtime.heap.valueAsBigInt(v)) |bi| {
+        const copy = cynic.runtime.bigint.toStringAlloc(std.heap.page_allocator, bi, 10) catch return error.OutOfMemory;
+        agentSpinLock(&st.group.reports_lock);
+        defer agentSpinUnlock(&st.group.reports_lock);
+        st.group.reports.append(std.heap.page_allocator, copy) catch std.heap.page_allocator.free(copy);
+        return AgentVal.undefined_;
+    }
+    var buf: [64]u8 = undefined;
+    const text: []const u8 = blk: {
+        if (v.isString()) {
+            const s: *cynic.runtime.JSString = @ptrCast(@alignCast(v.asString()));
+            break :blk s.flatBytes();
+        }
+        if (v.isInt32()) break :blk std.fmt.bufPrint(&buf, "{d}", .{v.asInt32()}) catch "0";
+        if (v.isDouble()) break :blk std.fmt.bufPrint(&buf, "{d}", .{v.asDouble()}) catch "0";
+        break :blk "undefined";
+    };
+    const copy = std.heap.page_allocator.dupe(u8, text) catch return error.OutOfMemory;
+    agentSpinLock(&st.group.reports_lock);
+    defer agentSpinUnlock(&st.group.reports_lock);
+    st.group.reports.append(std.heap.page_allocator, copy) catch {
+        std.heap.page_allocator.free(copy);
+    };
+    return AgentVal.undefined_;
+}
+
+fn agentReceiveBroadcast(realm: *cynic.runtime.Realm, this_value: AgentVal, args: []const AgentVal) cynic.runtime.function.NativeError!AgentVal {
+    _ = realm;
+    _ = this_value;
+    if (current_agent) |st| {
+        if (args.len > 0) st.callback = args[0];
+    }
+    return AgentVal.undefined_;
+}
+
+fn agentSleep(realm: *cynic.runtime.Realm, this_value: AgentVal, args: []const AgentVal) cynic.runtime.function.NativeError!AgentVal {
+    _ = realm;
+    _ = this_value;
+    const ms: f64 = if (args.len > 0 and args[0].isInt32())
+        @floatFromInt(args[0].asInt32())
+    else if (args.len > 0 and args[0].isDouble())
+        args[0].asDouble()
+    else
+        0;
+    if (ms <= 0) return AgentVal.undefined_;
+    // Actually sleep (yielding the CPU) — `tryYield` / `trySleep` rely
+    // on this to give other agents real time to reach their wait.
+    agentNapNs(@intFromFloat(ms * @as(f64, std.time.ns_per_ms)));
+    return AgentVal.undefined_;
+}
+
+fn agentMonotonicNow(realm: *cynic.runtime.Realm, this_value: AgentVal, args: []const AgentVal) cynic.runtime.function.NativeError!AgentVal {
+    _ = realm;
+    _ = this_value;
+    _ = args;
+    return AgentVal.fromDouble(agentMonoMs());
+}
+
+fn agentLeaving(realm: *cynic.runtime.Realm, this_value: AgentVal, args: []const AgentVal) cynic.runtime.function.NativeError!AgentVal {
+    _ = realm;
+    _ = this_value;
+    _ = args;
+    return AgentVal.undefined_;
+}
+
+/// Build `$262.agent` and store its per-realm `AgentGroup` (so agents
+/// from one fixture never cross into another's reports when the
+/// harness runs fixtures on multiple worker threads).
+fn installAgent(realm: *cynic.runtime.Realm, parent: *cynic.runtime.JSObject) !void {
+    const heap = realm.heap;
+    const agent = try heap.allocateObject();
+    agent.prototype = realm.intrinsics.object_prototype;
+    const group = try std.heap.page_allocator.create(AgentGroup);
+    group.* = .{};
+    // On the runner thread (no `current_agent`) this is the fixture's
+    // top-level group — record it so the runner reaps its agents at
+    // teardown. A spawned agent installing its own `$262.agent` must
+    // NOT clobber that pointer.
+    if (current_agent == null) reap_group = group;
+    try agent.setHostData(realm.allocator, @ptrCast(group));
+    const defs = .{
+        .{ "start", agentStart, 1 },
+        .{ "broadcast", agentBroadcast, 1 },
+        .{ "getReport", agentGetReport, 0 },
+        .{ "report", agentReport, 1 },
+        .{ "receiveBroadcast", agentReceiveBroadcast, 1 },
+        .{ "sleep", agentSleep, 1 },
+        .{ "monotonicNow", agentMonotonicNow, 0 },
+        .{ "leaving", agentLeaving, 0 },
+    };
+    inline for (defs) |d| {
+        const f = try heap.allocateFunctionNative(realm, d[1], d[2], d[0]);
+        try agent.set(realm.allocator, d[0], cynic.runtime.heap.taggedFunction(f));
+    }
+    try parent.set(realm.allocator, "agent", cynic.runtime.heap.taggedObject(agent));
+}
+
 fn install262(realm: *cynic.runtime.Realm) !void {
     const heap = realm.heap;
     const obj = try heap.allocateObject();
@@ -391,11 +987,101 @@ fn install262(realm: *cynic.runtime.Realm) !void {
     const cr_fn = try heap.allocateFunctionNative(realm, test262CreateRealm, 0, "createRealm");
     try obj.set(realm.allocator, "createRealm", cynic.runtime.heap.taggedFunction(cr_fn));
 
+    // §INTERPRETING.md `$262.agent` — multi-agent (real-thread) support.
+    try installAgent(realm, obj);
+
     // Cynic doesn't have `IsHTMLDDA` — that feature is on our
     // skip list. We install nothing for it; tests that need it
     // skip out via `features:`.
 
     try realm.globals.put(realm.allocator, "$262", cynic.runtime.heap.taggedObject(obj));
+}
+
+/// Run `src` as a Script and return its integer completion value, or
+/// `null` if it threw or didn't complete with an int.
+fn evalAgentInt(realm: *cynic.runtime.Realm, src: []const u8) ?i32 {
+    const outcome = cynic.runtime.lantern.evaluateScript(realm.allocator, realm, src) catch return null;
+    return switch (outcome) {
+        .value, .yielded => |v| if (v.isInt32()) v.asInt32() else if (v.isDouble()) @intFromFloat(v.asDouble()) else null,
+        .thrown => null,
+    };
+}
+
+test "agent realm reset: a reused realm isolates one agent from the next" {
+    // The pool runs many agents on ONE persistent realm, resetting it
+    // between them. This proves the reset both (a) scrubs the prior
+    // agent's globals so the next can't observe them and (b) releases
+    // the shared blocks the prior agent's SharedArrayBuffers pinned —
+    // `live_blocks` must return to baseline. Done here, on the bare
+    // `resetRealm`/`snapshotGlobals` primitives, before any concurrency.
+    const sdb = cynic.runtime.shared_data_block;
+    const testing = std.testing;
+
+    // Defensive: a prior test on this thread may have left these set.
+    current_agent = null;
+    reap_group = null;
+
+    var realm = cynic.runtime.Realm.init(std.heap.c_allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    realm.allow_eval = true;
+    try realm.installBuiltins();
+    try install262(&realm);
+    // `install262` recorded its `$262.agent` group as this thread's
+    // `reap_group`; free it at the end so the test leaks nothing.
+    const own_group = reap_group;
+    reap_group = null;
+    defer if (own_group) |g| reapAgents(g);
+
+    var snapshot = snapshotGlobals(&realm, realm.allocator);
+    defer {
+        freeSnapshotKeys(&snapshot, realm.allocator);
+        snapshot.deinit(realm.allocator);
+    }
+    var scratch: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer scratch.deinit(realm.allocator);
+
+    const baseline = sdb.live_blocks.load(.monotonic);
+
+    // Agent A: leaves top-level globals AND a SharedArrayBuffer alive.
+    const a_result = evalAgentInt(&realm,
+        \\var leakedVar = 123;
+        \\globalThis.leakedProp = "x";
+        \\var sabA = new SharedArrayBuffer(16);
+        \\var taA = new Int32Array(sabA);
+        \\Atomics.store(taA, 0, 99);
+        \\Atomics.load(taA, 0);
+    );
+    try testing.expectEqual(@as(?i32, 99), a_result);
+    // Agent A's SharedArrayBuffer created exactly one new shared block.
+    try testing.expectEqual(baseline + 1, sdb.live_blocks.load(.monotonic));
+
+    resetRealm(&realm, &snapshot, &scratch);
+
+    // The reset released Agent A's block — back to baseline.
+    try testing.expectEqual(baseline, sdb.live_blocks.load(.monotonic));
+
+    // Agent B sees a clean global env (none of A's values survive) and
+    // the realm still works (it can build + use its own SAB).
+    const b_result = evalAgentInt(&realm,
+        \\var clean =
+        \\  (typeof leakedVar === "undefined") &&
+        \\  (typeof leakedProp === "undefined") &&
+        \\  (typeof sabA === "undefined") &&
+        \\  (typeof taA === "undefined");
+        \\var sabB = new SharedArrayBuffer(8);
+        \\var taB = new Int32Array(sabB);
+        \\Atomics.store(taB, 0, 7);
+        \\(clean && Atomics.load(taB, 0) === 7) ? 1 : 0;
+    );
+    try testing.expectEqual(@as(?i32, 1), b_result);
+    try testing.expectEqual(baseline + 1, sdb.live_blocks.load(.monotonic));
+
+    // Reset is repeatable — Agent B's block is released too.
+    resetRealm(&realm, &snapshot, &scratch);
+    try testing.expectEqual(baseline, sdb.live_blocks.load(.monotonic));
+
+    current_agent = null;
 }
 
 test {
@@ -935,6 +1621,11 @@ pub fn main(init: std.process.Init) !void {
 
     var opts = try parseArgs(gpa, init.minimal.args);
     defer freeArgs(gpa, &opts);
+
+    // Tear down the persistent agent-realm pool (if any agent fixture
+    // started it) on normal completion. Every fixture reaps its own
+    // agents, so by here no worker is mid-task.
+    defer shutdownPool();
 
     const cwd = std.Io.Dir.cwd();
     var corpus = cwd.openDir(io, opts.corpus, .{ .iterate = true }) catch |err| {
@@ -1970,7 +2661,7 @@ fn classifyAndRun(
         return fail_reject_or_ch;
     }
 
-    var realm = cynic.runtime.Realm.initWithBytesAllocator(arena, bytes_allocator);
+    var realm = cynic.runtime.Realm.initWithBytesAllocator(std.heap.c_allocator, bytes_allocator);
     defer realm.deinit();
     // Wire the watchdog: on a worker thread, a wedged fixture can be
     // aborted from `monitorLoop` via this worker's host-interrupt
@@ -2044,7 +2735,15 @@ fn classifyAndRun(
     // `detachArrayBuffer`, etc. Tests gated on hooks Cynic
     // doesn't implement (`createRealm`, `agent.*`, `IsHTMLDDA`)
     // skip via the feature filter; the rest get a working shim.
+    reap_group = null;
     install262(&realm) catch return fail_reject_or_ch;
+    // Join + free this fixture's agent threads before the realm tears
+    // down (LIFO defer: runs before `realm.deinit` above), so their
+    // page-allocated Realms don't accumulate across the corpus.
+    defer if (reap_group) |g| {
+        reapAgents(g);
+        reap_group = null;
+    };
 
     // Install the module loader for both `is_module` tests AND
     // script tests that use dynamic `import()` (the `dynamic-import`
@@ -2078,11 +2777,11 @@ fn classifyAndRun(
     // so the loop below short-circuits.
     const eff_harness: ?harness_mod.HarnessSources = if (raw) null else harness_pair;
     if (eff_harness) |hp| {
-        const r1 = cynic.runtime.evaluateScript(arena, &realm, hp.sta) catch {
+        const r1 = cynic.runtime.evaluateScript(realm.allocator, &realm, hp.sta) catch {
             return fail_reject_or_ch;
         };
         if (r1 == .thrown) return fail_reject_or_ch;
-        const r2 = cynic.runtime.evaluateScript(arena, &realm, hp.assert_js) catch {
+        const r2 = cynic.runtime.evaluateScript(realm.allocator, &realm, hp.assert_js) catch {
             return fail_reject_or_ch;
         };
         if (r2 == .thrown) return fail_reject_or_ch;
@@ -2098,7 +2797,7 @@ fn classifyAndRun(
             const inc_source = hp.lookupInclude(inc_name) orelse {
                 return .{ .kind = .skip, .skip_reason = .has_includes };
             };
-            const r_inc = cynic.runtime.evaluateScript(arena, &realm, inc_source) catch {
+            const r_inc = cynic.runtime.evaluateScript(realm.allocator, &realm, inc_source) catch {
                 return fail_reject_or_ch;
             };
             if (r_inc == .thrown) return fail_reject_or_ch;
@@ -2144,7 +2843,7 @@ fn classifyAndRun(
             const saved_current_mod = realm.current_module;
             realm.current_module = entry_mod;
             defer realm.current_module = saved_current_mod;
-            const mod_outcome = cynic.runtime.run(arena, &realm, chunk_ptr) catch {
+            const mod_outcome = cynic.runtime.run(realm.allocator, &realm, chunk_ptr) catch {
                 entry_mod.state = .errored;
                 if (expected_negative) |_| return .{ .kind = .pass_negative };
                 return .{ .kind = .fail_false_reject };
@@ -2164,7 +2863,7 @@ fn classifyAndRun(
         // Plain script — go through evaluateScript so chunk
         // ownership lands on the realm and any function declared
         // here outlives this call.
-        break :blk cynic.runtime.evaluateScript(arena, &realm, test_source) catch {
+        break :blk cynic.runtime.evaluateScript(realm.allocator, &realm, test_source) catch {
             if (expected_negative) |_| return .{ .kind = .pass_negative };
             return .{ .kind = .fail_false_reject };
         };
@@ -2194,7 +2893,7 @@ fn classifyAndRun(
     // $DONE(e))`); standalone microtask throws are discarded
     // (real hosts dispatch HostPromiseRejectionTracker, which
     // Cynic doesn't model).
-    cynic.runtime.lantern.drainMicrotasks(arena, &realm) catch {
+    cynic.runtime.lantern.drainMicrotasks(realm.allocator, &realm) catch {
         test_threw = true;
     };
 

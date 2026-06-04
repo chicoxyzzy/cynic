@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 90.25 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 90.47 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **44950 passing** — Cynic produced the spec-expected result.
-- **4858 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only miss counts as a plain fail, same as an engine bug. Honest, not flattering. (This posture has SES off and eval on, so neither is a failure source here.)
+- **45062 passing** — Cynic produced the spec-expected result.
+- **4746 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 44950 | 4858 | 49808 | 90.25 % |
+| **`--unhardened --allow=eval`** | 45062 | 4746 | 49808 | 90.47 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -32,9 +32,8 @@ engine's spec coverage with the policy knobs out of the way.
 
 - **`passing`** — Cynic produced the spec-expected result.
 - **`failing`** — every other scored fixture. An Annex B,
-  no-Intl, or strict-only miss counts as a plain fail, same
-  as an engine bug. (Under this posture SES is off and eval
-  is on, so neither produces a failure.)
+  no-Intl, strict-only, SES, or eval miss counts as a plain
+  fail, same as an engine bug.
 - **`total`** — `passing + failing`. Excludes the upstream
   `harness/` / `staging/` / `annexB/` paths, Stage ≤ 3
   proposals, and structurally-unrunnable fixtures.
@@ -78,8 +77,7 @@ list.
 | `intl402/Locale` | 0 | 152 | 0 % |
 | `intl402/NumberFormat` | 0 | 253 | 0 % |
 | `language/eval-code` | 158 | 189 | 46 % |
-| `built-ins/Atomics` | 268 | 114 | 70 % |
-| `language/statements` | 8902 | 421 | 95 % |
+| `language/statements` | 8914 | 409 | 96 % |
 | `language/expressions` | 10227 | 455 | 96 % |
 
 **10–99 fails**
@@ -101,6 +99,7 @@ list.
 | `language/arguments-object` | 225 | 38 | 86 % |
 | `language/types` | 102 | 11 | 90 % |
 | `built-ins/Proxy` | 298 | 13 | 96 % |
+| `built-ins/Atomics` | 367 | 15 | 96 % |
 | `built-ins/Object` | 3329 | 82 | 98 % |
 | `built-ins/TypedArrayConstructors` | 719 | 17 | 98 % |
 | `built-ins/Array` | 3054 | 27 | 99 % |
@@ -127,7 +126,6 @@ list.
 | `language/comments` | 51 | 1 | 98 % |
 | `language/literals` | 527 | 7 | 99 % |
 | `language/module-code` | 589 | 6 | 99 % |
-| `built-ins/Reflect` | 152 | 1 | 99 % |
 | `built-ins/JSON` | 164 | 1 | 99 % |
 | `built-ins/TypedArray` | 1430 | 8 | 99 % |
 | `built-ins/String` | 1217 | 6 | 100 % |
@@ -161,6 +159,7 @@ list.
 | `built-ins/Math` | 327 | 0 | 100 % |
 | `built-ins/NativeErrors` | 94 | 0 | 100 % |
 | `built-ins/Number` | 340 | 0 | 100 % |
+| `built-ins/Reflect` | 153 | 0 | 100 % |
 | `built-ins/RegExpStringIteratorPrototype` | 17 | 0 | 100 % |
 | `built-ins/SetIteratorPrototype` | 11 | 0 | 100 % |
 | `built-ins/SharedArrayBuffer` | 104 | 0 | 100 % |
@@ -215,15 +214,23 @@ top-line score.
 
 ## History
 
+### 2026-06-04 — cynic `59e9b17`, test262 `d0c1b4555b`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 45062 | 4746 | 49808 | 90.47 % | +112 | 35.4 s |
+
+Biggest movers:
+
+- `built-ins/Atomics` +99
+- `language/statements` +12
+- `built-ins/Reflect` +1
+
 ### 2026-06-03 — cynic `51dc5d2`, test262 `d0c1b455`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
 | 44950 | 4858 | 49808 | 90.25 % | +528 | 25.1 s |
-
-Biggest movers:
-
-- `built-ins/Atomics` +55
 
 ### 2026-06-02 — cynic `bd0337e`, test262 `d0c1b455`
 
