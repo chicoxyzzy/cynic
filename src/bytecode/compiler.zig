@@ -6409,6 +6409,27 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, s.span);
         try self.builder.emitU8(r_disc);
 
+        // §13.12.9 CaseBlockEvaluation step 1 — "Let V be undefined."
+        // The switch accumulates its completion value starting from
+        // undefined, UpdateEmpty'd by each clause's StatementList. Seed
+        // the shared completion register with `undefined` so a case
+        // exited by an empty-abrupt break / continue (before any
+        // value-producing clause statement) yields `undefined`, not the
+        // value left by the statement before the `switch`. A
+        // value-producing clause statement overwrites it via `star`;
+        // a bare break / continue then carries the seeded `undefined`
+        // (or the value accumulated earlier in the same clause, e.g.
+        // `{ 3; break; }` → 3). Only matters when a completion register
+        // is live (top-level script / eval statement list); null inside
+        // function bodies. Emitted after the discriminant eval — that
+        // runs in the outer scope and leaves its value in a temp, not
+        // the completion register.
+        if (self.completion_reg) |r| {
+            try self.builder.emitOp(.lda_undefined, s.span);
+            try self.builder.emitOp(.star, s.span);
+            try self.builder.emitU8(r);
+        }
+
         // §14.12.3 — the CaseBlock gets a fresh DeclarativeEnvironment
         // ONLY when there are lexical declarations inside it. Without
         // any `let` / `const` / `class` in any case body, the spec
@@ -10017,6 +10038,29 @@ pub const Compiler = struct {
     }
 
     fn compileIf(self: *Compiler, s: ast.statement.IfStmt) CompileError!void {
+        // §14.6.2 IfStatement — the completion is UpdateEmpty(<taken
+        // branch>, undefined). Seed the shared completion register with
+        // `undefined` BEFORE evaluating the test so it covers every arm:
+        //   • no else, false test → control skips the consequent
+        //     entirely, completion is undefined;
+        //   • an empty taken branch (`if (true) { } else { 5 }`) →
+        //     undefined;
+        //   • a taken branch exited by an empty-abrupt break / continue
+        //     → undefined.
+        // A value-producing branch statement overwrites it via `star`.
+        // Emitted before the test (not between test and `jmp_if_false`)
+        // because `jmp_if_false` reads the accumulator the test left —
+        // `lda_undefined` would clobber it. The test expression never
+        // writes the completion register (only statement-level value
+        // production does), so the seed survives the test eval. Only
+        // matters when a completion register is live (top-level script /
+        // eval statement list); null inside function bodies.
+        if (self.completion_reg) |r| {
+            try self.builder.emitOp(.lda_undefined, s.span);
+            try self.builder.emitOp(.star, s.span);
+            try self.builder.emitU8(r);
+        }
+
         try self.compileExpression(&s.test_);
         try self.builder.emitOp(.jmp_if_false, s.span);
         const else_patch = self.builder.here();

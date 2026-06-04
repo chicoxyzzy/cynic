@@ -438,6 +438,37 @@ test "eval completion: trailing declaration leaves prior value" {
     try expectIntAllow("eval('5; var x = 99;')", 5);
 }
 
+// §14.6.2 IfStatement step 3a returns `undefined` (a normal completion),
+// NOT empty — so a false no-else `if` (and an empty taken branch)
+// OVERWRITES a prior statement's value rather than UpdateEmpty-keeping
+// it. The compiler seeds the completion register with `undefined`
+// before the test to model this; these guard that seed (they would
+// wrongly yield the prior value without it).
+
+test "eval completion: untaken if resets a prior value (§14.6.2 step 3a)" {
+    try expectUndefinedAllow("eval('1; if (false) ;')");
+}
+
+test "eval completion: empty taken branch resets a prior value" {
+    try expectUndefinedAllow("eval('1; if (true) {}')");
+}
+
+test "eval completion: if-else with an empty taken branch is undefined" {
+    try expectUndefinedAllow("eval('1; if (true) {} else { 5 }')");
+}
+
+// §13.12.9 CaseBlockEvaluation step 1 — V starts `undefined`; a `break`
+// before any value-producing clause statement keeps it undefined,
+// overwriting the prior statement's value. A value before the break
+// yields that value.
+test "eval completion: switch case that breaks before a value is undefined" {
+    try expectUndefinedAllow("eval('1; switch (0) { case 0: break; }')");
+}
+
+test "eval completion: switch clause value before break" {
+    try expectIntAllow("eval('switch (0) { case 0: 42; break; }')", 42);
+}
+
 // ── §19.2.1.1 / §19.2.1.3 indirect-eval var environment ─────────────
 //
 // Indirect eval (`(0, eval)(src)`) is global code: a non-strict body's
