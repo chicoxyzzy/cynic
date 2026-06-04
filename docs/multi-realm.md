@@ -866,6 +866,45 @@ behaviour when something looks off. Triggers during Phase 3:
   subclass differently from `Error` itself, audit
   §20.5.5–§20.5.8 first.
 
+### Known gap — cross-realm free-global resolution (discovered 2026-06-04)
+
+A function created in realm A but **invoked while a different realm
+is running** fails to resolve its free *global* references against
+A's global environment. Surfaced after the `cf85935` cross-realm
+cluster (indirect-eval realm + §10.1.14 proto sites) cleared the
+prototype half of two fixtures, leaving them failing at body
+execution:
+
+- `built-ins/GeneratorFunction/proto-from-ctor-realm-prototype.js`
+  → `ReferenceError: calls`
+- `built-ins/AsyncGeneratorFunction/proto-from-ctor-realm-prototype.js`
+  → counter never increments (`SameValue(0, 1)`)
+
+Minimal shape (needs `$262.createRealm`):
+
+```js
+var a = $262.createRealm().global; a.calls = 0;
+var aGF = a.eval("(function*(){})").constructor;     // GeneratorFunction of realm A
+var nt = new ($262.createRealm().global).Function(); nt.prototype = null;
+var fn = Reflect.construct(aGF, ["calls += 1;"], nt); // body belongs to realm A
+fn().next();                                          // expect a.calls === 1
+// observed: ReferenceError: calls — the body resolves globals against
+// the active (test) realm, not its constructor realm A.
+```
+
+Candidate cause (unconfirmed): `createDynamicFunction` builds the
+function via `evaluateEval(ctor_realm, …)`, which should capture
+`ctor_realm`'s global env — but either that capture binds the wrong
+realm's `[[GlobalEnv]]`, or the interpreter resolves a free global
+ref against the *running* realm at call time instead of the
+function's captured global environment. The two symptoms differ
+(sync-gen throws; async-gen runs but mis-counts), so the async path
+may carry an extra settlement nuance. This is a Phase-3-adjacent
+gap (cross-realm function realm tracking) and wants a focused
+multi-realm session, not a drive-by — the fix likely touches free-
+global resolution for *every* cross-realm-invoked function, with a
+correspondingly broad blast radius.
+
 ## Phase 4 — Compartment constructor (the SES API)
 
 **Goal.** A user-visible `Compartment` constructor that wraps
