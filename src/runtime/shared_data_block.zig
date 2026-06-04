@@ -13,6 +13,7 @@
 //! `docs/multi-agent-atomics.md`).
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Process-global count of currently-live shared data blocks (created
 /// minus freed). A diagnostic hook: a host that creates and destroys
@@ -26,6 +27,9 @@ pub var live_blocks: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
 /// deadlines (the wait records `now + timeout`; whatever host drives the
 /// timeout polls against the same scale). Uses libc's monotonic clock.
 pub fn monoNowMs() f64 {
+    // The monotonic clock needs libc; a freestanding (wasm) build has
+    // none, so report 0 — single-agent wasm has no real timer anyway.
+    if (builtin.os.tag == .freestanding) return 0;
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
     return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) / 1_000_000.0;
