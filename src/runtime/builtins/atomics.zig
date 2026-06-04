@@ -631,15 +631,24 @@ fn atomicsWaitAsync(realm: *Realm, _: Value, args: []const Value) NativeError!Va
         const cap = try promise_mod.newPromiseCapability(realm, promise_ctor);
         try result.set(realm.allocator, "async", Value.true_);
         try result.set(realm.allocator, "value", cap.promise);
-        // §25.4.1.4 — record the waiter so the host can fire its timeout.
-        // An untimed wait (`+∞`) gets a `+∞` deadline: only a cross-agent
-        // notify could settle it (that path is not yet wired). The
-        // capability's resolve function is rooted via `markRoots`.
+        // §25.4.1.4 AddWaiter — park on the block's process-global wait
+        // list so a cross-agent `notify` finds, counts, and wakes us. The
+        // waiting agent settles the Promise on its OWN thread — "ok" if a
+        // notify raised the node's `woken`, else "timed-out" at the
+        // deadline (`+∞` for an untimed wait, settled only by notify).
+        // The capability's resolve function is rooted via `markRoots`.
+        const block = tv.viewed.getSharedBlock().?;
+        const node = try block.addAsyncWaiter(byte_pos);
         const deadline: f64 = if (std.math.isInf(timeout_ms)) timeout_ms else nowMonoMs() + timeout_ms;
         realm.pending_async_waits.append(realm.allocator, .{
             .resolve = heap_mod.taggedFunction(cap.resolve),
             .deadline_ms = deadline,
-        }) catch return error.OutOfMemory;
+            .node = node,
+            .block = block,
+        }) catch {
+            _ = block.settleAndFreeAsyncWaiter(node);
+            return error.OutOfMemory;
+        };
     }
     return heap_mod.taggedObject(result);
 }

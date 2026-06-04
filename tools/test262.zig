@@ -588,9 +588,9 @@ fn resetRealm(
     realm.globals.decl_consts.clearRetainingCapacity();
     realm.globals.var_names.clearRetainingCapacity();
     // Drop any waitAsync the prior agent left pending (e.g. an untimed
-    // wait that never fired) so its capability doesn't pin memory or
-    // resolve into the next agent.
-    realm.pending_async_waits.clearRetainingCapacity();
+    // wait that never fired): unlink + free each block node so none
+    // dangles on a still-shared block, then empty the list.
+    realm.clearPendingAsyncWaits();
 
     // Reclaim the task's objects — releasing the refcounted shared-block
     // references its SharedArrayBuffers held, so a reused realm never
@@ -669,25 +669,12 @@ fn driveAsyncAgent(realm: *cynic.runtime.Realm, state: *AgentThreadState) void {
     const backstop_ms = agentMonoMs() + 30000;
     while (true) {
         cynic.runtime.lantern.drainMicrotasks(realm.allocator, realm) catch {};
-        const now = agentMonoMs();
-        var fired = false;
-        var i: usize = 0;
-        while (i < realm.pending_async_waits.items.len) {
-            if (now >= realm.pending_async_waits.items[i].deadline_ms) {
-                const w = realm.pending_async_waits.orderedRemove(i);
-                const resolve_fn = cynic.runtime.heap.valueAsFunction(w.resolve) orelse continue;
-                // Root the result string across the resolve call (it may GC).
-                const scope = realm.heap.openScope() catch break;
-                defer scope.close();
-                const str = realm.heap.allocateString("timed-out") catch continue;
-                const arg = AgentVal.fromString(str);
-                scope.push(arg) catch {};
-                _ = cynic.runtime.lantern.callJSFunction(realm.allocator, realm, resolve_fn, AgentVal.undefined_, &.{arg}) catch {};
-                fired = true;
-            } else {
-                i += 1;
-            }
-        }
+        // Settle this agent's waitAsync on a cross-agent notify or its
+        // deadline (the engine drain above handles the case where the
+        // agent's own microtasks keep the queue busy; this covers the
+        // common case where the agent suspended on the await and the
+        // queue is empty).
+        const fired = cynic.runtime.lantern.fireExpiredAsyncWaits(realm.allocator, realm) catch false;
         if (fired) continue; // re-drain so the resolution propagates
         if (realm.microtask_queue.items.len == 0 and realm.pending_async_waits.items.len == 0) break;
         if (agentMonoMs() >= backstop_ms) break;

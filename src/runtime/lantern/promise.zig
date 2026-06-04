@@ -23,6 +23,7 @@ const Environment = @import("../environment.zig").Environment;
 const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
+const shared_data_block = @import("../shared_data_block.zig");
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
 const module_mod = @import("../module.zig");
 
@@ -73,6 +74,38 @@ pub fn wrapInPromise(realm: *Realm, fulfilled: bool, value: Value) !Value {
 /// sites + at every external boundary (the CLI / test262
 /// runner). Microtasks queued during draining run before this
 /// call returns (FIFO), matching §9.4.
+/// §25.4.1.4 host-driven TriggerTimeout / wake: settle every pending
+/// async waiter whose deadline passed or that a cross-agent `notify`
+/// woke — resolve its Promise "ok" (woken) or "timed-out" and free the
+/// block node. Returns whether any fired so a drain loop re-runs to
+/// propagate the resolutions. A no-op (one length check) when nothing is
+/// pending. Driven from `drainMicrotasks` (so a main-agent poll loop's
+/// timeout fires) and from the test262 agent pool's idle loop.
+pub fn fireExpiredAsyncWaits(allocator: std.mem.Allocator, realm: *Realm) RunError!bool {
+    if (realm.pending_async_waits.items.len == 0) return false;
+    const now = shared_data_block.monoNowMs();
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    var fired = false;
+    var i: usize = 0;
+    while (i < realm.pending_async_waits.items.len) {
+        const entry = realm.pending_async_waits.items[i];
+        if (entry.node.woken.load(.acquire) or now >= entry.deadline_ms) {
+            _ = realm.pending_async_waits.orderedRemove(i);
+            const ok = entry.block.settleAndFreeAsyncWaiter(entry.node);
+            const resolve_fn = heap_mod.valueAsFunction(entry.resolve) orelse continue;
+            const str = realm.heap.allocateString(if (ok) "ok" else "timed-out") catch return error.OutOfMemory;
+            const arg = Value.fromString(str);
+            scope.push(arg) catch {};
+            _ = try callJSFunction(allocator, realm, resolve_fn, Value.undefined_, &.{arg});
+            fired = true;
+        } else {
+            i += 1;
+        }
+    }
+    return fired;
+}
+
 pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!void {
     // §9.10.4.2 ClearKeptObjects — the synchronous block that
     // queued whatever's about to drain just ended; release any
@@ -85,6 +118,11 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
     // SpiderMonkey.
     realm.clearKeptObjects();
     while (realm.microtask_queue.items.len > 0) {
+        // Host-drive any §25.4.1.4 waitAsync timeout/wake whose moment
+        // arrived during this drain (e.g. a main-agent `setTimeout` poll
+        // loop keeps the queue non-empty while real time advances toward
+        // the wait's deadline).
+        _ = fireExpiredAsyncWaits(allocator, realm) catch {};
         // §16.2.1.10 EvaluateImportCall — a deferred dynamic-import
         // job (`.module_import`) must not run while a synchronous
         // module-graph DFS is still in progress (`module_load_depth

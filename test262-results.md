@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 90.47 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 90.50 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **45062 passing** — Cynic produced the spec-expected result.
-- **4746 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **45075 passing** — Cynic produced the spec-expected result.
+- **4733 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 45062 | 4746 | 49808 | 90.47 % |
+| **`--unhardened --allow=eval`** | 45075 | 4733 | 49808 | 90.50 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -99,7 +99,6 @@ list.
 | `language/arguments-object` | 225 | 38 | 86 % |
 | `language/types` | 102 | 11 | 90 % |
 | `built-ins/Proxy` | 298 | 13 | 96 % |
-| `built-ins/Atomics` | 367 | 15 | 96 % |
 | `built-ins/Object` | 3329 | 82 | 98 % |
 | `built-ins/TypedArrayConstructors` | 719 | 17 | 98 % |
 | `built-ins/Array` | 3054 | 27 | 99 % |
@@ -128,6 +127,7 @@ list.
 | `language/module-code` | 589 | 6 | 99 % |
 | `built-ins/JSON` | 164 | 1 | 99 % |
 | `built-ins/TypedArray` | 1430 | 8 | 99 % |
+| `built-ins/Atomics` | 380 | 2 | 99 % |
 | `built-ins/String` | 1217 | 6 | 100 % |
 | `built-ins/Map` | 203 | 1 | 100 % |
 | `built-ins/Promise` | 637 | 3 | 100 % |
@@ -214,17 +214,15 @@ top-line score.
 
 ## History
 
-### 2026-06-04 — cynic `59e9b17`, test262 `d0c1b4555b`
+### 2026-06-04 — cynic `27426c4`, test262 `d0c1b455`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 45062 | 4746 | 49808 | 90.47 % | +112 | 35.4 s |
+| 45075 | 4733 | 49808 | 90.50 % | +125 | 50.1 s |
 
 Biggest movers:
 
-- `built-ins/Atomics` +99
-- `language/statements` +12
-- `built-ins/Reflect` +1
+- `built-ins/Atomics` +13
 
 ### 2026-06-03 — cynic `51dc5d2`, test262 `d0c1b455`
 
