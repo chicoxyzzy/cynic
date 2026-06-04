@@ -74,6 +74,11 @@ pub fn wrapGenerator(
     // inside the generator body translates the brand correctly.
     realm.heap.setGeneratorHomeObject(gen, home_object);
     realm.heap.setGeneratorHomeFunction(gen, home_function);
+    // §8.3 — capture the function's [[Realm]] so the body's free
+    // global references resolve through its own global environment
+    // even when resumed while another realm is running. Set before
+    // the eager prologue below (which resumes the generator).
+    if (callee) |c| gen.realm = c.getFunctionRealm();
     // Pre-load argument values into the generator's register
     // file so the function prologue's Ldar / sta_env sequence
     // sees them at indices 0..argc-1.
@@ -174,6 +179,10 @@ pub fn wrapAsyncGenerator(
     // inside the async-generator body translates the brand correctly.
     realm.heap.setGeneratorHomeObject(gen, home_object);
     realm.heap.setGeneratorHomeFunction(gen, home_function);
+    // §8.3 — capture the function's [[Realm]] so the body's free
+    // global references resolve through its own global environment
+    // even when resumed while another realm is running.
+    if (callee) |c| gen.realm = c.getFunctionRealm();
     var i: usize = 0;
     while (i < args.len and i < gen.registers.len) : (i += 1) {
         gen.registers[i] = args[i];
@@ -789,6 +798,10 @@ pub fn resumeAsyncGenBody(
                 .home_function = gen.home_function,
                 .argc = gen.argc,
                 .generator = gen,
+                // §8.3 — resolve the body's free globals through the
+                // generator function's own realm, not the realm that
+                // happens to be driving this resume (cross-realm case).
+                .running_realm = gen.realm,
                 .owns_registers = false,
             });
 

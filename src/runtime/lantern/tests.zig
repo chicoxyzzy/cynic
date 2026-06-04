@@ -7057,6 +7057,42 @@ test "later: cross-realm async generator instance derives its prototype from the
     try testing.expectEqual(child_agen_proto, agen.prototype.?);
 }
 
+test "later: cross-realm generator body resolves a free global against the function's realm (§8.3)" {
+    // A generator function created in the child realm, invoked while
+    // the parent realm is running, must resolve its body's free
+    // *global* references through the child's global environment
+    // (§8.3 — the function's [[Realm]]), not the resuming realm. The
+    // default parameter `a = probe` is evaluated eagerly in the
+    // prologue, so resolving against the wrong realm throws
+    // ReferenceError at call time. Mirrors
+    // built-ins/GeneratorFunction/proto-from-ctor-realm-prototype.js.
+    const call = @import("call.zig");
+    const heap_mod = @import("../heap.zig");
+    const intrinsics_mod = @import("../intrinsics.zig");
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try installBuiltinsAllFeatures(&parent);
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // A global that lives only on the child realm.
+    try child.globals.put(testing.allocator, "probe", Value.fromInt32(42));
+
+    // Generator function created in (and [[Realm]]-tagged with) the
+    // child; its prologue reads the child-only global `probe`.
+    const gfn_v = try intrinsics_mod.performIndirectEval(&child, "(function* (a = probe) { return a; })");
+    const gfn = heap_mod.valueAsFunction(gfn_v).?;
+    try testing.expectEqual(&child, gfn.realm.?);
+
+    // Invoke with the PARENT realm running: the prologue's `a = probe`
+    // must resolve against the child — no ReferenceError.
+    const res = try call.callJSFunction(testing.allocator, &parent, gfn, Value.undefined_, &.{});
+    try testing.expect(res == .value);
+}
+
 test "later: Array [[Construct]] derives result proto from newTarget's realm" {
     // §22.1.1 Array(...) + §10.1.14 — `Reflect.construct(Array, args,
     // C)` where `C` is a cross-realm function with a non-object

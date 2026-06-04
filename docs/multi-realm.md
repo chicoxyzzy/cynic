@@ -866,14 +866,14 @@ behaviour when something looks off. Triggers during Phase 3:
   subclass differently from `Error` itself, audit
   §20.5.5–§20.5.8 first.
 
-### Known gap — cross-realm free-global resolution (discovered 2026-06-04)
+### Resolved — cross-realm generator free-global resolution (fixed 2026-06-04)
 
-A function created in realm A but **invoked while a different realm
-is running** fails to resolve its free *global* references against
-A's global environment. Surfaced after the `cf85935` cross-realm
-cluster (indirect-eval realm + §10.1.14 proto sites) cleared the
-prototype half of two fixtures, leaving them failing at body
-execution:
+A generator (or async generator) function created in realm A but
+**resumed while a different realm is running** resolved its body's
+free *global* references against the running realm, not A's. Surfaced
+after the `cf85935` cross-realm cluster (indirect-eval realm + §10.1.14
+proto sites) cleared the prototype half of two fixtures, leaving them
+failing at body execution:
 
 - `built-ins/GeneratorFunction/proto-from-ctor-realm-prototype.js`
   → `ReferenceError: calls`
@@ -887,23 +887,19 @@ var a = $262.createRealm().global; a.calls = 0;
 var aGF = a.eval("(function*(){})").constructor;     // GeneratorFunction of realm A
 var nt = new ($262.createRealm().global).Function(); nt.prototype = null;
 var fn = Reflect.construct(aGF, ["calls += 1;"], nt); // body belongs to realm A
-fn().next();                                          // expect a.calls === 1
-// observed: ReferenceError: calls — the body resolves globals against
-// the active (test) realm, not its constructor realm A.
+fn().next();                                          // a.calls === 1
 ```
 
-Candidate cause (unconfirmed): `createDynamicFunction` builds the
-function via `evaluateEval(ctor_realm, …)`, which should capture
-`ctor_realm`'s global env — but either that capture binds the wrong
-realm's `[[GlobalEnv]]`, or the interpreter resolves a free global
-ref against the *running* realm at call time instead of the
-function's captured global environment. The two symptoms differ
-(sync-gen throws; async-gen runs but mis-counts), so the async path
-may carry an extra settlement nuance. This is a Phase-3-adjacent
-gap (cross-realm function realm tracking) and wants a focused
-multi-realm session, not a drive-by — the fix likely touches free-
-global resolution for *every* cross-realm-invoked function, with a
-correspondingly broad blast radius.
+Root cause: `JSGenerator` carried no `[[Realm]]`, so a resumed body
+frame never set `running_realm`; `lda_global` routes free-global
+reads through `frame.running_realm` and so fell back to the active
+realm. Fix: capture the function's realm (GetFunctionRealm of the
+callee) on the generator at wrap time and thread it into every
+resume-frame site — the sync `resumeGenerator` (all three resume_kind
+paths) and the async `resumeAsyncGenBody`. Blast radius is narrow:
+single-realm generators have `gen.realm == active realm`, so
+resolution there is unchanged. Covered by a unit test plus the two
+fixtures above.
 
 ## Phase 4 — Compartment constructor (the SES API)
 

@@ -174,6 +174,18 @@ pub const JSGenerator = struct {
     /// unwound `realm.current_module`. Null for async functions
     /// defined outside any module (plain scripts).
     owning_module: ?*@import("module.zig").ModuleRecord = null,
+    /// §10.2.5 / §8.3 — the [[Realm]] of the generator (async) function
+    /// this generator backs. The resumed body frame's `running_realm`
+    /// is set from this so a body's free *global* references resolve
+    /// through the function's own global environment, not whichever
+    /// realm happens to be running the resume (a cross-realm
+    /// `Reflect.construct(otherRealm.GeneratorFunction, …)` or
+    /// `otherRealm.eval("(function*(){})")()` invoked from another
+    /// realm). Null falls back to the resuming realm (single-realm
+    /// case, unchanged). Borrowed pointer — the realm outlives the
+    /// generator (child realms are anchored on the parent until
+    /// teardown), so it is not a GC root.
+    realm: ?*@import("realm.zig").Realm = null,
     /// §27.5.1.3 GeneratorPrototype.return — when set, the next
     /// `resumeGenerator` injects a return-completion at the
     /// yield site so any pending `try { … } finally { … }`

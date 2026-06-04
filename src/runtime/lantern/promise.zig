@@ -833,6 +833,10 @@ pub fn resumeAsyncFunction(
         .home_function = gen.home_function,
         .argc = gen.argc,
         .generator = gen,
+        // §8.3 — resolve the body's free globals through the
+        // generator function's own realm, not the realm driving
+        // this resume (cross-realm case; null falls back to it).
+        .running_realm = gen.realm,
         .owns_registers = false,
     });
 
@@ -938,6 +942,10 @@ pub fn resumeAsyncGeneratorOnSettle(
         .home_function = gen.home_function,
         .argc = gen.argc,
         .generator = gen,
+        // §8.3 — resolve the body's free globals through the
+        // generator function's own realm, not the realm driving
+        // this resume (cross-realm case; null falls back to it).
+        .running_realm = gen.realm,
         .owns_registers = false,
     });
 
@@ -1130,6 +1138,10 @@ pub fn resumeGenerator(
         .home_function = gen.home_function,
         .argc = gen.argc,
         .generator = gen,
+        // §8.3 — resolve the body's free globals through the
+        // generator function's own realm, not the realm driving
+        // this resume (cross-realm case; null falls back to it).
+        .running_realm = gen.realm,
         .owns_registers = false,
     });
 
