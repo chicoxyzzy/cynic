@@ -40,17 +40,9 @@ const TypedKind = ObjMod.TypedKind;
 const TypedView = ObjMod.TypedView;
 const ta_mod = @import("typed_array.zig");
 const promise_mod = @import("promise.zig");
-const SharedDataBlock = @import("../shared_data_block.zig").SharedDataBlock;
+const shared_data_block = @import("../shared_data_block.zig");
+const SharedDataBlock = shared_data_block.SharedDataBlock;
 
-/// Monotonic clock in milliseconds — the time base for an async waiter's
-/// timeout deadline. Matches the host's clock so the deadline the host
-/// polls against is the same scale.
-fn nowMonoMs() f64 {
-    if (builtin.os.tag == .freestanding) return 0;
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
-    return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) / 1_000_000.0;
-}
 const Waiter = @import("../shared_data_block.zig").Waiter;
 const builtin = @import("builtin");
 
@@ -686,7 +678,7 @@ fn atomicsWaitAsync(realm: *Realm, _: Value, args: []const Value) NativeError!Va
         // The capability's resolve function is rooted via `markRoots`.
         const block = tv.viewed.getSharedBlock().?;
         const node = try block.addAsyncWaiter(byte_pos);
-        const deadline: f64 = if (std.math.isInf(timeout_ms)) timeout_ms else nowMonoMs() + timeout_ms;
+        const deadline: f64 = if (std.math.isInf(timeout_ms)) timeout_ms else shared_data_block.monoNowMs() + timeout_ms;
         realm.pending_async_waits.append(realm.allocator, .{
             .resolve = heap_mod.taggedFunction(cap.resolve),
             .deadline_ms = deadline,
