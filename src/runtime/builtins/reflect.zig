@@ -1108,6 +1108,28 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     }
 }
 
+/// §7.2.4 IsConstructor / §10.5.13 through a Proxy CHAIN: a Proxy whose
+/// target is a constructor — possibly itself a Proxy over one — is a
+/// constructor. A Proxy over a function stores `proxy_target_fn`; a
+/// Proxy over another object/proxy stores `proxy_target` and propagates
+/// callability, so descend `proxy_target` until a function target is
+/// reached. Returns `null` for a revoked / non-callable proxy. The
+/// underlying function's `[[Realm]]` is also the §10.2.5
+/// GetFunctionRealm the created object's prototype resolves against.
+fn proxyChainTargetFn(obj: *JSObject) ?*JSFunction {
+    var cur: *JSObject = obj;
+    var guard: usize = 0;
+    while (guard < 100_000) : (guard += 1) {
+        if (cur.proxy_target_fn) |f| return f;
+        if (cur.proxy_target) |t| {
+            cur = t;
+            continue;
+        }
+        return null;
+    }
+    return null;
+}
+
 fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const target_v = argOr(args, 0, Value.undefined_);
@@ -1172,8 +1194,11 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     else if (heap_mod.valueAsFunction(new_target_v)) |nt|
         nt
     else if (heap_mod.valueAsPlainObject(new_target_v)) |po|
-        // newTarget can be a callable Proxy.
-        if (po.proxy_target_fn) |tfn| tfn else return throwTypeError(realm, "Reflect.construct newTarget must be a constructor")
+        // newTarget can be a callable Proxy — or a chain of them
+        // (Proxy over Proxy over … over a constructor). Resolve the
+        // underlying constructor through the whole chain (§10.5.13),
+        // not just one level.
+        if (proxyChainTargetFn(po)) |tfn| tfn else return throwTypeError(realm, "Reflect.construct newTarget must be a constructor")
     else
         return throwTypeError(realm, "Reflect.construct newTarget must be a constructor");
     if (!new_target.has_construct or new_target.is_arrow) return throwTypeError(realm, "Reflect.construct newTarget is not a constructor");

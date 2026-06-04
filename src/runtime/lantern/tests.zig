@@ -3689,6 +3689,21 @@ test "later: Reflect.construct primitive argumentsList still throws TypeError (�
     );
 }
 
+test "later: Reflect.construct with a Proxy-chain newTarget unwraps to the constructor (§7.2.4 / §10.5.13)" {
+    // A Proxy over a Proxy over a constructor IS a constructor, so the
+    // newTarget resolution must descend the WHOLE chain — a single-level
+    // unwrap wrongly threw "newTarget must be a constructor". Same-realm
+    // here, so the created object's prototype resolves through the chain
+    // to the underlying ctor's `prototype` (the cross-realm
+    // GetFunctionRealm path is exercised by test262
+    // built-ins/Proxy/get-fn-realm*).
+    try expectScriptIntWithBuiltins(
+        \\var P = new Proxy(new Proxy(Array, {}), {});
+        \\var a = Reflect.construct(Array, [], P);
+        \\(a instanceof Array) ? 1 : 0;
+    , 1);
+}
+
 test "later: for-in walks own properties" {
     try expectScriptStringWithBuiltins(
         \\const o = { a: 1, b: 2, c: 3 };
