@@ -115,6 +115,7 @@ const genResultObject = generator.genResultObject;
 const promise = @import("promise.zig");
 pub const wrapInPromise = promise.wrapInPromise;
 pub const drainMicrotasks = promise.drainMicrotasks;
+pub const fireExpiredAsyncWaits = promise.fireExpiredAsyncWaits;
 pub const resolvePromiseWithValue = promise.resolvePromiseWithValue;
 pub const resumeAsyncFunction = promise.resumeAsyncFunction;
 pub const resumeAsyncGeneratorOnSettle = promise.resumeAsyncGeneratorOnSettle;

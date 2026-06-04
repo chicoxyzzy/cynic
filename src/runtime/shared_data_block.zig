@@ -22,11 +22,23 @@ const std = @import("std");
 /// is released and the block is freed.
 pub var live_blocks: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
 
-/// One parked `Atomics.wait`. The node lives on the *waiting thread's
-/// stack* and is linked into its block's wait list for the duration of
-/// the wait — the list owns no memory. A waiter unlinks itself (under
-/// `wait_lock`) before its frame returns, so `notify` (which only walks
-/// the list under the same lock) can never touch a dead node.
+/// Monotonic clock in milliseconds — the time base for `Atomics.waitAsync`
+/// deadlines (the wait records `now + timeout`; whatever host drives the
+/// timeout polls against the same scale). Uses libc's monotonic clock.
+pub fn monoNowMs() f64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) / 1_000_000.0;
+}
+
+/// One parked waiter. A synchronous `Atomics.wait` node lives on the
+/// *waiting thread's stack* and is unlinked before its frame returns. An
+/// `Atomics.waitAsync` node has no blocking frame, so it is heap-
+/// allocated (`addAsyncWaiter`) and lives on the list until the waiting
+/// agent settles it (`settleAndFreeAsyncWaiter`). Either kind is linked
+/// into its block's wait list under `wait_lock`, so `notify` — which
+/// only walks the list under the same lock — can never touch a dead
+/// node.
 pub const Waiter = struct {
     /// §25.4 keys the wait list on the byte index within the block, so
     /// two views over the same block waiting on the same byte share a
@@ -34,6 +46,10 @@ pub const Waiter = struct {
     byte_pos: usize,
     /// Raised by `notify` (under `wait_lock`); the waiter polls it.
     woken: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// True for a heap-allocated `waitAsync` node (freed on settle);
+    /// false for a stack `wait` node (no free). Documents the lifetime
+    /// and guards `settleAndFreeAsyncWaiter` against a stack node.
+    is_async: bool = false,
     next: ?*Waiter = null,
 };
 
@@ -161,4 +177,92 @@ pub const SharedDataBlock = struct {
         }
         return n;
     }
+
+    // ── §25.4 async waiters ─────────────────────────────────────────
+    // `Atomics.waitAsync` returns immediately, so its waiter outlives the
+    // call — it can't live on a stack frame. Heap-allocate it on the
+    // block's process-global allocator and link it like any other
+    // waiter, so a cross-agent `notify` (which walks the same list)
+    // wakes + counts it. The waiting agent settles it on its OWN thread
+    // (the notifier can't touch the waiter agent's heap to resolve the
+    // Promise): "ok" if a notify raised `woken`, else "timed-out".
+
+    /// Allocate + link a heap async waiter on `byte_pos`. Freed by
+    /// `settleAndFreeAsyncWaiter`.
+    pub fn addAsyncWaiter(self: *SharedDataBlock, byte_pos: usize) !*Waiter {
+        const gpa = std.heap.page_allocator;
+        const w = try gpa.create(Waiter);
+        w.* = .{ .byte_pos = byte_pos, .is_async = true };
+        self.lockWaiters();
+        self.addWaiter(w);
+        self.unlockWaiters();
+        return w;
+    }
+
+    /// Under the lock, read whether a `notify` woke `w`, unlink it, then
+    /// free it. Returns the woken flag so the caller resolves the
+    /// Promise "ok" (woken) or "timed-out". Reading `woken` + unlinking
+    /// in one critical section mirrors the sync `wait` timeout settle, so
+    /// a notify racing the deadline can't leave the woken count and the
+    /// resolved value disagreeing.
+    pub fn settleAndFreeAsyncWaiter(self: *SharedDataBlock, w: *Waiter) bool {
+        std.debug.assert(w.is_async);
+        self.lockWaiters();
+        const woken = w.woken.load(.acquire);
+        self.removeWaiter(w);
+        self.unlockWaiters();
+        std.heap.page_allocator.destroy(w);
+        return woken;
+    }
 };
+
+test "async waiter on the block list is woken + counted by notify" {
+    const testing = std.testing;
+    const block = try SharedDataBlock.create(8, 8);
+    defer block.release();
+
+    // Park an async waiter on byte 0; a notify at byte 0 wakes exactly it.
+    const w = try block.addAsyncWaiter(0);
+    block.lockWaiters();
+    const woke = block.wakeWaiters(0, 1);
+    block.unlockWaiters();
+    try testing.expectEqual(@as(u32, 1), woke);
+    // The waiting agent settles on its own thread → "ok" (woken).
+    try testing.expect(block.settleAndFreeAsyncWaiter(w));
+}
+
+test "notify at another index does not wake an async waiter (timed-out)" {
+    const testing = std.testing;
+    const block = try SharedDataBlock.create(16, 16);
+    defer block.release();
+
+    const w = try block.addAsyncWaiter(0);
+    // A notify on byte 4 must not touch the byte-0 waiter.
+    block.lockWaiters();
+    const woke = block.wakeWaiters(4, std.math.maxInt(u32));
+    block.unlockWaiters();
+    try testing.expectEqual(@as(u32, 0), woke);
+    // No notify reached it → settle reports not-woken (→ "timed-out").
+    try testing.expect(!block.settleAndFreeAsyncWaiter(w));
+}
+
+test "notify wakes up to count async waiters and reports the number" {
+    const testing = std.testing;
+    const block = try SharedDataBlock.create(8, 8);
+    defer block.release();
+
+    const a = try block.addAsyncWaiter(0);
+    const b = try block.addAsyncWaiter(0);
+    const c = try block.addAsyncWaiter(0);
+    // count=2 wakes exactly two of the three parked on byte 0.
+    block.lockWaiters();
+    const woke = block.wakeWaiters(0, 2);
+    block.unlockWaiters();
+    try testing.expectEqual(@as(u32, 2), woke);
+    // Two settle "ok", the third "timed-out"; total woken == 2.
+    var ok: u32 = 0;
+    if (block.settleAndFreeAsyncWaiter(a)) ok += 1;
+    if (block.settleAndFreeAsyncWaiter(b)) ok += 1;
+    if (block.settleAndFreeAsyncWaiter(c)) ok += 1;
+    try testing.expectEqual(@as(u32, 2), ok);
+}

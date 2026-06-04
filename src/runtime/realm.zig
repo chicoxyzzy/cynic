@@ -20,6 +20,7 @@ const JSString = @import("string.zig").JSString;
 const JSFunction = @import("function.zig").JSFunction;
 const NativeFn = @import("function.zig").NativeFn;
 const heap_mod = @import("heap.zig");
+const shared_data_block = @import("shared_data_block.zig");
 const intrinsics_mod = @import("intrinsics.zig");
 const Intrinsics = intrinsics_mod.Intrinsics;
 const features = @import("features.zig");
@@ -607,12 +608,17 @@ pub const GlobalBindings = struct {
 
 /// §25.4.1.4 one pending `Atomics.waitAsync` whose Promise is still
 /// unsettled. `resolve` is the capability's resolve function (called
-/// with `"timed-out"` when the deadline passes); `deadline_ms` is an
-/// absolute monotonic timestamp in milliseconds (`+inf` for an
-/// untimed wait, which only a cross-agent notify can settle).
+/// with `"timed-out"` or `"ok"` when the wait settles); `deadline_ms` is
+/// an absolute monotonic timestamp in milliseconds (`+inf` for an
+/// untimed wait, which only a cross-agent notify can settle). `node` is
+/// this waiter's entry on `block`'s process-global wait list, where a
+/// cross-agent `notify` finds it; the waiting agent reads `node.woken`
+/// to decide "ok" vs "timed-out" and frees the node on settle.
 pub const AsyncWaitRecord = struct {
     resolve: Value,
     deadline_ms: f64,
+    node: *shared_data_block.Waiter,
+    block: *shared_data_block.SharedDataBlock,
 };
 
 pub const Realm = struct {
@@ -1073,6 +1079,7 @@ pub const Realm = struct {
         self.globals.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.microtask_queue.deinit(self.allocator);
+        self.clearPendingAsyncWaits();
         self.pending_async_waits.deinit(self.allocator);
         self.kept_alive.deinit(self.allocator);
         self.pending_indirect_export_validation.deinit(self.allocator);
@@ -1355,6 +1362,15 @@ pub const Realm = struct {
     /// Called from the interpreter dispatch loop when
     /// `heap.allocs_since_gc` crosses `heap.gc_threshold`. The
     /// counter resets to zero at the end of `heap.collect`.
+    /// Detach + free every pending async waiter's heap node from its
+    /// block (so none dangles on a still-shared block), then empty the
+    /// list. Leaves the Promises unsettled — for realm teardown or an
+    /// agent-realm reset where the realm is going away / being scrubbed.
+    pub fn clearPendingAsyncWaits(self: *Realm) void {
+        for (self.pending_async_waits.items) |w| _ = w.block.settleAndFreeAsyncWaiter(w.node);
+        self.pending_async_waits.clearRetainingCapacity();
+    }
+
     pub fn collectGarbage(self: *Realm) void {
         // §26.1 / §24.3 / §24.4 / §26.2 — arm the major cycle
         // BEFORE `markRoots`. `markRoots` calls `markValue` on every
