@@ -260,6 +260,16 @@ pub const Compiler = struct {
     /// across calls, §3.8.3.7) or for ordinary scripts. Reuses the
     /// same non-global binding path modules already take.
     eval_local: bool = false,
+    /// §19.2.1.3 — `D` (deletable) for top-level `var` / function
+    /// declarations that bind on the global env. True only for a
+    /// non-strict indirect `eval` body (EvalDeclarationInstantiation
+    /// passes `true` to CreateGlobalVar/FunctionBinding), so those
+    /// global properties are configurable / deletable. False for
+    /// scripts, modules, and `ShadowRealm.prototype.evaluate` (§16.1.7
+    /// GlobalDeclarationInstantiation keeps D=false). Threaded onto the
+    /// finished `Chunk` as `eval_global_deletable` for the runtime
+    /// function-decl opcode; consumed directly here for the var path.
+    eval_global_deletable: bool = false,
     /// §9.4.6.7 Module Namespace [[Get]] live binding propagation —
     /// maps a module-local binding name to the namespace key(s) it
     /// is exported under. Populated by `compileModuleAsChunk` from
@@ -567,6 +577,9 @@ pub const Compiler = struct {
                     self.realm.allocator,
                     name,
                     Value.undefined_,
+                    // §19.2.1.3 step 16.a.i: D=true for a non-strict
+                    // indirect eval, D=false for §16.1.7 script source.
+                    self.eval_global_deletable,
                 );
             } else {
                 try self.realm.globals.installScriptLexBinding(
@@ -12877,7 +12890,9 @@ pub fn compileScriptAsChunk(
     source: []const u8,
     diagnostics: ?*Diagnostics,
 ) CompileError!Chunk {
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, false, null, 0, false, &.{});
+    // §16.1.7 GlobalDeclarationInstantiation: script var / function are
+    // non-configurable (D=false).
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, false, null, 0, false, &.{}, false);
 }
 
 /// Compile eval code (§3.8.3.7 PerformShadowRealmEval today; the
@@ -12905,10 +12920,14 @@ pub fn compileEvalAsChunk(
     /// function bind eval-locally); `false` for `ShadowRealm.evaluate`
     /// (Script evaluation: var → the shadow realm's global env).
     eval_local: bool,
+    /// §19.2.1.3 — `D` for global-bound top-level `var` / function: true
+    /// for a non-strict indirect `eval` (deletable global props), false
+    /// for `ShadowRealm.evaluate` (§16.1.7 Script semantics, D=false).
+    deletable_global: bool,
 ) CompileError!Chunk {
     // Indirect eval has a null PrivateEnvironment (§19.2.1.1): no
     // enclosing-class private names are reachable.
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, null, 0, eval_local, &.{});
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, null, 0, eval_local, &.{}, deletable_global);
 }
 
 /// §19.2.1 direct eval — compile `program` as eval code whose free
@@ -12936,8 +12955,9 @@ pub fn compileDirectEvalAsChunk(
     class_contexts: []const @import("chunk.zig").DirectEvalClassContext,
 ) CompileError!Chunk {
     // Direct eval is always strict eval (§19.2.1.3): top-level var /
-    // function bind in the eval body's own env, not the caller's.
-    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, caller_scope, start_env_depth, true, class_contexts);
+    // function bind in the eval body's own env, not the caller's — so it
+    // never reaches the global-decl path and D is moot (false).
+    return compileScriptLikeChunk(allocator, realm, program, source, diagnostics, true, caller_scope, start_env_depth, true, class_contexts, false);
 }
 
 fn compileScriptLikeChunk(
@@ -12963,6 +12983,12 @@ fn compileScriptLikeChunk(
     /// prefixes the enclosing method used. Empty for scripts / indirect
     /// eval (null PrivateEnvironment). Borrowed from the realm's class arena.
     class_contexts: []const @import("chunk.zig").DirectEvalClassContext,
+    /// §19.2.1.3 — `D` for top-level `var` / function declarations that
+    /// bind on the global env. True only for a non-strict indirect `eval`
+    /// body; false for scripts, modules, ShadowRealm evaluation, and
+    /// strict / direct eval (which bind eval-locally and never reach the
+    /// global path). See `Compiler.eval_global_deletable`.
+    deletable_global: bool,
 ) CompileError!Chunk {
     var c = Compiler.init(allocator, realm, source);
     errdefer c.deinit();
@@ -12971,6 +12997,7 @@ fn compileScriptLikeChunk(
     c.diagnostics = diagnostics;
     c.eval_local = eval_local;
     c.eval_scope = eval_scope;
+    c.eval_global_deletable = deletable_global;
 
     // §19.2.1.1 — seed the compiler's class_stack with the inherited
     // PrivateEnvironment chain so `manglePrivateRef` reconstructs the
@@ -13043,6 +13070,9 @@ fn compileScriptLikeChunk(
         // `freshSubBuilder` so the whole tree shares one base.
         c.global_lexical_base = @intCast(c.realm.globals.decl_env.count());
         c.builder.global_lexical_base = c.global_lexical_base;
+        // §19.2.1.3 — surface D onto the chunk so the runtime
+        // `sta_global_fn_decl` opcode stamps the right [[Configurable]].
+        c.builder.eval_global_deletable = c.eval_global_deletable;
         // §13.2 / §19.2.1.3 — reserve the script/eval completion
         // register (held for the whole top-level statement list) and
         // seed it with `undefined`, so an empty program, a trailing

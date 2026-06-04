@@ -710,6 +710,11 @@ fn evaluateSource(
     // function on the global env (`eval_local = false`); a strict body
     // keeps them eval-local.
     const effective_local = if (indirect) programHasUseStrict(&program, source) else eval_local;
+    // §19.2.1.3 steps 15.c.i / 16.a.i — a non-strict indirect eval's
+    // top-level `var` / function bind on the global env with D=true
+    // (deletable / configurable). ShadowRealm Script evaluation
+    // (`!indirect`) keeps §16.1.7's D=false.
+    const deletable_global = indirect and !effective_local;
     // The chunk is owned by the realm so that any `JSFunction`
     // declared by this script (which keeps a pointer into the
     // chunk's `function_templates`) outlives the call and stays
@@ -718,7 +723,7 @@ fn evaluateSource(
     // across `script_chunks` array growth.
     const chunk_ptr = try realm.allocator.create(Chunk);
     chunk_ptr.* = (if (eval_scope)
-        compiler_mod.compileEvalAsChunk(realm.allocator, realm, &program, source, null, effective_local)
+        compiler_mod.compileEvalAsChunk(realm.allocator, realm, &program, source, null, effective_local, deletable_global)
     else
         compiler_mod.compileScriptAsChunk(realm.allocator, realm, &program, source, null)) catch {
         realm.allocator.destroy(chunk_ptr);
@@ -7158,14 +7163,16 @@ pub fn runFrames(
             // §9.1.1.4.19 CreateGlobalFunctionBinding —
             // function-decl install onto the global object
             // overwrites both data and descriptor flags
-            // (writable+enumerable+non-configurable).
+            // (writable+enumerable+[[Configurable]]:D). D=false for
+            // §16.1.7 script source; D=true (`eval_global_deletable`)
+            // for a non-strict indirect `eval` (§19.2.1.3 step 15.c.i).
             const k = readU16(code, ip);
             ip += 2;
             if (k >= local_chunk.constants.len) return error.InvalidOpcode;
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-            try realm.globals.installScriptFunctionBinding(realm.allocator, key_s.flatBytes(), acc);
+            try realm.globals.installScriptFunctionBinding(realm.allocator, key_s.flatBytes(), acc, local_chunk.eval_global_deletable);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .lda_global_slot => {

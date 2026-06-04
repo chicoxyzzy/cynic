@@ -124,6 +124,34 @@ test "eval: function declared in eval does not leak to the global env" {
     , 1);
 }
 
+test "eval: indirect-eval global var/function bindings are configurable (D=true)" {
+    // §19.2.1.3 EvalDeclarationInstantiation steps 15.c.i / 16.a.i pass
+    // `true` to §9.1.1.4.18/.19 CreateGlobalVar/FunctionBinding, so an
+    // eval-introduced global property is created `{writable:true,
+    // enumerable:true, configurable:true}` — deletable, unlike a top-level
+    // *script* var / function (D=false → non-configurable). A non-strict
+    // indirect eval is the only eval form that reaches the global env
+    // (direct + strict-body eval keep their declarations eval-local).
+    try expectIntAllow(
+        \\(0, eval)('var ix = 41; function fx(){ return 7; }');
+        \\var dv = Object.getOwnPropertyDescriptor(globalThis, 'ix');
+        \\var df = Object.getOwnPropertyDescriptor(globalThis, 'fx');
+        \\(dv.writable && dv.enumerable && dv.configurable &&
+        \\ df.writable && df.enumerable && df.configurable) ? 1 : 0;
+    , 1);
+}
+
+test "eval: script global var/function stay non-configurable (D=false)" {
+    // §16.1.7 GlobalDeclarationInstantiation keeps D=false, so a top-level
+    // *script* `var` / `function` is non-configurable. The eval D=true fix
+    // must not regress this invariant.
+    try expectIntAllow(
+        \\var sv = 1; function sf(){}
+        \\(!Object.getOwnPropertyDescriptor(globalThis, 'sv').configurable &&
+        \\ !Object.getOwnPropertyDescriptor(globalThis, 'sf').configurable) ? 1 : 0;
+    , 1);
+}
+
 test "eval: non-string argument returns unchanged" {
     // §19.2.1 step 2 — a non-String argument is returned as-is even
     // with the gate open.

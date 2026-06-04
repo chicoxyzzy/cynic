@@ -468,17 +468,23 @@ pub const GlobalBindings = struct {
         try self.decl_env.put(allocator, key, value);
     }
 
-    /// §16.1.7 GlobalDeclarationInstantiation step 18 — top-level
-    /// `var` / `function` declarations route through §9.1.1.4.18
-    /// CreateGlobalVarBinding / §9.1.1.4.19 CreateGlobalFunctionBinding.
-    /// Both create the property on the global object with
-    /// `{[[Writable]]:true, [[Enumerable]]:true, [[Configurable]]:D}`
-    /// where `D` is the "deletable" flag. For source-text scripts
-    /// `D` is false — Cynic doesn't ship `eval` so script-source
-    /// is the only path that can reach this. Distinguishes top-
-    /// level `var x` (non-configurable, enumerable) from a direct
-    /// `globalThis.x = 1` (the regular `put` path — configurable,
-    /// non-enumerable to match host built-in shape).
+    /// Top-level `var` / `function` declarations route through
+    /// §9.1.1.4.18 CreateGlobalVarBinding / §9.1.1.4.19
+    /// CreateGlobalFunctionBinding. Both create the property on the
+    /// global object with `{[[Writable]]:true, [[Enumerable]]:true,
+    /// [[Configurable]]:D}` where `D` is the "deletable" flag.
+    ///
+    /// `deletable` (D) is the spec's per-call argument:
+    ///   - **false** for §16.1.7 GlobalDeclarationInstantiation
+    ///     (source-text scripts, `ShadowRealm.prototype.evaluate`) —
+    ///     a top-level script `var x` is non-configurable.
+    ///   - **true** for §19.2.1.3 EvalDeclarationInstantiation steps
+    ///     15.c.i / 16.a.i (a non-strict indirect `eval` whose
+    ///     declarations bind on the global env) — the property is
+    ///     deletable, so `delete x` succeeds afterward.
+    /// Either way this differs from a direct `globalThis.x = 1` (the
+    /// regular `put` path — configurable, non-enumerable to match host
+    /// built-in shape).
     ///
     /// Idempotent for an existing key: §9.1.1.4.18 step 2 / step 6
     /// say "if hasProperty is true … return NormalCompletion" —
@@ -489,6 +495,7 @@ pub const GlobalBindings = struct {
         allocator: std.mem.Allocator,
         key: []const u8,
         value: Value,
+        deletable: bool,
     ) !void {
         try self.var_names.put(allocator, key, {});
         if (self.target) |t| {
@@ -499,7 +506,7 @@ pub const GlobalBindings = struct {
                 try t.setWithFlags(allocator, key, value, .{
                     .writable = true,
                     .enumerable = true,
-                    .configurable = false,
+                    .configurable = deletable,
                 });
             }
             return;
@@ -516,16 +523,21 @@ pub const GlobalBindings = struct {
     /// `function` declarations. Unlike var bindings (idempotent
     /// on existing keys) function decls OVERWRITE the data slot
     /// AND restamp the flags to `{writable:true, enumerable:true,
-    /// configurable:false}` when CanDeclareGlobalFunction has
-    /// already approved. The caller (compiler) is responsible for
-    /// running that approval check; here we just install. Any
-    /// existing accessor descriptor is replaced with a data
-    /// descriptor.
+    /// configurable:D}` when CanDeclareGlobalFunction has already
+    /// approved. The caller (compiler) is responsible for running
+    /// that approval check; here we just install. Any existing
+    /// accessor descriptor is replaced with a data descriptor.
+    ///
+    /// `deletable` (D) is false for §16.1.7 script-source function
+    /// declarations (non-configurable) and true for a non-strict
+    /// indirect `eval`'s §19.2.1.3 step 15.c.i declarations
+    /// (configurable / deletable).
     pub fn installScriptFunctionBinding(
         self: *GlobalBindings,
         allocator: std.mem.Allocator,
         key: []const u8,
         value: Value,
+        deletable: bool,
     ) !void {
         try self.var_names.put(allocator, key, {});
         if (self.target) |t| {
@@ -536,7 +548,7 @@ pub const GlobalBindings = struct {
             try t.setWithFlags(allocator, key, value, .{
                 .writable = true,
                 .enumerable = true,
-                .configurable = false,
+                .configurable = deletable,
             });
             return;
         }

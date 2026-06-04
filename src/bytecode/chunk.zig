@@ -444,6 +444,15 @@ pub const Chunk = struct {
     /// function-body chunks (their `await` is inside an async
     /// function, which is handled separately).
     is_async_module: bool = false,
+    /// §19.2.1.3 — when true, this chunk's top-level `var` / function
+    /// declarations that bind on the global env are deletable (D=true),
+    /// so `sta_global_fn_decl` stamps `[[Configurable]]:true`. Set only
+    /// for a non-strict indirect `eval` body (EvalDeclarationInstantiation
+    /// steps 15.c.i / 16.a.i pass `true`). False for scripts, modules, and
+    /// `ShadowRealm.prototype.evaluate` (§16.1.7 keeps D=false). The var
+    /// path is handled at compile time in `installVarBinding`; this flag
+    /// carries the same bit to the runtime function-decl opcode.
+    eval_global_deletable: bool = false,
     /// Base index into the realm's global declarative env-record
     /// (`GlobalBindings.decl_env`) for this chunk's slot-indexed
     /// global-lexical opcodes (`lda_global_slot` /
@@ -519,6 +528,10 @@ pub const Builder = struct {
     /// top-level emit for any `.await_` opcode (tracked via the
     /// compiler's `module_has_top_level_await` flag).
     is_async_module: bool = false,
+    /// Surfaced on the finished `Chunk` as `.eval_global_deletable`.
+    /// Set by the eval compile entry for a non-strict indirect `eval`
+    /// body. See `Chunk.eval_global_deletable`.
+    eval_global_deletable: bool = false,
     /// Surfaced on the finished `Chunk` as `.global_lexical_base`.
     /// Stamped by the compiler from its `global_lexical_base`
     /// field (constant for a script's whole compile tree) so the
@@ -843,6 +856,7 @@ pub const Builder = struct {
             .direct_eval_scopes = try self.direct_eval_scopes.toOwnedSlice(self.allocator),
             .register_count = self.register_count,
             .is_async_module = self.is_async_module,
+            .eval_global_deletable = self.eval_global_deletable,
             .global_lexical_base = self.global_lexical_base,
             .inline_caches = ics,
             .inline_call_caches = call_ics,
