@@ -378,7 +378,17 @@ pub fn getPrototypeFromConstructorValue(
                     if (nt_proxy.proxy_revoked or nt_proxy.proxy_handler == null) {
                         return .{ .thrown = try makeTypeError(realm, "Cannot retrieve realm from a revoked Proxy") };
                     }
-                    return .{ .proto = intrinsic_default };
+                    // §10.1.14 GetPrototypeFromConstructor step 4 — the
+                    // resolved `prototype` is not an Object, so the default
+                    // proto belongs to GetFunctionRealm(newTarget)'s
+                    // intrinsics. For a Proxy newTarget that realm is its
+                    // target function's (§10.2.5 step 4, recursed through
+                    // the chain), not the active realm — mirror the
+                    // JSFunction path's remap so a cross-realm proxy
+                    // newTarget yields its own realm's intrinsic default
+                    // (built-ins/Proxy/get-fn-realm{,-recursive}.js).
+                    const ctor_realm = proxyChainFunctionRealm(nt_proxy) orelse realm;
+                    return .{ .proto = remapDefaultProtoToCtorRealm(default_owner_realm, ctor_realm, intrinsic_default) };
                 },
             }
         }
@@ -453,6 +463,27 @@ fn remapDefaultProtoToCtorRealm(
     }
 
     return intrinsic_default;
+}
+
+/// §10.2.5 GetFunctionRealm step 4 — "If obj is a Proxy exotic object,
+/// return GetFunctionRealm(obj.[[ProxyTarget]])." Recurse the proxy
+/// chain (`proxy_target` for a Proxy-over-object/proxy, `proxy_target_fn`
+/// for a Proxy-over-function) to the underlying function and return its
+/// [[Realm]]. Returns null when no function target is reachable (a
+/// revoked link or a non-function target) — the caller falls back to the
+/// active realm, matching `JSFunction.getFunctionRealm`'s null contract.
+fn proxyChainFunctionRealm(obj: *JSObject) ?*Realm {
+    var cur: *JSObject = obj;
+    var guard: usize = 0;
+    while (guard < 100_000) : (guard += 1) {
+        if (cur.proxy_target_fn) |f| return f.getFunctionRealm();
+        if (cur.proxy_target) |t| {
+            cur = t;
+            continue;
+        }
+        return null;
+    }
+    return null;
 }
 
 pub fn getPrototypeFromConstructor(

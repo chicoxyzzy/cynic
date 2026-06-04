@@ -6915,6 +6915,73 @@ test "later: GetPrototypeFromConstructor derives default proto from newTarget's 
     try testing.expectEqual(child_map_proto, lookup.proto);
 }
 
+test "later: GetPrototypeFromConstructor remaps default proto through a Proxy newTarget's realm (§10.2.5)" {
+    // §10.1.14 GetPrototypeFromConstructor step 4 + §10.2.5
+    // GetFunctionRealm step 4 — when the newTarget is a Proxy whose
+    // target function lives in another realm and whose `prototype` is
+    // non-object, the default proto must resolve against that target
+    // realm's intrinsics, recursed through the proxy chain — not the
+    // active realm's. Mirrors built-ins/Proxy/get-fn-realm.js (one
+    // level; get-fn-realm-recursive.js covers the multi-level chain).
+    const call = @import("call.zig");
+    const heap_mod = @import("../heap.zig");
+    const NativeError = @import("../function.zig").NativeError;
+    const Noop = struct {
+        fn body(r: *Realm, t: Value, a: []const Value) NativeError!Value {
+            _ = r;
+            _ = t;
+            _ = a;
+            return Value.undefined_;
+        }
+    };
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try installBuiltinsAllFeatures(&parent);
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const parent_map = heap_mod.valueAsFunction(parent.globals.get("Map").?).?;
+    const child_map = heap_mod.valueAsFunction(child.globals.get("Map").?).?;
+    const parent_map_proto = parent_map.prototype;
+    const child_map_proto = child_map.prototype;
+    try testing.expect(parent_map_proto != null);
+    try testing.expect(child_map_proto != null);
+    try testing.expect(parent_map_proto != child_map_proto);
+
+    // `C`: a child-realm function with a non-object `prototype`.
+    const C = try parent.heap.allocateFunctionNative(&parent, Noop.body, 0, "C");
+    C.realm = &child;
+    try C.setWithFlags(testing.allocator, "prototype", Value.null_, .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
+
+    // A callable Proxy over `C` with an empty handler, minted in the
+    // parent (active) realm — the newTarget the construct path sees.
+    const handler = try parent.heap.allocateObject();
+    const proxy = try parent.heap.allocateObject();
+    parent.heap.setProxyHandler(proxy, handler);
+    parent.heap.setProxyTargetFn(proxy, C);
+    proxy.proxy_callable = true;
+
+    // The active-realm default the caller forwards is parent.Map.prototype
+    // (what `Reflect.construct(Map, …)` passes). The remap must swap it for
+    // the *child* realm's Map.prototype, since GetFunctionRealm(proxy) = child.
+    const lookup = try call.getPrototypeFromConstructorValue(
+        testing.allocator,
+        &parent,
+        heap_mod.taggedObject(proxy),
+        parent_map_proto,
+        &parent,
+    );
+    try testing.expect(lookup == .proto);
+    try testing.expectEqual(child_map_proto, lookup.proto);
+}
+
 test "later: Array [[Construct]] derives result proto from newTarget's realm" {
     // §22.1.1 Array(...) + §10.1.14 — `Reflect.construct(Array, args,
     // C)` where `C` is a cross-realm function with a non-object
