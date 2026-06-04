@@ -23,6 +23,15 @@ const TypedView = ObjMod.TypedView;
 const ta_mod = @import("typed_array.zig");
 const promise_mod = @import("promise.zig");
 const SharedDataBlock = @import("../shared_data_block.zig").SharedDataBlock;
+
+/// Monotonic clock in milliseconds — the time base for an async waiter's
+/// timeout deadline. Matches the host's clock so the deadline the host
+/// polls against is the same scale.
+fn nowMonoMs() f64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) / 1_000_000.0;
+}
 const Waiter = @import("../shared_data_block.zig").Waiter;
 const builtin = @import("builtin");
 
@@ -589,13 +598,14 @@ fn atomicsWaitAsync(realm: *Realm, _: Value, args: []const Value) NativeError!Va
     const size = kind.elementSize();
     const value_bits = try coerceRawBits(realm, kind, argOr(args, 2, Value.undefined_));
     // Timeout: undefined → +∞; NaN → +∞; else max(ToInteger, 0).
-    var timeout_zero = false;
+    var timeout_ms: f64 = std.math.inf(f64);
     const timeout_v = argOr(args, 3, Value.undefined_);
     if (!timeout_v.isUndefined()) {
         const n = try toNumber(realm, timeout_v);
         const d: f64 = if (n.isInt32()) @floatFromInt(n.asInt32()) else n.asDouble();
-        if (!std.math.isNan(d) and !std.math.isInf(d)) timeout_zero = (@max(@trunc(d), 0) == 0);
+        if (!std.math.isNan(d) and !std.math.isInf(d)) timeout_ms = @max(@trunc(d), 0);
     }
+    const timeout_zero = (timeout_ms == 0);
     const byte_pos = tv.byte_offset + idx * size;
     const cur_bits = readRawBits(buf, size, byte_pos);
     const mask: u64 = if (size == 8) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(size * 8)) - 1;
@@ -621,6 +631,15 @@ fn atomicsWaitAsync(realm: *Realm, _: Value, args: []const Value) NativeError!Va
         const cap = try promise_mod.newPromiseCapability(realm, promise_ctor);
         try result.set(realm.allocator, "async", Value.true_);
         try result.set(realm.allocator, "value", cap.promise);
+        // §25.4.1.4 — record the waiter so the host can fire its timeout.
+        // An untimed wait (`+∞`) gets a `+∞` deadline: only a cross-agent
+        // notify could settle it (that path is not yet wired). The
+        // capability's resolve function is rooted via `markRoots`.
+        const deadline: f64 = if (std.math.isInf(timeout_ms)) timeout_ms else nowMonoMs() + timeout_ms;
+        realm.pending_async_waits.append(realm.allocator, .{
+            .resolve = heap_mod.taggedFunction(cap.resolve),
+            .deadline_ms = deadline,
+        }) catch return error.OutOfMemory;
     }
     return heap_mod.taggedObject(result);
 }

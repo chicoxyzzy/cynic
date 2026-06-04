@@ -605,6 +605,16 @@ pub const GlobalBindings = struct {
     }
 };
 
+/// §25.4.1.4 one pending `Atomics.waitAsync` whose Promise is still
+/// unsettled. `resolve` is the capability's resolve function (called
+/// with `"timed-out"` when the deadline passes); `deadline_ms` is an
+/// absolute monotonic timestamp in milliseconds (`+inf` for an
+/// untimed wait, which only a cross-agent notify can settle).
+pub const AsyncWaitRecord = struct {
+    resolve: Value,
+    deadline_ms: f64,
+};
+
 pub const Realm = struct {
     allocator: std.mem.Allocator,
     /// `*Heap` so multiple Realms can share one heap — required
@@ -742,6 +752,16 @@ pub const Realm = struct {
     /// `await` opcode site. Each entry is a function to call
     /// with one argument.
     microtask_queue: std.ArrayListUnmanaged(Microtask) = .empty,
+    /// §25.4.1.4 pending async waiters — one per `Atomics.waitAsync`
+    /// whose value matched and whose timeout is non-zero, so its
+    /// Promise is still unsettled. Each record carries the capability's
+    /// resolve function and an absolute monotonic deadline (ms). The
+    /// spec fires the timeout "in parallel"; with no real event loop the
+    /// host drives it — polling these deadlines while draining
+    /// microtasks and resolving an expired waiter with `"timed-out"`.
+    /// (Cross-agent `notify` resolution is separate.) `markRoots` keeps
+    /// each resolve function live.
+    pending_async_waits: std.ArrayListUnmanaged(AsyncWaitRecord) = .empty,
     /// §9.10 [[KeptAlive]] — the per-agent "keep alive across the
     /// current job" list. `WeakRef.prototype.deref` (§26.1.4.1
     /// step 2a) and the `WeakRef` constructor (§26.1.1.1 step 4)
@@ -1053,6 +1073,7 @@ pub const Realm = struct {
         self.globals.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.microtask_queue.deinit(self.allocator);
+        self.pending_async_waits.deinit(self.allocator);
         self.kept_alive.deinit(self.allocator);
         self.pending_indirect_export_validation.deinit(self.allocator);
         // ModuleRecords are owned by the realm; the heap
@@ -1489,6 +1510,11 @@ pub const Realm = struct {
             self.heap.markValue(mt.reaction_handler);
             self.heap.markValue(mt.reaction_result);
         }
+
+        // §25.4.1.4 pending async waiters — keep each unsettled
+        // capability's resolve function alive until it fires or is
+        // dropped at realm reset.
+        for (self.pending_async_waits.items) |w| self.heap.markValue(w.resolve);
 
         // §9.10 [[KeptAlive]] — `WeakRef` constructor / `deref`
         // pin targets here for the duration of the current job.
