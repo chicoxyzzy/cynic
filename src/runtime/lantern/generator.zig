@@ -121,6 +121,18 @@ pub fn wrapGenerator(
     const proto_val_g: Value = if (callee) |c| c.get("prototype") else Value.undefined_;
     if (heap_mod.valueAsPlainObject(proto_val_g)) |p| {
         realm.heap.setObjectPrototype(wrapper, p);
+    } else if (callee) |c| {
+        // §9.1.14 GetPrototypeFromConstructor step 4 — a non-object
+        // `prototype` falls back to GetFunctionRealm(callee)'s
+        // %GeneratorPrototype%, not the active realm's (the line-92
+        // seed). A generator function created in another realm (e.g.
+        // `other.eval('(0, function*(){})')` carries [[Realm]] = other)
+        // yields instances that inherit other's %GeneratorPrototype%
+        // — language/expressions/generators/eval-body-proto-realm.js.
+        const fn_realm = c.getFunctionRealm() orelse realm;
+        if (fn_realm != realm) {
+            realm.heap.setObjectPrototype(wrapper, ensureGeneratorPrototype(fn_realm) catch return error.OutOfMemory);
+        }
     }
     switch (initial) {
         .yielded => return .{ .value = heap_mod.taggedObject(wrapper) },
@@ -195,6 +207,18 @@ pub fn wrapAsyncGenerator(
     const proto_val_ag: Value = if (callee) |c| c.get("prototype") else Value.undefined_;
     if (heap_mod.valueAsPlainObject(proto_val_ag)) |p| {
         realm.heap.setObjectPrototype(wrapper, p);
+    } else if (callee) |c| {
+        // §9.1.14 GetPrototypeFromConstructor step 4 — a non-object
+        // `prototype` falls back to GetFunctionRealm(callee)'s
+        // %AsyncGeneratorPrototype%, not the active realm's (the
+        // line-188 seed). An async generator function created in
+        // another realm carries [[Realm]] = that realm, so its
+        // instances inherit its %AsyncGeneratorPrototype%
+        // — language/expressions/async-generator/eval-body-proto-realm.js.
+        const fn_realm = c.getFunctionRealm() orelse realm;
+        if (fn_realm != realm) {
+            realm.heap.setObjectPrototype(wrapper, ensureAsyncGeneratorPrototype(fn_realm) catch return error.OutOfMemory);
+        }
     }
     switch (initial) {
         .yielded => return .{ .value = heap_mod.taggedObject(wrapper) },

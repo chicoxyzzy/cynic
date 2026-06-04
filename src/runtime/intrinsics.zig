@@ -2397,15 +2397,42 @@ fn globalEval(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const arg = if (args.len > 0) args[0] else Value.undefined_;
     // §19.2.1 step 2 — a non-String operand is returned unchanged.
     if (!arg.isString()) return arg;
-    if (!realm.allow_eval) {
-        // §19.2.1.2 HostEnsureCanCompileStrings — the host refuses code
-        // generation from strings (default SES posture). The thrown
-        // value is host-defined; Cynic raises EvalError, matching Node's
-        // `--disallow-code-generation-from-strings` and browser CSP.
+    // §19.2.1.1 PerformEval — evalRealm is the eval function's
+    // [[Realm]], not the caller's. For a cross-realm indirect eval
+    // (`otherRealm.eval(src)`) the active function object is
+    // otherRealm's %eval%, so the body's global lookups, top-level
+    // `var` / function bindings, ToObject wrapper prototypes, and
+    // intrinsics all resolve against that realm — see
+    // language/types/reference/{get,put}-value-prop-base-primitive-realm.js.
+    // The call dispatch records the dispatched callee's realm in
+    // `active_native_fn_realm` (§10.2.5); a same-realm eval leaves it
+    // == realm, so eval_realm is then just realm (no behaviour change).
+    const eval_realm = realm.active_native_fn_realm orelse realm;
+    if (!eval_realm.allow_eval) {
+        // §19.2.1.2 HostEnsureCanCompileStrings(evalRealm) — the host
+        // refuses code generation from strings (default SES posture).
+        // The thrown value is host-defined; Cynic raises EvalError,
+        // matching Node's `--disallow-code-generation-from-strings`
+        // and browser CSP.
         return throwEvalError(realm, eval_disabled_msg);
     }
     const s: *JSString = @ptrCast(@alignCast(arg.asString()));
-    return performIndirectEval(realm, s.flatBytes());
+    return performIndirectEval(eval_realm, s.flatBytes()) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => {
+            // The body ran in eval_realm, which carries any abrupt
+            // completion in its own pending slot; the call dispatcher
+            // consumes the *caller* realm's slot. Re-home it (the guard
+            // makes this a no-op for the common same-realm eval).
+            if (eval_realm != realm) {
+                if (eval_realm.pending_exception) |ex| {
+                    realm.pending_exception = ex;
+                    eval_realm.pending_exception = null;
+                }
+            }
+            return error.NativeThrew;
+        },
+    };
 }
 
 /// §19.2.1.1 — run `source` as indirect eval code (global scope) in

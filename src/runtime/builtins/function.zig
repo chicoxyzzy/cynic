@@ -726,7 +726,6 @@ fn variantConstructor(realm: *Realm, this_value: Value, args: []const Value, kin
 /// constructor's realm (cross-realm `new other.Function(...)`), tracked
 /// via `active_native_fn_realm`.
 fn createDynamicFunction(realm: *Realm, this_value: Value, args: []const Value, kind: DynamicFunctionKind) NativeError!Value {
-    _ = this_value;
     const ctor_realm = realm.active_native_fn_realm orelse realm;
 
     // §20.2.1.1.1 steps 8-16 — split args into parameter strings (all
@@ -785,6 +784,23 @@ fn createDynamicFunction(realm: *Realm, this_value: Value, args: []const Value, 
     const fn_obj = heap_mod.valueAsFunction(fn_val) orelse {
         return throwTypeError(realm, "Function constructor: synthesized source did not produce a function");
     };
+    // §20.2.1.1.1 step 22 — proto = ? GetPrototypeFromConstructor(
+    // newTarget, "%<kind>Function.prototype%"). On the construct path
+    // the caller (reflectConstruct / constructValue / `new`) pre-
+    // allocated `this_value` as the §10.1.14 OCFC instance whose
+    // [[Prototype]] is the realm-correct fallback —
+    // GetFunctionRealm(newTarget)'s, remapped for a cross-realm
+    // newTarget. evaluateEval just built the function in ctor_realm, so
+    // it carries ctor_realm's %<kind>Function.prototype%; adopt the
+    // resolved one so a cross-realm newTarget yields its realm's
+    // prototype (built-ins/{Generator,Async,AsyncGenerator}Function/
+    // proto-from-ctor-realm.js). Plain-call (`GeneratorFunction(...)`,
+    // this_value not an Object) keeps the ctor_realm default — same
+    // contract as the empty-`Function()` path above. Same-realm
+    // construct leaves it unchanged (the resolved proto IS ctor_realm's).
+    if (heap_mod.valueAsPlainObject(this_value)) |ocfc| {
+        fn_obj.proto = ocfc.prototype;
+    }
     // §20.2.1.1.1 step 28 — the function's name is "anonymous". The
     // `function anonymous` form already named it; nothing more to do.
     return heap_mod.taggedFunction(fn_obj);
