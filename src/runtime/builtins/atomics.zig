@@ -1,13 +1,22 @@
-//! §25.4 Atomics — single-agent.
+//! §25.4 Atomics.
 //!
-//! Cynic is single-agent-per-isolate, so the read-modify-write / load
-//! / store / compareExchange / isLockFree operations are ordinary
-//! sequential operations on the integer typed array's backing store
-//! (shared OR non-shared — Atomics is not restricted to shared
-//! buffers, except `wait`). `notify` always returns 0 (no other agent
-//! waits) and `wait` returns only `"not-equal"` / `"timed-out"`.
-//! Cross-agent `wait`/`notify` and the memory model are deferred —
-//! see `docs/sab-atomics.md`.
+//! The read-modify-write / load / store / compareExchange operations
+//! are real hardware-atomic ops (SeqCst) on the integer typed array's
+//! backing store — shared OR non-shared (Atomics is not restricted to
+//! shared buffers, except `wait` / `notify`). `wait` parks on the
+//! shared block's §25.4.11 wait list; `notify` wakes up to `count`
+//! parked agents and returns how many it woke. The wait is a
+//! bounded-sleep poll loop rather than a kernel futex because this Zig
+//! build's `std.Thread` no longer re-exports `Futex` — see the
+//! `Atomics.wait` poll loop.
+//!
+//! A default Cynic embedding is single-agent, so in practice there is
+//! no other agent to wake: `notify` returns 0 and `wait` only ever
+//! returns `"not-equal"` / `"timed-out"`. But the cross-agent substrate
+//! (the wait list + the SeqCst memory model) is real and is exercised
+//! by a host that runs several agents on their own threads sharing a
+//! SharedArrayBuffer (e.g. the test262 `$262.agent` harness). See
+//! `docs/sab-atomics.md`.
 
 const std = @import("std");
 
