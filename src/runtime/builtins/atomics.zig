@@ -11,6 +11,15 @@
 
 const std = @import("std");
 
+// §25.4 — wasm32/wasm64 (the freestanding playground target) has no
+// 64-bit atomic ops: `@atomicLoad` / `@atomicStore` / `@atomicRmw` /
+// `@cmpxchgStrong` on a 64-bit type fail to compile there. That target
+// is single-agent (no cross-thread SharedArrayBuffer), so a 64-bit op
+// has no concurrent observer and degrades to a plain non-atomic
+// load/store/rmw without changing observable behaviour. Every other
+// target keeps true atomics. Guards the four element-width helpers.
+const wide_atomics = !builtin.cpu.arch.isWasm();
+
 const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const NativeError = @import("../function.zig").NativeError;
@@ -223,7 +232,9 @@ fn elemPtrConst(comptime T: type, buf: []const u8, byte_pos: usize) *const T {
 }
 
 fn atomicLoadT(comptime T: type, buf: []const u8, byte_pos: usize) u64 {
-    return @atomicLoad(T, elemPtrConst(T, buf, byte_pos), .seq_cst);
+    const ptr = elemPtrConst(T, buf, byte_pos);
+    if (comptime @bitSizeOf(T) > 32 and !wide_atomics) return ptr.*;
+    return @atomicLoad(T, ptr, .seq_cst);
 }
 fn atomicLoadBits(buf: []const u8, size: u8, byte_pos: usize) u64 {
     return switch (size) {
@@ -236,7 +247,12 @@ fn atomicLoadBits(buf: []const u8, size: u8, byte_pos: usize) u64 {
 }
 
 fn atomicStoreT(comptime T: type, buf: []u8, byte_pos: usize, bits: u64) void {
-    @atomicStore(T, elemPtr(T, buf, byte_pos), @truncate(bits), .seq_cst);
+    const ptr = elemPtr(T, buf, byte_pos);
+    if (comptime @bitSizeOf(T) > 32 and !wide_atomics) {
+        ptr.* = @truncate(bits);
+        return;
+    }
+    @atomicStore(T, ptr, @truncate(bits), .seq_cst);
 }
 fn atomicStoreBits(buf: []u8, size: u8, byte_pos: usize, bits: u64) void {
     switch (size) {
@@ -249,7 +265,22 @@ fn atomicStoreBits(buf: []u8, size: u8, byte_pos: usize, bits: u64) void {
 }
 
 fn atomicRmwT(comptime T: type, comptime aop: std.builtin.AtomicRmwOp, buf: []u8, byte_pos: usize, arg: u64) u64 {
-    return @atomicRmw(T, elemPtr(T, buf, byte_pos), aop, @truncate(arg), .seq_cst);
+    const ptr = elemPtr(T, buf, byte_pos);
+    if (comptime @bitSizeOf(T) > 32 and !wide_atomics) {
+        const old = ptr.*;
+        const v: T = @truncate(arg);
+        ptr.* = switch (aop) {
+            .Add => old +% v,
+            .Sub => old -% v,
+            .And => old & v,
+            .Or => old | v,
+            .Xor => old ^ v,
+            .Xchg => v,
+            else => unreachable,
+        };
+        return old;
+    }
+    return @atomicRmw(T, ptr, aop, @truncate(arg), .seq_cst);
 }
 /// Atomic read-modify-write; returns the OLD bits zero-extended to u64.
 fn atomicRmwBits(buf: []u8, size: u8, byte_pos: usize, op: RmwOp, arg: u64) u64 {
@@ -275,8 +306,14 @@ fn atomicRmwBits(buf: []u8, size: u8, byte_pos: usize, op: RmwOp, arg: u64) u64 
 }
 
 fn atomicCasT(comptime T: type, buf: []u8, byte_pos: usize, expected: u64, replacement: u64) u64 {
+    const ptr = elemPtr(T, buf, byte_pos);
     const exp: T = @truncate(expected);
-    return @cmpxchgStrong(T, elemPtr(T, buf, byte_pos), exp, @truncate(replacement), .seq_cst, .seq_cst) orelse exp;
+    if (comptime @bitSizeOf(T) > 32 and !wide_atomics) {
+        const cur = ptr.*;
+        if (cur == exp) ptr.* = @truncate(replacement);
+        return cur;
+    }
+    return @cmpxchgStrong(T, ptr, exp, @truncate(replacement), .seq_cst, .seq_cst) orelse exp;
 }
 /// Atomic compare-and-swap; returns the OLD bits (always), like the
 /// spec's compareExchange. `@cmpxchgStrong` returns null when the swap
