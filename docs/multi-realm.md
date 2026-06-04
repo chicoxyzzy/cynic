@@ -809,7 +809,7 @@ Pre-plan survey, grounded in the actual code:
 | 3.1 | Phase 3 contract tests, gated | `src/runtime/realm_test.zig` | +4 (skipped pending 3.3) | Low — TDD pattern matched in Phase 0/1/2 |
 | 3.2 | Thread `realm` through `Heap.allocateFunction*` | `heap.zig` + `function.zig` + ~28 builtin/class/intrinsic/lantern files | 0 (mechanical) | Bootstrap edge: `Heap.allocateFunction` runs *during* `intrinsics.install` before `realm.heap.function_prototype` is set. Decision (b) below. |
 | 3.3 | Wire `RealmStack` + un-skip tests | `realm.zig` (RealmStack type), `lantern/call.zig`, `builtins/array.zig` (species §23.1.3.34), `builtins/error.zig` (classification §10.2.3) | +4 turn green | The "natives must read `callee.realm`, NOT `RealmStack.top()`" invariant — audit every existing native callback to confirm none consult a global current-realm accessor. |
-| 3.4 | Remove `proto-from-ctor-realm-*` skiplist; refresh score row | `tools/test262/skip.zig`, `test262-results.md` | +N test262 passes (≈40-80 by skiplist comment) | Negative Δ blocks; if any fixture regresses, file a pragmatist finding before unblocking. |
+| 3.4 | Remove `proto-from-ctor-realm-*` skiplist; refresh score row | `tools/test262/skip.zig`, `test262-results.md` | +N test262 passes (≈40-80 by skiplist comment) | Negative Δ blocks; if any fixture regresses, file a cross-engine differential finding before unblocking. |
 | 3.5 | Graduate `ShadowRealm` to default-on | `src/runtime/features.zig`, `src/runtime/builtins/shadow_realm.zig` | ShadowRealm fixtures move from gated phase to main phase | Low if 3.3 lands correctly. Recommended to land with Phase 3 since 3.3 is the natural enabling commit. |
 
 Total scope: ~5 commits, the largest (3.2) is purely
@@ -850,10 +850,10 @@ commit's design comment:
   spec-conformant; graduating it is the natural exit criterion,
   not a follow-up.
 
-#### Pragmatist re-audit triggers
+#### Cross-engine re-audit triggers
 
-The pragmatist MCP (sibling spec-auditing project; see local
-notes) is the right tool to validate cross-engine spec
+Cross-engine differential testing against a reference
+implementation is the right way to validate cross-engine spec
 behaviour when something looks off. Triggers during Phase 3:
 
 - **Negative test262 Δ in 3.4.** Any fixture that regresses
