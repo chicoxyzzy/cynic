@@ -43,9 +43,16 @@ fi
 echo "==> Building test262 harness (ReleaseFast)..." >&2
 zig build test262 -- --quiet --filter=__nonexistent_filter__ >/dev/null
 
-HARNESS_BIN="$(find .zig-cache -name 'test262' -type f -perm -u+x | head -1)"
-if [[ -z "${HARNESS_BIN:-}" ]]; then
-    echo "profile.sh: couldn't locate the test262 harness binary in .zig-cache" >&2
+# The build step above installs the ReleaseFast harness to
+# `zig-out/bin/cynic-test262` (the exe is named `cynic-test262`, not
+# `test262`). Prefer the installed path; fall back to the newest
+# matching binary in the build cache if the layout differs.
+HARNESS_BIN="zig-out/bin/cynic-test262"
+if [[ ! -x "${HARNESS_BIN}" ]]; then
+    HARNESS_BIN="$(find .zig-cache -name 'cynic-test262' -type f -perm -u+x -exec ls -t {} + 2>/dev/null | head -1)"
+fi
+if [[ -z "${HARNESS_BIN:-}" || ! -x "${HARNESS_BIN}" ]]; then
+    echo "profile.sh: couldn't locate the cynic-test262 harness binary (looked in zig-out/bin and .zig-cache)" >&2
     exit 1
 fi
 
