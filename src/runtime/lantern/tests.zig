@@ -6982,6 +6982,81 @@ test "later: GetPrototypeFromConstructor remaps default proto through a Proxy ne
     try testing.expectEqual(child_map_proto, lookup.proto);
 }
 
+test "later: cross-realm generator instance derives its prototype from the function's realm (§9.1.14)" {
+    // §15.6.2 EvaluateGeneratorBody → §10.1.13 OrdinaryCreateFromConstructor
+    // → §10.1.14 GetPrototypeFromConstructor step 4 — a generator function
+    // created in the child realm, with a non-object `prototype`, must produce
+    // instances whose [[Prototype]] is the *child* realm's %GeneratorPrototype%
+    // (GetFunctionRealm of the callee, §10.2.5), even when invoked while the
+    // parent realm is running. Mirrors
+    // language/expressions/generators/eval-body-proto-realm.js.
+    const call = @import("call.zig");
+    const heap_mod = @import("../heap.zig");
+    const intrinsics_mod = @import("../intrinsics.zig");
+    const generator_mod = @import("generator.zig");
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try installBuiltinsAllFeatures(&parent);
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // A generator function whose [[Realm]] is the child (created by an
+    // indirect eval that runs in the child).
+    const gfn_v = try intrinsics_mod.performIndirectEval(&child, "(function* () {})");
+    const gfn = heap_mod.valueAsFunction(gfn_v).?;
+    try testing.expectEqual(&child, gfn.realm.?);
+    // §10.1.14 step 4 fallback: make `Get(fn, "prototype")` a non-object.
+    try gfn.setWithFlags(testing.allocator, "prototype", Value.null_, .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
+
+    // Call it with the PARENT realm running.
+    const res = try call.callJSFunction(testing.allocator, &parent, gfn, Value.undefined_, &.{});
+    try testing.expect(res == .value);
+    const gen = heap_mod.valueAsPlainObject(res.value).?;
+    const child_gen_proto = try generator_mod.ensureGeneratorPrototype(&child);
+    try testing.expectEqual(child_gen_proto, gen.prototype.?);
+}
+
+test "later: cross-realm async generator instance derives its prototype from the function's realm (§9.1.14)" {
+    // §27.6.3.2 AsyncGeneratorStart — same §10.1.14 step-4 fallback as the
+    // sync generator above, resolving to the child realm's
+    // %AsyncGeneratorPrototype%. Mirrors
+    // language/expressions/async-generator/eval-body-proto-realm.js.
+    const call = @import("call.zig");
+    const heap_mod = @import("../heap.zig");
+    const intrinsics_mod = @import("../intrinsics.zig");
+    const generator_mod = @import("generator.zig");
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try installBuiltinsAllFeatures(&parent);
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const agfn_v = try intrinsics_mod.performIndirectEval(&child, "(async function* () {})");
+    const agfn = heap_mod.valueAsFunction(agfn_v).?;
+    try testing.expectEqual(&child, agfn.realm.?);
+    try agfn.setWithFlags(testing.allocator, "prototype", Value.null_, .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
+
+    const res = try call.callJSFunction(testing.allocator, &parent, agfn, Value.undefined_, &.{});
+    try testing.expect(res == .value);
+    const agen = heap_mod.valueAsPlainObject(res.value).?;
+    const child_agen_proto = try generator_mod.ensureAsyncGeneratorPrototype(&child);
+    try testing.expectEqual(child_agen_proto, agen.prototype.?);
+}
+
 test "later: Array [[Construct]] derives result proto from newTarget's realm" {
     // §22.1.1 Array(...) + §10.1.14 — `Reflect.construct(Array, args,
     // C)` where `C` is a cross-realm function with a non-object
