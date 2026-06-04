@@ -28,6 +28,7 @@ const SharedDataBlock = @import("../shared_data_block.zig").SharedDataBlock;
 /// timeout deadline. Matches the host's clock so the deadline the host
 /// polls against is the same scale.
 fn nowMonoMs() f64 {
+    if (builtin.os.tag == .freestanding) return 0;
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
     return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) / 1_000_000.0;

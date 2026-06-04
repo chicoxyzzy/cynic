@@ -233,7 +233,6 @@ test "multi-agent: Atomics.compareExchange serializes a shared counter" {
     try testing.expectEqual(@as(i32, N * iters), total);
 }
 
-
 // ── async `Atomics.waitAsync` across threads ─────────────────────────
 // Engine-level companions to the sync wait/notify test above. The sync
 // node blocks its thread; an async node has no blocking frame, so it
