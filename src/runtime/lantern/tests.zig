@@ -395,6 +395,21 @@ test "interpreter: JSON.stringify number uses ToString exponential form" {
     try expectScriptStringWithBuiltins("JSON.stringify([1e21, 0.1, 100]);", "[1e+21,0.1,100]");
 }
 
+test "interpreter: Array.from(string) iterates by code point (§22.1.5.1)" {
+    // §23.1.2.1 Array.from on a String uses the String iterator, which
+    // yields code POINTS (a supplementary char is one element), matching
+    // spread / for-of — not the underlying WTF-8 bytes or UTF-16 code
+    // units. The fast path previously sliced one byte per element, so an
+    // astral char (e.g. U+1D7D9, 𝟙) shattered into its 4 WTF-8 bytes.
+    try expectScriptStringWithBuiltins("Array.from('a\\u{1D7D9}b').join('|');", "a|\u{1D7D9}|b");
+    try expectScriptStringWithBuiltins("String(Array.from('a\\u{1D7D9}b').length);", "3");
+    // Emoji (also supplementary) — one element, with the index passed to
+    // mapfn being the code-point index, not the byte index.
+    try expectScriptStringWithBuiltins("Array.from('\\u{1F600}x', (c, i) => i).join(',');", "0,1");
+    // BMP + ASCII unaffected.
+    try expectScriptStringWithBuiltins("Array.from('héllo').length.toString();", "5");
+}
+
 test "interpreter: typeof returns spec strings" {
     try expectString("typeof 1;", "number");
     try expectString("typeof 1.5;", "number");

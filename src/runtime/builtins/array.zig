@@ -18,6 +18,7 @@ const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
 const lantern = @import("../lantern/interpreter.zig");
+const utf16 = @import("../utf16.zig");
 
 const installNativeMethod = intrinsics.installNativeMethod;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
@@ -1356,15 +1357,24 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     if (heap_mod.valueAsPlainObject(items) != null) {
         scope.push(items) catch return error.OutOfMemory;
     }
-    // String fast path — iterate characters.
+    // String fast path — the §22.1.5.1 String iterator yields code
+    // POINTS, so advance by WTF-8 sequence (a valid surrogate pair is
+    // stored as one 4-byte sequence, a lone surrogate as 3-byte CESU-8 —
+    // either way one sequence == one code point). Slicing one byte per
+    // element shattered any multi-byte code point (e.g. an astral char
+    // into its 4 bytes). Both the mapfn index and the output index are
+    // the code-point index, and the final length is the code-point count.
     if (items.isString()) {
         const s: *JSString = @ptrCast(@alignCast(items.asString()));
-        var i: usize = 0;
-        while (i < s.flatBytes().len) : (i += 1) {
-            const ch = realm.heap.allocateString(s.flatBytes()[i .. i + 1]) catch return error.OutOfMemory;
+        const bytes = s.flatBytes();
+        var i: usize = 0; // byte position
+        var cp_idx: usize = 0; // code-point (element) index
+        while (i < bytes.len) {
+            const end = @min(i + utf16.utf8SeqLen(bytes[i]), bytes.len);
+            const ch = realm.heap.allocateString(bytes[i..end]) catch return error.OutOfMemory;
             const elem: Value = blk: {
                 if (mapfn) |mf| {
-                    const cb_args = [_]Value{ Value.fromString(ch), numberFromI64(@intCast(i)) };
+                    const cb_args = [_]Value{ Value.fromString(ch), numberFromI64(@intCast(cp_idx)) };
 
                     const outcome = lantern.callJSFunction(realm.allocator, realm, mf, this_arg, &cb_args) catch return error.NativeThrew;
                     switch (outcome) {
@@ -1377,11 +1387,13 @@ fn arrayFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!
                 } else break :blk Value.fromString(ch);
             };
             var ibuf: [24]u8 = undefined;
-            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{cp_idx}) catch unreachable;
             const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             out.set(realm.allocator, idx_owned.flatBytes(), elem) catch return error.OutOfMemory;
+            i = end;
+            cp_idx += 1;
         }
-        setLength(realm, out, @intCast(s.flatBytes().len)) catch return error.OutOfMemory;
+        setLength(realm, out, @intCast(cp_idx)) catch return error.OutOfMemory;
         return heap_mod.taggedObject(out);
     }
 
