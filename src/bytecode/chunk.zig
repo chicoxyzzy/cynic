@@ -737,6 +737,27 @@ pub const Builder = struct {
         try self.emitU16(try self.allocCallIC());
     }
 
+    /// Emit `call_property` — the fused property-load + method-call
+    /// op. Reserves BOTH an IC slot (for the property lookup, same
+    /// table `lda_property` uses) AND a call-IC slot (for the loaded
+    /// callee, same table `call_method` uses). Encoding:
+    /// `[op] [k:u16] [r_recv:u8] [argc:u8] [ic_load:u16] [ic_call:u16]`.
+    /// Args live at `r_recv + 1.. r_recv + 1 + argc`.
+    pub fn emitCallProperty(
+        self: *Builder,
+        span: Span,
+        k: u16,
+        r_recv: u8,
+        argc: u8,
+    ) !void {
+        try self.emitOp(.call_property, span);
+        try self.emitU16(k);
+        try self.emitU8(r_recv);
+        try self.emitU8(argc);
+        try self.emitU16(try self.allocIC());
+        try self.emitU16(try self.allocCallIC());
+    }
+
     /// Append `v` to the constant pool, returning its index.
     /// Identical doubles, ints, etc. are not deduplicated — the
     /// optimizer (M5+) can do that. Keep simple here.

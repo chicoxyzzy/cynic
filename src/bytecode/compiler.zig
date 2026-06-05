@@ -3964,6 +3964,57 @@ pub const Compiler = struct {
         m: ast.expression.MemberExpr,
         emit_tail: bool,
     ) CompileError!void {
+        // Fused-emission gate: `obj.method(args)` where the property
+        // is a plain identifier, not a private name (`#x`), no
+        // optional chain on either side, and not in tail position.
+        // The qualifying shape compiles to one `call_property` op
+        // (8-byte operand) instead of the four-op
+        // `ldar + lda_property + star + call_method` sequence
+        // (15-byte operand) — saves 3 dispatches + 5 wire bytes per
+        // site. Every other shape (private, computed, optional,
+        // tail, super) falls through to the legacy emission below
+        // and behavior is unchanged.
+        const fused_ident: ?u16 = blk: {
+            if (emit_tail) break :blk null;
+            if (m.optional or c.optional) break :blk null;
+            switch (m.property) {
+                .ident => |span| {
+                    const key_slice = self.source[span.start..span.end];
+                    if (key_slice.len > 0 and key_slice[0] == '#') break :blk null;
+                    const decoded = try self.decodeIdentifierName(key_slice);
+                    break :blk try self.internString(decoded);
+                },
+                .computed => break :blk null,
+            }
+        };
+
+        if (fused_ident) |k| {
+            // Receiver into r_recv. Args contiguous from r_recv + 1
+            // — no intervening r_callee slot, since `call_property`
+            // loads the callee inline and never spills it to a
+            // register.
+            try self.compileExpression(m.object);
+            const r_recv = try self.reserveTemp();
+            try self.builder.emitOp(.star, c.span);
+            try self.builder.emitU8(r_recv);
+
+            var reserved: u8 = 0;
+            for (c.arguments) |*arg| {
+                try self.compileExpression(arg);
+                const r = try self.reserveTemp();
+                reserved += 1;
+                try self.builder.emitOp(.star, c.span);
+                try self.builder.emitU8(r);
+            }
+
+            try self.builder.emitCallProperty(c.span, k, r_recv, @intCast(c.arguments.len));
+
+            var j: u8 = 0;
+            while (j < reserved) : (j += 1) self.releaseTemp();
+            self.releaseTemp(); // r_recv
+            return;
+        }
+
         // Receiver into r_recv. `m.optional` flag (`a?.b`)
         // short-circuits to undefined when `a` is null/undefined.
         try self.compileExpression(m.object);
