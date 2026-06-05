@@ -526,6 +526,21 @@ pub const Heap = struct {
     /// sub-field cleanup goes through `JSObject.deinitFields`
     /// before the header returns to the pool.
     object_pool: std.heap.MemoryPool(JSObject) = .empty,
+    /// Slab pool for `Environment` headers. Every JS function call
+    /// that needs a binding env (params, locals) used to malloc a
+    /// fresh Environment struct from the general allocator. On a
+    /// 10M-iteration `class_instantiate.js` samply trace, those
+    /// `Heap.allocateEnvironment` calls into `Environment.init` were
+    /// the dominant remaining libsystem_malloc caller (~3 % of CPU)
+    /// once the JSObject pool had taken JSObject struct allocs out
+    /// of the hot path. Mirror the JSObject pool's MemoryPool slab:
+    /// O(1) acquire + release after warmup, no system-allocator
+    /// round-trip per call. The env's `slots: []Value` still goes
+    /// through the general allocator because slot counts vary per
+    /// function and a single-size pool won't cover the spread;
+    /// that's the next layer of cleanup if profiling shows it
+    /// still dominates after this lands.
+    env_pool: std.heap.MemoryPool(Environment) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{
@@ -609,10 +624,16 @@ pub const Heap = struct {
         self.realms.deinit(self.allocator);
         self.pending_realm_teardown.deinit(self.allocator);
         self.object_pool.deinit(self.allocator);
-        for (self.environments_young.items) |e| e.deinit(self.allocator);
-        for (self.environments_mature.items) |e| e.deinit(self.allocator);
+        // Free each environment's slot vector first (the only
+        // sub-field the env owns separately). The Environment
+        // header itself is slab-pooled — `env_pool.deinit` below
+        // reclaims every header in one shot, even partially-
+        // destroyed ones.
+        for (self.environments_young.items) |e| self.allocator.free(e.slots);
+        for (self.environments_mature.items) |e| self.allocator.free(e.slots);
         self.environments_young.deinit(self.allocator);
         self.environments_mature.deinit(self.allocator);
+        self.env_pool.deinit(self.allocator);
         for (self.generators_young.items) |g| g.deinit(self.allocator);
         for (self.generators_mature.items) |g| g.deinit(self.allocator);
         self.generators_young.deinit(self.allocator);
@@ -752,11 +773,23 @@ pub const Heap = struct {
     }
 
     /// Allocate a new `Environment` chained to `parent`, with
-    /// `slot_count` bindings initialised to the TDZ Hole.
+    /// `slot_count` bindings initialised to the TDZ Hole. Header
+    /// comes from the per-heap slab pool (O(1) after warmup);
+    /// the slot vector still goes through the general allocator.
     pub fn allocateEnvironment(self: *Heap, parent: ?*Environment, slot_count: u8) !*Environment {
-        const env = try Environment.init(self.allocator, parent, slot_count);
-        errdefer env.deinit(self.allocator);
-        env.mark_color = self.live_color;
+        const env = try self.env_pool.create(self.allocator);
+        errdefer self.env_pool.destroy(env);
+        const slots = try self.allocator.alloc(Value, slot_count);
+        errdefer self.allocator.free(slots);
+        // §13.3.1 TDZ — `let` / `const` reads before init throw.
+        // `var` / function-decl bindings are overwritten by their
+        // declaration with `undefined` / the function value.
+        @memset(slots, Value.hole_);
+        env.* = .{
+            .parent = parent,
+            .slots = slots,
+            .mark_color = self.live_color,
+        };
         try self.environments_young.append(self.allocator, env);
         self.allocs_since_gc +|= 1;
         return env;
@@ -1870,6 +1903,12 @@ pub const Heap = struct {
                     queueShadowRealmTeardown(entry, deinit_args[2], deinit_args[0]);
                     entry.deinitFields(deinit_args[0]);
                     deinit_args[1].destroy(entry);
+                } else if (comptime EntryT == Environment) {
+                    // Slab pool path for Environment — see
+                    // promoteYoungList for the matching logic.
+                    // `deinit_args` is `.{allocator, &heap.env_pool}`.
+                    deinit_args[0].free(entry.slots);
+                    deinit_args[1].destroy(entry);
                 } else {
                     @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
                 }
@@ -2054,14 +2093,14 @@ pub const Heap = struct {
         sweepList(&self.strings_mature, lc, ba);
         sweepList(&self.functions_mature, lc, sa);
         sweepList(&self.objects_mature, lc, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
-        sweepList(&self.environments_mature, lc, sa);
+        sweepList(&self.environments_mature, lc, .{ self.allocator, &self.env_pool });
         sweepList(&self.generators_mature, lc, sa);
         sweepList(&self.symbols_mature, lc, sa);
         sweepList(&self.bigints_mature, lc, sa);
         promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, ba);
         promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, sa);
         promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
-        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, sa);
+        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, .{ self.allocator, &self.env_pool });
         promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, sa);
         promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, sa);
         promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, sa);
@@ -2247,7 +2286,7 @@ pub const Heap = struct {
         promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, .{ self.allocator, self.bytes_allocator });
         promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, .{self.allocator});
         promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
-        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, .{self.allocator});
+        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, .{ self.allocator, &self.env_pool });
         promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, .{self.allocator});
         promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, .{self.allocator});
         promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, .{self.allocator});
@@ -2357,6 +2396,14 @@ pub const Heap = struct {
                     // unchanged for every other heap type.
                     queueShadowRealmTeardown(entry, deinit_args[2], deinit_args[0]);
                     entry.deinitFields(deinit_args[0]);
+                    deinit_args[1].destroy(entry);
+                } else if (comptime EntryT == Environment) {
+                    // Slab pool path for Environment headers —
+                    // free the variable-size slot vector through
+                    // the general allocator, then return the
+                    // fixed-size header to the env_pool free-list.
+                    // `deinit_args` is `.{allocator, &heap.env_pool}`.
+                    deinit_args[0].free(entry.slots);
                     deinit_args[1].destroy(entry);
                 } else {
                     @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
