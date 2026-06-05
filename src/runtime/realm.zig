@@ -48,42 +48,58 @@ pub const FeatureSet = features.FeatureSet;
 /// call. The pool keeps freed buffers in a per-size bin so a hot
 /// method loop pops the same buffer back out every iteration.
 ///
-/// Size key is `register_count` (u32 to cover both u8 and the
-/// `argc` path). Bin entries are owned `[]Value` slices freed
-/// individually at `realm.deinit`.
+/// Bins are direct-indexed by `register_count` (the array is grown
+/// lazily on first release of each size). That replaces the earlier
+/// `AutoHashMap(u32, …)` keyed on the count, whose `Wyhash(u32)` on
+/// every acquire + release showed up at ~6 % of `method_call.js`
+/// samples — a hot method loop hashed the same tiny integer twice
+/// per call. Direct indexing collapses that to one bounds check +
+/// one load. Empty bins are 16-byte `ArrayListUnmanaged` headers, so
+/// the memory overhead is bounded by the largest function's register
+/// count (~tens of KB even at pathological extremes).
+///
+/// Bin entries are owned `[]Value` slices freed individually at
+/// `realm.deinit`.
 pub const FramePool = struct {
-    bins: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged([]Value)) = .empty,
+    bins: std.ArrayListUnmanaged(std.ArrayListUnmanaged([]Value)) = .empty,
 
     /// Pop a register file of exactly `n` from the pool, or
     /// allocate a fresh one on miss. Caller is responsible for
     /// memset'ing to `undefined` before use — buffer contents
     /// are stale from the previous frame.
     pub fn acquire(self: *FramePool, allocator: std.mem.Allocator, n: usize) ![]Value {
-        if (self.bins.getPtr(@intCast(n))) |list| {
-            if (list.items.len > 0) return list.pop().?;
+        if (n < self.bins.items.len) {
+            const bin = &self.bins.items[n];
+            if (bin.items.len > 0) return bin.pop().?;
         }
         return try allocator.alloc(Value, n);
     }
 
     /// Return a register file to its size's bin. On allocation
-    /// failure (the bins map can't grow), fall back to freeing
-    /// the slice directly — pool growth is best-effort.
+    /// failure (the bins vector can't grow, or its inner list
+    /// can't append), fall back to freeing the slice directly —
+    /// pool growth is best-effort.
     pub fn release(self: *FramePool, allocator: std.mem.Allocator, regs: []Value) void {
-        const gop = self.bins.getOrPut(allocator, @intCast(regs.len)) catch {
-            allocator.free(regs);
-            return;
-        };
-        if (!gop.found_existing) gop.value_ptr.* = .empty;
-        gop.value_ptr.append(allocator, regs) catch {
+        const n = regs.len;
+        if (n >= self.bins.items.len) {
+            const new_len = n + 1;
+            self.bins.ensureTotalCapacity(allocator, new_len) catch {
+                allocator.free(regs);
+                return;
+            };
+            while (self.bins.items.len < new_len) {
+                self.bins.appendAssumeCapacity(.empty);
+            }
+        }
+        self.bins.items[n].append(allocator, regs) catch {
             allocator.free(regs);
         };
     }
 
     pub fn deinit(self: *FramePool, allocator: std.mem.Allocator) void {
-        var it = self.bins.iterator();
-        while (it.next()) |e| {
-            for (e.value_ptr.items) |buf| allocator.free(buf);
-            e.value_ptr.deinit(allocator);
+        for (self.bins.items) |*bin| {
+            for (bin.items) |buf| allocator.free(buf);
+            bin.deinit(allocator);
         }
         self.bins.deinit(allocator);
     }
@@ -1806,4 +1822,98 @@ test "Realm: deinit frees heap-allocated strings" {
     var realm = Realm.init(testing.allocator);
     _ = try realm.heap.allocateString("leakable");
     realm.deinit();
+}
+
+// FramePool — sized free-list of `[]Value` register files. The pool
+// fires on every JS-function call (acquire) and return (release), so
+// these tests pin the wire-level contract the interpreter relies on:
+//   * acquire(n) on a cold bin allocates a length-n slice;
+//   * release(s) followed by acquire(s.len) returns the same buffer
+//     (the LIFO that makes a hot method loop reuse one slice);
+//   * different sizes live in different bins;
+//   * deinit frees every buffer the pool is still holding.
+
+test "FramePool: acquire on cold pool allocates a length-n slice" {
+    var pool: FramePool = .{};
+    defer pool.deinit(testing.allocator);
+
+    const regs = try pool.acquire(testing.allocator, 4);
+    defer testing.allocator.free(regs);
+
+    try testing.expectEqual(@as(usize, 4), regs.len);
+}
+
+test "FramePool: release then acquire reuses the same buffer (LIFO)" {
+    var pool: FramePool = .{};
+    defer pool.deinit(testing.allocator);
+
+    const first = try pool.acquire(testing.allocator, 6);
+    const first_ptr = first.ptr;
+    pool.release(testing.allocator, first);
+
+    const reused = try pool.acquire(testing.allocator, 6);
+    defer testing.allocator.free(reused);
+    try testing.expectEqual(first_ptr, reused.ptr);
+    try testing.expectEqual(@as(usize, 6), reused.len);
+}
+
+test "FramePool: different sizes do not cross-pollinate bins" {
+    var pool: FramePool = .{};
+    defer pool.deinit(testing.allocator);
+
+    const a = try pool.acquire(testing.allocator, 3);
+    pool.release(testing.allocator, a);
+
+    // A request for a different size must not return the 3-slot buffer.
+    const b = try pool.acquire(testing.allocator, 5);
+    defer testing.allocator.free(b);
+    try testing.expectEqual(@as(usize, 5), b.len);
+    try testing.expect(b.ptr != a.ptr);
+
+    // The 3-slot buffer is still pooled — re-acquiring at 3 returns it.
+    const a2 = try pool.acquire(testing.allocator, 3);
+    defer testing.allocator.free(a2);
+    try testing.expectEqual(a.ptr, a2.ptr);
+}
+
+test "FramePool: LIFO ordering within a bin" {
+    var pool: FramePool = .{};
+    defer pool.deinit(testing.allocator);
+
+    const a = try pool.acquire(testing.allocator, 8);
+    const b = try pool.acquire(testing.allocator, 8);
+    // Distinct allocations even though same size.
+    try testing.expect(a.ptr != b.ptr);
+
+    pool.release(testing.allocator, a);
+    pool.release(testing.allocator, b);
+
+    // Last in, first out — b returned before a.
+    const got1 = try pool.acquire(testing.allocator, 8);
+    const got2 = try pool.acquire(testing.allocator, 8);
+    defer testing.allocator.free(got1);
+    defer testing.allocator.free(got2);
+    try testing.expectEqual(b.ptr, got1.ptr);
+    try testing.expectEqual(a.ptr, got2.ptr);
+}
+
+test "FramePool: deinit frees buffers still parked in any bin" {
+    // Leak detection runs through `testing.allocator`. If `deinit`
+    // misses any bin's parked slices, this test fails on shutdown.
+    var pool: FramePool = .{};
+    const sizes = [_]usize{ 1, 4, 4, 7, 32, 32, 64 };
+    for (sizes) |n| {
+        const buf = try pool.acquire(testing.allocator, n);
+        pool.release(testing.allocator, buf);
+    }
+    pool.deinit(testing.allocator);
+}
+
+test "FramePool: zero-length acquire round-trips" {
+    var pool: FramePool = .{};
+    defer pool.deinit(testing.allocator);
+
+    const empty = try pool.acquire(testing.allocator, 0);
+    try testing.expectEqual(@as(usize, 0), empty.len);
+    pool.release(testing.allocator, empty);
 }
