@@ -728,13 +728,23 @@ pub const Op = enum(u8) {
     /// `let` / `const` reads emit a follow-up `throw_if_hole`
     /// for §13.3.1 TDZ; that's how the global-env declarative
     /// vs property semantics is approximated.
+    ///
+    /// Wire: `[op] [k:u16] [ic:u16]`. The `ic` operand indexes
+    /// `Chunk.inline_caches`; a cell with `proto == null` and
+    /// `shape == gt.shape` caches an object-env slot on
+    /// `globalThis`. `proto_rev` is repurposed to record
+    /// `GlobalBindings.decl_revision` at fill time so a new
+    /// `let` / `const` / `class` declared at script scope
+    /// invalidates the cell (the lex binding shadows the
+    /// cached object-env slot per §9.1.1.4 lookup order).
     lda_global,
-    /// `[op] [k:u16]` — like `lda_global`, but produce
+    /// `[op] [k:u16] [ic:u16]` — like `lda_global`, but produce
     /// `undefined` instead of raising `ReferenceError` when the
     /// global isn't present. Used to compile `typeof Identifier`
     /// where `Identifier` isn't a known binding (§13.5.3 step 3:
     /// an unresolvable Reference yields the string "undefined"
-    /// rather than throwing).
+    /// rather than throwing). Shares the same IC cell shape and
+    /// invalidation contract as `lda_global`.
     lda_global_or_undef,
     /// `[op] [k:u16]` — store acc into the realm's globals map
     /// under the name held in `Chunk.constants[k]` (a `JSString`).
@@ -1148,8 +1158,6 @@ pub const Op = enum(u8) {
             .super_get,
             .lda_private,
             .private_in,
-            .lda_global,
-            .lda_global_or_undef,
             .sta_global,
             .sta_global_init,
             .sta_global_fn_decl,
@@ -1200,7 +1208,10 @@ pub const Op = enum(u8) {
             .loop_inc_lt => 4, // r_counter:u8 + r_bound:u8 + offset:i16
             .make_environment => 1, // slot_count:u8
             .lda_smi => 4, // i32 immediate
-            .lda_property => 4, // k:u16 + ic:u16 (inline-cache slot)
+            .lda_property,
+            .lda_global,
+            .lda_global_or_undef,
+            => 4, // k:u16 + ic:u16 (inline-cache slot)
             .lda_global_slot,
             .sta_global_slot,
             .sta_global_slot_init,
@@ -1384,6 +1395,14 @@ test "Op: operandSize agrees with the documented encoding" {
     // so unit-test failures stay hidden — playground/source-map
     // hover would be the user-visible signal).
     try testing.expectEqual(@as(u8, 4), Op.operandSize(.lda_property));
+    // `lda_global` and `lda_global_or_undef` carry an IC slot
+    // alongside the key constant index: `[op] [k:u16] [ic:u16]`,
+    // 4 bytes of operand. The IC turns a `decl_env.get` +
+    // `globalThis.lookupOwn` hash pair into a shape compare +
+    // slot load on the hot `Math` / `Object` / `Array` / `console`
+    // read sites.
+    try testing.expectEqual(@as(u8, 4), Op.operandSize(.lda_global));
+    try testing.expectEqual(@as(u8, 4), Op.operandSize(.lda_global_or_undef));
     // `call_property` is `[op] [k:u16] [r_recv:u8] [argc:u8]
     // [ic_load:u16] [ic_call:u16]` — 8 bytes of operand. Fuses the
     // `ldar + lda_property + star + call_method` 4-op sequence into

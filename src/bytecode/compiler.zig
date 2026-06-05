@@ -644,8 +644,7 @@ pub const Compiler = struct {
                 try self.builder.emitU32(binding.global_lex_slot);
             } else {
                 const k = try self.internString(binding.name);
-                try self.builder.emitOp(.lda_global, span);
-                try self.builder.emitU16(k);
+                try self.builder.emitLdaGlobal(span, k);
             }
         } else {
             const depth = self.env_depth - binding.env_depth;
@@ -1030,8 +1029,7 @@ pub const Compiler = struct {
         // Look up `RegExp` from globals at runtime; emit
         // `new RegExp(pattern, flags)` via the literal call path.
         const k_regexp = try self.internString("RegExp");
-        try self.builder.emitOp(.lda_global, span);
-        try self.builder.emitU16(k_regexp);
+        try self.builder.emitLdaGlobal(span, k_regexp);
         const r_ctor = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, span);
@@ -1291,8 +1289,7 @@ pub const Compiler = struct {
             try self.builder.emitOp(.iter_close, y.span);
             try self.builder.emitU8(r_iter);
             try self.builder.emitU8(0);
-            try self.builder.emitOp(.lda_global, y.span);
-            try self.builder.emitU16(k_type_error);
+            try self.builder.emitLdaGlobal(y.span, k_type_error);
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_callee);
             try self.builder.emitOp(.new_call, y.span);
@@ -1527,8 +1524,7 @@ pub const Compiler = struct {
         try self.builder.emitU8(r_iter);
         try self.builder.emitU8(0); // mode = normal
         // `new TypeError()` — lda_global TypeError → r_callee, new_call.
-        try self.builder.emitOp(.lda_global, y.span);
-        try self.builder.emitU16(k_type_error);
+        try self.builder.emitLdaGlobal(y.span, k_type_error);
         try self.builder.emitOp(.star, y.span);
         try self.builder.emitU8(r_callee);
         try self.builder.emitOp(.new_call, y.span);
@@ -4476,8 +4472,7 @@ pub const Compiler = struct {
         // Call Reflect.construct(callee, args). It allocates the
         // new instance and binds `this` correctly per §10.2.2.
         const k_reflect = try self.internString("Reflect");
-        try self.builder.emitOp(.lda_global, n.span);
-        try self.builder.emitU16(k_reflect);
+        try self.builder.emitLdaGlobal(n.span, k_reflect);
         const k_construct = try self.internString("construct");
         try self.builder.emitLdaProperty(n.span, k_construct);
         const r_construct = try self.reserveTemp();
@@ -4519,8 +4514,7 @@ pub const Compiler = struct {
             // `Realm.installBuiltins`. Resolution failure at
             // runtime raises a ReferenceError.
             const k = try self.internString(name);
-            try self.builder.emitOp(.lda_global, span);
-            try self.builder.emitU16(k);
+            try self.builder.emitLdaGlobal(span, k);
             return;
         };
         try self.emitLoadBinding(binding, span);
@@ -4838,8 +4832,7 @@ pub const Compiler = struct {
                     const k_ref_error = try self.internString("ReferenceError");
                     const r_callee = try self.reserveTemp();
                     defer self.releaseTemp();
-                    try self.builder.emitOp(.lda_global, u.span);
-                    try self.builder.emitU16(k_ref_error);
+                    try self.builder.emitLdaGlobal(u.span, k_ref_error);
                     try self.builder.emitOp(.star, u.span);
                     try self.builder.emitU8(r_callee);
                     try self.builder.emitOp(.new_call, u.span);
@@ -4917,8 +4910,7 @@ pub const Compiler = struct {
                 const scope = self.scope orelse return error.UnresolvedReference;
                 if (scope.resolve(name) == null and !std.mem.eql(u8, name, "undefined")) {
                     const k = try self.internString(name);
-                    try self.builder.emitOp(.lda_global_or_undef, span);
-                    try self.builder.emitU16(k);
+                    try self.builder.emitLdaGlobalOrUndef(span, k);
                     try self.builder.emitOp(.typeof_, u.span);
                     return;
                 }
@@ -8651,8 +8643,7 @@ pub const Compiler = struct {
     /// no message is uninformative.
     fn emitGlobalDeclThrow(self: *Compiler, name: []const u8, span: Span) CompileError!void {
         const k_type_error = try self.internString("TypeError");
-        try self.builder.emitOp(.lda_global, span);
-        try self.builder.emitU16(k_type_error);
+        try self.builder.emitLdaGlobal(span, k_type_error);
         const r_callee = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.star, span);

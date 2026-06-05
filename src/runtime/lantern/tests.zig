@@ -9903,3 +9903,93 @@ test "fused method-call: proto chain swap invalidates the IC" {
         \\first + second;
     , "AB");
 }
+
+// `lda_global` IC — bare-identifier reads that resolve through the
+// realm's global env. `globalThis` is one shape-stable object after
+// `intrinsics.install` runs (the SES freeze pass marks it
+// non-extensible), so a per-callsite `(gt_shape, slot)` cache turns
+// every `Object` / `Array` / `Math` / `console` lookup from a
+// `decl_env.get(key)` + `gt.lookupOwn(key)` hash pair into a shape
+// compare + slot load. The slow path still consults `decl_env` first
+// — `let X = …` at script scope MUST shadow a homonym builtin —
+// which is what `GlobalBindings.decl_revision` guards: any new lex
+// binding bumps the counter, every filled cell records it, the fast
+// path compares.
+
+test "lda_global IC: intrinsic builtin read (Math)" {
+    try expectScriptIntWithBuiltins(
+        \\let acc = 0;
+        \\for (let i = 0; i < 5; i++) acc += Math.abs(-1);
+        \\acc;
+    , 5);
+}
+
+test "lda_global IC: host-installed name (print is callable across iters)" {
+    // `print` is installed by `installBuiltinsAllFeatures` so the
+    // lookup must keep resolving it as the iterations re-execute
+    // the `lda_global "print"` site.
+    try expectScriptIntWithBuiltins(
+        \\let n = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\  if (typeof print === "function") n += 1;
+        \\}
+        \\n;
+    , 3);
+}
+
+test "lda_global_or_undef IC: typeof of an unbound name is \"undefined\"" {
+    // `typeof DefinitelyNotDeclared` compiles to `lda_global_or_undef`,
+    // which must surface `undefined` instead of ReferenceError both
+    // on cold (cell empty) and warm (cell filled to a real binding
+    // for a different key) callsites.
+    try expectScriptStringWithBuiltins(
+        \\let acc = "";
+        \\for (let i = 0; i < 3; i++) acc += typeof DefinitelyNotDeclared;
+        \\acc;
+    , "undefinedundefinedundefined");
+}
+
+test "lda_global IC: --unhardened — accessor on globalThis still fires its getter" {
+    // `Object.defineProperty(globalThis, …, { get })` installs an
+    // accessor on the global object. The IC must NOT take a data-
+    // slot fast path for accessors — the getter must run on every
+    // read, observably incrementing a counter held in a closure.
+    // Only sensible under `--unhardened`: the default SES posture
+    // freezes globalThis (`extensible = false`) so the define
+    // would itself throw before testing the IC.
+    try expectScriptIntUnhardened(
+        \\let calls = 0;
+        \\Object.defineProperty(globalThis, "g", { get() { calls++; return 1; } });
+        \\let acc = 0;
+        \\for (let i = 0; i < 5; i++) acc += g;
+        \\acc * 100 + calls;
+    , 5 * 100 + 5);
+}
+
+test "lda_global IC: --unhardened — adding a new global mid-loop invalidates the cache" {
+    // The first reads of `late` resolve via `lda_global_or_undef`
+    // (typeof) and surface "undefined"; halfway through, the
+    // script assigns `globalThis.late = 7`, which mutates
+    // `gt.shape`. A cell filled with the old shape (empty for
+    // this name) MUST miss the new shape and the slow path
+    // refills. If the cell served a stale "undefined" through the
+    // shape change, the second-half typeof would also surface
+    // "undefined" — wrong.
+    try expectScriptStringUnhardened(
+        \\let acc = "";
+        \\for (let i = 0; i < 4; i++) {
+        \\  if (i === 2) globalThis.late = 7;
+        \\  acc += typeof late;
+        \\}
+        \\acc;
+    , "undefinedundefinednumbernumber");
+}
+
+test "lda_global IC: ReferenceError on truly unbound name" {
+    try expectScriptStringWithBuiltins(
+        \\let msg = "no-throw";
+        \\try { totallyMissingBinding + 1; }
+        \\catch (e) { msg = e.constructor.name; }
+        \\msg;
+    , "ReferenceError");
+}

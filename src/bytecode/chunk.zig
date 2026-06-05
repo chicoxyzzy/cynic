@@ -700,6 +700,27 @@ pub const Builder = struct {
         try self.emitU16(try self.allocIC());
     }
 
+    /// Emit `lda_global` plus its key constant index and a freshly
+    /// allocated IC slot. Encoding: `[op] [k:u16] [ic:u16]`. The IC
+    /// caches `(globalThis_shape, slot, decl_revision)` so repeated
+    /// `Math` / `Object` / `Array` / `print` reads collapse from a
+    /// `decl_env.get` + `globalThis.lookupOwn` hash pair to a shape
+    /// compare + slot load.
+    pub fn emitLdaGlobal(self: *Builder, span: Span, k: u16) !void {
+        try self.emitOp(.lda_global, span);
+        try self.emitU16(k);
+        try self.emitU16(try self.allocIC());
+    }
+
+    /// Emit `lda_global_or_undef` plus its key constant index and a
+    /// freshly allocated IC slot. Same cache shape as
+    /// `lda_global` — the miss path is the only difference.
+    pub fn emitLdaGlobalOrUndef(self: *Builder, span: Span, k: u16) !void {
+        try self.emitOp(.lda_global_or_undef, span);
+        try self.emitU16(k);
+        try self.emitU16(try self.allocIC());
+    }
+
     /// Emit `sta_property` plus its key constant index, receiver
     /// register, and a freshly allocated IC slot. Encoding:
     /// `[op] [k:u16] [r_obj:u8] [ic:u16]`.
