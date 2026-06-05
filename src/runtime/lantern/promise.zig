@@ -568,6 +568,17 @@ fn runThenableJob(
     realm.heap.setBoundTarget(reject_fn, reject_impl);
     realm.heap.setBoundThis(reject_fn, outer_promise);
 
+    // §27.2.2.2 NewPromiseResolveThenableJob creates a FRESH pair of
+    // resolving functions (CreateResolvingFunctions) with their own
+    // [[AlreadyResolved]] = false. Cynic models [[AlreadyResolved]] as a
+    // single promise-level flag, which the ORIGINAL resolve function
+    // already set true before enqueuing this job — so without resetting
+    // it the job's resolve(v) would no-op and the promise would never
+    // settle. The original pair has already fired; the job's pair (these
+    // trampolines) gets the clean slate the spec mandates. The
+    // exception-after-resolve guard below re-reads the flag, which the
+    // job's resolve sets true again if the thenable resolved first.
+    outer_obj.promise_already_resolved = false;
     const args = [_]Value{ heap_mod.taggedFunction(resolve_fn), heap_mod.taggedFunction(reject_fn) };
     const outcome = callJSFunction(allocator, realm, then_fn, thenable, &args) catch |err| switch (err) {
         else => return err,

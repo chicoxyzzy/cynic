@@ -3214,6 +3214,33 @@ test "later: await using awaits sync Symbol.asyncDispose at block exit" {
     , "body,a-async,after");
 }
 
+test "later: Promise.resolve(thenable) settles via the thenable's resolve (§27.2.2.2)" {
+    // §27.2.2.2 NewPromiseResolveThenableJob creates a FRESH resolving-
+    // functions pair (its own [[AlreadyResolved]] = false), so a thenable
+    // calling resolve(v) settles the adopting promise and its .then fires.
+    // Cynic's single promise-level already-resolved flag — set when
+    // Promise.resolve first saw the thenable — wrongly suppressed the
+    // job's resolve, so the reaction never ran.
+    try expectScriptStringWithBuiltins(
+        \\let result = "never-ran";
+        \\const thenable = { then(res) { res(42); } };
+        \\Promise.resolve(thenable).then(v => { result = "got:" + v; });
+        \\globalThis.__drainMicrotasks();
+        \\result;
+    , "got:42");
+    // §27.2.1.3 — a throw AFTER resolve() in the thenable's `then` must NOT
+    // reject (resolve already won); the reaction still fires with the
+    // eventually-adopted value. Guards the fix's reset of the flag.
+    try expectScriptStringWithBuiltins(
+        \\let out = "?";
+        \\const inner = { then(res) { res(7); } };
+        \\const outer = { then(res) { res(inner); throw new Error("ignored"); } };
+        \\Promise.resolve(outer).then(v => { out = "ok:" + v; }, e => { out = "rejected"; });
+        \\globalThis.__drainMicrotasks();
+        \\out;
+    , "ok:7");
+}
+
 test "later: await using disposes in LIFO across sync + async hints" {
     try expectScriptStringWithBuiltins(
         \\const log = [];
