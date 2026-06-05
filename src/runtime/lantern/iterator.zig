@@ -300,6 +300,9 @@ pub fn openForInIterator(
         while (fit.next()) |entry| {
             const key = entry.key_ptr.*;
             if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+            // §14.7.5.9 EnumerateObjectProperties — String keys only; skip
+            // the flattened Symbol keys (`@@<name>` / `<sym:N>`).
+            if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) continue;
             if (!fn_obj.flagsForOwn(key).enumerable) continue;
             const gop = seen.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
             if (gop.found_existing) continue;
@@ -511,6 +514,8 @@ pub fn openForInIterator(
             defer emitted_str.deinit(realm.allocator);
             for (cur.own_key_order.items) |key| {
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                // §14.7.5.9 — String keys only; skip flattened Symbols.
+                if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) continue;
                 // Liveness: skip if neither map carries the key
                 // anymore (a delete path could leave a phantom entry).
                 if (!cur.ownDataContains(key) and !cur.hasAccessor(key)) continue;
@@ -533,6 +538,8 @@ pub fn openForInIterator(
             while (it.next()) |entry| {
                 const key = entry.key_ptr.*;
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                // §14.7.5.9 — String keys only; skip flattened Symbols.
+                if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) continue;
                 if (emitted_str.contains(key)) continue;
                 if (!cur.flagsFor(key).enumerable) {
                     shadow_only.append(realm.allocator, key) catch return error.OutOfMemory;
@@ -549,6 +556,8 @@ pub fn openForInIterator(
                 while (ait.next()) |entry| {
                     const key = entry.key_ptr.*;
                     if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+                    // §14.7.5.9 — String keys only; skip flattened Symbols.
+                    if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) continue;
                     if (emitted_str.contains(key)) continue;
                     if (cur.ownDataContains(key)) continue;
                     if (!cur.flagsFor(key).enumerable) {

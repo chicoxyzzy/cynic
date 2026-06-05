@@ -410,6 +410,26 @@ test "interpreter: Array.from(string) iterates by code point (§22.1.5.1)" {
     try expectScriptStringWithBuiltins("Array.from('héllo').length.toString();", "5");
 }
 
+test "interpreter: for-in does not enumerate Symbol-keyed properties (§14.7.5.9)" {
+    // EnumerateObjectProperties yields only String property keys —
+    // Symbols are never enumerated, own or inherited. Cynic flattens
+    // symbol keys to internal `@@<name>` / `<sym:N>` strings; the for-in
+    // collector must skip them (Object.keys already did, so for-in
+    // diverging from Object.keys was the symptom).
+    try expectScriptStringWithBuiltins(
+        \\var o = { a: 1, b: 2 };
+        \\o[Symbol('s')] = 3; o[Symbol.iterator] = 4;
+        \\var k = []; for (var p in o) k.push(p); k.join(',');
+    , "a,b");
+    // An enumerable Symbol on the prototype chain is also skipped, while
+    // an inherited String key is still surfaced.
+    try expectScriptStringWithBuiltins(
+        \\var proto = {}; proto[Symbol('p')] = 1; proto.inherited = 2;
+        \\var o = Object.create(proto); o.own = 3;
+        \\var k = []; for (var p in o) k.push(p); k.sort().join(',');
+    , "inherited,own");
+}
+
 test "interpreter: typeof returns spec strings" {
     try expectString("typeof 1;", "number");
     try expectString("typeof 1.5;", "number");
