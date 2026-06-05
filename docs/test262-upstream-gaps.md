@@ -615,3 +615,72 @@ the corpus under the relevant section's directory before adding.
   adoption broadly, but no fixture distinguishes the engine-specific
   shared-`[[AlreadyResolved]]` regression where the reaction silently
   never runs.
+### `Number.prototype.toString(radix)` truncated the fraction for radix ≠ 10
+
+- **Fixed in:** `8f99024`
+- **Spec:** §21.1.3.6 Number.prototype.toString → §6.1.6.1.20
+  Number::toString step 6 — for radix `r ≠ 10`, the result is the
+  String representation of `x` in radix `r` at implementation-defined
+  precision (every production engine + engine262 use V8's
+  DoubleToRadixCString shortest-round-trip expansion).
+- **Reproducer:**
+  ```js
+  (255.5).toString(16);   // expected "ff.8"
+  (0.5).toString(2);      // expected "0.1"
+  (5.75).toString(2);     // expected "101.11"
+  (-10.5).toString(2);    // expected "-1010.1"
+  (0.1).toString(3);      // expected "0.0022002200220022002200220022002201"
+  ```
+- **Before fix:** the non-decimal path handled only integer-valued `x`;
+  any non-integer with `radix ≠ 10` fell through to a base-10
+  `std.fmt` print, so `(255.5).toString(16)` returned the *decimal*
+  string `"255.5"` instead of `"ff.8"`. The fraction was never expanded
+  in the requested radix.
+- **After fix:** ports the V8 algorithm — emit fraction digits under a
+  half-ULP `delta` bound (round-to-even with carry-over into the integer
+  part), so the output round-trips and agrees digit-for-digit with
+  engine262 / V8 / JSC / SpiderMonkey / Hermes / QuickJS.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/Number/prototype/toString/`, no `features:` tag. The
+  existing `toString` fixtures (`S15.7.4.2_A2_T*`) only exercise
+  integer-valued receivers in non-decimal radixes; none passes a
+  non-integer to `toString(<radix ≠ 10>)`, so the whole fractional
+  branch is uncovered. A fixture asserting a handful of exact
+  expansions (e.g. `(255.5).toString(16) === "ff.8"`,
+  `(5.75).toString(2) === "101.11"`) would catch an engine that
+  truncates or mis-rounds the fraction.
+
+### `String.prototype.split("")` split by storage byte, not UTF-16 code unit
+
+- **Fixed in:** `8efcfd9`
+- **Spec:** §22.1.3.23 String.prototype.split — with an empty separator,
+  SplitMatch never matches, so each element is the substring spanning a
+  single UTF-16 code unit (§6.1.4 String type). A supplementary
+  character is two code units and splits into its lead + trail
+  surrogate halves.
+- **Reproducer:**
+  ```js
+  // U+1D7D9 is one code point = two UTF-16 code units (D835 DFD9)
+  var p = "a\u{1D7D9}b".split("");
+  p.length;                 // expected 4  → ["a", "\uD835", "\uDFD9", "b"]
+  p[1].charCodeAt(0);       // expected 0xD835 (lead surrogate)
+  p[2].charCodeAt(0);       // expected 0xDFD9 (trail surrogate)
+  ```
+- **Before fix:** Cynic stores Strings as WTF-8; the empty-separator
+  path iterated the raw storage bytes, so a 4-byte character produced
+  *four* one-byte fragments (each an ill-formed WTF-8 piece rendering as
+  a replacement char) — `p.length === 6` for the input above.
+- **After fix:** iterates UTF-16 code units via `utf16.codeUnitAt` /
+  `appendCodeUnitAsWtf8`, yielding one element per code unit (lead/trail
+  surrogates for supplementary characters); `limit` still caps by code
+  unit.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/String/prototype/split/`, no `features:` tag. The existing
+  empty-separator fixtures
+  (`separator-empty-string-instance-is-string.js`,
+  `call-split-instance-is-string-one-two-three.js`, …) all use ASCII
+  receivers; none contains a supplementary character, so the
+  byte-vs-code-unit distinction is untested. A fixture splitting a
+  string with an astral code point on `""` and asserting the surrogate
+  halves via `charCodeAt` would catch any engine whose internal
+  encoding leaks through `split("")`.
