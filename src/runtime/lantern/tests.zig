@@ -10502,6 +10502,119 @@ test "sta_property transition IC: setPrototypeOf mid-loop invalidates" {
     , 15);
 }
 
+// Parameter-to-register optimization — when no inner closure
+// captures a param, no `arguments` reference, no `eval`, and all
+// params are plain identifiers (no destructuring / no defaults),
+// the params stay in their caller-supplied registers and the
+// function-entry `MakeEnvironment` is elided. Tests pin the
+// observable behavior that must survive the optimization.
+
+test "param-register: simple ctor reads params correctly" {
+    try expectScriptIntWithBuiltins(
+        \\class Point { constructor(x, y) { this.x = x; this.y = y; } }
+        \\const p = new Point(7, 9);
+        \\p.x + p.y;
+    , 16);
+}
+
+test "param-register: recursive function reads its param each call" {
+    try expectScriptIntWithBuiltins(
+        \\function fact(n) { return n < 2 ? 1 : n * fact(n - 1); }
+        \\fact(6);
+    , 720);
+}
+
+test "param-register: param reassignment is visible to subsequent reads" {
+    try expectScriptIntWithBuiltins(
+        \\function f(x) { x = x + 10; return x + 1; }
+        \\f(5);
+    , 16);
+}
+
+test "param-register: closure capturing a param forces env (param still readable)" {
+    // The inner arrow captures `x`. The optimization must NOT
+    // promote `x` to a register-only binding — the closure would
+    // see a stale or wrong value. Verify the closure observes the
+    // current `x` after the outer reassigns it.
+    try expectScriptIntWithBuiltins(
+        \\function f(x) {
+        \\  const get = () => x;
+        \\  x = 42;
+        \\  return get();
+        \\}
+        \\f(1);
+    , 42);
+}
+
+test "param-register: closure-captured param survives outer return" {
+    // Classic counter pattern — the captured `n` must live in an
+    // env reachable from the returned closure.
+    try expectScriptIntWithBuiltins(
+        \\function makeAdder(n) { return (k) => n + k; }
+        \\const add3 = makeAdder(3);
+        \\add3(4) + add3(5);
+    , 15);
+}
+
+test "param-register: `arguments` references force env (binding works)" {
+    try expectScriptIntWithBuiltins(
+        \\function sum(a, b, c) {
+        \\  let total = 0;
+        \\  for (let i = 0; i < arguments.length; i++) total += arguments[i];
+        \\  return total;
+        \\}
+        \\sum(1, 2, 3, 4);
+    , 10);
+}
+
+test "param-register: default param expression initialises when missing" {
+    try expectScriptIntWithBuiltins(
+        \\function f(x, y = x + 10) { return x + y; }
+        \\f(3);
+    , 16);
+}
+
+test "param-register: destructuring param works" {
+    try expectScriptIntWithBuiltins(
+        \\function f({ a, b }) { return a * 10 + b; }
+        \\f({ a: 4, b: 7 });
+    , 47);
+}
+
+test "param-register: rest param collects trailing args" {
+    try expectScriptIntWithBuiltins(
+        \\function f(a, ...rest) {
+        \\  let s = a;
+        \\  for (let r of rest) s += r;
+        \\  return s;
+        \\}
+        \\f(1, 2, 3, 4);
+    , 10);
+}
+
+test "param-register: nested function decl references outer param" {
+    // Outer's `x` is captured by the nested function decl. Must
+    // force env on the outer.
+    try expectScriptIntWithBuiltins(
+        \\function outer(x) {
+        \\  function inner() { return x + 1; }
+        \\  return inner();
+        \\}
+        \\outer(41);
+    , 42);
+}
+
+test "param-register: tight recursion preserves param across many calls" {
+    // Stress the recursion path that benefits most. This is the
+    // tail_recursion.js shape — `sum(n, acc)` reads both params
+    // every call and passes them onward.
+    try expectScriptIntWithBuiltins(
+        \\'use strict';
+        \\function sum(n, acc) { return n === 0 ? acc : sum(n - 1, acc + 1); }
+        \\sum(500, 0);
+    , 500);
+}
+
 test "sta_property transition IC: polymorphic receivers fall back cleanly" {
     // Same `this.k = v` call site reached from two different
     // ctors. Each ctor writes a different key first, so the

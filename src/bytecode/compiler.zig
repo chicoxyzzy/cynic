@@ -71,6 +71,8 @@ const paramsReferenceArguments = arguments_scan.paramsReferenceArguments;
 
 const function_scope_scan = @import("function_scope_scan.zig");
 const functionEntryEnvNeeded = function_scope_scan.functionEntryEnvNeeded;
+const param_register_scan = @import("param_register_scan.zig");
+const paramsCanBeRegisters = param_register_scan.paramsCanBeRegisters;
 
 pub const CompileError = error{
     OutOfMemory,
@@ -195,6 +197,18 @@ pub const Compiler = struct {
     /// resume frame would dangle), so the PTC guard reads this
     /// to suppress `tail_call` emission.
     current_is_generator: bool = false,
+    /// Set by `compileFunctionTemplateExtNamed` when
+    /// `paramsCanBeRegisters` says every param can stay in its
+    /// caller-supplied register. Read by `declareParam` (marks
+    /// the binding `is_register = true` so reads/writes emit
+    /// `Ldar` / `Star` instead of `LdaEnv` / `StaEnv`) and by
+    /// `emitParamPrologue` (skips the `ldar r{i}; sta_env`
+    /// copy — the param's value is already in r{i}). When the
+    /// optimisation is in effect, `functionEntryEnvNeeded` also
+    /// sees an effectively-empty param list and elides the
+    /// `MakeEnvironment` entirely if the body has no other
+    /// env-needing bindings.
+    current_params_register_only: bool = false,
     /// §15.10.1 IsInTailPosition. True at the moment a call-
     /// emission site is about to compile a syntactic tail-position
     /// CallExpression: the expression of a ReturnStatement, the
@@ -466,7 +480,12 @@ pub const Compiler = struct {
         const slot = try self.declareBinding(name, .let_, span);
         const scope = self.scope orelse return slot;
         // The binding we just added is the last entry on the
-        // active scope's list — flip its `is_param` flag.
+        // active scope's list — flip its `is_param` flag. The
+        // register-only promotion happens in `emitParamPrologue`
+        // (which knows `i`, the param's caller-supplied register
+        // index) and the final `env_slot_count` unwind happens
+        // once after the whole param loop in
+        // `compileFunctionTemplateExtNamed`.
         var bindings = &scope.bindings;
         if (bindings.items.len > 0) {
             const last = &bindings.items[bindings.items.len - 1];
@@ -10020,6 +10039,34 @@ pub const Compiler = struct {
             // §12.7 — bind by StringValue.
             const param_name = try self.bindingName(sp.target.identifier.span);
             const slot = try self.declareParam(param_name, sp.span);
+            // Param-to-register fast path: the calling convention
+            // already places the value in `callee_regs[i]`; the
+            // binding's reads / writes emit `Ldar r{i}` / `Star
+            // r{i}` directly via `is_register`. Skip the per-call
+            // `Ldar + StaEnv` copy that the env path needs to seed
+            // env slot {i}. `paramsCanBeRegisters` already rejected
+            // defaults + destructuring, so the single-identifier
+            // branch is the only one this hot path reaches.
+            if (self.current_params_register_only) {
+                // Mark the just-declared binding with the
+                // matching caller-register index. `i` is the
+                // param's position in the parameter list AND its
+                // register slot in the callee_regs layout.
+                if (self.scope) |scope| {
+                    var bindings = &scope.bindings;
+                    if (bindings.items.len > 0) {
+                        const last = &bindings.items[bindings.items.len - 1];
+                        if (std.mem.eql(u8, last.name, param_name)) {
+                            last.is_register = true;
+                            last.register = i;
+                        }
+                    }
+                }
+                if (i + 1 > self.builder.register_count) {
+                    self.builder.register_count = i + 1;
+                }
+                return;
+            }
             // Load the caller-supplied register into acc.
             try self.builder.emitOp(.ldar, sp.span);
             try self.builder.emitU8(i);
@@ -12792,7 +12839,25 @@ fn compileFunctionTemplateExtNamed(
         .block => |stmts| stmts,
         .expression => null,
     };
-    const needs_entry_env = functionEntryEnvNeeded(self.source, params, body_stmts, is_arrow);
+    // Parameter-to-register pre-check. When every param can
+    // stay in its caller-supplied register, hide them from
+    // `functionEntryEnvNeeded` so the env is elided when the
+    // body has no other env-needing bindings; the body's reads
+    // emit `Ldar r{i}` directly. See `param_register_scan.zig`.
+    const params_register_only = paramsCanBeRegisters(
+        self.source,
+        params,
+        body_stmts,
+        is_arrow,
+        is_generator,
+        is_async,
+    );
+    const needs_entry_env = functionEntryEnvNeeded(
+        self.source,
+        if (params_register_only) &.{} else params,
+        body_stmts,
+        is_arrow,
+    );
     self.env_depth = saved_env_depth +
         (if (has_fn_name_env) @as(u8, 1) else @as(u8, 0)) +
         (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
@@ -12800,6 +12865,8 @@ fn compileFunctionTemplateExtNamed(
     self.completion_reg = null;
     self.current_is_async = is_async;
     self.current_is_generator = is_generator;
+    const saved_params_register_only = self.current_params_register_only;
+    self.current_params_register_only = params_register_only;
 
     var inner_finished = false;
     defer {
@@ -12817,6 +12884,7 @@ fn compileFunctionTemplateExtNamed(
             self.completion_reg = saved_completion_reg;
             self.current_is_async = saved_is_async;
             self.current_is_generator = saved_is_generator;
+            self.current_params_register_only = saved_params_register_only;
             self.in_tail_position = saved_in_tail_position;
             self.try_with_handler_depth = saved_try_with_handler_depth;
             self.pending_labels = saved_pending_labels;
@@ -12892,7 +12960,28 @@ fn compileFunctionTemplateExtNamed(
             .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
         }
     }
-    self.temps_in_use = saved_prologue_temps;
+    // Param-to-register path KEEPS the prologue reservation through
+    // the body — those registers ARE the param bindings; body temps
+    // must not overwrite them. The env path is free to restore (the
+    // values now live in env slots; the registers were just
+    // scratch). Without this, a recursive `function f(n, acc) {
+    // return f(n - 1, acc + 1) }` body would compile its arg-staging
+    // `star r0`/`star r1` over the live param values and recurse
+    // infinitely with the same arguments — observed as SIGKILL on a
+    // tight recursive test.
+    //
+    // Also unwind the env_slot_count `declareBinding` bumped for
+    // each param. The env was elided (`needs_entry_env` saw an
+    // empty param list), so the bumped slot indices are dead. A
+    // body-local lex binding declared later (if `paramsCanBeRegisters`
+    // unexpectedly mixed paths — it shouldn't today, but the
+    // unwind keeps the indices honest) would otherwise leak the
+    // dead reservation into env-slot land.
+    if (!params_register_only) {
+        self.temps_in_use = saved_prologue_temps;
+    } else {
+        self.env_slot_count = 0;
+    }
 
     // §27.5 / §27.6 — param init has run; suspend so the
     // wrapper can be handed back. Body resumes on first
@@ -12956,6 +13045,7 @@ fn compileFunctionTemplateExtNamed(
     self.completion_reg = saved_completion_reg;
     self.current_is_async = saved_is_async;
     self.current_is_generator = saved_is_generator;
+    self.current_params_register_only = saved_params_register_only;
     self.in_tail_position = saved_in_tail_position;
     self.try_with_handler_depth = saved_try_with_handler_depth;
     self.pending_labels = saved_pending_labels;
