@@ -118,7 +118,7 @@ All on `origin/main`:
   yields a vetted `JSFunction*`, mirroring `call_method`'s shape;
   the class-constructor TypeError check lives inside the blk so
   the IC never caches a class-ctor callee.
-- `<this-commit>` — `new_call` IC. Extends `CallICCell` with a
+- `90b6f5b` — `new_call` IC. Extends `CallICCell` with a
   `proto: ?*JSObject` slot to cache the
   `(constructor, resolved-prototype)` pair so each iteration of
   a hot `new C(…)` loop skips both the `valueAsFunction` decode
@@ -197,7 +197,7 @@ Stack-ranked by expected impact, biggest first.
 
 ### Tier 1 — drained
 
-Tier 1 is empty as of `<this-commit>` — the proto-load read IC,
+Tier 1 is empty as of `90b6f5b` — the proto-load read IC,
 own/write IC, `call_method` IC, fused `call_property`, global IC,
 free-function `call` IC, and `new_call` IC are all on `main`. The
 hot interpreter dispatch paths are IC-covered; future wins shift to
