@@ -204,21 +204,34 @@ hot interpreter dispatch paths are IC-covered; future wins shift to
 Tier 2 / 3 below or to non-IC axes (leaf-call register-file
 inlining, threaded dispatch).
 
-The first non-IC axis landed in `2675a82` — `realm.value_stack`,
-a bump-allocated register-file stack that the `.call_method`
-handler tries first for non-generator, non-async JS callees. On
-a 30M-call `method_call.js` samply trace the FramePool share
-dropped from 8.4 % to a much smaller fraction (the path now
-acquires from a pointer-bump instead of a hash-map-by-size),
-and `cynic-bench --runs=30` showed `method_call` p50 -6.8 %
-plus 3-11 % wins on `promise_chain`, `tail_recursion`,
-`json_stringify`, `array_iter`, `object_alloc`, and
-`string_concat`. The scope is intentionally narrow — only
-`.call_method`'s plain JS callee converts — so `.call`,
-`.new_call`, `.tail_call`, and the various `callJSFunction`
-re-entries still use `frame_pool` and a follow-up can widen
-the conversion site-by-site once the contract has been
-exercised in the wild.
+The first non-IC axis landed across two commits — `realm.value_stack`,
+a bump-allocated register-file stack that frame-push sites try
+first for non-generator, non-async JS callees. Fall through to
+`frame_pool` on overflow keeps the contract simple. Generators,
+async functions, and tail-call register-file reallocations stay
+on the pool because their register-file lifetime crosses the
+LIFO discipline.
+
+  • `2675a82` — MVP: `.call_method`'s plain JS callee. On a
+    30M-call `method_call.js` samply trace the FramePool share
+    dropped from 8.4 % to a much smaller fraction (the path now
+    acquires via a pointer-bump instead of a hash-map-by-size).
+    `cynic-bench --runs=30` showed `method_call` p50 -6.8 % plus
+    3-11 % wins on `promise_chain`, `tail_recursion`,
+    `json_stringify`, `array_iter`, `object_alloc`, and
+    `string_concat`.
+  • `8e8480a` — widening: `.call`, `.call_property`, `.new_call`
+    (both the IC fast path and the slow-path JS-callee
+    fall-through), `callJSFunction`, `callJSFunctionAsSuper`,
+    `constructValue` all converted to the same template. Every
+    bench fixture improved another 1.8-8.6 % p50. Also closed a
+    pre-existing leak in the three `call.zig` sites where
+    `try frames.append(...)` would propagate `error.OutOfMemory`
+    without releasing the freshly-acquired register file.
+
+Top-level `runFrames` entries (the one-shot allocations at realm
+boot) and the tail-call register-file reallocations stay on the
+pool by design.
 
 ### Tier 2 — medium
 
