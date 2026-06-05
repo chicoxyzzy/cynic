@@ -798,9 +798,7 @@ pub fn resumeAsyncGenBody(
                 .home_function = gen.home_function,
                 .argc = gen.argc,
                 .generator = gen,
-                // §8.3 — resolve the body's free globals through the
-                // generator function's own realm, not the realm that
-                // happens to be driving this resume (cross-realm case).
+                // §8.3 — see `JSGenerator.realm`.
                 .running_realm = gen.realm,
                 .owns_registers = false,
             });
