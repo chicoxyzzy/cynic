@@ -758,6 +758,24 @@ pub const Builder = struct {
         try self.emitU16(try self.allocCallIC());
     }
 
+    /// Emit `call` plus its callee / argc operands and a freshly
+    /// allocated call-IC slot. Encoding:
+    /// `[op] [r_callee:u8] [argc:u8] [ic:u16]`. Mirrors
+    /// `emitCallMethod`'s allocation pattern; targets the free-
+    /// function call site `f(args)` (not `obj.f(args)`), with the
+    /// same cached-callee fast path as `call_method`.
+    pub fn emitCall(
+        self: *Builder,
+        span: Span,
+        r_callee: u8,
+        argc: u8,
+    ) !void {
+        try self.emitOp(.call, span);
+        try self.emitU8(r_callee);
+        try self.emitU8(argc);
+        try self.emitU16(try self.allocCallIC());
+    }
+
     /// Emit `call_property` — the fused property-load + method-call
     /// op. Reserves BOTH an IC slot (for the property lookup, same
     /// table `lda_property` uses) AND a call-IC slot (for the loaded

@@ -9993,3 +9993,76 @@ test "lda_global IC: ReferenceError on truly unbound name" {
         \\msg;
     , "ReferenceError");
 }
+
+// Free-function `call` IC — the bare `f(args)` site (not
+// `obj.f(args)`). Caches the last plain (non-bound, non-proxy,
+// non-revoked) callee pointer so subsequent calls skip the proxy /
+// revocable / bound / `valueAsFunction` exotic dispatch chain and
+// go straight to `callJSFunction`. Mirrors `call_method`'s
+// per-call-site cache but targets the closure-captured-callee
+// pattern (parsers, traversals, FP-style helpers).
+
+test "free-function call IC: closure-captured callee in a tight loop" {
+    try expectScriptIntWithBuiltins(
+        \\function add(x) { return x + 1; }
+        \\let acc = 0;
+        \\for (let i = 0; i < 5; i++) acc = add(acc);
+        \\acc;
+    , 5);
+}
+
+test "free-function call IC: callee swap mid-loop invalidates the cell" {
+    // First half of the loop uses `f = a`; second half rebinds `f`
+    // to a different function. The cell must miss on rebind and
+    // refill — otherwise the second-half iterations would keep
+    // calling `a` (the cached callee), producing the wrong total.
+    try expectScriptIntWithBuiltins(
+        \\function a() { return 1; }
+        \\function b() { return 10; }
+        \\let f = a;
+        \\let acc = 0;
+        \\for (let i = 0; i < 4; i++) {
+        \\  if (i === 2) f = b;
+        \\  acc += f();
+        \\}
+        \\acc;
+    , 1 + 1 + 10 + 10);
+}
+
+test "free-function call IC: bound function still binds its captured this" {
+    // Bound functions are an exotic-callee case the IC must NOT
+    // serve as a plain JSFunction — the bound `this` would be
+    // dropped. The cell shouldn't fill for bound callees; the
+    // slow path's bound-target arm carries the binding.
+    try expectScriptIntWithBuiltins(
+        \\function take() { return this.n; }
+        \\const obj = { n: 42 };
+        \\const f = take.bind(obj);
+        \\let acc = 0;
+        \\for (let i = 0; i < 3; i++) acc += f();
+        \\acc;
+    , 42 * 3);
+}
+
+test "free-function call IC: calling a non-function throws TypeError" {
+    try expectScriptStringWithBuiltins(
+        \\const f = 5;
+        \\let msg = "no-throw";
+        \\try { f(); } catch (e) { msg = e.constructor.name; }
+        \\msg;
+    , "TypeError");
+}
+
+test "free-function call IC: a callable proxy still routes through its apply trap" {
+    // The IC must NOT serve a cached callee for a proxy-callable
+    // value — the proxy's `apply` trap must run on every call.
+    try expectScriptStringWithBuiltins(
+        \\let trap_calls = 0;
+        \\const f = new Proxy(function () { return "raw"; }, {
+        \\  apply(target, thisArg, args) { trap_calls++; return "trapped"; },
+        \\});
+        \\let last = "";
+        \\for (let i = 0; i < 3; i++) last = f();
+        \\last + ":" + trap_calls;
+    , "trapped:3");
+}
