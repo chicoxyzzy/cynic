@@ -2179,11 +2179,11 @@ pub fn runFrames(
                     realm.heap.setProxyTargetFn(rp, null);
                     rp.proxy_revoked = true;
                     fn_v.revocable_proxy = null;
-                acc = Value.undefined_;
-                // No frame pushed, no inline call — the active frame
-                // is unchanged → decodeNext.
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
+                    acc = Value.undefined_;
+                    // No frame pushed, no inline call — the active frame
+                    // is unchanged → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
 
                 // §3.8.3.6 WrappedFunction — cross-realm callable
                 // boundary. The inline call fast-path can't marshal
@@ -8900,7 +8900,12 @@ pub fn runFrames(
                 if (cell.post_shape != null and cell.pre_shape == obj_in.shape and
                     obj_in.prototype != null and obj_in.prototype == cell.proto and
                     cell.proto.?.shape == cell.proto_shape and
-                    cell.proto_rev == realm.proto_revision_counter)
+                    cell.proto_rev == realm.proto_revision_counter and
+                    // §10.1.9 — also catch a non-writable / accessor
+                    // installed on a dictionary-mode or non-immediate
+                    // prototype after fill (proto_shape / proto_rev miss
+                    // those; the structural funnels bump this epoch).
+                    cell.guard_epoch == realm.heap.proto_struct_epoch)
                 {
                     const post_shape = cell.post_shape.?;
                     if (obj_in.slots.items.len < post_shape.property_count) {
@@ -8994,6 +8999,7 @@ pub fn runFrames(
                                 cell.proto = obj_after.prototype;
                                 cell.proto_shape = obj_after.prototype.?.shape;
                                 cell.proto_rev = realm.proto_revision_counter;
+                                cell.guard_epoch = realm.heap.proto_struct_epoch;
                                 cell.bag_index = chunk_mod.bag_index_uncached;
                             }
                         }

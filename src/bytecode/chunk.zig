@@ -82,6 +82,14 @@ pub const ICCell = struct {
     /// hot loop because the slice's underlying capacity carries
     /// over) and stores into `slots[slot]`.
     post_shape: ?*Shape = null,
+    /// `sta_property` transition mode — `heap.proto_struct_epoch` at
+    /// fill. Complements `proto_shape` / `proto_rev`: a non-writable
+    /// data property (or accessor) installed on a *dictionary-mode* or
+    /// *non-immediate* prototype after fill bumps this epoch (the
+    /// structural funnels in `object.zig`) even though the proto's
+    /// (null) shape and the realm counter don't change. A mismatch on
+    /// the hot path forces the full `[[Set]]`, honouring §10.1.9.
+    guard_epoch: u64 = 0,
     /// Index into the receiver's `properties.values()` for the
     /// shape's `slot`-th key. Cached on `sta_property` IC fill so
     /// the IC-hit bag mirror collapses from a wyhash + bucket walk

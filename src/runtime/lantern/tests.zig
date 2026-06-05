@@ -10281,7 +10281,7 @@ test "new_call IC: tight `new C()` loop yields a fresh instance each time" {
         \\  total += p.x + p.y;
         \\}
         \\total;
-    // (0+1) + (1+2) + (2+3) + (3+4) + (4+5) = 25
+        // (0+1) + (1+2) + (2+3) + (3+4) + (4+5) = 25
     , 25);
 }
 
@@ -10337,7 +10337,7 @@ test "new_call IC: bound constructor still concatenates its bound args" {
         \\  total += p.s;
         \\}
         \\total;
-    // bound x=10, y=20; z = i. (10+20+0) + (10+20+1) + (10+20+2) = 93
+        // bound x=10, y=20; z = i. (10+20+0) + (10+20+1) + (10+20+2) = 93
     , 93);
 }
 
@@ -10415,7 +10415,7 @@ test "sta_property transition IC: hot class constructor loop preserves values" {
         \\  total += p.x + p.y;
         \\}
         \\total;
-    // sum of (i + 2i) for i in 0..99 = 3 * (0+1+…+99) = 3 * 4950 = 14850
+        // sum of (i + 2i) for i in 0..99 = 3 * (0+1+…+99) = 3 * 4950 = 14850
     , 14850);
 }
 
@@ -10434,7 +10434,7 @@ test "sta_property transition IC: frozen Object.prototype still resolves accesso
         \\  if (p.missing !== undefined) acc -= 1000;
         \\}
         \\acc;
-    // sum of (i + 1) for i in 0..19 = (0+1+…+19) + 20 = 190 + 20 = 210
+        // sum of (i + 1) for i in 0..19 = (0+1+…+19) + 20 = 190 + 20 = 210
     , 210);
 }
 
@@ -10461,6 +10461,29 @@ test "sta_property transition IC: --unhardened, accessor installed on proto mid-
     , "01UU:2");
 }
 
+test "sta_property transition IC: --unhardened, non-writable proto property mid-loop invalidates" {
+    // The accessor case above is caught by `proto_revision_counter`, but
+    // a NON-WRITABLE DATA property installed on a *dictionary-mode*
+    // prototype (Object.prototype) changes neither the proto's (null)
+    // shape nor the realm counter — only `heap.proto_struct_epoch`
+    // (bumped at the `setWithFlags` structural funnel) catches it. From
+    // the install onward `this.v = i` must throw a TypeError (§10.1.9 —
+    // a non-writable inherited data property blocks the own write), not
+    // blindly stamp an own slot. engine262 + every production engine
+    // throw here; the warm transition IC previously did not.
+    try expectScriptStringUnhardened(
+        \\class Box { constructor(v) { this.v = v; } }
+        \\let acc = "";
+        \\for (let i = 0; i < 4; i++) {
+        \\  if (i === 2) {
+        \\    Object.defineProperty(Object.prototype, "v", { value: 0, writable: false, configurable: true });
+        \\  }
+        \\  try { new Box(i); acc += "ok"; } catch (e) { acc += e.constructor.name[0]; }
+        \\}
+        \\acc;
+    , "okokTT");
+}
+
 test "sta_property transition IC: setPrototypeOf mid-loop invalidates" {
     // Bumping `realm.proto_revision_counter` (via setPrototypeOf
     // on ANY object) must invalidate every transition cell so
@@ -10475,7 +10498,7 @@ test "sta_property transition IC: setPrototypeOf mid-loop invalidates" {
         \\  sum += h.v;
         \\}
         \\sum;
-    // sum of (i) for i in 0..5 = 15
+        // sum of (i) for i in 0..5 = 15
     , 15);
 }
 
@@ -10498,6 +10521,6 @@ test "sta_property transition IC: polymorphic receivers fall back cleanly" {
         \\  sum += o.k;
         \\}
         \\sum;
-    // sum of (i) for i in 0..5 = 15
+        // sum of (i) for i in 0..5 = 15
     , 15);
 }

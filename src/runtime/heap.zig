@@ -353,6 +353,23 @@ pub const Heap = struct {
     /// threshold, so dead intermediates pile up between collects.
     /// Bytes-based trigger keeps GC firing on data volume too.
     bytes_since_gc: usize = 0,
+    /// Heap-level validity epoch for the `sta_property` transition write
+    /// IC, complementing the cell's `proto_rev` / `proto_shape` checks.
+    /// Those catch a `setPrototypeOf` (realm counter) and an immediate-
+    /// proto shape change, but MISS a non-writable data property (or an
+    /// accessor) installed via `Object.defineProperty` / `freeze` on a
+    /// *dictionary-mode* or *non-immediate* prototype — its (null) shape
+    /// doesn't change and the realm counter isn't bumped, so the cached
+    /// transition would wrongly write past a setter / non-writable
+    /// (§10.1.9). This epoch is bumped at the low-level structural
+    /// funnels reachable from any path — accessor install/remove,
+    /// non-default flagged data install, named delete, shape demote —
+    /// regardless of which native (or none) drove them. A transition
+    /// cell snapshots it (`guard_epoch`); a mismatch falls back to the
+    /// full `[[Set]]`. Plain value writes (`shadowSet`) never bump it,
+    /// so a hot constructor loop keeps it stable. (Replaced by
+    /// per-prototype validity cells later — see docs/inline-caches.md.)
+    proto_struct_epoch: u64 = 1,
     /// Allocation count that triggers a *major* (full) collection.
     /// Tunable; the default is sized so an empty allocating loop
     /// runs GC every few hundred ms at typical
@@ -2991,6 +3008,14 @@ pub const Heap = struct {
     /// `o.prototype = proto` with the generational write barrier.
     /// Null-clearing skips the barrier — no edge to remember when
     /// the slot is cleared.
+    /// Invalidate every transition write IC. Called at the low-level
+    /// structural funnels (accessor install/remove, non-default flagged
+    /// data install, named delete, shape demote). The IC hot path is a
+    /// single `u64` compare against the snapshot. `+%=` wraps harmlessly.
+    pub fn bumpProtoStructEpoch(self: *Heap) void {
+        self.proto_struct_epoch +%= 1;
+    }
+
     pub fn setObjectPrototype(self: *Heap, o: *JSObject, proto: ?*JSObject) void {
         if (proto) |p| self.writeBarrier(.{ .object = o }, taggedObject(p));
         o.prototype = proto;

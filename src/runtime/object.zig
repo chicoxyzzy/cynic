@@ -1243,12 +1243,22 @@ pub const JSObject = struct {
         key: []const u8,
     ) !std.StringArrayHashMapUnmanaged(Accessor).GetOrPutResult {
         const ext = try self.getOrCreateExtension(allocator);
+        // A setter installed at this key invalidates any transition
+        // write IC whose receiver inherits from `self`.
+        if (self.heap) |h| h.bumpProtoStructEpoch();
         return ext.accessors.getOrPut(allocator, key);
     }
 
     /// Returns true if the key was present and removed.
     pub fn removeAccessor(self: *JSObject, key: []const u8) bool {
-        if (self.extension) |ext| return ext.accessors.swapRemove(key);
+        if (self.extension) |ext| {
+            const removed = ext.accessors.swapRemove(key);
+            // Removing an accessor can re-expose an ancestor's setter.
+            if (removed) {
+                if (self.heap) |h| h.bumpProtoStructEpoch();
+            }
+            return removed;
+        }
         return false;
     }
 
@@ -1879,6 +1889,17 @@ pub const JSObject = struct {
         // representation, which is later).
         const is_default =
             flags.writable and flags.enumerable and flags.configurable;
+        // A non-default flagged install (defineProperty / freeze / a
+        // non-enumerable builtin) can place a non-writable data property
+        // — or, on the accessor path, a setter — into some receiver's
+        // prototype chain, which a transition write IC must not write
+        // past (§10.1.9). This is the funnel the cell's proto_shape /
+        // proto_rev miss for a dictionary-mode or non-immediate proto.
+        // Plain value writes go through `shadowSet`, not here, so the
+        // constructor hot loop is unaffected.
+        if (!is_default) {
+            if (self.heap) |h| h.bumpProtoStructEpoch();
+        }
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 if (is_default) {
@@ -2005,6 +2026,11 @@ pub const JSObject = struct {
     /// the bag as the source of truth before they touch it.
     pub fn demoteFromShape(self: *JSObject, allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
         const shape = self.shape orelse return;
+        // Leaving shape mode (delete, flag-diverging redefine, accessor
+        // install) can alter what a transition write IC inheriting from
+        // `self` may write past — broad funnel covering shaped-object
+        // delete/redefine. Not reached by plain shaped writes.
+        if (self.heap) |h| h.bumpProtoStructEpoch();
         // Walk leaf → root; the chain order is "last property
         // added is the leaf." Back-fill the bag with each entry,
         // including its descriptor attrs when they diverge from
@@ -2683,6 +2709,13 @@ pub const JSObject = struct {
     /// success / missing-already, false if a non-configurable
     /// own slot blocked the delete).
     pub fn deleteOwn(self: *JSObject, allocator: std.mem.Allocator, key: []const u8) !bool {
+        // Deleting a named property can re-expose an ancestor's setter
+        // at this key — invalidate transition write ICs. Integer-index
+        // deletes (Array.pop / shift / splice hot path) can't affect a
+        // named-key transition IC, so they skip the bump.
+        if (canonicalIntegerIndex(key) == null) {
+            if (self.heap) |h| h.bumpProtoStructEpoch();
+        }
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 _ = self.removeIndexed(idx);
