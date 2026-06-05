@@ -369,6 +369,32 @@ test "interpreter: number + string = string" {
     try expectString("'a' + 1;", "a1");
 }
 
+test "interpreter: Number.prototype.toString uses §6.1.6.1.20 exponential thresholds" {
+    // Radix-10 Number::toString switches to exponential notation when
+    // the integer part needs more than 21 digits (n > 21) or the value
+    // is below 1e-6 (n <= -6). Verified against engine262 + 11 production
+    // engines, which all agree. (`(1e21).toString()` previously printed
+    // the full decimal expansion "1000000000000000000000".)
+    try expectScriptStringWithBuiltins("(1e21).toString();", "1e+21");
+    try expectScriptStringWithBuiltins("(1e22).toString();", "1e+22");
+    try expectScriptStringWithBuiltins("(1.2345678901234568e22).toString();", "1.2345678901234568e+22");
+    try expectScriptStringWithBuiltins("(1e-7).toString();", "1e-7");
+    // Boundaries that stay in fixed notation.
+    try expectScriptStringWithBuiltins("(1e20).toString();", "100000000000000000000");
+    try expectScriptStringWithBuiltins("(1e-6).toString();", "0.000001");
+    try expectScriptStringWithBuiltins("(123.456).toString();", "123.456");
+    try expectScriptStringWithBuiltins("(255).toString();", "255");
+}
+
+test "interpreter: JSON.stringify number uses ToString exponential form" {
+    // §25.5.2.4 SerializeJSONNumber is ToString(number) (§6.1.6.1.20), so
+    // a large/small magnitude serializes with the ECMAScript exponential
+    // form ("1e+21"), not Zig's raw `{e}` ("1e21").
+    try expectScriptStringWithBuiltins("JSON.stringify(1e21);", "1e+21");
+    try expectScriptStringWithBuiltins("JSON.stringify(1e-7);", "1e-7");
+    try expectScriptStringWithBuiltins("JSON.stringify([1e21, 0.1, 100]);", "[1e+21,0.1,100]");
+}
+
 test "interpreter: typeof returns spec strings" {
     try expectString("typeof 1;", "number");
     try expectString("typeof 1.5;", "number");

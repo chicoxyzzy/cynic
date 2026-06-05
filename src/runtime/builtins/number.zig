@@ -459,8 +459,14 @@ fn numberToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
             const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
             return Value.fromString(s);
         }
-        const slice = std.fmt.bufPrint(&buf, "{d}", .{x}) catch return error.OutOfMemory;
-        const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
+        // §6.1.6.1.20 Number::toString(x, 10) — delegate to the shared
+        // ToString number formatter, which applies the exponential
+        // thresholds (integer part > 21 digits → mantissa e+NN; value
+        // < 1e-6 → mantissa e-NN). The earlier local `{d}` path printed
+        // the full decimal expansion for large / small magnitudes
+        // (e.g. `(1e21).toString()` → "1000000000000000000000" instead
+        // of "1e+21"), diverging from every other engine.
+        const s = try intrinsics.stringifyArg(realm, Value.fromDouble(x));
         return Value.fromString(s);
     }
     // Non-decimal: integer-only path. Fractional non-decimal

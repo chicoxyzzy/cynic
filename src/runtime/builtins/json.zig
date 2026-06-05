@@ -813,7 +813,12 @@ fn formatDoubleForJson(scratch: *[64]u8, d: f64) []const u8 {
         return std.fmt.bufPrint(scratch, "{d}", .{i}) catch unreachable;
     }
     if (a != 0 and (a < 1e-6 or a >= 1e21)) {
-        return std.fmt.bufPrint(scratch, "{e}", .{d}) catch unreachable;
+        // §25.5.2.4 SerializeJSONNumber == ToString(number) == §6.1.6.1.20,
+        // so the exponential form must carry the ECMAScript sign/format
+        // ("1e+21"), not Zig's raw `{e}` ("1e21"). Normalize like the
+        // shared ToString path does.
+        const raw = std.fmt.bufPrint(scratch, "{e}", .{d}) catch unreachable;
+        return intrinsics.normalizeExponentPub(scratch, raw);
     }
     return std.fmt.bufPrint(scratch, "{d}", .{d}) catch unreachable;
 }
