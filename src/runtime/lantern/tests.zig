@@ -7093,6 +7093,43 @@ test "later: cross-realm generator body resolves a free global against the funct
     try testing.expect(res == .value);
 }
 
+test "Number.prototype.toString(radix): large doubles emit a string, never panic (#22, §21.1.3.6)" {
+    // §21.1.3.6 step 6 is total over (Number × radix) — only a bad
+    // radix throws (RangeError); a huge finite x must yield a String,
+    // not a host abort. The radix-N path used to `@intFromFloat` an
+    // out-of-range double and SIGABRT.
+    try expectScriptIntWithBuiltins(
+        \\var ok = 0;
+        \\if (typeof (1e21).toString(36) === "string") ok++;
+        \\if (typeof (1e19).toString(2) === "string") ok++;
+        \\if (typeof (-1e21).toString(36) === "string") ok++;
+        \\if (Number.MAX_VALUE.toString(36).length > 0) ok++;
+        \\if ((9e18).toString(36) === "1wdllqhza58g0") ok++;
+        \\if ((255).toString(16) === "ff") ok++;
+        \\ok;
+    , 6);
+}
+
+test "huge numeric args on String/Array/TypedArray builtins don't panic (#23)" {
+    // §7.1.5 ToIntegerOrInfinity saturates a large finite value; each
+    // site then returns its spec completion (empty string / NaN /
+    // undefined / clamped index / RangeError) — never a process abort.
+    try expectScriptIntWithBuiltins(
+        \\var ok = 0;
+        \\if ("abc".charAt(1e21) === "") ok++;
+        \\if (Number.isNaN("abc".charCodeAt(1e21))) ok++;
+        \\if ("abc".codePointAt(1e21) === undefined) ok++;
+        \\if (JSON.stringify([1].fill(0, 1e21)) === "[1]") ok++;
+        \\if ([1, 2, 3].slice(1e21).length === 0) ok++;
+        \\if ([1, 2, 3].at(1e21) === undefined) ok++;
+        \\try { "ab".repeat(1e21); } catch (e) { if (e instanceof RangeError) ok++; }
+        \\try { "x".padStart(1e21); } catch (e) { if (e instanceof RangeError) ok++; }
+        \\try { [1, 2, 3].with(1e21, 9); } catch (e) { if (e instanceof RangeError) ok++; }
+        \\var u = new Uint8Array(4); u.fill(0, 1e21); if (u.length === 4) ok++;
+        \\ok;
+    , 10);
+}
+
 test "later: Array [[Construct]] derives result proto from newTarget's realm" {
     // §22.1.1 Array(...) + §10.1.14 — `Reflect.construct(Array, args,
     // C)` where `C` is a cross-realm function with a non-object

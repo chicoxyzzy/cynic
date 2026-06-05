@@ -799,7 +799,11 @@ fn stringCharAt(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const d = idx_v.asDouble();
         if (std.math.isNan(d)) break :blk 0;
         if (std.math.isInf(d)) break :blk if (d > 0) std.math.maxInt(i32) else -1;
-        break :blk @intFromFloat(@trunc(d));
+        // §7.1.5 ToIntegerOrInfinity — a large but finite value must
+        // saturate, not trap the host. `@intFromFloat` panics for
+        // |d| > i64::MAX (≈9.22e18); the helper clamps. NaN/±Inf are
+        // handled above, so this only affects huge finite inputs (#23).
+        break :blk intrinsics.doubleToI64Saturating(d);
     };
     if (idx < 0) {
         const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
@@ -829,7 +833,11 @@ fn stringCharCodeAt(realm: *Realm, this_value: Value, args: []const Value) Nativ
         const d = idx_v.asDouble();
         if (std.math.isNan(d)) break :blk 0;
         if (std.math.isInf(d)) break :blk if (d > 0) std.math.maxInt(i32) else -1;
-        break :blk @intFromFloat(@trunc(d));
+        // §7.1.5 ToIntegerOrInfinity — a large but finite value must
+        // saturate, not trap the host. `@intFromFloat` panics for
+        // |d| > i64::MAX (≈9.22e18); the helper clamps. NaN/±Inf are
+        // handled above, so this only affects huge finite inputs (#23).
+        break :blk intrinsics.doubleToI64Saturating(d);
     };
     if (idx < 0) return Value.fromDouble(std.math.nan(f64));
     const cu = utf16.codeUnitAt(s.flatBytes(), @intCast(idx)) orelse return Value.fromDouble(std.math.nan(f64));
@@ -1369,7 +1377,11 @@ fn stringRepeat(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             realm.pending_exception = ex;
             return error.NativeThrew;
         }
-        break :blk @intFromFloat(@trunc(d));
+        // §7.1.5 ToIntegerOrInfinity — a large but finite value must
+        // saturate, not trap the host. `@intFromFloat` panics for
+        // |d| > i64::MAX (≈9.22e18); the helper clamps. NaN/±Inf are
+        // handled above, so this only affects huge finite inputs (#23).
+        break :blk intrinsics.doubleToI64Saturating(d);
     };
     if (n < 0) {
         const ex = intrinsics.newRangeError(realm, "Invalid count value") catch return error.OutOfMemory;
@@ -1380,9 +1392,18 @@ fn stringRepeat(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const empty = realm.heap.allocateString("") catch return error.OutOfMemory;
         return Value.fromString(empty);
     }
-    // Cap to avoid OOM on giant repeat counts.
-    const total: usize = @intCast(@as(i64, @intCast(s.flatBytes().len)) * n);
-    if (total > 1024 * 1024) return error.NativeThrew;
+    // §22.1.3.16 step 6 — a result longer than the implementation's
+    // string-length limit is a RangeError, not a host abort. Check via
+    // division so `byte_len * n` can't overflow i64 (it would for a
+    // saturated `n` and a multi-byte receiver — `"ab".repeat(1e21)`).
+    const byte_len: i64 = @intCast(s.flatBytes().len);
+    const cap: i64 = 1024 * 1024;
+    if (byte_len != 0 and n > @divTrunc(cap, byte_len)) {
+        const ex = intrinsics.newRangeError(realm, "Invalid string length") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+    const total: usize = @intCast(byte_len * n);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
     buf.ensureTotalCapacity(realm.allocator, total) catch return error.OutOfMemory;
@@ -1564,7 +1585,11 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
         if (target_num.isInt32()) break :blk target_num.asInt32();
         const d = target_num.asDouble();
         if (std.math.isNan(d) or std.math.isInf(d) or d < 0) break :blk 0;
-        break :blk @intFromFloat(@trunc(d));
+        // §7.1.5 ToIntegerOrInfinity — a large but finite value must
+        // saturate, not trap the host. `@intFromFloat` panics for
+        // |d| > i64::MAX (≈9.22e18); the helper clamps. NaN/±Inf are
+        // handled above, so this only affects huge finite inputs (#23).
+        break :blk intrinsics.doubleToI64Saturating(d);
     };
     // Receiver code-unit length; pad only when the target exceeds
     // it (StringPad step 1).
@@ -1587,7 +1612,13 @@ fn stringPad(realm: *Realm, this_value: Value, args: []const Value, start: bool)
     }
     const fill_cu_len = utf16.lengthInCodeUnits(fill_str.flatBytes());
     const target_cu: usize = @intCast(target_len);
-    if (target_cu > 1024 * 1024) return error.NativeThrew; // sanity cap
+    if (target_cu > 1024 * 1024) {
+        // §22.1.3.{14,15} — a pad target beyond the implementation's
+        // string-length limit is a RangeError, not a generic throw.
+        const ex = intrinsics.newRangeError(realm, "Invalid string length") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
     const pad_cu = target_cu - s_cu_len;
     // StringPad step 7 — build a truncated padding string of length
     // `pad_cu` code units by concatenating `fillString` enough
@@ -2633,7 +2664,11 @@ fn stringCodePointAt(realm: *Realm, this_value: Value, args: []const Value) Nati
         const d = pos_v.asDouble();
         if (std.math.isNan(d)) break :blk 0;
         if (std.math.isInf(d)) break :blk if (d > 0) std.math.maxInt(i32) else -1;
-        break :blk @intFromFloat(@trunc(d));
+        // §7.1.5 ToIntegerOrInfinity — a large but finite value must
+        // saturate, not trap the host. `@intFromFloat` panics for
+        // |d| > i64::MAX (≈9.22e18); the helper clamps. NaN/±Inf are
+        // handled above, so this only affects huge finite inputs (#23).
+        break :blk intrinsics.doubleToI64Saturating(d);
     };
     if (pos < 0) return Value.undefined_;
     const target_unit: usize = @intCast(pos);

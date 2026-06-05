@@ -466,37 +466,76 @@ fn numberToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // Non-decimal: integer-only path. Fractional non-decimal
     // is rare in tests; we truncate.
     if (x == @trunc(x)) {
-        const i: i64 = @intFromFloat(x);
-        var u: u64 = 0;
-        var negate = false;
-        if (i < 0) {
-            negate = true;
-            u = @intCast(-i);
-        } else {
-            u = @intCast(i);
-        }
-        var tmp: [64]u8 = undefined;
-        var n: usize = 0;
-        if (u == 0) {
-            tmp[0] = '0';
-            n = 1;
-        } else {
-            while (u > 0) : (u /= radix) {
-                const d: u8 = @intCast(u % radix);
-                tmp[n] = if (d < 10) '0' + d else 'a' + (d - 10);
-                n += 1;
+        // §21.1.3.6 step 6. Exact i64 divmod for the common case;
+        // `@intFromFloat` would trap the host for |x| > i64::MAX
+        // (≈9.22e18), so larger integral doubles take the f64
+        // floor-division path below instead (#22).
+        const i64_max_f: f64 = 9223372036854775000.0;
+        if (@abs(x) <= i64_max_f) {
+            const i: i64 = @intFromFloat(x);
+            var u: u64 = 0;
+            var negate = false;
+            if (i < 0) {
+                negate = true;
+                u = @intCast(-i);
+            } else {
+                u = @intCast(i);
             }
+            var tmp: [64]u8 = undefined;
+            var n: usize = 0;
+            if (u == 0) {
+                tmp[0] = '0';
+                n = 1;
+            } else {
+                while (u > 0) : (u /= radix) {
+                    const d: u8 = @intCast(u % radix);
+                    tmp[n] = if (d < 10) '0' + d else 'a' + (d - 10);
+                    n += 1;
+                }
+            }
+            var len: usize = 0;
+            if (negate) {
+                buf[0] = '-';
+                len = 1;
+            }
+            var k: usize = 0;
+            while (k < n) : (k += 1) {
+                buf[len + k] = tmp[n - 1 - k];
+            }
+            const s = realm.heap.allocateString(buf[0 .. len + n]) catch return error.OutOfMemory;
+            return Value.fromString(s);
         }
+        // §21.1.3.6 step 6 — a large integral double. Emit the radix
+        // digits by repeated f64 floor-division so the cast never
+        // traps. Past 2^53 the double is not an exact integer, so the
+        // low digits are "implementation-approximated" (the latitude
+        // step 6 grants; V8 / SpiderMonkey / JSC do the same). Worst
+        // case digit count is base-2 of Number.MAX_VALUE ≈ 1024.
+        var big: [1100]u8 = undefined;
+        var n: usize = 0;
+        var xf = @abs(x);
+        const rf: f64 = @floatFromInt(radix);
+        while (xf >= 1.0 and n < big.len) {
+            const q = @floor(xf / rf);
+            var df = xf - q * rf; // x mod radix, in [0, radix)
+            if (df < 0) df = 0;
+            if (df >= rf) df = rf - 1.0;
+            const d: u8 = @intFromFloat(df);
+            big[n] = if (d < 10) '0' + d else 'a' + (d - 10);
+            n += 1;
+            xf = q;
+        }
+        var out: [1101]u8 = undefined;
         var len: usize = 0;
-        if (negate) {
-            buf[0] = '-';
+        if (x < 0) {
+            out[0] = '-';
             len = 1;
         }
         var k: usize = 0;
         while (k < n) : (k += 1) {
-            buf[len + k] = tmp[n - 1 - k];
+            out[len + k] = big[n - 1 - k];
         }
-        const s = realm.heap.allocateString(buf[0 .. len + n]) catch return error.OutOfMemory;
+        const s = realm.heap.allocateString(out[0 .. len + n]) catch return error.OutOfMemory;
         return Value.fromString(s);
     }
     // Fractional non-decimal — fall back to base 10 for now.

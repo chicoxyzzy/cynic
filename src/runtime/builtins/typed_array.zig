@@ -1715,7 +1715,7 @@ fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeE
             start = len_i;
         } else {
             const t = @trunc(sd);
-            start = if (t < 0) @max(@as(i64, 0), len_i + @as(i64, @intFromFloat(t))) else @min(len_i, @as(i64, @intFromFloat(t)));
+            start = if (t < 0) @max(@as(i64, 0), len_i + intrinsics.doubleToI64Saturating(t)) else @min(len_i, intrinsics.doubleToI64Saturating(t));
         }
     }
     var end: i64 = len_i;
@@ -1730,7 +1730,7 @@ fn typedArrayFill(realm: *Realm, this_value: Value, args: []const Value) NativeE
             end = len_i;
         } else {
             const t = @trunc(ed);
-            end = if (t < 0) @max(@as(i64, 0), len_i + @as(i64, @intFromFloat(t))) else @min(len_i, @as(i64, @intFromFloat(t)));
+            end = if (t < 0) @max(@as(i64, 0), len_i + intrinsics.doubleToI64Saturating(t)) else @min(len_i, intrinsics.doubleToI64Saturating(t));
         }
     }
 

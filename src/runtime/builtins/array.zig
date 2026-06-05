@@ -1668,7 +1668,11 @@ fn toIntPropagating(realm: *Realm, v: Value) NativeError!i64 {
     if (std.math.isNan(d)) return 0;
     if (d == std.math.inf(f64)) return std.math.maxInt(i64);
     if (d == -std.math.inf(f64)) return std.math.minInt(i64);
-    return @intFromFloat(@trunc(d));
+    // A large but finite value (|d| > i64::MAX ≈ 9.22e18) must
+    // saturate, not trap the host — `@intFromFloat` panics out of
+    // range. The clamp lands at the same boundary the callers'
+    // index arithmetic already handles for ±Infinity (#23).
+    return intrinsics.doubleToI64Saturating(d);
 }
 
 fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
