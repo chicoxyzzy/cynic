@@ -257,6 +257,33 @@ test "cross-realm: TypeError thrown by parent's code is parent's Error.prototype
     try testing.expect(probe.bits == Value.false_.bits);
 }
 
+test "cross-realm: a native-thrown TypeError uses the callee's home realm" {
+    // §10.2.1 [[Call]] makes the running execution context's realm the
+    // *called function's* [[Realm]], so a TypeError a builtin raises must
+    // come from that realm's %TypeError%, not the caller's. Here parent's
+    // `String.prototype.valueOf`, called from child with a non-String
+    // `this`, runs thisStringValue (§22.1.3.32 step 1) → TypeError. It must
+    // be parent's TypeError. Distinct from the user-`throw new TypeError`
+    // test above: this exercises the engine convenience `throwTypeError`,
+    // which resolves the home realm via `active_native_fn_realm` (pre-fix
+    // it used the dispatch — child — realm and mis-attributed the error).
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const valueof_v = (try lantern.evaluateScript(testing.allocator, &parent, "String.prototype.valueOf")).value;
+    try child.globals.put(testing.allocator, "pValueOf", valueof_v);
+
+    // The thrown error is parent's TypeError; child's `TypeError` global is
+    // a different JSFunction, so `e.constructor === TypeError` is false.
+    const probe = (try lantern.evaluateScript(testing.allocator, &child, "let r; try { pValueOf.call(123); } catch (e) { r = (e.constructor === TypeError); } r")).value;
+    try testing.expect(probe.bits == Value.false_.bits);
+}
+
 test "cross-realm: §23.1.3.34 Array.prototype.map uses source realm's %Array% as species" {
     // §23.1.3.34 ArraySpeciesCreate defaults the species constructor
     // `C` to the *source* array's realm's %Array%, not the calling

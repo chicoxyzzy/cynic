@@ -1549,8 +1549,20 @@ fn throwTypeErrorThrower(realm: *Realm, this_value: Value, args: []const Value) 
 }
 
 /// Convenience: throw a real `TypeError(msg)` from a native.
+///
+/// §10.2.1 [[Call]] makes the running execution context's realm the
+/// *called function's* [[Realm]], so a TypeError a native raises must be
+/// built from that realm's `%TypeError%` — not the caller's. When a
+/// builtin runs cross-realm (`other.fn.call(x)`), the dispatcher records
+/// the callee's home realm in `realm.active_native_fn_realm`; resolve it
+/// here so `thisStringValue` (String.prototype.{valueOf,toString}),
+/// `%ThrowTypeError%`, and every other native throw land in the right
+/// realm. Same-realm (`active_native_fn_realm` null or == realm) is
+/// unchanged. This generalises the explicit `throwTypeErrorInRealm`,
+/// which callers with a non-dispatch fn_realm in hand still use directly.
 pub fn throwTypeError(realm: *Realm, msg: []const u8) NativeError {
-    const ex = newTypeError(realm, msg) catch return error.OutOfMemory;
+    const fn_realm = realm.active_native_fn_realm orelse realm;
+    const ex = newTypeError(fn_realm, msg) catch return error.OutOfMemory;
     return throwNative(realm, ex);
 }
 
