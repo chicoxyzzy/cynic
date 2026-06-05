@@ -67,6 +67,44 @@ All on `origin/main`:
   prototype-inherited reads (`arr.push`, `instance.m`,
   `String.prototype.constructor`) — the dominant real-world
   case the own-data IC missed.
+- `fdf3940` — Fused `call_property` opcode for the simple
+  `obj.method(args)` shape. Replaces a 4-op `ldar + lda_property
+  + star + call_method` sequence (15 bytes operand, 4 dispatches)
+  with one `[k:u16] [r_recv:u8] [argc:u8] [ic_load:u16]
+  [ic_call:u16]` dispatch (8 bytes operand). Shares the proto-load
+  `ICCell` with `lda_property` and the call IC with `call_method`.
+  Slow path: a factored `slowLookupForCallProperty` helper mirrors
+  `lda_property`'s 11-arm receiver-type matrix (plain / proxy /
+  module-namespace / chainHasProxy / accessor /
+  function-poison-pill / string / number / bool / bigint /
+  symbol). Compiler gates the fused emission on the simple shape
+  (plain ident key, no `#private`, no optional, no `super`, not
+  in tail position); every other shape falls back to the legacy
+  emission unchanged. Hermes ships exactly this (`CallBuiltin` /
+  `CallPropertyN`); Ignition ships `CallProperty0/1/2`.
+  **`method_call` p50 -3.1 % (~22.7 → ~22.0 ms).**
+- `e2c5b59` — `lda_global` / `lda_global_or_undef` IC. Cache
+  `(globalThis_shape, slot, decl_revision)` at each callsite.
+  Wire format grows to `[k:u16] [ic:u16]`. Fast path: shape
+  compare on `gr.globals.target` + `decl_revision` snapshot
+  match → `gt.slots[cell.slot]`. Slow path: factored
+  `slowLdaGlobal` helper (decl_env first per §9.1.1.4 — does NOT
+  fill the cell so a top-level `let X = …` keeps shadowing the
+  cached object-env slot — then shape lookup, then accessor /
+  bootstrap-fallback). `GlobalBindings.decl_revision` is a new
+  counter on the realm's globals struct, bumped exactly once per
+  fresh `installScriptLexBinding` (`!found_existing` branch);
+  `putDecl` reassignments don't bump because they don't change
+  which env a free-identifier lookup resolves through. The
+  slow-path-factoring is load-bearing: an earlier inlined-handler
+  version added ~85 lines per opcode to the dispatch loop and
+  i-cache pressure regressed unrelated fixtures (e.g.
+  `class_instantiate` +12 % despite zero `lda_global` in its hot
+  loop); pulling the slow path out collapsed that footprint.
+  **Bench wins (p50 / min vs pre-IC baseline, --runs=30):**
+  `prop_access` -9.6 % / -7.3 %, `prop_write` -7.8 % / -4.5 %,
+  `array_iter` -8.4 % / -4.3 %, `string_concat` -12.8 % / -4.7 %,
+  `object_alloc` -5.8 % / -3.2 %, `method_call` -5.7 % / -4.2 %.
 
 ## Architecture decisions
 
@@ -94,55 +132,53 @@ All on `origin/main`:
   []CallICCell`** are mutable side-tables on the otherwise-immutable
   chunk. Both are zeroed at chunk finalisation. GC weak-clears the
   call-IC's callee pointer and the proto-load IC's proto pointer.
+- **`ICCell` is dual-use.** Same struct serves three opcodes — its
+  fields are reinterpreted by the consumer:
+    * `lda_property` / `sta_property` own-data mode: `proto == null`,
+      `slot` indexes `recv.slots`, `bag_index` is the `sta_property`
+      hot path's cached `properties` array index.
+    * `lda_property` proto-load mode: `proto != null` + `proto_shape`
+      + `proto_rev` (snapshot of `realm.proto_revision_counter`).
+    * `lda_global` / `lda_global_or_undef`: `proto == null`, `shape`
+      is the global object's shape, `proto_rev` is repurposed to
+      record `GlobalBindings.decl_revision`. A future `lda_global`
+      proto-walk variant would set `proto` like `lda_property`.
+- **Factor the slow path when the dispatch loop grows.** The lda_global
+  IC ran into 5-15 % regressions on unrelated micros (e.g.
+  `class_instantiate` +12 % despite zero `lda_global` in its hot
+  loop) when its ~85 lines of slow path lived inline in the giant
+  `switch :dispatch`. Pulling the slow path into a function
+  (`slowLdaGlobal`) and keeping each handler at ~25 lines collapsed
+  the i-cache footprint and turned the regressions into 5-13 % wins
+  across the IC-exercising fixtures. Same lesson holds for any future
+  IC: keep the per-op handler tight; helper-call the slow paths.
 
 ## Remaining IC frontier
 
 Stack-ranked by expected impact, biggest first.
 
-### Tier 1 — biggest single remaining win
+### Tier 1 — biggest single remaining wins
 
-**Fused `call_property` opcode.** Combines
-`lda_property + star + call_method` into a single dispatch.
-Compiler detects `Call(MemberExpr(obj, name), args)` in the AST
-and emits `call_property [k:u16] [r_recv:u8] [argc:u8] [ic:u16]`
-instead of the three-op sequence. Cell reuses the existing
-proto-load `ICCell` — fast path: receiver-shape compare → load
-callee via own or proto slot → call directly.
-
-Hermes ships exactly this; Ignition ships a near-equivalent
-(`CallProperty0`/`CallProperty1`). Two implementation paths:
-
-- **Clean: factor `lookupProperty` out of `lda_property`.** The
-  current 250-line handler interleaves IC fill, proxy [[Get]],
-  module-namespace [[Get]], `chainHasProxy` walk, accessor
-  dispatch, AND primitive-receiver auto-box paths. Extract the
-  slow-path lookup into a helper that returns
-  `enum { value: Value, handled, uncaught: Value }` so both
-  `lda_property` and `call_property` share semantics. Invasive
-  but clean.
-- **Pragmatic: duplicate the slow path inline.** Copy-paste ~250
-  lines; drift risk on every future `lda_property` change.
-
-Expected: meaningful single-digit % across method-heavy
-fixtures; bigger on tight monomorphic call loops.
-
-### Tier 2 — medium
-
-**Global-property IC** (`lda_global`). `globalThis` is one shared
-object; every script touches it repeatedly (`console.log`,
-`Object`, `Array`, …). Cache `(globalThis_shape, slot)` per
-`lda_global` site. Same machinery as `lda_property` against a
-fixed receiver.
-
-**`call` opcode IC** (free-function calls — `f(x)` not
-`obj.f(x)`). Same call-IC cell pattern as `call_method`: cache
-the last plain callee pointer, skip exotic-callee dispatch.
-Useful for direct calls to closure-captured functions and locals.
+**Free-function `call` opcode IC.** Mirror `call_method`'s
+`CallICCell` pattern on the bare `call` op for `f(x)` (closure-
+captured functions, helper functions, callbacks). Cache the last
+plain callee pointer; cell hit skips the proxy / revocable /
+bound / `valueAsFunction` exotic dispatch. ~50 lines, parallels
+existing code closely. Helps FP-style and parser / traversal
+code.
 
 **`new_call` IC.** Caches `(ctor_fn, proto)` so the fast path
 skips `valueAsFunction` + `OrdinaryCreateFromConstructor`'s
 prototype lookup. Constructor-heavy code (`new ClassName(…)`
-loops) benefits.
+loops — object pools, `new URL()`, `new Date()`) benefits.
+Moderate complexity (~80 lines).
+
+### Tier 2 — medium
+
+**Computed-property IC** (`obj[k]` where `k` is a hot constant
+string). Cache `(shape, key_intern, slot)`. Requires string
+interning first; unlocked once *the flip* (below) makes
+shape-mode reads independent of `properties`.
 
 ### Tier 3 — niche
 
@@ -153,10 +189,6 @@ we care about.
 
 **`hasOwn` / `in` ICs.** Cache shape-presence for
 `Object.hasOwn(obj, "x")` and `"x" in obj`. Niche.
-
-**Computed-property IC** (`obj[k]` where `k` is a hot constant
-string). Cache `(shape, key_intern, slot)`. Requires string
-interning first.
 
 ## The flip — retire `properties` for shaped objects
 
@@ -216,6 +248,8 @@ makes the JIT-tier work tractable. Phased plan + invariants in
 - `bench-results.md` records per-commit deltas.
 - Cross-engine comparison via `tools/bench-cross.sh` per
   [docs/benchmarking.md](benchmarking.md).
-- test262 runtime gate every new IC chunk — `fail` must not
-  regress from the established baseline (currently 9 fail,
-  all pre-existing RegExp property-escapes).
+- test262 runtime gate every new IC chunk — pass / fail counts must
+  match the row recorded in
+  [test262-results.md](../test262-results.md). Each landed IC in
+  the *Shipped* list above kept the count byte-for-byte stable;
+  any future IC must do the same.
