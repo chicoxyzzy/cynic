@@ -6423,8 +6423,17 @@ pub fn runFrames(
             // ToObject + indexed access, and (b) the wrong
             // chain made `arguments[N] = v` trigger Array
             // exotic auto-length-extend.
+            // §10.4.4 CreateUnmappedArgumentsObject runs in the *running
+            // function's* execution context, so its %Object.prototype%,
+            // %ThrowTypeError% (callee trap), and %Array.prototype.values%
+            // (@@iterator) come from that function's [[Realm]], not the
+            // caller's. For a cross-realm call (`other.fn()`) the frame's
+            // `running_realm` is the callee's home realm; same-realm it is
+            // the dispatch realm (or null → fall back). The heap is shared,
+            // so allocation still goes through `realm.heap`.
+            const arg_realm = f.running_realm orelse realm;
             const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-            realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
+            realm.heap.setObjectPrototype(obj, arg_realm.intrinsics.object_prototype);
             obj.is_arguments_exotic = true;
             var i: u8 = 0;
             while (i < f.argc) : (i += 1) {
@@ -6450,8 +6459,8 @@ pub fn runFrames(
             // [[Set]] are both %ThrowTypeError%. Cynic is
             // strict-only, so every `arguments` object lands
             // here. The thrower function is a per-realm
-            // singleton (§10.2.4); reuse it from intrinsics.
-            if (realm.intrinsics.throw_type_error) |thrower| {
+            // singleton (§10.2.4); reuse the running function's.
+            if (arg_realm.intrinsics.throw_type_error) |thrower| {
                 const entry = obj.getOrPutAccessor(allocator, "callee") catch return error.OutOfMemory;
                 realm.heap.storeInternalSlot(.{ .object = obj }, heap_mod.taggedFunction(thrower));
                 entry.value_ptr.* = .{ .getter = thrower, .setter = thrower };
@@ -6469,7 +6478,7 @@ pub fn runFrames(
             // function via Array.prototype.values (its identity
             // is intentional — `arguments[@@iterator] ===
             // Array.prototype.values` per §10.4.4.7 step 7).
-            if (realm.intrinsics.array_prototype) |arr_proto| {
+            if (arg_realm.intrinsics.array_prototype) |arr_proto| {
                 const values_v = arr_proto.get("values");
                 if (heap_mod.valueAsFunction(values_v) != null) {
                     realm.heap.storePropertyWithFlags(obj, allocator, "@@iterator", values_v, .{

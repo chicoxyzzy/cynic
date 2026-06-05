@@ -284,6 +284,31 @@ test "cross-realm: a native-thrown TypeError uses the callee's home realm" {
     try testing.expect(probe.bits == Value.false_.bits);
 }
 
+test "cross-realm: a strict arguments object's callee trap is the function's home realm %ThrowTypeError%" {
+    // §10.4.4 CreateUnmappedArgumentsObject runs in the function's
+    // execution context, so the `callee` accessor's getter/setter is
+    // that function's realm %ThrowTypeError% (§10.2.4, one per realm).
+    // A function from parent, called from child, must build its
+    // arguments with parent's thrower — and invoking it throws parent's
+    // TypeError (via active_native_fn_realm), distinct from child's.
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const argfn_v = (try lantern.evaluateScript(testing.allocator, &parent, "(function () { return arguments; })")).value;
+    try child.globals.put(testing.allocator, "pArgsFn", argfn_v);
+
+    // The callee getter is parent's %ThrowTypeError%; calling it throws
+    // parent's TypeError, so `e.constructor === TypeError` (child's) is
+    // false. Pre-fix the trap was built from the dispatch (child) realm.
+    const probe = (try lantern.evaluateScript(testing.allocator, &child, "let a = pArgsFn(); let g = Object.getOwnPropertyDescriptor(a, 'callee').get; let r; try { g(); } catch (e) { r = (e.constructor === TypeError); } r")).value;
+    try testing.expect(probe.bits == Value.false_.bits);
+}
+
 test "cross-realm: §23.1.3.34 Array.prototype.map uses source realm's %Array% as species" {
     // §23.1.3.34 ArraySpeciesCreate defaults the species constructor
     // `C` to the *source* array's realm's %Array%, not the calling
