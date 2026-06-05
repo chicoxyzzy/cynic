@@ -8887,7 +8887,17 @@ pub fn runFrames(
                 //     `Reflect.setPrototypeOf` / `__proto__` write
                 //     anywhere in the realm since fill. Covers
                 //     deeper-chain mutations.
-                if (cell.pre_shape != null and cell.pre_shape == obj_in.shape and
+                // `post_shape != null` is the transition-mode
+                // indicator (cold cells leave it null; same-shape
+                // mode never sets it). Using it instead of
+                // `pre_shape != null` lets the very FIRST write
+                // on a fresh instance hit the fast path — that
+                // instance has `shape == null` (the root), which
+                // matches `cell.pre_shape == null` from fill on
+                // an equally-fresh sibling instance. Before this
+                // fix, only the second-onward write in a ctor
+                // loop hit the fast path.
+                if (cell.post_shape != null and cell.pre_shape == obj_in.shape and
                     obj_in.prototype != null and obj_in.prototype == cell.proto and
                     cell.proto.?.shape == cell.proto_shape and
                     cell.proto_rev == realm.proto_revision_counter)

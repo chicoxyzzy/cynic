@@ -1775,6 +1775,18 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             const new_setter: ?*JSFunction = if (parsed.has_set) parsed.setter else if (cur_is_accessor) cur_setter else null;
             realm.heap.setAccessorGetter(.{ .object = target }, entry.value_ptr, new_getter);
             realm.heap.setAccessorSetter(.{ .object = target }, entry.value_ptr, new_setter);
+            // Installing an accessor on an object that may be a
+            // proto for other receivers invalidates any cached
+            // `sta_property` transition IC whose chain-clean
+            // check happened BEFORE this defineProperty. The
+            // existing `proto_revision_counter` is the broadest-
+            // useful invalidation signal we already have — every
+            // IC that snapshots it (proto-load read IC,
+            // transition write IC) refills on the next call.
+            // Defining a non-accessor descriptor doesn't need
+            // the bump because the IC's shape-comparison already
+            // catches own-data additions.
+            realm.proto_revision_counter +%= 1;
             // Accessors don't honor `writable`; clear that bit.
             flags.writable = false;
             target.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
@@ -1884,6 +1896,9 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             const new_setter: ?*JSFunction = if (parsed.has_set) parsed.setter else if (cur_is_accessor) cur_setter else null;
             realm.heap.setAccessorGetter(.{ .function = target_fn }, entry.value_ptr, new_getter);
             realm.heap.setAccessorSetter(.{ .function = target_fn }, entry.value_ptr, new_setter);
+            // Invalidate IC cells — see the matching bump on the
+            // object-target accessor-install path above.
+            realm.proto_revision_counter +%= 1;
             // Accessors don't carry a `writable` bit; clear it.
             flags.writable = false;
             const is_default = flags.writable and flags.enumerable and flags.configurable;
