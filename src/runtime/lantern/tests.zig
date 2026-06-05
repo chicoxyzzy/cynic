@@ -8309,6 +8309,29 @@ test "String.prototype.length: indexed access splits surrogate pair" {
     try expectScriptStringWithBuiltins("\"a\\u{1F600}c\"[3];", "c");
 }
 
+test "String.prototype.split(\"\") splits by UTF-16 code unit, not WTF-8 byte (§22.1.3.23)" {
+    // §22.1.3.23 with an empty separator returns one element per UTF-16
+    // code unit (§6.1.4 String type). A supplementary character is two
+    // code units, so it splits into its lead + trail surrogate halves —
+    // never per storage byte. Cynic stores strings as WTF-8 and the
+    // empty-separator path used to emit one fragment per byte, so a
+    // 4-byte character produced four mojibake pieces.
+    try expectScriptStringWithBuiltins("\"abc\".split(\"\").join(\"|\");", "a|b|c");
+    // U+1D7D9 → surrogate pair D835 DFD9 (WTF-8 ED A0 B5 / ED BF 99).
+    try expectScriptStringWithBuiltins(
+        "\"a\\u{1D7D9}b\".split(\"\").join(\"|\");",
+        "a|\xED\xA0\xB5|\xED\xBF\x99|b",
+    );
+    // Each piece is exactly one code unit; the lead/trail are distinct.
+    try expectScriptStringWithBuiltins(
+        \\var p = "a\u{1D7D9}b".split("");
+        \\p.length + ":" + p[1].length + ":" + p[1].charCodeAt(0).toString(16) +
+        \\  ":" + p[2].charCodeAt(0).toString(16);
+    , "4:1:d835:dfd9");
+    // `limit` still caps the result at a code-unit count.
+    try expectScriptIntWithBuiltins("\"a\\u{1D7D9}b\".split(\"\", 2).length;", 2);
+}
+
 // ── §22.1.3.1 charAt / §22.1.3.2 charCodeAt / §22.1.3.0 at ─────────────────
 
 test "String.prototype.charAt: ASCII index" {

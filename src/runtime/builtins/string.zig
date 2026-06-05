@@ -1513,17 +1513,26 @@ pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) Native
 
     const sep: *JSString = @ptrCast(@alignCast(sep_str_v.asString()));
 
-    // Empty separator — split into chars. Honour `limit`.
+    // Empty separator — split into individual UTF-16 code units, not
+    // storage bytes. §22.1.3.23 step 11 (SplitMatch never matches the
+    // empty separator) leaves each element as the substring spanning one
+    // code unit (§6.1.4): a supplementary character yields its lead +
+    // trail surrogate halves, each a 3-byte WTF-8 escape — NOT one piece
+    // per WTF-8 byte. Honour `limit`.
     if (sep.flatBytes().len == 0) {
+        const cu_len = utf16.lengthInCodeUnits(s.flatBytes());
         var idx: usize = 0;
-        for (s.flatBytes()) |c| {
+        while (idx < cu_len) : (idx += 1) {
             if (idx >= @as(usize, @intCast(limit))) break;
+            const cu = utf16.codeUnitAt(s.flatBytes(), idx) orelse break;
+            var cbuf: std.ArrayListUnmanaged(u8) = .empty;
+            defer cbuf.deinit(realm.allocator);
+            utf16.appendCodeUnitAsWtf8(realm.allocator, &cbuf, cu) catch return error.OutOfMemory;
             var ibuf: [24]u8 = undefined;
             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
             const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-            const cs = realm.heap.allocateString(&[_]u8{c}) catch return error.OutOfMemory;
+            const cs = realm.heap.allocateString(cbuf.items) catch return error.OutOfMemory;
             out.set(realm.allocator, owned.flatBytes(), Value.fromString(cs)) catch return error.OutOfMemory;
-            idx += 1;
         }
         setLength(realm, out, @intCast(idx)) catch return error.OutOfMemory;
         return heap_mod.taggedObject(out);
