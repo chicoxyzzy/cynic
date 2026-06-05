@@ -204,7 +204,7 @@ hot interpreter dispatch paths are IC-covered; future wins shift to
 Tier 2 / 3 below or to non-IC axes (leaf-call register-file
 inlining, threaded dispatch).
 
-The first non-IC axis landed in `<pending>` — `realm.value_stack`,
+The first non-IC axis landed in `2675a82` — `realm.value_stack`,
 a bump-allocated register-file stack that the `.call_method`
 handler tries first for non-generator, non-async JS callees. On
 a 30M-call `method_call.js` samply trace the FramePool share
