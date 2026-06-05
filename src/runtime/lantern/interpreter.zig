@@ -2369,7 +2369,14 @@ pub fn runFrames(
             }
 
             const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
-            const callee_regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
+            const reg_count = @max(@as(usize, callee_chunk.register_count), @as(usize, argc));
+            // value_stack first, FramePool on overflow — see
+            // `.call_method` for the template's rationale.
+            var is_stack_alloc = true;
+            const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
+                is_stack_alloc = false;
+                break :blk try realm.frame_pool.acquire(allocator, reg_count);
+            };
             @memset(callee_regs, Value.undefined_);
             var i: u8 = 0;
             while (i < argc and @as(usize, i) < callee_regs.len) : (i += 1) {
@@ -2413,8 +2420,13 @@ pub fn runFrames(
                 .wrap_return_in_promise = false,
                 .owning_module = callee_fn.owning_module,
                 .running_realm = callee_fn.realm,
+                .is_stack_alloc = is_stack_alloc,
             }) catch {
-                realm.frame_pool.release(allocator, callee_regs);
+                if (is_stack_alloc) {
+                    realm.freeStackRegisters(callee_regs);
+                } else {
+                    realm.frame_pool.release(allocator, callee_regs);
+                }
                 return error.OutOfMemory;
             };
             // JS callee — a new frame was pushed; the active
@@ -2995,7 +3007,12 @@ pub fn runFrames(
 
             // Plain JS callee — push a new frame.
             const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
-            const callee_regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
+            const reg_count = @max(@as(usize, callee_chunk.register_count), @as(usize, argc));
+            var is_stack_alloc = true;
+            const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
+                is_stack_alloc = false;
+                break :blk try realm.frame_pool.acquire(allocator, reg_count);
+            };
             @memset(callee_regs, Value.undefined_);
             var ai: u8 = 0;
             while (ai < argc and @as(usize, ai) < callee_regs.len) : (ai += 1) {
@@ -3030,8 +3047,13 @@ pub fn runFrames(
                 .wrap_return_in_promise = false,
                 .owning_module = callee_fn.owning_module,
                 .running_realm = callee_fn.realm,
+                .is_stack_alloc = is_stack_alloc,
             }) catch {
-                realm.frame_pool.release(allocator, callee_regs);
+                if (is_stack_alloc) {
+                    realm.freeStackRegisters(callee_regs);
+                } else {
+                    realm.frame_pool.release(allocator, callee_regs);
+                }
                 return error.OutOfMemory;
             };
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
@@ -3604,14 +3626,23 @@ pub fn runFrames(
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         }
                         const callee_chunk = fn_obj.chunk orelse return error.InvalidOpcode;
-                        const callee_regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
+                        const reg_count = @max(@as(usize, callee_chunk.register_count), @as(usize, argc));
+                        var is_stack_alloc = true;
+                        const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
+                            is_stack_alloc = false;
+                            break :blk try realm.frame_pool.acquire(allocator, reg_count);
+                        };
                         @memset(callee_regs, Value.undefined_);
                         var ai: u8 = 0;
                         while (ai < argc and @as(usize, ai) < callee_regs.len) : (ai += 1) {
                             callee_regs[ai] = registers[r_callee + 1 + ai];
                         }
                         const instance = realm.heap.allocateObject() catch {
-                            realm.frame_pool.release(allocator, callee_regs);
+                            if (is_stack_alloc) {
+                                realm.freeStackRegisters(callee_regs);
+                            } else {
+                                realm.frame_pool.release(allocator, callee_regs);
+                            }
                             return error.OutOfMemory;
                         };
                         realm.heap.setObjectPrototype(instance, call_cell.proto);
@@ -3636,8 +3667,13 @@ pub fn runFrames(
                             .owning_module = fn_obj.owning_module,
                             .running_realm = fn_obj.realm,
                             .argc = argc,
+                            .is_stack_alloc = is_stack_alloc,
                         }) catch {
-                            realm.frame_pool.release(allocator, callee_regs);
+                            if (is_stack_alloc) {
+                                realm.freeStackRegisters(callee_regs);
+                            } else {
+                                realm.frame_pool.release(allocator, callee_regs);
+                            }
                             return error.OutOfMemory;
                         };
                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
@@ -3941,7 +3977,12 @@ pub fn runFrames(
             }
 
             const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
-            const callee_regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
+            const reg_count = @max(@as(usize, callee_chunk.register_count), @as(usize, argc));
+            var is_stack_alloc = true;
+            const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
+                is_stack_alloc = false;
+                break :blk try realm.frame_pool.acquire(allocator, reg_count);
+            };
             @memset(callee_regs, Value.undefined_);
             var ai: u8 = 0;
             while (ai < argc and @as(usize, ai) < callee_regs.len) : (ai += 1) {
@@ -3977,8 +4018,13 @@ pub fn runFrames(
                 .owning_module = callee_fn.owning_module,
                 .running_realm = callee_fn.realm,
                 .argc = argc,
+                .is_stack_alloc = is_stack_alloc,
             }) catch {
-                realm.frame_pool.release(allocator, callee_regs);
+                if (is_stack_alloc) {
+                    realm.freeStackRegisters(callee_regs);
+                } else {
+                    realm.frame_pool.release(allocator, callee_regs);
+                }
                 return error.OutOfMemory;
             };
             // JS callee — a new frame was pushed; the active

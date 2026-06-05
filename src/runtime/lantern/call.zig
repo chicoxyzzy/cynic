@@ -767,11 +767,16 @@ pub fn constructValue(
         for (frames.items) |*f| f.releaseRegisters(realm, allocator);
         frames.deinit(allocator);
     }
-    const regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), args.len));
+    const reg_count = @max(@as(usize, callee_chunk.register_count), args.len);
+    var is_stack_alloc = true;
+    const regs = realm.allocStackRegisters(reg_count) orelse blk: {
+        is_stack_alloc = false;
+        break :blk try realm.frame_pool.acquire(allocator, reg_count);
+    };
     @memset(regs, Value.undefined_);
     var i: usize = 0;
     while (i < args.len and i < regs.len) : (i += 1) regs[i] = args[i];
-    try frames.append(allocator, .{
+    frames.append(allocator, .{
         .chunk = callee_chunk,
         .ip = 0,
         .accumulator = Value.undefined_,
@@ -787,7 +792,15 @@ pub fn constructValue(
         .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
         .wrap_return_in_promise = false,
         .running_realm = target.realm,
-    });
+        .is_stack_alloc = is_stack_alloc,
+    }) catch {
+        if (is_stack_alloc) {
+            realm.freeStackRegisters(regs);
+        } else {
+            realm.frame_pool.release(allocator, regs);
+        }
+        return error.OutOfMemory;
+    };
     const outcome = try runFrames(allocator, realm, &frames);
     switch (outcome) {
         .value, .yielded => |v| {
@@ -889,7 +902,12 @@ pub fn callJSFunction(
         frames.deinit(allocator);
     }
 
-    const regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), args.len));
+    const reg_count = @max(@as(usize, callee_chunk.register_count), args.len);
+    var is_stack_alloc = true;
+    const regs = realm.allocStackRegisters(reg_count) orelse blk: {
+        is_stack_alloc = false;
+        break :blk try realm.frame_pool.acquire(allocator, reg_count);
+    };
     @memset(regs, Value.undefined_);
     var i: usize = 0;
     while (i < args.len and i < regs.len) : (i += 1) {
@@ -901,7 +919,7 @@ pub fn callJSFunction(
     // calls land here without a `[[Construct]]` context, so
     // NewTarget is undefined.
     const callee_new_target: Value = if (callee.is_arrow) callee.captured_new_target else Value.undefined_;
-    try frames.append(allocator, .{
+    frames.append(allocator, .{
         .chunk = callee_chunk,
         .ip = 0,
         .accumulator = Value.undefined_,
@@ -916,7 +934,15 @@ pub fn callJSFunction(
         .wrap_return_in_promise = false,
         .owning_module = callee.owning_module,
         .running_realm = callee.realm,
-    });
+        .is_stack_alloc = is_stack_alloc,
+    }) catch {
+        if (is_stack_alloc) {
+            realm.freeStackRegisters(regs);
+        } else {
+            realm.frame_pool.release(allocator, regs);
+        }
+        return error.OutOfMemory;
+    };
 
     return runFrames(allocator, realm, &frames);
 }
@@ -979,11 +1005,16 @@ pub fn callJSFunctionAsSuper(
         frames.deinit(allocator);
     }
 
-    const regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), args.len));
+    const reg_count = @max(@as(usize, callee_chunk.register_count), args.len);
+    var is_stack_alloc = true;
+    const regs = realm.allocStackRegisters(reg_count) orelse blk: {
+        is_stack_alloc = false;
+        break :blk try realm.frame_pool.acquire(allocator, reg_count);
+    };
     @memset(regs, Value.undefined_);
     var i: usize = 0;
     while (i < args.len and i < regs.len) : (i += 1) regs[i] = args[i];
-    try frames.append(allocator, .{
+    frames.append(allocator, .{
         .chunk = callee_chunk,
         .ip = 0,
         .accumulator = Value.undefined_,
@@ -1002,7 +1033,15 @@ pub fn callJSFunctionAsSuper(
         .wrap_return_in_promise = false,
         .owning_module = callee.owning_module,
         .running_realm = callee.realm,
-    });
+        .is_stack_alloc = is_stack_alloc,
+    }) catch {
+        if (is_stack_alloc) {
+            realm.freeStackRegisters(regs);
+        } else {
+            realm.frame_pool.release(allocator, regs);
+        }
+        return error.OutOfMemory;
+    };
 
     return runFrames(allocator, realm, &frames);
 }
