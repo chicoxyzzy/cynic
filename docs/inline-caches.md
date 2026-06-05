@@ -105,6 +105,19 @@ All on `origin/main`:
   `prop_access` -9.6 % / -7.3 %, `prop_write` -7.8 % / -4.5 %,
   `array_iter` -8.4 % / -4.3 %, `string_concat` -12.8 % / -4.7 %,
   `object_alloc` -5.8 % / -3.2 %, `method_call` -5.7 % / -4.2 %.
+- `e44870f` — Free-function `call` opcode IC. Mirrors
+  `call_method`'s `CallICCell` pattern on the bare `.call` op for
+  `f(args)` (closure-captured functions, helper functions,
+  callbacks). Cell hit is a single pointer-compare on the cached
+  callee → straight to the generator / native / async / regular
+  dispatch arms, skipping the proxy / `%Function.prototype%` /
+  revocable / wrapped / bound / class-constructor /
+  `valueAsFunction` exotic-dispatch chain. Wire grew from
+  `[r_callee:u8] [argc:u8]` (2 bytes) to `[r_callee:u8] [argc:u8]
+  [ic:u16]` (4 bytes). Handler restructures around a `blk:` that
+  yields a vetted `JSFunction*`, mirroring `call_method`'s shape;
+  the class-constructor TypeError check lives inside the blk so
+  the IC never caches a class-ctor callee.
 
 ## Architecture decisions
 
@@ -157,15 +170,7 @@ All on `origin/main`:
 
 Stack-ranked by expected impact, biggest first.
 
-### Tier 1 — biggest single remaining wins
-
-**Free-function `call` opcode IC.** Mirror `call_method`'s
-`CallICCell` pattern on the bare `call` op for `f(x)` (closure-
-captured functions, helper functions, callbacks). Cache the last
-plain callee pointer; cell hit skips the proxy / revocable /
-bound / `valueAsFunction` exotic dispatch. ~50 lines, parallels
-existing code closely. Helps FP-style and parser / traversal
-code.
+### Tier 1 — biggest single remaining win
 
 **`new_call` IC.** Caches `(ctor_fn, proto)` so the fast path
 skips `valueAsFunction` + `OrdinaryCreateFromConstructor`'s
