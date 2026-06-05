@@ -3512,9 +3512,80 @@ pub fn runFrames(
         .new_call => {
             const r_callee = code[ip];
             const argc = code[ip + 1];
-            ip += 2;
+            const ic_idx = readU16(code, ip + 2);
+            ip += 4;
 
             const callee_v = registers[r_callee];
+            const call_cell = &local_chunk.inline_call_caches[ic_idx];
+
+            // IC fast path: previously cached a plain non-bound
+            // non-proxy non-arrow JS-callee constructor whose
+            // `.prototype` hasn't been reassigned since fill. Hit
+            // skips the proxy check, the `valueAsFunction` decode,
+            // the `is_arrow` / `has_construct` gates, the bound-
+            // target unwrap, the deferred-proto-lookup native
+            // check, the §10.1.14 GetPrototypeFromConstructor
+            // accessor walk, AND the native-callback dispatch —
+            // straight into instance allocation + JS body frame.
+            //
+            // Identity guard on `fn_obj.prototype` catches a
+            // `C.prototype = newProto` reassignment that leaves
+            // the constructor function pointer unchanged.
+            if (call_cell.callee) |cached| {
+                if (heap_mod.valueAsFunction(callee_v)) |fn_obj| {
+                    if (fn_obj == cached and fn_obj.prototype == call_cell.proto) {
+                        if (frames.items.len >= max_call_frames) {
+                            const ex = try makeRangeError(realm, "Maximum call stack size exceeded");
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        }
+                        const callee_chunk = fn_obj.chunk orelse return error.InvalidOpcode;
+                        const callee_regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
+                        @memset(callee_regs, Value.undefined_);
+                        var ai: u8 = 0;
+                        while (ai < argc and @as(usize, ai) < callee_regs.len) : (ai += 1) {
+                            callee_regs[ai] = registers[r_callee + 1 + ai];
+                        }
+                        const instance = realm.heap.allocateObject() catch {
+                            realm.frame_pool.release(allocator, callee_regs);
+                            return error.OutOfMemory;
+                        };
+                        realm.heap.setObjectPrototype(instance, call_cell.proto);
+                        const this_value = heap_mod.taggedObject(instance);
+
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+
+                        frames.append(allocator, .{
+                            .chunk = callee_chunk,
+                            .ip = 0,
+                            .accumulator = Value.undefined_,
+                            .registers = callee_regs,
+                            .env = fn_obj.captured_env,
+                            .this_value = this_value,
+                            .is_construct = true,
+                            .is_derived_ctor = fn_obj.constructor_kind == .derived,
+                            .new_target = heap_mod.taggedFunction(fn_obj),
+                            .home_object = fn_obj.home_object,
+                            .home_function = fn_obj.home_function,
+                            .owning_module = fn_obj.owning_module,
+                            .running_realm = fn_obj.realm,
+                            .argc = argc,
+                        }) catch {
+                            realm.frame_pool.release(allocator, callee_regs);
+                            return error.OutOfMemory;
+                        };
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    }
+                }
+            }
+
             // §10.5.14 callable Proxy [[Construct]] — if a
             // construct trap is installed, dispatch through
             // the handler. Missing trap recurses into the
@@ -3821,6 +3892,16 @@ pub fn runFrames(
             f.ip = ip;
             f.accumulator = acc;
             committed = true;
+
+            // Survived every exotic-construct gate (proxy, bound,
+            // arrow, no-construct, deferred-proto native, native
+            // callback) and the slow `getPrototypeFromConstructor`
+            // accessor walk. Refill the IC so the next iteration
+            // of a hot `new C(…)` loop takes the fast path: same
+            // callee identity AND same `.prototype` slot value →
+            // skip everything above.
+            call_cell.callee = callee_fn;
+            call_cell.proto = resolved_proto_main;
 
             frames.append(allocator, .{
                 .chunk = callee_chunk,

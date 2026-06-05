@@ -234,11 +234,18 @@ pub const Op = enum(u8) {
     /// `Chunk.inline_call_caches` (the same callee cache
     /// `call_method` uses).
     call_property,
-    /// `[op] [r_callee:u8] [argc:u8]` — `new f(args)` (§13.3.5).
-    /// Allocates a fresh ordinary object whose `[[Prototype]]` is
-    /// `f.prototype`, calls `f` with `this` bound to the new
-    /// object, and yields either the constructor's return value
-    /// (if it's an object) or the new object (otherwise).
+    /// `[op] [r_callee:u8] [argc:u8] [ic:u16]` — `new f(args)`
+    /// (§13.3.5). Allocates a fresh ordinary object whose
+    /// `[[Prototype]]` is `f.prototype`, calls `f` with `this`
+    /// bound to the new object, and yields either the constructor's
+    /// return value (if it's an object) or the new object
+    /// (otherwise). The `ic` operand indexes
+    /// `Chunk.inline_call_caches`; a hit on the cached
+    /// `(callee, callee.prototype)` pair skips both the
+    /// `valueAsFunction` decode AND the §10.1.14
+    /// GetPrototypeFromConstructor accessor walk on every
+    /// iteration of a hot `new C(…)` loop. The `proto` field on
+    /// `CallICCell` is set only by this opcode.
     new_call,
     /// `[op] [r_callee:u8] [argc:u8]` — §15.10 PTC. Tail-call the
     /// function in register `r_callee` with `argc` arguments at
@@ -1189,13 +1196,13 @@ pub const Op = enum(u8) {
             .sta_global_strict,
             => 3, // k:u16 + r:u8
             .make_class => 4, // k:u16 + r_keys_base:u8 + inner_class_slot:u8
-            .new_call,
             .super_call,
             .tail_call,
             .lda_env,
             .sta_env,
             => 2, // u8 + u8
             .call => 4, // r_callee:u8 + argc:u8 + ic:u16
+            .new_call => 4, // r_callee:u8 + argc:u8 + ic:u16
             .tail_call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
             .direct_eval => 4, // scope:u16 + r_callee:u8 + argc:u8
             .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
@@ -1411,6 +1418,12 @@ test "Op: operandSize agrees with the documented encoding" {
     // free-function calls (`f(x)`) get the cached-callee fast path
     // too: `[op] [r_callee:u8] [argc:u8] [ic:u16]` — 4 bytes.
     try testing.expectEqual(@as(u8, 4), Op.operandSize(.call));
+    // `new_call` reuses the same `CallICCell` table to cache
+    // `(callee, callee.prototype)` so hot `new C(…)` loops skip
+    // both `valueAsFunction` and §10.1.14
+    // GetPrototypeFromConstructor: `[op] [r_callee:u8] [argc:u8]
+    // [ic:u16]` — 4 bytes.
+    try testing.expectEqual(@as(u8, 4), Op.operandSize(.new_call));
     // `call_property` is `[op] [k:u16] [r_recv:u8] [argc:u8]
     // [ic_load:u16] [ic_call:u16]` — 8 bytes of operand. Fuses the
     // `ldar + lda_property + star + call_method` 4-op sequence into

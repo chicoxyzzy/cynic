@@ -1652,9 +1652,10 @@ pub const Heap = struct {
 
     /// Weak-clear stale heap pointers in both IC tables of a chunk:
     /// `inline_caches` (proto pointer for prototype-load cells)
-    /// and `inline_call_caches` (callee pointer). Cells whose
-    /// pointer isn't otherwise reachable get nulled, so a swept-
-    /// and-reused address cannot reawaken a stale cell.
+    /// and `inline_call_caches` (callee pointer + `new_call`'s
+    /// `proto` pointer). Cells whose pointer isn't otherwise
+    /// reachable get nulled, so a swept-and-reused address cannot
+    /// reawaken a stale cell.
     fn weakClearChunkICs(chunk: *const Chunk, live_color: u1) void {
         for (chunk.inline_caches) |*cell| {
             if (cell.proto) |proto| {
@@ -1667,7 +1668,24 @@ pub const Heap = struct {
         }
         for (chunk.inline_call_caches) |*cell| {
             if (cell.callee) |callee| {
-                if (callee.mark_color != live_color) cell.callee = null;
+                if (callee.mark_color != live_color) {
+                    cell.callee = null;
+                    // Drop the `new_call` proto alongside the
+                    // callee so the next miss refills both
+                    // together — a `proto != null` without a
+                    // matching `callee` would short-circuit
+                    // unreachably.
+                    cell.proto = null;
+                }
+            }
+            // The `new_call` proto can also outlive its callee in
+            // the unusual case where the cached prototype object
+            // gets swept before the constructor function does
+            // (e.g. `C.prototype = newObj` reassigns the slot then
+            // both old proto and callee become unreachable in the
+            // same cycle). Defensively re-check.
+            if (cell.proto) |proto| {
+                if (proto.mark_color != live_color) cell.proto = null;
             }
         }
         for (chunk.function_templates) |*ft| weakClearChunkICs(&ft.chunk, live_color);

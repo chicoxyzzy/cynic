@@ -118,6 +118,24 @@ All on `origin/main`:
   yields a vetted `JSFunction*`, mirroring `call_method`'s shape;
   the class-constructor TypeError check lives inside the blk so
   the IC never caches a class-ctor callee.
+- `<this-commit>` — `new_call` IC. Extends `CallICCell` with a
+  `proto: ?*JSObject` slot to cache the
+  `(constructor, resolved-prototype)` pair so each iteration of
+  a hot `new C(…)` loop skips both the `valueAsFunction` decode
+  AND the §10.1.14 GetPrototypeFromConstructor accessor walk —
+  straight from the cell hit into instance allocation + JS body
+  frame setup, bypassing every exotic-construct gate (proxy,
+  bound, arrow, no-construct, deferred-proto native, native
+  callback). Invalidation: cell hit verifies
+  `cached_callee == observed_callee` AND
+  `cached_proto == cached_callee.prototype` — the latter catches
+  `C.prototype = newProto` reassignments. Wire grew from
+  `[r_callee:u8] [argc:u8]` (2 bytes) to `[r_callee:u8] [argc:u8]
+  [ic:u16]` (4 bytes). The handler structure keeps the slow path
+  inline (no helper extracted yet) — the dispatch loop footprint
+  grew but no i-cache regressions surfaced in benches; if a
+  future change adds more to the handler, factor like
+  `slowLdaGlobal`.
 
 ## Architecture decisions
 
@@ -156,6 +174,13 @@ All on `origin/main`:
       is the global object's shape, `proto_rev` is repurposed to
       record `GlobalBindings.decl_revision`. A future `lda_global`
       proto-walk variant would set `proto` like `lda_property`.
+- **`CallICCell` is also dual-use.** `call_method` / `call` use
+  only `callee`; `new_call` sets `callee` AND `proto` (the
+  cached `callee.prototype` snapshot, for the
+  GetPrototypeFromConstructor skip). The GC's weak-clear pass
+  drops both fields together when the callee gets swept (an
+  orphan `proto` with `callee == null` would short-circuit
+  unreachably).
 - **Factor the slow path when the dispatch loop grows.** The lda_global
   IC ran into 5-15 % regressions on unrelated micros (e.g.
   `class_instantiate` +12 % despite zero `lda_global` in its hot
@@ -170,13 +195,14 @@ All on `origin/main`:
 
 Stack-ranked by expected impact, biggest first.
 
-### Tier 1 — biggest single remaining win
+### Tier 1 — drained
 
-**`new_call` IC.** Caches `(ctor_fn, proto)` so the fast path
-skips `valueAsFunction` + `OrdinaryCreateFromConstructor`'s
-prototype lookup. Constructor-heavy code (`new ClassName(…)`
-loops — object pools, `new URL()`, `new Date()`) benefits.
-Moderate complexity (~80 lines).
+Tier 1 is empty as of `<this-commit>` — the proto-load read IC,
+own/write IC, `call_method` IC, fused `call_property`, global IC,
+free-function `call` IC, and `new_call` IC are all on `main`. The
+hot interpreter dispatch paths are IC-covered; future wins shift to
+Tier 2 / 3 below or to non-IC axes (leaf-call register-file
+inlining, threaded dispatch).
 
 ### Tier 2 — medium
 

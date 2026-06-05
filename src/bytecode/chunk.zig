@@ -81,24 +81,35 @@ pub const ICCell = struct {
 
 pub const bag_index_uncached: u32 = std.math.maxInt(u32);
 
-/// Inline-cache cell for `call_method`. Caches the last callee
-/// observed at the call site so subsequent calls can skip the
-/// callable check, the proxy / revocable-proxy / bound-target
-/// exotic dispatch, and the `valueAsFunction` decode — going
-/// straight to `callJSFunction(cached_fn, ...)`. Monomorphic.
+/// Inline-cache cell for `call_method` / `call` / `new_call`.
+/// Caches the last callee observed at the call site so subsequent
+/// calls can skip the callable check, the proxy / revocable-proxy /
+/// bound-target exotic dispatch, and the `valueAsFunction` decode —
+/// going straight to `callJSFunction(cached_fn, ...)`. Monomorphic.
 ///
 /// `callee == null` is cold / un-cacheable (last callee was
 /// exotic, or hasn't run yet). The miss path only refills when
 /// the slow-path callee turned out to be a plain (non-bound,
 /// non-proxy, non-revoked) JSFunction.
 ///
-/// The cached pointer is a GC-heap allocation, unlike the Shape
+/// `proto` is set ONLY by `new_call`. It snapshots
+/// `callee.prototype` at fill time so a hot `new C(…)` loop also
+/// skips the §10.1.14 GetPrototypeFromConstructor accessor walk:
+/// cell hit verifies `cached_callee == observed_callee` AND
+/// `cached_proto == cached_callee.prototype` (the latter catches
+/// a `C.prototype = …` reassignment that doesn't change the
+/// constructor's identity). `.call` and `.call_method` leave
+/// `proto` at `null`; they don't consult it.
+///
+/// The cached pointers are GC-heap allocations, unlike the Shape
 /// pointers in `ICCell` (arena-stable). After the GC mark phase
 /// the heap walks every reachable chunk's `inline_call_caches`
-/// and nulls cells whose callee isn't marked, so a swept-and-
-/// reused address cannot reawaken a stale cell.
+/// and nulls cells whose callee (or `proto`, for `new_call`) isn't
+/// marked, so a swept-and-reused address cannot reawaken a stale
+/// cell.
 pub const CallICCell = struct {
     callee: ?*@import("../runtime/function.zig").JSFunction = null,
+    proto: ?*@import("../runtime/object.zig").JSObject = null,
 };
 
 /// Compile-time blueprint for an object-literal's shape — the V8 /
@@ -771,6 +782,24 @@ pub const Builder = struct {
         argc: u8,
     ) !void {
         try self.emitOp(.call, span);
+        try self.emitU8(r_callee);
+        try self.emitU8(argc);
+        try self.emitU16(try self.allocCallIC());
+    }
+
+    /// Emit `new_call` plus its callee / argc operands and a
+    /// freshly allocated call-IC slot. Encoding:
+    /// `[op] [r_callee:u8] [argc:u8] [ic:u16]`. The cell caches
+    /// the (constructor, resolved-prototype) pair so hot
+    /// `new C(…)` loops skip both `valueAsFunction` and the
+    /// §10.1.14 GetPrototypeFromConstructor accessor walk.
+    pub fn emitNewCall(
+        self: *Builder,
+        span: Span,
+        r_callee: u8,
+        argc: u8,
+    ) !void {
+        try self.emitOp(.new_call, span);
         try self.emitU8(r_callee);
         try self.emitU8(argc);
         try self.emitU16(try self.allocCallIC());

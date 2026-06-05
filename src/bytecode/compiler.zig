@@ -1051,9 +1051,7 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, span);
         try self.builder.emitU8(r_flags);
 
-        try self.builder.emitOp(.new_call, span);
-        try self.builder.emitU8(r_ctor);
-        try self.builder.emitU8(2);
+        try self.builder.emitNewCall(span, r_ctor, 2);
     }
 
     /// §13.5.5 OptionalExpression — compile the inner expression
@@ -1292,9 +1290,7 @@ pub const Compiler = struct {
             try self.builder.emitLdaGlobal(y.span, k_type_error);
             try self.builder.emitOp(.star, y.span);
             try self.builder.emitU8(r_callee);
-            try self.builder.emitOp(.new_call, y.span);
-            try self.builder.emitU8(r_callee);
-            try self.builder.emitU8(0);
+            try self.builder.emitNewCall(y.span, r_callee, 0);
             try self.builder.emitOp(.throw_, y.span);
 
             // ── Return handler ──
@@ -1527,9 +1523,7 @@ pub const Compiler = struct {
         try self.builder.emitLdaGlobal(y.span, k_type_error);
         try self.builder.emitOp(.star, y.span);
         try self.builder.emitU8(r_callee);
-        try self.builder.emitOp(.new_call, y.span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(0);
+        try self.builder.emitNewCall(y.span, r_callee, 0);
         try self.builder.emitOp(.throw_, y.span);
 
         // ── Return handler ──
@@ -4415,9 +4409,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(r);
         }
 
-        try self.builder.emitOp(.new_call, n.span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(@intCast(n.arguments.len));
+        try self.builder.emitNewCall(n.span, r_callee, @intCast(n.arguments.len));
 
         var j: u8 = 0;
         while (j < reserved) : (j += 1) self.releaseTemp();
@@ -4841,9 +4833,7 @@ pub const Compiler = struct {
                     try self.builder.emitLdaGlobal(u.span, k_ref_error);
                     try self.builder.emitOp(.star, u.span);
                     try self.builder.emitU8(r_callee);
-                    try self.builder.emitOp(.new_call, u.span);
-                    try self.builder.emitU8(r_callee);
-                    try self.builder.emitU8(0);
+                    try self.builder.emitNewCall(u.span, r_callee, 0);
                     try self.builder.emitOp(.throw_, u.span);
                     return;
                 }
@@ -8673,9 +8663,7 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, span);
         try self.builder.emitU8(r_msg);
 
-        try self.builder.emitOp(.new_call, span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(1);
+        try self.builder.emitNewCall(span, r_callee, 1);
         try self.builder.emitOp(.throw_, span);
     }
 

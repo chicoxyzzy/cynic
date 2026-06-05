@@ -10262,3 +10262,120 @@ test "free-function call IC: a callable proxy still routes through its apply tra
         \\last + ":" + trap_calls;
     , "trapped:3");
 }
+
+// `new_call` IC — `new C(args)` in a tight loop. Caches the
+// (constructor, resolved-prototype) pair so each iteration skips
+// the §10.1.14 GetPrototypeFromConstructor accessor walk + the
+// `valueAsFunction` decode + the is-arrow / has-construct gates.
+// The Hermes / V8 lineage caches the same pair; cell hit goes
+// straight to instance allocation + JS body dispatch.
+
+test "new_call IC: tight `new C()` loop yields a fresh instance each time" {
+    try expectScriptIntWithBuiltins(
+        \\class Point {
+        \\  constructor(x, y) { this.x = x; this.y = y; }
+        \\}
+        \\let total = 0;
+        \\for (let i = 0; i < 5; i++) {
+        \\  const p = new Point(i, i + 1);
+        \\  total += p.x + p.y;
+        \\}
+        \\total;
+    // (0+1) + (1+2) + (2+3) + (3+4) + (4+5) = 25
+    , 25);
+}
+
+test "new_call IC: each iteration's instance has its own prototype" {
+    // Verifying instance-vs-prototype identity through the IC —
+    // a cached proto must still be the actual `C.prototype` so
+    // `instance instanceof C` and method dispatch through the
+    // chain keep working.
+    try expectScriptIntWithBuiltins(
+        \\class Box { take() { return 7; } }
+        \\let acc = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\  const b = new Box();
+        \\  if (b instanceof Box) acc += b.take();
+        \\}
+        \\acc;
+    , 21);
+}
+
+test "new_call IC: reassigning ctor.prototype mid-loop invalidates the cell" {
+    // First two iterations use the original prototype; iteration
+    // 2 reassigns `Counter.prototype` to a fresh object. The IC
+    // cached the old proto's identity; the next call must miss
+    // (because `callee.prototype` no longer matches the cached
+    // value) and rebuild with the new proto. If the cell served
+    // the stale proto, `c.k` for the last two iterations would
+    // resolve through the OLD prototype, not the new one.
+    try expectScriptIntWithBuiltins(
+        \\function Counter() {}
+        \\Counter.prototype.k = 1;
+        \\let acc = 0;
+        \\for (let i = 0; i < 4; i++) {
+        \\  if (i === 2) Counter.prototype = { k: 100 };
+        \\  const c = new Counter();
+        \\  acc += c.k;
+        \\}
+        \\acc;
+    , 1 + 1 + 100 + 100);
+}
+
+test "new_call IC: bound constructor still concatenates its bound args" {
+    // `new BoundCtor(extra)` is the §10.4.1.2 case. The bound
+    // wrapper unwraps to the real target and concatenates the
+    // bound args ahead of the new ones. The IC must NOT serve a
+    // cached callee for a bound wrapper — the cached fast path
+    // would drop the bound args.
+    try expectScriptIntWithBuiltins(
+        \\function Pt(x, y, z) { this.s = x + y + z; }
+        \\const Bound = Pt.bind(null, 10, 20);
+        \\let total = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\  const p = new Bound(i);
+        \\  total += p.s;
+        \\}
+        \\total;
+    // bound x=10, y=20; z = i. (10+20+0) + (10+20+1) + (10+20+2) = 93
+    , 93);
+}
+
+test "new_call IC: arrow function as ctor throws TypeError (no fast path)" {
+    try expectScriptStringWithBuiltins(
+        \\const f = (x) => x + 1;
+        \\let msg = "no-throw";
+        \\try { new f(); } catch (e) { msg = e.constructor.name; }
+        \\msg;
+    , "TypeError");
+}
+
+test "new_call IC: constructor that throws surfaces correctly" {
+    try expectScriptStringWithBuiltins(
+        \\class Bad {
+        \\  constructor() { throw new RangeError("oops"); }
+        \\}
+        \\let msg = "no-throw";
+        \\try { new Bad(); } catch (e) { msg = e.message; }
+        \\msg;
+    , "oops");
+}
+
+test "new_call IC: ctor proxy with construct trap still routes through trap" {
+    // §10.5.14 callable Proxy [[Construct]] — a proxy with a
+    // construct trap MUST dispatch the trap on every `new`, never
+    // serve from cache.
+    try expectScriptStringWithBuiltins(
+        \\let trap_calls = 0;
+        \\function Plain(x) { this.x = x; }
+        \\const P = new Proxy(Plain, {
+        \\  construct(target, args) {
+        \\    trap_calls++;
+        \\    return Reflect.construct(target, args);
+        \\  },
+        \\});
+        \\let last = 0;
+        \\for (let i = 0; i < 4; i++) last = new P(i).x;
+        \\last + ":" + trap_calls;
+    , "3:4");
+}
