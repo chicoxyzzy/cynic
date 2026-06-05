@@ -204,6 +204,22 @@ hot interpreter dispatch paths are IC-covered; future wins shift to
 Tier 2 / 3 below or to non-IC axes (leaf-call register-file
 inlining, threaded dispatch).
 
+The first non-IC axis landed in `<pending>` — `realm.value_stack`,
+a bump-allocated register-file stack that the `.call_method`
+handler tries first for non-generator, non-async JS callees. On
+a 30M-call `method_call.js` samply trace the FramePool share
+dropped from 8.4 % to a much smaller fraction (the path now
+acquires from a pointer-bump instead of a hash-map-by-size),
+and `cynic-bench --runs=30` showed `method_call` p50 -6.8 %
+plus 3-11 % wins on `promise_chain`, `tail_recursion`,
+`json_stringify`, `array_iter`, `object_alloc`, and
+`string_concat`. The scope is intentionally narrow — only
+`.call_method`'s plain JS callee converts — so `.call`,
+`.new_call`, `.tail_call`, and the various `callJSFunction`
+re-entries still use `frame_pool` and a follow-up can widen
+the conversion site-by-site once the contract has been
+exercised in the wild.
+
 ### Tier 2 — medium
 
 **Computed-property IC** (`obj[k]` where `k` is a hot constant

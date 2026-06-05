@@ -744,6 +744,25 @@ pub const Realm = struct {
     /// bin; the map grows bounded by the number of unique
     /// register_counts the realm has seen.
     frame_pool: FramePool = .{},
+    /// Bump-allocated register-file stack for non-generator,
+    /// non-async JS callees. Frames push their register file on
+    /// call and pop on return — LIFO discipline matches the
+    /// `frames` ArrayList's call-stack shape, so a stack handles
+    /// the common case without per-call malloc / free. Generator
+    /// and async frames keep going through `frame_pool` because
+    /// their register file must outlive the suspending call.
+    ///
+    /// The buffer is pre-allocated at `Realm.init` to a fixed
+    /// capacity so its underlying memory never moves — slices
+    /// into it stay valid for the lifetime of the frame. A
+    /// request that would push past the end returns null; the
+    /// caller falls back to `frame_pool` (still correct, just
+    /// slower). 32 K slots covers the 1024-frame
+    /// `max_call_frames` ceiling × ~32 typical register-counts
+    /// with headroom; degenerate workloads with wider frames spill
+    /// to the pool transparently.
+    value_stack: []Value = &.{},
+    value_stack_top: usize = 0,
     /// One-shot exception slot for native callbacks. A native
     /// that wants to throw a specific JS value sets this and
     /// returns `error.NativeThrew`; the dispatcher reads it,
@@ -1006,6 +1025,7 @@ pub const Realm = struct {
             .owns_heap = true,
         };
         r.globals.heap = heap_ptr;
+        r.value_stack = allocator.alloc(Value, value_stack_capacity) catch unreachable;
         return r;
     }
 
@@ -1041,6 +1061,7 @@ pub const Realm = struct {
             .owns_heap = true,
         };
         r.globals.heap = heap_ptr;
+        r.value_stack = allocator.alloc(Value, value_stack_capacity) catch unreachable;
         return r;
     }
 
@@ -1079,6 +1100,7 @@ pub const Realm = struct {
             .feature_flags = parent.feature_flags,
         };
         r.globals.heap = parent.heap;
+        r.value_stack = parent.allocator.alloc(Value, value_stack_capacity) catch unreachable;
         return r;
     }
 
@@ -1114,12 +1136,44 @@ pub const Realm = struct {
         }
     }
 
+    /// Pre-allocated capacity for `value_stack`, in slots. 32 K ×
+    /// `@sizeOf(Value)` ≈ 256-512 KB per realm. Covers the
+    /// 1024-frame `max_call_frames` ceiling with headroom for
+    /// wider-than-typical register counts; a per-frame request
+    /// past the end returns null and the caller falls back to
+    /// `frame_pool` transparently.
+    pub const value_stack_capacity: usize = 32 * 1024;
+
+    /// Allocate `n` value slots from the bump-allocated value
+    /// stack. Returns null when the request would push past the
+    /// pre-allocated buffer — caller falls back to `frame_pool`.
+    /// LIFO: the returned slice is contiguous at the top of the
+    /// stack; `freeStackRegisters` must be called on slices in
+    /// reverse order of acquisition.
+    pub fn allocStackRegisters(self: *Realm, n: usize) ?[]Value {
+        const start = self.value_stack_top;
+        const new_top = start + n;
+        if (new_top > self.value_stack.len) return null;
+        self.value_stack_top = new_top;
+        return self.value_stack[start..new_top];
+    }
+
+    /// Return `n` slots to the stack. LIFO contract: the caller
+    /// must pass the most-recently-acquired slice. Debug builds
+    /// could assert `regs.ptr + regs.len == &value_stack[top]`;
+    /// release builds just trust the discipline.
+    pub fn freeStackRegisters(self: *Realm, regs: []Value) void {
+        std.debug.assert(regs.len <= self.value_stack_top);
+        self.value_stack_top -= regs.len;
+    }
+
     pub fn deinit(self: *Realm) void {
         // Drop out of the shared heap's realm set first, so a
         // collection during the rest of teardown never marks (or a
         // later sibling GC never touches) this dying realm.
         self.deregisterFromHeap();
         self.frame_pool.deinit(self.allocator);
+        if (self.value_stack.len > 0) self.allocator.free(self.value_stack);
         self.globals.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.microtask_queue.deinit(self.allocator);
@@ -1955,4 +2009,75 @@ test "GlobalBindings.decl_revision: bumps once per fresh installScriptLexBinding
     // resolution change, no bump.
     try realm.globals.putDecl(allocator, "x", Value.fromInt32(42));
     try testing.expect(realm.globals.decl_revision == r0 + 2);
+}
+
+// value_stack — bump-allocated register-file storage for
+// non-generator, non-async JS callees. Frames are pushed and
+// popped in LIFO order, so a stack handles them without
+// per-call malloc / free. Tests pin the wire-level contract
+// the interpreter relies on:
+//   * allocStackRegisters(n) on a cold stack returns a length-n
+//     slice carved from the pre-allocated buffer;
+//   * freeStackRegisters(s) restores `value_stack_top` so the
+//     next acquire reuses the same memory (LIFO);
+//   * a request larger than the remaining capacity returns null —
+//     caller falls back to FramePool;
+//   * deinit frees the pre-allocated buffer without leaking.
+
+test "value_stack: allocStackRegisters returns a length-n slice" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    const regs = realm.allocStackRegisters(4) orelse return error.UnexpectedNull;
+    try testing.expectEqual(@as(usize, 4), regs.len);
+    try testing.expectEqual(@as(usize, 4), realm.value_stack_top);
+    realm.freeStackRegisters(regs);
+    try testing.expectEqual(@as(usize, 0), realm.value_stack_top);
+}
+
+test "value_stack: LIFO acquire/release reuses the same buffer" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    const a = realm.allocStackRegisters(6) orelse return error.UnexpectedNull;
+    realm.freeStackRegisters(a);
+    const b = realm.allocStackRegisters(6) orelse return error.UnexpectedNull;
+    try testing.expectEqual(a.ptr, b.ptr);
+    realm.freeStackRegisters(b);
+}
+
+test "value_stack: nested LIFO acquires" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    const a = realm.allocStackRegisters(3) orelse return error.UnexpectedNull;
+    const b = realm.allocStackRegisters(5) orelse return error.UnexpectedNull;
+    try testing.expect(b.ptr == a.ptr + a.len);
+    try testing.expectEqual(@as(usize, 8), realm.value_stack_top);
+    realm.freeStackRegisters(b);
+    try testing.expectEqual(@as(usize, 3), realm.value_stack_top);
+    realm.freeStackRegisters(a);
+    try testing.expectEqual(@as(usize, 0), realm.value_stack_top);
+}
+
+test "value_stack: overflow returns null without disturbing the stack" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    const before = realm.value_stack_top;
+    const oversize = realm.value_stack.len + 1;
+    try testing.expect(realm.allocStackRegisters(oversize) == null);
+    try testing.expectEqual(before, realm.value_stack_top);
+}
+
+test "value_stack: deinit doesn't leak even with outstanding acquires" {
+    // The pre-allocated buffer is freed wholesale on deinit
+    // regardless of `value_stack_top`. (In practice the
+    // interpreter always pops before realm teardown, but the
+    // contract holds either way.) Leak detection comes from
+    // testing.allocator.
+    var realm = Realm.init(testing.allocator);
+    _ = realm.allocStackRegisters(16) orelse return error.UnexpectedNull;
+    _ = realm.allocStackRegisters(8) orelse return error.UnexpectedNull;
+    realm.deinit();
 }

@@ -272,6 +272,16 @@ pub const CallFrame = struct {
     /// their register file separately, so the dispatch loop
     /// must not free it on Return.
     owns_registers: bool = true,
+    /// Whether `registers` was acquired from `realm.value_stack`
+    /// (the bump-allocated register-file stack) rather than
+    /// `realm.frame_pool` (the heap-backed sized-bin free list).
+    /// True only when the call-site path chose the stack and the
+    /// `allocStackRegisters` request succeeded — generators,
+    /// async functions, and bound-target / proxy / callJSFunction
+    /// re-entries all stay on the pool. The Return / unwind
+    /// paths branch on this via `releaseFrameRegisters`.
+    is_stack_alloc: bool = false,
+
     /// Set on calls to `async function` bodies. The Return op
     /// wraps the returned value in `Promise.resolve(...)` and
     /// uncaught throws in `Promise.reject(...)` so the caller
@@ -303,6 +313,24 @@ pub const CallFrame = struct {
     /// `realm` (correct when the running function shares its realm,
     /// which is every single-realm program).
     running_realm: ?*@import("../realm.zig").Realm = null,
+
+    /// Release a frame's register file via the right helper for
+    /// its storage. Generators leave `owns_registers = false`
+    /// because the generator object outlives the frame and owns
+    /// the slice; for those this is a no-op. Stack-allocated
+    /// frames pop from `realm.value_stack` (LIFO); pool-allocated
+    /// frames return to `realm.frame_pool`. Every frame-cleanup
+    /// site (Return, unwind, error-path frame drain) routes
+    /// through here so the storage choice stays a single-line
+    /// branch local to this helper.
+    pub fn releaseRegisters(self: *const CallFrame, realm: *Realm, allocator: std.mem.Allocator) void {
+        if (!self.owns_registers) return;
+        if (self.is_stack_alloc) {
+            realm.freeStackRegisters(self.registers);
+        } else {
+            realm.frame_pool.release(allocator, self.registers);
+        }
+    }
 };
 
 pub const RunError = error{
@@ -626,7 +654,7 @@ pub fn evaluateDirectEval(
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*fr| if (fr.owns_registers) realm.frame_pool.release(allocator, fr.registers);
+        for (frames.items) |*fr| fr.releaseRegisters(realm, allocator);
         frames.deinit(allocator);
     }
     const main_regs = try realm.frame_pool.acquire(allocator, chunk_ptr.register_count);
@@ -757,7 +785,7 @@ pub fn run(allocator: std.mem.Allocator, realm: *Realm, chunk: *const Chunk) Run
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+        for (frames.items) |*f| f.releaseRegisters(realm, allocator);
         frames.deinit(allocator);
     }
 
@@ -2616,7 +2644,21 @@ pub fn runFrames(
             }
 
             const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
-            const callee_regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
+            const reg_count = @max(@as(usize, callee_chunk.register_count), @as(usize, argc));
+            // Try the bump-allocated `value_stack` first — it
+            // covers the LIFO common case (plain non-generator,
+            // non-async JS callee whose register file's lifetime
+            // is bounded by the frame). Falls through to the
+            // heap-backed `frame_pool` when the stack would
+            // overflow its pre-allocated buffer (which `Realm.init`
+            // sizes for the 1024-frame `max_call_frames` ceiling
+            // with headroom; only pathological workloads with
+            // very wide frames spill).
+            var is_stack_alloc = true;
+            const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
+                is_stack_alloc = false;
+                break :blk try realm.frame_pool.acquire(allocator, reg_count);
+            };
             @memset(callee_regs, Value.undefined_);
             var ai: u8 = 0;
             while (ai < argc and @as(usize, ai) < callee_regs.len) : (ai += 1) {
@@ -2656,8 +2698,16 @@ pub fn runFrames(
                 .wrap_return_in_promise = false,
                 .owning_module = callee_fn.owning_module,
                 .running_realm = callee_fn.realm,
+                .is_stack_alloc = is_stack_alloc,
             }) catch {
-                realm.frame_pool.release(allocator, callee_regs);
+                // Release via the matching helper. Can't construct
+                // a transient CallFrame here without restating
+                // every field, so branch inline.
+                if (is_stack_alloc) {
+                    realm.freeStackRegisters(callee_regs);
+                } else {
+                    realm.frame_pool.release(allocator, callee_regs);
+                }
                 return error.OutOfMemory;
             };
             // JS callee — a new frame was pushed; the active
@@ -3235,7 +3285,7 @@ pub fn runFrames(
 
             // Free the current frame's register file. The new
             // one is sized for the callee chunk.
-            if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+            f.releaseRegisters(realm, allocator);
             const callee_regs_t = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk_t.register_count), @as(usize, argc)));
             @memset(callee_regs_t, Value.undefined_);
             {
@@ -3262,6 +3312,12 @@ pub fn runFrames(
             f.argc = argc;
             f.generator = null;
             f.owns_registers = true;
+            // Tail-call reallocated through `frame_pool` above,
+            // so the reused frame is pool-backed regardless of
+            // whether the prior incarnation was stack-allocated.
+            // (The prior incarnation's stack registers, if any,
+            // were popped by the `releaseRegisters` call above.)
+            f.is_stack_alloc = false;
             f.wrap_return_in_promise = false;
             f.owning_module = callee_fn.owning_module;
             f.running_realm = callee_fn.realm;
@@ -3474,7 +3530,7 @@ pub fn runFrames(
                 var i: u8 = 0;
                 while (i < argc) : (i += 1) args_buf[i] = registers[r_callee + 1 + i];
             }
-            if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+            f.releaseRegisters(realm, allocator);
             const callee_regs_t = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk_t.register_count), @as(usize, argc)));
             @memset(callee_regs_t, Value.undefined_);
             {
@@ -3498,6 +3554,9 @@ pub fn runFrames(
             f.argc = argc;
             f.generator = null;
             f.owns_registers = true;
+            // See `tail_call`: tail-call reallocates through
+            // `frame_pool`, so the reused frame is pool-backed.
+            f.is_stack_alloc = false;
             f.wrap_return_in_promise = false;
             f.owning_module = callee_fn.owning_module;
             f.running_realm = callee_fn.realm;
@@ -9855,7 +9914,10 @@ pub fn runFrames(
                     ret = wrapInPromise(realm, true, ret) catch return error.OutOfMemory;
                 }
             }
-            if (f.owns_registers) realm.frame_pool.release(allocator, registers);
+            // `registers` is `f.registers` aliased earlier in the
+            // dispatch loop; `releaseRegisters` reads `f.registers`
+            // directly, so this is the same slice.
+            f.releaseRegisters(realm, allocator);
             _ = frames.pop();
             committed = true;
             // §10.2.2 [[Construct]] steps 7c / 11 — raise the
@@ -9999,7 +10061,7 @@ pub fn unwindThrow(
         // Promise we hand back — never escapes the function.
         if (frame.wrap_return_in_promise) {
             const rejected = wrapInPromise(realm, false, current_ex) catch return error.OutOfMemory;
-            if (frame.owns_registers) allocator.free(frame.registers);
+            frame.releaseRegisters(realm, allocator);
             _ = frames.pop();
             if (frames.items.len == 0) {
                 // Top-level async (rare). The throw was
@@ -10012,7 +10074,7 @@ pub fn unwindThrow(
             frames.items[frames.items.len - 1].accumulator = rejected;
             return true;
         }
-        if (frame.owns_registers) allocator.free(frame.registers);
+        frame.releaseRegisters(realm, allocator);
         _ = frames.pop();
     }
     return false;

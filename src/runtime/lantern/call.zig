@@ -764,7 +764,7 @@ pub fn constructValue(
     const callee_chunk = target.chunk.?;
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+        for (frames.items) |*f| f.releaseRegisters(realm, allocator);
         frames.deinit(allocator);
     }
     const regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), args.len));
@@ -885,7 +885,7 @@ pub fn callJSFunction(
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+        for (frames.items) |*f| f.releaseRegisters(realm, allocator);
         frames.deinit(allocator);
     }
 
@@ -975,7 +975,7 @@ pub fn callJSFunctionAsSuper(
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+        for (frames.items) |*f| f.releaseRegisters(realm, allocator);
         frames.deinit(allocator);
     }
 

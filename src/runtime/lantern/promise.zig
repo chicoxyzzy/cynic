@@ -829,7 +829,7 @@ pub fn resumeAsyncFunction(
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+        for (frames.items) |*f| f.releaseRegisters(realm, allocator);
         frames.deinit(allocator);
     }
 
@@ -936,7 +936,7 @@ pub fn resumeAsyncGeneratorOnSettle(
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+        for (frames.items) |*f| f.releaseRegisters(realm, allocator);
         frames.deinit(allocator);
     }
 
@@ -1130,7 +1130,7 @@ pub fn resumeGenerator(
 
     var frames: std.ArrayListUnmanaged(CallFrame) = .empty;
     defer {
-        for (frames.items) |*f| if (f.owns_registers) realm.frame_pool.release(allocator, f.registers);
+        for (frames.items) |*f| f.releaseRegisters(realm, allocator);
         frames.deinit(allocator);
     }
 
