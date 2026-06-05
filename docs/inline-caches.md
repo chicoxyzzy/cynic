@@ -137,7 +137,7 @@ All on `origin/main`:
   future change adds more to the handler, factor like
   `slowLdaGlobal`.
 
-- `<pending>` — `sta_property` transition IC. The original IC
+- `db6cfcb` — `sta_property` transition IC. The original IC
   explicitly refused to cache shape transitions ("the cached
   post-shape never matches the next pre-shape … e.g.
   literal-construction loops"), which meant every iteration of
