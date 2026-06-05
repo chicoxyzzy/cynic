@@ -469,8 +469,8 @@ fn numberToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const s = try intrinsics.stringifyArg(realm, Value.fromDouble(x));
         return Value.fromString(s);
     }
-    // Non-decimal: integer-only path. Fractional non-decimal
-    // is rare in tests; we truncate.
+    // Non-decimal, integer-valued: exact digit emission below. The
+    // fractional case falls through to the radix expansion afterward.
     if (x == @trunc(x)) {
         // §21.1.3.6 step 6. Exact i64 divmod for the common case;
         // `@intFromFloat` would trap the host for |x| > i64::MAX
@@ -544,9 +544,93 @@ fn numberToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const s = realm.heap.allocateString(out[0 .. len + n]) catch return error.OutOfMemory;
         return Value.fromString(s);
     }
-    // Fractional non-decimal — fall back to base 10 for now.
-    const slice = std.fmt.bufPrint(&buf, "{d}", .{x}) catch return error.OutOfMemory;
-    const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
+    // §21.1.3.6 step 6 / §6.1.6.1.20: a non-integer x in radix r ≠ 10.
+    // The spec leaves the precision implementation-defined; V8, JSC,
+    // SpiderMonkey, and engine262 all use V8's DoubleToRadixCString —
+    // emit fraction digits with a delta bound (half a ULP) so the
+    // expansion is the shortest that still round-trips, rounding to
+    // even with carry-over into the integer part. Port it so Cynic
+    // agrees digit for digit (e.g. (255.5).toString(16) === "ff.8").
+    const radix_chars = "0123456789abcdefghijklmnopqrstuvwxyz";
+    // Decimal point sits in the middle; integer digits grow left,
+    // fraction digits grow right. A non-integer double has |x| < 2^52,
+    // so the integer part is ≤ 53 digits and the fraction is at most a
+    // few hundred digits (denormals near floatTrueMin are the worst
+    // case) — 2200 bytes is ample, matching V8's buffer.
+    const buf_size: usize = 2200;
+    var rbuf: [buf_size]u8 = undefined;
+    const mid: usize = buf_size / 2;
+    var int_cursor: usize = mid;
+    var frac_cursor: usize = mid;
+    const rf: f64 = @floatFromInt(radix);
+
+    const negative = x < 0;
+    const value = if (negative) -x else x;
+    var integer = @floor(value);
+    var fraction = value - integer;
+
+    // delta = ½·(nextDouble(value) − value), floored to the smallest
+    // positive double so it is always strictly above zero.
+    var delta = 0.5 * (std.math.nextAfter(f64, value, std.math.inf(f64)) - value);
+    const min_pos = std.math.floatTrueMin(f64);
+    if (delta < min_pos) delta = min_pos;
+
+    if (fraction >= delta) {
+        rbuf[frac_cursor] = '.';
+        frac_cursor += 1;
+        while (true) {
+            // Shift up by one digit.
+            fraction *= rf;
+            delta *= rf;
+            const digit: usize = @intFromFloat(fraction);
+            rbuf[frac_cursor] = radix_chars[digit];
+            frac_cursor += 1;
+            fraction -= @as(f64, @floatFromInt(digit));
+            // Round to even.
+            if (fraction > 0.5 or (fraction == 0.5 and (digit & 1) == 1)) {
+                if (fraction + delta > 1.0) {
+                    // Carry-over: back-trace already-written digits.
+                    while (true) {
+                        frac_cursor -= 1;
+                        if (frac_cursor == mid) {
+                            // Only the '.' remains; carry into integer.
+                            integer += 1;
+                            break;
+                        }
+                        const c = rbuf[frac_cursor];
+                        const d: usize = if (c > '9') (c - 'a' + 10) else (c - '0');
+                        if (d + 1 < radix) {
+                            rbuf[frac_cursor] = radix_chars[d + 1];
+                            frac_cursor += 1;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+            if (fraction < delta) break;
+        }
+    }
+
+    // Integer part. |value| < 2^52 ⇒ the floored integer fits a u64
+    // exactly; emit its radix digits by divmod (least-significant first,
+    // growing left from the midpoint).
+    var iu: u64 = @intFromFloat(integer);
+    if (iu == 0) {
+        int_cursor -= 1;
+        rbuf[int_cursor] = '0';
+    } else {
+        while (iu > 0) : (iu /= radix) {
+            const d: u64 = iu % radix;
+            int_cursor -= 1;
+            rbuf[int_cursor] = radix_chars[@intCast(d)];
+        }
+    }
+    if (negative) {
+        int_cursor -= 1;
+        rbuf[int_cursor] = '-';
+    }
+    const s = realm.heap.allocateString(rbuf[int_cursor..frac_cursor]) catch return error.OutOfMemory;
     return Value.fromString(s);
 }
 

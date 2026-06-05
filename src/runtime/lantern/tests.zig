@@ -7222,6 +7222,30 @@ test "Number.prototype.toString(radix): large doubles emit a string, never panic
     , 6);
 }
 
+test "Number.prototype.toString(radix): fractional values expand in the radix (§21.1.3.6, §6.1.6.1.20)" {
+    // §6.1.6.1.20 leaves the radix-r representation of a non-integer at
+    // "implementation-defined precision"; V8 / JSC / SpiderMonkey /
+    // engine262 all use V8's DoubleToRadixCString shortest-round-trip
+    // expansion. Cynic previously truncated the fraction and emitted the
+    // *decimal* string for any non-integer with radix ≠ 10 (so
+    // `(255.5).toString(16)` wrongly gave "255.5"). Strings below are the
+    // engine262 authority outputs.
+    try expectScriptStringWithBuiltins("(255.5).toString(16);", "ff.8");
+    try expectScriptStringWithBuiltins("(0.5).toString(2);", "0.1");
+    try expectScriptStringWithBuiltins("(5.75).toString(2);", "101.11");
+    try expectScriptStringWithBuiltins("(-10.5).toString(2);", "-1010.1");
+    try expectScriptStringWithBuiltins("(1.5).toString(2);", "1.1");
+    try expectScriptStringWithBuiltins("(1000.0625).toString(16);", "3e8.1");
+    try expectScriptStringWithBuiltins("(255.99609375).toString(16);", "ff.ff");
+    try expectScriptStringWithBuiltins("(3.14159).toString(16);", "3.243f3e0370cdc");
+    try expectScriptStringWithBuiltins(
+        \\(0.1).toString(3);
+    , "0.0022002200220022002200220022002201");
+    try expectScriptStringWithBuiltins(
+        \\(0.1).toString(2);
+    , "0.0001100110011001100110011001100110011001100110011001101");
+}
+
 test "huge numeric args on String/Array/TypedArray builtins don't panic (#23)" {
     // §7.1.5 ToIntegerOrInfinity saturates a large finite value; each
     // site then returns its spec completion (empty string / NaN /
