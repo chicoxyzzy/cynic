@@ -430,6 +430,30 @@ test "interpreter: for-in does not enumerate Symbol-keyed properties (§14.7.5.9
     , "inherited,own");
 }
 
+test "interpreter: Array subclass methods honour @@species (§23.1.3.34)" {
+    // ArraySpeciesCreate reads `Get(C, @@species)`, which for a
+    // `class Sub extends Array` resolves the @@species accessor inherited
+    // from %Array% (Sub's [[Prototype]]) and returns Sub — so map / filter
+    // / slice / splice / concat / flat / flatMap produce Sub instances.
+    // The native @@species lookup previously checked only the
+    // constructor's OWN accessors, missing the inherited one and falling
+    // back to a plain Array.
+    try expectScriptStringWithBuiltins(
+        \\class A extends Array {}
+        \\var a = A.of(1, 2, 3);
+        \\[a.map(x=>x), a.filter(()=>true), a.slice(), a.concat([4]),
+        \\ a.flat(), a.flatMap(x=>[x]), a.splice(0,0)]
+        \\  .map(r => r instanceof A).join(',');
+    , "true,true,true,true,true,true,true");
+    // An explicit @@species override is honoured: B's species is %Array%,
+    // so the result is a plain Array, not a B.
+    try expectScriptStringWithBuiltins(
+        \\class B extends Array { static get [Symbol.species]() { return Array; } }
+        \\var m = B.of(1, 2).map(x=>x);
+        \\(m instanceof B) + ',' + (m.constructor === Array);
+    , "false,true");
+}
+
 test "interpreter: typeof returns spec strings" {
     try expectString("typeof 1;", "number");
     try expectString("typeof 1.5;", "number");

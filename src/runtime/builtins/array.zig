@@ -168,26 +168,6 @@ fn arraySpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) Nat
 /// data-property + proto chain. Used by ArraySpeciesCreate to read
 /// `@@species` off a constructor function where the species slot
 /// is a get-only accessor (e.g. the built-in `Array[@@species]`).
-fn getFunctionMember(realm: *Realm, fn_obj: *JSFunction, key: []const u8) NativeError!Value {
-    if (fn_obj.accessors.get(key)) |acc| {
-        if (acc.getter) |getter| {
-            const outcome = lantern.callJSFunction(realm.allocator, realm, getter, heap_mod.taggedFunction(fn_obj), &[_]Value{}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeThrew,
-            };
-            switch (outcome) {
-                .value, .yielded => |v| return v,
-                .thrown => |ex| {
-                    realm.pending_exception = ex;
-                    return error.NativeThrew;
-                },
-            }
-        }
-        return Value.undefined_;
-    }
-    return fn_obj.get(key);
-}
-
 /// §23.1.3.34 ArraySpeciesCreate(originalArray, length).
 /// 1. isArray = IsArray(originalArray)
 /// 2. If !isArray, return ! ArrayCreate(length).
@@ -248,14 +228,16 @@ pub fn arraySpeciesCreate(realm: *Realm, original: *JSObject, length: i64) Nativ
         }
     }
     // Step 5 — if C is an Object, set C to ? Get(C, @@species); if
-    // null, set C to undefined.
+    // null, set C to undefined. `getPropertyChainOnValue` is the
+    // §10.1.8 OrdinaryGet for both a plain object and a function,
+    // walking the [[Prototype]] chain — so a `class Sub extends Array`
+    // resolves the @@species accessor INHERITED from %Array% (returning
+    // Sub), not just Sub's own slots. Returns null only when C is a
+    // primitive (not an Object), in which case C is left unchanged and
+    // step 7's IsConstructor check rejects it.
     var c_v: Value = ctor_v;
-    if (heap_mod.valueAsFunction(ctor_v)) |ctor_fn| {
-        c_v = try getFunctionMember(realm, ctor_fn, "@@species");
-        if (c_v.isNull()) c_v = Value.undefined_;
-    } else if (heap_mod.valueAsPlainObject(ctor_v)) |ctor_obj| {
-        c_v = try intrinsics.getPropertyChain(realm, ctor_obj, "@@species");
-        if (c_v.isNull()) c_v = Value.undefined_;
+    if (try intrinsics.getPropertyChainOnValue(realm, ctor_v, "@@species")) |species| {
+        c_v = if (species.isNull()) Value.undefined_ else species;
     }
     // Step 6 — if C is undefined, return ArrayCreate(length).
     if (c_v.isUndefined()) return defaultArrayCreate(home, length);
