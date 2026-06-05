@@ -69,6 +69,9 @@ const arguments_scan = @import("arguments_scan.zig");
 const referencesArguments = arguments_scan.referencesArguments;
 const paramsReferenceArguments = arguments_scan.paramsReferenceArguments;
 
+const function_scope_scan = @import("function_scope_scan.zig");
+const functionEntryEnvNeeded = function_scope_scan.functionEntryEnvNeeded;
+
 pub const CompileError = error{
     OutOfMemory,
     TooManyRegisters,
@@ -7468,7 +7471,10 @@ pub const Compiler = struct {
         self.scope = &fn_scope;
         self.env_slot_count = 0;
         self.temps_in_use = 0;
-        self.env_depth = saved_env_depth + 1;
+        // Field initializer body is a single expression — no
+        // params, no declarations. Its entry env is always 0
+        // slots, so we elide unconditionally.
+        self.env_depth = saved_env_depth;
         self.current_loop = null;
         self.completion_reg = null;
         self.in_field_initializer = true;
@@ -7489,8 +7495,6 @@ pub const Compiler = struct {
             }
         }
 
-        try self.builder.emitOp(.make_environment, span);
-        try self.builder.emitU8(0);
         if (init_name) |n| {
             try self.compileNamedValue(init_expr, n);
         } else {
@@ -7498,7 +7502,7 @@ pub const Compiler = struct {
         }
         try self.builder.emitOp(.return_, span);
 
-        self.builder.code.items[1] = self.env_slot_count;
+        std.debug.assert(self.env_slot_count == 0);
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
         fn_scope.deinit(self.allocator);
@@ -7539,7 +7543,11 @@ pub const Compiler = struct {
         self.scope = &fn_scope;
         self.env_slot_count = 0;
         self.temps_in_use = 0;
-        self.env_depth = saved_env_depth + 1;
+        // Static block has no params. Reuse the function-entry
+        // discovery pass to decide whether the body declares
+        // anything that would need the env.
+        const needs_entry_env = functionEntryEnvNeeded(self.source, &.{}, body, false);
+        self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
         self.completion_reg = null;
         self.in_field_initializer = true;
@@ -7560,9 +7568,12 @@ pub const Compiler = struct {
             }
         }
 
-        try self.builder.emitOp(.make_environment, span);
-        const slot_count_patch = self.builder.here();
-        try self.builder.emitU8(0);
+        const slot_count_patch: ?usize = if (needs_entry_env) blk: {
+            try self.builder.emitOp(.make_environment, span);
+            const here = self.builder.here();
+            try self.builder.emitU8(0);
+            break :blk here;
+        } else null;
         try self.hoistLetConst(body);
         try self.hoistVarAndFunctions(body);
         try self.emitVarInits(span);
@@ -7571,7 +7582,11 @@ pub const Compiler = struct {
         try self.builder.emitOp(.lda_undefined, span);
         try self.builder.emitOp(.return_, span);
 
-        self.builder.code.items[slot_count_patch] = self.env_slot_count;
+        if (slot_count_patch) |p| {
+            self.builder.code.items[p] = self.env_slot_count;
+        } else {
+            std.debug.assert(self.env_slot_count == 0);
+        }
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
         fn_scope.deinit(self.allocator);
@@ -7614,7 +7629,13 @@ pub const Compiler = struct {
         self.scope = &fn_scope;
         self.env_slot_count = 0;
         self.temps_in_use = 0;
-        self.env_depth = saved_env_depth + 1;
+        // Function-entry env elision — same logic as the function /
+        // method paths. A user-written `constructor` with no params,
+        // no `arguments`, and no body decls (still runs
+        // `init_instance_fields` at entry but that doesn't touch the
+        // entry env) needs no entry env.
+        const needs_entry_env = functionEntryEnvNeeded(self.source, params, body_stmts, false);
+        self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
         self.completion_reg = null;
 
@@ -7633,9 +7654,12 @@ pub const Compiler = struct {
             }
         }
 
-        try self.builder.emitOp(.make_environment, span);
-        const slot_count_patch = self.builder.here();
-        try self.builder.emitU8(0);
+        const slot_count_patch: ?usize = if (needs_entry_env) blk: {
+            try self.builder.emitOp(.make_environment, span);
+            const here = self.builder.here();
+            try self.builder.emitU8(0);
+            break :blk here;
+        } else null;
 
         // §10.4.4 + §10.2.10 step 22/27 — install `arguments`
         // BEFORE the param prologue so default expressions like
@@ -7694,7 +7718,11 @@ pub const Compiler = struct {
         try self.builder.emitOp(.lda_undefined, span);
         try self.builder.emitOp(.return_, span);
 
-        self.builder.code.items[slot_count_patch] = self.env_slot_count;
+        if (slot_count_patch) |p| {
+            self.builder.code.items[p] = self.env_slot_count;
+        } else {
+            std.debug.assert(self.env_slot_count == 0);
+        }
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
         fn_scope.deinit(self.allocator);
@@ -7750,7 +7778,13 @@ pub const Compiler = struct {
         self.scope = &fn_scope;
         self.env_slot_count = 0;
         self.temps_in_use = 0;
-        self.env_depth = saved_env_depth + 1;
+        // Function-entry env elision — same logic as
+        // `compileFunctionTemplateExtNamed`. Methods follow the
+        // same §10.2.10 FunctionDeclarationInstantiation shape,
+        // so a 0-binding body (no params, no `arguments`, no
+        // body decls) needs no entry env.
+        const needs_entry_env = functionEntryEnvNeeded(self.source, params, body_stmts, false);
+        self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
         self.completion_reg = null;
         self.current_is_async = is_async;
@@ -7772,9 +7806,12 @@ pub const Compiler = struct {
             }
         }
 
-        try self.builder.emitOp(.make_environment, span);
-        const slot_count_patch = self.builder.here();
-        try self.builder.emitU8(0);
+        const slot_count_patch: ?usize = if (needs_entry_env) blk: {
+            try self.builder.emitOp(.make_environment, span);
+            const here = self.builder.here();
+            try self.builder.emitU8(0);
+            break :blk here;
+        } else null;
 
         // §10.4.4 + §10.2.10 step 22/27 — install `arguments`
         // BEFORE the param prologue so default expressions like
@@ -7823,7 +7860,11 @@ pub const Compiler = struct {
         try self.builder.emitOp(.lda_undefined, span);
         try self.builder.emitOp(.return_, span);
 
-        self.builder.code.items[slot_count_patch] = self.env_slot_count;
+        if (slot_count_patch) |p| {
+            self.builder.code.items[p] = self.env_slot_count;
+        } else {
+            std.debug.assert(self.env_slot_count == 0);
+        }
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
         fn_scope.deinit(self.allocator);
@@ -7865,7 +7906,12 @@ pub const Compiler = struct {
         self.scope = &fn_scope;
         self.env_slot_count = 0;
         self.temps_in_use = 0;
-        self.env_depth = saved_env_depth + 1;
+        // Synthetic default constructor has no params and no body
+        // declarations — its entry env is always 0 slots and
+        // unreferenced (super_call_forward + init_instance_fields
+        // both read the frame, not the env), so we elide
+        // unconditionally.
+        self.env_depth = saved_env_depth;
         self.current_loop = null;
         self.completion_reg = null;
 
@@ -7884,8 +7930,6 @@ pub const Compiler = struct {
             }
         }
 
-        try self.builder.emitOp(.make_environment, span);
-        try self.builder.emitU8(0);
         if (is_derived) {
             try self.builder.emitOp(.super_call_forward, span);
         }
@@ -12697,7 +12741,25 @@ fn compileFunctionTemplateExtNamed(
     self.scope = &fn_scope;
     self.env_slot_count = 0;
     self.temps_in_use = 0;
-    self.env_depth = saved_env_depth + 1 + (if (has_fn_name_env) @as(u8, 1) else @as(u8, 0));
+    // Function-entry env elision (§10.2.10 FunctionDeclarationInstantiation).
+    // The body's own DeclarativeEnvironment can be elided when the
+    // function declares no bindings of its own — no params, no
+    // implicit `arguments`, no body-level `var` / `function` /
+    // top-level `let` / `const` / `class`. Strict-only Cynic has
+    // no `with`, and direct `eval` binds in its own per-invocation
+    // env (§19.2.1.3) rather than the caller's, so an empty env
+    // is observably unobservable. When elided, env_depth stays at
+    // the outer level (plus the named-fn-expr wrapper, if any) so
+    // `lda_env` / `sta_env` depth deltas match the (shorter)
+    // runtime env chain.
+    const body_stmts: ?[]ast.statement.Statement = switch (body) {
+        .block => |stmts| stmts,
+        .expression => null,
+    };
+    const needs_entry_env = functionEntryEnvNeeded(self.source, params, body_stmts, is_arrow);
+    self.env_depth = saved_env_depth +
+        (if (has_fn_name_env) @as(u8, 1) else @as(u8, 0)) +
+        (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
     self.current_loop = null;
     self.completion_reg = null;
     self.current_is_async = is_async;
@@ -12730,10 +12792,16 @@ fn compileFunctionTemplateExtNamed(
 
     // Emit a `MakeEnvironment` placeholder. We patch the slot
     // count once the body has been compiled and we know how many
-    // bindings the function needs.
-    try self.builder.emitOp(.make_environment, span);
-    const slot_count_patch = self.builder.here();
-    try self.builder.emitU8(0);
+    // bindings the function needs. When `needs_entry_env` is
+    // false the discovery pass proved this scope holds zero
+    // bindings; skip the emit (and the patch) so the runtime
+    // never allocates an empty env at every call.
+    const slot_count_patch: ?usize = if (needs_entry_env) blk: {
+        try self.builder.emitOp(.make_environment, span);
+        const here = self.builder.here();
+        try self.builder.emitU8(0);
+        break :blk here;
+    } else null;
 
     // §10.4.4 Implicit `arguments` binding for non-arrow
     // functions. Installed BEFORE the param prologue so default
@@ -12825,11 +12893,16 @@ fn compileFunctionTemplateExtNamed(
         },
     }
 
-    // Patch the MakeEnvironment slot count.
-    self.builder.code.items[slot_count_patch] = self.env_slot_count;
-
-    const final_slot_count = self.env_slot_count;
-    _ = final_slot_count;
+    // Patch the MakeEnvironment slot count, if we emitted one.
+    // When elided, the discovery pass guaranteed no binding would
+    // be created, so `env_slot_count` must still be 0 here — a
+    // non-zero count would mean the predicate disagreed with the
+    // actual emit and is a compiler bug.
+    if (slot_count_patch) |p| {
+        self.builder.code.items[p] = self.env_slot_count;
+    } else {
+        std.debug.assert(self.env_slot_count == 0);
+    }
 
     const inner_chunk = try self.builder.finish();
     inner_finished = true;
