@@ -199,6 +199,37 @@ pub const Op = enum(u8) {
     /// pointer skips the proxy / revocable / bound / `valueAsFunction`
     /// dispatch chain and calls the function directly.
     call_method,
+    /// `[op] [k:u16] [r_recv:u8] [argc:u8] [ic_load:u16] [ic_call:u16]`
+    /// — fused property load + method call. Replaces the
+    /// `ldar r_recv; lda_property k ic_load; star r_callee;
+    /// call_method r_recv r_callee argc ic_call` 4-op sequence the
+    /// compiler used to emit for `obj.method(args)` when the property
+    /// name is a plain identifier (no private `#`, no computed key,
+    /// no optional chain, no tail position, no `super.method`). Hermes
+    /// ships the same fusion (its `CallBuiltin` / `CallPropertyN`);
+    /// Ignition's `CallProperty0/1/2` is the per-argc specialised
+    /// equivalent. Saves 3 dispatches + 5 wire bytes per call site —
+    /// material on tight method loops (`c.inc()`, `arr.push(x)`).
+    ///
+    /// Args live at `r_recv + 1.. r_recv + 1 + argc`. The compiler
+    /// reserves them contiguous to `r_recv` (no intervening
+    /// `r_callee` slot — the callee is loaded inline and never spills
+    /// to a register).
+    ///
+    /// Fast path: shape compare on the receiver, serve the cached
+    /// own- or proto-slot, pointer-compare the loaded callee against
+    /// the call IC cell, callJSFunction directly. Slow path: same
+    /// receiver-type lookup arms as `lda_property` (plain / function /
+    /// string / number / bool / bigint / symbol / proxy / namespace
+    /// / null+undefined) followed by the same call-dispatch arms as
+    /// `call_method` (proxy / bound / revocable / native / generator
+    /// / async / regular).
+    ///
+    /// `ic_load` indexes `Chunk.inline_caches` (the same proto-load
+    /// cache `lda_property` uses); `ic_call` indexes
+    /// `Chunk.inline_call_caches` (the same callee cache
+    /// `call_method` uses).
+    call_property,
     /// `[op] [r_callee:u8] [argc:u8]` — `new f(args)` (§13.3.5).
     /// Allocates a fresh ordinary object whose `[[Prototype]]` is
     /// `f.prototype`, calls `f` with `this` bound to the new
@@ -1164,6 +1195,7 @@ pub const Op = enum(u8) {
             .del_named_property => 3, // k:u16 + r_obj:u8
             .del_computed_property => 2, // r_obj:u8 + r_key:u8
             .call_method => 5, // r_recv:u8 + r_callee:u8 + argc:u8 + ic:u16
+            .call_property => 8, // k:u16 + r_recv:u8 + argc:u8 + ic_load:u16 + ic_call:u16
             .for_of_next => 3, // r_iter:u8 + r_next:u8 + r_done:u8
             .loop_inc_lt => 4, // r_counter:u8 + r_bound:u8 + offset:i16
             .make_environment => 1, // slot_count:u8
@@ -1228,6 +1260,7 @@ pub const Op = enum(u8) {
             .make_named_function_expr => "MakeNamedFunctionExpr",
             .call => "Call",
             .call_method => "CallMethod",
+            .call_property => "CallProperty",
             .new_call => "NewCall",
             .tail_call => "TailCall",
             .tail_call_method => "TailCallMethod",
@@ -1351,6 +1384,11 @@ test "Op: operandSize agrees with the documented encoding" {
     // so unit-test failures stay hidden — playground/source-map
     // hover would be the user-visible signal).
     try testing.expectEqual(@as(u8, 4), Op.operandSize(.lda_property));
+    // `call_property` is `[op] [k:u16] [r_recv:u8] [argc:u8]
+    // [ic_load:u16] [ic_call:u16]` — 8 bytes of operand. Fuses the
+    // `ldar + lda_property + star + call_method` 4-op sequence into
+    // one dispatch for the simple `obj.method(args)` shape.
+    try testing.expectEqual(@as(u8, 8), Op.operandSize(.call_property));
     // `sta_property` is `[op] [k:u16] [r_obj:u8] [ic:u16]` — 5 bytes
     // of operand. Same disassembler-PC-walk hazard as `lda_property`
     // if this gets out of sync with the encoding.

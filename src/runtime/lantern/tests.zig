@@ -9769,3 +9769,137 @@ test "SES Phase 3: iter spread on built-in iterators works under hardened" {
         \\[...Iterator.concat(new Iterable())].join(",");
     , "10,20,30");
 }
+
+// `obj.method(args)` — the fused-call-property shape. The compiler
+// emits a single dispatch (`call_property`) for the simple
+// identifier-property method-call form, in place of the
+// `ldar + lda_property + star + call_method` 4-op sequence used for
+// the harder shapes. These tests pin the observable behavior the
+// fused op must preserve across every receiver-type arm
+// `lda_property` covers: own / proto data, accessor (getter / setter),
+// proxy chain, module namespace, primitive auto-box (string, number,
+// bool, bigint), plus the `this` binding and the argument-count
+// matrix on the call dispatch side.
+
+test "fused method-call: proto-data method (the c.inc() shape)" {
+    try expectScriptIntWithBuiltins(
+        \\class Counter {
+        \\  constructor() { this.n = 0; }
+        \\  inc() { this.n += 1; return this.n; }
+        \\}
+        \\const c = new Counter();
+        \\let acc = 0;
+        \\for (let i = 0; i < 5; i++) acc = c.inc();
+        \\acc;
+    , 5);
+}
+
+test "fused method-call: own-data method shadows prototype" {
+    try expectScriptStringWithBuiltins(
+        \\const obj = {
+        \\  greet() { return "own"; },
+        \\};
+        \\Object.setPrototypeOf(obj, { greet() { return "proto"; } });
+        \\obj.greet();
+    , "own");
+}
+
+test "fused method-call: accessor returning a function fires the getter" {
+    // The getter MUST run (returning the inner function), then the
+    // returned function gets called. A fast path that read the data
+    // slot directly would skip the getter.
+    try expectScriptStringWithBuiltins(
+        \\let getter_called = 0;
+        \\const obj = {
+        \\  get fn() { getter_called++; return function () { return "ok"; }; },
+        \\};
+        \\const r = obj.fn();
+        \\r + ":" + getter_called;
+    , "ok:1");
+}
+
+test "fused method-call: getter that throws surfaces as TypeError" {
+    try expectScriptStringWithBuiltins(
+        \\const obj = {
+        \\  get bad() { throw new TypeError("nope"); },
+        \\};
+        \\let msg = "no-throw";
+        \\try { obj.bad(); } catch (e) { msg = e.message; }
+        \\msg;
+    , "nope");
+}
+
+test "fused method-call: `this` binds to the receiver, not undefined" {
+    try expectScriptStringWithBuiltins(
+        \\const obj = {
+        \\  name: "alice",
+        \\  who() { return this.name; },
+        \\};
+        \\obj.who();
+    , "alice");
+}
+
+test "fused method-call: primitive string receiver auto-boxes" {
+    try expectScriptStringWithBuiltins(
+        \\"hello".toUpperCase();
+    , "HELLO");
+}
+
+test "fused method-call: primitive number receiver auto-boxes" {
+    try expectScriptStringWithBuiltins(
+        \\(3.14).toFixed(1);
+    , "3.1");
+}
+
+test "fused method-call: argc = 0 / 1 / many" {
+    try expectScriptIntWithBuiltins(
+        \\const obj = {
+        \\  zero() { return 7; },
+        \\  one(x) { return x * 2; },
+        \\  many(a, b, c, d) { return a + b + c + d; },
+        \\};
+        \\obj.zero() + obj.one(5) + obj.many(1, 2, 3, 4);
+    , 7 + 10 + 10);
+}
+
+test "fused method-call: missing method throws TypeError, not a silent miss" {
+    try expectScriptStringWithBuiltins(
+        \\const obj = {};
+        \\let msg = "no-throw";
+        \\try { obj.missing(); } catch (e) { msg = e.constructor.name; }
+        \\msg;
+    , "TypeError");
+}
+
+test "fused method-call: monomorphic loop, second receiver same shape" {
+    // Two different Counter instances share an own shape and the
+    // same Counter.prototype — the IC must remain monomorphic and
+    // serve both with one cell.
+    try expectScriptIntWithBuiltins(
+        \\class Counter {
+        \\  constructor(start) { this.n = start; }
+        \\  inc() { this.n += 1; return this.n; }
+        \\}
+        \\const a = new Counter(0);
+        \\const b = new Counter(100);
+        \\let s = 0;
+        \\for (let i = 0; i < 3; i++) s += a.inc();
+        \\for (let i = 0; i < 3; i++) s += b.inc();
+        \\s;
+    , (1 + 2 + 3) + (101 + 102 + 103));
+}
+
+test "fused method-call: proto chain swap invalidates the IC" {
+    // The proto-load IC stores the cached proto pointer + its shape
+    // + `realm.proto_revision_counter`. `Object.setPrototypeOf`
+    // bumps the counter — so the next call must take the slow path
+    // and resolve through the new prototype.
+    try expectScriptStringWithBuiltins(
+        \\const obj = {};
+        \\Object.setPrototypeOf(obj, { greet() { return "A"; } });
+        \\const first = obj.greet();
+        \\Object.setPrototypeOf(obj, { greet() { return "B"; } });
+        \\const second = obj.greet();
+        \\first + second;
+    , "AB");
+}

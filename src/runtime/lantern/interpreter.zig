@@ -2635,6 +2635,326 @@ pub fn runFrames(
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 
+        // §13.3.6 EvaluateCall — fused property load + method call
+        // for the simple `obj.method(args)` shape. Replaces a
+        // 4-op `ldar + lda_property + star + call_method` sequence
+        // with one dispatch. Hot path: receiver shape compare +
+        // load cached own / proto slot + callee pointer compare +
+        // direct `callJSFunction`. Slow path: `slowLookupForCallProperty`
+        // (mirrors `lda_property`'s 11-arm receiver-type matrix)
+        // followed by the same call-dispatch arms as `call_method`
+        // (proxy / bound / revocable / native / generator / async /
+        // regular).
+        .call_property => {
+            const k = readU16(code, ip);
+            const r_recv = code[ip + 2];
+            const argc = code[ip + 3];
+            const ic_load_idx = readU16(code, ip + 4);
+            const ic_call_idx = readU16(code, ip + 6);
+            ip += 8;
+
+            if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+            const key_v = local_chunk.constants[k];
+            if (!key_v.isString()) return error.InvalidOpcode;
+            const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+            const recv = registers[r_recv];
+
+            // Resolve the callee. Fast path: shape compare on the
+            // receiver (and proto identity + proto_shape + proto_rev
+            // for the proto-load mode), serve `recv.slots[slot]` or
+            // `proto.slots[slot]`. Slow path: `slowLookupForCallProperty`.
+            var callee_v: Value = Value.undefined_;
+            var resolved_fast: bool = false;
+            if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
+                const cell = &local_chunk.inline_caches[ic_load_idx];
+                if (cell.shape != null and cell.shape == obj_in.shape) {
+                    if (cell.proto) |proto| {
+                        if (obj_in.prototype == proto and
+                            proto.shape == cell.proto_shape and
+                            cell.proto_rev == realm.proto_revision_counter)
+                        {
+                            callee_v = proto.slots.items[cell.slot];
+                            resolved_fast = true;
+                        }
+                    } else {
+                        callee_v = obj_in.slots.items[cell.slot];
+                        resolved_fast = true;
+                    }
+                }
+            }
+            if (!resolved_fast) {
+                const lookup = try slowLookupForCallProperty(allocator, realm, frames, f, ip, recv, key_s.flatBytes());
+                callee_v = switch (lookup) {
+                    .value => |v| v,
+                    .handled => {
+                        // The helper called `unwindThrow`, which
+                        // already rewrote `f.ip` to the matching
+                        // catch handler's PC. DO NOT overwrite it
+                        // — `reEnterDispatch` reads `f.ip` to pick
+                        // up at the catch. (Mirrors the
+                        // `getThroughChain` `.handled` arm in
+                        // `lda_property`'s slow path.)
+                        committed = true;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                    .uncaught => |ex| return .{ .thrown = ex },
+                };
+                // Refill the load IC for the simple shape-claimed
+                // own / proto-data case so the next call takes the
+                // fast path. Anything more exotic (accessor, proxy,
+                // module namespace, primitive auto-box) stays
+                // un-cached — mirrors `lda_property`'s IC fill
+                // policy.
+                if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
+                    if (obj_in.shape) |sh| {
+                        const cell = &local_chunk.inline_caches[ic_load_idx];
+                        if (sh.lookup(key_s.flatBytes())) |entry| {
+                            if (entry.kind == .data) {
+                                cell.shape = sh;
+                                cell.slot = entry.slot;
+                                cell.proto = null;
+                                cell.proto_shape = null;
+                            }
+                        } else if (!chainHasProxy(obj_in) and !obj_in.hasAccessor(key_s.flatBytes())) {
+                            var cursor: ?*JSObject = obj_in.prototype;
+                            while (cursor) |proto| : (cursor = proto.prototype) {
+                                if (proto.proxy_target != null or proto.proxy_revoked) break;
+                                if (proto.is_module_namespace) break;
+                                if (proto.hasAccessor(key_s.flatBytes())) break;
+                                if (proto.shape) |proto_sh| {
+                                    if (proto_sh.lookup(key_s.flatBytes())) |entry| {
+                                        if (entry.kind == .data) {
+                                            cell.shape = sh;
+                                            cell.slot = entry.slot;
+                                            cell.proto = proto;
+                                            cell.proto_shape = proto_sh;
+                                            cell.proto_rev = realm.proto_revision_counter;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (proto.ownDataContains(key_s.flatBytes())) break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Call IC: pointer-compare the loaded callee against the
+            // cached `JSFunction*`. A hit skips the entire exotic-
+            // dispatch chain below (proxy / revocable / bound /
+            // `valueAsFunction`) and goes straight to the
+            // generator / native / async / regular call.
+            const call_cell = &local_chunk.inline_call_caches[ic_call_idx];
+            const callee_fn = blk: {
+                if (call_cell.callee) |cached| {
+                    if (heap_mod.valueAsFunction(callee_v)) |fn_obj| {
+                        if (fn_obj == cached) break :blk fn_obj;
+                    }
+                }
+
+                // §10.5.13 callable Proxy [[Call]].
+                if (heap_mod.valueAsPlainObject(callee_v)) |po| {
+                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                        const args_start = @as(usize, r_recv) + 1;
+                        const args_slice = registers[args_start .. args_start + argc];
+                        const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, recv, args_slice);
+                        switch (cresult) {
+                            .value, .yielded => |v| {
+                                acc = v;
+                                continue :dispatch try decodeNext(code, &ip, &committed);
+                            },
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                        }
+                    }
+                    // §20.2.3 — call into %Function.prototype% is undefined.
+                    if (realm.intrinsics.function_prototype == po) {
+                        acc = Value.undefined_;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
+                }
+                const fn_v = heap_mod.valueAsFunction(callee_v) orelse {
+                    const ex = try makeTypeError(realm, "value is not callable");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                };
+
+                // §28.2.2.1.1 — revocation function.
+                if (fn_v.revocable_proxy) |rp| {
+                    realm.heap.setProxyTarget(rp, null);
+                    realm.heap.setProxyHandler(rp, null);
+                    realm.heap.setProxyTargetFn(rp, null);
+                    rp.proxy_revoked = true;
+                    fn_v.revocable_proxy = null;
+                    acc = Value.undefined_;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                // §10.4.1 — bound function. The bound `this`
+                // overrides `recv` inside `unwrapBoundCall`.
+                if (fn_v.bound_target != null) {
+                    const args_start = @as(usize, r_recv) + 1;
+                    const result = try callJSFunction(allocator, realm, fn_v, recv, registers[args_start .. args_start + argc]);
+                    switch (result) {
+                        .value, .yielded => |v| acc = v,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    }
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+
+                // Plain callable — refill the call IC.
+                call_cell.callee = fn_v;
+                break :blk fn_v;
+            };
+
+            // §27.5 / §27.6 — generator / async generator wrap.
+            if (callee_fn.is_generator) {
+                const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
+                const args_start = @as(usize, r_recv) + 1;
+                const wrap_result = if (callee_fn.is_async)
+                    try wrapAsyncGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn)
+                else
+                    try wrapGenerator(allocator, realm, callee_chunk, callee_fn.captured_env, recv, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn);
+                switch (wrap_result) {
+                    .value, .yielded => |v| acc = v,
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                }
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+
+            // Native fast path.
+            if (callee_fn.native_callback) |native| {
+                const prior_fn_realm = realm.active_native_fn_realm;
+                realm.active_native_fn_realm = callee_fn.realm;
+                defer realm.active_native_fn_realm = prior_fn_realm;
+                const args_start = @as(usize, r_recv) + 1;
+                const args = registers[args_start .. args_start + argc];
+                const native_this: Value = if (callee_fn.is_arrow)
+                    callee_fn.captured_this
+                else
+                    recv;
+                const result = native(realm, native_this, args) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = consumePendingException(realm) orelse try makeTypeError(realm, "native error");
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                };
+                acc = result;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+
+            if (callee_fn.is_async) {
+                const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
+                const args_start = @as(usize, r_recv) + 1;
+                const callee_this: Value = if (callee_fn.is_arrow) callee_fn.captured_this else recv;
+                const outcome = try startAsyncCall(allocator, realm, callee_chunk, callee_fn.captured_env, callee_this, registers[args_start .. args_start + argc], callee_fn.home_object, callee_fn.home_function, callee_fn.owning_module);
+                switch (outcome) {
+                    .value, .yielded => |v| acc = v,
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                }
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+
+            // §15.7.14 step 1 — class constructors are not callable.
+            if (callee_fn.is_class_constructor) {
+                const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .thrown = ex };
+                }
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+
+            // Plain JS callee — push a new frame.
+            const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
+            const callee_regs = try realm.frame_pool.acquire(allocator, @max(@as(usize, callee_chunk.register_count), @as(usize, argc)));
+            @memset(callee_regs, Value.undefined_);
+            var ai: u8 = 0;
+            while (ai < argc and @as(usize, ai) < callee_regs.len) : (ai += 1) {
+                callee_regs[ai] = registers[@as(usize, r_recv) + 1 + ai];
+            }
+
+            f.ip = ip;
+            f.accumulator = acc;
+            committed = true;
+
+            const callee_this: Value = if (callee_fn.is_arrow)
+                callee_fn.captured_this
+            else
+                recv;
+            const callee_new_target: Value = if (callee_fn.is_arrow)
+                callee_fn.captured_new_target
+            else
+                Value.undefined_;
+
+            frames.append(allocator, .{
+                .chunk = callee_chunk,
+                .ip = 0,
+                .accumulator = Value.undefined_,
+                .registers = callee_regs,
+                .env = callee_fn.captured_env,
+                .this_value = callee_this,
+                .new_target = callee_new_target,
+                .home_object = callee_fn.home_object,
+                .home_function = callee_fn.home_function,
+                .super_called_cell = callee_fn.super_called_cell,
+                .argc = argc,
+                .wrap_return_in_promise = false,
+                .owning_module = callee_fn.owning_module,
+                .running_realm = callee_fn.realm,
+            }) catch {
+                realm.frame_pool.release(allocator, callee_regs);
+                return error.OutOfMemory;
+            };
+            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+        },
+
         // §15.10 PTC — tail call. The compiler emitted this
         // only after the §15.10.1 IsInTailPosition checks
         // passed (statically a tail expression; not in async
@@ -10391,6 +10711,195 @@ const GetChainOutcome = union(enum) {
     handled,
     uncaught: Value,
 };
+
+/// §13.3.6 EvaluateCall + §10.1.8 OrdinaryGet — resolve the callee
+/// for the fused `call_property` opcode's slow path. Mirrors
+/// `lda_property`'s 11-arm receiver-type matrix (plain object,
+/// function, string, int / double, bool, bigint, symbol, plus the
+/// proxy / module-namespace / chainHasProxy edge cases and the
+/// non-coercible `null` / `undefined` throw) and routes the
+/// resolved value through a `GetChainOutcome` instead of the
+/// dispatch loop's accumulator.
+///
+/// Pairs with the `.lda_property` slow path in the dispatch loop —
+/// any new receiver-type arm added there must be mirrored here.
+/// The decision not to fold the two into one shared helper is
+/// pragmatic: `lda_property` is the engine's hottest opcode and
+/// folding would require threading the dispatch-loop locals
+/// (`acc`, `committed`, `code`, `registers`, `local_chunk`)
+/// through every arm.
+fn slowLookupForCallProperty(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: *CallFrame,
+    ip: usize,
+    recv: Value,
+    key: []const u8,
+) RunError!GetChainOutcome {
+    // §13.3.4.1 EvaluatePropertyAccessWithIdentifierKey step 5 —
+    // RequireObjectCoercible(baseValue) before the lookup.
+    if (recv.isNull() or recv.isUndefined()) {
+        const ex = try makeTypeError(realm, "Cannot read properties of null or undefined");
+        f.ip = ip;
+        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+        return .handled;
+    }
+    if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
+        var obj = obj_in;
+        // §10.5 Proxy [[Get]].
+        if (obj.proxy_target != null or obj.proxy_revoked) {
+            const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key, recv);
+            switch (r) {
+                .value => |v| return .{ .value = v },
+                .fallthrough => |t| obj = t,
+                .handled => return .handled,
+                .uncaught => |ex| return .{ .uncaught = ex },
+            }
+        }
+        // §9.4.6.7 Module Namespace [[Get]] — string-key path.
+        if (obj.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:")) {
+            const v_ns = module_mod.namespaceGetThrowingOnHole(realm, obj, key) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NativeThrew => {
+                    const ex = realm.pending_exception orelse Value.undefined_;
+                    realm.pending_exception = null;
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                },
+            };
+            return .{ .value = v_ns };
+        }
+        // §10.1.8 OrdinaryGet — a proxy ancestor anywhere on the
+        // chain forces the explicit `Receiver`-preserving walk so
+        // the proxy's [[Get]] fires with the original `recv`.
+        if (chainHasProxy(obj)) {
+            switch (try getThroughChain(allocator, realm, frames, f, ip, obj, key, recv)) {
+                .value => |v| return .{ .value = v },
+                .handled => return .handled,
+                .uncaught => |ex| return .{ .uncaught = ex },
+            }
+        }
+        // Accessor wins over inherited data.
+        if (lookupAccessor(obj, key)) |acc_pair| {
+            if (acc_pair.getter) |getter| {
+                if (getter.synth_accessor) |sa| {
+                    if (!sa.is_setter) return .{ .value = sa.value };
+                }
+                const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
+                switch (outcome) {
+                    .value, .yielded => |v| return .{ .value = v },
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                        return .handled;
+                    },
+                }
+            }
+            return .{ .value = Value.undefined_ };
+        }
+        return .{ .value = obj.get(key) };
+    }
+    if (heap_mod.valueAsFunction(recv)) |fn_obj| {
+        // §10.2.4 — `.caller` / `.arguments` are poison-pill
+        // accessors on %Function.prototype% inherited by every
+        // function object.
+        if (lookupFunctionAccessor(fn_obj, key)) |acc_pair| {
+            if (acc_pair.getter) |getter| {
+                if (getter.synth_accessor) |sa| {
+                    if (!sa.is_setter) return .{ .value = sa.value };
+                }
+                const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
+                switch (outcome) {
+                    .value, .yielded => |v| return .{ .value = v },
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                        return .handled;
+                    },
+                }
+            }
+            return .{ .value = Value.undefined_ };
+        }
+        return .{ .value = fn_obj.get(key) };
+    }
+    if (recv.isString()) {
+        // §6.1.4.4 — String primitive: .length (UTF-16 code units),
+        // numeric-index char access, inherited String.prototype.
+        const recv_s: *JSString = @ptrCast(@alignCast(recv.asString()));
+        if (std.mem.eql(u8, key, "length")) {
+            return .{ .value = Value.fromInt32(@intCast(utf16.lengthInCodeUnits(recv_s.flatBytes()))) };
+        }
+        if (realm.intrinsics.string_prototype) |sp| {
+            if (lookupAccessor(sp, key)) |acc_pair| {
+                if (acc_pair.getter) |getter| {
+                    const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
+                    switch (outcome) {
+                        .value, .yielded => |v| return .{ .value = v },
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                            return .handled;
+                        },
+                    }
+                }
+                return .{ .value = Value.undefined_ };
+            }
+            return .{ .value = sp.get(key) };
+        }
+        return .{ .value = Value.undefined_ };
+    }
+    if (recv.isInt32() or recv.isDouble()) {
+        return primitiveProtoLookupForCall(allocator, realm, frames, f, ip, recv, key, (f.running_realm orelse realm).globals.get("Number") orelse Value.undefined_);
+    }
+    if (recv.isBool()) {
+        return primitiveProtoLookupForCall(allocator, realm, frames, f, ip, recv, key, (f.running_realm orelse realm).globals.get("Boolean") orelse Value.undefined_);
+    }
+    if (heap_mod.isBigInt(recv)) {
+        return primitiveProtoLookupForCall(allocator, realm, frames, f, ip, recv, key, (f.running_realm orelse realm).globals.get("BigInt") orelse Value.undefined_);
+    }
+    if (heap_mod.isSymbol(recv)) {
+        return primitiveProtoLookupForCall(allocator, realm, frames, f, ip, recv, key, (f.running_realm orelse realm).globals.get("Symbol") orelse Value.undefined_);
+    }
+    const ex = try makeTypeError(realm, "Cannot read properties of non-object");
+    f.ip = ip;
+    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+    return .handled;
+}
+
+/// Shared tail of the Number / Boolean / BigInt / Symbol arms in
+/// `slowLookupForCallProperty` — read the ctor's `.prototype`, look
+/// up an accessor (firing the getter with the primitive as `this`),
+/// else fall back to the prototype's own / inherited data property.
+fn primitiveProtoLookupForCall(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: *CallFrame,
+    ip: usize,
+    recv: Value,
+    key: []const u8,
+    ctor_v: Value,
+) RunError!GetChainOutcome {
+    const ctor = heap_mod.valueAsFunction(ctor_v) orelse return .{ .value = Value.undefined_ };
+    const proto = ctor.prototype orelse return .{ .value = Value.undefined_ };
+    if (lookupAccessor(proto, key)) |acc_pair| {
+        if (acc_pair.getter) |getter| {
+            const outcome = try callJSFunction(allocator, realm, getter, recv, &.{});
+            switch (outcome) {
+                .value, .yielded => |v| return .{ .value = v },
+                .thrown => |ex| {
+                    f.ip = ip;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                    return .handled;
+                },
+            }
+        }
+        return .{ .value = Value.undefined_ };
+    }
+    return .{ .value = proto.get(key) };
+}
 
 /// §10.1.8 OrdinaryGet over a prototype chain that includes at
 /// least one Proxy ancestor. Walks the chain rung by rung: on a
