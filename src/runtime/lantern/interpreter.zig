@@ -7391,18 +7391,8 @@ pub fn runFrames(
         // ── Globals ─────────────────────────────────────────────────
         .lda_global => {
             const k = readU16(code, ip);
-            ip += 2;
-            if (k >= local_chunk.constants.len) return error.InvalidOpcode;
-            const key_v = local_chunk.constants[k];
-            if (!key_v.isString()) return error.InvalidOpcode;
-            const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-            // §9.1.1.4 GetBindingValue — declarative env-
-            // record first, then object env-record. The
-            // `realm.globals.get` helper does the lookup in
-            // that order; `throw_if_hole` (emitted by the
-            // compiler when the binding is `let`/`const`/
-            // `class`) catches the TDZ case.
-            //
+            const ic_idx = readU16(code, ip + 2);
+            ip += 4;
             // §8.3 / §9.1: free globals resolve through the
             // *executing* function's global environment, which is
             // its [[Realm]]'s. With a shared heap (a ShadowRealm
@@ -7410,20 +7400,31 @@ pub fn runFrames(
             // realm, so route the lookup through the active frame's
             // `running_realm` rather than the top-level `realm`.
             const gr = f.running_realm orelse realm;
-            if (gr.globals.get(key_s.flatBytes())) |v| {
-                acc = v;
-            } else switch (try lookupGlobalAccessor(allocator, gr, key_s.flatBytes())) {
+            // IC fast path: shape compare on the global object plus
+            // a decl-revision snapshot. A hit means no new `let` /
+            // `const` / `class` has been declared since fill and
+            // the global object hasn't transitioned to a different
+            // shape — the cached object-env slot is still
+            // authoritative.
+            if (gr.globals.target) |gt| {
+                const cell = &local_chunk.inline_caches[ic_idx];
+                if (cell.shape != null and cell.shape == gt.shape and cell.proto == null and cell.proto_rev == gr.globals.decl_revision) {
+                    acc = gt.slots.items[cell.slot];
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+            }
+            if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+            const key_v = local_chunk.constants[k];
+            if (!key_v.isString()) return error.InvalidOpcode;
+            const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+            switch (try slowLdaGlobal(allocator, realm, frames, f, ip, gr, key_s.flatBytes(), &local_chunk.inline_caches[ic_idx])) {
                 .value => |v| acc = v,
-                .thrown => |ex| {
-                    f.ip = ip;
-                    f.accumulator = acc;
+                .handled => {
                     committed = true;
-                    if (!try unwindThrow(allocator, realm, frames, ex)) {
-                        return .{ .thrown = ex };
-                    }
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 },
-                .none => {
+                .uncaught => |ex| return .{ .thrown = ex },
+                .not_found => {
                     const ex = try makeReferenceError(gr, key_s.flatBytes());
                     f.ip = ip;
                     f.accumulator = acc;
@@ -7439,35 +7440,31 @@ pub fn runFrames(
         .lda_global_or_undef => {
             // §13.5.3 step 3 — typeof of an unresolvable
             // Reference is "undefined", not a thrown
-            // ReferenceError. The compiler emits this op
-            // for `typeof Identifier` when `Identifier`
-            // doesn't bind to any known scope slot. Fires
-            // an accessor getter installed via
-            // `Object.defineProperty(globalThis, "y", {get: …})`
-            // so `typeof y` observes the side effect per
-            // §13.5.3 step 1 (`val = GetValue(val)`).
+            // ReferenceError. Shares the IC machinery with
+            // `lda_global`; only the `.not_found` case differs.
             const k = readU16(code, ip);
-            ip += 2;
+            const ic_idx = readU16(code, ip + 2);
+            ip += 4;
+            const gr = f.running_realm orelse realm;
+            if (gr.globals.target) |gt| {
+                const cell = &local_chunk.inline_caches[ic_idx];
+                if (cell.shape != null and cell.shape == gt.shape and cell.proto == null and cell.proto_rev == gr.globals.decl_revision) {
+                    acc = gt.slots.items[cell.slot];
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+            }
             if (k >= local_chunk.constants.len) return error.InvalidOpcode;
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-            // Same home-realm routing as `lda_global` (see note there).
-            const gr = f.running_realm orelse realm;
-            if (gr.globals.get(key_s.flatBytes())) |v| {
-                acc = v;
-            } else switch (try lookupGlobalAccessor(allocator, gr, key_s.flatBytes())) {
+            switch (try slowLdaGlobal(allocator, realm, frames, f, ip, gr, key_s.flatBytes(), &local_chunk.inline_caches[ic_idx])) {
                 .value => |v| acc = v,
-                .thrown => |ex| {
-                    f.ip = ip;
-                    f.accumulator = acc;
+                .handled => {
                     committed = true;
-                    if (!try unwindThrow(allocator, realm, frames, ex)) {
-                        return .{ .thrown = ex };
-                    }
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 },
-                .none => acc = Value.undefined_,
+                .uncaught => |ex| return .{ .thrown = ex },
+                .not_found => acc = Value.undefined_,
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -10711,6 +10708,90 @@ const GetChainOutcome = union(enum) {
     handled,
     uncaught: Value,
 };
+
+const LdaGlobalSlowOutcome = union(enum) {
+    /// Resolved synchronously (object-env slot, decl-env value,
+    /// accessor returning a value, or bootstrap fallback hit).
+    value: Value,
+    /// A user function (proxy / accessor getter) ran inline and
+    /// the helper already arranged the dispatch state for a
+    /// caught throw. Caller must `reEnterDispatch` without
+    /// re-stamping `f.ip`.
+    handled,
+    /// Uncaught exception — propagate.
+    uncaught: Value,
+    /// No binding for the name. Caller decides:
+    ///   • `lda_global` → ReferenceError.
+    ///   • `lda_global_or_undef` → `undefined`.
+    not_found,
+};
+
+/// Slow path of `lda_global` / `lda_global_or_undef`. Pulled out
+/// of the dispatch loop to keep each handler tight (better i-cache
+/// over the giant switch) and to dedupe the receiver-type matrix
+/// the two opcodes share. Fills `ic_cell` on a shape-resolvable
+/// object-env hit; leaves the cell alone on decl-env / fallback /
+/// accessor paths so they keep re-walking the slow path until the
+/// shape becomes the authoritative source.
+fn slowLdaGlobal(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: *CallFrame,
+    ip: usize,
+    gr: *Realm,
+    key: []const u8,
+    ic_cell: *@import("../../bytecode/chunk.zig").ICCell,
+) RunError!LdaGlobalSlowOutcome {
+    // §9.1.1.4 GetBindingValue — declarative env-record FIRST.
+    // A decl-env hit MUST shadow the cached object-env slot; that's
+    // why we don't fill `ic_cell` on this path. Subsequent calls
+    // pay the small `decl_env.get` cost, which the
+    // `decl_revision` snapshot guarantees stays in sync.
+    if (gr.globals.decl_env.get(key)) |v| return .{ .value = v };
+    if (gr.globals.target) |gt| {
+        // Shape lookup — the common case for host-installed
+        // intrinsics (`Math`, `Object`, …) and top-level
+        // `function` / `var` declarations (added through
+        // `installScriptFunctionBinding` / `installScriptVarBinding`,
+        // which route through `setWithFlags` / `shadowSet` and
+        // stamp the shape).
+        if (gt.shape) |sh| {
+            if (sh.lookup(key)) |entry| {
+                if (entry.kind == .data) {
+                    ic_cell.shape = sh;
+                    ic_cell.slot = entry.slot;
+                    ic_cell.proto = null;
+                    ic_cell.proto_shape = null;
+                    ic_cell.proto_rev = gr.globals.decl_revision;
+                    return .{ .value = gt.slots.items[entry.slot] };
+                }
+            }
+        }
+        // Shape miss / dictionary mode / accessor descriptor.
+        if (gt.lookupOwn(key)) |v| return .{ .value = v };
+        switch (try lookupGlobalAccessor(allocator, gr, key)) {
+            .value => |v| return .{ .value = v },
+            .thrown => |ex| {
+                f.ip = ip;
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+                return .handled;
+            },
+            .none => return .not_found,
+        }
+    }
+    // Pre-`bindToObject` bootstrap — `target` not yet wired.
+    if (gr.globals.fallback.get(key)) |v| return .{ .value = v };
+    switch (try lookupGlobalAccessor(allocator, gr, key)) {
+        .value => |v| return .{ .value = v },
+        .thrown => |ex| {
+            f.ip = ip;
+            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+            return .handled;
+        },
+        .none => return .not_found,
+    }
+}
 
 /// §13.3.6 EvaluateCall + §10.1.8 OrdinaryGet — resolve the callee
 /// for the fused `call_property` opcode's slow path. Mirrors

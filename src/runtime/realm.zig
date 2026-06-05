@@ -304,6 +304,18 @@ pub const GlobalBindings = struct {
     /// constructed `GlobalBindings` exists briefly before `init`
     /// wires it; every store path that matters runs after.
     heap: ?*Heap = null,
+    /// Bump-on-add counter for the declarative env. The `lda_global`
+    /// IC records this at fill time so the fast path can confirm
+    /// no new `let` / `const` / `class` has been declared at script
+    /// scope under a name that would now shadow the cached
+    /// object-env hit. Only `installScriptLexBinding` bumps it (and
+    /// only on a fresh `!found_existing` add) — reassigning a
+    /// pre-existing decl via `putDecl` doesn't change which env a
+    /// lookup resolves through, so an already-filled cell stays
+    /// authoritative. `decl_env`-resolved names never fill a cell
+    /// (the fast path serves the object-env slot), so a cell hit
+    /// implies an object-env hit at fill time.
+    decl_revision: u64 = 0,
 
     fn map(self: *GlobalBindings) *std.StringArrayHashMapUnmanaged(Value) {
         if (self.target) |t| return &t.properties;
@@ -594,6 +606,10 @@ pub const GlobalBindings = struct {
         const gop = try self.decl_env.getOrPut(allocator, key);
         if (!gop.found_existing) {
             gop.value_ptr.* = Value.hole_;
+            // Invalidate every `lda_global` IC cell in the realm
+            // — a newly-declared lex binding outranks the cached
+            // object-env slot for the same name.
+            self.decl_revision +%= 1;
         }
         try self.decl_consts.put(allocator, key, is_const);
     }
@@ -1916,4 +1932,27 @@ test "FramePool: zero-length acquire round-trips" {
     const empty = try pool.acquire(testing.allocator, 0);
     try testing.expectEqual(@as(usize, 0), empty.len);
     pool.release(testing.allocator, empty);
+}
+
+test "GlobalBindings.decl_revision: bumps once per fresh installScriptLexBinding" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const allocator = testing.allocator;
+
+    const r0 = realm.globals.decl_revision;
+    try realm.globals.installScriptLexBinding(allocator, "x", false);
+    try testing.expect(realm.globals.decl_revision == r0 + 1);
+
+    // Re-installing the same name is idempotent — no bump.
+    try realm.globals.installScriptLexBinding(allocator, "x", false);
+    try testing.expect(realm.globals.decl_revision == r0 + 1);
+
+    // A second fresh name bumps again.
+    try realm.globals.installScriptLexBinding(allocator, "y", true);
+    try testing.expect(realm.globals.decl_revision == r0 + 2);
+
+    // `putDecl` updates an existing entry's VALUE — no shadow-
+    // resolution change, no bump.
+    try realm.globals.putDecl(allocator, "x", Value.fromInt32(42));
+    try testing.expect(realm.globals.decl_revision == r0 + 2);
 }
