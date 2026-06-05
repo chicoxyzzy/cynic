@@ -182,11 +182,15 @@ pub const Op = enum(u8) {
     /// body compile to `throw_assign_const` so user-visible writes
     /// throw a TypeError per §8.1.1.1.4 SetMutableBinding step 9.b.
     make_named_function_expr,
-    /// `[op] [r_callee:u8] [argc:u8]` — invoke the function in
-    /// register `r_callee` with `argc` arguments drawn from the
+    /// `[op] [r_callee:u8] [argc:u8] [ic:u16]` — invoke the function
+    /// in register `r_callee` with `argc` arguments drawn from the
     /// consecutive registers `r_callee+1.. r_callee+argc`. The
     /// return value lands in the caller's accumulator after the
-    /// callee's `Return`.
+    /// callee's `Return`. The `ic` operand indexes
+    /// `Chunk.inline_call_caches` — a hit on the cached callee
+    /// pointer skips the proxy / revocable / bound / `valueAsFunction`
+    /// dispatch chain and calls the function directly. Same cell
+    /// shape as `call_method`'s call IC.
     call,
     /// `[op] [r_recv:u8] [r_callee:u8] [argc:u8] [ic:u16]` — method
     /// call. Identical to `Call` except `this` is bound to the value
@@ -1185,13 +1189,13 @@ pub const Op = enum(u8) {
             .sta_global_strict,
             => 3, // k:u16 + r:u8
             .make_class => 4, // k:u16 + r_keys_base:u8 + inner_class_slot:u8
-            .call,
             .new_call,
             .super_call,
             .tail_call,
             .lda_env,
             .sta_env,
             => 2, // u8 + u8
+            .call => 4, // r_callee:u8 + argc:u8 + ic:u16
             .tail_call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
             .direct_eval => 4, // scope:u16 + r_callee:u8 + argc:u8
             .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
@@ -1403,6 +1407,10 @@ test "Op: operandSize agrees with the documented encoding" {
     // read sites.
     try testing.expectEqual(@as(u8, 4), Op.operandSize(.lda_global));
     try testing.expectEqual(@as(u8, 4), Op.operandSize(.lda_global_or_undef));
+    // `call` carries the same call-IC slot `call_method` does, so
+    // free-function calls (`f(x)`) get the cached-callee fast path
+    // too: `[op] [r_callee:u8] [argc:u8] [ic:u16]` — 4 bytes.
+    try testing.expectEqual(@as(u8, 4), Op.operandSize(.call));
     // `call_property` is `[op] [k:u16] [r_recv:u8] [argc:u8]
     // [ic_load:u16] [ic_call:u16]` — 8 bytes of operand. Fuses the
     // `ldar + lda_property + star + call_method` 4-op sequence into

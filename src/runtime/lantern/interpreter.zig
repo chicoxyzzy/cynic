@@ -2049,27 +2049,124 @@ pub fn runFrames(
         .call => {
             const r_callee = code[ip];
             const argc = code[ip + 1];
-            ip += 2;
+            const ic_idx = readU16(code, ip + 2);
+            ip += 4;
 
             const callee_v = registers[r_callee];
-            // §10.5.13 callable Proxy [[Call]] — if the callee
-            // is a proxy, route through `callValue` which
-            // handles the apply trap and chained proxies.
-            if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+            const call_cell = &local_chunk.inline_call_caches[ic_idx];
+
+            // Inline cache: a hit means the same callee was here last
+            // time AND it survived every exotic-callee check (proxy,
+            // revocable, bound, wrapped, class constructor). Skip the
+            // entire dispatch chain below and fall through to the
+            // generator / native / async / regular call path.
+            //
+            // The IC is GC-aware: the heap's mark walk weak-clears
+            // any cell whose callee isn't reachable through other
+            // refs, so a swept-and-reused address cannot match.
+            // Same `CallICCell` shape as `call_method`.
+            const callee_fn = blk: {
+                if (call_cell.callee) |cached| {
+                    if (heap_mod.valueAsFunction(callee_v)) |fn_obj| {
+                        if (fn_obj == cached) break :blk fn_obj;
+                    }
+                }
+
+                // Slow path — exotic-callee dispatch.
+
+                // §10.5.13 callable Proxy [[Call]] — if the callee
+                // is a proxy, route through `callValue` which
+                // handles the apply trap and chained proxies.
+                if (heap_mod.valueAsPlainObject(callee_v)) |po| {
+                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                        const args_start = @as(usize, r_callee) + 1;
+                        const args_slice = registers[args_start .. args_start + argc];
+                        const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, Value.undefined_, args_slice);
+                        switch (cresult) {
+                            .value, .yielded => |v| {
+                                acc = v;
+                                // `callValue` ran the callee in its own
+                                // runFrames re-entry — no frame pushed onto
+                                // this stack, the active frame is unchanged
+                                // → decodeNext. reEnterDispatch would reload
+                                // a stale `f.ip` and re-run this call.
+                                continue :dispatch try decodeNext(code, &ip, &committed);
+                            },
+                            .thrown => |ex| {
+                                f.ip = ip;
+                                f.accumulator = acc;
+                                committed = true;
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                        }
+                    }
+                    // §20.2.3 %Function.prototype% [[Call]] — "the
+                    // Function prototype object is itself a built-in
+                    // function object that, when invoked, accepts any
+                    // arguments and returns undefined." Cynic stores
+                    // it as a JSObject (not a JSFunction) so the
+                    // identity check is the cheapest dispatch path.
+                    if (realm.intrinsics.function_prototype == po) {
+                        acc = Value.undefined_;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
+                }
+                const fn_v = heap_mod.valueAsFunction(callee_v) orelse {
+                    const ex = try makeTypeError(realm, "value is not callable");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                };
+
+                // §15.7.14 step 1 — class constructors are not
+                // callable without `new`; reject with TypeError.
+                // Checked inside the blk so the IC cell never
+                // caches a class-constructor callee (the next call
+                // would skip this check and try to invoke it).
+                if (fn_v.is_class_constructor) {
+                    const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                }
+
+                // §28.2.2.1.1 — revocation function. Calling it
+                // clears the captured proxy's internal slots.
+                // First call returns undefined and clears the slot;
+                // subsequent calls no-op (slot is null).
+                if (fn_v.revocable_proxy) |rp| {
+                    realm.heap.setProxyTarget(rp, null);
+                    realm.heap.setProxyHandler(rp, null);
+                    realm.heap.setProxyTargetFn(rp, null);
+                    rp.proxy_revoked = true;
+                    fn_v.revocable_proxy = null;
+                acc = Value.undefined_;
+                // No frame pushed, no inline call — the active frame
+                // is unchanged → decodeNext.
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+
+                // §3.8.3.6 WrappedFunction — cross-realm callable
+                // boundary. The inline call fast-path can't marshal
+                // args/return through the §3.8.3.4 filter; delegate
+                // to `callJSFunction` which routes into the boundary
+                // handler in `shadow_realm.zig`.
+                if (!fn_v.wrapped_target.isUndefined()) {
                     const args_start = @as(usize, r_callee) + 1;
-                    const args_slice = registers[args_start .. args_start + argc];
-                    const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, Value.undefined_, args_slice);
-                    switch (cresult) {
-                        .value, .yielded => |v| {
-                            acc = v;
-                            // `callValue` ran the callee in its own
-                            // runFrames re-entry — no frame pushed onto
-                            // this stack, the active frame is unchanged
-                            // → decodeNext. reEnterDispatch would reload
-                            // a stale `f.ip` and re-run this call.
-                            continue :dispatch try decodeNext(code, &ip, &committed);
-                        },
+                    const result = try callJSFunction(allocator, realm, fn_v, Value.undefined_, registers[args_start .. args_start + argc]);
+                    switch (result) {
+                        .value, .yielded => |v| acc = v,
                         .thrown => |ex| {
                             f.ip = ip;
                             f.accumulator = acc;
@@ -2080,69 +2177,22 @@ pub fn runFrames(
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                         },
                     }
-                }
-                // §20.2.3 %Function.prototype% [[Call]] — "the
-                // Function prototype object is itself a built-in
-                // function object that, when invoked, accepts any
-                // arguments and returns undefined." Cynic stores
-                // it as a JSObject (not a JSFunction) so the
-                // identity check is the cheapest dispatch path.
-                if (realm.intrinsics.function_prototype == po) {
-                    acc = Value.undefined_;
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
-            }
-            const callee_fn = heap_mod.valueAsFunction(callee_v) orelse {
-                const ex = try makeTypeError(realm, "value is not callable");
-                f.ip = ip;
-                f.accumulator = acc;
-                committed = true;
-                if (!try unwindThrow(allocator, realm, frames, ex)) {
-                    return .{ .thrown = ex };
-                }
-                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-            };
 
-            // §15.7.14 step 1 — class constructors are not
-            // callable without `new`; reject with TypeError.
-            if (callee_fn.is_class_constructor) {
-                const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
-                f.ip = ip;
-                f.accumulator = acc;
-                committed = true;
-                if (!try unwindThrow(allocator, realm, frames, ex)) {
-                    return .{ .thrown = ex };
-                }
-                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-            }
-
-            // §28.2.2.1.1 — revocation function. Calling it
-            // clears the captured proxy's internal slots.
-            // First call returns undefined and clears the slot;
-            // subsequent calls no-op (slot is null).
-            if (callee_fn.revocable_proxy) |rp| {
-                realm.heap.setProxyTarget(rp, null);
-                realm.heap.setProxyHandler(rp, null);
-                realm.heap.setProxyTargetFn(rp, null);
-                rp.proxy_revoked = true;
-                callee_fn.revocable_proxy = null;
-                acc = Value.undefined_;
-                // No frame pushed, no inline call — the active frame
-                // is unchanged → decodeNext.
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
-
-            // §3.8.3.6 WrappedFunction — cross-realm callable
-            // boundary. The inline call fast-path can't marshal
-            // args/return through the §3.8.3.4 filter; delegate
-            // to `callJSFunction` which routes into the boundary
-            // handler in `shadow_realm.zig`.
-            if (!callee_fn.wrapped_target.isUndefined()) {
-                const args_start = @as(usize, r_callee) + 1;
-                const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
-                switch (result) {
-                    .value, .yielded => |v| acc = v,
-                    .thrown => |ex| {
+                // §10.4.1 — bound functions unwrap and re-enter
+                // through `callJSFunction` (which builds a fresh
+                // frame stack with the concatenated args). Plain
+                // calls pass `this = undefined` (strict).
+                if (fn_v.bound_target != null) {
+                    // §10.2.1 step 2 — the bound wrapper's own
+                    // `is_class_constructor` is false, but the
+                    // inner target preserves the class-ctor brand.
+                    // `Subclass.bind(obj)(...)` must throw.
+                    var inner_target = fn_v;
+                    while (inner_target.bound_target) |i_t| inner_target = i_t;
+                    if (inner_target.is_class_constructor) {
+                        const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
                         f.ip = ip;
                         f.accumulator = acc;
                         committed = true;
@@ -2150,51 +2200,33 @@ pub fn runFrames(
                             return .{ .thrown = ex };
                         }
                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                    },
-                }
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
-
-            // §10.4.1 — bound functions unwrap and re-enter
-            // through `callJSFunction` (which builds a fresh
-            // frame stack with the concatenated args). Plain
-            // calls pass `this = undefined` (strict).
-            if (callee_fn.bound_target != null) {
-                // §10.2.1 step 2 — the bound wrapper's own
-                // `is_class_constructor` is false, but the
-                // inner target preserves the class-ctor brand.
-                // `Subclass.bind(obj)(...)` must throw.
-                var inner_target = callee_fn;
-                while (inner_target.bound_target) |i_t| inner_target = i_t;
-                if (inner_target.is_class_constructor) {
-                    const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
-                    f.ip = ip;
-                    f.accumulator = acc;
-                    committed = true;
-                    if (!try unwindThrow(allocator, realm, frames, ex)) {
-                        return .{ .thrown = ex };
                     }
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    const args_start = @as(usize, r_callee) + 1;
+                    const result = try callJSFunction(allocator, realm, fn_v, Value.undefined_, registers[args_start .. args_start + argc]);
+                    switch (result) {
+                        .value, .yielded => |v| acc = v,
+                        .thrown => |ex| {
+                            f.ip = ip;
+                            f.accumulator = acc;
+                            committed = true;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                return .{ .thrown = ex };
+                            }
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    }
+                    // `callJSFunction` ran the bound target in its own
+                    // runFrames re-entry — no frame pushed onto this
+                    // stack, the active frame is unchanged → decodeNext.
+                    continue :dispatch try decodeNext(code, &ip, &committed);
                 }
-                const args_start = @as(usize, r_callee) + 1;
-                const result = try callJSFunction(allocator, realm, callee_fn, Value.undefined_, registers[args_start .. args_start + argc]);
-                switch (result) {
-                    .value, .yielded => |v| acc = v,
-                    .thrown => |ex| {
-                        f.ip = ip;
-                        f.accumulator = acc;
-                        committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) {
-                            return .{ .thrown = ex };
-                        }
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                    },
-                }
-                // `callJSFunction` ran the bound target in its own
-                // runFrames re-entry — no frame pushed onto this
-                // stack, the active frame is unchanged → decodeNext.
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
+
+                // Survived every exotic check — `fn_v` is a plain
+                // function. Refill the IC so the next call takes
+                // the fast path.
+                call_cell.callee = fn_v;
+                break :blk fn_v;
+            };
 
             // §27.5 / §27.6 — calling a `function*` or
             // `async function*` allocates a generator wrapper

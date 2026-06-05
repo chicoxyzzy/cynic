@@ -2219,9 +2219,13 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_arg);
         }
 
-        try self.builder.emitOp(if (emit_tail) .tail_call else .call, tt.span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(@intCast(1 + lit.expressions.len));
+        if (emit_tail) {
+            try self.builder.emitOp(.tail_call, tt.span);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitU8(@intCast(1 + lit.expressions.len));
+        } else {
+            try self.builder.emitCall(tt.span, r_callee, @intCast(1 + lit.expressions.len));
+        }
 
         var k: u8 = 0;
         while (k < reserved) : (k += 1) self.releaseTemp();
@@ -3749,9 +3753,13 @@ pub const Compiler = struct {
         // tail position, emit `tail_call` so the interpreter reuses
         // the current frame instead of pushing one. Spread calls
         // and super calls don't take this path (handled above).
-        try self.builder.emitOp(if (emit_tail) .tail_call else .call, c.span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(@intCast(c.arguments.len));
+        if (emit_tail) {
+            try self.builder.emitOp(.tail_call, c.span);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitU8(@intCast(c.arguments.len));
+        } else {
+            try self.builder.emitCall(c.span, r_callee, @intCast(c.arguments.len));
+        }
 
         var j: u8 = 0;
         while (j < reserved) : (j += 1) self.releaseTemp();
@@ -4492,9 +4500,7 @@ pub const Compiler = struct {
         defer self.releaseTemp();
         try self.builder.emitOp(.star, n.span);
         try self.builder.emitU8(r_a2);
-        try self.builder.emitOp(.call, n.span);
-        try self.builder.emitU8(r_construct);
-        try self.builder.emitU8(2);
+        try self.builder.emitCall(n.span, r_construct, 2);
     }
 
     fn compileIdentRef(self: *Compiler, span: Span) CompileError!void {
