@@ -76,9 +76,9 @@ list.
 | `intl402/DurationFormat` | 0 | 111 | 0 % |
 | `intl402/Locale` | 0 | 152 | 0 % |
 | `intl402/NumberFormat` | 0 | 253 | 0 % |
-| `language/eval-code` | 160 | 187 | 46 % |
-| `language/expressions` | 10255 | 427 | 96 % |
-| `language/statements` | 8970 | 353 | 96 % |
+| `language/eval-code` | 162 | 185 | 47 % |
+| `language/expressions` | 10253 | 429 | 96 % |
+| `language/statements` | 8967 | 356 | 96 % |
 
 **10–99 fails**
 
@@ -117,20 +117,17 @@ list.
 | `language/future-reserved-words` | 48 | 7 | 87 % |
 | `language/global-code` | 37 | 5 | 88 % |
 | `language/types` | 104 | 9 | 92 % |
-| `built-ins/ThrowTypeError` | 13 | 1 | 93 % |
 | `language/destructuring` | 18 | 1 | 95 % |
-| `built-ins/AsyncGeneratorFunction` | 22 | 1 | 96 % |
-| `built-ins/GeneratorFunction` | 22 | 1 | 96 % |
 | `built-ins/Symbol` | 96 | 2 | 98 % |
 | `language/comments` | 51 | 1 | 98 % |
+| `language/module-code` | 587 | 8 | 99 % |
 | `language/literals` | 527 | 7 | 99 % |
-| `language/module-code` | 589 | 6 | 99 % |
 | `built-ins/JSON` | 164 | 1 | 99 % |
 | `built-ins/TypedArray` | 1430 | 8 | 99 % |
 | `built-ins/Atomics` | 380 | 2 | 99 % |
-| `built-ins/String` | 1217 | 6 | 100 % |
 | `built-ins/Map` | 203 | 1 | 100 % |
 | `built-ins/Promise` | 637 | 3 | 100 % |
+| `built-ins/String` | 1219 | 4 | 100 % |
 | `built-ins/Set` | 382 | 1 | 100 % |
 | `built-ins/RegExp` | 1878 | 1 | 100 % |
 
@@ -144,6 +141,7 @@ list.
 | `built-ins/AsyncDisposableStack` | 104 | 0 | 100 % |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 38 | 0 | 100 % |
 | `built-ins/AsyncFunction` | 18 | 0 | 100 % |
+| `built-ins/AsyncGeneratorFunction` | 23 | 0 | 100 % |
 | `built-ins/AsyncGeneratorPrototype` | 48 | 0 | 100 % |
 | `built-ins/AsyncIteratorPrototype` | 13 | 0 | 100 % |
 | `built-ins/BigInt` | 77 | 0 | 100 % |
@@ -153,6 +151,7 @@ list.
 | `built-ins/DisposableStack` | 93 | 0 | 100 % |
 | `built-ins/Error` | 58 | 0 | 100 % |
 | `built-ins/FinalizationRegistry` | 47 | 0 | 100 % |
+| `built-ins/GeneratorFunction` | 23 | 0 | 100 % |
 | `built-ins/GeneratorPrototype` | 61 | 0 | 100 % |
 | `built-ins/Iterator` | 432 | 0 | 100 % |
 | `built-ins/MapIteratorPrototype` | 11 | 0 | 100 % |
@@ -166,6 +165,7 @@ list.
 | `built-ins/StringIteratorPrototype` | 7 | 0 | 100 % |
 | `built-ins/SuppressedError` | 22 | 0 | 100 % |
 | `built-ins/Temporal` | 4588 | 0 | 100 % |
+| `built-ins/ThrowTypeError` | 14 | 0 | 100 % |
 | `built-ins/Uint8Array` | 68 | 0 | 100 % |
 | `built-ins/WeakMap` | 141 | 0 | 100 % |
 | `built-ins/WeakRef` | 29 | 0 | 100 % |
@@ -214,19 +214,25 @@ top-line score.
 
 ## History
 
+### 2026-06-05 — cynic `057df50`, test262 `d0c1b455`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 45166 | 4642 | 49808 | 90.68 % | ±0 | 40.2 s |
+
+Biggest movers:
+
+- `language/statements` -3
+- `built-ins/String` +2
+- `language/eval-code` +2
+- `language/expressions` -2
+- `language/module-code` -2
+
 ### 2026-06-04 — cynic `cf85935`, test262 `d0c1b455`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
 | 45166 | 4642 | 49808 | 90.68 % | +216 | 45.1 s |
-
-Biggest movers:
-
-- `language/statements` +56
-- `language/expressions` +28
-- `built-ins/Proxy` +2
-- `language/eval-code` +2
-- `language/types` +2
 
 ### 2026-06-03 — cynic `51dc5d2`, test262 `d0c1b455`
 
