@@ -484,3 +484,134 @@ the corpus under the relevant section's directory before adding.
   whose `length` is an accessor. A fixture mirroring the Reflect one but
   targeting `apply` would catch an engine that special-cases callable
   array-likes with a non-accessor-firing slot read.
+
+### `Number.prototype.toString` / `JSON.stringify` skipped exponential notation
+
+- **Fixed in:** `85c1de7`
+- **Spec:** §6.1.6.1.20 Number::toString(x, 10) — exponential form when
+  the integer part needs more than 21 digits (`n > 21`) or the magnitude
+  is below `1e-6` (`n ≤ -6`); §25.5.2.4 SerializeJSONNumber == ToString.
+- **Reproducer:**
+  ```js
+  (1e21).toString();      // must be "1e+21"
+  (1e-7).toString();      // must be "1e-7"
+  JSON.stringify(1e21);   // must be "1e+21"
+  ```
+- **Before fix:** `(1e21).toString()` → `"1000000000000000000000"` (full
+  decimal); `JSON.stringify(1e21)` → `"1e21"` (raw, missing the `+`). The
+  radix-10 `Number.prototype.toString` and the JSON number serializer each
+  had their own formatter that didn't apply the §6.1.6.1.20 thresholds.
+- **After fix:** both produce `"1e+21"`, matching engine262 + every
+  production engine.
+- **Suggested fixture shape:** positive runtime fixtures under
+  `built-ins/Number/prototype/toString/` (boundary values `1e20` /
+  `1e21` / `1e-6` / `1e-7`, fixed vs. exponential) and
+  `built-ins/JSON/stringify/` (a large/small Number serializes with the
+  ToString exponential form), no `features:` tag. Existing toString
+  fixtures cover the radix argument and NaN/Infinity but not the
+  `n > 21` / `n ≤ -6` decimal↔exponential transition.
+
+### `Array.from(string)` iterated by WTF-8 byte, not code point
+
+- **Fixed in:** `ff01cd2`
+- **Spec:** §23.1.2.1 Array.from — a String uses the §22.1.5.1 String
+  iterator, which yields code POINTS (a supplementary character is one
+  element), matching spread / `for-of`.
+- **Reproducer:**
+  ```js
+  Array.from("a\u{1D7D9}b");          // ["a", "𝟙", "b"], length 3
+  Array.from("\u{1F600}x", (c,i)=>i); // [0, 1]  (code-point index)
+  ```
+- **Before fix:** `Array.from("a𝟙b")` produced 6 elements — the astral
+  char shattered into its 4 WTF-8 bytes — and the mapfn / output index
+  was the byte offset. The string fast path sliced one byte per element.
+- **After fix:** 3 code-point elements; index is the code-point index.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/Array/from/`, `features: [String.prototype.@@iterator]`,
+  using a string with a supplementary character and asserting both the
+  element count and the mapfn index. Existing `from` fixtures exercise
+  array-likes and custom iterators but not astral-character iteration of
+  a primitive string.
+
+### `for-in` enumerated Symbol-keyed properties
+
+- **Fixed in:** `234f372`
+- **Spec:** §14.7.5.9 EnumerateObjectProperties — yields only String
+  property keys; Symbols are never enumerated (own or inherited).
+- **Reproducer:**
+  ```js
+  var o = { a: 1 };
+  o[Symbol("s")] = 2; o[Symbol.iterator] = 3;
+  var k = []; for (var p in o) k.push(p);
+  k.join(",");  // must be "a"  (no Symbol)
+  ```
+- **Before fix:** for-in surfaced the Symbol-keyed property (Cynic
+  flattens Symbol keys to internal `@@<name>` / `<sym:N>` strings; the
+  plain-object enumeration loops skipped only `__cynic_` keys, not these),
+  so for-in diverged from `Object.keys` (which excluded it correctly).
+- **After fix:** for-in yields only the String keys.
+- **Suggested fixture shape:** positive runtime fixture under
+  `language/statements/for-in/`, `features: [Symbol]`, with own and
+  inherited (prototype-chain) Symbol keys plus String keys, asserting the
+  Symbols are absent. Most engines never had this bug (they don't store
+  Symbol keys as strings), so the corpus doesn't probe the exclusion
+  explicitly — but a robust positive fixture would catch it.
+
+### `ArraySpeciesCreate` ignored `@@species` inherited from `%Array%`
+
+- **Fixed in:** `a9f10e7`
+- **Spec:** §23.1.3.34 ArraySpeciesCreate step 5 — `Get(C, @@species)`;
+  for `class Sub extends Array` the `@@species` accessor is inherited from
+  `%Array%` (Sub's `[[Prototype]]`) and returns Sub.
+- **Reproducer:**
+  ```js
+  class A extends Array {}
+  var a = A.of(1, 2, 3);
+  a.map(x => x) instanceof A;   // must be true (also filter/slice/
+  a.filter(() => true) instanceof A;  // splice/concat/flat/flatMap)
+  ```
+- **Before fix:** all of map / filter / slice / splice / concat / flat /
+  flatMap returned a plain `Array`. The native `@@species` lookup read
+  only the constructor's OWN accessors, missing the one inherited from
+  `%Array%`, so ArraySpeciesCreate fell back to the default `ArrayCreate`.
+  An explicit own `static get [Symbol.species]` was honoured.
+- **After fix:** the inherited accessor is invoked with the subclass as
+  receiver and returns Sub, so the methods produce Sub instances.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/Array/prototype/map/` (and siblings for the other species
+  methods), `features: [Symbol.species]`, with a bare `class Sub extends
+  Array {}` (NO own `@@species`) asserting `result instanceof Sub`.
+  Existing `create-species*` fixtures install an OWN `@@species` (or a
+  custom `constructor`), so they never exercise the inherited-accessor
+  resolution.
+
+### Promise thenable adoption did not fire the adopting promise's reactions
+
+- **Fixed in:** `8150ddf`
+- **Spec:** §27.2.2.2 NewPromiseResolveThenableJob — the job creates a
+  FRESH pair of resolving functions (CreateResolvingFunctions) with their
+  own `[[AlreadyResolved]] = false`, so a thenable calling `resolve(v)`
+  settles the adopting promise and runs its reactions.
+- **Reproducer:**
+  ```js
+  let ran = "no";
+  Promise.resolve({ then(res) { res(42); } }).then(v => { ran = "yes:" + v; });
+  // after the microtask queue drains, `ran` must be "yes:42"
+  ```
+- **Before fix:** the thenable's `then` was invoked (so `res` was called),
+  but the adopting promise never settled and the `.then` reaction never
+  ran. Cynic modelled `[[AlreadyResolved]]` as one promise-level flag that
+  `Promise.resolve` had already set true on first seeing the thenable, so
+  the job's `resolve(v)` hit the guard and no-op'd. Native promise
+  resolution was unaffected.
+- **After fix:** the reaction runs with the adopted value; the
+  exception-after-resolve guard (a throw after `resolve()` in the
+  thenable's `then`) still suppresses the rejection.
+- **Suggested fixture shape:** positive **async-flagged** fixture
+  (`flags: [async]`) under `built-ins/Promise/resolve/` (and a sibling
+  for `new Promise((r) => r(thenable))`), asserting via `asyncTest` that a
+  `.then` reaction on a promise adopted from a synchronously-resolving
+  thenable fires with the resolved value. The corpus covers thenable
+  adoption broadly, but no fixture distinguishes the engine-specific
+  shared-`[[AlreadyResolved]]` regression where the reaction silently
+  never runs.
