@@ -137,6 +137,32 @@ All on `origin/main`:
   future change adds more to the handler, factor like
   `slowLdaGlobal`.
 
+- `<pending>` — `sta_property` transition IC. The original IC
+  explicitly refused to cache shape transitions ("the cached
+  post-shape never matches the next pre-shape … e.g.
+  literal-construction loops"), which meant every iteration of
+  a class constructor's `this.x = …; this.y = …` writes took
+  the slow path: `lookupAccessor` chain walk + `Wyhash` on the
+  key + `ShapeTree.transition` lookup + `obj.slots.resize` per
+  write. On `class_instantiate.js` (10M `new Point(i, i+1)`),
+  samply showed Wyhash back at ~6.4 % of CPU plus another
+  ~13 % across accessor maps, properties maps, Shape.lookup,
+  hasOwn/flagsFor — roughly 23 % of CPU in slow-write
+  machinery that should be a tight transition. Add a third
+  mode to `ICCell`: `(pre_shape, post_shape, slot)` paired
+  with the same `(proto, proto_shape, proto_rev)` snapshot the
+  proto-load IC uses. Fast path stamps `post_shape` on the
+  receiver, resizes `slots` to its property_count, writes the
+  slot — skipping every hash, accessor walk, and transition
+  lookup. Slow-path fill walks the FULL proto chain once at
+  fill time to verify no accessor exists for the key
+  anywhere; if so, the cell is filled. Adding an accessor on
+  any proto later changes that proto's shape (accessor
+  entries are part of the shape), so the `proto.shape`
+  snapshot catches it; `setPrototypeOf` anywhere bumps
+  `proto_revision_counter` to catch deeper-chain mutations.
+  **`class_instantiate` p50 -20.9 % (116.24 → 91.99 ms).**
+
 ## Architecture decisions
 
 - **`ShapeTree` lives on the `Heap`, not the `Realm`.** Agent-scoped,
@@ -163,17 +189,27 @@ All on `origin/main`:
   []CallICCell`** are mutable side-tables on the otherwise-immutable
   chunk. Both are zeroed at chunk finalisation. GC weak-clears the
   call-IC's callee pointer and the proto-load IC's proto pointer.
-- **`ICCell` is dual-use.** Same struct serves three opcodes — its
-  fields are reinterpreted by the consumer:
-    * `lda_property` / `sta_property` own-data mode: `proto == null`,
-      `slot` indexes `recv.slots`, `bag_index` is the `sta_property`
-      hot path's cached `properties` array index.
-    * `lda_property` proto-load mode: `proto != null` + `proto_shape`
-      + `proto_rev` (snapshot of `realm.proto_revision_counter`).
-    * `lda_global` / `lda_global_or_undef`: `proto == null`, `shape`
-      is the global object's shape, `proto_rev` is repurposed to
-      record `GlobalBindings.decl_revision`. A future `lda_global`
-      proto-walk variant would set `proto` like `lda_property`.
+- **`ICCell` is multi-use.** Same struct serves four modes — the
+  consumer opcode picks which fields are valid:
+    * `lda_property` / `sta_property` same-shape (own-data) mode:
+      `shape` matches the receiver; `slot` indexes `recv.slots`;
+      `pre_shape` / `post_shape` null; `bag_index` is the
+      `sta_property` hot path's cached `properties` array index.
+    * `lda_property` proto-load mode: `shape` (receiver) +
+      `proto != null` + `proto_shape` (snapshot at fill) +
+      `proto_rev` (snapshot of `realm.proto_revision_counter`).
+      `slot` indexes `proto.slots`.
+    * `sta_property` transition mode: `pre_shape != null` AND
+      `post_shape != null`. Fast path stamps `post_shape` on the
+      receiver, resizes `slots`, writes `slots[slot]`. Same
+      `proto` + `proto_shape` + `proto_rev` snapshot as the
+      proto-load mode — adding an accessor to any proto changes
+      that proto's shape; `setPrototypeOf` bumps the counter.
+    * `lda_global` / `lda_global_or_undef`: `proto == null`,
+      `shape` is the global object's shape, `proto_rev` is
+      repurposed to record `GlobalBindings.decl_revision`. A
+      future `lda_global` proto-walk variant would set `proto`
+      like `lda_property`.
 - **`CallICCell` is also dual-use.** `call_method` / `call` use
   only `callee`; `new_call` sets `callee` AND `proto` (the
   cached `callee.prototype` snapshot, for the

@@ -8859,15 +8859,56 @@ pub fn runFrames(
                     realm.heap.storeInternalSlot(.{ .object = obj_in }, acc);
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
+                // Transition fast path — the "fresh instance" case
+                // the same-shape IC above refuses (the cached
+                // post-shape never matches the next iteration's
+                // pre-shape). Cell records `(pre_shape, post_shape,
+                // slot, proto, proto_shape, proto_rev)` so a hot
+                // class-ctor loop's `this.x = …` writes skip the
+                // slow path's `lookupAccessor` chain walk,
+                // `Wyhash` on the key, and `ShapeTree.transition`.
+                //
+                // Validity:
+                //   • `obj.shape == cell.pre_shape` — receiver shape
+                //     unchanged since fill.
+                //   • `obj.prototype == cell.proto` — immediate
+                //     proto identity unchanged. The slot is on the
+                //     receiver, but accessor inheritance fires
+                //     from the chain — invalidating on chain
+                //     identity catches `setPrototypeOf(obj, x)`
+                //     calls that don't bump the realm counter.
+                //   • `cell.proto.?.shape == cell.proto_shape` —
+                //     proto's own shape unchanged. Adding an
+                //     accessor to a proto with `defineProperty`
+                //     changes that proto's shape (accessor entries
+                //     are part of the shape), so we catch it.
+                //   • `cell.proto_rev == realm.proto_revision_counter`
+                //     — no `Object.setPrototypeOf` /
+                //     `Reflect.setPrototypeOf` / `__proto__` write
+                //     anywhere in the realm since fill. Covers
+                //     deeper-chain mutations.
+                if (cell.pre_shape != null and cell.pre_shape == obj_in.shape and
+                    obj_in.prototype != null and obj_in.prototype == cell.proto and
+                    cell.proto.?.shape == cell.proto_shape and
+                    cell.proto_rev == realm.proto_revision_counter)
+                {
+                    const post_shape = cell.post_shape.?;
+                    if (obj_in.slots.items.len < post_shape.property_count) {
+                        obj_in.slots.resize(allocator, post_shape.property_count) catch return error.OutOfMemory;
+                    }
+                    obj_in.shape = post_shape;
+                    obj_in.slots.items[cell.slot] = acc;
+                    realm.heap.writeBarrier(.{ .object = obj_in }, acc);
+                    realm.heap.storeInternalSlot(.{ .object = obj_in }, acc);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
             }
             // Capture the pre-write shape so the refill below
             // can distinguish a same-shape rewrite (cacheable
             // — next iteration hits) from a shape transition
-            // (uncacheable — the cached post-shape never
-            // matches the next pre-shape, so caching it would
-            // burn one shape lookup per slow-path execution
-            // for zero hits, e.g. literal-construction loops).
-            const pre_shape: ?*const @import("../shape.zig").Shape = if (recv_obj_opt) |o| o.shape else null;
+            // (cacheable via the transition mode, gated on
+            // proto-chain accessor-cleanliness — see fill block).
+            const pre_shape: ?*@import("../shape.zig").Shape = if (recv_obj_opt) |o| o.shape else null;
             {
                 const set_outcome = try strictSetProperty(allocator, realm, frames, f, ip, recv, key_s.flatBytes(), acc);
                 switch (set_outcome) {
@@ -8882,11 +8923,15 @@ pub fn runFrames(
             if (recv_obj_opt) |obj_after| {
                 if (obj_after.shape) |sh| {
                     if (pre_shape == sh) {
+                        // Same-shape rewrite — fill the original
+                        // own-data IC.
                         if (sh.lookup(key_s.flatBytes())) |entry| {
                             if (entry.kind == .data and entry.attrs.writable) {
                                 const cell = &local_chunk.inline_caches[ic_idx];
                                 cell.shape = sh;
                                 cell.slot = entry.slot;
+                                cell.pre_shape = null;
+                                cell.post_shape = null;
                                 // Capture the bag's array-index for
                                 // the IC hot path's bag mirror. Safe
                                 // for shape-stable receivers because
@@ -8899,6 +8944,47 @@ pub fn runFrames(
                                 } else {
                                     cell.bag_index = chunk_mod.bag_index_uncached;
                                 }
+                            }
+                        }
+                    } else if (sh.lookup(key_s.flatBytes())) |entry| {
+                        // Shape transition (sh != pre_shape) AND the
+                        // new shape claims the key as own data. The
+                        // write went through `shadowSet` cleanly, so
+                        // the receiver has no own accessor for the
+                        // key. Fill the transition IC if (a) the
+                        // entire proto chain has no accessor for
+                        // the key — otherwise a future call would
+                        // skip a setter inherited from a proto;
+                        // (b) no proxy ancestor — proxy [[Set]] must
+                        // run every time; (c) the receiver has a
+                        // non-null prototype to snapshot.
+                        if (entry.kind == .data and entry.attrs.writable and
+                            !chainHasProxy(obj_after) and
+                            obj_after.prototype != null)
+                        {
+                            // Walk the chain once at fill time to
+                            // ensure no accessor exists for the
+                            // key anywhere. This is `lookupAccessor`'s
+                            // shape — done once per cell-fill rather
+                            // than once per write.
+                            var chain_clean = true;
+                            var cursor: ?*JSObject = obj_after.prototype;
+                            while (cursor) |proto| : (cursor = proto.prototype) {
+                                if (proto.hasAccessor(key_s.flatBytes())) {
+                                    chain_clean = false;
+                                    break;
+                                }
+                            }
+                            if (chain_clean) {
+                                const cell = &local_chunk.inline_caches[ic_idx];
+                                cell.shape = null;
+                                cell.pre_shape = pre_shape;
+                                cell.post_shape = sh;
+                                cell.slot = entry.slot;
+                                cell.proto = obj_after.prototype;
+                                cell.proto_shape = obj_after.prototype.?.shape;
+                                cell.proto_rev = realm.proto_revision_counter;
+                                cell.bag_index = chunk_mod.bag_index_uncached;
                             }
                         }
                     }

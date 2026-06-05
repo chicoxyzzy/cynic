@@ -10379,3 +10379,125 @@ test "new_call IC: ctor proxy with construct trap still routes through trap" {
         \\last + ":" + trap_calls;
     , "3:4");
 }
+
+// `sta_property` transition IC — the "fresh instance" case the
+// existing same-shape IC explicitly refuses. Every iteration of
+// `new Class()` makes a fresh-shape instance, so the first
+// `this.x = …` write sees an empty receiver shape; the IC was
+// designed to skip caching shape transitions because the cached
+// post-shape never matches the next iteration's pre-shape. The
+// transition mode flips that: cache `(pre_shape, post_shape, slot)`
+// per call site, so the fast path stamps the new shape + writes
+// the slot without going through the slow path's `lookupAccessor`
+// chain walk, `Wyhash`-on-the-key, and ShapeTree.transition.
+//
+// Correctness contracts:
+//   * accessor on the proto chain MUST still fire on writes (the
+//     IC must NOT fill when an accessor exists for the key
+//     anywhere on the chain at fill time);
+//   * adding an accessor to the proto post-fill MUST invalidate
+//     (caught by the cached `proto.shape` snapshot, since
+//     defineProperty with an accessor changes the proto's shape);
+//   * `Object.setPrototypeOf` MUST invalidate (caught by the
+//     cached `realm.proto_revision_counter`);
+//   * polymorphic receivers at one site fall back cleanly — the
+//     pre_shape check fails for receivers with different
+//     starting shapes.
+
+test "sta_property transition IC: hot class constructor loop preserves values" {
+    try expectScriptIntWithBuiltins(
+        \\class Point {
+        \\  constructor(x, y) { this.x = x; this.y = y; }
+        \\}
+        \\let total = 0;
+        \\for (let i = 0; i < 100; i++) {
+        \\  const p = new Point(i, i * 2);
+        \\  total += p.x + p.y;
+        \\}
+        \\total;
+    // sum of (i + 2i) for i in 0..99 = 3 * (0+1+…+99) = 3 * 4950 = 14850
+    , 14850);
+}
+
+test "sta_property transition IC: frozen Object.prototype still resolves accessor reads" {
+    // The hardened default freezes Object.prototype, so no
+    // accessor can be added later. Verify the IC works AND that
+    // a read for an undefined name correctly returns undefined
+    // (the read path doesn't fire a phantom setter).
+    try expectScriptIntWithBuiltins(
+        \\class Pair { constructor(a, b) { this.a = a; this.b = b; } }
+        \\let acc = 0;
+        \\for (let i = 0; i < 20; i++) {
+        \\  const p = new Pair(i, 1);
+        \\  acc += p.a + p.b;
+        \\  // Reading an absent name must not trip anything in the IC.
+        \\  if (p.missing !== undefined) acc -= 1000;
+        \\}
+        \\acc;
+    // sum of (i + 1) for i in 0..19 = (0+1+…+19) + 20 = 190 + 20 = 210
+    , 210);
+}
+
+test "sta_property transition IC: --unhardened, accessor installed on proto mid-loop invalidates" {
+    // Mid-loop, install a setter on Object.prototype for the key
+    // the constructor writes. From iteration `n/2` onward, the
+    // setter fires AND no own property is created (verify by
+    // reading from the instance and falling back to undefined).
+    try expectScriptStringUnhardened(
+        \\let setter_calls = 0;
+        \\class Box { constructor(v) { this.v = v; } }
+        \\let acc = "";
+        \\for (let i = 0; i < 4; i++) {
+        \\  if (i === 2) {
+        \\    Object.defineProperty(Object.prototype, "v", {
+        \\      set(x) { setter_calls++; },
+        \\      configurable: true,
+        \\    });
+        \\  }
+        \\  const b = new Box(i);
+        \\  acc += (b.v === undefined ? "U" : String(b.v));
+        \\}
+        \\acc + ":" + setter_calls;
+    , "01UU:2");
+}
+
+test "sta_property transition IC: setPrototypeOf mid-loop invalidates" {
+    // Bumping `realm.proto_revision_counter` (via setPrototypeOf
+    // on ANY object) must invalidate every transition cell so
+    // the next write rechecks the proto chain.
+    try expectScriptIntUnhardened(
+        \\class Holder { constructor(v) { this.v = v; } }
+        \\const other = {};
+        \\let sum = 0;
+        \\for (let i = 0; i < 6; i++) {
+        \\  if (i === 3) Object.setPrototypeOf(other, null);
+        \\  const h = new Holder(i);
+        \\  sum += h.v;
+        \\}
+        \\sum;
+    // sum of (i) for i in 0..5 = 15
+    , 15);
+}
+
+test "sta_property transition IC: polymorphic receivers fall back cleanly" {
+    // Same `this.k = v` call site reached from two different
+    // ctors. Each ctor writes a different key first, so the
+    // pre_shapes differ. The cell will thrash but the values
+    // must remain correct (the IC must miss on shape mismatch
+    // and the slow path takes over).
+    try expectScriptIntWithBuiltins(
+        \\class A {
+        \\  constructor(v) { this.x = 1; this.k = v; }
+        \\}
+        \\class B {
+        \\  constructor(v) { this.y = 1; this.k = v; }
+        \\}
+        \\let sum = 0;
+        \\for (let i = 0; i < 6; i++) {
+        \\  const o = (i % 2 === 0) ? new A(i) : new B(i);
+        \\  sum += o.k;
+        \\}
+        \\sum;
+    // sum of (i) for i in 0..5 = 15
+    , 15);
+}

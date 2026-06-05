@@ -31,27 +31,37 @@ const BindingKind = @import("scope.zig").BindingKind;
 /// successful lookup; on the next hit, a shape pointer compare and a
 /// `slots[slot]` load skip the full lookup.
 ///
-/// Two modes:
-///   • `proto == null` (own-data hit) — `slot` indexes
-///     `recv.slots`. Same behaviour as the original IC.
-///   • `proto != null` (prototype-load hit) — the property was
-///     resolved through the receiver's prototype chain; `slot`
-///     indexes `proto.slots`. `proto_shape` snapshots `proto.shape`
-///     at fill time so a mutation that demotes / re-shapes the
-///     prototype (adding / removing / converting a key) misses
-///     the cache. `proto_rev` snapshots the realm's
-///     `proto_revision_counter` — bumped on every
-///     `Object.setPrototypeOf` / `Reflect.setPrototypeOf` /
-///     `__proto__` literal write, so a chain-link swap also
-///     invalidates.
+/// Three modes (the consumer opcode picks which fields are valid):
+///   • Same-shape hit — `proto == null` AND `pre_shape == null`.
+///     `shape` matches the receiver; `slot` indexes
+///     `recv.slots`. The original `lda_property` / `sta_property`
+///     mode.
+///   • Proto-load hit (`lda_property`) — `proto != null`. The
+///     property was resolved through the receiver's prototype
+///     chain; `slot` indexes `proto.slots`. `proto_shape`
+///     snapshots `proto.shape` at fill time; `proto_rev` snapshots
+///     the realm's `proto_revision_counter`. Either changing
+///     invalidates the cell.
+///   • Transition hit (`sta_property`) — `pre_shape != null` AND
+///     `post_shape != null`. The receiver had `pre_shape` at fill
+///     time, no own accessor for the key, AND the full proto
+///     chain had no accessor for the key. The fast path stamps
+///     `post_shape`, resizes `recv.slots` to its property_count,
+///     and writes the new slot value — skipping the slow path's
+///     `lookupAccessor` chain walk, `Wyhash` on the key, and
+///     `ShapeTree.transition` lookup. `proto` / `proto_shape` /
+///     `proto_rev` are additionally snapshot to invalidate on
+///     any proto-chain mutation that could introduce an accessor
+///     (defineProperty on a proto changes that proto's shape;
+///     setPrototypeOf bumps the realm counter).
 ///
 /// Monomorphic: a miss overwrites the cell, no polymorphism / chain.
 /// Hermes-style: no JIT, the cache lives entirely in the lantern.
 ///
-/// `shape == null` is the cold / un-cacheable state (the last
-/// lookup hit a dictionary-mode object, an accessor, the prototype
-/// chain, or simply hasn't run yet). Initialised that way at chunk
-/// finalisation.
+/// `shape == null` AND `pre_shape == null` is the cold /
+/// un-cacheable state (the last lookup hit a dictionary-mode
+/// object, an accessor, the prototype chain, or simply hasn't run
+/// yet). Initialised that way at chunk finalisation.
 ///
 /// The `proto` field is a GC-heap pointer; the heap's mark walk
 /// weak-clears any cell whose proto isn't otherwise reachable, so
@@ -62,6 +72,16 @@ pub const ICCell = struct {
     proto: ?*@import("../runtime/object.zig").JSObject = null,
     proto_shape: ?*Shape = null,
     proto_rev: u64 = 0,
+    /// `sta_property` transition mode — required receiver shape
+    /// before the write. Paired with `post_shape` below. Both
+    /// null in same-shape / proto-load modes.
+    pre_shape: ?*Shape = null,
+    /// `sta_property` transition mode — the shape to install on
+    /// the receiver after the write. The fast path resizes
+    /// `recv.slots` to `post_shape.property_count` (cheap on a
+    /// hot loop because the slice's underlying capacity carries
+    /// over) and stores into `slots[slot]`.
+    post_shape: ?*Shape = null,
     /// Index into the receiver's `properties.values()` for the
     /// shape's `slot`-th key. Cached on `sta_property` IC fill so
     /// the IC-hit bag mirror collapses from a wyhash + bucket walk
