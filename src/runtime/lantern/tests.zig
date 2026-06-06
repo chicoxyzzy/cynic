@@ -10912,6 +10912,166 @@ test "JSON.stringify: circular structure still throws after key drops" {
     );
 }
 
+// ── Class ctor + method param-register promotion ────────────────────
+//
+// `paramsCanBeRegisters` was wired into `compileFunctionTemplateExtNamed`
+// for free / named function declarations but NOT into the class
+// constructor / method paths. So `class P { constructor(x, y) {
+// this.x = x; this.y = y; } }` still copied `x` and `y` into env
+// slots on every `new P(…)`. Wiring the predicate into
+// `compileConstructorBody` / `compileMethodBody` extends the
+// register-only emit to class members. These tests pin the
+// semantic contract — the optimization is correctness-preserving
+// either way; the perf delta is the headline.
+
+test "ctor params register: simple constructor reads back both params" {
+    try expectScriptIntWithBuiltins(
+        \\class P { constructor(x, y) { this.x = x; this.y = y; } }
+        \\const p = new P(3, 4);
+        \\p.x + p.y;
+    , 7);
+}
+
+test "ctor params register: hot allocating loop preserves last-iteration values" {
+    try expectScriptIntWithBuiltins(
+        \\class Point { constructor(x, y) { this.x = x; this.y = y; } }
+        \\let last = null;
+        \\for (let i = 0; i < 100; i++) last = new Point(i, i + 1);
+        \\last.x + last.y;
+    , 99 + 100);
+}
+
+test "ctor params register: param reassignment inside body persists for the rest of the call" {
+    // `Star r0` for `x = …` writes the register; the read below
+    // sees the new value. Same shape as the function path
+    // recursion-then-reassignment test.
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  constructor(x) {
+        \\    if (x > 5) x = 5;
+        \\    this.x = x * 2;
+        \\  }
+        \\}
+        \\new C(7).x;
+    , 10);
+}
+
+test "ctor params register: arguments reference forces env path" {
+    // `arguments` reifies into env slot 0; the register-only fast
+    // path can't represent that. The predicate must reject, and
+    // the env-bound prologue must still bind `x` correctly.
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  constructor(x) {
+        \\    this.x = x + arguments.length;
+        \\  }
+        \\}
+        \\new C(10).x;
+    , 11);
+}
+
+test "ctor params register: nested arrow captures param → env path" {
+    // The nested arrow could close over `x`; the predicate
+    // conservatively rejects. The env path must still resolve
+    // the param read correctly across the closure.
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  constructor(x) {
+        \\    const f = () => x * 10;
+        \\    this.y = f();
+        \\  }
+        \\}
+        \\new C(4).y;
+    , 40);
+}
+
+test "ctor params register: default param forces env path" {
+    // §10.2.10 default-expression evaluation runs in scope where
+    // earlier params are bound; the predicate rejects defaults so
+    // the env path stays as the fallback.
+    try expectScriptIntWithBuiltins(
+        \\class C { constructor(x = 7) { this.x = x; } }
+        \\new C().x + new C(2).x;
+    , 9);
+}
+
+test "ctor params register: rest param forces env path" {
+    try expectScriptIntWithBuiltins(
+        \\class C { constructor(...args) { this.n = args.length; } }
+        \\new C(1, 2, 3, 4).n;
+    , 4);
+}
+
+test "method params register: simple instance method reads back both params" {
+    try expectScriptIntWithBuiltins(
+        \\class C { add(a, b) { return a + b; } }
+        \\new C().add(3, 4);
+    , 7);
+}
+
+test "method params register: hot method-call loop" {
+    try expectScriptIntWithBuiltins(
+        \\class C { mul(a, b) { return a * b; } }
+        \\const c = new C();
+        \\let r = 0;
+        \\for (let i = 0; i < 100; i++) r += c.mul(i, 2);
+        \\r;
+        // 2 * sum(0..99) = 9900
+    , 9900);
+}
+
+test "method params register: method with arguments forces env" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  pick(a, b) { return arguments[1]; }
+        \\}
+        \\new C().pick(10, 20);
+    , 20);
+}
+
+test "method params register: method with closure over this works" {
+    // `this` binding lives in the call frame, not the param
+    // registers; promotion must not break `this` reads from a
+    // nested arrow.
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  setup(v) {
+        \\    this.v = v;
+        \\    const get = () => this.v;
+        \\    return get();
+        \\  }
+        \\}
+        \\new C().setup(42);
+    , 42);
+}
+
+test "ctor params register: generator method stays on env path" {
+    // §27.5 — generator suspension reifies the env into the
+    // JSGenerator state; the predicate rejects generators. The
+    // env path keeps params correctly bound across yield.
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  *gen(n) {
+        \\    yield n;
+        \\    yield n + 1;
+        \\  }
+        \\}
+        \\const it = new C().gen(10);
+        \\it.next().value + it.next().value;
+    , 21);
+}
+
+test "ctor params register: derived class super() and own writes" {
+    try expectScriptIntWithBuiltins(
+        \\class A { constructor(x) { this.x = x; } }
+        \\class B extends A {
+        \\  constructor(x, y) { super(x); this.y = y; }
+        \\}
+        \\const b = new B(3, 4);
+        \\b.x + b.y;
+    , 7);
+}
+
 test "def_template_property: literal with mixed static + computed keys" {
     // Compiler bails template build on a literal that contains
     // any computed key (template build sees `.computed` and

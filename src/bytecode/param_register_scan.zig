@@ -75,7 +75,157 @@ pub fn paramsCanBeRegisters(
     // serve a stale register copy. Cheap to reject; precise
     // capture analysis is a follow-up.
     for (stmts) |*s| if (statementHasNestedFunctionShape(s)) return false;
+    // §19.2.1 — a direct eval reads bindings through the surrounding
+    // env chain. Register-only params skip the env entirely, so
+    // `function f(n) { return eval('n + 1'); }` couldn't resolve
+    // `n` from inside the eval. Reject when the body contains a
+    // bare `eval(…)` call — the env-bound path stays as the
+    // fallback. Indirect eval (`(0, eval)(…)`) doesn't see the
+    // caller's scope per §19.2.1, but it's cheap to reject both
+    // by detecting any call whose callee is the bare identifier
+    // `eval`.
+    for (stmts) |*s| if (statementHasDirectEvalCall(source, s)) return false;
     return true;
+}
+
+/// True when `s` (or any nested expression / statement) contains a
+/// call whose callee is the bare identifier `eval`. Used as a
+/// rejection condition by `paramsCanBeRegisters` — see the
+/// matching call site for the §19.2.1 motivation.
+fn statementHasDirectEvalCall(source: []const u8, s: *const ast.statement.Statement) bool {
+    return switch (s.*) {
+        .expression => |es| expressionHasDirectEvalCall(source, &es.expression),
+        .block => |b| blk: {
+            for (b.body) |*inner| if (statementHasDirectEvalCall(source, inner)) break :blk true;
+            break :blk false;
+        },
+        .lexical => |ld| blk: {
+            for (ld.declarators) |d| {
+                if (d.init) |*e| if (expressionHasDirectEvalCall(source, e)) break :blk true;
+            }
+            break :blk false;
+        },
+        .if_ => |i| blk: {
+            if (expressionHasDirectEvalCall(source, &i.test_)) break :blk true;
+            if (statementHasDirectEvalCall(source, i.consequent)) break :blk true;
+            if (i.alternate) |alt| if (statementHasDirectEvalCall(source, alt)) break :blk true;
+            break :blk false;
+        },
+        .while_ => |w| expressionHasDirectEvalCall(source, &w.test_) or statementHasDirectEvalCall(source, w.body),
+        .do_while => |dw| expressionHasDirectEvalCall(source, &dw.test_) or statementHasDirectEvalCall(source, dw.body),
+        .for_ => |f| blk: {
+            if (f.init) |head| switch (head) {
+                .expression => |*e| if (expressionHasDirectEvalCall(source, e)) break :blk true,
+                .lexical => |ld| for (ld.declarators) |d| {
+                    if (d.init) |*e| if (expressionHasDirectEvalCall(source, e)) break :blk true;
+                },
+            };
+            if (f.test_) |*e| if (expressionHasDirectEvalCall(source, e)) break :blk true;
+            if (f.update) |*e| if (expressionHasDirectEvalCall(source, e)) break :blk true;
+            if (statementHasDirectEvalCall(source, f.body)) break :blk true;
+            break :blk false;
+        },
+        .for_in_of => |f| blk: {
+            switch (f.left) {
+                .expression => |*e| if (expressionHasDirectEvalCall(source, e)) break :blk true,
+                .lexical => |ld| for (ld.declarators) |d| {
+                    if (d.init) |*e| if (expressionHasDirectEvalCall(source, e)) break :blk true;
+                },
+            }
+            if (expressionHasDirectEvalCall(source, &f.right)) break :blk true;
+            if (statementHasDirectEvalCall(source, f.body)) break :blk true;
+            break :blk false;
+        },
+        .labeled => |lb| statementHasDirectEvalCall(source, lb.body),
+        .return_ => |r| if (r.argument) |*e| expressionHasDirectEvalCall(source, e) else false,
+        .throw_ => |t| expressionHasDirectEvalCall(source, &t.argument),
+        .try_ => |t| blk: {
+            for (t.block.body) |*inner| if (statementHasDirectEvalCall(source, inner)) break :blk true;
+            if (t.handler) |h| {
+                for (h.body.body) |*inner| if (statementHasDirectEvalCall(source, inner)) break :blk true;
+            }
+            if (t.finalizer) |fb| {
+                for (fb.body) |*inner| if (statementHasDirectEvalCall(source, inner)) break :blk true;
+            }
+            break :blk false;
+        },
+        .switch_ => |sw| blk: {
+            if (expressionHasDirectEvalCall(source, &sw.discriminant)) break :blk true;
+            for (sw.cases) |c| {
+                if (c.test_) |*e| if (expressionHasDirectEvalCall(source, e)) break :blk true;
+                for (c.body) |*inner| if (statementHasDirectEvalCall(source, inner)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn expressionHasDirectEvalCall(source: []const u8, e: *const Expression) bool {
+    return switch (e.*) {
+        .call => |c| blk: {
+            // §19.2.1 — direct eval requires the callee to be the
+            // bare identifier `eval` (after parenthesis stripping).
+            // `obj.eval()` and `(0, eval)(…)` route differently;
+            // the latter is technically indirect eval but the
+            // identifier check below still flags any `eval(…)` in
+            // body so the conservative rejection covers both.
+            var callee = c.callee;
+            while (callee.* == .parenthesized) callee = callee.parenthesized.expression;
+            if (callee.* == .identifier_reference) {
+                const id = callee.identifier_reference;
+                if (std.mem.eql(u8, source[id.span.start..id.span.end], "eval")) {
+                    break :blk true;
+                }
+            }
+            if (expressionHasDirectEvalCall(source, c.callee)) break :blk true;
+            for (c.arguments) |*a| if (expressionHasDirectEvalCall(source, a)) break :blk true;
+            break :blk false;
+        },
+        .parenthesized => |p| expressionHasDirectEvalCall(source, p.expression),
+        .unary => |u| expressionHasDirectEvalCall(source, u.operand),
+        .binary => |b| expressionHasDirectEvalCall(source, b.lhs) or expressionHasDirectEvalCall(source, b.rhs),
+        .logical => |l| expressionHasDirectEvalCall(source, l.lhs) or expressionHasDirectEvalCall(source, l.rhs),
+        .conditional => |c| expressionHasDirectEvalCall(source, c.test_) or expressionHasDirectEvalCall(source, c.consequent) or expressionHasDirectEvalCall(source, c.alternate),
+        .assignment => |a| expressionHasDirectEvalCall(source, a.target) or expressionHasDirectEvalCall(source, a.value),
+        .sequence => |s| blk: {
+            for (s.expressions) |*ex| if (expressionHasDirectEvalCall(source, ex)) break :blk true;
+            break :blk false;
+        },
+        .member => |m| expressionHasDirectEvalCall(source, m.object) or switch (m.property) {
+            .computed => |k| expressionHasDirectEvalCall(source, k),
+            else => false,
+        },
+        .new_expr => |n| blk: {
+            if (expressionHasDirectEvalCall(source, n.callee)) break :blk true;
+            for (n.arguments) |*a| if (expressionHasDirectEvalCall(source, a)) break :blk true;
+            break :blk false;
+        },
+        .array_literal => |al| blk: {
+            for (al.elements) |maybe_elem| {
+                if (maybe_elem) |*ex| if (expressionHasDirectEvalCall(source, ex)) break :blk true;
+            }
+            break :blk false;
+        },
+        .object_literal => |o| blk: {
+            for (o.properties) |p| switch (p) {
+                .property => |prop| if (expressionHasDirectEvalCall(source, &prop.value)) break :blk true,
+                else => {},
+            };
+            break :blk false;
+        },
+        .template_literal => |t| blk: {
+            for (t.expressions) |*ex| if (expressionHasDirectEvalCall(source, ex)) break :blk true;
+            break :blk false;
+        },
+        .update => |u| expressionHasDirectEvalCall(source, u.operand),
+        .spread => |s| expressionHasDirectEvalCall(source, s.argument),
+        .yield => |y| if (y.argument) |a| expressionHasDirectEvalCall(source, a) else false,
+        .await_ => |a| expressionHasDirectEvalCall(source, a.argument),
+        .chain => |c| expressionHasDirectEvalCall(source, c.expression),
+        .tagged_template => |t| expressionHasDirectEvalCall(source, t.tag) or expressionHasDirectEvalCall(source, t.quasi),
+        else => false,
+    };
 }
 
 fn statementHasNestedFunctionShape(s: *const ast.statement.Statement) bool {

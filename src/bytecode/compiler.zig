@@ -7700,21 +7700,45 @@ pub const Compiler = struct {
         const saved_env_depth = self.env_depth;
         const saved_current_loop = self.current_loop;
         const saved_completion_reg = self.completion_reg;
+        const saved_params_register_only = self.current_params_register_only;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
         self.scope = &fn_scope;
         self.env_slot_count = 0;
         self.temps_in_use = 0;
+        // Parameter-to-register pre-check — same predicate the
+        // `compileFunctionTemplateExtNamed` path uses. When every
+        // ctor param can stay in its caller-supplied register, hide
+        // them from `functionEntryEnvNeeded` so the env elides
+        // when the body has no other env-needing bindings; the
+        // body reads emit `Ldar r{i}` directly via the binding's
+        // `is_register` flag. Constructors are never arrow /
+        // generator / async (those forms are syntax errors), so
+        // the conservative flags pass `false`.
+        const params_register_only = paramsCanBeRegisters(
+            self.source,
+            params,
+            body_stmts,
+            false,
+            false,
+            false,
+        );
         // Function-entry env elision — same logic as the function /
         // method paths. A user-written `constructor` with no params,
         // no `arguments`, and no body decls (still runs
         // `init_instance_fields` at entry but that doesn't touch the
         // entry env) needs no entry env.
-        const needs_entry_env = functionEntryEnvNeeded(self.source, params, body_stmts, false);
+        const needs_entry_env = functionEntryEnvNeeded(
+            self.source,
+            if (params_register_only) &.{} else params,
+            body_stmts,
+            false,
+        );
         self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
         self.completion_reg = null;
+        self.current_params_register_only = params_register_only;
 
         var inner_finished = false;
         defer {
@@ -7728,6 +7752,7 @@ pub const Compiler = struct {
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
                 self.completion_reg = saved_completion_reg;
+                self.current_params_register_only = saved_params_register_only;
             }
         }
 
@@ -7768,7 +7793,20 @@ pub const Compiler = struct {
                 .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
             }
         }
-        self.temps_in_use = saved_ctor_prologue_temps;
+        // Register-only ctors: KEEP the `params.len`-wide temp
+        // reservation through the body — those registers ARE the
+        // param bindings; body temps must not overwrite them.
+        // Also clear the `env_slot_count` bumped by each
+        // `declareParam`: with the env elided, the bumped slot
+        // indices are dead, and a body-local lex binding would
+        // otherwise inherit a non-zero start. See
+        // `compileFunctionTemplateExtNamed` for the matching
+        // function-path comment.
+        if (!params_register_only) {
+            self.temps_in_use = saved_ctor_prologue_temps;
+        } else {
+            self.env_slot_count = 0;
+        }
 
         // Base class: run field initializers at the start of the
         // user body. Derived classes wait for super_call to trigger.
@@ -7811,6 +7849,7 @@ pub const Compiler = struct {
         self.env_depth = saved_env_depth;
         self.current_loop = saved_current_loop;
         self.completion_reg = saved_completion_reg;
+        self.current_params_register_only = saved_params_register_only;
 
         return inner_chunk;
     }
@@ -7845,6 +7884,7 @@ pub const Compiler = struct {
         const saved_current_loop = self.current_loop;
         const saved_completion_reg = self.completion_reg;
         const saved_is_async = self.current_is_async;
+        const saved_params_register_only = self.current_params_register_only;
         // §sec-performeval-rules-in-initializer / ContainsArguments — a
         // method body introduces its own `arguments`, so the "eval inside
         // an initializer" early error does not reach into it.
@@ -7855,16 +7895,35 @@ pub const Compiler = struct {
         self.scope = &fn_scope;
         self.env_slot_count = 0;
         self.temps_in_use = 0;
+        // Parameter-to-register pre-check — same predicate the
+        // `compileFunctionTemplateExtNamed` / ctor paths use.
+        // Generators / async methods reify the env into the
+        // JSGenerator / async-state machinery, so the predicate
+        // bails on those two flags itself.
+        const params_register_only = paramsCanBeRegisters(
+            self.source,
+            params,
+            body_stmts,
+            false,
+            is_generator,
+            is_async,
+        );
         // Function-entry env elision — same logic as
         // `compileFunctionTemplateExtNamed`. Methods follow the
         // same §10.2.10 FunctionDeclarationInstantiation shape,
         // so a 0-binding body (no params, no `arguments`, no
         // body decls) needs no entry env.
-        const needs_entry_env = functionEntryEnvNeeded(self.source, params, body_stmts, false);
+        const needs_entry_env = functionEntryEnvNeeded(
+            self.source,
+            if (params_register_only) &.{} else params,
+            body_stmts,
+            false,
+        );
         self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
         self.completion_reg = null;
         self.current_is_async = is_async;
+        self.current_params_register_only = params_register_only;
         self.in_field_initializer = false;
 
         var inner_finished = false;
@@ -7879,6 +7938,7 @@ pub const Compiler = struct {
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
                 self.completion_reg = saved_completion_reg;
+                self.current_params_register_only = saved_params_register_only;
                 self.in_field_initializer = saved_in_field_initializer;
             }
         }
@@ -7920,7 +7980,17 @@ pub const Compiler = struct {
                 .rest => |*rp| try self.emitRestParamPrologue(rp, @intCast(i)),
             }
         }
-        self.temps_in_use = saved_method_prologue_temps;
+        // Register-only methods: KEEP the `params.len`-wide temp
+        // reservation through the body — those registers ARE the
+        // param bindings; body temps must not overwrite them.
+        // Clear the `env_slot_count` bumped by each `declareParam`
+        // since the env was elided. See `compileFunctionTemplateExtNamed`
+        // for the matching function-path comment.
+        if (!params_register_only) {
+            self.temps_in_use = saved_method_prologue_temps;
+        } else {
+            self.env_slot_count = 0;
+        }
 
         // §27.5 / §27.6 — generator methods suspend here so
         // `wrapGenerator` returns the wrapper after param init.
@@ -7954,6 +8024,7 @@ pub const Compiler = struct {
         self.current_loop = saved_current_loop;
         self.completion_reg = saved_completion_reg;
         self.current_is_async = saved_is_async;
+        self.current_params_register_only = saved_params_register_only;
         self.in_field_initializer = saved_in_field_initializer;
 
         return inner_chunk;
