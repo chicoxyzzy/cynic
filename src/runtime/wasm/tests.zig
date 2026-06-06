@@ -593,3 +593,148 @@ test "wasm interp: out-of-bounds store traps" {
     try testing.expectEqual(@as(i32, 0), try runMemFunc(&.{0x7f}, &.{0x7f}, &oob_code, "f", 1, &.{65532}));
     try testing.expectError(error.OutOfBoundsMemoryAccess, runMemFunc(&.{0x7f}, &.{0x7f}, &oob_code, "f", 1, &.{65533}));
 }
+
+// ── execution: floats, numeric unary, sign extension ────────────────
+
+/// Invoke a single-function module, passing raw arg cells and
+/// returning the first result cell raw (caller interprets the bits).
+fn callCells(
+    params: []const u8,
+    results: []const u8,
+    code_body: []const u8,
+    name: []const u8,
+    min_pages: ?u32,
+    arg_cells: []const u64,
+) !u64 {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = if (min_pages) |mp|
+        try buildMemFunc(a, params, results, code_body, name, mp)
+    else
+        try buildFunc(a, params, results, code_body, name);
+    const m = try wasm.decode(a, bytes);
+    const modp = try a.create(wasm.Module);
+    modp.* = m;
+    var instance = try interp.instantiate(a, testing.allocator, modp);
+    defer instance.deinit();
+    const fidx = funcExport(modp, name) orelse return error.NoSuchExport;
+    const res = try interp.invoke(&instance, testing.allocator, fidx, arg_cells);
+    defer testing.allocator.free(res);
+    return res[0];
+}
+
+fn f64c(x: f64) u64 {
+    return @bitCast(x);
+}
+fn f32c(x: f32) u64 {
+    return @as(u32, @bitCast(x));
+}
+fn asF64(c: u64) f64 {
+    return @bitCast(c);
+}
+fn asF32(c: u64) f32 {
+    return @bitCast(@as(u32, @truncate(c)));
+}
+fn asI32(c: u64) i32 {
+    return @bitCast(@as(u32, @truncate(c)));
+}
+
+const F64 = 0x7c;
+const F32 = 0x7d;
+const I32 = 0x7f;
+
+test "wasm interp: f64 arithmetic" {
+    // local.get 0; local.get 1; f64.<op>
+    const ops = [_]struct { code: u8, a: f64, b: f64, want: f64 }{
+        .{ .code = 0xa0, .a = 1.5, .b = 2.25, .want = 3.75 }, // add
+        .{ .code = 0xa1, .a = 5.0, .b = 1.5, .want = 3.5 }, // sub
+        .{ .code = 0xa2, .a = 3.0, .b = 4.0, .want = 12.0 }, // mul
+        .{ .code = 0xa3, .a = 9.0, .b = 2.0, .want = 4.5 }, // div
+    };
+    for (ops) |o| {
+        const code = [_]u8{ 0x00, 0x20, 0x00, 0x20, 0x01, o.code, 0x0b };
+        const r = asF64(try callCells(&.{ F64, F64 }, &.{F64}, &code, "f", null, &.{ f64c(o.a), f64c(o.b) }));
+        try testing.expectEqual(o.want, r);
+    }
+}
+
+test "wasm interp: f64.sqrt" {
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0x9f, 0x0b };
+    try testing.expectEqual(@as(f64, 3.0), asF64(try callCells(&.{F64}, &.{F64}, &code, "f", null, &.{f64c(9.0)})));
+}
+
+test "wasm interp: f64.nearest rounds ties to even" {
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0x9e, 0x0b };
+    const cases = [_]struct { x: f64, want: f64 }{
+        .{ .x = 2.5, .want = 2.0 },
+        .{ .x = 3.5, .want = 4.0 },
+        .{ .x = 0.5, .want = 0.0 },
+        .{ .x = -2.5, .want = -2.0 },
+        .{ .x = 2.4, .want = 2.0 },
+        .{ .x = 2.6, .want = 3.0 },
+    };
+    for (cases) |c| {
+        try testing.expectEqual(c.want, asF64(try callCells(&.{F64}, &.{F64}, &code, "f", null, &.{f64c(c.x)})));
+    }
+}
+
+test "wasm interp: f64.min/max signed zero and NaN" {
+    const min_code = [_]u8{ 0x00, 0x20, 0x00, 0x20, 0x01, 0xa4, 0x0b };
+    const max_code = [_]u8{ 0x00, 0x20, 0x00, 0x20, 0x01, 0xa5, 0x0b };
+    // min(-0, +0) = -0  (signbit set)
+    const mz = asF64(try callCells(&.{ F64, F64 }, &.{F64}, &min_code, "f", null, &.{ f64c(-0.0), f64c(0.0) }));
+    try testing.expect(std.math.signbit(mz) and mz == 0.0);
+    // max(-0, +0) = +0
+    const pz = asF64(try callCells(&.{ F64, F64 }, &.{F64}, &max_code, "f", null, &.{ f64c(-0.0), f64c(0.0) }));
+    try testing.expect(!std.math.signbit(pz) and pz == 0.0);
+    // min(NaN, 1) = NaN
+    const nan = asF64(try callCells(&.{ F64, F64 }, &.{F64}, &min_code, "f", null, &.{ f64c(std.math.nan(f64)), f64c(1.0) }));
+    try testing.expect(std.math.isNan(nan));
+}
+
+test "wasm interp: f64 comparison yields i32" {
+    const lt = [_]u8{ 0x00, 0x20, 0x00, 0x20, 0x01, 0x63, 0x0b }; // f64.lt
+    try testing.expectEqual(@as(i32, 1), asI32(try callCells(&.{ F64, F64 }, &.{I32}, &lt, "f", null, &.{ f64c(1.0), f64c(2.0) })));
+    try testing.expectEqual(@as(i32, 0), asI32(try callCells(&.{ F64, F64 }, &.{I32}, &lt, "f", null, &.{ f64c(2.0), f64c(1.0) })));
+    // NaN comparisons are false
+    try testing.expectEqual(@as(i32, 0), asI32(try callCells(&.{ F64, F64 }, &.{I32}, &lt, "f", null, &.{ f64c(std.math.nan(f64)), f64c(1.0) })));
+}
+
+test "wasm interp: f32 add round-trips through 32-bit cells" {
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0x20, 0x01, 0x92, 0x0b }; // f32.add
+    const r = asF32(try callCells(&.{ F32, F32 }, &.{F32}, &code, "f", null, &.{ f32c(1.5), f32c(2.25) }));
+    try testing.expectEqual(@as(f32, 3.75), r);
+}
+
+test "wasm interp: i32.clz/ctz/popcnt" {
+    const clz = [_]u8{ 0x00, 0x20, 0x00, 0x67, 0x0b };
+    const ctz = [_]u8{ 0x00, 0x20, 0x00, 0x68, 0x0b };
+    const pop = [_]u8{ 0x00, 0x20, 0x00, 0x69, 0x0b };
+    try testing.expectEqual(@as(i32, 24), asI32(try callCells(&.{I32}, &.{I32}, &clz, "f", null, &.{0x80}))); // 0x80 → 24 leading zeros
+    try testing.expectEqual(@as(i32, 7), asI32(try callCells(&.{I32}, &.{I32}, &ctz, "f", null, &.{0x80})));
+    try testing.expectEqual(@as(i32, 4), asI32(try callCells(&.{I32}, &.{I32}, &pop, "f", null, &.{0x0F})));
+}
+
+test "wasm interp: sign-extension ops" {
+    const e8 = [_]u8{ 0x00, 0x20, 0x00, 0xc0, 0x0b }; // i32.extend8_s
+    try testing.expectEqual(@as(i32, -1), asI32(try callCells(&.{I32}, &.{I32}, &e8, "f", null, &.{0xFF})));
+    try testing.expectEqual(@as(i32, 127), asI32(try callCells(&.{I32}, &.{I32}, &e8, "f", null, &.{0x7F})));
+    const e16 = [_]u8{ 0x00, 0x20, 0x00, 0xc1, 0x0b }; // i32.extend16_s
+    try testing.expectEqual(@as(i32, -1), asI32(try callCells(&.{I32}, &.{I32}, &e16, "f", null, &.{0xFFFF})));
+}
+
+test "wasm interp: f64 store then load round-trips" {
+    // (i32 addr, f64 val) -> f64
+    const code = [_]u8{
+        0x00,
+        0x20, 0x00, // local.get 0 (addr)
+        0x20, 0x01, // local.get 1 (val)
+        0x39, 0x03, 0x00, // f64.store align=3 offset=0
+        0x20, 0x00, // local.get 0
+        0x2b, 0x03, 0x00, // f64.load align=3 offset=0
+        0x0b,
+    };
+    const r = asF64(try callCells(&.{ I32, F64 }, &.{F64}, &code, "f", 1, &.{ 16, f64c(3.141592653589793) }));
+    try testing.expectEqual(@as(f64, 3.141592653589793), r);
+}

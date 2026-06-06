@@ -180,6 +180,18 @@ const Interp = struct {
     inline fn popI64(self: *Interp) i64 {
         return @bitCast(self.popCell());
     }
+    inline fn pushF32(self: *Interp, v: f32) TrapError!void {
+        try self.pushCell(@as(u32, @bitCast(v)));
+    }
+    inline fn popF32(self: *Interp) f32 {
+        return @bitCast(@as(u32, @truncate(self.popCell())));
+    }
+    inline fn pushF64(self: *Interp, v: f64) TrapError!void {
+        try self.pushCell(@bitCast(v));
+    }
+    inline fn popF64(self: *Interp) f64 {
+        return @bitCast(self.popCell());
+    }
 
     /// Push a frame for a wasm call. The top `param_count` operands are
     /// already the callee's first locals (zero-copy); remaining locals
@@ -392,12 +404,52 @@ fn run(ip: *Interp) Error!void {
                     try ip.pushI64(try arithI64(op, a, b));
                 },
 
+                // ── integer unary + sign extension ──────────────────
+                .i32_clz => try ip.pushI32(@intCast(@clz(@as(u32, @bitCast(ip.popI32()))))),
+                .i32_ctz => try ip.pushI32(@intCast(@ctz(@as(u32, @bitCast(ip.popI32()))))),
+                .i32_popcnt => try ip.pushI32(@intCast(@popCount(@as(u32, @bitCast(ip.popI32()))))),
+                .i64_clz => try ip.pushI64(@intCast(@clz(@as(u64, @bitCast(ip.popI64()))))),
+                .i64_ctz => try ip.pushI64(@intCast(@ctz(@as(u64, @bitCast(ip.popI64()))))),
+                .i64_popcnt => try ip.pushI64(@intCast(@popCount(@as(u64, @bitCast(ip.popI64()))))),
+                .i32_extend8_s => try ip.pushI32(@as(i8, @truncate(ip.popI32()))),
+                .i32_extend16_s => try ip.pushI32(@as(i16, @truncate(ip.popI32()))),
+                .i64_extend8_s => try ip.pushI64(@as(i8, @truncate(ip.popI64()))),
+                .i64_extend16_s => try ip.pushI64(@as(i16, @truncate(ip.popI64()))),
+                .i64_extend32_s => try ip.pushI64(@as(i32, @truncate(ip.popI64()))),
+
+                // ── floating point ──────────────────────────────────
+                .f32_const => try ip.pushF32(readF32(body, &pc)),
+                .f64_const => try ip.pushF64(readF64(body, &pc)),
+
+                .f32_abs, .f32_neg, .f32_ceil, .f32_floor, .f32_trunc, .f32_nearest, .f32_sqrt => try ip.pushF32(floatUnop(f32, op, ip.popF32())),
+                .f64_abs, .f64_neg, .f64_ceil, .f64_floor, .f64_trunc, .f64_nearest, .f64_sqrt => try ip.pushF64(floatUnop(f64, op, ip.popF64())),
+                .f32_add, .f32_sub, .f32_mul, .f32_div, .f32_min, .f32_max, .f32_copysign => {
+                    const b = ip.popF32();
+                    const a = ip.popF32();
+                    try ip.pushF32(floatBinop(f32, op, a, b));
+                },
+                .f64_add, .f64_sub, .f64_mul, .f64_div, .f64_min, .f64_max, .f64_copysign => {
+                    const b = ip.popF64();
+                    const a = ip.popF64();
+                    try ip.pushF64(floatBinop(f64, op, a, b));
+                },
+                .f32_eq, .f32_ne, .f32_lt, .f32_gt, .f32_le, .f32_ge => {
+                    const b = ip.popF32();
+                    const a = ip.popF32();
+                    try ip.pushI32(@intFromBool(floatCmp(f32, op, a, b)));
+                },
+                .f64_eq, .f64_ne, .f64_lt, .f64_gt, .f64_le, .f64_ge => {
+                    const b = ip.popF64();
+                    const a = ip.popF64();
+                    try ip.pushI32(@intFromBool(floatCmp(f64, op, a, b)));
+                },
+
                 // ── linear memory ───────────────────────────────────
-                .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u, .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u => {
+                .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u, .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u, .f32_load, .f64_load => {
                     const ea = memEa(ip, body, &pc);
                     try execLoad(ip, op, ea);
                 },
-                .i32_store, .i32_store8, .i32_store16, .i64_store, .i64_store8, .i64_store16, .i64_store32 => {
+                .i32_store, .i32_store8, .i32_store16, .i64_store, .i64_store8, .i64_store16, .i64_store32, .f32_store, .f64_store => {
                     try execStore(ip, op, body, &pc);
                 },
                 .memory_size => {
@@ -511,6 +563,14 @@ fn execLoad(ip: *Interp, op: Op, ea: u64) TrapError!void {
             try checkBounds(data.len, ea, 4);
             try ip.pushI64(@intCast(std.mem.readInt(u32, data[e..][0..4], .little)));
         },
+        .f32_load => {
+            try checkBounds(data.len, ea, 4);
+            try ip.pushCell(std.mem.readInt(u32, data[e..][0..4], .little));
+        },
+        .f64_load => {
+            try checkBounds(data.len, ea, 8);
+            try ip.pushCell(std.mem.readInt(u64, data[e..][0..8], .little));
+        },
         else => unreachable,
     }
 }
@@ -562,6 +622,20 @@ fn execStore(ip: *Interp, op: Op, body: []const u8, pc: *usize) TrapError!void {
                 },
                 else => unreachable,
             }
+        },
+        .f32_store => {
+            const v: u32 = @truncate(ip.popCell());
+            const ea = memEa(ip, body, pc);
+            const data = ip.instance.memory.?.data;
+            try checkBounds(data.len, ea, 4);
+            std.mem.writeInt(u32, data[@intCast(ea)..][0..4], v, .little);
+        },
+        .f64_store => {
+            const v: u64 = ip.popCell();
+            const ea = memEa(ip, body, pc);
+            const data = ip.instance.memory.?.data;
+            try checkBounds(data.len, ea, 8);
+            std.mem.writeInt(u64, data[@intCast(ea)..][0..8], v, .little);
         },
         else => unreachable,
     }
@@ -669,6 +743,87 @@ fn readI64(body: []const u8, pc: *usize) i64 {
     }
     if (shift < 63 and (b & 0x40) != 0) result |= @as(i64, -1) << @as(u6, @intCast(shift + 7));
     return result;
+}
+
+fn readF32(body: []const u8, pc: *usize) f32 {
+    const bits = std.mem.readInt(u32, body[pc.*..][0..4], .little);
+    pc.* += 4;
+    return @bitCast(bits);
+}
+
+fn readF64(body: []const u8, pc: *usize) f64 {
+    const bits = std.mem.readInt(u64, body[pc.*..][0..8], .little);
+    pc.* += 8;
+    return @bitCast(bits);
+}
+
+// ── floating point ──────────────────────────────────────────────────
+
+/// Round to nearest, ties to even (§4.3.3) — distinct from Zig's
+/// `@round`, which rounds ties away from zero.
+fn roundEven(comptime T: type, x: T) T {
+    const r = @round(x);
+    var result = r;
+    if (@abs(x - @trunc(x)) == 0.5 and @rem(r, 2) != 0) {
+        result = r - std.math.sign(r);
+    }
+    // Preserve the sign of a zero result (e.g. nearest(-0.4) = -0.0).
+    if (result == 0) return std.math.copysign(@as(T, 0), x);
+    return result;
+}
+
+/// wasm min: NaN-propagating, with min(-0, +0) = -0 (§4.3.3).
+fn fmin(comptime T: type, a: T, b: T) T {
+    if (a != a) return a;
+    if (b != b) return b;
+    if (a == 0 and b == 0) return if (std.math.signbit(a) or std.math.signbit(b)) -@as(T, 0) else @as(T, 0);
+    return if (a < b) a else b;
+}
+
+/// wasm max: NaN-propagating, with max(-0, +0) = +0 (§4.3.3).
+fn fmax(comptime T: type, a: T, b: T) T {
+    if (a != a) return a;
+    if (b != b) return b;
+    if (a == 0 and b == 0) return if (std.math.signbit(a) and std.math.signbit(b)) -@as(T, 0) else @as(T, 0);
+    return if (a > b) a else b;
+}
+
+fn floatUnop(comptime T: type, op: Op, x: T) T {
+    return switch (op) {
+        .f32_abs, .f64_abs => @abs(x),
+        .f32_neg, .f64_neg => -x,
+        .f32_ceil, .f64_ceil => @ceil(x),
+        .f32_floor, .f64_floor => @floor(x),
+        .f32_trunc, .f64_trunc => @trunc(x),
+        .f32_nearest, .f64_nearest => roundEven(T, x),
+        .f32_sqrt, .f64_sqrt => @sqrt(x),
+        else => unreachable,
+    };
+}
+
+fn floatBinop(comptime T: type, op: Op, a: T, b: T) T {
+    return switch (op) {
+        .f32_add, .f64_add => a + b,
+        .f32_sub, .f64_sub => a - b,
+        .f32_mul, .f64_mul => a * b,
+        .f32_div, .f64_div => a / b,
+        .f32_min, .f64_min => fmin(T, a, b),
+        .f32_max, .f64_max => fmax(T, a, b),
+        .f32_copysign, .f64_copysign => std.math.copysign(a, b),
+        else => unreachable,
+    };
+}
+
+fn floatCmp(comptime T: type, op: Op, a: T, b: T) bool {
+    return switch (op) {
+        .f32_eq, .f64_eq => a == b,
+        .f32_ne, .f64_ne => a != b,
+        .f32_lt, .f64_lt => a < b,
+        .f32_gt, .f64_gt => a > b,
+        .f32_le, .f64_le => a <= b,
+        .f32_ge, .f64_ge => a >= b,
+        else => unreachable,
+    };
 }
 
 // ── arithmetic ──────────────────────────────────────────────────────
