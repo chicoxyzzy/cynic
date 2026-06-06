@@ -403,6 +403,12 @@ jobs:
     # WeakSet additionally exercise the ephemeron-marking path; Object
     # is the property-bag / shape mutation surface.
     #
+    # `Reflect` and `Proxy` are the trap-forwarding / receiver re-entry
+    # surfaces (every Proxy trap and `Reflect.{get,set,apply,construct,
+    # ownKeys}` re-enters JS). Both probed gc1-clean when the cluster
+    # above was fixed — they're here as a regression net to keep them
+    # that way, not because a bug was found in them.
+    #
     # Matrix-parallelized: each bucket runs as its own job, so a
     # single regression points at the bucket directly and wall-time
     # is the slowest bucket, not the sum.
@@ -422,6 +428,8 @@ jobs:
           - built-ins/Promise
           - built-ins/Function
           - built-ins/Object
+          - built-ins/Reflect
+          - built-ins/Proxy
     steps:
       - name: Audit egress (advisory)
         uses: step-security/harden-runner@v2
