@@ -866,6 +866,17 @@ fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // ArrayBuffer backing the TA receiver, but the loop count
     // is fixed at entry (coerced-separator-shrink.js,
     // coerced-separator-grow.js).
+    // Native-stack guard. Joining a nested array recurses:
+    // `arrayJoin` → `stringifyArg(element)` → the element array's
+    // `toString` → `arrayJoin`. A deeply nested array
+    // (`let a=[0]; for(…) a=[a]; a.toString()`) would overflow the
+    // host stack; throw the RangeError V8 / JSC give for
+    // stack-exhausting join/toString instead.
+    if (@import("../../stack_guard.zig").nearLimit()) {
+        const ex = intrinsics.newRangeError(realm, "Maximum call stack size exceeded") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
     const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     const sep_v = argOr(args, 0, Value.undefined_);

@@ -11287,6 +11287,35 @@ test "deep structure: shallow JSON.stringify + flat still work" {
     , "{\"a\":[1,{\"b\":2}]}|[1,2,3]");
 }
 
+test "deep structure: harden() of a deep object throws RangeError" {
+    // `harden` deep-freezes by recursing the object graph; a deep
+    // acyclic structure exhausts the stack. Guarded → RangeError.
+    try expectScriptStringWithBuiltins(
+        \\let o = {}; for (let i = 0; i < 200000; i++) o = { a: o };
+        \\let saw = 'none';
+        \\try { harden(o); } catch (e) { saw = e.constructor.name; }
+        \\saw;
+    , "RangeError");
+}
+
+test "deep structure: Array.prototype.toString of a deep array throws RangeError" {
+    // `join` stringifies each element; a nested-array element
+    // re-enters `toString` → `join`. Deep nesting → RangeError.
+    try expectScriptStringWithBuiltins(
+        \\let a = [0]; for (let i = 0; i < 200000; i++) a = [a];
+        \\let saw = 'none';
+        \\try { a.toString(); } catch (e) { saw = e.constructor.name; }
+        \\saw;
+    , "RangeError");
+}
+
+test "deep structure: harden + nested toString shallow cases still work" {
+    try expectScriptStringWithBuiltins(
+        \\const o = harden({ a: 1, b: { c: 2 } });
+        \\Object.isFrozen(o) + "|" + Object.isFrozen(o.b) + "|" + [1, [2, [3]]].toString();
+    , "true|true|1,2,3");
+}
+
 // ── Class ctor + method param-register promotion ────────────────────
 //
 // `paramsCanBeRegisters` was wired into `compileFunctionTemplateExtNamed`

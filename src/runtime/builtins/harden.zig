@@ -93,6 +93,18 @@ fn hardenNative(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 /// freeze shape is identical to user-invoked `harden(value)`,
 /// and a second walker would just drift over time.
 pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void)) NativeError!void {
+    // Native-stack guard. `harden()` deep-freezes by recursing over
+    // the object graph (`hardenWalk` → each property value →
+    // `hardenWalk`). The `visited` set breaks cycles, but a deep
+    // ACYCLIC graph (`let o={}; for(…) o={a:o}; harden(o)`) still
+    // recurses on depth — bound it so a deep structure throws the
+    // RangeError V8 / @endo give for stack-exhausting deep-freeze
+    // rather than crashing.
+    if (@import("../../stack_guard.zig").nearLimit()) {
+        const ex = intrinsics.newRangeError(realm, "Maximum call stack size exceeded") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
     // Pointer identity for the visited set. Primitives have no
     // heap identity — bail before doing any work.
     const key: usize = if (heap_mod.valueAsPlainObject(v)) |o|
