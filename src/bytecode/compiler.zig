@@ -5028,6 +5028,22 @@ pub const Compiler = struct {
         // Headline win on `i + 1` / `n - 1` patterns in hot loops
         // (object_alloc, arith_loop, tail_recursion).
         if (self.tryRegisterBoundIdent(b.lhs.*)) |r_lhs| {
+            // Second-level fusion — `<reg> + <Smi literal>` collapses
+            // the two-op `LdaSmi imm; Add r_lhs` sequence into a
+            // single `add_smi r_lhs imm` dispatch. Saves one op +
+            // one byte on every counting-loop body of that shape
+            // (object_alloc's `i + 1`, tail_recursion's `acc + 1`).
+            // Slow path is identical to `.add`'s slow path —
+            // string concat, BigInt TypeError, double + Smi all
+            // surface through the same `addValues` call.
+            if (op == .add) {
+                if (self.tryGetSmiLiteralValue(b.rhs.*)) |imm| {
+                    try self.builder.emitOp(.add_smi, b.span);
+                    try self.builder.emitU8(r_lhs);
+                    try self.builder.emitI32(imm);
+                    return;
+                }
+            }
             try self.compileExpression(b.rhs);
             try self.builder.emitOp(op, b.span);
             try self.builder.emitU8(r_lhs);
@@ -5063,6 +5079,43 @@ pub const Compiler = struct {
         const binding = scope.resolve(name) orelse return null;
         if (!binding.is_register) return null;
         return binding.register;
+    }
+
+    /// Returns the int32 value when `expr` is a Smi-representable
+    /// numeric literal — a `NumericLiteral` that fits exactly in
+    /// `i32`, or a unary `-<NumericLiteral>` whose magnitude does.
+    /// Bigger numerics (doubles, BigInts, beyond ±2³¹) return
+    /// `null` and the caller stays on the unfused path. Used by
+    /// `compileBinary` to fuse the `<reg> + <imm>` pattern into a
+    /// single `add_smi` dispatch.
+    fn tryGetSmiLiteralValue(self: *Compiler, expr: ast.Expression) ?i32 {
+        var e = expr;
+        while (e == .parenthesized) e = e.parenthesized.expression.*;
+        // Positive numeric literal — try the same `asExactSmi`
+        // check `compileNumeric` uses so the fused emit covers
+        // exactly the literals the un-fused path would have
+        // `LdaSmi`-encoded.
+        if (e == .numeric_literal) {
+            const text = self.source[e.numeric_literal.span.start..e.numeric_literal.span.end];
+            const num = parseNumericLiteral(text) catch return null;
+            return asExactSmi(num);
+        }
+        // §13.5.6 UnaryExpression `-NumericLiteral` — the parser
+        // emits this as a unary node with op = .minus and a
+        // numeric_literal operand. Sign-flip the i32 and reject
+        // the only value the negation can overflow on
+        // (`-(-2³¹) == 2³¹`, which doesn't fit i32).
+        if (e == .unary and e.unary.op == .minus) {
+            const operand = e.unary.operand.*;
+            if (operand == .numeric_literal) {
+                const text = self.source[operand.numeric_literal.span.start..operand.numeric_literal.span.end];
+                const num = parseNumericLiteral(text) catch return null;
+                const pos = asExactSmi(num) orelse return null;
+                if (pos == std.math.minInt(i32)) return null;
+                return -pos;
+            }
+        }
+        return null;
     }
 
     fn compileLogical(self: *Compiler, l: ast.expression.LogicalExpr, tail: bool) CompileError!void {

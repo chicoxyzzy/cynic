@@ -11181,6 +11181,82 @@ test "binop peephole: env-slot binding falls through to standard path" {
     , 12);
 }
 
+// ── add_smi fused opcode ────────────────────────────────────────────
+//
+// When the binop peephole detects `<register-bound> + <Smi literal>`,
+// the compiler emits a single `add_smi reg imm` instead of the
+// two-op `LdaSmi imm; Add reg` sequence. Same observable behaviour;
+// these tests pin the fast int32 path AND every falls-through path
+// (overflow → double, non-int32 register → general `addValues`,
+// negative immediates, i32 bounds).
+
+test "add_smi: int32 + int32 stays int32 (non-overflow)" {
+    try expectScriptIntWithBuiltins(
+        \\let sum = 0;
+        \\for (let i = 0; i < 10; i++) sum = i + 1;
+        \\sum;
+    , 10);
+}
+
+test "add_smi: positive overflow to double" {
+    try expectScriptStringWithBuiltins(
+        \\let x = 2147483646;
+        \\(function (a) { return (a + 2).toString(); })(x);
+        // 2147483646 + 2 = 2147483648 — overflows i32 → f64.
+        // toString() to confirm exact value.
+    , "2147483648");
+}
+
+test "add_smi: negative immediate" {
+    try expectScriptIntWithBuiltins(
+        \\function dec(n) { return n + (-1); }
+        \\dec(10);
+    , 9);
+}
+
+test "add_smi: i32 max boundary preserves value" {
+    try expectScriptStringWithBuiltins(
+        \\function f(n) { return (n + 0).toString(); }
+        \\f(2147483647);
+    , "2147483647");
+}
+
+test "add_smi: BigInt register falls back to slow path (TypeError)" {
+    // §13.15.5 ApplyStringOrNumericBinaryOperator — BigInt + Number
+    // throws. The add_smi handler's slow-path branch must surface
+    // the TypeError via the standard `addValues` path.
+    try expectScriptThrows(
+        \\function f(n) { return n + 1; }
+        \\f(10n);
+    );
+}
+
+test "add_smi: string register concatenates (slow path)" {
+    // `+` on string + Smi: ToString of the Smi, concatenate. The
+    // fast int32 branch must NOT capture this; the slow path
+    // routes through `addValues` and produces a string.
+    try expectScriptStringWithBuiltins(
+        \\function f(s) { return s + 1; }
+        \\f("v");
+    , "v1");
+}
+
+test "add_smi: double register adds in floating-point" {
+    try expectScriptStringWithBuiltins(
+        \\function f(n) { return (n + 1).toString(); }
+        \\f(0.5);
+    , "1.5");
+}
+
+test "add_smi: hot loop sanity (i + 1 across 1000 iters)" {
+    try expectScriptIntWithBuiltins(
+        \\let acc = 0;
+        \\for (let i = 0; i < 1000; i++) acc = acc + (i + 1);
+        \\acc;
+        // sum(1..1000) = 500500
+    , 500500);
+}
+
 test "def_template_property: literal with mixed static + computed keys" {
     // Compiler bails template build on a literal that contains
     // any computed key (template build sees `.computed` and

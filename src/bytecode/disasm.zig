@@ -67,6 +67,11 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const r = chunk.code[i + 1];
                 try buf.print(allocator, " r{d}", .{r});
             },
+            .add_smi => {
+                const r = chunk.code[i + 1];
+                const imm = readI32(chunk.code, i + 2);
+                try buf.print(allocator, " r{d} {d}", .{ r, imm });
+            },
             .lda_constant => {
                 const k = readU16(chunk.code, i + 1);
                 try buf.print(allocator, " k{d}", .{k});

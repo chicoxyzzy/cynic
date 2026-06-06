@@ -1176,6 +1176,44 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
+        .add_smi => {
+            // Fused `<reg> + <imm>`. Reads the register, adds the
+            // baked-in Smi immediate, writes to acc. The int32 fast
+            // path here is BIT-IDENTICAL to `.add` with a Smi RHS:
+            // `@addWithOverflow` and fall back to f64 on overflow.
+            // The slow path wraps the immediate as a Smi `Value`
+            // and routes through `addValues`, so non-int32
+            // registers (string, BigInt, double, object) keep
+            // every §13.15 semantic — string concat, BigInt
+            // TypeError, double + Smi all behave as if the
+            // un-fused `LdaSmi imm; Add r` had run.
+            const r = code[ip];
+            const imm = readI32(code, ip + 1);
+            ip += 5;
+            const reg_v = registers[r];
+            if (reg_v.isInt32()) {
+                const ov = @addWithOverflow(reg_v.asInt32(), imm);
+                if (ov[1] == 0) {
+                    acc = Value.fromInt32(ov[0]);
+                } else {
+                    const fx: f64 = @floatFromInt(reg_v.asInt32());
+                    const fy: f64 = @floatFromInt(imm);
+                    acc = Value.fromDouble(fx + fy);
+                }
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+            const rhs = Value.fromInt32(imm);
+            if (try addValues(realm, reg_v, rhs)) |res| acc = res else {
+                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                realm.pending_exception = null;
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
         .sub => {
             const r = code[ip];
             ip += 1;

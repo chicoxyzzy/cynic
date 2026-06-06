@@ -66,6 +66,19 @@ pub const Op = enum(u8) {
     mod,
     /// `[op] [r:u8]` — acc = reg ** acc. §13.7.1.
     pow,
+    /// `[op] [r:u8] [imm:i32]` — `acc = reg + imm`. Fused
+    /// counterpart to the `LdaSmi imm; Add r` pair the
+    /// `compileBinary` register peephole emits when LHS is a
+    /// register-bound binding and RHS is a Smi-representable
+    /// numeric literal. Int32 fast path: `@addWithOverflow` and
+    /// fall back to f64 on overflow (bit-identical to `add`).
+    /// Non-int32 register routes through `addValues` with the
+    /// immediate wrapped as a Smi — string concat, BigInt
+    /// TypeError, double + Smi all stay correct. Saves one
+    /// dispatch + 1 byte vs the two-op sequence on every
+    /// counting-loop body with the `<reg> + <literal>` shape
+    /// (object_alloc, tail_recursion, JSON renumbering, etc.).
+    add_smi,
 
     // ── Bitwise (acc = reg OP acc, ToInt32 coercion) ─────────────────────
     /// `[op] [r:u8]` — acc = reg & acc. §13.12.
@@ -1220,6 +1233,7 @@ pub const Op = enum(u8) {
             .direct_eval => 4, // scope:u16 + r_callee:u8 + argc:u8
             .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
             .def_template_property => 5, // k:u16 + r_obj:u8 + slot:u16
+            .add_smi => 5, // r:u8 + imm:i32
             .sta_property => 5, // k:u16 + r_obj:u8 + ic:u16 (inline-cache slot)
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
             .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
@@ -1264,6 +1278,7 @@ pub const Op = enum(u8) {
             .div => "Div",
             .mod => "Mod",
             .pow => "Pow",
+            .add_smi => "AddSmi",
             .bit_and => "BitAnd",
             .bit_or => "BitOr",
             .bit_xor => "BitXor",
