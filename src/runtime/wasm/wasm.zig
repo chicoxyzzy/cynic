@@ -21,15 +21,23 @@
 //! memory, then JS API, then refs, then floats, then SIMD; spec
 //! testsuite harness scores progress in `wasm-results.md`.
 
-pub const decoder = @import("decoder.zig");
+pub const reader = @import("reader.zig");
+pub const types = @import("types.zig");
 pub const module = @import("module.zig");
+pub const decoder = @import("decoder.zig");
 
+pub const Reader = reader.Reader;
 pub const Module = module.Module;
+pub const ValType = types.ValType;
+pub const RefType = types.RefType;
+pub const FuncType = types.FuncType;
 pub const DecodeError = decoder.DecodeError;
 pub const decode = decoder.decode;
 
 test {
-    _ = @import("decoder.zig");
+    _ = @import("reader.zig");
+    _ = @import("types.zig");
     _ = @import("module.zig");
+    _ = @import("decoder.zig");
     _ = @import("tests.zig");
 }

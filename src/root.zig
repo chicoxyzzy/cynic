@@ -131,7 +131,9 @@ test {
     _ = @import("wasm_diag.zig");
     _ = wasm;
     _ = @import("runtime/wasm/wasm.zig");
-    _ = @import("runtime/wasm/decoder.zig");
+    _ = @import("runtime/wasm/reader.zig");
+    _ = @import("runtime/wasm/types.zig");
     _ = @import("runtime/wasm/module.zig");
+    _ = @import("runtime/wasm/decoder.zig");
     _ = @import("runtime/wasm/tests.zig");
 }
