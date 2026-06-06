@@ -354,13 +354,16 @@ jobs:
 
   test262-gc-stress:
     name: test262 GC stress / ${{ matrix.bucket }} (advisory)
-    # Advisory + main-only: gc-stress is a 5-bucket ReleaseSafe build
-    # plus a slow `--gc-threshold=1` sweep — too expensive to run on
-    # every PR for a non-gating signal. Catch GC rooting / write-
-    # barrier regressions post-merge; bisect from there. The default
-    # `test262` job (gating, ReleaseFast, every PR) is the front-line
-    # check; gc-stress is the deeper net.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Advisory, runs on PRs and main: gc-stress is a per-bucket
+    # ReleaseSafe build plus a slow `--gc-threshold=1` sweep. It stays
+    # `continue-on-error` (does not gate merges) because a gc1 sweep is
+    # slow and, at `--threads=4`, prone to the occasional flake under
+    # libc-malloc contention — surfacing a GC regression as a pre-merge
+    # annotation a reviewer can act on is the goal, not blocking. The
+    # default `test262` job (gating, ReleaseFast, every PR) is the
+    # front-line check; gc-stress is the deeper net. It runs on PRs now
+    # — not just post-merge — so a rooting hole is caught before it
+    # lands, not bisected afterward.
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: build-and-test
@@ -381,15 +384,24 @@ jobs:
     # `built-ins/RegExp/property-escapes` fixtures each exceed the
     # per-fixture watchdog (huge generated patterns × per-alloc GC),
     # so a whole-corpus gc1 run is timeout-bound. Instead it probes
-    # the GC-mutation-heavy buckets (Array / String / TypedArray /
-    # Iterator / generators) — the areas where the rooting
+    # the GC-mutation-heavy buckets — the areas where the rooting
     # contract and the iterative-marker contract are most often
     # exercised. See docs/handbook/gc.md ("Finding these bugs").
     #
     # `Iterator` and `generators` were added after the shadow-shape
     # removal class (9c4b70c) and the recursive-marker overflow
     # (9ac49ff, f97155a) — both surfaced in those buckets and
-    # would slip past Array / String / TypedArray.
+    # would slip past Array / String / TypedArray. `Map` / `Set` /
+    # `WeakMap` / `WeakSet` / `Promise` / `Function` / `Object` were
+    # added after this net caught three real use-after-free clusters
+    # in them: the `Object.create` / `defineProperties` / `assign`
+    # accessor path (a hard segfault — unrooted receiver / key / getter
+    # result across the descriptor re-entry), the `Set` set-like ops
+    # (raw `*JSFunction` has/keys held across the iteration), and the
+    # `Promise` aggregators (the once-read `resolve` held across every
+    # element). Set covers the `collections.zig` family; WeakMap /
+    # WeakSet additionally exercise the ephemeron-marking path; Object
+    # is the property-bag / shape mutation surface.
     #
     # Matrix-parallelized: each bucket runs as its own job, so a
     # single regression points at the bucket directly and wall-time
@@ -403,6 +415,13 @@ jobs:
           - built-ins/TypedArray
           - built-ins/Iterator
           - language/expressions/generators
+          - built-ins/Map
+          - built-ins/Set
+          - built-ins/WeakMap
+          - built-ins/WeakSet
+          - built-ins/Promise
+          - built-ins/Function
+          - built-ins/Object
     steps:
       - name: Audit egress (advisory)
         uses: step-security/harden-runner@v2
