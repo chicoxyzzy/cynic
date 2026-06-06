@@ -507,12 +507,40 @@ fn validateExpr(v: *Validator) ValidateError!void {
             .i32_add, .i32_sub, .i32_mul, .i32_div_s, .i32_div_u, .i32_rem_s, .i32_rem_u, .i32_and, .i32_or, .i32_xor, .i32_shl, .i32_shr_s, .i32_shr_u, .i32_rotl, .i32_rotr => try binop(v, .i32, .i32),
             .i64_add, .i64_sub, .i64_mul, .i64_div_s, .i64_div_u, .i64_rem_s, .i64_rem_u, .i64_and, .i64_or, .i64_xor, .i64_shl, .i64_shr_s, .i64_shr_u, .i64_rotl, .i64_rotr => try binop(v, .i64, .i64),
 
+            // Integer unary (count bits) and sign extension.
+            .i32_clz, .i32_ctz, .i32_popcnt, .i32_extend8_s, .i32_extend16_s => try unop(v, .i32, .i32),
+            .i64_clz, .i64_ctz, .i64_popcnt, .i64_extend8_s, .i64_extend16_s, .i64_extend32_s => try unop(v, .i64, .i64),
+
+            // Float constants.
+            .f32_const => {
+                _ = try v.r.bytesN(4);
+                try v.pushVal(.f32);
+            },
+            .f64_const => {
+                _ = try v.r.bytesN(8);
+                try v.pushVal(.f64);
+            },
+
+            // Float comparisons → i32.
+            .f32_eq, .f32_ne, .f32_lt, .f32_gt, .f32_le, .f32_ge => try binop(v, .f32, .i32),
+            .f64_eq, .f64_ne, .f64_lt, .f64_gt, .f64_le, .f64_ge => try binop(v, .f64, .i32),
+
+            // Float unary / binary arithmetic.
+            .f32_abs, .f32_neg, .f32_ceil, .f32_floor, .f32_trunc, .f32_nearest, .f32_sqrt => try unop(v, .f32, .f32),
+            .f32_add, .f32_sub, .f32_mul, .f32_div, .f32_min, .f32_max, .f32_copysign => try binop(v, .f32, .f32),
+            .f64_abs, .f64_neg, .f64_ceil, .f64_floor, .f64_trunc, .f64_nearest, .f64_sqrt => try unop(v, .f64, .f64),
+            .f64_add, .f64_sub, .f64_mul, .f64_div, .f64_min, .f64_max, .f64_copysign => try binop(v, .f64, .f64),
+
             // Memory loads: pop the i32 address, push the result.
             .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u => try load(v, .i32),
             .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u => try load(v, .i64),
+            .f32_load => try load(v, .f32),
+            .f64_load => try load(v, .f64),
             // Memory stores: pop the value, then the i32 address.
             .i32_store, .i32_store8, .i32_store16 => try store(v, .i32),
             .i64_store, .i64_store8, .i64_store16, .i64_store32 => try store(v, .i64),
+            .f32_store => try store(v, .f32),
+            .f64_store => try store(v, .f64),
 
             .memory_size => {
                 try requireMemory(v);
