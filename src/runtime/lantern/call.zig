@@ -995,6 +995,16 @@ pub fn callJSFunctionAsSuper(
     // Native / generator / async paths don't observe new.target
     // via a frame slot — they receive `this` and args directly.
     if (callee.native_callback != null or callee.is_generator or callee.is_async) {
+        // Root the caller-allocated instance across the call. A native
+        // constructor reached this way (super() / Reflect.construct) can
+        // re-enter JS during argument coercion — a user `@@toPrimitive` /
+        // `valueOf` — and trigger a GC while `this_value` is only a
+        // native-stack local. The normal construct path guards this with
+        // `pushNativeRoot`; without the same guard here the instance is
+        // swept mid-construct and the native writes through a freed
+        // pointer (a use-after-free against the 0xaa-poisoned slot).
+        realm.heap.pushNativeRoot(this_value) catch return error.OutOfMemory;
+        defer realm.heap.popNativeRoot();
         return callJSFunction(allocator, realm, callee, this_value, args);
     }
     const callee_chunk = callee.chunk orelse return error.InvalidOpcode;

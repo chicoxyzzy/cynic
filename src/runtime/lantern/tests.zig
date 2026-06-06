@@ -6488,6 +6488,29 @@ test "GC: using SuppressedError chain survives gc_threshold=1" {
     , "true,true,true,true,true");
 }
 
+test "GC: native constructor via Reflect.construct survives re-entrant arg coercion" {
+    // Regression: a native constructor reached through
+    // `callJSFunctionAsSuper` (the `Reflect.construct` / `super()` path)
+    // coerces its arguments after the caller has already allocated `this`.
+    // When an argument's @@toPrimitive runs user code that triggers a GC,
+    // the freshly-allocated instance is reachable only from a native-stack
+    // local: the normal construct path roots it via `pushNativeRoot`, but
+    // this path did not. The GC forced inside the month-arg coercion swept
+    // the half-built PlainMonthDay, and the constructor wrote its record
+    // through the freed extension (0xaa poison → SEGV; in the test262
+    // harness it surfaced as a corrupted `frame_stacks` registry instead).
+    // Rooting `this` across the native call keeps it live. newTarget is
+    // omitted so it defaults to the target — the result then has
+    // `PlainMonthDay.prototype`, so the day / monthCode getters resolve and
+    // reading both fields back proves the instance survived intact.
+    try expectScriptStringWithBuiltins(
+        \\const obj = {};
+        \\Object.defineProperty(obj, Symbol.toPrimitive, { get() { __collectGarbage(); return () => 5; } });
+        \\const md = Reflect.construct(Temporal.PlainMonthDay, [obj, 7]);
+        \\md.monthCode + "/" + md.day;
+    , "M05/7");
+}
+
 // ---------------------------------------------------------------------------
 // §23.1.3 Array.prototype — receiver coercion + spec dispatch regressions.
 //
