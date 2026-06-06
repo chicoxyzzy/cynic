@@ -416,6 +416,21 @@ fn serializeJSONProperty(
 ) NativeError!bool {
     const realm = state.realm;
 
+    // Native-stack guard. `JSON.stringify` recurses through
+    // `serializeJSONProperty` → `serializeJSONObject` /
+    // `serializeJSONArray` → `serializeJSONProperty` on the
+    // structure's depth. A deeply nested *runtime-built* value
+    // (`let o={}; for(…) o={a:o}; JSON.stringify(o)`) — which the
+    // cycle check doesn't catch (no cycle, just depth) — would
+    // overflow the host stack; throw the `RangeError` V8 / JSC give
+    // for stack-exhausting serialization instead. (The GC marks such
+    // a graph iteratively, so the crash is here, not in marking.)
+    if (@import("../../stack_guard.zig").nearLimit()) {
+        const ex = intrinsics.newRangeError(realm, "Maximum call stack size exceeded") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
+
     // §25.5.2.4 step 1 — `value = ? Get(holder, key)`. Routes
     // through any Proxy `get` trap installed on `holder` (the
     // BigInt-cross-realm / proxy-receiver fixtures exercise this).

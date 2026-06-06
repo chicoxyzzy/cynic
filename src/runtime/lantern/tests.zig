@@ -11229,6 +11229,64 @@ test "JSON.parse: shallow nested round-trips through stringify" {
     , "[1,[2,[3,{\"a\":4}]]]");
 }
 
+// ── Deeply nested runtime-built structures (GC + builtin recursion) ──
+//
+// A deep object/array graph built at RUNTIME (a loop, not nested
+// source) exercises two native recursions on structure depth:
+//   • the GC mark phase — now iterative via the mark worklist, so
+//     building the graph (which triggers GC) no longer overflows;
+//   • `JSON.stringify` / `Array.prototype.flat(Infinity)` — guarded
+//     by the shared native-stack check, throwing RangeError.
+
+test "deep structure: building a 50k-deep object graph survives GC" {
+    // Each iteration allocates a fresh wrapper → triggers minor GC
+    // cycles that mark the growing chain. Recursive marking
+    // overflowed; iterative marking walks it. Assert the chain is
+    // intact afterward.
+    try expectScriptIntWithBuiltins(
+        \\let o = {};
+        \\for (let i = 0; i < 50000; i++) o = { a: o, v: i };
+        \\let n = 0, c = o;
+        \\while (c.a) { c = c.a; n++; }
+        \\n;
+    , 50000);
+}
+
+test "deep structure: building a deep array graph survives GC" {
+    try expectScriptIntWithBuiltins(
+        \\let a = [0];
+        \\for (let i = 0; i < 50000; i++) a = [a];
+        \\let n = 0, c = a;
+        \\while (Array.isArray(c[0])) { c = c[0]; n++; }
+        \\n;
+    , 50000);
+}
+
+test "deep structure: JSON.stringify of a deep object throws RangeError" {
+    try expectScriptStringWithBuiltins(
+        \\let o = {}; for (let i = 0; i < 200000; i++) o = { a: o };
+        \\let saw = 'none';
+        \\try { JSON.stringify(o); } catch (e) { saw = e.constructor.name; }
+        \\saw;
+    , "RangeError");
+}
+
+test "deep structure: Array.prototype.flat(Infinity) of a deep array throws RangeError" {
+    try expectScriptStringWithBuiltins(
+        \\let a = []; for (let i = 0; i < 200000; i++) a = [a];
+        \\let saw = 'none';
+        \\try { a.flat(Infinity); } catch (e) { saw = e.constructor.name; }
+        \\saw;
+    , "RangeError");
+}
+
+test "deep structure: shallow JSON.stringify + flat still work" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ a: [1, { b: 2 }] }) + "|" +
+        \\  JSON.stringify([1, [2, [3]]].flat(Infinity));
+    , "{\"a\":[1,{\"b\":2}]}|[1,2,3]");
+}
+
 // ── Class ctor + method param-register promotion ────────────────────
 //
 // `paramsCanBeRegisters` was wired into `compileFunctionTemplateExtNamed`

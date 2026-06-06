@@ -2138,6 +2138,16 @@ fn arrayFlat(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 }
 
 fn flattenInto(realm: *Realm, source: *JSObject, source_len: i64, depth: i64, target: *JSObject, write_idx: *i64) NativeError!void {
+    // Native-stack guard. §23.1.3.10.1 FlattenIntoArray recurses one
+    // level per nested array up to `depth` — `arr.flat(Infinity)` on
+    // a deeply nested (or runtime-built `a=[a]`×N) array would
+    // otherwise overflow the host stack. Throw the RangeError V8 /
+    // JSC give for stack-exhausting flattening instead of crashing.
+    if (@import("../../stack_guard.zig").nearLimit()) {
+        const ex = intrinsics.newRangeError(realm, "Maximum call stack size exceeded") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
     // §23.1.3.10.1 FlattenIntoArray step 3 — visit `sourceLen`
     // indices using `HasProperty` + `Get` on the source. Route
     // through the Proxy-aware helpers so traps fire per spec

@@ -1194,6 +1194,26 @@ pub const Heap = struct {
         }
     }
 
+    /// Defer marking `v` to the iterative `drainMarkWorklist` pass
+    /// rather than recursing into `markValue` now. Used for the
+    /// out-edges of container types (object slots / named values /
+    /// elements, function captures) so a deeply nested reachable
+    /// graph — a linked list `o = {a: o}` ×N, a nested array
+    /// `a = [a]` ×N, a deep JSON tree — is marked breadth-first off
+    /// a heap queue instead of overflowing the host stack with one
+    /// `markValue` frame per level. `drainMarkWorklist` runs in BOTH
+    /// the full (`collectFull`) and minor (`collectYoung`) cycles, so
+    /// enqueuing is exactly equivalent to an immediate `markValue` —
+    /// the same nodes get marked, just from the queue. The node's
+    /// own colour is set by its parent's scan BEFORE the child is
+    /// enqueued (and again, idempotently, when the child is popped),
+    /// so re-enqueues are harmless. OOM falls back to direct
+    /// recursion — a missed mark would be a use-after-free, far worse
+    /// than a deep frame on an already-failing allocator.
+    inline fn enqueue(self: *Heap, v: Value) void {
+        self.mark_worklist.append(self.allocator, v) catch self.markValue(v);
+    }
+
     /// Mark a single value if it carries a heap pointer. Idempotent.
     /// handles `String` and `Object` (where Object is
     /// currently always a `JSFunction`). later generalises Object
@@ -1220,7 +1240,7 @@ pub const Heap = struct {
                     };
                 }
                 var it = f.properties.iterator();
-                while (it.next()) |entry| self.markValue(entry.value_ptr.*);
+                while (it.next()) |entry| self.enqueue(entry.value_ptr.*);
                 // §10.1.8 accessor descriptors on the function
                 // object itself (e.g. `Object.defineProperty(fn,
                 // 'prototype', {get: …})`). The accessor functions
@@ -1229,24 +1249,24 @@ pub const Heap = struct {
                 // pending constructions still holds the function.
                 var fait = f.accessors.iterator();
                 while (fait.next()) |entry| {
-                    if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
-                    if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                    if (entry.value_ptr.*.getter) |g| self.enqueue(taggedFunction(g));
+                    if (entry.value_ptr.*.setter) |s| self.enqueue(taggedFunction(s));
                 }
                 // §15.7 static private slots on the class
                 // constructor — `static #x = …` data slots and
                 // `static get/set #y` accessor halves.
                 var fpit = f.private_properties.iterator();
-                while (fpit.next()) |entry| self.markValue(entry.value_ptr.*);
+                while (fpit.next()) |entry| self.enqueue(entry.value_ptr.*);
                 var fpait = f.private_accessors.iterator();
                 while (fpait.next()) |entry| {
-                    if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
-                    if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                    if (entry.value_ptr.*.getter) |g| self.enqueue(taggedFunction(g));
+                    if (entry.value_ptr.*.setter) |s| self.enqueue(taggedFunction(s));
                 }
                 // Heap-allocated JSStrings backing computed property
                 // keys (`fn[expr] = v`). The property map holds only
                 // the `bytes` slice — without this the key dangles.
                 for (f.key_anchors.items) |s| s.mark_color = self.live_color;
-                if (f.prototype) |p| self.markValue(taggedObject(p));
+                if (f.prototype) |p| self.enqueue(taggedObject(p));
                 // §10.2.3 [[HomeObject]] — a method's home object
                 // (and, for the typed-slot split Cynic uses, the
                 // owning `home_function`) back `super` lookups.
@@ -1254,28 +1274,28 @@ pub const Heap = struct {
                 // prototype / constructor alive — without these marks
                 // a method's home object is swept and a later call
                 // copies the dangling pointer into the call frame.
-                if (f.home_object) |ho| self.markValue(taggedObject(ho));
-                if (f.home_function) |hf| self.markValue(taggedFunction(hf));
+                if (f.home_object) |ho| self.enqueue(taggedObject(ho));
+                if (f.home_function) |hf| self.enqueue(taggedFunction(hf));
                 // §15.3 ArrowFunction lexical captures — `this` and
                 // `new.target` are stamped at MakeFunction time and
                 // may be the only roots holding their referents
                 // alive. Without these the captured instance can be
                 // swept while the arrow is still callable.
-                self.markValue(f.captured_this);
-                self.markValue(f.captured_new_target);
+                self.enqueue(f.captured_this);
+                self.enqueue(f.captured_new_target);
                 // §10.4.1 BoundFunction state — keep target +
                 // bound this + bound args alive.
-                if (f.bound_target) |bt| self.markValue(taggedFunction(bt));
-                self.markValue(f.bound_this);
+                if (f.bound_target) |bt| self.enqueue(taggedFunction(bt));
+                self.enqueue(f.bound_this);
                 if (f.bound_args) |ba| {
-                    for (ba) |a| self.markValue(a);
+                    for (ba) |a| self.enqueue(a);
                 }
                 // §3.8.3.5 WrappedFunction — see
                 // `markFunctionInternalSlots`.
-                self.markValue(f.wrapped_target);
+                self.enqueue(f.wrapped_target);
                 // Phase 3 synthetic accessor — see
                 // `markFunctionInternalSlots` for the rationale.
-                if (f.synth_accessor) |sa| self.markValue(sa.value);
+                if (f.synth_accessor) |sa| self.enqueue(sa.value);
                 // The function's chunk holds heap-allocated string
                 // constants. Those JSStrings were pinned at
                 // chunk-finalize time (see `pinChunk`), so we
@@ -1299,25 +1319,25 @@ pub const Heap = struct {
                 // objects keep them in `properties`. Walk both —
                 // for any individual object only one of the two
                 // is non-empty, so the cost is paid once.
-                for (o.slots.items) |slot_v| self.markValue(slot_v);
+                for (o.slots.items) |slot_v| self.enqueue(slot_v);
                 var it = o.iterOwnNamedKeys();
-                while (it.next()) |entry| self.markValue(entry.value_ptr.*);
+                while (it.next()) |entry| self.enqueue(entry.value_ptr.*);
                 if (o.privatePropertyIterator()) |pit_outer| {
                     var pit = pit_outer;
-                    while (pit.next()) |entry| self.markValue(entry.value_ptr.*);
+                    while (pit.next()) |entry| self.enqueue(entry.value_ptr.*);
                 }
                 if (o.privateAccessorIterator()) |pait_outer| {
                     var pait = pait_outer;
                     while (pait.next()) |entry| {
-                        if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
-                        if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                        if (entry.value_ptr.*.getter) |g| self.enqueue(taggedFunction(g));
+                        if (entry.value_ptr.*.setter) |s| self.enqueue(taggedFunction(s));
                     }
                 }
                 if (o.accessorIterator()) |ait_outer| {
                     var ait = ait_outer;
                     while (ait.next()) |entry| {
-                        if (entry.value_ptr.*.getter) |g| self.markValue(taggedFunction(g));
-                        if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
+                        if (entry.value_ptr.*.getter) |g| self.enqueue(taggedFunction(g));
+                        if (entry.value_ptr.*.setter) |s| self.enqueue(taggedFunction(s));
                     }
                 }
                 // §15.2.1.16.3 ResolveExport chain — re-export
@@ -1330,10 +1350,10 @@ pub const Heap = struct {
                 if (o.namespaceRedirectIterator()) |nrit_outer| {
                     var nrit = nrit_outer;
                     while (nrit.next()) |entry| {
-                        self.markValue(taggedObject(entry.value_ptr.target_ns));
+                        self.enqueue(taggedObject(entry.value_ptr.target_ns));
                     }
                 }
-                if (o.boxed_primitive) |bp| self.markValue(bp);
+                if (o.boxed_primitive) |bp| self.enqueue(bp);
                 // §22.1.3 `[[StringData]]` — the JSString a `String`
                 // wrapper boxes; a typed slot, not a property.
                 if (o.getBoxedString()) |bs| self.markString(bs);
@@ -1350,8 +1370,8 @@ pub const Heap = struct {
                         // cycle) — strong-mark every live entry.
                         for (md.entries.items) |entry| {
                             if (entry.deleted) continue;
-                            self.markValue(entry.key);
-                            self.markValue(entry.value);
+                            self.enqueue(entry.key);
+                            self.enqueue(entry.value);
                         }
                     }
                 }
@@ -1365,43 +1385,43 @@ pub const Heap = struct {
                         // cycle) — strong-mark every live member.
                         for (sd.entries.items) |entry| {
                             if (entry.deleted) continue;
-                            self.markValue(entry.value);
+                            self.enqueue(entry.value);
                         }
                     }
                 }
                 if (o.array_like_iter) |s| {
-                    self.markValue(s.target);
-                    self.markValue(s.for_in_source);
+                    self.enqueue(s.target);
+                    self.enqueue(s.for_in_source);
                 }
-                if (o.map_set_iter) |s| self.markValue(s.source);
+                if (o.map_set_iter) |s| self.enqueue(s.source);
                 if (o.regexp_string_iter) |s| {
-                    self.markValue(s.regexp);
-                    self.markValue(s.string);
+                    self.enqueue(s.regexp);
+                    self.enqueue(s.string);
                 }
-                if (o.iter_record) |s| self.markValue(s.next);
+                if (o.iter_record) |s| self.enqueue(s.next);
                 if (o.iter_helper) |s| {
-                    self.markValue(s.source);
-                    self.markValue(s.next_fn);
-                    self.markValue(s.payload);
-                    self.markValue(s.active);
+                    self.enqueue(s.source);
+                    self.enqueue(s.next_fn);
+                    self.enqueue(s.payload);
+                    self.enqueue(s.active);
                     for (s.concat_inputs.items) |ci| {
-                        self.markValue(ci.iterable);
-                        self.markValue(ci.method);
+                        self.enqueue(ci.iterable);
+                        self.enqueue(ci.method);
                     }
                     for (s.zip_inputs.items) |zi| {
-                        self.markValue(zi.iter);
-                        self.markValue(zi.next);
-                        self.markValue(zi.key);
-                        self.markValue(zi.pad);
+                        self.enqueue(zi.iter);
+                        self.enqueue(zi.next);
+                        self.enqueue(zi.key);
+                        self.enqueue(zi.pad);
                     }
                 }
                 if (o.capability_record) |c| {
-                    self.markValue(c.resolve);
-                    self.markValue(c.reject);
+                    self.enqueue(c.resolve);
+                    self.enqueue(c.reject);
                 }
-                if (o.finally_callback) |f| self.markValue(taggedFunction(f));
-                self.markValue(o.finally_value);
-                if (o.finally_constructor) |f| self.markValue(taggedFunction(f));
+                if (o.finally_callback) |f| self.enqueue(taggedFunction(f));
+                self.enqueue(o.finally_value);
+                if (o.finally_constructor) |f| self.enqueue(taggedFunction(f));
                 if (o.generator_ref) |gen| self.markGenerator(gen);
                 // §10.4.2 Array exotic — packed indexed elements
                 // are part of the JSObject's own state; mark each
@@ -1409,9 +1429,9 @@ pub const Heap = struct {
                 if (o.is_array_exotic) {
                     if (o.is_sparse) {
                         var sit = o.sparse_elements.iterator();
-                        while (sit.next()) |entry| self.markValue(entry.value_ptr.*);
+                        while (sit.next()) |entry| self.enqueue(entry.value_ptr.*);
                     } else {
-                        for (o.elements.items) |elem| self.markValue(elem);
+                        for (o.elements.items) |elem| self.enqueue(elem);
                     }
                 }
                 // §26.1 WeakRef — the `[[WeakRefTarget]]` is a weak
@@ -1425,7 +1445,7 @@ pub const Heap = struct {
                     if (self.weak_aware_mark) {
                         self.weak_refs_seen.append(self.allocator, o) catch {};
                     } else {
-                        self.markValue(o.getWeakRefTarget());
+                        self.enqueue(o.getWeakRefTarget());
                     }
                 }
                 // §26.2 FinalizationRegistry — the cleanup callback
@@ -1438,19 +1458,19 @@ pub const Heap = struct {
                 // for any dead target). A minor cycle keeps the old
                 // strong-marking of every slot.
                 if (o.getFinalizationCells()) |fc| {
-                    self.markValue(fc.cleanup_callback);
+                    self.enqueue(fc.cleanup_callback);
                     if (self.weak_aware_mark) {
                         self.finalization_registries_seen.append(self.allocator, o) catch {};
                         for (fc.cells.items) |cell| {
                             if (cell.deleted) continue;
-                            self.markValue(cell.held_value);
+                            self.enqueue(cell.held_value);
                         }
                     } else {
                         for (fc.cells.items) |cell| {
                             if (cell.deleted) continue;
-                            self.markValue(cell.target);
-                            self.markValue(cell.held_value);
-                            if (cell.has_token) self.markValue(cell.unregister_token);
+                            self.enqueue(cell.target);
+                            self.enqueue(cell.held_value);
+                            if (cell.has_token) self.enqueue(cell.unregister_token);
                         }
                     }
                 }
@@ -1473,8 +1493,8 @@ pub const Heap = struct {
                 // it here, mid-drain GC collects the chain.
                 if (o.promiseReactionsConst()) |reactions| {
                     for (reactions.items) |r| {
-                        self.markValue(r.on_fulfilled);
-                        self.markValue(r.on_rejected);
+                        self.enqueue(r.on_fulfilled);
+                        self.enqueue(r.on_rejected);
                         // Defer the chained sub-Promise: a `.then` chain
                         // of length N walks N deep through reactions if
                         // we recurse, overflowing past ~5k frames under
@@ -1485,7 +1505,7 @@ pub const Heap = struct {
                         // recursive mark so a missed mark can't become
                         // a missed sweep.
                         self.mark_worklist.append(self.allocator, r.result_promise) catch {
-                            self.markValue(r.result_promise);
+                            self.enqueue(r.result_promise);
                         };
                     }
                 }
@@ -1502,8 +1522,8 @@ pub const Heap = struct {
                 // the regular property walk above misses them.
                 if (o.disposableResourcesConst()) |resources| {
                     for (resources.items) |r| {
-                        self.markValue(r.resource);
-                        self.markValue(r.dispose_method);
+                        self.enqueue(r.resource);
+                        self.enqueue(r.dispose_method);
                     }
                 }
                 // ES2026 explicit-resource-management — the
@@ -1519,18 +1539,18 @@ pub const Heap = struct {
                 if (o.extension) |ext| {
                     if (ext.async_dispose_walk) |w| {
                         for (w.resources.items) |r| {
-                            self.markValue(r.resource);
-                            self.markValue(r.dispose_method);
+                            self.enqueue(r.resource);
+                            self.enqueue(r.dispose_method);
                         }
-                        if (w.has_pending_error) self.markValue(w.pending_error);
-                        self.markValue(w.outer);
+                        if (w.has_pending_error) self.enqueue(w.pending_error);
+                        self.enqueue(w.outer);
                     }
                 }
                 // §27.2 `[[PromiseResult]]` — the settled value on
                 // a fulfilled / rejected Promise. Held in the typed
                 // `promise_value` slot rather than a property bag,
                 // so the regular property walk above misses it.
-                if (o.promise_state != .none) self.markValue(o.promise_value);
+                if (o.promise_state != .none) self.enqueue(o.promise_value);
                 // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]`
                 // for RegExp instances. Strings that the regular
                 // property walk wouldn't reach.
@@ -1538,12 +1558,12 @@ pub const Heap = struct {
                 if (o.regexp_flags) |s| s.mark_color = self.live_color;
                 if (o.instance_field_inits) |inits| {
                     for (inits) |fi| {
-                        if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
+                        if (fi.init_fn) |fnp| self.enqueue(taggedFunction(fnp));
                     }
                 }
                 if (o.private_method_inits) |inits| {
                     for (inits) |fi| {
-                        if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
+                        if (fi.init_fn) |fnp| self.enqueue(taggedFunction(fnp));
                     }
                 }
                 // Defer the prototype walk to break the proto-chain
@@ -1552,15 +1572,15 @@ pub const Heap = struct {
                 // walks the worklist iteratively after markRoots.
                 if (o.prototype) |p| {
                     self.mark_worklist.append(self.allocator, taggedObject(p)) catch {
-                        self.markValue(taggedObject(p));
+                        self.enqueue(taggedObject(p));
                     };
                 }
                 // §10.5 Proxy exotic — `[[ProxyTarget]]` /
                 // `[[ProxyHandler]]` are typed slots, not properties;
                 // a reachable Proxy must keep both alive.
-                if (o.proxy_target) |pt| self.markValue(taggedObject(pt));
-                if (o.proxy_handler) |ph| self.markValue(taggedObject(ph));
-                if (o.proxy_target_fn) |ptf| self.markValue(taggedFunction(ptf));
+                if (o.proxy_target) |pt| self.enqueue(taggedObject(pt));
+                if (o.proxy_handler) |ph| self.enqueue(taggedObject(ph));
+                if (o.proxy_target_fn) |ptf| self.enqueue(taggedFunction(ptf));
                 // §23.2 / §25.3 — TypedArray and DataView views
                 // borrow bytes from a sibling ArrayBuffer object via
                 // `viewed`. The ArrayBuffer is held only through this
@@ -1568,8 +1588,8 @@ pub const Heap = struct {
                 // without marking it here the buffer gets swept while
                 // the view is still reachable and indexed reads see
                 // freed bytes.
-                if (o.getTypedView()) |tv| self.markValue(taggedObject(tv.viewed));
-                if (o.getDataView()) |dv| self.markValue(taggedObject(dv.viewed));
+                if (o.getTypedView()) |tv| self.enqueue(taggedObject(tv.viewed));
+                if (o.getDataView()) |dv| self.enqueue(taggedObject(dv.viewed));
             }
         }
         // Doubles, ints, bools, null, undefined, hole: no heap pointer.
