@@ -1,9 +1,14 @@
-//! WebAssembly execution engine.
+//! Sarcasm — the WebAssembly engine.
 //!
 //! Native Zig implementation of the WebAssembly Core specification
-//! (https://webassembly.github.io/spec/core/). Strictly distinct
-//! from `src/playground_wasm.zig`, which is Cynic compiled *as* a
-//! wasm32-freestanding module for the in-browser playground:
+//! (https://webassembly.github.io/spec/core/). The name buries `asm`
+//! (sarc·asm — WebAsm) and matches the house voice; it scopes to the
+//! whole subsystem (decoder + validator + interpreter), the way
+//! SpiderMonkey's Baldr names all of its wasm support.
+//!
+//! Strictly distinct from `src/playground_wasm.zig`, which is Cynic
+//! compiled *as* a wasm32-freestanding module for the in-browser
+//! playground:
 //!
 //!   src/playground_wasm.zig    Cynic ➜ WASM   (an output target)
 //!   src/runtime/wasm/          WASM ➜ Cynic   (an execution surface)
