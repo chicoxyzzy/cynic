@@ -333,8 +333,20 @@ fn expressionHasNestedFunctionShape(e: *const Expression) bool {
         },
         .object_literal => |o| blk: {
             for (o.properties) |p| switch (p) {
-                .property => |prop| if (expressionHasNestedFunctionShape(&prop.value)) break :blk true,
-                else => {},
+                .property => |prop| {
+                    if (expressionHasNestedFunctionShape(&prop.value)) break :blk true;
+                    // §13.2.5 — a computed key is an arbitrary expression
+                    // that can itself hold a nested function: `{ [g()]: 1 }`.
+                    if (prop.key == .computed and expressionHasNestedFunctionShape(prop.key.computed)) break :blk true;
+                },
+                // §13.2.5 — `method(){}`, `get x(){}`, `set x(v){}` ARE
+                // nested function definitions; their bodies can capture an
+                // enclosing param through the scope chain, so the env must
+                // NOT be elided. (Missing this skip wrongly register-promoted
+                // a function returning `{ get g(){…a…} }`, then the accessor
+                // read an elided env slot — OOB / heap corruption.)
+                .method => break :blk true,
+                .spread => |sp| if (expressionHasNestedFunctionShape(sp.argument)) break :blk true,
             };
             break :blk false;
         },

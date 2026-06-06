@@ -10659,6 +10659,24 @@ test "param-register: tight recursion preserves param across many calls" {
     , 500);
 }
 
+test "param-register: object-literal accessor/method capturing a param forces env" {
+    // §13.2.5 — `expressionHasNestedFunctionShape` skipped an object
+    // literal's `.method` members (`get`/`set`/method shorthand) and its
+    // `.spread`, so a function returning `{ get g() { return a; } }` that
+    // captures a param `a` was wrongly treated as register-only. With the
+    // environment elided, the accessor read a non-existent env slot —
+    // `index 0, len 0` OOB — which (in a longer run) corrupted the heap
+    // and crashed the test262 harness's `frame_stacks` registry. Each
+    // shape reads the captured param back through the accessor/method,
+    // which only resolves if the outer function kept its env.
+    try expectScriptStringWithBuiltins(
+        \\function getter(a) { return { get g() { return a; } }; }
+        \\function method(a, b) { return { m() { return a + b; } }; }
+        \\function setter(a) { const o = { set s(v) { this.captured = a + v; } }; o.s = 10; return o.captured; }
+        \\String(getter(42).g) + "|" + String(method(10, 20).m()) + "|" + String(setter(5));
+    , "42|30|15");
+}
+
 test "sta_property transition IC: polymorphic receivers fall back cleanly" {
     // Same `this.k = v` call site reached from two different
     // ctors. Each ctor writes a different key first, so the
