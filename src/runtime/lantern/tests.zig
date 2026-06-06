@@ -10637,3 +10637,138 @@ test "sta_property transition IC: polymorphic receivers fall back cleanly" {
         // sum of (i) for i in 0..5 = 15
     , 15);
 }
+
+// ── Templatized def_property fast slot path ─────────────────────────
+//
+// `make_object_shape` stamps a cached `Shape*` onto a fresh object
+// and pre-fills `own_key_order` with the template's static keys, so
+// every downstream property write knows its slot index at compile
+// time. The fused write op skips `hasOwn` / `flagsFor` / `shadowSet`
+// lookups and writes the slot directly. These tests pin the
+// semantic contract that survives the fast-path swap.
+
+test "def_template_property: simple {x,y} literal reads back both keys" {
+    try expectScriptIntWithBuiltins(
+        \\const o = { x: 7, y: 11 };
+        \\o.x + o.y;
+    , 18);
+}
+
+test "def_template_property: own enumerable keys emit in source order" {
+    // `Object.keys` reads `own_key_order`. The fast path pre-fills
+    // it inside `make_object_shape` — `def_template_property` skips
+    // `recordKey` entirely, so the only contributor is the
+    // template's static key list.
+    try expectScriptStringWithBuiltins(
+        \\const o = { first: 1, second: 2, third: 3, fourth: 4 };
+        \\Object.keys(o).join(",");
+    , "first,second,third,fourth");
+}
+
+test "def_template_property: for-in walks templatized keys in source order" {
+    try expectScriptStringWithBuiltins(
+        \\const o = { aa: 1, bb: 2, cc: 3 };
+        \\let s = '';
+        \\for (const k in o) s += k + ':' + o[k] + ',';
+        \\s;
+    , "aa:1,bb:2,cc:3,");
+}
+
+test "def_template_property: own-property descriptor reports default attrs" {
+    // §13.2.5.5 step 8.e — CreateDataPropertyOrThrow lands the key
+    // with {writable, enumerable, configurable} = true. The fast
+    // path must preserve those flags via the shape transition (the
+    // template builds with `PropertyFlags.default`).
+    try expectScriptStringWithBuiltins(
+        \\const o = { p: 5 };
+        \\const d = Object.getOwnPropertyDescriptor(o, "p");
+        \\d.value + ":" + d.writable + ":" + d.enumerable + ":" + d.configurable;
+    , "5:true:true:true");
+}
+
+test "def_template_property: side-effect in value expression preserves slot writes" {
+    // The value expression can run arbitrary user code (here a
+    // function call) between `make_object_shape` and the
+    // `def_template_property` writes. The partial object is in a
+    // temp register and never observable from the value expr, so
+    // the slot writes must still land correctly.
+    try expectScriptIntWithBuiltins(
+        \\let counter = 0;
+        \\function next() { return ++counter; }
+        \\const o = { a: next(), b: next(), c: next() };
+        \\o.a * 100 + o.b * 10 + o.c;
+    , 123);
+}
+
+test "def_template_property: hot loop, fresh literal per iteration" {
+    // The headline allocation-churn case (bench/object_alloc.js
+    // shape). Shape cached on first iter; each subsequent
+    // iteration stamps the shape, pre-fills own_key_order, writes
+    // both slots. Correctness across 1000 iters.
+    try expectScriptIntWithBuiltins(
+        \\let r = 0;
+        \\let last = null;
+        \\for (let i = 0; i < 1000; i++) {
+        \\  last = { a: i, b: i + 1 };
+        \\  r += last.a + last.b;
+        \\}
+        \\r + last.a + last.b;
+    , 1_000_000 + 999 + 1000);
+}
+
+test "def_template_property: JSON.stringify roundtrips templatized literal" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ a: 1, b: "two", c: true });
+    , "{\"a\":1,\"b\":\"two\",\"c\":true}");
+}
+
+test "def_template_property: Object.assign target sees templatized slots" {
+    try expectScriptIntWithBuiltins(
+        \\const src = { x: 4, y: 6 };
+        \\const dst = Object.assign({}, src);
+        \\dst.x + dst.y;
+    , 10);
+}
+
+test "def_template_property: re-assignment via sta_property keeps shape stable" {
+    // After the literal is stamped, writes through `sta_property`
+    // hit the transition IC's same-shape fast path (since the
+    // value's flags match the templatized shape).
+    try expectScriptIntWithBuiltins(
+        \\const o = { x: 1, y: 2 };
+        \\o.x = 100;
+        \\o.y = 200;
+        \\Object.keys(o).join(",") === "x,y" ? o.x + o.y : -1;
+    , 300);
+}
+
+test "def_template_property: hasOwnProperty reports templatized keys" {
+    try expectScriptStringWithBuiltins(
+        \\const o = { alpha: 1, beta: 2 };
+        \\o.hasOwnProperty("alpha") + ":" + o.hasOwnProperty("beta") + ":" + o.hasOwnProperty("gamma");
+    , "true:true:false");
+}
+
+test "def_template_property: defineProperty with non-default flags demotes correctly" {
+    // The templatized shape encodes default {w:T,e:T,c:T} on every
+    // slot. A subsequent defineProperty with diverging attrs (here
+    // `enumerable: false`) demotes off the shape; Object.keys then
+    // filters per §10.1.11.
+    try expectScriptStringWithBuiltins(
+        \\const o = { x: 1, y: 2, z: 3 };
+        \\Object.defineProperty(o, "y", { value: 22, enumerable: false, writable: true, configurable: true });
+        \\Object.keys(o).join(",") + ":" + (o.x + o.y + o.z);
+    , "x,z:26");
+}
+
+test "def_template_property: literal with mixed static + computed keys" {
+    // Compiler bails template build on a literal that contains
+    // any computed key (template build sees `.computed` and
+    // returns null). All keys fall through the regular def_property
+    // path. Behaviour identical, slot reads/writes still work.
+    try expectScriptIntWithBuiltins(
+        \\const k = "dyn";
+        \\const o = { a: 10, [k]: 20, b: 30 };
+        \\o.a + o.dyn + o.b;
+    , 60);
+}

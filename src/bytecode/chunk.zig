@@ -833,6 +833,24 @@ pub const Builder = struct {
         try self.emitU16(try self.allocCallIC());
     }
 
+    /// Emit `def_template_property` — templatized CreateDataPropertyOrThrow.
+    /// Pairs with a preceding `make_object_shape` whose cached `Shape*`
+    /// assigns `slot` to the key at constants[k]. Encoding:
+    /// `[op] [k:u16] [r_obj:u8] [slot:u16]`. The slot index is computed
+    /// at compile time by counting templatized properties in source order.
+    pub fn emitDefTemplateProperty(
+        self: *Builder,
+        span: Span,
+        k: u16,
+        r_obj: u8,
+        slot: u16,
+    ) !void {
+        try self.emitOp(.def_template_property, span);
+        try self.emitU16(k);
+        try self.emitU8(r_obj);
+        try self.emitU16(slot);
+    }
+
     /// Emit `call_property` — the fused property-load + method-call
     /// op. Reserves BOTH an IC slot (for the property lookup, same
     /// table `lda_property` uses) AND a call-IC slot (for the loaded

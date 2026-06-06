@@ -910,6 +910,19 @@ pub const Op = enum(u8) {
     /// Drives ArrayLiteral element init (§13.2.4) and ObjectLiteral
     /// PropertyDefinitionEvaluation (§13.2.5).
     def_property,
+    /// `[op] [k:u16] [r_obj:u8] [slot:u16]` — templatized
+    /// CreateDataPropertyOrThrow. The companion `make_object_shape`
+    /// op stamped a cached `Shape*` whose layout assigns the
+    /// literal's `i`th static key to slot `i`, and pre-filled the
+    /// receiver's `own_key_order`. This op writes `acc` directly
+    /// into `obj.slots.items[slot]` with the generational write
+    /// barrier — no `hasOwn`, no `flagsFor`, no `shadowSet` shape
+    /// lookup, no `recordKey` linear scan. On a shape-guard miss
+    /// (e.g. the literal hit a path that demoted the object), it
+    /// falls back to the regular `def_property` path so semantics
+    /// survive an unexpected demote. `k` is retained for the
+    /// fallback's key resolution and for disassembler readability.
+    def_template_property,
     /// `[op] [r_obj:u8]` — `acc = obj[acc]` (computed property
     /// read). Coerces the key to a string at runtime; non-string
     /// keys go through ToPropertyKey (§7.1.19). Walks the
@@ -1206,6 +1219,7 @@ pub const Op = enum(u8) {
             .tail_call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
             .direct_eval => 4, // scope:u16 + r_callee:u8 + argc:u8
             .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
+            .def_template_property => 5, // k:u16 + r_obj:u8 + slot:u16
             .sta_property => 5, // k:u16 + r_obj:u8 + ic:u16 (inline-cache slot)
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
             .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
@@ -1343,6 +1357,7 @@ pub const Op = enum(u8) {
             .lda_property => "LdaProperty",
             .sta_property => "StaProperty",
             .def_property => "DefProperty",
+            .def_template_property => "DefTemplateProperty",
             .lda_computed => "LdaComputed",
             .sta_computed => "StaComputed",
             .def_computed => "DefComputed",

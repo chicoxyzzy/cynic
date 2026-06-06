@@ -8059,11 +8059,24 @@ pub fn runFrames(
             obj.slots.resize(allocator, shape.property_count) catch return error.OutOfMemory;
             // `ArrayList.resize` doesn't zero-fill. Initialise
             // every slot to `undefined` so a GC trigger between
-            // `make_object_shape` and the downstream
-            // `def_property` writes finds a valid Value (the
-            // slot won't have its real entry yet — that's the
-            // def_property's job).
+            // `make_object_shape` and the downstream property
+            // writes finds a valid Value (the slot won't have its
+            // real entry yet — that's the `def_template_property` /
+            // `def_property` job).
             for (obj.slots.items) |*s| s.* = Value.undefined_;
+            // Pre-fill `own_key_order` from the template's keys.
+            // The downstream `def_template_property` op skips
+            // `recordKey` entirely, so this is the one chance to
+            // populate the §10.1.11 OrdinaryOwnPropertyKeys order
+            // list. Chunk constants are pinned for the chunk's
+            // lifetime, so the borrowed slices outlive any
+            // reachable instance.
+            obj.own_key_order.ensureTotalCapacityPrecise(allocator, tmpl.keys.len) catch return error.OutOfMemory;
+            for (tmpl.keys) |key_idx| {
+                const key_v = local_chunk.constants[key_idx];
+                const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                obj.own_key_order.appendAssumeCapacity(key_s.flatBytes());
+            }
             acc = heap_mod.taggedObject(obj);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -9061,6 +9074,69 @@ pub fn runFrames(
                 // Attrs would change — the append-only shape
                 // can't encode that, so demote and rebuild
                 // through `storePropertyWithFlags`.
+                obj.demoteFromShape(allocator) catch return error.OutOfMemory;
+                _ = obj.properties.swapRemove(key_s.flatBytes());
+                _ = obj.property_flags.swapRemove(key_s.flatBytes());
+            }
+            realm.heap.storePropertyWithFlags(obj, allocator, key_s.flatBytes(), acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
+        .def_template_property => {
+            // §7.3.7 CreateDataPropertyOrThrow, templatized form.
+            // The preceding `make_object_shape` op stamped a cached
+            // `Shape*` whose layout puts this key at `slot` and
+            // pre-filled `own_key_order` with every template key,
+            // so the fast path is a raw slot write + generational
+            // write barrier. No `hasOwn`, no `flagsFor`, no
+            // `shadowSet` shape lookup, no `recordKey` linear scan.
+            const k = readU16(code, ip);
+            const r_obj = code[ip + 2];
+            const slot = readU16(code, ip + 3);
+            ip += 5;
+            const recv = registers[r_obj];
+            const obj = heap_mod.valueAsPlainObject(recv) orelse return error.InvalidOpcode;
+            // Fast path: the templatized shape is still in place,
+            // the pre-sized slots vector still covers `slot`, and
+            // the object hasn't been demoted (e.g. by a user-code
+            // `Object.defineProperty` between `make_object_shape`
+            // and this write, which can't happen for a literal in
+            // a temp register but is checked for safety).
+            if (obj.shape != null and slot < obj.slots.items.len) {
+                obj.slots.items[slot] = acc;
+                realm.heap.writeBarrier(.{ .object = obj }, acc);
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+            // Deopt — fall through to the regular def_property
+            // semantics so any unexpected shape demote (a future
+            // path, a debugger-injected mutation, etc.) keeps
+            // CreateDataPropertyOrThrow's spec contract.
+            if (k >= local_chunk.constants.len) return error.InvalidOpcode;
+            const key_v = local_chunk.constants[k];
+            if (!key_v.isString()) return error.InvalidOpcode;
+            const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+            const had_own = obj.hasOwn(key_s.flatBytes());
+            if (!had_own and !obj.extensible) {
+                const ex = try makeTypeError(realm, "Cannot define property on non-extensible object");
+                return .{ .thrown = ex };
+            }
+            if (had_own) {
+                const cur = obj.flagsFor(key_s.flatBytes());
+                if (!cur.configurable) {
+                    const ex = try makeTypeError(realm, "Cannot redefine non-configurable property");
+                    return .{ .thrown = ex };
+                }
+                const new_default: object_mod.PropertyFlags = .{
+                    .writable = true,
+                    .enumerable = true,
+                    .configurable = true,
+                };
+                if (cur.writable == new_default.writable and
+                    cur.enumerable == new_default.enumerable and
+                    cur.configurable == new_default.configurable)
+                {
+                    realm.heap.storePropertyWithFlags(obj, allocator, key_s.flatBytes(), acc, new_default) catch return error.OutOfMemory;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 obj.demoteFromShape(allocator) catch return error.OutOfMemory;
                 _ = obj.properties.swapRemove(key_s.flatBytes());
                 _ = obj.property_flags.swapRemove(key_s.flatBytes());

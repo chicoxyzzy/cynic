@@ -2619,6 +2619,16 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, lit.span);
         try self.builder.emitU8(r_obj);
 
+        // When the literal was templatized, every static-key
+        // `.property` writes into a known slot (template-build
+        // walked properties in source order and bailed on any
+        // pattern that wouldn't fit the append-only shape, so a
+        // surviving template means every static key gets slot
+        // `template_slot`, post-incremented). The slot index lets
+        // the runtime skip `hasOwn` / `flagsFor` / `shadowSet` /
+        // `recordKey` for the hot literal-allocating loop.
+        var template_slot: u16 = 0;
+
         for (lit.properties) |prop| switch (prop) {
             .property => |p| {
                 // §13.2.5.5 PropertyDefinitionEvaluation — computed
@@ -2691,9 +2701,18 @@ pub const Compiler = struct {
                 // §13.2.5.5 step 8.e — CreateDataPropertyOrThrow,
                 // NOT [[Set]]; an inherited accessor on
                 // `Object.prototype.<k>` must not fire.
-                try self.builder.emitOp(.def_property, p.span);
-                try self.builder.emitU16(k);
-                try self.builder.emitU8(r_obj);
+                if (template_idx != null) {
+                    // Templatized literal: the static key lives at
+                    // `template_slot` on the shape stamped by the
+                    // preceding `make_object_shape`. The fused fast
+                    // path writes the slot directly.
+                    try self.builder.emitDefTemplateProperty(p.span, k, r_obj, template_slot);
+                    template_slot += 1;
+                } else {
+                    try self.builder.emitOp(.def_property, p.span);
+                    try self.builder.emitU16(k);
+                    try self.builder.emitU8(r_obj);
+                }
             },
             .method => |m| {
                 // Computed-key method / accessor — evaluate the key,
