@@ -13,6 +13,15 @@
 //! installed from `src/runtime/builtins/webassembly.zig` once that
 //! step lands.
 //!
+//! Architecture — see `docs/wasm-engine.md` for the full design and
+//! the prior art behind it. In short: validation doubles as a
+//! compiler front-end, lowering each function into a register-based
+//! internal IR (resolved immediates, register-indexed operands,
+//! resolved branch targets); the interpreter is a threaded-dispatch
+//! loop over that IR, matching Lantern's idiom. Scalar and reference
+//! registers are segregated so scalars stay untyped-fast while
+//! references are precisely GC-rooted.
+//!
 //! Scope is the standardized baseline used by every modern toolchain:
 //! MVP plus the universally-shipped post-MVP features
 //! (`mutable-globals`, `sign-extension-ops`,
