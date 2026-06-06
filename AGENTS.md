@@ -20,6 +20,22 @@ These are project rules — they apply to everyone.
 - **Spec-faithful naming.** Internal function names mirror
   ECMA-262 abstract operations so test262 failures map cleanly to
   spec sections.
+- **Never abort the host on untrusted input.** Cynic runs untrusted
+  JS inside a host process, so any input — however hostile or
+  pathological — must produce a normal completion or a *catchable*
+  JS exception, never a `panic`, `unreachable`, a segfault, an
+  `@intFromFloat` / `@intCast` trap, or unbounded resource growth.
+  A `RangeError` the script can `try`/`catch` is correct; a SIGABRT
+  / SIGSEGV is a denial-of-service (and a use-after-free is worse).
+  This is a robustness contract distinct from spec conformance, and
+  several bugs in this class are invisible to a normal test262 run —
+  they surface only under allocation-pressure GC or deep recursion —
+  so apply it at authoring time: saturate / range-check casts on
+  user-controlled numbers (`doubleToI64Saturating`), bound recursion
+  over user-sized input, root heap pointers held across a JS re-entry
+  (the `HandleScope` contract), and propagate `error.OutOfMemory` to
+  a throw. The mechanisms, precedents, and the per-builtin checklist
+  are in [docs/handbook/host-safety.md](docs/handbook/host-safety.md).
 - **No engine state on user-visible objects.** Internal engine
   state — iterator cursors, aggregator records, cached methods,
   captured inputs — must never be stored as ordinary property-bag
@@ -249,6 +265,7 @@ These are project rules — they apply to everyone.
 | See what's planned and what's done | [docs/ROADMAP.md](docs/ROADMAP.md) |
 | Decide between two designs | [docs/handbook/prior-art.md](docs/handbook/prior-art.md) |
 | Add a lexer / parser / runtime feature | [docs/handbook/tdd.md](docs/handbook/tdd.md), then [docs/handbook/compiler-engineering.md](docs/handbook/compiler-engineering.md) |
+| Add / touch a builtin that coerces user numbers, recurses over user-sized input, or re-enters JS | [docs/handbook/host-safety.md](docs/handbook/host-safety.md) (the never-abort-the-host invariant + per-builtin checklist) |
 | Touch heap-allocating native code | [docs/handbook/gc.md](docs/handbook/gc.md) (`HandleScope` contract for natives that re-enter JS) |
 | Touch binding / scope / top-level resolution | [docs/handbook/environments.md](docs/handbook/environments.md) (GlobalEnvironmentRecord split, named-fn-expr wrapper, module env-record, top-level write opcodes) |
 | Touch the property-storage layout (bag / shape / slots) | [docs/inline-caches.md](docs/inline-caches.md) (shape substrate + read/write IC); [docs/lazy-property-bag.md](docs/lazy-property-bag.md) (Phase 3 shipped — shape-mode writes skip the bag mirror entirely) |

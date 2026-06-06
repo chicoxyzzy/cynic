@@ -1187,6 +1187,47 @@ direct-eval interaction), no `with` (drops out of the spec
 walk), no DevTools surface today (no installed expectation
 that `Error.stack` shows eliminated frames).
 
+## Robustness & host-safety
+
+The invariant: untrusted JS never aborts the host — any input yields
+a normal completion or a catchable JS exception, never a panic /
+`unreachable` / segfault / numeric-cast trap / unbounded growth. See
+[handbook/host-safety.md](handbook/host-safety.md) for the mechanisms
+and the per-builtin checklist; this section tracks status.
+
+**Shipped**
+
+- **Saturating numeric casts** — §7.1.5 / §7.1.20 sites route through
+  `doubleToI64Saturating` instead of trapping on out-of-range user
+  doubles; length×size multiplies guard against overflow. Began with
+  eight Number/String/Array/TypedArray sites, extended to the
+  array-like iterator and ShadowRealm-arity paths.
+- **Recursion bounds** — parser nesting and `JSON.parse` depth throw
+  `RangeError` instead of overflowing the host stack.
+- **Native re-entry stack guard** — `nearNativeStackLimit()` throws
+  `RangeError` before a native→JS re-entry (accessor getter, array
+  callback, `Reflect.apply`, Proxy trap, promise drain) overflows the
+  host stack; precise per-thread bounds on macOS + Linux.
+- **GC rooting under re-entry** — the `HandleScope` contract (see
+  [handbook/gc.md](handbook/gc.md)); the Object / Set / Promise
+  accessor + set-like + aggregator paths root the values they hold
+  across a JS re-entry.
+- **`test262-gc-stress` CI** — ReleaseSafe + `--gc-threshold=1` across
+  the GC-mutation-heavy buckets, on every PR, so a missed root is a
+  deterministic crash pre-merge.
+
+**Planned**
+
+- **CI lint for the cast/abort class** — fail the build on a new
+  `@intFromFloat` / `@intCast`-from-float / bare `@panic` /
+  `unreachable` reachable from `builtins/`, so the class can't
+  regress silently.
+- **Fuzzer harness** — structure-aware over the parser, `JSON.parse`,
+  and Perlex (ReleaseSafe target so a trap surfaces as a crash).
+- **Make gc-stress gating** — promote from advisory once the
+  occasional `--threads=4` gc1 flake is understood, so a real
+  use-after-free blocks rather than annotates.
+
 ## Future work (post-strict-only-runtime)
 
 - **Bistromath** — baseline JIT (T1). Direct opcode-to-native,
