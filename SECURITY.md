@@ -109,8 +109,15 @@ What the engine does today, not a claim that it does it perfectly:
   `new AsyncFunction(string)` throw `EvalError` unless `--allow=eval`
   is passed. Matches Node's
   `--disallow-code-generation-from-strings`.
+- **No host abort on untrusted input.** Pathological input yields a
+  catchable JS exception (`RangeError` / `EvalError`), not a panic,
+  segfault, numeric-cast trap, or unbounded growth — enforced by
+  saturating casts, recursion bounds, a native-reentry stack guard,
+  and the GC rooting contract. See
+  [`docs/handbook/host-safety.md`](docs/handbook/host-safety.md).
 - **CI safety nets.** CodeQL static analysis on every push,
-  dependabot on the dependency surface, `test262` and
-  `test262-gc-stress` runtime conformance gating, and ReleaseSafe
-  builds in the unit-test and conformance jobs so GC verifiers and
-  free-poison are armed in CI.
+  dependabot on the dependency surface, the `test262` runtime sweep
+  gating on a pass-rate floor, the advisory `test262-gc-stress` job
+  (ReleaseSafe + `--gc-threshold=1` across the GC-mutation-heavy
+  buckets, on every PR), and ReleaseSafe builds in the unit-test and
+  conformance jobs so the GC verifiers and free-poison are armed.
