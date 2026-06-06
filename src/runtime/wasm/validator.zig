@@ -531,6 +531,24 @@ fn validateExpr(v: *Validator) ValidateError!void {
             .f64_abs, .f64_neg, .f64_ceil, .f64_floor, .f64_trunc, .f64_nearest, .f64_sqrt => try unop(v, .f64, .f64),
             .f64_add, .f64_sub, .f64_mul, .f64_div, .f64_min, .f64_max, .f64_copysign => try binop(v, .f64, .f64),
 
+            // Conversions (§5.4.4) — each pops one value, pushes one.
+            .i32_wrap_i64 => try unop(v, .i64, .i32),
+            .i32_trunc_f32_s, .i32_trunc_f32_u => try unop(v, .f32, .i32),
+            .i32_trunc_f64_s, .i32_trunc_f64_u => try unop(v, .f64, .i32),
+            .i64_extend_i32_s, .i64_extend_i32_u => try unop(v, .i32, .i64),
+            .i64_trunc_f32_s, .i64_trunc_f32_u => try unop(v, .f32, .i64),
+            .i64_trunc_f64_s, .i64_trunc_f64_u => try unop(v, .f64, .i64),
+            .f32_convert_i32_s, .f32_convert_i32_u => try unop(v, .i32, .f32),
+            .f32_convert_i64_s, .f32_convert_i64_u => try unop(v, .i64, .f32),
+            .f32_demote_f64 => try unop(v, .f64, .f32),
+            .f64_convert_i32_s, .f64_convert_i32_u => try unop(v, .i32, .f64),
+            .f64_convert_i64_s, .f64_convert_i64_u => try unop(v, .i64, .f64),
+            .f64_promote_f32 => try unop(v, .f32, .f64),
+            .i32_reinterpret_f32 => try unop(v, .f32, .i32),
+            .i64_reinterpret_f64 => try unop(v, .f64, .i64),
+            .f32_reinterpret_i32 => try unop(v, .i32, .f32),
+            .f64_reinterpret_i64 => try unop(v, .i64, .f64),
+
             // Memory loads: pop the i32 address, push the result.
             .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u => try load(v, .i32),
             .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u => try load(v, .i64),
@@ -572,6 +590,15 @@ fn validateExpr(v: *Validator) ValidateError!void {
                         try v.popExpect(.i32);
                         try v.popExpect(.i32);
                     },
+                    // Saturating float→int truncations (non-trapping).
+                    0 => try unop(v, .f32, .i32), // i32.trunc_sat_f32_s
+                    1 => try unop(v, .f32, .i32), // i32.trunc_sat_f32_u
+                    2 => try unop(v, .f64, .i32), // i32.trunc_sat_f64_s
+                    3 => try unop(v, .f64, .i32), // i32.trunc_sat_f64_u
+                    4 => try unop(v, .f32, .i64), // i64.trunc_sat_f32_s
+                    5 => try unop(v, .f32, .i64), // i64.trunc_sat_f32_u
+                    6 => try unop(v, .f64, .i64), // i64.trunc_sat_f64_s
+                    7 => try unop(v, .f64, .i64), // i64.trunc_sat_f64_u
                     else => return error.UnknownOpcode,
                 }
             },

@@ -29,6 +29,7 @@ pub const TrapError = error{
     Unreachable,
     IntegerDivideByZero,
     IntegerOverflow,
+    InvalidConversionToInteger,
     OutOfBoundsMemoryAccess,
     CallStackExhausted,
     ValueStackOverflow,
@@ -444,6 +445,34 @@ fn run(ip: *Interp) Error!void {
                     try ip.pushI32(@intFromBool(floatCmp(f64, op, a, b)));
                 },
 
+                // ── conversions ─────────────────────────────────────
+                .i32_wrap_i64 => try ip.pushI32(@truncate(ip.popI64())),
+                .i64_extend_i32_s => try ip.pushI64(ip.popI32()),
+                .i64_extend_i32_u => try ip.pushI64(@bitCast(@as(u64, @as(u32, @bitCast(ip.popI32()))))),
+
+                .i32_trunc_f32_s => try ip.pushI32(try truncTrap(i32, f32, ip.popF32(), -2147483648.0, true, 2147483648.0)),
+                .i32_trunc_f32_u => try ip.pushI32(@bitCast(try truncTrap(u32, f32, ip.popF32(), -1.0, false, 4294967296.0))),
+                .i32_trunc_f64_s => try ip.pushI32(try truncTrap(i32, f64, ip.popF64(), -2147483649.0, false, 2147483648.0)),
+                .i32_trunc_f64_u => try ip.pushI32(@bitCast(try truncTrap(u32, f64, ip.popF64(), -1.0, false, 4294967296.0))),
+                .i64_trunc_f32_s => try ip.pushI64(try truncTrap(i64, f32, ip.popF32(), -9223372036854775808.0, true, 9223372036854775808.0)),
+                .i64_trunc_f32_u => try ip.pushI64(@bitCast(try truncTrap(u64, f32, ip.popF32(), -1.0, false, 18446744073709551616.0))),
+                .i64_trunc_f64_s => try ip.pushI64(try truncTrap(i64, f64, ip.popF64(), -9223372036854775808.0, true, 9223372036854775808.0)),
+                .i64_trunc_f64_u => try ip.pushI64(@bitCast(try truncTrap(u64, f64, ip.popF64(), -1.0, false, 18446744073709551616.0))),
+
+                .f32_convert_i32_s => try ip.pushF32(@floatFromInt(ip.popI32())),
+                .f32_convert_i32_u => try ip.pushF32(@floatFromInt(@as(u32, @bitCast(ip.popI32())))),
+                .f32_convert_i64_s => try ip.pushF32(@floatFromInt(ip.popI64())),
+                .f32_convert_i64_u => try ip.pushF32(@floatFromInt(@as(u64, @bitCast(ip.popI64())))),
+                .f64_convert_i32_s => try ip.pushF64(@floatFromInt(ip.popI32())),
+                .f64_convert_i32_u => try ip.pushF64(@floatFromInt(@as(u32, @bitCast(ip.popI32())))),
+                .f64_convert_i64_s => try ip.pushF64(@floatFromInt(ip.popI64())),
+                .f64_convert_i64_u => try ip.pushF64(@floatFromInt(@as(u64, @bitCast(ip.popI64())))),
+                .f32_demote_f64 => try ip.pushF32(@floatCast(ip.popF64())),
+                .f64_promote_f32 => try ip.pushF64(@floatCast(ip.popF32())),
+
+                // Reinterpret is a bit-identity on the untyped cell.
+                .i32_reinterpret_f32, .i64_reinterpret_f64, .f32_reinterpret_i32, .f64_reinterpret_i64 => {},
+
                 // ── linear memory ───────────────────────────────────
                 .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u, .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u, .f32_load, .f64_load => {
                     const ea = memEa(ip, body, &pc);
@@ -472,6 +501,15 @@ fn run(ip: *Interp) Error!void {
                             pc += 1; // reserved memidx
                             try memFill(ip);
                         },
+                        // Saturating float→int truncations.
+                        0 => try ip.pushI32(truncSat(i32, f32, ip.popF32())),
+                        1 => try ip.pushI32(@bitCast(truncSat(u32, f32, ip.popF32()))),
+                        2 => try ip.pushI32(truncSat(i32, f64, ip.popF64())),
+                        3 => try ip.pushI32(@bitCast(truncSat(u32, f64, ip.popF64()))),
+                        4 => try ip.pushI64(truncSat(i64, f32, ip.popF32())),
+                        5 => try ip.pushI64(@bitCast(truncSat(u64, f32, ip.popF32()))),
+                        6 => try ip.pushI64(truncSat(i64, f64, ip.popF64())),
+                        7 => try ip.pushI64(@bitCast(truncSat(u64, f64, ip.popF64()))),
                         else => return error.UnsupportedImportCall,
                     }
                 },
@@ -824,6 +862,36 @@ fn floatCmp(comptime T: type, op: Op, a: T, b: T) bool {
         .f32_ge, .f64_ge => a >= b,
         else => unreachable,
     };
+}
+
+/// Trapping float→int truncation (§4.3.3): traps on NaN and on values
+/// outside `[lo, hi)`. The bounds are the exact representable limits
+/// for each (Int, Float) pair, so the subsequent `@intFromFloat` is in
+/// range.
+fn truncTrap(
+    comptime Int: type,
+    comptime Float: type,
+    f: Float,
+    comptime lo: Float,
+    comptime lo_inclusive: bool,
+    comptime hi: Float,
+) TrapError!Int {
+    if (std.math.isNan(f)) return error.InvalidConversionToInteger;
+    const lo_ok = if (lo_inclusive) f >= lo else f > lo;
+    if (!lo_ok or f >= hi) return error.IntegerOverflow;
+    return @intFromFloat(@trunc(f));
+}
+
+/// Saturating float→int truncation (trunc_sat): NaN → 0, out-of-range
+/// clamps to the integer min/max.
+fn truncSat(comptime Int: type, comptime Float: type, f: Float) Int {
+    if (std.math.isNan(f)) return 0;
+    const t = @trunc(f);
+    const min_f: Float = @floatFromInt(std.math.minInt(Int));
+    const max_f: Float = @floatFromInt(std.math.maxInt(Int));
+    if (t <= min_f) return std.math.minInt(Int);
+    if (t >= max_f) return std.math.maxInt(Int);
+    return @intFromFloat(t);
 }
 
 // ── arithmetic ──────────────────────────────────────────────────────

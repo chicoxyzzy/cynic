@@ -738,3 +738,60 @@ test "wasm interp: f64 store then load round-trips" {
     const r = asF64(try callCells(&.{ I32, F64 }, &.{F64}, &code, "f", 1, &.{ 16, f64c(3.141592653589793) }));
     try testing.expectEqual(@as(f64, 3.141592653589793), r);
 }
+
+// ── execution: conversions ──────────────────────────────────────────
+
+const I64 = 0x7e;
+
+fn asI64(c: u64) i64 {
+    return @bitCast(c);
+}
+
+test "wasm interp: i32.wrap_i64" {
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xa7, 0x0b };
+    try testing.expectEqual(@as(i32, 1), asI32(try callCells(&.{I64}, &.{I32}, &code, "f", null, &.{0x1_0000_0001})));
+}
+
+test "wasm interp: i64.extend_i32_s/u" {
+    const es = [_]u8{ 0x00, 0x20, 0x00, 0xac, 0x0b };
+    const eu = [_]u8{ 0x00, 0x20, 0x00, 0xad, 0x0b };
+    const neg1: u64 = @as(u32, @bitCast(@as(i32, -1)));
+    try testing.expectEqual(@as(i64, -1), asI64(try callCells(&.{I32}, &.{I64}, &es, "f", null, &.{neg1})));
+    try testing.expectEqual(@as(i64, 0xFFFFFFFF), asI64(try callCells(&.{I32}, &.{I64}, &eu, "f", null, &.{neg1})));
+}
+
+test "wasm interp: i32.trunc_f64_s computes and traps" {
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xaa, 0x0b };
+    try testing.expectEqual(@as(i32, 3), asI32(try callCells(&.{F64}, &.{I32}, &code, "f", null, &.{f64c(3.7)})));
+    try testing.expectEqual(@as(i32, -3), asI32(try callCells(&.{F64}, &.{I32}, &code, "f", null, &.{f64c(-3.7)})));
+    try testing.expectError(error.InvalidConversionToInteger, callCells(&.{F64}, &.{I32}, &code, "f", null, &.{f64c(std.math.nan(f64))}));
+    try testing.expectError(error.IntegerOverflow, callCells(&.{F64}, &.{I32}, &code, "f", null, &.{f64c(1e30)}));
+}
+
+test "wasm interp: i32.trunc_sat_f64_s saturates instead of trapping" {
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xfc, 0x02, 0x0b };
+    try testing.expectEqual(@as(i32, 3), asI32(try callCells(&.{F64}, &.{I32}, &code, "f", null, &.{f64c(3.7)})));
+    try testing.expectEqual(@as(i32, 0), asI32(try callCells(&.{F64}, &.{I32}, &code, "f", null, &.{f64c(std.math.nan(f64))})));
+    try testing.expectEqual(@as(i32, 2147483647), asI32(try callCells(&.{F64}, &.{I32}, &code, "f", null, &.{f64c(1e30)})));
+    try testing.expectEqual(@as(i32, -2147483648), asI32(try callCells(&.{F64}, &.{I32}, &code, "f", null, &.{f64c(-1e30)})));
+}
+
+test "wasm interp: f64.convert_i32_u treats the operand as unsigned" {
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xb8, 0x0b };
+    const neg1: u64 = @as(u32, @bitCast(@as(i32, -1)));
+    try testing.expectEqual(@as(f64, 4294967295.0), asF64(try callCells(&.{I32}, &.{F64}, &code, "f", null, &.{neg1})));
+}
+
+test "wasm interp: demote / promote between f32 and f64" {
+    const demote = [_]u8{ 0x00, 0x20, 0x00, 0xb6, 0x0b };
+    const promote = [_]u8{ 0x00, 0x20, 0x00, 0xbb, 0x0b };
+    try testing.expectEqual(@as(f32, 1.5), asF32(try callCells(&.{F64}, &.{F32}, &demote, "f", null, &.{f64c(1.5)})));
+    try testing.expectEqual(@as(f64, 1.5), asF64(try callCells(&.{F32}, &.{F64}, &promote, "f", null, &.{f32c(1.5)})));
+}
+
+test "wasm interp: reinterpret preserves the bit pattern" {
+    const i32_from_f32 = [_]u8{ 0x00, 0x20, 0x00, 0xbc, 0x0b };
+    try testing.expectEqual(@as(i32, @bitCast(@as(u32, 0x3f800000))), asI32(try callCells(&.{F32}, &.{I32}, &i32_from_f32, "f", null, &.{f32c(1.0)})));
+    const f32_from_i32 = [_]u8{ 0x00, 0x20, 0x00, 0xbe, 0x0b };
+    try testing.expectEqual(@as(f32, 1.0), asF32(try callCells(&.{I32}, &.{F32}, &f32_from_i32, "f", null, &.{0x3f800000})));
+}
