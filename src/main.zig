@@ -211,11 +211,15 @@ fn printUsage(io: std.Io) !void {
         \\                                   Use this for code that monkey-patches
         \\                                   intrinsics or polyfills primordials.
         \\  --allow=eval                     Open the eval / Function(string) policy
-        \\                                   gate. Cynic ships no eval engine yet, so
-        \\                                   the call throws EvalError ("not
-        \\                                   implemented") instead of the default SES
-        \\                                   policy SyntaxError. The implementation is
-        \\                                   a separate effort (docs/ses-alignment.md).
+        \\                                   gate. By default the SES posture refuses
+        \\                                   runtime code construction — `eval(...)`,
+        \\                                   `new Function(src)`, and the Async/Generator
+        \\                                   Function constructors throw EvalError
+        \\                                   (§19.2.1.2 HostEnsureCanCompileStrings). With
+        \\                                   this flag the eval engine runs the source in
+        \\                                   the realm (§19.2.1 / §20.2.1.1.1); the frozen
+        \\                                   primordials still confine it unless paired
+        \\                                   with --unhardened (docs/ses-alignment.md).
         \\
     );
 }
