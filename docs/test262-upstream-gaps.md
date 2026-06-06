@@ -722,3 +722,67 @@ the corpus under the relevant section's directory before adding.
   string with an astral code point on `""` and asserting the surrogate
   halves via `charCodeAt` would catch any engine whose internal
   encoding leaks through `split("")`.
+
+### Array-like iterator `next()` aborted the host on an out-of-range `length`
+
+- **Fixed in:** `3cf3386`
+- **Spec:** §23.1.5.2.1 %ArrayIteratorPrototype%.next step 6 —
+  `len = ? LengthOfArrayLike(O)` = `F(ToLength(? Get(O, "length")))`
+  (§7.1.20 ToLength clamps NaN / -∞ / negatives to 0 and caps at
+  2⁵³ - 1).
+- **Reproducer:**
+  ```js
+  // Array.prototype.values over a non-array array-like reads `length`
+  // directly. A user-controlled `length` that exceeds i64 range — or
+  // is NaN / ±Infinity — must coerce via ToLength, not crash.
+  Array.prototype.values.call({ length: Infinity, 0: "a" }).next(); // → { value: "a", done: false }
+  Array.prototype.values.call({ length: 1e30, 0: "a" }).next();     // → { value: "a", done: false }
+  Array.prototype.values.call({ length: NaN, 0: "a" }).next();      // → { value: undefined, done: true }
+  ```
+- **Before fix:** the array-like iterator step cast a `Double` `length`
+  with a raw `@intFromFloat`, which panics (SIGABRT, uncatchable by JS
+  `try`/`catch`) for any finite magnitude past i64 range, NaN, or
+  ±Infinity — a trivial host-abort DoS reachable from
+  `[].values.call(arrayLike)` / `Array.prototype[Symbol.iterator]`.
+- **After fix:** the step routes the `length` Get through the shared
+  §7.1.20 `ToLength` helper, so the three reproducers return their spec
+  completions and never abort.
+- **Suggested fixture shape:** positive runtime fixtures under
+  `built-ins/Array/prototype/Symbol.iterator/` — one each for
+  `{ length: Infinity }`, a large finite `{ length: 1e30 }`, and
+  `{ length: NaN }` on a non-array array-like, asserting the first
+  `next()` result. The corpus exercises the iterator on real Arrays and
+  TypedArrays, but not a plain array-like whose `length` is an
+  out-of-range Number coerced via `LengthOfArrayLike` → `ToLength`.
+
+### ShadowRealm callable-boundary `length` copy aborted on an out-of-range arity
+
+- **Fixed in:** `3cf3386`
+- **Spec:** §3.8.3.5.1 (ShadowRealm proposal) CopyNameAndLength
+  step 4.b — `targetLen = max(0, trunc(L))`, then set the wrapped
+  function's `length` to that integer.
+- **Reproducer:**
+  ```js
+  // requires --enable=ShadowRealm
+  const sr = new ShadowRealm();
+  const f = sr.evaluate(
+    'Object.defineProperty(function g() {}, "length", { value: 1e30 });'
+  );
+  f.length; // → 1e30 (no host abort)
+  ```
+- **Before fix:** CopyNameAndLength gated the `length` box on a
+  round-trip equality `clamped == @floatFromInt(@intFromFloat(clamped))`,
+  but the inner `@intFromFloat` ran unconditionally — so wrapping a
+  callable whose `length` exceeds i64 range aborted the host before the
+  comparison could short-circuit. NaN / -∞ were already handled; only the
+  large-finite arity tripped it.
+- **After fix:** the cast is gated by the i32 upper-bound check first
+  (`clamped <= 2147483647.0` boxes Int32, else Double); the cast only
+  runs once `clamped` is known to fit, so a `1e30` arity round-trips as a
+  Double.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/ShadowRealm/prototype/evaluate/` (feature: `ShadowRealm`)
+  wrapping a callable whose `length` is `Object.defineProperty`'d to a
+  large finite value, asserting the wrapped function's `length` matches.
+  Existing fixtures cover the +∞ and 0/NaN cases; none drives an arity
+  past the engine's native integer width.
