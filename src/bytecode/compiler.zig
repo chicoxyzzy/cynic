@@ -5018,6 +5018,21 @@ pub const Compiler = struct {
             .in_ => .in_op,
         };
 
+        // Register-binding peephole — when LHS is a register-bound
+        // identifier (a loop counter promoted by
+        // `compileForStatement`, or a register-only function param
+        // from `paramsCanBeRegisters`), skip the `Ldar r_lhs;
+        // Star r_tmp` save-trip and emit `<RHS into acc>; Op r_lhs`
+        // directly. `Op reg` semantics are `acc = reg op acc`, so
+        // the result is `lhs op rhs` regardless of op commutativity.
+        // Headline win on `i + 1` / `n - 1` patterns in hot loops
+        // (object_alloc, arith_loop, tail_recursion).
+        if (self.tryRegisterBoundIdent(b.lhs.*)) |r_lhs| {
+            try self.compileExpression(b.rhs);
+            try self.builder.emitOp(op, b.span);
+            try self.builder.emitU8(r_lhs);
+            return;
+        }
         // LHS into a temp register, RHS into the accumulator,
         // then `<op> <reg>` runs `acc = reg <op> acc`.
         try self.compileExpression(b.lhs);
@@ -5028,6 +5043,26 @@ pub const Compiler = struct {
         try self.compileExpression(b.rhs);
         try self.builder.emitOp(op, b.span);
         try self.builder.emitU8(r);
+    }
+
+    /// Returns the register index when `expr` is a direct
+    /// identifier reference resolving to a register-bound binding
+    /// (loop counter or register-only function param) in scope.
+    /// Returns `null` otherwise. Used by the `compileBinary`
+    /// register peephole — when LHS is already in a register,
+    /// we can skip the `Ldar; Star` save-trip the standard path
+    /// uses to free `acc` for RHS evaluation. `Op reg` is
+    /// `acc = reg op acc`, so the peephole preserves commutative
+    /// AND non-commutative ops correctly.
+    fn tryRegisterBoundIdent(self: *Compiler, expr: ast.Expression) ?u8 {
+        var e = expr;
+        while (e == .parenthesized) e = e.parenthesized.expression.*;
+        if (e != .identifier_reference) return null;
+        const name = self.bindingName(e.identifier_reference.span) catch return null;
+        const scope = self.scope orelse return null;
+        const binding = scope.resolve(name) orelse return null;
+        if (!binding.is_register) return null;
+        return binding.register;
     }
 
     fn compileLogical(self: *Compiler, l: ast.expression.LogicalExpr, tail: bool) CompileError!void {

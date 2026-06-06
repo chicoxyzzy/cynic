@@ -11072,6 +11072,115 @@ test "ctor params register: derived class super() and own writes" {
     , 7);
 }
 
+// ── Binary-op register peephole ─────────────────────────────────────
+//
+// When the LHS of a binary expression is a register-bound binding
+// (a loop counter promoted by `compileForStatement` or a
+// register-only function parameter), the compiler now skips the
+// `Ldar r_lhs; Star r_tmp` save-trip and emits `<RHS into acc>;
+// <Op> r_lhs` directly. `Op reg` semantics are `acc = reg op acc`,
+// so the result is `r_lhs op rhs` regardless of op commutativity.
+// These tests pin the semantic contract; the perf delta is the
+// headline win (object_alloc / arith_loop / tail_recursion).
+
+test "binop peephole: i + 1 in register-promoted loop" {
+    try expectScriptIntWithBuiltins(
+        \\let sum = 0;
+        \\for (let i = 0; i < 100; i++) sum = sum + (i + 1);
+        \\sum;
+        // sum(1..100) = 5050
+    , 5050);
+}
+
+test "binop peephole: i - 1 (non-commutative) preserves order" {
+    try expectScriptIntWithBuiltins(
+        \\let sum = 0;
+        \\for (let i = 0; i < 10; i++) sum = sum + (i - 1);
+        \\sum;
+        // sum(-1..8) = (-1+0+1+...+8) = 35
+    , 35);
+}
+
+test "binop peephole: i * 2 hot loop" {
+    try expectScriptIntWithBuiltins(
+        \\let sum = 0;
+        \\for (let i = 0; i < 10; i++) sum = sum + i * 2;
+        \\sum;
+        // 2 * sum(0..9) = 2 * 45 = 90
+    , 90);
+}
+
+test "binop peephole: register param + literal in function body" {
+    try expectScriptIntWithBuiltins(
+        \\function inc(x) { return x + 1; }
+        \\let r = 0;
+        \\for (let i = 0; i < 100; i++) r = r + inc(i);
+        \\r;
+        // sum(1..100) = 5050
+    , 5050);
+}
+
+test "binop peephole: register param - register param (non-commutative both)" {
+    try expectScriptIntWithBuiltins(
+        \\function sub(a, b) { return a - b; }
+        \\sub(10, 3);
+    , 7);
+}
+
+test "binop peephole: nested binary chain" {
+    try expectScriptIntWithBuiltins(
+        \\let r = 0;
+        \\for (let i = 0; i < 10; i++) r = r + (i + 1) * 2;
+        \\r;
+        // 2 * sum(1..10) = 2 * 55 = 110
+    , 110);
+}
+
+test "binop peephole: comparison op uses register binding" {
+    // Comparisons (`<`, `>`, `<=`, `>=`) are non-commutative;
+    // `lt reg` is `acc = reg < acc`, so the peephole still
+    // resolves to `lhs < rhs` correctly.
+    try expectScriptIntWithBuiltins(
+        \\let count = 0;
+        \\for (let i = 0; i < 10; i++) if (i < 5) count = count + 1;
+        \\count;
+    , 5);
+}
+
+test "binop peephole: strict equality with register binding" {
+    try expectScriptIntWithBuiltins(
+        \\let hits = 0;
+        \\for (let i = 0; i < 10; i++) if (i === 7) hits = hits + 1;
+        \\hits;
+    , 1);
+}
+
+test "binop peephole: bitwise OR with register binding" {
+    try expectScriptIntWithBuiltins(
+        \\let r = 0;
+        \\for (let i = 0; i < 5; i++) r = r | (1 << i);
+        \\r;
+        // 1 | 2 | 4 | 8 | 16 = 31
+    , 31);
+}
+
+test "binop peephole: rhs is the register, lhs is literal — falls through" {
+    try expectScriptIntWithBuiltins(
+        \\let r = 0;
+        \\for (let i = 0; i < 100; i++) r = r + (10 - i);
+        \\r;
+        // sum(10-i for i in 0..99) = 100*10 - sum(0..99) = 1000 - 4950 = -3950
+    , -3950);
+}
+
+test "binop peephole: env-slot binding falls through to standard path" {
+    try expectScriptIntWithBuiltins(
+        \\let x = 5;
+        \\const y = x + 7;
+        \\y;
+    , 12);
+}
+
 test "def_template_property: literal with mixed static + computed keys" {
     // Compiler bails template build on a literal that contains
     // any computed key (template build sees `.computed` and
