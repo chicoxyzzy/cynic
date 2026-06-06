@@ -14,13 +14,15 @@
 //! step lands.
 //!
 //! Architecture — see `docs/wasm-engine.md` for the full design and
-//! the prior art behind it. In short: validation doubles as a
-//! compiler front-end, lowering each function into a register-based
-//! internal IR (resolved immediates, register-indexed operands,
-//! resolved branch targets); the interpreter is a threaded-dispatch
-//! loop over that IR, matching Lantern's idiom. Scalar and reference
-//! registers are segregated so scalars stay untyped-fast while
-//! references are precisely GC-rooted.
+//! the prior art behind it (Titzer, OOPSLA 2022). In short: the
+//! bytecode is interpreted *in place* — never rewritten to an
+//! internal IR. Validation emits a compact O(1) side-table of branch
+//! metadata as a side-effect; the interpreter is a threaded-dispatch
+//! loop (Lantern's `continue :dispatch` idiom) over the original
+//! bytecode plus that side-table, against an unboxed value stack
+//! whose reference slots carry lazy type tags for precise GC. This
+//! gives best-in-class startup and memory — the metrics Cynic's edge
+//! target rewards — at throughput on par with rewriting interpreters.
 //!
 //! Scope is the standardized baseline used by every modern toolchain:
 //! MVP plus the universally-shipped post-MVP features
