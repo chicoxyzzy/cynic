@@ -10706,6 +10706,20 @@ test "param-register: object-literal accessor/method capturing a param forces en
     , "42|30|15");
 }
 
+test "param-register: arguments in object-literal computed key / spread forces env" {
+    // §10.4.4 — `referencesArguments` skipped object-literal computed keys
+    // and `.spread` members, so a function that touches `arguments` ONLY in
+    // those positions was wrongly param-register-promoted and never reified
+    // its arguments object (the body then threw ReferenceError / read junk).
+    // The computed key and the spread argument are both evaluated in the
+    // enclosing scope, so they DO reference the outer `arguments`.
+    try expectScriptStringWithBuiltins(
+        \\function key(a) { return { [arguments[0]]: a }; }
+        \\function spread(a, b) { const o = { ...arguments }; return o[1]; }
+        \\JSON.stringify(key("k")) + "|" + String(spread(10, 20));
+    , "{\"k\":\"k\"}|20");
+}
+
 test "sta_property transition IC: polymorphic receivers fall back cleanly" {
     // Same `this.k = v` call site reached from two different
     // ctors. Each ctor writes a different key first, so the

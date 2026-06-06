@@ -651,3 +651,16 @@ test "eval: gate OPEN, genuine parse error still throws SyntaxError" {
     };
     try testing.expect(v.isInt32() and v.asInt32() == 1);
 }
+
+test "param-register: direct eval in object-literal computed key keeps env" {
+    // §19.2.1 — `expressionHasDirectEvalCall` skipped object-literal
+    // `.method`/`.spread` members and the `.property` computed key, so
+    // `function f(a){ return { [eval("a")]: 7 }; }` was wrongly
+    // param-register-promoted with its environment elided — the direct eval
+    // (evaluated in the enclosing scope) then could not resolve `a` and
+    // threw ReferenceError. Reading the value back proves the env survived.
+    try expectIntAllow(
+        \\function f(a) { const o = { [eval("a")]: 7 }; return o[a]; }
+        \\f(42);
+    , 7);
+}

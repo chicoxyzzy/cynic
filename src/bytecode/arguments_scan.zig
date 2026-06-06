@@ -155,8 +155,17 @@ pub fn expressionReferencesArguments(source: []const u8, e: *const Expression) b
         },
         .object_literal => |o| blk: {
             for (o.properties) |p| switch (p) {
-                .property => |prop| if (expressionReferencesArguments(source, &prop.value)) break :blk true,
-                else => {},
+                .property => |prop| {
+                    if (expressionReferencesArguments(source, &prop.value)) break :blk true;
+                    // A computed key is evaluated in the enclosing scope, so
+                    // `{ [arguments[0]]: v }` references the outer `arguments`.
+                    if (prop.key == .computed and expressionReferencesArguments(source, prop.key.computed)) break :blk true;
+                },
+                // A method body is the method's own scope (its own
+                // `arguments`); only its computed key is evaluated in the
+                // enclosing scope.
+                .method => |m| if (m.key == .computed and expressionReferencesArguments(source, m.key.computed)) break :blk true,
+                .spread => |sp| if (expressionReferencesArguments(source, sp.argument)) break :blk true,
             };
             break :blk false;
         },

@@ -209,8 +209,16 @@ fn expressionHasDirectEvalCall(source: []const u8, e: *const Expression) bool {
         },
         .object_literal => |o| blk: {
             for (o.properties) |p| switch (p) {
-                .property => |prop| if (expressionHasDirectEvalCall(source, &prop.value)) break :blk true,
-                else => {},
+                .property => |prop| {
+                    if (expressionHasDirectEvalCall(source, &prop.value)) break :blk true;
+                    // A computed key is evaluated in the enclosing scope, so a
+                    // direct `eval` there reads the outer function's bindings.
+                    if (prop.key == .computed and expressionHasDirectEvalCall(source, prop.key.computed)) break :blk true;
+                },
+                // A method body is the method's own scope; only its computed
+                // key is evaluated in the enclosing scope.
+                .method => |m| if (m.key == .computed and expressionHasDirectEvalCall(source, m.key.computed)) break :blk true,
+                .spread => |sp| if (expressionHasDirectEvalCall(source, sp.argument)) break :blk true,
             };
             break :blk false;
         },
