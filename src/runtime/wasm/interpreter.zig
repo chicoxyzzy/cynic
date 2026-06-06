@@ -29,6 +29,7 @@ pub const TrapError = error{
     Unreachable,
     IntegerDivideByZero,
     IntegerOverflow,
+    OutOfBoundsMemoryAccess,
     CallStackExhausted,
     ValueStackOverflow,
     UnsupportedImportCall,
@@ -39,10 +40,25 @@ pub const Error = TrapError || validator.ValidateError || error{ NoSuchExport, O
 const STACK_CELLS = 1 << 16;
 const MAX_FRAMES = 1 << 12;
 
+/// WebAssembly linear-memory page size (§2.5.2): 64 KiB.
+pub const PAGE_SIZE = 1 << 16;
+
 /// A runtime global cell.
 const Global = struct {
     value: u64,
     mutable: bool,
+};
+
+/// Linear memory: a byte-addressable, page-granular buffer. (The
+/// ArrayBuffer aliasing the JS API exposes arrives with that step;
+/// here it is a plain owned buffer.)
+pub const Memory = struct {
+    data: []u8,
+    max_pages: ?u32,
+
+    fn pages(self: *const Memory) u32 {
+        return @intCast(self.data.len / PAGE_SIZE);
+    }
 };
 
 /// An instantiated module: its validated functions plus runtime state.
@@ -55,9 +71,14 @@ pub const Instance = struct {
     /// Number of imported functions preceding the defined ones in the
     /// function index space.
     func_import_count: u32,
+    /// The module's single linear memory (multi-memory is post-1.0).
+    memory: ?Memory,
+    /// Owns `globals` and `memory.data`; used to grow and free them.
+    gpa: std.mem.Allocator,
 
-    pub fn deinit(self: *Instance, allocator: std.mem.Allocator) void {
-        allocator.free(self.globals);
+    pub fn deinit(self: *Instance) void {
+        self.gpa.free(self.globals);
+        if (self.memory) |m| self.gpa.free(m.data);
     }
 
     /// Resolve a function-index-space entry to a defined function, or
@@ -90,11 +111,23 @@ pub fn instantiate(
         globals[i] = .{ .value = evalConstExpr(g.init_expr), .mutable = g.type.mut == .mutable };
     }
 
+    // Create the single defined linear memory (if any), zero-filled to
+    // its minimum size. Imported memories are not yet wired.
+    var memory: ?Memory = null;
+    if (module.mems.len > 0) {
+        const lim = module.mems[0].limits;
+        const bytes = try allocator.alloc(u8, @as(usize, lim.min) * PAGE_SIZE);
+        @memset(bytes, 0);
+        memory = .{ .data = bytes, .max_pages = lim.max };
+    }
+
     return .{
         .module = module,
         .funcs = funcs,
         .globals = globals,
         .func_import_count = func_imports,
+        .memory = memory,
+        .gpa = allocator,
     };
 }
 
@@ -359,6 +392,38 @@ fn run(ip: *Interp) Error!void {
                     try ip.pushI64(try arithI64(op, a, b));
                 },
 
+                // ── linear memory ───────────────────────────────────
+                .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u, .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u => {
+                    const ea = memEa(ip, body, &pc);
+                    try execLoad(ip, op, ea);
+                },
+                .i32_store, .i32_store8, .i32_store16, .i64_store, .i64_store8, .i64_store16, .i64_store32 => {
+                    try execStore(ip, op, body, &pc);
+                },
+                .memory_size => {
+                    pc += 1; // reserved memory index
+                    const mem = ip.instance.memory.?;
+                    try ip.pushI32(@bitCast(mem.pages()));
+                },
+                .memory_grow => {
+                    pc += 1; // reserved memory index
+                    try ip.pushI32(try memGrow(ip));
+                },
+                .prefix_fc => {
+                    const sub = readU32(body, &pc);
+                    switch (sub) {
+                        10 => { // memory.copy
+                            pc += 2; // dst, src reserved memidx
+                            try memCopy(ip);
+                        },
+                        11 => { // memory.fill
+                            pc += 1; // reserved memidx
+                            try memFill(ip);
+                        },
+                        else => return error.UnsupportedImportCall,
+                    }
+                },
+
                 else => return error.UnsupportedImportCall, // unreachable: validation rejects
             }
         };
@@ -377,6 +442,179 @@ inline fn moveValues(ip: *Interp, e: code_mod.BranchEntry) void {
         ip.stack[ip.sp - keep - drop + i] = ip.stack[ip.sp - keep + i];
     }
     ip.sp -= drop;
+}
+
+// ── linear memory ───────────────────────────────────────────────────
+
+/// Read a memarg (align, offset) and pop the i32 base address, giving
+/// the effective byte address (§4.4.7).
+inline fn memEa(ip: *Interp, body: []const u8, pc: *usize) u64 {
+    _ = readU32(body, pc); // align hint (ignored)
+    const offset = readU32(body, pc);
+    const addr: u32 = @bitCast(ip.popI32());
+    return @as(u64, addr) + offset;
+}
+
+inline fn checkBounds(len: usize, ea: u64, n: u64) TrapError!void {
+    if (ea + n > len) return error.OutOfBoundsMemoryAccess;
+}
+
+fn execLoad(ip: *Interp, op: Op, ea: u64) TrapError!void {
+    const data = ip.instance.memory.?.data;
+    const e: usize = @intCast(ea);
+    switch (op) {
+        .i32_load => {
+            try checkBounds(data.len, ea, 4);
+            try ip.pushI32(@bitCast(std.mem.readInt(u32, data[e..][0..4], .little)));
+        },
+        .i32_load8_s => {
+            try checkBounds(data.len, ea, 1);
+            try ip.pushI32(@as(i8, @bitCast(data[e])));
+        },
+        .i32_load8_u => {
+            try checkBounds(data.len, ea, 1);
+            try ip.pushI32(@intCast(data[e]));
+        },
+        .i32_load16_s => {
+            try checkBounds(data.len, ea, 2);
+            try ip.pushI32(@as(i16, @bitCast(std.mem.readInt(u16, data[e..][0..2], .little))));
+        },
+        .i32_load16_u => {
+            try checkBounds(data.len, ea, 2);
+            try ip.pushI32(@intCast(std.mem.readInt(u16, data[e..][0..2], .little)));
+        },
+        .i64_load => {
+            try checkBounds(data.len, ea, 8);
+            try ip.pushI64(@bitCast(std.mem.readInt(u64, data[e..][0..8], .little)));
+        },
+        .i64_load8_s => {
+            try checkBounds(data.len, ea, 1);
+            try ip.pushI64(@as(i8, @bitCast(data[e])));
+        },
+        .i64_load8_u => {
+            try checkBounds(data.len, ea, 1);
+            try ip.pushI64(@intCast(data[e]));
+        },
+        .i64_load16_s => {
+            try checkBounds(data.len, ea, 2);
+            try ip.pushI64(@as(i16, @bitCast(std.mem.readInt(u16, data[e..][0..2], .little))));
+        },
+        .i64_load16_u => {
+            try checkBounds(data.len, ea, 2);
+            try ip.pushI64(@intCast(std.mem.readInt(u16, data[e..][0..2], .little)));
+        },
+        .i64_load32_s => {
+            try checkBounds(data.len, ea, 4);
+            try ip.pushI64(@as(i32, @bitCast(std.mem.readInt(u32, data[e..][0..4], .little))));
+        },
+        .i64_load32_u => {
+            try checkBounds(data.len, ea, 4);
+            try ip.pushI64(@intCast(std.mem.readInt(u32, data[e..][0..4], .little)));
+        },
+        else => unreachable,
+    }
+}
+
+fn execStore(ip: *Interp, op: Op, body: []const u8, pc: *usize) TrapError!void {
+    switch (op) {
+        .i32_store, .i32_store8, .i32_store16 => {
+            const v: u32 = @bitCast(ip.popI32());
+            const ea = memEa(ip, body, pc);
+            const data = ip.instance.memory.?.data;
+            const e: usize = @intCast(ea);
+            switch (op) {
+                .i32_store => {
+                    try checkBounds(data.len, ea, 4);
+                    std.mem.writeInt(u32, data[e..][0..4], v, .little);
+                },
+                .i32_store8 => {
+                    try checkBounds(data.len, ea, 1);
+                    data[e] = @truncate(v);
+                },
+                .i32_store16 => {
+                    try checkBounds(data.len, ea, 2);
+                    std.mem.writeInt(u16, data[e..][0..2], @truncate(v), .little);
+                },
+                else => unreachable,
+            }
+        },
+        .i64_store, .i64_store8, .i64_store16, .i64_store32 => {
+            const v: u64 = @bitCast(ip.popI64());
+            const ea = memEa(ip, body, pc);
+            const data = ip.instance.memory.?.data;
+            const e: usize = @intCast(ea);
+            switch (op) {
+                .i64_store => {
+                    try checkBounds(data.len, ea, 8);
+                    std.mem.writeInt(u64, data[e..][0..8], v, .little);
+                },
+                .i64_store8 => {
+                    try checkBounds(data.len, ea, 1);
+                    data[e] = @truncate(v);
+                },
+                .i64_store16 => {
+                    try checkBounds(data.len, ea, 2);
+                    std.mem.writeInt(u16, data[e..][0..2], @truncate(v), .little);
+                },
+                .i64_store32 => {
+                    try checkBounds(data.len, ea, 4);
+                    std.mem.writeInt(u32, data[e..][0..4], @truncate(v), .little);
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
+}
+
+/// memory.grow: returns the previous page count, or -1 if the request
+/// exceeds the maximum or allocation fails (§4.4.7).
+fn memGrow(ip: *Interp) TrapError!i32 {
+    const delta: u32 = @bitCast(ip.popI32());
+    const mem = &ip.instance.memory.?;
+    const old_pages = mem.pages();
+    const new_pages: u64 = @as(u64, old_pages) + delta;
+    if (new_pages > 65536) return -1; // memory32 hard cap (4 GiB)
+    if (mem.max_pages) |mx| {
+        if (new_pages > mx) return -1;
+    }
+    const old_len = mem.data.len;
+    const new_len: usize = @as(usize, @intCast(new_pages)) * PAGE_SIZE;
+    const grown = ip.instance.gpa.realloc(mem.data, new_len) catch return -1;
+    @memset(grown[old_len..], 0);
+    mem.data = grown;
+    return @bitCast(old_pages);
+}
+
+fn memCopy(ip: *Interp) TrapError!void {
+    const n: u32 = @bitCast(ip.popI32());
+    const src: u32 = @bitCast(ip.popI32());
+    const dst: u32 = @bitCast(ip.popI32());
+    const data = ip.instance.memory.?.data;
+    try checkBounds(data.len, src, n);
+    try checkBounds(data.len, dst, n);
+    if (n == 0) return;
+    // memmove semantics for overlapping ranges.
+    if (dst <= src) {
+        var i: usize = 0;
+        while (i < n) : (i += 1) data[dst + i] = data[src + i];
+    } else {
+        var i: usize = n;
+        while (i > 0) {
+            i -= 1;
+            data[dst + i] = data[src + i];
+        }
+    }
+}
+
+fn memFill(ip: *Interp) TrapError!void {
+    const n: u32 = @bitCast(ip.popI32());
+    const val: u32 = @bitCast(ip.popI32());
+    const dst: u32 = @bitCast(ip.popI32());
+    const data = ip.instance.memory.?.data;
+    try checkBounds(data.len, dst, n);
+    if (n == 0) return;
+    @memset(data[dst..][0..n], @truncate(val));
 }
 
 // ── immediate readers (advance `pc`) ────────────────────────────────

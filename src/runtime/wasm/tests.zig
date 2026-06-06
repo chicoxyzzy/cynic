@@ -24,7 +24,7 @@ fn runI32(bytes: []const u8, name: []const u8, args: []const i32) !i32 {
     mp.* = m;
 
     var instance = try interp.instantiate(a, testing.allocator, mp);
-    defer instance.deinit(testing.allocator);
+    defer instance.deinit();
 
     const fidx = funcExport(mp, name) orelse return error.NoSuchExport;
 
@@ -121,6 +121,67 @@ fn runFunc(
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const bytes = try buildFunc(arena.allocator(), params, results, code_body, name);
+    return runI32(bytes, name, args);
+}
+
+/// Like `buildFunc`, but also declares a linear memory of `min_pages`.
+fn buildMemFunc(
+    a: std.mem.Allocator,
+    params: []const u8,
+    results: []const u8,
+    code_body: []const u8,
+    export_name: []const u8,
+    min_pages: u32,
+) ![]const u8 {
+    var out: List = .empty;
+    try out.appendSlice(a, &preamble);
+
+    var ty: List = .empty;
+    try uleb(a, &ty, 1);
+    try ty.append(a, 0x60);
+    try uleb(a, &ty, params.len);
+    try ty.appendSlice(a, params);
+    try uleb(a, &ty, results.len);
+    try ty.appendSlice(a, results);
+    try section(a, &out, 1, ty.items);
+
+    try section(a, &out, 3, &.{ 0x01, 0x00 });
+
+    // memory section: one memory, limits {min}.
+    var me: List = .empty;
+    try uleb(a, &me, 1);
+    try me.append(a, 0x00); // limits flag: min only
+    try uleb(a, &me, min_pages);
+    try section(a, &out, 5, me.items);
+
+    var ex: List = .empty;
+    try uleb(a, &ex, 1);
+    try uleb(a, &ex, export_name.len);
+    try ex.appendSlice(a, export_name);
+    try ex.append(a, 0x00);
+    try ex.append(a, 0x00);
+    try section(a, &out, 7, ex.items);
+
+    var co: List = .empty;
+    try uleb(a, &co, 1);
+    try uleb(a, &co, code_body.len);
+    try co.appendSlice(a, code_body);
+    try section(a, &out, 10, co.items);
+
+    return out.items;
+}
+
+fn runMemFunc(
+    params: []const u8,
+    results: []const u8,
+    code_body: []const u8,
+    name: []const u8,
+    min_pages: u32,
+    args: []const i32,
+) !i32 {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try buildMemFunc(arena.allocator(), params, results, code_body, name, min_pages);
     return runI32(bytes, name, args);
 }
 
@@ -442,4 +503,93 @@ test "wasm interp: i32.div_s computes and traps" {
     try testing.expectEqual(@as(i32, -4), try runFunc(&.{ 0x7f, 0x7f }, &.{0x7f}, &div_code, "div", &.{ 8, -2 }));
     try testing.expectError(error.IntegerDivideByZero, runFunc(&.{ 0x7f, 0x7f }, &.{0x7f}, &div_code, "div", &.{ 1, 0 }));
     try testing.expectError(error.IntegerOverflow, runFunc(&.{ 0x7f, 0x7f }, &.{0x7f}, &div_code, "div", &.{ -2147483648, -1 }));
+}
+
+// ── execution: linear memory ────────────────────────────────────────
+
+// store(addr,val) then load(addr): local.get 0; local.get 1; i32.store;
+// local.get 0; i32.load.  memargs are (align=2, offset=0).
+const store_load_code = [_]u8{
+    0x00,
+    0x20, 0x00, // local.get 0 (addr)
+    0x20, 0x01, // local.get 1 (val)
+    0x36, 0x02, 0x00, // i32.store align=2 offset=0
+    0x20, 0x00, // local.get 0
+    0x28, 0x02, 0x00, // i32.load align=2 offset=0
+    0x0b,
+};
+
+test "wasm interp: i32.store then i32.load round-trips" {
+    try testing.expectEqual(@as(i32, 0x12345678), try runMemFunc(&.{ 0x7f, 0x7f }, &.{0x7f}, &store_load_code, "f", 1, &.{ 8, 0x12345678 }));
+    try testing.expectEqual(@as(i32, -1), try runMemFunc(&.{ 0x7f, 0x7f }, &.{0x7f}, &store_load_code, "f", 1, &.{ 65532, -1 }));
+}
+
+// store8(addr,val); load8_u(addr): exercises sub-width access.
+const store8_code = [_]u8{
+    0x00,
+    0x20, 0x00, 0x20, 0x01, 0x3a, 0x00, 0x00, // i32.store8
+    0x20, 0x00, 0x2d, 0x00, 0x00, // i32.load8_u
+    0x0b,
+};
+
+test "wasm interp: i32.store8 / load8_u keep only the low byte" {
+    try testing.expectEqual(@as(i32, 0xAB), try runMemFunc(&.{ 0x7f, 0x7f }, &.{0x7f}, &store8_code, "f", 1, &.{ 3, 0x12AB }));
+}
+
+// memory.size (in pages).
+const size_code = [_]u8{ 0x00, 0x3f, 0x00, 0x0b };
+
+test "wasm interp: memory.size reports the page count" {
+    try testing.expectEqual(@as(i32, 1), try runMemFunc(&.{}, &.{0x7f}, &size_code, "f", 1, &.{}));
+    try testing.expectEqual(@as(i32, 3), try runMemFunc(&.{}, &.{0x7f}, &size_code, "f", 3, &.{}));
+}
+
+// memory.grow(delta) returns the previous page count.
+const grow_code = [_]u8{ 0x00, 0x20, 0x00, 0x40, 0x00, 0x0b };
+
+test "wasm interp: memory.grow returns the old size" {
+    try testing.expectEqual(@as(i32, 1), try runMemFunc(&.{0x7f}, &.{0x7f}, &grow_code, "f", 1, &.{2}));
+    try testing.expectEqual(@as(i32, 2), try runMemFunc(&.{0x7f}, &.{0x7f}, &grow_code, "f", 2, &.{0}));
+}
+
+// memory.fill(0, val, 4); i32.load8_u(0).
+const fill_code = [_]u8{
+    0x00,
+    0x41, 0x00, // i32.const 0 (dst)
+    0x20, 0x00, // local.get 0 (val)
+    0x41, 0x04, // i32.const 4 (n)
+    0xfc, 0x0b, 0x00, // memory.fill
+    0x41, 0x00, 0x2d, 0x00, 0x00, // i32.load8_u 0
+    0x0b,
+};
+
+test "wasm interp: memory.fill writes the low byte" {
+    try testing.expectEqual(@as(i32, 0xCD), try runMemFunc(&.{0x7f}, &.{0x7f}, &fill_code, "f", 1, &.{0xCD}));
+}
+
+// store at 0; memory.copy(32, 0, 4); load at 32.
+// (32 keeps the SLEB constant to a single byte; 64 would be read as -64.)
+const copy_code = [_]u8{
+    0x00,
+    0x41, 0x00, 0x20, 0x00, 0x36, 0x02, 0x00, // i32.store [0] = val
+    0x41, 0x20, // i32.const 32 (dst)
+    0x41, 0x00, // i32.const 0 (src)
+    0x41, 0x04, // i32.const 4 (n)
+    0xfc, 0x0a, 0x00, 0x00, // memory.copy
+    0x41, 0x20, 0x28, 0x02, 0x00, // i32.load [32]
+    0x0b,
+};
+
+test "wasm interp: memory.copy moves bytes" {
+    try testing.expectEqual(@as(i32, 0x0BADF00D), try runMemFunc(&.{0x7f}, &.{0x7f}, &copy_code, "f", 1, &.{0x0BADF00D}));
+}
+
+// store(addr, 0): traps when addr+4 exceeds the single page.
+const oob_code = [_]u8{
+    0x00, 0x20, 0x00, 0x41, 0x00, 0x36, 0x02, 0x00, 0x41, 0x00, 0x0b,
+};
+
+test "wasm interp: out-of-bounds store traps" {
+    try testing.expectEqual(@as(i32, 0), try runMemFunc(&.{0x7f}, &.{0x7f}, &oob_code, "f", 1, &.{65532}));
+    try testing.expectError(error.OutOfBoundsMemoryAccess, runMemFunc(&.{0x7f}, &.{0x7f}, &oob_code, "f", 1, &.{65533}));
 }
