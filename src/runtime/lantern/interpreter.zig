@@ -257,9 +257,14 @@ threadlocal var stack_fallback_base: usize = 0;
 /// platform without OS introspection doesn't re-probe every entry.
 threadlocal var stack_bounds_probed: bool = false;
 
-/// True when the native stack is within the red zone — `runFrames`
+/// True when the native stack is within the red zone — the caller
 /// must throw `RangeError` rather than recurse one level deeper.
-inline fn nearNativeStackLimit() bool {
+/// `pub` so other recursive-descent subsystems that run on the same
+/// native stack (the JSON parser / reviver walk in `builtins/json.zig`,
+/// and any future deeply-recursive native) share one consistent,
+/// stack-size-adaptive bound instead of inventing their own depth
+/// magic number.
+pub inline fn nativeStackNearLimit() bool {
     var probe: u8 = undefined;
     const sp = @intFromPtr(&probe);
     if (stack_limit_addr != 0) return sp <= stack_limit_addr;
@@ -1132,7 +1137,7 @@ pub fn runFrames(
     // faults the process; throw `RangeError` while there's still room
     // to unwind. The caller's `defer` releases `frames`. See the
     // `nearNativeStackLimit` block above for the bounds strategy.
-    if (nearNativeStackLimit()) {
+    if (nativeStackNearLimit()) {
         const ex = try makeRangeError(realm, "Maximum call stack size exceeded");
         return .{ .thrown = ex };
     }

@@ -894,6 +894,11 @@ pub fn parseDefaultExport(realm: *Realm, source: []const u8) error{ OutOfMemory,
         // parse, so a NativeThrew can only mean a downstream
         // allocator failed under the parse — surface as OOM.
         error.NativeThrew => return error.OutOfMemory,
+        // Deeply nested JSON module — the import fails to load
+        // rather than crashing. Surface as a malformed-module
+        // error (this path returns a Zig error set, not a JS
+        // exception).
+        error.StackOverflow => return error.Malformed,
         error.Malformed => return error.Malformed,
     };
     parser.skipWs();
@@ -932,6 +937,15 @@ fn jsonParse(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     const parsed = parser.parseValue() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => return error.NativeThrew,
+        error.StackOverflow => {
+            // Deeply nested JSON exhausted the native parse stack.
+            // V8 / JSC throw `RangeError("Maximum call stack size
+            // exceeded")` here; match that (a catchable RangeError,
+            // never a crash).
+            const ex = intrinsics.newRangeError(realm, "Maximum call stack size exceeded") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
         error.Malformed => {
             // §25.5.1 step 5 — malformed input becomes a real
             // SyntaxError so `assert.throws(SyntaxError, …)`
@@ -1317,7 +1331,7 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     return true;
 }
 
-const JsonError = error{ Malformed, OutOfMemory, NativeThrew };
+const JsonError = error{ Malformed, OutOfMemory, NativeThrew, StackOverflow };
 
 /// Per-parsed-value source-tracking tree built alongside the
 /// `Value` tree during JSON.parse. Used by §25.5.1.1
@@ -1412,6 +1426,16 @@ const JsonParser = struct {
     }
 
     fn parseValue(self: *JsonParser) JsonError!ParseResult {
+        // §25.5.1 — the JSON grammar is recursive (`parseValue` →
+        // `parseObject`/`parseArray` → `parseValue`), so deeply
+        // nested input (`[[[[…]]]]`) recurses on the native stack.
+        // Untrusted JSON could otherwise overflow it and crash the
+        // process; bound it with the shared native-stack guard and
+        // surface a catchable `RangeError` (what V8 throws here)
+        // rather than a fault.
+        if (@import("../lantern/interpreter.zig").nativeStackNearLimit()) {
+            return error.StackOverflow;
+        }
         self.skipWs();
         const c = self.peek() orelse return error.Malformed;
         switch (c) {

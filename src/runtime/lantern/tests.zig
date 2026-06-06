@@ -11069,6 +11069,56 @@ test "JSON.stringify: circular structure still throws after key drops" {
     );
 }
 
+// ── JSON.parse deep-nesting stack guard ─────────────────────────────
+//
+// `JSON.parse` is recursive descent (`parseValue` → `parseArray` /
+// `parseObject` → `parseValue`). Deeply nested untrusted input
+// (`[[[[…]]]]`) recursed on the native stack unbounded and crashed
+// the process. The shared `nativeStackNearLimit` guard now surfaces
+// a catchable `RangeError` (matching V8 / JSC) instead of faulting.
+
+test "JSON.parse: deeply nested array throws RangeError, not a crash" {
+    try expectScriptStringWithBuiltins(
+        \\const depth = 100000;
+        \\const src = "[".repeat(depth) + "]".repeat(depth);
+        \\let saw = 'none';
+        \\try { JSON.parse(src); } catch (e) { saw = e.constructor.name; }
+        \\saw;
+    , "RangeError");
+}
+
+test "JSON.parse: deeply nested object throws RangeError" {
+    try expectScriptStringWithBuiltins(
+        \\const depth = 100000;
+        \\let src = '';
+        \\for (let i = 0; i < depth; i++) src += '{"a":';
+        \\src += '1';
+        \\for (let i = 0; i < depth; i++) src += '}';
+        \\let saw = 'none';
+        \\try { JSON.parse(src); } catch (e) { saw = e.constructor.name; }
+        \\saw;
+    , "RangeError");
+}
+
+test "JSON.parse: moderately nested input still parses correctly" {
+    // The guard must NOT trip on legitimate nesting. 200 levels is
+    // deep for real JSON yet far within the native stack budget.
+    try expectScriptIntWithBuiltins(
+        \\const depth = 200;
+        \\const src = "[".repeat(depth) + "0" + "]".repeat(depth);
+        \\let v = JSON.parse(src);
+        \\let n = 0;
+        \\while (Array.isArray(v)) { v = v[0]; n++; }
+        \\n;
+    , 200);
+}
+
+test "JSON.parse: shallow nested round-trips through stringify" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify(JSON.parse('[1,[2,[3,{"a":4}]]]'));
+    , "[1,[2,[3,{\"a\":4}]]]");
+}
+
 // ── Class ctor + method param-register promotion ────────────────────
 //
 // `paramsCanBeRegisters` was wired into `compileFunctionTemplateExtNamed`
