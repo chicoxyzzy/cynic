@@ -65,6 +65,16 @@ pub fn parseLeftHandSideEntry(p: *Parser) ParseError!Expression {
 /// the spec's `CoverParenthesizedExpressionAndArrowParameterList`
 /// trick implemented post hoc.
 fn parseAssignment(p: *Parser) ParseError!Expression {
+    // Native-stack guard. Arrow chains (`() => () => … => 1`) recurse
+    // here — each concise arrow body re-enters `parseAssignment` —
+    // BEFORE descending to `parseUnary`, so the `parseUnary` guard
+    // alone misses them. Guarding the AssignmentExpression entry too
+    // bounds arrow nesting (and is redundant-but-harmless for the
+    // structural nesting `parseUnary` already covers).
+    if (stack_guard.nearLimit()) {
+        try p.report(.too_deeply_nested, p.peek().span);
+        return error.ParseError;
+    }
     // §15.5.4: `yield` is a YieldExpression at AssignmentExpression level
     // when inside a generator body. Cynic is strict-only so `yield` is
     // always tokenized as `kw_yield`.

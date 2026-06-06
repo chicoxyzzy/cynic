@@ -716,6 +716,18 @@ pub const Parser = struct {
     /// an ObjectBindingPattern, `[` an ArrayBindingPattern, an identifier
     /// is a plain BindingIdentifier.
     pub fn parseBindingTarget(self: *Parser) ParseError!stmt_mod.BindingTarget {
+        // Native-stack guard for nested destructuring patterns
+        // (`var [[[[x]]]] = …`, `({a:{a:{a:…}}}) = …`). Binding
+        // patterns parse through their own recursion
+        // (`parseObjectPattern` / `parseArrayPattern` →
+        // `parseBindingElement` → `parseBindingTarget`), separate
+        // from the `parseUnary` / `parseAssignment` expression
+        // choke points, so they need their own guard. See
+        // `src/stack_guard.zig`.
+        if (stack_guard.nearLimit()) {
+            try self.report(.too_deeply_nested, self.current.span);
+            return error.ParseError;
+        }
         switch (self.current.kind) {
             .lbrace => return .{ .object = try self.parseObjectPattern() },
             .lbracket => return .{ .array = try self.parseArrayPattern() },

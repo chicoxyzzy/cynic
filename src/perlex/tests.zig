@@ -455,6 +455,27 @@ test "perlex: an unmatched `)` is a syntax error (§22.2.1)" {
     try expectMatch("(?:a)b", "ab", "ab");
 }
 
+test "perlex: deeply nested groups hit the stack guard (no crash)" {
+    // §22.2.1 Pattern is recursive (`parseGroup` → `parseDisjunction`
+    // per `(`). A deeply nested untrusted pattern
+    // (`new RegExp("(".repeat(1e5)+…)`) would overflow the host stack
+    // and crash; the shared native-stack guard surfaces a SyntaxError
+    // instead (what V8 / JSC give for stack-exhausting patterns).
+    // Build the pattern at runtime — a literal this large isn't
+    // practical, and `expectCompile` takes a `[]const u8`.
+    const depth = 200_000;
+    const buf = try testing.allocator.alloc(u8, depth * 2 + 1);
+    defer testing.allocator.free(buf);
+    @memset(buf[0..depth], '(');
+    buf[depth] = 'a';
+    @memset(buf[depth + 1 ..], ')');
+    try expectCompile(buf, .syntax_error);
+    // Moderate nesting must still compile + match (no false-trip).
+    // Render is the overall match followed by each of the 4 capture
+    // groups → five "a"s.
+    try expectMatch("((((a))))", "a", "a,a,a,a,a");
+}
+
 test "perlex: anchors are input-relative" {
     try expectMatch("^a$", "a", "a");
     try expectNoMatch("^a$", "ab");

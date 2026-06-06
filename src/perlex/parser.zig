@@ -282,6 +282,15 @@ const Parser = struct {
 
     /// Disjunction :: Alternative ( `|` Alternative )*
     fn parseDisjunction(self: *Parser) ParseError!*Node {
+        // Native-stack guard. Nested groups (`(((…)))`) recurse
+        // through here — each `(` group's body re-enters
+        // `parseDisjunction` (`parseAtom` → `parseGroup` →
+        // `parseDisjunction`). Deeply nested untrusted patterns
+        // (`new RegExp("(".repeat(1e5)+…)`) would otherwise overflow
+        // the host stack and crash; surface the regex `SyntaxError`
+        // (what V8 / JSC give for stack-exhausting patterns) instead.
+        // Shares the engine-wide bound — see `src/stack_guard.zig`.
+        if (@import("../stack_guard.zig").nearLimit()) return error.SyntaxError;
         var alts: std.ArrayListUnmanaged(*Node) = .empty;
         try alts.append(self.a, try self.parseAlternative());
         while (self.peek() == '|') {

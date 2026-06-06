@@ -4018,3 +4018,40 @@ test "Parser: moderate nesting parses without false-tripping the guard" {
     _ = try parseScript(arena.allocator(), src, &diags);
     try testing.expect(!hasErr(diags.items));
 }
+
+test "Parser: deeply nested arrow chain hits the stack guard" {
+    // `() => () => … => 1` — arrows recurse through `parseAssignment`
+    // (each concise body re-enters it) without descending to
+    // `parseUnary`, so the AssignmentExpression-entry guard catches
+    // them.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const depth = 200_000;
+    const arrows = try repeatAlloc(arena.allocator(), "()=>", depth);
+    const src = try std.mem.concat(arena.allocator(), u8, &.{ arrows, "1;" });
+    try expectTooDeeplyNested(src);
+}
+
+test "Parser: deeply nested destructuring pattern hits the stack guard" {
+    // `var [[[[x]]]] = 0` — binding patterns parse through their own
+    // recursion (`parseBindingTarget` → `parseArrayPattern` →
+    // `parseBindingElement` → `parseBindingTarget`), separate from the
+    // expression choke points, so they need their own guard.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const depth = 200_000;
+    const open = try repeatAlloc(arena.allocator(), "[", depth);
+    const close = try repeatAlloc(arena.allocator(), "]", depth);
+    const src = try std.mem.concat(arena.allocator(), u8, &.{ "var ", open, "x", close, "=0;" });
+    try expectTooDeeplyNested(src);
+}
+
+test "Parser: moderate arrow + destructuring nesting parses cleanly" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    const arrows = try repeatAlloc(arena.allocator(), "()=>", 300);
+    const src = try std.mem.concat(arena.allocator(), u8, &.{ arrows, "1;" });
+    _ = try parseScript(arena.allocator(), src, &diags);
+    try testing.expect(!hasErr(diags.items));
+}
