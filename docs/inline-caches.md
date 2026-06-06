@@ -163,6 +163,40 @@ All on `origin/main`:
   `proto_revision_counter` to catch deeper-chain mutations.
   **`class_instantiate` p50 -20.9 % (116.24 → 91.99 ms).**
 
+- `fb952c5` — `sta_property` transition IC: §10.1.9 epoch guard, plus
+  the per-prototype-validity-cell decision. The `(proto, proto_shape,
+  proto_rev)` snapshot above misses one §10.1.9 case: a non-writable
+  data property (or accessor) installed on a *dictionary-mode* proto
+  (null shape → `proto_shape` unchanged) or a *non-immediate* proto
+  (not snapshotted) would let the fast path keep stamping an own slot
+  where `OrdinarySetWithOwnDescriptor` mandates a `TypeError`. Closed
+  with a realm-wide `heap.proto_struct_epoch`, bumped at the structural
+  funnels in `object.zig` (accessor install, non-default
+  `defineProperty`, `demoteFromShape`, named `deleteOwn`); the cell
+  snapshots it as `guard_epoch` and the hot path adds one `u64 ==`.
+
+  **Why a global epoch and not per-prototype validity cells**
+  (V8/JSC-style; the deliberately-deferred follow-up). The global
+  counter is maximally coarse — *any* structural mutation to *any*
+  object invalidates *every* transition cell — so it looks like a prime
+  candidate for fine-grained per-proto cells. A deterministic
+  measurement says no. Counting fast-path hits vs epoch-forced
+  fallbacks over a 2,000,000-iteration loop: `new C()` alone →
+  1,999,999 hits / 0 fallbacks; the same loop with one non-writable
+  `defineProperty` on an *unrelated* (non-prototype) object per
+  iteration → 0 hits / 1,999,999 fallbacks — a total IC kill. Yet the
+  wall-time gap between that full-thrash loop and an identical
+  `defineProperty(writable:true)` loop (0 fallbacks, same machinery) is
+  within the ±100 ms run-to-run noise: 2 M forced refills add ≈0 ms.
+  The reason — every epoch bump originates in a structural mutation
+  (~600 ns) that dwarfs the <50 ns refill it triggers, and under
+  hardened-by-default frozen primordials such mutations are rare
+  post-init anyway. Per-proto cells would convert those fallbacks back
+  to hits (sub-noise saving) while taxing *every* common-case fast hit
+  with a proto-chain validity walk plus per-cell memory + GC. Net loss
+  for Cynic's target; revisit only if a real workload shows
+  transition-IC refills surfacing above noise.
+
 ## Architecture decisions
 
 - **`ShapeTree` lives on the `Heap`, not the `Realm`.** Agent-scoped,
