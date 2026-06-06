@@ -38,6 +38,44 @@ the corpus under the relevant section's directory before adding.
 
 ## Entries
 
+### Binary operand evaluation order when RHS reassigns a function parameter
+
+- **Fixed in:** `05d2e67`
+- **Spec:** §13.15.2 EvaluateStringOrNumericBinaryExpression — the
+  left operand is evaluated to a value (steps 1-2) BEFORE the right
+  operand (steps 3-4), so a side effect in the right operand cannot
+  retroactively change the value already read for the left.
+- **Reproducer:**
+  ```js
+  function f(x) { return x + (x = 5); }
+  f(3);              // must be 8 (3 + 5), not 10
+  function g(x) { return x + x++; }
+  g(3);              // must be 6 (3 + 3), not 7
+  ```
+- **Before fix:** Returned `10` / `7`. A bytecode peephole kept a
+  simple-parameter binding in its caller-supplied register and, for
+  `lhs op rhs` where `lhs` was that register, emitted `<eval rhs>;
+  op r_lhs` — reading `r_lhs` *after* the RHS ran. When the RHS
+  reassigns the parameter (`x = 5`) or updates it (`x++`), the
+  register already holds the new value, so the left operand was
+  observed post-write.
+- **After fix:** Returns `8` / `6`. The peephole now falls back to
+  the snapshot-first path (`load lhs; save to temp; eval rhs; op
+  temp`) whenever the RHS subtree contains any assignment or update
+  expression.
+- **Suggested fixture shape:** positive runtime fixture under
+  `language/expressions/addition/` (and siblings
+  `subtraction/`, `multiplication/`, `bitwise-*`). The corpus has
+  rich operand-coercion-order coverage (`*-order.js` with logged
+  `valueOf` side effects on two *distinct* objects), but none
+  exercises a right operand that *mutates a binding the left operand
+  already read* — especially a plain function parameter, the case an
+  engine is most tempted to keep in a register. A fixture asserting
+  `f(3) === 8` for `x + (x = 5)` (and the `x++` / `++x` / `x += n`
+  variants) would catch any engine that elides the left-operand
+  snapshot. The same gap applies to every numeric/bitwise binary
+  operator, since they share the operand-ordering rule.
+
 ### C-style `for` shared a body-block lexical when a closure captured it
 
 - **Fixed in:** `1b5687c`
