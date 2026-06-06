@@ -519,7 +519,7 @@
         <h1 class="title">Cynic.</h1>
         <p class="tagline">A JavaScript engine that has <em>heard enough</em>.</p>
         <p class="lede">
-          Aimed at edge runtimes, Workers, and servers — eventually. Today it already parses, compiles, and runs: async and generators, a real module graph, a generational collector, even proper tail calls. Everything the language spent twenty years trying to forget, it forgets on purpose — no <code>with</code>, no sloppy mode. There's no <code>eval</code>, either: code is code here, never strings assembled at runtime. And it starts the day hardened — the primordials freeze before your first line runs, so a dependency can't redefine <code>Array.prototype</code> out from under you.
+          Aimed at edge runtimes, Workers, and servers — eventually. Today it already parses, compiles, and runs: async and generators, a real module graph, a generational collector, even proper tail calls. Everything the language spent twenty years trying to forget, it forgets on purpose — no <code>with</code>, no sloppy mode. <code>eval</code> is off by default: code is code here, not strings assembled at runtime unless you ask for it. And it starts the day hardened — the primordials freeze before your first line runs, so a dependency can't redefine <code>Array.prototype</code> out from under you.
         </p>
       </div>
 
@@ -617,11 +617,11 @@
         </article>
 
         <article class="refuse">
-          <div class="stamp">BANNED</div>
+          <div class="stamp">OFF BY DEFAULT</div>
           <span class="feature">eval() · new Function("…")</span>
           <h3>Runtime code construction</h3>
-          <p>Out for good. Aligns with <a href="https://github.com/endojs/endo/tree/main/packages/ses" target="_blank" rel="noopener">SES</a> / Hardened JavaScript, kills the optimization fence, and removes the supply-chain bait. Multi-file scripts use a host hook, not user-reachable.</p>
-          <div class="quote">EvalError: not even once.</div>
+          <p>Off by default — code is code here, not strings assembled at runtime. Aligns with <a href="https://github.com/endojs/endo/tree/main/packages/ses" target="_blank" rel="noopener">SES</a> / Hardened JavaScript and removes the supply-chain bait. <code>--allow=eval</code> opens a real evaluator when you mean it; the frozen primordials still box it in. Multi-file scripts use a host hook, not user-reachable.</p>
+          <div class="quote">EvalError by default. --allow=eval if you insist.</div>
         </article>
 
       </div>
