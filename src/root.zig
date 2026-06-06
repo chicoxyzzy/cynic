@@ -135,5 +135,9 @@ test {
     _ = @import("runtime/wasm/types.zig");
     _ = @import("runtime/wasm/module.zig");
     _ = @import("runtime/wasm/decoder.zig");
+    _ = @import("runtime/wasm/opcodes.zig");
+    _ = @import("runtime/wasm/code.zig");
+    _ = @import("runtime/wasm/validator.zig");
+    _ = @import("runtime/wasm/interpreter.zig");
     _ = @import("runtime/wasm/tests.zig");
 }

@@ -7,7 +7,122 @@ const std = @import("std");
 const testing = std.testing;
 
 const wasm = @import("wasm.zig");
+const interp = @import("interpreter.zig");
 const ValType = wasm.ValType;
+
+// ── execution harness ───────────────────────────────────────────────
+
+/// Decode + validate + instantiate `bytes`, invoke the i32-returning
+/// export `name` with i32 `args`, and return the i32 result.
+fn runI32(bytes: []const u8, name: []const u8, args: []const i32) !i32 {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance = try interp.instantiate(a, testing.allocator, mp);
+    defer instance.deinit(testing.allocator);
+
+    const fidx = funcExport(mp, name) orelse return error.NoSuchExport;
+
+    const cells = try a.alloc(u64, args.len);
+    for (args, 0..) |x, i| cells[i] = @as(u32, @bitCast(x));
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+    return @bitCast(@as(u32, @truncate(res[0])));
+}
+
+/// Same, but surface the trap/validate error instead of a value.
+fn runI32Err(bytes: []const u8, name: []const u8, args: []const i32) anyerror!void {
+    _ = try runI32(bytes, name, args);
+}
+
+fn funcExport(m: *const wasm.Module, name: []const u8) ?u32 {
+    for (m.exports) |e| {
+        if (e.desc == .func and std.mem.eql(u8, e.name, name)) return e.desc.func;
+    }
+    return null;
+}
+
+// ── module builder (computes section/LEB sizes so tests don't) ───────
+
+const List = std.ArrayListUnmanaged(u8);
+
+fn uleb(a: std.mem.Allocator, l: *List, value: usize) !void {
+    var v = value;
+    while (true) {
+        var byte: u8 = @intCast(v & 0x7f);
+        v >>= 7;
+        if (v != 0) byte |= 0x80;
+        try l.append(a, byte);
+        if (v == 0) break;
+    }
+}
+
+fn section(a: std.mem.Allocator, out: *List, id: u8, body: []const u8) !void {
+    try out.append(a, id);
+    try uleb(a, out, body.len);
+    try out.appendSlice(a, body);
+}
+
+/// Assemble a single-function module: one type `(params)->(results)`,
+/// `func 0`, an export, and a code body (locals header + expression).
+/// All section and LEB lengths are computed here.
+fn buildFunc(
+    a: std.mem.Allocator,
+    params: []const u8,
+    results: []const u8,
+    code_body: []const u8,
+    export_name: []const u8,
+) ![]const u8 {
+    var out: List = .empty;
+    try out.appendSlice(a, &preamble);
+
+    var ty: List = .empty;
+    try uleb(a, &ty, 1); // one type
+    try ty.append(a, 0x60);
+    try uleb(a, &ty, params.len);
+    try ty.appendSlice(a, params);
+    try uleb(a, &ty, results.len);
+    try ty.appendSlice(a, results);
+    try section(a, &out, 1, ty.items);
+
+    try section(a, &out, 3, &.{ 0x01, 0x00 }); // function: func 0 : type 0
+
+    var ex: List = .empty;
+    try uleb(a, &ex, 1);
+    try uleb(a, &ex, export_name.len);
+    try ex.appendSlice(a, export_name);
+    try ex.append(a, 0x00); // export kind: func
+    try ex.append(a, 0x00); // func 0
+    try section(a, &out, 7, ex.items);
+
+    var co: List = .empty;
+    try uleb(a, &co, 1); // one code entry
+    try uleb(a, &co, code_body.len);
+    try co.appendSlice(a, code_body);
+    try section(a, &out, 10, co.items);
+
+    return out.items;
+}
+
+/// Build + run a single-function i32 module in one call.
+fn runFunc(
+    params: []const u8,
+    results: []const u8,
+    code_body: []const u8,
+    name: []const u8,
+    args: []const i32,
+) !i32 {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try buildFunc(arena.allocator(), params, results, code_body, name);
+    return runI32(bytes, name, args);
+}
 
 /// The eight-byte preamble of every well-formed wasm binary:
 /// `\0asm\x01\x00\x00\x00` (magic + version 1, little-endian).
@@ -252,4 +367,79 @@ test "wasm decoder: tolerates custom sections between known ones" {
     defer arena.deinit();
     const m = try wasm.decode(arena.allocator(), bytes);
     try testing.expectEqual(@as(usize, 1), m.types.len);
+}
+
+// ── execution: integer + control subset ─────────────────────────────
+
+test "wasm interp: the adder computes 2 + 3" {
+    var buf: [8 + adder_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &adder_body);
+    try testing.expectEqual(@as(i32, 5), try runI32(bytes, "add", &.{ 2, 3 }));
+    try testing.expectEqual(@as(i32, -1), try runI32(bytes, "add", &.{ 2, -3 }));
+}
+
+// fib(n) = n<2 ? n : fib(n-1)+fib(n-2). Exercises if/else with a
+// result, recursive call, and the function's own terminating `end`.
+const fib_code = [_]u8{
+    0x00, // 0 local groups
+    0x20, 0x00, // local.get 0
+    0x41, 0x02, // i32.const 2
+    0x48, // i32.lt_s
+    0x04, 0x7f, // if (result i32)
+    0x20, 0x00, //   local.get 0
+    0x05, // else
+    0x20, 0x00, //   local.get 0
+    0x41, 0x01, //   i32.const 1
+    0x6b, //   i32.sub
+    0x10, 0x00, //   call 0
+    0x20, 0x00, //   local.get 0
+    0x41, 0x02, //   i32.const 2
+    0x6b, //   i32.sub
+    0x10, 0x00, //   call 0
+    0x6a, //   i32.add
+    0x0b, // end (if)
+    0x0b, // end (func)
+};
+
+test "wasm interp: recursive fib exercises if/else/call" {
+    const want = [_]i32{ 0, 1, 1, 2, 3, 5, 8 };
+    for (want, 0..) |w, n| {
+        try testing.expectEqual(w, try runFunc(&.{0x7f}, &.{0x7f}, &fib_code, "fib", &.{@intCast(n)}));
+    }
+    try testing.expectEqual(@as(i32, 55), try runFunc(&.{0x7f}, &.{0x7f}, &fib_code, "fib", &.{10}));
+    try testing.expectEqual(@as(i32, 832040), try runFunc(&.{0x7f}, &.{0x7f}, &fib_code, "fib", &.{30}));
+}
+
+// sum(n) = 0+1+…+(n-1) via block/loop with br_if (break) and br (continue).
+// locals: 0 = n (param), 1 = i, 2 = acc.
+const sum_code = [_]u8{
+    0x01, 0x02, 0x7f, // locals: 2 × i32
+    0x02, 0x40, // block
+    0x03, 0x40, // loop
+    0x20, 0x01, 0x20, 0x00, 0x4e, // local.get i; local.get n; i32.ge_s
+    0x0d, 0x01, // br_if 1   (i>=n → break block)
+    0x20, 0x02, 0x20, 0x01, 0x6a, 0x21, 0x02, // acc += i
+    0x20, 0x01, 0x41, 0x01, 0x6a, 0x21, 0x01, // i += 1
+    0x0c, 0x00, // br 0   (continue loop)
+    0x0b, // end loop
+    0x0b, // end block
+    0x20, 0x02, // local.get acc
+    0x0b, // end func
+};
+
+test "wasm interp: loop + br_if sums 0..n-1" {
+    try testing.expectEqual(@as(i32, 0), try runFunc(&.{0x7f}, &.{0x7f}, &sum_code, "sum", &.{0}));
+    try testing.expectEqual(@as(i32, 0), try runFunc(&.{0x7f}, &.{0x7f}, &sum_code, "sum", &.{1}));
+    try testing.expectEqual(@as(i32, 10), try runFunc(&.{0x7f}, &.{0x7f}, &sum_code, "sum", &.{5}));
+    try testing.expectEqual(@as(i32, 4950), try runFunc(&.{0x7f}, &.{0x7f}, &sum_code, "sum", &.{100}));
+}
+
+// div(a,b) = a / b (signed), trapping on /0 and INT_MIN/-1.
+const div_code = [_]u8{ 0x00, 0x20, 0x00, 0x20, 0x01, 0x6d, 0x0b };
+
+test "wasm interp: i32.div_s computes and traps" {
+    try testing.expectEqual(@as(i32, 3), try runFunc(&.{ 0x7f, 0x7f }, &.{0x7f}, &div_code, "div", &.{ 7, 2 }));
+    try testing.expectEqual(@as(i32, -4), try runFunc(&.{ 0x7f, 0x7f }, &.{0x7f}, &div_code, "div", &.{ 8, -2 }));
+    try testing.expectError(error.IntegerDivideByZero, runFunc(&.{ 0x7f, 0x7f }, &.{0x7f}, &div_code, "div", &.{ 1, 0 }));
+    try testing.expectError(error.IntegerOverflow, runFunc(&.{ 0x7f, 0x7f }, &.{0x7f}, &div_code, "div", &.{ -2147483648, -1 }));
 }
