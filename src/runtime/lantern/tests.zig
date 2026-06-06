@@ -7310,6 +7310,35 @@ test "huge numeric args on String/Array/TypedArray builtins don't panic (#23)" {
     , 10);
 }
 
+test "huge length on array-like iter and ShadowRealm wrap don't panic" {
+    // §23.1.5.2.1 step 6 LengthOfArrayLike and §3.8.3.5.1 step 4.b
+    // WrappedFunction-length each consume a Number whose magnitude
+    // the caller can drive. A raw `@intFromFloat` on |x| > i64::MAX,
+    // NaN, or ±Infinity would SIGABRT the host process, uncatchable
+    // by JS try/catch. The first now routes through `ToLength`
+    // (NaN / -∞ / negative → 0; +∞ and large finite → 2^53 - 1);
+    // the second boxes the spec-derived `length` as Int32 only when
+    // it fits in i32, otherwise as a Double — without round-tripping
+    // through i64.
+    try expectScriptIntWithBuiltins(
+        \\var ok = 0;
+        \\if (Array.prototype.values.call({length: Infinity, 0: "a"}).next().value === "a") ok++;
+        \\if (Array.prototype.values.call({length: NaN, 0: "a"}).next().done === true) ok++;
+        \\if (Array.prototype.values.call({length: -Infinity, 0: "a"}).next().done === true) ok++;
+        \\if (Array.prototype.values.call({length: 1e30, 0: "a"}).next().value === "a") ok++;
+        \\const sr = new ShadowRealm();
+        \\const f1 = sr.evaluate('Object.defineProperty(function f1() {}, "length", {value: 1e30});');
+        \\if (f1.length === 1e30) ok++;
+        \\const f2 = sr.evaluate('Object.defineProperty(function f2() {}, "length", {value: NaN});');
+        \\if (f2.length === 0) ok++;
+        \\const f3 = sr.evaluate('Object.defineProperty(function f3() {}, "length", {value: -Infinity});');
+        \\if (f3.length === 0) ok++;
+        \\const f4 = sr.evaluate('Object.defineProperty(function f4() {}, "length", {value: Infinity});');
+        \\if (f4.length === Infinity) ok++;
+        \\ok;
+    , 8);
+}
+
 test "later: Array [[Construct]] derives result proto from newTarget's realm" {
     // §22.1.1 Array(...) + §10.1.14 — `Reflect.construct(Array, args,
     // C)` where `C` is a cross-realm function with a non-object
