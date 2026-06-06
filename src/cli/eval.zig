@@ -45,9 +45,10 @@ pub fn run(
     // `--unhardened` — drop the SES posture before
     // `installBuiltins` so the Phase 1 freeze pass is skipped.
     if (unhardened) realm.hardened = false;
-    // `--allow=eval` — open the runtime-code-construction gate. Cynic
-    // ships no eval engine, so this only changes which error the eval
-    // paths throw; see `Realm.allow_eval`.
+    // `--allow=eval` — open the runtime-code-construction gate. Without
+    // it the eval / `Function(string)` paths refuse by SES policy
+    // (§19.2.1.2 EvalError); with it the eval engine runs source in the
+    // realm (§19.2.1 / §20.2.1.1.1). See `Realm.allow_eval`.
     if (allow_eval) realm.allow_eval = true;
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();

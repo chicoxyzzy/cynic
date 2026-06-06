@@ -1009,20 +1009,18 @@ pub const Realm = struct {
     /// See [docs/ses-alignment.md](../../docs/ses-alignment.md).
     hardened: bool = true,
     /// `--allow=eval` posture toggle. When `false` (the default)
-    /// Cynic ships no runtime code construction: the `eval` stub
-    /// and the `Function` / `Generator…Function` / `Async…Function`
-    /// string-source constructors refuse by policy (SES-aligned —
-    /// see AGENTS.md "eval and runtime code construction"). Setting
-    /// it `true` opens the policy gate so the eval surface is no
-    /// longer a deliberate refusal.
-    ///
-    /// NOTE: this flag wires the *posture* only. Cynic still has no
-    /// eval engine — when the gate is open the eval paths throw an
-    /// `EvalError("…not implemented…")` rather than executing source,
-    /// because the actual runtime-compile implementation is a
-    /// separate effort (docs/ses-alignment.md §Phase 4). Distinct
-    /// from `hardened`: a build can be unhardened yet eval-off, or
-    /// hardened yet eval-on — they're orthogonal capabilities.
+    /// Cynic refuses runtime code construction: `eval` and the
+    /// `Function` / `Generator…Function` / `Async…Function`
+    /// string-source constructors throw EvalError by policy
+    /// (§19.2.1.2 HostEnsureCanCompileStrings; SES-aligned — see
+    /// AGENTS.md "eval and runtime code construction"). Setting it
+    /// `true` opens the gate so the eval engine runs the source in
+    /// the realm (§19.2.1 PerformEval, §20.2.1.1.1
+    /// CreateDynamicFunction); the frozen primordials still confine
+    /// it unless `hardened` is also off. Distinct from `hardened`:
+    /// a build can be unhardened yet eval-off, or hardened yet
+    /// eval-on — they're orthogonal capabilities. See
+    /// docs/ses-alignment.md.
     allow_eval: bool = false,
     /// Phase 3 SES override-mistake fix — `freezePrimordials`
     /// installs a `SyntheticAccessor` pair (getter + setter

@@ -372,12 +372,13 @@ pub const ParsedFlags = struct {
     unhardened: bool = false,
     /// `--allow=eval` — open the runtime-code-construction policy
     /// gate. When set, `realm.allow_eval` is flipped to `true`
-    /// before `installBuiltins`. Cynic ships no eval engine, so this
-    /// only changes *which* failure the eval / `Function(string)`
-    /// paths produce (EvalError "not implemented" instead of the
-    /// default SES policy SyntaxError) — the actual implementation
-    /// is a separate effort. See
-    /// [docs/ses-alignment.md](../docs/ses-alignment.md) §Phase 4.
+    /// before `installBuiltins`. By default the SES posture refuses
+    /// `eval` / `Function(string)` (§19.2.1.2
+    /// HostEnsureCanCompileStrings throws EvalError); with the gate
+    /// open the eval engine runs the source in the realm (§19.2.1
+    /// PerformEval, §20.2.1.1.1 CreateDynamicFunction), still confined
+    /// by the frozen primordials unless paired with `--unhardened`.
+    /// See [docs/ses-alignment.md](../docs/ses-alignment.md).
     allow_eval: bool = false,
     /// The unconsumed tail of the argv slice (subcommand + its
     /// arguments). Empty when no subcommand was supplied — the
