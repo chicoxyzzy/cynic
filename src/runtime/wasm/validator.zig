@@ -51,6 +51,7 @@ pub const ValidateError = error{
     UnexpectedElse,
     UnbalancedEnd,
     InvalidLocalCount,
+    NoMemory,
     OutOfMemory,
 };
 
@@ -108,6 +109,7 @@ const Validator = struct {
     module: *const Module,
     local_types: []const ValType,
     results: []const ValType,
+    has_memory: bool,
     r: Reader, // over the body's expression bytes
     vals: std.ArrayListUnmanaged(AbsVal) = .empty,
     ctrls: std.ArrayListUnmanaged(Ctrl) = .empty,
@@ -253,11 +255,17 @@ fn validateFunc(
     const local_types = try locals.toOwnedSlice(arena);
     const expr = body_bytes[br.pos..];
 
+    var has_memory = module.mems.len > 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .mem) has_memory = true;
+    }
+
     var v: Validator = .{
         .arena = arena,
         .module = module,
         .local_types = local_types,
         .results = ft.results,
+        .has_memory = has_memory,
         .r = Reader.init(expr),
     };
 
@@ -499,9 +507,73 @@ fn validateExpr(v: *Validator) ValidateError!void {
             .i32_add, .i32_sub, .i32_mul, .i32_div_s, .i32_div_u, .i32_rem_s, .i32_rem_u, .i32_and, .i32_or, .i32_xor, .i32_shl, .i32_shr_s, .i32_shr_u, .i32_rotl, .i32_rotr => try binop(v, .i32, .i32),
             .i64_add, .i64_sub, .i64_mul, .i64_div_s, .i64_div_u, .i64_rem_s, .i64_rem_u, .i64_and, .i64_or, .i64_xor, .i64_shl, .i64_shr_s, .i64_shr_u, .i64_rotl, .i64_rotr => try binop(v, .i64, .i64),
 
+            // Memory loads: pop the i32 address, push the result.
+            .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u => try load(v, .i32),
+            .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u => try load(v, .i64),
+            // Memory stores: pop the value, then the i32 address.
+            .i32_store, .i32_store8, .i32_store16 => try store(v, .i32),
+            .i64_store, .i64_store8, .i64_store16, .i64_store32 => try store(v, .i64),
+
+            .memory_size => {
+                try requireMemory(v);
+                _ = try v.r.byte(); // reserved memory index
+                try v.pushVal(.i32);
+            },
+            .memory_grow => {
+                try requireMemory(v);
+                _ = try v.r.byte();
+                try v.popExpect(.i32);
+                try v.pushVal(.i32);
+            },
+
+            .prefix_fc => {
+                const sub = try v.r.uleb(u32);
+                switch (sub) {
+                    10 => { // memory.copy
+                        try requireMemory(v);
+                        _ = try v.r.byte(); // dst memidx
+                        _ = try v.r.byte(); // src memidx
+                        try v.popExpect(.i32);
+                        try v.popExpect(.i32);
+                        try v.popExpect(.i32);
+                    },
+                    11 => { // memory.fill
+                        try requireMemory(v);
+                        _ = try v.r.byte(); // memidx
+                        try v.popExpect(.i32);
+                        try v.popExpect(.i32);
+                        try v.popExpect(.i32);
+                    },
+                    else => return error.UnknownOpcode,
+                }
+            },
+
             _ => return error.UnknownOpcode,
         }
     }
+}
+
+fn requireMemory(v: *Validator) !void {
+    if (!v.has_memory) return error.NoMemory;
+}
+
+fn load(v: *Validator, result: ValType) !void {
+    try requireMemory(v);
+    try skipMemarg(v);
+    try v.popExpect(.i32); // address
+    try v.pushVal(result);
+}
+
+fn store(v: *Validator, value: ValType) !void {
+    try requireMemory(v);
+    try skipMemarg(v);
+    try v.popExpect(value); // value
+    try v.popExpect(.i32); // address
+}
+
+fn skipMemarg(v: *Validator) !void {
+    _ = try v.r.uleb(u32); // align (log2)
+    _ = try v.r.uleb(u32); // offset
 }
 
 fn unop(v: *Validator, in: ValType, out: ValType) !void {
