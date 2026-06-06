@@ -309,6 +309,37 @@ pub fn build(b: *std.Build) void {
     const t262_step = b.step("test262", "Run the test262 conformance suite (parser-only)");
     t262_step.dependOn(&run_t262.step);
 
+    // `zig build wasm-testsuite` — Sarcasm conformance against the
+    // official WebAssembly spec testsuite. The `.wast` corpus is
+    // preprocessed to JSON + `.wasm` by wast2json
+    // (tools/wasm-testsuite-gen.sh); the harness then replays the
+    // assertions. Defaults to the in-tree smoke corpus; point
+    // `-Dwasm-corpus=` at `vendor/wasm-testsuite` once vendored.
+    const wts_mod = b.createModule(.{
+        .root_source_file = b.path("tools/wasm_testsuite.zig"),
+        .target = target,
+        .optimize = t262_optimize,
+    });
+    wts_mod.addImport("cynic", lib_mod_fast);
+    const wts_exe = b.addExecutable(.{
+        .name = "cynic-wasm-testsuite",
+        .root_module = wts_mod,
+    });
+    const install_wts = b.addInstallArtifact(wts_exe, .{});
+    const wts_corpus = b.option([]const u8, "wasm-corpus", "Directory of .wast spec tests (default: tools/wasm-testsuite-smoke)") orelse "tools/wasm-testsuite-smoke";
+    const wts_gendir = ".zig-cache/wasm-testsuite";
+    const wts_gen = b.addSystemCommand(&.{ "sh", "tools/wasm-testsuite-gen.sh" });
+    wts_gen.addArg(wts_corpus);
+    wts_gen.addArg(wts_gendir);
+    wts_gen.has_side_effects = true; // always re-convert; output isn't graph-tracked
+    const run_wts = b.addRunArtifact(wts_exe);
+    run_wts.step.dependOn(&install_wts.step);
+    run_wts.step.dependOn(&wts_gen.step);
+    run_wts.addArg(b.fmt("--gen-dir={s}", .{wts_gendir}));
+    if (b.args) |args| run_wts.addArgs(args);
+    const wts_step = b.step("wasm-testsuite", "Run the WebAssembly spec testsuite conformance harness");
+    wts_step.dependOn(&run_wts.step);
+
     // The frontmatter / skip helper modules under tools/test262/ get
     // their inline `test` blocks picked up via the t262 module's test
     // walk.

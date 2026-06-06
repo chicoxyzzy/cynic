@@ -36,6 +36,13 @@ node_modules/
 # every full run, consumed by `--only-failing`.
 .test262-pass-cache.txt
 
+# `wasm-results.md` is written by `zig build wasm-testsuite
+# -- --write-results`. Ignored while the harness runs against the
+# self-authored smoke corpus; once the official WebAssembly spec
+# testsuite is vendored at vendor/wasm-testsuite, the real scoreboard
+# gets committed (un-ignore then, mirroring test262-results.md).
+wasm-results.md
+
 # Local profiling artifacts from tools/profile.sh + /profile.
 # `samply load profile.json` symbolicates these into the Firefox
 # Profiler UI; they're per-machine, multi-MB, and not meant to be
