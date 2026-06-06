@@ -189,6 +189,98 @@ const RelOp = arith.RelOp;
 /// per-call allocation work.
 const max_call_frames: usize = 1024;
 
+// ── Native re-entry stack guard ─────────────────────────────────────
+//
+// `max_call_frames` bounds the *JS* frame stack within ONE `runFrames`
+// dispatch (direct `f()` calls append to the same `frames` list). But
+// a native builtin that calls back into JS — an accessor getter, a
+// `.map` / `.forEach` callback, `Reflect.apply`, a Proxy trap, a
+// promise reaction drain — re-enters through `callJSFunction`, which
+// starts a FRESH `runFrames` on a fresh native stack frame. That
+// nesting was previously unbounded: deeply-recursive-through-native
+// code (`o = { get x() { return o.x } }; o.x`) grew the host stack
+// without limit until the OS faulted (`EXC_BAD_ACCESS` at the
+// `runFrames` prologue), crashing the process instead of throwing the
+// §spec `RangeError("Maximum call stack size exceeded")`. `runFrames`
+// is one large stack frame (the inlined dispatch loop), so even a
+// shallow nesting depth exhausts a 2 MiB worker stack.
+//
+// The guard measures *actual remaining native stack* at each
+// `runFrames` entry and throws before the red zone. Two strategies:
+//   • macOS — exact thread stack bounds via `pthread_get_stackaddr_np`
+//     / `pthread_get_stacksize_np`. Adapts to the thread's real stack
+//     size (the harness runs 2 MiB agent workers AND larger default
+//     workers), so the limit is precise per thread.
+//   • Other targets — a portable growth-from-base heuristic: the
+//     first `runFrames` on the thread records its SP as the high-water
+//     base; the guard trips once growth past it exceeds
+//     `stack_growth_budget`, chosen safely below the smallest stack
+//     the engine runs on.
+// `runFrames` entry is per-native-re-entry (NOT per JS call — those
+// stay in the dispatch loop), so the check is off the hot path.
+
+extern "c" fn pthread_self() *anyopaque;
+extern "c" fn pthread_get_stackaddr_np(thread: *anyopaque) *anyopaque;
+extern "c" fn pthread_get_stacksize_np(thread: *anyopaque) usize;
+
+/// Headroom kept below the true stack limit: enough for the
+/// `makeRangeError` allocation plus the worst-case native frames
+/// between this check and the actual page guard — i.e. it must
+/// exceed the stack one full re-entry level consumes (one
+/// `runFrames` + `callJSFunction` + the builtin + the property /
+/// iterator machinery). Debug builds don't optimize locals, so a
+/// single `runFrames` frame is far larger there; size the red zone
+/// per build mode. Release stacks include the harness's 2 MiB agent
+/// workers, so the release zone stays modest; Debug only ever runs
+/// on the 16 MiB main thread / default workers, where 2 MiB of
+/// headroom is comfortable.
+const stack_red_zone: usize = switch (@import("builtin").mode) {
+    .Debug => 2 * 1024 * 1024,
+    else => 256 * 1024,
+};
+
+/// Fallback growth allowance for targets without OS stack
+/// introspection. Kept below the harness's smallest worker stack
+/// (2 MiB `agent_stack`) so the guard always trips before a real
+/// overflow regardless of thread stack size.
+const stack_growth_budget: usize = 1024 * 1024;
+
+/// Lowest stack address `runFrames` may touch before it must throw,
+/// computed once per thread from OS bounds. `0` = not yet computed
+/// (or this platform lacks precise bounds — see the fallback base).
+threadlocal var stack_limit_addr: usize = 0;
+/// Heuristic-path high-water base: the shallowest SP seen on this
+/// thread. `growth = base - sp`. Updated upward so a later top-level
+/// entry from a shallower context never underflows.
+threadlocal var stack_fallback_base: usize = 0;
+/// Set once per thread after the first precise-bounds attempt so a
+/// platform without OS introspection doesn't re-probe every entry.
+threadlocal var stack_bounds_probed: bool = false;
+
+/// True when the native stack is within the red zone — `runFrames`
+/// must throw `RangeError` rather than recurse one level deeper.
+inline fn nearNativeStackLimit() bool {
+    var probe: u8 = undefined;
+    const sp = @intFromPtr(&probe);
+    if (stack_limit_addr != 0) return sp <= stack_limit_addr;
+    if (!stack_bounds_probed) {
+        stack_bounds_probed = true;
+        const builtin = @import("builtin");
+        if (builtin.os.tag.isDarwin()) {
+            const self = pthread_self();
+            const base = @intFromPtr(pthread_get_stackaddr_np(self)); // high addr; stack grows down
+            const size = pthread_get_stacksize_np(self);
+            if (size > stack_red_zone and base > size) {
+                stack_limit_addr = base - size + stack_red_zone;
+                return sp <= stack_limit_addr;
+            }
+        }
+    }
+    // Portable growth-from-base fallback.
+    if (sp > stack_fallback_base) stack_fallback_base = sp;
+    return stack_fallback_base - sp > stack_growth_budget;
+}
+
 pub const CallFrame = struct {
     chunk: *const Chunk,
     ip: usize,
@@ -1033,6 +1125,17 @@ pub fn runFrames(
     realm: *Realm,
     frames: *std.ArrayListUnmanaged(CallFrame),
 ) RunError!RunResult {
+    // §spec — native re-entry stack guard. A builtin that called back
+    // into JS (accessor getter, `.map` callback, `Reflect.apply`,
+    // Proxy trap, promise drain) re-entered here on a fresh native
+    // stack frame. Unbounded nesting overflows the host stack and
+    // faults the process; throw `RangeError` while there's still room
+    // to unwind. The caller's `defer` releases `frames`. See the
+    // `nearNativeStackLimit` block above for the bounds strategy.
+    if (nearNativeStackLimit()) {
+        const ex = try makeRangeError(realm, "Maximum call stack size exceeded");
+        return .{ .thrown = ex };
+    }
     // Register this dispatch's frame stack with the realm so
     // `collectGarbage` can walk OUR frames as roots in addition
     // to any outer (parent) `runFrames` stack. Without this,

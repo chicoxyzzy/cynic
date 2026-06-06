@@ -843,6 +843,79 @@ test "later: deep recursion is catchable" {
     , "caught");
 }
 
+// ── Native re-entry stack guard ─────────────────────────────────────
+//
+// `max_call_frames` bounds direct JS recursion within ONE dispatch
+// (the `frames` list). But recursion THROUGH a native builtin —
+// accessor getter, `Array.prototype.map` callback, `Reflect.apply` —
+// re-enters via `callJSFunction` → a fresh `runFrames` on a fresh
+// native stack frame, which was previously unbounded and crashed the
+// process (`EXC_BAD_ACCESS`) instead of throwing. The address-based
+// guard in `runFrames` now throws `RangeError` before the host stack
+// overflows. These pin: each native-reentry recursion shape throws
+// (and is catchable) rather than faulting the engine.
+
+test "native reentry: recursive accessor getter throws RangeError" {
+    // `o.x` resolves an accessor whose getter reads `o.x` again —
+    // each level re-enters the engine through the native [[Get]] →
+    // getter dispatch. Must throw, not crash.
+    try expectScriptThrows(
+        \\const o = { get x() { return o.x; } };
+        \\o.x;
+    );
+}
+
+test "native reentry: recursive accessor is catchable" {
+    // WithBuiltins: the catch body reads `e.constructor.name`, which
+    // needs `RangeError.prototype.constructor` + `Function.prototype.
+    // name` installed.
+    try expectScriptStringWithBuiltins(
+        \\const o = { get x() { return o.x; } };
+        \\let saw = '';
+        \\try { o.x; } catch (e) { saw = e.constructor.name; }
+        \\saw;
+    , "RangeError");
+}
+
+test "native reentry: recursive Array.prototype.map callback throws" {
+    // `map`'s callback re-enters JS per element via the native
+    // dispatch; an unbounded self-recursion through it must throw.
+    // WithBuiltins — `[].map` must resolve to the real native, else
+    // the test would throw a TypeError on an undefined `.map` and
+    // never exercise the stack guard at all.
+    try expectScriptThrowsWithBuiltins(
+        \\function f() { return [0].map(f); }
+        \\f();
+    );
+}
+
+test "native reentry: recursive Reflect.apply throws and is catchable" {
+    // WithBuiltins: needs `Reflect.apply` AND the catch's
+    // `e.constructor.name` resolution.
+    try expectScriptStringWithBuiltins(
+        \\function f() { return Reflect.apply(f, null, []); }
+        \\let saw = '';
+        \\try { f(); } catch (e) { saw = e.constructor.name; }
+        \\saw;
+    , "RangeError");
+}
+
+test "native reentry: bounded callback recursion still completes" {
+    // The guard must NOT trip on legitimate shallow native re-entry.
+    // A depth-50 recursion through `Array.prototype.forEach` is well
+    // within budget and must return the right answer.
+    try expectScriptIntWithBuiltins(
+        \\function sumDown(n) {
+        \\  if (n === 0) return 0;
+        \\  let acc = 0;
+        \\  [n].forEach(v => { acc = v + sumDown(v - 1); });
+        \\  return acc;
+        \\}
+        \\sumDown(50);
+        // sum(1..50) = 1275
+    , 1275);
+}
+
 test "later: calling a non-function throws TypeError" {
     try expectScriptThrows("let x = 1; x();");
 }
