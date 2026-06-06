@@ -7,14 +7,14 @@
 A strict-only ECMAScript engine, written from scratch in Zig.
 
 Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
-— and omits browser-era legacy by design:
+— and omits the web-compatibility surfaces by design:
 
 - **No sloppy mode.** Every source is parsed as strict. The strict
   reserved-word set, restricted assignment to `eval` / `arguments`, and
   the absence of `with`, labels, legacy octal, HTML-like comments, and
   Annex B *language* extensions (sloppy-mode-only function-in-block,
   `for-in` initializer, …) are baked in at the language level.
-- **No browser-era built-ins.** `escape` / `unescape`, the 13
+- **No web-compatibility built-ins.** `escape` / `unescape`, the 13
   `String.prototype` HTML wrappers (`anchor`, `bold`, …),
   `Date.prototype.{getYear, setYear, toGMTString}`, and the
   `String.prototype.{substr, trimLeft, trimRight}` aliases aren't
