@@ -477,7 +477,20 @@ fn stringMatchDispatched(realm: *Realm, this_value: Value, args: []const Value) 
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     const recv_s = try coerceThisStringRooted(realm, this_value, scope);
-    const rx = try regExpCreate(realm, regexp_arg, null);
+    // §22.1.3.{13,14} step 4 — RegExpCreate(regexp, undefined). Per
+    // RegExpInitialize the pattern is `ToString(regexp)` UNLESS it is
+    // undefined (→ empty pattern). `regExpCreate` routes through the
+    // RegExp constructor, which for a RegExp *reuses its source* — so a
+    // regex whose @@match/@@search is undefined would wrongly re-run its
+    // own matcher instead of matching the literal "/b/g" (#24). Defuse
+    // that by ToStringing ONLY a regex-like argument; undefined / null /
+    // string / number pass through unchanged so `match()` (undefined)
+    // still builds the empty pattern, not `/undefined/`.
+    const rx = if (isRegexLike(regexp_arg) != null) blk: {
+        const pat_str = try intrinsics.stringifyArg(realm, regexp_arg);
+        scope.push(Value.fromString(pat_str)) catch return error.OutOfMemory;
+        break :blk try regExpCreate(realm, Value.fromString(pat_str), null);
+    } else try regExpCreate(realm, regexp_arg, null);
     scope.push(rx) catch return error.OutOfMemory;
     if (try getSymbolMethod(realm, rx, "@@match")) |matcher| {
         return invokeSymbolMethod(realm, matcher, rx, Value.fromString(recv_s), null);
@@ -600,7 +613,20 @@ fn stringSearchDispatched(realm: *Realm, this_value: Value, args: []const Value)
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     const recv_s = try coerceThisStringRooted(realm, this_value, scope);
-    const rx = try regExpCreate(realm, regexp_arg, null);
+    // §22.1.3.{13,14} step 4 — RegExpCreate(regexp, undefined). Per
+    // RegExpInitialize the pattern is `ToString(regexp)` UNLESS it is
+    // undefined (→ empty pattern). `regExpCreate` routes through the
+    // RegExp constructor, which for a RegExp *reuses its source* — so a
+    // regex whose @@match/@@search is undefined would wrongly re-run its
+    // own matcher instead of matching the literal "/b/g" (#24). Defuse
+    // that by ToStringing ONLY a regex-like argument; undefined / null /
+    // string / number pass through unchanged so `match()` (undefined)
+    // still builds the empty pattern, not `/undefined/`.
+    const rx = if (isRegexLike(regexp_arg) != null) blk: {
+        const pat_str = try intrinsics.stringifyArg(realm, regexp_arg);
+        scope.push(Value.fromString(pat_str)) catch return error.OutOfMemory;
+        break :blk try regExpCreate(realm, Value.fromString(pat_str), null);
+    } else try regExpCreate(realm, regexp_arg, null);
     scope.push(rx) catch return error.OutOfMemory;
     if (try getSymbolMethod(realm, rx, "@@search")) |searcher| {
         return invokeSymbolMethod(realm, searcher, rx, Value.fromString(recv_s), null);
@@ -1475,17 +1501,14 @@ pub fn stringSplit(realm: *Realm, this_value: Value, args: []const Value) Native
     // same scope that already pins the source string `s`.
     split_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
 
-    // §22.1.3.23 — when separator is a regex (we already filtered
-    // out the @@split dispatch in `stringSplitDispatched`), drive
-    // matching through libregexp via the spec's sticky-splitter.
-    if (isRegexLike(sep_v)) |regex_obj| {
-        if (limit == 0) {
-            setLength(realm, out, 0) catch return error.OutOfMemory;
-            return heap_mod.taggedObject(out);
-        }
-        return regexSplit(realm, s, regex_obj, limit, out);
-    }
-
+    // §22.1.3.23 — this core runs ONLY after `stringSplitDispatched`
+    // found `separator[@@split]` to be undefined (the spec opt-out,
+    // #24). Steps 6+ are the non-regex path: `separatorStr =
+    // ToString(separator)` then a literal string split — the RegExp
+    // matcher must NOT be consulted (a regex with `@@split = undefined`
+    // ToStrings to "/b/g" and is split on literally). The regex
+    // behaviour lives in `RegExp.prototype[@@split]` (`regexSplit`),
+    // reached via the @@split dispatch.
     // step 6 — `separatorStr = ? ToString(separator)`. ToString
     // runs BEFORE the `lim == 0` short-circuit (fixture
     // `separator-tostring-error`).
@@ -1948,13 +1971,15 @@ pub fn stringReplace(realm: *Realm, this_value: Value, args: []const Value) Nati
     const s = try coerceThisStringRooted(realm, this_value, replace_scope);
     const pat_v = argOr(args, 0, Value.undefined_);
     const repl_v = argOr(args, 1, Value.undefined_);
-    // §22.1.3.19 — when the pattern is a regex, dispatch through
-    // its `exec`. Global flag → iterate all matches; otherwise
-    // replace just the first.
-    if (isRegexLike(pat_v)) |regex_obj| {
-        return regexReplace(realm, s, regex_obj, repl_v, false);
-    }
-    // §22.1.3.19 step 4 — searchString = ToString(searchValue).
+    // §22.1.3.19 — this core runs ONLY after `stringReplaceDispatched`
+    // found `searchValue[@@replace]` to be undefined (the spec opt-out,
+    // #24). Steps 4+ are the non-regex path: `searchString =
+    // ToString(searchValue)` then StringIndexOf + GetSubstitution — the
+    // RegExp matcher must NOT be consulted here (a regex with
+    // `@@replace = undefined` ToStrings to "/b/g" and is searched
+    // literally). The regex behaviour lives in `RegExp.prototype[
+    // @@replace]` (`regexReplace`), reached via the @@replace dispatch.
+    // step 4 — searchString = ToString(searchValue).
     const pat = if (pat_v.isString())
         @as(*JSString, @ptrCast(@alignCast(pat_v.asString())))
     else

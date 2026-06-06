@@ -454,6 +454,27 @@ test "interpreter: Array subclass methods honour @@species (§23.1.3.34)" {
     , "false,true");
 }
 
+test "interpreter: String.prototype methods honour @@symbol = undefined opt-out (#24)" {
+    // §22.1.3.{19,13,14,21} — setting rx[@@replace/@@match/@@search/
+    // @@split] to undefined opts the object OUT of regex-aware dispatch:
+    // GetMethod returns undefined, so the method falls through to its
+    // non-regex path (which ToStrings the search value to the literal
+    // "/b/g", absent in "abc"). Cynic ran the matcher anyway. Verified
+    // against engine262 + every production engine.
+    try expectScriptStringWithBuiltins(
+        \\function s(rx, k){ rx[k] = undefined; return rx; }
+        \\const a = "abc".replace(s(/b/g, Symbol.replace), "X");
+        \\const b = "abc".match(s(/b/g, Symbol.match));
+        \\const c = "abc".search(s(/b/g, Symbol.search));
+        \\const d = "abc".split(s(/b/g, Symbol.split));
+        \\a + "|" + (b === null ? "null" : b) + "|" + c + "|" + JSON.stringify(d);
+    , "abc|null|-1|[\"abc\"]");
+    // Control: the normal regex path (no opt-out) still works.
+    try expectScriptStringWithBuiltins(
+        \\"abc".replace(/b/, "X") + "|" + "abc".match(/b/)[0] + "|" + "abc".search(/b/) + "|" + JSON.stringify("a-b".split(/-/));
+    , "aXc|b|1|[\"a\",\"b\"]");
+}
+
 test "interpreter: typeof returns spec strings" {
     try expectString("typeof 1;", "number");
     try expectString("typeof 1.5;", "number");
