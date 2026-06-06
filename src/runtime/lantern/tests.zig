@@ -6584,6 +6584,116 @@ test "GC: native constructor via Reflect.construct survives re-entrant arg coerc
     , "M05/7");
 }
 
+test "GC: Object.create with a Function Properties + accessor getter survives gc_threshold=1" {
+    // §20.1.2.3.1 ObjectDefineProperties, Function-`Properties` path
+    // (`defineFromFunctionProps`). The accessor getter returns a fresh
+    // descriptor object; `allocateString` and the getter's
+    // `callJSFunction` each allocate, so under threshold=1 the unrooted
+    // `target` / key string / getter result were swept mid-define — a
+    // null deref (segfault). Mirrors
+    // `built-ins/Object/create/15.2.3.5-4-5.js`.
+    try expectScriptIntUnderGcPressure(
+        \\function P() {}
+        \\Object.defineProperty(P, "x", {
+        \\  enumerable: true,
+        \\  get: function () { return { value: 42, enumerable: true, configurable: true }; },
+        \\});
+        \\var o = Object.create({}, P);
+        \\o.x;
+    , 42);
+}
+
+test "GC: Object.defineProperties with an accessor in Properties survives gc_threshold=1" {
+    // §20.1.2.3.1 main loop: a plain-object `Properties` whose key is
+    // an accessor returns a fresh descriptor (`getPropertyValue` fires
+    // the getter). That `descObj` was held across the key-string
+    // `allocateString` before `objectDefineProperty` consumed it —
+    // freed under threshold=1.
+    try expectScriptIntUnderGcPressure(
+        \\var props = {};
+        \\Object.defineProperty(props, "k", {
+        \\  enumerable: true,
+        \\  get: function () { return { value: 99, enumerable: true, configurable: true }; },
+        \\});
+        \\var o = Object.defineProperties({}, props);
+        \\o.k;
+    , 99);
+}
+
+test "GC: Object.assign with accessor sources survives gc_threshold=1" {
+    // §20.1.2.1 Object.assign: `target`, the per-key string, and each
+    // getter result were held across the descriptor lookup, the getter,
+    // and the strict setter (all re-enter JS / allocate). Under
+    // threshold=1 the unrooted receiver was swept before
+    // `assignSetOrThrow` wrote through it.
+    try expectScriptIntUnderGcPressure(
+        \\var src = {};
+        \\Object.defineProperty(src, "a", { enumerable: true, get: function () { return 7; } });
+        \\Object.defineProperty(src, "b", { enumerable: true, get: function () { return 13; } });
+        \\var t = Object.assign({}, src);
+        \\t.a + t.b;
+    , 20);
+}
+
+test "GC: Set.union over a set-like class survives gc_threshold=1" {
+    // §24.2.1.2 GetSetRecord + §24.2.4.x. The set-like's `get has` /
+    // `get keys` / `get next` accessors each return a FRESH function
+    // reachable through nothing; the raw `*JSFunction` pointers in the
+    // native `SetLike` record (and the iterator's cached `next`) were
+    // held across the iteration's re-entries — swept under threshold=1.
+    // Mirrors `built-ins/Set/prototype/union/set-like-class-order.js`.
+    try expectScriptIntUnderGcPressure(
+        \\class SL {
+        \\  get size() { return 2; }
+        \\  get has() { return function () { return false; }; }
+        \\  get keys() {
+        \\    return function () {
+        \\      var i = 0, a = [10, 20];
+        \\      return { next: function () { return i < a.length ? { value: a[i++], done: false } : { value: undefined, done: true }; } };
+        \\    };
+        \\  }
+        \\}
+        \\new Set([1]).union(new SL()).size;
+    , 3);
+}
+
+test "GC: Set.intersection probing a set-like .has survives gc_threshold=1" {
+    // §24.2.4.5 — the smaller-receiver branch iterates `this` and
+    // probes the set-like's `has`. The fresh `has` function from the
+    // `get has()` accessor is held raw across every probe call.
+    try expectScriptIntUnderGcPressure(
+        \\class SL2 {
+        \\  get size() { return 3; }
+        \\  get has() { return function (v) { return v === 1; }; }
+        \\  get keys() {
+        \\    return function () {
+        \\      var i = 0, a = [1, 2, 3];
+        \\      return { next: function () { return i < a.length ? { value: a[i++], done: false } : { value: undefined, done: true }; } };
+        \\    };
+        \\  }
+        \\}
+        \\new Set([1, 9]).intersection(new SL2()).size;
+    , 1);
+}
+
+test "GC: Promise.all reading a fresh constructor.resolve survives gc_threshold=1" {
+    // §27.2.4.1.1 PerformPromiseAll — `Get(C, "resolve")` runs once
+    // before the loop and is the callee on every element. A
+    // `get resolve()` returning a fresh function leaves it reachable
+    // through nothing; it was unrooted across `iteratorOpen` and every
+    // per-element call, so threshold=1 swept it. Mirrors
+    // `built-ins/Promise/all/invoke-resolve-get-once-multiple-calls.js`.
+    try expectScriptIntUnderGcPressure(
+        \\var calls = 0;
+        \\function C(executor) { executor(function () {}, function () {}); }
+        \\Object.defineProperty(C, "resolve", {
+        \\  get: function () { return function (v) { calls++; return Promise.resolve(v); }; },
+        \\});
+        \\Promise.all.call(C, [1, 2, 3]);
+        \\calls;
+    , 3);
+}
+
 // ---------------------------------------------------------------------------
 // §23.1.3 Array.prototype — receiver coercion + spec dispatch regressions.
 //
