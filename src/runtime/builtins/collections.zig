@@ -1875,12 +1875,17 @@ const SetLike = struct {
     size: usize,
 };
 
-fn validateSetLike(realm: *Realm, op: []const u8, value: Value) NativeError!SetLike {
+fn validateSetLike(realm: *Realm, op: []const u8, value: Value, scope: *heap_mod.HandleScope) NativeError!SetLike {
     const obj = heap_mod.valueAsPlainObject(value) orelse {
         var buf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument must be a set-like object", .{op}) catch op;
         return throwTypeError(realm, msg);
     };
+    // Root the set-like object for the lifetime of the operation —
+    // the caller holds the returned `SetLike` (and its raw `has` /
+    // `keys` `*JSFunction` pointers) across the iteration, which
+    // re-enters JS and GCs under allocation pressure.
+    scope.push(value) catch return error.OutOfMemory;
     // §24.2.1.2 GetSetRecord step 6 — ToIntegerOrInfinity(size).
     // Route through the accessor chain so `get size() { return 2; }`
     // getters fire instead of the bare data-slot lookup returning
@@ -1923,6 +1928,10 @@ fn validateSetLike(realm: *Realm, op: []const u8, value: Value) NativeError!SetL
         const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (no callable 'has')", .{op}) catch op;
         return throwTypeError(realm, msg);
     };
+    // Root `has` before the `keys` getter runs — a `get has() { return
+    // function(){…} }` returns a fresh function reachable through
+    // nothing, and the `keys` getter below allocates / can GC.
+    scope.push(has_v) catch return error.OutOfMemory;
     // §24.2.1.2 step 9-10 — `Get(obj, "keys")`. Accessor-aware.
     const keys_v = try intrinsics.getPropertyChain(realm, obj, "keys");
     const keys_fn = heap_mod.valueAsFunction(keys_v) orelse {
@@ -1930,6 +1939,7 @@ fn validateSetLike(realm: *Realm, op: []const u8, value: Value) NativeError!SetL
         const msg = std.fmt.bufPrint(&buf, "Set.prototype.{s}: argument is not set-like (no callable 'keys')", .{op}) catch op;
         return throwTypeError(realm, msg);
     };
+    scope.push(keys_v) catch return error.OutOfMemory;
     return .{ .has = has_fn, .keys = keys_fn, .obj = value, .size = size_usize };
 }
 
@@ -1995,7 +2005,6 @@ fn forEachSetLikeKey(
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     scope.push(iter) catch return error.OutOfMemory;
-    const loop_base = scope.handles.items.len;
     const iter_obj = heap_mod.valueAsPlainObject(iter) orelse return throwTypeError(realm, "set-like keys() did not return an iterator");
     // §7.4.1 GetIteratorFromMethod step 4 — `next` is cached on
     // the IteratorRecord at open time, not refetched every step.
@@ -2003,6 +2012,13 @@ fn forEachSetLikeKey(
     // exactly once (`set-like-class-order.js` asserts this).
     const next_v = try intrinsics.getPropertyChain(realm, iter_obj, "next");
     const next_fn = heap_mod.valueAsFunction(next_v) orelse return throwTypeError(realm, "set-like keys() iterator missing callable 'next'");
+    // Pin the cached `next` function for the whole walk — a
+    // `get next() { return function(){…} }` returns a fresh function
+    // reachable through nothing, and it is reused as the callee on
+    // every iteration. Push it before capturing `loop_base` so the
+    // per-iteration `shrinkRetainingCapacity` keeps it rooted.
+    scope.push(next_v) catch return error.OutOfMemory;
+    const loop_base = scope.handles.items.len;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
     while (step < max_iter) : (step += 1) {
@@ -2075,17 +2091,16 @@ fn allocateEmptySet(realm: *Realm) NativeError!*JSObject {
 
 fn setUnion(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     if (setDataOf(this_value) == null) return throwTypeError(realm, "Set.prototype.union called on non-Set");
-    const sl = try validateSetLike(realm, "union", argOr(args, 0, Value.undefined_));
+    // One scope roots the set-like (its raw has/keys/obj pointers) and
+    // the half-built result for the whole operation — both are held
+    // across `forEachSetLikeKey`, which re-enters JS (the set-like's
+    // `keys()` iterator + accessors) and GCs under allocation pressure.
+    const op_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer op_scope.close();
+    const sl = try validateSetLike(realm, "union", argOr(args, 0, Value.undefined_), op_scope);
 
     const out = try allocateEmptySet(realm);
-    // `out` is held raw across `forEachSetLikeKey`, which re-enters
-    // JS (the set-like's `keys()` iterator + accessors) and can GC
-    // under allocation pressure. Root the half-built result so a
-    // sweep can't collect it before `setAddInternal` dereferences
-    // `out.getSetData()`.
-    const out_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer out_scope.close();
-    out_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    op_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     // Copy this set first, then add other's keys (sameValueZero
     // dedup keeps duplicates out).
     {
@@ -2106,17 +2121,16 @@ fn setUnion(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 
 fn setIntersection(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.intersection called on non-Set");
-    const sl = try validateSetLike(realm, "intersection", argOr(args, 0, Value.undefined_));
+    // One scope roots the set-like (its raw has/keys/obj pointers) and
+    // the half-built result for the whole operation — both are held
+    // across `setLikeHas` / `forEachSetLikeKey`, which re-enter JS (the
+    // set-like's `has` / `keys` / iterator accessors) and GC.
+    const op_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer op_scope.close();
+    const sl = try validateSetLike(realm, "intersection", argOr(args, 0, Value.undefined_), op_scope);
 
     const out = try allocateEmptySet(realm);
-    // `out` is held raw across `setLikeHas` / `forEachSetLikeKey`,
-    // both of which re-enter JS (the set-like's `has` / `keys` /
-    // iterator accessors) and can GC. Root the half-built result
-    // so a sweep there can't collect it before `setAddInternal`
-    // dereferences `out.getSetData()`.
-    const out_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer out_scope.close();
-    out_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    op_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     // §24.2.4.5 step 5 — branch on size. When `this` is smaller
     // (or equal), iterate `this` and probe `other.has(value)`.
     // Otherwise iterate `other`'s keys() and probe `this.has`.
@@ -2167,16 +2181,16 @@ fn activeSetSize(d: *@import("../object.zig").SetData) usize {
 
 fn setDifference(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.difference called on non-Set");
-    const sl = try validateSetLike(realm, "difference", argOr(args, 0, Value.undefined_));
+    // One scope roots the set-like (its raw has/keys/obj pointers) and
+    // the half-built result (and its cached `out_d` slot) for the whole
+    // operation — both are held across `setLikeHas` / `forEachSetLikeKey`,
+    // which re-enter JS and GC.
+    const op_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer op_scope.close();
+    const sl = try validateSetLike(realm, "difference", argOr(args, 0, Value.undefined_), op_scope);
 
     const out = try allocateEmptySet(realm);
-    // `out` (and the `out_d` slot pointer cached below) are held raw
-    // across `setLikeHas` / `forEachSetLikeKey`, both of which
-    // re-enter JS and can GC. Root `out` so neither it nor its
-    // `getSetData()` slot is swept mid-loop.
-    const out_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer out_scope.close();
-    out_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    op_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     // §24.2.4.5 step 5-7 — start from a copy of `this`, then branch
     // on size. When `this` is smaller (or equal), call `other.has`
     // for each `this` entry and drop matches. When `this` is larger,
@@ -2223,7 +2237,12 @@ fn setDifference(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
 fn setSymmetricDifference(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.symmetricDifference called on non-Set");
-    const sl = try validateSetLike(realm, "symmetricDifference", argOr(args, 0, Value.undefined_));
+    // One scope roots the set-like (its raw has/keys/obj pointers) and
+    // the half-built result for the whole operation — both are held
+    // across `forEachSetLikeKey`, which re-enters JS and GCs.
+    const op_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer op_scope.close();
+    const sl = try validateSetLike(realm, "symmetricDifference", argOr(args, 0, Value.undefined_), op_scope);
 
     // §24.2.4.10 — `Set.prototype.symmetricDifference` MUST NOT
     // invoke `has` on the set-like. The spec algorithm:
@@ -2240,13 +2259,7 @@ fn setSymmetricDifference(realm: *Realm, this_value: Value, args: []const Value)
     // mid-iteration and asserts the toggle reads the post-
     // mutation membership.
     const out = try allocateEmptySet(realm);
-    // `out` (and the `out_d` slot pointer cached below) are held raw
-    // across `forEachSetLikeKey`, which re-enters JS (the set-like's
-    // `keys()` iterator + accessors) and can GC. Root `out` so a
-    // sweep can't free it (or its `getSetData()` slot) mid-loop.
-    const out_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer out_scope.close();
-    out_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    op_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     {
         var i: usize = 0;
         while (i < this_d.entries.items.len) : (i += 1) {
@@ -2293,7 +2306,11 @@ fn setSymmetricDifference(realm: *Realm, this_value: Value, args: []const Value)
 
 fn setIsSubsetOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.isSubsetOf called on non-Set");
-    const sl = try validateSetLike(realm, "isSubsetOf", argOr(args, 0, Value.undefined_));
+    // Root the set-like (its raw has/keys/obj pointers) across the
+    // operation — `setLikeHas` re-enters JS and GCs.
+    const op_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer op_scope.close();
+    const sl = try validateSetLike(realm, "isSubsetOf", argOr(args, 0, Value.undefined_), op_scope);
     // §24.2.4.7 step 4 — fast-reject: a larger set can't be a
     // subset of a smaller one.
     if (activeSetSize(this_d) > sl.size) return Value.false_;
@@ -2309,7 +2326,11 @@ fn setIsSubsetOf(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
 fn setIsSupersetOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.isSupersetOf called on non-Set");
-    const sl = try validateSetLike(realm, "isSupersetOf", argOr(args, 0, Value.undefined_));
+    // Root the set-like (its raw has/keys/obj pointers) across the
+    // operation — `forEachSetLikeKey` re-enters JS and GCs.
+    const op_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer op_scope.close();
+    const sl = try validateSetLike(realm, "isSupersetOf", argOr(args, 0, Value.undefined_), op_scope);
     // §24.2.4.9 step 4 — fast-reject: a smaller set can't be a
     // superset of a larger one. Avoids invoking the set-like's
     // `keys()` iterator unnecessarily.
@@ -2332,7 +2353,11 @@ fn setIsSupersetOf(realm: *Realm, this_value: Value, args: []const Value) Native
 
 fn setIsDisjointFrom(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const this_d = setDataOf(this_value) orelse return throwTypeError(realm, "Set.prototype.isDisjointFrom called on non-Set");
-    const sl = try validateSetLike(realm, "isDisjointFrom", argOr(args, 0, Value.undefined_));
+    // Root the set-like (its raw has/keys/obj pointers) across the
+    // operation — `setLikeHas` / `forEachSetLikeKey` re-enter JS and GC.
+    const op_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer op_scope.close();
+    const sl = try validateSetLike(realm, "isDisjointFrom", argOr(args, 0, Value.undefined_), op_scope);
 
     // §24.2.4.4 step 5 — pick the smaller side to iterate.
     // When `this` is smaller (or equal), iterate `this` + probe

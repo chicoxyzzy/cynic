@@ -2003,11 +2003,16 @@ fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value)
         }
         // §20.1.2.3.1 step 5.b.ii — `Let descObj be ? Get(props, nextKey)`.
         // Route through `getPropertyValue` so a Proxy `get` trap fires.
+        // When `props` holds an accessor, `descObj` is a fresh value
+        // reachable through nothing — root it (and the freshly
+        // allocated key string) before `objectDefineProperty`
+        // re-enters JS / allocates, or an allocation-pressure GC frees
+        // them mid-define (use-after-free).
         const desc_v = try getPropertyValue(realm, props, key, heap_mod.taggedObject(props));
-        const inner_args = [_]Value{ heap_mod.taggedObject(target), blk: {
-            const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-            break :blk Value.fromString(k_str);
-        }, desc_v };
+        dps_scope.push(desc_v) catch return error.OutOfMemory;
+        const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        dps_scope.push(Value.fromString(k_str)) catch return error.OutOfMemory;
+        const inner_args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(k_str), desc_v };
         _ = try objectDefineProperty(realm, Value.undefined_, &inner_args);
     }
     return heap_mod.taggedObject(target);
@@ -2027,6 +2032,20 @@ fn defineFromFunctionProps(
 ) NativeError!Value {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(realm.allocator);
+    // Root the receiver and the Properties function across the loop.
+    // `allocateString` (every iteration) and the accessor getter
+    // (`callJSFunction`) each allocate, so under allocation-pressure
+    // GC an unrooted `target` would be swept before
+    // `objectDefineProperty` consumes it — a use-after-free that
+    // segfaults when the getter re-enters JS
+    // (`built-ins/Object/create/15.2.3.5-4-5.js`: a Function
+    // `Properties` whose accessor getter returns a fresh object).
+    // Rooting `props_fn` also keeps its property / accessor bags —
+    // and the borrowed `key` slices into them — alive across the loop.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(target)) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedFunction(props_fn)) catch return error.OutOfMemory;
     var pit = props_fn.properties.iterator();
     while (pit.next()) |entry| {
         const key = entry.key_ptr.*;
@@ -2039,6 +2058,10 @@ fn defineFromFunctionProps(
         const flags = props_fn.property_flags.get(key) orelse @import("../object.zig").PropertyFlags{};
         if (!flags.enumerable) continue;
         const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        // `desc_v` is a data value already reachable through the
+        // rooted `props_fn`; root only the freshly-allocated key
+        // string across `objectDefineProperty`'s re-entry.
+        scope.push(Value.fromString(k_str)) catch return error.OutOfMemory;
         const desc_v = entry.value_ptr.*;
         const inner = [_]Value{ heap_mod.taggedObject(target), Value.fromString(k_str), desc_v };
         _ = try objectDefineProperty(realm, Value.undefined_, &inner);
@@ -2050,6 +2073,9 @@ fn defineFromFunctionProps(
         const flags = props_fn.property_flags.get(key) orelse continue;
         if (!flags.enumerable) continue;
         const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        // Root the key string before the getter runs — the getter
+        // allocates and can GC.
+        scope.push(Value.fromString(k_str)) catch return error.OutOfMemory;
         var desc_v: Value = Value.undefined_;
         if (entry.value_ptr.getter) |getter| {
             const lantern = @import("../lantern/interpreter.zig");
@@ -2065,6 +2091,10 @@ fn defineFromFunctionProps(
                 },
             };
         }
+        // The getter's result is a fresh value reachable through
+        // nothing yet — root it across `objectDefineProperty`, which
+        // re-enters JS and allocates.
+        scope.push(desc_v) catch return error.OutOfMemory;
         const inner = [_]Value{ heap_mod.taggedObject(target), Value.fromString(k_str), desc_v };
         _ = try objectDefineProperty(realm, Value.undefined_, &inner);
     }
@@ -2751,6 +2781,14 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // null throw. The wrapper itself is what gets returned.
     const target_v = argOr(args, 0, Value.undefined_);
     const target = try intrinsics.toObjectThis(realm, target_v);
+    // Root the receiver across every source's key loop — each source
+    // fires accessor getters (`getPropertyChain`) and strict setters
+    // (`assignSetOrThrow`) that re-enter JS and allocate, so an
+    // unrooted `target` would be swept by an allocation-pressure GC
+    // and the next `assignSetOrThrow` would write through freed memory.
+    const target_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer target_scope.close();
+    target_scope.push(heap_mod.taggedObject(target)) catch return error.OutOfMemory;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const src_v = args[i];
@@ -2784,6 +2822,10 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             // and now). Use objectGetOwnPropertyDescriptor so the
             // Proxy invariants and abrupt completions propagate.
             const key_string = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            // Root the key string across the descriptor lookup, the
+            // getter, and the strict setter below — all re-enter JS /
+            // allocate and would otherwise free it mid-copy.
+            key_scope.push(Value.fromString(key_string)) catch return error.OutOfMemory;
             const desc_args = [_]Value{ src_value, Value.fromString(key_string) };
             const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &desc_args);
             // §20.1.2.1 step 4.a.iii.2 — only act when `desc` is not
@@ -2811,6 +2853,9 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
                 }
                 break :blk_v try getPropertyChain(realm, cur_get, key);
             };
+            // The getter's result is reachable through nothing yet —
+            // root it across the strict setter's re-entry / allocation.
+            key_scope.push(v) catch return error.OutOfMemory;
             // §20.1.2.1 step 4.a.iii.2.b — `Set(to, nextKey, propValue, true)`.
             // Strict-mode Set per §10.1.9 throws TypeError on any
             // failure (non-extensible + new key, non-writable own

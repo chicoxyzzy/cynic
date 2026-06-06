@@ -1269,18 +1269,25 @@ fn iterateAggregator(
     };
     const resolve_fn = heap_mod.valueAsFunction(resolve_v) orelse return throwTypeError(realm, "Promise aggregator: resolve is not a function");
 
+    // Root the iterator object + its `next` method AND the once-read
+    // `resolve` function for the whole walk. `iteratorStep`, the
+    // per-item `resolve` call, and `process` all re-enter JS and can
+    // GC; each of these is reachable only through a native record, so
+    // without rooting a collection sweeps it and a later dereference
+    // (`iteratorClose`, the next `iteratorStep`, or the next
+    // `resolve` call) reads freed memory. `resolve` especially: a
+    // `get resolve() { return function(){…} }` returns a fresh
+    // function reachable through nothing, yet it is the callee on
+    // every iteration — root it BEFORE `iteratorOpen`, which itself
+    // re-enters JS (via @@iterator) and can GC.
+    const it_sc = realm.heap.openScope() catch return error.OutOfMemory;
+    defer it_sc.close();
+    it_sc.push(resolve_v) catch return error.OutOfMemory;
+
     // `iteratorOpen` always returns a record or throws — no
     // array-like fallback (spec §7.4.2 only allows GetIterator).
     const rec_in = (try iteratorOpen(realm, source_v)) orelse unreachable;
     var rec = rec_in;
-    // Root the iterator object + its `next` method for the whole
-    // walk. `iteratorStep`, the per-item `resolve` call, and
-    // `process` all re-enter JS and can GC; the user-created
-    // iterator is reachable only through this native record, so
-    // without rooting it a collection sweeps it and `iteratorClose`
-    // (or the next `iteratorStep`) dereferences freed memory.
-    const it_sc = realm.heap.openScope() catch return error.OutOfMemory;
-    defer it_sc.close();
     it_sc.push(rec.iter_v) catch return error.OutOfMemory;
     it_sc.push(heap_mod.taggedFunction(rec.next_fn)) catch return error.OutOfMemory;
     const max_iter: usize = 1 << 24;
