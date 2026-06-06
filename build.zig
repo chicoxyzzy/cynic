@@ -55,6 +55,61 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // `zig build fuzz` — the Fuzzilli REPRL host binary. Built with
+    // `-fsanitize-coverage=trace-pc-guard` so every basic block calls
+    // into `src/cli/fuzz_coverage.zig`'s edge-tracking hooks (LLVM
+    // emits the calls; Zig's `sanitize_coverage_trace_pc_guard` flag
+    // wires it on). Kept separate from `cynic` because the
+    // instrumentation imposes a per-edge function-call overhead that
+    // production embedders shouldn't pay; cynic-fuzz is the sole
+    // target Fuzzilli's profile points at.
+    //
+    // ReleaseSafe matches `cynic-test262-safe`'s posture: GC verifiers
+    // (`verifyRememberedSet` / `verifyShapeInvariant`) and 0xaa
+    // free-poison stay armed via `runtime_safety`, so a fuzz-found
+    // use-after-free panics on the poisoned read instead of returning
+    // garbage. Same reason `/gc-stress` reaches for the safe binary.
+    const cynic_fuzz_mod = b.createModule(.{
+        .root_source_file = b.path("src/fuzz_main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    // Re-import the lib at ReleaseSafe so the fuzz binary is also
+    // ReleaseSafe end-to-end (matches the test262-safe pattern).
+    const lib_mod_fuzz = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    lib_mod_fuzz.addAnonymousImport("NormalizationTest.txt", .{
+        .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
+    });
+    lib_mod_fuzz.addOptions("build_options", lib_build_options);
+    cynic_fuzz_mod.addImport("cynic", lib_mod_fuzz);
+    const cynic_fuzz = b.addExecutable(.{
+        .name = "cynic-fuzz",
+        .root_module = cynic_fuzz_mod,
+    });
+    // The flag Fuzzilli's coverage hooks need. LLVM emits a call
+    // to `__sanitizer_cov_trace_pc_guard(*u32)` at every edge,
+    // plus a one-time `__sanitizer_cov_trace_pc_guard_init` over
+    // the `__sancov_guards` section — both defined in
+    // `src/cli/fuzz_coverage.zig`.
+    cynic_fuzz.sanitize_coverage_trace_pc_guard = true;
+    // LLVM's stack-depth probe destination (`__sancov_lowest_stack`)
+    // is defined as a C `__thread` global — Zig's TLS layout on
+    // macOS doesn't quite line up with the symbol shape LLVM's
+    // sancov pass emits. See `src/cli/fuzz_coverage_sancov.c`.
+    cynic_fuzz_mod.addCSourceFile(.{
+        .file = b.path("src/cli/fuzz_coverage_sancov.c"),
+        .flags = &.{},
+    });
+    const install_cynic_fuzz = b.addInstallArtifact(cynic_fuzz, .{});
+    const fuzz_step = b.step("fuzz", "Build cynic-fuzz — the Fuzzilli REPRL host (ReleaseSafe + sanitize-coverage)");
+    fuzz_step.dependOn(&install_cynic_fuzz.step);
+
     // `zig build run -- ...` runs the CLI with forwarded args.
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

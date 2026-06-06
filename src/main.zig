@@ -519,8 +519,12 @@ test {
     // Force the test walker into the `cli/` subtree so test blocks
     // inside subcommand modules are picked up. Zig's discovery only
     // descends into files reached via `@import`; a top-level use
-    // from `main` isn't always enough.
+    // from `main` isn't always enough. `fuzz_coverage.zig` is also
+    // imported here so its pure-arithmetic unit tests run — the
+    // `export fn` sancov hooks inside it don't link into a non-test
+    // `cynic` build (this `test` block only compiles in `zig test`).
     _ = @import("cli/fuzz_reprl.zig");
+    _ = @import("cli/fuzz_coverage.zig");
 }
 
 test "parseTopLevelFlags: no flags returns empty feature set and null gc_threshold" {
