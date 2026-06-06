@@ -110,6 +110,7 @@ test {
     _ = @import("runtime/builtins/function.zig");
     _ = @import("runtime/builtins/error.zig");
     _ = @import("runtime/builtins/temporal.zig");
+    _ = @import("runtime/builtins/fuzzilli.zig");
     _ = @import("bytecode/op.zig");
     _ = @import("bytecode/chunk.zig");
     _ = @import("bytecode/disasm.zig");

@@ -5,6 +5,7 @@ const cynic = @import("cynic");
 const eval_cmd = @import("cli/eval.zig");
 const run_cmd = @import("cli/run.zig");
 const repl_cmd = @import("cli/repl.zig");
+const fuzz_reprl = @import("cli/fuzz_reprl.zig");
 
 const FeatureFlag = cynic.runtime.FeatureFlag;
 const FeatureSet = cynic.runtime.FeatureSet;
@@ -153,6 +154,41 @@ pub fn main(init: std.process.Init) !void {
             return error.UnexpectedArgument;
         }
         try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened, allow_eval);
+    } else if (std.mem.eql(u8, sub, "fuzz-reprl")) {
+        // `cynic fuzz-reprl` — Fuzzilli REPRL host. The subcommand
+        // takes no per-call args; the fuzzing posture is hardcoded
+        // (--unhardened + --allow=eval + installTestGlobals). The
+        // top-level `--gc-threshold` knob composes: setting it to 1
+        // here puts every fuzzed sample under maximal GC pressure.
+        // Inherits FDs 100/101/102/103 from Fuzzilli — running
+        // outside that context errors with a focused message.
+        if (args.len != 0) {
+            try printUsage(io);
+            return error.UnexpectedArgument;
+        }
+        fuzz_reprl.run(allocator, gc_threshold, null) catch |err| switch (err) {
+            error.UnsupportedPlatform => {
+                try std.Io.File.stderr().writeStreamingAll(io, "error: `fuzz-reprl` is not supported on this platform (Fuzzilli is POSIX-only)\n");
+                std.process.exit(2);
+            },
+            error.NotOpenForReading, error.WriteFailed => {
+                try std.Io.File.stderr().writeStreamingAll(io, "error: `fuzz-reprl` expects FDs 100/101/102/103 inherited from Fuzzilli; invoke via the Fuzzilli harness, not directly.\n");
+                std.process.exit(2);
+            },
+            error.HandshakeFailed => {
+                try std.Io.File.stderr().writeStreamingAll(io, "error: REPRL handshake failed — parent did not reply with `HELO`.\n");
+                std.process.exit(2);
+            },
+            error.UnknownAction => {
+                try std.Io.File.stderr().writeStreamingAll(io, "error: REPRL: unknown action code on control channel.\n");
+                std.process.exit(2);
+            },
+            error.ScriptTooLarge => {
+                try std.Io.File.stderr().writeStreamingAll(io, "error: REPRL: sample size exceeds 16 MiB cap (likely a corrupt control channel).\n");
+                std.process.exit(2);
+            },
+            else => return err,
+        };
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage(io);
     } else {
@@ -191,6 +227,14 @@ fn printUsage(io: std.Io) !void {
         \\  repl [--debug-globals]           Interactive read-eval-print loop with
         \\                                   a persistent realm. Type .exit or
         \\                                   press Ctrl-D to leave.
+        \\  fuzz-reprl                       Fuzzilli REPRL host. Invoked by
+        \\                                   Fuzzilli with FDs 100-103 preset;
+        \\                                   loops until EOF on the control
+        \\                                   channel. Posture is hardcoded
+        \\                                   (--unhardened + --allow=eval); the
+        \\                                   `fuzzilli(op, arg)` host hook
+        \\                                   (FUZZILLI_CRASH / FUZZILLI_PRINT) is
+        \\                                   installed per iteration.
         \\  help                             Show this help.
         \\
         \\Top-level options (consumed before the subcommand):
@@ -470,6 +514,14 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
 }
 
 const testing = std.testing;
+
+test {
+    // Force the test walker into the `cli/` subtree so test blocks
+    // inside subcommand modules are picked up. Zig's discovery only
+    // descends into files reached via `@import`; a top-level use
+    // from `main` isn't always enough.
+    _ = @import("cli/fuzz_reprl.zig");
+}
 
 test "parseTopLevelFlags: no flags returns empty feature set and null gc_threshold" {
     const args = [_][]const u8{ "run", "foo.js" };

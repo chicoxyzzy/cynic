@@ -1779,6 +1779,13 @@ pub const Realm = struct {
         const drain_fn = try self.heap.allocateFunctionNative(self, @import("builtins/promise.zig").microtaskDrainNative, 0, "__drainMicrotasks");
         try self.globals.put(self.allocator, "__drainMicrotasks", heap_mod.taggedFunction(drain_fn));
 
+        // `fuzzilli(op, arg)` — Fuzzilli's host hook. Exposed only
+        // through the test-globals path; the production `cynic`
+        // CLI never installs it. Native lives in `builtins/fuzzilli.zig`;
+        // the REPRL loop that drives it sits in `cli/fuzz_reprl.zig`.
+        const fuzzilli_fn = try self.heap.allocateFunctionNative(self, @import("builtins/fuzzilli.zig").fuzzilliNative, 2, "fuzzilli");
+        try self.globals.put(self.allocator, "fuzzilli", heap_mod.taggedFunction(fuzzilli_fn));
+
         // Re-stamp the freeze contract over the just-installed
         // debug globals when the realm is hardened. `globals.put`
         // adds new keys with `{writable: true, configurable: true}`
@@ -1799,6 +1806,7 @@ pub const Realm = struct {
                     "__collectGarbage",
                     "__clearKeptObjects",
                     "__drainMicrotasks",
+                    "fuzzilli",
                 };
                 inline for (debug_keys) |k| {
                     try gt.property_flags.put(self.allocator, k, .{
