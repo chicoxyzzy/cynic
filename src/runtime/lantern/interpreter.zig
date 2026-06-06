@@ -1176,6 +1176,34 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
+        .to_int32 => {
+            // Fused form of `expr | 0` — semantically equivalent to
+            // ApplyStringOrNumericBinaryOperator(BitOr, acc, +0).
+            // Int32 fast path: `intBitwise(.bor, acc, 0)` returns
+            // `acc | 0 = acc` (identity), so this is a 0-cost
+            // transform for the dominant int32 case. Everything
+            // else (double, string, bool, null, undefined, BigInt)
+            // routes through `bitwiseBinary(.bor, acc, 0)` so the
+            // ToInt32 spec sequence (NaN/±∞ → +0, double truncate,
+            // ToNumber on String, BigInt TypeError) lands
+            // bit-identically to the un-fused `Star r; LdaSmi 0;
+            // BitOr r` triple.
+            const zero = Value.fromInt32(0);
+            if (intBitwise(.bor, acc, zero)) |res| {
+                acc = res;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+            if (try bitwiseBinary(realm, .bit_or, acc, zero)) |res| acc = res else {
+                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                realm.pending_exception = null;
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
         .add_smi => {
             // Fused `<reg> + <imm>`. Reads the register, adds the
             // baked-in Smi immediate, writes to acc. The int32 fast

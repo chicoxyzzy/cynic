@@ -11257,6 +11257,117 @@ test "add_smi: hot loop sanity (i + 1 across 1000 iters)" {
     , 500500);
 }
 
+// ── to_int32 (x | 0 ToInt32 idiom) ──────────────────────────────────
+//
+// `compileBinary` detects `expr | 0` and emits `<compile expr>;
+// to_int32` instead of the standard `Star r_tmp; LdaSmi 0;
+// BitOr r_tmp` triple. The handler routes through the existing
+// `intBitwise(.bor, acc, 0)` fast path (int32 → identity) and
+// the slow `bitwiseBinary(.bor, acc, 0)` path for everything
+// else, so § 7.1.6 ToInt32 + § 13.15.5 bitwise OR with 0 stay
+// observably identical to the un-fused triple.
+
+test "to_int32: int32 passes through unchanged" {
+    try expectScriptIntWithBuiltins(
+        \\(7 | 0);
+    , 7);
+}
+
+test "to_int32: positive double truncates toward zero" {
+    try expectScriptIntWithBuiltins(
+        \\(3.7 | 0);
+    , 3);
+}
+
+test "to_int32: negative double truncates toward zero" {
+    try expectScriptIntWithBuiltins(
+        \\(-3.7 | 0);
+    , -3);
+}
+
+test "to_int32: NaN coerces to 0" {
+    try expectScriptIntWithBuiltins(
+        \\(NaN | 0);
+    , 0);
+}
+
+test "to_int32: Infinity coerces to 0" {
+    try expectScriptIntWithBuiltins(
+        \\(Infinity | 0);
+    , 0);
+}
+
+test "to_int32: negative Infinity coerces to 0" {
+    try expectScriptIntWithBuiltins(
+        \\(-Infinity | 0);
+    , 0);
+}
+
+test "to_int32: i32 overflow wraps modulo 2^32" {
+    // 2147483648 (one past i32 max) → -2147483648.
+    try expectScriptIntWithBuiltins(
+        \\(2147483648 | 0);
+    , -2147483648);
+}
+
+test "to_int32: string coerces via ToNumber → ToInt32" {
+    try expectScriptIntWithBuiltins(
+        \\("42" | 0);
+    , 42);
+}
+
+test "to_int32: non-numeric string coerces to 0" {
+    try expectScriptIntWithBuiltins(
+        \\("abc" | 0);
+    , 0);
+}
+
+test "to_int32: true → 1" {
+    try expectScriptIntWithBuiltins(
+        \\(true | 0);
+    , 1);
+}
+
+test "to_int32: false → 0" {
+    try expectScriptIntWithBuiltins(
+        \\(false | 0);
+    , 0);
+}
+
+test "to_int32: null → 0" {
+    try expectScriptIntWithBuiltins(
+        \\(null | 0);
+    , 0);
+}
+
+test "to_int32: undefined coerces to 0" {
+    // § 7.1.6 ToInt32 → ToNumber(undefined) = NaN → +0.
+    try expectScriptIntWithBuiltins(
+        \\(undefined | 0);
+    , 0);
+}
+
+test "to_int32: BigInt operand throws TypeError" {
+    try expectScriptThrows(
+        \\(10n | 0);
+    );
+}
+
+test "to_int32: hot loop sanity ((sum + i) | 0)" {
+    try expectScriptIntWithBuiltins(
+        \\let sum = 0;
+        \\for (let i = 0; i < 1000; i++) sum = (sum + i) | 0;
+        \\sum;
+        // sum(0..999) = 999*1000/2 = 499500
+    , 499500);
+}
+
+test "to_int32: 0 | 0 idiom" {
+    try expectScriptIntWithBuiltins(
+        \\(0 | 0);
+    , 0);
+}
+
 test "def_template_property: literal with mixed static + computed keys" {
     // Compiler bails template build on a literal that contains
     // any computed key (template build sees `.computed` and

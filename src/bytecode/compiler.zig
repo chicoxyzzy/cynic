@@ -5018,6 +5018,25 @@ pub const Compiler = struct {
             .in_ => .in_op,
         };
 
+        // `expr | 0` — the ECMAScript ToInt32 idiom. The standard
+        // path would emit `Star r_tmp; LdaSmi 0; BitOr r_tmp` (3
+        // ops + 1 temp); `to_int32` collapses that to a single
+        // dispatch that transforms `acc` in place. Works for ANY
+        // LHS shape (register-bound, env-bound, complex
+        // expression) — the slow path routes through
+        // `bitwiseBinary(.bit_or, acc, 0)` so every § 7.1.6
+        // ToInt32 / § 13.15 BitOr-with-zero edge case stays
+        // bit-identical to the un-fused triple. The headline
+        // arith_loop / int-coerce hot-path win.
+        if (op == .bit_or) {
+            if (self.tryGetSmiLiteralValue(b.rhs.*)) |imm| {
+                if (imm == 0) {
+                    try self.compileExpression(b.lhs);
+                    try self.builder.emitOp(.to_int32, b.span);
+                    return;
+                }
+            }
+        }
         // Register-binding peephole — when LHS is a register-bound
         // identifier (a loop counter promoted by
         // `compileForStatement`, or a register-only function param

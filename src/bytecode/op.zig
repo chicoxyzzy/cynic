@@ -79,6 +79,19 @@ pub const Op = enum(u8) {
     /// counting-loop body with the `<reg> + <literal>` shape
     /// (object_alloc, tail_recursion, JSON renumbering, etc.).
     add_smi,
+    /// `[op]` — `acc = ToInt32(acc)`. Fused form of the
+    /// `expr | 0` ToInt32 idiom. The compiler emits it when a
+    /// `BitOr` binary has a Smi-literal-0 RHS — instead of the
+    /// 3-op `Star r_tmp; LdaSmi 0; BitOr r_tmp` triple, the LHS
+    /// stays in `acc` and a single `to_int32` op transforms it
+    /// in place. Int32 fast path: identity (already int32, no
+    /// shift). Anything else routes through the existing
+    /// `bitwiseBinary(.bor, acc, 0)` slow path so § 7.1.6
+    /// ToInt32's NaN/±∞ → +0, double truncate, string ToNumber,
+    /// BigInt → TypeError all behave bit-identically to the
+    /// un-fused triple. Headline arith_loop / int-coerce
+    /// hot-path win.
+    to_int32,
 
     // ── Bitwise (acc = reg OP acc, ToInt32 coercion) ─────────────────────
     /// `[op] [r:u8]` — acc = reg & acc. §13.12.
@@ -1234,6 +1247,7 @@ pub const Op = enum(u8) {
             .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
             .def_template_property => 5, // k:u16 + r_obj:u8 + slot:u16
             .add_smi => 5, // r:u8 + imm:i32
+            .to_int32 => 0, // no operand — transforms acc in place
             .sta_property => 5, // k:u16 + r_obj:u8 + ic:u16 (inline-cache slot)
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
             .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
@@ -1279,6 +1293,7 @@ pub const Op = enum(u8) {
             .mod => "Mod",
             .pow => "Pow",
             .add_smi => "AddSmi",
+            .to_int32 => "ToInt32",
             .bit_and => "BitAnd",
             .bit_or => "BitOr",
             .bit_xor => "BitXor",
