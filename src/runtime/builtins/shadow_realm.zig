@@ -509,9 +509,17 @@ fn copyNameAndLength(realm: *Realm, wrapped: *JSFunction, target_v: Value) Nativ
         } else if (std.math.isInf(d)) {
             length_value = if (d > 0) Value.fromDouble(std.math.inf(f64)) else Value.fromInt32(0);
         } else {
+            // §3.8.3.5.1 step 4.b — `length = max(trunc(n), 0)`.
+            // Boxing as Int32 when the value fits and Double when it
+            // doesn't keeps `Number.isInteger(wrapped.length)` true
+            // for the common spec-mandated small cases. The upper-
+            // bound check has to gate the `@intFromFloat` cast:
+            // wrapping a callable whose `length` is `1e30` (or any
+            // |x| > i64::MAX) would otherwise abort the host before
+            // the comparison short-circuited.
             const ti: f64 = @trunc(d);
             const clamped: f64 = if (ti > 0) ti else 0;
-            if (clamped == @as(f64, @floatFromInt(@as(i64, @intFromFloat(clamped)))) and clamped < 2147483647.0) {
+            if (clamped <= 2147483647.0) {
                 length_value = Value.fromInt32(@intFromFloat(clamped));
             } else {
                 length_value = Value.fromDouble(clamped);

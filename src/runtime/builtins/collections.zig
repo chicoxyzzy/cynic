@@ -564,12 +564,20 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
             }
         } else {
             // §23.1.5.2.1 step 6 — \`length = LengthOfArrayLike(O)\`,
-            // which routes through \`[[Get]]\` and therefore accessors.
+            // which is \`F(ToLength(? Get(O, "length")))\`. ToLength
+            // (§7.1.20) clamps NaN / ±∞ / negatives to 0 and caps the
+            // result at 2^53 - 1, and a raw \`@intFromFloat(len_v)\`
+            // on a user-controlled \`{length: Infinity}\` /
+            // \`{length: 1e30}\` / \`{length: NaN}\` would panic the
+            // host instead.
             const len_v = intrinsics.getPropertyChain(realm, obj, "length") catch {
                 state.done = true;
                 return .propagated;
             };
-            if (len_v.isInt32()) length = len_v.asInt32() else if (len_v.isDouble()) length = @intFromFloat(len_v.asDouble());
+            length = intrinsics.toLengthValue(realm, len_v) catch {
+                state.done = true;
+                return .propagated;
+            };
             if (idx < length) {
                 var ibuf: [16]u8 = undefined;
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable;
