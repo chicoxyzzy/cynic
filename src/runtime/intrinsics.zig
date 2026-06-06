@@ -2468,6 +2468,9 @@ pub fn performIndirectEval(realm: *Realm, source: []const u8) NativeError!Value 
         error.OutOfMemory => return error.OutOfMemory,
         // §19.2.1 step 11 — a SyntaxError from parsing the program.
         error.ParseError, error.CompileError => return throwSyntaxError(realm, "eval: SyntaxError in evaluated source"),
+        // Deeply nested eval source → RangeError (matches V8 / JSC
+        // and the `too_deeply_nested` diagnostic's range_error class).
+        error.ParseRangeError => return throwRangeError(realm, "Maximum call stack size exceeded"),
         error.InvalidOpcode => return error.OutOfMemory,
     };
     return switch (result) {

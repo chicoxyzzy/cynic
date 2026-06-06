@@ -769,6 +769,10 @@ fn createDynamicFunction(realm: *Realm, this_value: Value, args: []const Value, 
     const result = lantern.evaluateEval(ctor_realm.allocator, ctor_realm, source) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ParseError, error.CompileError => return @import("../intrinsics.zig").throwSyntaxError(realm, "Function constructor: SyntaxError in synthesized source"),
+        // Deeply nested synthesized body → RangeError (matches V8 /
+        // JSC and the `too_deeply_nested` diagnostic's range_error
+        // class).
+        error.ParseRangeError => return @import("../intrinsics.zig").throwRangeError(realm, "Maximum call stack size exceeded"),
         error.InvalidOpcode => return error.OutOfMemory,
     };
     const fn_val = switch (result) {

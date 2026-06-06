@@ -664,3 +664,40 @@ test "param-register: direct eval in object-literal computed key keeps env" {
         \\f(42);
     , 7);
 }
+
+test "eval: deeply nested source throws RangeError, not SyntaxError" {
+    // The parser bounds recursion with a `too_deeply_nested`
+    // diagnostic whose `Code.errorClass()` is range_error. The eval
+    // entry points (`evaluateIndirectEval` / `evaluateDirectEval` /
+    // the Function constructor) now surface that as a RangeError —
+    // matching V8 / JSC and the diagnostic's class — instead of the
+    // generic SyntaxError every other parse failure gets. Build the
+    // deep source in JS so the test file stays small.
+    try expectIntAllow(
+        \\const d = 100000;
+        \\const src = "[".repeat(d) + "]".repeat(d);
+        \\let r = 0;
+        \\try { eval(src); } catch (e) { r = (e instanceof RangeError) ? 1 : 0; }
+        \\r;
+    , 1);
+}
+
+test "eval: ordinary syntax error still throws SyntaxError" {
+    // The range-error reclassification must NOT capture normal parse
+    // failures — those stay SyntaxError.
+    try expectIntAllow(
+        \\let r = 0;
+        \\try { eval("var var var"); } catch (e) { r = (e instanceof SyntaxError) ? 1 : 0; }
+        \\r;
+    , 1);
+}
+
+test "eval: Function constructor with deeply nested body throws RangeError" {
+    try expectIntAllow(
+        \\const d = 100000;
+        \\const body = "return " + "[".repeat(d) + "]".repeat(d);
+        \\let r = 0;
+        \\try { new Function(body); } catch (e) { r = (e instanceof RangeError) ? 1 : 0; }
+        \\r;
+    , 1);
+}

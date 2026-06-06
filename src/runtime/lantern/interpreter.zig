@@ -383,9 +383,33 @@ pub const RunResult = union(enum) {
 pub const EvaluateError = error{
     OutOfMemory,
     ParseError,
+    /// A parse-phase diagnostic whose `Code.errorClass()` is
+    /// `range_error` rather than `syntax_error` — currently only
+    /// `too_deeply_nested` (stack-exhausting source). Distinguished
+    /// from `ParseError` so the eval entry points throw the
+    /// RangeError V8 / JSC give for deeply nested eval source,
+    /// consistent with the diagnostic's class (the test262 scoring
+    /// path reads `errorClass()` directly, so this keeps the eval
+    /// runtime path in agreement with it).
+    ParseRangeError,
     CompileError,
     InvalidOpcode,
 };
+
+/// Classify an error-severity parse-diagnostic list into the
+/// matching `EvaluateError`. A `range_error`-class code (deeply
+/// nested source) becomes `ParseRangeError`; everything else (the
+/// SyntaxError family) becomes `ParseError`. Returns `null` when no
+/// error-severity diagnostic is present (the caller proceeds).
+fn classifyParseDiagnostics(diags: []const @import("../../diagnostic.zig").Diagnostic) ?EvaluateError {
+    var result: ?EvaluateError = null;
+    for (diags) |d| {
+        if (d.severity != .err) continue;
+        if (d.code.errorClass() == .range_error) return error.ParseRangeError;
+        result = error.ParseError;
+    }
+    return result;
+}
 
 /// §15.7.14 step 31 PrivateBoundIdentifiers — every evaluation of
 /// a ClassTail allocates a fresh `[[PrivateBrand]]`. The compiler
@@ -630,7 +654,7 @@ pub fn evaluateDirectEval(
         // (SyntaxError) if ContainsArguments of its StatementList is true.
         .in_field_initializer = snapshot.in_field_initializer,
     }) catch return error.ParseError;
-    for (diags.items) |d| if (d.severity == .err) return error.ParseError;
+    if (classifyParseDiagnostics(diags.items)) |e| return e;
 
     // Rebuild the caller's visible env-slot bindings as a synthetic
     // outer scope (parent = null). Each binding keeps its original
@@ -751,7 +775,7 @@ fn evaluateSource(
     const diag_mod = @import("../../diagnostic.zig");
     var diags: diag_mod.Diagnostics = .empty;
     const program = parser_mod.parseScript(aa, source, &diags) catch return error.ParseError;
-    for (diags.items) |d| if (d.severity == .err) return error.ParseError;
+    if (classifyParseDiagnostics(diags.items)) |e| return e;
     // §19.2.1 — an indirect eval is a strict eval iff its body carries
     // a Use Strict Directive. A non-strict body binds top-level `var` /
     // function on the global env (`eval_local = false`); a strict body
@@ -2143,6 +2167,16 @@ pub fn runFrames(
             const eresult = evaluateDirectEval(allocator, realm, src_str.flatBytes(), snapshot, ctx) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidOpcode => return error.InvalidOpcode,
+                // Deeply nested eval source exhausts the parser stack —
+                // a RangeError, matching V8 / JSC and the diagnostic's
+                // own `range_error` class (see `too_deeply_nested`).
+                error.ParseRangeError => {
+                    const ex = try makeRangeError(realm, "Maximum call stack size exceeded");
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
                 // §19.2.1 step 11 — a parse / compile failure is a
                 // SyntaxError raised in the caller.
                 error.ParseError, error.CompileError => {
