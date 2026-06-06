@@ -983,9 +983,15 @@ pub const Heap = struct {
         try self.charge(a.byte_len + b.byte_len + @sizeOf(JSString));
         const a_bytes = try a.flatten(self.bytes_allocator);
         const b_bytes = try b.flatten(self.bytes_allocator);
-        const total = utf16.wtf8ConcatLen(a_bytes, b_bytes);
+        // `total` is u64 (not usize) so the > max_byte_len check stays alive
+        // on wasm32, where usize is u32 and a usize-typed total can never
+        // exceed maxInt(u32) — comptime-dead branch, error.StringTooLong gets
+        // dropped from the inferred error set, and callers fail to compile.
+        const total: u64 = @as(u64, utf16.wtf8ConcatLen(a_bytes, b_bytes));
         if (total > string_mod.max_byte_len) return error.StringTooLong;
-        const owned = try self.bytes_allocator.alloc(u8, total);
+        // Safe @intCast: the cap check above ensures total fits in u32,
+        // and u32 ≤ usize on every supported target.
+        const owned = try self.bytes_allocator.alloc(u8, @intCast(total));
         errdefer self.bytes_allocator.free(owned);
         utf16.wtf8ConcatInto(owned, a_bytes, b_bytes);
         const s = try self.string_pool.create(self.allocator);
@@ -1036,8 +1042,12 @@ pub const Heap = struct {
         var left = a;
         var right = b;
 
-        // Gate A — min-length threshold. `byte_len` is O(1).
-        const total: usize = @as(usize, left.byte_len) + @as(usize, right.byte_len);
+        // Gate A — min-length threshold. `byte_len` is O(1). `total` is
+        // u64 (not usize) so the > max_byte_len check below stays alive
+        // on wasm32 (see `concatStrings` for the dead-elim rationale) and
+        // the addition itself can't overflow when both operands are at u32
+        // max.
+        const total: u64 = @as(u64, left.byte_len) + @as(u64, right.byte_len);
         if (total < string_mod.min_cons_byte_len) {
             return self.concatStrings(left, right);
         }
@@ -1117,9 +1127,12 @@ pub const Heap = struct {
     /// second copy that `allocateString(scratch)` would incur.
     pub fn allocateStringConcat2(self: *Heap, a: []const u8, b: []const u8) !*JSString {
         try self.charge(a.len + b.len + @sizeOf(JSString));
-        const total = utf16.wtf8ConcatLen(a, b);
+        // u64 total — see `concatStrings` for the wasm32 dead-elim rationale.
+        const total: u64 = @as(u64, utf16.wtf8ConcatLen(a, b));
         if (total > string_mod.max_byte_len) return error.StringTooLong;
-        const owned = try self.bytes_allocator.alloc(u8, total);
+        // Safe @intCast: the cap check above ensures total fits in u32,
+        // and u32 ≤ usize on every supported target.
+        const owned = try self.bytes_allocator.alloc(u8, @intCast(total));
         errdefer self.bytes_allocator.free(owned);
         utf16.wtf8ConcatInto(owned, a, b);
         const s = try self.string_pool.create(self.allocator);
