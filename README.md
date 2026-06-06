@@ -193,6 +193,11 @@ Contributors — human or AI agent — should read
 prior-art surveys, spec-faithful naming) and pointers into the
 engineering handbook under [`docs/handbook/`](docs/handbook/).
 
+## Security
+
+Security policy, in-scope / out-of-scope, and disclosure channel:
+see [`SECURITY.md`](SECURITY.md).
+
 ## License
 
 Cynic is [MIT-licensed](LICENSE). Bundled third-party data under
