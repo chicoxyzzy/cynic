@@ -11354,6 +11354,27 @@ test "peephole clobber: x + (x += 10) compound assignment in RHS" {
     , 16);
 }
 
+test "peephole clobber: comparison op x < (x = 5) — gate is op-agnostic" {
+    // The clobber gate runs before the op-specific logic, so the
+    // relational ops get the snapshot-first path too. LHS x = 3,
+    // then x := 5; 3 < 5 → true → 1. A post-write read would
+    // compute 5 < 5 → false.
+    try expectScriptIntWithBuiltins(
+        \\function f(x) { return (x < (x = 5)) ? 1 : 0; }
+        \\f(3);
+    , 1);
+}
+
+test "peephole clobber: bitwise op x | (x = 8) snapshots LHS" {
+    // 3 | 8 = 11 (LHS 3 frozen before x := 8). Note this is the
+    // bit_or-with-NONZERO path, so the to_int32 fast path does not
+    // apply — exercises the register peephole's bitwise branch.
+    try expectScriptIntWithBuiltins(
+        \\function f(x) { return x | (x = 8); }
+        \\f(3);
+    , 11);
+}
+
 test "peephole clobber: nested — x + (1 + (x = 9))" {
     // Inner assignment buried under another binary. LHS x = 3,
     // RHS = 1 + 9 = 10. 3 + 10 = 13.
