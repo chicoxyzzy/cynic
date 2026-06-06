@@ -11280,6 +11280,99 @@ test "add_smi: hot loop sanity (i + 1 across 1000 iters)" {
     , 500500);
 }
 
+// ── Register peephole RHS-clobber correctness ───────────────────────
+//
+// The `compileBinary` register peephole skips the `Ldar r_lhs;
+// Star r_tmp` snapshot the standard path uses to freeze the LHS
+// value before evaluating RHS. That's only sound when RHS can't
+// write `r_lhs`. A register-only PARAM can be reassigned in the
+// body (loop counters can't — promotion rejects body writes), so
+// `x + (x = 5)` / `x + x++` would read the post-write register
+// without the gate. § 13.15.2 evaluates the LHS operand BEFORE the
+// RHS, so the original `x` must be observed. These tests pin the
+// ordering across assignment + update forms in RHS.
+
+test "peephole clobber: x + (x = 5) observes original x" {
+    // §13.15.2 — LHS evaluated first (3), then RHS assigns x=5 and
+    // yields 5; result 3 + 5 = 8. The peephole must NOT read the
+    // mutated register.
+    try expectScriptIntWithBuiltins(
+        \\function f(x) { return x + (x = 5); }
+        \\f(3);
+    , 8);
+}
+
+test "peephole clobber: x + x++ observes pre-increment x" {
+    // x++ yields the old value (3) then sets x=4; LHS x is 3.
+    // 3 + 3 = 6.
+    try expectScriptIntWithBuiltins(
+        \\function g(x) { return x + x++; }
+        \\g(3);
+    , 6);
+}
+
+test "peephole clobber: x + ++x observes original x, RHS is incremented" {
+    // ++x sets x=4 and yields 4; LHS x snapshot is 3. 3 + 4 = 7.
+    try expectScriptIntWithBuiltins(
+        \\function g(x) { return x + ++x; }
+        \\g(3);
+    , 7);
+}
+
+test "peephole clobber: x - (x = 1) non-commutative ordering" {
+    // 3 - 1 = 2 (LHS 3 frozen before x=1).
+    try expectScriptIntWithBuiltins(
+        \\function f(x) { return x - (x = 1); }
+        \\f(3);
+    , 2);
+}
+
+test "peephole clobber: x + (x += 10) compound assignment in RHS" {
+    // x += 10 → x becomes 13, yields 13; LHS x snapshot 3.
+    // 3 + 13 = 16.
+    try expectScriptIntWithBuiltins(
+        \\function f(x) { return x + (x += 10); }
+        \\f(3);
+    , 16);
+}
+
+test "peephole clobber: nested — x + (1 + (x = 9))" {
+    // Inner assignment buried under another binary. LHS x = 3,
+    // RHS = 1 + 9 = 10. 3 + 10 = 13.
+    try expectScriptIntWithBuiltins(
+        \\function f(x) { return x + (1 + (x = 9)); }
+        \\f(3);
+    , 13);
+}
+
+test "peephole clobber: x + f(x = 7) assignment inside call arg" {
+    // The call arg writes x; LHS snapshot 3. f returns its arg
+    // (7). 3 + 7 = 10.
+    try expectScriptIntWithBuiltins(
+        \\function id(v) { return v; }
+        \\function f(x) { return x + id(x = 7); }
+        \\f(3);
+    , 10);
+}
+
+test "peephole clobber: add_smi path safe — x + 1 with no RHS write" {
+    // Control: the fast path still fires when RHS is a pure
+    // literal (no clobber risk). 3 + 1 = 4.
+    try expectScriptIntWithBuiltins(
+        \\function f(x) { return x + 1; }
+        \\f(3);
+    , 4);
+}
+
+test "peephole clobber: reading another register in RHS stays fast + correct" {
+    // RHS reads a DIFFERENT param (no write) — peephole should
+    // still fire and be correct. a=10, b=3 → 13.
+    try expectScriptIntWithBuiltins(
+        \\function f(a, b) { return a + b; }
+        \\f(10, 3);
+    , 13);
+}
+
 // ── to_int32 (x | 0 ToInt32 idiom) ──────────────────────────────────
 //
 // `compileBinary` detects `expr | 0` and emits `<compile expr>;

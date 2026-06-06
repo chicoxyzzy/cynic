@@ -5046,27 +5046,41 @@ pub const Compiler = struct {
         // the result is `lhs op rhs` regardless of op commutativity.
         // Headline win on `i + 1` / `n - 1` patterns in hot loops
         // (object_alloc, arith_loop, tail_recursion).
+        // The peephole reads `r_lhs` AFTER evaluating RHS, so it's
+        // only sound when RHS can't write that register. §13.15.2
+        // evaluates the LHS operand first; a register-bound param
+        // reassigned in RHS (`x + (x = 5)`, `x + x++`) would
+        // otherwise be read post-write. Gate on the RHS being free
+        // of assignment / update — loop counters are already safe
+        // (promotion rejects body writes), and register params are
+        // never closure-captured, so a bare call in RHS can't reach
+        // the slot either; only a direct assignment/update can.
         if (self.tryRegisterBoundIdent(b.lhs.*)) |r_lhs| {
-            // Second-level fusion — `<reg> + <Smi literal>` collapses
-            // the two-op `LdaSmi imm; Add r_lhs` sequence into a
-            // single `add_smi r_lhs imm` dispatch. Saves one op +
-            // one byte on every counting-loop body of that shape
-            // (object_alloc's `i + 1`, tail_recursion's `acc + 1`).
-            // Slow path is identical to `.add`'s slow path —
-            // string concat, BigInt TypeError, double + Smi all
-            // surface through the same `addValues` call.
-            if (op == .add) {
-                if (self.tryGetSmiLiteralValue(b.rhs.*)) |imm| {
-                    try self.builder.emitOp(.add_smi, b.span);
-                    try self.builder.emitU8(r_lhs);
-                    try self.builder.emitI32(imm);
-                    return;
+            // RHS-clobber gate: skip the peephole when RHS could
+            // write `r_lhs`. When safe, take the fused path.
+            if (!self.exprMayWriteRegister(b.rhs)) {
+                // Second-level fusion — `<reg> + <Smi literal>`
+                // collapses the two-op `LdaSmi imm; Add r_lhs`
+                // sequence into a single `add_smi r_lhs imm`
+                // dispatch. Saves one op + one byte on every
+                // counting-loop body of that shape (object_alloc's
+                // `i + 1`, tail_recursion's `acc + 1`). Slow path
+                // is identical to `.add`'s — string concat, BigInt
+                // TypeError, double + Smi all surface through the
+                // same `addValues` call.
+                if (op == .add) {
+                    if (self.tryGetSmiLiteralValue(b.rhs.*)) |imm| {
+                        try self.builder.emitOp(.add_smi, b.span);
+                        try self.builder.emitU8(r_lhs);
+                        try self.builder.emitI32(imm);
+                        return;
+                    }
                 }
+                try self.compileExpression(b.rhs);
+                try self.builder.emitOp(op, b.span);
+                try self.builder.emitU8(r_lhs);
+                return;
             }
-            try self.compileExpression(b.rhs);
-            try self.builder.emitOp(op, b.span);
-            try self.builder.emitU8(r_lhs);
-            return;
         }
         // LHS into a temp register, RHS into the accumulator,
         // then `<op> <reg>` runs `acc = reg <op> acc`.
@@ -5098,6 +5112,102 @@ pub const Compiler = struct {
         const binding = scope.resolve(name) orelse return null;
         if (!binding.is_register) return null;
         return binding.register;
+    }
+
+    /// True when evaluating `e` could write a register-bound
+    /// binding's slot — i.e. the subtree contains an assignment or
+    /// an update (`++` / `--`) expression. The register peephole
+    /// in `compileBinary` evaluates RHS WITHOUT first snapshotting
+    /// the LHS register; §13.15.2 requires the LHS operand value to
+    /// be the pre-RHS value, so the peephole is only sound when RHS
+    /// can't mutate `r_lhs`. Register-bound params can be reassigned
+    /// in the body (`function f(x){ return x + (x = 5); }`), so an
+    /// RHS assignment to the same name would otherwise read the
+    /// post-write register (observed: returned 10, spec says 8).
+    ///
+    /// Register-bound bindings are never closure-captured
+    /// (`paramsCanBeRegisters` / the loop-counter promotion both
+    /// reject nested functions and `eval`), so a plain call in RHS
+    /// can't reach the slot — only a direct assignment/update can.
+    /// The check is conservative (ANY assignment/update, not just
+    /// ones targeting the LHS name): the missed-fusion cases are
+    /// rare and the gate keeps the common `i + 1` / `a + b` / `i +
+    /// (j * 2)` shapes fast.
+    fn exprMayWriteRegister(self: *Compiler, e: *const ast.expression.Expression) bool {
+        return switch (e.*) {
+            .assignment, .update => true,
+            .null_literal,
+            .boolean_literal,
+            .numeric_literal,
+            .bigint_literal,
+            .string_literal,
+            .regex_literal,
+            .this_expr,
+            .super_,
+            .import_meta,
+            .new_target,
+            .private_identifier,
+            .identifier_reference,
+            // A nested function / arrow / class body can't run during
+            // RHS evaluation of the enclosing binary — it only
+            // constructs a closure value. Its inner assignments don't
+            // execute here, so they can't clobber `r_lhs`.
+            .function_expr,
+            .arrow_function,
+            .class_expr,
+            => false,
+            .template_literal => |tl| {
+                for (tl.expressions) |*sub| if (self.exprMayWriteRegister(sub)) return true;
+                return false;
+            },
+            .parenthesized => |p| self.exprMayWriteRegister(p.expression),
+            .unary => |u| self.exprMayWriteRegister(u.operand),
+            .binary => |b| self.exprMayWriteRegister(b.lhs) or self.exprMayWriteRegister(b.rhs),
+            .logical => |l| self.exprMayWriteRegister(l.lhs) or self.exprMayWriteRegister(l.rhs),
+            .conditional => |c| self.exprMayWriteRegister(c.test_) or
+                self.exprMayWriteRegister(c.consequent) or self.exprMayWriteRegister(c.alternate),
+            .sequence => |sq| {
+                for (sq.expressions) |*sub| if (self.exprMayWriteRegister(sub)) return true;
+                return false;
+            },
+            .member => |m| self.exprMayWriteRegister(m.object) or
+                (m.property == .computed and self.exprMayWriteRegister(m.property.computed)),
+            .call => |c| blk: {
+                if (self.exprMayWriteRegister(c.callee)) break :blk true;
+                for (c.arguments) |*arg| if (self.exprMayWriteRegister(arg)) break :blk true;
+                break :blk false;
+            },
+            .new_expr => |n| blk: {
+                if (self.exprMayWriteRegister(n.callee)) break :blk true;
+                for (n.arguments) |*arg| if (self.exprMayWriteRegister(arg)) break :blk true;
+                break :blk false;
+            },
+            .chain => |ch| self.exprMayWriteRegister(ch.expression),
+            .tagged_template => |tt| self.exprMayWriteRegister(tt.tag) or self.exprMayWriteRegister(tt.quasi),
+            .spread => |sp| self.exprMayWriteRegister(sp.argument),
+            .array_literal => |al| {
+                for (al.elements) |maybe| {
+                    if (maybe) |sub| if (self.exprMayWriteRegister(&sub)) return true;
+                }
+                return false;
+            },
+            .object_literal => |ol| blk: {
+                for (ol.properties) |m| switch (m) {
+                    .property => |p| {
+                        if (p.key == .computed and self.exprMayWriteRegister(p.key.computed)) break :blk true;
+                        if (self.exprMayWriteRegister(&p.value)) break :blk true;
+                    },
+                    .spread => |sp| if (self.exprMayWriteRegister(sp.argument)) break :blk true,
+                    // A method definition is a closure constructor —
+                    // its body doesn't run during RHS evaluation.
+                    .method => {},
+                };
+                break :blk false;
+            },
+            .yield => |y| if (y.argument) |arg| self.exprMayWriteRegister(arg) else false,
+            .await_ => |aw| self.exprMayWriteRegister(aw.argument),
+            .import_call => |ic| self.exprMayWriteRegister(ic.source),
+        };
     }
 
     /// Returns the int32 value when `expr` is a Smi-representable
