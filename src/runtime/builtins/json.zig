@@ -160,18 +160,44 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const replacer_v = argOr(args, 1, Value.undefined_);
     const space_v = argOr(args, 2, Value.undefined_);
 
+    // §25.5.2 scratch reuse — the top-level (non-re-entrant) call
+    // takes the realm's pooled `buf` / `state.indent` / `state.stack`
+    // so a hot `JSON.stringify(obj)` loop pays the (allocate, grow,
+    // free) chain ONCE at warm-up rather than on every iteration.
+    // Re-entry through `toJSON` / replacer falling back to fresh
+    // allocations preserves correctness — see the
+    // `recursive JSON.stringify call inside toJSON` lantern test.
+    const reuse_pool = !realm.json_scratch_in_use;
+    if (reuse_pool) realm.json_scratch_in_use = true;
+    defer if (reuse_pool) {
+        realm.json_scratch_in_use = false;
+        realm.json_scratch_buf.clearRetainingCapacity();
+        realm.json_scratch_stack.clearRetainingCapacity();
+        realm.json_scratch_indent.clearRetainingCapacity();
+    };
+
     var state = StringifyState{
         .realm = realm,
         .replacer_fn = null,
         .property_list = null,
         .gap = "",
-        .indent = .empty,
-        .stack = .empty,
+        .indent = if (reuse_pool) realm.json_scratch_indent else .empty,
+        .stack = if (reuse_pool) realm.json_scratch_stack else .empty,
         .owned_buffers = .empty,
     };
     defer {
-        state.indent.deinit(realm.allocator);
-        state.stack.deinit(realm.allocator);
+        if (reuse_pool) {
+            // Hand the pooled lists back with their grown
+            // capacity; the deferred `clearRetainingCapacity`
+            // above zeroes length without freeing storage. Also
+            // mirror the (possibly-grown) headers back to the
+            // realm so the next call sees the new capacity.
+            realm.json_scratch_indent = state.indent;
+            realm.json_scratch_stack = state.stack;
+        } else {
+            state.indent.deinit(realm.allocator);
+            state.stack.deinit(realm.allocator);
+        }
         for (state.owned_buffers.items) |b| realm.allocator.free(b);
         state.owned_buffers.deinit(realm.allocator);
         if (state.property_list) |pl| realm.allocator.free(pl);
@@ -210,8 +236,15 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     defer wrapper_scope.close();
     wrapper_scope.push(heap_mod.taggedObject(wrapper)) catch return error.OutOfMemory;
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(realm.allocator);
+    var buf: std.ArrayListUnmanaged(u8) = if (reuse_pool) realm.json_scratch_buf else .empty;
+    defer if (reuse_pool) {
+        // Hand the (possibly-grown) backing storage back to the
+        // realm — `clearRetainingCapacity` in the outer deferred
+        // block then zeroes the length without freeing.
+        realm.json_scratch_buf = buf;
+    } else {
+        buf.deinit(realm.allocator);
+    };
 
     const ok = try serializeJSONProperty(&state, "", heap_mod.taggedObject(wrapper), &buf);
     if (!ok) return Value.undefined_;
@@ -629,15 +662,16 @@ fn serializeJSONObject(
                 if (!obj.flagsFor(key).enumerable) continue;
             }
         }
-        // Probe whether the property serializes to anything.
-        var item_buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer item_buf.deinit(realm.allocator);
-        const ok = try serializeJSONProperty(state, key, obj_v, &item_buf);
-        if (!ok) continue;
-
+        // §25.5.2.5 step 8.b.iii — a "no value" result (undefined,
+        // callable, symbol) DROPS the key entirely; we can't write
+        // a `"key":` prefix until we know SerializeJSONProperty
+        // produced output. Checkpoint the buf at the pre-prefix
+        // length, write the tentative `[,][\n indent]"key":[ ]`
+        // header, then call SerializeJSONProperty directly into
+        // buf. On a `false` return, rewind to the checkpoint —
+        // no transient per-property buffer needed.
+        const checkpoint = buf.items.len;
         if (!first) try buf.append(realm.allocator, ',');
-        first = false;
-        rendered_any = true;
         if (state.gap.len > 0) {
             try buf.append(realm.allocator, '\n');
             try buf.appendSlice(realm.allocator, state.indent.items);
@@ -645,7 +679,17 @@ fn serializeJSONObject(
         try jsonAppendString(realm, buf, key);
         try buf.append(realm.allocator, ':');
         if (state.gap.len > 0) try buf.append(realm.allocator, ' ');
-        try buf.appendSlice(realm.allocator, item_buf.items);
+        const ok = try serializeJSONProperty(state, key, obj_v, buf);
+        if (!ok) {
+            // Rewind — the dropped key leaves no trace, including
+            // the prospective comma / newline / indent. `first`
+            // stays as it was so the next surviving key emits the
+            // correct delimiter.
+            buf.shrinkRetainingCapacity(checkpoint);
+            continue;
+        }
+        first = false;
+        rendered_any = true;
     }
     if (rendered_any and state.gap.len > 0) {
         try buf.append(realm.allocator, '\n');

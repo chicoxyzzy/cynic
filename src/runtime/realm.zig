@@ -821,6 +821,23 @@ pub const Realm = struct {
     /// `await` opcode site. Each entry is a function to call
     /// with one argument.
     microtask_queue: std.ArrayListUnmanaged(Microtask) = .empty,
+    /// §25.5.2 scratch buffers reused across `JSON.stringify` calls.
+    /// A tight `JSON.stringify(obj)` hot loop would otherwise pay
+    /// (allocate, grow to ~hundreds of bytes, free) for `buf`,
+    /// `state.stack`, and `state.indent` on every iteration. The
+    /// pool retains the highest-water capacity reached on prior
+    /// calls; only the first non-trivial call pays the realloc
+    /// chain. Lifetime: top-level `jsonStringify` checks
+    /// `json_scratch_in_use`, takes the pool, resets length to 0
+    /// (capacity retained), runs, releases. Re-entry via `toJSON`
+    /// or a replacer that calls `JSON.stringify(otherObj)` finds
+    /// the flag set and falls back to fresh per-call allocations
+    /// — correctness preserved at the cost of one realloc chain
+    /// for the rare nested case.
+    json_scratch_buf: std.ArrayListUnmanaged(u8) = .empty,
+    json_scratch_stack: std.ArrayListUnmanaged(*@import("object.zig").JSObject) = .empty,
+    json_scratch_indent: std.ArrayListUnmanaged(u8) = .empty,
+    json_scratch_in_use: bool = false,
     /// §25.4.1.4 pending async waiters — one per `Atomics.waitAsync`
     /// whose value matched and whose timeout is non-zero, so its
     /// Promise is still unsettled. Each record carries the capability's
@@ -1177,6 +1194,9 @@ pub const Realm = struct {
         self.globals.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.microtask_queue.deinit(self.allocator);
+        self.json_scratch_buf.deinit(self.allocator);
+        self.json_scratch_stack.deinit(self.allocator);
+        self.json_scratch_indent.deinit(self.allocator);
         self.clearPendingAsyncWaits();
         self.pending_async_waits.deinit(self.allocator);
         self.kept_alive.deinit(self.allocator);

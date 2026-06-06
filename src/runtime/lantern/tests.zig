@@ -10761,6 +10761,136 @@ test "def_template_property: defineProperty with non-default flags demotes corre
     , "x,z:26");
 }
 
+// ── JSON.stringify checkpoint/rewind contract ───────────────────────
+//
+// SerializeJSONObject probes each key for "no value" (undefined,
+// callable, symbol) before emitting `"key":value`. The fast path
+// replaces a per-key transient buffer with a checkpoint+rewind on
+// the main buffer: tentatively emit the prefix + key + `:`, call
+// SerializeJSONProperty into the same buffer, and rewind to the
+// checkpoint on a `false` return. These tests pin the key-dropping
+// invariants the rewind path must preserve.
+
+test "JSON.stringify: undefined value drops the key" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ x: undefined, y: 1 });
+    , "{\"y\":1}");
+}
+
+test "JSON.stringify: middle undefined value drops the key but keeps siblings" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ a: 1, b: undefined, c: 3 });
+    , "{\"a\":1,\"c\":3}");
+}
+
+test "JSON.stringify: leading undefined leaves no spurious leading comma" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ a: undefined, b: 2 });
+    , "{\"b\":2}");
+}
+
+test "JSON.stringify: trailing undefined leaves no spurious trailing comma" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ a: 1, b: undefined });
+    , "{\"a\":1}");
+}
+
+test "JSON.stringify: every value undefined → empty object" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ a: undefined, b: undefined, c: undefined });
+    , "{}");
+}
+
+test "JSON.stringify: function value drops the key" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ a: 1, fn: function () {}, b: 2 });
+    , "{\"a\":1,\"b\":2}");
+}
+
+test "JSON.stringify: symbol value drops the key" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ a: 1, s: Symbol(), b: 2 });
+    , "{\"a\":1,\"b\":2}");
+}
+
+test "JSON.stringify: replacer returning undefined drops the key" {
+    // §25.5.2.4 step 3 — replacer runs before primitive dispatch;
+    // returning `undefined` triggers the same key-omit path.
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ a: 1, b: 2, c: 3 }, (k, v) => k === "b" ? undefined : v);
+    , "{\"a\":1,\"c\":3}");
+}
+
+test "JSON.stringify: toJSON returning undefined drops the key" {
+    try expectScriptStringWithBuiltins(
+        \\const drop = { toJSON() { return undefined; } };
+        \\JSON.stringify({ a: 1, d: drop, b: 2 });
+    , "{\"a\":1,\"b\":2}");
+}
+
+test "JSON.stringify: indent preserved when middle key drops" {
+    // Pretty-printing: the rewind path must NOT leave a dangling
+    // `,\n  ` from the dropped key.
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ a: 1, b: undefined, c: 3 }, null, 2);
+    , "{\n  \"a\": 1,\n  \"c\": 3\n}");
+}
+
+test "JSON.stringify: array with undefined element serializes as null" {
+    // §25.5.2.6 — array index path uses `null` for omitted, NOT
+    // the rewind (different path from object key drop).
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify([1, undefined, 3]);
+    , "[1,null,3]");
+}
+
+test "JSON.stringify: nested object whose every key drops emits empty {}" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ outer: { inner: undefined }, kept: 1 });
+    , "{\"outer\":{},\"kept\":1}");
+}
+
+test "JSON.stringify: bench-shape roundtrip — independent results across calls" {
+    // Hot loop — sequential calls must produce independent
+    // outputs (no scratch-buffer cross-call leakage).
+    try expectScriptStringWithBuiltins(
+        \\let r = '';
+        \\const obj = { name: "cynic", version: 0, nested: { count: 0 } };
+        \\for (let i = 0; i < 3; i++) {
+        \\  obj.version = i;
+        \\  obj.nested.count = i * 2;
+        \\  r += JSON.stringify(obj) + ';';
+        \\}
+        \\r;
+    ,
+        "{\"name\":\"cynic\",\"version\":0,\"nested\":{\"count\":0}};" ++
+        "{\"name\":\"cynic\",\"version\":1,\"nested\":{\"count\":2}};" ++
+        "{\"name\":\"cynic\",\"version\":2,\"nested\":{\"count\":4}};",
+    );
+}
+
+test "JSON.stringify: recursive JSON.stringify call inside toJSON works" {
+    // Re-entry path — toJSON calls JSON.stringify on a different
+    // object. The outer scratch is in-use; the inner call must
+    // fall back to a fresh buffer.
+    try expectScriptStringWithBuiltins(
+        \\const inner = { x: 1 };
+        \\const outer = { toJSON() { return JSON.stringify(inner); } };
+        \\JSON.stringify({ k: outer });
+    , "{\"k\":\"{\\\"x\\\":1}\"}");
+}
+
+test "JSON.stringify: circular structure still throws after key drops" {
+    // Cycle detection runs in serializeJSONObject after the
+    // rewind path's checkpoint write. A dropped sibling key must
+    // not prevent the cycle from being detected.
+    try expectScriptThrows(
+        \\const a = { x: undefined };
+        \\a.self = a;
+        \\JSON.stringify(a);
+    );
+}
+
 test "def_template_property: literal with mixed static + computed keys" {
     // Compiler bails template build on a literal that contains
     // any computed key (template build sees `.computed` and
