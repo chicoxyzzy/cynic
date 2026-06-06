@@ -361,4 +361,3 @@ fn plainMonthDayToPlainDate(realm: *Realm, this_value: Value, args: []const Valu
         return throwRangeError(realm, "PlainDate is out of range");
     return createTemporalDate(realm, rec);
 }
-

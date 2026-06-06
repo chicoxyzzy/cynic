@@ -458,4 +458,3 @@ fn differenceTemporalTime(realm: *Realm, this_value: Value, args: []const Value,
     }
     return createTemporalDuration(realm, dr);
 }
-

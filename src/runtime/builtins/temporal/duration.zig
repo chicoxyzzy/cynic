@@ -930,4 +930,3 @@ fn requireDurationToStringSmallestUnit(realm: *Realm, unit: ?temporal.LargestUni
         return throwRangeError(realm, "smallestUnit must be second, millisecond, microsecond, or nanosecond");
     }
 }
-

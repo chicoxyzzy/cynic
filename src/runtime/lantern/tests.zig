@@ -10885,8 +10885,8 @@ test "JSON.stringify: bench-shape roundtrip — independent results across calls
         \\r;
     ,
         "{\"name\":\"cynic\",\"version\":0,\"nested\":{\"count\":0}};" ++
-        "{\"name\":\"cynic\",\"version\":1,\"nested\":{\"count\":2}};" ++
-        "{\"name\":\"cynic\",\"version\":2,\"nested\":{\"count\":4}};",
+            "{\"name\":\"cynic\",\"version\":1,\"nested\":{\"count\":2}};" ++
+            "{\"name\":\"cynic\",\"version\":2,\"nested\":{\"count\":4}};",
     );
 }
 
