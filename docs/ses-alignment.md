@@ -507,6 +507,34 @@ handled" reclassification. See `test262-results.md` and
 [handbook/ses-test262-policy.md](handbook/ses-test262-policy.md)
 (retired policy model) for the full picture.
 
+**Default-off is a permanent, intentional divergence.** `eval` /
+`Function(string)` / `Async`/`GeneratorFunction` refusing by default is
+a deliberate, terminal design choice, not a stop-gap — the same class of
+default-non-conformance Cynic already carries for Annex B and sloppy
+mode. The spec (§19.2.1, §20.2.1.1, §27.5.1.1, §27.7.1.1) defines these
+as callable with no host-refusal branch outside the gate, and every
+shipping engine (V8 / Node, JSC, SpiderMonkey, QuickJS) runs them by
+default; Cynic's hardened-by-default posture overrides that, the same
+way it ships strict-only and Annex-B-out. Three points settle the
+question (tracked as issue #25):
+
+- **Conformance scoring is not affected.** The test262 harness self-sets
+  `realm.allow_eval = true` (the scored `--unhardened --allow=eval`
+  posture above), so the ~2,100 eval-surface fixtures already run for
+  real. Default-off costs zero test262 points.
+- **A `--conformance` mode that flips only eval would be redundant**
+  with the existing `--allow=eval`, and a *true* conformance mode is
+  incompatible with Cynic's strict-only / Annex-B-out target (it would
+  have to re-enable sloppy mode and Annex B), so there is nothing
+  coherent for it to mean here.
+- **`--allow=eval` is the documented escape hatch** for an embedder or
+  user who genuinely needs runtime code construction, and it runs the
+  real engine described above.
+
+So Cynic does **not** claim default-configuration conformance on this
+surface and will not flip the default. Users who want spec-default eval
+pass `--allow=eval`; everyone else gets the hardened posture.
+
 ## Verification
 
 - `zig build test` after each phase
