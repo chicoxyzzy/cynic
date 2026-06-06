@@ -558,6 +558,19 @@ pub const Heap = struct {
     /// that's the next layer of cleanup if profiling shows it
     /// still dominates after this lands.
     env_pool: std.heap.MemoryPool(Environment) = .empty,
+    /// Slab pool for `JSString` headers. A tight string-concat loop
+    /// (`s = s + "x"` × 300k, or any JSON.stringify hot path) used
+    /// to reach `allocator.create(JSString)` through the GP
+    /// allocator on every iteration — ~600k mallocs in the
+    /// `string_concat` micro alone (one per `(i&0xff).toString()`,
+    /// one per cons-node build). Mirror the JSObject / Environment
+    /// pool layout: a `MemoryPool` slab for the fixed-size header,
+    /// the byte payload still goes through `bytes_allocator`
+    /// because string lengths vary too much for a single-size pool
+    /// to cover them. The byte buffer is freed before the header
+    /// returns to the pool — see the `JSString` branches in
+    /// `sweepList` and `promoteYoungList`.
+    string_pool: std.heap.MemoryPool(JSString) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{
@@ -623,10 +636,20 @@ pub const Heap = struct {
     /// Idempotent — safe to call on a partially-initialized heap.
     pub fn deinit(self: *Heap) void {
         self.shapes.deinit();
-        for (self.strings_young.items) |s| s.deinit(self.allocator, self.bytes_allocator);
-        for (self.strings_mature.items) |s| s.deinit(self.allocator, self.bytes_allocator);
+        // JSString headers live in the slab pool — free each
+        // owned byte payload first, then let `string_pool.deinit`
+        // reclaim every header in one shot.
+        for (self.strings_young.items) |s| switch (s.payload) {
+            .flat => |b| self.bytes_allocator.free(b),
+            .cons => {},
+        };
+        for (self.strings_mature.items) |s| switch (s.payload) {
+            .flat => |b| self.bytes_allocator.free(b),
+            .cons => {},
+        };
         self.strings_young.deinit(self.allocator);
         self.strings_mature.deinit(self.allocator);
+        self.string_pool.deinit(self.allocator);
         for (self.functions_young.items) |f| f.deinit(self.allocator);
         for (self.functions_mature.items) |f| f.deinit(self.allocator);
         self.functions_young.deinit(self.allocator);
@@ -932,9 +955,21 @@ pub const Heap = struct {
     /// it marked, or when the heap itself is deinit'd.
     pub fn allocateString(self: *Heap, src: []const u8) !*JSString {
         try self.charge(src.len + @sizeOf(JSString));
-        const s = try JSString.init(self.allocator, self.bytes_allocator, src);
-        errdefer s.deinit(self.allocator, self.bytes_allocator);
-        s.mark_color = self.live_color;
+        // A single source buffer past `max_byte_len` (4 GiB) is
+        // effectively an allocation failure — see `JSString.init`'s
+        // matching guard. Mirrored here so the pool path doesn't
+        // skip the check that the GP-allocator path enforced.
+        if (src.len > string_mod.max_byte_len) return error.OutOfMemory;
+        const owned = try self.bytes_allocator.dupe(u8, src);
+        errdefer self.bytes_allocator.free(owned);
+        const s = try self.string_pool.create(self.allocator);
+        errdefer self.string_pool.destroy(s);
+        s.* = .{
+            .length_cu = @intCast(utf16.lengthInCodeUnits(owned)),
+            .byte_len = @intCast(owned.len),
+            .payload = .{ .flat = owned },
+            .mark_color = self.live_color,
+        };
         try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -946,9 +981,21 @@ pub const Heap = struct {
     /// buffer in one shot. No rope is built.
     pub fn concatStrings(self: *Heap, a: *JSString, b: *JSString) !*JSString {
         try self.charge(a.byte_len + b.byte_len + @sizeOf(JSString));
-        const s = try JSString.concat(self.allocator, self.bytes_allocator, a, b);
-        errdefer s.deinit(self.allocator, self.bytes_allocator);
-        s.mark_color = self.live_color;
+        const a_bytes = try a.flatten(self.bytes_allocator);
+        const b_bytes = try b.flatten(self.bytes_allocator);
+        const total = utf16.wtf8ConcatLen(a_bytes, b_bytes);
+        if (total > string_mod.max_byte_len) return error.StringTooLong;
+        const owned = try self.bytes_allocator.alloc(u8, total);
+        errdefer self.bytes_allocator.free(owned);
+        utf16.wtf8ConcatInto(owned, a_bytes, b_bytes);
+        const s = try self.string_pool.create(self.allocator);
+        errdefer self.string_pool.destroy(s);
+        s.* = .{
+            .length_cu = @intCast(utf16.lengthInCodeUnits(owned)),
+            .byte_len = @intCast(owned.len),
+            .payload = .{ .flat = owned },
+            .mark_color = self.live_color,
+        };
         try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -1044,8 +1091,8 @@ pub const Heap = struct {
         // both `length_cu` figures are O(1) stored values.
         if (total > string_mod.max_byte_len) return error.StringTooLong;
         try self.charge(@sizeOf(JSString));
-        const s = try self.allocator.create(JSString);
-        errdefer self.allocator.destroy(s);
+        const s = try self.string_pool.create(self.allocator);
+        errdefer self.string_pool.destroy(s);
         s.* = .{
             .length_cu = left.length_cu + right.length_cu,
             .byte_len = @intCast(total),
@@ -1055,8 +1102,8 @@ pub const Heap = struct {
                 .right = right,
                 .heap = self,
             } },
+            .mark_color = self.live_color,
         };
-        s.mark_color = self.live_color;
         try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -1070,9 +1117,19 @@ pub const Heap = struct {
     /// second copy that `allocateString(scratch)` would incur.
     pub fn allocateStringConcat2(self: *Heap, a: []const u8, b: []const u8) !*JSString {
         try self.charge(a.len + b.len + @sizeOf(JSString));
-        const s = try JSString.concatBytes(self.allocator, self.bytes_allocator, a, b);
-        errdefer s.deinit(self.allocator, self.bytes_allocator);
-        s.mark_color = self.live_color;
+        const total = utf16.wtf8ConcatLen(a, b);
+        if (total > string_mod.max_byte_len) return error.StringTooLong;
+        const owned = try self.bytes_allocator.alloc(u8, total);
+        errdefer self.bytes_allocator.free(owned);
+        utf16.wtf8ConcatInto(owned, a, b);
+        const s = try self.string_pool.create(self.allocator);
+        errdefer self.string_pool.destroy(s);
+        s.* = .{
+            .length_cu = @intCast(utf16.lengthInCodeUnits(owned)),
+            .byte_len = @intCast(owned.len),
+            .payload = .{ .flat = owned },
+            .mark_color = self.live_color,
+        };
         try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
         return s;
@@ -1926,6 +1983,17 @@ pub const Heap = struct {
                     // `deinit_args` is `.{allocator, &heap.env_pool}`.
                     deinit_args[0].free(entry.slots);
                     deinit_args[1].destroy(entry);
+                } else if (comptime EntryT == JSString) {
+                    // Slab pool path for JSString headers — free
+                    // the owned byte buffer (or no-op for a cons),
+                    // then return the fixed-size header to the
+                    // string_pool free-list. `deinit_args` is
+                    // `.{allocator, bytes_allocator, &string_pool}`.
+                    switch (entry.payload) {
+                        .flat => |b| deinit_args[1].free(b),
+                        .cons => {},
+                    }
+                    deinit_args[2].destroy(entry);
                 } else {
                     @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
                 }
@@ -2104,7 +2172,7 @@ pub const Heap = struct {
         // lists are empty, so the generational invariant "no
         // mature→young edge outside the remembered set" holds
         // trivially (there are no young objects to point at).
-        const ba = .{ self.allocator, self.bytes_allocator };
+        const ba = .{ self.allocator, self.bytes_allocator, &self.string_pool };
         const sa = .{self.allocator};
         const lc = self.live_color;
         sweepList(&self.strings_mature, lc, ba);
@@ -2300,7 +2368,7 @@ pub const Heap = struct {
         // defeating part of the generational promise: a "cheap"
         // minor cycle still cost O(mature_set) per cycle.)
         const lc = self.live_color;
-        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, .{ self.allocator, self.bytes_allocator });
+        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, .{ self.allocator, self.bytes_allocator, &self.string_pool });
         promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, .{self.allocator});
         promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
         promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, .{ self.allocator, &self.env_pool });
@@ -2422,6 +2490,16 @@ pub const Heap = struct {
                     // `deinit_args` is `.{allocator, &heap.env_pool}`.
                     deinit_args[0].free(entry.slots);
                     deinit_args[1].destroy(entry);
+                } else if (comptime EntryT == JSString) {
+                    // Slab pool path for JSString headers — see the
+                    // matching sweepList branch for the layout.
+                    // `deinit_args` is
+                    // `.{allocator, bytes_allocator, &string_pool}`.
+                    switch (entry.payload) {
+                        .flat => |b| deinit_args[1].free(b),
+                        .cons => {},
+                    }
+                    deinit_args[2].destroy(entry);
                 } else {
                     @call(.auto, EntryT.deinit, .{entry} ++ deinit_args);
                 }
@@ -4023,7 +4101,12 @@ test "Heap: markString recurses through a hand-built cons node" {
     // code never builds a cons — this exercises the mark recursion.
     const left = try heap.allocateString("Hello, ");
     const right = try heap.allocateString("world!");
-    const cons = try heap.allocator.create(JSString);
+    // Hand-build a cons through the same slab pool the sweep
+    // expects to destroy it through. Skipping the pool here used
+    // to leak the header (sweep called `string_pool.destroy` on a
+    // pointer the GP allocator owned, which a `MemoryPool` can
+    // safely no-op on but DebugAllocator catches as a leak).
+    const cons = try heap.string_pool.create(heap.allocator);
     cons.* = .{
         .length_cu = left.length_cu + right.length_cu,
         .byte_len = left.byte_len + right.byte_len,
