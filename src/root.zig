@@ -39,14 +39,23 @@ pub const perlex = @import("perlex/perlex.zig");
 /// Value → display-string formatter used by the playground panel.
 /// Lives at the library boundary (not under `runtime/`) because it
 /// is a display concern — the engine itself does not need it, but
-/// surfacing it here lets both `src/wasm.zig` and host unit tests
-/// reach the same code.
+/// surfacing it here lets both `src/playground_wasm.zig` and host
+/// unit tests reach the same code.
 pub const wasm_format = @import("wasm_format.zig");
 
 /// Diagnostics → playground-frame error text. Same rationale as
-/// `wasm_format`: extracted from `src/wasm.zig` so `zig build test`
-/// can exercise the helpers (wasm.zig is wasm32-only).
+/// `wasm_format`: extracted from `src/playground_wasm.zig` so
+/// `zig build test` can exercise the helpers (the playground entry
+/// is wasm32-only).
 pub const wasm_diag = @import("wasm_diag.zig");
+
+/// WebAssembly execution engine — decoder, validator, interpreter.
+/// Implements §1-§5 of the WebAssembly Core specification natively;
+/// the JS API surface (`WebAssembly.Module/Instance/Memory/...`)
+/// lives in `src/runtime/builtins/webassembly.zig`. Strictly distinct
+/// from `playground_wasm.zig`, which is Cynic compiled *as* a wasm
+/// module for the in-browser playground.
+pub const wasm = @import("runtime/wasm/wasm.zig");
 
 test {
     // Force the compiler to walk every reachable module so that every file's
@@ -120,4 +129,9 @@ test {
     _ = @import("bytecode/arguments_scan.zig");
     _ = @import("wasm_format.zig");
     _ = @import("wasm_diag.zig");
+    _ = wasm;
+    _ = @import("runtime/wasm/wasm.zig");
+    _ = @import("runtime/wasm/decoder.zig");
+    _ = @import("runtime/wasm/module.zig");
+    _ = @import("runtime/wasm/tests.zig");
 }

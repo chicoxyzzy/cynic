@@ -7,9 +7,10 @@
 //! their natural form. Lives in `src/` (not `src/runtime/`) because
 //! it is a display concern — the engine itself does not need it.
 //!
-//! Lifted out of `src/wasm.zig` so `zig build test` can exercise it.
-//! `wasm.zig` only compiles for `wasm32-freestanding`, but the
-//! formatter has no wasm-specific dependencies — it just walks
+//! Lifted out of `src/playground_wasm.zig` so `zig build test` can
+//! exercise it. The playground entry only compiles for
+//! `wasm32-freestanding`, but the formatter has no wasm-specific
+//! dependencies — it just walks
 //! Cynic's host-portable `Value` / `JSObject`. The allocator is
 //! parameterised so production passes the WASM allocator and tests
 //! pass `testing.allocator`.
