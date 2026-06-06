@@ -1,10 +1,15 @@
-# WebAssembly engine — architecture
+# Sarcasm — the WebAssembly engine
 
-Cynic runs WebAssembly with a from-scratch native engine in
-`src/runtime/wasm/`. This document is the durable design record: the
-load-bearing decisions, the prior art behind them, and the data
-structures the implementation builds on. Read it before touching the
-decoder, validator, or interpreter.
+Cynic runs WebAssembly with **Sarcasm**, a from-scratch native engine
+in `src/runtime/wasm/`. The name buries *asm* (sarc·**asm** — WebA**sm**)
+and is, fittingly for this project, the native register of a cynic.
+It scopes to the whole subsystem — decoder, validator, interpreter —
+the way SpiderMonkey's *Baldr* names all of its wasm support.
+
+This document is the durable design record: the load-bearing
+decisions, the prior art behind them, and the data structures the
+implementation builds on. Read it before touching the decoder,
+validator, or interpreter.
 
 > Not to be confused with `src/playground_wasm.zig`, which compiles
 > Cynic *to* a `wasm32-freestanding` module for the browser
