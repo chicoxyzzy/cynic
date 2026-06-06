@@ -38,6 +38,46 @@ the corpus under the relevant section's directory before adding.
 
 ## Entries
 
+### Deep recursion through a native builtin crashed instead of throwing RangeError
+
+- **Fixed in:** `833f8ca`
+- **Spec:** §spec — there is no normative stack limit, but an
+  implementation that cannot continue must throw
+  `RangeError("Maximum call stack size exceeded")` (the
+  observable behaviour every shipping engine gives); it must not
+  fault the process.
+- **Reproducer:**
+  ```js
+  const o = { get x() { return o.x; } };
+  o.x;                                       // recursion via accessor [[Get]]
+  // and: function f() { return [0].map(f); } f();
+  // and: function f() { return Reflect.apply(f, null, []); } f();
+  ```
+- **Before fix:** Cynic bounded only *direct* JS recursion (one
+  dispatch's frame list, cap 1024). Recursion that re-entered the
+  engine through a native builtin — an accessor getter, an
+  `Array.prototype.map` / `forEach` callback, `Reflect.apply`, a
+  Proxy trap, the promise reaction drain — started a fresh native
+  `runFrames` per level with no limit, overflowing the host stack
+  (`EXC_BAD_ACCESS`) and crashing the process.
+- **After fix:** An address-based stack guard throws a catchable
+  `RangeError` before the host stack overflows.
+- **Suggested fixture shape:** positive runtime fixtures asserting
+  `assert.throws(RangeError, …)` for each native-reentry shape:
+  a self-referential accessor getter under
+  `built-ins/Object/defineProperty/` or
+  `language/expressions/property-accessors/`; a self-recursive
+  `Array.prototype.map` callback under
+  `built-ins/Array/prototype/map/`; a self-recursive
+  `Reflect.apply` under `built-ins/Reflect/apply/`. The corpus
+  exercises these builtins heavily but none drives one into
+  unbounded native re-entry to assert the RangeError-not-crash
+  contract — so a robust engine's stack-limit handling on the
+  *native callback* path goes untested. (The bug surfaced only
+  because `built-ins/Array/{from,fromAsync}` and
+  `built-ins/Temporal/*` fixtures incidentally recurse deeply
+  enough to crash mid-sweep; none asserts the limit directly.)
+
 ### Binary operand evaluation order when RHS reassigns a function parameter
 
 - **Fixed in:** `05d2e67`
