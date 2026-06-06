@@ -117,6 +117,15 @@ pub const Code = enum {
     /// the policy ("Cynic doesn't ship sloppy mode") instead of a
     /// generic "I didn't expect this here".
     with_statement_in_strict,
+    /// Source nesting (`[[[[…]]]]`, `((((…))))`, `{{{{…}}}}`,
+    /// `!!!!…`) deep enough to exhaust the parser's native stack.
+    /// The recursive-descent parser bounds its depth via the shared
+    /// stack guard and reports this rather than overflowing the host
+    /// stack and crashing. V8 / JSC surface deeply-nested-source
+    /// stack exhaustion as a `RangeError("Maximum call stack size
+    /// exceeded")`, so this maps to RangeError (not SyntaxError) —
+    /// it's a resource limit, not a grammar violation.
+    too_deeply_nested,
 
     // ── Runtime (later+) ───────────────────────────────────────────────────
     /// `let` or `const` binding read before its initialiser ran —
@@ -158,6 +167,7 @@ pub const Code = enum {
             .continue_target_not_iteration,
             .with_statement_in_strict,
             => .syntax_error,
+            .too_deeply_nested => .range_error,
             .let_in_tdz => .reference_error,
             .assignment_to_const => .type_error,
         };

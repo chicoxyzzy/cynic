@@ -33,6 +33,7 @@ const source_mod = @import("../source.zig");
 const Span = source_mod.Span;
 
 const diag_mod = @import("../diagnostic.zig");
+const stack_guard = @import("../stack_guard.zig");
 const Diagnostic = diag_mod.Diagnostic;
 const Diagnostics = diag_mod.Diagnostics;
 const Code = diag_mod.Code;
@@ -443,6 +444,16 @@ pub const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) ParseError!Statement {
+        // Native-stack guard for statement nesting (`{{{{…}}}}`,
+        // deeply nested `if` / `while` / `try`). Mirrors the
+        // expression guard in `parseUnary`; bounds the recursive-
+        // descent parser before deeply nested source overflows the
+        // host stack, reporting a RangeError-class diagnostic
+        // instead of crashing. See `src/stack_guard.zig`.
+        if (stack_guard.nearLimit()) {
+            try self.report(.too_deeply_nested, self.current.span);
+            return error.ParseError;
+        }
         const kind = self.current.kind;
         switch (kind) {
             .semicolon => return self.parseEmptyStatement(),

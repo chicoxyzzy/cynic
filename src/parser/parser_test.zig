@@ -3931,3 +3931,90 @@ test "Parser: missing semicolon (no LF) emits unexpected_token" {
     try testing.expect(diags.items.len >= 1);
     try testing.expectEqual(Code.unexpected_token, diags.items[0].code);
 }
+
+// ── Native-stack guard (deeply nested source) ───────────────────────
+//
+// The recursive-descent parser is bounded by the shared
+// `stack_guard.nearLimit` check at `parseUnary` (expressions) and
+// `parseStatement` (statements). Deeply nested source that would
+// have overflowed the host stack and crashed the process now
+// reports a `too_deeply_nested` diagnostic (RangeError-class) and
+// returns `error.ParseError`. These build the nested source
+// programmatically and assert no crash + the right diagnostic; a
+// moderate-depth control confirms the guard does not false-trip.
+
+fn repeatAlloc(a: std.mem.Allocator, unit: []const u8, n: usize) ![]u8 {
+    const buf = try a.alloc(u8, unit.len * n);
+    var i: usize = 0;
+    while (i < n) : (i += 1) @memcpy(buf[i * unit.len ..][0..unit.len], unit);
+    return buf;
+}
+
+fn expectTooDeeplyNested(source: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var diags: Diagnostics = .empty;
+    // Must not crash; must surface the depth-limit diagnostic.
+    _ = parseScript(arena.allocator(), source, &diags) catch {};
+    var saw = false;
+    for (diags.items) |d| {
+        if (d.code == .too_deeply_nested) saw = true;
+    }
+    try testing.expect(saw);
+    // §spec — the depth limit is a resource error, not a grammar
+    // violation: it maps to RangeError (matching V8 / JSC).
+    try testing.expectEqual(cynic_diag.ErrorClass.range_error, Code.too_deeply_nested.errorClass());
+}
+
+test "Parser: deeply nested array literal hits the stack guard" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const depth = 200_000;
+    const open = try repeatAlloc(arena.allocator(), "[", depth);
+    const close = try repeatAlloc(arena.allocator(), "]", depth);
+    const src = try std.mem.concat(arena.allocator(), u8, &.{ open, close, ";" });
+    try expectTooDeeplyNested(src);
+}
+
+test "Parser: deeply nested parentheses hit the stack guard" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const depth = 200_000;
+    const open = try repeatAlloc(arena.allocator(), "(", depth);
+    const close = try repeatAlloc(arena.allocator(), ")", depth);
+    const src = try std.mem.concat(arena.allocator(), u8, &.{ open, "1", close, ";" });
+    try expectTooDeeplyNested(src);
+}
+
+test "Parser: deeply nested blocks hit the stack guard" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const depth = 200_000;
+    const open = try repeatAlloc(arena.allocator(), "{", depth);
+    const close = try repeatAlloc(arena.allocator(), "}", depth);
+    const src = try std.mem.concat(arena.allocator(), u8, &.{ open, close });
+    try expectTooDeeplyNested(src);
+}
+
+test "Parser: long prefix-operator chain hits the stack guard" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const depth = 200_000;
+    const ops = try repeatAlloc(arena.allocator(), "!", depth);
+    const src = try std.mem.concat(arena.allocator(), u8, &.{ ops, "true;" });
+    try expectTooDeeplyNested(src);
+}
+
+test "Parser: moderate nesting parses without false-tripping the guard" {
+    // 500 levels is deep for real source yet far within the native
+    // stack budget — must parse cleanly with no diagnostic.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const depth = 500;
+    const open = try repeatAlloc(arena.allocator(), "[", depth);
+    const close = try repeatAlloc(arena.allocator(), "]", depth);
+    const src = try std.mem.concat(arena.allocator(), u8, &.{ open, close, ";" });
+    var diags: Diagnostics = .empty;
+    _ = try parseScript(arena.allocator(), src, &diags);
+    try testing.expect(!hasErr(diags.items));
+}

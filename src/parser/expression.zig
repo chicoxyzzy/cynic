@@ -12,6 +12,7 @@ const Parser = parser_mod.Parser;
 const ParseError = parser_mod.ParseError;
 
 const regex_validate = @import("regex_validate.zig");
+const stack_guard = @import("../stack_guard.zig");
 
 const ast_expr = @import("../ast/expression.zig");
 const Expression = ast_expr.Expression;
@@ -807,6 +808,19 @@ fn binaryPrec(kind: TokenKind, allow_in: bool) ?BinaryInfo {
 /// UpdateExpression's prefix forms (`++x`, `--x`) sit at this level too.
 /// §15.8.2 AwaitExpression also lives at this level when `[+Await]`.
 fn parseUnary(p: *Parser) ParseError!Expression {
+    // Native-stack guard. `parseUnary` is the universal descent
+    // point for expression nesting: every structural level (`[`,
+    // `(`, `{`, `?:`) re-enters through `parseAssignment` → … →
+    // `parseUnary`, and prefix-operator chains (`!!!!x`,
+    // `await await …`, `----x`) recurse directly here. Bounding it
+    // catches all deeply-nested expression source before the
+    // recursive-descent parser overflows the host stack. Reports a
+    // RangeError-class diagnostic (what V8 / JSC give for
+    // stack-exhausting source) instead of crashing.
+    if (stack_guard.nearLimit()) {
+        try p.report(.too_deeply_nested, p.peek().span);
+        return error.ParseError;
+    }
     const tok = p.peek();
     if (p.in_async and tok.kind == .kw_await) {
         _ = try p.bump();

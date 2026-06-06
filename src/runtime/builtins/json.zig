@@ -1433,7 +1433,7 @@ const JsonParser = struct {
         // process; bound it with the shared native-stack guard and
         // surface a catchable `RangeError` (what V8 throws here)
         // rather than a fault.
-        if (@import("../lantern/interpreter.zig").nativeStackNearLimit()) {
+        if (@import("../../stack_guard.zig").nearLimit()) {
             return error.StackOverflow;
         }
         self.skipWs();

@@ -197,139 +197,16 @@ const max_call_frames: usize = 1024;
 // `.map` / `.forEach` callback, `Reflect.apply`, a Proxy trap, a
 // promise reaction drain — re-enters through `callJSFunction`, which
 // starts a FRESH `runFrames` on a fresh native stack frame. That
-// nesting was previously unbounded: deeply-recursive-through-native
-// code (`o = { get x() { return o.x } }; o.x`) grew the host stack
-// without limit until the OS faulted (`EXC_BAD_ACCESS` at the
-// `runFrames` prologue), crashing the process instead of throwing the
-// §spec `RangeError("Maximum call stack size exceeded")`. `runFrames`
-// is one large stack frame (the inlined dispatch loop), so even a
-// shallow nesting depth exhausts a 2 MiB worker stack.
-//
-// The guard measures *actual remaining native stack* at each
-// `runFrames` entry and throws before the red zone. Three strategies,
-// in precision order:
-//   • macOS — exact thread stack bounds via `pthread_get_stackaddr_np`
-//     / `pthread_get_stacksize_np`. Adapts to the thread's real stack
-//     size (the harness runs 2 MiB agent workers AND larger default
-//     workers), so the limit is precise per thread.
-//   • Linux (glibc / musl) — exact bounds via the GNU extension
-//     `pthread_getattr_np` → `pthread_attr_getstack`, which yields the
-//     stack's low address and size. (`pthread_get_stackaddr_np` is a
-//     BSD/Darwin spelling that glibc/musl don't provide.) Precise per
-//     thread, just like macOS. Without this the portable heuristic
-//     below tripped on legitimate shallow re-entry: its 1 MiB growth
-//     budget sits under depth-50 `Array.prototype.forEach` recursion
-//     on the larger default worker stacks, producing a false
-//     `RangeError`. See commit 63c5811 (which added the guard) and
-//     the `bounded callback recursion still completes` test.
-//   • Any other target (e.g. wasm-freestanding, which has no pthread)
-//     — a portable growth-from-base heuristic: the first `runFrames`
-//     on the thread records its SP as the high-water base; the guard
-//     trips once growth past it exceeds `stack_growth_budget`, chosen
-//     safely below the smallest stack the engine runs on. Last resort
-//     only — it still genuinely protects against overflow.
-// `runFrames` entry is per-native-re-entry (NOT per JS call — those
-// stay in the dispatch loop), so the check is off the hot path.
-
-extern "c" fn pthread_self() *anyopaque;
-// Darwin / BSD spelling — returns the stack's *high* address (stack
-// grows down). Only referenced under `builtin.os.tag.isDarwin()`.
-extern "c" fn pthread_get_stackaddr_np(thread: *anyopaque) *anyopaque;
-extern "c" fn pthread_get_stacksize_np(thread: *anyopaque) usize;
-// glibc / musl GNU extension — fills `attr` with the running thread's
-// attributes (incl. its real stack base + size). Only referenced under
-// `builtin.os.tag == .linux`, so the externs never resolve on targets
-// (macOS, wasm-freestanding) whose libc lacks them.
-extern "c" fn pthread_getattr_np(thread: *anyopaque, attr: *anyopaque) c_int;
-extern "c" fn pthread_attr_getstack(attr: *anyopaque, stackaddr: *?*anyopaque, stacksize: *usize) c_int;
-extern "c" fn pthread_attr_destroy(attr: *anyopaque) c_int;
-
-/// Headroom kept below the true stack limit: enough for the
-/// `makeRangeError` allocation plus the worst-case native frames
-/// between this check and the actual page guard — i.e. it must
-/// exceed the stack one full re-entry level consumes (one
-/// `runFrames` + `callJSFunction` + the builtin + the property /
-/// iterator machinery). Debug builds don't optimize locals, so a
-/// single `runFrames` frame is far larger there; size the red zone
-/// per build mode. Release stacks include the harness's 2 MiB agent
-/// workers, so the release zone stays modest; Debug only ever runs
-/// on the 16 MiB main thread / default workers, where 2 MiB of
-/// headroom is comfortable.
-const stack_red_zone: usize = switch (@import("builtin").mode) {
-    .Debug => 2 * 1024 * 1024,
-    else => 256 * 1024,
-};
-
-/// Fallback growth allowance for targets without OS stack
-/// introspection. Kept below the harness's smallest worker stack
-/// (2 MiB `agent_stack`) so the guard always trips before a real
-/// overflow regardless of thread stack size.
-const stack_growth_budget: usize = 1024 * 1024;
-
-/// Lowest stack address `runFrames` may touch before it must throw,
-/// computed once per thread from OS bounds. `0` = not yet computed
-/// (or this platform lacks precise bounds — see the fallback base).
-threadlocal var stack_limit_addr: usize = 0;
-/// Heuristic-path high-water base: the shallowest SP seen on this
-/// thread. `growth = base - sp`. Updated upward so a later top-level
-/// entry from a shallower context never underflows.
-threadlocal var stack_fallback_base: usize = 0;
-/// Set once per thread after the first precise-bounds attempt so a
-/// platform without OS introspection doesn't re-probe every entry.
-threadlocal var stack_bounds_probed: bool = false;
-
-/// True when the native stack is within the red zone — the caller
-/// must throw `RangeError` rather than recurse one level deeper.
-/// `pub` so other recursive-descent subsystems that run on the same
-/// native stack (the JSON parser / reviver walk in `builtins/json.zig`,
-/// and any future deeply-recursive native) share one consistent,
-/// stack-size-adaptive bound instead of inventing their own depth
-/// magic number.
-pub inline fn nativeStackNearLimit() bool {
-    var probe: u8 = undefined;
-    const sp = @intFromPtr(&probe);
-    if (stack_limit_addr != 0) return sp <= stack_limit_addr;
-    if (!stack_bounds_probed) {
-        stack_bounds_probed = true;
-        const builtin = @import("builtin");
-        if (builtin.os.tag.isDarwin()) {
-            const self = pthread_self();
-            const base = @intFromPtr(pthread_get_stackaddr_np(self)); // high addr; stack grows down
-            const size = pthread_get_stacksize_np(self);
-            if (size > stack_red_zone and base > size) {
-                stack_limit_addr = base - size + stack_red_zone;
-                return sp <= stack_limit_addr;
-            }
-        } else if (builtin.os.tag == .linux and builtin.link_libc) {
-            // glibc / musl: `pthread_getattr_np` reports the running
-            // thread's real stack bounds. `pthread_attr_getstack`
-            // returns the LOW address (unlike Darwin's high-address
-            // `pthread_get_stackaddr_np`), so the limit is
-            // `low + red_zone`. `pthread_attr_t` is opaque and its
-            // size varies by libc/arch (glibc x86_64 = 56 B,
-            // aarch64 = 64 B; musl = 64 B on LP64); a 16-aligned
-            // 128-byte buffer covers every 64-bit target the engine
-            // builds for.
-            var attr: [128]u8 align(16) = undefined;
-            const attr_ptr: *anyopaque = @ptrCast(&attr);
-            if (pthread_getattr_np(pthread_self(), attr_ptr) == 0) {
-                defer _ = pthread_attr_destroy(attr_ptr);
-                var low_ptr: ?*anyopaque = null;
-                var size: usize = 0;
-                if (pthread_attr_getstack(attr_ptr, &low_ptr, &size) == 0) {
-                    const low = @intFromPtr(low_ptr);
-                    if (size > stack_red_zone and low != 0) {
-                        stack_limit_addr = low + stack_red_zone;
-                        return sp <= stack_limit_addr;
-                    }
-                }
-            }
-        }
-    }
-    // Portable growth-from-base fallback.
-    if (sp > stack_fallback_base) stack_fallback_base = sp;
-    return stack_fallback_base - sp > stack_growth_budget;
-}
+// nesting is bounded by the shared address-based stack guard
+// (`stack_guard.nearLimit`), which `runFrames` consults at entry and,
+// when within the red zone, throws `RangeError("Maximum call stack
+// size exceeded")` instead of letting the host stack overflow. The
+// same primitive bounds the JSON parser and the AST parser — see
+// `src/stack_guard.zig` for the bounds strategy (macOS + Linux exact
+// thread bounds; a growth heuristic elsewhere). `runFrames` entry is
+// per-native-re-entry (NOT per JS call — those stay in the dispatch
+// loop), so the check is off the hot path.
+const stack_guard = @import("../../stack_guard.zig");
 
 pub const CallFrame = struct {
     chunk: *const Chunk,
@@ -1182,7 +1059,7 @@ pub fn runFrames(
     // faults the process; throw `RangeError` while there's still room
     // to unwind. The caller's `defer` releases `frames`. See the
     // `nearNativeStackLimit` block above for the bounds strategy.
-    if (nativeStackNearLimit()) {
+    if (stack_guard.nearLimit()) {
         const ex = try makeRangeError(realm, "Maximum call stack size exceeded");
         return .{ .thrown = ex };
     }
