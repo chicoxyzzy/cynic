@@ -41,6 +41,10 @@ pub const reader = @import("reader.zig");
 pub const types = @import("types.zig");
 pub const module = @import("module.zig");
 pub const decoder = @import("decoder.zig");
+pub const opcodes = @import("opcodes.zig");
+pub const code = @import("code.zig");
+pub const validator = @import("validator.zig");
+pub const interpreter = @import("interpreter.zig");
 
 pub const Reader = reader.Reader;
 pub const Module = module.Module;
@@ -49,11 +53,22 @@ pub const RefType = types.RefType;
 pub const FuncType = types.FuncType;
 pub const DecodeError = decoder.DecodeError;
 pub const decode = decoder.decode;
+pub const CompiledFunc = code.CompiledFunc;
+pub const BranchEntry = code.BranchEntry;
+pub const ValidateError = validator.ValidateError;
+pub const validateModule = validator.validateModule;
+pub const Instance = interpreter.Instance;
+pub const instantiate = interpreter.instantiate;
+pub const invoke = interpreter.invoke;
 
 test {
     _ = @import("reader.zig");
     _ = @import("types.zig");
     _ = @import("module.zig");
     _ = @import("decoder.zig");
+    _ = @import("opcodes.zig");
+    _ = @import("code.zig");
+    _ = @import("validator.zig");
+    _ = @import("interpreter.zig");
     _ = @import("tests.zig");
 }
