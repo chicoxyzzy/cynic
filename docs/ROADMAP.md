@@ -1195,3 +1195,30 @@ that `Error.stack` shows eliminated frames).
 - **Ohaimark** — optimizing JIT (T2). IR (SSA), type speculation
   from inline caches, deopt back to Lantern on guard failure.
   Modeled on JSC DFG / V8 TurboFan or Maglev.
+
+## Considered and declined
+
+- **Constant-time / timing-attack-resistant mode.** No source
+  language exposes a constant-time *mode for JavaScript* — JIT,
+  GC, and megamorphic dispatch destroy any source-level CT
+  discipline before it reaches silicon. The only web-platform CT
+  work that survives compilation is **CT-Wasm** (POPL '19;
+  [`WebAssembly/constant-time`](https://github.com/WebAssembly/constant-time)),
+  where secret `s32`/`s64` types make branching, memory-indexing,
+  or `div`/`rem` on a secret a *type error* rather than something
+  the engine papers over. That model is the only one worth
+  copying, but it is pre-shipping, has zero mainstream-engine
+  adoption (the lone implementation is a PLSysSec V8 fork), and
+  applies to WASM, not the ECMAScript surface Cynic targets.
+  Building it here would mean inventing a surface, not conforming
+  to one — so it's out until there's a stable proposal and real
+  demand. Mainstream engines (V8, JSC, SpiderMonkey) don't make
+  user code constant-time either; they bound the *attacker's
+  clock* (coarsened `performance.now()`, `SharedArrayBuffer`
+  gated behind COOP+COEP cross-origin isolation) and isolate the
+  process. If a security-conscious embedder ever needs it, the
+  honest, cheap answer is a posture decision Cynic can make as a
+  non-browser host — coarse-by-default timer resolution and no
+  `SharedArrayBuffer` nanosecond-timer escape hatch — plus a
+  `crypto.timingSafeEqual`-style primitive (Node/Deno expose one;
+  browser SubtleCrypto does not), not a CT *mode*.
