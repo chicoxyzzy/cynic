@@ -82,6 +82,18 @@ pub const Instance = struct {
         if (self.memory) |m| self.gpa.free(m.data);
     }
 
+    /// Read a global's raw cell by its index in the global index space
+    /// (used by the conformance harness's `get` action). Returns null
+    /// for an imported global, which is not yet wired.
+    pub fn readGlobalByIndex(self: *const Instance, global_index: u32) ?u64 {
+        var imported: u32 = 0;
+        for (self.module.imports) |imp| {
+            if (imp.desc == .global) imported += 1;
+        }
+        if (global_index < imported) return null;
+        return self.globals[global_index - imported].value;
+    }
+
     /// Resolve a function-index-space entry to a defined function, or
     /// null if it names an import (host calls land in a later step).
     fn definedFunc(self: *const Instance, func_index: u32) ?*const CompiledFunc {
