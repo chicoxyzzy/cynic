@@ -86,13 +86,13 @@ pub const Instance = struct {
     /// Read a global's raw cell by its index in the global index space
     /// (used by the conformance harness's `get` action). Returns null
     /// for an imported global, which is not yet wired.
-    pub fn readGlobalByIndex(self: *const Instance, global_index: u32) ?u64 {
+    pub fn readGlobalByIndex(self: *const Instance, global_index: u32) ?u128 {
         var imported: u32 = 0;
         for (self.module.imports) |imp| {
             if (imp.desc == .global) imported += 1;
         }
         if (global_index < imported) return null;
-        return @truncate(self.globals[global_index - imported].value);
+        return self.globals[global_index - imported].value;
     }
 
     /// Resolve a function-index-space entry to a defined function, or
@@ -259,14 +259,14 @@ const Interp = struct {
 };
 
 /// Invoke `func_index` (function-index space) with `args` already
-/// encoded as raw cells. Returns the result cells, allocated from
-/// `allocator`.
+/// encoded as raw 128-bit cells (scalars in the low bits). Returns the
+/// result cells, allocated from `allocator`.
 pub fn invoke(
     self: *Instance,
     allocator: std.mem.Allocator,
     func_index: u32,
-    args: []const u64,
-) Error![]u64 {
+    args: []const u128,
+) Error![]u128 {
     const entry = self.definedFunc(func_index) orelse return error.UnsupportedImportCall;
 
     const stack = try allocator.alloc(Cell, STACK_CELLS);
@@ -284,12 +284,11 @@ pub fn invoke(
 
     try run(&ip);
 
-    // Results sit at the bottom of the stack after the final pop. The
-    // public boundary is scalar (u64) for now; a v128 result truncates
-    // (lossy) until the JS-API/harness path widens it.
+    // Results sit at the bottom of the stack after the final pop, one
+    // 128-bit cell each (scalars in the low bits).
     const nres = ip.sp;
-    const out = try allocator.alloc(u64, nres);
-    for (0..nres) |i| out[i] = @truncate(ip.stack[i]);
+    const out = try allocator.alloc(u128, nres);
+    @memcpy(out, ip.stack[0..nres]);
     return out;
 }
 

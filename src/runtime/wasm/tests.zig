@@ -28,7 +28,7 @@ fn runI32(bytes: []const u8, name: []const u8, args: []const i32) !i32 {
 
     const fidx = funcExport(mp, name) orelse return error.NoSuchExport;
 
-    const cells = try a.alloc(u64, args.len);
+    const cells = try a.alloc(u128, args.len);
     for (args, 0..) |x, i| cells[i] = @as(u32, @bitCast(x));
 
     const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
@@ -604,8 +604,8 @@ fn callCells(
     code_body: []const u8,
     name: []const u8,
     min_pages: ?u32,
-    arg_cells: []const u64,
-) !u64 {
+    arg_cells: []const u128,
+) !u128 {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -624,19 +624,19 @@ fn callCells(
     return res[0];
 }
 
-fn f64c(x: f64) u64 {
-    return @bitCast(x);
+fn f64c(x: f64) u128 {
+    return @as(u64, @bitCast(x));
 }
-fn f32c(x: f32) u64 {
+fn f32c(x: f32) u128 {
     return @as(u32, @bitCast(x));
 }
-fn asF64(c: u64) f64 {
-    return @bitCast(c);
+fn asF64(c: u128) f64 {
+    return @bitCast(@as(u64, @truncate(c)));
 }
-fn asF32(c: u64) f32 {
+fn asF32(c: u128) f32 {
     return @bitCast(@as(u32, @truncate(c)));
 }
-fn asI32(c: u64) i32 {
+fn asI32(c: u128) i32 {
     return @bitCast(@as(u32, @truncate(c)));
 }
 
@@ -743,8 +743,8 @@ test "wasm interp: f64 store then load round-trips" {
 
 const I64 = 0x7e;
 
-fn asI64(c: u64) i64 {
-    return @bitCast(c);
+fn asI64(c: u128) i64 {
+    return @bitCast(@as(u64, @truncate(c)));
 }
 
 test "wasm interp: i32.wrap_i64" {
