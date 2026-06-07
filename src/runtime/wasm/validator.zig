@@ -190,16 +190,15 @@ fn markRefFuncsInExpr(r: *Reader, declared: []bool) ValidateError!void {
 }
 
 /// Build §3.4.1.3's function reference set: the functions a body's
-/// `ref.func` may name — those referenced by exports, the start
-/// function, global initializers, and element segments.
+/// `ref.func` may name — those referenced by exports, global
+/// initializers, and element segments. The start function index does
+/// *not* contribute (a start that is otherwise unreferenced may not be
+/// the target of a `ref.func`).
 fn buildDeclaredSet(arena: std.mem.Allocator, module: *const Module) ValidateError![]bool {
     const declared = try arena.alloc(bool, totalFuncs(module));
     @memset(declared, false);
     for (module.exports) |ex| {
         if (ex.desc == .func and ex.desc.func < declared.len) declared[ex.desc.func] = true;
-    }
-    if (module.start) |s| {
-        if (s < declared.len) declared[s] = true;
     }
     for (module.globals) |gl| {
         var r = Reader.init(gl.init_expr);
