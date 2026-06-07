@@ -64,9 +64,10 @@ pub inline fn funcRefIndex(ref: u128) u32 {
     return @truncate(ref);
 }
 
-/// A table: a growable vector of references. (Holds opaque cells today;
-/// once the JS API lands, externref cells carry JS values and Metla
-/// scans them — see docs/wasm-engine.md.)
+/// A table: a growable vector of references. Cells are opaque to the
+/// engine; an externref cell carries a JS value's bits, kept alive by
+/// the realm pin set (the engine never dereferences it) — see
+/// docs/wasm-engine.md §5.
 pub const Table = struct {
     elems: []u128,
     max: ?u64,

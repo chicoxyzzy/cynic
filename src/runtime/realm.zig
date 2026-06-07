@@ -1060,6 +1060,14 @@ pub const Realm = struct {
     wasm_compile_error_prototype: ?*@import("object.zig").JSObject = null,
     wasm_link_error_prototype: ?*@import("object.zig").JSObject = null,
     wasm_runtime_error_prototype: ?*@import("object.zig").JSObject = null,
+    /// Every JS value that has entered a wasm `externref` cell, keyed by
+    /// its NaN-boxed bits (deduped; the non-moving collector means the
+    /// bits are a stable identity). Marked as a GC root each cycle so an
+    /// `externref` held anywhere wasm can reach it — a table, a global,
+    /// the value stack across a host call — survives. Entries persist
+    /// until realm teardown; precise per-slot reclaim (the lazy ref-tag
+    /// scheme of docs/wasm-engine.md §5) is a future refinement.
+    wasm_extern_roots: std.AutoArrayHashMapUnmanaged(u64, void) = .empty,
     /// Phase 3 SES override-mistake fix — `freezePrimordials`
     /// installs a `SyntheticAccessor` pair (getter + setter
     /// JSFunctions sharing one capture cell) for every data
@@ -1288,6 +1296,7 @@ pub const Realm = struct {
         }
         if (self.class_arena) |*a| a.deinit();
         if (self.wasm_arena) |*a| a.deinit();
+        self.wasm_extern_roots.deinit(self.allocator);
     }
 
     /// Request the interpreter unwind on its next dispatch tick.
@@ -1505,6 +1514,13 @@ pub const Realm = struct {
         return self.wasm_arena.?.allocator();
     }
 
+    /// Pin a JS value as a wasm `externref` GC root (deduped). Primitives
+    /// (non-heap values) are skipped — the collector never touches them.
+    pub fn pinExternRef(self: *Realm, v: Value) !void {
+        if (!v.isHeapValue()) return;
+        try self.wasm_extern_roots.put(self.allocator, v.bits, {});
+    }
+
     /// Run a stop-the-world mark-sweep cycle. Roots:
     ///   • `realm.globals` (every binding)
     ///   • `realm.intrinsics` (every prototype / constructor pointer)
@@ -1703,6 +1719,10 @@ pub const Realm = struct {
         // them as live; `drainMicrotasks` releases them at the
         // next job boundary via `clearKeptObjects`.
         for (self.kept_alive.items) |v| self.heap.markValue(v);
+
+        // Wasm externref roots — every JS value handed to wasm as an
+        // `externref` stays live for as long as wasm could reach it.
+        for (self.wasm_extern_roots.keys()) |bits| self.heap.markValue(Value{ .bits = bits });
 
         // Modules — each `ModuleRecord.exports` is a plain
         // `*JSObject` on the GC heap whose property bag holds

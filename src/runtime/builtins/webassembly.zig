@@ -12,13 +12,19 @@
 //!   - imports: host functions (JS callables re-entering Lantern),
 //!     cross-module functions, and shared globals / memories / tables.
 //!   - `CompileError` / `LinkError` / `RuntimeError` (Error subclasses).
-//!   - marshalling: i32 / i64↔BigInt / f32 / f64.
+//!   - marshalling: i32 / i64↔BigInt / f32 / f64; funcref↔function and
+//!     externref↔JS value (incl. externref tables / globals and
+//!     reference round-trips through host calls).
 //!
-//! All wasm artifacts live in the realm's `wasm_arena`, freed at realm
-//! teardown, so they need no per-object cleanup or GC marking.
+//! Most wasm artifacts live in the realm's `wasm_arena`, freed at realm
+//! teardown, so they need no per-object cleanup or GC marking. The one
+//! exception is `externref`: a JS value handed to wasm is pinned in
+//! `realm.wasm_extern_roots` and marked each GC so it survives wherever
+//! wasm holds it (the collector is non-moving, so identity is preserved).
 //!
-//! Known gaps: externref tables (await GC integration); v128 /
-//! reference marshalling across the JS boundary. An imported memory
+//! Known gaps: externref pins persist until realm teardown (precise
+//! per-slot reclaim — the ref-tag scheme of docs/wasm-engine.md §5 — is
+//! future); v128 marshalling across the JS boundary. An imported memory
 //! shares the provider's bytes (writes propagate both ways), though a
 //! JS-side `grow` after instantiation isn't yet observed by the
 //! importer. `Instance.prototype.exports` is a prototype getter per
@@ -67,12 +73,14 @@ fn valTypeFromString(s: []const u8) ?wasm.ValType {
     if (std.mem.eql(u8, s, "i64")) return .i64;
     if (std.mem.eql(u8, s, "f32")) return .f32;
     if (std.mem.eql(u8, s, "f64")) return .f64;
+    if (std.mem.eql(u8, s, "externref")) return .externref;
+    if (std.mem.eql(u8, s, "anyfunc") or std.mem.eql(u8, s, "funcref")) return .funcref;
     return null;
 }
 
 /// A `WebAssembly.Table`'s backing state: the shared engine table plus
-/// its element kind. Arena-owned. (Only `funcref` tables are supported
-/// today; `externref` tables await GC integration.)
+/// its element kind (`funcref` → callable wrappers; `externref` → JS
+/// values pinned per §5). Arena-owned.
 const TableState = struct {
     table: *wasm.Table,
     funcref: bool,
@@ -380,9 +388,11 @@ fn globalConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     const a = realm.wasmAllocator();
     const cell = a.create(u128) catch return error.OutOfMemory;
-    // A missing initial value is the type's zero (the 0 bit pattern is
-    // i32 0 / i64 0n / f32 +0 / f64 +0).
-    cell.* = if (args.len > 1) try marshalArg(realm, vt, args[1]) else 0;
+    // A missing initial value is the type's default: the null ref for
+    // reference types, else the zero bit pattern (i32 0 / i64 0n /
+    // f32 +0 / f64 +0).
+    const default_cell: u128 = if (vt == .externref or vt == .funcref) wasm.REF_NULL else 0;
+    cell.* = if (args.len > 1) try marshalArg(realm, vt, args[1]) else default_cell;
 
     const st = a.create(GlobalState) catch return error.OutOfMemory;
     st.* = .{ .cell = cell, .valtype = vt, .mutable = mutable };
@@ -445,9 +455,8 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     if (!elem_v.isString()) return intrinsics.throwTypeError(realm, "WebAssembly.Table: invalid element type");
     const elem_s: *JSString = @ptrCast(@alignCast(elem_v.asString()));
     const elem = elem_s.flatBytes();
-    if (std.mem.eql(u8, elem, "externref"))
-        return intrinsics.throwTypeError(realm, "WebAssembly.Table: externref tables are not yet supported");
-    if (!std.mem.eql(u8, elem, "anyfunc") and !std.mem.eql(u8, elem, "funcref"))
+    const is_funcref = std.mem.eql(u8, elem, "anyfunc") or std.mem.eql(u8, elem, "funcref");
+    if (!is_funcref and !std.mem.eql(u8, elem, "externref"))
         return intrinsics.throwTypeError(realm, "WebAssembly.Table: invalid element type");
 
     const initial = try indexArg(realm, desc.get("initial"));
@@ -455,15 +464,20 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
     const a = realm.wasmAllocator();
     const elems = a.alloc(u128, initial) catch return error.OutOfMemory;
-    const fill = if (args.len > 1) try funcRefFromValue(realm, args[1]) else wasm.REF_NULL;
+    const fill = if (args.len > 1) try tableElemFromValue(realm, is_funcref, args[1]) else wasm.REF_NULL;
     @memset(elems, fill);
 
     const tbl = a.create(wasm.Table) catch return error.OutOfMemory;
     tbl.* = .{ .elems = elems, .max = max, .is_64 = false };
     const st = a.create(TableState) catch return error.OutOfMemory;
-    st.* = .{ .table = tbl, .funcref = true };
+    st.* = .{ .table = tbl, .funcref = is_funcref };
     self.wasm_table = st;
     return this_value;
+}
+
+/// A JS value -> a table element cell, per the table's element type.
+fn tableElemFromValue(realm: *Realm, is_funcref: bool, v: Value) NativeError!u128 {
+    return if (is_funcref) funcRefFromValue(realm, v) else marshalArg(realm, .externref, v);
 }
 
 fn tableStateOf(realm: *Realm, this_value: Value) NativeError!*TableState {
@@ -484,14 +498,13 @@ fn tableGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     const st = try tableStateOf(realm, this_value);
     const idx = try tableIndex(realm, st, if (args.len > 0) args[0] else Value.undefined_);
     const cell = st.table.elems[idx];
-    if (cell == wasm.REF_NULL) return Value.null_;
-    return makeExportedFunction(realm, wasm.funcRefInstance(cell), wasm.funcRefIndex(cell), "");
+    return marshalResult(realm, if (st.funcref) .funcref else .externref, cell);
 }
 
 fn tableSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const st = try tableStateOf(realm, this_value);
     const idx = try tableIndex(realm, st, if (args.len > 0) args[0] else Value.undefined_);
-    st.table.elems[idx] = try funcRefFromValue(realm, if (args.len > 1) args[1] else Value.null_);
+    st.table.elems[idx] = try tableElemFromValue(realm, st.funcref, if (args.len > 1) args[1] else Value.null_);
     return Value.undefined_;
 }
 
@@ -808,8 +821,8 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
             },
             .table => |tidx| {
                 const tbl = ip.tableRef(tidx) orelse continue;
-                if ((ip.tableElemType(tidx) orelse continue) != .funcref) continue; // externref: deferred
-                const tobj = try makeTable(realm, tbl, true);
+                const et = ip.tableElemType(tidx) orelse continue;
+                const tobj = try makeTable(realm, tbl, et == .funcref);
                 obj.set(realm.allocator, ex.name, tobj) catch return error.OutOfMemory;
             },
             .mem => {
@@ -894,7 +907,16 @@ fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
         },
         .f32 => return @as(u32, @bitCast(@as(f32, @floatCast(arith.toNumber(v))))),
         .f64 => return @as(u64, @bitCast(arith.toNumber(v))),
-        else => return intrinsics.throwTypeError(realm, "WebAssembly: v128 / reference marshalling is not yet supported"),
+        // §ToWebAssemblyValue for reference types. An externref cell holds
+        // the JS value's NaN-boxed bits (pinned as a GC root); JS null maps
+        // to the wasm null ref. A funcref accepts null or an exported fn.
+        .externref => {
+            if (v.isNull()) return wasm.REF_NULL;
+            realm.pinExternRef(v) catch return error.OutOfMemory;
+            return @as(u128, v.bits);
+        },
+        .funcref => return funcRefFromValue(realm, v),
+        else => return intrinsics.throwTypeError(realm, "WebAssembly: v128 marshalling is not yet supported"),
     }
 }
 
@@ -910,7 +932,18 @@ fn marshalResult(realm: *Realm, vt: wasm.ValType, cell: u128) NativeError!Value 
         },
         .f32 => return Value.fromDouble(@as(f64, @as(f32, @bitCast(@as(u32, @truncate(cell)))))),
         .f64 => return Value.fromDouble(@as(f64, @bitCast(@as(u64, @truncate(cell))))),
-        else => return intrinsics.throwTypeError(realm, "WebAssembly: v128 / reference marshalling is not yet supported"),
+        // §ToJSValue for reference types. The wasm null ref becomes JS
+        // null; an externref reconstructs the JS value from its bits; a
+        // funcref becomes a callable exported-function wrapper.
+        .externref => {
+            if (cell == wasm.REF_NULL) return Value.null_;
+            return Value{ .bits = @truncate(cell) };
+        },
+        .funcref => {
+            if (cell == wasm.REF_NULL) return Value.null_;
+            return makeExportedFunction(realm, wasm.funcRefInstance(cell), wasm.funcRefIndex(cell), "");
+        },
+        else => return intrinsics.throwTypeError(realm, "WebAssembly: v128 marshalling is not yet supported"),
     }
 }
 

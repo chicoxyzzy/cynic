@@ -458,8 +458,46 @@ test "table.grow past the maximum throws" {
     try expectIntWasm(src, 1);
 }
 
-test "externref tables are rejected for now" {
-    try expectIntWasm("try { new WebAssembly.Table({ element: 'externref', initial: 1 }); 0 } catch (e) { 1 }", 1);
+test "an externref table holds and returns JS values" {
+    const src =
+        "const t = new WebAssembly.Table({ element: 'externref', initial: 2 });" ++
+        "const o = { tag: 42 };" ++
+        "t.set(1, o);" ++
+        "(t.length === 2 && t.get(0) === null && t.get(1) === o && t.get(1).tag === 42) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "an externref held in a table survives GC with identity intact" {
+    // The marquee GC test: a JS object stored as an externref must be
+    // kept alive (pinned as a root) across collection, and — the GC being
+    // non-moving — return with identity preserved.
+    const src =
+        "const t = new WebAssembly.Table({ element: 'externref', initial: 1 });" ++
+        "const o = { tag: 99 };" ++
+        "t.set(0, o);" ++
+        "for (let i = 0; i < 400000; i++) { const x = { y: i }; void x; }" ++ // force GC cycles
+        "(t.get(0) === o && t.get(0).tag === 99) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "an externref Global holds a JS value" {
+    const src =
+        "const o = { v: 5 };" ++
+        "const g = new WebAssembly.Global({ value: 'externref' }, o);" ++
+        "(g.value === o && new WebAssembly.Global({ value: 'externref' }).value === null) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+// imports env.id (externref)->externref; exports run(externref)->externref = id(x).
+const extern_id_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,6,1,96,1,111,1,111, 2,10,1,3,101,110,118,2,105,100,0,0, 3,2,1,0, 7,7,1,3,114,117,110,0,1, 10,8,1,6,0,32,0,16,0,11])";
+
+test "an externref round-trips JS -> wasm -> host -> wasm -> JS" {
+    const src =
+        "const o = { id: 7 };" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ extern_id_bytes ++ "), { env: { id: (x) => x } });" ++
+        "inst.exports.run(o) === o ? 1 : 0";
+    try expectIntWasm(src, 1);
 }
 
 test "an exported table is a WebAssembly.Table over the live table" {

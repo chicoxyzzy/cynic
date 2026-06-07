@@ -37,10 +37,11 @@ official WebAssembly spec testsuite — see `wasm-results.md`.
 The **JS API** surface — `WebAssembly.*` objects (`Module`, `Instance`,
 `Memory`, `Table`, `Global`), `compile` / `instantiate` Promises,
 imports incl. host functions, the error types, and i32/i64/f32/f64
-marshalling — is shipped (§8). The **GC integration** (§5, §6) is the
-main remaining structural piece; until it lands, `externref` can't hold
-a live JS object, so externref tables and reference marshalling across
-the JS boundary stay deferred.
+marshalling — is shipped (§8), and `externref` holds live JS objects
+(externref tables / globals, reference round-trips through host calls),
+kept alive by the realm pin set of §5. The remaining **GC** refinement
+is precise per-slot reclaim (lazy ref tags) to replace that pin set's
+retain-until-teardown; `v128` doesn't yet cross the JS boundary.
 
 Deferred: `threads` (sits on the existing `SharedArrayBuffer` /
 `Atomics` substrate), `exceptions`, `gc`, `tail-call` beyond the
@@ -155,9 +156,9 @@ Interpreters* (2003) on threaded dispatch.
    (`interpreter.zig`), wide enough for `v128`; references are encoded
    inline (a `funcref` carries its defining instance in the high bits —
    see §5). The originally-planned lazy 1-byte ref tags for precise GC
-   roots are **not built** — they belong with the GC integration, which
-   waits on the JS API (no `externref` holding a JS value can reach the
-   stack until then). See §5.
+   roots are **not built**; `externref` liveness is instead handled
+   coarsely by the realm pin set (§5), which keeps every JS value handed
+   to wasm alive until realm teardown. See §5.
 
 5. **Guard-bounded stacks, not per-push checks** (see §6).
 
@@ -218,20 +219,22 @@ stack, so its representation dominates interpreter speed.
   defined in either, and `call_indirect` runs each in the instance it
   was defined in. The null reference is all-ones; a bare index (high
   bits zero) resolves against the current instance.
-- **GC integration is future.** The originally-planned scheme —
-  lazy 1-byte ref tags so Metla scans only reference slots, no
-  stackmaps — is **not built**, and neither is registering the value
-  stack as a GC root. With the JS API shipped (§8), a GC *can* now fire
-  mid-execution — a host import re-enters Lantern, which allocates — but
-  it stays safe because only numeric values reach the wasm stack: a
-  `funcref`'s instance pointer is arena-owned (not GC-managed) and no
-  `externref` carries a live JS object yet, so there is nothing for the
-  collector to lose (locked in by a host-import-under-GC-churn test).
-  The ref tags + root registration become load-bearing the moment
-  `externref` holds JS values (externref tables, reference marshalling
-  across the boundary); the instance-pointer-in-a-funcref encoding will
-  also need a GC-visible, lifetime-safe form then. This is the engine's
-  largest open design item — see §6 and §11.
+- **GC integration — externref pinning (shipped), precise ref tags
+  (future).** An `externref` cell carries the JS value's NaN-boxed bits;
+  a `funcref` carries its arena-owned defining-instance pointer (not
+  GC-managed); the null ref is all-ones. Because the collector is
+  **non-moving**, those bits are a stable identity, so the engine moves
+  reference cells around opaquely — no per-slot machinery in the hot
+  loop. Liveness is handled by a realm-level pin set
+  (`realm.wasm_extern_roots`): every JS value handed to wasm as an
+  `externref` is recorded (deduped by bits) and marked as a GC root each
+  cycle, so it survives wherever wasm can reach it — a table, a global,
+  the value stack across a host call. This is conservative on *lifetime*
+  (a pinned value lives until realm teardown) but precise on identity.
+  The originally-planned **lazy 1-byte ref tags** — so Metla scans only
+  the live reference slots and reclaims them precisely — are still
+  **not built**; they are the refinement that replaces the pin set's
+  retain-until-teardown with per-slot precision. See §6 and §11.
 
 ## 6. Calls, frames, traps
 
@@ -258,14 +261,14 @@ refinement.
 At the future JS boundary these become a thrown
 `WebAssembly.RuntimeError`.
 
-**GC roots — future.** The plan is to register the value stack and
-frames as realm GC roots (exactly as `realm.frame_stacks` does for
-Lantern) so a GC fired mid-execution — e.g. inside an imported JS call
-— walks live wasm references. **Not built.** A host import now *does*
-fire a GC mid-execution, but it is safe without rooting today because
-the wasm stack holds only numerics (no live `externref`); registration
-becomes load-bearing once `externref` carries JS values. It lands then,
-with `/gc-stress` coverage at `--gc-threshold=1`. See §5.
+**GC roots.** Live `externref` JS values are kept alive by the realm pin
+set (§5), marked alongside `realm.frame_stacks` in `realm.markRoots` — so
+a GC fired mid-execution (e.g. inside an imported JS call) never loses an
+`externref`, verified by a host-import-under-GC-churn test and a
+500-externref / 5M-allocation stress under ReleaseSafe. The **future**
+refinement is to register the value stack + frames *precisely* (lazy ref
+tags, exactly as `realm.frame_stacks` does for Lantern) so the pin set's
+retain-until-teardown becomes per-slot reclaim. See §5.
 
 ## 7. Runtime data structures
 
@@ -350,9 +353,11 @@ exported function    → wasm_export slot → *ExportRecord (instance, index)
 `grow` detaches the old buffer and re-materializes a fresh one. An
 imported memory shares the provider's bytes (`Imports.share_memory`), so
 writes propagate both ways; the spectest harness keeps the snapshot
-(dupe) default. Known gaps: `externref` tables (await the §5 GC
-integration), and a JS-side `grow` of an imported memory isn't yet
-observed by the importer (the aliased slice header goes stale).
+(dupe) default. `externref` tables / globals and reference round-trips
+through host calls work — JS values pinned per §5. Known gaps: a JS-side
+`grow` of an imported memory isn't yet observed by the importer (the
+aliased slice header goes stale), and `v128` doesn't cross the JS
+boundary.
 
 ## 9. SES / hardening
 
@@ -410,7 +415,7 @@ the measured design space:
 | Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128 — **done** |
 | Cross-module linking | imported funcs/globals/tables/memories, shared tables, cross-instance funcrefs, host functions, start functions — **done** |
 | Conformance | the WebAssembly spec testsuite harness → `wasm-results.md` — **done, 100.00%** |
-| JS API | `WebAssembly.*` typed-slot objects (`Module`/`Instance`/`Memory`/`Table`/`Global`), `compile`/`instantiate` Promises, imports incl. host functions, error types, i32/i64/f32/f64 marshalling, `--allow=wasm` — **done** (§8); externref-across-JS + the §5 GC roots are future |
+| JS API | `WebAssembly.*` typed-slot objects (`Module`/`Instance`/`Memory`/`Table`/`Global`), `compile`/`instantiate` Promises, imports incl. host functions, error types, i32/i64/f32/f64 marshalling, `--allow=wasm` — **done** (§8), incl. externref-across-JS (tables / globals / host round-trips) via the §5 pin set; precise ref-tag reclaim is future |
 
 Conformance is scored against the official WebAssembly spec testsuite
 (the `.wast` corpus), the same way `test262-results.md` scores ECMA-262.
