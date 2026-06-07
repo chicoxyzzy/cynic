@@ -94,6 +94,7 @@ test {
     _ = @import("runtime/annex_b_rejection_test.zig");
     _ = @import("runtime/eval_policy_test.zig");
     _ = @import("runtime/eval_test.zig");
+    _ = @import("runtime/wasm_js_test.zig");
     _ = @import("runtime/shared_array_buffer_test.zig");
     _ = @import("runtime/atomics_test.zig");
     _ = @import("runtime/multi_agent_test.zig");

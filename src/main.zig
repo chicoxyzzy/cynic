@@ -60,6 +60,7 @@ pub fn main(init: std.process.Init) !void {
 
     const unhardened = parsed.unhardened;
     const allow_eval = parsed.allow_eval;
+    const allow_wasm = parsed.allow_wasm;
 
     if (std.mem.eql(u8, sub, "lex")) {
         if (args.len != 1) {
@@ -104,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened, allow_eval);
+        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened, allow_eval, allow_wasm);
     } else if (std.mem.eql(u8, sub, "run")) {
         // `cynic run a.js b.js c.js` evaluates each file in order
         // against one realm — the same shape every other engine's
@@ -131,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals, unhardened, allow_eval);
+        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals, unhardened, allow_eval, allow_wasm);
     } else if (std.mem.eql(u8, sub, "repl")) {
         // `cynic repl [--debug-globals]` — interactive read-eval-print
         // loop with a persistent realm. Same `--debug-globals` opt-in
@@ -153,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.UnexpectedArgument;
         }
-        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened, allow_eval);
+        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened, allow_eval, allow_wasm);
     } else if (std.mem.eql(u8, sub, "fuzz-reprl")) {
         // `cynic fuzz-reprl` — Fuzzilli REPRL host. The subcommand
         // takes no per-call args; the fuzzing posture is hardcoded
@@ -264,6 +265,12 @@ fn printUsage(io: std.Io) !void {
         \\                                   the realm (§19.2.1 / §20.2.1.1.1); the frozen
         \\                                   primordials still confine it unless paired
         \\                                   with --unhardened (docs/ses-alignment.md).
+        \\  --allow=wasm                     Open the WebAssembly code-construction
+        \\                                   gate (HostEnsureCanCompileWasmBytes).
+        \\                                   By default `new WebAssembly.Module` /
+        \\                                   `Instance` throw; `WebAssembly.validate`
+        \\                                   stays available. Orthogonal to
+        \\                                   --allow=eval (docs/wasm-engine.md §9).
         \\
     );
 }
@@ -299,7 +306,7 @@ fn unknownAllow(io: std.Io, name: []const u8) !void {
     var buf: [256]u8 = undefined;
     const msg = try std.fmt.bufPrint(
         &buf,
-        "error: unknown --allow target '{s}'. The only relaxation is `--allow=eval`.\n",
+        "error: unknown --allow target '{s}'. Valid relaxations: `--allow=eval`, `--allow=wasm`.\n",
         .{name},
     );
     try std.Io.File.stderr().writeStreamingAll(io, msg);
@@ -424,6 +431,9 @@ pub const ParsedFlags = struct {
     /// by the frozen primordials unless paired with `--unhardened`.
     /// See [docs/ses-alignment.md](../docs/ses-alignment.md).
     allow_eval: bool = false,
+    /// `--allow=wasm` — open the WebAssembly code-construction policy
+    /// gate. When set, `realm.allow_wasm` is flipped to `true`.
+    allow_wasm: bool = false,
     /// The unconsumed tail of the argv slice (subcommand + its
     /// arguments). Empty when no subcommand was supplied — the
     /// caller prints usage in that case.
@@ -470,12 +480,15 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
             out.unhardened = true;
             rest = rest[1..];
         } else if (std.mem.startsWith(u8, a, "--allow=")) {
-            // `--allow=<name>` relaxes a default-on restriction. Only
-            // `--allow=eval` exists today (AGENTS.md). An unknown name
-            // is rejected rather than silently ignored.
+            // `--allow=<name>` relaxes a default-on restriction
+            // (`eval`, `wasm`). An unknown name is rejected rather than
+            // silently ignored.
             const name = a["--allow=".len..];
             if (std.mem.eql(u8, name, "eval")) {
                 out.allow_eval = true;
+                rest = rest[1..];
+            } else if (std.mem.eql(u8, name, "wasm")) {
+                out.allow_wasm = true;
                 rest = rest[1..];
             } else {
                 out.err = .unknown_allow;

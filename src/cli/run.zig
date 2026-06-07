@@ -30,6 +30,7 @@ pub fn run(
     debug_globals: bool,
     unhardened: bool,
     allow_eval: bool,
+    allow_wasm: bool,
 ) !void {
     std.debug.assert(paths.len > 0);
 
@@ -54,6 +55,7 @@ pub fn run(
     // `--allow=eval` — open the runtime-code-construction gate
     // before `installBuiltins`. See `Realm.allow_eval`.
     if (allow_eval) realm.allow_eval = true;
+    if (allow_wasm) realm.allow_wasm = true;
     // Apply the `--gc-threshold` knob before `installBuiltins`
     // so the builtin-install allocations themselves run at the
     // requested cadence (matters at `--gc-threshold=1` where every
