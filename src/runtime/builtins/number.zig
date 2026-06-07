@@ -726,14 +726,22 @@ fn isStrWhiteSpace(cp: u21) bool {
 
 /// Return the byte index of the first non-StrWhiteSpace codepoint
 /// in `bytes`, or `bytes.len` if all-whitespace. UTF-8; an invalid
-/// sequence stops the scan.
+/// sequence stops the scan. Manual decode rather than
+/// `Utf8View.initUnchecked` because the stdlib iterator's
+/// `utf8ByteSequenceLength(b) catch unreachable` panics on
+/// untrusted input that happens to contain an invalid start byte
+/// (Fuzzilli can build strings from raw byte buffers that aren't
+/// valid UTF-8 — host-safety violation per AGENTS.md).
 fn skipStrWhiteSpace(bytes: []const u8) usize {
-    var view = std.unicode.Utf8View.initUnchecked(bytes).iterator();
-    while (true) {
-        const before = view.i;
-        const cp = view.nextCodepoint() orelse return bytes.len;
-        if (!isStrWhiteSpace(cp)) return before;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const cp_len = std.unicode.utf8ByteSequenceLength(bytes[i]) catch return i;
+        if (i + cp_len > bytes.len) return i; // truncated trailing seq
+        const cp = std.unicode.utf8Decode(bytes[i .. i + cp_len]) catch return i;
+        if (!isStrWhiteSpace(cp)) return i;
+        i += cp_len;
     }
+    return bytes.len;
 }
 
 fn parseIntNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
