@@ -121,7 +121,6 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
 
     var counts: Counts = .{};
     var current: ?*wasm.Instance = null;
-    var current_module: ?*wasm.Module = null;
 
     // Cross-module linking registry: registered name → instance. Names
     // a `register` command exposes for a later module's imports.
@@ -145,22 +144,25 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
             const res = loadModule(arena, io, dir, cmd, &registry) catch null;
             if (res) |loaded| {
                 current = loaded.instance;
-                current_module = loaded.module;
+                // A named module ((module $M …)) is addressable by later
+                // actions and registers via its internal name.
+                if (cmd.get("name")) |n| registry.put(arena, n.string, loaded.instance) catch {};
             } else {
                 current = null;
-                current_module = null;
             }
         } else if (std.mem.eql(u8, kind, "register")) {
-            // Expose the current instance under its registration name so
-            // subsequent modules can import its exports.
+            // Expose an instance under its registration name so later
+            // modules can import its exports. A `name` field selects a
+            // specific named module; otherwise the current one is used.
             const as = if (cmd.get("as")) |a| a.string else "";
-            if (current) |inst| {
-                registry.put(arena, as, inst) catch {};
+            const inst = if (cmd.get("name")) |n| (registry.get(n.string) orelse current) else current;
+            if (inst) |i| {
+                registry.put(arena, as, i) catch {};
             }
             // A register is not a scored assertion.
         } else if (std.mem.eql(u8, kind, "assert_return")) {
             const before = counts.fail;
-            scoreReturn(arena, cmd, current, current_module, &counts);
+            scoreReturn(arena, cmd, current, &registry, &counts);
             if (debug_loads and counts.fail > before) {
                 const action = cmd.get("action").?.object;
                 var line: [256]u8 = undefined;
@@ -169,11 +171,11 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
                 std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
             }
         } else if (std.mem.eql(u8, kind, "assert_trap") or std.mem.eql(u8, kind, "assert_exhaustion")) {
-            scoreTrap(arena, cmd, current, current_module, &counts, std.mem.eql(u8, kind, "assert_exhaustion"));
+            scoreTrap(arena, cmd, current, &registry, &counts, std.mem.eql(u8, kind, "assert_exhaustion"));
         } else if (std.mem.eql(u8, kind, "assert_invalid") or std.mem.eql(u8, kind, "assert_malformed")) {
             scoreRejected(arena, io, dir, cmd, &counts);
         } else if (std.mem.eql(u8, kind, "action")) {
-            const r = doAction(arena, cmd.get("action").?.object, current, current_module);
+            const r = doAction(arena, cmd.get("action").?.object, current, &registry);
             switch (r) {
                 .values => counts.pass += 1,
                 else => counts.fail += 1,
@@ -351,14 +353,19 @@ const ActionResult = union(enum) {
     unsupported,
 };
 
-fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: ?*wasm.Instance, modp: ?*wasm.Module) ActionResult {
+fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: ?*wasm.Instance, registry: *const Registry) ActionResult {
     const atype = (action.get("type") orelse return .unsupported).string;
     const field = (action.get("field") orelse return .unsupported).string;
-    const m = modp orelse return .no_module;
+    // An action may target a named module (cross-module linking tests);
+    // otherwise it targets the most recently instantiated one.
+    const inst = blk: {
+        if (action.get("module")) |mn| break :blk registry.get(mn.string) orelse current;
+        break :blk current;
+    } orelse return .no_module;
+    const m = inst.module;
 
     if (std.mem.eql(u8, atype, "get")) {
         const gidx = exportIndex(m, field, .global) orelse return .no_module;
-        const inst = current orelse return .no_module;
         const cell = inst.readGlobalByIndex(gidx) orelse return .unsupported;
         const out = arena.alloc(u128, 1) catch return .{ .err = error.OutOfMemory };
         out[0] = cell;
@@ -369,13 +376,12 @@ fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: ?*was
     const fidx = exportIndex(m, field, .func) orelse return .no_module;
 
     const args = encodeArgs(arena, action) catch return .unsupported;
-    const inst = current orelse return .no_module;
     const result = wasm.invoke(inst, arena, fidx, args) catch |err| return .{ .err = err };
     return .{ .values = result };
 }
 
-fn scoreReturn(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.Instance, modp: ?*wasm.Module, counts: *Counts) void {
-    const r = doAction(arena, cmd.get("action").?.object, current, modp);
+fn scoreReturn(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.Instance, registry: *const Registry, counts: *Counts) void {
+    const r = doAction(arena, cmd.get("action").?.object, current, registry);
     const values = switch (r) {
         .values => |v| v,
         .unsupported => {
@@ -404,8 +410,8 @@ fn scoreReturn(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*was
     counts.pass += 1;
 }
 
-fn scoreTrap(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.Instance, modp: ?*wasm.Module, counts: *Counts, exhaustion: bool) void {
-    const r = doAction(arena, cmd.get("action").?.object, current, modp);
+fn scoreTrap(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.Instance, registry: *const Registry, counts: *Counts, exhaustion: bool) void {
+    const r = doAction(arena, cmd.get("action").?.object, current, registry);
     switch (r) {
         .err => |err| {
             if (exhaustion) {
