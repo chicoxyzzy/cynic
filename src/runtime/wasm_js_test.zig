@@ -537,3 +537,96 @@ test "growing an exported memory keeps wasm and JS in sync" {
         "new Uint8Array(inst.exports.mem.buffer)[70000]";
     try expectIntWasm(src, 9);
 }
+
+// ── imports ─────────────────────────────────────────────────────────
+
+// imports env.add (i32,i32)->i32; exports run(i32,i32)->i32 = add(a,b).
+const host_add_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,7,1,96,2,127,127,1,127, 2,11,1,3,101,110,118,3,105,109,112,0,0, 3,2,1,0, 7,7,1,3,114,117,110,0,1, 10,10,1,8,0,32,0,32,1,16,0,11])";
+
+// imports env.f ()->i32; exports run()->i32 = f().
+const consumer_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,5,1,96,0,1,127, 2,9,1,3,101,110,118,1,102,0,0, 3,2,1,0, 7,7,1,3,114,117,110,0,1, 10,6,1,4,0,16,0,11])";
+
+// imports env.g (global i32); exports get()->i32 = global.get 0.
+const global_import_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,5,1,96,0,1,127, 2,10,1,3,101,110,118,1,103,3,127,0, 3,2,1,0, 7,7,1,3,103,101,116,0,0, 10,6,1,4,0,35,0,11])";
+
+// imports env.mem (memory 1); exports load(addr)->i32.
+const mem_import_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,6,1,96,1,127,1,127, 2,12,1,3,101,110,118,3,109,101,109,2,0,1, 3,2,1,0, 7,8,1,4,108,111,97,100,0,0, 10,9,1,7,0,32,0,40,2,0,11])";
+
+// imports env.tbl (funcref table 1); exports callIndirect()->i32.
+const table_import_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,5,1,96,0,1,127, 2,13,1,3,101,110,118,3,116,98,108,1,112,0,1, 3,2,1,0, 7,16,1,12,99,97,108,108,73,110,100,105,114,101,99,116,0,0, 10,9,1,7,0,65,0,17,0,0,11])";
+
+test "a JS function import is called by wasm with marshalled args" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ host_add_bytes ++ ")," ++
+        "  { env: { imp: (a, b) => a * 10 + b } });" ++
+        "inst.exports.run(3, 4)"; // run calls imp(3,4) -> 34
+    try expectIntWasm(src, 34);
+}
+
+test "a host import that throws propagates the exception into the wasm caller" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ consumer_bytes ++ ")," ++
+        "  { env: { f: () => { throw new RangeError('boom') } } });" ++
+        "try { inst.exports.run(); 0 } catch (e) { (e instanceof RangeError && e.message === 'boom') ? 1 : 0 }";
+    try expectIntWasm(src, 1);
+}
+
+test "an exported function from one instance imports into another (cross-module)" {
+    const src =
+        "const provider = new WebAssembly.Instance(new WebAssembly.Module(" ++ f7_bytes ++ "));" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ consumer_bytes ++ ")," ++
+        "  { env: { f: provider.exports.f } });" ++
+        "inst.exports.run()"; // run -> provider.f -> 7
+    try expectIntWasm(src, 7);
+}
+
+test "a WebAssembly.Global import is read by wasm" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ global_import_bytes ++ ")," ++
+        "  { env: { g: new WebAssembly.Global({ value: 'i32' }, 77) } });" ++
+        "inst.exports.get()"; // global.get 0 -> 77
+    try expectIntWasm(src, 77);
+}
+
+test "a Number import fills an i32 global" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ global_import_bytes ++ ")," ++
+        "  { env: { g: 55 } });" ++
+        "inst.exports.get()";
+    try expectIntWasm(src, 55);
+}
+
+test "a WebAssembly.Memory import is used by wasm" {
+    // Write before instantiation; wasm reads the imported bytes.
+    const src =
+        "const mem = new WebAssembly.Memory({ initial: 1 });" ++
+        "new Uint8Array(mem.buffer)[0] = 99;" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ mem_import_bytes ++ "), { env: { mem } });" ++
+        "inst.exports.load(0)"; // -> 99
+    try expectIntWasm(src, 99);
+}
+
+test "a WebAssembly.Table import drives wasm call_indirect" {
+    const src =
+        "const f7 = new WebAssembly.Instance(new WebAssembly.Module(" ++ f7_bytes ++ ")).exports.f;" ++
+        "const tbl = new WebAssembly.Table({ element: 'anyfunc', initial: 1 });" ++
+        "tbl.set(0, f7);" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ table_import_bytes ++ "), { env: { tbl } });" ++
+        "inst.exports.callIndirect()"; // call_indirect 0 -> f7 -> 7
+    try expectIntWasm(src, 7);
+}
+
+test "instantiating an importing module without an importObject throws" {
+    try expectIntWasm("try { new WebAssembly.Instance(new WebAssembly.Module(" ++ consumer_bytes ++ ")); 0 } catch (e) { 1 }", 1);
+}
+
+test "a non-callable function import throws" {
+    const src =
+        "try { new WebAssembly.Instance(new WebAssembly.Module(" ++ consumer_bytes ++ "), { env: { f: 123 } }); 0 } catch (e) { 1 }";
+    try expectIntWasm(src, 1);
+}

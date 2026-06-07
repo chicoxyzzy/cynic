@@ -229,7 +229,8 @@ const Registry = struct {
 
 /// The `spectest` host module's functions are all `print*` — they take
 /// arguments and return nothing. Modelled as a no-op.
-fn spectestNoop(args: []const u128, results: []u128) void {
+fn spectestNoop(ctx: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
+    _ = ctx;
     _ = args;
     @memset(results, 0);
 }

@@ -1444,7 +1444,8 @@ fn invokeInst(a: std.mem.Allocator, ip: *interp.Instance, name: []const u8, arg_
 }
 
 /// A host function for import tests: ignores its arguments and returns 7.
-fn hostReturns7(args: []const u128, results: []u128) void {
+fn hostReturns7(ctx: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
+    _ = ctx;
     _ = args;
     results[0] = 7;
 }

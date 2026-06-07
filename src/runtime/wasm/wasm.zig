@@ -63,6 +63,7 @@ pub const invoke = interpreter.invoke;
 pub const Imports = interpreter.Imports;
 pub const FuncRef = interpreter.FuncRef;
 pub const HostFn = interpreter.HostFn;
+pub const TrapError = interpreter.TrapError;
 pub const Memory = interpreter.Memory;
 pub const Table = interpreter.Table;
 pub const runStart = interpreter.runStart;

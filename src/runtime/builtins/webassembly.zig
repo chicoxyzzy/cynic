@@ -22,10 +22,12 @@ const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const JSObject = @import("../object.zig").JSObject;
 const NativeError = @import("../function.zig").NativeError;
+const JSFunction = @import("../function.zig").JSFunction;
 const JSString = @import("../string.zig").JSString;
 const intrinsics = @import("../intrinsics.zig");
 const heap_mod = @import("../heap.zig");
 const arith = @import("../lantern/arith.zig");
+const call = @import("../lantern/call.zig");
 const wasm = @import("../wasm/wasm.zig");
 
 /// A `WebAssembly.Module`'s decoded record. Arena-owned.
@@ -215,16 +217,17 @@ fn instanceConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
         return intrinsics.throwTypeError(realm, "WebAssembly.Instance expects a WebAssembly.Module");
     const mstate: *ModuleState = @ptrCast(@alignCast(mstate_raw));
 
-    // Imports are not yet wired (next slice).
-    if (mstate.module.imports.len > 0)
-        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: imports are not yet supported (LinkError)");
+    const imports = try resolveImports(realm, mstate.module, if (args.len > 1) args[1] else Value.undefined_);
 
     const a = realm.wasmAllocator();
     const ip = a.create(wasm.Instance) catch return error.OutOfMemory;
-    wasm.instantiate(ip, a, a, mstate.module, .{}) catch
+    wasm.instantiate(ip, a, a, mstate.module, imports) catch
         return intrinsics.throwTypeError(realm, "WebAssembly.Instance: instantiation failed (LinkError)");
-    wasm.runStart(ip, a) catch
-        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: start function trapped (RuntimeError)");
+    wasm.runStart(ip, a) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.HostThrew => return error.NativeThrew, // a host import threw during start
+        else => return intrinsics.throwTypeError(realm, "WebAssembly.Instance: start function trapped (RuntimeError)"),
+    };
 
     const exports = try buildExports(realm, ip, mstate.module);
     // Spec models `exports` as an Instance.prototype getter returning the
@@ -509,6 +512,156 @@ fn makeMemory(realm: *Realm, mem: *wasm.Memory) NativeError!Value {
     return heap_mod.taggedObject(obj);
 }
 
+// ── imports (importObject -> engine Imports) ────────────────────────
+
+/// A JS-backed host function's context, reached through the engine's
+/// `FuncRef.host.ctx`. Arena-owned.
+const HostImportCtx = struct {
+    realm: *Realm,
+    js_fn: *JSFunction,
+    params: []const wasm.ValType,
+    results: []const wasm.ValType,
+};
+
+/// The engine's host-function callback for a JS import: marshal the wasm
+/// operands to JS values, call the JS function (re-entering Lantern),
+/// and marshal its result back. A JS throw becomes `HostThrew`, re-raised
+/// at the wasm->JS boundary.
+fn jsHostTrampoline(ctx: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
+    const c: *HostImportCtx = @ptrCast(@alignCast(ctx orelse return error.HostThrew));
+    const realm = c.realm;
+    if (c.params.len > 16 or c.results.len > 1) return error.HostThrew; // arity bounds / multi-value host returns: unsupported
+
+    var jsargs: [16]Value = undefined;
+    const scope = realm.heap.openScope() catch return error.HostThrew;
+    defer scope.close();
+    for (c.params, 0..) |pt, i| {
+        jsargs[i] = marshalResult(realm, pt, args[i]) catch return error.HostThrew;
+        scope.push(jsargs[i]) catch return error.HostThrew;
+    }
+
+    const outcome = call.callJSFunction(realm.allocator, realm, c.js_fn, Value.undefined_, jsargs[0..c.params.len]) catch return error.HostThrew;
+    const ret = switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return error.HostThrew;
+        },
+    };
+    if (c.results.len == 1) results[0] = marshalArg(realm, c.results[0], ret) catch return error.HostThrew;
+}
+
+/// Build the engine `Imports` from a module's import list and a JS
+/// `importObject`. Functions resolve to a cross-module funcref (a
+/// WebAssembly exported function) or a host trampoline (any JS
+/// function); globals read a `Global` cell or marshal a primitive;
+/// memories / tables share the imported object's engine state.
+fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value) NativeError!wasm.Imports {
+    var nfunc: usize = 0;
+    var nglob: usize = 0;
+    var ntab: usize = 0;
+    for (module.imports) |imp| switch (imp.desc) {
+        .func => nfunc += 1,
+        .global => nglob += 1,
+        .table => ntab += 1,
+        .mem => {},
+    };
+    if (module.imports.len == 0) return .{};
+
+    const import_obj = heap_mod.valueAsPlainObject(import_obj_v) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: an importObject is required (LinkError)");
+
+    const a = realm.wasmAllocator();
+    const funcs = a.alloc(wasm.FuncRef, nfunc) catch return error.OutOfMemory;
+    const globals = a.alloc(u128, nglob) catch return error.OutOfMemory;
+    const tables = a.alloc(*wasm.Table, ntab) catch return error.OutOfMemory;
+    var memory: ?*const wasm.Memory = null;
+    var fi: usize = 0;
+    var gi: usize = 0;
+    var ti: usize = 0;
+
+    for (module.imports) |imp| {
+        const v = try lookupImport(realm, import_obj, imp.module, imp.name);
+        switch (imp.desc) {
+            .func => |type_idx| {
+                funcs[fi] = try resolveFuncImport(realm, v, module, type_idx);
+                fi += 1;
+            },
+            .global => |gt| {
+                globals[gi] = try resolveGlobalImport(realm, v, gt);
+                gi += 1;
+            },
+            .table => {
+                tables[ti] = try resolveTableImport(realm, v);
+                ti += 1;
+            },
+            .mem => memory = try resolveMemImport(realm, v),
+        }
+    }
+    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory };
+}
+
+/// `importObject[module][name]`.
+fn lookupImport(realm: *Realm, import_obj: *JSObject, module_name: []const u8, name: []const u8) NativeError!Value {
+    const mod_v = import_obj.get(module_name);
+    const mod_obj = heap_mod.valueAsPlainObject(mod_v) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: import module namespace is not an object (LinkError)");
+    return mod_obj.get(name);
+}
+
+fn resolveFuncImport(realm: *Realm, v: Value, module: *const wasm.Module, type_idx: u32) NativeError!wasm.FuncRef {
+    const fn_obj = heap_mod.valueAsFunction(v) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: function import is not callable (LinkError)");
+    // A WebAssembly exported function links directly to its wasm body.
+    if (fn_obj.wasm_export) |raw| {
+        const rec: *ExportRecord = @ptrCast(@alignCast(raw));
+        return rec.instance.funcRefAt(rec.func_index) orelse
+            return intrinsics.throwTypeError(realm, "WebAssembly.Instance: bad exported-function import (LinkError)");
+    }
+    // Any other JS function becomes a host import.
+    const ft = module.types[type_idx];
+    if (ft.params.len > 16 or ft.results.len > 1)
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: host import arity is not supported");
+    const ctx = realm.wasmAllocator().create(HostImportCtx) catch return error.OutOfMemory;
+    ctx.* = .{ .realm = realm, .js_fn = fn_obj, .params = ft.params, .results = ft.results };
+    return .{ .host = .{
+        .fn_ptr = jsHostTrampoline,
+        .ctx = ctx,
+        .params = @intCast(ft.params.len),
+        .results = @intCast(ft.results.len),
+    } };
+}
+
+fn resolveGlobalImport(realm: *Realm, v: Value, gt: anytype) NativeError!u128 {
+    // A WebAssembly.Global shares its current cell value; a primitive is
+    // marshalled to the global's declared type.
+    if (heap_mod.valueAsPlainObject(v)) |obj| {
+        if (obj.wasm_global) |raw| {
+            const st: *GlobalState = @ptrCast(@alignCast(raw));
+            return st.cell.*;
+        }
+    }
+    return marshalArg(realm, gt.val, v);
+}
+
+fn resolveTableImport(realm: *Realm, v: Value) NativeError!*wasm.Table {
+    const obj = heap_mod.valueAsPlainObject(v) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: table import is not a WebAssembly.Table (LinkError)");
+    const raw = obj.wasm_table orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: table import is not a WebAssembly.Table (LinkError)");
+    const st: *TableState = @ptrCast(@alignCast(raw));
+    return st.table;
+}
+
+fn resolveMemImport(realm: *Realm, v: Value) NativeError!*const wasm.Memory {
+    const obj = heap_mod.valueAsPlainObject(v) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: memory import is not a WebAssembly.Memory (LinkError)");
+    const raw = obj.wasm_memory orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: memory import is not a WebAssembly.Memory (LinkError)");
+    const st: *MemoryState = @ptrCast(@alignCast(raw));
+    return st.mem;
+}
+
 /// Build the exports namespace object: each function export becomes a
 /// callable JS function carrying its `(instance, func_index)`; each
 /// global export becomes a `WebAssembly.Global`; each funcref table
@@ -580,6 +733,8 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
     const results = wasm.invoke(rec.instance, realm.allocator, rec.func_index, argbuf[0..ft.params.len]) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        // A JS-backed host import threw — re-raise its pending exception.
+        error.HostThrew => return error.NativeThrew,
         else => return intrinsics.throwTypeError(realm, "WebAssembly exported function trapped (RuntimeError)"),
     };
     defer realm.allocator.free(results);
