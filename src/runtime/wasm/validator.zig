@@ -41,6 +41,7 @@ pub const ValidateError = error{
     BadRefType,
     BadBlockType,
     BadLane,
+    BadAlign,
     UnknownOpcode,
     TypeMismatch,
     StackUnderflow,
@@ -627,15 +628,15 @@ fn validateExpr(v: *Validator) ValidateError!void {
             .f64_reinterpret_i64 => try unop(v, .i64, .f64),
 
             // Memory loads: pop the i32 address, push the result.
-            .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u => try load(v, .i32),
-            .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u => try load(v, .i64),
-            .f32_load => try load(v, .f32),
-            .f64_load => try load(v, .f64),
+            .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u => try load(v, .i32, op),
+            .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u => try load(v, .i64, op),
+            .f32_load => try load(v, .f32, op),
+            .f64_load => try load(v, .f64, op),
             // Memory stores: pop the value, then the i32 address.
-            .i32_store, .i32_store8, .i32_store16 => try store(v, .i32),
-            .i64_store, .i64_store8, .i64_store16, .i64_store32 => try store(v, .i64),
-            .f32_store => try store(v, .f32),
-            .f64_store => try store(v, .f64),
+            .i32_store, .i32_store8, .i32_store16 => try store(v, .i32, op),
+            .i64_store, .i64_store8, .i64_store16, .i64_store32 => try store(v, .i64, op),
+            .f32_store => try store(v, .f32, op),
+            .f64_store => try store(v, .f64, op),
 
             .memory_size => {
                 try requireMemory(v);
@@ -737,15 +738,15 @@ fn validateSimd(v: *Validator) !void {
     switch (sub) {
         0 => { // v128.load
             try requireMemory(v);
-            try skipMemarg(v);
-            try v.popExpect(.i32);
+            try skipMemarg(v, simdMemAlign(sub));
+            try v.popExpect(v.mem_addr);
             try v.pushVal(.v128);
         },
         11 => { // v128.store
             try requireMemory(v);
-            try skipMemarg(v);
+            try skipMemarg(v, simdMemAlign(sub));
             try v.popExpect(.v128);
-            try v.popExpect(.i32);
+            try v.popExpect(v.mem_addr);
         },
         12 => { // v128.const
             _ = try v.r.bytesN(16);
@@ -872,14 +873,14 @@ fn validateSimd(v: *Validator) !void {
         // load_splat / load_extend / load_zero: pop address (+ memarg), push v128.
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 92, 93 => {
             try requireMemory(v);
-            try skipMemarg(v);
+            try skipMemarg(v, simdMemAlign(sub));
             try v.popExpect(v.mem_addr);
             try v.pushVal(.v128);
         },
         // load_lane: memarg + range-checked lane; pop v128, pop addr, push v128.
         84, 85, 86, 87 => {
             try requireMemory(v);
-            try skipMemarg(v);
+            try skipMemarg(v, simdMemAlign(sub));
             try checkLane(v, laneCount(sub));
             try v.popExpect(.v128);
             try v.popExpect(v.mem_addr);
@@ -888,7 +889,7 @@ fn validateSimd(v: *Validator) !void {
         // store_lane: memarg + range-checked lane; pop v128, pop addr.
         88, 89, 90, 91 => {
             try requireMemory(v);
-            try skipMemarg(v);
+            try skipMemarg(v, simdMemAlign(sub));
             try checkLane(v, laneCount(sub));
             try v.popExpect(.v128);
             try v.popExpect(v.mem_addr);
@@ -918,28 +919,62 @@ fn laneCount(sub: u32) u8 {
     };
 }
 
-fn load(v: *Validator, result: ValType) !void {
+fn load(v: *Validator, result: ValType, op: Op) !void {
     try requireMemory(v);
-    try skipMemarg(v);
+    try skipMemarg(v, memAlign(op));
     try v.popExpect(v.mem_addr); // address
     try v.pushVal(result);
 }
 
-fn store(v: *Validator, value: ValType) !void {
+fn store(v: *Validator, value: ValType, op: Op) !void {
     try requireMemory(v);
-    try skipMemarg(v);
+    try skipMemarg(v, memAlign(op));
     try v.popExpect(value); // value
     try v.popExpect(v.mem_addr); // address
 }
 
-fn skipMemarg(v: *Validator) !void {
-    _ = try v.r.uleb(u32); // align (log2)
+fn skipMemarg(v: *Validator, max_align: u8) !void {
+    // §3.3.6 — the alignment (log2 of bytes) may not exceed the access's
+    // natural alignment.
+    const a = try v.r.uleb(u32);
+    if (a > max_align) return error.BadAlign;
     // The offset is a 64-bit immediate for a memory64 access.
     if (v.mem_addr == .i64) {
         _ = try v.r.uleb(u64);
     } else {
         _ = try v.r.uleb(u32);
     }
+}
+
+/// Natural alignment (log2 of the access width in bytes) of a scalar
+/// load/store opcode.
+fn memAlign(op: Op) u8 {
+    return switch (op) {
+        .i32_load8_s, .i32_load8_u, .i64_load8_s, .i64_load8_u, .i32_store8, .i64_store8 => 0,
+        .i32_load16_s, .i32_load16_u, .i64_load16_s, .i64_load16_u, .i32_store16, .i64_store16 => 1,
+        .i32_load, .f32_load, .i32_store, .f32_store, .i64_load32_s, .i64_load32_u, .i64_store32 => 2,
+        .i64_load, .f64_load, .i64_store, .f64_store => 3,
+        else => 0,
+    };
+}
+
+/// Natural alignment (log2 bytes) of a SIMD memory sub-opcode.
+fn simdMemAlign(sub: u32) u8 {
+    return switch (sub) {
+        0, 11 => 4, // v128.load / v128.store (16 bytes)
+        1, 2, 3, 4, 5, 6 => 3, // load8x8 / load16x4 / load32x2 (8 bytes)
+        7 => 0, // v128.load8_splat
+        8 => 1, // v128.load16_splat
+        9 => 2, // v128.load32_splat
+        10 => 3, // v128.load64_splat
+        92 => 2, // v128.load32_zero
+        93 => 3, // v128.load64_zero
+        84, 88 => 0, // load8_lane / store8_lane
+        85, 89 => 1, // 16-bit lane
+        86, 90 => 2, // 32-bit lane
+        87, 91 => 3, // 64-bit lane
+        else => 4,
+    };
 }
 
 fn unop(v: *Validator, in: ValType, out: ValType) !void {
