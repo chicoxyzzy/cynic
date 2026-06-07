@@ -166,7 +166,7 @@ fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.js
 // ── actions ─────────────────────────────────────────────────────────
 
 const ActionResult = union(enum) {
-    values: []const u64,
+    values: []const u128,
     err: anyerror,
     no_module,
     unsupported,
@@ -181,7 +181,7 @@ fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: *?was
         const gidx = exportIndex(m, field, .global) orelse return .no_module;
         var inst = current.* orelse return .no_module;
         const cell = inst.readGlobalByIndex(gidx) orelse return .unsupported;
-        const out = arena.alloc(u64, 1) catch return .{ .err = error.OutOfMemory };
+        const out = arena.alloc(u128, 1) catch return .{ .err = error.OutOfMemory };
         out[0] = cell;
         return .{ .values = out };
     }
@@ -275,19 +275,20 @@ fn scoreRejected(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std
 
 // ── value encoding / comparison ─────────────────────────────────────
 
-fn encodeArgs(arena: std.mem.Allocator, action: std.json.ObjectMap) ![]const u64 {
+fn encodeArgs(arena: std.mem.Allocator, action: std.json.ObjectMap) ![]const u128 {
     const args = (action.get("args") orelse return &.{}).array.items;
-    const cells = try arena.alloc(u64, args.len);
+    const cells = try arena.alloc(u128, args.len);
     for (args, 0..) |arg, i| {
         cells[i] = encodeValue(arg.object) orelse return error.Unsupported;
     }
     return cells;
 }
 
-fn encodeValue(v: std.json.ObjectMap) ?u64 {
+fn encodeValue(v: std.json.ObjectMap) ?u128 {
     const t = (v.get("type") orelse return null).string;
+    if (std.mem.eql(u8, t, "v128")) return encodeV128(v);
     const val = v.get("value") orelse return null;
-    if (val != .string) return null; // v128 carries a lane array
+    if (val != .string) return null;
     const s = val.string;
     if (std.mem.eql(u8, t, "i32") or std.mem.eql(u8, t, "f32")) {
         if (nanBits(s, false)) |b| return b;
@@ -297,11 +298,12 @@ fn encodeValue(v: std.json.ObjectMap) ?u64 {
         if (nanBits(s, true)) |b| return b;
         return std.fmt.parseInt(u64, s, 10) catch return null;
     }
-    return null; // v128 / funcref / externref
+    return null; // funcref / externref
 }
 
-fn matchValue(v: std.json.ObjectMap, got: u64) bool {
+fn matchValue(v: std.json.ObjectMap, got: u128) bool {
     const t = (v.get("type") orelse return false).string;
+    if (std.mem.eql(u8, t, "v128")) return matchV128(v, got);
     const val = v.get("value") orelse return false;
     if (val != .string) return false;
     const s = val.string;
@@ -311,7 +313,7 @@ fn matchValue(v: std.json.ObjectMap, got: u64) bool {
     }
     if (std.mem.eql(u8, t, "i64")) {
         const want = std.fmt.parseInt(u64, s, 10) catch return false;
-        return got == want;
+        return @as(u64, @truncate(got)) == want;
     }
     if (std.mem.eql(u8, t, "f32")) {
         const lo: u32 = @truncate(got);
@@ -320,21 +322,83 @@ fn matchValue(v: std.json.ObjectMap, got: u64) bool {
         return lo == want; // exact bits (handles ±0, exact floats)
     }
     if (std.mem.eql(u8, t, "f64")) {
-        if (isNanToken(s)) return std.math.isNan(@as(f64, @bitCast(got)));
+        const lo: u64 = @truncate(got);
+        if (isNanToken(s)) return std.math.isNan(@as(f64, @bitCast(lo)));
         const want = std.fmt.parseInt(u64, s, 10) catch return false;
-        return got == want;
+        return lo == want;
     }
-    return false; // v128 / ref
+    return false; // ref
+}
+
+// ── v128 lane packing ───────────────────────────────────────────────
+
+fn laneBits(lane_type: []const u8) ?u7 {
+    if (std.mem.eql(u8, lane_type, "i8")) return 8;
+    if (std.mem.eql(u8, lane_type, "i16")) return 16;
+    if (std.mem.eql(u8, lane_type, "i32") or std.mem.eql(u8, lane_type, "f32")) return 32;
+    if (std.mem.eql(u8, lane_type, "i64") or std.mem.eql(u8, lane_type, "f64")) return 64;
+    return null;
+}
+
+fn laneIsFloat(lane_type: []const u8) bool {
+    return std.mem.eql(u8, lane_type, "f32") or std.mem.eql(u8, lane_type, "f64");
+}
+
+/// Parse one lane's value string into its unsigned bit pattern.
+fn parseLane(lane_type: []const u8, s: []const u8) ?u128 {
+    const is64 = std.mem.eql(u8, lane_type, "i64") or std.mem.eql(u8, lane_type, "f64");
+    if (laneIsFloat(lane_type) and isNanToken(s)) {
+        return if (is64) @as(u128, 0x7ff8000000000000) else @as(u128, 0x7fc00000);
+    }
+    if (is64) return std.fmt.parseInt(u64, s, 10) catch return null;
+    return std.fmt.parseInt(u32, s, 10) catch return null;
+}
+
+fn encodeV128(v: std.json.ObjectMap) ?u128 {
+    const lt = (v.get("lane_type") orelse return null).string;
+    const lanes = (v.get("value") orelse return null).array.items;
+    const bits = laneBits(lt) orelse return null;
+    const mask: u128 = (@as(u128, 1) << bits) - 1;
+    var result: u128 = 0;
+    for (lanes, 0..) |lane, i| {
+        if (lane != .string) return null;
+        const lb = parseLane(lt, lane.string) orelse return null;
+        result |= (lb & mask) << @intCast(@as(usize, i) * bits);
+    }
+    return result;
+}
+
+fn matchV128(v: std.json.ObjectMap, got: u128) bool {
+    const lt = (v.get("lane_type") orelse return false).string;
+    const lanes = (v.get("value") orelse return false).array.items;
+    const bits = laneBits(lt) orelse return false;
+    const mask: u128 = (@as(u128, 1) << bits) - 1;
+    const is_float = laneIsFloat(lt);
+    for (lanes, 0..) |lane, i| {
+        if (lane != .string) return false;
+        const got_lane = (got >> @intCast(@as(usize, i) * bits)) & mask;
+        if (is_float and isNanToken(lane.string)) {
+            const is_nan = if (bits == 64)
+                std.math.isNan(@as(f64, @bitCast(@as(u64, @truncate(got_lane)))))
+            else
+                std.math.isNan(@as(f32, @bitCast(@as(u32, @truncate(got_lane)))));
+            if (!is_nan) return false;
+        } else {
+            const want = parseLane(lt, lane.string) orelse return false;
+            if (got_lane != (want & mask)) return false;
+        }
+    }
+    return true;
 }
 
 fn isNanToken(s: []const u8) bool {
     return std.mem.startsWith(u8, s, "nan");
 }
 
-/// Canonical NaN bit pattern for a NaN token in an arg position.
-fn nanBits(s: []const u8, is64: bool) ?u64 {
+/// Canonical NaN bit pattern for a NaN token in a scalar arg position.
+fn nanBits(s: []const u8, is64: bool) ?u128 {
     if (!isNanToken(s)) return null;
-    return if (is64) @as(u64, 0x7ff8000000000000) else @as(u64, 0x7fc00000);
+    return if (is64) @as(u128, 0x7ff8000000000000) else @as(u128, 0x7fc00000);
 }
 
 // ── exports ─────────────────────────────────────────────────────────
