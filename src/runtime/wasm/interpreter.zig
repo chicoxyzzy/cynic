@@ -981,7 +981,7 @@ fn run(ip: *Interp) Error!void {
             if (table_idx >= ip.instance.tables.len) return error.UnsupportedImportCall;
             const table = ip.instance.tables[table_idx];
             if (elem_index >= table.elems.len) return error.UndefinedElement;
-            const ref = table.elems[elem_index];
+            const ref = table.elems[@as(usize, @intCast(elem_index))]; // bounded above; usize is 32-bit on wasm32
             if (ref == REF_NULL) return error.UninitializedElement;
             // The funcref's defining instance is encoded in its high bits;
             // a bare index (high bits zero, e.g. from a funcref global)
