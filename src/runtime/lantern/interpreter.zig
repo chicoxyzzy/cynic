@@ -8203,7 +8203,10 @@ pub fn runFrames(
             // writes finds a valid Value (the slot won't have its
             // real entry yet — that's the `def_template_property` /
             // `def_property` job).
-            { var us_i: usize = 0; while (us_i < obj.slotCount()) : (us_i += 1) obj.slotPtr(us_i).* = Value.undefined_; }
+            {
+                var us_i: usize = 0;
+                while (us_i < obj.slotCount()) : (us_i += 1) obj.slotPtr(us_i).* = Value.undefined_;
+            }
             // Pre-fill `own_key_order` from the template's keys.
             // The downstream `def_template_property` op skips
             // `recordKey` entirely, so this is the one chance to
