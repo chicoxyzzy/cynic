@@ -52,6 +52,25 @@ fn expectDoubleWasm(source: []const u8, want: f64) !void {
     try testing.expectApproxEqAbs(want, got, 1e-9);
 }
 
+/// Run an async `setup` that stashes a result on `globalThis.__r`, drain
+/// the microtask queue (settling the promise reactions), then read it.
+fn expectIntWasmAsync(setup: []const u8, want: i32) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm = true;
+    realm.hardened = false; // the .then callback writes globalThis.__r
+    try realm.installBuiltins();
+    _ = try lantern.evaluateScript(testing.allocator, &realm, setup);
+    try lantern.drainMicrotasks(testing.allocator, &realm);
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, "globalThis.__r");
+    const v = switch (outcome) {
+        .value, .yielded => |x| x,
+        .thrown => return error.WasmThrewUnexpectedly,
+    };
+    if (!v.isInt32()) return error.ResultNotInt;
+    try testing.expectEqual(want, v.asInt32());
+}
+
 // An `(i32,i32)->i32` adder exported as "add".
 const adder_bytes =
     "new Uint8Array([0,97,115,109,1,0,0,0, 1,7,1,96,2,127,127,1,127, 3,2,1,0, 7,7,1,3,97,100,100,0,0, 10,9,1,7,0,32,0,32,1,106,11])";
@@ -629,4 +648,49 @@ test "a non-callable function import throws" {
     const src =
         "try { new WebAssembly.Instance(new WebAssembly.Module(" ++ consumer_bytes ++ "), { env: { f: 123 } }); 0 } catch (e) { 1 }";
     try expectIntWasm(src, 1);
+}
+
+// ── WebAssembly.compile / instantiate (Promises) ────────────────────
+
+test "compile and instantiate return Promises" {
+    try expectIntWasm("WebAssembly.compile(" ++ adder_bytes ++ ") instanceof Promise ? 1 : 0", 1);
+    try expectIntWasm("WebAssembly.instantiate(" ++ adder_bytes ++ ") instanceof Promise ? 1 : 0", 1);
+}
+
+test "compile resolves to a Module" {
+    const setup =
+        "WebAssembly.compile(" ++ adder_bytes ++ ").then(m => {" ++
+        "  globalThis.__r = (m instanceof WebAssembly.Module) ? 1 : 0; });";
+    try expectIntWasmAsync(setup, 1);
+}
+
+test "instantiate(bytes) resolves to a module/instance pair" {
+    const setup =
+        "WebAssembly.instantiate(" ++ adder_bytes ++ ").then(res => {" ++
+        "  globalThis.__r = (res.module instanceof WebAssembly.Module && res.instance instanceof WebAssembly.Instance)" ++
+        "    ? res.instance.exports.add(2, 3) : -1; });";
+    try expectIntWasmAsync(setup, 5);
+}
+
+test "instantiate(module) resolves to an Instance" {
+    const setup =
+        "const m = new WebAssembly.Module(" ++ adder_bytes ++ ");" ++
+        "WebAssembly.instantiate(m).then(inst => {" ++
+        "  globalThis.__r = (inst instanceof WebAssembly.Instance) ? inst.exports.add(4, 5) : -1; });";
+    try expectIntWasmAsync(setup, 9);
+}
+
+test "instantiate threads an importObject" {
+    const setup =
+        "WebAssembly.instantiate(" ++ consumer_bytes ++ ", { env: { f: () => 7 } }).then(res => {" ++
+        "  globalThis.__r = res.instance.exports.run(); });";
+    try expectIntWasmAsync(setup, 7);
+}
+
+test "compile rejects invalid bytes" {
+    const setup =
+        "WebAssembly.compile(new Uint8Array([0,1,2,3])).then(" ++
+        "  () => { globalThis.__r = 0; }," ++
+        "  (e) => { globalThis.__r = 1; });";
+    try expectIntWasmAsync(setup, 1);
 }

@@ -1050,6 +1050,11 @@ pub const Realm = struct {
     /// `WebAssembly.Memory.prototype`, cached at install so memory
     /// exports can be wrapped as `Memory` objects.
     wasm_memory_prototype: ?*@import("object.zig").JSObject = null,
+    /// `WebAssembly.Module.prototype` / `Instance.prototype`, cached at
+    /// install so `WebAssembly.compile` / `instantiate` can build those
+    /// objects without `new`.
+    wasm_module_prototype: ?*@import("object.zig").JSObject = null,
+    wasm_instance_prototype: ?*@import("object.zig").JSObject = null,
     /// Phase 3 SES override-mistake fix — `freezePrimordials`
     /// installs a `SyntheticAccessor` pair (getter + setter
     /// JSFunctions sharing one capture cell) for every data

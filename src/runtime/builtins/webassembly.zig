@@ -28,6 +28,7 @@ const intrinsics = @import("../intrinsics.zig");
 const heap_mod = @import("../heap.zig");
 const arith = @import("../lantern/arith.zig");
 const call = @import("../lantern/call.zig");
+const promise_mod = @import("promise.zig");
 const wasm = @import("../wasm/wasm.zig");
 
 /// A `WebAssembly.Module`'s decoded record. Arena-owned.
@@ -80,6 +81,8 @@ pub fn install(realm: *Realm) !void {
     realm.heap.setObjectPrototype(ns, realm.intrinsics.object_prototype);
     try intrinsics.installToStringTag(realm, ns, "WebAssembly");
     try intrinsics.installNativeMethodOnProto(realm, ns, "validate", wasmValidate, 1);
+    try intrinsics.installNativeMethodOnProto(realm, ns, "compile", wasmCompile, 1);
+    try intrinsics.installNativeMethodOnProto(realm, ns, "instantiate", wasmInstantiate, 1);
 
     // Constructors live under the namespace, not the global object.
     const module_ctor = try intrinsics.installConstructor(realm, .{
@@ -89,6 +92,7 @@ pub fn install(realm: *Realm) !void {
         .install_global = false,
     });
     try ns.set(realm.allocator, "Module", heap_mod.taggedFunction(module_ctor.ctor));
+    realm.wasm_module_prototype = module_ctor.proto;
 
     const instance_ctor = try intrinsics.installConstructor(realm, .{
         .ctor = instanceConstructor,
@@ -97,6 +101,7 @@ pub fn install(realm: *Realm) !void {
         .install_global = false,
     });
     try ns.set(realm.allocator, "Instance", heap_mod.taggedFunction(instance_ctor.ctor));
+    realm.wasm_instance_prototype = instance_ctor.proto;
 
     const global_ctor = try intrinsics.installConstructor(realm, .{
         .ctor = globalConstructor,
@@ -188,7 +193,12 @@ fn moduleConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         return intrinsics.throwTypeError(realm, "WebAssembly.Module requires 'new'");
     const bytes = bufferSourceBytes(args) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Module expects a BufferSource");
+    try decodeModuleInto(realm, self, bytes);
+    return this_value;
+}
 
+/// Decode + validate `bytes` into a `ModuleState` stored on `self`.
+fn decodeModuleInto(realm: *Realm, self: *JSObject, bytes: []const u8) NativeError!void {
     const a = realm.wasmAllocator();
     // The decoded module borrows slices from the source bytes, so both
     // must outlive it — keep a copy in the wasm arena.
@@ -198,11 +208,18 @@ fn moduleConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         return intrinsics.throwTypeError(realm, "WebAssembly.Module: invalid module (CompileError)");
     _ = wasm.validateModule(a, mp) catch
         return intrinsics.throwTypeError(realm, "WebAssembly.Module: invalid module (CompileError)");
-
     const state = a.create(ModuleState) catch return error.OutOfMemory;
     state.* = .{ .module = mp };
     self.wasm_module = state;
-    return this_value;
+}
+
+/// Build a fresh `WebAssembly.Module` object (no `new`), for the
+/// Promise entry points.
+fn makeModuleObject(realm: *Realm, bytes: []const u8) NativeError!Value {
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, realm.wasm_module_prototype);
+    try decodeModuleInto(realm, obj, bytes);
+    return heap_mod.taggedObject(obj);
 }
 
 /// `new WebAssembly.Instance(module, importObject?)` — instantiate a
@@ -216,8 +233,14 @@ fn instanceConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     const mstate_raw = (if (mod_obj) |o| o.wasm_module else null) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Instance expects a WebAssembly.Module");
     const mstate: *ModuleState = @ptrCast(@alignCast(mstate_raw));
+    try populateInstance(realm, self, mstate, if (args.len > 1) args[1] else Value.undefined_);
+    return this_value;
+}
 
-    const imports = try resolveImports(realm, mstate.module, if (args.len > 1) args[1] else Value.undefined_);
+/// Resolve imports, instantiate, run the start function, and attach the
+/// `exports` namespace to `self`.
+fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import_object: Value) NativeError!void {
+    const imports = try resolveImports(realm, mstate.module, import_object);
 
     const a = realm.wasmAllocator();
     const ip = a.create(wasm.Instance) catch return error.OutOfMemory;
@@ -238,7 +261,90 @@ fn instanceConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
         .enumerable = true,
         .configurable = false,
     });
-    return this_value;
+}
+
+/// Build a fresh `WebAssembly.Instance` object (no `new`), for the
+/// Promise entry points.
+fn makeInstanceObject(realm: *Realm, mstate: *ModuleState, import_object: Value) NativeError!Value {
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, realm.wasm_instance_prototype);
+    try populateInstance(realm, obj, mstate, import_object);
+    return heap_mod.taggedObject(obj);
+}
+
+// ── Promise entry points (compile / instantiate) ────────────────────
+
+fn promiseCtor(realm: *Realm) NativeError!*JSFunction {
+    return heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly: %Promise% is missing");
+}
+
+/// Turn a synchronous abrupt completion into a promise rejection (so
+/// `compile` / `instantiate` always return a settled promise).
+fn rejectFromError(realm: *Realm, cap: promise_mod.PromiseCapability, err: NativeError) NativeError!Value {
+    switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => {
+            const reason = realm.pending_exception orelse Value.undefined_;
+            realm.pending_exception = null;
+            return promise_mod.capabilityReject(realm, cap, reason);
+        },
+    }
+}
+
+/// `WebAssembly.compile(bytes)` → Promise<Module>.
+fn wasmCompile(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const cap = try promise_mod.newPromiseCapability(realm, try promiseCtor(realm));
+    const result = compileToModule(realm, args) catch |err| return rejectFromError(realm, cap, err);
+    return promise_mod.capabilityResolve(realm, cap, result);
+}
+
+fn compileToModule(realm: *Realm, args: []const Value) NativeError!Value {
+    if (!realm.allow_wasm) return wasmDisabled(realm);
+    const bytes = bufferSourceBytes(args) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.compile expects a BufferSource");
+    return makeModuleObject(realm, bytes);
+}
+
+/// `WebAssembly.instantiate(bytes, importObject?)` → Promise<{module,
+/// instance}>; `WebAssembly.instantiate(module, importObject?)` →
+/// Promise<Instance>.
+fn wasmInstantiate(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const cap = try promise_mod.newPromiseCapability(realm, try promiseCtor(realm));
+    const result = instantiateToResult(realm, args) catch |err| return rejectFromError(realm, cap, err);
+    return promise_mod.capabilityResolve(realm, cap, result);
+}
+
+fn instantiateToResult(realm: *Realm, args: []const Value) NativeError!Value {
+    if (!realm.allow_wasm) return wasmDisabled(realm);
+    const import_object = if (args.len > 1) args[1] else Value.undefined_;
+
+    // A Module argument instantiates directly, resolving to the Instance.
+    if (args.len > 0) {
+        if (heap_mod.valueAsPlainObject(args[0])) |o| {
+            if (o.wasm_module) |raw| {
+                const mstate: *ModuleState = @ptrCast(@alignCast(raw));
+                return makeInstanceObject(realm, mstate, import_object);
+            }
+        }
+    }
+
+    // Otherwise a BufferSource: compile then instantiate, resolving to
+    // `{ module, instance }`.
+    const bytes = bufferSourceBytes(args) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.instantiate expects a BufferSource or Module");
+    const module_v = try makeModuleObject(realm, bytes);
+    const mobj = heap_mod.valueAsPlainObject(module_v) orelse unreachable;
+    const mstate: *ModuleState = @ptrCast(@alignCast(mobj.wasm_module orelse unreachable));
+    const instance_v = try makeInstanceObject(realm, mstate, import_object);
+
+    const result = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(result, realm.intrinsics.object_prototype);
+    try result.set(realm.allocator, "module", module_v);
+    try result.set(realm.allocator, "instance", instance_v);
+    return heap_mod.taggedObject(result);
 }
 
 // ── WebAssembly.Global ──────────────────────────────────────────────
