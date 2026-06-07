@@ -40,9 +40,26 @@ pub const TrapError = error{
     UnsupportedImportCall,
 };
 
-/// The null reference sentinel. Function indices and host extern values
-/// are small, so all-ones never collides with a real reference.
+/// The null reference sentinel. A funcref always carries a non-null
+/// instance pointer in its high bits, and host extern values are small,
+/// so all-ones never collides with a real reference.
 const REF_NULL: u128 = std.math.maxInt(u128);
+
+/// A `funcref` cell encodes the function's *defining* instance in the
+/// high 64 bits and its function-space index in the low 32. This makes
+/// a funcref callable across module boundaries: a table shared between
+/// instances may hold functions defined in either, and `call_indirect`
+/// runs each in the instance it was defined in. (The low 32 bits remain
+/// the bare function index, which the conformance harness compares.)
+inline fn makeFuncRef(instance: *Instance, idx: u32) u128 {
+    return (@as(u128, @intFromPtr(instance)) << 64) | idx;
+}
+inline fn funcRefInstance(ref: u128) *Instance {
+    return @ptrFromInt(@as(usize, @truncate(ref >> 64)));
+}
+inline fn funcRefIndex(ref: u128) u32 {
+    return @truncate(ref);
+}
 
 /// A table: a growable vector of references. (Holds opaque cells today;
 /// once the JS API lands, externref cells carry JS values and Metla
@@ -108,8 +125,9 @@ pub const Imports = struct {
     globals: []const u128 = &.{},
     /// Source for the imported linear memory (snapshotted at instantiate).
     memory: ?*const Memory = null,
-    /// Sources for imported tables, in table-import order (snapshotted).
-    tables: []const *const Table = &.{},
+    /// Imported tables, in table-import order — the provider's own
+    /// `*Table` (shared), so writes are mutually visible.
+    tables: []const *Table = &.{},
 };
 
 /// Linear memory: a byte-addressable, page-granular buffer. (The
@@ -140,8 +158,14 @@ pub const Instance = struct {
     imported_funcs: []const FuncRef = &.{},
     /// The module's single linear memory (multi-memory is post-1.0).
     memory: ?Memory,
-    /// Tables (reference-types allows several).
-    tables: []Table,
+    /// The table index space: imported tables (shared pointers into the
+    /// providing instance) followed by pointers into `owned_tables`.
+    /// Tables are pointers so an imported table is genuinely shared —
+    /// a write through one instance is visible through the other.
+    tables: []*Table,
+    /// Backing storage for this module's own (defined) tables, pointed
+    /// into by the tail of `tables`.
+    owned_tables: []Table,
     /// Passive/active element segments, in declaration order.
     elem_segments: []ElemSegment,
     /// Passive/active data segments, in declaration order.
@@ -153,7 +177,8 @@ pub const Instance = struct {
     pub fn deinit(self: *Instance) void {
         self.gpa.free(self.globals);
         if (self.memory) |m| self.gpa.free(m.data);
-        for (self.tables) |t| self.gpa.free(t.elems);
+        for (self.owned_tables) |t| self.gpa.free(t.elems);
+        self.gpa.free(self.owned_tables);
         self.gpa.free(self.tables);
     }
 
@@ -229,11 +254,11 @@ pub const Instance = struct {
     }
 
     /// The exported table named `name`, for a later module importing it.
-    pub fn exportedTable(self: *Instance, name: []const u8) ?*const Table {
+    pub fn exportedTable(self: *Instance, name: []const u8) ?*Table {
         for (self.module.exports) |ex| {
             switch (ex.desc) {
                 .table => |idx| if (std.mem.eql(u8, ex.name, name)) {
-                    if (idx < self.tables.len) return &self.tables[idx];
+                    if (idx < self.tables.len) return self.tables[idx];
                 },
                 else => {},
             }
@@ -242,15 +267,17 @@ pub const Instance = struct {
     }
 };
 
-/// Validate every function and lay out runtime state. `arena` owns the
-/// validated `CompiledFunc`s for the instance's lifetime; `allocator`
-/// owns the mutable globals.
+/// Validate every function and lay out runtime state into `self` (which
+/// must outlive the call at a stable address — funcrefs the module
+/// creates capture `self`). `arena` owns the validated `CompiledFunc`s
+/// for the instance's lifetime; `allocator` owns the mutable state.
 pub fn instantiate(
+    self: *Instance,
     arena: std.mem.Allocator,
     allocator: std.mem.Allocator,
     module: *const Module,
     imports: Imports,
-) Error!Instance {
+) Error!void {
     const funcs = try validator.validateModule(arena, module);
 
     var func_imports: u32 = 0;
@@ -309,37 +336,40 @@ pub fn instantiate(
         memory = .{ .data = bytes, .max_pages = lim.max, .is_64 = lim.is_64 };
     }
 
-    // Table index space: imported tables (snapshotted from the provider)
-    // precede defined ones, each sized to its minimum and null-filled.
+    // Defined tables, each sized to its minimum and null-filled.
+    const owned_tables = try allocator.alloc(Table, module.tables.len);
+    errdefer allocator.free(owned_tables);
+    for (module.tables, 0..) |t, i| {
+        const elems = try allocator.alloc(u128, @intCast(t.limits.min));
+        @memset(elems, REF_NULL);
+        owned_tables[i] = .{ .elems = elems, .max = t.limits.max, .is_64 = t.limits.is_64 };
+    }
+
+    // The table index space: imported tables (shared — the provider's
+    // own `*Table`, so writes are mutually visible) precede pointers
+    // into this module's `owned_tables`.
     var table_imports: u32 = 0;
     for (module.imports) |imp| {
         if (imp.desc == .table) table_imports += 1;
     }
-    const tables = try allocator.alloc(Table, table_imports + module.tables.len);
+    const tables = try allocator.alloc(*Table, table_imports + module.tables.len);
     errdefer allocator.free(tables);
-    var ti: usize = 0;
     {
+        var ti: usize = 0;
         var k: usize = 0;
         for (module.imports) |imp| {
             if (imp.desc != .table) continue;
-            if (k < imports.tables.len) {
-                const src = imports.tables[k];
-                tables[ti] = .{ .elems = try allocator.dupe(u128, src.elems), .max = src.max, .is_64 = src.is_64 };
-            } else {
-                tables[ti] = .{ .elems = &.{}, .max = null };
-            }
+            tables[ti] = imports.tables[k];
             ti += 1;
             k += 1;
         }
-    }
-    for (module.tables) |t| {
-        const elems = try allocator.alloc(u128, @intCast(t.limits.min));
-        @memset(elems, REF_NULL);
-        tables[ti] = .{ .elems = elems, .max = t.limits.max, .is_64 = t.limits.is_64 };
-        ti += 1;
+        for (owned_tables) |*t| {
+            tables[ti] = t;
+            ti += 1;
+        }
     }
 
-    var instance: Instance = .{
+    self.* = .{
         .module = module,
         .funcs = funcs,
         .globals = globals,
@@ -347,16 +377,16 @@ pub fn instantiate(
         .imported_funcs = imports.funcs,
         .memory = memory,
         .tables = tables,
+        .owned_tables = owned_tables,
         .elem_segments = &.{},
         .data_segments = &.{},
         .gpa = allocator,
     };
 
-    // Parse element + data segments, applying active ones into the
-    // tables and linear memory.
-    instance.elem_segments = try parseElements(arena, module, tables, globals);
-    instance.data_segments = try parseData(arena, module, if (memory) |*m| m else null, globals);
-    return instance;
+    // With `self` now stable, apply element + data segments. Element
+    // funcrefs capture `self` as their defining instance.
+    self.elem_segments = try parseElements(self, arena, module, globals);
+    self.data_segments = try parseData(arena, module, if (self.memory) |*m| m else null, globals);
 }
 
 /// Parse the data section, applying active segments into linear memory
@@ -388,9 +418,12 @@ fn parseData(arena: std.mem.Allocator, module: *const Module, memory: ?*Memory, 
     return segs;
 }
 
-/// Parse the element section, applying active segments into `tables`
-/// and returning the (passive-keeping) segments for `table.init`.
-fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Table, globals: []const Global) Error![]ElemSegment {
+/// Parse the element section, applying active segments into the
+/// instance's tables and returning the (passive-keeping) segments for
+/// `table.init`. A `ref.func` element captures `self` as the funcref's
+/// defining instance, so the function stays callable after the funcref
+/// is copied into another module's table.
+fn parseElements(self: *Instance, arena: std.mem.Allocator, module: *const Module, globals: []const Global) Error![]ElemSegment {
     const count = module.elements_count;
     const segs = try arena.alloc(ElemSegment, count);
     var r = reader_mod.Reader.init(module.elements_raw);
@@ -411,12 +444,15 @@ fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Tabl
         const values = try arena.alloc(u128, n);
         var j: u32 = 0;
         while (j < n) : (j += 1) {
-            values[j] = if (use_exprs) try readElemExpr(&r, globals) else try r.uleb(u32);
+            values[j] = if (use_exprs)
+                try readElemRefExpr(self, &r, globals)
+            else
+                makeFuncRef(self, try r.uleb(u32));
         }
 
         if (is_active) {
-            if (table_idx >= tables.len) return error.UnsupportedImportCall;
-            const table = &tables[table_idx];
+            if (table_idx >= self.tables.len) return error.UnsupportedImportCall;
+            const table = self.tables[table_idx];
             const off: usize = @intCast(offset);
             if (off + n > table.elems.len) return error.OutOfBoundsTableAccess;
             @memcpy(table.elems[off..][0..n], values);
@@ -428,6 +464,24 @@ fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Tabl
         }
     }
     return segs;
+}
+
+/// Evaluate a single element reference expression — `ref.func` (encoding
+/// `self`), `ref.null`, or `global.get` — consuming up to `end`.
+fn readElemRefExpr(self: *Instance, r: *reader_mod.Reader, globals: []const Global) Error!u128 {
+    const op: Op = @enumFromInt(try r.byte());
+    var val: u128 = REF_NULL;
+    switch (op) {
+        .ref_func => val = makeFuncRef(self, try r.uleb(u32)),
+        .ref_null => _ = try r.byte(), // reftype
+        .global_get => {
+            const gi = try r.uleb(u32);
+            val = if (gi < globals.len) globals[gi].value else REF_NULL;
+        },
+        else => {},
+    }
+    _ = try r.byte(); // end
+    return val;
 }
 
 /// Evaluate a constant expression (§3.3.7), consuming it from `r` up to
@@ -514,12 +568,6 @@ fn evalConstReader(r: *reader_mod.Reader, globals: []const Global) Error!u128 {
 /// address (its low bits).
 fn readOffsetExpr(r: *reader_mod.Reader, globals: []const Global) Error!u64 {
     return @truncate(try evalConstReader(r, globals));
-}
-
-/// An element expression yields a reference cell (`ref.func` index or
-/// `ref.null`).
-fn readElemExpr(r: *reader_mod.Reader, globals: []const Global) Error!u128 {
-    return evalConstReader(r, globals);
 }
 
 /// Evaluate a global's constant initializer (§3.3.7) over the globals
@@ -804,12 +852,16 @@ fn run(ip: *Interp) Error!void {
                     const table_idx = readU32(body, &pc);
                     const elem_index: u64 = @truncate(ip.popCell());
                     if (table_idx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-                    const table = &ip.instance.tables[table_idx];
+                    const table = ip.instance.tables[table_idx];
                     if (elem_index >= table.elems.len) return error.UndefinedElement;
                     const ref = table.elems[elem_index];
                     if (ref == REF_NULL) return error.UninitializedElement;
-                    const fidx: u32 = @truncate(ref);
-                    const target = ip.instance.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
+                    // The funcref's defining instance is encoded in its
+                    // high bits; a bare index (high bits zero, e.g. from a
+                    // funcref global) defaults to the current instance.
+                    const fidx = funcRefIndex(ref);
+                    const def_inst = if (ref >> 64 == 0) ip.instance else funcRefInstance(ref);
+                    const target = def_inst.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
                     const expected = ip.instance.module.types[type_idx];
                     switch (target) {
                         .host => |h| {
@@ -836,7 +888,7 @@ fn run(ip: *Interp) Error!void {
                     try ip.pushV128(REF_NULL);
                 },
                 .ref_is_null => try ip.pushI32(@intFromBool(ip.popV128() == REF_NULL)),
-                .ref_func => try ip.pushV128(readU32(body, &pc)),
+                .ref_func => try ip.pushV128(makeFuncRef(ip.instance, readU32(body, &pc))),
 
                 .select_t => {
                     const n = readU32(body, &pc);
@@ -851,7 +903,7 @@ fn run(ip: *Interp) Error!void {
                     const tidx = readU32(body, &pc);
                     const index: u64 = @truncate(ip.popCell());
                     if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-                    const table = &ip.instance.tables[tidx];
+                    const table = ip.instance.tables[tidx];
                     if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
                     try ip.pushV128(table.elems[@intCast(index)]);
                 },
@@ -860,7 +912,7 @@ fn run(ip: *Interp) Error!void {
                     const val = ip.popV128();
                     const index: u64 = @truncate(ip.popCell());
                     if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-                    const table = &ip.instance.tables[tidx];
+                    const table = ip.instance.tables[tidx];
                     if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
                     table.elems[@intCast(index)] = val;
                 },
@@ -1343,7 +1395,7 @@ fn tableInit(ip: *Interp, elem_idx: u32, tidx: u32) TrapError!void {
     const src: u32 = @bitCast(ip.popI32());
     const dst: u64 = @truncate(ip.popCell());
     if (tidx >= ip.instance.tables.len or elem_idx >= ip.instance.elem_segments.len) return error.UnsupportedImportCall;
-    const table = &ip.instance.tables[tidx];
+    const table = ip.instance.tables[tidx];
     const vals = ip.instance.elem_segments[elem_idx].values;
     if (!rangeInBounds(vals.len, src, n) or !rangeInBounds(table.elems.len, dst, n)) return error.OutOfBoundsTableAccess;
     const base: usize = @intCast(dst);
@@ -1356,8 +1408,8 @@ fn tableCopy(ip: *Interp, dst_t: u32, src_t: u32) TrapError!void {
     const src: u64 = @truncate(ip.popCell());
     const dst: u64 = @truncate(ip.popCell());
     if (dst_t >= ip.instance.tables.len or src_t >= ip.instance.tables.len) return error.UnsupportedImportCall;
-    const dtable = &ip.instance.tables[dst_t];
-    const stable = &ip.instance.tables[src_t];
+    const dtable = ip.instance.tables[dst_t];
+    const stable = ip.instance.tables[src_t];
     if (!rangeInBounds(stable.elems.len, src, n) or !rangeInBounds(dtable.elems.len, dst, n)) return error.OutOfBoundsTableAccess;
     if (n == 0) return;
     const d: usize = @intCast(dst);
@@ -1379,7 +1431,7 @@ fn tableGrow(ip: *Interp, tidx: u32) TrapError!void {
     const n: u64 = @truncate(ip.popCell());
     const init_val = ip.popV128();
     if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-    const table = &ip.instance.tables[tidx];
+    const table = ip.instance.tables[tidx];
     const result = growTable(ip, table, n, init_val);
     if (table.is_64) {
         try ip.pushI64(if (result) |r| @intCast(r) else -1);
@@ -1409,7 +1461,7 @@ fn tableFill(ip: *Interp, tidx: u32) TrapError!void {
     const val = ip.popV128();
     const dst: u64 = @truncate(ip.popCell());
     if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-    const table = &ip.instance.tables[tidx];
+    const table = ip.instance.tables[tidx];
     if (!rangeInBounds(table.elems.len, dst, n)) return error.OutOfBoundsTableAccess;
     const base: usize = @intCast(dst);
     var k: usize = 0;
