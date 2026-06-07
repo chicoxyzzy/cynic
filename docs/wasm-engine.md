@@ -296,34 +296,49 @@ replaces.
 
 ## 8. The JS boundary
 
-**Status: mostly future.** Only `WebAssembly.validate` is wired today
-(`builtins/webassembly.zig`) — it decodes + validates a module's bytes
-and returns a bool. The engine is fully exercised through its Zig API
-(`decode` / `instantiate` / `invoke`) and the conformance harness; the
-JS-visible objects below are the design for when the surface is built.
-This is the largest remaining feature, and it is what pulls in the GC
-integration of §5–§6, the realm-owned store and ArrayBuffer memory of
-§7, and the `--allow=wasm` gate of §9.
+**Status: shipped** (`builtins/webassembly.zig`, tested in
+`runtime/wasm_js_test.zig`). The full surface is wired:
+`validate` (ungated); the `Module` / `Instance` constructors and the
+`compile` / `instantiate` Promises; the `Memory` / `Table` / `Global`
+objects (standalone and as instance exports); imports — host functions,
+cross-module functions, and shared globals / memories / tables; and the
+`CompileError` / `LinkError` / `RuntimeError` types. The engine is also
+still exercised through its Zig API (`decode` / `instantiate` / `invoke`)
+and the conformance harness.
 
-`WebAssembly.instantiate` returns a Promise (uses the existing
-microtask queue). Argument and result marshalling is
+`compile` / `instantiate` return Promises (built on the existing
+microtask queue via §27.2.1.5 NewPromiseCapability); compilation is
+synchronous, so they resolve — or, on an abrupt completion, reject with
+the proper error class. Argument and result marshalling is
 §ToWebAssemblyValue / §ToJSValue: `i32 ↔ Number`, `i64 ↔ BigInt`,
-`f32/f64 ↔ Number`, references pass through. **Every wasm→JS call site
-opens a `HandleScope`** — calling an imported JS function re-enters
-Lantern, which allocates, so the gc.md re-entry contract applies.
+`f32/f64 ↔ Number` (`v128` / references across the JS boundary are still
+TODO). **Every wasm→JS host call opens a `HandleScope`** — calling an
+imported JS function re-enters Lantern, which allocates, so the gc.md
+re-entry contract applies; a JS throw propagates as the engine trap
+`HostThrew` and is re-raised at the boundary. To carry a JS callable
+into the engine, `FuncRef.host` gained a `ctx` pointer.
 
-All engine state lives in **typed internal slots** on `JSObject`,
-never `__cynic_*` property keys (AGENTS.md "no engine state on
-user-visible objects"), the same pattern as `iter_helper` /
-`capability_record`:
+All engine state lives in **typed internal slots** on `JSObject` /
+`JSFunction`, never `__cynic_*` property keys (AGENTS.md "no engine
+state on user-visible objects"), the same pattern as `iter_helper` /
+`capability_record`. The records are opaque pointers into the realm's
+`wasm_arena` (realm-lifetime, so no GC marking or cleanup):
 
 ```
-WebAssembly.Module   → slot → *CompiledModule   (immutable, shareable)
-WebAssembly.Instance → slot → *ModuleInstance
-WebAssembly.Memory   → slot → *WasmMemory        (+ cached .buffer ArrayBuffer)
-WebAssembly.Table    → slot → *WasmTable
-WebAssembly.Global   → slot → *WasmGlobal
+WebAssembly.Module   → wasm_module slot → *ModuleState   (decoded module)
+WebAssembly.Instance → exports own property; the *Instance lives in the
+                       arena, reached via each export fn's wasm_export slot
+WebAssembly.Memory   → wasm_memory slot → *MemoryState   (+ cached .buffer)
+WebAssembly.Table    → wasm_table slot  → *TableState     (funcref only)
+WebAssembly.Global   → wasm_global slot → *GlobalState
+exported function    → wasm_export slot → *ExportRecord (instance, index)
 ```
+
+`Memory.buffer` is a non-owning `ArrayBuffer` view over the arena bytes
+(an `array_buffer_external` flag keeps `deinit` from freeing them);
+`grow` detaches the old buffer and re-materializes a fresh one. Known
+gaps: `externref` tables (await the §5 GC integration), and an imported
+memory is snapshotted at instantiation rather than shared.
 
 ## 9. SES / hardening
 
@@ -334,14 +349,13 @@ keys). `Memory.buffer` detaching on `memory.grow` stays observable —
 spec-conformant and SES-fine.
 
 The code-constructing surface — `WebAssembly.compile` / `instantiate` /
-`new Module` — will be **gated behind `--allow=wasm`**, the WASM
-analogue of `--allow=eval` (HostEnsureCanCompileWasmBytes). The two
-gates are orthogonal: a build can allow eval but not wasm, or vice
-versa. Default-off matches the SES posture of refusing runtime code
-construction unless opted in. `WebAssembly.validate`, which only
-inspects bytes and constructs nothing runnable, is the one piece wired
-today and is installed ungated; the gate lands with the constructors.
-See [ses-alignment.md](ses-alignment.md).
+`new Module` / `new Instance` — is **gated behind `--allow=wasm`**, the
+WASM analogue of `--allow=eval` (HostEnsureCanCompileWasmBytes); a closed
+gate throws `EvalError`. The two gates are orthogonal: a build can allow
+eval but not wasm, or vice versa. Default-off matches the SES posture of
+refusing runtime code construction unless opted in. `WebAssembly.validate`,
+which only inspects bytes and constructs nothing runnable, is installed
+ungated. See [ses-alignment.md](ses-alignment.md).
 
 ## 10. Performance posture
 
