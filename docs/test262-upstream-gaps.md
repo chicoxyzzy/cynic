@@ -974,3 +974,53 @@ the corpus under the relevant section's directory before adding.
   dozens of string-keyed properties, forcing GC between property
   additions, then asserting the result. No existing fixture
   combines property enumeration with GC stress this way.
+
+### Object spread / rest from a TypedArray dangled the target's index keys
+
+- **Spec:** §7.3.27 CopyDataProperties (used by §13.2.5.5
+  PropertyDefinitionEvaluation for `{ ...src }` and by §14.3.3.4
+  RestBindingInitialization for `let { ...rest } = src`) — step 4.c.iv
+  `CreateDataPropertyOrThrow(target, key, propValue)`. No normative
+  rule on lifetime management; the engine-side contract is that the
+  target's own property keys must remain valid for the target's
+  lifetime, not just the spread expression's.
+- **Reproducer:**
+  ```js
+  // Only observable under allocation-triggered GC (e.g. the
+  // harness' --gc-threshold=1). The TypedArray exposes its indices
+  // as integer-keyed own properties (§10.4.5.7) — the spread side
+  // synthesises a fresh JSString per index that gets rooted only
+  // while the opcode runs.
+  const v = new Int16Array(50);
+  const o = { set b(a) {}, ...v };
+  // GC after the opcode closed its key_scope sweeps the index
+  // JSStrings; o.properties retains their slice pointers.
+  Object.getOwnPropertyNames(o);   // must list "0".."49","b", not crash
+  ```
+- **Before fix:** `ownPropertyKeysOrdered` allocated a JSString for
+  each TypedArray index and rooted it on the spread / rest opcode's
+  temporary `key_scope`. The spread loop then passed the returned
+  slices straight to `obj.set` (no anchor). For a *non-array-exotic*
+  target — a plain object — integer-index keys skip `own_key_order`
+  (recordKey rejects them) and land in the property bag as borrowed
+  slices. After the opcode's `key_scope.close()` ran, the synthesised
+  JSStrings had no remaining root; the next allocation-pressure GC
+  swept them and the target's bag held 50+ dangling key slices.
+  `Object.getOwnPropertyNames(o)` then walked the bag through
+  `orderListContains`, dereferenced reclaimed memory, and
+  segfaulted (or returned garbage on shorter-string sites). String-
+  keyed spread sources had the same hazard one step removed — the
+  slices borrowed from `src`'s `key_anchors`, so dropping `src`
+  produced the same dangling-key bag on the target.
+- **After fix:** Both opcodes allocate a fresh JSString per key inside
+  the loop and route through `storePropertyComputedOwned`, which
+  appends the JSString to the target's `key_anchors` — the bag's
+  borrowed slice stays live as long as the target.
+- **Suggested fixture shape:** positive runtime fixture under
+  `language/expressions/object/` (and a sibling under
+  `language/statements/variable/` for the rest binding) spreading a
+  TypedArray view into a plain-object target, allocating heavily
+  between the spread and the next `Object.getOwnPropertyNames` call,
+  then asserting the full key list. Existing spread fixtures cover
+  the value-copy side and proxy traps but never combine TypedArray
+  source + GC stress + post-spread own-key enumeration.

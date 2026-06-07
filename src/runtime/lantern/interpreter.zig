@@ -4608,7 +4608,17 @@ pub fn runFrames(
                             break;
                         },
                     };
-                    realm.heap.storeProperty(out_obj, allocator, k, v) catch return error.OutOfMemory;
+                    // §7.3.27 step 4.c.iv — `CreateDataPropertyOrThrow`.
+                    // Allocate a fresh JSString and route through the
+                    // anchored store. `keys` borrows either from
+                    // `src_obj.key_anchors` (gone with src) or from the
+                    // opcode-local `key_scope`'s integer-index strings
+                    // (gone after `key_scope.close()`); plain
+                    // `storeProperty` would leave `out_obj.properties`
+                    // with dangling key slices the next sweep poisons.
+                    key_scope.push(v) catch return error.OutOfMemory;
+                    const k_anchor = realm.heap.allocateString(k) catch return error.OutOfMemory;
+                    realm.heap.storePropertyComputedOwned(out_obj, allocator, k_anchor, v) catch return error.OutOfMemory;
                 }
                 if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
@@ -8522,7 +8532,17 @@ pub fn runFrames(
                         prop_value = src_obj.get(key);
                     }
                 }
-                realm.heap.storeProperty(target, allocator, key, prop_value) catch return error.OutOfMemory;
+                // §7.3.27 step 4.c.iv — `CreateDataPropertyOrThrow`.
+                // Allocate a fresh JSString and route through the
+                // anchored store; see the matching note on
+                // `.object_rest_from`. Without this the integer-index
+                // keys synthesised for a TypedArray source dangle on
+                // `target.properties` after `key_scope.close()` and a
+                // later `Object.getOwnPropertyNames(target)` poisons
+                // `orderListContains`.
+                key_scope.push(prop_value) catch return error.OutOfMemory;
+                const key_anchor = realm.heap.allocateString(key) catch return error.OutOfMemory;
+                realm.heap.storePropertyComputedOwned(target, allocator, key_anchor, prop_value) catch return error.OutOfMemory;
             }
             if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             continue :dispatch try decodeNext(code, &ip, &committed);

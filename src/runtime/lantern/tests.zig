@@ -5431,6 +5431,41 @@ test "GC: integer-index keys on an array-like survive gc_threshold=1" {
     , 30);
 }
 
+test "GC: object-spread TypedArray-index keys survive gc_threshold=1" {
+    // §7.3.27 CopyDataProperties — `{ ...v8 }` over an Int16Array
+    // copies the view's indexed elements as integer-keyed own
+    // properties. `ownPropertyKeysOrdered` synthesises a fresh
+    // JSString for every index and roots it on the spread opcode's
+    // `key_scope`; if the spread loop then routed each store through
+    // plain `obj.set` (no anchor), the resulting integer keys landed
+    // in the target's `properties` bag as borrowed slices. Once
+    // `key_scope.close()` ran at the end of the opcode, a gc_threshold=1
+    // sweep freed every key JSString — and the next
+    // `Object.getOwnPropertyNames(target)` walked the bag's dangling
+    // slices through `orderListContains` and segfaulted (or, on
+    // shorter strings, returned garbage). `storePropertyComputedOwned`
+    // anchors the JSString on the target. Found via Fuzzilli.
+    try expectScriptIntUnderGcPressure(
+        \\var v8 = new Int16Array(50);
+        \\var v11 = { set b(a) {}, ...v8 };
+        \\Object.getOwnPropertyNames(v11).length;
+    , 51);
+}
+
+test "GC: object-rest TypedArray-index keys survive gc_threshold=1" {
+    // §14.3.3.4 RestBindingInitialization — `let { ...rest } = src`
+    // routes through `object_rest_from`, which used the same
+    // `storeProperty` (unanchored) write path as `object_spread`.
+    // Same hazard: the rest target's keys borrowed bytes from
+    // JSStrings rooted only on the opcode's `key_scope`, so a sweep
+    // after the opcode dangled the rest object's property bag.
+    try expectScriptIntUnderGcPressure(
+        \\var src = new Int16Array(50);
+        \\var { ...rest } = src;
+        \\Object.getOwnPropertyNames(rest).length;
+    , 50);
+}
+
 test "GC: suspended async fn result Promise survives gc_threshold=1" {
     // A fire-and-forget async function suspends on `await`; its
     // [[Promise]] (the value returned to the caller) is reachable
