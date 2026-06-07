@@ -34,12 +34,17 @@ cross-module linking (imported functions / globals / tables / memories,
 shared tables, host functions). The engine scores **100.00%** on the
 official WebAssembly spec testsuite — see `wasm-results.md`.
 
+The **JS API** surface — `WebAssembly.*` objects (`Module`, `Instance`,
+`Memory`, `Table`, `Global`), `compile` / `instantiate` Promises,
+imports incl. host functions, the error types, and i32/i64/f32/f64
+marshalling — is shipped (§8). The **GC integration** (§5, §6) is the
+main remaining structural piece; until it lands, `externref` can't hold
+a live JS object, so externref tables and reference marshalling across
+the JS boundary stay deferred.
+
 Deferred: `threads` (sits on the existing `SharedArrayBuffer` /
 `Atomics` substrate), `exceptions`, `gc`, `tail-call` beyond the
-trivial case, `relaxed-simd`, the component model. The **JS API**
-surface (`WebAssembly.*` objects, marshalling) and the **GC
-integration** (§5, §6) are likewise not yet built — see those sections
-and §11 for what exists today versus what is planned.
+trivial case, `relaxed-simd`, the component model.
 
 Non-goals: a browser host, debugging surfaces, or any sloppy-mode
 affordance. Cynic is strict, non-browser, edge-runtime shaped — the
@@ -391,12 +396,12 @@ the measured design space:
 | Decoder | §5 binary → parsed module — **done** |
 | Validate + side-table | single-pass validation emitting the O(1) branch side-table (§4) — **done** |
 | Interpreter | in-place **threaded** dispatch over bytecode + side-table — **done** (integer, control, floats, SIMD, references) |
-| Memory | loads/stores, bulk-memory, grow; memory64 i64 addressing — **done** (plain buffer; ArrayBuffer aliasing is future) |
+| Memory | loads/stores, bulk-memory, grow; memory64 i64 addressing — **done** (engine plain buffer; the JS `Memory.buffer` aliasing view + detach-on-grow ships in §8) |
 | References / tables | tables, funcref/externref, `call_indirect`, element segments — **done** (ref tags + Metla GC roots are future, §5) |
 | Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128 — **done** |
 | Cross-module linking | imported funcs/globals/tables/memories, shared tables, cross-instance funcrefs, host functions, start functions — **done** |
 | Conformance | the WebAssembly spec testsuite harness → `wasm-results.md` — **done, 100.00%** |
-| JS API | `WebAssembly.*` typed-slot objects, marshalling, `--allow=wasm`, the §5–§7 GC/store/ArrayBuffer work — **future** (only `validate` wired) |
+| JS API | `WebAssembly.*` typed-slot objects (`Module`/`Instance`/`Memory`/`Table`/`Global`), `compile`/`instantiate` Promises, imports incl. host functions, error types, i32/i64/f32/f64 marshalling, `--allow=wasm` — **done** (§8); externref-across-JS + the §5 GC roots are future |
 
 Conformance is scored against the official WebAssembly spec testsuite
 (the `.wast` corpus), the same way `test262-results.md` scores ECMA-262.
