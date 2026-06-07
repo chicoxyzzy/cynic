@@ -5347,18 +5347,37 @@ test "GC: generator wrapper iteration survives gc_threshold=1" {
 }
 
 test "GC: Promise microtask chain survives gc_threshold=1" {
-    // `.then(...).then(...)` queues `promise_reaction` microtasks
-    // whose `reaction_result` is the chained sub-Promise. The
-    // outer Promise the next-step reaction was registered on
-    // must be kept alive across mid-drain collections — it lives
-    // on `JSObject.promise_reactions[i].result_promise`, which
-    // the walker reaches only via the source object's reaction list.
+    // `.then(...).then(...)` queues reaction records whose
+    // `result_promise` is the chained sub-Promise. The outer
+    // Promise the next-step reaction was registered on must be kept
+    // alive across mid-drain collections — it lives on
+    // `JSObject.promise_store.reactions[i].result_promise`, reached
+    // by the GC only via the source Promise's reaction node.
     try expectScriptIntUnderGcPressure(
         \\let acc = 0;
         \\Promise.resolve(1).then(v => v + 10).then(v => v + 100).then(v => { acc = v; });
         \\globalThis.__drainMicrotasks();
         \\acc;
     , 111);
+}
+
+test "GC: long pending Promise chain survives gc_threshold=1" {
+    // Regression for the `promise_store` split — each pending
+    // Promise in the chain lazily allocates its own reaction node
+    // (no longer the shared JSObjectExtension). With gc_threshold=1
+    // a collection fires between every allocation, so each node and
+    // the reaction Values it holds (handler + `result_promise`) must
+    // be marked through `promiseReactionsConst` or the chain breaks
+    // mid-drain. Build the chain in a loop so dozens of nodes are
+    // live at once when the cascade runs.
+    try expectScriptIntUnderGcPressure(
+        \\let p = Promise.resolve(0);
+        \\for (let i = 0; i < 50; i++) p = p.then(v => v + 1);
+        \\let acc = -1;
+        \\p.then(v => { acc = v; });
+        \\globalThis.__drainMicrotasks();
+        \\acc;
+    , 50);
 }
 
 test "GC: Promise.resolve(thenable) survives gc_threshold=1" {

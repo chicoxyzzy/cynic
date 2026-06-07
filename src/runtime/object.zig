@@ -558,14 +558,10 @@ pub const JSObjectExtension = struct {
     /// `WeakSet` instances populate this. `null` means "not a Set
     /// instance".
     set_data: ?*SetData = null,
-    /// §27.2 — generators awaiting a pending Promise's settlement.
-    /// Populated only on Promise instances; cleared when the
-    /// Promise settles. Microtask scheduler drains this list.
-    promise_waiters: std.ArrayListUnmanaged(*@import("generator.zig").JSGenerator) = .empty,
-    /// §27.2.5 PerformPromiseThen — `.then` reaction records queued
-    /// on a pending Promise. Drained at settlement time when each
-    /// reaction is scheduled as a microtask.
-    promise_reactions: std.ArrayListUnmanaged(PromiseReaction) = .empty,
+    // (`promise_waiters` + `promise_reactions` moved OUT of the
+    // extension into `JSObject.promise_store` — a Promise touches
+    // none of the extension's other cold fields, so they get a
+    // dedicated lightweight node instead of the full extension.)
     /// §26.1.1 [[WeakRefTarget]] — the cell a `WeakRef` watches.
     /// Genuinely weak: the GC marker skips this slot on a full
     /// cycle and clears it post-mark for a dead referent. Defaults
@@ -662,8 +658,6 @@ pub const JSObjectExtension = struct {
         self.ambiguous_namespace_keys.deinit(allocator);
         if (self.map_data) |m| m.deinit(allocator);
         if (self.set_data) |s| s.deinit(allocator);
-        self.promise_waiters.deinit(allocator);
-        self.promise_reactions.deinit(allocator);
         if (self.finalization_cells) |fc| fc.deinit(allocator);
         // §25.2 — a SharedArrayBuffer's bytes belong to the refcounted
         // shared block (not this realm's allocator); drop our reference
@@ -974,10 +968,16 @@ pub const JSObject = struct {
     // Access via `getBoxedString` / `setBoxedString` helpers.)
     // (`host_data` moved to `JSObjectExtension` — only the test262
     // harness uses it. Access via `getHostData` / `setHostData`.)
-    // (`promise_waiters` + `promise_reactions` moved to
-    // `JSObjectExtension` — only Promise instances populate them.
-    // Access via the `promiseWaiters*` / `promiseReactions*`
-    // helpers below.)
+    /// §27.2 Promise reaction + waiter lists, in a dedicated
+    /// lazily-allocated node reached by this single inline pointer.
+    /// Kept OUT of `JSObjectExtension`: a pending Promise in a
+    /// `.then` chain populates only these two lists and would
+    /// otherwise allocate the full ~500-byte extension just to hold
+    /// them (the dominant per-Promise heap cost on long chains).
+    /// `null` on every non-Promise and on a Promise that has never
+    /// queued a reaction or waiter. Access via the `promiseWaiters*`
+    /// / `promiseReactions*` helpers below — never the field.
+    promise_store: ?*PromiseReactionStore = null,
     /// §27.2.6 `[[PromiseState]]`. `.none` means this object isn't
     /// a Promise; the runtime brand-checks for `!= .none` rather
     /// than walking the prototype chain. Hidden from JS — never
@@ -1475,23 +1475,34 @@ pub const JSObject = struct {
     // instances carry their backing state here. Plain objects
     // pay the null-extension fast path.
 
+    /// Lazily allocate (and cache) this Promise's reaction/waiter
+    /// node. See `promise_store`. Distinct from `getOrCreateExtension`
+    /// — a Promise pays only this ~small node, not the full extension.
+    fn getOrCreatePromiseStore(self: *JSObject, allocator: std.mem.Allocator) !*PromiseReactionStore {
+        if (self.promise_store) |s| return s;
+        const s = try allocator.create(PromiseReactionStore);
+        s.* = .{};
+        self.promise_store = s;
+        return s;
+    }
+
     pub fn promiseWaitersPtr(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged(*@import("generator.zig").JSGenerator) {
-        const ext = try self.getOrCreateExtension(allocator);
-        return &ext.promise_waiters;
+        const s = try self.getOrCreatePromiseStore(allocator);
+        return &s.waiters;
     }
 
     pub fn promiseWaitersConst(self: *const JSObject) ?*const std.ArrayListUnmanaged(*@import("generator.zig").JSGenerator) {
-        if (self.extension) |ext| return &ext.promise_waiters;
+        if (self.promise_store) |s| return &s.waiters;
         return null;
     }
 
     pub fn promiseReactionsPtr(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged(PromiseReaction) {
-        const ext = try self.getOrCreateExtension(allocator);
-        return &ext.promise_reactions;
+        const s = try self.getOrCreatePromiseStore(allocator);
+        return &s.reactions;
     }
 
     pub fn promiseReactionsConst(self: *const JSObject) ?*const std.ArrayListUnmanaged(PromiseReaction) {
-        if (self.extension) |ext| return &ext.promise_reactions;
+        if (self.promise_store) |s| return &s.reactions;
         return null;
     }
 
@@ -1783,10 +1794,14 @@ pub const JSObject = struct {
             p.deinit();
             allocator.destroy(p);
         }
-        // `finalization_cells`, `promise_waiters`, `promise_reactions`,
-        // `weak_ref_target`, `array_buffer`, `typed_view`, `data_view`,
-        // `array_buffer_max_byte_length` all live in the extension —
-        // freed when it is.
+        // `finalization_cells`, `weak_ref_target`, `array_buffer`,
+        // `typed_view`, `data_view`, `array_buffer_max_byte_length`
+        // all live in the extension — freed when it is.
+        // Promise reaction/waiter lists live in their own node.
+        if (self.promise_store) |s| {
+            s.deinit(allocator);
+            allocator.destroy(s);
+        }
         self.key_anchors.deinit(allocator);
         self.own_key_order.deinit(allocator);
         self.elements.deinit(allocator);
@@ -2930,6 +2945,27 @@ pub const PromiseReaction = struct {
     /// The Promise that `then` returned to user code; settled
     /// based on the handler's outcome.
     result_promise: Value,
+};
+
+/// §27.2 per-Promise reaction + waiter lists. Split out of the
+/// shared `JSObjectExtension` into this small dedicated node
+/// (reached by `JSObject.promise_store`): a Promise touches none of
+/// the extension's other ~24 cold fields, so piggybacking these two
+/// lists on the full extension cost ~500 bytes per pending Promise
+/// in a `.then` chain. Lazily allocated on the first reaction /
+/// waiter append; owned by the JSObject and freed in `deinitFields`.
+pub const PromiseReactionStore = struct {
+    /// §27.2.1.8 reaction records queued on a *pending* Promise; run
+    /// in FIFO order when it settles.
+    reactions: std.ArrayListUnmanaged(PromiseReaction) = .empty,
+    /// Generators (async-function suspensions) awaiting this Promise
+    /// via `Await` (§27.7) — resumed when it settles.
+    waiters: std.ArrayListUnmanaged(*@import("generator.zig").JSGenerator) = .empty,
+
+    pub fn deinit(self: *PromiseReactionStore, allocator: std.mem.Allocator) void {
+        self.reactions.deinit(allocator);
+        self.waiters.deinit(allocator);
+    }
 };
 
 // ---------------------------------------------------------------------------
