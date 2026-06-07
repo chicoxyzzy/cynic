@@ -214,19 +214,17 @@ top-line score.
 
 ## History
 
+### 2026-06-07 — cynic `690388f`, test262 `d0c1b455`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 45166 | 4642 | 49808 | 90.68 % | ±0 | 45.1 s |
+
 ### 2026-06-05 — cynic `057df50`, test262 `d0c1b455`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
 | 45166 | 4642 | 49808 | 90.68 % | ±0 | 40.2 s |
-
-Biggest movers:
-
-- `language/statements` -3
-- `built-ins/String` +2
-- `language/eval-code` +2
-- `language/expressions` -2
-- `language/module-code` -2
 
 ### 2026-06-04 — cynic `cf85935`, test262 `d0c1b455`
 
