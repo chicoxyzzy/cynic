@@ -180,9 +180,14 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
                 .values => counts.pass += 1,
                 else => counts.fail += 1,
             }
+        } else if (std.mem.eql(u8, kind, "assert_uninstantiable")) {
+            // Instantiate the module and expect a trap. Side effects that
+            // ran before the trap (e.g. an active element segment writing
+            // into a shared imported table) persist by design.
+            const res = loadModule(arena, io, dir, cmd, &registry) catch null;
+            if (res == null) counts.pass += 1 else counts.fail += 1;
         } else {
-            // register / assert_unlinkable / assert_uninstantiable —
-            // require imports or linking Sarcasm doesn't do yet.
+            // register / assert_unlinkable — not yet scored.
             counts.skip += 1;
         }
     }
@@ -257,7 +262,7 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
 
     const funcs = try arena.alloc(wasm.FuncRef, nfunc);
     const globals = try arena.alloc(u128, nglob);
-    const tables = try arena.alloc(*const wasm.Table, ntab);
+    const tables = try arena.alloc(*wasm.Table, ntab);
     var memory: ?*const wasm.Memory = null;
     var fi: usize = 0;
     var gi: usize = 0;
@@ -321,14 +326,13 @@ fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.js
         if (debug_loads) logLoadError(io, filename, "link", err);
         return null;
     };
-    const instance = wasm.instantiate(arena, arena, modp, imports) catch |err| {
+    // The instance must outlive this call at a stable address: imports
+    // reference it by pointer, and its funcrefs/functions resolve to it.
+    const ip = try arena.create(wasm.Instance);
+    wasm.instantiate(ip, arena, arena, modp, imports) catch |err| {
         if (debug_loads) logLoadError(io, filename, "instantiate", err);
         return null;
     };
-    // The instance must outlive this call at a stable address: imports
-    // reference it by pointer, and its own functions resolve to `&self`.
-    const ip = try arena.create(wasm.Instance);
-    ip.* = instance;
     // §5.5.11 — the start function runs as part of instantiation; a trap
     // here means the module failed to instantiate.
     wasm.runStart(ip, arena) catch |err| {
@@ -448,7 +452,11 @@ fn scoreRejected(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std
         };
         modp.* = m;
         // Decoded; expect validation (via instantiate) to reject it.
-        if (wasm.instantiate(arena, arena, modp, .{})) |_| {
+        const ip = arena.create(wasm.Instance) catch {
+            counts.fail += 1;
+            return;
+        };
+        if (wasm.instantiate(ip, arena, arena, modp, .{})) |_| {
             counts.fail += 1; // accepted a module the spec rejects
             if (debug_loads) {
                 const txt = if (cmd.get("text")) |t| t.string else "?";
