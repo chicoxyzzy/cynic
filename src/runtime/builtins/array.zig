@@ -536,7 +536,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
     while (cur.proxy_target != null or cur.proxy_revoked) {
-        const set_r = try proxy_mod.nativeProxySet(realm, cur, key, value, heap_mod.taggedObject(cur));
+        const set_r = try proxy_mod.nativeProxySet(realm, cur, key, value, heap_mod.taggedObject(cur), null);
         switch (set_r) {
             .boolean => |b| {
                 if (!b) return throwTypeError(realm, "Set: 'set' trap returned false");
@@ -547,11 +547,11 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
                 // on a plain target with Receiver = outer proxy):
                 // `Receiver.[[GetOwnProperty]](P)` fires the
                 // outer proxy's `getOwnPropertyDescriptor` trap.
-                _ = try proxy_mod.nativeProxyGetOwnPropertyDescriptor(realm, cur, key);
+                _ = try proxy_mod.nativeProxyGetOwnPropertyDescriptor(realm, cur, key, null);
                 // §10.1.9.2 step 2.e.iv —
                 // `Receiver.[[DefineOwnProperty]](P, valueDesc)`
                 // fires the outer proxy's `defineProperty` trap.
-                const dp_r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value);
+                const dp_r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value, null);
                 switch (dp_r) {
                     .boolean => |b| {
                         if (!b) return throwTypeError(realm, "Set: 'defineProperty' trap returned false");
@@ -699,7 +699,7 @@ pub fn deletePropertyOrThrow(realm: *Realm, obj: *JSObject, key: []const u8) Nat
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
     while (cur.proxy_target != null or cur.proxy_revoked) {
-        const r = try proxy_mod.nativeProxyDelete(realm, cur, key);
+        const r = try proxy_mod.nativeProxyDelete(realm, cur, key, null);
         switch (r) {
             .boolean => |b| {
                 if (!b) return throwTypeError(realm, "Cannot delete property");
@@ -1206,7 +1206,7 @@ fn getOnProxyChain(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: V
     const proxy_mod = @import("proxy.zig");
     var cur = proxy;
     while (true) {
-        const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, receiver);
+        const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, receiver, null);
         switch (outcome) {
             .value => |v| return v,
             .fallthrough => |t| {
@@ -2491,7 +2491,7 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
     while (cur.proxy_target != null or cur.proxy_revoked) {
-        const r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value);
+        const r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value, null);
         switch (r) {
             .boolean => |b| {
                 if (!b) return throwTypeError(realm, "CreateDataPropertyOrThrow: 'defineProperty' trap returned false");
@@ -2629,7 +2629,7 @@ fn hasPropertyP(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
     while (cur.proxy_target != null or cur.proxy_revoked) {
-        const r = try proxy_mod.nativeProxyHas(realm, cur, key);
+        const r = try proxy_mod.nativeProxyHas(realm, cur, key, null);
         switch (r) {
             .boolean => |b| return b,
             .fallthrough => |t| {
@@ -4141,7 +4141,7 @@ fn createDataPropertyOrThrow(
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
     while (cur.proxy_target != null or cur.proxy_revoked) {
-        const r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value);
+        const r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value, null);
         switch (r) {
             .boolean => |b| {
                 if (!b) return throwTypeError(realm, "Array.fromAsync: 'defineProperty' trap returned false");

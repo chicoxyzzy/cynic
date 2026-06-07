@@ -8969,6 +8969,45 @@ test "Proxy [[GetOwnProperty]]: trap can't report non-configurable target as con
     );
 }
 
+test "Proxy [[Get]]: trap receives a real String for the property key" {
+    // Hot-path key-reuse fix — the constants-pool JSString backing a
+    // static-name read (`o.x`) is forwarded to the trap as-is, skipping
+    // a fresh `allocateString` per fire. The trap still observes a
+    // String whose `===` matches a fresh literal and whose `typeof`
+    // is `"string"`.
+    try expectScriptStringWithBuiltins(
+        \\let captured;
+        \\const o = new Proxy({}, { get(t, k, r) { captured = k; return 1; } });
+        \\o.x;
+        \\(typeof captured) + ":" + captured + ":" + (captured === "x");
+    , "string:x:true");
+}
+
+test "Proxy [[Get]]: 1000× Reflect.get loop sums correctly" {
+    // Hot-path correctness check for `o.x` traps in a Vue-style
+    // reactive read loop. The constants-pool key Value is forwarded
+    // to the trap and reused across iterations — the spec result
+    // (sum of 1000 ones = 1000) must still be exactly right.
+    try expectScriptStringWithBuiltins(
+        \\const o = new Proxy({ x: 1 }, { get(t, k, r) { return Reflect.get(t, k, r); } });
+        \\let s = 0;
+        \\for (let i = 0; i < 1000; i++) s += o.x;
+        \\String(s);
+    , "1000");
+}
+
+test "Proxy [[Get]]: Symbol key still passes through as a Symbol value" {
+    // The key-reuse fast path must not trigger for Symbol keys —
+    // `typeof` of the trap arg must stay `"symbol"`, NOT degrade to
+    // `"string"`. Regression for `@@iterator` etc.
+    try expectScriptStringWithBuiltins(
+        \\let captured;
+        \\const o = new Proxy({}, { get(t, k, r) { captured = k; return 1; } });
+        \\o[Symbol.iterator];
+        \\(typeof captured) + ":" + (captured === Symbol.iterator);
+    , "symbol:true");
+}
+
 test "Proxy [[GetOwnProperty]]: compatible descriptor passes through" {
     // A configurable target property whose trap descriptor agrees is
     // returned unchanged — the new invariant check must not over-reject.

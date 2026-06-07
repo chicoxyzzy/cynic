@@ -156,7 +156,7 @@ fn raiseRevoked(realm: *Realm, op: []const u8) NativeError {
 /// (test262 splice/property-traps-order-with-species).
 fn getTrap(realm: *Realm, handler: *JSObject, key: []const u8) NativeError!Value {
     if (handler.proxy_target != null or handler.proxy_revoked) {
-        const r = try nativeProxyGet(realm, handler, key, heap_mod.taggedObject(handler));
+        const r = try nativeProxyGet(realm, handler, key, heap_mod.taggedObject(handler), null);
         switch (r) {
             .value => |v| return v,
             .fallthrough => |t| return intrinsics.getPropertyChain(realm, t, key),
@@ -185,9 +185,24 @@ fn callTrap(realm: *Realm, trap_fn: *@import("../function.zig").JSFunction, hand
 /// property key is a Symbol. Look up the registered Symbol
 /// (well-known or user-allocated) and pass it as a Symbol Value.
 /// Plain string keys round-trip as Strings.
-fn trapKeyValue(realm: *Realm, key: []const u8) NativeError!Value {
+///
+/// `hint` lets a caller pre-supply a String Value that already
+/// backs `key` (the constants-pool JSString an interpreter opcode
+/// already holds, or the Reflect.get arg the native call already
+/// has). Same observable result — the trap sees a String whose
+/// `flatBytes()` equals `key` — but with no per-call
+/// `allocateString`, which is the dominant cost in a hot
+/// `Proxy` get / set / has loop (each allocation charges the
+/// young-GC trigger and grows the strings pool).
+fn trapKeyValue(realm: *Realm, key: []const u8, hint: ?Value) NativeError!Value {
     if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) {
         if (realm.heap.symbolForKey(key)) |sym| return heap_mod.taggedSymbol(sym);
+    }
+    if (hint) |h| {
+        if (h.isString()) {
+            const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(h.asString()));
+            if (std.mem.eql(u8, s.flatBytes(), key)) return h;
+        }
     }
     const s = realm.heap.allocateString(key) catch return error.OutOfMemory;
     return Value.fromString(s);
@@ -195,7 +210,15 @@ fn trapKeyValue(realm: *Realm, key: []const u8) NativeError!Value {
 
 /// §10.5.5 [[Get]] (P, Receiver) — native dispatcher for callers
 /// that aren't bytecode-driven (Reflect.get, host code).
-pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: Value) NativeError!NativeProxyOutcome {
+///
+/// `key_hint`, when non-null and a String matching `key`, is
+/// reused as the trap's property-key argument. The hot proxy
+/// loop allocates one JSString per trap fire otherwise; a caller
+/// that already has the key as a Value (an interpreter opcode
+/// holds the constants-pool entry; `Reflect.get` holds its arg
+/// after `ToPropertyKey`) avoids that allocation by passing the
+/// existing Value through.
+pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: Value, key_hint: ?Value) NativeError!NativeProxyOutcome {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'get' on a proxy that has been revoked");
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
@@ -210,7 +233,7 @@ pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver
     const trap_v = try getTrap(realm, handler, "get");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'get' trap is not callable");
-    const key_v = try trapKeyValue(realm, key);
+    const key_v = try trapKeyValue(realm, key, key_hint);
     const args = [_]Value{ heap_mod.taggedObject(target), key_v, receiver };
     const v = try callTrap(realm, trap_fn, handler, &args);
     // §10.5.5 invariants: non-configurable non-writable data prop
@@ -244,7 +267,7 @@ pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver
 /// Caller is responsible for choosing between strict-throw and
 /// non-strict-return-false; this helper itself never throws on a
 /// merely-falsy return.
-pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: Value, receiver: Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
+pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: Value, receiver: Value, key_hint: ?Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'set' on a proxy that has been revoked");
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
@@ -255,7 +278,7 @@ pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: V
     const trap_v = try getTrap(realm, handler, "set");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'set' trap is not callable");
-    const key_v = try trapKeyValue(realm, key);
+    const key_v = try trapKeyValue(realm, key, key_hint);
     const args = [_]Value{ heap_mod.taggedObject(target), key_v, value, receiver };
     const v = try callTrap(realm, trap_fn, handler, &args);
     const arith = @import("../lantern/arith.zig");
@@ -282,14 +305,14 @@ pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: V
 }
 
 /// §10.5.7 [[HasProperty]] (P) — native dispatcher.
-pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
+pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8, key_hint: ?Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'has' on a proxy that has been revoked");
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
     const trap_v = handler.get("has");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'has' trap is not callable");
-    const key_v = try trapKeyValue(realm, key);
+    const key_v = try trapKeyValue(realm, key, key_hint);
     const args = [_]Value{ heap_mod.taggedObject(target), key_v };
     const v = try callTrap(realm, trap_fn, handler, &args);
     const arith = @import("../lantern/arith.zig");
@@ -323,15 +346,15 @@ pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8) NativeEr
 /// it; today we only use it from `setOrThrow` to fire the trap
 /// lookup so the handler-as-Proxy `get` trap logs the access
 /// (test262 Array.prototype.splice/property-traps-order-with-species).
-pub fn nativeProxyGetOwnPropertyDescriptor(realm: *Realm, proxy: *JSObject, key: []const u8) NativeError!union(enum) { value: Value, fallthrough: *JSObject } {
+pub fn nativeProxyGetOwnPropertyDescriptor(realm: *Realm, proxy: *JSObject, key: []const u8, key_hint: ?Value) NativeError!union(enum) { value: Value, fallthrough: *JSObject } {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'getOwnPropertyDescriptor' on a proxy that has been revoked");
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
     const trap_v = try getTrap(realm, handler, "getOwnPropertyDescriptor");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'getOwnPropertyDescriptor' trap is not callable");
-    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
+    const key_v = try trapKeyValue(realm, key, key_hint);
+    const args = [_]Value{ heap_mod.taggedObject(target), key_v };
     const v = try callTrap(realm, trap_fn, handler, &args);
     return .{ .value = v };
 }
@@ -345,7 +368,7 @@ pub fn nativeProxyGetOwnPropertyDescriptor(realm: *Realm, proxy: *JSObject, key:
 /// `value` is the data-property value to install with
 /// `{writable: true, enumerable: true, configurable: true}` flags
 /// — the descriptor shape CreateDataPropertyOrThrow requires (§7.3.6).
-pub fn nativeProxyDefineProperty(realm: *Realm, proxy: *JSObject, key: []const u8, value: Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
+pub fn nativeProxyDefineProperty(realm: *Realm, proxy: *JSObject, key: []const u8, value: Value, key_hint: ?Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'defineProperty' on a proxy that has been revoked");
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
@@ -365,22 +388,22 @@ pub fn nativeProxyDefineProperty(realm: *Realm, proxy: *JSObject, key: []const u
     desc.set(realm.allocator, "writable", Value.true_) catch return error.OutOfMemory;
     desc.set(realm.allocator, "enumerable", Value.true_) catch return error.OutOfMemory;
     desc.set(realm.allocator, "configurable", Value.true_) catch return error.OutOfMemory;
-    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-    const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), heap_mod.taggedObject(desc) };
+    const key_v = try trapKeyValue(realm, key, key_hint);
+    const args = [_]Value{ heap_mod.taggedObject(target), key_v, heap_mod.taggedObject(desc) };
     const v = try callTrap(realm, trap_fn, handler, &args);
     const arith = @import("../lantern/arith.zig");
     return .{ .boolean = arith.toBoolean(v) };
 }
 
 /// §10.5.10 [[Delete]] (P) — native dispatcher.
-pub fn nativeProxyDelete(realm: *Realm, proxy: *JSObject, key: []const u8) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
+pub fn nativeProxyDelete(realm: *Realm, proxy: *JSObject, key: []const u8, key_hint: ?Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'deleteProperty' on a proxy that has been revoked");
     const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
     const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
     const trap_v = handler.get("deleteProperty");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'deleteProperty' trap is not callable");
-    const key_v = try trapKeyValue(realm, key);
+    const key_v = try trapKeyValue(realm, key, key_hint);
     const args = [_]Value{ heap_mod.taggedObject(target), key_v };
     const v = try callTrap(realm, trap_fn, handler, &args);
     const arith = @import("../lantern/arith.zig");

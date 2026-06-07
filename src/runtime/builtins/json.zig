@@ -62,7 +62,7 @@ fn jsonGetValue(realm: *Realm, value: Value, key: []const u8) NativeError!Value 
     const obj = heap_mod.valueAsPlainObject(value) orelse return Value.undefined_;
     var cur = obj;
     while (cur.proxy_target != null or cur.proxy_revoked) {
-        const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(obj));
+        const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(obj), null);
         switch (outcome) {
             .value => |v| return v,
             .fallthrough => |t| {
@@ -1199,7 +1199,7 @@ fn jsonIsArray(realm: *Realm, v: Value) NativeError!bool {
 fn jsonGet(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!Value {
     var cur = obj;
     while (cur.proxy_target != null or cur.proxy_revoked) {
-        const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(obj));
+        const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(obj), null);
         switch (outcome) {
             .value => |v| return v,
             .fallthrough => |t| {
@@ -1219,7 +1219,7 @@ fn jsonGet(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!Value {
 fn jsonDelete(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
     var cur = obj;
     while (cur.proxy_target != null or cur.proxy_revoked) {
-        const r = try proxy_mod.nativeProxyDelete(realm, cur, key);
+        const r = try proxy_mod.nativeProxyDelete(realm, cur, key, null);
         switch (r) {
             .boolean => |b| return b,
             .fallthrough => |t| {

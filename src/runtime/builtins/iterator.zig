@@ -495,7 +495,7 @@ fn iterGet(realm: *Realm, recv: Value, key: []const u8) NativeError!Value {
         const proxy_mod = @import("proxy.zig");
         var cur = obj;
         while (true) {
-            const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, recv);
+            const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, recv, null);
             switch (outcome) {
                 .value => |v| return v,
                 .fallthrough => |t| {

@@ -1309,7 +1309,7 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
         const proxy_mod = @import("builtins/proxy.zig");
         var cur_proxy = obj;
         while (cur_proxy.proxy_target != null or cur_proxy.proxy_revoked) {
-            const r = try proxy_mod.nativeProxyGet(realm, cur_proxy, key, heap_mod.taggedObject(obj));
+            const r = try proxy_mod.nativeProxyGet(realm, cur_proxy, key, heap_mod.taggedObject(obj), null);
             switch (r) {
                 .value => |v| return v,
                 .fallthrough => |t| {

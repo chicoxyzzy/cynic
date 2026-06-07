@@ -575,7 +575,7 @@ fn errorOptionsHasCause(realm: *Realm, opts: *JSObject) NativeError!bool {
     const proxy_mod = @import("proxy.zig");
     var cur = opts;
     while (cur.proxy_target != null or cur.proxy_revoked) {
-        const r = try proxy_mod.nativeProxyHas(realm, cur, "cause");
+        const r = try proxy_mod.nativeProxyHas(realm, cur, "cause", null);
         switch (r) {
             .boolean => |b| return b,
             .fallthrough => |t| {

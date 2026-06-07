@@ -479,7 +479,7 @@ pub fn getHandlerProperty(realm: *Realm, handler: *JSObject, key: []const u8) Na
         const proxy_mod = @import("proxy.zig");
         var cur = handler;
         while (true) {
-            const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(handler));
+            const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(handler), null);
             switch (outcome) {
                 .value => |v| return v,
                 .fallthrough => |t| {
@@ -516,7 +516,7 @@ pub fn getPropertyValue(realm: *Realm, obj: *JSObject, key: []const u8, receiver
         const proxy_mod = @import("proxy.zig");
         var cur = obj;
         while (true) {
-            const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, receiver);
+            const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, receiver, null);
             switch (outcome) {
                 .value => |v| return v,
                 .fallthrough => |t| {
@@ -2851,7 +2851,7 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
                 var cur_get: *JSObject = src;
                 while (cur_get.proxy_target != null or cur_get.proxy_revoked) {
                     const proxy_mod = @import("proxy.zig");
-                    const r = try proxy_mod.nativeProxyGet(realm, cur_get, key, src_value);
+                    const r = try proxy_mod.nativeProxyGet(realm, cur_get, key, src_value, null);
                     switch (r) {
                         .value => |val| break :blk_v val,
                         .fallthrough => |t| {

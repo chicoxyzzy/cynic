@@ -154,7 +154,7 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
     if (heap_mod.valueAsPlainObject(arg)) |maybe_proxy| {
         var cur = maybe_proxy;
         while (cur.proxy_target != null or cur.proxy_revoked) {
-            const r = try proxy_mod.nativeProxyHas(realm, cur, key_slice);
+            const r = try proxy_mod.nativeProxyHas(realm, cur, key_slice, key_v);
             switch (r) {
                 .boolean => |b| return Value.fromBool(b),
                 .fallthrough => |t| {
@@ -229,7 +229,7 @@ fn hasPropertyProxyAware(realm: *Realm, root: *JSObject, key: []const u8) Native
         if (parent.proxy_target != null or parent.proxy_revoked) {
             var p = parent;
             while (p.proxy_target != null or p.proxy_revoked) {
-                const r = try proxy_mod.nativeProxyHas(realm, p, key);
+                const r = try proxy_mod.nativeProxyHas(realm, p, key, null);
                 switch (r) {
                     .boolean => |b| return b,
                     .fallthrough => |t| {
@@ -293,7 +293,7 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // §10.5.5 Proxy [[Get]] dispatch.
     var proxy_cur = target;
     while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
-        const r = try proxy_mod.nativeProxyGet(realm, proxy_cur, key_slice, receiver);
+        const r = try proxy_mod.nativeProxyGet(realm, proxy_cur, key_slice, receiver, key_v);
         switch (r) {
             .value => |v| return v,
             .fallthrough => |t| {
@@ -422,7 +422,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 const ok = fn_target.setIfWritable(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
                 return Value.fromBool(ok);
             }
-            const r = try proxy_mod.nativeProxySet(realm, proxy_cur, key_slice, v, receiver_v);
+            const r = try proxy_mod.nativeProxySet(realm, proxy_cur, key_slice, v, receiver_v, key_v);
             switch (r) {
                 .boolean => |b| return Value.fromBool(b),
                 .fallthrough => |t| {
@@ -609,7 +609,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                     const ok = fn_target.setIfWritable(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
                     return Value.fromBool(ok);
                 }
-                const r = try proxy_mod.nativeProxySet(realm, proxy_cur, key_slice, v, receiver_v);
+                const r = try proxy_mod.nativeProxySet(realm, proxy_cur, key_slice, v, receiver_v, null);
                 switch (r) {
                     .boolean => |b| return Value.fromBool(b),
                     .fallthrough => |t| {
@@ -699,8 +699,8 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
             // tick (reverse/length-exceeding-integer-limit-with-proxy
             // expects `Set:k`, `GetOwnPropertyDescriptor:k`,
             // `DefineProperty:k` per slot).
-            _ = try proxy_mod.nativeProxyGetOwnPropertyDescriptor(realm, proxy_cur, key_slice);
-            const r = try proxy_mod.nativeProxyDefineProperty(realm, proxy_cur, key_slice, v);
+            _ = try proxy_mod.nativeProxyGetOwnPropertyDescriptor(realm, proxy_cur, key_slice, null);
+            const r = try proxy_mod.nativeProxyDefineProperty(realm, proxy_cur, key_slice, v, null);
             switch (r) {
                 .boolean => |b| return Value.fromBool(b),
                 .fallthrough => |t| {
@@ -863,7 +863,7 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     // (§10.5.10 step 7.a).
     var target = target_outer;
     while (target.proxy_target != null or target.proxy_revoked) {
-        const r = try proxy_mod.nativeProxyDelete(realm, target, key_slice);
+        const r = try proxy_mod.nativeProxyDelete(realm, target, key_slice, key_v);
         switch (r) {
             .boolean => |b| return Value.fromBool(b),
             .fallthrough => |t| {

@@ -4578,7 +4578,7 @@ pub fn runFrames(
                     // abrupt completion through the destructuring.
                     const v: Value = if (is_src_proxy) blk_v: {
                         const proxy_mod = @import("../builtins/proxy.zig");
-                        const outcome = proxy_mod.nativeProxyGet(realm, src_obj, k, heap_mod.taggedObject(src_obj)) catch |err| switch (err) {
+                        const outcome = proxy_mod.nativeProxyGet(realm, src_obj, k, heap_mod.taggedObject(src_obj), null) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             else => {
                                 const ex = consumePendingException(realm) orelse try makeTypeError(realm, "rest property read failed");
@@ -4848,7 +4848,7 @@ pub fn runFrames(
             var handled_via_proxy = false;
             walk: while (cursor) |c| {
                 if (c.proxy_target != null or c.proxy_revoked) {
-                    const r2 = try proxyHasTrap(allocator, realm, frames, f, ip, c, key_slice);
+                    const r2 = try proxyHasTrap(allocator, realm, frames, f, ip, c, key_slice, key_v);
                     switch (r2) {
                         .value => |v| {
                             // Trap ran via `callJSFunction` (its
@@ -8491,7 +8491,7 @@ pub fn runFrames(
                     // ordinary property bag + prototype chain
                     // and would silently miss the trap.
                     const proxy_mod = @import("../builtins/proxy.zig");
-                    const outcome = proxy_mod.nativeProxyGet(realm, src_obj, key, src_v) catch |err| switch (err) {
+                    const outcome = proxy_mod.nativeProxyGet(realm, src_obj, key, src_v, null) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => {
                             const ex = consumePendingException(realm) orelse try makeTypeError(realm, "object spread get failed");
@@ -8668,7 +8668,7 @@ pub fn runFrames(
                 // on the target.
                 var obj = obj_in;
                 if (obj.proxy_target != null or obj.proxy_revoked) {
-                    const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_s.flatBytes(), acc);
+                    const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_s.flatBytes(), key_v, acc);
                     switch (r) {
                         .value => |v| {
                             acc = v;
@@ -9328,7 +9328,7 @@ pub fn runFrames(
                 var obj = obj_in;
                 // §10.5 Proxy [[Get]] — handler trap dispatch.
                 if (obj.proxy_target != null or obj.proxy_revoked) {
-                    const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_slice, recv);
+                    const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_slice, key_v, recv);
                     switch (r) {
                         .value => |v| {
                             acc = v;
@@ -9730,7 +9730,7 @@ pub fn runFrames(
             // §10.5.10 Proxy [[Delete]] dispatch.
             if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
                 if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
-                    const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_s.flatBytes());
+                    const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_s.flatBytes(), key_v);
                     switch (r) {
                         .value => |v| {
                             // §13.5.1.2 step 6 — strict-mode
@@ -9809,7 +9809,7 @@ pub fn runFrames(
             const key_slice = computedKeyToString(key_v, &key_buf);
             if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
                 if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
-                    const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_slice);
+                    const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_slice, key_v);
                     switch (r) {
                         .value => |v| {
                             if (!arith.toBoolean(v)) {
@@ -10713,8 +10713,9 @@ fn strictSetPropertyAnchored(
                         if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
                         return .handled;
                     };
-                    const key_str_t = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                    const trap_args = [_]Value{ heap_mod.taggedFunction(obj.proxy_target_fn.?), Value.fromString(key_str_t), value, recv };
+                    const key_hint_v: ?Value = if (key_string) |ks| Value.fromString(ks) else null;
+                    const key_v_t = try proxyTrapKeyValue(realm, key, key_hint_v);
+                    const trap_args = [_]Value{ heap_mod.taggedFunction(obj.proxy_target_fn.?), key_v_t, value, recv };
                     const trap_outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args);
                     switch (trap_outcome) {
                         .value, .yielded => |trap_ret| {
@@ -10747,7 +10748,8 @@ fn strictSetPropertyAnchored(
                 }
                 return .ok;
             }
-            const r = try proxySetTrap(allocator, realm, frames, f, ip, obj, key, value, recv);
+            const key_hint_v: ?Value = if (key_string) |ks| Value.fromString(ks) else null;
+            const r = try proxySetTrap(allocator, realm, frames, f, ip, obj, key, key_hint_v, value, recv);
             switch (r) {
                 .value => return .ok,
                 .fallthrough => |t| {
@@ -11386,7 +11388,7 @@ fn slowLookupForCallProperty(
         var obj = obj_in;
         // §10.5 Proxy [[Get]].
         if (obj.proxy_target != null or obj.proxy_revoked) {
-            const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key, recv);
+            const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key, null, recv);
             switch (r) {
                 .value => |v| return .{ .value = v },
                 .fallthrough => |t| obj = t,
@@ -11560,7 +11562,7 @@ fn getThroughChain(
             // §10.5.5 Proxy [[Get]] — dispatch with `receiver`,
             // not the proxy itself. The trap helper already
             // recurses through proxy-target-is-proxy chains.
-            switch (try proxyGetTrap(allocator, realm, frames, f, ip, c, key, receiver)) {
+            switch (try proxyGetTrap(allocator, realm, frames, f, ip, c, key, null, receiver)) {
                 .value => |v| return .{ .value = v },
                 .fallthrough => |t| {
                     // Trapless proxy whose target is non-proxy —
@@ -11668,7 +11670,7 @@ fn setThroughChain(
     var cursor: ?*JSObject = obj;
     while (cursor) |c| {
         if (c.proxy_target != null or c.proxy_revoked) {
-            switch (try proxySetTrap(allocator, realm, frames, f, ip, c, key, value, recv)) {
+            switch (try proxySetTrap(allocator, realm, frames, f, ip, c, key, null, value, recv)) {
                 .value => return .{ .handled_set = true },
                 .fallthrough => |t| {
                     // The proxy is trapless and target is non-proxy.
@@ -11768,6 +11770,23 @@ const ProxyOutcome = union(enum) {
     uncaught: Value,
 };
 
+/// Build the String Value passed to a Proxy trap. If `hint` is a
+/// String whose flat bytes equal `key`, reuse it — the
+/// constants-pool JSString an `lda_property` opcode already holds
+/// — and skip a fresh `allocateString`. Symbol-key marker strings
+/// (`@@iterator`, `<sym:N>`) are handled by the caller before
+/// reaching here.
+inline fn proxyTrapKeyValue(realm: *Realm, key: []const u8, hint: ?Value) RunError!Value {
+    if (hint) |kh| {
+        if (kh.isString()) {
+            const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(kh.asString()));
+            if (std.mem.eql(u8, s.flatBytes(), key)) return kh;
+        }
+    }
+    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+    return Value.fromString(key_str);
+}
+
 /// §10.5.5 [[Get]] (P, Receiver) on a proxy. If the handler's
 /// `get` trap is missing or non-callable, fall through to the
 /// target. Otherwise call `trap(target, key, receiver)` and use
@@ -11781,6 +11800,14 @@ fn proxyGetTrap(
     ip: usize,
     proxy: *JSObject,
     key: []const u8,
+    /// Optional String Value that already backs `key` (the
+    /// constants-pool JSString an `lda_property` opcode holds for
+    /// a static-name read, etc.). Avoids the per-trap-fire
+    /// `allocateString` that otherwise drives this hot path into
+    /// the young-GC trigger — a Vue-style `o.x` proxy loop fires
+    /// one `Get` trap per access, so the saved allocation is the
+    /// dominant per-call cost.
+    key_hint: ?Value,
     receiver: Value,
 ) RunError!ProxyOutcome {
     // §10.5.5 [[Get]] step 7.a — when the trap is missing, the
@@ -11827,8 +11854,7 @@ fn proxyGetTrap(
             if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) {
                 if (realm.heap.symbolForKey(key)) |sym| break :blk_kv heap_mod.taggedSymbol(sym);
             }
-            const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-            break :blk_kv Value.fromString(key_str);
+            break :blk_kv try proxyTrapKeyValue(realm, key, key_hint);
         };
         const args = [_]Value{ heap_mod.taggedObject(target), key_v, receiver };
         const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
@@ -11886,6 +11912,8 @@ fn proxyDeleteTrap(
     ip: usize,
     proxy: *JSObject,
     key: []const u8,
+    /// See `proxyGetTrap`'s `key_hint` — same reuse contract.
+    key_hint: ?Value,
 ) RunError!ProxyOutcome {
     // §10.5.10 [[Delete]] step 7.a — when the trap is missing,
     // recurse via `target.[[Delete]]`. If `target` is itself a
@@ -11934,8 +11962,8 @@ fn proxyDeleteTrap(
                 if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
                 return .handled;
             };
-            const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-            const args = [_]Value{ heap_mod.taggedFunction(target_fn), Value.fromString(key_str) };
+            const key_v = try proxyTrapKeyValue(realm, key, key_hint);
+            const args = [_]Value{ heap_mod.taggedFunction(target_fn), key_v };
             const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler_opt.?), &args);
             const v = switch (outcome) {
                 .value, .yielded => |val| val,
@@ -11963,8 +11991,8 @@ fn proxyDeleteTrap(
             if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
             return .handled;
         };
-        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-        const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
+        const key_v = try proxyTrapKeyValue(realm, key, key_hint);
+        const args = [_]Value{ heap_mod.taggedObject(target), key_v };
         const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
         const v = switch (outcome) {
             .value, .yielded => |val| val,
@@ -12016,6 +12044,8 @@ fn proxyHasTrap(
     ip: usize,
     proxy: *JSObject,
     key: []const u8,
+    /// See `proxyGetTrap`'s `key_hint` — same reuse contract.
+    key_hint: ?Value,
 ) RunError!ProxyOutcome {
     // §10.5.7 [[HasProperty]] step 7.a — trap missing recurses
     // via `target.[[HasProperty]]`. Walk the chain so a trapless
@@ -12046,8 +12076,8 @@ fn proxyHasTrap(
             if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
             return .handled;
         };
-        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-        const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str) };
+        const key_v = try proxyTrapKeyValue(realm, key, key_hint);
+        const args = [_]Value{ heap_mod.taggedObject(target), key_v };
         const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
         const v = switch (outcome) {
             .value, .yielded => |val| val,
@@ -12098,6 +12128,8 @@ fn proxySetTrap(
     ip: usize,
     proxy: *JSObject,
     key: []const u8,
+    /// See `proxyGetTrap`'s `key_hint` — same reuse contract.
+    key_hint: ?Value,
     value: Value,
     receiver: Value,
 ) RunError!ProxyOutcome {
@@ -12130,8 +12162,8 @@ fn proxySetTrap(
             if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
             return .handled;
         };
-        const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
-        const args = [_]Value{ heap_mod.taggedObject(target), Value.fromString(key_str), value, receiver };
+        const key_v = try proxyTrapKeyValue(realm, key, key_hint);
+        const args = [_]Value{ heap_mod.taggedObject(target), key_v, value, receiver };
         const outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &args);
         switch (outcome) {
             .value, .yielded => |v| {
