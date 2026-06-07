@@ -2897,11 +2897,11 @@ pub fn runFrames(
                             proto.shape == cell.proto_shape and
                             cell.proto_rev == realm.proto_revision_counter)
                         {
-                            callee_v = proto.slots.items[cell.slot];
+                            callee_v = proto.slotAt(cell.slot);
                             resolved_fast = true;
                         }
                     } else {
-                        callee_v = obj_in.slots.items[cell.slot];
+                        callee_v = obj_in.slotAt(cell.slot);
                         resolved_fast = true;
                     }
                 }
@@ -7757,7 +7757,7 @@ pub fn runFrames(
             if (gr.globals.target) |gt| {
                 const cell = &local_chunk.inline_caches[ic_idx];
                 if (cell.shape != null and cell.shape == gt.shape and cell.proto == null and cell.proto_rev == gr.globals.decl_revision) {
-                    acc = gt.slots.items[cell.slot];
+                    acc = gt.slotAt(cell.slot);
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
             }
@@ -7797,7 +7797,7 @@ pub fn runFrames(
             if (gr.globals.target) |gt| {
                 const cell = &local_chunk.inline_caches[ic_idx];
                 if (cell.shape != null and cell.shape == gt.shape and cell.proto == null and cell.proto_rev == gr.globals.decl_revision) {
-                    acc = gt.slots.items[cell.slot];
+                    acc = gt.slotAt(cell.slot);
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
             }
@@ -8186,14 +8186,14 @@ pub fn runFrames(
             const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
             realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
             obj.shape = shape;
-            obj.slots.resize(allocator, shape.property_count) catch return error.OutOfMemory;
+            obj.resizeSlots(allocator, shape.property_count) catch return error.OutOfMemory;
             // `ArrayList.resize` doesn't zero-fill. Initialise
             // every slot to `undefined` so a GC trigger between
             // `make_object_shape` and the downstream property
             // writes finds a valid Value (the slot won't have its
             // real entry yet — that's the `def_template_property` /
             // `def_property` job).
-            for (obj.slots.items) |*s| s.* = Value.undefined_;
+            { var us_i: usize = 0; while (us_i < obj.slotCount()) : (us_i += 1) obj.slotPtr(us_i).* = Value.undefined_; }
             // Pre-fill `own_key_order` from the template's keys.
             // The downstream `def_template_property` op skips
             // `recordKey` entirely, so this is the one chance to
@@ -8577,11 +8577,11 @@ pub fn runFrames(
                             proto.shape == cell.proto_shape and
                             cell.proto_rev == realm.proto_revision_counter)
                         {
-                            acc = proto.slots.items[cell.slot];
+                            acc = proto.slotAt(cell.slot);
                             continue :dispatch try decodeNext(code, &ip, &committed);
                         }
                     } else {
-                        acc = obj_in.slots.items[cell.slot];
+                        acc = obj_in.slotAt(cell.slot);
                         continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                 }
@@ -8594,7 +8594,7 @@ pub fn runFrames(
                             cell.slot = entry.slot;
                             cell.proto = null;
                             cell.proto_shape = null;
-                            acc = obj_in.slots.items[entry.slot];
+                            acc = obj_in.slotAt(entry.slot);
                             continue :dispatch try decodeNext(code, &ip, &committed);
                         }
                     }
@@ -8634,7 +8634,7 @@ pub fn runFrames(
                                         cell.proto = proto;
                                         cell.proto_shape = proto_sh;
                                         cell.proto_rev = realm.proto_revision_counter;
-                                        acc = proto.slots.items[entry.slot];
+                                        acc = proto.slotAt(entry.slot);
                                         continue :dispatch try decodeNext(code, &ip, &committed);
                                     }
                                 }
@@ -8998,7 +8998,7 @@ pub fn runFrames(
                     // route it through `JSObject.get` or accept
                     // the bag staleness as an audit-flagged
                     // divergence.
-                    obj_in.slots.items[cell.slot] = acc;
+                    obj_in.setSlot(cell.slot, acc);
                     realm.heap.storeInternalSlot(.{ .object = obj_in }, acc);
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
@@ -9051,11 +9051,11 @@ pub fn runFrames(
                     cell.guard_epoch == realm.heap.proto_struct_epoch)
                 {
                     const post_shape = cell.post_shape.?;
-                    if (obj_in.slots.items.len < post_shape.property_count) {
-                        obj_in.slots.resize(allocator, post_shape.property_count) catch return error.OutOfMemory;
+                    if (obj_in.slotCount() < post_shape.property_count) {
+                        obj_in.resizeSlots(allocator, post_shape.property_count) catch return error.OutOfMemory;
                     }
                     obj_in.shape = post_shape;
-                    obj_in.slots.items[cell.slot] = acc;
+                    obj_in.setSlot(cell.slot, acc);
                     realm.heap.writeBarrier(.{ .object = obj_in }, acc);
                     realm.heap.storeInternalSlot(.{ .object = obj_in }, acc);
                     continue :dispatch try decodeNext(code, &ip, &committed);
@@ -9231,8 +9231,8 @@ pub fn runFrames(
             // `Object.defineProperty` between `make_object_shape`
             // and this write, which can't happen for a literal in
             // a temp register but is checked for safety).
-            if (obj.shape != null and slot < obj.slots.items.len) {
-                obj.slots.items[slot] = acc;
+            if (obj.shape != null and slot < obj.slotCount()) {
+                obj.setSlot(slot, acc);
                 realm.heap.writeBarrier(.{ .object = obj }, acc);
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
@@ -11293,7 +11293,7 @@ fn slowLdaGlobal(
                     ic_cell.proto = null;
                     ic_cell.proto_shape = null;
                     ic_cell.proto_rev = gr.globals.decl_revision;
-                    return .{ .value = gt.slots.items[entry.slot] };
+                    return .{ .value = gt.slotAt(entry.slot) };
                 }
             }
         }

@@ -941,7 +941,7 @@ pub const Op = enum(u8) {
     /// op stamped a cached `Shape*` whose layout assigns the
     /// literal's `i`th static key to slot `i`, and pre-filled the
     /// receiver's `own_key_order`. This op writes `acc` directly
-    /// into `obj.slots.items[slot]` with the generational write
+    /// into `obj.setSlot(slot, …)` with the generational write
     /// barrier — no `hasOwn`, no `flagsFor`, no `shadowSet` shape
     /// lookup, no `recordKey` linear scan. On a shape-guard miss
     /// (e.g. the literal hit a path that demoted the object), it

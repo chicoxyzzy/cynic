@@ -746,9 +746,9 @@ pub const OwnNamedIterator = struct {
                         }
                     }
                     const entry = found orelse continue;
-                    if (entry.slot >= walk.obj.slots.items.len) continue;
+                    if (entry.slot >= walk.obj.slotCount()) continue;
                     walk.cur_key = entry.key;
-                    walk.cur_value = walk.obj.slots.items[entry.slot];
+                    walk.cur_value = walk.obj.slotAt(entry.slot);
                     return .{ .key_ptr = &walk.cur_key, .value_ptr = &walk.cur_value };
                 }
                 return null;
@@ -756,6 +756,15 @@ pub const OwnNamedIterator = struct {
         }
     }
 };
+
+/// Number of shape-mode property values stored inline in the
+/// `JSObject` header before spilling to a heap buffer. Covers the
+/// common small object (2-4 props: `{a, b}`, `{x, y, z}`, RGBA) so
+/// it pays no per-object value-buffer allocation. Each slot is a
+/// `Value` (8 bytes); 4 adds 32 bytes to the header, which the slab
+/// pool absorbs and which is recouped the moment the object would
+/// otherwise have `malloc`'d a slots buffer.
+pub const inline_slot_cap: u32 = 4;
 
 pub const JSObject = struct {
     /// Discriminator — must remain the first field. Mirrors the
@@ -783,7 +792,24 @@ pub const JSObject = struct {
     /// dictionary representation). Routing access over and
     /// retiring those two maps is the remaining work.
     shape: ?*@import("shape.zig").Shape = null,
-    slots: std.ArrayListUnmanaged(Value) = .empty,
+    /// Shape-mode property values, split for allocation speed (V8
+    /// "in-object properties" / JSC inline storage). The first
+    /// `inline_slot_cap` values live INLINE in the header — the
+    /// overwhelmingly common small object (`{a, b}`, a `Point`,
+    /// RGBA) stores every value here and pays NO separate
+    /// allocation, since the header itself comes from the slab
+    /// pool. Only objects that grow past the inline capacity spill
+    /// the remainder into `overflow_slots` (a heap buffer holding
+    /// logical slots `[inline_slot_cap ..]`). `slot_count` is the
+    /// total live count across both. Access ONLY through
+    /// `slotAt` / `slotPtr` / `setSlot` / `slotCount` /
+    /// `resizeSlots` / `clearSlots` — never the raw fields — so the
+    /// inline/overflow split stays an implementation detail.
+    /// Non-moving: inline slots live in the (pinned-address) header,
+    /// so the engine's pointer-stability invariant is preserved.
+    inline_slots: [inline_slot_cap]Value = undefined,
+    slot_count: u32 = 0,
+    overflow_slots: std.ArrayListUnmanaged(Value) = .empty,
     /// Back-pointer to the owning heap, stamped at allocation by
     /// `Heap.allocateObject`. Lets the realm-agnostic `get` / `set`
     /// API reach the agent-wide property-shape tree (`heap.shapes`)
@@ -1172,8 +1198,8 @@ pub const JSObject = struct {
     pub fn lookupOwn(self: *const JSObject, key: []const u8) ?Value {
         if (self.shape) |sh| {
             if (sh.lookup(key)) |entry| {
-                if (entry.kind == .data and entry.slot < self.slots.items.len) {
-                    return self.slots.items[entry.slot];
+                if (entry.kind == .data and entry.slot < self.slotCount()) {
+                    return self.slotAt(entry.slot);
                 }
             }
         }
@@ -1674,6 +1700,66 @@ pub const JSObject = struct {
         ext.shadow_realm_owner = r;
     }
 
+    // ── Shape-mode slot storage (inline + overflow) ─────────────────
+    //
+    // The first `inline_slot_cap` logical slots live in `inline_slots`
+    // (in the header); the rest in `overflow_slots`. These accessors
+    // hide the split — callers index a single logical [0 .. slot_count)
+    // space. Bounds are the caller's responsibility (same contract the
+    // old `slots.items[i]` had).
+
+    /// Total live slot count (inline + overflow).
+    pub inline fn slotCount(self: *const JSObject) usize {
+        return self.slot_count;
+    }
+
+    /// Read logical slot `i`.
+    pub inline fn slotAt(self: *const JSObject, i: usize) Value {
+        return if (i < inline_slot_cap)
+            self.inline_slots[i]
+        else
+            self.overflow_slots.items[i - inline_slot_cap];
+    }
+
+    /// Pointer to logical slot `i` (for in-place update).
+    pub inline fn slotPtr(self: *JSObject, i: usize) *Value {
+        return if (i < inline_slot_cap)
+            &self.inline_slots[i]
+        else
+            &self.overflow_slots.items[i - inline_slot_cap];
+    }
+
+    /// Write logical slot `i`.
+    pub inline fn setSlot(self: *JSObject, i: usize, v: Value) void {
+        if (i < inline_slot_cap) {
+            self.inline_slots[i] = v;
+        } else {
+            self.overflow_slots.items[i - inline_slot_cap] = v;
+        }
+    }
+
+    /// Grow / shrink the live slot space to exactly `n`. Overflow is
+    /// allocated only when `n > inline_slot_cap`. Matches
+    /// `ArrayList.resize` semantics: new slots are uninitialised
+    /// (the caller writes them); shrinking just lowers the count.
+    pub fn resizeSlots(self: *JSObject, allocator: std.mem.Allocator, n: usize) !void {
+        if (n > inline_slot_cap) {
+            try self.overflow_slots.resize(allocator, n - inline_slot_cap);
+        } else if (self.overflow_slots.items.len != 0) {
+            // Shrinking back into the inline range — drop the
+            // overflow buffer's live entries (keep capacity).
+            self.overflow_slots.clearRetainingCapacity();
+        }
+        self.slot_count = @intCast(n);
+    }
+
+    /// Reset to zero live slots, retaining overflow capacity (the
+    /// demote path's `slots.clearRetainingCapacity()` analogue).
+    pub fn clearSlots(self: *JSObject) void {
+        self.slot_count = 0;
+        self.overflow_slots.clearRetainingCapacity();
+    }
+
     /// Drop every sub-allocation owned by this object — does NOT
     /// release the `JSObject` struct itself. The full `deinit`
     /// path calls this and then `allocator.destroy(self)`; the
@@ -1706,8 +1792,9 @@ pub const JSObject = struct {
         self.elements.deinit(allocator);
         self.sparse_elements.deinit(allocator);
         // `shape` itself is realm-lifetime arena memory (ShapeTree),
-        // not freed per-object; only the slot vector is owned here.
-        self.slots.deinit(allocator);
+        // not freed per-object; only the overflow slot vector is
+        // owned here (inline slots live in the header).
+        self.overflow_slots.deinit(allocator);
         if (self.extension) |ext| {
             ext.deinit(allocator);
             allocator.destroy(ext);
@@ -2039,8 +2126,8 @@ pub const JSObject = struct {
         while (node) |n| : (node = n.parent) {
             if (n.parent == null) break; // root carries no key
             if (n.kind != .data) continue;
-            if (n.slot >= self.slots.items.len) continue;
-            const v = self.slots.items[n.slot];
+            if (n.slot >= self.slotCount()) continue;
+            const v = self.slotAt(n.slot);
             try self.properties.put(allocator, n.key, v);
             const is_default = n.attrs.writable and n.attrs.enumerable and n.attrs.configurable;
             if (!is_default) {
@@ -2048,7 +2135,7 @@ pub const JSObject = struct {
             }
         }
         self.shape = null;
-        self.slots.clearRetainingCapacity();
+        self.clearSlots();
     }
 
     /// Debug-only consistency check: under Phase 3 of
@@ -2066,10 +2153,10 @@ pub const JSObject = struct {
         while (node) |n| : (node = n.parent) {
             if (n.parent == null) break;
             if (n.kind != .data) continue;
-            if (n.slot >= self.slots.items.len) {
+            if (n.slot >= self.slotCount()) {
                 std.debug.panic(
                     "shape invariant: slot {} out of range (slots.len={}) for key '{s}'",
-                    .{ n.slot, self.slots.items.len, n.key },
+                    .{ n.slot, self.slotCount(), n.key },
                 );
             }
             // Bag may legitimately not have the key (pure shape-
@@ -2077,7 +2164,7 @@ pub const JSObject = struct {
             // carry it (a stragger from a partial demote, or a
             // raw `properties.put` callsite we missed migrating).
             if (self.properties.get(n.key)) |props_val| {
-                const slot_val = self.slots.items[n.slot];
+                const slot_val = self.slotAt(n.slot);
                 if (slot_val.bits != props_val.bits) {
                     std.debug.panic(
                         "shape invariant: key '{s}' diverges — slot=0x{x} properties=0x{x}",
@@ -2125,7 +2212,7 @@ pub const JSObject = struct {
                     e.attrs.enumerable == flags.enumerable and
                     e.attrs.configurable == flags.configurable)
                 {
-                    self.slots.items[e.slot] = v;
+                    self.setSlot(e.slot, v);
                     // Generational write barrier — a mature object
                     // gaining a young referent in a shape slot must
                     // join the remembered set, or the minor sweep
@@ -2153,11 +2240,11 @@ pub const JSObject = struct {
             try self.demoteFromShape(allocator);
             return err;
         };
-        self.slots.resize(allocator, child.property_count) catch |err| {
+        self.resizeSlots(allocator, child.property_count) catch |err| {
             try self.demoteFromShape(allocator);
             return err;
         };
-        self.slots.items[child.slot] = v;
+        self.setSlot(child.slot, v);
         // Generational write barrier for the freshly transitioned
         // slot — same hazard as the same-descriptor update above.
         heap.writeBarrier(.{ .object = self }, v);
@@ -2258,8 +2345,8 @@ pub const JSObject = struct {
         // mirror on IC hits without leaving slow-path readers stale.
         if (self.shape) |sh| {
             if (sh.lookup(key)) |entry| {
-                if (entry.kind == .data and entry.slot < self.slots.items.len) {
-                    return self.slots.items[entry.slot];
+                if (entry.kind == .data and entry.slot < self.slotCount()) {
+                    return self.slotAt(entry.slot);
                 }
             }
         }
@@ -2298,8 +2385,8 @@ pub const JSObject = struct {
     pub fn ownDataLookup(self: *const JSObject, key: []const u8) ?Value {
         if (self.shape) |sh| {
             if (sh.lookup(key)) |entry| {
-                if (entry.kind == .data and entry.slot < self.slots.items.len) {
-                    return self.slots.items[entry.slot];
+                if (entry.kind == .data and entry.slot < self.slotCount()) {
+                    return self.slotAt(entry.slot);
                 }
             }
         }
@@ -2858,6 +2945,46 @@ test "JSObject: set/get round-trip" {
     try testing.expectEqual(@as(i32, 42), o.get("x").asInt32());
 }
 
+test "JSObject: inline/overflow slot boundary round-trips" {
+    // The first `inline_slot_cap` property values live in the
+    // header's `inline_slots`; the rest spill to the heap-backed
+    // `overflow_slots`. Set enough properties to straddle the
+    // boundary and confirm every value reads back through both
+    // `slotAt` and the spec-facing `get`, including the slots on
+    // either side of the inline/overflow seam.
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const o = try heap.allocateObject();
+    const n: usize = inline_slot_cap + 3;
+    var keys: [inline_slot_cap + 3][1]u8 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        keys[i] = .{@as(u8, 'a') + @as(u8, @intCast(i))};
+        try o.set(testing.allocator, &keys[i], Value.fromInt32(@intCast(i * 10)));
+    }
+
+    try testing.expectEqual(n, o.slotCount());
+    // Every logical slot reads back its value via the low-level
+    // accessor (the seam is at index `inline_slot_cap`).
+    i = 0;
+    while (i < n) : (i += 1) {
+        try testing.expectEqual(@as(i32, @intCast(i * 10)), o.slotAt(i).asInt32());
+    }
+    // And via the spec-facing key lookup.
+    i = 0;
+    while (i < n) : (i += 1) {
+        try testing.expectEqual(@as(i32, @intCast(i * 10)), o.get(&keys[i]).asInt32());
+    }
+
+    // Mutating an overflow slot through `setSlot` is visible to
+    // the next read — the write must not silently target the
+    // inline array.
+    o.setSlot(inline_slot_cap + 1, Value.fromInt32(777));
+    try testing.expectEqual(@as(i32, 777), o.slotAt(inline_slot_cap + 1).asInt32());
+}
+
 test "JSObject: get prefers the shape slot when present" {
     // The IC fast path serves shape-backed reads in the
     // interpreter, but the JSObject.get fallback (called by
@@ -2875,14 +3002,14 @@ test "JSObject: get prefers the shape slot when present" {
 
     // Shape was built — `set` routes through `shadowSet`.
     try testing.expect(o.shape != null);
-    try testing.expectEqual(@as(usize, 2), o.slots.items.len);
+    try testing.expectEqual(@as(usize, 2), o.slotCount());
 
     // Stamp a different value directly into the slot, leaving
     // the property bag stale. A shape-first `get` must see the
     // slot value; a bag-first `get` would return the stale bag
     // value. Bag-mirror skip in `sta_property` (future commit)
     // relies on this ordering.
-    o.slots.items[0] = Value.fromInt32(7);
+    o.setSlot(0, Value.fromInt32(7));
     try testing.expectEqual(@as(i32, 7), o.get("x").asInt32());
 }
 
@@ -3098,9 +3225,13 @@ test "JSObject: defineProperty-style flagged write past threshold goes sparse" {
 test "JSObjectExtension: footprint probe (size measurement, not an invariant)" {
     // Surfaces the JSObject header size on every test run so a
     // future migration can be checked against the recorded
-    // baseline. The current ~960-byte header is the cost the
-    // extension-pointer pattern attacks; field-by-field moves
-    // should drop this number.
+    // baseline. The header carries `inline_slot_cap` Values
+    // inline (the first N property slots live in the header so a
+    // small object never mallocs a separate value buffer — see
+    // `inline_slots`); the extension-pointer pattern keeps the
+    // cold fields off the hot header. Field-by-field moves into
+    // the extension should drop this number; raising
+    // `inline_slot_cap` raises it by 8 bytes per added slot.
     std.debug.print("[footprint] @sizeOf(JSObject)          = {d} bytes\n", .{@sizeOf(JSObject)});
     std.debug.print("[footprint] @sizeOf(JSObjectExtension) = {d} bytes\n", .{@sizeOf(JSObjectExtension)});
 }

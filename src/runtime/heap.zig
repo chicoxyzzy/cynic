@@ -1319,7 +1319,10 @@ pub const Heap = struct {
                 // objects keep them in `properties`. Walk both —
                 // for any individual object only one of the two
                 // is non-empty, so the cost is paid once.
-                for (o.slots.items) |slot_v| self.enqueue(slot_v);
+                {
+                    var si: usize = 0;
+                    while (si < o.slotCount()) : (si += 1) self.enqueue(o.slotAt(si));
+                }
                 var it = o.iterOwnNamedKeys();
                 while (it.next()) |entry| self.enqueue(entry.value_ptr.*);
                 if (o.privatePropertyIterator()) |pit_outer| {
@@ -2822,7 +2825,9 @@ pub const Heap = struct {
             // Shape slots — under Phase 3 of
             // [docs/lazy-property-bag.md] these carry the
             // values for shape-mode objects (the bag is empty).
-            for (o.slots.items, 0..) |slot_v, slot_idx| {
+            var slot_idx: usize = 0;
+            while (slot_idx < o.slotCount()) : (slot_idx += 1) {
+                const slot_v = o.slotAt(slot_idx);
                 if (isYoungHeapValue(slot_v) and !o.in_remembered_set) {
                     std.debug.print(
                         "verifyRememberedSet: un-barriered mature\u{2192}young edge: " ++
@@ -3766,6 +3771,48 @@ test "Heap: collectYoung keeps a young object reachable from the remembered set"
     try testing.expectEqual(Generation.mature, young.generation);
     try testing.expectEqual(@as(usize, 0), heap.remembered.items.len);
     try testing.expect(!container.in_remembered_set);
+}
+
+test "Heap: minor cycle scans both inline and overflow property slots" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // A mature container whose properties straddle the inline/
+    // overflow slot seam: the first `inline_slot_cap` values live
+    // in the JSObject header, the rest in the heap-backed overflow
+    // buffer. Each value is a young object reachable ONLY through
+    // its slot. The minor cycle must scan past the inline cap into
+    // the overflow buffer — miss either region and that child is
+    // swept out from under a live reference (use-after-free).
+    const object_mod = @import("object.zig");
+    const container = try heap.allocateObject();
+    _ = heap.objects_young.pop();
+    try heap.objects_mature.append(heap.allocator, container);
+    container.generation = .mature;
+
+    const n: usize = object_mod.inline_slot_cap + 2;
+    var children: [object_mod.inline_slot_cap + 2]*object_mod.JSObject = undefined;
+    var keys: [object_mod.inline_slot_cap + 2][1]u8 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const child = try heap.allocateObject();
+        // Tag each child so we can prove it survived intact.
+        try child.set(heap.allocator, "tag", Value.fromInt32(@intCast(i * 100)));
+        children[i] = child;
+        keys[i] = .{@as(u8, 'a') + @as(u8, @intCast(i))};
+        try heap.storeProperty(container, heap.allocator, &keys[i], taggedObject(child));
+    }
+
+    heap.collectYoung(&.{taggedObject(container)});
+
+    // Every child — inline-resident and overflow-resident alike —
+    // promoted to mature and kept its tag value. A swept child
+    // would have a stale generation / freed payload here.
+    i = 0;
+    while (i < n) : (i += 1) {
+        try testing.expectEqual(Generation.mature, children[i].generation);
+        try testing.expectEqual(@as(i32, @intCast(i * 100)), children[i].get("tag").asInt32());
+    }
 }
 
 test "Heap: collectYoung keeps a young object reachable from a mature typed slot" {
