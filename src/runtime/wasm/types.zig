@@ -81,11 +81,14 @@ pub const FuncType = struct {
 
 /// §5.3.7 — resizable limits. `max` is null when the bound is open.
 /// `shared` carries the threads-proposal flag; the validator decides
-/// where a shared limit is admissible (memories only).
+/// where a shared limit is admissible (memories only). `is_64` marks a
+/// 64-bit address space (memory64 / table64 proposal): the memory's
+/// addresses and a table's indices are i64 rather than i32.
 pub const Limits = struct {
-    min: u32,
-    max: ?u32 = null,
+    min: u64,
+    max: ?u64 = null,
     shared: bool = false,
+    is_64: bool = false,
 };
 
 /// §5.3.9 — a table type pairs an element reference type with limits.

@@ -112,6 +112,7 @@ const Validator = struct {
     local_types: []const ValType,
     results: []const ValType,
     has_memory: bool,
+    mem_addr: ValType, // i32, or i64 for a 64-bit memory
     r: Reader, // over the body's expression bytes
     vals: std.ArrayListUnmanaged(AbsVal) = .empty,
     ctrls: std.ArrayListUnmanaged(Ctrl) = .empty,
@@ -257,9 +258,17 @@ fn validateFunc(
     const local_types = try locals.toOwnedSlice(arena);
     const expr = body_bytes[br.pos..];
 
-    var has_memory = module.mems.len > 0;
+    var has_memory = false;
+    var mem_addr: ValType = .i32;
+    if (module.mems.len > 0) {
+        has_memory = true;
+        if (module.mems[0].limits.is_64) mem_addr = .i64;
+    }
     for (module.imports) |imp| {
-        if (imp.desc == .mem) has_memory = true;
+        if (imp.desc == .mem) {
+            has_memory = true;
+            if (imp.desc.mem.limits.is_64) mem_addr = .i64;
+        }
     }
 
     var v: Validator = .{
@@ -268,6 +277,7 @@ fn validateFunc(
         .local_types = local_types,
         .results = ft.results,
         .has_memory = has_memory,
+        .mem_addr = mem_addr,
         .r = Reader.init(expr),
     };
 
@@ -500,14 +510,14 @@ fn validateExpr(v: *Validator) ValidateError!void {
             },
 
             .table_get => {
-                const elem = try tableElemType(v.module, try v.r.uleb(u32));
-                try v.popExpect(.i32);
-                try v.pushVal(elem);
+                const idx = try v.r.uleb(u32);
+                try v.popExpect(try tableAddr(v.module, idx));
+                try v.pushVal(try tableElemType(v.module, idx));
             },
             .table_set => {
-                const elem = try tableElemType(v.module, try v.r.uleb(u32));
-                try v.popExpect(elem);
-                try v.popExpect(.i32);
+                const idx = try v.r.uleb(u32);
+                try v.popExpect(try tableElemType(v.module, idx));
+                try v.popExpect(try tableAddr(v.module, idx));
             },
 
             .drop => {
@@ -629,13 +639,13 @@ fn validateExpr(v: *Validator) ValidateError!void {
             .memory_size => {
                 try requireMemory(v);
                 _ = try v.r.byte(); // reserved memory index
-                try v.pushVal(.i32);
+                try v.pushVal(v.mem_addr);
             },
             .memory_grow => {
                 try requireMemory(v);
                 _ = try v.r.byte();
-                try v.popExpect(.i32);
-                try v.pushVal(.i32);
+                try v.popExpect(v.mem_addr);
+                try v.pushVal(v.mem_addr);
             },
 
             .prefix_fc => {
@@ -645,58 +655,58 @@ fn validateExpr(v: *Validator) ValidateError!void {
                         try requireMemory(v);
                         _ = try v.r.byte(); // dst memidx
                         _ = try v.r.byte(); // src memidx
-                        try v.popExpect(.i32);
-                        try v.popExpect(.i32);
-                        try v.popExpect(.i32);
+                        try v.popExpect(v.mem_addr); // n
+                        try v.popExpect(v.mem_addr); // src
+                        try v.popExpect(v.mem_addr); // dst
                     },
                     11 => { // memory.fill
                         try requireMemory(v);
                         _ = try v.r.byte(); // memidx
-                        try v.popExpect(.i32);
-                        try v.popExpect(.i32);
-                        try v.popExpect(.i32);
+                        try v.popExpect(v.mem_addr); // n
+                        try v.popExpect(.i32); // value byte
+                        try v.popExpect(v.mem_addr); // dst
                     },
                     8 => { // memory.init
                         try requireMemory(v);
                         _ = try v.r.uleb(u32); // data segment index
                         _ = try v.r.byte(); // reserved memidx
-                        try v.popExpect(.i32);
-                        try v.popExpect(.i32);
-                        try v.popExpect(.i32);
+                        try v.popExpect(.i32); // n
+                        try v.popExpect(.i32); // src
+                        try v.popExpect(v.mem_addr); // dst
                     },
                     9 => _ = try v.r.uleb(u32), // data.drop
 
                     // Bulk table operations (reference-types).
                     12 => { // table.init
                         _ = try v.r.uleb(u32); // element segment index
-                        _ = try v.r.uleb(u32); // table index
-                        try v.popExpect(.i32);
-                        try v.popExpect(.i32);
-                        try v.popExpect(.i32);
+                        const tidx = try v.r.uleb(u32);
+                        try v.popExpect(.i32); // n
+                        try v.popExpect(.i32); // src
+                        try v.popExpect(try tableAddr(v.module, tidx)); // dst
                     },
                     13 => _ = try v.r.uleb(u32), // elem.drop
                     14 => { // table.copy
-                        _ = try v.r.uleb(u32); // dst table
-                        _ = try v.r.uleb(u32); // src table
-                        try v.popExpect(.i32);
-                        try v.popExpect(.i32);
-                        try v.popExpect(.i32);
+                        const dst_t = try v.r.uleb(u32);
+                        const src_t = try v.r.uleb(u32);
+                        try v.popExpect(try tableAddr(v.module, dst_t)); // n
+                        try v.popExpect(try tableAddr(v.module, src_t)); // src
+                        try v.popExpect(try tableAddr(v.module, dst_t)); // dst
                     },
                     15 => { // table.grow
-                        const elem = try tableElemType(v.module, try v.r.uleb(u32));
-                        try v.popExpect(.i32);
-                        try v.popExpect(elem);
-                        try v.pushVal(.i32);
+                        const tidx = try v.r.uleb(u32);
+                        try v.popExpect(try tableAddr(v.module, tidx)); // delta
+                        try v.popExpect(try tableElemType(v.module, tidx)); // init
+                        try v.pushVal(try tableAddr(v.module, tidx));
                     },
                     16 => { // table.size
-                        _ = try tableElemType(v.module, try v.r.uleb(u32));
-                        try v.pushVal(.i32);
+                        const tidx = try v.r.uleb(u32);
+                        try v.pushVal(try tableAddr(v.module, tidx));
                     },
                     17 => { // table.fill
-                        const elem = try tableElemType(v.module, try v.r.uleb(u32));
-                        try v.popExpect(.i32);
-                        try v.popExpect(elem);
-                        try v.popExpect(.i32);
+                        const tidx = try v.r.uleb(u32);
+                        try v.popExpect(try tableAddr(v.module, tidx)); // n
+                        try v.popExpect(try tableElemType(v.module, tidx)); // value
+                        try v.popExpect(try tableAddr(v.module, tidx)); // dst
                     },
 
                     // Saturating float→int truncations (non-trapping).
@@ -869,7 +879,7 @@ fn requireMemory(v: *Validator) !void {
 fn load(v: *Validator, result: ValType) !void {
     try requireMemory(v);
     try skipMemarg(v);
-    try v.popExpect(.i32); // address
+    try v.popExpect(v.mem_addr); // address
     try v.pushVal(result);
 }
 
@@ -877,12 +887,17 @@ fn store(v: *Validator, value: ValType) !void {
     try requireMemory(v);
     try skipMemarg(v);
     try v.popExpect(value); // value
-    try v.popExpect(.i32); // address
+    try v.popExpect(v.mem_addr); // address
 }
 
 fn skipMemarg(v: *Validator) !void {
     _ = try v.r.uleb(u32); // align (log2)
-    _ = try v.r.uleb(u32); // offset
+    // The offset is a 64-bit immediate for a memory64 access.
+    if (v.mem_addr == .i64) {
+        _ = try v.r.uleb(u64);
+    } else {
+        _ = try v.r.uleb(u32);
+    }
 }
 
 fn unop(v: *Validator, in: ValType, out: ValType) !void {
@@ -915,6 +930,20 @@ fn tableElemType(module: *const Module, table_index: u32) !ValType {
     const local_index = table_index - imported;
     if (local_index >= module.tables.len) return error.UnknownTable;
     return module.tables[local_index].elem.toValType();
+}
+
+/// The index type of a table — i64 for a 64-bit table, else i32.
+fn tableAddr(module: *const Module, table_index: u32) !ValType {
+    var imported: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .table) {
+            if (table_index == imported) return if (imp.desc.table.limits.is_64) .i64 else .i32;
+            imported += 1;
+        }
+    }
+    const local_index = table_index - imported;
+    if (local_index >= module.tables.len) return error.UnknownTable;
+    return if (module.tables[local_index].limits.is_64) .i64 else .i32;
 }
 
 fn globalType(module: *const Module, global_index: u32) !types.GlobalType {

@@ -307,23 +307,16 @@ fn decodeCodeSection(allocator: std.mem.Allocator, r: *Reader) DecodeError![]con
 // ── shared type decoders ────────────────────────────────────────────
 
 fn decodeLimits(r: *Reader) DecodeError!Limits {
-    // §5.3.7, extended by the threads proposal's shared flag.
+    // §5.3.7, extended by the threads proposal's shared flag (bit 1) and
+    // the memory64 proposal's 64-bit flag (bit 2).
     const flag = try r.byte();
-    return switch (flag) {
-        0x00 => .{ .min = try r.uleb(u32) },
-        0x01 => blk: {
-            const min = try r.uleb(u32);
-            const max = try r.uleb(u32);
-            break :blk .{ .min = min, .max = max };
-        },
-        0x02 => .{ .min = try r.uleb(u32), .shared = true },
-        0x03 => blk: {
-            const min = try r.uleb(u32);
-            const max = try r.uleb(u32);
-            break :blk .{ .min = min, .max = max, .shared = true };
-        },
-        else => error.BadLimitsFlag,
-    };
+    if (flag > 0x07) return error.BadLimitsFlag;
+    const has_max = (flag & 0x01) != 0;
+    const shared = (flag & 0x02) != 0;
+    const is_64 = (flag & 0x04) != 0;
+    const min: u64 = if (is_64) try r.uleb(u64) else try r.uleb(u32);
+    const max: ?u64 = if (has_max) (if (is_64) try r.uleb(u64) else try r.uleb(u32)) else null;
+    return .{ .min = min, .max = max, .shared = shared, .is_64 = is_64 };
 }
 
 fn decodeTableType(r: *Reader) DecodeError!TableType {

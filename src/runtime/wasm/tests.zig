@@ -301,8 +301,8 @@ test "wasm decoder: decodes an import section" {
     try testing.expectEqual(@as(usize, 2), m.imports.len);
     try testing.expectEqualStrings("env", m.imports[0].module);
     try testing.expectEqualStrings("mem", m.imports[0].name);
-    try testing.expectEqual(@as(u32, 1), m.imports[0].desc.mem.limits.min);
-    try testing.expectEqual(@as(?u32, null), m.imports[0].desc.mem.limits.max);
+    try testing.expectEqual(@as(u64, 1), m.imports[0].desc.mem.limits.min);
+    try testing.expectEqual(@as(?u64, null), m.imports[0].desc.mem.limits.max);
 
     try testing.expectEqualStrings("g", m.imports[1].name);
     try testing.expectEqual(ValType.i32, m.imports[1].desc.global.val);
@@ -340,11 +340,11 @@ test "wasm decoder: decodes table and memory sections" {
 
     try testing.expectEqual(@as(usize, 1), m.tables.len);
     try testing.expectEqual(@import("types.zig").RefType.funcref, m.tables[0].elem);
-    try testing.expectEqual(@as(u32, 1), m.tables[0].limits.min);
-    try testing.expectEqual(@as(?u32, 2), m.tables[0].limits.max);
+    try testing.expectEqual(@as(u64, 1), m.tables[0].limits.min);
+    try testing.expectEqual(@as(?u64, 2), m.tables[0].limits.max);
 
     try testing.expectEqual(@as(usize, 1), m.mems.len);
-    try testing.expectEqual(@as(u32, 1), m.mems[0].limits.min);
+    try testing.expectEqual(@as(u64, 1), m.mems[0].limits.min);
 }
 
 // ── malformed inputs ────────────────────────────────────────────────

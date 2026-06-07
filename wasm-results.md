@@ -10,4 +10,4 @@ Sarcasm does not yet support are counted as skips.
 
 | passing | failing | pass% | skipped | files |
 |---|---|---|---|---|
-| 54248 | 2232 | 96.05 | 1104 | 157 |
+| 55790 | 690 | 98.78 | 1104 | 157 |
