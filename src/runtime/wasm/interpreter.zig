@@ -84,6 +84,27 @@ const Global = struct {
     mutable: bool,
 };
 
+/// A host (native) function backing a wasm import — `spectest.print` and
+/// friends. Receives the marshalled argument cells (low bits hold
+/// scalars) and fills `results`.
+pub const HostFn = *const fn (args: []const u128, results: []u128) void;
+
+/// A resolved function-import target: a wasm function living in some
+/// (possibly other) instance, or a host callable. The function index
+/// space of an importing module is `imported_funcs ++ funcs`.
+pub const FuncRef = union(enum) {
+    wasm: struct { instance: *Instance, func: *const CompiledFunc },
+    host: struct { fn_ptr: HostFn, params: u32, results: u32 },
+};
+
+/// Resolved imports handed to `instantiate` for cross-module linking.
+/// Today only function imports are wired (the dominant linking case);
+/// table/memory/global imports arrive alongside the host `spectest`
+/// module.
+pub const Imports = struct {
+    funcs: []const FuncRef = &.{},
+};
+
 /// Linear memory: a byte-addressable, page-granular buffer. (The
 /// ArrayBuffer aliasing the JS API exposes arrives with that step;
 /// here it is a plain owned buffer.)
@@ -107,6 +128,9 @@ pub const Instance = struct {
     /// Number of imported functions preceding the defined ones in the
     /// function index space.
     func_import_count: u32,
+    /// Resolved function imports (cross-module linking). Empty for a
+    /// self-contained module. Index `i` is function-space index `i`.
+    imported_funcs: []const FuncRef = &.{},
     /// The module's single linear memory (multi-memory is post-1.0).
     memory: ?Memory,
     /// Tables (reference-types allows several).
@@ -139,11 +163,37 @@ pub const Instance = struct {
     }
 
     /// Resolve a function-index-space entry to a defined function, or
-    /// null if it names an import (host calls land in a later step).
+    /// null if it names an import.
     fn definedFunc(self: *const Instance, func_index: u32) ?*const CompiledFunc {
         if (func_index < self.func_import_count) return null;
         const local = func_index - self.func_import_count;
         return &self.funcs[local];
+    }
+
+    /// Resolve a function-index-space entry to its call target, spanning
+    /// imports (cross-module linking) and defined functions. Null on an
+    /// out-of-range index (an import the harness could not link, or a
+    /// bad index).
+    fn resolveFunc(self: *Instance, func_index: u32) ?FuncRef {
+        if (func_index < self.imported_funcs.len)
+            return self.imported_funcs[func_index];
+        const local = func_index - @as(u32, @intCast(self.imported_funcs.len));
+        if (local >= self.funcs.len) return null;
+        return .{ .wasm = .{ .instance = self, .func = &self.funcs[local] } };
+    }
+
+    /// Resolve an exported function by name to a callable `FuncRef`,
+    /// for cross-module linking (the importing instance stores this as
+    /// one of its `imported_funcs`). Null if there is no such function
+    /// export.
+    pub fn exportedFuncRef(self: *Instance, name: []const u8) ?FuncRef {
+        for (self.module.exports) |ex| {
+            switch (ex.desc) {
+                .func => |idx| if (std.mem.eql(u8, ex.name, name)) return self.resolveFunc(idx),
+                else => {},
+            }
+        }
+        return null;
     }
 };
 
@@ -154,6 +204,7 @@ pub fn instantiate(
     arena: std.mem.Allocator,
     allocator: std.mem.Allocator,
     module: *const Module,
+    imports: Imports,
 ) Error!Instance {
     const funcs = try validator.validateModule(arena, module);
 
@@ -192,6 +243,7 @@ pub fn instantiate(
         .funcs = funcs,
         .globals = globals,
         .func_import_count = func_imports,
+        .imported_funcs = imports.funcs,
         .memory = memory,
         .tables = tables,
         .elem_segments = &.{},
@@ -321,6 +373,11 @@ fn evalConstExpr(expr: []const u8) u64 {
 
 const Frame = struct {
     func: *const CompiledFunc,
+    /// The instance this frame executes in. Differs from the caller's
+    /// for a cross-module (imported) call; the interpreter rebinds
+    /// `Interp.instance` to it each time the active frame changes, so
+    /// every memory / table / global access targets the right module.
+    instance: *Instance,
     ip: usize,
     stp: usize,
     locals_base: usize,
@@ -383,7 +440,7 @@ const Interp = struct {
     /// Push a frame for a wasm call. The top `param_count` operands are
     /// already the callee's first locals (zero-copy); remaining locals
     /// are zero-initialized.
-    fn pushFrame(self: *Interp, func: *const CompiledFunc, param_count: u32) TrapError!void {
+    fn pushFrame(self: *Interp, instance: *Instance, func: *const CompiledFunc, param_count: u32) TrapError!void {
         if (self.nframes >= self.frames.len) return error.CallStackExhausted;
         const locals_base = self.sp - param_count;
         // Zero-init declared (non-parameter) locals.
@@ -393,15 +450,30 @@ const Interp = struct {
         // Reserve operand headroom check.
         if (locals_base + total_locals + func.max_stack > self.stack.len)
             return error.ValueStackOverflow;
-        const rc: u32 = @intCast(self.instance.module.types[func.type_index].results.len);
+        const rc: u32 = @intCast(instance.module.types[func.type_index].results.len);
         self.frames[self.nframes] = .{
             .func = func,
+            .instance = instance,
             .ip = 0,
             .stp = 0,
             .locals_base = locals_base,
             .result_count = rc,
         };
         self.nframes += 1;
+    }
+
+    /// Execute a host (imported native) function inline: pop its
+    /// arguments, run it, push its results. No wasm frame is created.
+    fn callHost(self: *Interp, h: anytype) TrapError!void {
+        var argbuf: [16]u128 = undefined;
+        var resbuf: [16]u128 = undefined;
+        if (h.params > argbuf.len or h.results > resbuf.len)
+            return error.UnsupportedImportCall;
+        self.sp -= h.params;
+        @memcpy(argbuf[0..h.params], self.stack[self.sp..][0..h.params]);
+        h.fn_ptr(argbuf[0..h.params], resbuf[0..h.results]);
+        var i: u32 = 0;
+        while (i < h.results) : (i += 1) try self.pushCell(resbuf[i]);
     }
 
     /// Collapse the top frame: move its results down over the frame and
@@ -428,7 +500,11 @@ pub fn invoke(
     func_index: u32,
     args: []const u128,
 ) Error![]u128 {
-    const entry = self.definedFunc(func_index) orelse return error.UnsupportedImportCall;
+    const entry_ref = self.resolveFunc(func_index) orelse return error.UnsupportedImportCall;
+    const entry = switch (entry_ref) {
+        .wasm => |w| w.func,
+        .host => return error.UnsupportedImportCall,
+    };
 
     const stack = try allocator.alloc(Cell, STACK_CELLS);
     defer allocator.free(stack);
@@ -441,7 +517,7 @@ pub fn invoke(
     const param_count: u32 = @intCast(self.module.types[entry.type_index].params.len);
     if (args.len != param_count) return error.UnsupportedImportCall;
     for (args) |a| try ip.pushCell(a);
-    try ip.pushFrame(entry, param_count);
+    try ip.pushFrame(self, entry, param_count);
 
     try run(&ip);
 
@@ -455,8 +531,11 @@ pub fn invoke(
 
 fn run(ip: *Interp) Error!void {
     var f: *Frame = &ip.frames[ip.nframes - 1];
-    // Outer loop reloads frame-local cache after a call / return.
+    // Outer loop reloads frame-local cache after a call / return. The
+    // active instance is rebound to this frame's so an imported call's
+    // body sees its own module's memory / tables / globals.
     while (true) {
+        ip.instance = f.instance;
         const func = f.func;
         const body = func.body;
         const side_table = func.side_table;
@@ -539,13 +618,21 @@ fn run(ip: *Interp) Error!void {
                 },
                 .call => {
                     const fidx = readU32(body, &pc);
-                    const callee = ip.instance.definedFunc(fidx) orelse return error.UnsupportedImportCall;
-                    const pcount: u32 = @intCast(ip.instance.module.types[callee.type_index].params.len);
-                    f.ip = pc;
-                    f.stp = stp;
-                    try ip.pushFrame(callee, pcount);
-                    f = &ip.frames[ip.nframes - 1];
-                    break :inner true;
+                    const ref = ip.instance.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
+                    switch (ref) {
+                        .host => |h| {
+                            try ip.callHost(h);
+                            // No frame change; continue this body.
+                        },
+                        .wasm => |w| {
+                            const pcount: u32 = @intCast(w.instance.module.types[w.func.type_index].params.len);
+                            f.ip = pc;
+                            f.stp = stp;
+                            try ip.pushFrame(w.instance, w.func, pcount);
+                            f = &ip.frames[ip.nframes - 1];
+                            break :inner true;
+                        },
+                    }
                 },
                 .call_indirect => {
                     const type_idx = readU32(body, &pc);
@@ -557,15 +644,26 @@ fn run(ip: *Interp) Error!void {
                     const ref = table.elems[elem_index];
                     if (ref == REF_NULL) return error.UninitializedElement;
                     const fidx: u32 = @truncate(ref);
-                    const callee = ip.instance.definedFunc(fidx) orelse return error.UnsupportedImportCall;
+                    const target = ip.instance.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
                     const expected = ip.instance.module.types[type_idx];
-                    const actual = ip.instance.module.types[callee.type_index];
-                    if (!funcTypesEqual(expected, actual)) return error.IndirectCallTypeMismatch;
-                    f.ip = pc;
-                    f.stp = stp;
-                    try ip.pushFrame(callee, @intCast(actual.params.len));
-                    f = &ip.frames[ip.nframes - 1];
-                    break :inner true;
+                    switch (target) {
+                        .host => |h| {
+                            // A host target's signature is checked at link
+                            // time; run it inline.
+                            if (expected.params.len != h.params or expected.results.len != h.results)
+                                return error.IndirectCallTypeMismatch;
+                            try ip.callHost(h);
+                        },
+                        .wasm => |w| {
+                            const actual = w.instance.module.types[w.func.type_index];
+                            if (!funcTypesEqual(expected, actual)) return error.IndirectCallTypeMismatch;
+                            f.ip = pc;
+                            f.stp = stp;
+                            try ip.pushFrame(w.instance, w.func, @intCast(actual.params.len));
+                            f = &ip.frames[ip.nframes - 1];
+                            break :inner true;
+                        },
+                    }
                 },
 
                 .ref_null => {

@@ -120,15 +120,19 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
     const commands = (root.object.get("commands") orelse return error.BadManifest).array.items;
 
     var counts: Counts = .{};
-    var current: ?wasm.Instance = null;
+    var current: ?*wasm.Instance = null;
     var current_module: ?*wasm.Module = null;
+
+    // Cross-module linking registry: registered name → instance. Names
+    // a `register` command exposes for a later module's imports.
+    var registry: Registry = .{};
 
     for (commands) |cmd_v| {
         const cmd = cmd_v.object;
         const kind = (cmd.get("type") orelse continue).string;
 
         if (std.mem.eql(u8, kind, "module")) {
-            const res = loadModule(arena, io, dir, cmd) catch null;
+            const res = loadModule(arena, io, dir, cmd, &registry) catch null;
             if (res) |loaded| {
                 current = loaded.instance;
                 current_module = loaded.module;
@@ -136,9 +140,17 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
                 current = null;
                 current_module = null;
             }
+        } else if (std.mem.eql(u8, kind, "register")) {
+            // Expose the current instance under its registration name so
+            // subsequent modules can import its exports.
+            const as = if (cmd.get("as")) |a| a.string else "";
+            if (current) |inst| {
+                registry.put(arena, as, inst) catch {};
+            }
+            // A register is not a scored assertion.
         } else if (std.mem.eql(u8, kind, "assert_return")) {
             const before = counts.fail;
-            scoreReturn(arena, cmd, &current, current_module, &counts);
+            scoreReturn(arena, cmd, current, current_module, &counts);
             if (debug_loads and counts.fail > before) {
                 const action = cmd.get("action").?.object;
                 var line: [256]u8 = undefined;
@@ -147,11 +159,11 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
                 std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
             }
         } else if (std.mem.eql(u8, kind, "assert_trap") or std.mem.eql(u8, kind, "assert_exhaustion")) {
-            scoreTrap(arena, cmd, &current, current_module, &counts, std.mem.eql(u8, kind, "assert_exhaustion"));
+            scoreTrap(arena, cmd, current, current_module, &counts, std.mem.eql(u8, kind, "assert_exhaustion"));
         } else if (std.mem.eql(u8, kind, "assert_invalid") or std.mem.eql(u8, kind, "assert_malformed")) {
             scoreRejected(arena, io, dir, cmd, &counts);
         } else if (std.mem.eql(u8, kind, "action")) {
-            const r = doAction(arena, cmd.get("action").?.object, &current, current_module);
+            const r = doAction(arena, cmd.get("action").?.object, current, current_module);
             switch (r) {
                 .values => counts.pass += 1,
                 else => counts.fail += 1,
@@ -165,11 +177,74 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
     return counts;
 }
 
-const Loaded = struct { instance: wasm.Instance, module: *wasm.Module };
+const Loaded = struct { instance: *wasm.Instance, module: *wasm.Module };
 
 var debug_loads = false;
 
-fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap) !?Loaded {
+/// Cross-module linking registry. A `register "name"` command binds the
+/// current instance to a name; a later module importing `(name, field)`
+/// resolves against it. Latest binding wins.
+const Registry = struct {
+    entries: std.ArrayListUnmanaged(Entry) = .empty,
+
+    const Entry = struct { name: []const u8, inst: *wasm.Instance };
+
+    fn put(self: *Registry, a: std.mem.Allocator, name: []const u8, inst: *wasm.Instance) !void {
+        try self.entries.append(a, .{ .name = name, .inst = inst });
+    }
+
+    fn get(self: *const Registry, name: []const u8) ?*wasm.Instance {
+        var i = self.entries.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, self.entries.items[i].name, name)) return self.entries.items[i].inst;
+        }
+        return null;
+    }
+};
+
+/// The `spectest` host module's functions are all `print*` — they take
+/// arguments and return nothing. Modelled as a no-op.
+fn spectestNoop(args: []const u128, results: []u128) void {
+    _ = args;
+    @memset(results, 0);
+}
+
+/// Resolve a module's imports for cross-module linking. Function imports
+/// link to `spectest` host stubs or to a registered instance's exports;
+/// any non-function import (table / memory / global) is not yet wired,
+/// so the module is reported unlinkable.
+fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const Registry) !wasm.Imports {
+    var nfunc: usize = 0;
+    for (modp.imports) |imp| {
+        switch (imp.desc) {
+            .func => nfunc += 1,
+            else => return error.Unlinkable,
+        }
+    }
+    if (nfunc == 0) return .{};
+
+    const funcs = try arena.alloc(wasm.FuncRef, nfunc);
+    var fi: usize = 0;
+    for (modp.imports) |imp| {
+        const type_idx = imp.desc.func;
+        if (std.mem.eql(u8, imp.module, "spectest")) {
+            const ft = modp.types[type_idx];
+            funcs[fi] = .{ .host = .{
+                .fn_ptr = spectestNoop,
+                .params = @intCast(ft.params.len),
+                .results = @intCast(ft.results.len),
+            } };
+        } else {
+            const provider = registry.get(imp.module) orelse return error.Unlinkable;
+            funcs[fi] = provider.exportedFuncRef(imp.name) orelse return error.Unlinkable;
+        }
+        fi += 1;
+    }
+    return .{ .funcs = funcs };
+}
+
+fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap, registry: *const Registry) !?Loaded {
     const filename = (cmd.get("filename") orelse return null).string;
     const bytes = dir.readFileAlloc(io, filename, arena, .limited(64 * 1024 * 1024)) catch return null;
     const modp = try arena.create(wasm.Module);
@@ -177,11 +252,19 @@ fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.js
         if (debug_loads) logLoadError(io, filename, "decode", err);
         return null;
     };
-    const instance = wasm.instantiate(arena, arena, modp) catch |err| {
+    const imports = resolveImports(arena, modp, registry) catch |err| {
+        if (debug_loads) logLoadError(io, filename, "link", err);
+        return null;
+    };
+    const instance = wasm.instantiate(arena, arena, modp, imports) catch |err| {
         if (debug_loads) logLoadError(io, filename, "instantiate", err);
         return null;
     };
-    return .{ .instance = instance, .module = modp };
+    // The instance must outlive this call at a stable address: imports
+    // reference it by pointer, and its own functions resolve to `&self`.
+    const ip = try arena.create(wasm.Instance);
+    ip.* = instance;
+    return .{ .instance = ip, .module = modp };
 }
 
 fn logLoadError(io: std.Io, filename: []const u8, phase: []const u8, err: anyerror) void {
@@ -199,14 +282,14 @@ const ActionResult = union(enum) {
     unsupported,
 };
 
-fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: *?wasm.Instance, modp: ?*wasm.Module) ActionResult {
+fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: ?*wasm.Instance, modp: ?*wasm.Module) ActionResult {
     const atype = (action.get("type") orelse return .unsupported).string;
     const field = (action.get("field") orelse return .unsupported).string;
     const m = modp orelse return .no_module;
 
     if (std.mem.eql(u8, atype, "get")) {
         const gidx = exportIndex(m, field, .global) orelse return .no_module;
-        var inst = current.* orelse return .no_module;
+        const inst = current orelse return .no_module;
         const cell = inst.readGlobalByIndex(gidx) orelse return .unsupported;
         const out = arena.alloc(u128, 1) catch return .{ .err = error.OutOfMemory };
         out[0] = cell;
@@ -217,12 +300,12 @@ fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: *?was
     const fidx = exportIndex(m, field, .func) orelse return .no_module;
 
     const args = encodeArgs(arena, action) catch return .unsupported;
-    var inst = current.* orelse return .no_module;
-    const result = wasm.invoke(&inst, arena, fidx, args) catch |err| return .{ .err = err };
+    const inst = current orelse return .no_module;
+    const result = wasm.invoke(inst, arena, fidx, args) catch |err| return .{ .err = err };
     return .{ .values = result };
 }
 
-fn scoreReturn(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: *?wasm.Instance, modp: ?*wasm.Module, counts: *Counts) void {
+fn scoreReturn(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.Instance, modp: ?*wasm.Module, counts: *Counts) void {
     const r = doAction(arena, cmd.get("action").?.object, current, modp);
     const values = switch (r) {
         .values => |v| v,
@@ -252,7 +335,7 @@ fn scoreReturn(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: *?was
     counts.pass += 1;
 }
 
-fn scoreTrap(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: *?wasm.Instance, modp: ?*wasm.Module, counts: *Counts, exhaustion: bool) void {
+fn scoreTrap(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.Instance, modp: ?*wasm.Module, counts: *Counts, exhaustion: bool) void {
     const r = doAction(arena, cmd.get("action").?.object, current, modp);
     switch (r) {
         .err => |err| {
@@ -290,7 +373,7 @@ fn scoreRejected(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std
         };
         modp.* = m;
         // Decoded; expect validation (via instantiate) to reject it.
-        if (wasm.instantiate(arena, arena, modp)) |_| {
+        if (wasm.instantiate(arena, arena, modp, .{})) |_| {
             counts.fail += 1; // accepted a module the spec rejects
         } else |_| {
             counts.pass += 1;

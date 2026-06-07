@@ -23,7 +23,7 @@ fn runI32(bytes: []const u8, name: []const u8, args: []const i32) !i32 {
     const mp = try a.create(wasm.Module);
     mp.* = m;
 
-    var instance = try interp.instantiate(a, testing.allocator, mp);
+    var instance = try interp.instantiate(a, testing.allocator, mp, .{});
     defer instance.deinit();
 
     const fidx = funcExport(mp, name) orelse return error.NoSuchExport;
@@ -616,7 +616,7 @@ fn callCells(
     const m = try wasm.decode(a, bytes);
     const modp = try a.create(wasm.Module);
     modp.* = m;
-    var instance = try interp.instantiate(a, testing.allocator, modp);
+    var instance = try interp.instantiate(a, testing.allocator, modp, .{});
     defer instance.deinit();
     const fidx = funcExport(modp, name) orelse return error.NoSuchExport;
     const res = try interp.invoke(&instance, testing.allocator, fidx, arg_cells);

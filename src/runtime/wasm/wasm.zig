@@ -60,6 +60,9 @@ pub const validateModule = validator.validateModule;
 pub const Instance = interpreter.Instance;
 pub const instantiate = interpreter.instantiate;
 pub const invoke = interpreter.invoke;
+pub const Imports = interpreter.Imports;
+pub const FuncRef = interpreter.FuncRef;
+pub const HostFn = interpreter.HostFn;
 
 test {
     _ = @import("reader.zig");
