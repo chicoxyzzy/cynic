@@ -1055,6 +1055,11 @@ pub const Realm = struct {
     /// objects without `new`.
     wasm_module_prototype: ?*@import("object.zig").JSObject = null,
     wasm_instance_prototype: ?*@import("object.zig").JSObject = null,
+    /// `WebAssembly.{CompileError,LinkError,RuntimeError}.prototype`,
+    /// cached at install so the engine can throw the right error class.
+    wasm_compile_error_prototype: ?*@import("object.zig").JSObject = null,
+    wasm_link_error_prototype: ?*@import("object.zig").JSObject = null,
+    wasm_runtime_error_prototype: ?*@import("object.zig").JSObject = null,
     /// Phase 3 SES override-mistake fix — `freezePrimordials`
     /// installs a `SyntheticAccessor` pair (getter + setter
     /// JSFunctions sharing one capture cell) for every data

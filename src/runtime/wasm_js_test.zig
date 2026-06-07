@@ -694,3 +694,42 @@ test "compile rejects invalid bytes" {
         "  (e) => { globalThis.__r = 1; });";
     try expectIntWasmAsync(setup, 1);
 }
+
+// ── CompileError / LinkError / RuntimeError ─────────────────────────
+
+test "the wasm error types are Error subclasses on the namespace" {
+    try expectIntWasm("typeof WebAssembly.CompileError === 'function' && typeof WebAssembly.LinkError === 'function' && typeof WebAssembly.RuntimeError === 'function' ? 1 : 0", 1);
+    const src =
+        "const e = new WebAssembly.CompileError('boom');" ++
+        "(e instanceof WebAssembly.CompileError && e instanceof Error && e.message === 'boom' && e.name === 'CompileError') ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "invalid module bytes throw a CompileError" {
+    const src =
+        "try { new WebAssembly.Module(new Uint8Array([0,1,2,3])); 0 }" ++
+        "catch (e) { (e instanceof WebAssembly.CompileError) ? 1 : 0 }";
+    try expectIntWasm(src, 1);
+}
+
+test "a bad import throws a LinkError" {
+    const src =
+        "try { new WebAssembly.Instance(new WebAssembly.Module(" ++ consumer_bytes ++ "), { env: { f: 123 } }); 0 }" ++
+        "catch (e) { (e instanceof WebAssembly.LinkError) ? 1 : 0 }";
+    try expectIntWasm(src, 1);
+}
+
+test "a wasm trap throws a RuntimeError" {
+    const src =
+        "const d = new WebAssembly.Instance(new WebAssembly.Module(" ++ div_bytes ++ ")).exports.div;" ++
+        "try { d(1, 0); 0 } catch (e) { (e instanceof WebAssembly.RuntimeError) ? 1 : 0 }";
+    try expectIntWasm(src, 1);
+}
+
+test "compile rejects with a CompileError" {
+    const setup =
+        "WebAssembly.compile(new Uint8Array([0,1,2,3])).then(" ++
+        "  () => { globalThis.__r = 0; }," ++
+        "  (e) => { globalThis.__r = (e instanceof WebAssembly.CompileError) ? 1 : 0; });";
+    try expectIntWasmAsync(setup, 1);
+}
