@@ -7898,8 +7898,16 @@ pub const Compiler = struct {
 
         if (slot_count_patch) |p| {
             self.builder.code.items[p] = self.env_slot_count;
-        } else {
-            std.debug.assert(self.env_slot_count == 0);
+        } else if (self.env_slot_count != 0) {
+            // functionEntryEnvNeeded predicted zero env slots, but
+            // body compilation bumped env_slot_count anyway. Happens
+            // on corner-case shapes — e.g. a `static [self-ref](…)`
+            // class method inside a per-iteration `for-let` env where
+            // capture analysis under-predicts. Surface as a typed
+            // CompileError (the host throws SyntaxError at the
+            // boundary) rather than abort the process — AGENTS.md
+            // host-safety.
+            return error.UnsupportedExpression;
         }
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
@@ -8072,8 +8080,16 @@ pub const Compiler = struct {
 
         if (slot_count_patch) |p| {
             self.builder.code.items[p] = self.env_slot_count;
-        } else {
-            std.debug.assert(self.env_slot_count == 0);
+        } else if (self.env_slot_count != 0) {
+            // functionEntryEnvNeeded predicted zero env slots, but
+            // body compilation bumped env_slot_count anyway. Happens
+            // on corner-case shapes — e.g. a `static [self-ref](…)`
+            // class method inside a per-iteration `for-let` env where
+            // capture analysis under-predicts. Surface as a typed
+            // CompileError (the host throws SyntaxError at the
+            // boundary) rather than abort the process — AGENTS.md
+            // host-safety.
+            return error.UnsupportedExpression;
         }
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
@@ -8246,8 +8262,16 @@ pub const Compiler = struct {
 
         if (slot_count_patch) |p| {
             self.builder.code.items[p] = self.env_slot_count;
-        } else {
-            std.debug.assert(self.env_slot_count == 0);
+        } else if (self.env_slot_count != 0) {
+            // functionEntryEnvNeeded predicted zero env slots, but
+            // body compilation bumped env_slot_count anyway. Happens
+            // on corner-case shapes — e.g. a `static [self-ref](…)`
+            // class method inside a per-iteration `for-let` env where
+            // capture analysis under-predicts. Surface as a typed
+            // CompileError (the host throws SyntaxError at the
+            // boundary) rather than abort the process — AGENTS.md
+            // host-safety.
+            return error.UnsupportedExpression;
         }
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
