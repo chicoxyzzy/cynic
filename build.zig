@@ -340,6 +340,24 @@ pub fn build(b: *std.Build) void {
     const wts_step = b.step("wasm-testsuite", "Run the WebAssembly spec testsuite conformance harness");
     wts_step.dependOn(&run_wts.step);
 
+    // `zig build wasm-bench` — standalone ReleaseFast micro-benchmark
+    // for the Sarcasm interpreter (dispatch-bound workloads), so a
+    // hot-loop change can be measured against a fixed baseline.
+    const wbench_mod = b.createModule(.{
+        .root_source_file = b.path("tools/wasm_bench.zig"),
+        .target = target,
+        .optimize = t262_optimize,
+    });
+    wbench_mod.addImport("cynic", lib_mod_fast);
+    const wbench_exe = b.addExecutable(.{
+        .name = "cynic-wasm-bench",
+        .root_module = wbench_mod,
+    });
+    const run_wbench = b.addRunArtifact(wbench_exe);
+    if (b.args) |args| run_wbench.addArgs(args);
+    const wbench_step = b.step("wasm-bench", "Run the WebAssembly interpreter micro-benchmark");
+    wbench_step.dependOn(&run_wbench.step);
+
     // The frontmatter / skip helper modules under tools/test262/ get
     // their inline `test` blocks picked up via the t262 module's test
     // walk.
