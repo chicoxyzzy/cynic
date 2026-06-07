@@ -574,6 +574,11 @@ pub fn install(realm: *Realm) !void {
     try @import("builtins/function.zig").installVariantPrototypes(realm);
     try @import("builtins/regexp.zig").install(realm);
     try @import("builtins/json.zig").install(realm);
+    // The `WebAssembly` namespace — host surface over Sarcasm. Installed
+    // after typed_array so `validate`'s BufferSource handling is in
+    // place; the runnable compile/instantiate surface (gated by
+    // --allow=wasm) lands in a later step.
+    try @import("builtins/webassembly.zig").install(realm);
     try @import("builtins/iterator.zig").install(realm);
     // §27.3 DisposableStack (ES2026 explicit-resource-management).
     // Installed AFTER `error.installAll` (so the SuppressedError
