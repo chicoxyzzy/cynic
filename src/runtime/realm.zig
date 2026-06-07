@@ -1041,6 +1041,9 @@ pub const Realm = struct {
     /// wholesale at realm teardown, so wasm objects need no per-object
     /// cleanup. The realm-owned store of docs/wasm-engine.md §7.
     wasm_arena: ?std.heap.ArenaAllocator = null,
+    /// `WebAssembly.Global.prototype`, cached at install so an instance's
+    /// global exports can be wrapped as `Global` objects.
+    wasm_global_prototype: ?*@import("object.zig").JSObject = null,
     /// Phase 3 SES override-mistake fix — `freezePrimordials`
     /// installs a `SyntheticAccessor` pair (getter + setter
     /// JSFunctions sharing one capture cell) for every data

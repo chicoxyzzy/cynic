@@ -228,6 +228,30 @@ pub const Instance = struct {
         return self.module.types[self.module.funcs[local]];
     }
 
+    /// A pointer to a global's live operand cell (imports occupy the
+    /// front of the index space), for the JS API's `Global.prototype.
+    /// value` accessor — reads and writes are visible to wasm.
+    pub fn globalCellPtr(self: *Instance, idx: u32) ?*u128 {
+        if (idx >= self.globals.len) return null;
+        return &self.globals[idx].value;
+    }
+
+    /// A global's declared type (value type + mutability) by index,
+    /// spanning imports and defined globals.
+    pub fn globalTypeAt(self: *const Instance, idx: u32) ?types.GlobalType {
+        var k: u32 = 0;
+        for (self.module.imports) |imp| switch (imp.desc) {
+            .global => |gt| {
+                if (k == idx) return gt;
+                k += 1;
+            },
+            else => {},
+        };
+        const local = idx - k;
+        if (local >= self.module.globals.len) return null;
+        return self.module.globals[local].type;
+    }
+
     /// Resolve an exported function by name to a callable `FuncRef`,
     /// for cross-module linking (the importing instance stores this as
     /// one of its `imported_funcs`). Null if there is no such function

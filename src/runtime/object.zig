@@ -917,6 +917,10 @@ pub const JSObject = struct {
     /// casts it); the record lives in the realm's `wasm_arena`, so it
     /// holds no GC values and needs no marking or cleanup.
     wasm_module: ?*anyopaque = null,
+    /// A `WebAssembly.Global`'s backing record (cell pointer + value
+    /// type + mutability). Opaque, arena-owned — same contract as
+    /// `wasm_module`.
+    wasm_global: ?*anyopaque = null,
     /// `Promise.prototype.finally` callback — set on the per-
     /// `.finally()` context object the reaction closures capture
     /// via `is_arrow + captured_this`. Hidden from JS.
