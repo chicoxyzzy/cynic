@@ -341,9 +341,12 @@ exported function    → wasm_export slot → *ExportRecord (instance, index)
 
 `Memory.buffer` is a non-owning `ArrayBuffer` view over the arena bytes
 (an `array_buffer_external` flag keeps `deinit` from freeing them);
-`grow` detaches the old buffer and re-materializes a fresh one. Known
-gaps: `externref` tables (await the §5 GC integration), and an imported
-memory is snapshotted at instantiation rather than shared.
+`grow` detaches the old buffer and re-materializes a fresh one. An
+imported memory shares the provider's bytes (`Imports.share_memory`), so
+writes propagate both ways; the spectest harness keeps the snapshot
+(dupe) default. Known gaps: `externref` tables (await the §5 GC
+integration), and a JS-side `grow` of an imported memory isn't yet
+observed by the importer (the aliased slice header goes stale).
 
 ## 9. SES / hardening
 

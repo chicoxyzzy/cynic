@@ -126,8 +126,13 @@ pub const Imports = struct {
     /// Imported global values, in global-import declaration order. Each
     /// occupies the front of the importing module's global index space.
     globals: []const u128 = &.{},
-    /// Source for the imported linear memory (snapshotted at instantiate).
+    /// Source for the imported linear memory. By default its bytes are
+    /// snapshotted (duped) at instantiate; with `share_memory` the
+    /// importing instance aliases the provider's byte slice instead, so
+    /// writes are mutually visible (the JS API shares; the spectest
+    /// harness snapshots).
     memory: ?*const Memory = null,
+    share_memory: bool = false,
     /// Imported tables, in table-import order — the provider's own
     /// `*Table` (shared), so writes are mutually visible.
     tables: []const *Table = &.{},
@@ -320,7 +325,7 @@ pub const Instance = struct {
     }
 
     /// The exported linear memory named `name`, for a later module
-    /// importing it (snapshotted by the importer).
+    /// importing it (duped or, with `Imports.share_memory`, aliased).
     pub fn exportedMemory(self: *Instance, name: []const u8) ?*const Memory {
         for (self.module.exports) |ex| {
             switch (ex.desc) {
@@ -395,7 +400,8 @@ pub fn instantiate(
     }
 
     // The single linear memory (multi-memory is post-1.0): an imported
-    // memory occupies memory index 0 and is snapshotted from the
+    // memory occupies memory index 0 — its bytes are shared (aliased)
+    // when `share_memory` is set, else snapshotted (duped) from the
     // provider; otherwise a defined memory is zero-filled to its minimum.
     var memory: ?Memory = null;
     var has_mem_import = false;
@@ -407,7 +413,8 @@ pub fn instantiate(
     }
     if (has_mem_import) {
         if (imports.memory) |src| {
-            memory = .{ .data = try allocator.dupe(u8, src.data), .max_pages = src.max_pages, .is_64 = src.is_64 };
+            const data = if (imports.share_memory) src.data else try allocator.dupe(u8, src.data);
+            memory = .{ .data = data, .max_pages = src.max_pages, .is_64 = src.is_64 };
         }
     } else if (module.mems.len > 0) {
         const lim = module.mems[0].limits;

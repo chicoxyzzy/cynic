@@ -17,11 +17,13 @@
 //! All wasm artifacts live in the realm's `wasm_arena`, freed at realm
 //! teardown, so they need no per-object cleanup or GC marking.
 //!
-//! Known gaps: externref tables (await GC integration); an imported
-//! memory is snapshotted at instantiation rather than shared; v128 /
-//! reference marshalling across the JS boundary.
-//! `Instance.prototype.exports` is a prototype getter per spec; this
-//! implementation exposes the exports object as an own data property.
+//! Known gaps: externref tables (await GC integration); v128 /
+//! reference marshalling across the JS boundary. An imported memory
+//! shares the provider's bytes (writes propagate both ways), though a
+//! JS-side `grow` after instantiation isn't yet observed by the
+//! importer. `Instance.prototype.exports` is a prototype getter per
+//! spec; this implementation exposes the exports object as an own data
+//! property.
 
 const std = @import("std");
 const Realm = @import("../realm.zig").Realm;
@@ -718,7 +720,9 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
             .mem => memory = try resolveMemImport(realm, v),
         }
     }
-    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory };
+    // JS-API imports share the provider's linear memory (writes are
+    // mutually visible), unlike the spectest harness's snapshot.
+    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory, .share_memory = true };
 }
 
 /// `importObject[module][name]`.

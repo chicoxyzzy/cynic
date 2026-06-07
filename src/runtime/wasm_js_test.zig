@@ -630,6 +630,17 @@ test "a WebAssembly.Memory import is used by wasm" {
     try expectIntWasm(src, 99);
 }
 
+test "an imported memory is shared: a post-instantiation JS write reaches wasm" {
+    // The snapshot model would miss this — the write lands after the
+    // instance is built, so it only reaches wasm if the bytes are shared.
+    const src =
+        "const mem = new WebAssembly.Memory({ initial: 1 });" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ mem_import_bytes ++ "), { env: { mem } });" ++
+        "new Uint8Array(mem.buffer)[8] = 123;" ++ // write AFTER instantiation
+        "inst.exports.load(8)"; // -> 123 only if shared
+    try expectIntWasm(src, 123);
+}
+
 test "a WebAssembly.Table import drives wasm call_indirect" {
     const src =
         "const f7 = new WebAssembly.Instance(new WebAssembly.Module(" ++ f7_bytes ++ ")).exports.f;" ++
