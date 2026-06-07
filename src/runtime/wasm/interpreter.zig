@@ -1224,6 +1224,87 @@ fn execSimd(ip: *Interp, sub: u32, body: []const u8, pc: *usize) TrapError!void 
         204 => try shiftOp(ip, 2, i64, u64, .shr_s),
         205 => try shiftOp(ip, 2, i64, u64, .shr_u),
 
+        // integer abs / popcnt
+        96 => try ip.pushV128(vabs(16, i8, ip.popV128())),
+        128 => try ip.pushV128(vabs(8, i16, ip.popV128())),
+        160 => try ip.pushV128(vabs(4, i32, ip.popV128())),
+        192 => try ip.pushV128(vabs(2, i64, ip.popV128())),
+        98 => try ip.pushV128(vpopcnt(ip.popV128())),
+
+        // all_true / bitmask
+        99 => try ip.pushI32(vallTrue(16, u8, ip.popV128())),
+        131 => try ip.pushI32(vallTrue(8, u16, ip.popV128())),
+        163 => try ip.pushI32(vallTrue(4, u32, ip.popV128())),
+        195 => try ip.pushI32(vallTrue(2, u64, ip.popV128())),
+        100 => try ip.pushI32(vbitmask(16, i8, ip.popV128())),
+        132 => try ip.pushI32(vbitmask(8, i16, ip.popV128())),
+        164 => try ip.pushI32(vbitmask(4, i32, ip.popV128())),
+        196 => try ip.pushI32(vbitmask(2, i64, ip.popV128())),
+
+        // min / max (signed and unsigned)
+        118 => try ip.pushV128(vminmax(ip, 16, i8, false)),
+        119 => try ip.pushV128(vminmax(ip, 16, u8, false)),
+        120 => try ip.pushV128(vminmax(ip, 16, i8, true)),
+        121 => try ip.pushV128(vminmax(ip, 16, u8, true)),
+        150 => try ip.pushV128(vminmax(ip, 8, i16, false)),
+        151 => try ip.pushV128(vminmax(ip, 8, u16, false)),
+        152 => try ip.pushV128(vminmax(ip, 8, i16, true)),
+        153 => try ip.pushV128(vminmax(ip, 8, u16, true)),
+        182 => try ip.pushV128(vminmax(ip, 4, i32, false)),
+        183 => try ip.pushV128(vminmax(ip, 4, u32, false)),
+        184 => try ip.pushV128(vminmax(ip, 4, i32, true)),
+        185 => try ip.pushV128(vminmax(ip, 4, u32, true)),
+
+        // avgr_u
+        123 => try ip.pushV128(vavgr(ip, 16, u8)),
+        155 => try ip.pushV128(vavgr(ip, 8, u16)),
+
+        // saturating add / sub
+        111 => try ip.pushV128(vsat(ip, 16, i8, true)),
+        112 => try ip.pushV128(vsat(ip, 16, u8, true)),
+        114 => try ip.pushV128(vsat(ip, 16, i8, false)),
+        115 => try ip.pushV128(vsat(ip, 16, u8, false)),
+        143 => try ip.pushV128(vsat(ip, 8, i16, true)),
+        144 => try ip.pushV128(vsat(ip, 8, u16, true)),
+        146 => try ip.pushV128(vsat(ip, 8, i16, false)),
+        147 => try ip.pushV128(vsat(ip, 8, u16, false)),
+
+        // i64x2 comparisons (signed only)
+        214 => try ip.pushV128(intCmp(ip, 2, i64, u64, 0)),
+        215 => try ip.pushV128(intCmp(ip, 2, i64, u64, 1)),
+        216 => try ip.pushV128(intCmp(ip, 2, i64, u64, 2)),
+        217 => try ip.pushV128(intCmp(ip, 2, i64, u64, 4)),
+        218 => try ip.pushV128(intCmp(ip, 2, i64, u64, 6)),
+        219 => try ip.pushV128(intCmp(ip, 2, i64, u64, 8)),
+
+        // float rounding
+        103 => try ip.pushV128(vround(4, f32, .ceil, ip.popV128())),
+        104 => try ip.pushV128(vround(4, f32, .floor, ip.popV128())),
+        105 => try ip.pushV128(vround(4, f32, .trunc, ip.popV128())),
+        106 => try ip.pushV128(vround(4, f32, .nearest, ip.popV128())),
+        116 => try ip.pushV128(vround(2, f64, .ceil, ip.popV128())),
+        117 => try ip.pushV128(vround(2, f64, .floor, ip.popV128())),
+        122 => try ip.pushV128(vround(2, f64, .trunc, ip.popV128())),
+        148 => try ip.pushV128(vround(2, f64, .nearest, ip.popV128())),
+
+        // pmin / pmax
+        234 => try ip.pushV128(vpminmax(ip, 4, f32, false)),
+        235 => try ip.pushV128(vpminmax(ip, 4, f32, true)),
+        246 => try ip.pushV128(vpminmax(ip, 2, f64, false)),
+        247 => try ip.pushV128(vpminmax(ip, 2, f64, true)),
+
+        // conversions
+        248 => try ip.pushV128(truncSatF32x4(i32, ip.popV128())),
+        249 => try ip.pushV128(truncSatF32x4(u32, ip.popV128())),
+        250 => try ip.pushV128(convertI32x4(i32, ip.popV128())),
+        251 => try ip.pushV128(convertI32x4(u32, ip.popV128())),
+        252 => try ip.pushV128(truncSatF64x2Zero(i32, ip.popV128())),
+        253 => try ip.pushV128(truncSatF64x2Zero(u32, ip.popV128())),
+        254 => try ip.pushV128(convertLowI32x4(i32, ip.popV128())),
+        255 => try ip.pushV128(convertLowI32x4(u32, ip.popV128())),
+        94 => try ip.pushV128(demoteF64x2Zero(ip.popV128())),
+        95 => try ip.pushV128(promoteLowF32x4(ip.popV128())),
+
         else => return error.UnsupportedImportCall, // not yet implemented
     }
 }
@@ -1273,6 +1354,132 @@ fn shiftOp(ip: *Interp, comptime N: usize, comptime S: type, comptime U: type, c
     const count: u32 = @bitCast(ip.popI32());
     const v = ip.popV128();
     try ip.pushV128(ishift(N, S, U, op, count, v));
+}
+
+fn vabs(comptime N: usize, comptime T: type, a: u128) u128 {
+    const x: @Vector(N, T) = @bitCast(a);
+    const z: @Vector(N, T) = @splat(0);
+    return @bitCast(@select(T, x < z, z -% x, x));
+}
+
+fn vpopcnt(a: u128) u128 {
+    const x: @Vector(16, u8) = @bitCast(a);
+    const counts: @Vector(16, u8) = @intCast(@popCount(x));
+    return @bitCast(counts);
+}
+
+fn vallTrue(comptime N: usize, comptime T: type, a: u128) i32 {
+    const x: @Vector(N, T) = @bitCast(a);
+    const z: @Vector(N, T) = @splat(0);
+    return @intFromBool(@reduce(.And, x != z));
+}
+
+fn vbitmask(comptime N: usize, comptime T: type, a: u128) i32 {
+    const arr: [N]T = @bitCast(a);
+    var m: u32 = 0;
+    inline for (0..N) |i| {
+        if (arr[i] < 0) m |= (@as(u32, 1) << @intCast(i));
+    }
+    return @bitCast(m);
+}
+
+fn vminmax(ip: *Interp, comptime N: usize, comptime T: type, comptime is_max: bool) u128 {
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const x: @Vector(N, T) = @bitCast(a);
+    const y: @Vector(N, T) = @bitCast(b);
+    return @bitCast(if (is_max) @max(x, y) else @min(x, y));
+}
+
+fn vavgr(ip: *Interp, comptime N: usize, comptime T: type) u128 {
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const xa: [N]T = @bitCast(a);
+    const ya: [N]T = @bitCast(b);
+    var r: [N]T = undefined;
+    inline for (0..N) |i| {
+        const s: u32 = @as(u32, xa[i]) + @as(u32, ya[i]) + 1;
+        r[i] = @truncate(s >> 1);
+    }
+    return @bitCast(r);
+}
+
+fn vsat(ip: *Interp, comptime N: usize, comptime T: type, comptime is_add: bool) u128 {
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const x: @Vector(N, T) = @bitCast(a);
+    const y: @Vector(N, T) = @bitCast(b);
+    return @bitCast(if (is_add) x +| y else x -| y);
+}
+
+fn vround(comptime N: usize, comptime T: type, comptime op: enum { ceil, floor, trunc, nearest }, a: u128) u128 {
+    const x: @Vector(N, T) = @bitCast(a);
+    switch (op) {
+        .ceil => return @bitCast(@ceil(x)),
+        .floor => return @bitCast(@floor(x)),
+        .trunc => return @bitCast(@trunc(x)),
+        .nearest => {
+            var r: @Vector(N, T) = x;
+            inline for (0..N) |i| r[i] = roundEven(T, x[i]);
+            return @bitCast(r);
+        },
+    }
+}
+
+fn vpminmax(ip: *Interp, comptime N: usize, comptime T: type, comptime is_max: bool) u128 {
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const x: @Vector(N, T) = @bitCast(a);
+    const y: @Vector(N, T) = @bitCast(b);
+    // pmin(a, b) = b < a ? b : a ; pmax(a, b) = a < b ? b : a (§5.4.8).
+    const r = if (is_max) @select(T, x < y, y, x) else @select(T, y < x, y, x);
+    return @bitCast(r);
+}
+
+fn truncSatF32x4(comptime Int: type, a: u128) u128 {
+    const f: [4]f32 = @bitCast(a);
+    var r: [4]Int = undefined;
+    inline for (0..4) |i| r[i] = truncSat(Int, f32, f[i]);
+    return @bitCast(r);
+}
+
+fn truncSatF64x2Zero(comptime Int: type, a: u128) u128 {
+    const f: [2]f64 = @bitCast(a);
+    var r: [4]Int = .{ 0, 0, 0, 0 };
+    r[0] = truncSat(Int, f64, f[0]);
+    r[1] = truncSat(Int, f64, f[1]);
+    return @bitCast(r);
+}
+
+fn convertI32x4(comptime Int: type, a: u128) u128 {
+    const iv: [4]Int = @bitCast(a);
+    var r: [4]f32 = undefined;
+    inline for (0..4) |i| r[i] = @floatFromInt(iv[i]);
+    return @bitCast(r);
+}
+
+fn convertLowI32x4(comptime Int: type, a: u128) u128 {
+    const iv: [4]Int = @bitCast(a);
+    var r: [2]f64 = undefined;
+    r[0] = @floatFromInt(iv[0]);
+    r[1] = @floatFromInt(iv[1]);
+    return @bitCast(r);
+}
+
+fn demoteF64x2Zero(a: u128) u128 {
+    const d: [2]f64 = @bitCast(a);
+    var r: [4]f32 = .{ 0, 0, 0, 0 };
+    r[0] = @floatCast(d[0]);
+    r[1] = @floatCast(d[1]);
+    return @bitCast(r);
+}
+
+fn promoteLowF32x4(a: u128) u128 {
+    const f: [4]f32 = @bitCast(a);
+    var r: [2]f64 = undefined;
+    r[0] = f[0];
+    r[1] = f[1];
+    return @bitCast(r);
 }
 
 // ── arithmetic ──────────────────────────────────────────────────────
