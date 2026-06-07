@@ -211,6 +211,13 @@ pub const Instance = struct {
         return .{ .wasm = .{ .instance = self, .func = &self.funcs[local] } };
     }
 
+    /// A pointer to the instance's live linear memory, for the JS API's
+    /// `Memory` object (its `buffer` aliases these bytes).
+    pub fn memoryPtr(self: *Instance) ?*Memory {
+        if (self.memory) |*m| return m;
+        return null;
+    }
+
     /// The function type (params / results) of a function-index-space
     /// entry, spanning imports and defined functions. For the JS API's
     /// argument / result marshalling.

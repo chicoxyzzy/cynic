@@ -459,3 +459,81 @@ test "a function set into a table from JS is callable by wasm call_indirect" {
         "inst.exports.callIndirect()"; // call_indirect 0 -> f -> 42
     try expectIntWasm(src, 42);
 }
+
+// ── WebAssembly.Memory ──────────────────────────────────────────────
+
+// Exports a memory "mem", a "store"(addr,val) and a "load"(addr).
+const memory_module_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,11,2,96,2,127,127,0,96,1,127,1,127, 3,3,2,0,1, 5,3,1,0,1, 7,22,3,3,109,101,109,2,0,5,115,116,111,114,101,0,0,4,108,111,97,100,0,1, 10,19,2,9,0,32,0,32,1,54,2,0,11,7,0,32,0,40,2,0,11])";
+
+test "WebAssembly.Memory is a constructor" {
+    try expectIntWasm("typeof WebAssembly.Memory === 'function' ? 1 : 0", 1);
+}
+
+test "a fresh Memory exposes a zeroed ArrayBuffer of the right size" {
+    const src =
+        "const m = new WebAssembly.Memory({ initial: 1 });" ++
+        "(m.buffer instanceof ArrayBuffer && m.buffer.byteLength === 65536 && new Uint8Array(m.buffer)[0] === 0) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "Memory.buffer is cached (same object across accesses)" {
+    try expectIntWasm("const m = new WebAssembly.Memory({ initial: 1 }); m.buffer === m.buffer ? 1 : 0", 1);
+}
+
+test "a JS write to Memory.buffer is visible to a wasm load" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ memory_module_bytes ++ "));" ++
+        "new Uint8Array(inst.exports.mem.buffer)[0] = 42;" ++
+        "inst.exports.load(0)"; // i32.load at 0 -> 42
+    try expectIntWasm(src, 42);
+}
+
+test "a wasm store is visible through Memory.buffer" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ memory_module_bytes ++ "));" ++
+        "inst.exports.store(4, 7);" ++ // i32.store 7 at address 4
+        "new Uint8Array(inst.exports.mem.buffer)[4]"; // low byte = 7
+    try expectIntWasm(src, 7);
+}
+
+test "an exported memory is a WebAssembly.Memory" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ memory_module_bytes ++ "));" ++
+        "inst.exports.mem instanceof WebAssembly.Memory ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "Memory.grow returns the old page count and resizes the buffer" {
+    const src =
+        "const m = new WebAssembly.Memory({ initial: 1, maximum: 3 });" ++
+        "const old = m.grow(1);" ++
+        "(old === 1 && m.buffer.byteLength === 131072) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "Memory.grow detaches the previous buffer" {
+    const src =
+        "const m = new WebAssembly.Memory({ initial: 1 });" ++
+        "const b = m.buffer; m.grow(1);" ++
+        "(b.byteLength === 0 && m.buffer.byteLength === 131072) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "Memory.grow past the maximum throws" {
+    const src =
+        "const m = new WebAssembly.Memory({ initial: 1, maximum: 1 });" ++
+        "try { m.grow(1); 0 } catch (e) { 1 }";
+    try expectIntWasm(src, 1);
+}
+
+test "growing an exported memory keeps wasm and JS in sync" {
+    // Grow from JS, then store from wasm into the new region and read it
+    // back through the fresh buffer.
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ memory_module_bytes ++ "));" ++
+        "inst.exports.mem.grow(1);" ++ // now 2 pages
+        "inst.exports.store(70000, 9);" ++ // address in the new page
+        "new Uint8Array(inst.exports.mem.buffer)[70000]";
+    try expectIntWasm(src, 9);
+}

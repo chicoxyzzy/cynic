@@ -70,6 +70,7 @@ pub const REF_NULL = interpreter.REF_NULL;
 pub const makeFuncRef = interpreter.makeFuncRef;
 pub const funcRefInstance = interpreter.funcRefInstance;
 pub const funcRefIndex = interpreter.funcRefIndex;
+pub const PAGE_SIZE = interpreter.PAGE_SIZE;
 
 test {
     _ = @import("reader.zig");
