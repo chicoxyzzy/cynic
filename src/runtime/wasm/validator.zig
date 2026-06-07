@@ -45,6 +45,7 @@ pub const ValidateError = error{
     BadConstExpr,
     DataCountMissing,
     UnknownDataSegment,
+    UnknownMemory,
     UnknownOpcode,
     TypeMismatch,
     StackUnderflow,
@@ -110,9 +111,16 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
     for (module.imports) |imp| {
         if (imp.desc == .global) glob_imports += 1;
     }
+    const total_globals = glob_imports + @as(u32, @intCast(module.globals.len));
     for (module.globals, 0..) |g, i| {
         try validateConstExpr(module, g.init_expr, g.type.val, glob_imports + @as(u32, @intCast(i)));
     }
+
+    // §3.4.5/§3.4.6 — active data and element segment offsets are
+    // constant expressions of the target's address type, and their
+    // memory / table indices must exist.
+    try validateData(module, total_globals);
+    try validateElements(module, total_globals);
 
     const out = try arena.alloc(CompiledFunc, module.code.len);
     for (module.code, 0..) |body, i| {
@@ -162,6 +170,12 @@ fn constGlobalType(module: *const Module, gi: u32, limit: u32) ValidateError!Val
 /// extended-const `i32`/`i64` `add` / `sub` / `mul`.
 fn validateConstExpr(module: *const Module, expr: []const u8, expected: ValType, global_limit: u32) ValidateError!void {
     var r = Reader.init(expr);
+    return validateConstExprR(module, &r, expected, global_limit);
+}
+
+/// As `validateConstExpr`, but consuming the expression from an existing
+/// reader (for data / element segment offsets parsed in-stream).
+fn validateConstExprR(module: *const Module, r: *Reader, expected: ValType, global_limit: u32) ValidateError!void {
     var stack: [16]ValType = undefined;
     var sp: usize = 0;
     const push = struct {
@@ -231,6 +245,87 @@ fn validateConstExpr(module: *const Module, expr: []const u8, expected: ValType,
         }
     }
     if (sp != 1 or stack[0] != expected) return error.TypeMismatch;
+}
+
+/// Number of memories in the index space (imports + defined).
+fn numMemories(module: *const Module) u32 {
+    var n: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .mem) n += 1;
+    }
+    return n + @as(u32, @intCast(module.mems.len));
+}
+
+/// Address type (i32, or i64 for a memory64) of memory 0.
+fn memAddrType(module: *const Module) ValType {
+    for (module.imports) |imp| {
+        if (imp.desc == .mem) return if (imp.desc.mem.limits.is_64) .i64 else .i32;
+    }
+    if (module.mems.len > 0) return if (module.mems[0].limits.is_64) .i64 else .i32;
+    return .i32;
+}
+
+/// §3.4.6 — validate active data segment offsets (constant expressions
+/// of the memory's address type) and their memory indices.
+fn validateData(module: *const Module, global_limit: u32) ValidateError!void {
+    if (module.data_count_in_section == 0) return;
+    var r = Reader.init(module.data_raw);
+    var i: u32 = 0;
+    while (i < module.data_count_in_section) : (i += 1) {
+        const flag = try r.uleb(u32);
+        const is_active = (flag != 1);
+        var memidx: u32 = 0;
+        if (flag == 2) memidx = try r.uleb(u32);
+        if (is_active) {
+            if (memidx >= numMemories(module)) return error.UnknownMemory;
+            try validateConstExprR(module, &r, memAddrType(module), global_limit);
+        }
+        const n = try r.uleb(u32);
+        _ = try r.bytesN(n);
+    }
+}
+
+/// §3.4.5 — validate active element segment offsets and the function
+/// indices a segment references.
+fn validateElements(module: *const Module, global_limit: u32) ValidateError!void {
+    if (module.elements_count == 0) return;
+    var r = Reader.init(module.elements_raw);
+    var i: u32 = 0;
+    while (i < module.elements_count) : (i += 1) {
+        const flag = try r.uleb(u32);
+        const kind = flag & 3; // 0/2 active, 1 passive, 3 declarative
+        const use_exprs = flag >= 4;
+        const is_active = (kind == 0 or kind == 2);
+
+        var table_idx: u32 = 0;
+        if (kind == 2) table_idx = try r.uleb(u32);
+        if (is_active) {
+            const addr = try tableAddr(module, table_idx);
+            try validateConstExprR(module, &r, addr, global_limit);
+        }
+        // For an expression-form segment the byte after the offset is the
+        // element reference type; for an index-form segment it is the
+        // elemkind (always funcref).
+        var elem_type: ValType = .funcref;
+        if (kind != 0) {
+            const b = try r.byte();
+            if (use_exprs) {
+                const rt = types.RefType.fromByte(b) orelse return error.BadRefType;
+                elem_type = rt.toValType();
+            }
+        }
+
+        const n = try r.uleb(u32);
+        var j: u32 = 0;
+        while (j < n) : (j += 1) {
+            if (use_exprs) {
+                try validateConstExprR(module, &r, elem_type, global_limit);
+            } else {
+                const fi = try r.uleb(u32);
+                if (fi >= totalFuncs(module)) return error.UnknownFunc;
+            }
+        }
+    }
 }
 
 const Validator = struct {

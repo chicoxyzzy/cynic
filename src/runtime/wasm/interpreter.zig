@@ -106,6 +106,10 @@ pub const Imports = struct {
     /// Imported global values, in global-import declaration order. Each
     /// occupies the front of the importing module's global index space.
     globals: []const u128 = &.{},
+    /// Source for the imported linear memory (snapshotted at instantiate).
+    memory: ?*const Memory = null,
+    /// Sources for imported tables, in table-import order (snapshotted).
+    tables: []const *const Table = &.{},
 };
 
 /// Linear memory: a byte-addressable, page-granular buffer. (The
@@ -209,6 +213,33 @@ pub const Instance = struct {
         }
         return null;
     }
+
+    /// The exported linear memory named `name`, for a later module
+    /// importing it (snapshotted by the importer).
+    pub fn exportedMemory(self: *Instance, name: []const u8) ?*const Memory {
+        for (self.module.exports) |ex| {
+            switch (ex.desc) {
+                .mem => if (std.mem.eql(u8, ex.name, name)) {
+                    if (self.memory) |*m| return m;
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    /// The exported table named `name`, for a later module importing it.
+    pub fn exportedTable(self: *Instance, name: []const u8) ?*const Table {
+        for (self.module.exports) |ex| {
+            switch (ex.desc) {
+                .table => |idx| if (std.mem.eql(u8, ex.name, name)) {
+                    if (idx < self.tables.len) return &self.tables[idx];
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
 };
 
 /// Validate every function and lay out runtime state. `arena` owns the
@@ -256,23 +287,56 @@ pub fn instantiate(
         };
     }
 
-    // Create the single defined linear memory (if any), zero-filled to
-    // its minimum size. Imported memories are not yet wired.
+    // The single linear memory (multi-memory is post-1.0): an imported
+    // memory occupies memory index 0 and is snapshotted from the
+    // provider; otherwise a defined memory is zero-filled to its minimum.
     var memory: ?Memory = null;
-    if (module.mems.len > 0) {
+    var has_mem_import = false;
+    for (module.imports) |imp| {
+        if (imp.desc == .mem) {
+            has_mem_import = true;
+            break;
+        }
+    }
+    if (has_mem_import) {
+        if (imports.memory) |src| {
+            memory = .{ .data = try allocator.dupe(u8, src.data), .max_pages = src.max_pages, .is_64 = src.is_64 };
+        }
+    } else if (module.mems.len > 0) {
         const lim = module.mems[0].limits;
         const bytes = try allocator.alloc(u8, @as(usize, @intCast(lim.min)) * PAGE_SIZE);
         @memset(bytes, 0);
         memory = .{ .data = bytes, .max_pages = lim.max, .is_64 = lim.is_64 };
     }
 
-    // Tables, sized to their minimum and filled with the null reference.
-    const tables = try allocator.alloc(Table, module.tables.len);
+    // Table index space: imported tables (snapshotted from the provider)
+    // precede defined ones, each sized to its minimum and null-filled.
+    var table_imports: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .table) table_imports += 1;
+    }
+    const tables = try allocator.alloc(Table, table_imports + module.tables.len);
     errdefer allocator.free(tables);
-    for (module.tables, 0..) |t, i| {
+    var ti: usize = 0;
+    {
+        var k: usize = 0;
+        for (module.imports) |imp| {
+            if (imp.desc != .table) continue;
+            if (k < imports.tables.len) {
+                const src = imports.tables[k];
+                tables[ti] = .{ .elems = try allocator.dupe(u128, src.elems), .max = src.max, .is_64 = src.is_64 };
+            } else {
+                tables[ti] = .{ .elems = &.{}, .max = null };
+            }
+            ti += 1;
+            k += 1;
+        }
+    }
+    for (module.tables) |t| {
         const elems = try allocator.alloc(u128, @intCast(t.limits.min));
         @memset(elems, REF_NULL);
-        tables[i] = .{ .elems = elems, .max = t.limits.max, .is_64 = t.limits.is_64 };
+        tables[ti] = .{ .elems = elems, .max = t.limits.max, .is_64 = t.limits.is_64 };
+        ti += 1;
     }
 
     var instance: Instance = .{

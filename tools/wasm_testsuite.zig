@@ -126,6 +126,16 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
     // Cross-module linking registry: registered name → instance. Names
     // a `register` command exposes for a later module's imports.
     var registry: Registry = .{};
+    {
+        const m = try arena.create(wasm.Memory);
+        m.* = .{ .data = try arena.alloc(u8, 64 * 1024), .max_pages = 2 };
+        @memset(m.data, 0);
+        registry.spectest_mem = m;
+        const t = try arena.create(wasm.Table);
+        t.* = .{ .elems = try arena.alloc(u128, 10), .max = 20 };
+        @memset(t.elems, REF_NULL);
+        registry.spectest_tab = t;
+    }
 
     for (commands) |cmd_v| {
         const cmd = cmd_v.object;
@@ -186,6 +196,10 @@ var debug_loads = false;
 /// resolves against it. Latest binding wins.
 const Registry = struct {
     entries: std.ArrayListUnmanaged(Entry) = .empty,
+    /// The `spectest` host module's memory (1 page, max 2) and table
+    /// (10 funcref slots, max 20). Created once per manifest.
+    spectest_mem: ?*wasm.Memory = null,
+    spectest_tab: ?*wasm.Table = null,
 
     const Entry = struct { name: []const u8, inst: *wasm.Instance };
 
@@ -221,26 +235,31 @@ fn spectestGlobal(name: []const u8) ?u128 {
     return null;
 }
 
-/// Resolve a module's imports for cross-module linking. Function and
-/// global imports link to `spectest` host definitions or to a registered
-/// instance's exports; table / memory imports are not yet wired, so a
-/// module needing them is reported unlinkable.
+/// Resolve a module's imports for cross-module linking. Functions and
+/// globals link to `spectest` host definitions or a registered
+/// instance's exports; memory and table imports link to the `spectest`
+/// host objects or a registered export (snapshotted by the importer).
 fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const Registry) !wasm.Imports {
     var nfunc: usize = 0;
     var nglob: usize = 0;
+    var ntab: usize = 0;
     for (modp.imports) |imp| {
         switch (imp.desc) {
             .func => nfunc += 1,
             .global => nglob += 1,
-            else => return error.Unlinkable,
+            .table => ntab += 1,
+            .mem => {},
         }
     }
-    if (nfunc == 0 and nglob == 0) return .{};
+    if (modp.imports.len == 0) return .{};
 
     const funcs = try arena.alloc(wasm.FuncRef, nfunc);
     const globals = try arena.alloc(u128, nglob);
+    const tables = try arena.alloc(*const wasm.Table, ntab);
+    var memory: ?*const wasm.Memory = null;
     var fi: usize = 0;
     var gi: usize = 0;
+    var tj: usize = 0;
     for (modp.imports) |imp| {
         switch (imp.desc) {
             .func => |type_idx| {
@@ -266,10 +285,26 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
                 }
                 gi += 1;
             },
-            else => return error.Unlinkable,
+            .table => {
+                if (std.mem.eql(u8, imp.module, "spectest")) {
+                    tables[tj] = registry.spectest_tab orelse return error.Unlinkable;
+                } else {
+                    const provider = registry.get(imp.module) orelse return error.Unlinkable;
+                    tables[tj] = provider.exportedTable(imp.name) orelse return error.Unlinkable;
+                }
+                tj += 1;
+            },
+            .mem => {
+                if (std.mem.eql(u8, imp.module, "spectest")) {
+                    memory = registry.spectest_mem orelse return error.Unlinkable;
+                } else {
+                    const provider = registry.get(imp.module) orelse return error.Unlinkable;
+                    memory = provider.exportedMemory(imp.name) orelse return error.Unlinkable;
+                }
+            },
         }
     }
-    return .{ .funcs = funcs, .globals = globals };
+    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory };
 }
 
 fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap, registry: *const Registry) !?Loaded {
