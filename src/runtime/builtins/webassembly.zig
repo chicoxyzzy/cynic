@@ -1,27 +1,34 @@
 //! The `WebAssembly` JS namespace — the host API surface over Sarcasm
 //! (the engine in `src/runtime/wasm/`).
 //!
-//! Today's surface: `WebAssembly.validate` (ungated — it only inspects
-//! bytes), plus the `WebAssembly.Module` and `WebAssembly.Instance`
-//! constructors and an instance's callable function exports, all gated
-//! behind `--allow=wasm` (HostEnsureCanCompileWasmBytes; see
-//! docs/wasm-engine.md §8-§9). All wasm artifacts live in the realm's
-//! `wasm_arena`, freed at realm teardown, so they need no per-object
-//! cleanup or GC marking.
+//! Surface:
+//!   - `validate(bytes)` — ungated (only inspects bytes).
+//!   - `Module` / `Instance` constructors + `compile` / `instantiate`
+//!     Promises, gated behind `--allow=wasm`
+//!     (HostEnsureCanCompileWasmBytes; see docs/wasm-engine.md §8-§9).
+//!   - `Memory` (aliasing, detach-on-grow `buffer`), `Table` (anyfunc),
+//!     `Global` (typed cell) — as standalone constructors and as
+//!     instance exports.
+//!   - imports: host functions (JS callables re-entering Lantern),
+//!     cross-module functions, and shared globals / memories / tables.
+//!   - `CompileError` / `LinkError` / `RuntimeError` (Error subclasses).
+//!   - marshalling: i32 / i64↔BigInt / f32 / f64.
 //!
-//! Not yet built (next slices): imported functions/globals/tables/
-//! memories, the `Memory` / `Table` / `Global` objects, the
-//! `instantiate` / `compile` Promises, the `CompileError` / `LinkError`
-//! / `RuntimeError` types (TypeError stands in for now), and i64↔BigInt
-//! / v128 / reference marshalling. `Instance.prototype.exports` is a
-//! prototype getter per spec; this slice exposes the exports object as
-//! an own data property for simplicity.
+//! All wasm artifacts live in the realm's `wasm_arena`, freed at realm
+//! teardown, so they need no per-object cleanup or GC marking.
+//!
+//! Known gaps: externref tables (await GC integration); an imported
+//! memory is snapshotted at instantiation rather than shared; v128 /
+//! reference marshalling across the JS boundary.
+//! `Instance.prototype.exports` is a prototype getter per spec; this
+//! implementation exposes the exports object as an own data property.
 
 const std = @import("std");
 const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const JSObject = @import("../object.zig").JSObject;
 const NativeError = @import("../function.zig").NativeError;
+const NativeFn = @import("../function.zig").NativeFn;
 const JSFunction = @import("../function.zig").JSFunction;
 const JSString = @import("../string.zig").JSString;
 const intrinsics = @import("../intrinsics.zig");
@@ -29,6 +36,7 @@ const heap_mod = @import("../heap.zig");
 const arith = @import("../lantern/arith.zig");
 const call = @import("../lantern/call.zig");
 const promise_mod = @import("promise.zig");
+const error_mod = @import("error.zig");
 const wasm = @import("../wasm/wasm.zig");
 
 /// A `WebAssembly.Module`'s decoded record. Arena-owned.
@@ -102,6 +110,12 @@ pub fn install(realm: *Realm) !void {
     });
     try ns.set(realm.allocator, "Instance", heap_mod.taggedFunction(instance_ctor.ctor));
     realm.wasm_instance_prototype = instance_ctor.proto;
+
+    // §Errors — CompileError / LinkError / RuntimeError, Error subclasses
+    // on the namespace.
+    realm.wasm_compile_error_prototype = try makeWasmErrorClass(realm, ns, "CompileError", compileErrorNative);
+    realm.wasm_link_error_prototype = try makeWasmErrorClass(realm, ns, "LinkError", linkErrorNative);
+    realm.wasm_runtime_error_prototype = try makeWasmErrorClass(realm, ns, "RuntimeError", runtimeErrorNative);
 
     const global_ctor = try intrinsics.installConstructor(realm, .{
         .ctor = globalConstructor,
@@ -205,9 +219,9 @@ fn decodeModuleInto(realm: *Realm, self: *JSObject, bytes: []const u8) NativeErr
     const owned = a.dupe(u8, bytes) catch return error.OutOfMemory;
     const mp = a.create(wasm.Module) catch return error.OutOfMemory;
     mp.* = wasm.decode(a, owned) catch
-        return intrinsics.throwTypeError(realm, "WebAssembly.Module: invalid module (CompileError)");
+        return throwCompileError(realm, "WebAssembly.Module: invalid module");
     _ = wasm.validateModule(a, mp) catch
-        return intrinsics.throwTypeError(realm, "WebAssembly.Module: invalid module (CompileError)");
+        return throwCompileError(realm, "WebAssembly.Module: invalid module");
     const state = a.create(ModuleState) catch return error.OutOfMemory;
     state.* = .{ .module = mp };
     self.wasm_module = state;
@@ -245,11 +259,11 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
     const a = realm.wasmAllocator();
     const ip = a.create(wasm.Instance) catch return error.OutOfMemory;
     wasm.instantiate(ip, a, a, mstate.module, imports) catch
-        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: instantiation failed (LinkError)");
+        return throwLinkError(realm, "WebAssembly.Instance: instantiation failed");
     wasm.runStart(ip, a) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.HostThrew => return error.NativeThrew, // a host import threw during start
-        else => return intrinsics.throwTypeError(realm, "WebAssembly.Instance: start function trapped (RuntimeError)"),
+        else => return throwRuntimeError(realm, "WebAssembly.Instance: start function trapped"),
     };
 
     const exports = try buildExports(realm, ip, mstate.module);
@@ -675,7 +689,7 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
     if (module.imports.len == 0) return .{};
 
     const import_obj = heap_mod.valueAsPlainObject(import_obj_v) orelse
-        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: an importObject is required (LinkError)");
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: an importObject is required");
 
     const a = realm.wasmAllocator();
     const funcs = a.alloc(wasm.FuncRef, nfunc) catch return error.OutOfMemory;
@@ -711,18 +725,18 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
 fn lookupImport(realm: *Realm, import_obj: *JSObject, module_name: []const u8, name: []const u8) NativeError!Value {
     const mod_v = import_obj.get(module_name);
     const mod_obj = heap_mod.valueAsPlainObject(mod_v) orelse
-        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: import module namespace is not an object (LinkError)");
+        return throwLinkError(realm, "WebAssembly.Instance: import module namespace is not an object");
     return mod_obj.get(name);
 }
 
 fn resolveFuncImport(realm: *Realm, v: Value, module: *const wasm.Module, type_idx: u32) NativeError!wasm.FuncRef {
     const fn_obj = heap_mod.valueAsFunction(v) orelse
-        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: function import is not callable (LinkError)");
+        return throwLinkError(realm, "WebAssembly.Instance: function import is not callable");
     // A WebAssembly exported function links directly to its wasm body.
     if (fn_obj.wasm_export) |raw| {
         const rec: *ExportRecord = @ptrCast(@alignCast(raw));
         return rec.instance.funcRefAt(rec.func_index) orelse
-            return intrinsics.throwTypeError(realm, "WebAssembly.Instance: bad exported-function import (LinkError)");
+            return throwLinkError(realm, "WebAssembly.Instance: bad exported-function import");
     }
     // Any other JS function becomes a host import.
     const ft = module.types[type_idx];
@@ -752,18 +766,18 @@ fn resolveGlobalImport(realm: *Realm, v: Value, gt: anytype) NativeError!u128 {
 
 fn resolveTableImport(realm: *Realm, v: Value) NativeError!*wasm.Table {
     const obj = heap_mod.valueAsPlainObject(v) orelse
-        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: table import is not a WebAssembly.Table (LinkError)");
+        return throwLinkError(realm, "WebAssembly.Instance: table import is not a WebAssembly.Table");
     const raw = obj.wasm_table orelse
-        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: table import is not a WebAssembly.Table (LinkError)");
+        return throwLinkError(realm, "WebAssembly.Instance: table import is not a WebAssembly.Table");
     const st: *TableState = @ptrCast(@alignCast(raw));
     return st.table;
 }
 
 fn resolveMemImport(realm: *Realm, v: Value) NativeError!*const wasm.Memory {
     const obj = heap_mod.valueAsPlainObject(v) orelse
-        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: memory import is not a WebAssembly.Memory (LinkError)");
+        return throwLinkError(realm, "WebAssembly.Instance: memory import is not a WebAssembly.Memory");
     const raw = obj.wasm_memory orelse
-        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: memory import is not a WebAssembly.Memory (LinkError)");
+        return throwLinkError(realm, "WebAssembly.Instance: memory import is not a WebAssembly.Memory");
     const st: *MemoryState = @ptrCast(@alignCast(raw));
     return st.mem;
 }
@@ -841,7 +855,7 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
         error.OutOfMemory => return error.OutOfMemory,
         // A JS-backed host import threw — re-raise its pending exception.
         error.HostThrew => return error.NativeThrew,
-        else => return intrinsics.throwTypeError(realm, "WebAssembly exported function trapped (RuntimeError)"),
+        else => return throwRuntimeError(realm, "WebAssembly exported function trapped"),
     };
     defer realm.allocator.free(results);
 
@@ -899,6 +913,54 @@ fn marshalResult(realm: *Realm, vt: wasm.ValType, cell: u128) NativeError!Value 
 /// The `--allow=wasm` host refusal (HostEnsureCanCompileWasmBytes).
 fn wasmDisabled(realm: *Realm) NativeError {
     return intrinsics.throwEvalError(realm, "WebAssembly is not enabled; pass --allow=wasm to enable");
+}
+
+// ── WebAssembly.CompileError / LinkError / RuntimeError ─────────────
+
+/// Build a `WebAssembly.<name>` Error subclass on the namespace and
+/// return its prototype (chained to %Error.prototype%).
+fn makeWasmErrorClass(realm: *Realm, ns: *JSObject, name: []const u8, native: NativeFn) !*JSObject {
+    const fn_obj = try realm.heap.allocateFunctionNative(realm, native, 1, name);
+    const proto = try realm.heap.allocateObject();
+    realm.heap.setObjectPrototype(proto, realm.intrinsics.error_prototype);
+    try proto.setWithFlags(realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj), .{ .writable = true, .enumerable = false, .configurable = true });
+    const name_str = try realm.heap.allocateString(name);
+    try proto.setWithFlags(realm.allocator, "name", Value.fromString(name_str), .{ .writable = true, .enumerable = false, .configurable = true });
+    const empty = try realm.heap.allocateString("");
+    try proto.setWithFlags(realm.allocator, "message", Value.fromString(empty), .{ .writable = true, .enumerable = false, .configurable = true });
+    realm.heap.setFunctionPrototype(fn_obj, proto);
+    try fn_obj.property_flags.put(realm.allocator, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try ns.set(realm.allocator, name, heap_mod.taggedFunction(fn_obj));
+    return proto;
+}
+
+fn compileErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return error_mod.constructErrorInstance(realm, this_value, realm.wasm_compile_error_prototype.?, args);
+}
+fn linkErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return error_mod.constructErrorInstance(realm, this_value, realm.wasm_link_error_prototype.?, args);
+}
+fn runtimeErrorNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return error_mod.constructErrorInstance(realm, this_value, realm.wasm_runtime_error_prototype.?, args);
+}
+
+/// Throw an instance of a host-defined wasm error class (falling back to
+/// a TypeError if the class somehow isn't installed).
+fn throwWasmError(realm: *Realm, proto_opt: ?*JSObject, msg: []const u8) NativeError {
+    const proto = proto_opt orelse return intrinsics.throwTypeError(realm, msg);
+    const ex = error_mod.newErrorWithProto(realm, proto, msg) catch return error.OutOfMemory;
+    realm.pending_exception = ex;
+    return error.NativeThrew;
+}
+
+fn throwCompileError(realm: *Realm, msg: []const u8) NativeError {
+    return throwWasmError(realm, realm.wasm_compile_error_prototype, msg);
+}
+fn throwLinkError(realm: *Realm, msg: []const u8) NativeError {
+    return throwWasmError(realm, realm.wasm_link_error_prototype, msg);
+}
+fn throwRuntimeError(realm: *Realm, msg: []const u8) NativeError {
+    return throwWasmError(realm, realm.wasm_runtime_error_prototype, msg);
 }
 
 /// Borrow the bytes of a BufferSource argument — an `ArrayBuffer` or any

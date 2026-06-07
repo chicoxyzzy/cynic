@@ -507,7 +507,7 @@ fn errorPrototypeToString(realm: *Realm, this_value: Value, args: []const Value)
     return Value.fromString(out);
 }
 
-fn constructErrorInstance(realm: *Realm, this_value: Value, proto: *JSObject, args: []const Value) NativeError!Value {
+pub fn constructErrorInstance(realm: *Realm, this_value: Value, proto: *JSObject, args: []const Value) NativeError!Value {
     // §20.5.1.1 Error / NativeError — when called via `new`
     // (including via `super(...)` from a derived class), the
     // engine has already allocated `this_value` as an object
@@ -633,6 +633,12 @@ fn makeError(realm: *Realm, proto: *JSObject, message: []const u8) !Value {
     const msg_str = try realm.heap.allocateString(message);
     try instance.set(realm.allocator, "message", Value.fromString(msg_str));
     return heap_mod.taggedObject(instance);
+}
+
+/// Build an error instance with an explicit prototype + message — for
+/// host-defined Error subclasses (e.g. `WebAssembly.CompileError`).
+pub fn newErrorWithProto(realm: *Realm, proto: *JSObject, message: []const u8) !Value {
+    return makeError(realm, proto, message);
 }
 
 /// Last-resort fallback when intrinsics aren't installed (test
