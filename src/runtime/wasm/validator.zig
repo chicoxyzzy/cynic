@@ -123,6 +123,15 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
     try validateData(module, total_globals);
     try validateElements(module, total_globals);
 
+    // §3.4.2 — a table's explicit element initializer is a constant
+    // expression of the table's element type. Only imported globals
+    // precede the table section, so defined globals are out of scope.
+    for (module.tables) |t| {
+        if (t.init_expr) |expr| {
+            try validateConstExpr(module, expr, t.elem.toValType(), glob_imports);
+        }
+    }
+
     // §3.4.9 — the start function must exist and have type [] -> [].
     if (module.start) |s| {
         const ft = module.types[try funcTypeIndex(module, s)];

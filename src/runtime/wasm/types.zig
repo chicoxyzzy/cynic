@@ -92,9 +92,13 @@ pub const Limits = struct {
 };
 
 /// §5.3.9 — a table type pairs an element reference type with limits.
+/// `init_expr` carries the raw bytes of an explicit element initializer
+/// (the function-references `0x40 0x00` form), including the terminating
+/// `end`; null for the plain form.
 pub const TableType = struct {
     elem: RefType,
     limits: Limits,
+    init_expr: ?[]const u8 = null,
 };
 
 /// §5.3.10 — a memory type is just its limits (in units of 64 KiB
