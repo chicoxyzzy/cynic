@@ -122,6 +122,12 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
     try validateData(module, total_globals);
     try validateElements(module, total_globals);
 
+    // §3.4.9 — the start function must exist and have type [] -> [].
+    if (module.start) |s| {
+        const ft = module.types[try funcTypeIndex(module, s)];
+        if (ft.params.len != 0 or ft.results.len != 0) return error.TypeMismatch;
+    }
+
     const out = try arena.alloc(CompiledFunc, module.code.len);
     for (module.code, 0..) |body, i| {
         const type_index = module.funcs[i];
@@ -129,6 +135,22 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
         out[i] = try validateFunc(arena, module, type_index, body.bytes);
     }
     return out;
+}
+
+/// The type index of a function by its function-index-space index,
+/// spanning imports and defined functions.
+fn funcTypeIndex(module: *const Module, fidx: u32) ValidateError!u32 {
+    var k: u32 = 0;
+    for (module.imports) |imp| switch (imp.desc) {
+        .func => |ti| {
+            if (k == fidx) return ti;
+            k += 1;
+        },
+        else => {},
+    };
+    const local = fidx - k;
+    if (local >= module.funcs.len) return error.UnknownFunc;
+    return module.funcs[local];
 }
 
 /// Total functions in the index space (imports + defined).
