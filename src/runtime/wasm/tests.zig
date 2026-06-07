@@ -209,6 +209,49 @@ fn expectDecodeError(expected: anyerror, bytes: []const u8) !void {
     try testing.expectError(expected, wasm.decode(arena.allocator(), bytes));
 }
 
+/// Decode + validate + instantiate `bytes` under a throwaway arena (used
+/// for both allocators, so a partial allocation before a rejection is
+/// reclaimed wholesale). The positive path returns void; the negative
+/// path surfaces the decode or validation error. Mirrors the spec's
+/// `assert_invalid` / `assert_malformed`.
+fn loadErr(bytes: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, a, mp, .{});
+}
+
+/// Assemble a single function `(params)->(results)` with `code_body` and
+/// assert that loading it (decode → validate → instantiate) fails with
+/// `want` — the function-body equivalent of `assert_invalid`.
+fn expectFuncInvalid(want: anyerror, params: []const u8, results: []const u8, code_body: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try buildFunc(arena.allocator(), params, results, code_body, "f");
+    try testing.expectError(want, loadErr(bytes));
+}
+
+/// Run a single export and return all of its raw result cells (for
+/// multi-value functions). The returned slice is owned by
+/// `testing.allocator`; the caller frees it.
+fn runRaw(bytes: []const u8, name: []const u8, arg_cells: []const u128) ![]u128 {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    const fidx = funcExport(mp, name) orelse return error.NoSuchExport;
+    return interp.invoke(&instance, testing.allocator, fidx, arg_cells);
+}
+
 // ── preamble ────────────────────────────────────────────────────────
 
 test "wasm decoder: accepts the empty-module preamble" {
@@ -863,4 +906,865 @@ test "wasm interp: v128 store then load round-trips" {
         0xfd, 0x1b, 0x03, 0x0b,
     };
     try testing.expectEqual(@as(i32, 40), asI32(try callCells(&.{}, &.{I32}, &code, "f", 1, &.{})));
+}
+
+// ── validator: function-body type checking (assert_invalid) ─────────
+
+/// `f64.const 1.0` — the 0x44 opcode plus its 8 little-endian bytes.
+const f64_one = [_]u8{ 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f };
+
+/// Build a single memory-bearing function and assert it fails to load.
+fn expectMemFuncInvalid(want: anyerror, params: []const u8, results: []const u8, code_body: []const u8, min_pages: u32) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try buildMemFunc(arena.allocator(), params, results, code_body, "f", min_pages);
+    try testing.expectError(want, loadErr(bytes));
+}
+
+test "wasm validator: result type mismatch is rejected" {
+    // body yields f64 where the signature promises i32.
+    try expectFuncInvalid(error.TypeMismatch, &.{}, &.{I32}, &([_]u8{0x00} ++ f64_one ++ [_]u8{0x0b}));
+}
+
+test "wasm validator: binary-op operand type mismatch is rejected" {
+    // i32.const 1; f64.const 1.0; i32.add — second operand is f64.
+    const body = [_]u8{ 0x00, 0x41, 0x01 } ++ f64_one ++ [_]u8{ 0x6a, 0x0b };
+    try expectFuncInvalid(error.TypeMismatch, &.{}, &.{I32}, &body);
+}
+
+test "wasm validator: stack underflow is rejected" {
+    // i32.add with nothing on the stack.
+    try expectFuncInvalid(error.StackUnderflow, &.{}, &.{I32}, &.{ 0x00, 0x6a, 0x0b });
+}
+
+test "wasm validator: leftover operands at function end are rejected" {
+    // two i32 values remain where one result is expected.
+    try expectFuncInvalid(error.TypeMismatch, &.{}, &.{I32}, &.{ 0x00, 0x41, 0x01, 0x41, 0x02, 0x0b });
+}
+
+test "wasm validator: non-i32 if condition is rejected" {
+    // f64.const 1.0; if (result i32) i32.const 1 else i32.const 2 end
+    const body = [_]u8{0x00} ++ f64_one ++ [_]u8{ 0x04, 0x7f, 0x41, 0x01, 0x05, 0x41, 0x02, 0x0b, 0x0b };
+    try expectFuncInvalid(error.TypeMismatch, &.{}, &.{I32}, &body);
+}
+
+test "wasm validator: local index out of range is rejected" {
+    // (param i32) local.get 5
+    try expectFuncInvalid(error.UnknownLocal, &.{I32}, &.{I32}, &.{ 0x00, 0x20, 0x05, 0x0b });
+}
+
+test "wasm validator: global index out of range is rejected" {
+    // global.get 0 with no globals declared
+    try expectFuncInvalid(error.UnknownGlobal, &.{}, &.{I32}, &.{ 0x00, 0x23, 0x00, 0x0b });
+}
+
+test "wasm validator: branch to a non-existent label is rejected" {
+    // i32.const 0; br 5 — only the function block (label 0) exists.
+    try expectFuncInvalid(error.UnknownLabel, &.{}, &.{I32}, &.{ 0x00, 0x41, 0x00, 0x0c, 0x05, 0x0b });
+}
+
+test "wasm validator: SIMD lane index out of range is rejected" {
+    // i32.const 0; i32x4.splat; i32x4.extract_lane 5  (only lanes 0..3)
+    try expectFuncInvalid(error.BadLane, &.{}, &.{I32}, &.{ 0x00, 0x41, 0x00, 0xfd, 0x11, 0xfd, 0x1b, 0x05, 0x0b });
+}
+
+test "wasm validator: i8x16.shuffle lane >= 32 is rejected" {
+    // two v128s then shuffle with a lane index of 32 (out of 0..31).
+    var body: [64]u8 = undefined;
+    var n: usize = 0;
+    body[n] = 0x00;
+    n += 1; // 0 locals
+    // v128.const 0 (16 zero bytes), twice
+    inline for (0..2) |_| {
+        body[n] = 0xfd;
+        body[n + 1] = 0x0c;
+        n += 2;
+        @memset(body[n .. n + 16], 0);
+        n += 16;
+    }
+    body[n] = 0xfd;
+    body[n + 1] = 0x0d; // i8x16.shuffle
+    n += 2;
+    @memset(body[n .. n + 16], 0);
+    body[n] = 32; // first lane out of range
+    n += 16;
+    body[n] = 0xfd;
+    body[n + 1] = 0x1b;
+    body[n + 2] = 0x00; // i32x4.extract_lane 0 → i32 result
+    n += 3;
+    body[n] = 0x0b;
+    n += 1;
+    try expectFuncInvalid(error.BadLane, &.{}, &.{I32}, body[0..n]);
+}
+
+test "wasm validator: over-aligned load is rejected" {
+    // i32.const 0; i32.load align=3 offset=0 — natural alignment is 2.
+    try expectMemFuncInvalid(error.BadAlign, &.{}, &.{I32}, &.{ 0x00, 0x41, 0x00, 0x28, 0x03, 0x00, 0x0b }, 1);
+}
+
+test "wasm validator: load without a memory is rejected" {
+    // i32.const 0; i32.load — no memory section.
+    try expectFuncInvalid(error.NoMemory, &.{}, &.{I32}, &.{ 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x0b });
+}
+
+test "wasm validator: unreachable makes following code polymorphic" {
+    // unreachable; i32.add (no operands) — valid because unreachable
+    // poisons the stack; the function never returns at runtime.
+    try testing.expectError(error.Unreachable, runFunc(&.{}, &.{I32}, &.{ 0x00, 0x00, 0x6a, 0x0b }, "f", &.{}));
+}
+
+// ── validator: module-level rejection (assert_invalid) ──────────────
+
+const Section = struct { id: u8, body: []const u8 };
+
+/// Assemble a module from the preamble plus the given sections (in the
+/// order supplied), computing each section's length.
+fn assemble(a: std.mem.Allocator, sections: []const Section) ![]const u8 {
+    var out: List = .empty;
+    try out.appendSlice(a, &preamble);
+    for (sections) |s| try section(a, &out, s.id, s.body);
+    return out.items;
+}
+
+/// Build a module from `sections` and assert that loading it fails with
+/// `want`.
+fn expectModuleInvalid(want: anyerror, sections: []const Section) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try assemble(arena.allocator(), sections);
+    try testing.expectError(want, loadErr(bytes));
+}
+
+test "wasm validator: global initializer type mismatch is rejected" {
+    // global (i32) (f64.const 1.0) — initializer yields f64.
+    const gbody = [_]u8{ 0x01, 0x7f, 0x00 } ++ f64_one ++ [_]u8{0x0b};
+    try expectModuleInvalid(error.TypeMismatch, &.{.{ .id = 6, .body = &gbody }});
+}
+
+test "wasm validator: non-constant global initializer is rejected" {
+    // global (i32) (local.get 0) — local.get is not a constant instr.
+    const gbody = [_]u8{ 0x01, 0x7f, 0x00, 0x20, 0x00, 0x0b };
+    try expectModuleInvalid(error.BadConstExpr, &.{.{ .id = 6, .body = &gbody }});
+}
+
+test "wasm validator: global.get of a later global in an initializer is rejected" {
+    // two globals; the first reads the second (forward reference).
+    // g0 (i32) (global.get 1); g1 (i32) (i32.const 7)
+    const gbody = [_]u8{
+        0x02,
+        0x7f, 0x00, 0x23, 0x01, 0x0b, // g0 = global.get 1
+        0x7f, 0x00, 0x41, 0x07, 0x0b, // g1 = i32.const 7
+    };
+    try expectModuleInvalid(error.UnknownGlobal, &.{.{ .id = 6, .body = &gbody }});
+}
+
+test "wasm validator: active data segment with no memory is rejected" {
+    // data segment (active, offset i32.const 0, 0 bytes) but no memory.
+    const dbody = [_]u8{ 0x01, 0x00, 0x41, 0x00, 0x0b, 0x00 };
+    try expectModuleInvalid(error.UnknownMemory, &.{.{ .id = 11, .body = &dbody }});
+}
+
+test "wasm validator: active data offset of the wrong type is rejected" {
+    // memory {min 1}; data (active, offset i64.const 0) — needs i32.
+    const mbody = [_]u8{ 0x01, 0x00, 0x01 };
+    const dbody = [_]u8{ 0x01, 0x00, 0x42, 0x00, 0x0b, 0x00 };
+    try expectModuleInvalid(error.TypeMismatch, &.{
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 11, .body = &dbody },
+    });
+}
+
+test "wasm validator: active element segment with no table is rejected" {
+    // element (active, table 0, offset i32.const 0, 0 funcs) but no table.
+    const ebody = [_]u8{ 0x01, 0x00, 0x41, 0x00, 0x0b, 0x00 };
+    try expectModuleInvalid(error.UnknownTable, &.{.{ .id = 9, .body = &ebody }});
+}
+
+test "wasm validator: memory.init without a data count section is rejected" {
+    // i32.const 0 ×3; memory.init 0 0 — no data count section present.
+    const body = [_]u8{ 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x08, 0x00, 0x00, 0x0b };
+    try expectMemFuncInvalid(error.DataCountMissing, &.{}, &.{}, &body, 1);
+}
+
+test "wasm validator: call_indirect with no table is rejected" {
+    // i32.const 0; call_indirect (type 0) (table 0) — no table declared.
+    try expectFuncInvalid(error.UnknownTable, &.{}, &.{}, &.{ 0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b });
+}
+
+test "wasm validator: ref.func to an out-of-range function is rejected" {
+    // ref.func 5; drop — only one function exists.
+    try expectFuncInvalid(error.UnknownFunc, &.{}, &.{}, &.{ 0x00, 0xd2, 0x05, 0x1a, 0x0b });
+}
+
+test "wasm validator: ref.func to an undeclared function is rejected" {
+    // Two funcs; func 0 takes ref.func 1, but func 1 is not exported,
+    // global-, or element-referenced, so it is not in the reference set.
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x00 }; // type 0: () -> ()
+    const fbody = [_]u8{ 0x02, 0x00, 0x00 }; // funcs 0,1 : type 0
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 }; // export "f" -> func 0
+    const cbody = [_]u8{
+        0x02,
+        0x05, 0x00, 0xd2, 0x01, 0x1a, 0x0b, // func 0: ref.func 1; drop
+        0x02, 0x00, 0x0b, // func 1: (empty)
+    };
+    try expectModuleInvalid(error.UnknownFunc, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+}
+
+test "wasm validator: start function with a non-empty type is rejected" {
+    // start references func 0, whose type is (i32) -> () — must be ()->().
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x00 }; // type 0: (i32)->()
+    const fbody = [_]u8{ 0x01, 0x00 }; // func 0 : type 0
+    const sbody = [_]u8{0x00}; // start = func 0
+    const cbody = [_]u8{ 0x01, 0x02, 0x00, 0x0b }; // func 0: (empty)
+    try expectModuleInvalid(error.TypeMismatch, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 8, .body = &sbody },
+        .{ .id = 10, .body = &cbody },
+    });
+}
+
+// ── execution: i32 / i64 arithmetic, bitwise, shifts ────────────────
+
+/// Run `(i32,i32)->i32` whose body is `local.get 0; local.get 1; op`.
+fn i32op(op: u8, x: i32, y: i32) !i32 {
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0x20, 0x01, op, 0x0b };
+    return runFunc(&.{ I32, I32 }, &.{I32}, &code, "f", &.{ x, y });
+}
+
+/// Run `(i64,i64)->i64` whose body is `local.get 0; local.get 1; op`.
+fn i64op(op: u8, x: i64, y: i64) !i64 {
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0x20, 0x01, op, 0x0b };
+    const args = [_]u128{ @as(u64, @bitCast(x)), @as(u64, @bitCast(y)) };
+    return asI64(try callCells(&.{ I64, I64 }, &.{I64}, &code, "f", null, &args));
+}
+
+test "wasm interp: i32 arithmetic and bitwise ops" {
+    try testing.expectEqual(@as(i32, 7), try i32op(0x6b, 10, 3)); // sub
+    try testing.expectEqual(@as(i32, 30), try i32op(0x6c, 10, 3)); // mul
+    try testing.expectEqual(@as(i32, 3), try i32op(0x6d, 10, 3)); // div_s
+    try testing.expectEqual(@as(i32, -3), try i32op(0x6d, -10, 3)); // div_s
+    try testing.expectEqual(@as(i32, 1), try i32op(0x6f, 10, 3)); // rem_s
+    try testing.expectEqual(@as(i32, 0x0c), try i32op(0x71, 0x1c, 0x0d)); // and
+    try testing.expectEqual(@as(i32, 0x1d), try i32op(0x72, 0x1c, 0x0d)); // or
+    try testing.expectEqual(@as(i32, 0x11), try i32op(0x73, 0x1c, 0x0d)); // xor
+}
+
+test "wasm interp: i32 div_u / rem_u treat operands as unsigned" {
+    try testing.expectEqual(@as(i32, 0x7fffffff), try i32op(0x6e, -1, 2)); // div_u 0xffffffff/2
+    try testing.expectEqual(@as(i32, 1), try i32op(0x70, -1, 2)); // rem_u 0xffffffff%2
+}
+
+test "wasm interp: i32 shifts and rotates" {
+    try testing.expectEqual(@as(i32, 0x40), try i32op(0x74, 1, 6)); // shl
+    try testing.expectEqual(@as(i32, -1), try i32op(0x75, -2, 1)); // shr_s sign-extends
+    try testing.expectEqual(@as(i32, 0x7fffffff), try i32op(0x76, -2, 1)); // shr_u
+    try testing.expectEqual(@as(i32, 1), try i32op(0x77, -2147483648, 1)); // rotl wraps MSB to LSB
+    try testing.expectEqual(@as(i32, -2147483648), try i32op(0x78, 1, 1)); // rotr wraps LSB to MSB
+}
+
+test "wasm interp: i32 shift count is taken modulo 32" {
+    // shifting by 33 is the same as shifting by 1.
+    try testing.expectEqual(@as(i32, 2), try i32op(0x74, 1, 33));
+}
+
+test "wasm interp: i32 comparisons yield 0/1" {
+    try testing.expectEqual(@as(i32, 1), try i32op(0x46, 5, 5)); // eq
+    try testing.expectEqual(@as(i32, 0), try i32op(0x47, 5, 5)); // ne
+    try testing.expectEqual(@as(i32, 1), try i32op(0x48, -1, 0)); // lt_s
+    try testing.expectEqual(@as(i32, 0), try i32op(0x49, -1, 0)); // lt_u (0xffffffff<0)
+    try testing.expectEqual(@as(i32, 1), try i32op(0x4a, 5, 3)); // gt_s
+    try testing.expectEqual(@as(i32, 1), try i32op(0x4f, -1, 0)); // ge_u
+}
+
+test "wasm interp: i32.div_s by zero and overflow trap" {
+    try testing.expectError(error.IntegerDivideByZero, i32op(0x6d, 1, 0));
+    try testing.expectError(error.IntegerDivideByZero, i32op(0x6f, 1, 0)); // rem_s by 0
+    try testing.expectError(error.IntegerOverflow, i32op(0x6d, -2147483648, -1));
+}
+
+test "wasm interp: i32.rem_s of INT_MIN by -1 is 0, not a trap" {
+    try testing.expectEqual(@as(i32, 0), try i32op(0x6f, -2147483648, -1));
+}
+
+test "wasm interp: i64 arithmetic across the 32-bit boundary" {
+    try testing.expectEqual(@as(i64, 0x1_0000_0000), try i64op(0x7c, 0xffff_ffff, 1)); // add
+    try testing.expectEqual(@as(i64, 0x1_0000_0000), try i64op(0x7e, 0x1_0000, 0x1_0000)); // mul
+    try testing.expectEqual(@as(i64, -1), try i64op(0x7d, 0, 1)); // sub
+    try testing.expectEqual(@as(i64, 0x2_0000_0000), try i64op(0x7f, 0x4_0000_0000, 2)); // div_s
+}
+
+test "wasm interp: i64 shifts and div traps" {
+    try testing.expectEqual(@as(i64, 0x1_0000_0000), try i64op(0x86, 1, 32)); // shl
+    try testing.expectError(error.IntegerDivideByZero, i64op(0x7f, 1, 0));
+    try testing.expectError(error.IntegerOverflow, i64op(0x7f, std.math.minInt(i64), -1));
+}
+
+test "wasm interp: i64.eqz and i64 comparisons" {
+    // i64.eqz: local.get 0; i64.eqz
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0x50, 0x0b };
+    try testing.expectEqual(@as(i32, 1), asI32(try callCells(&.{I64}, &.{I32}, &code, "f", null, &.{0})));
+    try testing.expectEqual(@as(i32, 0), asI32(try callCells(&.{I64}, &.{I32}, &code, "f", null, &.{99})));
+}
+
+// ── execution: control flow ─────────────────────────────────────────
+
+test "wasm interp: br_table selects a branch by index" {
+    // input 0 → 10 (inner block), anything else → 20 (outer block).
+    const code = [_]u8{
+        0x00,
+        0x02, 0x40, // block (outer)
+        0x02, 0x40, // block (inner)
+        0x20, 0x00, // local.get 0
+        0x0e, 0x01, 0x00, 0x01, // br_table count=1 [0] default 1
+        0x0b, // end inner
+        0x41, 0x0a, 0x0f, // i32.const 10; return
+        0x0b, // end outer
+        0x41, 0x14, 0x0f, // i32.const 20; return
+        0x0b, // end func
+    };
+    try testing.expectEqual(@as(i32, 10), try runFunc(&.{I32}, &.{I32}, &code, "f", &.{0}));
+    try testing.expectEqual(@as(i32, 20), try runFunc(&.{I32}, &.{I32}, &code, "f", &.{1}));
+    try testing.expectEqual(@as(i32, 20), try runFunc(&.{I32}, &.{I32}, &code, "f", &.{7}));
+}
+
+test "wasm interp: select picks by condition" {
+    // i32.const 10; i32.const 20; local.get 0; select
+    const code = [_]u8{ 0x00, 0x41, 0x0a, 0x41, 0x14, 0x20, 0x00, 0x1b, 0x0b };
+    try testing.expectEqual(@as(i32, 10), try runFunc(&.{I32}, &.{I32}, &code, "f", &.{1}));
+    try testing.expectEqual(@as(i32, 20), try runFunc(&.{I32}, &.{I32}, &code, "f", &.{0}));
+}
+
+test "wasm interp: typed select picks by condition" {
+    // i32.const 10; i32.const 20; local.get 0; select (result i32)
+    const code = [_]u8{ 0x00, 0x41, 0x0a, 0x41, 0x14, 0x20, 0x00, 0x1c, 0x01, 0x7f, 0x0b };
+    try testing.expectEqual(@as(i32, 20), try runFunc(&.{I32}, &.{I32}, &code, "f", &.{0}));
+}
+
+test "wasm interp: return exits early" {
+    // local.get 0; return; (dead) i32.const 99
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0x0f, 0x41, 0x63, 0x0b };
+    try testing.expectEqual(@as(i32, 7), try runFunc(&.{I32}, &.{I32}, &code, "f", &.{7}));
+}
+
+test "wasm interp: a function returns multiple values" {
+    // () -> (i32, i32): i32.const 1; i32.const 2
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const code = [_]u8{ 0x00, 0x41, 0x01, 0x41, 0x02, 0x0b };
+    const bytes = try buildFunc(arena.allocator(), &.{}, &.{ I32, I32 }, &code, "f");
+    const res = try runRaw(bytes, "f", &.{});
+    defer testing.allocator.free(res);
+    try testing.expectEqual(@as(usize, 2), res.len);
+    try testing.expectEqual(@as(i32, 1), asI32(res[0]));
+    try testing.expectEqual(@as(i32, 2), asI32(res[1]));
+}
+
+// ── execution: globals ──────────────────────────────────────────────
+
+test "wasm interp: a mutable global round-trips through global.set/get" {
+    // module: (global (mut i32) (i32.const 0))
+    //         (func (param i32) (result i32)
+    //            local.get 0; global.set 0; global.get 0)
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const gbody = [_]u8{ 0x01, 0x7f, 0x01, 0x41, 0x00, 0x0b };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x08, 0x00, 0x20, 0x00, 0x24, 0x00, 0x23, 0x00, 0x0b };
+    const bytes = try assemble(arena.allocator(), &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 6, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 42), try runI32(bytes, "f", &.{42}));
+}
+
+test "wasm interp: an extended-const global initializer is evaluated" {
+    // (global i32 (i32.const 20) (i32.const 2) (i32.mul))  ;; = 40
+    // exported via a getter function.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const gbody = [_]u8{ 0x01, 0x7f, 0x00, 0x41, 0x14, 0x41, 0x02, 0x6c, 0x0b };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x04, 0x00, 0x23, 0x00, 0x0b };
+    const bytes = try assemble(arena.allocator(), &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 6, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 40), try runI32(bytes, "f", &.{}));
+}
+
+// ── execution: reference types, tables, call_indirect ───────────────
+
+test "wasm interp: ref.null is null, ref.func is not" {
+    // ref.null func; ref.is_null  → 1
+    try testing.expectEqual(@as(i32, 1), try runFunc(&.{}, &.{I32}, &.{ 0x00, 0xd0, 0x70, 0xd1, 0x0b }, "f", &.{}));
+    // ref.func 0; ref.is_null  → 0  (func 0 is exported, hence declared)
+    try testing.expectEqual(@as(i32, 0), try runFunc(&.{}, &.{I32}, &.{ 0x00, 0xd2, 0x00, 0xd1, 0x0b }, "f", &.{}));
+}
+
+test "wasm interp: table.size reports the table's length" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const tabbody = [_]u8{ 0x01, 0x70, 0x00, 0x03 }; // funcref, min 3
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x05, 0x00, 0xfc, 0x10, 0x00, 0x0b }; // table.size 0
+    const bytes = try assemble(arena.allocator(), &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tabbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 3), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm interp: table.grow returns the old size and extends the table" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const tabbody = [_]u8{ 0x01, 0x70, 0x01, 0x02, 0x0a }; // funcref, min 2 max 10
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // ref.null func; local.get 0; table.grow 0
+    const cbody = [_]u8{ 0x01, 0x09, 0x00, 0xd0, 0x70, 0x20, 0x00, 0xfc, 0x0f, 0x00, 0x0b };
+    const bytes = try assemble(arena.allocator(), &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tabbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 2), try runI32(bytes, "f", &.{3})); // old size 2
+}
+
+test "wasm interp: table.grow past the maximum returns -1" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const tabbody = [_]u8{ 0x01, 0x70, 0x01, 0x02, 0x03 }; // funcref, min 2 max 3
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x09, 0x00, 0xd0, 0x70, 0x20, 0x00, 0xfc, 0x0f, 0x00, 0x0b };
+    const bytes = try assemble(arena.allocator(), &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tabbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, -1), try runI32(bytes, "f", &.{5})); // 2+5 > max 3
+}
+
+/// A module with two no-arg i32 callees (func 0 → 42, func 1 → 99), a
+/// funcref table of size 4 with indices 0 and 1 filled by an active
+/// element segment, and an exported `(i32)->(i32)` dispatcher (func 2)
+/// that does `call_indirect` on its argument.
+fn dispatcherModule(a: std.mem.Allocator) ![]const u8 {
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x03, 0x00, 0x00, 0x01 }; // funcs 0,1: type 0; func 2: type 1
+    const tabbody = [_]u8{ 0x01, 0x70, 0x00, 0x04 }; // funcref min 4
+    const xbody = [_]u8{ 0x01, 0x08, 0x64, 0x69, 0x73, 0x70, 0x61, 0x74, 0x63, 0x68, 0x00, 0x02 };
+    const ebody = [_]u8{ 0x01, 0x00, 0x41, 0x00, 0x0b, 0x02, 0x00, 0x01 }; // active, [0,1] at 0
+    const cbody = [_]u8{
+        0x03,
+        0x04, 0x00, 0x41, 0x2a, 0x0b, // func 0 → 42
+        0x05, 0x00, 0x41, 0xe3, 0x00, 0x0b, // func 1 → 99 (SLEB 0xe3 0x00)
+        0x07, 0x00, 0x20, 0x00, 0x11, 0x00, 0x00, 0x0b, // func 2: call_indirect type 0
+    };
+    return assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tabbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+}
+
+test "wasm interp: call_indirect dispatches through the table" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try dispatcherModule(arena.allocator());
+    try testing.expectEqual(@as(i32, 42), try runI32(bytes, "dispatch", &.{0}));
+    try testing.expectEqual(@as(i32, 99), try runI32(bytes, "dispatch", &.{1}));
+}
+
+test "wasm interp: call_indirect on a null element traps" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try dispatcherModule(arena.allocator());
+    // index 2 is in bounds (table size 4) but never initialized.
+    try testing.expectError(error.UninitializedElement, runI32(bytes, "dispatch", &.{2}));
+}
+
+test "wasm interp: call_indirect out of bounds traps" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try dispatcherModule(arena.allocator());
+    try testing.expectError(error.UndefinedElement, runI32(bytes, "dispatch", &.{9}));
+}
+
+// ── cross-module linking ────────────────────────────────────────────
+
+/// Decode + instantiate `bytes` (all allocations from `a`, so dropping
+/// the arena reclaims them) and return the heap-stable instance.
+fn instOf(a: std.mem.Allocator, bytes: []const u8, imports: wasm.Imports) !*interp.Instance {
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+    const ip = try a.create(interp.Instance);
+    try interp.instantiate(ip, a, a, mp, imports);
+    try interp.runStart(ip, a); // §5.5.11 — runs the start function, if any
+    return ip;
+}
+
+/// Invoke an export on an already-instantiated instance, returning the
+/// first result as i32. Results are arena-allocated by the caller's `a`.
+fn invokeInst(a: std.mem.Allocator, ip: *interp.Instance, name: []const u8, arg_cells: []const u128) !i32 {
+    const fidx = funcExport(ip.module, name) orelse return error.NoSuchExport;
+    const res = try interp.invoke(ip, a, fidx, arg_cells);
+    return asI32(res[0]);
+}
+
+/// A host function for import tests: ignores its arguments and returns 7.
+fn hostReturns7(args: []const u128, results: []u128) void {
+    _ = args;
+    results[0] = 7;
+}
+
+test "wasm link: an imported function is called across instances" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // provider: (func (export "callee") (result i32) i32.const 7)
+    const provider = try instOf(a, try buildFunc(a, &.{}, &.{I32}, &.{ 0x00, 0x41, 0x07, 0x0b }, "callee"), .{});
+
+    // importer: import "p"."callee"; (func (export "run") (result i32) call 0)
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const ibody = [_]u8{ 0x01, 0x01, 0x70, 0x06, 0x63, 0x61, 0x6c, 0x6c, 0x65, 0x65, 0x00, 0x00 }; // "p"."callee" func type 0
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x01 }; // "run" -> func 1
+    const cbody = [_]u8{ 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b }; // call 0
+    const ibytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 2, .body = &ibody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    const fref = provider.exportedFuncRef("callee").?;
+    const importer = try instOf(a, ibytes, .{ .funcs = &.{fref} });
+    try testing.expectEqual(@as(i32, 7), try invokeInst(a, importer, "run", &.{}));
+}
+
+test "wasm link: an imported global value is read" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // provider: (global (export "g") i32 (i32.const 42))
+    const pgbody = [_]u8{ 0x01, 0x7f, 0x00, 0x41, 0x2a, 0x0b };
+    const pxbody = [_]u8{ 0x01, 0x01, 0x67, 0x03, 0x00 }; // "g" -> global 0
+    const pbytes = try assemble(a, &.{
+        .{ .id = 6, .body = &pgbody },
+        .{ .id = 7, .body = &pxbody },
+    });
+    const provider = try instOf(a, pbytes, .{});
+
+    // importer: import "p"."g" (global i32); (func (export "run") global.get 0)
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const ibody = [_]u8{ 0x01, 0x01, 0x70, 0x01, 0x67, 0x03, 0x7f, 0x00 }; // "p"."g" global i32 const
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00 }; // "run" -> func 0
+    const cbody = [_]u8{ 0x01, 0x04, 0x00, 0x23, 0x00, 0x0b }; // global.get 0
+    const ibytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 2, .body = &ibody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    const importer = try instOf(a, ibytes, .{ .globals = &.{provider.exportedGlobalValue("g").?} });
+    try testing.expectEqual(@as(i32, 42), try invokeInst(a, importer, "run", &.{}));
+}
+
+test "wasm link: a host function import is callable" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // import "host"."f" (func (result i32)); (func (export "run") call 0)
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const ibody = [_]u8{ 0x01, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x01, 0x66, 0x00, 0x00 }; // "host"."f" func type 0
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x01 }; // "run" -> func 1
+    const cbody = [_]u8{ 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b }; // call 0
+    const ibytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 2, .body = &ibody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    const host = wasm.FuncRef{ .host = .{ .fn_ptr = &hostReturns7, .params = 0, .results = 1 } };
+    const importer = try instOf(a, ibytes, .{ .funcs = &.{host} });
+    try testing.expectEqual(@as(i32, 7), try invokeInst(a, importer, "run", &.{}));
+}
+
+test "wasm link: a funcref written into a shared table runs in its own instance" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // provider owns a funcref table and a dispatcher; it does NOT fill
+    // the table — the importer does, with a function of its own.
+    const ptbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const pfbody = [_]u8{ 0x01, 0x01 }; // func 0 : type 1 (dispatcher)
+    const ptab = [_]u8{ 0x01, 0x70, 0x00, 0x04 }; // funcref min 4
+    const pxbody = [_]u8{ 0x02, 0x03, 0x74, 0x61, 0x62, 0x01, 0x00, 0x04, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x00 }; // "tab"->table 0, "call"->func 0
+    const pcbody = [_]u8{ 0x01, 0x07, 0x00, 0x20, 0x00, 0x11, 0x00, 0x00, 0x0b }; // local.get 0; call_indirect type 0 table 0
+    const pbytes = try assemble(a, &.{
+        .{ .id = 1, .body = &ptbody },
+        .{ .id = 3, .body = &pfbody },
+        .{ .id = 4, .body = &ptab },
+        .{ .id = 7, .body = &pxbody },
+        .{ .id = 10, .body = &pcbody },
+    });
+    const provider = try instOf(a, pbytes, .{});
+
+    // importer imports the table and writes ref.func of its own func
+    // (returns 50) into index 0 via an active element segment.
+    const itbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const iibody = [_]u8{ 0x01, 0x01, 0x70, 0x03, 0x74, 0x61, 0x62, 0x01, 0x70, 0x00, 0x04 }; // import "p"."tab" table funcref min 4
+    const ifbody = [_]u8{ 0x01, 0x00 }; // func 0 : type 0
+    const iebody = [_]u8{ 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00 }; // active table 0, [func 0] at 0
+    const icbody = [_]u8{ 0x01, 0x04, 0x00, 0x41, 0x32, 0x0b }; // func 0 → 50
+    const ibytes = try assemble(a, &.{
+        .{ .id = 1, .body = &itbody },
+        .{ .id = 2, .body = &iibody },
+        .{ .id = 3, .body = &ifbody },
+        .{ .id = 9, .body = &iebody },
+        .{ .id = 10, .body = &icbody },
+    });
+    const tab = provider.exportedTable("tab").?;
+    _ = try instOf(a, ibytes, .{ .tables = &.{tab} }); // its element segment fills the shared table
+
+    // Now the provider dispatches index 0 → the importer's function.
+    try testing.expectEqual(@as(i32, 50), try invokeInst(a, provider, "call", &.{0}));
+}
+
+// ── memory64 ────────────────────────────────────────────────────────
+
+test "wasm decoder: a 64-bit memory limit sets is_64" {
+    // memory section: one memory, flag 0x04 (64-bit, min only), min 1.
+    const body = [_]u8{ 0x05, 0x03, 0x01, 0x04, 0x01 };
+    var buf: [8 + body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const m = try wasm.decode(arena.allocator(), bytes);
+    try testing.expectEqual(@as(usize, 1), m.mems.len);
+    try testing.expect(m.mems[0].limits.is_64);
+    try testing.expectEqual(@as(u64, 1), m.mems[0].limits.min);
+}
+
+test "wasm interp: a memory64 store/load round-trips with i64 addressing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // (memory i64 1)
+    // (func (export "f") (result i64)
+    //    i64.const 8; i64.const 42; i64.store; i64.const 8; i64.load)
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7e }; // () -> (i64)
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x01, 0x04, 0x01 }; // 64-bit memory, min 1
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const cbody = [_]u8{
+        0x01, 0x0e, 0x00,
+        0x42, 0x08, // i64.const 8 (addr)
+        0x42, 0x2a, // i64.const 42 (value)
+        0x37, 0x03, 0x00, // i64.store align=3 offset=0
+        0x42, 0x08, // i64.const 8 (addr)
+        0x29, 0x03, 0x00, // i64.load align=3 offset=0
+        0x0b,
+    };
+    const bytes = try assemble(arena.allocator(), &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    const res = try runRaw(bytes, "f", &.{});
+    defer testing.allocator.free(res);
+    try testing.expectEqual(@as(i64, 42), asI64(res[0]));
+}
+
+// ── memory.init / data.drop and start function ──────────────────────
+
+test "wasm interp: memory.init copies a passive data segment into memory" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // passive data segment = i32 42 (little-endian); memory.init then load.
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x01, 0x00, 0x01 }; // memory min 1
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const dcbody = [_]u8{0x01}; // data count = 1
+    const cbody = [_]u8{
+        0x01, 0x11, 0x00,
+        0x41, 0x00, // dst 0
+        0x41, 0x00, // src 0
+        0x41, 0x04, // n 4
+        0xfc, 0x08, 0x00, 0x00, // memory.init data 0 mem 0
+        0x41, 0x00, // addr 0
+        0x28, 0x02, 0x00, // i32.load
+        0x0b,
+    };
+    const dbody = [_]u8{ 0x01, 0x01, 0x04, 0x2a, 0x00, 0x00, 0x00 }; // passive, 4 bytes = i32 42
+    const bytes = try assemble(arena.allocator(), &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 12, .body = &dcbody },
+        .{ .id = 10, .body = &cbody },
+        .{ .id = 11, .body = &dbody },
+    });
+    try testing.expectEqual(@as(i32, 42), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm interp: the start function runs during instantiation" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // func 0 (start): global.set 0 = 7; func 1 (get): global.get 0.
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x00, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x02, 0x00, 0x01 };
+    const gbody = [_]u8{ 0x01, 0x7f, 0x01, 0x41, 0x00, 0x0b }; // mut i32 = 0
+    const xbody = [_]u8{ 0x01, 0x03, 0x67, 0x65, 0x74, 0x00, 0x01 }; // "get" -> func 1
+    const sbody = [_]u8{0x00}; // start = func 0
+    const cbody = [_]u8{
+        0x02,
+        0x06, 0x00, 0x41, 0x07, 0x24, 0x00, 0x0b, // func 0: i32.const 7; global.set 0
+        0x04, 0x00, 0x23, 0x00, 0x0b, // func 1: global.get 0
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 6, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 8, .body = &sbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    // instOf runs the start function as part of instantiation.
+    const ip = try instOf(a, bytes, .{});
+    try testing.expectEqual(@as(i32, 7), try invokeInst(a, ip, "get", &.{}));
+}
+
+// ── more SIMD: boolean reductions and bitselect ─────────────────────
+
+test "wasm interp: v128.any_true reports a non-zero lane" {
+    // local.get 0; i32x4.splat; v128.any_true
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xfd, 0x11, 0xfd, 0x53, 0x0b };
+    try testing.expectEqual(@as(i32, 0), asI32(try callCells(&.{I32}, &.{I32}, &code, "f", null, &.{0})));
+    try testing.expectEqual(@as(i32, 1), asI32(try callCells(&.{I32}, &.{I32}, &code, "f", null, &.{9})));
+}
+
+test "wasm interp: i8x16.all_true requires every lane non-zero" {
+    // local.get 0; i8x16.splat; i8x16.all_true
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xfd, 0x0f, 0xfd, 0x63, 0x0b };
+    try testing.expectEqual(@as(i32, 1), asI32(try callCells(&.{I32}, &.{I32}, &code, "f", null, &.{1})));
+    try testing.expectEqual(@as(i32, 0), asI32(try callCells(&.{I32}, &.{I32}, &code, "f", null, &.{0})));
+}
+
+test "wasm interp: v128.bitselect merges by mask" {
+    // splat a; splat b; splat mask; v128.bitselect; extract_lane 0
+    const code = [_]u8{
+        0x00,
+        0x20, 0x00, 0xfd, 0x11, // splat a
+        0x20, 0x01, 0xfd, 0x11, // splat b
+        0x20, 0x02, 0xfd, 0x11, // splat mask
+        0xfd, 0x52, // v128.bitselect
+        0xfd, 0x1b, 0x00, // extract_lane 0
+        0x0b,
+    };
+    // mask all-ones → a; mask zero → b
+    try testing.expectEqual(@as(i32, 0x12), asI32(try callCells(&.{ I32, I32, I32 }, &.{I32}, &code, "f", null, &.{ 0x12, 0x34, 0xffff_ffff })));
+    try testing.expectEqual(@as(i32, 0x34), asI32(try callCells(&.{ I32, I32, I32 }, &.{I32}, &code, "f", null, &.{ 0x12, 0x34, 0 })));
+}
+
+// ── traps, recursion limit, and memory edge cases ───────────────────
+
+test "wasm interp: unbounded recursion exhausts the call stack" {
+    // (func (call 0)) — calls itself forever.
+    try testing.expectError(error.CallStackExhausted, runFunc(&.{}, &.{}, &.{ 0x00, 0x10, 0x00, 0x0b }, "f", &.{}));
+}
+
+test "wasm interp: unreachable traps" {
+    // unreachable
+    try testing.expectError(error.Unreachable, runFunc(&.{}, &.{}, &.{ 0x00, 0x00, 0x0b }, "f", &.{}));
+}
+
+test "wasm interp: memory.grow past the maximum returns -1" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x01, 0x01, 0x01, 0x01 }; // memory min 1 max 1
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x06, 0x00, 0x20, 0x00, 0x40, 0x00, 0x0b }; // local.get 0; memory.grow 0
+    const bytes = try assemble(arena.allocator(), &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, -1), try runI32(bytes, "f", &.{5})); // can't grow past max
+}
+
+test "wasm interp: i32.load8_s sign-extends the byte" {
+    // store 0xff at 0; load8_s → -1
+    const code = [_]u8{
+        0x00,
+        0x41, 0x00, 0x41, 0xff, 0x01, 0x3a, 0x00, 0x00, // i32.store8 0xff at 0
+        0x41, 0x00, 0x2c, 0x00, 0x00, // i32.load8_s at 0
+        0x0b,
+    };
+    try testing.expectEqual(@as(i32, -1), try runMemFunc(&.{}, &.{I32}, &code, "f", 1, &.{}));
+}
+
+test "wasm interp: i32.load16_u zero-extends the half-word" {
+    // store 0xffff at 0; load16_u → 65535
+    const code = [_]u8{
+        0x00,
+        0x41, 0x00, 0x41, 0xff, 0xff, 0x03, 0x3b, 0x01, 0x00, // i32.store16 0xffff at 0
+        0x41, 0x00, 0x2f, 0x01, 0x00, // i32.load16_u at 0
+        0x0b,
+    };
+    try testing.expectEqual(@as(i32, 65535), try runMemFunc(&.{}, &.{I32}, &code, "f", 1, &.{}));
+}
+
+test "wasm interp: out-of-bounds load traps" {
+    // i32.load at the last page byte + 1 (offset 65536 of a 1-page memory)
+    const code = [_]u8{ 0x00, 0x41, 0x80, 0x80, 0x04, 0x28, 0x02, 0x00, 0x0b }; // i32.const 65536; i32.load
+    try testing.expectError(error.OutOfBoundsMemoryAccess, runMemFunc(&.{}, &.{I32}, &code, "f", 1, &.{}));
 }
