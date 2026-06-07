@@ -705,6 +705,14 @@ fn validateSimd(v: *Validator) !void {
             try v.popExpect(.v128);
             try v.pushVal(.v128);
         },
+
+        // integer abs / popcnt, float rounding, conversions: v128 -> v128.
+        96, 98, 128, 160, 192, 103, 104, 105, 106, 116, 117, 122, 148, 94, 95, 248, 249, 250, 251, 252, 253, 254, 255 => try unop(v, .v128, .v128),
+        // all_true / bitmask: v128 -> i32.
+        99, 100, 131, 132, 163, 164, 195, 196 => try unop(v, .v128, .i32),
+        // integer min/max/avgr/sat, i64x2 compares, float pmin/pmax: v128, v128 -> v128.
+        111, 112, 114, 115, 118, 119, 120, 121, 123, 143, 144, 146, 147, 150, 151, 152, 153, 155, 182, 183, 184, 185, 214, 215, 216, 217, 218, 219, 234, 235, 246, 247 => try binop(v, .v128, .v128),
+
         else => return error.UnknownOpcode,
     }
 }
