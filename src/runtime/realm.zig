@@ -1044,6 +1044,9 @@ pub const Realm = struct {
     /// `WebAssembly.Global.prototype`, cached at install so an instance's
     /// global exports can be wrapped as `Global` objects.
     wasm_global_prototype: ?*@import("object.zig").JSObject = null,
+    /// `WebAssembly.Table.prototype`, cached at install so table exports
+    /// can be wrapped as `Table` objects.
+    wasm_table_prototype: ?*@import("object.zig").JSObject = null,
     /// Phase 3 SES override-mistake fix — `freezePrimordials`
     /// installs a `SyntheticAccessor` pair (getter + setter
     /// JSFunctions sharing one capture cell) for every data

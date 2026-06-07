@@ -379,3 +379,83 @@ test "writing an exported mutable global is visible to wasm" {
         "inst.exports.get()"; // global.get 0
     try expectIntWasm(src, 100);
 }
+
+// ── WebAssembly.Table ───────────────────────────────────────────────
+
+// Exports a funcref table "tbl" (size 1), a function "f" (→ 42), and a
+// "callIndirect" that does call_indirect through table index 0.
+const table_module_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,5,1,96,0,1,127, 3,3,2,0,0, 4,4,1,112,0,1, 7,26,3,1,102,0,0,3,116,98,108,1,0,12,99,97,108,108,73,110,100,105,114,101,99,116,0,1, 10,14,2,4,0,65,42,11,7,0,65,0,17,0,0,11])";
+
+// An exported "f" that returns 7, for filling tables from JS.
+const f7_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,5,1,96,0,1,127, 3,2,1,0, 7,5,1,1,102,0,0, 10,6,1,4,0,65,7,11])";
+
+test "WebAssembly.Table is a constructor" {
+    try expectIntWasm("typeof WebAssembly.Table === 'function' ? 1 : 0", 1);
+}
+
+test "a fresh anyfunc table has the requested length and null entries" {
+    const src =
+        "const t = new WebAssembly.Table({ element: 'anyfunc', initial: 3 });" ++
+        "(t.length === 3 && t.get(0) === null && t.get(2) === null) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "table.get out of bounds throws" {
+    const src =
+        "const t = new WebAssembly.Table({ element: 'anyfunc', initial: 1 });" ++
+        "try { t.get(5); 0 } catch (e) { 1 }";
+    try expectIntWasm(src, 1);
+}
+
+test "table.set stores an exported function that is callable via get" {
+    const src =
+        "const f = new WebAssembly.Instance(new WebAssembly.Module(" ++ f7_bytes ++ ")).exports.f;" ++
+        "const t = new WebAssembly.Table({ element: 'anyfunc', initial: 2 });" ++
+        "t.set(1, f); t.get(1)()"; // → 7
+    try expectIntWasm(src, 7);
+}
+
+test "table.set rejects a non-function value" {
+    const src =
+        "const t = new WebAssembly.Table({ element: 'anyfunc', initial: 1 });" ++
+        "try { t.set(0, 123); 0 } catch (e) { 1 }";
+    try expectIntWasm(src, 1);
+}
+
+test "table.grow extends the table and returns the old length" {
+    const src =
+        "const t = new WebAssembly.Table({ element: 'anyfunc', initial: 2 });" ++
+        "const old = t.grow(3);" ++
+        "(old === 2 && t.length === 5 && t.get(4) === null) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "table.grow past the maximum throws" {
+    const src =
+        "const t = new WebAssembly.Table({ element: 'anyfunc', initial: 1, maximum: 2 });" ++
+        "try { t.grow(5); 0 } catch (e) { 1 }";
+    try expectIntWasm(src, 1);
+}
+
+test "externref tables are rejected for now" {
+    try expectIntWasm("try { new WebAssembly.Table({ element: 'externref', initial: 1 }); 0 } catch (e) { 1 }", 1);
+}
+
+test "an exported table is a WebAssembly.Table over the live table" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ table_module_bytes ++ "));" ++
+        "(inst.exports.tbl instanceof WebAssembly.Table && inst.exports.tbl.length === 1) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "a function set into a table from JS is callable by wasm call_indirect" {
+    // The marquee test: JS writes an exported function into the shared
+    // table; a wasm `call_indirect` through that table then runs it.
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ table_module_bytes ++ "));" ++
+        "inst.exports.tbl.set(0, inst.exports.f);" ++
+        "inst.exports.callIndirect()"; // call_indirect 0 -> f -> 42
+    try expectIntWasm(src, 42);
+}

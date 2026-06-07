@@ -921,6 +921,9 @@ pub const JSObject = struct {
     /// type + mutability). Opaque, arena-owned — same contract as
     /// `wasm_module`.
     wasm_global: ?*anyopaque = null,
+    /// A `WebAssembly.Table`'s backing record (the shared engine table +
+    /// element type). Opaque, arena-owned.
+    wasm_table: ?*anyopaque = null,
     /// `Promise.prototype.finally` callback — set on the per-
     /// `.finally()` context object the reaction closures capture
     /// via `is_arrow + captured_this`. Hidden from JS.

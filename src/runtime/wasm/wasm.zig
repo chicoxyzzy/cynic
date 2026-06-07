@@ -66,6 +66,10 @@ pub const HostFn = interpreter.HostFn;
 pub const Memory = interpreter.Memory;
 pub const Table = interpreter.Table;
 pub const runStart = interpreter.runStart;
+pub const REF_NULL = interpreter.REF_NULL;
+pub const makeFuncRef = interpreter.makeFuncRef;
+pub const funcRefInstance = interpreter.funcRefInstance;
+pub const funcRefIndex = interpreter.funcRefIndex;
 
 test {
     _ = @import("reader.zig");
