@@ -3386,10 +3386,18 @@ fn dataViewByteLength(realm: *Realm, this_value: Value, args: []const Value) Nat
     const buf = dv.viewed.getArrayBuffer() orelse return throwTypeError(realm, "DataView: buffer is detached");
     if (dv.length_tracking) {
         if (dv.byte_offset > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
-        return Value.fromInt32(@intCast(buf.len - dv.byte_offset));
+        // Length-tracking views over a resizable / growable
+        // ArrayBuffer can outpace 2^31 bytes. Same fast-path-with-
+        // double-fallback as `typedArrayLength` /
+        // `typedArrayByteLength` (commit 3189821) — fast int32
+        // case, fallback to Double for larger views.
+        const tracked = buf.len - dv.byte_offset;
+        if (tracked <= std.math.maxInt(i32)) return Value.fromInt32(@intCast(tracked));
+        return Value.fromDouble(@floatFromInt(tracked));
     }
     if (dv.byte_offset + dv.byte_length > buf.len) return throwTypeError(realm, "DataView: out-of-bounds");
-    return Value.fromInt32(@intCast(dv.byte_length));
+    if (dv.byte_length <= std.math.maxInt(i32)) return Value.fromInt32(@intCast(dv.byte_length));
+    return Value.fromDouble(@floatFromInt(dv.byte_length));
 }
 
 fn dataViewByteOffset(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
