@@ -409,6 +409,12 @@ fn scoreRejected(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std
         // Decoded; expect validation (via instantiate) to reject it.
         if (wasm.instantiate(arena, arena, modp, .{})) |_| {
             counts.fail += 1; // accepted a module the spec rejects
+            if (debug_loads) {
+                const txt = if (cmd.get("text")) |t| t.string else "?";
+                var line: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&line, "    WRONGLY-ACCEPTED {s} L{d}: {s}\n", .{ filename, if (cmd.get("line")) |l| l.integer else 0, txt }) catch return;
+                std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
+            }
         } else |_| {
             counts.pass += 1;
         }
