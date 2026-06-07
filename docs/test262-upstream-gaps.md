@@ -1102,3 +1102,61 @@ the corpus under the relevant section's directory before adding.
   `using` declaration, asserting the loop completes. No existing
   fixture combines a `using` declaration with a nested class
   method body.
+
+### `DataView.prototype.byteLength` aborted on length-tracking views past 2^31 bytes
+
+- **Fixed in:** `3597550`
+- **Spec:** §25.3.4.1 — return the current view byte length as a
+  Number. A Number losslessly represents up to 2^53-1 (§6.1.6), so
+  the accessor must accommodate any view size the implementation
+  allows.
+- **Reproducer:**
+  ```js
+  const buf = new ArrayBuffer(2147483648, { maxByteLength: 4294967296 });
+  const dv = new DataView(buf);
+  buf.resize(2147483649);
+  dv.byteLength;  // → 2147483649, not host-abort
+  ```
+- **Before fix:** the accessor cast `usize` through `@intCast` to
+  `i32` before `Value.fromInt32`. A length-tracking view over a
+  resizable buffer past 2^31 bytes panicked with "integer does not
+  fit in destination type".
+- **After fix:** Fast-path the int32 case; fall back to
+  `Value.fromDouble` for the larger range. Same shape as the
+  earlier `typedArrayLength` / `typedArrayByteLength` fix
+  (`3189821`).
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/DataView/prototype/byteLength/` exercising a
+  length-tracking view past 2^31 bytes on a growable buffer.
+  Current fixtures top out around the i32 boundary.
+
+### `Array.prototype.toLocaleString` aborted the host on a self-referential array
+
+- **Fixed in:** `2241a32`
+- **Spec:** §23.1.3.32 — `Invoke(elt, "toLocaleString")` for each
+  element. A circular array would re-enter
+  `Array.prototype.toLocaleString` indefinitely; the spec says
+  nothing about cycle detection, but every shipping engine throws
+  RangeError on host-stack exhaustion (and the matching
+  `Array.prototype.join` already does — see the test262 fixture
+  `built-ins/Array/prototype/join/length-near-overflow.js`).
+- **Reproducer:**
+  ```js
+  const a = [];
+  a.push(a);
+  a.toLocaleString();  // → RangeError, not a host abort
+  ```
+- **Before fix:** `arrayJoin` had the address-based native-stack
+  guard (`stack_guard.nearLimit()` throwing RangeError); the
+  sibling `arrayToLocaleString` was missed at the time the join
+  guard landed (commit `833f8ca`). The 4h Fuzzilli post-host-
+  safety-fixes run surfaced six distinct reprs that all
+  trace-bottom into this recursion.
+- **After fix:** Same `stack_guard.nearLimit()` check at the top
+  of `arrayToLocaleString`, throwing a catchable RangeError.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/Array/prototype/toLocaleString/` asserting that
+  `assert.throws(RangeError, () => { const a = []; a.push(a);
+  a.toLocaleString(); })`. The join sibling has this fixture
+  (`length-near-overflow.js` family); the toLocaleString one
+  doesn't.
