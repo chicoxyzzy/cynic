@@ -206,9 +206,11 @@ These need to route to the shape when the object is shape-mode:
 
 `runtime/heap.zig` `markObject` currently walks
 `obj.properties.values()` to mark each child Value. For shape-mode
-objects it must walk `obj.slots.items[0..obj.shape.property_count]`
-instead. (The shape itself is realm-lifetime, not GC-managed, so
-no extra trace.)
+objects it must walk the shape slots `obj.slotAt(i)` for `i` in
+`0..obj.slotCount()` instead — the values live inline in the JSObject
+header plus an overflow buffer, reached through the slot accessors
+(`JSObject.inline_slots` / `overflow_slots`). (The shape itself is
+realm-lifetime, not GC-managed, so no extra trace.)
 
 `deinitFields` likewise has to skip the bag teardown when the bag
 is empty / never allocated.

@@ -424,8 +424,8 @@ of the scan. Three buckets remain:
    barrier coverage on the containing JSObject when the
    `*IteratorHelperState` field is updated.
 2. **Collection mutations** — `map_data.entries`,
-   `set_data.entries`, `promise_reactions[]`,
-   `promise_waiters[]`, `finalization_cells.cells[]`,
+   `set_data.entries`, `promise_store.reactions[]`,
+   `promise_store.waiters[]`, `finalization_cells.cells[]`,
    `key_anchors[]`, `private_properties` / `private_accessors`.
    Two design choices: per-mutation barriers at each `Map.set` /
    `.then` / etc., or an "always-remembered subset" list of
