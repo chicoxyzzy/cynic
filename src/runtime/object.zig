@@ -577,6 +577,11 @@ pub const JSObjectExtension = struct {
     /// ArrayBuffer(n)` / `.transfer()` / `.slice()` instances
     /// populate this. Heap-allocated slice; freed in deinit.
     array_buffer: ?[]u8 = null,
+    /// When true, `array_buffer` is a *borrowed* (externally-owned)
+    /// view — `deinit` must not free it. Set for the ArrayBuffer that
+    /// `WebAssembly.Memory.prototype.buffer` returns: its bytes live in
+    /// the realm's wasm arena, not this realm's general allocator.
+    array_buffer_external: bool = false,
     /// §25.2 SharedArrayBuffer backing store — a refcounted, non-GC
     /// block shared across agents. Present (and `array_buffer` null)
     /// on `SharedArrayBuffer` instances; `getArrayBuffer` returns the
@@ -662,7 +667,9 @@ pub const JSObjectExtension = struct {
         // §25.2 — a SharedArrayBuffer's bytes belong to the refcounted
         // shared block (not this realm's allocator); drop our reference
         // instead of freeing. A plain ArrayBuffer frees its own slice.
-        if (self.shared_block) |blk| blk.release() else if (self.array_buffer) |ab| allocator.free(ab);
+        if (self.shared_block) |blk| blk.release() else if (self.array_buffer) |ab| {
+            if (!self.array_buffer_external) allocator.free(ab);
+        }
         self.disposable_resources.deinit(allocator);
         if (self.async_dispose_walk) |w| w.deinit(allocator);
         if (self.temporal_record) |tr| {
@@ -924,6 +931,9 @@ pub const JSObject = struct {
     /// A `WebAssembly.Table`'s backing record (the shared engine table +
     /// element type). Opaque, arena-owned.
     wasm_table: ?*anyopaque = null,
+    /// A `WebAssembly.Memory`'s backing record (the shared engine memory
+    /// + its cached `buffer` ArrayBuffer). Opaque, arena-owned.
+    wasm_memory: ?*anyopaque = null,
     /// `Promise.prototype.finally` callback — set on the per-
     /// `.finally()` context object the reaction closures capture
     /// via `is_arrow + captured_this`. Hidden from JS.
@@ -1634,6 +1644,14 @@ pub const JSObject = struct {
     pub fn setArrayBuffer(self: *JSObject, allocator: std.mem.Allocator, bytes: ?[]u8) !void {
         const ext = try self.getOrCreateExtension(allocator);
         ext.array_buffer = bytes;
+    }
+
+    /// Set `array_buffer` to a *borrowed* slice the object must not free
+    /// (e.g. WebAssembly linear memory backing `Memory.prototype.buffer`).
+    pub fn setExternalArrayBuffer(self: *JSObject, allocator: std.mem.Allocator, bytes: []u8) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.array_buffer = bytes;
+        ext.array_buffer_external = true;
     }
 
     /// In-place mutate of the slice; safe only when the extension

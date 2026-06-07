@@ -65,6 +65,14 @@ const TableState = struct {
     funcref: bool,
 };
 
+/// A `WebAssembly.Memory`'s backing state: the shared engine memory and
+/// the cached `buffer` ArrayBuffer (a non-owning view over the memory's
+/// bytes, recreated after a JS-initiated grow). Arena-owned.
+const MemoryState = struct {
+    mem: *wasm.Memory,
+    buffer: ?*JSObject,
+};
+
 pub fn install(realm: *Realm) !void {
     const ns = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(ns, realm.intrinsics.object_prototype);
@@ -125,6 +133,26 @@ pub fn install(realm: *Realm) !void {
         const entry = try table_ctor.proto.getOrPutAccessor(realm.allocator, "length");
         entry.value_ptr.* = .{ .getter = getter, .setter = null };
         try table_ctor.proto.property_flags.put(realm.allocator, "length", .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = true,
+        });
+    }
+
+    const memory_ctor = try intrinsics.installConstructor(realm, .{
+        .ctor = memoryConstructor,
+        .arity = 1,
+        .name = "Memory",
+        .install_global = false,
+    });
+    try ns.set(realm.allocator, "Memory", heap_mod.taggedFunction(memory_ctor.ctor));
+    realm.wasm_memory_prototype = memory_ctor.proto;
+    try intrinsics.installNativeMethodOnProto(realm, memory_ctor.proto, "grow", memoryGrow, 1);
+    {
+        const getter = try intrinsics.makeNativeFunction(realm, memoryBufferGet, 0, "get buffer");
+        const entry = try memory_ctor.proto.getOrPutAccessor(realm.allocator, "buffer");
+        entry.value_ptr.* = .{ .getter = getter, .setter = null };
+        try memory_ctor.proto.property_flags.put(realm.allocator, "buffer", .{
             .writable = false,
             .enumerable = false,
             .configurable = true,
@@ -400,11 +428,92 @@ fn makeTable(realm: *Realm, table: *wasm.Table, funcref: bool) NativeError!Value
     return heap_mod.taggedObject(obj);
 }
 
+// ── WebAssembly.Memory ──────────────────────────────────────────────
+
+/// `new WebAssembly.Memory({initial, maximum?})` — a page-granular
+/// linear memory. Gated. The bytes live in the realm's wasm arena;
+/// `buffer` exposes a non-owning ArrayBuffer view over them.
+fn memoryConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (!realm.allow_wasm) return wasmDisabled(realm);
+    const self = heap_mod.valueAsPlainObject(this_value) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Memory requires 'new'");
+    const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Memory expects a descriptor object");
+
+    const initial = try indexArg(realm, desc.get("initial"));
+    const max = try optionalIndexArg(realm, desc.get("maximum"));
+
+    const a = realm.wasmAllocator();
+    const bytes = a.alloc(u8, initial * wasm.PAGE_SIZE) catch return error.OutOfMemory;
+    @memset(bytes, 0);
+    const mem = a.create(wasm.Memory) catch return error.OutOfMemory;
+    mem.* = .{ .data = bytes, .max_pages = max, .is_64 = false };
+    const st = a.create(MemoryState) catch return error.OutOfMemory;
+    st.* = .{ .mem = mem, .buffer = null };
+    self.wasm_memory = st;
+    return this_value;
+}
+
+fn memoryStateOf(realm: *Realm, this_value: Value) NativeError!*MemoryState {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Memory");
+    const raw = obj.wasm_memory orelse
+        return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Memory");
+    return @ptrCast(@alignCast(raw));
+}
+
+/// `Memory.prototype.buffer` — a cached non-owning ArrayBuffer aliasing
+/// the live linear bytes.
+fn memoryBufferGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const st = try memoryStateOf(realm, this_value);
+    if (st.buffer) |b| return heap_mod.taggedObject(b);
+    const buf = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(buf, realm.intrinsics.array_buffer_prototype);
+    buf.setExternalArrayBuffer(realm.allocator, st.mem.data) catch return error.OutOfMemory;
+    buf.has_array_buffer_data = true;
+    st.buffer = buf;
+    return heap_mod.taggedObject(buf);
+}
+
+/// `Memory.prototype.grow(delta)` — grow by `delta` pages, detach the
+/// current buffer, return the previous page count.
+fn memoryGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const st = try memoryStateOf(realm, this_value);
+    const delta = try indexArg(realm, if (args.len > 0) args[0] else Value.undefined_);
+    const old_pages = st.mem.data.len / wasm.PAGE_SIZE;
+    const new_pages = old_pages + delta;
+    if (st.mem.max_pages) |m| {
+        if (new_pages > m) return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the maximum");
+    }
+    const a = realm.wasmAllocator();
+    const new_bytes = a.alloc(u8, new_pages * wasm.PAGE_SIZE) catch return error.OutOfMemory;
+    @memset(new_bytes, 0);
+    @memcpy(new_bytes[0..st.mem.data.len], st.mem.data);
+    // DetachArrayBuffer (§25.1.3.4) on the prior buffer, if materialized.
+    if (st.buffer) |b| {
+        b.setArrayBuffer(realm.allocator, null) catch {};
+        st.buffer = null;
+    }
+    st.mem.data = new_bytes;
+    return Value.fromInt32(@intCast(old_pages));
+}
+
+/// Wrap a shared engine memory as a `WebAssembly.Memory` (for exports).
+fn makeMemory(realm: *Realm, mem: *wasm.Memory) NativeError!Value {
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, realm.wasm_memory_prototype);
+    const st = realm.wasmAllocator().create(MemoryState) catch return error.OutOfMemory;
+    st.* = .{ .mem = mem, .buffer = null };
+    obj.wasm_memory = st;
+    return heap_mod.taggedObject(obj);
+}
+
 /// Build the exports namespace object: each function export becomes a
 /// callable JS function carrying its `(instance, func_index)`; each
 /// global export becomes a `WebAssembly.Global`; each funcref table
-/// export becomes a `WebAssembly.Table`. Memory exports are omitted in
-/// this slice.
+/// export becomes a `WebAssembly.Table`; the memory export becomes a
+/// `WebAssembly.Memory`.
 fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) NativeError!Value {
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, null); // §exports object has a null prototype
@@ -426,7 +535,11 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
                 const tobj = try makeTable(realm, tbl, true);
                 obj.set(realm.allocator, ex.name, tobj) catch return error.OutOfMemory;
             },
-            else => {}, // memory exports: next slice
+            .mem => {
+                const mem = ip.memoryPtr() orelse continue;
+                const mobj = try makeMemory(realm, mem);
+                obj.set(realm.allocator, ex.name, mobj) catch return error.OutOfMemory;
+            },
         }
     }
     return heap_mod.taggedObject(obj);
