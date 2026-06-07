@@ -40,6 +40,7 @@ pub const ValidateError = error{
     BadValType,
     BadRefType,
     BadBlockType,
+    BadLane,
     UnknownOpcode,
     TypeMismatch,
     StackUnderflow,
@@ -755,48 +756,70 @@ fn validateSimd(v: *Validator) !void {
         18 => try unop(v, .i64, .v128),
         19 => try unop(v, .f32, .v128),
         20 => try unop(v, .f64, .v128),
-        // extract_lane (1-byte lane immediate): pop v128, push scalar.
-        21, 22, 24, 25, 27 => {
-            _ = try v.r.byte();
+        // extract_lane (1-byte lane immediate, range-checked): pop v128, push scalar.
+        21, 22 => {
+            try checkLane(v, 16);
+            try v.popExpect(.v128);
+            try v.pushVal(.i32);
+        },
+        24, 25 => {
+            try checkLane(v, 8);
+            try v.popExpect(.v128);
+            try v.pushVal(.i32);
+        },
+        27 => {
+            try checkLane(v, 4);
             try v.popExpect(.v128);
             try v.pushVal(.i32);
         },
         29 => {
-            _ = try v.r.byte();
+            try checkLane(v, 2);
             try v.popExpect(.v128);
             try v.pushVal(.i64);
         },
         31 => {
-            _ = try v.r.byte();
+            try checkLane(v, 4);
             try v.popExpect(.v128);
             try v.pushVal(.f32);
         },
         33 => {
-            _ = try v.r.byte();
+            try checkLane(v, 2);
             try v.popExpect(.v128);
             try v.pushVal(.f64);
         },
         // replace_lane (1-byte lane): pop scalar, pop v128, push v128.
-        23, 26, 28 => {
-            _ = try v.r.byte();
+        23 => {
+            try checkLane(v, 16);
+            try v.popExpect(.i32);
+            try v.popExpect(.v128);
+            try v.pushVal(.v128);
+        },
+        26 => {
+            try checkLane(v, 8);
+            try v.popExpect(.i32);
+            try v.popExpect(.v128);
+            try v.pushVal(.v128);
+        },
+        28 => {
+            try checkLane(v, 4);
             try v.popExpect(.i32);
             try v.popExpect(.v128);
             try v.pushVal(.v128);
         },
         30 => {
-            _ = try v.r.byte();
+            try checkLane(v, 2);
             try v.popExpect(.i64);
             try v.popExpect(.v128);
             try v.pushVal(.v128);
         },
         32 => {
-            _ = try v.r.byte();
+            try checkLane(v, 4);
             try v.popExpect(.f32);
             try v.popExpect(.v128);
             try v.pushVal(.v128);
         },
         34 => {
-            _ = try v.r.byte();
+            try checkLane(v, 2);
             try v.popExpect(.f64);
             try v.popExpect(.v128);
             try v.pushVal(.v128);
@@ -832,9 +855,12 @@ fn validateSimd(v: *Validator) !void {
         // integer min/max/avgr/sat, i64x2 compares, float pmin/pmax: v128, v128 -> v128.
         111, 112, 114, 115, 118, 119, 120, 121, 123, 143, 144, 146, 147, 150, 151, 152, 153, 155, 182, 183, 184, 185, 214, 215, 216, 217, 218, 219, 234, 235, 246, 247 => try binop(v, .v128, .v128),
 
-        // i8x16.shuffle: 16-byte lane immediate; v128, v128 -> v128.
+        // i8x16.shuffle: 16-byte lane immediate, each lane < 32.
         13 => {
-            _ = try v.r.bytesN(16);
+            const lanes = try v.r.bytesN(16);
+            for (lanes) |l| {
+                if (l >= 32) return error.BadLane;
+            }
             try v.popExpect(.v128);
             try v.popExpect(.v128);
             try v.pushVal(.v128);
@@ -843,29 +869,29 @@ fn validateSimd(v: *Validator) !void {
         14, 101, 102, 133, 134, 156, 157, 158, 159, 188, 189, 190, 191, 220, 221, 222, 223, 186, 130 => try binop(v, .v128, .v128),
         // extend / extadd_pairwise: v128 -> v128.
         135, 136, 137, 138, 167, 168, 169, 170, 199, 200, 201, 202, 124, 125, 126, 127 => try unop(v, .v128, .v128),
-        // load_splat / load_extend / load_zero: pop i32 addr (+ memarg), push v128.
+        // load_splat / load_extend / load_zero: pop address (+ memarg), push v128.
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 92, 93 => {
             try requireMemory(v);
             try skipMemarg(v);
-            try v.popExpect(.i32);
+            try v.popExpect(v.mem_addr);
             try v.pushVal(.v128);
         },
-        // load_lane: memarg + lane immediate; pop v128, pop i32, push v128.
+        // load_lane: memarg + range-checked lane; pop v128, pop addr, push v128.
         84, 85, 86, 87 => {
             try requireMemory(v);
             try skipMemarg(v);
-            _ = try v.r.byte();
+            try checkLane(v, laneCount(sub));
             try v.popExpect(.v128);
-            try v.popExpect(.i32);
+            try v.popExpect(v.mem_addr);
             try v.pushVal(.v128);
         },
-        // store_lane: memarg + lane immediate; pop v128, pop i32.
+        // store_lane: memarg + range-checked lane; pop v128, pop addr.
         88, 89, 90, 91 => {
             try requireMemory(v);
             try skipMemarg(v);
-            _ = try v.r.byte();
+            try checkLane(v, laneCount(sub));
             try v.popExpect(.v128);
-            try v.popExpect(.i32);
+            try v.popExpect(v.mem_addr);
         },
 
         else => return error.UnknownOpcode,
@@ -874,6 +900,22 @@ fn validateSimd(v: *Validator) !void {
 
 fn requireMemory(v: *Validator) !void {
     if (!v.has_memory) return error.NoMemory;
+}
+
+/// Read a SIMD lane-index immediate and require it to be in range.
+fn checkLane(v: *Validator, lane_count: u8) !void {
+    if (try v.r.byte() >= lane_count) return error.BadLane;
+}
+
+/// Lane count for a load_lane / store_lane sub-opcode (by access width).
+fn laneCount(sub: u32) u8 {
+    return switch (sub) {
+        84, 88 => 16, // 8-bit
+        85, 89 => 8, // 16-bit
+        86, 90 => 4, // 32-bit
+        87, 91 => 2, // 64-bit
+        else => 16,
+    };
 }
 
 fn load(v: *Validator, result: ValType) !void {
