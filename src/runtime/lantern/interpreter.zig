@@ -10103,11 +10103,6 @@ pub fn runFrames(
             const r_stack = code[ip];
             const mode = code[ip + 1];
             ip += 2;
-            // Compiler may emit a register index past this frame's
-            // window on certain shapes (DisposableStack inside
-            // generators / async). Surface as InvalidOpcode so the
-            // host doesn't abort. AGENTS.md host-safety.
-            if (r_stack >= registers.len) return error.InvalidOpcode;
             const stack_v = registers[r_stack];
             const stack_obj = heap_mod.valueAsPlainObject(stack_v) orelse {
                 return error.InvalidOpcode;
@@ -10170,11 +10165,6 @@ pub fn runFrames(
             const r_stack = code[ip];
             const mode = code[ip + 1];
             ip += 2;
-            // Compiler may emit a register index past this frame's
-            // window on certain shapes (DisposableStack inside
-            // generators / async). Surface as InvalidOpcode so the
-            // host doesn't abort. AGENTS.md host-safety.
-            if (r_stack >= registers.len) return error.InvalidOpcode;
             const stack_v = registers[r_stack];
             const stack_obj = heap_mod.valueAsPlainObject(stack_v) orelse {
                 return error.InvalidOpcode;

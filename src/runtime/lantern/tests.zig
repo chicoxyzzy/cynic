@@ -12037,3 +12037,83 @@ test "def_template_property: literal with mixed static + computed keys" {
         \\o.a + o.dyn + o.b;
     , 60);
 }
+
+test "class method body resets finally_chain at function boundary" {
+    // A method body is a function boundary — §10.2.10 — so its
+    // `return` must not inline an OUTER try-finally. Without the
+    // reset, the method compiled inside this outer `try { } finally
+    // { let x; }` would inline the finally body at its `return`,
+    // declare the let, bump `env_slot_count` past the elided method
+    // entry-env, and either panic the compiler or surface as a
+    // SyntaxError. Source from a Fuzzilli crash.
+    try expectScriptIntWithBuiltins(
+        \\let outcome = 0;
+        \\try {} catch (e) {
+        \\    class C {
+        \\        m() { return 99; }
+        \\    }
+        \\    outcome = new C().m();
+        \\} finally {
+        \\    const t = 1;
+        \\    outcome += t;
+        \\}
+        \\outcome;
+    , 1);
+}
+
+test "class method body resets current_dispose_stack across class in for-of using" {
+    // A `using` declaration inside the for-of body publishes a
+    // `current_dispose_stack` register on the OUTER builder. A class
+    // method compiled inside that body must not inherit it: its
+    // `return` would otherwise inline the dispose-stack walk against
+    // an outer register the method's frame doesn't own, blowing the
+    // register-window bounds. Source from a Fuzzilli crash.
+    try expectScriptIntWithBuiltins(
+        \\let total = 0;
+        \\function F() {
+        \\    for (const v of "i") {
+        \\        const d = Symbol.dispose;
+        \\        class C {
+        \\            [d]() { total += 10; }
+        \\        }
+        \\        using r = new C();
+        \\        total += 1;
+        \\    }
+        \\}
+        \\F();
+        \\total;
+    , 11);
+}
+
+test "static block body resets finally_chain at function boundary" {
+    // Same shape as the method-body test above, but the inner
+    // function-body chunk is a `static { … }` class block.
+    try expectScriptIntWithBuiltins(
+        \\let probe = 0;
+        \\try { throw 0; } catch (e) {
+        \\    class C {
+        \\        static { probe = 42; }
+        \\    }
+        \\} finally {
+        \\    const t = 1;
+        \\    probe += t;
+        \\}
+        \\probe;
+    , 43);
+}
+
+test "class constructor body resets finally_chain at function boundary" {
+    try expectScriptIntWithBuiltins(
+        \\let out = 0;
+        \\try { throw 0; } catch (e) {
+        \\    class C {
+        \\        constructor() { return; }
+        \\    }
+        \\    out = (new C(), 7);
+        \\} finally {
+        \\    const t = 1;
+        \\    out += t;
+        \\}
+        \\out;
+    , 8);
+}

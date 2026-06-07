@@ -7851,6 +7851,22 @@ pub const Compiler = struct {
         // §sec-performeval-rules-in-initializer — a direct eval inside
         // this static block applies the ContainsArguments early error.
         const saved_in_field_initializer = self.in_field_initializer;
+        // §15.10 / §14.13 / §9.5.4 — the static block runs as its
+        // own function-shape chunk at class-definition time, so
+        // `return` / `break` / `continue` / inline-finally inside
+        // it must not walk the OUTER function's try / using / label
+        // chain. Mirrors the reset in `compileFunctionTemplateExtNamed`
+        // for ordinary function decls and arrows.
+        const saved_in_tail_position = self.in_tail_position;
+        const saved_try_with_handler_depth = self.try_with_handler_depth;
+        const saved_pending_labels = self.pending_labels;
+        const saved_finally_chain = self.finally_chain;
+        const saved_current_dispose_stack = self.current_dispose_stack;
+        self.in_tail_position = false;
+        self.try_with_handler_depth = 0;
+        self.pending_labels = .empty;
+        self.finally_chain = null;
+        self.current_dispose_stack = null;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -7871,6 +7887,7 @@ pub const Compiler = struct {
             if (!inner_finished) {
                 self.builder.deinit();
                 fn_scope.deinit(self.allocator);
+                self.pending_labels.deinit(self.allocator);
                 self.builder = saved_builder;
                 self.scope = saved_scope;
                 self.env_slot_count = saved_env_slot_count;
@@ -7879,6 +7896,11 @@ pub const Compiler = struct {
                 self.current_loop = saved_current_loop;
                 self.completion_reg = saved_completion_reg;
                 self.in_field_initializer = saved_in_field_initializer;
+                self.in_tail_position = saved_in_tail_position;
+                self.try_with_handler_depth = saved_try_with_handler_depth;
+                self.pending_labels = saved_pending_labels;
+                self.finally_chain = saved_finally_chain;
+                self.current_dispose_stack = saved_current_dispose_stack;
             }
         }
 
@@ -7898,20 +7920,15 @@ pub const Compiler = struct {
 
         if (slot_count_patch) |p| {
             self.builder.code.items[p] = self.env_slot_count;
-        } else if (self.env_slot_count != 0) {
-            // functionEntryEnvNeeded predicted zero env slots, but
-            // body compilation bumped env_slot_count anyway. Happens
-            // on corner-case shapes — e.g. a `static [self-ref](…)`
-            // class method inside a per-iteration `for-let` env where
-            // capture analysis under-predicts. Surface as a typed
-            // CompileError (the host throws SyntaxError at the
-            // boundary) rather than abort the process — AGENTS.md
-            // host-safety.
-            return error.UnsupportedExpression;
+        } else {
+            // §10.2.10 — env elided; the discovery pass guaranteed
+            // no binding would be created here.
+            std.debug.assert(self.env_slot_count == 0);
         }
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
         fn_scope.deinit(self.allocator);
+        self.pending_labels.deinit(self.allocator);
 
         self.builder = saved_builder;
         self.scope = saved_scope;
@@ -7921,6 +7938,11 @@ pub const Compiler = struct {
         self.current_loop = saved_current_loop;
         self.completion_reg = saved_completion_reg;
         self.in_field_initializer = saved_in_field_initializer;
+        self.in_tail_position = saved_in_tail_position;
+        self.try_with_handler_depth = saved_try_with_handler_depth;
+        self.pending_labels = saved_pending_labels;
+        self.finally_chain = saved_finally_chain;
+        self.current_dispose_stack = saved_current_dispose_stack;
 
         return inner_chunk;
     }
@@ -7946,6 +7968,22 @@ pub const Compiler = struct {
         const saved_current_loop = self.current_loop;
         const saved_completion_reg = self.completion_reg;
         const saved_params_register_only = self.current_params_register_only;
+        // §15.10 / §14.13 / §9.5.4 — the constructor body is a
+        // function boundary. `return` / `break` / `continue` /
+        // inline-finally inside it must not walk the OUTER
+        // function's try / using / label chain. Mirrors the reset
+        // in `compileFunctionTemplateExtNamed` for ordinary
+        // function decls and arrows.
+        const saved_in_tail_position = self.in_tail_position;
+        const saved_try_with_handler_depth = self.try_with_handler_depth;
+        const saved_pending_labels = self.pending_labels;
+        const saved_finally_chain = self.finally_chain;
+        const saved_current_dispose_stack = self.current_dispose_stack;
+        self.in_tail_position = false;
+        self.try_with_handler_depth = 0;
+        self.pending_labels = .empty;
+        self.finally_chain = null;
+        self.current_dispose_stack = null;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -7990,6 +8028,7 @@ pub const Compiler = struct {
             if (!inner_finished) {
                 self.builder.deinit();
                 fn_scope.deinit(self.allocator);
+                self.pending_labels.deinit(self.allocator);
                 self.builder = saved_builder;
                 self.scope = saved_scope;
                 self.env_slot_count = saved_env_slot_count;
@@ -7998,6 +8037,11 @@ pub const Compiler = struct {
                 self.current_loop = saved_current_loop;
                 self.completion_reg = saved_completion_reg;
                 self.current_params_register_only = saved_params_register_only;
+                self.in_tail_position = saved_in_tail_position;
+                self.try_with_handler_depth = saved_try_with_handler_depth;
+                self.pending_labels = saved_pending_labels;
+                self.finally_chain = saved_finally_chain;
+                self.current_dispose_stack = saved_current_dispose_stack;
             }
         }
 
@@ -8080,20 +8124,16 @@ pub const Compiler = struct {
 
         if (slot_count_patch) |p| {
             self.builder.code.items[p] = self.env_slot_count;
-        } else if (self.env_slot_count != 0) {
-            // functionEntryEnvNeeded predicted zero env slots, but
-            // body compilation bumped env_slot_count anyway. Happens
-            // on corner-case shapes — e.g. a `static [self-ref](…)`
-            // class method inside a per-iteration `for-let` env where
-            // capture analysis under-predicts. Surface as a typed
-            // CompileError (the host throws SyntaxError at the
-            // boundary) rather than abort the process — AGENTS.md
-            // host-safety.
-            return error.UnsupportedExpression;
+        } else {
+            // §10.2.10 — env elided; the discovery pass guaranteed
+            // no binding would be created here. A bumped count
+            // means the predicate and emit disagree.
+            std.debug.assert(self.env_slot_count == 0);
         }
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
         fn_scope.deinit(self.allocator);
+        self.pending_labels.deinit(self.allocator);
 
         self.builder = saved_builder;
         self.scope = saved_scope;
@@ -8103,6 +8143,11 @@ pub const Compiler = struct {
         self.current_loop = saved_current_loop;
         self.completion_reg = saved_completion_reg;
         self.current_params_register_only = saved_params_register_only;
+        self.in_tail_position = saved_in_tail_position;
+        self.try_with_handler_depth = saved_try_with_handler_depth;
+        self.pending_labels = saved_pending_labels;
+        self.finally_chain = saved_finally_chain;
+        self.current_dispose_stack = saved_current_dispose_stack;
 
         return inner_chunk;
     }
@@ -8142,6 +8187,25 @@ pub const Compiler = struct {
         // method body introduces its own `arguments`, so the "eval inside
         // an initializer" early error does not reach into it.
         const saved_in_field_initializer = self.in_field_initializer;
+        // §15.10 / §14.13 / §9.5.4 — these all anchor to the enclosing
+        // function: a `return` / `break` / `continue` / inline-finally
+        // emitted inside a method body must not walk an OUTER function's
+        // try / using / label chain. Mirrors the reset in
+        // `compileFunctionTemplateExtNamed` for ordinary function decls
+        // and arrows; without it, a method nested inside an outer
+        // `try { } finally { let x; }` had its first `return` inline the
+        // outer finally body, bumping the method's `env_slot_count` past
+        // the elided entry env.
+        const saved_in_tail_position = self.in_tail_position;
+        const saved_try_with_handler_depth = self.try_with_handler_depth;
+        const saved_pending_labels = self.pending_labels;
+        const saved_finally_chain = self.finally_chain;
+        const saved_current_dispose_stack = self.current_dispose_stack;
+        self.in_tail_position = false;
+        self.try_with_handler_depth = 0;
+        self.pending_labels = .empty;
+        self.finally_chain = null;
+        self.current_dispose_stack = null;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -8184,6 +8248,7 @@ pub const Compiler = struct {
             if (!inner_finished) {
                 self.builder.deinit();
                 fn_scope.deinit(self.allocator);
+                self.pending_labels.deinit(self.allocator);
                 self.builder = saved_builder;
                 self.scope = saved_scope;
                 self.env_slot_count = saved_env_slot_count;
@@ -8191,8 +8256,14 @@ pub const Compiler = struct {
                 self.env_depth = saved_env_depth;
                 self.current_loop = saved_current_loop;
                 self.completion_reg = saved_completion_reg;
+                self.current_is_async = saved_is_async;
                 self.current_params_register_only = saved_params_register_only;
                 self.in_field_initializer = saved_in_field_initializer;
+                self.in_tail_position = saved_in_tail_position;
+                self.try_with_handler_depth = saved_try_with_handler_depth;
+                self.pending_labels = saved_pending_labels;
+                self.finally_chain = saved_finally_chain;
+                self.current_dispose_stack = saved_current_dispose_stack;
             }
         }
 
@@ -8262,20 +8333,19 @@ pub const Compiler = struct {
 
         if (slot_count_patch) |p| {
             self.builder.code.items[p] = self.env_slot_count;
-        } else if (self.env_slot_count != 0) {
-            // functionEntryEnvNeeded predicted zero env slots, but
-            // body compilation bumped env_slot_count anyway. Happens
-            // on corner-case shapes — e.g. a `static [self-ref](…)`
-            // class method inside a per-iteration `for-let` env where
-            // capture analysis under-predicts. Surface as a typed
-            // CompileError (the host throws SyntaxError at the
-            // boundary) rather than abort the process — AGENTS.md
-            // host-safety.
-            return error.UnsupportedExpression;
+        } else {
+            // §10.2.10 FunctionDeclarationInstantiation — the
+            // function-entry discovery pass guaranteed no binding would
+            // be created here, so `env_slot_count` must still be 0. A
+            // non-zero count means the predicate disagreed with the
+            // actual emit and is a compiler bug. Mirrors the assertion
+            // at the end of `compileFunctionTemplateExtNamed`.
+            std.debug.assert(self.env_slot_count == 0);
         }
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
         fn_scope.deinit(self.allocator);
+        self.pending_labels.deinit(self.allocator);
 
         self.builder = saved_builder;
         self.scope = saved_scope;
@@ -8287,6 +8357,11 @@ pub const Compiler = struct {
         self.current_is_async = saved_is_async;
         self.current_params_register_only = saved_params_register_only;
         self.in_field_initializer = saved_in_field_initializer;
+        self.in_tail_position = saved_in_tail_position;
+        self.try_with_handler_depth = saved_try_with_handler_depth;
+        self.pending_labels = saved_pending_labels;
+        self.finally_chain = saved_finally_chain;
+        self.current_dispose_stack = saved_current_dispose_stack;
 
         return inner_chunk;
     }

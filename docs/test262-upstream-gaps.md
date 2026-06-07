@@ -1024,3 +1024,81 @@ the corpus under the relevant section's directory before adding.
   then asserting the full key list. Existing spread fixtures cover
   the value-copy side and proxy traps but never combine TypedArray
   source + GC stress + post-spread own-key enumeration.
+
+### A class method's `return` inlined an enclosing function's `try`/`finally`
+
+- **Fixed in:** `9c947a8`
+- **Spec:** §10.2.10 FunctionDeclarationInstantiation — a method
+  body, class constructor body, and `static { … }` class block
+  are each function-shape chunks with their own scope chain.
+  §14.15.3 / §13.10.1 inline-finally and §9.5.4 DisposeResources
+  walks attach to the *enclosing function's* try / using chain,
+  not the inner function's.
+- **Reproducer:**
+  ```js
+  try { throw 0; } catch (e) {
+      class C { m() { return 99; } }
+      (new C()).m();   // → 99
+  } finally {
+      const t = 1;   // a binding in the finally is the trigger
+  }
+  ```
+- **Before fix:** The class-body compile entry points
+  (`compileMethodBody`, `compileConstructorBody`,
+  `compileStaticBlockChunk`) did NOT reset the compiler-global
+  `finally_chain` / `current_dispose_stack` / `pending_labels` /
+  `try_with_handler_depth` / `in_tail_position` at the function
+  boundary. The inner `return` then saw the outer try's finally
+  chain, inlined the finally body (which declared its own `let`),
+  bumped `env_slot_count` past the elided method-entry env, and
+  surfaced as a host-side `unreachable` (the `env_slot_count == 0`
+  assertion at the elision tail) — observable from the script as
+  an engine-internal panic. Fuzzilli surfaced this with a
+  `static [self-ref]` class inside `try/catch/finally`.
+- **After fix:** All three class-body entry points now mirror
+  `compileFunctionTemplateExtNamed`'s save/reset/restore of those
+  five compiler-global fields at the function boundary, matching
+  the ordinary function-decl / arrow path.
+- **Suggested fixture shape:** positive runtime fixture under
+  `language/expressions/class/` asserting that
+  `(new C()).m()` inside an outer `try { } finally { let t; }`
+  returns the method's value cleanly. Sibling fixtures cover
+  inline-finally for ordinary functions but none with a method
+  body nested inside an outer try-finally.
+
+### `using` block's `dispose_stack` register leaked into a nested class method's frame
+
+- **Fixed in:** TBD
+- **Spec:** §13.2.4.6 BlockStatement / §9.5.4 DisposeResources —
+  the synthetic dispose-stack and its finally context attach to
+  the enclosing function's chunk. A class method compiled inside
+  the using block has its own frame and must not emit a
+  `dispose_stack r` that references the outer block's register.
+- **Reproducer:**
+  ```js
+  function F() {
+      for (const v of "i") {
+          const d = Symbol.dispose;
+          class C { [d]() {} }
+          using r = new C();
+      }
+  }
+  F();   // → completes, no panic
+  ```
+- **Before fix:** Same root cause as the entry above —
+  `compileMethodBody` inherited the outer block's
+  `current_dispose_stack` and `finally_chain`, so the method's
+  `return` inlined the dispose walk with the outer's register
+  index. At runtime the method's frame had only a few registers
+  but the opcode read register 4, panicking the interpreter's
+  bounds check (`index out of bounds`).
+- **After fix:** Same fix as above — the function-body boundary
+  saves and resets `current_dispose_stack` along with the rest of
+  the finally state.
+- **Suggested fixture shape:** positive runtime fixture under
+  `language/statements/for-of/using-class-method-body.js` (or
+  `language/statements/using/`) wiring a class with a
+  `Symbol.dispose` method inside a for-of body that contains a
+  `using` declaration, asserting the loop completes. No existing
+  fixture combines a `using` declaration with a nested class
+  method body.
