@@ -469,6 +469,17 @@ vector regardless of how many iterations the source produced.
 
 ### Future work
 
+- **Generational aging via card marking.** Short-lived churn is
+  promoted-then-stranded as mature garbage today (`promoteYoungList`
+  tenures on first survival), which is the engine's clearest
+  alloc-perf gap vs the big-engine interpreters (see the cross-engine
+  compass — `ctor_array_build` ~5×, `object_alloc` ~2×). The fix is a
+  nursery with aging, but it requires a **card-marking** remembered
+  set first: two aging attempts were reverted at the `gc-threshold=1`
+  gate because the current per-edge-class barrier/scan patchwork can't
+  be made complete by inspection (whack-a-mole — verifier gap, then a
+  promise-`finally` reaction use-after-free). Full root-cause +
+  design: [docs/gc-generational-aging.md](../gc-generational-aging.md).
 - **Write-barrier closure + scan drop.** In progress — see
   "Typed-setter helpers" above. Once the iter_helper and
   collection-mutation buckets close, `collectYoung`'s per-cycle
