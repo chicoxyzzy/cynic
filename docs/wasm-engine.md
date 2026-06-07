@@ -221,12 +221,17 @@ stack, so its representation dominates interpreter speed.
 - **GC integration is future.** The originally-planned scheme —
   lazy 1-byte ref tags so Metla scans only reference slots, no
   stackmaps — is **not built**, and neither is registering the value
-  stack as a GC root. It is unneeded today: nothing puts a live
-  `externref` (a JS object) on the stack and no GC fires mid-execution,
-  because there is no JS interop yet (§8). It becomes load-bearing the
-  moment the JS API lands; the instance-pointer-in-a-funcref encoding
-  above will also need a GC-visible, lifetime-safe form then. This is
-  the engine's largest open design item — see §6 and §11.
+  stack as a GC root. With the JS API shipped (§8), a GC *can* now fire
+  mid-execution — a host import re-enters Lantern, which allocates — but
+  it stays safe because only numeric values reach the wasm stack: a
+  `funcref`'s instance pointer is arena-owned (not GC-managed) and no
+  `externref` carries a live JS object yet, so there is nothing for the
+  collector to lose (locked in by a host-import-under-GC-churn test).
+  The ref tags + root registration become load-bearing the moment
+  `externref` holds JS values (externref tables, reference marshalling
+  across the boundary); the instance-pointer-in-a-funcref encoding will
+  also need a GC-visible, lifetime-safe form then. This is the engine's
+  largest open design item — see §6 and §11.
 
 ## 6. Calls, frames, traps
 
@@ -256,10 +261,11 @@ At the future JS boundary these become a thrown
 **GC roots — future.** The plan is to register the value stack and
 frames as realm GC roots (exactly as `realm.frame_stacks` does for
 Lantern) so a GC fired mid-execution — e.g. inside an imported JS call
-— walks live wasm references. **Not built**, and not yet needed: there
-is no JS interop, so no `externref` reaches the stack and no GC fires
-during wasm execution. It lands with the JS API, with `/gc-stress`
-coverage at `--gc-threshold=1`. See §5.
+— walks live wasm references. **Not built.** A host import now *does*
+fire a GC mid-execution, but it is safe without rooting today because
+the wasm stack holds only numerics (no live `externref`); registration
+becomes load-bearing once `externref` carries JS values. It lands then,
+with `/gc-stress` coverage at `--gc-threshold=1`. See §5.
 
 ## 7. Runtime data structures
 
