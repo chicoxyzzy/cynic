@@ -2143,6 +2143,17 @@ fn parseParenthesized(p: *Parser) ParseError!Expression {
         }
     }
     const rparen = try p.expect(.rparen);
+    // §13.2 — `(` Expression `)` requires at least one Expression
+    // inside. Empty parens (`()`) are only legal as the head of an
+    // arrow's parameter list, and the arrow path is reinterpreted
+    // separately. When `=>` doesn't follow, `()` is a SyntaxError.
+    // Without this check the empty `items` slice flows into a
+    // zero-element SequenceExpr that trips compiler.zig's
+    // `compileSequence` assertion.
+    if (items.items.len == 0 and p.peek().kind != .arrow) {
+        try p.report(.unexpected_token, rparen.span);
+        return error.ParseError;
+    }
     const inner_ptr = try p.arena.create(Expression);
     if (items.items.len == 1) {
         inner_ptr.* = items.items[0];
