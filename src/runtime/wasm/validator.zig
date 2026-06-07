@@ -128,11 +128,19 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
         if (ft.params.len != 0 or ft.results.len != 0) return error.TypeMismatch;
     }
 
+    // §3.4.10 — every imported function names an existing type.
+    for (module.imports) |imp| switch (imp.desc) {
+        .func => |ti| if (ti >= module.types.len) return error.UnknownType,
+        else => {},
+    };
+
+    const declared = try buildDeclaredSet(arena, module);
+
     const out = try arena.alloc(CompiledFunc, module.code.len);
     for (module.code, 0..) |body, i| {
         const type_index = module.funcs[i];
         if (type_index >= module.types.len) return error.UnknownType;
-        out[i] = try validateFunc(arena, module, type_index, body.bytes);
+        out[i] = try validateFunc(arena, module, type_index, body.bytes, declared);
     }
     return out;
 }
@@ -151,6 +159,75 @@ fn funcTypeIndex(module: *const Module, fidx: u32) ValidateError!u32 {
     const local = fidx - k;
     if (local >= module.funcs.len) return error.UnknownFunc;
     return module.funcs[local];
+}
+
+/// Walk a constant expression, marking every `ref.func` index it names
+/// in `declared` (used to build §3.4.1.3's reference set).
+fn markRefFuncsInExpr(r: *Reader, declared: []bool) ValidateError!void {
+    while (true) {
+        const b = try r.byte();
+        switch (b) {
+            0x0b => break,
+            0x41 => _ = try r.sleb(i32),
+            0x42 => _ = try r.sleb(i64),
+            0x43 => _ = try r.bytesN(4),
+            0x44 => _ = try r.bytesN(8),
+            0x23 => _ = try r.uleb(u32),
+            0xd0 => _ = try r.byte(),
+            0xd2 => {
+                const fi = try r.uleb(u32);
+                if (fi < declared.len) declared[fi] = true;
+            },
+            0x6a, 0x6b, 0x6c, 0x7c, 0x7d, 0x7e => {},
+            0xfd => {
+                _ = try r.uleb(u32);
+                _ = try r.bytesN(16);
+            },
+            else => {},
+        }
+    }
+}
+
+/// Build §3.4.1.3's function reference set: the functions a body's
+/// `ref.func` may name — those referenced by exports, the start
+/// function, global initializers, and element segments.
+fn buildDeclaredSet(arena: std.mem.Allocator, module: *const Module) ValidateError![]bool {
+    const declared = try arena.alloc(bool, totalFuncs(module));
+    @memset(declared, false);
+    for (module.exports) |ex| {
+        if (ex.desc == .func and ex.desc.func < declared.len) declared[ex.desc.func] = true;
+    }
+    if (module.start) |s| {
+        if (s < declared.len) declared[s] = true;
+    }
+    for (module.globals) |gl| {
+        var r = Reader.init(gl.init_expr);
+        try markRefFuncsInExpr(&r, declared);
+    }
+    if (module.elements_count != 0) {
+        var r = Reader.init(module.elements_raw);
+        var i: u32 = 0;
+        while (i < module.elements_count) : (i += 1) {
+            const flag = try r.uleb(u32);
+            const kind = flag & 3;
+            const use_exprs = flag >= 4;
+            const is_active = (kind == 0 or kind == 2);
+            if (kind == 2) _ = try r.uleb(u32); // table index
+            if (is_active) try markRefFuncsInExpr(&r, declared); // offset (no ref.func)
+            if (kind != 0) _ = try r.byte(); // elemkind / reftype
+            const n = try r.uleb(u32);
+            var j: u32 = 0;
+            while (j < n) : (j += 1) {
+                if (use_exprs) {
+                    try markRefFuncsInExpr(&r, declared);
+                } else {
+                    const fi = try r.uleb(u32);
+                    if (fi < declared.len) declared[fi] = true;
+                }
+            }
+        }
+    }
+    return declared;
 }
 
 /// Total functions in the index space (imports + defined).
@@ -357,6 +434,7 @@ const Validator = struct {
     results: []const ValType,
     has_memory: bool,
     mem_addr: ValType, // i32, or i64 for a 64-bit memory
+    declared_funcs: []const bool, // §3.4.1.3 ref.func reference set
     r: Reader, // over the body's expression bytes
     vals: std.ArrayListUnmanaged(AbsVal) = .empty,
     ctrls: std.ArrayListUnmanaged(Ctrl) = .empty,
@@ -482,6 +560,7 @@ fn validateFunc(
     module: *const Module,
     type_index: u32,
     body_bytes: []const u8,
+    declared: []const bool,
 ) ValidateError!CompiledFunc {
     const ft = module.types[type_index];
 
@@ -522,6 +601,7 @@ fn validateFunc(
         .results = ft.results,
         .has_memory = has_memory,
         .mem_addr = mem_addr,
+        .declared_funcs = declared,
         .r = Reader.init(expr),
     };
 
@@ -753,7 +833,10 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 try v.pushVal(.i32);
             },
             .ref_func => {
-                _ = try v.r.uleb(u32); // function index
+                // §3.4.1.3 — the function must exist and be in the
+                // module's reference set (declared outside a body).
+                const fi = try v.r.uleb(u32);
+                if (fi >= v.declared_funcs.len or !v.declared_funcs[fi]) return error.UnknownFunc;
                 try v.pushVal(.funcref);
             },
 
