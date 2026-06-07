@@ -320,14 +320,12 @@ pub const Parser = struct {
             else
                 self.parseStatement()) catch |err| switch (err) {
                 error.ParseError => {
-                    self.synchronize();
                     // §14: at the top level there is no enclosing block,
-                    // so if `synchronize` saw a stray `}` it returns
-                    // without advancing. Force one bump to keep the loop
-                    // from spinning on garbage like `}`/`)` / `]`.
-                    if (self.current.span.start == before and self.current.kind != .eof) {
-                        _ = self.bump() catch break;
-                    }
+                    // so a resync that lands back on a stray `}`/`)`/`]`
+                    // — or wedges on a byte the lexer can't advance past —
+                    // would spin the loop. The shared progress guard forces
+                    // a bump (or breaks when the lexer is stuck).
+                    if (self.recoverStatementListItem(before)) break;
                     in_prologue = false;
                     continue;
                 },
@@ -1437,9 +1435,10 @@ pub const Parser = struct {
         const lbrace = try self.expect(.lbrace);
         var body: std.ArrayListUnmanaged(Statement) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            const before = self.current.span.start;
             const stmt = self.parseStatement() catch |err| switch (err) {
                 error.ParseError => {
-                    self.synchronize();
+                    if (self.recoverStatementListItem(before)) break;
                     continue;
                 },
                 else => return err,
@@ -1518,9 +1517,10 @@ pub const Parser = struct {
             self.current.kind != .rbrace and
             self.current.kind != .eof)
         {
+            const before = self.current.span.start;
             const stmt = self.parseStatement() catch |err| switch (err) {
                 error.ParseError => {
-                    self.synchronize();
+                    if (self.recoverStatementListItem(before)) break;
                     continue;
                 },
                 else => return err,
@@ -4036,6 +4036,29 @@ pub const Parser = struct {
             }
             _ = self.bump() catch return;
         }
+    }
+
+    /// §14 StatementList error recovery, with a forward-progress
+    /// guarantee. Called from every StatementList loop (program body,
+    /// block body, switch-case body) after `parseStatement` fails:
+    /// resynchronize, then ensure the loop advanced. If `synchronize`
+    /// landed back on the exact token the failed item started at — and
+    /// it isn't EOF — force one `bump` so the loop can't re-parse the
+    /// same token forever. Returns `true` when even that bump can't make
+    /// progress: the lexer is wedged on a byte it can't tokenize and
+    /// re-reports in place without consuming it (a bare `\` not opening a
+    /// `\u` escape does this — see `scanIdentifierStart` /
+    /// `parseIdentifierEscape`). In that state the caller must stop the
+    /// loop; spinning would re-parse the parked token endlessly and grow
+    /// the parse arena without bound — a never-abort-the-host violation
+    /// where a degenerate-but-finite byte sequence (e.g. `{1\`) must
+    /// surface a catchable SyntaxError, not OOM the process.
+    fn recoverStatementListItem(self: *Parser, before: u32) bool {
+        self.synchronize();
+        if (self.current.span.start == before and self.current.kind != .eof) {
+            _ = self.bump() catch return true;
+        }
+        return false;
     }
 };
 

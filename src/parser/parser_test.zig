@@ -4055,3 +4055,40 @@ test "Parser: moderate arrow + destructuring nesting parses cleanly" {
     _ = try parseScript(arena.allocator(), src, &diags);
     try testing.expect(!hasErr(diags.items));
 }
+
+// A bare `\` not opening a `\u` escape makes the lexer report
+// `invalid_escape_sequence` and return the error *without consuming the
+// backslash* — every retry re-hits the same byte. A StatementList
+// recovery loop that resynchronizes and retries therefore makes no
+// forward progress: it re-parses the parked token forever and grows the
+// parse arena unbounded. These inputs are finite, well-formed byte
+// sequences that must surface a catchable SyntaxError rather than OOM
+// the host (AGENTS.md never-abort-the-host invariant). Pre-fix they
+// hung / ballooned to multi-GB; post-fix the shared forward-progress
+// guard (`recoverStatementListItem`) terminates each in a few steps.
+// The top-level loop already had the guard, hence each case wraps the
+// `\` inside a *nested* StatementList (block / switch-case / class
+// static block / function body) where it previously spun.
+test "Parser: trailing backslash inside a block terminates with error" {
+    try expectParseError("{1\\");
+    try expectParseError("{;\\");
+    try expectParseError("{1;\\");
+    try expectParseError("{ /a/\\");
+}
+
+test "Parser: trailing backslash inside nested StatementLists terminates" {
+    try expectParseError("switch(0){default:1\\");
+    try expectParseError("class C{static{1\\");
+    try expectParseError("function f(){1\\");
+    try expectParseError("try{1\\");
+}
+
+test "Parser: doubled split/regex token storm terminates with error" {
+    // The original reported reproducer: a degenerate doubled
+    // `split(/…split(/` sequence that lexes to `try {` + an expression
+    // whose trailing `\` wedges the lexer inside the try-block
+    // StatementList. Must reject, not OOM.
+    try expectParseError(
+        \\try { var r = "x".split(/try { var r = "x".split(/\d/); } catch(e) { print('THROW "x".split(/\d/) => ' + e); }
+    );
+}
