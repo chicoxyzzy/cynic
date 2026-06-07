@@ -587,6 +587,18 @@ test "a JS function import is called by wasm with marshalled args" {
     try expectIntWasm(src, 34);
 }
 
+test "a GC during a host-import call does not corrupt the wasm caller" {
+    // The host import allocates heavily (forcing GC cycles) before
+    // returning. Mid-wasm-call GC is safe today because only numeric
+    // values sit on the wasm value stack — there is no live externref to
+    // lose. This locks that property in (see docs/wasm-engine.md §5/§6).
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ host_add_bytes ++ ")," ++
+        "  { env: { imp: (a, b) => { for (let i = 0; i < 300000; i++) { const o = { x: i }; void o; } return a * 10 + b; } } });" ++
+        "inst.exports.run(3, 4)"; // -> 34, despite GC churn inside imp
+    try expectIntWasm(src, 34);
+}
+
 test "a host import that throws propagates the exception into the wasm caller" {
     const src =
         "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ consumer_bytes ++ ")," ++
