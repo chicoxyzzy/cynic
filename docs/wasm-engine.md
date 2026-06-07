@@ -27,9 +27,19 @@ Target the standardized baseline every modern toolchain emits: the
 any of these makes most real `.wasm` fail to validate, so they are the
 floor, not extensions.
 
+**Shipped beyond that floor:** `memory64` / `table64` (i64 addressing),
+the `extended-const` constant-expression operators, the
+function-references table-with-initializer encoding, and full
+cross-module linking (imported functions / globals / tables / memories,
+shared tables, host functions). The engine scores **100.00%** on the
+official WebAssembly spec testsuite — see `wasm-results.md`.
+
 Deferred: `threads` (sits on the existing `SharedArrayBuffer` /
 `Atomics` substrate), `exceptions`, `gc`, `tail-call` beyond the
-trivial case, `memory64`, `relaxed-simd`, the component model.
+trivial case, `relaxed-simd`, the component model. The **JS API**
+surface (`WebAssembly.*` objects, marshalling) and the **GC
+integration** (§5, §6) are likewise not yet built — see those sections
+and §11 for what exists today versus what is planned.
 
 Non-goals: a browser host, debugging surfaces, or any sloppy-mode
 affordance. Cynic is strict, non-browser, edge-runtime shaped — the
@@ -124,16 +134,25 @@ Interpreters* (2003) on threaded dispatch.
    whole function, going pathological (up to 8×) on branch-heavy code.
    The validator-emitted side-table is the fix and the entire point.
 
-3. **Threaded dispatch.** A Zig labeled switch whose every arm ends in
-   `continue :dispatch <next-op>` — the computed-goto equivalent,
-   identical to Lantern's idiom. This is non-negotiable for
-   performance (disabling WAMR's jump table cost 2×). It is the *one*
+3. **Threaded dispatch** *(shipped)*. A Zig labeled switch whose every
+   arm ends in `continue :dispatch nextOp(...)` — the computed-goto
+   equivalent, identical to Lantern's idiom. Each opcode site emits its
+   own indirect branch, so the predictor learns per-opcode-pair patterns
+   instead of funnelling through one shared dispatch. Measured on a
+   dispatch-bound arithmetic loop this was ~1.47× over the prior
+   `while` + `switch` form (see `zig build wasm-bench`). It is the *one*
    thing we borrow from Lantern; we do **not** borrow its
    rewrite-to-register-bytecode, because wasm (unlike JS source) is
    already compact validated bytecode.
 
-4. **Unboxed value stack** with lazy reference tags (see §5) — fast
-   primitives, precise GC roots, no stackmaps.
+4. **Unboxed value stack.** Raw `i32/i64/f32/f64/v128/ref` bytes, never
+   a heap allocation. Today every slot is a uniform 128-bit `Cell`
+   (`interpreter.zig`), wide enough for `v128`; references are encoded
+   inline (a `funcref` carries its defining instance in the high bits —
+   see §5). The originally-planned lazy 1-byte ref tags for precise GC
+   roots are **not built** — they belong with the GC integration, which
+   waits on the JS API (no `externref` holding a JS value can reach the
+   stack until then). See §5.
 
 5. **Guard-bounded stacks, not per-push checks** (see §6).
 
@@ -171,7 +190,7 @@ The internal opcode space *is* the wasm byte opcodes — there is no
 second instruction set. (A future baseline JIT tier would introduce
 its own lowered form; the interpreter does not.)
 
-## 5. Operand model — unboxed value stack, lazy ref tags
+## 5. Operand model — unboxed value stack
 
 Wasm is a stack machine; nearly every instruction touches the operand
 stack, so its representation dominates interpreter speed.
@@ -182,50 +201,78 @@ stack, so its representation dominates interpreter speed.
   first locals — **zero-copy calls**.
 - **Values are unboxed** — raw `i32/i64/f32/f64/v128/ref` bytes, never
   a heap allocation. (Boxing would be prohibitive, the very thing wasm
-  exists to avoid.)
-- **References and GC.** A precise GC must find `externref`/`funcref`
-  cells on the value stack. Natively-compiled engines use stackmaps;
-  an interpreter can't afford to precompute them. Instead, value-stack
-  slots carry a **1-byte type tag written lazily** — only when a
-  reference is stored (e.g. initializing a ref local in the prologue),
-  never for primitive arithmetic. Metla scans only ref-tagged slots.
-  Fast primitives, precise roots, no stackmaps. (Validation guarantees
-  types, so the tag is never used for a dynamic check — only for GC.)
+  exists to avoid.) Today the slot is a uniform 128-bit `Cell`: simple
+  and wide enough for `v128`, at the cost of 2× the bandwidth a scalar
+  needs. Narrowing to an 8-byte scalar slot with a side `v128` lane is
+  a documented future refinement (§10).
+- **References are self-describing values.** A `funcref` is encoded as
+  `instance_ptr << 64 | func_index`: the defining instance rides in the
+  high bits, the function index in the low 32 (where the spec testsuite
+  compares it). This is what makes a funcref callable across module
+  boundaries — a table shared between instances may hold functions
+  defined in either, and `call_indirect` runs each in the instance it
+  was defined in. The null reference is all-ones; a bare index (high
+  bits zero) resolves against the current instance.
+- **GC integration is future.** The originally-planned scheme —
+  lazy 1-byte ref tags so Metla scans only reference slots, no
+  stackmaps — is **not built**, and neither is registering the value
+  stack as a GC root. It is unneeded today: nothing puts a live
+  `externref` (a JS object) on the stack and no GC fires mid-execution,
+  because there is no JS interop yet (§8). It becomes load-bearing the
+  moment the JS API lands; the instance-pointer-in-a-funcref encoding
+  above will also need a GC-visible, lifetime-safe form then. This is
+  the engine's largest open design item — see §6 and §11.
 
 ## 6. Calls, frames, traps
 
-**Frames are explicit**, drawn from a pool like Lantern's
-`frame_pool`; a wasm→wasm call pushes a frame and continues the same
-dispatch loop rather than recursing in Zig.
+**Frames are explicit.** `invoke` allocates a value stack and a frame
+array up front; a wasm→wasm call pushes a frame and continues the same
+dispatch loop rather than recursing in Zig. Each frame records the
+instance it runs in, so an imported (cross-module) call's body sees its
+own module's memory / tables / globals — the interpreter rebinds the
+active instance at every frame swap.
 
 **Stack overflow** is bounded without per-push checks. Titzer's engine
 uses a guard page at the end of the value stack plus an OS signal;
 Cynic's portable first cut uses a **frame-depth limit checked once per
 call** (cheap, no signal handler), converting overflow into a clean
-`call stack exhausted` trap. A guard-page scheme is a documented later
+`CallStackExhausted` trap. A guard-page scheme is a documented later
 refinement.
 
-**Traps** (§4.2) are an unwind: a Zig `error.WasmTrap` plus a reason
-recorded on the store, propagated out of the loop and converted to a
-thrown `WebAssembly.RuntimeError` at the JS boundary. Sources:
-`unreachable`, OOB memory/table, integer divide-by-zero,
-`i32.div_s INT_MIN / -1`, trapping float→int, `call_indirect`
-null/signature mismatch, uninitialized element, stack exhaustion.
+**Traps** (§4.2) are a Zig error unwind: each maps to a member of the
+`TrapError` set (`Unreachable`, `OutOfBoundsMemoryAccess`,
+`IntegerDivideByZero`, `IntegerOverflow` for `i32.div_s INT_MIN / -1`,
+`InvalidConversionToInteger`, `UndefinedElement` /
+`UninitializedElement` / `IndirectCallTypeMismatch` for
+`call_indirect`, `CallStackExhausted`, …), propagated out of the loop.
+At the future JS boundary these become a thrown
+`WebAssembly.RuntimeError`.
 
-The **value stack and frames are GC roots**, registered with the realm
-exactly like `realm.frame_stacks` does for Lantern, so a GC fired
-mid-execution (e.g. inside an imported JS call) walks live wasm
-references (the ref-tagged slots of §5). This is the use-after-free
-hazard; it lands with `/gc-stress` coverage at `--gc-threshold=1` when
-references arrive.
+**GC roots — future.** The plan is to register the value stack and
+frames as realm GC roots (exactly as `realm.frame_stacks` does for
+Lantern) so a GC fired mid-execution — e.g. inside an imported JS call
+— walks live wasm references. **Not built**, and not yet needed: there
+is no JS interop, so no `externref` reaches the stack and no GC fires
+during wasm execution. It lands with the JS API, with `/gc-stress`
+coverage at `--gc-threshold=1`. See §5.
 
-## 7. Runtime data structures — realm-owned
+## 7. Runtime data structures
 
-The §4.2.1 store is realm-scoped and created lazily, so non-wasm
+**Today: a standalone `Instance`.** Instantiation lays out runtime state
+into a caller-provided `Instance` (`interpreter.zig`) — validated
+function bodies, a global array (imports then defined), the single
+linear memory, and the table index space. The function / table / global
+index spaces place **imports first** so cross-module linking resolves by
+index; tables are held by pointer (`[]*Table`) so an imported table is
+genuinely shared — a write through one instance is visible to the other.
+Memory is a plain owned `[]u8`; bounds are checked on every access.
+
+**Planned: a realm-owned store.** When the JS API (§8) lands, the
+§4.2.1 store becomes realm-scoped and lazily created, so non-wasm
 programs pay nothing:
 
 ```zig
-// realm.zig
+// realm.zig (planned — not yet built)
 wasm_store: ?*WasmStore = null,   // allocated on first wasm use
 
 const WasmStore = struct {
@@ -236,17 +283,27 @@ const WasmStore = struct {
 };
 ```
 
-**Linear memory is an `ArrayBuffer`.** `WebAssembly.Memory.prototype.buffer`
-must return a real `ArrayBuffer` aliasing the linear bytes, so
-`WasmMemory` is backed by the *same* backing-store abstraction
-`shared_data_block.zig` and the ArrayBuffer machinery already use — not
-a private buffer. `memory.grow` reallocates and **detaches** the prior
-buffer (observable, spec-required); we reuse Cynic's existing detach
-path. Shared memory (threads, later) backs onto a SharedArrayBuffer
-data block so `Atomics` work unchanged. Bounds are checked on every
-access in the interpreter tier.
+**Planned: linear memory as an `ArrayBuffer`.**
+`WebAssembly.Memory.prototype.buffer` must return a real `ArrayBuffer`
+aliasing the linear bytes, so `WasmMemory` will back onto the *same*
+backing-store abstraction `shared_data_block.zig` and the ArrayBuffer
+machinery already use — not a private buffer. `memory.grow` reallocates
+and **detaches** the prior buffer (observable, spec-required); reuse
+Cynic's existing detach path. Shared memory (threads, later) backs onto
+a SharedArrayBuffer data block so `Atomics` work unchanged. The
+interpreter's current plain-buffer memory is the placeholder this
+replaces.
 
 ## 8. The JS boundary
+
+**Status: mostly future.** Only `WebAssembly.validate` is wired today
+(`builtins/webassembly.zig`) — it decodes + validates a module's bytes
+and returns a bool. The engine is fully exercised through its Zig API
+(`decode` / `instantiate` / `invoke`) and the conformance harness; the
+JS-visible objects below are the design for when the surface is built.
+This is the largest remaining feature, and it is what pulls in the GC
+integration of §5–§6, the realm-owned store and ArrayBuffer memory of
+§7, and the `--allow=wasm` gate of §9.
 
 `WebAssembly.instantiate` returns a Promise (uses the existing
 microtask queue). Argument and result marshalling is
@@ -276,12 +333,15 @@ ordinary hardenable objects with typed slots (no observable engine
 keys). `Memory.buffer` detaching on `memory.grow` stays observable —
 spec-conformant and SES-fine.
 
-`WebAssembly.compile` / `validate` / `new Module` are **gated behind
-`--allow=wasm`**, the WASM analogue of `--allow=eval`
-(HostEnsureCanCompileWasmBytes). The two gates are orthogonal: a build
-can allow eval but not wasm, or vice versa. Default-off matches the
-SES posture of refusing runtime code construction unless opted in. See
-[ses-alignment.md](ses-alignment.md).
+The code-constructing surface — `WebAssembly.compile` / `instantiate` /
+`new Module` — will be **gated behind `--allow=wasm`**, the WASM
+analogue of `--allow=eval` (HostEnsureCanCompileWasmBytes). The two
+gates are orthogonal: a build can allow eval but not wasm, or vice
+versa. Default-off matches the SES posture of refusing runtime code
+construction unless opted in. `WebAssembly.validate`, which only
+inspects bytes and constructs nothing runnable, is the one piece wired
+today and is installed ungated; the gate lands with the constructors.
+See [ses-alignment.md](ses-alignment.md).
 
 ## 10. Performance posture
 
@@ -291,30 +351,38 @@ the measured design space:
 - In-place + O(1) side-table + threaded dispatch + unboxed value stack
   puts it in the `wamr-fast` / Wizard class on throughput, with the
   **best-in-class startup and memory** — the metrics Cynic's edge
-  target actually rewards.
+  target actually rewards. Threaded dispatch is now in (§3 Decision 3);
+  `zig build wasm-bench` is a standalone ReleaseFast harness for the
+  dispatch-bound loop and recursive `fib` so future hot-loop changes
+  stay measured.
 - Honest trade: `wasm3` is ~2–3× faster as an interpreter via a
   register rewrite + stack caching, paying 2–4× memory and a compile
   pass. We decline that trade on purpose.
-- Documented future refinements (not done up front, none change the
-  in-place design): **stack caching** — keep top-of-stack in a
-  register/accumulator like Lantern; **superinstructions** for common
-  opcode pairs; a guard-page value stack. The real throughput jump
-  comes from a **baseline JIT tier** later (the ~10×→~2–3× step),
-  which would consume the validated module + side-table — exactly
-  where V8/JSC/SM add Liftoff/BBQ over their interpreters.
+- Documented future refinements (none change the in-place design),
+  roughly in leverage order: **narrow the operand cell** — the uniform
+  128-bit `Cell` doubles scalar bandwidth; an 8-byte scalar slot with a
+  side `v128` lane is the next win (§5); **hoist the memarg align/offset
+  and the memory `is_64` flag** out of the per-access path into the
+  side-table; **stack caching** (top-of-stack in a register, like
+  Lantern); **superinstructions** for common opcode pairs; a guard-page
+  value stack. The real throughput jump comes from a **baseline JIT
+  tier** later (the ~10×→~2–3× step), which would consume the validated
+  module + side-table — exactly where V8/JSC/SM add Liftoff/BBQ over
+  their interpreters.
 
 ## 11. Implementation map
 
-| Step | Deliverable |
+| Step | Status |
 |---|---|
-| Decoder | §5 binary → parsed module *(done)* |
-| Validate + side-table | single-pass validation **emitting the O(1) branch side-table** (§4) |
-| Interpreter | in-place threaded dispatch over bytecode + side-table, integer + control subset → `fib` |
-| Memory | `WasmMemory`, loads/stores, bulk-memory, grow + detach |
-| JS API | `WebAssembly.*` typed-slot objects, marshalling, `--allow=wasm` |
-| References | tables, funcref/externref, `call_indirect`, ref tags + Metla roots + gc-stress |
-| Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128 |
-| Conformance | the WebAssembly spec testsuite harness → `wasm-results.md` |
+| Decoder | §5 binary → parsed module — **done** |
+| Validate + side-table | single-pass validation emitting the O(1) branch side-table (§4) — **done** |
+| Interpreter | in-place **threaded** dispatch over bytecode + side-table — **done** (integer, control, floats, SIMD, references) |
+| Memory | loads/stores, bulk-memory, grow; memory64 i64 addressing — **done** (plain buffer; ArrayBuffer aliasing is future) |
+| References / tables | tables, funcref/externref, `call_indirect`, element segments — **done** (ref tags + Metla GC roots are future, §5) |
+| Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128 — **done** |
+| Cross-module linking | imported funcs/globals/tables/memories, shared tables, cross-instance funcrefs, host functions, start functions — **done** |
+| Conformance | the WebAssembly spec testsuite harness → `wasm-results.md` — **done, 100.00%** |
+| JS API | `WebAssembly.*` typed-slot objects, marshalling, `--allow=wasm`, the §5–§7 GC/store/ArrayBuffer work — **future** (only `validate` wired) |
 
 Conformance is scored against the official WebAssembly spec testsuite
 (the `.wast` corpus), the same way `test262-results.md` scores ECMA-262.
