@@ -18,6 +18,9 @@ const std = @import("std");
 const cynic = @import("cynic");
 const wasm = cynic.wasm;
 
+/// Mirrors the interpreter's null-reference sentinel.
+const REF_NULL: u128 = std.math.maxInt(u128);
+
 const Counts = struct {
     pass: u32 = 0,
     fail: u32 = 0,
@@ -298,7 +301,11 @@ fn encodeValue(v: std.json.ObjectMap) ?u128 {
         if (nanBits(s, true)) |b| return b;
         return std.fmt.parseInt(u64, s, 10) catch return null;
     }
-    return null; // funcref / externref
+    if (std.mem.eql(u8, t, "funcref") or std.mem.eql(u8, t, "externref")) {
+        if (std.mem.eql(u8, s, "null")) return REF_NULL;
+        return std.fmt.parseInt(u32, s, 10) catch return null;
+    }
+    return null;
 }
 
 fn matchValue(v: std.json.ObjectMap, got: u128) bool {
@@ -327,7 +334,12 @@ fn matchValue(v: std.json.ObjectMap, got: u128) bool {
         const want = std.fmt.parseInt(u64, s, 10) catch return false;
         return lo == want;
     }
-    return false; // ref
+    if (std.mem.eql(u8, t, "funcref") or std.mem.eql(u8, t, "externref")) {
+        if (std.mem.eql(u8, s, "null")) return got == REF_NULL;
+        const want = std.fmt.parseInt(u32, s, 10) catch return false;
+        return @as(u32, @truncate(got)) == want;
+    }
+    return false;
 }
 
 // ── v128 lane packing ───────────────────────────────────────────────

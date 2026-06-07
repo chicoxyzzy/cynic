@@ -38,6 +38,7 @@ pub const ValidateError = error{
     LebTooLong,
     BadUtf8,
     BadValType,
+    BadRefType,
     BadBlockType,
     UnknownOpcode,
     TypeMismatch,
@@ -46,6 +47,7 @@ pub const ValidateError = error{
     UnknownGlobal,
     UnknownFunc,
     UnknownType,
+    UnknownTable,
     UnknownLabel,
     ImmutableGlobal,
     UnexpectedElse,
@@ -443,6 +445,49 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 try v.popVals(ft.params);
                 try v.pushVals(ft.results);
             },
+            .call_indirect => {
+                const type_idx = try v.r.uleb(u32);
+                _ = try v.r.uleb(u32); // table index
+                if (type_idx >= v.module.types.len) return error.UnknownType;
+                const ft = v.module.types[type_idx];
+                try v.popExpect(.i32); // element index
+                try v.popVals(ft.params);
+                try v.pushVals(ft.results);
+            },
+
+            .select_t => {
+                const n = try v.r.uleb(u32);
+                if (n != 1) return error.TypeMismatch; // exactly one result type
+                const t = ValType.fromByte(try v.r.byte()) orelse return error.BadValType;
+                try v.popExpect(.i32);
+                try v.popExpect(t);
+                try v.popExpect(t);
+                try v.pushVal(t);
+            },
+
+            .ref_null => {
+                const rt = types.RefType.fromByte(try v.r.byte()) orelse return error.BadRefType;
+                try v.pushVal(rt.toValType());
+            },
+            .ref_is_null => {
+                try popRef(v);
+                try v.pushVal(.i32);
+            },
+            .ref_func => {
+                _ = try v.r.uleb(u32); // function index
+                try v.pushVal(.funcref);
+            },
+
+            .table_get => {
+                const elem = try tableElemType(v.module, try v.r.uleb(u32));
+                try v.popExpect(.i32);
+                try v.pushVal(elem);
+            },
+            .table_set => {
+                const elem = try tableElemType(v.module, try v.r.uleb(u32));
+                try v.popExpect(elem);
+                try v.popExpect(.i32);
+            },
 
             .drop => {
                 _ = try v.popVal();
@@ -590,6 +635,39 @@ fn validateExpr(v: *Validator) ValidateError!void {
                         try v.popExpect(.i32);
                         try v.popExpect(.i32);
                     },
+                    // Bulk table operations (reference-types).
+                    12 => { // table.init
+                        _ = try v.r.uleb(u32); // element segment index
+                        _ = try v.r.uleb(u32); // table index
+                        try v.popExpect(.i32);
+                        try v.popExpect(.i32);
+                        try v.popExpect(.i32);
+                    },
+                    13 => _ = try v.r.uleb(u32), // elem.drop
+                    14 => { // table.copy
+                        _ = try v.r.uleb(u32); // dst table
+                        _ = try v.r.uleb(u32); // src table
+                        try v.popExpect(.i32);
+                        try v.popExpect(.i32);
+                        try v.popExpect(.i32);
+                    },
+                    15 => { // table.grow
+                        const elem = try tableElemType(v.module, try v.r.uleb(u32));
+                        try v.popExpect(.i32);
+                        try v.popExpect(elem);
+                        try v.pushVal(.i32);
+                    },
+                    16 => { // table.size
+                        _ = try tableElemType(v.module, try v.r.uleb(u32));
+                        try v.pushVal(.i32);
+                    },
+                    17 => { // table.fill
+                        const elem = try tableElemType(v.module, try v.r.uleb(u32));
+                        try v.popExpect(.i32);
+                        try v.popExpect(elem);
+                        try v.popExpect(.i32);
+                    },
+
                     // Saturating float→int truncations (non-trapping).
                     0 => try unop(v, .f32, .i32), // i32.trunc_sat_f32_s
                     1 => try unop(v, .f32, .i32), // i32.trunc_sat_f32_u
@@ -785,6 +863,27 @@ fn binop(v: *Validator, in: ValType, out: ValType) !void {
     try v.popExpect(in);
     try v.popExpect(in);
     try v.pushVal(out);
+}
+
+fn popRef(v: *Validator) !void {
+    const actual = try v.popVal();
+    if (actual) |a| {
+        if (!a.isRef()) return error.TypeMismatch;
+    }
+}
+
+/// The element (reference) type of a table in the table index space.
+fn tableElemType(module: *const Module, table_index: u32) !ValType {
+    var imported: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .table) {
+            if (table_index == imported) return imp.desc.table.elem.toValType();
+            imported += 1;
+        }
+    }
+    const local_index = table_index - imported;
+    if (local_index >= module.tables.len) return error.UnknownTable;
+    return module.tables[local_index].elem.toValType();
 }
 
 fn globalType(module: *const Module, global_index: u32) !types.GlobalType {
