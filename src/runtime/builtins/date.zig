@@ -857,6 +857,18 @@ fn makeUTC(y: f64, m: f64, d: f64, h: f64, mi: f64, s: f64, ms: f64) f64 {
     // panics on those.
     const safe_year_max: f64 = 275760.0; // ~JS spec maximum year
     if (@abs(yi) > safe_year_max) return std.math.nan(f64);
+    // Month and day inherit the same "too far away to be a valid time"
+    // envelope. Without these guards Fuzzilli inputs like
+    // `new Date(0, -2.3e307)` panic on the @intFromFloat cast — host-
+    // safety violation per AGENTS.md (never abort on untrusted input).
+    // 9e15 sits well below both i64 saturation (~9.2e18) and the
+    // downstream era*146097 overflow threshold (~6.3e13 for era), so
+    // daysFromEpoch's i64 arithmetic stays bounded; it's also large
+    // enough that legitimate test262 fixtures (`Date.UTC(1970,0,2e11,
+    // 0,0,0,-1.8e19)` — fp-evaluation-order.js) pass through without
+    // being clamped to NaN.
+    const safe_md_max: f64 = 9.0e15;
+    if (@abs(mi_int) > safe_md_max or @abs(di) > safe_md_max) return std.math.nan(f64);
     const year_i: i64 = @intFromFloat(yi);
     const month_i: i64 = @intFromFloat(mi_int);
     const day_i: i64 = @intFromFloat(di);
