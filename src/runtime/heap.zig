@@ -1267,6 +1267,14 @@ pub const Heap = struct {
                 // the `bytes` slice — without this the key dangles.
                 for (f.key_anchors.items) |s| s.mark_color = self.live_color;
                 if (f.prototype) |p| self.enqueue(taggedObject(p));
+                // §10.2 [[Prototype]] — `f.proto` is JSFunction's
+                // `__proto__` chain (the analogue of `JSObject.prototype`
+                // below). Without this edge a user-installed proto
+                // (`setPrototypeOf(fn, x)`) becomes reachable ONLY
+                // through `f.proto`; the next major sweep reclaims it
+                // and a later chain walk (e.g. ToPrimitive looking up
+                // `@@toPrimitive`) reads 0xaa-poisoned memory.
+                if (f.proto) |p| self.enqueue(taggedObject(p));
                 // §10.2.3 [[HomeObject]] — a method's home object
                 // (and, for the typed-slot split Cynic uses, the
                 // owning `home_function`) back `super` lookups.
@@ -2752,6 +2760,20 @@ pub const Heap = struct {
             if (entry.value_ptr.*.setter) |s| self.markValue(taggedFunction(s));
         }
         if (f.prototype) |p| self.markValue(taggedObject(p));
+        // §10.2 [[Prototype]] — JSFunction.proto is the `__proto__`
+        // chain (analogous to JSObject.prototype in
+        // markObjectInternalSlots above). Without this edge a major
+        // sweep reclaims a user-installed proto (`setPrototypeOf(fn,
+        // x)`), leaving the function with a stale pointer that the
+        // next chain walk — e.g. ToPrimitive looking up
+        // `@@toPrimitive` — dereferences as 0xaa-poisoned memory.
+        // Worklist-append pattern matches the JSObject arm: proto
+        // chains can be deep enough to risk the mark stack.
+        if (f.proto) |p| {
+            self.mark_worklist.append(self.allocator, taggedObject(p)) catch {
+                self.markValue(taggedObject(p));
+            };
+        }
         // §10.2.3 [[HomeObject]] — see the `markValue` function arm.
         if (f.home_object) |ho| self.markValue(taggedObject(ho));
         if (f.home_function) |hf| self.markValue(taggedFunction(hf));
