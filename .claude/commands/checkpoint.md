@@ -103,10 +103,35 @@ same host (`Darwin 25.5.0 arm64`, or whatever `uname -srm` yields):
 - Per-fixture % delta.
 - Flag any fixture moving ≥5% in either direction.
 
-The driver doesn't auto-write a row. If anything moved ≥5%, the
-summary suggests appending a new row (format mirrors prior rows:
-date + cynic SHA + host + per-fixture median/min/max/rss + prose
-diff). **Don't append yourself — let the user decide.**
+**Then append a fresh row to `bench-results.md`** (newest-first,
+directly under `## History`) so the file tracks this run — UNLESS
+the run is contaminated. A trustworthy run keeps every fixture's
+`spread%` in the healthy band (≤ ~15 %); if any fixture spreads
+wider, the machine is loaded (confirm with `uptime` load average)
+and the numbers aren't comparable — **print + warn + skip the
+write**, and tell the user to re-run on an idle machine. Never
+record a contaminated row.
+
+Row format — mirror the existing sections verbatim:
+
+```md
+### <YYYY-MM-DD> — cynic `<git rev-parse --short HEAD>`, host `<uname -srm>`
+
+<one line: the ≥5 % movers vs the previous same-host row, e.g.
+`object_alloc -38 %`, `class_instantiate -45 %`; or
+"no fixture moved ≥5 % vs <prev sha>" when flat>
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| <fixture> | <p50> | <min> | <max> | <rss_kb> |
+… one line per fixture, in the driver's table order …
+```
+
+`median_ms` is the driver's `p50_ms` column; `rss_kb` is its
+`rss_kb`. If a row already exists for the same date + host, replace
+it (don't stack duplicates). Writing the file is a working-tree
+change only — the final "Stage and commit?" still lets the user
+decide whether it lands.
 
 ## 4. Cross-engine (gated)
 
@@ -118,10 +143,22 @@ Also skipped when step 4 (bench) ran and found **no fixture moved
 didn't move, cross-engine positions can't have shifted relative
 to peers.
 
+**Apply the same load guard as step 3 first:** if step 3 found the
+machine loaded (any fixture spread > ~15 %, or `uptime` load average
+high), **skip cross-engine entirely** — its numbers would be garbage
+and `-o` would overwrite the good snapshot. Only run when the machine
+is quiet.
+
 ```sh
 tools/guarded-run.sh --timeout=900 -- \
     tools/bench-cross.sh -o bench-cross-results.md
 ```
+
+The `-o` flag rewrites `bench-cross-results.md` in place — that IS
+the file update (a working-tree change; the final "Stage and
+commit?" decides whether it lands). If the run aborts or looks
+contaminated, restore the prior snapshot with
+`git checkout -- bench-cross-results.md` rather than leave a bad one.
 
 **Print the table to the user.** Then diff against the prior
 snapshot via `git diff bench-cross-results.md` and call out:
@@ -157,9 +194,9 @@ Print a compact summary with the actual numbers visible:
 | step | status | runtime |
 |---|---|---|
 | leak-check  | ran / skipped (reason) | … s |
-| test262 runtime | ran (Δ pass = N) / skipped (smoke matched) | … s |
-| bench | ran / skipped (inputs unchanged) | … s |
-| cross-engine | ran / skipped (no bench movement) | … s |
+| test262 runtime | ran (Δ pass = N, wrote row) / skipped (smoke matched) | … s |
+| bench | ran (wrote row) / ran (contaminated — no write) / skipped (inputs unchanged) | … s |
+| cross-engine | ran (wrote file) / skipped (no bench movement / loaded) | … s |
 
 ### test262 row (if ran)
 <extracted runtime row from test262-results.md, copy verbatim>
