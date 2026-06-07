@@ -57,6 +57,8 @@ pub fn main(init: std.process.Init) !void {
                 opts.quiet = true;
             } else if (std.mem.eql(u8, a, "--write-results")) {
                 opts.write_results = true;
+            } else if (std.mem.eql(u8, a, "--debug-loads")) {
+                debug_loads = true;
             }
         }
     }
@@ -135,7 +137,15 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
                 current_module = null;
             }
         } else if (std.mem.eql(u8, kind, "assert_return")) {
+            const before = counts.fail;
             scoreReturn(arena, cmd, &current, current_module, &counts);
+            if (debug_loads and counts.fail > before) {
+                const action = cmd.get("action").?.object;
+                var line: [256]u8 = undefined;
+                const fld = if (action.get("field")) |f| f.string else "?";
+                const msg = std.fmt.bufPrint(&line, "    FAIL line {d}: {s}\n", .{ if (cmd.get("line")) |l| l.integer else 0, fld }) catch continue;
+                std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
+            }
         } else if (std.mem.eql(u8, kind, "assert_trap") or std.mem.eql(u8, kind, "assert_exhaustion")) {
             scoreTrap(arena, cmd, &current, current_module, &counts, std.mem.eql(u8, kind, "assert_exhaustion"));
         } else if (std.mem.eql(u8, kind, "assert_invalid") or std.mem.eql(u8, kind, "assert_malformed")) {
@@ -157,13 +167,27 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
 
 const Loaded = struct { instance: wasm.Instance, module: *wasm.Module };
 
+var debug_loads = false;
+
 fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap) !?Loaded {
     const filename = (cmd.get("filename") orelse return null).string;
     const bytes = dir.readFileAlloc(io, filename, arena, .limited(64 * 1024 * 1024)) catch return null;
     const modp = try arena.create(wasm.Module);
-    modp.* = wasm.decode(arena, bytes) catch return null;
-    const instance = wasm.instantiate(arena, arena, modp) catch return null;
+    modp.* = wasm.decode(arena, bytes) catch |err| {
+        if (debug_loads) logLoadError(io, filename, "decode", err);
+        return null;
+    };
+    const instance = wasm.instantiate(arena, arena, modp) catch |err| {
+        if (debug_loads) logLoadError(io, filename, "instantiate", err);
+        return null;
+    };
     return .{ .instance = instance, .module = modp };
+}
+
+fn logLoadError(io: std.Io, filename: []const u8, phase: []const u8, err: anyerror) void {
+    var line: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&line, "    LOAD-FAIL {s} ({s}): {t}\n", .{ filename, phase, err }) catch return;
+    std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
 }
 
 // ── actions ─────────────────────────────────────────────────────────

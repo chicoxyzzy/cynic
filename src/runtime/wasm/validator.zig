@@ -435,6 +435,27 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 try v.popVals(target.labelTypes());
                 try v.pushVals(target.labelTypes());
             },
+            .br_table => {
+                const count = try v.r.uleb(u32);
+                const labels = try v.arena.alloc(u32, count);
+                for (labels) |*l| l.* = try v.r.uleb(u32);
+                const default_label = try v.r.uleb(u32);
+                try v.popExpect(.i32); // index
+                // One side-table entry per case, then the default — in
+                // bytecode order, so the interpreter can index by case.
+                for (labels) |l| {
+                    _ = try v.emitBranch(op_ip, try v.label(l));
+                }
+                const def = try v.label(default_label);
+                _ = try v.emitBranch(op_ip, def);
+                // Every target must share the default's label arity.
+                const def_arity = def.labelTypes().len;
+                for (labels) |l| {
+                    if ((try v.label(l)).labelTypes().len != def_arity) return error.TypeMismatch;
+                }
+                try v.popVals(def.labelTypes());
+                v.setUnreachable();
+            },
             .@"return" => {
                 try v.popVals(v.results);
                 v.setUnreachable();

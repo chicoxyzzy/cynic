@@ -473,6 +473,19 @@ fn run(ip: *Interp) Error!void {
                         stp += 1;
                     }
                 },
+                .br_table => {
+                    const count = readU32(body, &pc);
+                    var i: u32 = 0;
+                    while (i < count) : (i += 1) _ = readU32(body, &pc); // case labels
+                    _ = readU32(body, &pc); // default label
+                    const index: u32 = @bitCast(ip.popI32());
+                    const sel = if (index < count) index else count;
+                    const entry_index = stp + sel;
+                    const e = side_table[entry_index];
+                    moveValues(ip, e);
+                    pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                    stp = @intCast(@as(i64, @intCast(entry_index)) + e.delta_stp);
+                },
                 .@"return" => {
                     f.ip = pc;
                     f.stp = stp;
