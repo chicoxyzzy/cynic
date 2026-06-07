@@ -31,15 +31,40 @@ pub const TrapError = error{
     IntegerOverflow,
     InvalidConversionToInteger,
     OutOfBoundsMemoryAccess,
+    OutOfBoundsTableAccess,
+    UndefinedElement,
+    UninitializedElement,
+    IndirectCallTypeMismatch,
     CallStackExhausted,
     ValueStackOverflow,
     UnsupportedImportCall,
+};
+
+/// The null reference sentinel. Function indices and host extern values
+/// are small, so all-ones never collides with a real reference.
+const REF_NULL: u128 = std.math.maxInt(u128);
+
+/// A table: a growable vector of references. (Holds opaque cells today;
+/// once the JS API lands, externref cells carry JS values and Metla
+/// scans them — see docs/wasm-engine.md.)
+pub const Table = struct {
+    elems: []u128,
+    max: ?u32,
+};
+
+/// A parsed element segment (for `table.init`). Active and declarative
+/// segments arrive already dropped.
+const ElemSegment = struct {
+    values: []const u128,
+    dropped: bool,
 };
 
 pub const Error = TrapError || validator.ValidateError || error{ NoSuchExport, OutOfMemory };
 
 const STACK_CELLS = 1 << 16;
 const MAX_FRAMES = 1 << 12;
+/// Implementation cap on table size (§4.5.4 allows growth to fail).
+const MAX_TABLE_ELEMS = 1 << 24;
 
 /// WebAssembly linear-memory page size (§2.5.2): 64 KiB.
 pub const PAGE_SIZE = 1 << 16;
@@ -75,12 +100,19 @@ pub const Instance = struct {
     func_import_count: u32,
     /// The module's single linear memory (multi-memory is post-1.0).
     memory: ?Memory,
-    /// Owns `globals` and `memory.data`; used to grow and free them.
+    /// Tables (reference-types allows several).
+    tables: []Table,
+    /// Passive/active element segments, in declaration order.
+    elem_segments: []ElemSegment,
+    /// Owns `globals`, `memory.data`, and the table backing; used to
+    /// grow and free them.
     gpa: std.mem.Allocator,
 
     pub fn deinit(self: *Instance) void {
         self.gpa.free(self.globals);
         if (self.memory) |m| self.gpa.free(m.data);
+        for (self.tables) |t| self.gpa.free(t.elems);
+        self.gpa.free(self.tables);
     }
 
     /// Read a global's raw cell by its index in the global index space
@@ -135,14 +167,99 @@ pub fn instantiate(
         memory = .{ .data = bytes, .max_pages = lim.max };
     }
 
-    return .{
+    // Tables, sized to their minimum and filled with the null reference.
+    const tables = try allocator.alloc(Table, module.tables.len);
+    errdefer allocator.free(tables);
+    for (module.tables, 0..) |t, i| {
+        const elems = try allocator.alloc(u128, t.limits.min);
+        @memset(elems, REF_NULL);
+        tables[i] = .{ .elems = elems, .max = t.limits.max };
+    }
+
+    var instance: Instance = .{
         .module = module,
         .funcs = funcs,
         .globals = globals,
         .func_import_count = func_imports,
         .memory = memory,
+        .tables = tables,
+        .elem_segments = &.{},
         .gpa = allocator,
     };
+
+    // Parse element segments, applying active ones into the tables.
+    instance.elem_segments = try parseElements(arena, module, tables);
+    return instance;
+}
+
+/// Parse the element section, applying active segments into `tables`
+/// and returning the (passive-keeping) segments for `table.init`.
+fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Table) Error![]ElemSegment {
+    const count = module.elements_count;
+    const segs = try arena.alloc(ElemSegment, count);
+    var r = reader_mod.Reader.init(module.elements_raw);
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const flag = try r.uleb(u32);
+        const kind = flag & 3; // 0/2 active, 1 passive, 3 declarative
+        const use_exprs = flag >= 4;
+        const is_active = (kind == 0 or kind == 2);
+
+        var table_idx: u32 = 0;
+        if (kind == 2) table_idx = try r.uleb(u32);
+        var offset: i32 = 0;
+        if (is_active) offset = try readOffsetExpr(&r);
+        if (kind != 0) _ = try r.byte(); // elemkind / reftype
+
+        const n = try r.uleb(u32);
+        const values = try arena.alloc(u128, n);
+        var j: u32 = 0;
+        while (j < n) : (j += 1) {
+            values[j] = if (use_exprs) try readElemExpr(&r) else try r.uleb(u32);
+        }
+
+        if (is_active) {
+            if (table_idx >= tables.len) return error.UnsupportedImportCall;
+            const table = &tables[table_idx];
+            const off: usize = @as(u32, @bitCast(offset));
+            if (off + n > table.elems.len) return error.OutOfBoundsTableAccess;
+            @memcpy(table.elems[off..][0..n], values);
+            segs[i] = .{ .values = &.{}, .dropped = true };
+        } else if (kind == 3) {
+            segs[i] = .{ .values = &.{}, .dropped = true };
+        } else {
+            segs[i] = .{ .values = values, .dropped = false };
+        }
+    }
+    return segs;
+}
+
+/// An active segment's offset is a constant expression — `i32.const`
+/// (or an imported `global.get`, treated as 0 for now) then `end`.
+fn readOffsetExpr(r: *reader_mod.Reader) Error!i32 {
+    const op: Op = @enumFromInt(try r.byte());
+    var val: i32 = 0;
+    switch (op) {
+        .i32_const => val = try r.sleb(i32),
+        .global_get => _ = try r.uleb(u32),
+        else => {},
+    }
+    _ = try r.byte(); // end
+    return val;
+}
+
+/// An element expression yields a reference: `ref.func idx` or
+/// `ref.null` then `end`.
+fn readElemExpr(r: *reader_mod.Reader) Error!u128 {
+    const op: Op = @enumFromInt(try r.byte());
+    var val: u128 = REF_NULL;
+    switch (op) {
+        .ref_func => val = try r.uleb(u32),
+        .ref_null => _ = try r.byte(), // reftype
+        else => {},
+    }
+    _ = try r.byte(); // end
+    return val;
 }
 
 /// Evaluate a global's constant initializer (§3.3.7) for the subset
@@ -373,6 +490,60 @@ fn run(ip: *Interp) Error!void {
                     f = &ip.frames[ip.nframes - 1];
                     break :inner true;
                 },
+                .call_indirect => {
+                    const type_idx = readU32(body, &pc);
+                    const table_idx = readU32(body, &pc);
+                    const elem_index: u32 = @bitCast(ip.popI32());
+                    if (table_idx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+                    const table = &ip.instance.tables[table_idx];
+                    if (elem_index >= table.elems.len) return error.UndefinedElement;
+                    const ref = table.elems[elem_index];
+                    if (ref == REF_NULL) return error.UninitializedElement;
+                    const fidx: u32 = @truncate(ref);
+                    const callee = ip.instance.definedFunc(fidx) orelse return error.UnsupportedImportCall;
+                    const expected = ip.instance.module.types[type_idx];
+                    const actual = ip.instance.module.types[callee.type_index];
+                    if (!funcTypesEqual(expected, actual)) return error.IndirectCallTypeMismatch;
+                    f.ip = pc;
+                    f.stp = stp;
+                    try ip.pushFrame(callee, @intCast(actual.params.len));
+                    f = &ip.frames[ip.nframes - 1];
+                    break :inner true;
+                },
+
+                .ref_null => {
+                    pc += 1; // reftype byte
+                    try ip.pushV128(REF_NULL);
+                },
+                .ref_is_null => try ip.pushI32(@intFromBool(ip.popV128() == REF_NULL)),
+                .ref_func => try ip.pushV128(readU32(body, &pc)),
+
+                .select_t => {
+                    const n = readU32(body, &pc);
+                    pc += n; // skip the result-type vector
+                    const cond = ip.popI32();
+                    const b = ip.popCell();
+                    const a = ip.popCell();
+                    try ip.pushCell(if (cond != 0) a else b);
+                },
+
+                .table_get => {
+                    const tidx = readU32(body, &pc);
+                    const index: u32 = @bitCast(ip.popI32());
+                    if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+                    const table = &ip.instance.tables[tidx];
+                    if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
+                    try ip.pushV128(table.elems[index]);
+                },
+                .table_set => {
+                    const tidx = readU32(body, &pc);
+                    const val = ip.popV128();
+                    const index: u32 = @bitCast(ip.popI32());
+                    if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+                    const table = &ip.instance.tables[tidx];
+                    if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
+                    table.elems[index] = val;
+                },
 
                 .drop => _ = ip.popCell(),
                 .select => {
@@ -526,6 +697,36 @@ fn run(ip: *Interp) Error!void {
                         11 => { // memory.fill
                             pc += 1; // reserved memidx
                             try memFill(ip);
+                        },
+                        12 => { // table.init
+                            const elem_idx = readU32(body, &pc);
+                            const tidx = readU32(body, &pc);
+                            try tableInit(ip, elem_idx, tidx);
+                        },
+                        13 => { // elem.drop
+                            const elem_idx = readU32(body, &pc);
+                            if (elem_idx < ip.instance.elem_segments.len) {
+                                ip.instance.elem_segments[elem_idx].dropped = true;
+                                ip.instance.elem_segments[elem_idx].values = &.{};
+                            }
+                        },
+                        14 => { // table.copy
+                            const dst_t = readU32(body, &pc);
+                            const src_t = readU32(body, &pc);
+                            try tableCopy(ip, dst_t, src_t);
+                        },
+                        15 => { // table.grow
+                            const tidx = readU32(body, &pc);
+                            try ip.pushI32(try tableGrow(ip, tidx));
+                        },
+                        16 => { // table.size
+                            const tidx = readU32(body, &pc);
+                            if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+                            try ip.pushI32(@intCast(ip.instance.tables[tidx].elems.len));
+                        },
+                        17 => { // table.fill
+                            const tidx = readU32(body, &pc);
+                            try tableFill(ip, tidx);
                         },
                         // Saturating float→int truncations.
                         0 => try ip.pushI32(truncSat(i32, f32, ip.popF32())),
@@ -757,6 +958,79 @@ fn memFill(ip: *Interp) TrapError!void {
     try checkBounds(data.len, dst, n);
     if (n == 0) return;
     @memset(data[dst..][0..n], @truncate(val));
+}
+
+// ── tables ──────────────────────────────────────────────────────────
+
+fn funcTypesEqual(a: types.FuncType, b: types.FuncType) bool {
+    if (a.params.len != b.params.len or a.results.len != b.results.len) return false;
+    for (a.params, b.params) |x, y| if (x != y) return false;
+    for (a.results, b.results) |x, y| if (x != y) return false;
+    return true;
+}
+
+fn tableInit(ip: *Interp, elem_idx: u32, tidx: u32) TrapError!void {
+    const n: u32 = @bitCast(ip.popI32());
+    const src: u32 = @bitCast(ip.popI32());
+    const dst: u32 = @bitCast(ip.popI32());
+    if (tidx >= ip.instance.tables.len or elem_idx >= ip.instance.elem_segments.len) return error.UnsupportedImportCall;
+    const table = &ip.instance.tables[tidx];
+    const vals = ip.instance.elem_segments[elem_idx].values;
+    if (@as(u64, src) + n > vals.len or @as(u64, dst) + n > table.elems.len) return error.OutOfBoundsTableAccess;
+    var k: u32 = 0;
+    while (k < n) : (k += 1) table.elems[dst + k] = vals[src + k];
+}
+
+fn tableCopy(ip: *Interp, dst_t: u32, src_t: u32) TrapError!void {
+    const n: u32 = @bitCast(ip.popI32());
+    const src: u32 = @bitCast(ip.popI32());
+    const dst: u32 = @bitCast(ip.popI32());
+    if (dst_t >= ip.instance.tables.len or src_t >= ip.instance.tables.len) return error.UnsupportedImportCall;
+    const dtable = &ip.instance.tables[dst_t];
+    const stable = &ip.instance.tables[src_t];
+    if (@as(u64, src) + n > stable.elems.len or @as(u64, dst) + n > dtable.elems.len) return error.OutOfBoundsTableAccess;
+    if (n == 0) return;
+    if (dst <= src) {
+        var k: u32 = 0;
+        while (k < n) : (k += 1) dtable.elems[dst + k] = stable.elems[src + k];
+    } else {
+        var k: u32 = n;
+        while (k > 0) {
+            k -= 1;
+            dtable.elems[dst + k] = stable.elems[src + k];
+        }
+    }
+}
+
+fn tableGrow(ip: *Interp, tidx: u32) TrapError!i32 {
+    const n: u32 = @bitCast(ip.popI32());
+    const init_val = ip.popV128();
+    if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+    const table = &ip.instance.tables[tidx];
+    const old: u32 = @intCast(table.elems.len);
+    const new_len: u64 = @as(u64, old) + n;
+    // §4.5.4 permits growth to fail for any implementation limit; cap
+    // well below the point where a huge request would lazily "succeed"
+    // and fault on first touch.
+    if (new_len > MAX_TABLE_ELEMS) return -1;
+    if (table.max) |mx| {
+        if (new_len > mx) return -1;
+    }
+    const grown = ip.instance.gpa.realloc(table.elems, @intCast(new_len)) catch return -1;
+    for (grown[old..]) |*e| e.* = init_val;
+    table.elems = grown;
+    return @bitCast(old);
+}
+
+fn tableFill(ip: *Interp, tidx: u32) TrapError!void {
+    const n: u32 = @bitCast(ip.popI32());
+    const val = ip.popV128();
+    const dst: u32 = @bitCast(ip.popI32());
+    if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+    const table = &ip.instance.tables[tidx];
+    if (@as(u64, dst) + n > table.elems.len) return error.OutOfBoundsTableAccess;
+    var k: u32 = 0;
+    while (k < n) : (k += 1) table.elems[dst + k] = val;
 }
 
 // ── immediate readers (advance `pc`) ────────────────────────────────

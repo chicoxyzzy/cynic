@@ -16,15 +16,23 @@ pub const Op = enum(u8) {
     br_if = 0x0d,
     @"return" = 0x0f,
     call = 0x10,
+    call_indirect = 0x11,
 
     drop = 0x1a,
     select = 0x1b,
+    select_t = 0x1c,
 
     local_get = 0x20,
     local_set = 0x21,
     local_tee = 0x22,
     global_get = 0x23,
     global_set = 0x24,
+    table_get = 0x25,
+    table_set = 0x26,
+
+    ref_null = 0xd0,
+    ref_is_null = 0xd1,
+    ref_func = 0xd2,
 
     // Memory access (§5.4.6). Each carries a memarg (align, offset).
     i32_load = 0x28,
