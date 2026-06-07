@@ -10797,6 +10797,33 @@ test "sta_property transition IC: setPrototypeOf mid-loop invalidates" {
     , 15);
 }
 
+test "sta_property transition IC: building an array literal does not invalidate the cell" {
+    // Regression for the constructor-IC deopt: `make_array` installed
+    // the array exotic's intrinsic `length` (§23.1.4 — non-enumerable,
+    // non-configurable) through `setWithFlags`, whose non-default
+    // branch bumps `heap.proto_struct_epoch` — the global
+    // transition-write-IC invalidation epoch the `sta_property` guard
+    // checks. A freshly-built array literal is never any object's
+    // prototype, so that bump was a pure false positive: it deopted a
+    // constructor's `this.x = …` transition IC on every iteration of any
+    // hot loop that also built an array (the very common
+    // `const p = new Point(x, y); const a = [p.x, p.y];` shape),
+    // forcing the slow `strictSetProperty` → `lookupAccessor` chain
+    // walk. Pin the invariant directly at the heap level: creating
+    // arrays must leave the epoch untouched so warm transition cells
+    // survive.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+
+    // Settle the one-time global-env / intrinsic touches the first
+    // script triggers, so the measured window below is array-only.
+    _ = try evaluateScriptValue(&realm, "1 + 1;");
+    const before = realm.heap.proto_struct_epoch;
+    _ = try evaluateScriptValue(&realm, "[1, 2, 3]; [4, 5]; []; [6, 7, 8, 9];");
+    try testing.expectEqual(before, realm.heap.proto_struct_epoch);
+}
+
 // Parameter-to-register optimization — when no inner closure
 // captures a param, no `arguments` reference, no `eval`, and all
 // params are plain identifiers (no destructuring / no defaults),

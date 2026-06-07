@@ -73,6 +73,10 @@ const BENCHES = [_]Bench{
     .{ .name = "object_alloc", .path = "bench/micros/object_alloc.js" },
     .{ .name = "method_call", .path = "bench/micros/method_call.js" },
     .{ .name = "class_instantiate", .path = "bench/micros/class_instantiate.js" },
+    // Constructor `this.x = …` write IC surviving an array literal
+    // built in the same loop — guards the make_array proto-struct-epoch
+    // false-positive deopt.
+    .{ .name = "ctor_array_build", .path = "bench/micros/ctor_array_build.js" },
     .{ .name = "json_stringify", .path = "bench/micros/json_stringify.js" },
     // §15.10 PTC — recurses past the 1024-frame stack ceiling;
     // proves the tail_call opcodes keep the spine at depth 1.

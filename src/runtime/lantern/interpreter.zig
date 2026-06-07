@@ -8213,15 +8213,12 @@ pub fn runFrames(
         .make_array => {
             const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
             realm.heap.setObjectPrototype(obj, realm.intrinsics.array_prototype);
+            // `markAsArrayExotic` installs the §23.1.4 `length` slot
+            // (non-enumerable, non-configurable) — no separate write
+            // needed. It deliberately avoids bumping the proto-struct
+            // epoch so a constructor's transition write IC survives an
+            // array literal built in the same hot loop.
             obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
-            // §23.1.4 — `Array.prototype.length` is
-            // non-enumerable. Pre-flag the slot so for-in
-            // and `Object.keys` don't surface it.
-            realm.heap.storePropertyWithFlags(obj, allocator, "length", Value.fromInt32(0), .{
-                .writable = true,
-                .enumerable = false,
-                .configurable = false,
-            }) catch return error.OutOfMemory;
             acc = heap_mod.taggedObject(obj);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },

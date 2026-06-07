@@ -1983,6 +1983,36 @@ pub const JSObject = struct {
         v: Value,
         flags: PropertyFlags,
     ) !void {
+        return self.setWithFlagsImpl(allocator, key, v, flags, true);
+    }
+
+    /// `setWithFlags` without the `heap.proto_struct_epoch` bump.
+    /// Valid ONLY when `self` is a brand-new object not yet reachable
+    /// as any other object's prototype: a non-default-flagged own
+    /// install on such an object (e.g. an array exotic's §23.1.4
+    /// `length` at construction) cannot sit in any live transition
+    /// write IC's snapshotted prototype chain, so the conservative
+    /// epoch bump `setWithFlags` does for §10.1.9 prototype-chain
+    /// safety would be a pure false positive that deopts unrelated hot
+    /// constructor loops. See `markAsArrayExotic`.
+    fn setWithFlagsNoEpochBump(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+        flags: PropertyFlags,
+    ) !void {
+        return self.setWithFlagsImpl(allocator, key, v, flags, false);
+    }
+
+    fn setWithFlagsImpl(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+        flags: PropertyFlags,
+        comptime bump_epoch: bool,
+    ) !void {
         // §10.4.2 Array exotic — integer-indexed writes route to
         // `elements`. The descriptor flags are silently ignored
         // for now: indexed slots are always `{w,e,c} = true`
@@ -1998,8 +2028,10 @@ pub const JSObject = struct {
         // past (§10.1.9). This is the funnel the cell's proto_shape /
         // proto_rev miss for a dictionary-mode or non-immediate proto.
         // Plain value writes go through `shadowSet`, not here, so the
-        // constructor hot loop is unaffected.
-        if (!is_default) {
+        // constructor hot loop is unaffected. Callers installing onto a
+        // freshly-created, never-yet-a-prototype object opt out via
+        // `setWithFlagsNoEpochBump` — the bump would be a false positive.
+        if (bump_epoch and !is_default) {
             if (self.heap) |h| h.bumpProtoStructEpoch();
         }
         if (self.is_array_exotic) {
@@ -2782,7 +2814,14 @@ pub const JSObject = struct {
     pub fn markAsArrayExotic(self: *JSObject, allocator: std.mem.Allocator) !void {
         if (self.is_array_exotic) return;
         self.is_array_exotic = true;
-        try self.setWithFlags(allocator, "length", Value.fromInt32(0), .{
+        // Install the exotic's own `length` (§23.1.4 — non-enumerable,
+        // non-configurable) without bumping `heap.proto_struct_epoch`:
+        // the object is freshly created here (every caller marks a just-
+        // allocated JSObject) and so is never a live prototype, making
+        // the bump a false-positive transition-IC invalidation that
+        // deopts hot constructor loops building arrays. See
+        // `setWithFlagsNoEpochBump`.
+        try self.setWithFlagsNoEpochBump(allocator, "length", Value.fromInt32(0), .{
             .writable = true,
             .enumerable = false,
             .configurable = false,
