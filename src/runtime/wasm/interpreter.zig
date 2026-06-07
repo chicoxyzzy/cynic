@@ -38,6 +38,9 @@ pub const TrapError = error{
     CallStackExhausted,
     ValueStackOverflow,
     UnsupportedImportCall,
+    /// A JS-backed host import threw; the exception is pending on the
+    /// realm and is re-raised at the wasm->JS boundary.
+    HostThrew,
 };
 
 /// The null reference sentinel. A funcref always carries a non-null
@@ -104,14 +107,14 @@ const Global = struct {
 /// A host (native) function backing a wasm import — `spectest.print` and
 /// friends. Receives the marshalled argument cells (low bits hold
 /// scalars) and fills `results`.
-pub const HostFn = *const fn (args: []const u128, results: []u128) void;
+pub const HostFn = *const fn (ctx: ?*anyopaque, args: []const u128, results: []u128) TrapError!void;
 
 /// A resolved function-import target: a wasm function living in some
 /// (possibly other) instance, or a host callable. The function index
 /// space of an importing module is `imported_funcs ++ funcs`.
 pub const FuncRef = union(enum) {
     wasm: struct { instance: *Instance, func: *const CompiledFunc },
-    host: struct { fn_ptr: HostFn, params: u32, results: u32 },
+    host: struct { fn_ptr: HostFn, ctx: ?*anyopaque = null, params: u32, results: u32 },
 };
 
 /// Resolved imports handed to `instantiate` for cross-module linking.
@@ -209,6 +212,13 @@ pub const Instance = struct {
         const local = func_index - @as(u32, @intCast(self.imported_funcs.len));
         if (local >= self.funcs.len) return null;
         return .{ .wasm = .{ .instance = self, .func = &self.funcs[local] } };
+    }
+
+    /// Resolve a function-index-space entry to a callable `FuncRef`, for
+    /// the JS API (importing one instance's exported function into
+    /// another module).
+    pub fn funcRefAt(self: *Instance, idx: u32) ?FuncRef {
+        return self.resolveFunc(idx);
     }
 
     /// A pointer to the instance's live linear memory, for the JS API's
@@ -747,7 +757,7 @@ const Interp = struct {
             return error.UnsupportedImportCall;
         self.sp -= h.params;
         @memcpy(argbuf[0..h.params], self.stack[self.sp..][0..h.params]);
-        h.fn_ptr(argbuf[0..h.params], resbuf[0..h.results]);
+        try h.fn_ptr(h.ctx, argbuf[0..h.params], resbuf[0..h.results]);
         var i: u32 = 0;
         while (i < h.results) : (i += 1) try self.pushCell(resbuf[i]);
     }
