@@ -46,6 +46,7 @@ pub const ValidateError = error{
     DataCountMissing,
     UnknownDataSegment,
     UnknownMemory,
+    SectionSizeMismatch,
     UnknownOpcode,
     TypeMismatch,
     StackUnderflow,
@@ -382,6 +383,9 @@ fn validateData(module: *const Module, global_limit: u32) ValidateError!void {
         const n = try r.uleb(u32);
         _ = try r.bytesN(n);
     }
+    // The segments must consume the whole section payload (§5.5.14): a
+    // declared size larger than the structural content is malformed.
+    if (r.pos != module.data_raw.len) return error.SectionSizeMismatch;
 }
 
 /// §3.4.5 — validate active element segment offsets and the function
@@ -425,6 +429,7 @@ fn validateElements(module: *const Module, global_limit: u32) ValidateError!void
             }
         }
     }
+    if (r.pos != module.elements_raw.len) return error.SectionSizeMismatch;
 }
 
 const Validator = struct {
