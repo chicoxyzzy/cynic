@@ -1632,7 +1632,13 @@ fn typedArrayLength(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // is recomputed against the live buffer.
     if (tv.viewed.getArrayBuffer() == null) return Value.fromInt32(0);
     if (taIsOutOfBounds(tv)) return Value.fromInt32(0);
-    return Value.fromInt32(@intCast(taCurrentLength(tv)));
+    // A typed array's length can exceed i32 (resizable / growable
+    // buffers can outpace 2^31 elements). Spec representation is a
+    // Number — fast-path the common int32 case, fall back to double
+    // for larger lengths so `@intCast` doesn't trap.
+    const len = taCurrentLength(tv);
+    if (len <= std.math.maxInt(i32)) return Value.fromInt32(@intCast(len));
+    return Value.fromDouble(@floatFromInt(len));
 }
 
 fn typedArrayByteLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1642,7 +1648,11 @@ fn typedArrayByteLength(realm: *Realm, this_value: Value, args: []const Value) N
     // §23.2.3.2 — IsDetachedBuffer or IsTypedArrayOutOfBounds → 0.
     if (tv.viewed.getArrayBuffer() == null) return Value.fromInt32(0);
     if (taIsOutOfBounds(tv)) return Value.fromInt32(0);
-    return Value.fromInt32(@intCast(taCurrentLength(tv) * tv.kind.elementSize()));
+    // Same fast-path-with-double-fallback as length, multiplied by
+    // the element size.
+    const bytes = taCurrentLength(tv) * tv.kind.elementSize();
+    if (bytes <= std.math.maxInt(i32)) return Value.fromInt32(@intCast(bytes));
+    return Value.fromDouble(@floatFromInt(bytes));
 }
 
 fn typedArrayByteOffset(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
