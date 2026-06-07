@@ -15,17 +15,28 @@
 //!     no-op when `DWFD` isn't open (running outside REPRL).
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const JSString = @import("../string.zig").JSString;
 const NativeError = @import("../function.zig").NativeError;
 
+/// Fuzzilli REPRL is POSIX-only — it speaks over inherited fds via
+/// libc. On `freestanding` / `wasm` there are no file descriptors
+/// (`std.posix.fd_t` is `void`, `std.c.write` is unavailable), so the
+/// host's I/O compiles out there (see `writeAll`). The playground's
+/// `wasm32-freestanding` build reaches this module through
+/// `installTestGlobals`, so it MUST compile on that target.
+const fuzzilli_host = builtin.target.os.tag != .freestanding and builtin.target.os.tag != .wasi;
+
 /// Fuzzilli's differential output sink (data-write fd). Engine
 /// writes `FUZZILLI_PRINT` output here; Fuzzilli reads it for
 /// differential comparison. Must stay in sync with `cli/fuzz_reprl.zig`'s
-/// fd constants — the REPRL protocol mandates the exact numbers.
-pub const DWFD: std.posix.fd_t = 103;
+/// fd constants — the REPRL protocol mandates the exact numbers. Typed
+/// as `i32` (== `std.posix.fd_t` on POSIX) so the declaration is valid
+/// on `freestanding`, where `fd_t` is `void`.
+pub const DWFD: i32 = 103;
 
 pub fn fuzzilliNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = realm;
@@ -73,15 +84,19 @@ fn renderValue(buf: []u8, v: Value) []const u8 {
     return "[object]";
 }
 
-fn writeAll(fd: std.posix.fd_t, buf: []const u8) !void {
+fn writeAll(fd: i32, buf: []const u8) !void {
     // `std.posix.write` is gone in 0.17-dev; `std.c.write` is the
     // stable path on libc-linked builds. A -1 / 0 return means the
     // sink is closed — for FUZZILLI_PRINT that's the "running
-    // outside REPRL" case, which the caller swallows.
-    var written: usize = 0;
-    while (written < buf.len) {
-        const n = std.c.write(fd, buf[written..].ptr, buf.len - written);
-        if (n <= 0) return error.WriteFailed;
-        written += @intCast(n);
+    // outside REPRL" case, which the caller swallows. POSIX-only: the
+    // libc body is comptime-excluded on `freestanding` / `wasm`, where
+    // there is no `std.c.write` and `FUZZILLI_PRINT` is never driven.
+    if (comptime fuzzilli_host) {
+        var written: usize = 0;
+        while (written < buf.len) {
+            const n = std.c.write(fd, buf[written..].ptr, buf.len - written);
+            if (n <= 0) return error.WriteFailed;
+            written += @intCast(n);
+        }
     }
 }
