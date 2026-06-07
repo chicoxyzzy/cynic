@@ -795,3 +795,70 @@ test "wasm interp: reinterpret preserves the bit pattern" {
     const f32_from_i32 = [_]u8{ 0x00, 0x20, 0x00, 0xbe, 0x0b };
     try testing.expectEqual(@as(f32, 1.0), asF32(try callCells(&.{I32}, &.{F32}, &f32_from_i32, "f", null, &.{0x3f800000})));
 }
+
+// ── execution: SIMD (v128) ──────────────────────────────────────────
+// Results are read back through extract_lane so the scalar invoke
+// boundary can verify v128 computation.
+
+const V128 = 0x7b;
+
+test "wasm interp: i32x4.splat + extract_lane" {
+    // local.get 0; i32x4.splat; i32x4.extract_lane 2
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xfd, 0x11, 0xfd, 0x1b, 0x02, 0x0b };
+    try testing.expectEqual(@as(i32, 7), asI32(try callCells(&.{I32}, &.{I32}, &code, "f", null, &.{7})));
+}
+
+test "wasm interp: i32x4.add lanewise" {
+    // splat a; splat b; i32x4.add; extract_lane 0
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xfd, 0x11, 0x20, 0x01, 0xfd, 0x11, 0xfd, 0xae, 0x01, 0xfd, 0x1b, 0x00, 0x0b };
+    try testing.expectEqual(@as(i32, 7), asI32(try callCells(&.{ I32, I32 }, &.{I32}, &code, "f", null, &.{ 3, 4 })));
+}
+
+test "wasm interp: f32x4.mul lanewise" {
+    // splat a; splat b; f32x4.mul; f32x4.extract_lane 1
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xfd, 0x13, 0x20, 0x01, 0xfd, 0x13, 0xfd, 0xe6, 0x01, 0xfd, 0x1f, 0x01, 0x0b };
+    try testing.expectEqual(@as(f32, 6.0), asF32(try callCells(&.{ F32, F32 }, &.{F32}, &code, "f", null, &.{ f32c(2.0), f32c(3.0) })));
+}
+
+test "wasm interp: v128.const + extract_lane" {
+    // v128.const i32x4 {10,20,30,40}; i32x4.extract_lane 2
+    const code = [_]u8{
+        0x00, 0xfd, 0x0c,
+        0x0a, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00,
+        0xfd, 0x1b, 0x02, 0x0b,
+    };
+    try testing.expectEqual(@as(i32, 30), asI32(try callCells(&.{}, &.{I32}, &code, "f", null, &.{})));
+}
+
+test "wasm interp: i8x16.add wraps per lane" {
+    // splat x; splat x; i8x16.add; i8x16.extract_lane_s 0
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xfd, 0x0f, 0x20, 0x00, 0xfd, 0x0f, 0xfd, 0x6e, 0xfd, 0x15, 0x00, 0x0b };
+    // 100 + 100 = 200, wraps to -56 as i8
+    try testing.expectEqual(@as(i32, -56), asI32(try callCells(&.{I32}, &.{I32}, &code, "f", null, &.{100})));
+}
+
+test "wasm interp: i32x4.eq yields an all-ones lane mask" {
+    // splat x; splat x; i32x4.eq; extract_lane 0
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xfd, 0x11, 0x20, 0x00, 0xfd, 0x11, 0xfd, 0x37, 0xfd, 0x1b, 0x00, 0x0b };
+    try testing.expectEqual(@as(i32, -1), asI32(try callCells(&.{I32}, &.{I32}, &code, "f", null, &.{5})));
+}
+
+test "wasm interp: i32x4.shl shifts each lane" {
+    // splat x; i32.const 4; i32x4.shl; extract_lane 0
+    const code = [_]u8{ 0x00, 0x20, 0x00, 0xfd, 0x11, 0x41, 0x04, 0xfd, 0xab, 0x01, 0xfd, 0x1b, 0x00, 0x0b };
+    try testing.expectEqual(@as(i32, 16), asI32(try callCells(&.{I32}, &.{I32}, &code, "f", null, &.{1})));
+}
+
+test "wasm interp: v128 store then load round-trips" {
+    // i32.const 0; v128.const{10,20,30,40}; v128.store; i32.const 0; v128.load; extract_lane 3
+    const code = [_]u8{
+        0x00,
+        0x41, 0x00,
+        0xfd, 0x0c, 0x0a, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00,
+        0xfd, 0x0b, 0x04, 0x00, // v128.store align=4 offset=0
+        0x41, 0x00,
+        0xfd, 0x00, 0x04, 0x00, // v128.load align=4 offset=0
+        0xfd, 0x1b, 0x03, 0x0b,
+    };
+    try testing.expectEqual(@as(i32, 40), asI32(try callCells(&.{}, &.{I32}, &code, "f", 1, &.{})));
+}

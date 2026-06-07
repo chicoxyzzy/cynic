@@ -44,9 +44,10 @@ const MAX_FRAMES = 1 << 12;
 /// WebAssembly linear-memory page size (§2.5.2): 64 KiB.
 pub const PAGE_SIZE = 1 << 16;
 
-/// A runtime global cell.
+/// A runtime global cell. 128-bit to hold a `v128` (scalars use the
+/// low bits).
 const Global = struct {
-    value: u64,
+    value: u128,
     mutable: bool,
 };
 
@@ -91,7 +92,7 @@ pub const Instance = struct {
             if (imp.desc == .global) imported += 1;
         }
         if (global_index < imported) return null;
-        return self.globals[global_index - imported].value;
+        return @truncate(self.globals[global_index - imported].value);
     }
 
     /// Resolve a function-index-space entry to a defined function, or
@@ -165,19 +166,25 @@ const Frame = struct {
     result_count: u32,
 };
 
+/// The operand/local stack cell. 128 bits so a single cell holds any
+/// value type including `v128`; scalars occupy the low bits. Keeping
+/// one value == one cell preserves the validator's value-count
+/// bookkeeping (and the side-table's pop/keep counts) unchanged.
+const Cell = u128;
+
 const Interp = struct {
     instance: *Instance,
-    stack: []u64,
+    stack: []Cell,
     sp: usize,
     frames: []Frame,
     nframes: usize,
 
-    inline fn pushCell(self: *Interp, v: u64) TrapError!void {
+    inline fn pushCell(self: *Interp, v: Cell) TrapError!void {
         if (self.sp >= self.stack.len) return error.ValueStackOverflow;
         self.stack[self.sp] = v;
         self.sp += 1;
     }
-    inline fn popCell(self: *Interp) u64 {
+    inline fn popCell(self: *Interp) Cell {
         self.sp -= 1;
         return self.stack[self.sp];
     }
@@ -188,10 +195,10 @@ const Interp = struct {
         return @bitCast(@as(u32, @truncate(self.popCell())));
     }
     inline fn pushI64(self: *Interp, v: i64) TrapError!void {
-        try self.pushCell(@bitCast(v));
+        try self.pushCell(@as(u64, @bitCast(v)));
     }
     inline fn popI64(self: *Interp) i64 {
-        return @bitCast(self.popCell());
+        return @bitCast(@as(u64, @truncate(self.popCell())));
     }
     inline fn pushF32(self: *Interp, v: f32) TrapError!void {
         try self.pushCell(@as(u32, @bitCast(v)));
@@ -200,10 +207,16 @@ const Interp = struct {
         return @bitCast(@as(u32, @truncate(self.popCell())));
     }
     inline fn pushF64(self: *Interp, v: f64) TrapError!void {
-        try self.pushCell(@bitCast(v));
+        try self.pushCell(@as(u64, @bitCast(v)));
     }
     inline fn popF64(self: *Interp) f64 {
-        return @bitCast(self.popCell());
+        return @bitCast(@as(u64, @truncate(self.popCell())));
+    }
+    inline fn pushV128(self: *Interp, v: u128) TrapError!void {
+        try self.pushCell(v);
+    }
+    inline fn popV128(self: *Interp) u128 {
+        return self.popCell();
     }
 
     /// Push a frame for a wasm call. The top `param_count` operands are
@@ -256,7 +269,7 @@ pub fn invoke(
 ) Error![]u64 {
     const entry = self.definedFunc(func_index) orelse return error.UnsupportedImportCall;
 
-    const stack = try allocator.alloc(u64, STACK_CELLS);
+    const stack = try allocator.alloc(Cell, STACK_CELLS);
     defer allocator.free(stack);
     const frames = try allocator.alloc(Frame, MAX_FRAMES);
     defer allocator.free(frames);
@@ -271,10 +284,12 @@ pub fn invoke(
 
     try run(&ip);
 
-    // Results sit at the bottom of the stack after the final pop.
+    // Results sit at the bottom of the stack after the final pop. The
+    // public boundary is scalar (u64) for now; a v128 result truncates
+    // (lossy) until the JS-API/harness path widens it.
     const nres = ip.sp;
     const out = try allocator.alloc(u64, nres);
-    @memcpy(out, ip.stack[0..nres]);
+    for (0..nres) |i| out[i] = @truncate(ip.stack[i]);
     return out;
 }
 
@@ -525,6 +540,10 @@ fn run(ip: *Interp) Error!void {
                         else => return error.UnsupportedImportCall,
                     }
                 },
+                .prefix_fd => {
+                    const sub = readU32(body, &pc);
+                    try execSimd(ip, sub, body, &pc);
+                },
 
                 else => return error.UnsupportedImportCall, // unreachable: validation rejects
             }
@@ -681,7 +700,7 @@ fn execStore(ip: *Interp, op: Op, body: []const u8, pc: *usize) TrapError!void {
             std.mem.writeInt(u32, data[@intCast(ea)..][0..4], v, .little);
         },
         .f64_store => {
-            const v: u64 = ip.popCell();
+            const v: u64 = @truncate(ip.popCell());
             const ea = memEa(ip, body, pc);
             const data = ip.instance.memory.?.data;
             try checkBounds(data.len, ea, 8);
@@ -904,6 +923,357 @@ fn truncSat(comptime Int: type, comptime Float: type, f: Float) Int {
     if (t <= min_f) return std.math.minInt(Int);
     if (t >= max_f) return std.math.maxInt(Int);
     return @intFromFloat(t);
+}
+
+// ── SIMD (v128, §5.4.8) ─────────────────────────────────────────────
+//
+// A v128 lives in the 128-bit cell; each operation `@bitCast`s it to
+// the relevant `@Vector` shape, computes with Zig's vector ops, and
+// casts back. This is the wasm3/DrumBrake idiom expressed natively.
+
+fn vsplat(comptime N: usize, comptime T: type, x: T) u128 {
+    const vec: @Vector(N, T) = @splat(x);
+    return @bitCast(vec);
+}
+
+const IOp = enum { add, sub, mul };
+fn ibin(ip: *Interp, comptime N: usize, comptime T: type, comptime op: IOp) u128 {
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const x: @Vector(N, T) = @bitCast(a);
+    const y: @Vector(N, T) = @bitCast(b);
+    const r = switch (op) {
+        .add => x +% y,
+        .sub => x -% y,
+        .mul => x *% y,
+    };
+    return @bitCast(r);
+}
+
+fn ineg(comptime N: usize, comptime T: type, a: u128) u128 {
+    const x: @Vector(N, T) = @bitCast(a);
+    const z: @Vector(N, T) = @splat(0);
+    return @bitCast(z -% x);
+}
+
+const FUn = enum { abs, neg, sqrt };
+fn funary(comptime N: usize, comptime T: type, comptime op: FUn, a: u128) u128 {
+    const x: @Vector(N, T) = @bitCast(a);
+    const r = switch (op) {
+        .abs => @abs(x),
+        .neg => -x,
+        .sqrt => @sqrt(x),
+    };
+    return @bitCast(r);
+}
+
+const FBin = enum { add, sub, mul, div, min, max };
+fn fbin(ip: *Interp, comptime N: usize, comptime T: type, comptime op: FBin) u128 {
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const x: @Vector(N, T) = @bitCast(a);
+    const y: @Vector(N, T) = @bitCast(b);
+    switch (op) {
+        .add => return @bitCast(x + y),
+        .sub => return @bitCast(x - y),
+        .mul => return @bitCast(x * y),
+        .div => return @bitCast(x / y),
+        .min, .max => {
+            // Per-lane NaN / signed-zero handling (the scalar rule).
+            var r: @Vector(N, T) = undefined;
+            inline for (0..N) |i| r[i] = if (op == .min) fmin(T, x[i], y[i]) else fmax(T, x[i], y[i]);
+            return @bitCast(r);
+        },
+    }
+}
+
+fn maskBits(comptime N: usize, comptime U: type, mask: @Vector(N, bool)) u128 {
+    const ones: @Vector(N, U) = @splat(~@as(U, 0));
+    const zero: @Vector(N, U) = @splat(0);
+    return @bitCast(@select(U, mask, ones, zero));
+}
+
+fn intCmp(ip: *Interp, comptime N: usize, comptime S: type, comptime U: type, op_idx: u32) u128 {
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const as: @Vector(N, S) = @bitCast(a);
+    const bs: @Vector(N, S) = @bitCast(b);
+    const au: @Vector(N, U) = @bitCast(a);
+    const bu: @Vector(N, U) = @bitCast(b);
+    const mask = switch (op_idx) {
+        0 => au == bu, // eq
+        1 => au != bu, // ne
+        2 => as < bs, // lt_s
+        3 => au < bu, // lt_u
+        4 => as > bs, // gt_s
+        5 => au > bu, // gt_u
+        6 => as <= bs, // le_s
+        7 => au <= bu, // le_u
+        8 => as >= bs, // ge_s
+        9 => au >= bu, // ge_u
+        else => unreachable,
+    };
+    return maskBits(N, U, mask);
+}
+
+fn floatCmpV(ip: *Interp, comptime N: usize, comptime T: type, comptime U: type, op_idx: u32) u128 {
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const x: @Vector(N, T) = @bitCast(a);
+    const y: @Vector(N, T) = @bitCast(b);
+    const mask = switch (op_idx) {
+        0 => x == y,
+        1 => x != y,
+        2 => x < y,
+        3 => x > y,
+        4 => x <= y,
+        5 => x >= y,
+        else => unreachable,
+    };
+    return maskBits(N, U, mask);
+}
+
+const ShOp = enum { shl, shr_s, shr_u };
+fn ishift(comptime N: usize, comptime S: type, comptime U: type, comptime op: ShOp, count: u32, a: u128) u128 {
+    const Log2 = std.math.Log2Int(U);
+    const amt: Log2 = @intCast(count & (@bitSizeOf(U) - 1));
+    const shv: @Vector(N, Log2) = @splat(amt);
+    switch (op) {
+        .shl => {
+            const xu: @Vector(N, U) = @bitCast(a);
+            return @bitCast(xu << shv);
+        },
+        .shr_s => {
+            const xs: @Vector(N, S) = @bitCast(a);
+            return @bitCast(xs >> shv);
+        },
+        .shr_u => {
+            const xu: @Vector(N, U) = @bitCast(a);
+            return @bitCast(xu >> shv);
+        },
+    }
+}
+
+fn execSimd(ip: *Interp, sub: u32, body: []const u8, pc: *usize) TrapError!void {
+    switch (sub) {
+        0 => { // v128.load
+            const ea = memEa(ip, body, pc);
+            const data = ip.instance.memory.?.data;
+            try checkBounds(data.len, ea, 16);
+            try ip.pushV128(std.mem.readInt(u128, data[@intCast(ea)..][0..16], .little));
+        },
+        11 => { // v128.store
+            const val = ip.popV128();
+            const ea = memEa(ip, body, pc);
+            const data = ip.instance.memory.?.data;
+            try checkBounds(data.len, ea, 16);
+            std.mem.writeInt(u128, data[@intCast(ea)..][0..16], val, .little);
+        },
+        12 => { // v128.const
+            const val = std.mem.readInt(u128, body[pc.*..][0..16], .little);
+            pc.* += 16;
+            try ip.pushV128(val);
+        },
+
+        15 => try ip.pushV128(vsplat(16, i8, @truncate(ip.popI32()))),
+        16 => try ip.pushV128(vsplat(8, i16, @truncate(ip.popI32()))),
+        17 => try ip.pushV128(vsplat(4, i32, ip.popI32())),
+        18 => try ip.pushV128(vsplat(2, i64, ip.popI64())),
+        19 => try ip.pushV128(vsplat(4, f32, ip.popF32())),
+        20 => try ip.pushV128(vsplat(2, f64, ip.popF64())),
+
+        21 => try ip.pushI32(laneI8(ip.popV128(), readLane(body, pc), true)),
+        22 => try ip.pushI32(laneI8(ip.popV128(), readLane(body, pc), false)),
+        24 => try ip.pushI32(laneI16(ip.popV128(), readLane(body, pc), true)),
+        25 => try ip.pushI32(laneI16(ip.popV128(), readLane(body, pc), false)),
+        27 => {
+            const lane = readLane(body, pc);
+            const arr: [4]i32 = @bitCast(ip.popV128());
+            try ip.pushI32(arr[lane]);
+        },
+        29 => {
+            const lane = readLane(body, pc);
+            const arr: [2]i64 = @bitCast(ip.popV128());
+            try ip.pushI64(arr[lane]);
+        },
+        31 => {
+            const lane = readLane(body, pc);
+            const arr: [4]f32 = @bitCast(ip.popV128());
+            try ip.pushF32(arr[lane]);
+        },
+        33 => {
+            const lane = readLane(body, pc);
+            const arr: [2]f64 = @bitCast(ip.popV128());
+            try ip.pushF64(arr[lane]);
+        },
+
+        23 => try ip.pushV128(replaceI8(body, pc, @truncate(ip.popI32()), ip.popV128())),
+        26 => try ip.pushV128(replaceI16(body, pc, @truncate(ip.popI32()), ip.popV128())),
+        28 => {
+            const lane = readLane(body, pc);
+            const x = ip.popI32();
+            var arr: [4]i32 = @bitCast(ip.popV128());
+            arr[lane] = x;
+            try ip.pushV128(@bitCast(arr));
+        },
+        30 => {
+            const lane = readLane(body, pc);
+            const x = ip.popI64();
+            var arr: [2]i64 = @bitCast(ip.popV128());
+            arr[lane] = x;
+            try ip.pushV128(@bitCast(arr));
+        },
+        32 => {
+            const lane = readLane(body, pc);
+            const x = ip.popF32();
+            var arr: [4]f32 = @bitCast(ip.popV128());
+            arr[lane] = x;
+            try ip.pushV128(@bitCast(arr));
+        },
+        34 => {
+            const lane = readLane(body, pc);
+            const x = ip.popF64();
+            var arr: [2]f64 = @bitCast(ip.popV128());
+            arr[lane] = x;
+            try ip.pushV128(@bitCast(arr));
+        },
+
+        // lane-wise comparisons
+        35...44 => try ip.pushV128(intCmp(ip, 16, i8, u8, sub - 35)),
+        45...54 => try ip.pushV128(intCmp(ip, 8, i16, u16, sub - 45)),
+        55...64 => try ip.pushV128(intCmp(ip, 4, i32, u32, sub - 55)),
+        65...70 => try ip.pushV128(floatCmpV(ip, 4, f32, u32, sub - 65)),
+        71...76 => try ip.pushV128(floatCmpV(ip, 2, f64, u64, sub - 71)),
+
+        77 => try ip.pushV128(~ip.popV128()), // v128.not
+        78 => {
+            const b = ip.popV128();
+            try ip.pushV128(ip.popV128() & b);
+        },
+        79 => {
+            const b = ip.popV128();
+            try ip.pushV128(ip.popV128() & ~b);
+        },
+        80 => {
+            const b = ip.popV128();
+            try ip.pushV128(ip.popV128() | b);
+        },
+        81 => {
+            const b = ip.popV128();
+            try ip.pushV128(ip.popV128() ^ b);
+        },
+        82 => { // bitselect(a, b, mask) = (a & mask) | (b & ~mask)
+            const mask = ip.popV128();
+            const b = ip.popV128();
+            const a = ip.popV128();
+            try ip.pushV128((a & mask) | (b & ~mask));
+        },
+        83 => try ip.pushI32(@intFromBool(ip.popV128() != 0)), // any_true
+
+        // unary integer negate
+        97 => try ip.pushV128(ineg(16, i8, ip.popV128())),
+        129 => try ip.pushV128(ineg(8, i16, ip.popV128())),
+        161 => try ip.pushV128(ineg(4, i32, ip.popV128())),
+        193 => try ip.pushV128(ineg(2, i64, ip.popV128())),
+
+        // unary float
+        224 => try ip.pushV128(funary(4, f32, .abs, ip.popV128())),
+        225 => try ip.pushV128(funary(4, f32, .neg, ip.popV128())),
+        227 => try ip.pushV128(funary(4, f32, .sqrt, ip.popV128())),
+        236 => try ip.pushV128(funary(2, f64, .abs, ip.popV128())),
+        237 => try ip.pushV128(funary(2, f64, .neg, ip.popV128())),
+        239 => try ip.pushV128(funary(2, f64, .sqrt, ip.popV128())),
+
+        // binary integer arithmetic
+        110 => try ip.pushV128(ibin(ip, 16, i8, .add)),
+        113 => try ip.pushV128(ibin(ip, 16, i8, .sub)),
+        142 => try ip.pushV128(ibin(ip, 8, i16, .add)),
+        145 => try ip.pushV128(ibin(ip, 8, i16, .sub)),
+        149 => try ip.pushV128(ibin(ip, 8, i16, .mul)),
+        174 => try ip.pushV128(ibin(ip, 4, i32, .add)),
+        177 => try ip.pushV128(ibin(ip, 4, i32, .sub)),
+        181 => try ip.pushV128(ibin(ip, 4, i32, .mul)),
+        206 => try ip.pushV128(ibin(ip, 2, i64, .add)),
+        209 => try ip.pushV128(ibin(ip, 2, i64, .sub)),
+        213 => try ip.pushV128(ibin(ip, 2, i64, .mul)),
+
+        // binary float arithmetic
+        228 => try ip.pushV128(fbin(ip, 4, f32, .add)),
+        229 => try ip.pushV128(fbin(ip, 4, f32, .sub)),
+        230 => try ip.pushV128(fbin(ip, 4, f32, .mul)),
+        231 => try ip.pushV128(fbin(ip, 4, f32, .div)),
+        232 => try ip.pushV128(fbin(ip, 4, f32, .min)),
+        233 => try ip.pushV128(fbin(ip, 4, f32, .max)),
+        240 => try ip.pushV128(fbin(ip, 2, f64, .add)),
+        241 => try ip.pushV128(fbin(ip, 2, f64, .sub)),
+        242 => try ip.pushV128(fbin(ip, 2, f64, .mul)),
+        243 => try ip.pushV128(fbin(ip, 2, f64, .div)),
+        244 => try ip.pushV128(fbin(ip, 2, f64, .min)),
+        245 => try ip.pushV128(fbin(ip, 2, f64, .max)),
+
+        // shifts: pop the v128 first (top), then the i32 count below it.
+        107 => try shiftOp(ip, 16, i8, u8, .shl),
+        108 => try shiftOp(ip, 16, i8, u8, .shr_s),
+        109 => try shiftOp(ip, 16, i8, u8, .shr_u),
+        139 => try shiftOp(ip, 8, i16, u16, .shl),
+        140 => try shiftOp(ip, 8, i16, u16, .shr_s),
+        141 => try shiftOp(ip, 8, i16, u16, .shr_u),
+        171 => try shiftOp(ip, 4, i32, u32, .shl),
+        172 => try shiftOp(ip, 4, i32, u32, .shr_s),
+        173 => try shiftOp(ip, 4, i32, u32, .shr_u),
+        203 => try shiftOp(ip, 2, i64, u64, .shl),
+        204 => try shiftOp(ip, 2, i64, u64, .shr_s),
+        205 => try shiftOp(ip, 2, i64, u64, .shr_u),
+
+        else => return error.UnsupportedImportCall, // not yet implemented
+    }
+}
+
+fn readLane(body: []const u8, pc: *usize) u8 {
+    const lane = body[pc.*];
+    pc.* += 1;
+    return lane;
+}
+
+// Lane access uses a fixed array view rather than `vec[i]` because a
+// `@Vector` index must be comptime-known, while the lane is a runtime
+// immediate.
+fn laneI8(v: u128, lane: u8, signed: bool) i32 {
+    if (signed) {
+        const arr: [16]i8 = @bitCast(v);
+        return arr[lane];
+    }
+    const arr: [16]u8 = @bitCast(v);
+    return arr[lane];
+}
+
+fn laneI16(v: u128, lane: u8, signed: bool) i32 {
+    if (signed) {
+        const arr: [8]i16 = @bitCast(v);
+        return arr[lane];
+    }
+    const arr: [8]u16 = @bitCast(v);
+    return arr[lane];
+}
+
+fn replaceI8(body: []const u8, pc: *usize, x: i8, v: u128) u128 {
+    const lane = readLane(body, pc);
+    var arr: [16]i8 = @bitCast(v);
+    arr[lane] = x;
+    return @bitCast(arr);
+}
+
+fn replaceI16(body: []const u8, pc: *usize, x: i16, v: u128) u128 {
+    const lane = readLane(body, pc);
+    var arr: [8]i16 = @bitCast(v);
+    arr[lane] = x;
+    return @bitCast(arr);
+}
+
+fn shiftOp(ip: *Interp, comptime N: usize, comptime S: type, comptime U: type, comptime op: ShOp) TrapError!void {
+    const count: u32 = @bitCast(ip.popI32());
+    const v = ip.popV128();
+    try ip.pushV128(ishift(N, S, U, op, count, v));
 }
 
 // ── arithmetic ──────────────────────────────────────────────────────

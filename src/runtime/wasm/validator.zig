@@ -603,8 +603,109 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 }
             },
 
+            .prefix_fd => try validateSimd(v),
+
             _ => return error.UnknownOpcode,
         }
+    }
+}
+
+/// Validate a `0xFD` SIMD instruction (the sub-opcode subset Sarcasm
+/// implements). Lane immediates and the v128 literal are consumed here.
+fn validateSimd(v: *Validator) !void {
+    const sub = try v.r.uleb(u32);
+    switch (sub) {
+        0 => { // v128.load
+            try requireMemory(v);
+            try skipMemarg(v);
+            try v.popExpect(.i32);
+            try v.pushVal(.v128);
+        },
+        11 => { // v128.store
+            try requireMemory(v);
+            try skipMemarg(v);
+            try v.popExpect(.v128);
+            try v.popExpect(.i32);
+        },
+        12 => { // v128.const
+            _ = try v.r.bytesN(16);
+            try v.pushVal(.v128);
+        },
+        // splats: pop a scalar, push v128.
+        15, 16, 17 => try unop(v, .i32, .v128),
+        18 => try unop(v, .i64, .v128),
+        19 => try unop(v, .f32, .v128),
+        20 => try unop(v, .f64, .v128),
+        // extract_lane (1-byte lane immediate): pop v128, push scalar.
+        21, 22, 24, 25, 27 => {
+            _ = try v.r.byte();
+            try v.popExpect(.v128);
+            try v.pushVal(.i32);
+        },
+        29 => {
+            _ = try v.r.byte();
+            try v.popExpect(.v128);
+            try v.pushVal(.i64);
+        },
+        31 => {
+            _ = try v.r.byte();
+            try v.popExpect(.v128);
+            try v.pushVal(.f32);
+        },
+        33 => {
+            _ = try v.r.byte();
+            try v.popExpect(.v128);
+            try v.pushVal(.f64);
+        },
+        // replace_lane (1-byte lane): pop scalar, pop v128, push v128.
+        23, 26, 28 => {
+            _ = try v.r.byte();
+            try v.popExpect(.i32);
+            try v.popExpect(.v128);
+            try v.pushVal(.v128);
+        },
+        30 => {
+            _ = try v.r.byte();
+            try v.popExpect(.i64);
+            try v.popExpect(.v128);
+            try v.pushVal(.v128);
+        },
+        32 => {
+            _ = try v.r.byte();
+            try v.popExpect(.f32);
+            try v.popExpect(.v128);
+            try v.pushVal(.v128);
+        },
+        34 => {
+            _ = try v.r.byte();
+            try v.popExpect(.f64);
+            try v.popExpect(.v128);
+            try v.pushVal(.v128);
+        },
+        // lane-wise comparisons (35..76): v128, v128 -> v128.
+        35...76 => try binop(v, .v128, .v128),
+        77 => try unop(v, .v128, .v128), // v128.not
+        78, 79, 80, 81 => try binop(v, .v128, .v128), // and/andnot/or/xor
+        82 => { // v128.bitselect
+            try v.popExpect(.v128);
+            try v.popExpect(.v128);
+            try v.popExpect(.v128);
+            try v.pushVal(.v128);
+        },
+        83 => try unop(v, .v128, .i32), // v128.any_true
+        // unary v128 arithmetic (neg / abs / sqrt).
+        97, 129, 161, 193, 224, 225, 227, 236, 237, 239 => try unop(v, .v128, .v128),
+        // binary integer arithmetic (add / sub / mul).
+        110, 113, 142, 145, 149, 174, 177, 181, 206, 209, 213 => try binop(v, .v128, .v128),
+        // binary float arithmetic (add / sub / mul / div / min / max).
+        228...233, 240...245 => try binop(v, .v128, .v128),
+        // shifts: pop i32 count, pop v128, push v128.
+        107, 108, 109, 139, 140, 141, 171, 172, 173, 203, 204, 205 => {
+            try v.popExpect(.i32);
+            try v.popExpect(.v128);
+            try v.pushVal(.v128);
+        },
+        else => return error.UnknownOpcode,
     }
 }
 
