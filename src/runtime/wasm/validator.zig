@@ -713,6 +713,42 @@ fn validateSimd(v: *Validator) !void {
         // integer min/max/avgr/sat, i64x2 compares, float pmin/pmax: v128, v128 -> v128.
         111, 112, 114, 115, 118, 119, 120, 121, 123, 143, 144, 146, 147, 150, 151, 152, 153, 155, 182, 183, 184, 185, 214, 215, 216, 217, 218, 219, 234, 235, 246, 247 => try binop(v, .v128, .v128),
 
+        // i8x16.shuffle: 16-byte lane immediate; v128, v128 -> v128.
+        13 => {
+            _ = try v.r.bytesN(16);
+            try v.popExpect(.v128);
+            try v.popExpect(.v128);
+            try v.pushVal(.v128);
+        },
+        // swizzle, narrow, extmul, dot, q15mulr: v128, v128 -> v128.
+        14, 101, 102, 133, 134, 156, 157, 158, 159, 188, 189, 190, 191, 220, 221, 222, 223, 186, 130 => try binop(v, .v128, .v128),
+        // extend / extadd_pairwise: v128 -> v128.
+        135, 136, 137, 138, 167, 168, 169, 170, 199, 200, 201, 202, 124, 125, 126, 127 => try unop(v, .v128, .v128),
+        // load_splat / load_extend / load_zero: pop i32 addr (+ memarg), push v128.
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 92, 93 => {
+            try requireMemory(v);
+            try skipMemarg(v);
+            try v.popExpect(.i32);
+            try v.pushVal(.v128);
+        },
+        // load_lane: memarg + lane immediate; pop v128, pop i32, push v128.
+        84, 85, 86, 87 => {
+            try requireMemory(v);
+            try skipMemarg(v);
+            _ = try v.r.byte();
+            try v.popExpect(.v128);
+            try v.popExpect(.i32);
+            try v.pushVal(.v128);
+        },
+        // store_lane: memarg + lane immediate; pop v128, pop i32.
+        88, 89, 90, 91 => {
+            try requireMemory(v);
+            try skipMemarg(v);
+            _ = try v.r.byte();
+            try v.popExpect(.v128);
+            try v.popExpect(.i32);
+        },
+
         else => return error.UnknownOpcode,
     }
 }
