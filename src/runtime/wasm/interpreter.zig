@@ -738,7 +738,7 @@ fn run(ip: *Interp) Error!void {
                 .call_indirect => {
                     const type_idx = readU32(body, &pc);
                     const table_idx = readU32(body, &pc);
-                    const elem_index: u32 = @bitCast(ip.popI32());
+                    const elem_index: u64 = @truncate(ip.popCell());
                     if (table_idx >= ip.instance.tables.len) return error.UnsupportedImportCall;
                     const table = &ip.instance.tables[table_idx];
                     if (elem_index >= table.elems.len) return error.UndefinedElement;

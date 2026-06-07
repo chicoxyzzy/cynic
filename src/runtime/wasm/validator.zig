@@ -605,10 +605,14 @@ fn validateExpr(v: *Validator) ValidateError!void {
             },
             .call_indirect => {
                 const type_idx = try v.r.uleb(u32);
-                _ = try v.r.uleb(u32); // table index
+                const table_idx = try v.r.uleb(u32);
+                // The table must exist and be funcref-typed; the element
+                // index is that table's address type (i64 for a table64).
+                const addr = try tableAddr(v.module, table_idx);
+                if (try tableElemType(v.module, table_idx) != .funcref) return error.TypeMismatch;
                 if (type_idx >= v.module.types.len) return error.UnknownType;
                 const ft = v.module.types[type_idx];
-                try v.popExpect(.i32); // element index
+                try v.popExpect(addr); // element index
                 try v.popVals(ft.params);
                 try v.pushVals(ft.results);
             },
