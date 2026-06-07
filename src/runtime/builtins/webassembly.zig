@@ -57,6 +57,14 @@ fn valTypeFromString(s: []const u8) ?wasm.ValType {
     return null;
 }
 
+/// A `WebAssembly.Table`'s backing state: the shared engine table plus
+/// its element kind. Arena-owned. (Only `funcref` tables are supported
+/// today; `externref` tables await GC integration.)
+const TableState = struct {
+    table: *wasm.Table,
+    funcref: bool,
+};
+
 pub fn install(realm: *Realm) !void {
     const ns = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(ns, realm.intrinsics.object_prototype);
@@ -95,6 +103,28 @@ pub fn install(realm: *Realm) !void {
         const entry = try global_ctor.proto.getOrPutAccessor(realm.allocator, "value");
         entry.value_ptr.* = .{ .getter = getter, .setter = setter };
         try global_ctor.proto.property_flags.put(realm.allocator, "value", .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = true,
+        });
+    }
+
+    const table_ctor = try intrinsics.installConstructor(realm, .{
+        .ctor = tableConstructor,
+        .arity = 1,
+        .name = "Table",
+        .install_global = false,
+    });
+    try ns.set(realm.allocator, "Table", heap_mod.taggedFunction(table_ctor.ctor));
+    realm.wasm_table_prototype = table_ctor.proto;
+    try intrinsics.installNativeMethodOnProto(realm, table_ctor.proto, "get", tableGet, 1);
+    try intrinsics.installNativeMethodOnProto(realm, table_ctor.proto, "set", tableSet, 2);
+    try intrinsics.installNativeMethodOnProto(realm, table_ctor.proto, "grow", tableGrow, 1);
+    {
+        const getter = try intrinsics.makeNativeFunction(realm, tableLength, 0, "get length");
+        const entry = try table_ctor.proto.getOrPutAccessor(realm.allocator, "length");
+        entry.value_ptr.* = .{ .getter = getter, .setter = null };
+        try table_ctor.proto.property_flags.put(realm.allocator, "length", .{
             .writable = false,
             .enumerable = false,
             .configurable = true,
@@ -247,25 +277,142 @@ fn makeGlobal(realm: *Realm, valtype: wasm.ValType, mutable: bool, cell: *u128) 
     return heap_mod.taggedObject(obj);
 }
 
+// ── WebAssembly.Table ───────────────────────────────────────────────
+
+/// `new WebAssembly.Table({element, initial, maximum?}, value?)` — a
+/// growable funcref table. Gated.
+fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (!realm.allow_wasm) return wasmDisabled(realm);
+    const self = heap_mod.valueAsPlainObject(this_value) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Table requires 'new'");
+    const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Table expects a descriptor object");
+
+    const elem_v = desc.get("element");
+    if (!elem_v.isString()) return intrinsics.throwTypeError(realm, "WebAssembly.Table: invalid element type");
+    const elem_s: *JSString = @ptrCast(@alignCast(elem_v.asString()));
+    const elem = elem_s.flatBytes();
+    if (std.mem.eql(u8, elem, "externref"))
+        return intrinsics.throwTypeError(realm, "WebAssembly.Table: externref tables are not yet supported");
+    if (!std.mem.eql(u8, elem, "anyfunc") and !std.mem.eql(u8, elem, "funcref"))
+        return intrinsics.throwTypeError(realm, "WebAssembly.Table: invalid element type");
+
+    const initial = try indexArg(realm, desc.get("initial"));
+    const max = try optionalIndexArg(realm, desc.get("maximum"));
+
+    const a = realm.wasmAllocator();
+    const elems = a.alloc(u128, initial) catch return error.OutOfMemory;
+    const fill = if (args.len > 1) try funcRefFromValue(realm, args[1]) else wasm.REF_NULL;
+    @memset(elems, fill);
+
+    const tbl = a.create(wasm.Table) catch return error.OutOfMemory;
+    tbl.* = .{ .elems = elems, .max = max, .is_64 = false };
+    const st = a.create(TableState) catch return error.OutOfMemory;
+    st.* = .{ .table = tbl, .funcref = true };
+    self.wasm_table = st;
+    return this_value;
+}
+
+fn tableStateOf(realm: *Realm, this_value: Value) NativeError!*TableState {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Table");
+    const raw = obj.wasm_table orelse
+        return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Table");
+    return @ptrCast(@alignCast(raw));
+}
+
+fn tableLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const st = try tableStateOf(realm, this_value);
+    return Value.fromInt32(@intCast(st.table.elems.len));
+}
+
+fn tableGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const st = try tableStateOf(realm, this_value);
+    const idx = try tableIndex(realm, st, if (args.len > 0) args[0] else Value.undefined_);
+    const cell = st.table.elems[idx];
+    if (cell == wasm.REF_NULL) return Value.null_;
+    return makeExportedFunction(realm, wasm.funcRefInstance(cell), wasm.funcRefIndex(cell), "");
+}
+
+fn tableSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const st = try tableStateOf(realm, this_value);
+    const idx = try tableIndex(realm, st, if (args.len > 0) args[0] else Value.undefined_);
+    st.table.elems[idx] = try funcRefFromValue(realm, if (args.len > 1) args[1] else Value.null_);
+    return Value.undefined_;
+}
+
+fn tableGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const st = try tableStateOf(realm, this_value);
+    const delta = try indexArg(realm, if (args.len > 0) args[0] else Value.undefined_);
+    const fill = if (args.len > 1) try funcRefFromValue(realm, args[1]) else wasm.REF_NULL;
+    const old_len = st.table.elems.len;
+    const new_len = old_len + delta;
+    if (st.table.max) |m| {
+        if (new_len > m) return intrinsics.throwRangeError(realm, "WebAssembly.Table.grow exceeds the maximum");
+    }
+    const new_elems = realm.wasmAllocator().realloc(st.table.elems, new_len) catch return error.OutOfMemory;
+    @memset(new_elems[old_len..], fill);
+    st.table.elems = new_elems;
+    return Value.fromInt32(@intCast(old_len));
+}
+
+/// A JS value -> a funcref cell: null/undefined -> the null ref; a
+/// WebAssembly exported function -> its funcref; anything else throws.
+fn funcRefFromValue(realm: *Realm, v: Value) NativeError!u128 {
+    if (v.isUndefined() or v.isNull()) return wasm.REF_NULL;
+    const fn_obj = heap_mod.valueAsFunction(v) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Table value must be null or an exported function");
+    const raw = fn_obj.wasm_export orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Table value must be a WebAssembly exported function");
+    const rec: *ExportRecord = @ptrCast(@alignCast(raw));
+    return wasm.makeFuncRef(rec.instance, rec.func_index);
+}
+
+/// Validate a table index argument against the table's bounds.
+fn tableIndex(realm: *Realm, st: *TableState, v: Value) NativeError!usize {
+    const i = arith.toInt32(v);
+    if (i < 0 or @as(usize, @intCast(i)) >= st.table.elems.len)
+        return intrinsics.throwRangeError(realm, "WebAssembly.Table index is out of bounds");
+    return @intCast(i);
+}
+
+/// Read a non-negative length-like argument as a usize.
+fn indexArg(realm: *Realm, v: Value) NativeError!usize {
+    const i = arith.toInt32(v);
+    if (i < 0) return intrinsics.throwRangeError(realm, "WebAssembly: length must be non-negative");
+    return @intCast(i);
+}
+
+/// Read an optional maximum (undefined -> null).
+fn optionalIndexArg(realm: *Realm, v: Value) NativeError!?u64 {
+    if (v.isUndefined()) return null;
+    return @as(u64, try indexArg(realm, v));
+}
+
+/// Wrap a shared engine table as a `WebAssembly.Table` (for exports).
+fn makeTable(realm: *Realm, table: *wasm.Table, funcref: bool) NativeError!Value {
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, realm.wasm_table_prototype);
+    const st = realm.wasmAllocator().create(TableState) catch return error.OutOfMemory;
+    st.* = .{ .table = table, .funcref = funcref };
+    obj.wasm_table = st;
+    return heap_mod.taggedObject(obj);
+}
+
 /// Build the exports namespace object: each function export becomes a
 /// callable JS function carrying its `(instance, func_index)`; each
-/// global export becomes a `WebAssembly.Global`. Memory / table exports
-/// are omitted in this slice.
+/// global export becomes a `WebAssembly.Global`; each funcref table
+/// export becomes a `WebAssembly.Table`. Memory exports are omitted in
+/// this slice.
 fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) NativeError!Value {
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, null); // §exports object has a null prototype
-    const a = realm.wasmAllocator();
-
     for (module.exports) |ex| {
         switch (ex.desc) {
             .func => |fidx| {
-                const ft = ip.funcType(fidx) orelse continue;
-                const fn_obj = intrinsics.makeNativeFunction(realm, exportTrampoline, @intCast(ft.params.len), ex.name) catch
-                    return error.OutOfMemory;
-                const rec = a.create(ExportRecord) catch return error.OutOfMemory;
-                rec.* = .{ .instance = ip, .func_index = fidx };
-                fn_obj.wasm_export = rec;
-                obj.set(realm.allocator, ex.name, heap_mod.taggedFunction(fn_obj)) catch return error.OutOfMemory;
+                const fv = try makeExportedFunction(realm, ip, fidx, ex.name);
+                obj.set(realm.allocator, ex.name, fv) catch return error.OutOfMemory;
             },
             .global => |gidx| {
                 const cell = ip.globalCellPtr(gidx) orelse continue;
@@ -273,10 +420,29 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
                 const gobj = try makeGlobal(realm, gt.val, gt.mut == .mutable, cell);
                 obj.set(realm.allocator, ex.name, gobj) catch return error.OutOfMemory;
             },
-            else => {}, // table / memory exports: next slice
+            .table => |tidx| {
+                const tbl = ip.tableRef(tidx) orelse continue;
+                if ((ip.tableElemType(tidx) orelse continue) != .funcref) continue; // externref: deferred
+                const tobj = try makeTable(realm, tbl, true);
+                obj.set(realm.allocator, ex.name, tobj) catch return error.OutOfMemory;
+            },
+            else => {}, // memory exports: next slice
         }
     }
     return heap_mod.taggedObject(obj);
+}
+
+/// Create a callable JS function wrapping `(instance, func_index)` —
+/// shared by `Instance.exports` and `Table.prototype.get` of a funcref.
+fn makeExportedFunction(realm: *Realm, instance: *wasm.Instance, func_index: u32, name: []const u8) NativeError!Value {
+    const ft = instance.funcType(func_index) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly: unknown exported function type");
+    const fn_obj = intrinsics.makeNativeFunction(realm, exportTrampoline, @intCast(ft.params.len), name) catch
+        return error.OutOfMemory;
+    const rec = realm.wasmAllocator().create(ExportRecord) catch return error.OutOfMemory;
+    rec.* = .{ .instance = instance, .func_index = func_index };
+    fn_obj.wasm_export = rec;
+    return heap_mod.taggedFunction(fn_obj);
 }
 
 /// Trampoline shared by every exported function. Recovers its

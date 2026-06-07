@@ -43,7 +43,7 @@ pub const TrapError = error{
 /// The null reference sentinel. A funcref always carries a non-null
 /// instance pointer in its high bits, and host extern values are small,
 /// so all-ones never collides with a real reference.
-const REF_NULL: u128 = std.math.maxInt(u128);
+pub const REF_NULL: u128 = std.math.maxInt(u128);
 
 /// A `funcref` cell encodes the function's *defining* instance in the
 /// high 64 bits and its function-space index in the low 32. This makes
@@ -51,13 +51,13 @@ const REF_NULL: u128 = std.math.maxInt(u128);
 /// instances may hold functions defined in either, and `call_indirect`
 /// runs each in the instance it was defined in. (The low 32 bits remain
 /// the bare function index, which the conformance harness compares.)
-inline fn makeFuncRef(instance: *Instance, idx: u32) u128 {
+pub inline fn makeFuncRef(instance: *Instance, idx: u32) u128 {
     return (@as(u128, @intFromPtr(instance)) << 64) | idx;
 }
-inline fn funcRefInstance(ref: u128) *Instance {
+pub inline fn funcRefInstance(ref: u128) *Instance {
     return @ptrFromInt(@as(usize, @truncate(ref >> 64)));
 }
-inline fn funcRefIndex(ref: u128) u32 {
+pub inline fn funcRefIndex(ref: u128) u32 {
     return @truncate(ref);
 }
 
@@ -226,6 +226,28 @@ pub const Instance = struct {
         const local = func_index - k;
         if (local >= self.module.funcs.len) return null;
         return self.module.types[self.module.funcs[local]];
+    }
+
+    /// The live (shared) table at `idx`, for the JS API's `Table` object
+    /// — get / set / grow operate on the same elements wasm sees.
+    pub fn tableRef(self: *Instance, idx: u32) ?*Table {
+        if (idx >= self.tables.len) return null;
+        return self.tables[idx];
+    }
+
+    /// A table's element reference type by index (imports first).
+    pub fn tableElemType(self: *const Instance, idx: u32) ?types.RefType {
+        var k: u32 = 0;
+        for (self.module.imports) |imp| switch (imp.desc) {
+            .table => |tt| {
+                if (k == idx) return tt.elem;
+                k += 1;
+            },
+            else => {},
+        };
+        const local = idx - k;
+        if (local >= self.module.tables.len) return null;
+        return self.module.tables[local].elem;
     }
 
     /// A pointer to a global's live operand cell (imports occupy the
