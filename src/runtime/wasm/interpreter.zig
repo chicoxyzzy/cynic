@@ -742,398 +742,587 @@ pub fn runStart(self: *Instance, allocator: std.mem.Allocator) Error!void {
     _ = try invoke(self, allocator, idx, &.{});
 }
 
+/// Read the opcode at `pc` and advance past it. `pc >= body.len` is the
+/// function-level `end`: a `br` to the outermost block targets
+/// `after_end == body.len` (see the validator's `patchPending`), and the
+/// final `end` lands `pc` there too, so this synthesizes `.end` rather
+/// than reading out of bounds. The `.end` arm distinguishes the
+/// function end (`pc >= body.len`) from an interior block end.
+inline fn nextOp(body: []const u8, pc: *usize) Op {
+    if (pc.* >= body.len) return .end;
+    const op: Op = @enumFromInt(body[pc.*]);
+    pc.* += 1;
+    return op;
+}
+
 fn run(ip: *Interp) Error!void {
     var f: *Frame = &ip.frames[ip.nframes - 1];
-    // Outer loop reloads frame-local cache after a call / return. The
-    // active instance is rebound to this frame's so an imported call's
-    // body sees its own module's memory / tables / globals.
-    while (true) {
-        ip.instance = f.instance;
-        const func = f.func;
-        const body = func.body;
-        const side_table = func.side_table;
-        const locals_base = f.locals_base;
-        var pc = f.ip;
-        var stp = f.stp;
+    // Threaded dispatch: every arm ends in `continue :dispatch
+    // nextOp(...)`, so the compiler emits a separate indirect branch per
+    // opcode site (the computed-goto equivalent) and the predictor learns
+    // per-opcode-pair patterns instead of funnelling through one shared
+    // dispatch. The frame-local cache (body / side_table / locals_base /
+    // pc / stp and the active instance) is reloaded only at frame-swap
+    // points (call / return / function end).
+    ip.instance = f.instance;
+    var body = f.func.body;
+    var side_table = f.func.side_table;
+    var locals_base = f.locals_base;
+    var pc = f.ip;
+    var stp = f.stp;
 
-        const frame_changed = inner: while (true) {
+    dispatch: switch (nextOp(body, &pc)) {
+        .nop => continue :dispatch nextOp(body, &pc),
+        .end => {
+            // The function-level end (and a `br` to the outermost block,
+            // which lands at body.len) returns; an interior block end is
+            // a no-op.
             if (pc >= body.len) {
-                // Implicit function `end` → return.
-                f.ip = pc;
-                f.stp = stp;
                 if (ip.popFrame()) return;
                 f = &ip.frames[ip.nframes - 1];
-                break :inner true;
+                ip.instance = f.instance;
+                body = f.func.body;
+                side_table = f.func.side_table;
+                locals_base = f.locals_base;
+                pc = f.ip;
+                stp = f.stp;
             }
-            const op_ip = pc;
-            const op: Op = @enumFromInt(body[pc]);
-            pc += 1;
-            switch (op) {
-                .nop, .end => {},
-                .@"unreachable" => return error.Unreachable,
+            continue :dispatch nextOp(body, &pc);
+        },
+        .@"unreachable" => return error.Unreachable,
 
-                .block, .loop => pc = skipBlockType(body, pc),
-                .@"if" => {
-                    pc = skipBlockType(body, pc);
-                    const cond = ip.popI32();
-                    if (cond != 0) {
-                        stp += 1; // enter the then-arm
-                    } else {
-                        const e = side_table[stp];
-                        moveValues(ip, e);
-                        pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
-                        stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
-                    }
-                },
-                .@"else" => {
-                    const e = side_table[stp];
-                    moveValues(ip, e);
-                    pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
-                    stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
-                },
-                .br => {
-                    const e = side_table[stp];
-                    moveValues(ip, e);
-                    pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
-                    stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
-                },
-                .br_if => {
-                    _ = readU32(body, &pc); // label immediate (unused at runtime)
-                    const cond = ip.popI32();
-                    if (cond != 0) {
-                        const e = side_table[stp];
-                        moveValues(ip, e);
-                        pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
-                        stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
-                    } else {
-                        stp += 1;
-                    }
-                },
-                .br_table => {
-                    const count = readU32(body, &pc);
-                    var i: u32 = 0;
-                    while (i < count) : (i += 1) _ = readU32(body, &pc); // case labels
-                    _ = readU32(body, &pc); // default label
-                    const index: u32 = @bitCast(ip.popI32());
-                    const sel = if (index < count) index else count;
-                    const entry_index = stp + sel;
-                    const e = side_table[entry_index];
-                    moveValues(ip, e);
-                    pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
-                    stp = @intCast(@as(i64, @intCast(entry_index)) + e.delta_stp);
-                },
-                .@"return" => {
+        .block, .loop => {
+            pc = skipBlockType(body, pc);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .@"if" => {
+            const op_ip = pc - 1;
+            pc = skipBlockType(body, pc);
+            const cond = ip.popI32();
+            if (cond != 0) {
+                stp += 1; // enter the then-arm
+            } else {
+                const e = side_table[stp];
+                moveValues(ip, e);
+                pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
+            }
+            continue :dispatch nextOp(body, &pc);
+        },
+        .@"else" => {
+            const op_ip = pc - 1;
+            const e = side_table[stp];
+            moveValues(ip, e);
+            pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+            stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .br => {
+            const op_ip = pc - 1;
+            const e = side_table[stp];
+            moveValues(ip, e);
+            pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+            stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .br_if => {
+            const op_ip = pc - 1;
+            _ = readU32(body, &pc); // label immediate (unused at runtime)
+            const cond = ip.popI32();
+            if (cond != 0) {
+                const e = side_table[stp];
+                moveValues(ip, e);
+                pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
+            } else {
+                stp += 1;
+            }
+            continue :dispatch nextOp(body, &pc);
+        },
+        .br_table => {
+            const op_ip = pc - 1;
+            const count = readU32(body, &pc);
+            var i: u32 = 0;
+            while (i < count) : (i += 1) _ = readU32(body, &pc); // case labels
+            _ = readU32(body, &pc); // default label
+            const index: u32 = @bitCast(ip.popI32());
+            const sel = if (index < count) index else count;
+            const entry_index = stp + sel;
+            const e = side_table[entry_index];
+            moveValues(ip, e);
+            pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+            stp = @intCast(@as(i64, @intCast(entry_index)) + e.delta_stp);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .@"return" => {
+            if (ip.popFrame()) return;
+            f = &ip.frames[ip.nframes - 1];
+            ip.instance = f.instance;
+            body = f.func.body;
+            side_table = f.func.side_table;
+            locals_base = f.locals_base;
+            pc = f.ip;
+            stp = f.stp;
+            continue :dispatch nextOp(body, &pc);
+        },
+        .call => {
+            const fidx = readU32(body, &pc);
+            const ref = ip.instance.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
+            switch (ref) {
+                .host => |h| try ip.callHost(h), // no frame change
+                .wasm => |w| {
+                    const pcount: u32 = @intCast(w.instance.module.types[w.func.type_index].params.len);
                     f.ip = pc;
                     f.stp = stp;
-                    if (ip.popFrame()) return;
+                    try ip.pushFrame(w.instance, w.func, pcount);
                     f = &ip.frames[ip.nframes - 1];
-                    break :inner true;
+                    ip.instance = f.instance;
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    pc = f.ip;
+                    stp = f.stp;
                 },
-                .call => {
-                    const fidx = readU32(body, &pc);
-                    const ref = ip.instance.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
-                    switch (ref) {
-                        .host => |h| {
-                            try ip.callHost(h);
-                            // No frame change; continue this body.
-                        },
-                        .wasm => |w| {
-                            const pcount: u32 = @intCast(w.instance.module.types[w.func.type_index].params.len);
-                            f.ip = pc;
-                            f.stp = stp;
-                            try ip.pushFrame(w.instance, w.func, pcount);
-                            f = &ip.frames[ip.nframes - 1];
-                            break :inner true;
-                        },
-                    }
-                },
-                .call_indirect => {
-                    const type_idx = readU32(body, &pc);
-                    const table_idx = readU32(body, &pc);
-                    const elem_index: u64 = @truncate(ip.popCell());
-                    if (table_idx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-                    const table = ip.instance.tables[table_idx];
-                    if (elem_index >= table.elems.len) return error.UndefinedElement;
-                    const ref = table.elems[elem_index];
-                    if (ref == REF_NULL) return error.UninitializedElement;
-                    // The funcref's defining instance is encoded in its
-                    // high bits; a bare index (high bits zero, e.g. from a
-                    // funcref global) defaults to the current instance.
-                    const fidx = funcRefIndex(ref);
-                    const def_inst = if (ref >> 64 == 0) ip.instance else funcRefInstance(ref);
-                    const target = def_inst.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
-                    const expected = ip.instance.module.types[type_idx];
-                    switch (target) {
-                        .host => |h| {
-                            // A host target's signature is checked at link
-                            // time; run it inline.
-                            if (expected.params.len != h.params or expected.results.len != h.results)
-                                return error.IndirectCallTypeMismatch;
-                            try ip.callHost(h);
-                        },
-                        .wasm => |w| {
-                            const actual = w.instance.module.types[w.func.type_index];
-                            if (!funcTypesEqual(expected, actual)) return error.IndirectCallTypeMismatch;
-                            f.ip = pc;
-                            f.stp = stp;
-                            try ip.pushFrame(w.instance, w.func, @intCast(actual.params.len));
-                            f = &ip.frames[ip.nframes - 1];
-                            break :inner true;
-                        },
-                    }
-                },
-
-                .ref_null => {
-                    pc += 1; // reftype byte
-                    try ip.pushV128(REF_NULL);
-                },
-                .ref_is_null => try ip.pushI32(@intFromBool(ip.popV128() == REF_NULL)),
-                .ref_func => try ip.pushV128(makeFuncRef(ip.instance, readU32(body, &pc))),
-
-                .select_t => {
-                    const n = readU32(body, &pc);
-                    pc += n; // skip the result-type vector
-                    const cond = ip.popI32();
-                    const b = ip.popCell();
-                    const a = ip.popCell();
-                    try ip.pushCell(if (cond != 0) a else b);
-                },
-
-                .table_get => {
-                    const tidx = readU32(body, &pc);
-                    const index: u64 = @truncate(ip.popCell());
-                    if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-                    const table = ip.instance.tables[tidx];
-                    if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
-                    try ip.pushV128(table.elems[@intCast(index)]);
-                },
-                .table_set => {
-                    const tidx = readU32(body, &pc);
-                    const val = ip.popV128();
-                    const index: u64 = @truncate(ip.popCell());
-                    if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-                    const table = ip.instance.tables[tidx];
-                    if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
-                    table.elems[@intCast(index)] = val;
-                },
-
-                .drop => _ = ip.popCell(),
-                .select => {
-                    const c = ip.popI32();
-                    const b = ip.popCell();
-                    const a = ip.popCell();
-                    try ip.pushCell(if (c != 0) a else b);
-                },
-
-                .local_get => {
-                    const x = readU32(body, &pc);
-                    try ip.pushCell(ip.stack[locals_base + x]);
-                },
-                .local_set => {
-                    const x = readU32(body, &pc);
-                    ip.stack[locals_base + x] = ip.popCell();
-                },
-                .local_tee => {
-                    const x = readU32(body, &pc);
-                    ip.stack[locals_base + x] = ip.stack[ip.sp - 1];
-                },
-                .global_get => {
-                    const x = readU32(body, &pc);
-                    try ip.pushCell(ip.instance.globals[x].value);
-                },
-                .global_set => {
-                    const x = readU32(body, &pc);
-                    ip.instance.globals[x].value = ip.popCell();
-                },
-
-                .i32_const => try ip.pushI32(readI32(body, &pc)),
-                .i64_const => try ip.pushI64(readI64(body, &pc)),
-
-                .i32_eqz => try ip.pushI32(@intFromBool(ip.popI32() == 0)),
-                .i64_eqz => try ip.pushI32(@intFromBool(ip.popI64() == 0)),
-
-                .i32_eq, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u => {
-                    const b = ip.popI32();
-                    const a = ip.popI32();
-                    try ip.pushI32(@intFromBool(compareI32(op, a, b)));
-                },
-                .i64_eq, .i64_ne, .i64_lt_s, .i64_lt_u, .i64_gt_s, .i64_gt_u, .i64_le_s, .i64_le_u, .i64_ge_s, .i64_ge_u => {
-                    const b = ip.popI64();
-                    const a = ip.popI64();
-                    try ip.pushI32(@intFromBool(compareI64(op, a, b)));
-                },
-
-                .i32_add, .i32_sub, .i32_mul, .i32_div_s, .i32_div_u, .i32_rem_s, .i32_rem_u, .i32_and, .i32_or, .i32_xor, .i32_shl, .i32_shr_s, .i32_shr_u, .i32_rotl, .i32_rotr => {
-                    const b = ip.popI32();
-                    const a = ip.popI32();
-                    try ip.pushI32(try arithI32(op, a, b));
-                },
-                .i64_add, .i64_sub, .i64_mul, .i64_div_s, .i64_div_u, .i64_rem_s, .i64_rem_u, .i64_and, .i64_or, .i64_xor, .i64_shl, .i64_shr_s, .i64_shr_u, .i64_rotl, .i64_rotr => {
-                    const b = ip.popI64();
-                    const a = ip.popI64();
-                    try ip.pushI64(try arithI64(op, a, b));
-                },
-
-                // ── integer unary + sign extension ──────────────────
-                .i32_clz => try ip.pushI32(@intCast(@clz(@as(u32, @bitCast(ip.popI32()))))),
-                .i32_ctz => try ip.pushI32(@intCast(@ctz(@as(u32, @bitCast(ip.popI32()))))),
-                .i32_popcnt => try ip.pushI32(@intCast(@popCount(@as(u32, @bitCast(ip.popI32()))))),
-                .i64_clz => try ip.pushI64(@intCast(@clz(@as(u64, @bitCast(ip.popI64()))))),
-                .i64_ctz => try ip.pushI64(@intCast(@ctz(@as(u64, @bitCast(ip.popI64()))))),
-                .i64_popcnt => try ip.pushI64(@intCast(@popCount(@as(u64, @bitCast(ip.popI64()))))),
-                .i32_extend8_s => try ip.pushI32(@as(i8, @truncate(ip.popI32()))),
-                .i32_extend16_s => try ip.pushI32(@as(i16, @truncate(ip.popI32()))),
-                .i64_extend8_s => try ip.pushI64(@as(i8, @truncate(ip.popI64()))),
-                .i64_extend16_s => try ip.pushI64(@as(i16, @truncate(ip.popI64()))),
-                .i64_extend32_s => try ip.pushI64(@as(i32, @truncate(ip.popI64()))),
-
-                // ── floating point ──────────────────────────────────
-                .f32_const => try ip.pushF32(readF32(body, &pc)),
-                .f64_const => try ip.pushF64(readF64(body, &pc)),
-
-                .f32_abs, .f32_neg, .f32_ceil, .f32_floor, .f32_trunc, .f32_nearest, .f32_sqrt => try ip.pushF32(floatUnop(f32, op, ip.popF32())),
-                .f64_abs, .f64_neg, .f64_ceil, .f64_floor, .f64_trunc, .f64_nearest, .f64_sqrt => try ip.pushF64(floatUnop(f64, op, ip.popF64())),
-                .f32_add, .f32_sub, .f32_mul, .f32_div, .f32_min, .f32_max, .f32_copysign => {
-                    const b = ip.popF32();
-                    const a = ip.popF32();
-                    try ip.pushF32(floatBinop(f32, op, a, b));
-                },
-                .f64_add, .f64_sub, .f64_mul, .f64_div, .f64_min, .f64_max, .f64_copysign => {
-                    const b = ip.popF64();
-                    const a = ip.popF64();
-                    try ip.pushF64(floatBinop(f64, op, a, b));
-                },
-                .f32_eq, .f32_ne, .f32_lt, .f32_gt, .f32_le, .f32_ge => {
-                    const b = ip.popF32();
-                    const a = ip.popF32();
-                    try ip.pushI32(@intFromBool(floatCmp(f32, op, a, b)));
-                },
-                .f64_eq, .f64_ne, .f64_lt, .f64_gt, .f64_le, .f64_ge => {
-                    const b = ip.popF64();
-                    const a = ip.popF64();
-                    try ip.pushI32(@intFromBool(floatCmp(f64, op, a, b)));
-                },
-
-                // ── conversions ─────────────────────────────────────
-                .i32_wrap_i64 => try ip.pushI32(@truncate(ip.popI64())),
-                .i64_extend_i32_s => try ip.pushI64(ip.popI32()),
-                .i64_extend_i32_u => try ip.pushI64(@bitCast(@as(u64, @as(u32, @bitCast(ip.popI32()))))),
-
-                .i32_trunc_f32_s => try ip.pushI32(try truncTrap(i32, f32, ip.popF32(), -2147483648.0, true, 2147483648.0)),
-                .i32_trunc_f32_u => try ip.pushI32(@bitCast(try truncTrap(u32, f32, ip.popF32(), -1.0, false, 4294967296.0))),
-                .i32_trunc_f64_s => try ip.pushI32(try truncTrap(i32, f64, ip.popF64(), -2147483649.0, false, 2147483648.0)),
-                .i32_trunc_f64_u => try ip.pushI32(@bitCast(try truncTrap(u32, f64, ip.popF64(), -1.0, false, 4294967296.0))),
-                .i64_trunc_f32_s => try ip.pushI64(try truncTrap(i64, f32, ip.popF32(), -9223372036854775808.0, true, 9223372036854775808.0)),
-                .i64_trunc_f32_u => try ip.pushI64(@bitCast(try truncTrap(u64, f32, ip.popF32(), -1.0, false, 18446744073709551616.0))),
-                .i64_trunc_f64_s => try ip.pushI64(try truncTrap(i64, f64, ip.popF64(), -9223372036854775808.0, true, 9223372036854775808.0)),
-                .i64_trunc_f64_u => try ip.pushI64(@bitCast(try truncTrap(u64, f64, ip.popF64(), -1.0, false, 18446744073709551616.0))),
-
-                .f32_convert_i32_s => try ip.pushF32(@floatFromInt(ip.popI32())),
-                .f32_convert_i32_u => try ip.pushF32(@floatFromInt(@as(u32, @bitCast(ip.popI32())))),
-                .f32_convert_i64_s => try ip.pushF32(@floatFromInt(ip.popI64())),
-                .f32_convert_i64_u => try ip.pushF32(@floatFromInt(@as(u64, @bitCast(ip.popI64())))),
-                .f64_convert_i32_s => try ip.pushF64(@floatFromInt(ip.popI32())),
-                .f64_convert_i32_u => try ip.pushF64(@floatFromInt(@as(u32, @bitCast(ip.popI32())))),
-                .f64_convert_i64_s => try ip.pushF64(@floatFromInt(ip.popI64())),
-                .f64_convert_i64_u => try ip.pushF64(@floatFromInt(@as(u64, @bitCast(ip.popI64())))),
-                .f32_demote_f64 => try ip.pushF32(@floatCast(ip.popF64())),
-                .f64_promote_f32 => try ip.pushF64(@floatCast(ip.popF32())),
-
-                // Reinterpret is a bit-identity on the untyped cell.
-                .i32_reinterpret_f32, .i64_reinterpret_f64, .f32_reinterpret_i32, .f64_reinterpret_i64 => {},
-
-                // ── linear memory ───────────────────────────────────
-                .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u, .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u, .f32_load, .f64_load => {
-                    const ea = memEa(ip, body, &pc);
-                    try execLoad(ip, op, ea);
-                },
-                .i32_store, .i32_store8, .i32_store16, .i64_store, .i64_store8, .i64_store16, .i64_store32, .f32_store, .f64_store => {
-                    try execStore(ip, op, body, &pc);
-                },
-                .memory_size => {
-                    pc += 1; // reserved memory index
-                    const mem = ip.instance.memory.?;
-                    if (mem.is_64) try ip.pushI64(@bitCast(mem.pages())) else try ip.pushI32(@intCast(mem.pages()));
-                },
-                .memory_grow => {
-                    pc += 1; // reserved memory index
-                    try memGrow(ip);
-                },
-                .prefix_fc => {
-                    const sub = readU32(body, &pc);
-                    switch (sub) {
-                        10 => { // memory.copy
-                            pc += 2; // dst, src reserved memidx
-                            try memCopy(ip);
-                        },
-                        11 => { // memory.fill
-                            pc += 1; // reserved memidx
-                            try memFill(ip);
-                        },
-                        8 => { // memory.init
-                            const data_idx = readU32(body, &pc);
-                            pc += 1; // reserved memidx
-                            try memInit(ip, data_idx);
-                        },
-                        9 => { // data.drop
-                            const data_idx = readU32(body, &pc);
-                            if (data_idx < ip.instance.data_segments.len) {
-                                ip.instance.data_segments[data_idx].dropped = true;
-                                ip.instance.data_segments[data_idx].bytes = &.{};
-                            }
-                        },
-                        12 => { // table.init
-                            const elem_idx = readU32(body, &pc);
-                            const tidx = readU32(body, &pc);
-                            try tableInit(ip, elem_idx, tidx);
-                        },
-                        13 => { // elem.drop
-                            const elem_idx = readU32(body, &pc);
-                            if (elem_idx < ip.instance.elem_segments.len) {
-                                ip.instance.elem_segments[elem_idx].dropped = true;
-                                ip.instance.elem_segments[elem_idx].values = &.{};
-                            }
-                        },
-                        14 => { // table.copy
-                            const dst_t = readU32(body, &pc);
-                            const src_t = readU32(body, &pc);
-                            try tableCopy(ip, dst_t, src_t);
-                        },
-                        15 => { // table.grow
-                            const tidx = readU32(body, &pc);
-                            try tableGrow(ip, tidx);
-                        },
-                        16 => { // table.size
-                            const tidx = readU32(body, &pc);
-                            if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-                            const table = ip.instance.tables[tidx];
-                            if (table.is_64) try ip.pushI64(@intCast(table.elems.len)) else try ip.pushI32(@intCast(table.elems.len));
-                        },
-                        17 => { // table.fill
-                            const tidx = readU32(body, &pc);
-                            try tableFill(ip, tidx);
-                        },
-                        // Saturating float→int truncations.
-                        0 => try ip.pushI32(truncSat(i32, f32, ip.popF32())),
-                        1 => try ip.pushI32(@bitCast(truncSat(u32, f32, ip.popF32()))),
-                        2 => try ip.pushI32(truncSat(i32, f64, ip.popF64())),
-                        3 => try ip.pushI32(@bitCast(truncSat(u32, f64, ip.popF64()))),
-                        4 => try ip.pushI64(truncSat(i64, f32, ip.popF32())),
-                        5 => try ip.pushI64(@bitCast(truncSat(u64, f32, ip.popF32()))),
-                        6 => try ip.pushI64(truncSat(i64, f64, ip.popF64())),
-                        7 => try ip.pushI64(@bitCast(truncSat(u64, f64, ip.popF64()))),
-                        else => return error.UnsupportedImportCall,
-                    }
-                },
-                .prefix_fd => {
-                    const sub = readU32(body, &pc);
-                    try execSimd(ip, sub, body, &pc);
-                },
-
-                else => return error.UnsupportedImportCall, // unreachable: validation rejects
             }
-        };
-        _ = frame_changed;
+            continue :dispatch nextOp(body, &pc);
+        },
+        .call_indirect => {
+            const type_idx = readU32(body, &pc);
+            const table_idx = readU32(body, &pc);
+            const elem_index: u64 = @truncate(ip.popCell());
+            if (table_idx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+            const table = ip.instance.tables[table_idx];
+            if (elem_index >= table.elems.len) return error.UndefinedElement;
+            const ref = table.elems[elem_index];
+            if (ref == REF_NULL) return error.UninitializedElement;
+            // The funcref's defining instance is encoded in its high bits;
+            // a bare index (high bits zero, e.g. from a funcref global)
+            // defaults to the current instance.
+            const fidx = funcRefIndex(ref);
+            const def_inst = if (ref >> 64 == 0) ip.instance else funcRefInstance(ref);
+            const target = def_inst.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
+            const expected = ip.instance.module.types[type_idx];
+            switch (target) {
+                .host => |h| {
+                    if (expected.params.len != h.params or expected.results.len != h.results)
+                        return error.IndirectCallTypeMismatch;
+                    try ip.callHost(h);
+                },
+                .wasm => |w| {
+                    const actual = w.instance.module.types[w.func.type_index];
+                    if (!funcTypesEqual(expected, actual)) return error.IndirectCallTypeMismatch;
+                    f.ip = pc;
+                    f.stp = stp;
+                    try ip.pushFrame(w.instance, w.func, @intCast(actual.params.len));
+                    f = &ip.frames[ip.nframes - 1];
+                    ip.instance = f.instance;
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    pc = f.ip;
+                    stp = f.stp;
+                },
+            }
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .ref_null => {
+            pc += 1; // reftype byte
+            try ip.pushV128(REF_NULL);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .ref_is_null => {
+            try ip.pushI32(@intFromBool(ip.popV128() == REF_NULL));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .ref_func => {
+            try ip.pushV128(makeFuncRef(ip.instance, readU32(body, &pc)));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .select_t => {
+            const n = readU32(body, &pc);
+            pc += n; // skip the result-type vector
+            const cond = ip.popI32();
+            const b = ip.popCell();
+            const a = ip.popCell();
+            try ip.pushCell(if (cond != 0) a else b);
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .table_get => {
+            const tidx = readU32(body, &pc);
+            const index: u64 = @truncate(ip.popCell());
+            if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+            const table = ip.instance.tables[tidx];
+            if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
+            try ip.pushV128(table.elems[@intCast(index)]);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .table_set => {
+            const tidx = readU32(body, &pc);
+            const val = ip.popV128();
+            const index: u64 = @truncate(ip.popCell());
+            if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+            const table = ip.instance.tables[tidx];
+            if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
+            table.elems[@intCast(index)] = val;
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .drop => {
+            _ = ip.popCell();
+            continue :dispatch nextOp(body, &pc);
+        },
+        .select => {
+            const c = ip.popI32();
+            const b = ip.popCell();
+            const a = ip.popCell();
+            try ip.pushCell(if (c != 0) a else b);
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .local_get => {
+            const x = readU32(body, &pc);
+            try ip.pushCell(ip.stack[locals_base + x]);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .local_set => {
+            const x = readU32(body, &pc);
+            ip.stack[locals_base + x] = ip.popCell();
+            continue :dispatch nextOp(body, &pc);
+        },
+        .local_tee => {
+            const x = readU32(body, &pc);
+            ip.stack[locals_base + x] = ip.stack[ip.sp - 1];
+            continue :dispatch nextOp(body, &pc);
+        },
+        .global_get => {
+            const x = readU32(body, &pc);
+            try ip.pushCell(ip.instance.globals[x].value);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .global_set => {
+            const x = readU32(body, &pc);
+            ip.instance.globals[x].value = ip.popCell();
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .i32_const => {
+            try ip.pushI32(readI32(body, &pc));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_const => {
+            try ip.pushI64(readI64(body, &pc));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .i32_eqz => {
+            try ip.pushI32(@intFromBool(ip.popI32() == 0));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_eqz => {
+            try ip.pushI32(@intFromBool(ip.popI64() == 0));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .i32_eq, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u => |op| {
+            const b = ip.popI32();
+            const a = ip.popI32();
+            try ip.pushI32(@intFromBool(compareI32(op, a, b)));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_eq, .i64_ne, .i64_lt_s, .i64_lt_u, .i64_gt_s, .i64_gt_u, .i64_le_s, .i64_le_u, .i64_ge_s, .i64_ge_u => |op| {
+            const b = ip.popI64();
+            const a = ip.popI64();
+            try ip.pushI32(@intFromBool(compareI64(op, a, b)));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .i32_add, .i32_sub, .i32_mul, .i32_div_s, .i32_div_u, .i32_rem_s, .i32_rem_u, .i32_and, .i32_or, .i32_xor, .i32_shl, .i32_shr_s, .i32_shr_u, .i32_rotl, .i32_rotr => |op| {
+            const b = ip.popI32();
+            const a = ip.popI32();
+            try ip.pushI32(try arithI32(op, a, b));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_add, .i64_sub, .i64_mul, .i64_div_s, .i64_div_u, .i64_rem_s, .i64_rem_u, .i64_and, .i64_or, .i64_xor, .i64_shl, .i64_shr_s, .i64_shr_u, .i64_rotl, .i64_rotr => |op| {
+            const b = ip.popI64();
+            const a = ip.popI64();
+            try ip.pushI64(try arithI64(op, a, b));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .i32_clz => {
+            try ip.pushI32(@intCast(@clz(@as(u32, @bitCast(ip.popI32())))));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i32_ctz => {
+            try ip.pushI32(@intCast(@ctz(@as(u32, @bitCast(ip.popI32())))));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i32_popcnt => {
+            try ip.pushI32(@intCast(@popCount(@as(u32, @bitCast(ip.popI32())))));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_clz => {
+            try ip.pushI64(@intCast(@clz(@as(u64, @bitCast(ip.popI64())))));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_ctz => {
+            try ip.pushI64(@intCast(@ctz(@as(u64, @bitCast(ip.popI64())))));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_popcnt => {
+            try ip.pushI64(@intCast(@popCount(@as(u64, @bitCast(ip.popI64())))));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i32_extend8_s => {
+            try ip.pushI32(@as(i8, @truncate(ip.popI32())));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i32_extend16_s => {
+            try ip.pushI32(@as(i16, @truncate(ip.popI32())));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_extend8_s => {
+            try ip.pushI64(@as(i8, @truncate(ip.popI64())));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_extend16_s => {
+            try ip.pushI64(@as(i16, @truncate(ip.popI64())));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_extend32_s => {
+            try ip.pushI64(@as(i32, @truncate(ip.popI64())));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .f32_const => {
+            try ip.pushF32(readF32(body, &pc));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f64_const => {
+            try ip.pushF64(readF64(body, &pc));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .f32_abs, .f32_neg, .f32_ceil, .f32_floor, .f32_trunc, .f32_nearest, .f32_sqrt => |op| {
+            try ip.pushF32(floatUnop(f32, op, ip.popF32()));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f64_abs, .f64_neg, .f64_ceil, .f64_floor, .f64_trunc, .f64_nearest, .f64_sqrt => |op| {
+            try ip.pushF64(floatUnop(f64, op, ip.popF64()));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f32_add, .f32_sub, .f32_mul, .f32_div, .f32_min, .f32_max, .f32_copysign => |op| {
+            const b = ip.popF32();
+            const a = ip.popF32();
+            try ip.pushF32(floatBinop(f32, op, a, b));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f64_add, .f64_sub, .f64_mul, .f64_div, .f64_min, .f64_max, .f64_copysign => |op| {
+            const b = ip.popF64();
+            const a = ip.popF64();
+            try ip.pushF64(floatBinop(f64, op, a, b));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f32_eq, .f32_ne, .f32_lt, .f32_gt, .f32_le, .f32_ge => |op| {
+            const b = ip.popF32();
+            const a = ip.popF32();
+            try ip.pushI32(@intFromBool(floatCmp(f32, op, a, b)));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f64_eq, .f64_ne, .f64_lt, .f64_gt, .f64_le, .f64_ge => |op| {
+            const b = ip.popF64();
+            const a = ip.popF64();
+            try ip.pushI32(@intFromBool(floatCmp(f64, op, a, b)));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .i32_wrap_i64 => {
+            try ip.pushI32(@truncate(ip.popI64()));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_extend_i32_s => {
+            try ip.pushI64(ip.popI32());
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_extend_i32_u => {
+            try ip.pushI64(@bitCast(@as(u64, @as(u32, @bitCast(ip.popI32())))));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .i32_trunc_f32_s => {
+            try ip.pushI32(try truncTrap(i32, f32, ip.popF32(), -2147483648.0, true, 2147483648.0));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i32_trunc_f32_u => {
+            try ip.pushI32(@bitCast(try truncTrap(u32, f32, ip.popF32(), -1.0, false, 4294967296.0)));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i32_trunc_f64_s => {
+            try ip.pushI32(try truncTrap(i32, f64, ip.popF64(), -2147483649.0, false, 2147483648.0));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i32_trunc_f64_u => {
+            try ip.pushI32(@bitCast(try truncTrap(u32, f64, ip.popF64(), -1.0, false, 4294967296.0)));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_trunc_f32_s => {
+            try ip.pushI64(try truncTrap(i64, f32, ip.popF32(), -9223372036854775808.0, true, 9223372036854775808.0));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_trunc_f32_u => {
+            try ip.pushI64(@bitCast(try truncTrap(u64, f32, ip.popF32(), -1.0, false, 18446744073709551616.0)));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_trunc_f64_s => {
+            try ip.pushI64(try truncTrap(i64, f64, ip.popF64(), -9223372036854775808.0, true, 9223372036854775808.0));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i64_trunc_f64_u => {
+            try ip.pushI64(@bitCast(try truncTrap(u64, f64, ip.popF64(), -1.0, false, 18446744073709551616.0)));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        .f32_convert_i32_s => {
+            try ip.pushF32(@floatFromInt(ip.popI32()));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f32_convert_i32_u => {
+            try ip.pushF32(@floatFromInt(@as(u32, @bitCast(ip.popI32()))));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f32_convert_i64_s => {
+            try ip.pushF32(@floatFromInt(ip.popI64()));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f32_convert_i64_u => {
+            try ip.pushF32(@floatFromInt(@as(u64, @bitCast(ip.popI64()))));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f64_convert_i32_s => {
+            try ip.pushF64(@floatFromInt(ip.popI32()));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f64_convert_i32_u => {
+            try ip.pushF64(@floatFromInt(@as(u32, @bitCast(ip.popI32()))));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f64_convert_i64_s => {
+            try ip.pushF64(@floatFromInt(ip.popI64()));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f64_convert_i64_u => {
+            try ip.pushF64(@floatFromInt(@as(u64, @bitCast(ip.popI64()))));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f32_demote_f64 => {
+            try ip.pushF32(@floatCast(ip.popF64()));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .f64_promote_f32 => {
+            try ip.pushF64(@floatCast(ip.popF32()));
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        // Reinterpret is a bit-identity on the untyped cell.
+        .i32_reinterpret_f32, .i64_reinterpret_f64, .f32_reinterpret_i32, .f64_reinterpret_i64 => continue :dispatch nextOp(body, &pc),
+
+        .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u, .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u, .f32_load, .f64_load => |op| {
+            const ea = memEa(ip, body, &pc);
+            try execLoad(ip, op, ea);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .i32_store, .i32_store8, .i32_store16, .i64_store, .i64_store8, .i64_store16, .i64_store32, .f32_store, .f64_store => |op| {
+            try execStore(ip, op, body, &pc);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .memory_size => {
+            pc += 1; // reserved memory index
+            const mem = ip.instance.memory.?;
+            if (mem.is_64) try ip.pushI64(@bitCast(mem.pages())) else try ip.pushI32(@intCast(mem.pages()));
+            continue :dispatch nextOp(body, &pc);
+        },
+        .memory_grow => {
+            pc += 1; // reserved memory index
+            try memGrow(ip);
+            continue :dispatch nextOp(body, &pc);
+        },
+        .prefix_fc => {
+            const sub = readU32(body, &pc);
+            switch (sub) {
+                10 => { // memory.copy
+                    pc += 2; // dst, src reserved memidx
+                    try memCopy(ip);
+                },
+                11 => { // memory.fill
+                    pc += 1; // reserved memidx
+                    try memFill(ip);
+                },
+                8 => { // memory.init
+                    const data_idx = readU32(body, &pc);
+                    pc += 1; // reserved memidx
+                    try memInit(ip, data_idx);
+                },
+                9 => { // data.drop
+                    const data_idx = readU32(body, &pc);
+                    if (data_idx < ip.instance.data_segments.len) {
+                        ip.instance.data_segments[data_idx].dropped = true;
+                        ip.instance.data_segments[data_idx].bytes = &.{};
+                    }
+                },
+                12 => { // table.init
+                    const elem_idx = readU32(body, &pc);
+                    const tidx = readU32(body, &pc);
+                    try tableInit(ip, elem_idx, tidx);
+                },
+                13 => { // elem.drop
+                    const elem_idx = readU32(body, &pc);
+                    if (elem_idx < ip.instance.elem_segments.len) {
+                        ip.instance.elem_segments[elem_idx].dropped = true;
+                        ip.instance.elem_segments[elem_idx].values = &.{};
+                    }
+                },
+                14 => { // table.copy
+                    const dst_t = readU32(body, &pc);
+                    const src_t = readU32(body, &pc);
+                    try tableCopy(ip, dst_t, src_t);
+                },
+                15 => { // table.grow
+                    const tidx = readU32(body, &pc);
+                    try tableGrow(ip, tidx);
+                },
+                16 => { // table.size
+                    const tidx = readU32(body, &pc);
+                    if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+                    const table = ip.instance.tables[tidx];
+                    if (table.is_64) try ip.pushI64(@intCast(table.elems.len)) else try ip.pushI32(@intCast(table.elems.len));
+                },
+                17 => { // table.fill
+                    const tidx = readU32(body, &pc);
+                    try tableFill(ip, tidx);
+                },
+                // Saturating float->int truncations.
+                0 => try ip.pushI32(truncSat(i32, f32, ip.popF32())),
+                1 => try ip.pushI32(@bitCast(truncSat(u32, f32, ip.popF32()))),
+                2 => try ip.pushI32(truncSat(i32, f64, ip.popF64())),
+                3 => try ip.pushI32(@bitCast(truncSat(u32, f64, ip.popF64()))),
+                4 => try ip.pushI64(truncSat(i64, f32, ip.popF32())),
+                5 => try ip.pushI64(@bitCast(truncSat(u64, f32, ip.popF32()))),
+                6 => try ip.pushI64(truncSat(i64, f64, ip.popF64())),
+                7 => try ip.pushI64(@bitCast(truncSat(u64, f64, ip.popF64()))),
+                else => return error.UnsupportedImportCall,
+            }
+            continue :dispatch nextOp(body, &pc);
+        },
+        .prefix_fd => {
+            const sub = readU32(body, &pc);
+            try execSimd(ip, sub, body, &pc);
+            continue :dispatch nextOp(body, &pc);
+        },
+
+        else => return error.UnsupportedImportCall, // unreachable: validation rejects
     }
 }
 
