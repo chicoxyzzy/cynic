@@ -1160,3 +1160,50 @@ the corpus under the relevant section's directory before adding.
   a.toLocaleString(); })`. The join sibling has this fixture
   (`length-near-overflow.js` family); the toLocaleString one
   doesn't.
+
+### A bare `\` inside a block spun parser error-recovery, OOMing the host
+
+- **Fixed in:** `89f671b`
+- **Spec:** §12.7 IdentifierName (a `\` not opening a
+  `UnicodeEscapeSequence` is not a valid token → SyntaxError) and
+  §14 StatementList. There is no normative recovery algorithm —
+  this is an engine-shape robustness bug, not a conformance one —
+  but the input is a finite, well-formed byte sequence the engine
+  must reject with a catchable SyntaxError, never with unbounded
+  allocation.
+- **Reproducer:**
+  ```js
+  {1\
+  // also: {;\   ·  switch(0){default:1\   ·  class C{static{1\
+  //       function f(){1\   ·  try{1\
+  // the originally-reported degenerate form (doubled split/regex):
+  // try { var r = "x".split(/try { var r = "x".split(/\d/); } …
+  ```
+- **Before fix:** A lone `\` (not `\u…`) makes the lexer report
+  `invalid_escape_sequence` and return the error *without consuming
+  the backslash* (`scanIdentifierStart` → `parseIdentifierEscape`
+  leaves `pos` parked on the `\`). A StatementList recovery loop
+  (block / switch-case / function / static-block body) that hits
+  `ParseError`, resynchronizes, and retries therefore never
+  advances: `synchronize`'s `bump() catch return` bails on the
+  in-place lex error, leaving `current` on the same token, so the
+  loop re-parses it forever and grows the parse arena without
+  bound — RSS climbed past multiple GB (observed 133 GB / 3 GB
+  under a cap) until the host OOMed. The bug needed at least one
+  successfully-parsed item before the `\` so the `\` was the loop's
+  *third-or-later* token; the top-level program loop already had a
+  forward-progress guard, so a `\` reached as the first/second
+  token (e.g. `{\`) rejected cleanly.
+- **After fix:** A shared `recoverStatementListItem` guard (now used
+  by the program, block, and switch-case loops) forces a `bump`
+  when a resync made no progress and breaks the loop when even that
+  bump can't advance (the wedged-lexer case). Every form above
+  terminates in a few steps with a catchable SyntaxError.
+- **Suggested fixture shape:** negative parser fixture (`negative:
+  phase: parse, type: SyntaxError`) under
+  `language/statements/block/` (mirrors under
+  `language/statements/switch/` and `language/statements/class/`
+  static blocks) with a body like `{ 1\ ` — a robust engine rejects
+  it as a SyntaxError; the value is catching the host-abort
+  variant. No existing fixture pairs a parsed StatementListItem
+  with a trailing lone backslash inside a nested block.
