@@ -17,6 +17,42 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-07 — cynic `15a921a`, host `Darwin 25.6.0 arm64`
+
+First row on `Darwin 25.6.0` — an OS point-bump from the `25.5.0`
+row below, so per this file's rule it's a *new host line* and not
+strictly comparable. Same physical machine; measured with the
+parallel worktree session quiet (fixture spread ≤ 9 % except a
+single `method_call` outlier inflating its max — median/min are
+tight). Treating the cross-host deltas vs `618f795` as directional
+only, this session's inline-slots + register-promotion + IC +
+array-literal work lands big wins on the allocation/dispatch-heavy
+fixtures: `class_instantiate` 116.28 → 30.65 (≈ −74 %),
+`tail_recursion` 87.69 → 34.59 (≈ −61 %), `object_alloc`
+44.41 → 26.81 (≈ −40 %), `method_call` 30.11 → 17.95 (≈ −40 %),
+`string_concat` 42.54 → 37.04 (≈ −13 %). Counter-moving:
+`prop_access` 10.59 → 13.36 and `prop_write` 11.51 → 14.29
+(≈ +25 %) — an apparent read/write-hot-path regression. The OS bump
+muddies it (cross-host), and the isolated inline-slots A/B was flat,
+so a same-host bisect across the post-`618f795` window is needed
+before calling it real. `ctor_array_build` (518.73) is a new fixture
+(no prior baseline).
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 31.95 | 31.51 | 32.13 | 5200 |
+| prop_access | 13.36 | 13.03 | 13.73 | 5280 |
+| prop_write | 14.29 | 14.21 | 14.61 | 5368 |
+| array_iter | 21.76 | 21.44 | 22.46 | 6280 |
+| string_concat | 37.04 | 36.47 | 38.21 | 14248 |
+| promise_chain | 13.38 | 13.07 | 14.29 | 26608 |
+| object_alloc | 26.81 | 26.43 | 27.71 | 10024 |
+| method_call | 17.95 | 17.64 | 21.44 | 5496 |
+| class_instantiate | 30.65 | 30.29 | 31.79 | 9976 |
+| ctor_array_build | 518.73 | 505.76 | 540.21 | 13072 |
+| json_stringify | 36.25 | 35.95 | 37.70 | 9344 |
+| tail_recursion | 34.59 | 33.70 | 35.00 | 5208 |
+
 ### 2026-05-27 — cynic `618f795` (post ERM landing + SES accessor-flag stamp), host `Darwin 25.5.0 arm64`
 
 Every fixture moved against the `74c2d0a` baseline. Headline:
