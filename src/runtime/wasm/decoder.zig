@@ -244,7 +244,21 @@ fn decodeTableSection(allocator: std.mem.Allocator, r: *Reader) DecodeError![]co
     const n = try r.uleb(u32);
     const tabs = try allocator.alloc(TableType, n);
     var i: u32 = 0;
-    while (i < n) : (i += 1) tabs[i] = try decodeTableType(r);
+    while (i < n) : (i += 1) {
+        // function-references proposal: a table definition may carry an
+        // explicit element initializer, encoded `0x40 0x00 <tabletype>
+        // <constexpr>`. The plain form starts directly with the element
+        // reference type.
+        const first = try r.byte();
+        if (first == 0x40) {
+            _ = try r.byte(); // 0x00 reserved
+            tabs[i] = try decodeTableType(r);
+            _ = try captureConstExpr(r); // initializer (default fill suffices)
+        } else {
+            const elem = RefType.fromByte(first) orelse return error.BadRefType;
+            tabs[i] = .{ .elem = elem, .limits = try decodeLimits(r) };
+        }
+    }
     return tabs;
 }
 
