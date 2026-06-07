@@ -55,6 +55,8 @@ pub const Op = enum(u8) {
 
     // 0xFC-prefixed family (bulk memory, non-trapping conversions…).
     prefix_fc = 0xfc,
+    // 0xFD-prefixed family (SIMD / v128). Sub-opcode is a uleb.
+    prefix_fd = 0xfd,
 
     i32_const = 0x41,
     i64_const = 0x42,
