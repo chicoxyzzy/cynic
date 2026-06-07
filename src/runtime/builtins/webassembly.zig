@@ -22,6 +22,7 @@ const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const JSObject = @import("../object.zig").JSObject;
 const NativeError = @import("../function.zig").NativeError;
+const JSString = @import("../string.zig").JSString;
 const intrinsics = @import("../intrinsics.zig");
 const heap_mod = @import("../heap.zig");
 const arith = @import("../lantern/arith.zig");
@@ -38,6 +39,23 @@ const ExportRecord = struct {
     instance: *wasm.Instance,
     func_index: u32,
 };
+
+/// A `WebAssembly.Global`'s backing state: a pointer to its live operand
+/// cell (an instance's global for an export, or a standalone arena cell),
+/// plus its value type and mutability. Arena-owned.
+const GlobalState = struct {
+    cell: *u128,
+    valtype: wasm.ValType,
+    mutable: bool,
+};
+
+fn valTypeFromString(s: []const u8) ?wasm.ValType {
+    if (std.mem.eql(u8, s, "i32")) return .i32;
+    if (std.mem.eql(u8, s, "i64")) return .i64;
+    if (std.mem.eql(u8, s, "f32")) return .f32;
+    if (std.mem.eql(u8, s, "f64")) return .f64;
+    return null;
+}
 
 pub fn install(realm: *Realm) !void {
     const ns = try realm.heap.allocateObject();
@@ -61,6 +79,27 @@ pub fn install(realm: *Realm) !void {
         .install_global = false,
     });
     try ns.set(realm.allocator, "Instance", heap_mod.taggedFunction(instance_ctor.ctor));
+
+    const global_ctor = try intrinsics.installConstructor(realm, .{
+        .ctor = globalConstructor,
+        .arity = 1,
+        .name = "Global",
+        .install_global = false,
+    });
+    try ns.set(realm.allocator, "Global", heap_mod.taggedFunction(global_ctor.ctor));
+    realm.wasm_global_prototype = global_ctor.proto;
+    {
+        // `Global.prototype.value` — a getter / setter over the cell.
+        const getter = try intrinsics.makeNativeFunction(realm, globalValueGet, 0, "get value");
+        const setter = try intrinsics.makeNativeFunction(realm, globalValueSet, 1, "set value");
+        const entry = try global_ctor.proto.getOrPutAccessor(realm.allocator, "value");
+        entry.value_ptr.* = .{ .getter = getter, .setter = setter };
+        try global_ctor.proto.property_flags.put(realm.allocator, "value", .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = true,
+        });
+    }
 
     try realm.globals.put(realm.allocator, "WebAssembly", heap_mod.taggedObject(ns));
 }
@@ -141,9 +180,77 @@ fn instanceConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     return this_value;
 }
 
+// ── WebAssembly.Global ──────────────────────────────────────────────
+
+/// `new WebAssembly.Global(descriptor, value?)` — a typed, optionally
+/// mutable global cell. Gated.
+fn globalConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (!realm.allow_wasm) return wasmDisabled(realm);
+    const self = heap_mod.valueAsPlainObject(this_value) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Global requires 'new'");
+    const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Global expects a descriptor object");
+
+    const vt = readValType(desc.get("value")) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Global: invalid value type");
+    const mutable = arith.toBoolean(desc.get("mutable"));
+
+    const a = realm.wasmAllocator();
+    const cell = a.create(u128) catch return error.OutOfMemory;
+    // A missing initial value is the type's zero (the 0 bit pattern is
+    // i32 0 / i64 0n / f32 +0 / f64 +0).
+    cell.* = if (args.len > 1) try marshalArg(realm, vt, args[1]) else 0;
+
+    const st = a.create(GlobalState) catch return error.OutOfMemory;
+    st.* = .{ .cell = cell, .valtype = vt, .mutable = mutable };
+    self.wasm_global = st;
+    return this_value;
+}
+
+/// Read a value-type string Value ("i32"/"i64"/"f32"/"f64").
+fn readValType(v: Value) ?wasm.ValType {
+    if (!v.isString()) return null;
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    return valTypeFromString(s.flatBytes());
+}
+
+fn globalStateOf(realm: *Realm, this_value: Value) NativeError!*GlobalState {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse
+        return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Global");
+    const raw = obj.wasm_global orelse
+        return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Global");
+    return @ptrCast(@alignCast(raw));
+}
+
+fn globalValueGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const st = try globalStateOf(realm, this_value);
+    return marshalResult(realm, st.valtype, st.cell.*);
+}
+
+fn globalValueSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const st = try globalStateOf(realm, this_value);
+    if (!st.mutable) return intrinsics.throwTypeError(realm, "WebAssembly.Global is immutable");
+    st.cell.* = try marshalArg(realm, st.valtype, if (args.len > 0) args[0] else Value.undefined_);
+    return Value.undefined_;
+}
+
+/// Wrap an instance's live global cell as a `WebAssembly.Global` object
+/// (for global exports). Reads / writes go straight to the cell.
+fn makeGlobal(realm: *Realm, valtype: wasm.ValType, mutable: bool, cell: *u128) NativeError!Value {
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, realm.wasm_global_prototype);
+    const a = realm.wasmAllocator();
+    const st = a.create(GlobalState) catch return error.OutOfMemory;
+    st.* = .{ .cell = cell, .valtype = valtype, .mutable = mutable };
+    obj.wasm_global = st;
+    return heap_mod.taggedObject(obj);
+}
+
 /// Build the exports namespace object: each function export becomes a
-/// callable JS function carrying its `(instance, func_index)`.
-/// Non-function exports are omitted in this slice.
+/// callable JS function carrying its `(instance, func_index)`; each
+/// global export becomes a `WebAssembly.Global`. Memory / table exports
+/// are omitted in this slice.
 fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) NativeError!Value {
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, null); // §exports object has a null prototype
@@ -160,7 +267,13 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
                 fn_obj.wasm_export = rec;
                 obj.set(realm.allocator, ex.name, heap_mod.taggedFunction(fn_obj)) catch return error.OutOfMemory;
             },
-            else => {}, // table / memory / global exports: next slice
+            .global => |gidx| {
+                const cell = ip.globalCellPtr(gidx) orelse continue;
+                const gt = ip.globalTypeAt(gidx) orelse continue;
+                const gobj = try makeGlobal(realm, gt.val, gt.mut == .mutable, cell);
+                obj.set(realm.allocator, ex.name, gobj) catch return error.OutOfMemory;
+            },
+            else => {}, // table / memory exports: next slice
         }
     }
     return heap_mod.taggedObject(obj);
@@ -212,22 +325,34 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
 }
 
 /// JS value -> a wasm operand cell, per the parameter's value type.
+/// (§ToWebAssemblyValue.)
 fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
     switch (vt) {
         .i32 => return @as(u32, @bitCast(arith.toInt32(v))),
+        .i64 => {
+            const bi = heap_mod.valueAsBigInt(v) orelse
+                return intrinsics.throwTypeError(realm, "WebAssembly: an i64 value must be a BigInt");
+            return @as(u64, @bitCast(bi.toI64Truncating()));
+        },
         .f32 => return @as(u32, @bitCast(@as(f32, @floatCast(arith.toNumber(v))))),
         .f64 => return @as(u64, @bitCast(arith.toNumber(v))),
-        else => return intrinsics.throwTypeError(realm, "WebAssembly: i64/v128/reference marshalling is not yet supported"),
+        else => return intrinsics.throwTypeError(realm, "WebAssembly: v128 / reference marshalling is not yet supported"),
     }
 }
 
 /// A wasm result cell -> a JS value, per the result's value type.
+/// (§ToJSValue.)
 fn marshalResult(realm: *Realm, vt: wasm.ValType, cell: u128) NativeError!Value {
     switch (vt) {
         .i32 => return Value.fromInt32(@bitCast(@as(u32, @truncate(cell)))),
+        .i64 => {
+            const v: i64 = @bitCast(@as(u64, @truncate(cell)));
+            const bi = realm.heap.allocateBigInt(@as(i128, v)) catch return error.OutOfMemory;
+            return heap_mod.taggedBigInt(bi);
+        },
         .f32 => return Value.fromDouble(@as(f64, @as(f32, @bitCast(@as(u32, @truncate(cell)))))),
         .f64 => return Value.fromDouble(@as(f64, @bitCast(@as(u64, @truncate(cell))))),
-        else => return intrinsics.throwTypeError(realm, "WebAssembly: i64/v128/reference marshalling is not yet supported"),
+        else => return intrinsics.throwTypeError(realm, "WebAssembly: v128 / reference marshalling is not yet supported"),
     }
 }
 

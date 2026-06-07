@@ -254,10 +254,10 @@ test "recursion runs across the JS boundary" {
     try expectIntWasm(src, 55233);
 }
 
-test "calling an i64 export throws (BigInt marshalling not yet supported)" {
+test "an i64 export adds two BigInts" {
     const src =
         "const a = new WebAssembly.Instance(new WebAssembly.Module(" ++ i64_adder_bytes ++ ")).exports.add;" ++
-        "try { a(1n, 2n); 0 } catch (e) { 1 }";
+        "a(40n, 2n) === 42n ? 1 : 0";
     try expectIntWasm(src, 1);
 }
 
@@ -299,4 +299,83 @@ test "validate honours a typed-array view offset" {
         "padded.set(u, 2);" ++
         "WebAssembly.validate(padded.subarray(2)) ? 1 : 0";
     try expectIntWasm(src, 1);
+}
+
+// ── i64 ↔ BigInt marshalling ────────────────────────────────────────
+
+test "i64 exports marshal through BigInt" {
+    const i64adder = "new WebAssembly.Instance(new WebAssembly.Module(" ++ i64_adder_bytes ++ ")).exports.add";
+    try expectIntWasm("const a = " ++ i64adder ++ "; a(5n, 7n) === 12n ? 1 : 0", 1);
+    try expectIntWasm("const a = " ++ i64adder ++ "; typeof a(1n, 2n) === 'bigint' ? 1 : 0", 1);
+}
+
+test "i64 results wrap to a signed 64-bit BigInt" {
+    // 2^63 has no positive i64; it wraps to i64::MIN.
+    const src =
+        "const a = new WebAssembly.Instance(new WebAssembly.Module(" ++ i64_adder_bytes ++ ")).exports.add;" ++
+        "a(9223372036854775808n, 0n) === -9223372036854775808n ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "an i64 argument must be a BigInt, not a Number" {
+    const src =
+        "const a = new WebAssembly.Instance(new WebAssembly.Module(" ++ i64_adder_bytes ++ ")).exports.add;" ++
+        "try { a(5, 7); 0 } catch (e) { 1 }";
+    try expectIntWasm(src, 1);
+}
+
+// ── WebAssembly.Global ──────────────────────────────────────────────
+
+// Exports a mutable i32 global "g" (init 42) and a getter "get".
+const global_module_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,5,1,96,0,1,127, 3,2,1,0, 6,6,1,127,1,65,42,11, 7,11,2,1,103,3,0,3,103,101,116,0,0, 10,6,1,4,0,35,0,11])";
+
+test "WebAssembly.Global is a constructor" {
+    try expectIntWasm("typeof WebAssembly.Global === 'function' ? 1 : 0", 1);
+}
+
+test "an immutable Global holds its value" {
+    try expectIntWasm("new WebAssembly.Global({ value: 'i32' }, 42).value === 42 ? 1 : 0", 1);
+    try expectIntWasm("new WebAssembly.Global({ value: 'i32' }).value === 0 ? 1 : 0", 1); // default 0
+}
+
+test "a mutable Global round-trips through value get/set" {
+    const src =
+        "const g = new WebAssembly.Global({ value: 'i32', mutable: true }, 1);" ++
+        "g.value = 99; g.value === 99 ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "writing an immutable Global throws" {
+    const src =
+        "const g = new WebAssembly.Global({ value: 'i32' }, 1);" ++
+        "try { g.value = 2; 0 } catch (e) { 1 }";
+    try expectIntWasm(src, 1);
+}
+
+test "Global supports every numeric value type" {
+    try expectIntWasm("new WebAssembly.Global({ value: 'i64' }, 7n).value === 7n ? 1 : 0", 1);
+    try expectIntWasm("new WebAssembly.Global({ value: 'f32' }, 1.5).value === 1.5 ? 1 : 0", 1);
+    try expectIntWasm("new WebAssembly.Global({ value: 'f64' }, 3.25).value === 3.25 ? 1 : 0", 1);
+}
+
+test "an unknown Global value type throws" {
+    try expectIntWasm("try { new WebAssembly.Global({ value: 'i128' }, 0); 0 } catch (e) { 1 }", 1);
+}
+
+test "an exported global is a WebAssembly.Global reading the live cell" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ global_module_bytes ++ "));" ++
+        "(inst.exports.g instanceof WebAssembly.Global && inst.exports.g.value === 42) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "writing an exported mutable global is visible to wasm" {
+    // Set the global through the JS Global object; a wasm function that
+    // reads the same global must observe the new value.
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ global_module_bytes ++ "));" ++
+        "inst.exports.g.value = 100;" ++
+        "inst.exports.get()"; // global.get 0
+    try expectIntWasm(src, 100);
 }
