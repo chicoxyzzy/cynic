@@ -113,6 +113,15 @@ that will be settled with an ADR when the time comes.
    No CommonJS. Loading is host-driven via Realm.module_loader callback.
 ```
 
+Cynic also **runs WebAssembly**, through **Sarcasm** — a from-scratch
+in-place wasm interpreter that is a parallel subsystem to the JS engine
+above: its own decoder, validator (emitting an O(1) branch side-table),
+and threaded dispatch loop in [`src/runtime/wasm/`](../src/runtime/wasm/),
+with the `WebAssembly.*` host API in `runtime/builtins/webassembly.zig`.
+It is 100% conformant on the official spec testsuite and shares the Metla
+heap (an `externref` is a pinned JS value). Its design has its own record
+in [wasm-engine.md](wasm-engine.md).
+
 ## Strict-only
 
 Cynic does not implement sloppy mode. Every script and module is parsed as
