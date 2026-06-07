@@ -2454,14 +2454,34 @@ pub const Compiler = struct {
                 }
                 idx += 1;
             }
-            const k_length = try self.internString("length");
-            if (idx <= std.math.maxInt(i32)) {
-                try self.builder.emitOp(.lda_smi, lit.span);
-                try self.builder.emitI32(@intCast(idx));
-            } else {
-                return error.UnsupportedExpression;
+            // §13.2.4.1 ArrayAccumulation — each element init is a
+            // CreateDataProperty on the canonical index, which routes
+            // through the array exotic's setIndexed and auto-extends
+            // `length` to `index + 1` (§10.4.2.1). So for a literal
+            // whose LAST slot is a present element, the final
+            // def_property already left `length == elements.len`; the
+            // explicit write is redundant. Skip it there — it would
+            // otherwise be an OrdinarySet("length") whose slow path
+            // walks the prototype chain in `lookupAccessor` (length is
+            // a virtual exotic field, so `hasOwn("length")` is false and
+            // the walk runs to %Object.prototype%) on every literal.
+            // A trailing hole (`[a,,]`, `[,,]`) leaves the highest
+            // written index below the intended length, so the write is
+            // still required; an empty literal gets length 0 from
+            // make_array. `idx == elements.len` here (the loop bumps
+            // `idx` for holes too).
+            const needs_length_write = lit.elements.len > 0 and
+                lit.elements[lit.elements.len - 1] == null;
+            if (needs_length_write) {
+                const k_length = try self.internString("length");
+                if (idx <= std.math.maxInt(i32)) {
+                    try self.builder.emitOp(.lda_smi, lit.span);
+                    try self.builder.emitI32(@intCast(idx));
+                } else {
+                    return error.UnsupportedExpression;
+                }
+                try self.builder.emitStaProperty(lit.span, k_length, r_arr);
             }
-            try self.builder.emitStaProperty(lit.span, k_length, r_arr);
         } else {
             // length starts at 0 — array_spread / arrayPush rely
             // on the existing length. Initialise it explicitly.

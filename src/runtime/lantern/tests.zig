@@ -8009,6 +8009,26 @@ test "later: arr.length = N truncates elements past N" {
     , "2:1,2");
 }
 
+test "array literal: length is correct across hole patterns" {
+    // §13.2.4.1 — the compiler skips the explicit `length` write for
+    // a hole-free literal (the last element's CreateDataProperty
+    // already auto-extended length) and keeps it only for a trailing
+    // hole / all-holes / empty cases. Pin every shape so that
+    // optimization can't silently desync `length`.
+    try expectScriptInt("[1,2,3].length", 3); // hole-free → write skipped
+    try expectScriptInt("[1,,3].length", 3); // middle hole, last present → skipped
+    try expectScriptInt("[1,2,,].length", 3); // trailing hole → write kept
+    try expectScriptInt("[].length", 0); // empty → make_array length 0
+    try expectScriptInt("[,,].length", 2); // all holes → write kept
+    try expectScriptInt("[1,,].length", 2); // [1, <hole>] → write kept
+    try expectScriptInt("[5][0]", 5); // single element value intact
+    try expectScriptInt("var a=[10,20,30]; a[0]+a[1]+a[2]", 60); // values intact
+    // A computed last element still leaves length right with no write.
+    try expectScriptInt("var n=7; [n, n+1, n+2].length", 3);
+    // Object.keys reflects the real (hole-skipping) own indices.
+    try expectScriptStringWithBuiltins("Object.keys([1,,3]).join(',')", "0,2");
+}
+
 test "later: holes fall through to prototype-chain accessors" {
     // §10.4.2.1 step 2 — sparse holes are NOT own properties;
     // reads delegate to the prototype chain, where Array.prototype's
