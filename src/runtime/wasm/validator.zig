@@ -656,6 +656,16 @@ fn validateExpr(v: *Validator) ValidateError!void {
                         try v.popExpect(.i32);
                         try v.popExpect(.i32);
                     },
+                    8 => { // memory.init
+                        try requireMemory(v);
+                        _ = try v.r.uleb(u32); // data segment index
+                        _ = try v.r.byte(); // reserved memidx
+                        try v.popExpect(.i32);
+                        try v.popExpect(.i32);
+                        try v.popExpect(.i32);
+                    },
+                    9 => _ = try v.r.uleb(u32), // data.drop
+
                     // Bulk table operations (reference-types).
                     12 => { // table.init
                         _ = try v.r.uleb(u32); // element segment index

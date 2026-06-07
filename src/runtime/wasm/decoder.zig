@@ -135,7 +135,10 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) DecodeError!Modul
 
         var sr = Reader.init(payload);
         switch (id) {
-            .custom => sr.pos = payload.len, // §5.5.3 — opaque payload, consumed wholesale.
+            .custom => { // §5.5.3 — a leading UTF-8 name, then opaque bytes.
+                _ = try sr.name();
+                sr.pos = payload.len;
+            },
             .type => m.types = try decodeTypeSection(allocator, &sr),
             .import => m.imports = try decodeImportSection(allocator, &sr),
             .function => {
@@ -355,6 +358,11 @@ fn captureConstExpr(r: *Reader) DecodeError![]const u8 {
             0x23 => _ = try r.uleb(u32), // global.get
             0xd0 => _ = try r.byte(), // ref.null reftype
             0xd2 => _ = try r.uleb(u32), // ref.func
+            0xfd => { // SIMD prefix — only v128.const (12) is constant
+                const sub = try r.uleb(u32);
+                if (sub != 12) return error.BadConstExpr;
+                _ = try r.bytesN(16);
+            },
             else => return error.BadConstExpr,
         }
     }

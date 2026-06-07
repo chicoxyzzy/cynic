@@ -59,6 +59,13 @@ const ElemSegment = struct {
     dropped: bool,
 };
 
+/// A parsed data segment (for `memory.init`). Active segments arrive
+/// already dropped.
+const DataSegment = struct {
+    bytes: []const u8,
+    dropped: bool,
+};
+
 pub const Error = TrapError || validator.ValidateError || error{ NoSuchExport, OutOfMemory };
 
 const STACK_CELLS = 1 << 16;
@@ -104,6 +111,8 @@ pub const Instance = struct {
     tables: []Table,
     /// Passive/active element segments, in declaration order.
     elem_segments: []ElemSegment,
+    /// Passive/active data segments, in declaration order.
+    data_segments: []DataSegment,
     /// Owns `globals`, `memory.data`, and the table backing; used to
     /// grow and free them.
     gpa: std.mem.Allocator,
@@ -184,12 +193,44 @@ pub fn instantiate(
         .memory = memory,
         .tables = tables,
         .elem_segments = &.{},
+        .data_segments = &.{},
         .gpa = allocator,
     };
 
-    // Parse element segments, applying active ones into the tables.
+    // Parse element + data segments, applying active ones into the
+    // tables and linear memory.
     instance.elem_segments = try parseElements(arena, module, tables);
+    instance.data_segments = try parseData(arena, module, if (memory) |*m| m else null);
     return instance;
+}
+
+/// Parse the data section, applying active segments into linear memory
+/// and returning the (passive-keeping) segments for `memory.init`.
+fn parseData(arena: std.mem.Allocator, module: *const Module, memory: ?*Memory) Error![]DataSegment {
+    const count = module.data_count_in_section;
+    const segs = try arena.alloc(DataSegment, count);
+    var r = reader_mod.Reader.init(module.data_raw);
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const flag = try r.uleb(u32);
+        const is_active = (flag != 1); // flags 0 and 2 are active
+        if (flag == 2) _ = try r.uleb(u32); // explicit memory index
+        var offset: i32 = 0;
+        if (is_active) offset = try readOffsetExpr(&r);
+        const n = try r.uleb(u32);
+        const bytes = try r.bytesN(n);
+
+        if (is_active) {
+            const mem = memory orelse return error.OutOfBoundsMemoryAccess;
+            const off: usize = @as(u32, @bitCast(offset));
+            if (off + n > mem.data.len) return error.OutOfBoundsMemoryAccess;
+            @memcpy(mem.data[off..][0..n], bytes);
+            segs[i] = .{ .bytes = &.{}, .dropped = true };
+        } else {
+            segs[i] = .{ .bytes = bytes, .dropped = false };
+        }
+    }
+    return segs;
 }
 
 /// Parse the element section, applying active segments into `tables`
@@ -711,6 +752,18 @@ fn run(ip: *Interp) Error!void {
                             pc += 1; // reserved memidx
                             try memFill(ip);
                         },
+                        8 => { // memory.init
+                            const data_idx = readU32(body, &pc);
+                            pc += 1; // reserved memidx
+                            try memInit(ip, data_idx);
+                        },
+                        9 => { // data.drop
+                            const data_idx = readU32(body, &pc);
+                            if (data_idx < ip.instance.data_segments.len) {
+                                ip.instance.data_segments[data_idx].dropped = true;
+                                ip.instance.data_segments[data_idx].bytes = &.{};
+                            }
+                        },
                         12 => { // table.init
                             const elem_idx = readU32(body, &pc);
                             const tidx = readU32(body, &pc);
@@ -971,6 +1024,18 @@ fn memFill(ip: *Interp) TrapError!void {
     try checkBounds(data.len, dst, n);
     if (n == 0) return;
     @memset(data[dst..][0..n], @truncate(val));
+}
+
+fn memInit(ip: *Interp, data_idx: u32) TrapError!void {
+    const n: u32 = @bitCast(ip.popI32());
+    const src: u32 = @bitCast(ip.popI32());
+    const dst: u32 = @bitCast(ip.popI32());
+    if (data_idx >= ip.instance.data_segments.len) return error.OutOfBoundsMemoryAccess;
+    const seg = ip.instance.data_segments[data_idx].bytes;
+    const mem = ip.instance.memory orelse return error.OutOfBoundsMemoryAccess;
+    if (@as(u64, src) + n > seg.len or @as(u64, dst) + n > mem.data.len) return error.OutOfBoundsMemoryAccess;
+    var k: u32 = 0;
+    while (k < n) : (k += 1) mem.data[dst + k] = seg[src + k];
 }
 
 // ── tables ──────────────────────────────────────────────────────────
