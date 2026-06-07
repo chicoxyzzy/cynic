@@ -49,7 +49,8 @@ const REF_NULL: u128 = std.math.maxInt(u128);
 /// scans them — see docs/wasm-engine.md.)
 pub const Table = struct {
     elems: []u128,
-    max: ?u32,
+    max: ?u64,
+    is_64: bool = false,
 };
 
 /// A parsed element segment (for `table.init`). Active and declarative
@@ -88,10 +89,11 @@ const Global = struct {
 /// here it is a plain owned buffer.)
 pub const Memory = struct {
     data: []u8,
-    max_pages: ?u32,
+    max_pages: ?u64,
+    is_64: bool = false,
 
-    fn pages(self: *const Memory) u32 {
-        return @intCast(self.data.len / PAGE_SIZE);
+    fn pages(self: *const Memory) u64 {
+        return self.data.len / PAGE_SIZE;
     }
 };
 
@@ -171,18 +173,18 @@ pub fn instantiate(
     var memory: ?Memory = null;
     if (module.mems.len > 0) {
         const lim = module.mems[0].limits;
-        const bytes = try allocator.alloc(u8, @as(usize, lim.min) * PAGE_SIZE);
+        const bytes = try allocator.alloc(u8, @as(usize, @intCast(lim.min)) * PAGE_SIZE);
         @memset(bytes, 0);
-        memory = .{ .data = bytes, .max_pages = lim.max };
+        memory = .{ .data = bytes, .max_pages = lim.max, .is_64 = lim.is_64 };
     }
 
     // Tables, sized to their minimum and filled with the null reference.
     const tables = try allocator.alloc(Table, module.tables.len);
     errdefer allocator.free(tables);
     for (module.tables, 0..) |t, i| {
-        const elems = try allocator.alloc(u128, t.limits.min);
+        const elems = try allocator.alloc(u128, @intCast(t.limits.min));
         @memset(elems, REF_NULL);
-        tables[i] = .{ .elems = elems, .max = t.limits.max };
+        tables[i] = .{ .elems = elems, .max = t.limits.max, .is_64 = t.limits.is_64 };
     }
 
     var instance: Instance = .{
@@ -215,14 +217,14 @@ fn parseData(arena: std.mem.Allocator, module: *const Module, memory: ?*Memory) 
         const flag = try r.uleb(u32);
         const is_active = (flag != 1); // flags 0 and 2 are active
         if (flag == 2) _ = try r.uleb(u32); // explicit memory index
-        var offset: i32 = 0;
+        var offset: u64 = 0;
         if (is_active) offset = try readOffsetExpr(&r);
         const n = try r.uleb(u32);
         const bytes = try r.bytesN(n);
 
         if (is_active) {
             const mem = memory orelse return error.OutOfBoundsMemoryAccess;
-            const off: usize = @as(u32, @bitCast(offset));
+            const off: usize = @intCast(offset);
             if (off + n > mem.data.len) return error.OutOfBoundsMemoryAccess;
             @memcpy(mem.data[off..][0..n], bytes);
             segs[i] = .{ .bytes = &.{}, .dropped = true };
@@ -248,7 +250,7 @@ fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Tabl
 
         var table_idx: u32 = 0;
         if (kind == 2) table_idx = try r.uleb(u32);
-        var offset: i32 = 0;
+        var offset: u64 = 0;
         if (is_active) offset = try readOffsetExpr(&r);
         if (kind != 0) _ = try r.byte(); // elemkind / reftype
 
@@ -262,7 +264,7 @@ fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Tabl
         if (is_active) {
             if (table_idx >= tables.len) return error.UnsupportedImportCall;
             const table = &tables[table_idx];
-            const off: usize = @as(u32, @bitCast(offset));
+            const off: usize = @intCast(offset);
             if (off + n > table.elems.len) return error.OutOfBoundsTableAccess;
             @memcpy(table.elems[off..][0..n], values);
             segs[i] = .{ .values = &.{}, .dropped = true };
@@ -277,11 +279,12 @@ fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Tabl
 
 /// An active segment's offset is a constant expression — `i32.const`
 /// (or an imported `global.get`, treated as 0 for now) then `end`.
-fn readOffsetExpr(r: *reader_mod.Reader) Error!i32 {
+fn readOffsetExpr(r: *reader_mod.Reader) Error!u64 {
     const op: Op = @enumFromInt(try r.byte());
-    var val: i32 = 0;
+    var val: u64 = 0;
     switch (op) {
-        .i32_const => val = try r.sleb(i32),
+        .i32_const => val = @as(u32, @bitCast(try r.sleb(i32))),
+        .i64_const => val = @bitCast(try r.sleb(i64)),
         .global_get => _ = try r.uleb(u32),
         else => {},
     }
@@ -583,20 +586,20 @@ fn run(ip: *Interp) Error!void {
 
                 .table_get => {
                     const tidx = readU32(body, &pc);
-                    const index: u32 = @bitCast(ip.popI32());
+                    const index: u64 = @truncate(ip.popCell());
                     if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
                     const table = &ip.instance.tables[tidx];
                     if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
-                    try ip.pushV128(table.elems[index]);
+                    try ip.pushV128(table.elems[@intCast(index)]);
                 },
                 .table_set => {
                     const tidx = readU32(body, &pc);
                     const val = ip.popV128();
-                    const index: u32 = @bitCast(ip.popI32());
+                    const index: u64 = @truncate(ip.popCell());
                     if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
                     const table = &ip.instance.tables[tidx];
                     if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
-                    table.elems[index] = val;
+                    table.elems[@intCast(index)] = val;
                 },
 
                 .drop => _ = ip.popCell(),
@@ -735,11 +738,11 @@ fn run(ip: *Interp) Error!void {
                 .memory_size => {
                     pc += 1; // reserved memory index
                     const mem = ip.instance.memory.?;
-                    try ip.pushI32(@bitCast(mem.pages()));
+                    if (mem.is_64) try ip.pushI64(@bitCast(mem.pages())) else try ip.pushI32(@intCast(mem.pages()));
                 },
                 .memory_grow => {
                     pc += 1; // reserved memory index
-                    try ip.pushI32(try memGrow(ip));
+                    try memGrow(ip);
                 },
                 .prefix_fc => {
                     const sub = readU32(body, &pc);
@@ -783,12 +786,13 @@ fn run(ip: *Interp) Error!void {
                         },
                         15 => { // table.grow
                             const tidx = readU32(body, &pc);
-                            try ip.pushI32(try tableGrow(ip, tidx));
+                            try tableGrow(ip, tidx);
                         },
                         16 => { // table.size
                             const tidx = readU32(body, &pc);
                             if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-                            try ip.pushI32(@intCast(ip.instance.tables[tidx].elems.len));
+                            const table = ip.instance.tables[tidx];
+                            if (table.is_64) try ip.pushI64(@intCast(table.elems.len)) else try ip.pushI32(@intCast(table.elems.len));
                         },
                         17 => { // table.fill
                             const tidx = readU32(body, &pc);
@@ -837,13 +841,26 @@ inline fn moveValues(ip: *Interp, e: code_mod.BranchEntry) void {
 /// the effective byte address (§4.4.7).
 inline fn memEa(ip: *Interp, body: []const u8, pc: *usize) u64 {
     _ = readU32(body, pc); // align hint (ignored)
-    const offset = readU32(body, pc);
-    const addr: u32 = @bitCast(ip.popI32());
-    return @as(u64, addr) + offset;
+    const is_64 = if (ip.instance.memory) |m| m.is_64 else false;
+    const offset: u64 = if (is_64) readU64(body, pc) else readU32(body, pc);
+    // The i32 address zero-extends in its cell, so reading the low 64
+    // bits gives the correct unsigned address for both 32- and 64-bit
+    // memories. Saturate on overflow so an oversized effective address
+    // fails the bounds check rather than wrapping.
+    const addr: u64 = @truncate(ip.popCell());
+    return std.math.add(u64, addr, offset) catch std.math.maxInt(u64);
+}
+
+/// Overflow-safe `[start, start+n)` ⊆ `[0, len)`. memory64/table64
+/// operands can be near 2^64, so `start + n` must not be computed
+/// directly.
+inline fn rangeInBounds(len: usize, start: u64, n: u64) bool {
+    if (start > len) return false;
+    return n <= @as(u64, len) - start;
 }
 
 inline fn checkBounds(len: usize, ea: u64, n: u64) TrapError!void {
-    if (ea + n > len) return error.OutOfBoundsMemoryAccess;
+    if (!rangeInBounds(len, ea, n)) return error.OutOfBoundsMemoryAccess;
 }
 
 fn execLoad(ip: *Interp, op: Op, ea: u64) TrapError!void {
@@ -976,66 +993,77 @@ fn execStore(ip: *Interp, op: Op, body: []const u8, pc: *usize) TrapError!void {
     }
 }
 
-/// memory.grow: returns the previous page count, or -1 if the request
-/// exceeds the maximum or allocation fails (§4.4.7).
-fn memGrow(ip: *Interp) TrapError!i32 {
-    const delta: u32 = @bitCast(ip.popI32());
+/// memory.grow: pushes the previous page count, or -1, with the result
+/// width matching the memory's address type (§4.4.7).
+fn memGrow(ip: *Interp) TrapError!void {
+    const delta: u64 = @truncate(ip.popCell());
     const mem = &ip.instance.memory.?;
-    const old_pages = mem.pages();
-    const new_pages: u64 = @as(u64, old_pages) + delta;
-    if (new_pages > 65536) return -1; // memory32 hard cap (4 GiB)
+    const result = growMem(ip, mem, delta);
+    if (mem.is_64) {
+        try ip.pushI64(if (result) |r| @bitCast(r) else -1);
+    } else {
+        try ip.pushI32(if (result) |r| @intCast(r) else -1);
+    }
+}
+
+fn growMem(ip: *Interp, mem: *Memory, delta: u64) ?u64 {
+    const old = mem.pages();
+    const new_pages: u64 = old + delta;
+    if (new_pages > 65536) return null; // hard cap (4 GiB) bounds allocation
     if (mem.max_pages) |mx| {
-        if (new_pages > mx) return -1;
+        if (new_pages > mx) return null;
     }
     const old_len = mem.data.len;
-    const new_len: usize = @as(usize, @intCast(new_pages)) * PAGE_SIZE;
-    const grown = ip.instance.gpa.realloc(mem.data, new_len) catch return -1;
+    const grown = ip.instance.gpa.realloc(mem.data, @as(usize, @intCast(new_pages)) * PAGE_SIZE) catch return null;
     @memset(grown[old_len..], 0);
     mem.data = grown;
-    return @bitCast(old_pages);
+    return old;
 }
 
 fn memCopy(ip: *Interp) TrapError!void {
-    const n: u32 = @bitCast(ip.popI32());
-    const src: u32 = @bitCast(ip.popI32());
-    const dst: u32 = @bitCast(ip.popI32());
+    const n: u64 = @truncate(ip.popCell());
+    const src: u64 = @truncate(ip.popCell());
+    const dst: u64 = @truncate(ip.popCell());
     const data = ip.instance.memory.?.data;
     try checkBounds(data.len, src, n);
     try checkBounds(data.len, dst, n);
     if (n == 0) return;
-    // memmove semantics for overlapping ranges.
+    const d: usize = @intCast(dst);
+    const s: usize = @intCast(src);
+    const cnt: usize = @intCast(n);
     if (dst <= src) {
         var i: usize = 0;
-        while (i < n) : (i += 1) data[dst + i] = data[src + i];
+        while (i < cnt) : (i += 1) data[d + i] = data[s + i];
     } else {
-        var i: usize = n;
+        var i: usize = cnt;
         while (i > 0) {
             i -= 1;
-            data[dst + i] = data[src + i];
+            data[d + i] = data[s + i];
         }
     }
 }
 
 fn memFill(ip: *Interp) TrapError!void {
-    const n: u32 = @bitCast(ip.popI32());
+    const n: u64 = @truncate(ip.popCell());
     const val: u32 = @bitCast(ip.popI32());
-    const dst: u32 = @bitCast(ip.popI32());
+    const dst: u64 = @truncate(ip.popCell());
     const data = ip.instance.memory.?.data;
     try checkBounds(data.len, dst, n);
     if (n == 0) return;
-    @memset(data[dst..][0..n], @truncate(val));
+    @memset(data[@intCast(dst)..][0..@intCast(n)], @truncate(val));
 }
 
 fn memInit(ip: *Interp, data_idx: u32) TrapError!void {
     const n: u32 = @bitCast(ip.popI32());
     const src: u32 = @bitCast(ip.popI32());
-    const dst: u32 = @bitCast(ip.popI32());
+    const dst: u64 = @truncate(ip.popCell());
     if (data_idx >= ip.instance.data_segments.len) return error.OutOfBoundsMemoryAccess;
     const seg = ip.instance.data_segments[data_idx].bytes;
     const mem = ip.instance.memory orelse return error.OutOfBoundsMemoryAccess;
-    if (@as(u64, src) + n > seg.len or @as(u64, dst) + n > mem.data.len) return error.OutOfBoundsMemoryAccess;
+    if (!rangeInBounds(seg.len, src, n) or !rangeInBounds(mem.data.len, dst, n)) return error.OutOfBoundsMemoryAccess;
+    const base: usize = @intCast(dst);
     var k: u32 = 0;
-    while (k < n) : (k += 1) mem.data[dst + k] = seg[src + k];
+    while (k < n) : (k += 1) mem.data[base + k] = seg[src + k];
 }
 
 // ── tables ──────────────────────────────────────────────────────────
@@ -1050,65 +1078,79 @@ fn funcTypesEqual(a: types.FuncType, b: types.FuncType) bool {
 fn tableInit(ip: *Interp, elem_idx: u32, tidx: u32) TrapError!void {
     const n: u32 = @bitCast(ip.popI32());
     const src: u32 = @bitCast(ip.popI32());
-    const dst: u32 = @bitCast(ip.popI32());
+    const dst: u64 = @truncate(ip.popCell());
     if (tidx >= ip.instance.tables.len or elem_idx >= ip.instance.elem_segments.len) return error.UnsupportedImportCall;
     const table = &ip.instance.tables[tidx];
     const vals = ip.instance.elem_segments[elem_idx].values;
-    if (@as(u64, src) + n > vals.len or @as(u64, dst) + n > table.elems.len) return error.OutOfBoundsTableAccess;
+    if (!rangeInBounds(vals.len, src, n) or !rangeInBounds(table.elems.len, dst, n)) return error.OutOfBoundsTableAccess;
+    const base: usize = @intCast(dst);
     var k: u32 = 0;
-    while (k < n) : (k += 1) table.elems[dst + k] = vals[src + k];
+    while (k < n) : (k += 1) table.elems[base + k] = vals[src + k];
 }
 
 fn tableCopy(ip: *Interp, dst_t: u32, src_t: u32) TrapError!void {
-    const n: u32 = @bitCast(ip.popI32());
-    const src: u32 = @bitCast(ip.popI32());
-    const dst: u32 = @bitCast(ip.popI32());
+    const n: u64 = @truncate(ip.popCell());
+    const src: u64 = @truncate(ip.popCell());
+    const dst: u64 = @truncate(ip.popCell());
     if (dst_t >= ip.instance.tables.len or src_t >= ip.instance.tables.len) return error.UnsupportedImportCall;
     const dtable = &ip.instance.tables[dst_t];
     const stable = &ip.instance.tables[src_t];
-    if (@as(u64, src) + n > stable.elems.len or @as(u64, dst) + n > dtable.elems.len) return error.OutOfBoundsTableAccess;
+    if (!rangeInBounds(stable.elems.len, src, n) or !rangeInBounds(dtable.elems.len, dst, n)) return error.OutOfBoundsTableAccess;
     if (n == 0) return;
+    const d: usize = @intCast(dst);
+    const s: usize = @intCast(src);
+    const cnt: usize = @intCast(n);
     if (dst <= src) {
-        var k: u32 = 0;
-        while (k < n) : (k += 1) dtable.elems[dst + k] = stable.elems[src + k];
+        var k: usize = 0;
+        while (k < cnt) : (k += 1) dtable.elems[d + k] = stable.elems[s + k];
     } else {
-        var k: u32 = n;
+        var k: usize = cnt;
         while (k > 0) {
             k -= 1;
-            dtable.elems[dst + k] = stable.elems[src + k];
+            dtable.elems[d + k] = stable.elems[s + k];
         }
     }
 }
 
-fn tableGrow(ip: *Interp, tidx: u32) TrapError!i32 {
-    const n: u32 = @bitCast(ip.popI32());
+fn tableGrow(ip: *Interp, tidx: u32) TrapError!void {
+    const n: u64 = @truncate(ip.popCell());
     const init_val = ip.popV128();
     if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
     const table = &ip.instance.tables[tidx];
-    const old: u32 = @intCast(table.elems.len);
-    const new_len: u64 = @as(u64, old) + n;
+    const result = growTable(ip, table, n, init_val);
+    if (table.is_64) {
+        try ip.pushI64(if (result) |r| @intCast(r) else -1);
+    } else {
+        try ip.pushI32(if (result) |r| @intCast(r) else -1);
+    }
+}
+
+fn growTable(ip: *Interp, table: *Table, n: u64, init_val: u128) ?u64 {
+    const old: u64 = table.elems.len;
+    const new_len: u64 = old + n;
     // §4.5.4 permits growth to fail for any implementation limit; cap
     // well below the point where a huge request would lazily "succeed"
     // and fault on first touch.
-    if (new_len > MAX_TABLE_ELEMS) return -1;
+    if (new_len > MAX_TABLE_ELEMS) return null;
     if (table.max) |mx| {
-        if (new_len > mx) return -1;
+        if (new_len > mx) return null;
     }
-    const grown = ip.instance.gpa.realloc(table.elems, @intCast(new_len)) catch return -1;
-    for (grown[old..]) |*e| e.* = init_val;
+    const grown = ip.instance.gpa.realloc(table.elems, @intCast(new_len)) catch return null;
+    for (grown[@intCast(old)..]) |*e| e.* = init_val;
     table.elems = grown;
-    return @bitCast(old);
+    return old;
 }
 
 fn tableFill(ip: *Interp, tidx: u32) TrapError!void {
-    const n: u32 = @bitCast(ip.popI32());
+    const n: u64 = @truncate(ip.popCell());
     const val = ip.popV128();
-    const dst: u32 = @bitCast(ip.popI32());
+    const dst: u64 = @truncate(ip.popCell());
     if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
     const table = &ip.instance.tables[tidx];
-    if (@as(u64, dst) + n > table.elems.len) return error.OutOfBoundsTableAccess;
-    var k: u32 = 0;
-    while (k < n) : (k += 1) table.elems[dst + k] = val;
+    if (!rangeInBounds(table.elems.len, dst, n)) return error.OutOfBoundsTableAccess;
+    const base: usize = @intCast(dst);
+    var k: usize = 0;
+    while (k < n) : (k += 1) table.elems[base + k] = val;
 }
 
 // ── immediate readers (advance `pc`) ────────────────────────────────
@@ -1135,6 +1177,19 @@ fn readU32(body: []const u8, pc: *usize) u32 {
     return result;
 }
 
+fn readU64(body: []const u8, pc: *usize) u64 {
+    var result: u64 = 0;
+    var shift: u6 = 0;
+    while (true) {
+        const b = body[pc.*];
+        pc.* += 1;
+        result |= @as(u64, b & 0x7f) << shift;
+        if (b & 0x80 == 0) break;
+        shift += 7;
+    }
+    return result;
+}
+
 fn readI32(body: []const u8, pc: *usize) i32 {
     var result: i32 = 0;
     var shift: u5 = 0;
@@ -1146,7 +1201,9 @@ fn readI32(body: []const u8, pc: *usize) i32 {
         if (b & 0x80 == 0) break;
         shift += 7;
     }
-    if (shift < 31 and (b & 0x40) != 0) result |= @as(i32, -1) << (shift + 7);
+    // Sign-extend only when there is room: at the final byte of a
+    // 5-byte i32 LEB the value already fills 32 bits (shift == 28).
+    if (shift < 25 and (b & 0x40) != 0) result |= @as(i32, -1) << (shift + 7);
     return result;
 }
 
@@ -1161,7 +1218,7 @@ fn readI64(body: []const u8, pc: *usize) i64 {
         if (b & 0x80 == 0) break;
         shift += 7;
     }
-    if (shift < 63 and (b & 0x40) != 0) result |= @as(i64, -1) << @as(u6, @intCast(shift + 7));
+    if (shift < 57 and (b & 0x40) != 0) result |= @as(i64, -1) << @as(u6, @intCast(shift + 7));
     return result;
 }
 
