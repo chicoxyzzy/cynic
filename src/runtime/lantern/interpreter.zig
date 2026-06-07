@@ -2430,6 +2430,9 @@ pub fn runFrames(
                 const prior_fn_realm = realm.active_native_fn_realm;
                 realm.active_native_fn_realm = callee_fn.realm;
                 defer realm.active_native_fn_realm = prior_fn_realm;
+                const prior_active_native_fn = realm.active_native_fn;
+                realm.active_native_fn = callee_fn;
+                defer realm.active_native_fn = prior_active_native_fn;
                 const args_start = @as(usize, r_callee) + 1;
                 const args = registers[args_start .. args_start + argc];
                 const native_this: Value = if (callee_fn.is_arrow)
@@ -2727,6 +2730,9 @@ pub fn runFrames(
                 const prior_fn_realm = realm.active_native_fn_realm;
                 realm.active_native_fn_realm = callee_fn.realm;
                 defer realm.active_native_fn_realm = prior_fn_realm;
+                const prior_active_native_fn = realm.active_native_fn;
+                realm.active_native_fn = callee_fn;
+                defer realm.active_native_fn = prior_active_native_fn;
                 const args_start = @as(usize, r_callee) + 1;
                 const args = registers[args_start .. args_start + argc];
                 const native_this: Value = if (callee_fn.is_arrow)
@@ -3080,6 +3086,9 @@ pub fn runFrames(
                 const prior_fn_realm = realm.active_native_fn_realm;
                 realm.active_native_fn_realm = callee_fn.realm;
                 defer realm.active_native_fn_realm = prior_fn_realm;
+                const prior_active_native_fn = realm.active_native_fn;
+                realm.active_native_fn = callee_fn;
+                defer realm.active_native_fn = prior_active_native_fn;
                 const args_start = @as(usize, r_recv) + 1;
                 const args = registers[args_start .. args_start + argc];
                 const native_this: Value = if (callee_fn.is_arrow)
@@ -3373,6 +3382,9 @@ pub fn runFrames(
                 const prior_fn_realm = realm.active_native_fn_realm;
                 realm.active_native_fn_realm = callee_fn.realm;
                 defer realm.active_native_fn_realm = prior_fn_realm;
+                const prior_active_native_fn = realm.active_native_fn;
+                realm.active_native_fn = callee_fn;
+                defer realm.active_native_fn = prior_active_native_fn;
                 const args_start = @as(usize, r_callee) + 1;
                 const args = registers[args_start .. args_start + argc];
                 const native_this: Value = if (callee_fn.is_arrow)
@@ -3632,6 +3644,9 @@ pub fn runFrames(
                 const prior_fn_realm = realm.active_native_fn_realm;
                 realm.active_native_fn_realm = callee_fn.realm;
                 defer realm.active_native_fn_realm = prior_fn_realm;
+                const prior_active_native_fn = realm.active_native_fn;
+                realm.active_native_fn = callee_fn;
+                defer realm.active_native_fn = prior_active_native_fn;
                 const args_start = @as(usize, r_callee) + 1;
                 const args = registers[args_start .. args_start + argc];
                 const native_this: Value = if (callee_fn.is_arrow)
@@ -4053,6 +4068,9 @@ pub fn runFrames(
                 const prior_fn_realm = realm.active_native_fn_realm;
                 realm.active_native_fn_realm = callee_fn.realm;
                 defer realm.active_native_fn_realm = prior_fn_realm;
+                const prior_active_native_fn = realm.active_native_fn;
+                realm.active_native_fn = callee_fn;
+                defer realm.active_native_fn = prior_active_native_fn;
                 const args_start = @as(usize, r_callee) + 1;
                 const args = registers[args_start .. args_start + argc];
                 // For native constructors, `this` is the freshly

@@ -799,6 +799,13 @@ pub const Realm = struct {
     /// invocation, so nested native calls don't clobber an outer
     /// frame's value.
     active_native_fn_realm: ?*Realm = null,
+    /// The native function currently executing, recorded by the call
+    /// dispatcher around every native invocation (saved / restored for
+    /// nesting, like `active_native_fn_realm`). A native that needs
+    /// per-callee state — e.g. a WebAssembly exported function reaching
+    /// its `(instance, func_index)` — reads it here, since the native
+    /// signature does not pass the callee.
+    active_native_fn: ?*@import("function.zig").JSFunction = null,
     /// Sticky flag set when [[DefineOwnProperty]] rejected a typed-
     /// array index (per §10.4.5.3 — returns false, not throws).
     /// Object.defineProperty translates the reject to TypeError;
@@ -1022,6 +1029,18 @@ pub const Realm = struct {
     /// eval-on — they're orthogonal capabilities. See
     /// docs/ses-alignment.md.
     allow_eval: bool = false,
+    /// `--allow=wasm` posture toggle. When `false` (the default) the
+    /// WebAssembly code-construction surface (`compile` / `instantiate`
+    /// / `new Module` / `new Instance`) throws by policy
+    /// (HostEnsureCanCompileWasmBytes; SES-aligned, orthogonal to
+    /// `allow_eval`). `WebAssembly.validate` is ungated — it only
+    /// inspects bytes. Set `true` to open the gate.
+    allow_wasm: bool = false,
+    /// Lazily-created arena owning every realm-resident WebAssembly
+    /// artifact (decoded modules, instances, their store state). Freed
+    /// wholesale at realm teardown, so wasm objects need no per-object
+    /// cleanup. The realm-owned store of docs/wasm-engine.md §7.
+    wasm_arena: ?std.heap.ArenaAllocator = null,
     /// Phase 3 SES override-mistake fix — `freezePrimordials`
     /// installs a `SyntheticAccessor` pair (getter + setter
     /// JSFunctions sharing one capture cell) for every data
@@ -1249,6 +1268,7 @@ pub const Realm = struct {
             self.allocator.destroy(self.heap);
         }
         if (self.class_arena) |*a| a.deinit();
+        if (self.wasm_arena) |*a| a.deinit();
     }
 
     /// Request the interpreter unwind on its next dispatch tick.
@@ -1454,6 +1474,16 @@ pub const Realm = struct {
             self.class_arena = std.heap.ArenaAllocator.init(self.allocator);
         }
         return self.class_arena.?.allocator();
+    }
+
+    /// Lazily-initialised allocator owning every realm-resident
+    /// WebAssembly artifact (decoded modules, instances, store state).
+    /// Lives until `realm.deinit`. See docs/wasm-engine.md §7.
+    pub fn wasmAllocator(self: *Realm) std.mem.Allocator {
+        if (self.wasm_arena == null) {
+            self.wasm_arena = std.heap.ArenaAllocator.init(self.allocator);
+        }
+        return self.wasm_arena.?.allocator();
     }
 
     /// Run a stop-the-world mark-sweep cycle. Roots:

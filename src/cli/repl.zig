@@ -33,6 +33,7 @@ pub fn run(
     debug_globals: bool,
     unhardened: bool,
     allow_eval: bool,
+    allow_wasm: bool,
 ) !void {
     var realm = Realm.init(allocator);
     defer realm.deinit();
@@ -46,6 +47,7 @@ pub fn run(
     // `--allow=eval` — open the runtime-code-construction gate. See
     // `Realm.allow_eval`.
     if (allow_eval) realm.allow_eval = true;
+    if (allow_wasm) realm.allow_wasm = true;
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
     // REPL is a debug / exploration context — install the debug

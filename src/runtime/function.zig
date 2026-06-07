@@ -281,6 +281,12 @@ pub const JSFunction = struct {
     bound_target: ?*JSFunction = null,
     bound_this: Value = Value.undefined_,
     bound_args: ?[]const Value = null,
+    /// A WebAssembly *Exported Function*'s backing record (its defining
+    /// instance + function index), set on the native function returned
+    /// in an `Instance.exports`. Opaque here to keep this module free of
+    /// a wasm dependency; the WebAssembly builtin casts it. The record
+    /// lives in the realm's `wasm_arena`, so no cleanup is needed here.
+    wasm_export: ?*anyopaque = null,
     /// §3.8.3.5 WrappedFunctionCreate — set on a function that
     /// crosses a ShadowRealm callable boundary. Holds the original
     /// target from the OTHER realm; the call dispatch reads it,

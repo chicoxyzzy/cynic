@@ -211,6 +211,23 @@ pub const Instance = struct {
         return .{ .wasm = .{ .instance = self, .func = &self.funcs[local] } };
     }
 
+    /// The function type (params / results) of a function-index-space
+    /// entry, spanning imports and defined functions. For the JS API's
+    /// argument / result marshalling.
+    pub fn funcType(self: *const Instance, func_index: u32) ?types.FuncType {
+        var k: u32 = 0;
+        for (self.module.imports) |imp| switch (imp.desc) {
+            .func => |ti| {
+                if (k == func_index) return self.module.types[ti];
+                k += 1;
+            },
+            else => {},
+        };
+        const local = func_index - k;
+        if (local >= self.module.funcs.len) return null;
+        return self.module.types[self.module.funcs[local]];
+    }
+
     /// Resolve an exported function by name to a callable `FuncRef`,
     /// for cross-module linking (the importing instance stores this as
     /// one of its `imported_funcs`). Null if there is no such function

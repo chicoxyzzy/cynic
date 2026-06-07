@@ -862,6 +862,12 @@ pub fn callJSFunction(
         const prior_fn_realm = realm.active_native_fn_realm;
         realm.active_native_fn_realm = callee.realm;
         defer realm.active_native_fn_realm = prior_fn_realm;
+        // Record the callee so a native needing per-function state (e.g.
+        // a WebAssembly exported function) can recover it; the native
+        // signature passes only `this`/`args`, not the callee.
+        const prior_fn = realm.active_native_fn;
+        realm.active_native_fn = callee;
+        defer realm.active_native_fn = prior_fn;
         const result = native(realm, native_this, args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NativeThrew => {

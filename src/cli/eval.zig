@@ -18,6 +18,7 @@ pub fn run(
     gc_threshold: ?u32,
     unhardened: bool,
     allow_eval: bool,
+    allow_wasm: bool,
 ) !void {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -50,6 +51,7 @@ pub fn run(
     // (§19.2.1.2 EvalError); with it the eval engine runs source in the
     // realm (§19.2.1 / §20.2.1.1.1). See `Realm.allow_eval`.
     if (allow_eval) realm.allow_eval = true;
+    if (allow_wasm) realm.allow_wasm = true;
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
 

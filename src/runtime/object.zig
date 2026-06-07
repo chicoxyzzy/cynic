@@ -912,6 +912,11 @@ pub const JSObject = struct {
     /// transient bound-this object the capability executor closes
     /// over. Hidden from JS.
     capability_record: ?*PromiseCapabilityRecord = null,
+    /// A `WebAssembly.Module`'s decoded module record, set on the
+    /// constructed Module instance. Opaque here (the WebAssembly builtin
+    /// casts it); the record lives in the realm's `wasm_arena`, so it
+    /// holds no GC values and needs no marking or cleanup.
+    wasm_module: ?*anyopaque = null,
     /// `Promise.prototype.finally` callback — set on the per-
     /// `.finally()` context object the reaction closures capture
     /// via `is_arrow + captured_this`. Hidden from JS.
