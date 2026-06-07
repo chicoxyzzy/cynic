@@ -826,3 +826,151 @@ the corpus under the relevant section's directory before adding.
   large finite value, asserting the wrapped function's `length` matches.
   Existing fixtures cover the +∞ and 0/NaN cases; none drives an arity
   past the engine's native integer width.
+
+### `setPrototypeOf` on a function + chain walk via Proxy trap segfaulted after GC
+
+- **Fixed in:** `4bdbb66`
+- **Spec:** §10.2 [[Prototype]] — a function's `__proto__` is
+  reachable through the function and must remain so for the
+  lifetime of the function's own reachability. Not a normative
+  rule but a memory-safety invariant every shipping engine
+  preserves.
+- **Reproducer:**
+  ```js
+  function f() {}
+  const h = { get: (t, k, r) => Reflect.get(t, k, r) };
+  Object.setPrototypeOf(f, new Proxy(Object.getPrototypeOf(f), h));
+  __collectGarbage();
+  void (1 / f);  // ToPrimitive walks f.__proto__.@@toPrimitive
+  ```
+- **Before fix:** Cynic's mark phase walked `JSObject.prototype`
+  but not `JSFunction.proto`, so the new Proxy installed as
+  `f.__proto__` was reachable only through `f.proto` and got
+  reclaimed at the next major sweep. ToPrimitive's chain walk then
+  dereferenced 0xaa-poisoned memory and segfaulted (ReleaseSafe)
+  or read garbage (ReleaseFast). Fuzzilli's Probe instrumentation
+  surfaced this pattern as 166 of 188 deterministic crashes in a
+  single 4-minute run.
+- **After fix:** Both `markValue`'s function arm and
+  `markFunctionInternalSlots` enqueue `f.proto`, matching the
+  JSObject prototype handling.
+- **Suggested fixture shape:** positive runtime fixture (requires
+  a `gc()` host hook — `$262.gc()` is the test262 convention)
+  under `language/expressions/binary-operators/` or
+  `built-ins/Symbol/toPrimitive/` that calls `gc()` after
+  `setPrototypeOf(fn, proxy)`, then exercises a chain walk that
+  crosses the new proto. Existing GC stress tests don't combine
+  `setPrototypeOf` on a callable with a Proxy proto and a
+  subsequent ToPrimitive trigger.
+
+### `new Date(0, 1e308)` aborted the host on the `@intFromFloat` cast
+
+- **Fixed in:** `43cc2ea`
+- **Spec:** §21.4.1.13 MakeDay — the result must be a Number;
+  out-of-range month / day inputs flow through MakeTime and
+  TimeClip to NaN per §21.4.1.14 / §21.4.1.21.
+- **Reproducer:**
+  ```js
+  new Date(0, -2.3e307).getTime();  // → NaN, not a host abort
+  Date.UTC(0, 1e20, 1);
+  ```
+- **Before fix:** `makeUTC` guarded the year against the
+  §21.4.1.13 envelope but not month / day; values outside i64
+  reached `@intFromFloat` and panicked the process.
+- **After fix:** Month and day are clamped to ±9e15 (below i64
+  saturation and the downstream `era*146097` overflow threshold),
+  returning NaN for larger inputs — matching what TimeClip would
+  produce downstream.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/Date/UTC/` and `built-ins/Date/` asserting
+  `Number.isNaN(new Date(0, 1e20).getTime())`. The existing
+  `fp-evaluation-order.js` tests precision but not OOB-month
+  aborts; no current fixture drives an OOB month past i64 range.
+
+### TypedArray.prototype.{length, byteLength} aborted on buffers larger than 2^31
+
+- **Fixed in:** `3189821`
+- **Spec:** §23.2.3.18 / §23.2.3.2 — return the current size as a
+  Number. A Number losslessly represents up to 2^53-1 (§6.1.6),
+  so the accessor must accommodate any buffer size the
+  implementation allows.
+- **Reproducer:**
+  ```js
+  const buf = new ArrayBuffer(2147483648, { maxByteLength: 4294967296 });
+  const v = new Uint8Array(buf);
+  buf.resize(2147483649);
+  v.length;  // → 2147483649, not host-abort
+  ```
+- **Before fix:** Both accessors cast `usize` through `@intCast`
+  to `i32` before `Value.fromInt32`. A view with > 2^31 elements
+  panicked with "integer does not fit in destination type".
+- **After fix:** Fast-path the int32 case (the common path); fall
+  back to `Value.fromDouble` for the larger range. Result is still
+  a Number primitive.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/TypedArray/prototype/length/` exercising
+  `length > 2^31` on a growable buffer, asserting the value is
+  exact; similar for `byteLength`. Current fixtures top out
+  around the array-length cap.
+
+### `parseInt` / `parseFloat` aborted on a string with invalid UTF-8 bytes
+
+- **Fixed in:** `2f41632`
+- **Spec:** §19.2.5 parseInt / §19.2.6 parseFloat — `S = ! ToString(string)`.
+  ToString never throws here; the parser must consume `S` and
+  return NaN if no prefix is parseable, regardless of what bytes
+  the string contains.
+- **Reproducer:**
+  ```js
+  // a string whose storage contains a byte that's not a valid
+  // UTF-8 start byte (e.g. a lone 0xFF, or a surrogate-half
+  // sequence smuggled through fromCharCode).
+  parseInt(String.fromCharCode(0xDC00));  // → NaN, not a host abort
+  ```
+- **Before fix:** `skipStrWhiteSpace` iterated through
+  `std.unicode.Utf8View.initUnchecked`, whose internal
+  `utf8ByteSequenceLength(b) catch unreachable` panicked on any
+  byte that wasn't a valid UTF-8 start byte. The function's own
+  docstring already promised "an invalid sequence stops the scan"
+  — this was a contract violation against its own spec.
+- **After fix:** Manual byte loop calling `utf8ByteSequenceLength`
+  and `utf8Decode` with `catch return i`; invalid bytes terminate
+  the scan and the parser sees no whitespace at that position.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/parseInt/` and `built-ins/parseFloat/` building a
+  string from `String.fromCharCode(0xDC00)` (a lone surrogate) and
+  asserting `Number.isNaN`. Existing fixtures cover the WS-only
+  and valid-numeric paths; none drives an invalid-UTF-8 prefix
+  through ToString.
+
+### `Object.getOwnPropertyNames` aborted on `@memcpy` aliasing under GC pressure
+
+- **Fixed in:** `820f987`
+- **Spec:** §20.1.2.10 — return a fresh Array of the receiver's
+  own string-keyed property names. No normative rule on lifetime
+  management; the engine-side contract is that allocations during
+  the loop must not invalidate the keys still being copied.
+- **Reproducer:**
+  ```js
+  const o = {};
+  for (let i = 0; i < 100; i++) o[`p${i}`] = i;
+  // force allocator reuse of the JSString buffers backing `o`'s keys
+  for (let j = 0; j < 1000; j++) ({});
+  __collectGarbage();
+  Object.getOwnPropertyNames(o);  // → array of names, not host abort
+  ```
+- **Before fix:** The loop borrowed each `key` slice from existing
+  JSString buffers. The inner `allocateString(index_string)`
+  triggered GC, which could reclaim a JSString whose bytes a later
+  iteration's `key` pointed to; if the next slab allocation landed
+  at the same byte address, `allocateString(key)` saw
+  `dest_ptr == src_ptr` and Zig's `@memcpy` panicked on the
+  aliasing check.
+- **After fix:** Each `key` is duped onto `realm.allocator` (not
+  the GC heap) at the top of the iteration, so the bytes survive
+  any intervening collection.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/Object/getOwnPropertyNames/` building an object with
+  dozens of string-keyed properties, forcing GC between property
+  additions, then asserting the result. No existing fixture
+  combines property enumeration with GC stress this way.
