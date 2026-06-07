@@ -42,6 +42,9 @@ pub const ValidateError = error{
     BadBlockType,
     BadLane,
     BadAlign,
+    BadConstExpr,
+    DataCountMissing,
+    UnknownDataSegment,
     UnknownOpcode,
     TypeMismatch,
     StackUnderflow,
@@ -99,6 +102,18 @@ const Ctrl = struct {
 /// each (positionally matching `module.code`). Allocations come from
 /// `arena`, which the caller owns for the module's lifetime.
 pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateError![]const CompiledFunc {
+    // §3.4.4 — each global's initializer is a constant expression of the
+    // global's declared type. A `global.get` may name any preceding
+    // immutable global (imported or defined), so each initializer sees
+    // only the globals declared before it.
+    var glob_imports: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .global) glob_imports += 1;
+    }
+    for (module.globals, 0..) |g, i| {
+        try validateConstExpr(module, g.init_expr, g.type.val, glob_imports + @as(u32, @intCast(i)));
+    }
+
     const out = try arena.alloc(CompiledFunc, module.code.len);
     for (module.code, 0..) |body, i| {
         const type_index = module.funcs[i];
@@ -106,6 +121,116 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
         out[i] = try validateFunc(arena, module, type_index, body.bytes);
     }
     return out;
+}
+
+/// Total functions in the index space (imports + defined).
+fn totalFuncs(module: *const Module) u32 {
+    var imported: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .func) imported += 1;
+    }
+    return imported + @as(u32, @intCast(module.funcs.len));
+}
+
+/// Type of a global referenceable from a constant expression (§3.3.7):
+/// `global.get gi` may name any immutable global preceding `limit` in
+/// the index space (imports followed by earlier-declared definitions).
+fn constGlobalType(module: *const Module, gi: u32, limit: u32) ValidateError!ValType {
+    if (gi >= limit) return error.UnknownGlobal;
+    var k: u32 = 0;
+    for (module.imports) |imp| switch (imp.desc) {
+        .global => |gt| {
+            if (k == gi) {
+                if (gt.mut == .mutable) return error.BadConstExpr;
+                return gt.val;
+            }
+            k += 1;
+        },
+        else => {},
+    };
+    // A defined global preceding `limit`.
+    const di = gi - k;
+    if (di >= module.globals.len) return error.UnknownGlobal;
+    const g = module.globals[di];
+    if (g.type.mut == .mutable) return error.BadConstExpr;
+    return g.type.val;
+}
+
+/// §3.3.7 — type-check a constant expression and require it to yield
+/// exactly `expected`. Admits the typed `*.const` forms, `ref.null` /
+/// `ref.func`, `global.get` of an imported immutable global, and the
+/// extended-const `i32`/`i64` `add` / `sub` / `mul`.
+fn validateConstExpr(module: *const Module, expr: []const u8, expected: ValType, global_limit: u32) ValidateError!void {
+    var r = Reader.init(expr);
+    var stack: [16]ValType = undefined;
+    var sp: usize = 0;
+    const push = struct {
+        fn f(s: *[16]ValType, n: *usize, t: ValType) ValidateError!void {
+            if (n.* >= s.len) return error.BadConstExpr;
+            s.*[n.*] = t;
+            n.* += 1;
+        }
+    }.f;
+    const pop = struct {
+        fn f(s: *[16]ValType, n: *usize, t: ValType) ValidateError!void {
+            if (n.* == 0) return error.TypeMismatch;
+            n.* -= 1;
+            if (s.*[n.*] != t) return error.TypeMismatch;
+        }
+    }.f;
+    while (true) {
+        const op = try r.byte();
+        switch (op) {
+            0x0b => break, // end
+            0x41 => {
+                _ = try r.sleb(i32);
+                try push(&stack, &sp, .i32);
+            },
+            0x42 => {
+                _ = try r.sleb(i64);
+                try push(&stack, &sp, .i64);
+            },
+            0x43 => {
+                _ = try r.bytesN(4);
+                try push(&stack, &sp, .f32);
+            },
+            0x44 => {
+                _ = try r.bytesN(8);
+                try push(&stack, &sp, .f64);
+            },
+            0x23 => { // global.get
+                const gi = try r.uleb(u32);
+                try push(&stack, &sp, try constGlobalType(module, gi, global_limit));
+            },
+            0xd0 => { // ref.null
+                const rt = types.RefType.fromByte(try r.byte()) orelse return error.BadRefType;
+                try push(&stack, &sp, rt.toValType());
+            },
+            0xd2 => { // ref.func
+                const fi = try r.uleb(u32);
+                if (fi >= totalFuncs(module)) return error.UnknownFunc;
+                try push(&stack, &sp, .funcref);
+            },
+            0x6a, 0x6b, 0x6c => { // i32.add / sub / mul
+                try pop(&stack, &sp, .i32);
+                try pop(&stack, &sp, .i32);
+                try push(&stack, &sp, .i32);
+            },
+            0x7c, 0x7d, 0x7e => { // i64.add / sub / mul
+                try pop(&stack, &sp, .i64);
+                try pop(&stack, &sp, .i64);
+                try push(&stack, &sp, .i64);
+            },
+            0xfd => { // v128.const (only constant 0xFD form)
+                const sub = try r.uleb(u32);
+                if (sub != 12) return error.BadConstExpr;
+                _ = try r.bytesN(16);
+                try push(&stack, &sp, .v128);
+            },
+            else => return error.BadConstExpr, // not a constant instruction
+        }
+    }
+    if (sp != 1 or stack[0] != expected) return error.TypeMismatch;
 }
 
 const Validator = struct {
@@ -670,13 +795,13 @@ fn validateExpr(v: *Validator) ValidateError!void {
                     },
                     8 => { // memory.init
                         try requireMemory(v);
-                        _ = try v.r.uleb(u32); // data segment index
+                        try checkDataSeg(v, try v.r.uleb(u32)); // data segment index
                         _ = try v.r.byte(); // reserved memidx
                         try v.popExpect(.i32); // n
                         try v.popExpect(.i32); // src
                         try v.popExpect(v.mem_addr); // dst
                     },
-                    9 => _ = try v.r.uleb(u32), // data.drop
+                    9 => try checkDataSeg(v, try v.r.uleb(u32)), // data.drop
 
                     // Bulk table operations (reference-types).
                     12 => { // table.init
@@ -906,6 +1031,13 @@ fn requireMemory(v: *Validator) !void {
 /// Read a SIMD lane-index immediate and require it to be in range.
 fn checkLane(v: *Validator, lane_count: u8) !void {
     if (try v.r.byte() >= lane_count) return error.BadLane;
+}
+
+/// §3.4.8 — `memory.init` / `data.drop` reference a data segment by
+/// index. A data count section must be present and the index in range.
+fn checkDataSeg(v: *Validator, idx: u32) !void {
+    const count = v.module.data_count orelse return error.DataCountMissing;
+    if (idx >= count) return error.UnknownDataSegment;
 }
 
 /// Lane count for a load_lane / store_lane sub-opcode (by access width).
