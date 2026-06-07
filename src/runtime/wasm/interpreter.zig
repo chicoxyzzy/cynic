@@ -103,6 +103,9 @@ pub const FuncRef = union(enum) {
 /// module.
 pub const Imports = struct {
     funcs: []const FuncRef = &.{},
+    /// Imported global values, in global-import declaration order. Each
+    /// occupies the front of the importing module's global index space.
+    globals: []const u128 = &.{},
 };
 
 /// Linear memory: a byte-addressable, page-granular buffer. (The
@@ -154,12 +157,9 @@ pub const Instance = struct {
     /// (used by the conformance harness's `get` action). Returns null
     /// for an imported global, which is not yet wired.
     pub fn readGlobalByIndex(self: *const Instance, global_index: u32) ?u128 {
-        var imported: u32 = 0;
-        for (self.module.imports) |imp| {
-            if (imp.desc == .global) imported += 1;
-        }
-        if (global_index < imported) return null;
-        return self.globals[global_index - imported].value;
+        // Imported globals occupy the front of the index space.
+        if (global_index >= self.globals.len) return null;
+        return self.globals[global_index].value;
     }
 
     /// Resolve a function-index-space entry to a defined function, or
@@ -195,6 +195,20 @@ pub const Instance = struct {
         }
         return null;
     }
+
+    /// Read an exported global's current value by name, for a later
+    /// module importing it (cross-module linking).
+    pub fn exportedGlobalValue(self: *const Instance, name: []const u8) ?u128 {
+        for (self.module.exports) |ex| {
+            switch (ex.desc) {
+                .global => |idx| if (std.mem.eql(u8, ex.name, name)) {
+                    if (idx < self.globals.len) return self.globals[idx].value;
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
 };
 
 /// Validate every function and lay out runtime state. `arena` owns the
@@ -213,10 +227,33 @@ pub fn instantiate(
         if (imp.desc == .func) func_imports += 1;
     }
 
-    const globals = try allocator.alloc(Global, module.globals.len);
+    // The global index space is imported globals followed by defined
+    // ones; a defined initializer may `global.get` any earlier global.
+    var glob_imports: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .global) glob_imports += 1;
+    }
+    const globals = try allocator.alloc(Global, glob_imports + module.globals.len);
     errdefer allocator.free(globals);
+    {
+        var k: usize = 0;
+        for (module.imports) |imp| switch (imp.desc) {
+            .global => |gt| {
+                globals[k] = .{
+                    .value = if (k < imports.globals.len) imports.globals[k] else 0,
+                    .mutable = gt.mut == .mutable,
+                };
+                k += 1;
+            },
+            else => {},
+        };
+    }
     for (module.globals, 0..) |g, i| {
-        globals[i] = .{ .value = evalConstExpr(g.init_expr), .mutable = g.type.mut == .mutable };
+        const idx = glob_imports + i;
+        globals[idx] = .{
+            .value = evalConstExpr(g.init_expr, globals[0..idx]),
+            .mutable = g.type.mut == .mutable,
+        };
     }
 
     // Create the single defined linear memory (if any), zero-filled to
@@ -253,14 +290,14 @@ pub fn instantiate(
 
     // Parse element + data segments, applying active ones into the
     // tables and linear memory.
-    instance.elem_segments = try parseElements(arena, module, tables);
-    instance.data_segments = try parseData(arena, module, if (memory) |*m| m else null);
+    instance.elem_segments = try parseElements(arena, module, tables, globals);
+    instance.data_segments = try parseData(arena, module, if (memory) |*m| m else null, globals);
     return instance;
 }
 
 /// Parse the data section, applying active segments into linear memory
 /// and returning the (passive-keeping) segments for `memory.init`.
-fn parseData(arena: std.mem.Allocator, module: *const Module, memory: ?*Memory) Error![]DataSegment {
+fn parseData(arena: std.mem.Allocator, module: *const Module, memory: ?*Memory, globals: []const Global) Error![]DataSegment {
     const count = module.data_count_in_section;
     const segs = try arena.alloc(DataSegment, count);
     var r = reader_mod.Reader.init(module.data_raw);
@@ -270,7 +307,7 @@ fn parseData(arena: std.mem.Allocator, module: *const Module, memory: ?*Memory) 
         const is_active = (flag != 1); // flags 0 and 2 are active
         if (flag == 2) _ = try r.uleb(u32); // explicit memory index
         var offset: u64 = 0;
-        if (is_active) offset = try readOffsetExpr(&r);
+        if (is_active) offset = try readOffsetExpr(&r, globals);
         const n = try r.uleb(u32);
         const bytes = try r.bytesN(n);
 
@@ -289,7 +326,7 @@ fn parseData(arena: std.mem.Allocator, module: *const Module, memory: ?*Memory) 
 
 /// Parse the element section, applying active segments into `tables`
 /// and returning the (passive-keeping) segments for `table.init`.
-fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Table) Error![]ElemSegment {
+fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Table, globals: []const Global) Error![]ElemSegment {
     const count = module.elements_count;
     const segs = try arena.alloc(ElemSegment, count);
     var r = reader_mod.Reader.init(module.elements_raw);
@@ -303,14 +340,14 @@ fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Tabl
         var table_idx: u32 = 0;
         if (kind == 2) table_idx = try r.uleb(u32);
         var offset: u64 = 0;
-        if (is_active) offset = try readOffsetExpr(&r);
+        if (is_active) offset = try readOffsetExpr(&r, globals);
         if (kind != 0) _ = try r.byte(); // elemkind / reftype
 
         const n = try r.uleb(u32);
         const values = try arena.alloc(u128, n);
         var j: u32 = 0;
         while (j < n) : (j += 1) {
-            values[j] = if (use_exprs) try readElemExpr(&r) else try r.uleb(u32);
+            values[j] = if (use_exprs) try readElemExpr(&r, globals) else try r.uleb(u32);
         }
 
         if (is_active) {
@@ -329,46 +366,103 @@ fn parseElements(arena: std.mem.Allocator, module: *const Module, tables: []Tabl
     return segs;
 }
 
-/// An active segment's offset is a constant expression — `i32.const`
-/// (or an imported `global.get`, treated as 0 for now) then `end`.
-fn readOffsetExpr(r: *reader_mod.Reader) Error!u64 {
-    const op: Op = @enumFromInt(try r.byte());
-    var val: u64 = 0;
-    switch (op) {
-        .i32_const => val = @as(u32, @bitCast(try r.sleb(i32))),
-        .i64_const => val = @bitCast(try r.sleb(i64)),
-        .global_get => _ = try r.uleb(u32),
-        else => {},
+/// Evaluate a constant expression (§3.3.7), consuming it from `r` up to
+/// the terminating `end`. A small stack machine covering the constant
+/// instruction set: the typed `*.const` forms, `ref.null` / `ref.func`,
+/// `global.get` of an already-initialized (imported or earlier) global,
+/// and the extended-const proposal's `i32`/`i64` `add` / `sub` / `mul`.
+/// Returns the result as a raw cell (scalars in the low bits).
+fn evalConstReader(r: *reader_mod.Reader, globals: []const Global) Error!u128 {
+    var stack: [16]u128 = undefined;
+    var sp: usize = 0;
+    while (true) {
+        const b = try r.byte();
+        switch (b) {
+            0x0b => break, // end
+            0x41 => { // i32.const
+                stack[sp] = @as(u32, @bitCast(try r.sleb(i32)));
+                sp += 1;
+            },
+            0x42 => { // i64.const
+                stack[sp] = @as(u64, @bitCast(try r.sleb(i64)));
+                sp += 1;
+            },
+            0x43 => { // f32.const (4-byte little-endian pattern)
+                const bytes = try r.bytesN(4);
+                stack[sp] = std.mem.readInt(u32, bytes[0..4], .little);
+                sp += 1;
+            },
+            0x44 => { // f64.const
+                const bytes = try r.bytesN(8);
+                stack[sp] = std.mem.readInt(u64, bytes[0..8], .little);
+                sp += 1;
+            },
+            0x23 => { // global.get
+                const gi = try r.uleb(u32);
+                stack[sp] = if (gi < globals.len) globals[gi].value else 0;
+                sp += 1;
+            },
+            0xd0 => { // ref.null
+                _ = try r.byte(); // reftype
+                stack[sp] = REF_NULL;
+                sp += 1;
+            },
+            0xd2 => { // ref.func
+                stack[sp] = try r.uleb(u32);
+                sp += 1;
+            },
+            0x6a, 0x6b, 0x6c => { // i32.add / sub / mul
+                sp -= 1;
+                const y: u32 = @truncate(stack[sp]);
+                const x: u32 = @truncate(stack[sp - 1]);
+                stack[sp - 1] = switch (b) {
+                    0x6a => x +% y,
+                    0x6b => x -% y,
+                    else => x *% y,
+                };
+            },
+            0x7c, 0x7d, 0x7e => { // i64.add / sub / mul
+                sp -= 1;
+                const y: u64 = @truncate(stack[sp]);
+                const x: u64 = @truncate(stack[sp - 1]);
+                stack[sp - 1] = switch (b) {
+                    0x7c => x +% y,
+                    0x7d => x -% y,
+                    else => x *% y,
+                };
+            },
+            0xfd => { // v128.const (only constant 0xFD form)
+                const sub = try r.uleb(u32);
+                if (sub == 12) {
+                    const bytes = try r.bytesN(16);
+                    stack[sp] = std.mem.readInt(u128, bytes[0..16], .little);
+                    sp += 1;
+                }
+            },
+            else => {},
+        }
+        if (sp >= stack.len) return error.ValueStackOverflow;
     }
-    _ = try r.byte(); // end
-    return val;
+    return if (sp > 0) stack[sp - 1] else 0;
 }
 
-/// An element expression yields a reference: `ref.func idx` or
-/// `ref.null` then `end`.
-fn readElemExpr(r: *reader_mod.Reader) Error!u128 {
-    const op: Op = @enumFromInt(try r.byte());
-    var val: u128 = REF_NULL;
-    switch (op) {
-        .ref_func => val = try r.uleb(u32),
-        .ref_null => _ = try r.byte(), // reftype
-        else => {},
-    }
-    _ = try r.byte(); // end
-    return val;
+/// An active segment's offset is a constant expression yielding an
+/// address (its low bits).
+fn readOffsetExpr(r: *reader_mod.Reader, globals: []const Global) Error!u64 {
+    return @truncate(try evalConstReader(r, globals));
 }
 
-/// Evaluate a global's constant initializer (§3.3.7) for the subset
-/// that needs no other globals: `i32.const` / `i64.const`. The bytes
-/// are validated; an unrecognized form yields 0 for now.
-fn evalConstExpr(expr: []const u8) u64 {
+/// An element expression yields a reference cell (`ref.func` index or
+/// `ref.null`).
+fn readElemExpr(r: *reader_mod.Reader, globals: []const Global) Error!u128 {
+    return evalConstReader(r, globals);
+}
+
+/// Evaluate a global's constant initializer (§3.3.7) over the globals
+/// initialized so far (imports + earlier defined globals).
+fn evalConstExpr(expr: []const u8, globals: []const Global) u128 {
     var r = reader_mod.Reader.init(expr);
-    const op: Op = @enumFromInt(r.byte() catch return 0);
-    return switch (op) {
-        .i32_const => @as(u64, @as(u32, @bitCast(r.sleb(i32) catch 0))),
-        .i64_const => @bitCast(r.sleb(i64) catch 0),
-        else => 0,
-    };
+    return evalConstReader(&r, globals) catch 0;
 }
 
 const Frame = struct {
@@ -527,6 +621,13 @@ pub fn invoke(
     const out = try allocator.alloc(u128, nres);
     @memcpy(out, ip.stack[0..nres]);
     return out;
+}
+
+/// Run the module's start function (§5.5.11), if any. Called once after
+/// instantiation; a trap here means instantiation failed.
+pub fn runStart(self: *Instance, allocator: std.mem.Allocator) Error!void {
+    const idx = self.module.start orelse return;
+    _ = try invoke(self, allocator, idx, &.{});
 }
 
 fn run(ip: *Interp) Error!void {
