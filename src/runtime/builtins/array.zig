@@ -912,6 +912,18 @@ fn arrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeError!
 /// `Number.prototype.toLocaleString` is observed. `undefined` and
 /// `null` slots stringify to empty per step 6.c (matching join).
 fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // Native-stack guard — same rationale as `arrayJoin`. A self-
+    // referential array (`const a = []; a.push(a); a.toLocaleString()`)
+    // would otherwise recurse `arrayToLocaleString → callValue →
+    // arrayToLocaleString` forever and overflow the host stack
+    // (Fuzzilli reliably surfaced this in 4 of 6 stack-overflow
+    // crashes in the post-fix corpus). AGENTS.md host-safety
+    // contract: throw a catchable RangeError, never abort the host.
+    if (@import("../../stack_guard.zig").nearLimit()) {
+        const ex = intrinsics.newRangeError(realm, "Maximum call stack size exceeded") catch return error.OutOfMemory;
+        realm.pending_exception = ex;
+        return error.NativeThrew;
+    }
     _ = args;
     const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
