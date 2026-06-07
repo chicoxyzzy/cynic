@@ -6405,6 +6405,185 @@ test "iterator internal state is not an observable own property" {
     , 0);
 }
 
+test "no __cynic_* slot is observable across the prime-suspect builtins" {
+    // AGENTS.md "No engine state on user-visible objects" — engine
+    // state (iterator records, aggregator records, captured inputs,
+    // cached methods) must NEVER be stored as ordinary property-bag
+    // keys on an object reachable by user JS. `__cynic_*` keys stay
+    // observable through four vectors even though enumeration hides
+    // them: direct get, `in`, `Object.getOwnPropertyDescriptor`,
+    // `Object.hasOwn`. This test pins the invariant for every prime-
+    // suspect family the rule calls out: Promise aggregators
+    // (§27.2.4.{1,2,3} Promise.all / allSettled / any), Promise.race
+    // (§27.2.4.5), `Array.fromAsync` (§23.1.2.1.1), and the
+    // async-from-sync iterator wrapper (§27.6.1) reached through
+    // `yield* syncIter` in an async generator. Sister test above
+    // covers the sync iterator family.
+    //
+    // The slot list mirrors the engine-internal names the bound-
+    // trampoline state uses today (`k_fa_*` in array.zig,
+    // `k_agg_*` / `k_elem_*` in promise.zig,
+    // `__cynic_sync_iter__` in async_iterator.zig). All of these
+    // sit on `bound_this` targets or internal reaction functions —
+    // the AGENTS.md tolerable exception — so user code should
+    // never observe any of them.
+    try expectScriptIntWithBuiltins(
+        \\const slots = [
+        \\  "__cynic_fa_cap_resolve__", "__cynic_fa_cap_reject__",
+        \\  "__cynic_fa_array__", "__cynic_fa_index__",
+        \\  "__cynic_fa_length__", "__cynic_fa_iter__",
+        \\  "__cynic_fa_next_fn__", "__cynic_fa_mapfn__",
+        \\  "__cynic_fa_this_arg__", "__cynic_fa_items__",
+        \\  "__cynic_fa_mode__", "__cynic_fa_is_async__",
+        \\  "__cynic_agg_kind__", "__cynic_agg_remaining__",
+        \\  "__cynic_agg_values__", "__cynic_agg_cap_resolve__",
+        \\  "__cynic_agg_cap_reject__", "__cynic_agg_fulfilled_str__",
+        \\  "__cynic_agg_rejected_str__",
+        \\  "__cynic_elem_state__", "__cynic_elem_index__",
+        \\  "__cynic_elem_called__",
+        \\  "__cynic_sync_iter__"
+        \\];
+        \\// All four observability vectors per AGENTS.md. The first
+        \\// loop is a sanity check on the enumeration filter; the
+        \\// inner block is the real guard.
+        \\function leaks(o) {
+        \\  if (o === null || (typeof o !== "object" && typeof o !== "function")) return 0;
+        \\  let n = 0;
+        \\  for (const k of Object.getOwnPropertyNames(o))
+        \\    if (k.indexOf("__cynic") === 0) n++;
+        \\  for (const s of slots) {
+        \\    if (s in o) n++;                                       // vector: `in`
+        \\    if (Object.getOwnPropertyDescriptor(o, s) !== undefined) n++; // vector: gOPD
+        \\    if (Object.hasOwn(o, s)) n++;                          // vector: hasOwn
+        \\    if (o[s] !== undefined) n++;                           // vector: direct get
+        \\  }
+        \\  return n;
+        \\}
+        \\let total = 0;
+        \\
+        \\// (a) Promise.all + user thenable probes the resolve/reject
+        \\//     trampolines the engine hands it. The bound `wrapper`
+        \\//     and `state` sit behind those trampolines as their
+        \\//     `bound_this` — invisible from JS unless the rule is
+        \\//     violated.
+        \\let captured = [];
+        \\const thenable = {
+        \\  then(resolve, reject) {
+        \\    captured.push(resolve, reject);
+        \\    resolve(42);
+        \\  }
+        \\};
+        \\let allArr = null;
+        \\Promise.all([thenable, thenable]).then(a => { allArr = a; });
+        \\globalThis.__drainMicrotasks();
+        \\total += leaks(allArr);
+        \\for (const f of captured) total += leaks(f);
+        \\
+        \\// (b) Promise.allSettled — same probe, fulfilled with the
+        \\//     {status, value} entry array.
+        \\captured = [];
+        \\let settledArr = null;
+        \\Promise.allSettled([thenable]).then(a => { settledArr = a; });
+        \\globalThis.__drainMicrotasks();
+        \\total += leaks(settledArr);
+        \\if (settledArr) for (const e of settledArr) total += leaks(e);
+        \\for (const f of captured) total += leaks(f);
+        \\
+        \\// (c) Promise.any — fulfills with the first value.
+        \\captured = [];
+        \\let anyVal = null;
+        \\Promise.any([thenable]).then(v => { anyVal = v; });
+        \\globalThis.__drainMicrotasks();
+        \\total += leaks(anyVal);
+        \\for (const f of captured) total += leaks(f);
+        \\
+        \\// (d) Promise.race — first to settle wins. Even though
+        \\//     race doesn't allocate an aggregator state today, pin
+        \\//     it so a future refactor introducing one would trip.
+        \\captured = [];
+        \\let raceVal = null;
+        \\Promise.race([thenable]).then(v => { raceVal = v; });
+        \\globalThis.__drainMicrotasks();
+        \\total += leaks(raceVal);
+        \\for (const f of captured) total += leaks(f);
+        \\
+        \\// (e) Array.fromAsync iterator-path: a user-provided sync
+        \\//     iterator and a user-provided mapper. The driver
+        \\//     `state` is bound_this of internal trampolines.
+        \\let mapperSeen = [];
+        \\const syncIter = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  i: 0,
+        \\  next() {
+        \\    mapperSeen.push(this);
+        \\    return { value: this.i++, done: this.i > 3 };
+        \\  }
+        \\};
+        \\let faArr = null;
+        \\Array.fromAsync(syncIter, function(x, k) {
+        \\  mapperSeen.push(this, x, k);
+        \\  return x + 10;
+        \\}, { tag: "thisArg" }).then(a => { faArr = a; });
+        \\globalThis.__drainMicrotasks();
+        \\total += leaks(faArr);
+        \\for (const v of mapperSeen) total += leaks(v);
+        \\
+        \\// (f) Array.fromAsync array-like-path: object with .length.
+        \\mapperSeen = [];
+        \\let faArr2 = null;
+        \\Array.fromAsync({ length: 2, 0: "a", 1: "b" }, function(x) {
+        \\  mapperSeen.push(this, x);
+        \\  return x;
+        \\}).then(a => { faArr2 = a; });
+        \\globalThis.__drainMicrotasks();
+        \\total += leaks(faArr2);
+        \\for (const v of mapperSeen) total += leaks(v);
+        \\
+        \\// (g) async generator `yield*` over a sync iter routes
+        \\//     through §27.6.1 CreateAsyncFromSyncIterator. The
+        \\//     wrapper isn't bound to user JS, but the inner sync
+        \\//     iterator (whose `this` IS visible from `next()`) is —
+        \\//     pin that the engine doesn't graft `__cynic_sync_iter__`
+        \\//     onto it.
+        \\let yieldSeen = [];
+        \\async function* g() { yield* syncIter2; }
+        \\const syncIter2 = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  i: 0,
+        \\  next() {
+        \\    yieldSeen.push(this);
+        \\    return { value: this.i++, done: this.i > 2 };
+        \\  }
+        \\};
+        \\(async () => {
+        \\  for await (const x of g()) { yieldSeen.push(x); }
+        \\})();
+        \\globalThis.__drainMicrotasks();
+        \\for (const v of yieldSeen) total += leaks(v);
+        \\
+        \\total;
+    , 0);
+}
+
+test "negative control: a real __cynic_* leak is detected via all four vectors" {
+    // Pin that the probe used by the prime-suspect test above
+    // actually catches a leak — if every probe vector silently
+    // returns "absent", a passing test would be meaningless. We
+    // simulate a regression by stashing a `__cynic_*` key directly
+    // on an ordinary object and assert each of the four vectors
+    // independently surfaces it.
+    try expectScriptIntWithBuiltins(
+        \\const o = {};
+        \\o.__cynic_fake__ = 7;
+        \\let hits = 0;
+        \\if ("__cynic_fake__" in o) hits++;                                         // 1: `in`
+        \\if (Object.getOwnPropertyDescriptor(o, "__cynic_fake__") !== undefined) hits++; // 2: gOPD
+        \\if (Object.hasOwn(o, "__cynic_fake__")) hits++;                            // 3: hasOwn
+        \\if (o.__cynic_fake__ !== undefined) hits++;                                // 4: direct get
+        \\hits;
+    , 4);
+}
+
 test "iterator helpers share %IteratorHelperPrototype%" {
     // §27.1.4.1 — every iterator helper result (map / filter /
     // take / drop / flatMap / concat / zip) inherits one shared
