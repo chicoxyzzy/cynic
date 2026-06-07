@@ -14,6 +14,7 @@ pub const Op = enum(u8) {
     end = 0x0b,
     br = 0x0c,
     br_if = 0x0d,
+    br_table = 0x0e,
     @"return" = 0x0f,
     call = 0x10,
     call_indirect = 0x11,
