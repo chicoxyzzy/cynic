@@ -246,7 +246,7 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         buf.deinit(realm.allocator);
     };
 
-    const ok = try serializeJSONProperty(&state, "", heap_mod.taggedObject(wrapper), &buf);
+    const ok = try serializeJSONProperty(&state, "", heap_mod.taggedObject(wrapper), null, &buf);
     if (!ok) return Value.undefined_;
 
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
@@ -412,6 +412,13 @@ fn serializeJSONProperty(
     state: *StringifyState,
     key: []const u8,
     holder_v: Value,
+    /// Pre-read property value, when the caller already has it in hand
+    /// and reading it again via `Get(holder, key)` would be redundant
+    /// (the dense-array fast path — see `serializeJSONArray`). MUST
+    /// equal what `Get(holder, key)` returns: pass it only for an
+    /// ordinary (non-Proxy) holder's own data slot. `null` keeps the
+    /// spec-exact `Get` read (accessors, proxies, prototype walks).
+    prefetched: ?Value,
     buf: *std.ArrayListUnmanaged(u8),
 ) NativeError!bool {
     const realm = state.realm;
@@ -434,7 +441,9 @@ fn serializeJSONProperty(
     // §25.5.2.4 step 1 — `value = ? Get(holder, key)`. Routes
     // through any Proxy `get` trap installed on `holder` (the
     // BigInt-cross-realm / proxy-receiver fixtures exercise this).
-    var value = try jsonGetValue(realm, holder_v, key);
+    // `prefetched` short-circuits the read when the caller already
+    // holds the exact `Get` result (dense-array fast path).
+    var value = prefetched orelse try jsonGetValue(realm, holder_v, key);
 
     // §25.5.2.4 step 2 — "If Type(value) is Object or BigInt"
     // then look up `toJSON`. The §6.1.6 BigInt receiver dispatch
@@ -694,7 +703,7 @@ fn serializeJSONObject(
         try jsonAppendString(realm, buf, key);
         try buf.append(realm.allocator, ':');
         if (state.gap.len > 0) try buf.append(realm.allocator, ' ');
-        const ok = try serializeJSONProperty(state, key, obj_v, buf);
+        const ok = try serializeJSONProperty(state, key, obj_v, null, buf);
         if (!ok) {
             // Rewind — the dropped key leaves no trace, including
             // the prospective comma / newline / indent. `first`
@@ -757,7 +766,16 @@ fn serializeJSONArray(
         }
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-        const ok = try serializeJSONProperty(state, islice, obj_v, buf);
+        // Dense-array fast path — for an ordinary (non-Proxy) array,
+        // read the own indexed slot directly instead of round-tripping
+        // the index through ToString → Get → canonicalNumericIndex per
+        // element. A hole / absent slot yields `null`, so the spec
+        // `Get` (with its prototype walk) still runs for those.
+        const prefetched: ?Value = if (obj.proxy_target == null and !obj.proxy_revoked)
+            obj.tryGetIndexedOwn(@intCast(i))
+        else
+            null;
+        const ok = try serializeJSONProperty(state, islice, obj_v, prefetched, buf);
         if (!ok) try buf.appendSlice(realm.allocator, "null");
     }
     if (len > 0 and state.gap.len > 0) {

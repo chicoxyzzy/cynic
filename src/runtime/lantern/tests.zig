@@ -395,6 +395,30 @@ test "interpreter: JSON.stringify number uses ToString exponential form" {
     try expectScriptStringWithBuiltins("JSON.stringify([1e21, 0.1, 100]);", "[1e+21,0.1,100]");
 }
 
+test "interpreter: JSON.stringify array dense fast-path edges" {
+    // §25.5.2.6 — the dense-array prefetch reads own indexed slots
+    // directly instead of round-tripping each index through
+    // ToString → Get. Pin the cases where the direct read must still
+    // match the spec `Get`: a HOLE delegates to the prototype (→ null);
+    // present-but-`undefined` and `null` are distinct; nested
+    // objects/arrays recurse; mixed value types render correctly.
+    try expectScriptStringWithBuiltins("JSON.stringify([1,2,3])", "[1,2,3]");
+    try expectScriptStringWithBuiltins("JSON.stringify([1,,3])", "[1,null,3]"); // hole → null
+    try expectScriptStringWithBuiltins("JSON.stringify([undefined, null])", "[null,null]");
+    try expectScriptStringWithBuiltins("JSON.stringify([1,\"a\",true,null,[2],{\"k\":3}])", "[1,\"a\",true,null,[2],{\"k\":3}]");
+    try expectScriptStringWithBuiltins("JSON.stringify([[1,[2,[3]]]])", "[[1,[2,[3]]]]");
+    // A present element whose value is an object with toJSON still
+    // routes through the toJSON path (prefetched value, not bypassed).
+    try expectScriptStringWithBuiltins("JSON.stringify([{toJSON:function(){return 7}}])", "[7]");
+    // Holes that the prototype fills: an inherited index is read via
+    // the fallback Get, not the (null) direct slot read.
+    try expectScriptStringUnhardened(
+        \\Array.prototype[1] = "proto";
+        \\var s; try { s = JSON.stringify([0,,2]); } finally { delete Array.prototype[1]; }
+        \\s;
+    , "[0,\"proto\",2]");
+}
+
 test "interpreter: Array.from(string) iterates by code point (§22.1.5.1)" {
     // §23.1.2.1 Array.from on a String uses the String iterator, which
     // yields code POINTS (a supplementary char is one element), matching
