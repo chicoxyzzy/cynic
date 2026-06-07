@@ -351,6 +351,9 @@ fn captureConstExpr(r: *Reader) DecodeError![]const u8 {
             0x23 => _ = try r.uleb(u32), // global.get
             0xd0 => _ = try r.byte(), // ref.null reftype
             0xd2 => _ = try r.uleb(u32), // ref.func
+            // extended-const proposal: i32/i64 add, sub, mul are
+            // admissible in a constant expression (no immediate).
+            0x6a, 0x6b, 0x6c, 0x7c, 0x7d, 0x7e => {},
             0xfd => { // SIMD prefix — only v128.const (12) is constant
                 const sub = try r.uleb(u32);
                 if (sub != 12) return error.BadConstExpr;

@@ -210,38 +210,66 @@ fn spectestNoop(args: []const u128, results: []u128) void {
     @memset(results, 0);
 }
 
-/// Resolve a module's imports for cross-module linking. Function imports
-/// link to `spectest` host stubs or to a registered instance's exports;
-/// any non-function import (table / memory / global) is not yet wired,
-/// so the module is reported unlinkable.
+/// The `spectest` host module's immutable globals, per the testsuite's
+/// conventional definitions (global_i32 = 666, global_i64 = 666,
+/// global_f32 = 666.6, global_f64 = 666.6).
+fn spectestGlobal(name: []const u8) ?u128 {
+    if (std.mem.eql(u8, name, "global_i32")) return 666;
+    if (std.mem.eql(u8, name, "global_i64")) return 666;
+    if (std.mem.eql(u8, name, "global_f32")) return @as(u32, @bitCast(@as(f32, 666.6)));
+    if (std.mem.eql(u8, name, "global_f64")) return @as(u64, @bitCast(@as(f64, 666.6)));
+    return null;
+}
+
+/// Resolve a module's imports for cross-module linking. Function and
+/// global imports link to `spectest` host definitions or to a registered
+/// instance's exports; table / memory imports are not yet wired, so a
+/// module needing them is reported unlinkable.
 fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const Registry) !wasm.Imports {
     var nfunc: usize = 0;
+    var nglob: usize = 0;
     for (modp.imports) |imp| {
         switch (imp.desc) {
             .func => nfunc += 1,
+            .global => nglob += 1,
             else => return error.Unlinkable,
         }
     }
-    if (nfunc == 0) return .{};
+    if (nfunc == 0 and nglob == 0) return .{};
 
     const funcs = try arena.alloc(wasm.FuncRef, nfunc);
+    const globals = try arena.alloc(u128, nglob);
     var fi: usize = 0;
+    var gi: usize = 0;
     for (modp.imports) |imp| {
-        const type_idx = imp.desc.func;
-        if (std.mem.eql(u8, imp.module, "spectest")) {
-            const ft = modp.types[type_idx];
-            funcs[fi] = .{ .host = .{
-                .fn_ptr = spectestNoop,
-                .params = @intCast(ft.params.len),
-                .results = @intCast(ft.results.len),
-            } };
-        } else {
-            const provider = registry.get(imp.module) orelse return error.Unlinkable;
-            funcs[fi] = provider.exportedFuncRef(imp.name) orelse return error.Unlinkable;
+        switch (imp.desc) {
+            .func => |type_idx| {
+                if (std.mem.eql(u8, imp.module, "spectest")) {
+                    const ft = modp.types[type_idx];
+                    funcs[fi] = .{ .host = .{
+                        .fn_ptr = spectestNoop,
+                        .params = @intCast(ft.params.len),
+                        .results = @intCast(ft.results.len),
+                    } };
+                } else {
+                    const provider = registry.get(imp.module) orelse return error.Unlinkable;
+                    funcs[fi] = provider.exportedFuncRef(imp.name) orelse return error.Unlinkable;
+                }
+                fi += 1;
+            },
+            .global => {
+                if (std.mem.eql(u8, imp.module, "spectest")) {
+                    globals[gi] = spectestGlobal(imp.name) orelse return error.Unlinkable;
+                } else {
+                    const provider = registry.get(imp.module) orelse return error.Unlinkable;
+                    globals[gi] = provider.exportedGlobalValue(imp.name) orelse return error.Unlinkable;
+                }
+                gi += 1;
+            },
+            else => return error.Unlinkable,
         }
-        fi += 1;
     }
-    return .{ .funcs = funcs };
+    return .{ .funcs = funcs, .globals = globals };
 }
 
 fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap, registry: *const Registry) !?Loaded {
@@ -264,6 +292,12 @@ fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.js
     // reference it by pointer, and its own functions resolve to `&self`.
     const ip = try arena.create(wasm.Instance);
     ip.* = instance;
+    // §5.5.11 — the start function runs as part of instantiation; a trap
+    // here means the module failed to instantiate.
+    wasm.runStart(ip, arena) catch |err| {
+        if (debug_loads) logLoadError(io, filename, "start", err);
+        return null;
+    };
     return .{ .instance = ip, .module = modp };
 }
 
