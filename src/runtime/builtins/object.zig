@@ -2558,8 +2558,17 @@ fn objectGetOwnPropertyNames(realm: *Realm, this_value: Value, args: []const Val
         if (isSymbolKey(key)) continue;
         var ibuf: [16]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
+        // `key` borrows the JSString buffer of an existing property
+        // entry. The `allocateString` below can trigger GC; if that
+        // GC reclaims `key`'s JSString and the next slab allocation
+        // returns the same address, `realm.heap.allocateString(key)`
+        // sees src == dst and panics on the @memcpy. Dupe onto the
+        // realm allocator (not the GC heap) so the bytes survive any
+        // intervening collection.
+        const key_anchor = realm.allocator.dupe(u8, key) catch return error.OutOfMemory;
+        defer realm.allocator.free(key_anchor);
         const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-        const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
+        const k_owned = realm.heap.allocateString(key_anchor) catch return error.OutOfMemory;
         out.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
         len += 1;
     }
