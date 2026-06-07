@@ -4,11 +4,14 @@
 //! The `.wast` text format is preprocessed by `wast2json` (wabt) into a
 //! JSON manifest plus `.wasm` binaries (see tools/wasm-testsuite-gen.sh);
 //! Sarcasm itself only decodes binary modules. This harness walks the
-//! generated directory, replays each command — `module`,
+//! generated directory, replays each command — `module`, `register`,
 //! `assert_return`, `assert_trap`, `assert_invalid`, `assert_malformed`,
-//! `assert_exhaustion`, `action` — and tallies plain pass/fail, the same
-//! shape as the test262 harness. Unsupported command kinds (cross-module
-//! linking, v128/ref values) are counted as skips, reported separately.
+//! `assert_exhaustion`, `assert_uninstantiable`, `action` — including
+//! cross-module linking (a registry of named/registered instances with
+//! shared tables, memories, and host `spectest` objects) and tallies
+//! plain pass/fail, the same shape as the test262 harness. The residual
+//! skips (`assert_unlinkable`, text/quoted modules, a few unmodelled
+//! value forms) are reported separately.
 //!
 //! Usage:
 //!   zig build wasm-testsuite -- [--gen-dir=<dir>] [--filter=<s>]
