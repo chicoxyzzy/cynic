@@ -1305,6 +1305,125 @@ fn execSimd(ip: *Interp, sub: u32, body: []const u8, pc: *usize) TrapError!void 
         94 => try ip.pushV128(demoteF64x2Zero(ip.popV128())),
         95 => try ip.pushV128(promoteLowF32x4(ip.popV128())),
 
+        // shuffle / swizzle
+        13 => {
+            var lanes: [16]u8 = undefined;
+            @memcpy(&lanes, body[pc.*..][0..16]);
+            pc.* += 16;
+            const b = ip.popV128();
+            const a = ip.popV128();
+            const aa: [16]u8 = @bitCast(a);
+            const bb: [16]u8 = @bitCast(b);
+            var r: [16]u8 = undefined;
+            inline for (0..16) |i| {
+                const idx = lanes[i];
+                r[i] = if (idx < 16) aa[idx] else bb[idx - 16];
+            }
+            try ip.pushV128(@bitCast(r));
+        },
+        14 => {
+            const s = ip.popV128();
+            const a = ip.popV128();
+            const aa: [16]u8 = @bitCast(a);
+            const ss: [16]u8 = @bitCast(s);
+            var r: [16]u8 = undefined;
+            inline for (0..16) |i| {
+                const idx = ss[i];
+                r[i] = if (idx < 16) aa[idx] else 0;
+            }
+            try ip.pushV128(@bitCast(r));
+        },
+
+        // narrow (saturating)
+        101 => try ip.pushV128(vnarrow(ip, 8, i16, i8)),
+        102 => try ip.pushV128(vnarrow(ip, 8, i16, u8)),
+        133 => try ip.pushV128(vnarrow(ip, 4, i32, i16)),
+        134 => try ip.pushV128(vnarrow(ip, 4, i32, u16)),
+
+        // extend (low/high, signed/unsigned)
+        135 => try ip.pushV128(vextend(16, i8, i16, false, ip.popV128())),
+        136 => try ip.pushV128(vextend(16, i8, i16, true, ip.popV128())),
+        137 => try ip.pushV128(vextend(16, u8, u16, false, ip.popV128())),
+        138 => try ip.pushV128(vextend(16, u8, u16, true, ip.popV128())),
+        167 => try ip.pushV128(vextend(8, i16, i32, false, ip.popV128())),
+        168 => try ip.pushV128(vextend(8, i16, i32, true, ip.popV128())),
+        169 => try ip.pushV128(vextend(8, u16, u32, false, ip.popV128())),
+        170 => try ip.pushV128(vextend(8, u16, u32, true, ip.popV128())),
+        199 => try ip.pushV128(vextend(4, i32, i64, false, ip.popV128())),
+        200 => try ip.pushV128(vextend(4, i32, i64, true, ip.popV128())),
+        201 => try ip.pushV128(vextend(4, u32, u64, false, ip.popV128())),
+        202 => try ip.pushV128(vextend(4, u32, u64, true, ip.popV128())),
+
+        // extmul (low/high, signed/unsigned)
+        156 => try ip.pushV128(vextmul(ip, 16, i8, i16, false)),
+        157 => try ip.pushV128(vextmul(ip, 16, i8, i16, true)),
+        158 => try ip.pushV128(vextmul(ip, 16, u8, u16, false)),
+        159 => try ip.pushV128(vextmul(ip, 16, u8, u16, true)),
+        188 => try ip.pushV128(vextmul(ip, 8, i16, i32, false)),
+        189 => try ip.pushV128(vextmul(ip, 8, i16, i32, true)),
+        190 => try ip.pushV128(vextmul(ip, 8, u16, u32, false)),
+        191 => try ip.pushV128(vextmul(ip, 8, u16, u32, true)),
+        220 => try ip.pushV128(vextmul(ip, 4, i32, i64, false)),
+        221 => try ip.pushV128(vextmul(ip, 4, i32, i64, true)),
+        222 => try ip.pushV128(vextmul(ip, 4, u32, u64, false)),
+        223 => try ip.pushV128(vextmul(ip, 4, u32, u64, true)),
+
+        // extadd_pairwise
+        124 => try ip.pushV128(vextadd(16, i8, i16, ip.popV128())),
+        125 => try ip.pushV128(vextadd(16, u8, u16, ip.popV128())),
+        126 => try ip.pushV128(vextadd(8, i16, i32, ip.popV128())),
+        127 => try ip.pushV128(vextadd(8, u16, u32, ip.popV128())),
+
+        // i32x4.dot_i16x8_s
+        186 => {
+            const b = ip.popV128();
+            const a = ip.popV128();
+            const aa: [8]i16 = @bitCast(a);
+            const bb: [8]i16 = @bitCast(b);
+            var r: [4]i32 = undefined;
+            inline for (0..4) |j| {
+                r[j] = @as(i32, aa[2 * j]) * @as(i32, bb[2 * j]) + @as(i32, aa[2 * j + 1]) * @as(i32, bb[2 * j + 1]);
+            }
+            try ip.pushV128(@bitCast(r));
+        },
+        // i16x8.q15mulr_sat_s
+        130 => {
+            const b = ip.popV128();
+            const a = ip.popV128();
+            const aa: [8]i16 = @bitCast(a);
+            const bb: [8]i16 = @bitCast(b);
+            var r: [8]i16 = undefined;
+            inline for (0..8) |i| {
+                const prod: i32 = (@as(i32, aa[i]) * @as(i32, bb[i]) + 0x4000) >> 15;
+                r[i] = if (prod > 32767) 32767 else if (prod < -32768) -32768 else @intCast(prod);
+            }
+            try ip.pushV128(@bitCast(r));
+        },
+
+        // load_splat / load_extend / load_zero
+        7 => try ip.pushV128(try loadSplat(ip, body, pc, 16, u8)),
+        8 => try ip.pushV128(try loadSplat(ip, body, pc, 8, u16)),
+        9 => try ip.pushV128(try loadSplat(ip, body, pc, 4, u32)),
+        10 => try ip.pushV128(try loadSplat(ip, body, pc, 2, u64)),
+        1 => try ip.pushV128(try loadExtend(ip, body, pc, 8, i8, i16)),
+        2 => try ip.pushV128(try loadExtend(ip, body, pc, 8, u8, u16)),
+        3 => try ip.pushV128(try loadExtend(ip, body, pc, 4, i16, i32)),
+        4 => try ip.pushV128(try loadExtend(ip, body, pc, 4, u16, u32)),
+        5 => try ip.pushV128(try loadExtend(ip, body, pc, 2, i32, i64)),
+        6 => try ip.pushV128(try loadExtend(ip, body, pc, 2, u32, u64)),
+        92 => try ip.pushV128(try loadZero(ip, body, pc, 4)),
+        93 => try ip.pushV128(try loadZero(ip, body, pc, 8)),
+
+        // load_lane / store_lane
+        84 => try ip.pushV128(try loadLane(ip, body, pc, 16, u8)),
+        85 => try ip.pushV128(try loadLane(ip, body, pc, 8, u16)),
+        86 => try ip.pushV128(try loadLane(ip, body, pc, 4, u32)),
+        87 => try ip.pushV128(try loadLane(ip, body, pc, 2, u64)),
+        88 => try storeLane(ip, body, pc, 16, u8),
+        89 => try storeLane(ip, body, pc, 8, u16),
+        90 => try storeLane(ip, body, pc, 4, u32),
+        91 => try storeLane(ip, body, pc, 2, u64),
+
         else => return error.UnsupportedImportCall, // not yet implemented
     }
 }
@@ -1480,6 +1599,110 @@ fn promoteLowF32x4(a: u128) u128 {
     r[0] = f[0];
     r[1] = f[1];
     return @bitCast(r);
+}
+
+fn satNarrow(comptime Src: type, comptime Dst: type, x: Src) Dst {
+    const lo = std.math.minInt(Dst);
+    const hi = std.math.maxInt(Dst);
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return @intCast(x);
+}
+
+fn vnarrow(ip: *Interp, comptime SrcN: usize, comptime Src: type, comptime Dst: type) u128 {
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const aa: [SrcN]Src = @bitCast(a);
+    const bb: [SrcN]Src = @bitCast(b);
+    var r: [SrcN * 2]Dst = undefined;
+    inline for (0..SrcN) |i| {
+        r[i] = satNarrow(Src, Dst, aa[i]);
+        r[i + SrcN] = satNarrow(Src, Dst, bb[i]);
+    }
+    return @bitCast(r);
+}
+
+fn vextend(comptime SrcN: usize, comptime Src: type, comptime Dst: type, comptime high: bool, a: u128) u128 {
+    const arr: [SrcN]Src = @bitCast(a);
+    const DstN = SrcN / 2;
+    const off = if (high) DstN else 0;
+    var r: [DstN]Dst = undefined;
+    inline for (0..DstN) |i| r[i] = arr[off + i];
+    return @bitCast(r);
+}
+
+fn vextmul(ip: *Interp, comptime SrcN: usize, comptime Src: type, comptime Dst: type, comptime high: bool) u128 {
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const aa: [SrcN]Src = @bitCast(a);
+    const bb: [SrcN]Src = @bitCast(b);
+    const DstN = SrcN / 2;
+    const off = if (high) DstN else 0;
+    var r: [DstN]Dst = undefined;
+    inline for (0..DstN) |i| r[i] = @as(Dst, aa[off + i]) *% @as(Dst, bb[off + i]);
+    return @bitCast(r);
+}
+
+fn vextadd(comptime SrcN: usize, comptime Src: type, comptime Dst: type, a: u128) u128 {
+    const arr: [SrcN]Src = @bitCast(a);
+    const DstN = SrcN / 2;
+    var r: [DstN]Dst = undefined;
+    inline for (0..DstN) |i| r[i] = @as(Dst, arr[2 * i]) +% @as(Dst, arr[2 * i + 1]);
+    return @bitCast(r);
+}
+
+fn loadSplat(ip: *Interp, body: []const u8, pc: *usize, comptime N: usize, comptime T: type) TrapError!u128 {
+    const ea = memEa(ip, body, pc);
+    const data = ip.instance.memory.?.data;
+    const nbytes = @sizeOf(T);
+    try checkBounds(data.len, ea, nbytes);
+    const x = std.mem.readInt(T, data[@intCast(ea)..][0..nbytes], .little);
+    return vsplat(N, T, x);
+}
+
+fn loadExtend(ip: *Interp, body: []const u8, pc: *usize, comptime DstN: usize, comptime Src: type, comptime Dst: type) TrapError!u128 {
+    const ea = memEa(ip, body, pc);
+    const data = ip.instance.memory.?.data;
+    try checkBounds(data.len, ea, 8); // always reads 8 source bytes
+    const src_bytes = @sizeOf(Src);
+    const base: usize = @intCast(ea);
+    var r: [DstN]Dst = undefined;
+    inline for (0..DstN) |i| {
+        r[i] = std.mem.readInt(Src, data[base + i * src_bytes ..][0..src_bytes], .little);
+    }
+    return @bitCast(r);
+}
+
+fn loadZero(ip: *Interp, body: []const u8, pc: *usize, comptime nbytes: usize) TrapError!u128 {
+    const ea = memEa(ip, body, pc);
+    const data = ip.instance.memory.?.data;
+    try checkBounds(data.len, ea, nbytes);
+    const base: usize = @intCast(ea);
+    if (nbytes == 4) return std.mem.readInt(u32, data[base..][0..4], .little);
+    return std.mem.readInt(u64, data[base..][0..8], .little);
+}
+
+fn loadLane(ip: *Interp, body: []const u8, pc: *usize, comptime N: usize, comptime T: type) TrapError!u128 {
+    const vector = ip.popV128();
+    const ea = memEa(ip, body, pc);
+    const lane = readLane(body, pc);
+    const data = ip.instance.memory.?.data;
+    const nbytes = @sizeOf(T);
+    try checkBounds(data.len, ea, nbytes);
+    var arr: [N]T = @bitCast(vector);
+    arr[lane] = std.mem.readInt(T, data[@intCast(ea)..][0..nbytes], .little);
+    return @bitCast(arr);
+}
+
+fn storeLane(ip: *Interp, body: []const u8, pc: *usize, comptime N: usize, comptime T: type) TrapError!void {
+    const vector = ip.popV128();
+    const ea = memEa(ip, body, pc);
+    const lane = readLane(body, pc);
+    const data = ip.instance.memory.?.data;
+    const nbytes = @sizeOf(T);
+    try checkBounds(data.len, ea, nbytes);
+    const arr: [N]T = @bitCast(vector);
+    std.mem.writeInt(T, data[@intCast(ea)..][0..nbytes], arr[lane], .little);
 }
 
 // ── arithmetic ──────────────────────────────────────────────────────
