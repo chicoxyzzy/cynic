@@ -272,6 +272,7 @@ These are project rules — they apply to everyone.
 | Touch realm setup / intrinsic install / hardening | [docs/ses-alignment.md](docs/ses-alignment.md) (SES-by-default position, frozen primordials, `harden()`, override-mistake fix, the `--unhardened` opt-out + the separate `--allow=eval`) |
 | Verify a shared-machinery change without missing regressions | [docs/handbook/agent-checks.md](docs/handbook/agent-checks.md) (the `--only-failing` trap, per-touch bucket filters, harness threading invariant) |
 | Look up a Zig idiom Cynic uses | [docs/handbook/zig.md](docs/handbook/zig.md) |
+| Touch the WebAssembly engine (Sarcasm) or its JS API | [docs/wasm-engine.md](docs/wasm-engine.md) (in-place interpreter + side-table, the reference encoding + externref pin set, `WebAssembly.*` surface, `--allow=wasm`); score in [wasm-results.md](wasm-results.md) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |
 | Measure perf (micros) | `zig build bench` (or `/perf`); design in [docs/benchmarking.md](docs/benchmarking.md) |
 | Find a hot function | `tools/profile.sh "<filter>"` (or `/profile`); requires `samply` |
@@ -303,6 +304,7 @@ Common commands:
     zig build test-ses                              # hand-written SES positive-coverage tests
     zig build test262                               # full conformance run (runtime mode)
     zig build test262-safe                          # same harness, ReleaseSafe (GC verifiers + poison live)
+    zig build wasm-testsuite -- --quiet             # WebAssembly spec-testsuite conformance (needs tools/wasm-testsuite-gen.sh first)
     zig build run -- parse <file>                   # script-mode parse
     zig build run -- parse --module <file>          # module-mode parse (alias: -m)
     zig build run -- parse <file>.mjs               # `.mjs` auto-detected as module
@@ -552,12 +554,24 @@ reviewed in PRs against `test262-results.md`.
                           prototype family. Each exports `pub fn install(realm)`
                           (or named installers) wired from `intrinsics.install`.
                           Adding a JS-callable method? It goes here.
+                          `webassembly.zig` is the `WebAssembly.*` host API
+                          over the wasm engine — see docs/wasm-engine.md §8.
+    src/runtime/wasm/     Sarcasm — the from-scratch WebAssembly engine
+                          (decoder, validator + O(1) branch side-table,
+                          in-place threaded interpreter). `wasm.zig`
+                          re-exports the public API (`decode`,
+                          `validateModule`, `instantiate`, `invoke`);
+                          `interpreter.zig` holds the dispatch loop +
+                          runtime structs. 100% spec-testsuite conformant
+                          (wasm-results.md). See docs/wasm-engine.md.
     tools/       gen_unicode_idents.zig (regenerates UCD tables);
                  test262/ (frontmatter + skip rules);
                  test262.zig (conformance harness — runs parse +
                  compile + execute; parse-negative fixtures resolve
                  inline at their parse-phase frontmatter, no separate
-                 parser-only mode)
+                 parser-only mode);
+                 wasm_testsuite.zig (the WebAssembly spec-testsuite
+                 harness → wasm-results.md)
     vendor/      pinned third-party data (UCD; test262 git submodule)
     docs/        ARCHITECTURE.md, ROADMAP.md, handbook/
 
