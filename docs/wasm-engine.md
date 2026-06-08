@@ -32,10 +32,12 @@ floor, not extensions.
 constant-expression operators, the function-references
 table-with-initializer encoding, the **`tail-call`** proposal
 (`return_call` / `return_call_indirect` — the callee replaces the current
-frame, so deep tail recursion runs in constant stack), and full
-cross-module linking (imported functions / globals / tables / memories,
-shared tables, host functions). The engine scores **100.00%** on the
-official WebAssembly spec testsuite — see `wasm-results.md`.
+frame, so deep tail recursion runs in constant stack), **`relaxed-simd`**
+(the relaxed-SIMD opcodes, each computed to one deterministic valid
+result), and full cross-module linking (imported functions / globals /
+tables / memories, shared tables, host functions). The engine scores
+**100.00%** on the official WebAssembly spec testsuite — see
+`wasm-results.md`.
 
 The **JS API** surface — `WebAssembly.*` objects (`Module`, `Instance`,
 `Memory`, `Table`, `Global`), `compile` / `instantiate` Promises,
@@ -47,8 +49,8 @@ return, plus per-container marking of externref tables / globals). `v128`
 is spec-mandated not to cross the JS boundary.
 
 Not yet implemented, in two groups. **Standardized (Phase 5, Wasm 3.0)
-but unimplemented** — real conformance gaps: `exceptions`, `gc` (WasmGC),
-`relaxed-simd`. **Still in flight** — `threads` (Phase 4; sits on the
+but unimplemented** — the remaining real conformance gaps: `exceptions`
+and `gc` (WasmGC). **Still in flight** — `threads` (Phase 4; sits on the
 existing `SharedArrayBuffer` / `Atomics` substrate), shared-everything
 threads and the component model (Phase 1).
 
@@ -425,7 +427,7 @@ the measured design space:
 | Interpreter | in-place **threaded** dispatch over bytecode + side-table — **done** (integer, control, floats, SIMD, references, tail calls) |
 | Memory | loads/stores, bulk-memory, grow; memory64 i64 addressing — **done** (engine plain buffer; the JS `Memory.buffer` aliasing view + detach-on-grow ships in §8) |
 | References / tables | tables, funcref/externref, `call_indirect`, element segments — **done**; externref GC rooting precise (§5), value-stack ref tags a future micro-opt |
-| Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128 — **done** |
+| Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128, relaxed-SIMD — **done** |
 | Cross-module linking | imported funcs/globals/tables/memories, shared tables, cross-instance funcrefs, host functions, start functions — **done** |
 | Conformance | the WebAssembly spec testsuite harness → `wasm-results.md` — **done, 100.00%** |
 | JS API | `WebAssembly.*` typed-slot objects (`Module`/`Instance`/`Memory`/`Table`/`Global`), `compile`/`instantiate` Promises, imports incl. host functions, error types, i32/i64/f32/f64 marshalling, `--allow=wasm` — **done** (§8), incl. externref-across-JS (tables / globals / host round-trips), precisely GC-reclaimed (§5); v128 is spec-rejected at the boundary |

@@ -1854,3 +1854,44 @@ test "wasm tail call: return_call_indirect dispatches through the table" {
     try testing.expectEqual(@as(i32, 42), try runI32(bytes, "dispatch", &.{0}));
     try testing.expectEqual(@as(i32, 99), try runI32(bytes, "dispatch", &.{1}));
 }
+
+test "wasm relaxed-simd: i32x4.relaxed_laneselect picks lanes by mask" {
+    // splat a, b, mask; i32x4.relaxed_laneselect; i32x4.extract_lane 0.
+    const code = [_]u8{
+        0x00,
+        0x20, 0x00, 0xfd, 0x11, // local.get 0; i32x4.splat
+        0x20, 0x01, 0xfd, 0x11, // local.get 1; i32x4.splat
+        0x20, 0x02, 0xfd, 0x11, // local.get 2; i32x4.splat (mask)
+        0xfd, 0x8b, 0x02, // i32x4.relaxed_laneselect (sub 267)
+        0xfd, 0x1b, 0x00, // i32x4.extract_lane 0
+        0x0b,
+    };
+    try testing.expectEqual(@as(i32, 7), try runFunc(&.{ I32, I32, I32 }, &.{I32}, &code, "f", &.{ 7, 9, -1 }));
+    try testing.expectEqual(@as(i32, 9), try runFunc(&.{ I32, I32, I32 }, &.{I32}, &code, "f", &.{ 7, 9, 0 }));
+}
+
+test "wasm relaxed-simd: f32x4.relaxed_madd computes a*b+c" {
+    const code = [_]u8{
+        0x00,
+        0x20, 0x00, 0xb2, 0xfd, 0x13, // local.get 0; f32.convert_i32_s; f32x4.splat
+        0x20, 0x01, 0xb2, 0xfd, 0x13, // b
+        0x20, 0x02, 0xb2, 0xfd, 0x13, // c
+        0xfd, 0x85, 0x02, // f32x4.relaxed_madd (sub 261)
+        0xfd, 0xf8, 0x01, // i32x4.trunc_sat_f32x4_s
+        0xfd, 0x1b, 0x00, // i32x4.extract_lane 0
+        0x0b,
+    };
+    try testing.expectEqual(@as(i32, 7), try runFunc(&.{ I32, I32, I32 }, &.{I32}, &code, "f", &.{ 2, 3, 1 })); // 2*3+1
+}
+
+test "wasm relaxed-simd: i16x8.relaxed_dot_i8x16_i7x16_s" {
+    const code = [_]u8{
+        0x00,
+        0x20, 0x00, 0xfd, 0x0f, // local.get 0; i8x16.splat
+        0x20, 0x01, 0xfd, 0x0f, // local.get 1; i8x16.splat
+        0xfd, 0x92, 0x02, // i16x8.relaxed_dot_i8x16_i7x16_s (sub 274)
+        0xfd, 0x18, 0x00, // i16x8.extract_lane_s 0
+        0x0b,
+    };
+    try testing.expectEqual(@as(i32, 12), try runFunc(&.{ I32, I32 }, &.{I32}, &code, "f", &.{ 2, 3 })); // 2*3 + 2*3
+}

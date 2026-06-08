@@ -1230,6 +1230,21 @@ fn validateSimd(v: *Validator) !void {
             try v.popExpect(.v128);
             try v.pushVal(.v128);
         },
+
+        // relaxed-simd proposal (Wasm 3.0). Binary v128 -> v128:
+        // relaxed_swizzle, relaxed_{min,max}, relaxed_q15mulr_s, the
+        // i16x8 relaxed dot.
+        256, 269, 270, 271, 272, 273, 274 => try binop(v, .v128, .v128),
+        // unary v128 -> v128: the four relaxed_trunc forms.
+        257, 258, 259, 260 => try unop(v, .v128, .v128),
+        // ternary v128 v128 v128 -> v128: relaxed_{madd,nmadd},
+        // relaxed_laneselect (4 widths), the i32x4 relaxed dot+add.
+        261, 262, 263, 264, 265, 266, 267, 268, 275 => {
+            try v.popExpect(.v128);
+            try v.popExpect(.v128);
+            try v.popExpect(.v128);
+            try v.pushVal(.v128);
+        },
         // swizzle, narrow, extmul, dot, q15mulr: v128, v128 -> v128.
         14, 101, 102, 133, 134, 156, 157, 158, 159, 188, 189, 190, 191, 220, 221, 222, 223, 186, 130 => try binop(v, .v128, .v128),
         // extend / extadd_pairwise: v128 -> v128.

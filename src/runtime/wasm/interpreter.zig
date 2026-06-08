@@ -2072,6 +2072,23 @@ fn funary(comptime N: usize, comptime T: type, comptime op: FUn, a: u128) u128 {
 }
 
 const FBin = enum { add, sub, mul, div, min, max };
+/// relaxed_{madd,nmadd}: per-lane `±(a*b) + c`. Pops c, b, a. Computed
+/// unfused (a valid relaxed choice — no separate FMA rounding).
+fn frelaxedMadd(ip: *Interp, comptime N: usize, comptime T: type, comptime negate: bool) u128 {
+    const c = ip.popV128();
+    const b = ip.popV128();
+    const a = ip.popV128();
+    const av: [N]T = @bitCast(a);
+    const bv: [N]T = @bitCast(b);
+    const cv: [N]T = @bitCast(c);
+    var r: [N]T = undefined;
+    inline for (0..N) |i| {
+        const prod = av[i] * bv[i];
+        r[i] = (if (negate) -prod else prod) + cv[i];
+    }
+    return @bitCast(r);
+}
+
 fn fbin(ip: *Interp, comptime N: usize, comptime T: type, comptime op: FBin) u128 {
     const b = ip.popV128();
     const a = ip.popV128();
@@ -2435,6 +2452,79 @@ fn execSimd(ip: *Interp, sub: u32, body: []const u8, pc: *usize) TrapError!void 
             inline for (0..16) |i| {
                 const idx = ss[i];
                 r[i] = if (idx < 16) aa[idx] else 0;
+            }
+            try ip.pushV128(@bitCast(r));
+        },
+
+        // relaxed-simd (Wasm 3.0). "Relaxed" permits a choice of valid
+        // results per lane; Sarcasm picks the deterministic, non-fused
+        // behavior (so the same module yields the same bits everywhere).
+        256 => { // i8x16.relaxed_swizzle — swizzle (out-of-range lane → 0)
+            const s = ip.popV128();
+            const a = ip.popV128();
+            const aa: [16]u8 = @bitCast(a);
+            const ss: [16]u8 = @bitCast(s);
+            var r: [16]u8 = undefined;
+            inline for (0..16) |i| {
+                const idx = ss[i];
+                r[i] = if (idx < 16) aa[idx] else 0;
+            }
+            try ip.pushV128(@bitCast(r));
+        },
+        257 => try ip.pushV128(truncSatF32x4(i32, ip.popV128())), // relaxed_trunc_f32x4_s
+        258 => try ip.pushV128(truncSatF32x4(u32, ip.popV128())), // relaxed_trunc_f32x4_u
+        259 => try ip.pushV128(truncSatF64x2Zero(i32, ip.popV128())), // _f64x2_s_zero
+        260 => try ip.pushV128(truncSatF64x2Zero(u32, ip.popV128())), // _f64x2_u_zero
+        261 => try ip.pushV128(frelaxedMadd(ip, 4, f32, false)), // f32x4.relaxed_madd
+        262 => try ip.pushV128(frelaxedMadd(ip, 4, f32, true)), // f32x4.relaxed_nmadd
+        263 => try ip.pushV128(frelaxedMadd(ip, 2, f64, false)), // f64x2.relaxed_madd
+        264 => try ip.pushV128(frelaxedMadd(ip, 2, f64, true)), // f64x2.relaxed_nmadd
+        265, 266, 267, 268 => { // relaxed_laneselect (8/16/32/64) — bitselect
+            const mask = ip.popV128();
+            const b = ip.popV128();
+            const a = ip.popV128();
+            try ip.pushV128((a & mask) | (b & ~mask));
+        },
+        269 => try ip.pushV128(fbin(ip, 4, f32, .min)), // f32x4.relaxed_min
+        270 => try ip.pushV128(fbin(ip, 4, f32, .max)), // f32x4.relaxed_max
+        271 => try ip.pushV128(fbin(ip, 2, f64, .min)), // f64x2.relaxed_min
+        272 => try ip.pushV128(fbin(ip, 2, f64, .max)), // f64x2.relaxed_max
+        273 => { // i16x8.relaxed_q15mulr_s — saturating Q15 multiply-round
+            const b = ip.popV128();
+            const a = ip.popV128();
+            const aa: [8]i16 = @bitCast(a);
+            const bb: [8]i16 = @bitCast(b);
+            var r: [8]i16 = undefined;
+            inline for (0..8) |i| {
+                const prod: i32 = (@as(i32, aa[i]) * @as(i32, bb[i]) + 0x4000) >> 15;
+                r[i] = if (prod > 32767) 32767 else if (prod < -32768) -32768 else @intCast(prod);
+            }
+            try ip.pushV128(@bitCast(r));
+        },
+        274 => { // i16x8.relaxed_dot_i8x16_i7x16_s — pairwise i8×i8 → i16
+            const b = ip.popV128();
+            const a = ip.popV128();
+            const aa: [16]i8 = @bitCast(a);
+            const bb: [16]i8 = @bitCast(b);
+            var r: [8]i16 = undefined;
+            inline for (0..8) |j| {
+                const s: i32 = @as(i32, aa[2 * j]) * @as(i32, bb[2 * j]) + @as(i32, aa[2 * j + 1]) * @as(i32, bb[2 * j + 1]);
+                r[j] = @truncate(s);
+            }
+            try ip.pushV128(@bitCast(r));
+        },
+        275 => { // i32x4.relaxed_dot_i8x16_i7x16_add_s — 4 products + c, per lane
+            const c = ip.popV128();
+            const b = ip.popV128();
+            const a = ip.popV128();
+            const aa: [16]i8 = @bitCast(a);
+            const bb: [16]i8 = @bitCast(b);
+            const cv: [4]i32 = @bitCast(c);
+            var r: [4]i32 = undefined;
+            inline for (0..4) |k| {
+                var s: i32 = 0;
+                inline for (0..4) |m| s += @as(i32, aa[4 * k + m]) * @as(i32, bb[4 * k + m]);
+                r[k] = s + cv[k];
             }
             try ip.pushV128(@bitCast(r));
         },
