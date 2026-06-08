@@ -494,13 +494,18 @@ vector regardless of how many iterations the source produced.
   `environments_mature` can be dropped in favour of the
   remembered set as the sole mature→young root source. The
   generator-register / async-queue scan stays.
-- **Incremental marking.** Today's mark phase is a single
+- **Parallel / concurrent collection.** Today's mark phase is a single
   uninterruptible walk; long lists or deep object graphs introduce
-  GC-pause latency. V8's incremental marker, JSC's Riptide concurrent
-  marker bound this; Cynic doesn't yet need to.
-- **Concurrent / parallel sweep.** Useful once the heap is big enough
-  that a single-threaded sweep eats real wall-time. Not a current
-  bottleneck — test262's typical resident set is well under 50 MB.
+  GC-pause latency, and on a large live set a single-threaded mark is
+  itself wall-time. V8's incremental/parallel marker, JSC's Riptide
+  concurrent marker, SpiderMonkey's parallel marking bound this. The
+  staged plan — atomic mark-claim → work-stealing parallel
+  stop-the-world marking (threshold-gated) → parallel sweep → (deferred)
+  concurrent marking — plus the honest "large-heap-only, gate on heap
+  size, measure first" case is written up in
+  [../gc-parallel.md](../gc-parallel.md). Metla's non-moving design is
+  the key leverage (no evacuation race). Not a current bottleneck —
+  test262's typical resident set is well under 50 MB.
 - **Compaction.** Mark-compact would reduce fragmentation in
   long-running embedder scenarios (Workers, Deno). Not a
   bottleneck against test262's allocation profile.
