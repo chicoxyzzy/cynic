@@ -25,11 +25,13 @@
 //! it survives wherever wasm holds it (the non-moving collector
 //! preserves identity) and is reclaimed once wasm drops it. See §5.
 //!
-//! Known gaps: an imported memory shares the provider's bytes (writes
-//! propagate both ways) but a JS-side `grow` after instantiation isn't
-//! yet observed by the importer (the aliased slice header goes stale).
-//! A v128 value crossing the JS boundary throws a TypeError — that is
-//! spec-mandated (§ToJSValue / §ToWebAssemblyValue), not a Cynic gap.
+//! Deliberate limitation: an imported memory shares the provider's bytes
+//! (writes propagate both ways), but a JS-side `grow` after instantiation
+//! isn't observed by the importer — its aliased slice header goes stale.
+//! Propagating it would require the instance to hold its memory by
+//! pointer (an indirection on every load/store), not worth this rare
+//! case. A v128 value crossing the JS boundary throws a TypeError — that
+//! is spec-mandated (§ToJSValue / §ToWebAssemblyValue), not a Cynic gap.
 //! `Instance.prototype.exports` is a prototype getter per spec; this
 //! implementation exposes the exports object as an own data property.
 

@@ -361,10 +361,11 @@ exported function    → wasm_export slot → *ExportRecord (instance, index)
 imported memory shares the provider's bytes (`Imports.share_memory`), so
 writes propagate both ways; the spectest harness keeps the snapshot
 (dupe) default. `externref` tables / globals and reference round-trips
-through host calls work — JS values pinned per §5. Known gaps: a JS-side
-`grow` of an imported memory isn't yet observed by the importer (the
-aliased slice header goes stale), and `v128` doesn't cross the JS
-boundary.
+through host calls work, GC-reclaimed precisely per §5. Two deliberate
+limitations: a JS-side `grow` of an imported memory isn't observed by the
+importer (the aliased slice header goes stale; propagating it would cost
+a load/store indirection for a rare case), and `v128` is spec-rejected at
+the boundary (a TypeError, §ToJSValue / §ToWebAssemblyValue).
 
 ## 9. SES / hardening
 
