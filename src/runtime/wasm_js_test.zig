@@ -794,3 +794,22 @@ test "compile rejects with a CompileError" {
         "  (e) => { globalThis.__r = (e instanceof WebAssembly.CompileError) ? 1 : 0; });";
     try expectIntWasmAsync(setup, 1);
 }
+
+// ── v128 across the JS boundary (spec-mandated TypeError) ───────────
+
+// (func (export "f") (result v128) v128.const 0).
+const v128_result_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,5,1,96,0,1,123, 3,2,1,0, 7,5,1,1,102,0,0, 10,22,1,20,0,253,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,11])";
+
+test "a v128 result cannot cross the JS boundary" {
+    // §ToJSValue throws a TypeError for v128 — calling a v128-returning
+    // export from JS is spec-mandated to fail (v128 works inside wasm).
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ v128_result_bytes ++ "));" ++
+        "try { inst.exports.f(); 0 } catch (e) { (e instanceof TypeError) ? 1 : 0 }";
+    try expectIntWasm(src, 1);
+}
+
+test "a v128 Global cannot be constructed from JS" {
+    try expectIntWasm("try { new WebAssembly.Global({ value: 'v128' }); 0 } catch (e) { (e instanceof TypeError) ? 1 : 0 }", 1);
+}

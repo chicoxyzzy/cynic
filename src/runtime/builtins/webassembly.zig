@@ -24,12 +24,13 @@
 //!
 //! Known gaps: externref pins persist until realm teardown (precise
 //! per-slot reclaim — the ref-tag scheme of docs/wasm-engine.md §5 — is
-//! future); v128 marshalling across the JS boundary. An imported memory
-//! shares the provider's bytes (writes propagate both ways), though a
-//! JS-side `grow` after instantiation isn't yet observed by the
-//! importer. `Instance.prototype.exports` is a prototype getter per
-//! spec; this implementation exposes the exports object as an own data
-//! property.
+//! future); an imported memory shares the provider's bytes (writes
+//! propagate both ways) but a JS-side `grow` after instantiation isn't
+//! yet observed by the importer (the aliased slice header goes stale).
+//! A v128 value crossing the JS boundary throws a TypeError — that is
+//! spec-mandated (§ToJSValue / §ToWebAssemblyValue), not a Cynic gap.
+//! `Instance.prototype.exports` is a prototype getter per spec; this
+//! implementation exposes the exports object as an own data property.
 
 const std = @import("std");
 const Realm = @import("../realm.zig").Realm;
@@ -916,7 +917,9 @@ fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
             return @as(u128, v.bits);
         },
         .funcref => return funcRefFromValue(realm, v),
-        else => return intrinsics.throwTypeError(realm, "WebAssembly: v128 marshalling is not yet supported"),
+        // §ToWebAssemblyValue / §ToJSValue — a v128 value cannot cross the JS
+        // boundary; the spec mandates a TypeError.
+        .v128 => return intrinsics.throwTypeError(realm, "WebAssembly: a v128 value cannot cross the JS boundary"),
     }
 }
 
@@ -943,7 +946,9 @@ fn marshalResult(realm: *Realm, vt: wasm.ValType, cell: u128) NativeError!Value 
             if (cell == wasm.REF_NULL) return Value.null_;
             return makeExportedFunction(realm, wasm.funcRefInstance(cell), wasm.funcRefIndex(cell), "");
         },
-        else => return intrinsics.throwTypeError(realm, "WebAssembly: v128 marshalling is not yet supported"),
+        // §ToWebAssemblyValue / §ToJSValue — a v128 value cannot cross the JS
+        // boundary; the spec mandates a TypeError.
+        .v128 => return intrinsics.throwTypeError(realm, "WebAssembly: a v128 value cannot cross the JS boundary"),
     }
 }
 
