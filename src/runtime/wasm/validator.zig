@@ -97,6 +97,7 @@ const Ctrl = struct {
     pending: std.ArrayListUnmanaged(Pending) = .empty,
     if_entry: ?u32 = null, // `if`'s own entry, patched at else/end
     if_ip: u32 = 0,
+    op_ip: u32 = 0, // IP of the construct's opcode (used for try_table extents)
 
     fn labelTypes(self: *const Ctrl) []const ValType {
         return if (self.op == .loop) self.start_types else self.end_types;
@@ -455,6 +456,7 @@ const Validator = struct {
     vals: std.ArrayListUnmanaged(AbsVal) = .empty,
     ctrls: std.ArrayListUnmanaged(Ctrl) = .empty,
     side_table: std.ArrayListUnmanaged(BranchEntry) = .empty,
+    try_extents: std.ArrayListUnmanaged(code_mod.TryExtent) = .empty,
     max_stack: u32 = 0,
 
     fn reachable(self: *Validator) bool {
@@ -640,6 +642,7 @@ fn validateFunc(
         .local_types = local_types,
         .body = expr,
         .side_table = try v.side_table.toOwnedSlice(arena),
+        .try_extents = try v.try_extents.toOwnedSlice(arena),
         .max_stack = v.max_stack,
     };
 }
@@ -775,6 +778,9 @@ fn validateExpr(v: *Validator) ValidateError!void {
                         e.delta_stp = @as(i32, @intCast(v.side_table.items.len)) - @as(i32, @intCast(ie));
                     }
                 }
+                if (c.op == .try_table) {
+                    try v.try_extents.append(v.arena, .{ .op_ip = c.op_ip, .end_ip = after_end_ip });
+                }
                 v.patchPending(&c, after_end_ip);
                 try v.pushVals(c.end_types);
                 if (v.ctrls.items.len == 0) return; // function `end`
@@ -861,6 +867,7 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 }
                 const body_ip: u32 = @intCast(v.r.pos);
                 try v.pushCtrl(.try_table, bt.params, bt.results, body_ip);
+                v.ctrls.items[v.ctrls.items.len - 1].op_ip = op_ip;
             },
             .call => {
                 const fidx = try v.r.uleb(u32);

@@ -115,6 +115,10 @@ const Handler = struct {
     catch_base_stp: usize,
     /// IP of the `try_table` opcode — the base for its catch branch deltas.
     try_op_ip: usize,
+    /// IP just past the construct's `end`. Together with `try_op_ip` this
+    /// is the body range; a frame whose active IP sits outside it has
+    /// left the construct, so the handler is stale and does not catch.
+    end_ip: usize,
 };
 /// Implementation cap on table size (§4.5.4 allows growth to fail).
 const MAX_TABLE_ELEMS = 1 << 24;
@@ -962,12 +966,31 @@ fn run(ip: *Interp) Error!void {
                 if (kind == 0 or kind == 1) _ = readU32(body, &pc); // tag index
                 _ = readU32(body, &pc); // label
             }
+            // Drop stale handlers from this frame — a try_table this one
+            // is not nested inside (a sibling that completed, or this same
+            // try_table re-entered by a loop). Stale handlers always sit
+            // above the still-enclosing ones, so popping from the top is
+            // safe and keeps a loop from accumulating handlers unboundedly.
+            while (ip.nhandlers > 0) {
+                const top = ip.handlers[ip.nhandlers - 1];
+                if (top.frame != ip.nframes) break;
+                if (top.try_op_ip < try_op_ip and try_op_ip < top.end_ip) break;
+                ip.nhandlers -= 1;
+            }
             if (ip.nhandlers >= ip.handlers.len) return error.CallStackExhausted;
+            var end_ip: usize = body.len;
+            for (f.func.try_extents) |ex| {
+                if (ex.op_ip == try_op_ip) {
+                    end_ip = ex.end_ip;
+                    break;
+                }
+            }
             ip.handlers[ip.nhandlers] = .{
                 .frame = ip.nframes,
                 .entry_sp = ip.sp - param_count,
                 .catch_base_stp = catch_base_stp,
                 .try_op_ip = try_op_ip,
+                .end_ip = end_ip,
             };
             ip.nhandlers += 1;
             stp += ncatch; // skip the catch branch entries on the no-throw path
@@ -980,6 +1003,8 @@ fn run(ip: *Interp) Error!void {
         // for catch_all), and takes the catch's side-table branch. With
         // no handler anywhere it traps as uncaught.
         .throw => {
+            const throw_op_ip = pc - 1;
+            const orig_nframes = ip.nframes;
             const throw_tag = readU32(body, &pc);
             const tt = ip.instance.module.tags[throw_tag];
             const npayload: u32 = @intCast(ip.instance.module.types[tt.type_index].params.len);
@@ -994,6 +1019,13 @@ fn run(ip: *Interp) Error!void {
                 hi -= 1;
                 const h = ip.handlers[hi];
                 const hframe = ip.frames[h.frame - 1];
+                // Active IP in the handler's frame: the throw site for the
+                // throwing frame, the saved call IP for an outer frame. If
+                // it lies outside the try_table's body the construct has
+                // already completed (or was branched out of) — the handler
+                // is stale and cannot catch.
+                const rip = if (h.frame == orig_nframes) throw_op_ip else hframe.ip;
+                if (rip < h.try_op_ip or rip >= h.end_ip) continue;
                 if (findCatch(hframe.func.body, hframe.instance, h, ip.instance, throw_tag)) |m| {
                     // Discard frames above the handler's (no result move).
                     ip.nframes = h.frame;

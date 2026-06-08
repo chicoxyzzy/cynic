@@ -27,6 +27,15 @@ pub const BranchEntry = struct {
     pop_count: u32,
 };
 
+/// Byte range of a `try_table` construct: the IP of its opcode and the
+/// IP just past its `end`. Lets the interpreter tell whether a still-open
+/// exception handler is actually in scope at a throw — an IP outside the
+/// range means the construct already completed or was branched out of.
+pub const TryExtent = struct {
+    op_ip: u32,
+    end_ip: u32,
+};
+
 /// A validated, executable function: the original body bytes (run in
 /// place) plus the metadata the interpreter needs to set up a frame
 /// and resolve branches.
@@ -45,4 +54,7 @@ pub const CompiledFunc = struct {
     /// Peak operand-stack depth (above the locals), from validation —
     /// lets the interpreter size the value stack once.
     max_stack: u32,
+    /// Byte ranges of this body's `try_table` constructs, for scoping
+    /// exception handlers at runtime. Empty for functions with none.
+    try_extents: []const TryExtent = &.{},
 };
