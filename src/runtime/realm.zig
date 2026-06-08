@@ -1060,14 +1060,26 @@ pub const Realm = struct {
     wasm_compile_error_prototype: ?*@import("object.zig").JSObject = null,
     wasm_link_error_prototype: ?*@import("object.zig").JSObject = null,
     wasm_runtime_error_prototype: ?*@import("object.zig").JSObject = null,
-    /// Every JS value that has entered a wasm `externref` cell, keyed by
-    /// its NaN-boxed bits (deduped; the non-moving collector means the
-    /// bits are a stable identity). Marked as a GC root each cycle so an
-    /// `externref` held anywhere wasm can reach it — a table, a global,
-    /// the value stack across a host call — survives. Entries persist
-    /// until realm teardown; precise per-slot reclaim (the lazy ref-tag
-    /// scheme of docs/wasm-engine.md §5) is a future refinement.
+    /// `externref` GC rooting, reclaimed precisely (docs/wasm-engine.md §5):
+    ///
+    /// - **Transient** — `externref` values live on the wasm value stack /
+    ///   in locals *during* a call (where a host import could trigger GC),
+    ///   keyed by NaN-boxed bits (deduped; the non-moving collector makes
+    ///   the bits a stable identity). Cleared when the outermost wasm call
+    ///   returns to JS (`wasm_call_depth` hits 0) — by then the stack is
+    ///   empty and any escapee is rooted by its JS caller.
+    /// - **Persistent** — `externref` cells inside tables / globals are
+    ///   marked precisely by walking the registered containers, so an
+    ///   overwritten or dropped slot is reclaimed.
     wasm_extern_roots: std.AutoArrayHashMapUnmanaged(u64, void) = .empty,
+    /// Nesting of JS→wasm entries (the export trampoline). The transient
+    /// set is cleared when this returns to 0.
+    wasm_call_depth: u32 = 0,
+    /// Registered `externref` tables / global cells, walked each GC so
+    /// their live JS values survive. The lists grow with the number of
+    /// such containers (bounded), not the number of values.
+    wasm_extern_tables: std.ArrayListUnmanaged(*const @import("wasm/wasm.zig").Table) = .empty,
+    wasm_extern_global_cells: std.ArrayListUnmanaged(*const u128) = .empty,
     /// Phase 3 SES override-mistake fix — `freezePrimordials`
     /// installs a `SyntheticAccessor` pair (getter + setter
     /// JSFunctions sharing one capture cell) for every data
@@ -1297,6 +1309,8 @@ pub const Realm = struct {
         if (self.class_arena) |*a| a.deinit();
         if (self.wasm_arena) |*a| a.deinit();
         self.wasm_extern_roots.deinit(self.allocator);
+        self.wasm_extern_tables.deinit(self.allocator);
+        self.wasm_extern_global_cells.deinit(self.allocator);
     }
 
     /// Request the interpreter unwind on its next dispatch tick.
@@ -1514,11 +1528,32 @@ pub const Realm = struct {
         return self.wasm_arena.?.allocator();
     }
 
-    /// Pin a JS value as a wasm `externref` GC root (deduped). Primitives
-    /// (non-heap values) are skipped — the collector never touches them.
-    pub fn pinExternRef(self: *Realm, v: Value) !void {
+    /// Pin a JS value as a *transient* wasm `externref` GC root (deduped),
+    /// kept until the outermost wasm call returns. Primitives (non-heap
+    /// values) are skipped — the collector never touches them.
+    pub fn pinExternRefTransient(self: *Realm, v: Value) !void {
         if (!v.isHeapValue()) return;
         try self.wasm_extern_roots.put(self.allocator, v.bits, {});
+    }
+
+    /// Enter / leave a JS→wasm call (the export trampoline). On the
+    /// outermost return the stack is empty, so transient externref pins
+    /// are dropped — only container-held values stay rooted.
+    pub fn enterWasmCall(self: *Realm) void {
+        self.wasm_call_depth += 1;
+    }
+    pub fn leaveWasmCall(self: *Realm) void {
+        self.wasm_call_depth -= 1;
+        if (self.wasm_call_depth == 0) self.wasm_extern_roots.clearRetainingCapacity();
+    }
+
+    /// Register an externref table / global cell so its live JS values are
+    /// marked each GC (precise: an overwritten or dropped slot is freed).
+    pub fn registerExternTable(self: *Realm, t: *const @import("wasm/wasm.zig").Table) !void {
+        try self.wasm_extern_tables.append(self.allocator, t);
+    }
+    pub fn registerExternGlobalCell(self: *Realm, cell: *const u128) !void {
+        try self.wasm_extern_global_cells.append(self.allocator, cell);
     }
 
     /// Run a stop-the-world mark-sweep cycle. Roots:
@@ -1720,9 +1755,20 @@ pub const Realm = struct {
         // next job boundary via `clearKeptObjects`.
         for (self.kept_alive.items) |v| self.heap.markValue(v);
 
-        // Wasm externref roots — every JS value handed to wasm as an
-        // `externref` stays live for as long as wasm could reach it.
+        // Wasm externref roots — transient values in-flight on the wasm
+        // stack, plus the live cells of every registered externref table
+        // / global. (REF_NULL all-ones is skipped; a non-heap externref
+        // marks as a no-op.)
         for (self.wasm_extern_roots.keys()) |bits| self.heap.markValue(Value{ .bits = bits });
+        const ref_null = std.math.maxInt(u128);
+        for (self.wasm_extern_tables.items) |t| {
+            for (t.elems) |cell| {
+                if (cell != ref_null) self.heap.markValue(Value{ .bits = @truncate(cell) });
+            }
+        }
+        for (self.wasm_extern_global_cells.items) |c| {
+            if (c.* != ref_null) self.heap.markValue(Value{ .bits = @truncate(c.*) });
+        }
 
         // Modules — each `ModuleRecord.exports` is a plain
         // `*JSObject` on the GC heap whose property bag holds

@@ -18,13 +18,14 @@
 //!
 //! Most wasm artifacts live in the realm's `wasm_arena`, freed at realm
 //! teardown, so they need no per-object cleanup or GC marking. The one
-//! exception is `externref`: a JS value handed to wasm is pinned in
-//! `realm.wasm_extern_roots` and marked each GC so it survives wherever
-//! wasm holds it (the collector is non-moving, so identity is preserved).
+//! exception is `externref`: a JS value handed to wasm is kept alive as
+//! a GC root — *transiently* while it is on the wasm stack during a call
+//! (dropped when the outermost call returns), and *persistently* while
+//! it sits in a registered externref table / global (walked each GC). So
+//! it survives wherever wasm holds it (the non-moving collector
+//! preserves identity) and is reclaimed once wasm drops it. See §5.
 //!
-//! Known gaps: externref pins persist until realm teardown (precise
-//! per-slot reclaim — the ref-tag scheme of docs/wasm-engine.md §5 — is
-//! future); an imported memory shares the provider's bytes (writes
+//! Known gaps: an imported memory shares the provider's bytes (writes
 //! propagate both ways) but a JS-side `grow` after instantiation isn't
 //! yet observed by the importer (the aliased slice header goes stale).
 //! A v128 value crossing the JS boundary throws a TypeError — that is
@@ -271,6 +272,20 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
     const ip = a.create(wasm.Instance) catch return error.OutOfMemory;
     wasm.instantiate(ip, a, a, mstate.module, imports) catch
         return throwLinkError(realm, "WebAssembly.Instance: instantiation failed");
+
+    // Register the instance's externref tables / globals as GC roots, so a
+    // JS value a wasm body stores into one survives past the call that put
+    // it there (its transient pin is dropped at the outermost return).
+    for (0..ip.tables.len) |i| {
+        if ((ip.tableElemType(@intCast(i)) orelse continue) == .externref)
+            realm.registerExternTable(ip.tableRef(@intCast(i)).?) catch return error.OutOfMemory;
+    }
+    for (0..ip.globals.len) |i| {
+        const gt = ip.globalTypeAt(@intCast(i)) orelse continue;
+        if (gt.val == .externref)
+            realm.registerExternGlobalCell(ip.globalCellPtr(@intCast(i)).?) catch return error.OutOfMemory;
+    }
+
     wasm.runStart(ip, a) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.HostThrew => return error.NativeThrew, // a host import threw during start
@@ -398,6 +413,7 @@ fn globalConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     const st = a.create(GlobalState) catch return error.OutOfMemory;
     st.* = .{ .cell = cell, .valtype = vt, .mutable = mutable };
     self.wasm_global = st;
+    if (vt == .externref) realm.registerExternGlobalCell(cell) catch return error.OutOfMemory;
     return this_value;
 }
 
@@ -473,6 +489,7 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const st = a.create(TableState) catch return error.OutOfMemory;
     st.* = .{ .table = tbl, .funcref = is_funcref };
     self.wasm_table = st;
+    if (!is_funcref) realm.registerExternTable(tbl) catch return error.OutOfMemory;
     return this_value;
 }
 
@@ -864,6 +881,14 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
     var argbuf: [32]u128 = undefined;
     if (ft.params.len > argbuf.len)
         return intrinsics.throwTypeError(realm, "WebAssembly exported function: too many parameters");
+
+    // Inside the call, externref values live on the wasm stack: pin them
+    // transiently (params, host-import results), and drop the pins when
+    // the outermost call returns. The defer runs after the result Value
+    // is built; a returned externref is then rooted by the JS caller.
+    realm.enterWasmCall();
+    defer realm.leaveWasmCall();
+
     for (ft.params, 0..) |pt, i| {
         const v = if (i < args.len) args[i] else Value.undefined_;
         argbuf[i] = try marshalArg(realm, pt, v);
@@ -913,7 +938,11 @@ fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
         // to the wasm null ref. A funcref accepts null or an exported fn.
         .externref => {
             if (v.isNull()) return wasm.REF_NULL;
-            realm.pinExternRef(v) catch return error.OutOfMemory;
+            // Pin only while inside a wasm call, where the value lives on
+            // the operand stack / in a local. At depth 0 it instead lands
+            // in a registered container (table / global) or is returned to
+            // JS — both root it precisely without a transient pin.
+            if (realm.wasm_call_depth > 0) realm.pinExternRefTransient(v) catch return error.OutOfMemory;
             return @as(u128, v.bits);
         },
         .funcref => return funcRefFromValue(realm, v),

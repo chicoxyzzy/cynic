@@ -813,3 +813,63 @@ test "a v128 result cannot cross the JS boundary" {
 test "a v128 Global cannot be constructed from JS" {
     try expectIntWasm("try { new WebAssembly.Global({ value: 'v128' }); 0 } catch (e) { (e instanceof TypeError) ? 1 : 0 }", 1);
 }
+
+// ── externref precise reclaim (no retain-until-teardown leak) ───────
+
+/// Like `expectIntWasmAsync` but installs the test globals
+/// (`__collectGarbage` / `__clearKeptObjects`) so a `WeakRef` can observe
+/// collection deterministically.
+fn expectIntWasmGc(setup: []const u8, want: i32) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm = true;
+    realm.hardened = false; // the script writes globalThis.__r
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+    _ = try lantern.evaluateScript(testing.allocator, &realm, setup);
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, "globalThis.__r");
+    const v = switch (outcome) {
+        .value, .yielded => |x| x,
+        .thrown => return error.WasmThrewUnexpectedly,
+    };
+    if (!v.isInt32()) return error.ResultNotInt;
+    try testing.expectEqual(want, v.asInt32());
+}
+
+// (func (export "f") (param externref)) — takes an externref and drops it.
+const extern_drop_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,5,1,96,1,111,0, 3,2,1,0, 7,5,1,1,102,0,0, 10,4,1,2,0,11])";
+
+test "an externref dropped by a wasm call is reclaimed" {
+    // The marquee reclaim test: a JS object passed to wasm (pinned only
+    // transiently) is collected once the call returns and JS drops it —
+    // no retain-until-teardown leak.
+    const setup =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ extern_drop_bytes ++ "));" ++
+        "let wr;" ++
+        "(function () { const o = { tag: 1 }; wr = new WeakRef(o); inst.exports.f(o); })();" ++
+        "__clearKeptObjects(); __collectGarbage();" ++
+        "globalThis.__r = (wr.deref() === undefined) ? 1 : 0;";
+    try expectIntWasmGc(setup, 1);
+}
+
+test "overwriting an externref table slot reclaims the old value" {
+    const setup =
+        "const t = new WebAssembly.Table({ element: 'externref', initial: 1 });" ++
+        "let wr;" ++
+        "(function () { const o = {}; wr = new WeakRef(o); t.set(0, o); })();" ++
+        "t.set(0, null);" ++ // drop the only reference held by wasm
+        "__clearKeptObjects(); __collectGarbage();" ++
+        "globalThis.__r = (wr.deref() === undefined) ? 1 : 0;";
+    try expectIntWasmGc(setup, 1);
+}
+
+test "an externref still in a table survives an explicit GC" {
+    const setup =
+        "const t = new WebAssembly.Table({ element: 'externref', initial: 1 });" ++
+        "const o = { tag: 5 };" ++
+        "t.set(0, o);" ++
+        "__clearKeptObjects(); __collectGarbage();" ++
+        "globalThis.__r = (t.get(0) === o && t.get(0).tag === 5) ? 1 : 0;";
+    try expectIntWasmGc(setup, 1);
+}
