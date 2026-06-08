@@ -51,11 +51,14 @@ Ohaimark) and generational GC are future work. See
 Current scores, history, and per-bucket breakdown live in
 [`test262-results.md`](test262-results.md). Scoring is binary under a
 single posture (`--unhardened --allow=eval`): `pass%` is
-`passing / (passing + failing)`, with **no** "expected fail"
-reclassification — an Annex B, no-Intl, strict-only, SES, or eval
-miss counts as a plain `failing`, the same as an engine bug. The
-denominator drops only structurally-unrunnable fixtures and the
-pre-Stage-4 proposals (which get their own per-feature scoreboard).
+`passing / total`, where `total` is `passing + failing` — there is
+**no** "expected fail" reclassification, so an Annex B, no-Intl,
+strict-only, SES, or eval miss counts as a plain `failing`, the same as
+an engine bug. `total` excludes the upstream `harness/` / `staging/` /
+`annexB/` paths, every Stage ≤ 3 proposal, and structurally-unrunnable
+fixtures; shipped pre-Stage-4 proposals get their own per-feature
+scoreboard. The WebAssembly engine has its own conformance run
+([`wasm-results.md`](wasm-results.md) — 100 % of the spec testsuite).
 The unit-test suite (`zig build test`) runs alongside.
 
 ### Build targets
