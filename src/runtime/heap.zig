@@ -119,11 +119,16 @@ pub const PtrKind = enum(u3) {
 /// O(1)-membership index for one slab-pooled heap kind
 /// (`object` / `environment` / `string`). The conservative stack
 /// scanner needs a cheap "is this address a live header of kind K"
-/// test for every machine word on the native stack. Rebuilding a
-/// hashmap of every live address each GC cycle is O(live) and cost
-/// +8-31% on alloc-heavy workloads; this structure replaces it with
-/// per-allocation bit maintenance and a per-cycle chunk-topology
-/// refresh that walks only the (geometrically few) arena chunks.
+/// test for every machine word on the native stack. The earlier
+/// backstop kept a hashmap of every live address and rebuilt it each
+/// GC (O(live) *hash inserts* — `+8-31%` on alloc-heavy workloads).
+/// This structure keeps the same per-GC rebuild *shape* but rebuilds
+/// a chunk-indexed **bitmap** instead: O(live) cheap *bit-sets* (no
+/// hashing, no collisions) plus an O(chunks) topology refresh. There
+/// is deliberately NO per-allocation maintenance — a bit-set per live
+/// object once per GC is far less total work than a bit op on every
+/// allocation, because allocations vastly outnumber live objects on a
+/// churn workload (most die before the next cycle).
 ///
 /// The `std.heap.MemoryPool(T)` backing each pooled kind hands every
 /// item out of an `ArenaAllocator`: each chunk is one child-allocator
@@ -132,25 +137,25 @@ pub const PtrKind = enum(u3) {
 /// pool allocations share one size + alignment, so there is no
 /// inter-slot padding after the first — verified by a comptime grid
 /// assertion below). A header address is therefore a *live* slot iff:
-///   (a) it lies in some chunk's `[base, end)` usable range,
+///   (a) it lies in some chunk's `[base, base+cap*item_size)` range,
 ///   (b) it sits on the item grid (`(addr - base) % item_size == 0`),
-///   (c) its per-slot allocated bit is set.
-/// Clause (c) is correctness-critical: a freed-but-not-reused slot is
-/// still grid-aligned and below the chunk's high-water mark, so range
-/// + alignment alone would resurrect it (a use-after-free at mark
-/// time, since `pool.destroy` poisons the slot to `undefined`). The
-/// bit is set right after `pool.create` and cleared right before
-/// `pool.destroy`, so it tracks liveness exactly. The inviolable
-/// invariants this preserves: NO false negative (every live slot's
-/// bit is set → the scanner never misses a live object), and NEVER a
-/// false-positive *deref* of a non-object (range + grid + bit means a
-/// matched address is always a real allocated slot).
+///   (c) its per-slot live bit is set in the current rebuild.
+/// Clause (c) is correctness-critical: a freed (or never-allocated)
+/// slot is still grid-aligned and in range, so range + alignment
+/// alone would resurrect a poisoned slot (a use-after-free at mark
+/// time, since `pool.destroy` writes the slot to `undefined`). The
+/// rebuild clears every bit, then sets exactly one bit per object in
+/// the kind's authoritative young/mature lists, so a swept slot's bit
+/// is never set. The inviolable invariants: NO false negative (every
+/// live object is in those lists → its bit is set → the scanner never
+/// misses it), and NEVER a false-positive *deref* of a non-object
+/// (range + grid + bit ⇒ a matched address is a real listed object).
 ///
-/// Arena internals (`State.used_list`, `Node.size` / `.end_index` /
-/// `.next`) are std-private layout; this struct is the single place
-/// that reaches into them, guarded by a comptime check on the arena
-/// `Node` size (`arenaNodeBytes`) so a stdlib layout change fails the
-/// build loudly instead of silently corrupting the test.
+/// Arena internals (`State.used_list`, `Node.size` / `.next`) are
+/// std-private layout; this struct is the single place that reaches
+/// into them, guarded by a comptime check on the arena `Node` size
+/// (`arena_node_bytes`) so a stdlib layout change fails the build
+/// loudly instead of silently corrupting the test.
 fn PoolMembership(comptime Pool: type) type {
     // The pool's item grid: every `create()` is an identical
     // `alignedAlloc(u8, item_alignment, item_size)`, so slots pack
@@ -166,38 +171,38 @@ fn PoolMembership(comptime Pool: type) type {
         const item_align: usize = Pool.item_alignment.toByteUnits();
 
         /// One arena chunk: a contiguous run of `cap` item slots
-        /// starting at `base`. `alloc_bits.bit_length == cap`; bit
-        /// `k` set ⇔ the slot at `base + k*item_size` is allocated.
+        /// starting at `base`. `live_bits.bit_length == cap`; bit `k`
+        /// set ⇔ the slot at `base + k*item_size` held a live object as
+        /// of the current rebuild.
         const PoolChunk = struct {
             base: usize,
             cap: usize,
-            alloc_bits: std.DynamicBitSetUnmanaged,
+            live_bits: std.DynamicBitSetUnmanaged,
         };
 
         chunks: std.ArrayListUnmanaged(PoolChunk) = .empty,
-        /// Cache of the chunk index that served the most recent
-        /// alloc / free / lookup. Allocations bump the active chunk's
-        /// high slot until it fills, so the cached index resolves the
-        /// vast majority of hot-path addresses without a scan.
-        cache: usize = 0,
+        /// One-entry hint: the chunk index that served the previous
+        /// `markLive`. Objects are walked roughly in allocation order
+        /// within a kind's list, so consecutive marks usually land in
+        /// the same chunk — the hint skips the linear scan for them.
+        hint: usize = 0,
 
         fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            for (self.chunks.items) |*c| c.alloc_bits.deinit(allocator);
+            for (self.chunks.items) |*c| c.live_bits.deinit(allocator);
             self.chunks.deinit(allocator);
             self.* = .{};
         }
 
         /// Locate the chunk index whose `[base, base+cap*item_size)`
-        /// range contains `addr`, consulting the cache first. Returns
-        /// `null` if no *currently-snapshotted* chunk covers it (the
-        /// caller decides whether to refresh + retry or report a
-        /// miss).
+        /// range contains `addr` (hint-first, then linear). `null` if
+        /// no snapshotted chunk covers it.
         fn chunkIndexOf(self: *const Self, addr: usize) ?usize {
-            if (self.chunks.items.len == 0) return null;
-            const ci = self.cache;
-            if (ci < self.chunks.items.len) {
-                const c = self.chunks.items[ci];
-                if (addr >= c.base and addr < c.base + c.cap * item_size) return ci;
+            const n = self.chunks.items.len;
+            if (n == 0) return null;
+            const h = self.hint;
+            if (h < n) {
+                const c = self.chunks.items[h];
+                if (addr >= c.base and addr < c.base + c.cap * item_size) return h;
             }
             for (self.chunks.items, 0..) |c, i| {
                 if (addr >= c.base and addr < c.base + c.cap * item_size) return i;
@@ -205,16 +210,16 @@ fn PoolMembership(comptime Pool: type) type {
             return null;
         }
 
-        /// Re-snapshot the chunk topology from the pool's arena. Adds
-        /// any new chunk (matched by base address) and grows the
-        /// capacity / bitmap of a chunk the arena resized in place.
-        /// Existing chunks keep their `alloc_bits` (liveness is
-        /// maintained incrementally on alloc / free, never rebuilt
-        /// here). O(chunks) — chunks grow geometrically, so this is a
-        /// handful of header reads even for a large heap. On OOM the
-        /// snapshot is left as-is; the conservative scan degrades to
-        /// the precise scopes for that cycle rather than crashing.
-        fn refresh(self: *Self, pool: *const Pool, allocator: std.mem.Allocator) error{OutOfMemory}!void {
+        /// Re-snapshot the chunk topology from the pool's arena and
+        /// clear every live bit, readying the bitmap for a fresh
+        /// rebuild. Adds any new chunk (matched by base address) and
+        /// grows the capacity / bitmap of a chunk the arena resized in
+        /// place. O(chunks) header reads + O(total-capacity / 64) for
+        /// the clear — chunks grow geometrically, so this is cheap even
+        /// for a large heap. On OOM the snapshot is left as-is and the
+        /// (still-cleared) bits mean the scan degrades to the precise
+        /// scopes for the cycle rather than crashing.
+        fn beginRebuild(self: *Self, pool: *const Pool, allocator: std.mem.Allocator) error{OutOfMemory}!void {
             var it = pool.arena_state.used_list;
             while (it) |node| : (it = node.next) {
                 const node_addr = @intFromPtr(node);
@@ -237,15 +242,17 @@ fn PoolMembership(comptime Pool: type) type {
                 if (self.findChunkByBase(base)) |idx| {
                     const c = &self.chunks.items[idx];
                     if (cap > c.cap) {
-                        try c.alloc_bits.resize(allocator, cap, false);
+                        try c.live_bits.resize(allocator, cap, false);
                         c.cap = cap;
                     }
                 } else {
                     var bits = try std.DynamicBitSetUnmanaged.initEmpty(allocator, cap);
                     errdefer bits.deinit(allocator);
-                    try self.chunks.append(allocator, .{ .base = base, .cap = cap, .alloc_bits = bits });
+                    try self.chunks.append(allocator, .{ .base = base, .cap = cap, .live_bits = bits });
                 }
             }
+            // Clear every bit — the rebuild re-marks each live object.
+            for (self.chunks.items) |*c| c.live_bits.unsetAll();
         }
 
         fn findChunkByBase(self: *const Self, base: usize) ?usize {
@@ -255,44 +262,23 @@ fn PoolMembership(comptime Pool: type) type {
             return null;
         }
 
-        /// Mark the slot at `addr` allocated. Called right after
-        /// `pool.create`. If the address falls outside every
-        /// snapshotted chunk (a brand-new chunk the arena just grew),
-        /// refresh the topology and retry. A genuine pool address
-        /// resolves after a refresh unless that refresh itself OOM'd
-        /// (it allocates the new chunk's bitmap): in that rare case the
-        /// bit is left unset, so this one object reverts to precise-
-        /// scope rooting for its lifetime — the documented best-effort
-        /// degradation, never a crash and never a UAF of *another*
-        /// object.
-        fn setAllocated(self: *Self, addr: usize, pool: *const Pool, allocator: std.mem.Allocator) void {
-            const idx = self.resolve(addr, pool, allocator) orelse return;
-            self.cache = idx;
-            const c = &self.chunks.items[idx];
-            const slot = (addr - c.base) / item_size;
-            if (slot < c.cap) c.alloc_bits.set(slot);
-        }
-
-        /// Mark the slot at `addr` free. Called right before
-        /// `pool.destroy`. A miss is benign (the address was never
-        /// recorded — e.g. allocated while a refresh OOM'd) and simply
-        /// leaves nothing to clear.
-        fn clearAllocated(self: *Self, addr: usize) void {
+        /// Set the live bit for a known-live object header `addr` (an
+        /// entry of this kind's young/mature list). Called O(live)
+        /// times per GC between `beginRebuild` and the scan. A miss
+        /// (address not in any snapshotted chunk) can only happen if
+        /// `beginRebuild` OOM'd while growing the topology; the object
+        /// then reverts to precise-scope rooting for this cycle — the
+        /// documented best-effort degradation, never a crash.
+        fn markLive(self: *Self, addr: usize) void {
             const idx = self.chunkIndexOf(addr) orelse return;
-            self.cache = idx;
+            self.hint = idx;
             const c = &self.chunks.items[idx];
             const slot = (addr - c.base) / item_size;
-            if (slot < c.cap) c.alloc_bits.unset(slot);
+            if (slot < c.cap) c.live_bits.set(slot);
         }
 
-        fn resolve(self: *Self, addr: usize, pool: *const Pool, allocator: std.mem.Allocator) ?usize {
-            if (self.chunkIndexOf(addr)) |i| return i;
-            self.refresh(pool, allocator) catch {};
-            return self.chunkIndexOf(addr);
-        }
-
-        /// True iff `addr` is the header of a *live* slot of this kind:
-        /// in range, on the item grid, and its allocated bit set. The
+        /// True iff `addr` is the header of a live slot of this kind:
+        /// in range, on the item grid, and its live bit set. The
         /// membership test the conservative scanner calls per stack
         /// word — pure reads, no allocation, no hashing.
         fn isLive(self: *const Self, addr: usize) bool {
@@ -302,7 +288,7 @@ fn PoolMembership(comptime Pool: type) type {
             if (off % item_size != 0) return false; // mid-object / unaligned
             const slot = off / item_size;
             if (slot >= c.cap) return false;
-            return c.alloc_bits.isSet(slot);
+            return c.live_bits.isSet(slot);
         }
     };
 }
@@ -759,26 +745,30 @@ pub const Heap = struct {
     // rooting class disappears.
     //
     // Cynic's heap is POOLED and non-contiguous, so the membership
-    // test splits by kind. The three high-volume kinds
-    // (`object` / `environment` / `string`) are slab-pooled, so a
-    // live header is a set allocated-bit on the pool's item grid —
-    // `PoolMembership` maintains that bit per alloc / free and needs
-    // no per-GC rebuild (the cost the hashmap version paid). The four
-    // low-volume kinds (`function` / `generator` / `symbol` /
-    // `bigint`) come from the general allocator with no grid, so they
-    // keep an exact address→present index, but maintained
-    // *incrementally* (inserted on alloc, removed on free) rather than
-    // rebuilt each cycle. Both halves preserve the inviolable
-    // invariant — a freed slot never reads as live (its bit is cleared
-    // / its entry removed before the slot is poisoned) — so
+    // test splits by kind, and is rebuilt once per GC (NOT maintained
+    // per allocation — allocations vastly outnumber live objects on a
+    // churn workload, so a bit per live object once per cycle is far
+    // less work than a bit op on every alloc). The three high-volume
+    // kinds (`object` / `environment` / `string`) are slab-pooled, so
+    // `PoolMembership` rebuilds a chunk-indexed bitmap: `beginRebuild`
+    // clears every bit, then `markLive` sets one bit per object in the
+    // kind's young/mature lists. A live header is then a set bit on the
+    // pool's item grid — O(live) cheap bit-sets, replacing the O(live)
+    // *hash inserts* the previous hashmap-rebuild paid. The four
+    // low-volume kinds (`function` / `generator` / `symbol` / `bigint`)
+    // come from the general allocator with no grid, so they refill an
+    // exact address→kind hashmap from their lists each cycle; they are
+    // few, so the hash cost is negligible. Both halves preserve the
+    // inviolable invariant — a freed slot never reads as live (the
+    // rebuild only marks objects still in the authoritative lists) — so
     // false-retention of a not-yet-swept object is fine but a
     // use-after-free is impossible.
     obj_membership: PoolMembership(std.heap.MemoryPool(JSObject)) = .{},
     env_membership: PoolMembership(std.heap.MemoryPool(Environment)) = .{},
     str_membership: PoolMembership(std.heap.MemoryPool(JSString)) = .{},
-    /// Incrementally-maintained address→kind index for the four
-    /// general-allocator (non-slab-pooled) kinds. Inserted in their
-    /// `allocateX`, removed in the sweep / promote free paths.
+    /// Address→kind index for the four general-allocator
+    /// (non-slab-pooled) kinds, refilled from their young/mature lists
+    /// each GC alongside the pooled bitmaps.
     cold_ptr_set: std.AutoHashMapUnmanaged(usize, PtrKind) = .empty,
     /// Master switch for the conservative backstop. On by default
     /// (the completeness guarantee aging relies on). The
@@ -1024,47 +1014,11 @@ pub const Heap = struct {
         self.cold_ptr_set.deinit(self.allocator);
     }
 
-    // ── Conservative-scan membership maintenance ────────────────
-    // Hooks the alloc / free paths so `isLiveHeapPointer` is an O(1)
-    // read with no per-GC rebuild. Pooled kinds flip a per-slot bit;
-    // cold kinds add / drop a hashmap entry. Both are best-effort on
-    // OOM: a missed *insert* could only under-root (degrades to the
-    // precise scopes for that one object — never a UAF), and the
-    // conservative scan tolerates a missing entry the same way the
-    // hashmap-rebuild version tolerated an OOM'd rebuild.
-
-    /// Record a freshly-created pooled-object header as allocated.
-    inline fn membershipAlloc(self: *Heap, comptime kind: PtrKind, ptr: anytype) void {
-        const addr = @intFromPtr(ptr);
-        switch (kind) {
-            .object => self.obj_membership.setAllocated(addr, &self.object_pool, self.allocator),
-            .environment => self.env_membership.setAllocated(addr, &self.env_pool, self.allocator),
-            .string => self.str_membership.setAllocated(addr, &self.string_pool, self.allocator),
-            else => self.cold_ptr_set.put(self.allocator, addr, kind) catch {},
-        }
-    }
-
-    /// Record a header as freed (bit cleared / entry removed) right
-    /// before the slot returns to its pool or the GP allocator frees
-    /// it. Driven from the sweep / promote free paths via `noteFreed`.
-    inline fn membershipFree(self: *Heap, comptime EntryT: type, addr: usize) void {
-        if (EntryT == JSObject) {
-            self.obj_membership.clearAllocated(addr);
-        } else if (EntryT == Environment) {
-            self.env_membership.clearAllocated(addr);
-        } else if (EntryT == JSString) {
-            self.str_membership.clearAllocated(addr);
-        } else {
-            _ = self.cold_ptr_set.remove(addr);
-        }
-    }
-
     pub fn allocateBigInt(self: *Heap, value: i128) !*JSBigInt {
         const b = try JSBigInt.init(self.allocator, value);
         errdefer b.deinit(self.allocator);
         b.mark_color = self.live_color;
         try self.bigints_young.append(self.allocator, b);
-        self.membershipAlloc(.bigint, b);
         self.allocs_since_gc +|= 1;
         return b;
     }
@@ -1085,7 +1039,6 @@ pub const Heap = struct {
         errdefer b.deinit(self.allocator);
         b.mark_color = self.live_color;
         try self.bigints_young.append(self.allocator, b);
-        self.membershipAlloc(.bigint, b);
         self.allocs_since_gc +|= 1;
         return b;
     }
@@ -1105,7 +1058,6 @@ pub const Heap = struct {
         errdefer s.deinit(self.allocator);
         s.mark_color = self.live_color;
         try self.symbols_young.append(self.allocator, s);
-        self.membershipAlloc(.symbol, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -1138,7 +1090,6 @@ pub const Heap = struct {
         errdefer s.deinit(self.allocator);
         s.mark_color = self.live_color;
         try self.symbols_young.append(self.allocator, s);
-        self.membershipAlloc(.symbol, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -1154,7 +1105,6 @@ pub const Heap = struct {
         errdefer g.deinit(self.allocator);
         g.mark_color = self.live_color;
         try self.generators_young.append(self.allocator, g);
-        self.membershipAlloc(.generator, g);
         self.allocs_since_gc +|= 1;
         return g;
     }
@@ -1175,10 +1125,6 @@ pub const Heap = struct {
         o.mark_color = self.live_color;
         if (std.debug.runtime_safety) o.alloc_site = @returnAddress();
         try self.objects_young.append(self.allocator, o);
-        // After the (fallible) append: with the object now tracked in
-        // a live list, the errdefer above is disarmed, so recording
-        // the slot allocated can't leave a set bit on a destroyed slot.
-        self.membershipAlloc(.object, o);
         self.allocs_since_gc +|= 1;
         return o;
     }
@@ -1202,7 +1148,6 @@ pub const Heap = struct {
             .mark_color = self.live_color,
         };
         try self.environments_young.append(self.allocator, env);
-        self.membershipAlloc(.environment, env);
         self.allocs_since_gc +|= 1;
         return env;
     }
@@ -1250,10 +1195,6 @@ pub const Heap = struct {
                 .configurable = true,
             });
         }
-        // Record only after every fallible step: an earlier failure
-        // runs the errdefer that frees `f`, and the cold-set entry
-        // must not outlive the slot.
-        self.membershipAlloc(.function, f);
         return f;
     }
 
@@ -1287,7 +1228,6 @@ pub const Heap = struct {
         try self.installFunctionLengthAndName(f, param_count, name);
         f.mark_color = self.live_color;
         try self.functions_young.append(self.allocator, f);
-        self.membershipAlloc(.function, f);
         self.allocs_since_gc +|= 1;
         return f;
     }
@@ -1348,7 +1288,6 @@ pub const Heap = struct {
             .mark_color = self.live_color,
         };
         try self.strings_young.append(self.allocator, s);
-        self.membershipAlloc(.string, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -1381,7 +1320,6 @@ pub const Heap = struct {
             .mark_color = self.live_color,
         };
         try self.strings_young.append(self.allocator, s);
-        self.membershipAlloc(.string, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -1494,7 +1432,6 @@ pub const Heap = struct {
             .mark_color = self.live_color,
         };
         try self.strings_young.append(self.allocator, s);
-        self.membershipAlloc(.string, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -1524,7 +1461,6 @@ pub const Heap = struct {
             .mark_color = self.live_color,
         };
         try self.strings_young.append(self.allocator, s);
-        self.membershipAlloc(.string, s);
         self.allocs_since_gc +|= 1;
         return s;
     }
@@ -2348,10 +2284,11 @@ pub const Heap = struct {
 
     // ── Conservative native-stack scanning ──────────────────────
     // See the membership-field comment for the why. The flow:
-    //   1. `refreshConservativeMembership` — re-snapshot the three
-    //      pooled kinds' arena chunk topology (cheap; the per-slot
-    //      allocated bits and the cold-kind map are already current
-    //      from the alloc / free hooks, so there is NO per-GC rebuild).
+    //   1. `refreshConservativeMembership` — rebuild the membership
+    //      index from the authoritative young/mature lists: clear the
+    //      three pooled kinds' bitmaps and set one bit per live object,
+    //      and refill the cold-kind address→kind map. O(live) cheap
+    //      bit-sets, no per-allocation cost.
     //   2. `scanConservativeStack` — walk `[sp, base)` on the running
     //      thread, mask each word to a header-aligned candidate, and
     //      mark any candidate `isLiveHeapPointer` recognises.
@@ -2361,14 +2298,12 @@ pub const Heap = struct {
     /// `null`. The membership test the conservative scanner calls per
     /// stack word. Two arms, both O(1) and allocation-free: the three
     /// slab-pooled kinds resolve via chunk-range + item-grid + a set
-    /// allocated bit; the four general-allocator kinds resolve via an
-    /// incrementally-maintained address→kind map. Both arms NEVER
-    /// report a freed slot (the bit is cleared / the entry removed
-    /// before the slot is poisoned) — false-retention of a
-    /// dead-but-unswept object is tolerable, a use-after-free is not.
-    /// Reusable by GC verifiers. Requires `refreshConservativeMembership`
-    /// to have run this cycle so a chunk grown since the last cycle is
-    /// in range.
+    /// live bit; the four general-allocator kinds resolve via an
+    /// address→kind hashmap. Both arms NEVER report a freed slot (the
+    /// rebuild marks only objects still in the authoritative lists) —
+    /// false-retention of a dead-but-unswept object is tolerable, a
+    /// use-after-free is not. Reusable by GC verifiers. Requires
+    /// `refreshConservativeMembership` to have run this cycle.
     pub fn isLiveHeapPointer(self: *const Heap, addr: usize) ?PtrKind {
         if (self.obj_membership.isLive(addr)) return .object;
         if (self.env_membership.isLive(addr)) return .environment;
@@ -2376,20 +2311,57 @@ pub const Heap = struct {
         return self.cold_ptr_set.get(addr);
     }
 
-    /// Re-snapshot the pooled-kind arena chunk topology so a chunk the
-    /// arena grew (or a brand-new chunk) since the last cycle is in
-    /// range for `isLiveHeapPointer`. O(chunks) per pooled kind —
-    /// chunks grow geometrically, so this is a handful of header reads,
-    /// not the O(live) hashmap rebuild it replaces. The allocated bits
-    /// themselves are maintained on every alloc / free and are NOT
-    /// touched here. On OOM the snapshot is left as-is and the
-    /// conservative scan degrades to the precise scopes for the cycle
-    /// (a missing scope reverts to pre-backstop behaviour for one
-    /// cycle rather than crashing).
-    fn refreshConservativeMembership(self: *Heap) void {
-        self.obj_membership.refresh(&self.object_pool, self.allocator) catch {};
-        self.env_membership.refresh(&self.env_pool, self.allocator) catch {};
-        self.str_membership.refresh(&self.string_pool, self.allocator) catch {};
+    /// Rebuild the conservative-scan membership index from the
+    /// authoritative young/mature lists, once per GC, before the stack
+    /// scan. For the three pooled kinds: `beginRebuild` refreshes the
+    /// arena chunk topology and clears every bit, then one `markLive`
+    /// per object sets its bit — O(live) cheap bit-sets, replacing the
+    /// O(live) hash inserts the previous hashmap rebuild paid, with no
+    /// per-allocation cost. For the four cold kinds: refill the
+    /// address→kind map (they are few). On OOM the structures are left
+    /// best-effort and the scan degrades to the precise scopes for the
+    /// cycle (a missing precise scope reverts to pre-backstop behaviour
+    /// for one cycle rather than crashing).
+    ///
+    /// `young_only` (a minor cycle) marks only the young lists: a minor
+    /// cycle sweeps only young objects, so a conservatively-found stack
+    /// word into a *mature* object needs no protection — it survives
+    /// regardless. Skipping the mature half is the bulk of the savings
+    /// on alloc-heavy workloads (promote-on-first grows the mature set,
+    /// so the young lists are short). A full cycle sweeps everything
+    /// and marks both halves.
+    fn refreshConservativeMembership(self: *Heap, young_only: bool) void {
+        // ── Pooled kinds: chunk-indexed bitmap ──
+        self.obj_membership.beginRebuild(&self.object_pool, self.allocator) catch {};
+        self.env_membership.beginRebuild(&self.env_pool, self.allocator) catch {};
+        self.str_membership.beginRebuild(&self.string_pool, self.allocator) catch {};
+        for (self.objects_young.items) |o| self.obj_membership.markLive(@intFromPtr(o));
+        for (self.environments_young.items) |e| self.env_membership.markLive(@intFromPtr(e));
+        for (self.strings_young.items) |s| self.str_membership.markLive(@intFromPtr(s));
+        if (!young_only) {
+            for (self.objects_mature.items) |o| self.obj_membership.markLive(@intFromPtr(o));
+            for (self.environments_mature.items) |e| self.env_membership.markLive(@intFromPtr(e));
+            for (self.strings_mature.items) |s| self.str_membership.markLive(@intFromPtr(s));
+        }
+        // ── Cold kinds: exact address→kind map ──
+        self.cold_ptr_set.clearRetainingCapacity();
+        var cold_total =
+            self.functions_young.items.len + self.generators_young.items.len +
+            self.symbols_young.items.len + self.bigints_young.items.len;
+        if (!young_only) cold_total +=
+            self.functions_mature.items.len + self.generators_mature.items.len +
+            self.symbols_mature.items.len + self.bigints_mature.items.len;
+        self.cold_ptr_set.ensureTotalCapacity(self.allocator, @intCast(cold_total)) catch {};
+        for (self.functions_young.items) |f| self.cold_ptr_set.put(self.allocator, @intFromPtr(f), .function) catch {};
+        for (self.generators_young.items) |g| self.cold_ptr_set.put(self.allocator, @intFromPtr(g), .generator) catch {};
+        for (self.symbols_young.items) |s| self.cold_ptr_set.put(self.allocator, @intFromPtr(s), .symbol) catch {};
+        for (self.bigints_young.items) |b| self.cold_ptr_set.put(self.allocator, @intFromPtr(b), .bigint) catch {};
+        if (!young_only) {
+            for (self.functions_mature.items) |f| self.cold_ptr_set.put(self.allocator, @intFromPtr(f), .function) catch {};
+            for (self.generators_mature.items) |g| self.cold_ptr_set.put(self.allocator, @intFromPtr(g), .generator) catch {};
+            for (self.symbols_mature.items) |s| self.cold_ptr_set.put(self.allocator, @intFromPtr(s), .symbol) catch {};
+            for (self.bigints_mature.items) |b| self.cold_ptr_set.put(self.allocator, @intFromPtr(b), .bigint) catch {};
+        }
     }
 
     /// Mark the live object a conservatively-found stack word points
@@ -2591,7 +2563,7 @@ pub const Heap = struct {
         pending.append(allocator, @ptrCast(@alignCast(hd))) catch {};
     }
 
-    fn sweepList(heap: *Heap, list: anytype, live_color: u1, deinit_args: anytype) void {
+    fn sweepList(list: anytype, live_color: u1, deinit_args: anytype) void {
         var i: usize = list.items.len;
         while (i > 0) {
             i -= 1;
@@ -2616,10 +2588,6 @@ pub const Heap = struct {
                 }
             } else {
                 _ = list.swapRemove(i);
-                // Drop the conservative-scan membership record before
-                // the slot is poisoned / freed — a freed address must
-                // never read as live (the inviolable no-UAF invariant).
-                heap.membershipFree(EntryT, @intFromPtr(entry));
                 if (comptime EntryT == JSObject) {
                     // Slab pool path — see promoteYoungList for the
                     // matching logic; for JSObject `deinit_args` is
@@ -2784,7 +2752,7 @@ pub const Heap = struct {
         // `scanConservativeStack`.
         self.conservative_roots_found = 0;
         if (self.conservative_scan) {
-            self.refreshConservativeMembership();
+            self.refreshConservativeMembership(false); // full cycle: mark both halves
             self.scanConservativeStack();
         }
 
@@ -2837,23 +2805,23 @@ pub const Heap = struct {
         const ba = .{ self.allocator, self.bytes_allocator, &self.string_pool };
         const sa = .{self.allocator};
         const lc = self.live_color;
-        sweepList(self, &self.strings_mature, lc, ba);
-        sweepList(self, &self.functions_mature, lc, sa);
-        sweepList(self, &self.objects_mature, lc, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
-        sweepList(self, &self.environments_mature, lc, .{ self.allocator, &self.env_pool });
-        sweepList(self, &self.generators_mature, lc, sa);
-        sweepList(self, &self.symbols_mature, lc, sa);
-        sweepList(self, &self.bigints_mature, lc, sa);
+        sweepList(&self.strings_mature, lc, ba);
+        sweepList(&self.functions_mature, lc, sa);
+        sweepList(&self.objects_mature, lc, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
+        sweepList(&self.environments_mature, lc, .{ self.allocator, &self.env_pool });
+        sweepList(&self.generators_mature, lc, sa);
+        sweepList(&self.symbols_mature, lc, sa);
+        sweepList(&self.bigints_mature, lc, sa);
         // A full cycle tenures every survivor outright (age_survivors
         // = false), so no mature→young edge can exist afterwards and
         // the dirty list is trivially empty.
-        promoteYoungList(self, *JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, false, 0, ba);
-        promoteYoungList(self, *JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, false, 0, sa);
-        promoteYoungList(self, *JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, false, 0, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
-        promoteYoungList(self, *Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, false, 0, .{ self.allocator, &self.env_pool });
-        promoteYoungList(self, *JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, false, 0, sa);
-        promoteYoungList(self, *JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, false, 0, sa);
-        promoteYoungList(self, *JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, false, 0, sa);
+        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, false, 0, ba);
+        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, false, 0, sa);
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, false, 0, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
+        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, false, 0, .{ self.allocator, &self.env_pool });
+        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, false, 0, sa);
+        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, false, 0, sa);
+        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, false, 0, sa);
 
         // The dirty list is empty after a full cycle — a full mark
         // visited every mature object, and every survivor tenured, so
@@ -3030,7 +2998,7 @@ pub const Heap = struct {
         // drain below so its marks are honoured at sweep.
         self.conservative_roots_found = 0;
         if (self.conservative_scan) {
-            self.refreshConservativeMembership();
+            self.refreshConservativeMembership(true); // minor cycle: young-only
             self.scanConservativeStack();
         }
 
@@ -3068,13 +3036,13 @@ pub const Heap = struct {
         // JSObject with `age < promote_age` bumps its age and stays
         // young; everything else tenures on first survival.
         const ag = self.promote_age;
-        promoteYoungList(self, *JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, true, ag, .{ self.allocator, self.bytes_allocator, &self.string_pool });
-        promoteYoungList(self, *JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, true, ag, .{self.allocator});
-        promoteYoungList(self, *JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, true, ag, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
-        promoteYoungList(self, *Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, true, ag, .{ self.allocator, &self.env_pool });
-        promoteYoungList(self, *JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, true, ag, .{self.allocator});
-        promoteYoungList(self, *JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, true, ag, .{self.allocator});
-        promoteYoungList(self, *JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, true, ag, .{self.allocator});
+        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, true, ag, .{ self.allocator, self.bytes_allocator, &self.string_pool });
+        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, true, ag, .{self.allocator});
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, true, ag, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
+        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, true, ag, .{ self.allocator, &self.env_pool });
+        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, true, ag, .{self.allocator});
+        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, true, ag, .{self.allocator});
+        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, true, ag, .{self.allocator});
 
         // Rebuild the dirty list. Under aging a young JSObject can
         // survive a minor cycle still young, so a mature→young edge
@@ -3160,7 +3128,6 @@ pub const Heap = struct {
     /// roots through it. The conservative native-stack backstop covers
     /// the rooting hazard of a survivor staying young across a cycle.
     fn promoteYoungList(
-        heap: *Heap,
         comptime PtrT: type,
         young_list: *std.ArrayListUnmanaged(PtrT),
         mature_list: *std.ArrayListUnmanaged(PtrT),
@@ -3211,9 +3178,6 @@ pub const Heap = struct {
                 };
             } else {
                 _ = young_list.swapRemove(i);
-                // Drop the conservative-scan membership record before
-                // the slot is poisoned / freed (see `sweepList`).
-                heap.membershipFree(EntryT, @intFromPtr(entry));
                 if (comptime EntryT == JSObject) {
                     // Slab pool path — drop sub-fields, then
                     // return the header to the free-list instead
@@ -5385,7 +5349,7 @@ test "conservative scan: isLiveHeapPointer reports live objects by kind" {
     const sym = try heap.allocateSymbol("d");
     const b = try heap.allocateBigInt(1);
 
-    heap.refreshConservativeMembership();
+    heap.refreshConservativeMembership(false);
     try testing.expectEqual(PtrKind.object, heap.isLiveHeapPointer(@intFromPtr(o)).?);
     try testing.expectEqual(PtrKind.environment, heap.isLiveHeapPointer(@intFromPtr(env)).?);
     try testing.expectEqual(PtrKind.string, heap.isLiveHeapPointer(@intFromPtr(s)).?);
@@ -5394,19 +5358,22 @@ test "conservative scan: isLiveHeapPointer reports live objects by kind" {
     try testing.expectEqual(PtrKind.bigint, heap.isLiveHeapPointer(@intFromPtr(b)).?);
 }
 
-test "conservative scan: membership tracks allocation before any refresh" {
-    // The alloc hook sets the bit immediately; a *fresh* young object
-    // must read live even if no GC (hence no refresh) has run yet —
-    // the chunk gets snapshotted lazily on first lookup. (Invariant #1
-    // for the just-allocated case the conservative scan most cares
-    // about: an object pinned only by a native local between alloc and
-    // the next safepoint.)
+test "conservative scan: the rebuild picks up a young object in a fresh chunk" {
+    // Invariant #1 for the case the scan most cares about: a young
+    // object allocated into a brand-new arena chunk (one created after
+    // the previous rebuild) must read live after the next rebuild — the
+    // `beginRebuild` topology refresh discovers the chunk and `markLive`
+    // sets its bit. Force a fresh chunk by allocating many objects.
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
-    const o = try heap.allocateObject();
-    const s = try heap.allocateString("x");
-    try testing.expectEqual(PtrKind.object, heap.isLiveHeapPointer(@intFromPtr(o)).?);
-    try testing.expectEqual(PtrKind.string, heap.isLiveHeapPointer(@intFromPtr(s)).?);
+    var addrs: [200]usize = undefined;
+    for (&addrs) |*a| a.* = @intFromPtr(try heap.allocateObject());
+    heap.refreshConservativeMembership(true); // minor-cycle shape (young-only)
+    // Every young object — across however many chunks the pool grew —
+    // resolves to .object.
+    for (addrs) |a| {
+        try testing.expectEqual(PtrKind.object, heap.isLiveHeapPointer(a).?);
+    }
 }
 
 test "conservative scan: a mid-object (unaligned) address returns null" {
@@ -5416,7 +5383,7 @@ test "conservative scan: a mid-object (unaligned) address returns null" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
     const o = try heap.allocateObject();
-    heap.refreshConservativeMembership();
+    heap.refreshConservativeMembership(false);
     const base = @intFromPtr(o);
     try testing.expect(heap.isLiveHeapPointer(base) != null); // the header itself
     // One word into the slot is mid-object: not a header.
@@ -5434,7 +5401,7 @@ test "conservative scan: an address just past the chunk returns null" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
     _ = try heap.allocateObject();
-    heap.refreshConservativeMembership();
+    heap.refreshConservativeMembership(false);
     try testing.expect(heap.obj_membership.chunks.items.len >= 1);
     const c = heap.obj_membership.chunks.items[0];
     const just_past = c.base + c.cap * @TypeOf(heap.obj_membership).item_size;
@@ -5464,30 +5431,34 @@ test "conservative scan: a freed pooled slot reads null even if grid-aligned" {
     const garbage = try heap.allocateObject();
     const garbage_addr = @intFromPtr(garbage);
     // Confirm it WAS on the grid + live before the free.
-    heap.refreshConservativeMembership();
+    heap.refreshConservativeMembership(false);
     try testing.expect(heap.isLiveHeapPointer(garbage_addr) != null);
     const c = heap.obj_membership.chunks.items[heap.obj_membership.chunkIndexOf(garbage_addr).?];
     try testing.expect((garbage_addr - c.base) % @TypeOf(heap.obj_membership).item_size == 0);
-    // Sweep `garbage`; the free hook clears its bit.
+    // Sweep `garbage` (removed from the live list), then rebuild the
+    // membership: the rebuild marks only objects still in the list, so
+    // `garbage`'s bit stays clear even though its slot is still in
+    // range and grid-aligned.
     heap.collect(&.{taggedObject(survivor)});
-    heap.refreshConservativeMembership();
+    heap.refreshConservativeMembership(false);
     try testing.expect(heap.isLiveHeapPointer(@intFromPtr(survivor)) != null);
     try testing.expect(heap.isLiveHeapPointer(garbage_addr) == null);
 }
 
 test "conservative scan: a freed cold (function) slot reads null" {
-    // Same invariant for the general-allocator kinds: the cold-set
-    // entry must be removed on free so a freed function address does
-    // not read live.
+    // Same invariant for the general-allocator kinds: after the rebuild
+    // a freed function's address must not read live (it is no longer in
+    // the authoritative list, so the cold-set refill omits it).
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
     heap.conservative_scan = false;
     const keep = try heap.allocateObject();
     const fn_ptr = try heap.allocateFunction(undefined, 0, "g", true, null);
     const fn_addr = @intFromPtr(fn_ptr);
-    heap.refreshConservativeMembership();
+    heap.refreshConservativeMembership(false);
     try testing.expectEqual(PtrKind.function, heap.isLiveHeapPointer(fn_addr).?);
     heap.collect(&.{taggedObject(keep)});
+    heap.refreshConservativeMembership(false);
     try testing.expect(heap.isLiveHeapPointer(fn_addr) == null);
 }
 
@@ -5495,7 +5466,7 @@ test "conservative scan: isLiveHeapPointer rejects a non-heap address" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
     _ = try heap.allocateObject();
-    heap.refreshConservativeMembership();
+    heap.refreshConservativeMembership(false);
     // A stack address is never a live heap pointer.
     var local: usize = 0xdeadbeef;
     try testing.expect(heap.isLiveHeapPointer(@intFromPtr(&local)) == null);
@@ -5519,7 +5490,7 @@ test "conservative scan: a NEVER-resurrects-freed-slot invariant" {
     const garbage_addr = @intFromPtr(garbage);
     // Collect with only `survivor` rooted; `garbage` is freed.
     heap.collect(&.{taggedObject(survivor)});
-    heap.refreshConservativeMembership();
+    heap.refreshConservativeMembership(false);
     // `survivor` still live; `garbage`'s old address is not (unless
     // the pool happened to hand it back to a new allocation, which it
     // didn't here — no allocation between free and rebuild).
