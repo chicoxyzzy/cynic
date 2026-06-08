@@ -8267,6 +8267,51 @@ test "array literal: length is correct across hole patterns" {
     try expectScriptStringWithBuiltins("Object.keys([1,,3]).join(',')", "0,2");
 }
 
+test "def_property dense-append fast path: array-literal element init" {
+    // §13.2.4.1 ArrayAccumulation — a dense literal's elements append
+    // straight onto `elements` (skipping the `hasOwn` precheck, the
+    // second `canonicalIntegerIndex` re-parse, and `setIndexed`'s
+    // hole-fill + duplicate write barrier). Pin that the fast path
+    // reproduces CreateDataProperty exactly and that the non-sequential
+    // cases fall back cleanly to the general indexed path.
+
+    // Dense sequential — the fast path itself.
+    try expectScriptInt("var a=[1,2,3,4,5]; a.length", 5);
+    try expectScriptInt("var a=[1,2,3,4,5]; a[0]+a[2]+a[4]", 9);
+    // `in` distinguishes present index from past-the-end.
+    try expectScriptStringWithBuiltins(
+        "String(2 in [1,2,3]) + ',' + String(3 in [1,2,3])",
+        "true,false",
+    );
+    // A larger literal exercises repeated sequential append.
+    try expectScriptInt(
+        \\var a=[0,1,2,3,4,5,6,7,8,9];
+        \\var s=0; for (var i=0;i<a.length;i++) s+=a[i]; s
+    , 45);
+
+    // Fall-through: a middle hole — index 2's CreateDataProperty
+    // arrives when `elements.len` is 1 (only index 0 appended), so the
+    // fast path declines and `setIndexed` hole-fills index 1.
+    try expectScriptStringWithBuiltins(
+        "var c=[1,,3]; c.length + ',' + String(1 in c) + ',' + c[2]",
+        "3,false,3",
+    );
+    // Fall-through: a sparse out-of-order assignment auto-extends length.
+    try expectScriptInt("var b=[]; b[5]=9; b.length", 6);
+    try expectScriptStringWithBuiltins(
+        "var b=[]; b[5]=9; String(0 in b) + ',' + b[5]",
+        "false,9",
+    );
+    // Post-literal overwrite (a separate write path) leaves state intact.
+    try expectScriptInt("var d=[10,20]; d[0]=99; d[0]+d[1]+d.length", 121);
+
+    // Heap-object elements exercise the write barrier on the append
+    // path (a maturing array gaining young element referents).
+    try expectScriptInt("var a=[{v:1},{v:2},{v:3}]; a[0].v + a[1].v + a[2].v", 6);
+    // Nested literals — the inner literals also take the fast path.
+    try expectScriptInt("var m=[[1,2],[3,4]]; m[0][0]+m[0][1]+m[1][0]+m[1][1]", 10);
+}
+
 test "later: holes fall through to prototype-chain accessors" {
     // §10.4.2.1 step 2 — sparse holes are NOT own properties;
     // reads delegate to the prototype chain, where Array.prototype's

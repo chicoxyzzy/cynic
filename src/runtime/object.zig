@@ -2725,6 +2725,28 @@ pub const JSObject = struct {
         }
     }
 
+    /// Append `v` at the next dense index on a dense Array exotic — the
+    /// sequential array-literal init case `[a, b, c]`, whose elements
+    /// land at 0, 1, 2 in order. Pushes straight onto `elements` and
+    /// fires the generational write barrier (a mature array can gain a
+    /// young element referent — same `verifyRememberedSet` element-edge
+    /// obligation as `setIndexed`). Returns `false` so the caller falls
+    /// back to the general indexed path when the array is sparse or
+    /// `idx` is not the next slot (a hole-creating or overwriting
+    /// write). Does NOT touch `length`; the caller syncs it. §10.4.2.1.
+    pub fn appendDenseSequential(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        idx: u32,
+        v: Value,
+    ) !bool {
+        if (self.is_sparse) return false;
+        if (idx != self.elements.items.len) return false;
+        try self.elements.append(allocator, v);
+        if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
+        return true;
+    }
+
     /// Grow indexed storage to `new_len`, filling any new slots
     /// with the hole sentinel (§10.4.2.1 — sparse holes are NOT
     /// own properties; reads fall through to the prototype

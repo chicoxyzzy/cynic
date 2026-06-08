@@ -9207,6 +9207,25 @@ pub fn runFrames(
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
             const recv = registers[r_obj];
             const obj = heap_mod.valueAsPlainObject(recv) orelse return error.InvalidOpcode;
+            // §13.2.4.1 ArrayAccumulation fast path — an array literal
+            // `[a, b, c]` emits one CreateDataProperty per element with
+            // the next canonical index ("0", "1", "2") onto a freshly
+            // made dense Array exotic. A sequential dense append produces
+            // exactly CreateDataProperty's effect (`elements[idx] = v`,
+            // `length = idx + 1`, implicit `{w,e,c} = true`) while skipping
+            // the `hasOwn` precheck (a fresh append is never a preexisting
+            // own slot), the second `canonicalIntegerIndex` re-parse inside
+            // `setWithFlags`, and `setIndexed`'s redundant hole-fill +
+            // duplicate write barrier. Falls through for sparse arrays or
+            // out-of-order / overwriting indices.
+            if (obj.is_array_exotic) {
+                if (object_mod.JSObject.canonicalIntegerIndex(key_s.flatBytes())) |idx| {
+                    if (obj.appendDenseSequential(allocator, idx, acc) catch return error.OutOfMemory) {
+                        obj.syncLengthProperty(allocator) catch return error.OutOfMemory;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
+                }
+            }
             const had_own = obj.hasOwn(key_s.flatBytes());
             if (!had_own and !obj.extensible) {
                 const ex = try makeTypeError(realm, "Cannot define property on non-extensible object");
