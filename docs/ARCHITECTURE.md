@@ -342,9 +342,13 @@ object / declarative / `[[VarNames]]` split). Host bindings
 via per-builtin `install(realm)` calls and looked up by the
 `lda_global` opcode when an identifier reference doesn't
 resolve in any user scope. Multiple realms are also the
-foundation for the SES / Compartments direction; today ships a
-single realm and the API is shaped so adding more later is a
-structural addition, not a refactor.
+foundation for the SES / Compartments direction, and they ship
+today: per-realm intrinsics and globals, a `RealmStack` with each
+function's `[[Realm]]` resolved at call time, and `ShadowRealm`
+with per-realm teardown. Cross-realm calls resolve intrinsics
+through the executing function's realm, not the dispatch realm.
+The `Compartment` surface on top stays deferred — a TC39 Stage 1
+proposal — see [docs/multi-realm.md](multi-realm.md).
 
 `print` and friends are wired as `JSFunction` instances with a
 `native_callback: ?NativeFn` field (a native function pointer).

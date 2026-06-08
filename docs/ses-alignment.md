@@ -85,7 +85,7 @@ guarantee against Cynic's status:
 | 4 | **Freeze all primordials at realm init** | ✅ shipped | Phase 1 |
 | 5 | **`harden()` global** — recursive deep freeze | ✅ shipped | Phase 2 |
 | 6 | **Override-mistake fix** — data props on frozen prototypes become accessor pairs that allow instance shadowing | ✅ shipped | Phase 3 |
-| 7 | **`Compartment` class** — isolated realm-like sandboxes | ❌ — Cynic is single-realm | Deferred |
+| 7 | **`Compartment` class** — isolated realm-like sandboxes | ❌ — TC39 Stage 1; the multi-realm substrate ships (per-realm intrinsics/globals, `ShadowRealm`, per-realm teardown), the `Compartment` surface waits | Deferred |
 | 8 | Tame ambient state (`Math.random`, `Date.now`, …) | ❌ | Deferred (needs Compartments) |
 | 9 | Tame error stacks | partial — minimal surface today | Phase 4 (small) |
 | 10 | Tame RegExp legacy globals | ✅ explicitly out | — |
