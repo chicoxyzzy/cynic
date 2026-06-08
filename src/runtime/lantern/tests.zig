@@ -11665,6 +11665,54 @@ test "JSON.stringify: replacer function still applies under shape walk" {
     , "{\"a\":1,\"b\":20,\"c\":3}");
 }
 
+// ── Small-integer toString cache ────────────────────────────────────
+//
+// `(n).toString()` for a small non-negative integer is extremely
+// common (`string_concat`: `(i & 0xff).toString()` 300k times) and now
+// returns a pinned, shared, cached JSString instead of allocating a
+// fresh one each call. Strings are immutable and `===`-compared by
+// value, so sharing one instance is unobservable. These pin the value
+// semantics the cache must preserve.
+
+test "Number.prototype.toString: small-int cache returns correct decimals" {
+    try expectScriptStringWithBuiltins(
+        \\[(0).toString(), (5).toString(), (255).toString(),
+        \\ (256).toString(), (1000000).toString(), (-7).toString()].join(",");
+    , "0,5,255,256,1000000,-7");
+}
+
+test "Number.prototype.toString: cached value compares equal + concatenates" {
+    try expectScriptStringWithBuiltins(
+        \\const a = (42).toString(), b = (42).toString();
+        \\"" + (a === b) + ":" + a + b + ":" + ("x" + (7).toString());
+    , "true:4242:x7");
+}
+
+test "Number.prototype.toString: cached string supports normal string ops" {
+    try expectScriptStringWithBuiltins(
+        \\const s = (123).toString();
+        \\s.length + ":" + s.charAt(1) + ":" + s.toUpperCase() + ":" + s[2];
+    , "3:2:123:3");
+}
+
+test "Number.prototype.toString: radix bypasses the decimal cache" {
+    try expectScriptStringWithBuiltins(
+        \\(255).toString(16) + "," + (10).toString(2) + "," + (255).toString();
+    , "ff,1010,255");
+}
+
+test "Number.prototype.toString: small-int cache durable under GC pressure" {
+    // The cached strings are pinned (permanently live); repeated
+    // toString across many GC cycles must keep returning the correct
+    // value with no use-after-free.
+    try expectScriptStringUnderGcPressure(
+        \\let acc = "";
+        \\for (let i = 0; i < 10; i++) acc += (i).toString();
+        \\for (let i = 250; i < 256; i++) acc += (i).toString();
+        \\acc;
+    , "0123456789250251252253254255");
+}
+
 // ── JSON.parse deep-nesting stack guard ─────────────────────────────
 //
 // `JSON.parse` is recursive descent (`parseValue` → `parseArray` /

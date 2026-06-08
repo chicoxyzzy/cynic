@@ -455,6 +455,11 @@ fn numberToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
         // step 2 for zero NumericValue regardless of sign-bit).
         if (x == @trunc(x) and x >= -1.0e18 and x <= 1.0e18) {
             const i: i64 = @intFromFloat(x);
+            // Small non-negative integers hit the pinned, shared cache
+            // (`(i & 0xff).toString()` and friends) — no per-call
+            // allocation. Larger / negative integers format + allocate.
+            if (realm.heap.smallIntString(i) catch return error.OutOfMemory) |s|
+                return Value.fromString(s);
             const slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
             const s = realm.heap.allocateString(slice) catch return error.OutOfMemory;
             return Value.fromString(s);

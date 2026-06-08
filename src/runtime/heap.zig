@@ -201,6 +201,14 @@ pub fn isJSObject(v: Value) bool {
 }
 
 pub const Heap = struct {
+    /// Upper bound (exclusive) of the small-integer toString cache
+    /// (`small_int_strings` / `smallIntString`). 256 covers byte
+    /// values, small loop counters / array indices, and
+    /// `string_concat`'s `(i & 0xff)` range at a 2 KiB
+    /// (256 × `?*JSString`) per-realm cost; lazy population means only
+    /// the integers actually stringified allocate a backing string.
+    pub const small_int_cache_max = 256;
+
     allocator: std.mem.Allocator,
     /// Allocator backing large heap-owned payloads (JSString.bytes,
     /// ArrayBuffer slabs) that the mark-sweep collector will free
@@ -585,6 +593,17 @@ pub const Heap = struct {
     /// returns to the pool — see the `JSString` branches in
     /// `sweepList` and `promoteYoungList`.
     string_pool: std.heap.MemoryPool(JSString) = .empty,
+
+    /// Cache of pinned `JSString`s for the decimal forms of small
+    /// non-negative integers `[0, small_int_cache_max)`. Number-to-
+    /// string on a small integer (`(i & 0xff).toString()`, an array
+    /// index, an HTTP status, a byte value) is extremely common and
+    /// otherwise allocates a fresh 1-3 byte `JSString` every call.
+    /// Lazily populated and pinned permanently: strings are immutable
+    /// and `===`-compared by value, so handing the SAME instance to
+    /// every caller is unobservable (string identity isn't visible to
+    /// JS). See `smallIntString`.
+    small_int_strings: [small_int_cache_max]?*JSString = @splat(null),
 
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{
@@ -986,6 +1005,29 @@ pub const Heap = struct {
         };
         try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
+        return s;
+    }
+
+    /// Pinned, shared `JSString` for the decimal form of `n` when
+    /// `0 <= n < small_int_cache_max`; `null` otherwise (the caller
+    /// allocates normally). The returned string is immutable and
+    /// permanently live (`pinValue`), so the SAME instance is handed
+    /// to every caller — unobservable since JS compares strings by
+    /// value, never identity. First use of each value allocates +
+    /// pins it; later uses are a single array load.
+    pub fn smallIntString(self: *Heap, n: i64) !?*JSString {
+        if (n < 0 or n >= small_int_cache_max) return null;
+        const idx: usize = @intCast(n);
+        if (self.small_int_strings[idx]) |cached| return cached;
+        var buf: [3]u8 = undefined; // max "255"
+        const slice = std.fmt.bufPrint(&buf, "{d}", .{idx}) catch unreachable;
+        const s = try self.allocateString(slice);
+        // Pin BEFORE any further allocation — the freshly allocated
+        // string isn't yet a root, so an intervening GC would sweep
+        // it. `pinValue` only sets flags (no allocation), so nothing
+        // can collect between the `allocateString` above and here.
+        try self.pinValue(Value.fromString(s));
+        self.small_int_strings[idx] = s;
         return s;
     }
 
