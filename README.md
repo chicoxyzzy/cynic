@@ -39,8 +39,9 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
 
 Pre-alpha. Lexer + parser + Lantern (T0 bytecode interpreter) +
 Metla (mark-sweep GC) ship, alongside Perlex (the native §22.2
-RegExp engine), the native §3 Unicode tables, and the
-hardened-by-default realm-boot pipeline. The runtime is filling
+RegExp engine), Sarcasm (the from-scratch WebAssembly engine —
+100 % on the spec testsuite), the native §3 Unicode tables, and
+the hardened-by-default realm-boot pipeline. The runtime is filling
 in §19-§28 one bucket at a time. The JIT tiers (Bistromath,
 Ohaimark) and generational GC are future work. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
@@ -104,6 +105,14 @@ The shape, in broad strokes — the per-bucket numbers live in the
   pending-await suspension via `JSGenerator` capture, async
   generators with promise-reaction chaining, `Promise.try` and
   `Promise.withResolvers`.
+- **WebAssembly** — Cynic runs Wasm through the `WebAssembly` JS
+  API (`Module` / `Instance` / `Memory` / `Table` / `Global`,
+  `compile` / `instantiate`, host imports, cross-module linking),
+  powered by **Sarcasm** — a from-scratch in-place interpreter
+  (SIMD, reference types, memory64, multi-memory). **100 %
+  (56510/56510)** on the official WebAssembly spec testsuite. Off
+  by default; opt in with `--allow=wasm` (same SES posture as
+  `eval` — see [`docs/wasm-engine.md`](docs/wasm-engine.md)).
 - **Proper Tail Calls** (ES2015 §15.10) — calls in tail position
   reuse the caller's frame instead of pushing a fresh one;
   `function f(n) { return f(n - 1); }` recurses without growing
