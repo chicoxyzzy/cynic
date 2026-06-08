@@ -847,27 +847,40 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 while (k < ncatch) : (k += 1) {
                     const kind = try v.r.byte();
                     // 0 catch, 1 catch_ref, 2 catch_all, 3 catch_all_ref.
-                    // The `_ref` forms need `exnref` — a later step.
-                    if (kind == 1 or kind == 3) return error.UnsupportedRefCatch;
                     if (kind > 3) return error.BadCatchKind;
                     var payload: []const ValType = &.{};
-                    if (kind == 0) {
+                    if (kind == 0 or kind == 1) {
                         const tag_idx = try v.r.uleb(u32);
                         payload = (try tagType(v.module, tag_idx)).params;
                     }
+                    // The label receives the tag's payload, plus a trailing
+                    // exnref for the `_ref` forms (catch_ref/catch_all_ref).
+                    var label_types = payload;
+                    if (kind == 1 or kind == 3) {
+                        const lt = try v.arena.alloc(ValType, payload.len + 1);
+                        @memcpy(lt[0..payload.len], payload);
+                        lt[payload.len] = .exnref;
+                        label_types = lt;
+                    }
                     const target = try v.label(try v.r.uleb(u32));
-                    if (!sameTypes(target.labelTypes(), payload)) return error.TypeMismatch;
-                    // Simulate the payload on the stack so the catch's
+                    if (!sameTypes(target.labelTypes(), label_types)) return error.TypeMismatch;
+                    // Simulate the label values on the stack so the catch's
                     // side-table branch gets the correct pop count (at
-                    // runtime the payload is pushed before the branch).
+                    // runtime they are pushed before the branch).
                     const h = v.vals.items.len;
-                    try v.pushVals(payload);
+                    try v.pushVals(label_types);
                     _ = try v.emitBranch(op_ip, target);
                     v.vals.shrinkRetainingCapacity(h);
                 }
                 const body_ip: u32 = @intCast(v.r.pos);
                 try v.pushCtrl(.try_table, bt.params, bt.results, body_ip);
                 v.ctrls.items[v.ctrls.items.len - 1].op_ip = op_ip;
+            },
+            // `throw_ref` re-raises a captured exnref; control does not
+            // fall through.
+            .throw_ref => {
+                try v.popExpect(.exnref);
+                v.setUnreachable();
             },
             .call => {
                 const fidx = try v.r.uleb(u32);

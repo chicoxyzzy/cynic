@@ -951,6 +951,8 @@ fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
         // §ToWebAssemblyValue / §ToJSValue — a v128 value cannot cross the JS
         // boundary; the spec mandates a TypeError.
         .v128 => return intrinsics.throwTypeError(realm, "WebAssembly: a v128 value cannot cross the JS boundary"),
+        // exnref interop is the WebAssembly.Exception surface (not yet built).
+        .exnref => return intrinsics.throwTypeError(realm, "WebAssembly: an exnref cannot yet cross the JS boundary"),
     }
 }
 
@@ -980,6 +982,8 @@ fn marshalResult(realm: *Realm, vt: wasm.ValType, cell: u128) NativeError!Value 
         // §ToWebAssemblyValue / §ToJSValue — a v128 value cannot cross the JS
         // boundary; the spec mandates a TypeError.
         .v128 => return intrinsics.throwTypeError(realm, "WebAssembly: a v128 value cannot cross the JS boundary"),
+        // exnref interop is the WebAssembly.Exception surface (not yet built).
+        .exnref => return intrinsics.throwTypeError(realm, "WebAssembly: an exnref cannot yet cross the JS boundary"),
     }
 }
 

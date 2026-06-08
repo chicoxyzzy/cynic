@@ -13,6 +13,7 @@ pub const ValType = enum(u8) {
     v128 = 0x7b,
     funcref = 0x70,
     externref = 0x6f,
+    exnref = 0x69, // exception-handling proposal — (ref null exn)
 
     /// Decode a value-type byte. Returns null for an unrecognized tag.
     pub fn fromByte(b: u8) ?ValType {
@@ -24,6 +25,7 @@ pub const ValType = enum(u8) {
             0x7b => .v128,
             0x70 => .funcref,
             0x6f => .externref,
+            0x69 => .exnref,
             else => null,
         };
     }
@@ -41,10 +43,10 @@ pub const ValType = enum(u8) {
         return self == .v128;
     }
 
-    /// §2.3.3 — funcref/externref.
+    /// §2.3.3 — funcref/externref/exnref.
     pub fn isRef(self: ValType) bool {
         return switch (self) {
-            .funcref, .externref => true,
+            .funcref, .externref, .exnref => true,
             else => false,
         };
     }
@@ -55,11 +57,13 @@ pub const ValType = enum(u8) {
 pub const RefType = enum(u8) {
     funcref = 0x70,
     externref = 0x6f,
+    exnref = 0x69,
 
     pub fn fromByte(b: u8) ?RefType {
         return switch (b) {
             0x70 => .funcref,
             0x6f => .externref,
+            0x69 => .exnref,
             else => null,
         };
     }
@@ -68,6 +72,7 @@ pub const RefType = enum(u8) {
         return switch (self) {
             .funcref => .funcref,
             .externref => .externref,
+            .exnref => .exnref,
         };
     }
 };

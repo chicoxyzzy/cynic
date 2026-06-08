@@ -2074,3 +2074,68 @@ test "wasm exceptions: a second try_table still catches after a sibling complete
     });
     try testing.expectEqual(@as(i32, 3), try runI32(bytes, "f", &.{}));
 }
+
+test "wasm exceptions: catch_all_ref binds an exnref that throw_ref re-raises" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const gbody = [_]u8{ 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // block $outer (i32) { try_table (i32) (catch tag0 -> $outer)
+    //   block $inner (exnref) { try_table (exnref) (catch_all_ref -> $inner)
+    //     i32.const 5; throw tag0 end } end
+    //   throw_ref   ;; re-raise the bound exnref -> outer catch -> result 5
+    // end } end
+    const cbody = [_]u8{
+        0x01, 0x1a, 0x00,
+        0x02, 0x7f, 0x1f,
+        0x7f, 0x01, 0x00,
+        0x00, 0x00, 0x02,
+        0x69, 0x1f, 0x69,
+        0x01, 0x03, 0x00,
+        0x41, 0x05, 0x08,
+        0x00, 0x0b, 0x0b,
+        0x0a, 0x0b, 0x0b,
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 5), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm exceptions: catch_ref binds an exnref for an empty-payload tag" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // type0 ()->i32 (func); type1 (i32)->(); type2 ()->() (the tag, no payload)
+    const tbody = [_]u8{ 0x03, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x00, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const gbody = [_]u8{ 0x01, 0x00, 0x02 }; // tag0 : type2
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // block $inner (exnref) { try_table (exnref) (catch_ref tag0 -> $inner) throw tag0 end } end
+    // drop ; i32.const 7   ;; reaching here means catch_ref caught + bound an exnref
+    const cbody = [_]u8{
+        0x01, 0x11, 0x00,
+        0x02, 0x69, 0x1f,
+        0x69, 0x01, 0x01,
+        0x00, 0x00, 0x08,
+        0x00, 0x0b, 0x0b,
+        0x1a, 0x41, 0x07,
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 7), try runI32(bytes, "f", &.{}));
+}

@@ -41,10 +41,11 @@ pub const TrapError = error{
     /// A JS-backed host import threw; the exception is pending on the
     /// realm and is re-raised at the wasm->JS boundary.
     HostThrew,
-    /// A wasm `throw` reached the top of the call stack with no matching
-    /// `try_table` handler. (Handler matching is not yet implemented, so
-    /// every `throw` currently surfaces here.)
+    /// A wasm `throw` (or `throw_ref`) reached the top of the call stack
+    /// with no matching `try_table` handler.
     UncaughtException,
+    /// `throw_ref` was given a null exnref.
+    NullExnRef,
 };
 
 /// The null reference sentinel. A funcref always carries a non-null
@@ -119,6 +120,16 @@ const Handler = struct {
     /// is the body range; a frame whose active IP sits outside it has
     /// left the construct, so the handler is stale and does not catch.
     end_ip: usize,
+};
+
+/// A reified thrown exception that an `exnref` refers to. Materialized
+/// when a `catch_ref` / `catch_all_ref` binds the exception, or carried
+/// directly by `throw_ref`. Identity is (defining_instance, tag); the
+/// payload is a copy of the tag's argument values.
+const ExnRecord = struct {
+    defining_instance: *Instance,
+    tag: u32,
+    payload: []u128,
 };
 /// Implementation cap on table size (§4.5.4 allows growth to fail).
 const MAX_TABLE_ELEMS = 1 << 24;
@@ -210,6 +221,10 @@ pub const Instance = struct {
     /// Owns `globals`, `memory.data`, and the table backing; used to
     /// grow and free them.
     gpa: std.mem.Allocator,
+    /// Reified exceptions thrown by (or materialized for) this instance —
+    /// an `exnref` points at one. Held for the instance's lifetime so an
+    /// exnref stored in a global / table / handed to JS never dangles.
+    exn_pool: std.ArrayListUnmanaged(*ExnRecord) = .empty,
 
     pub fn deinit(self: *Instance) void {
         self.gpa.free(self.globals);
@@ -217,6 +232,11 @@ pub const Instance = struct {
         for (self.owned_tables) |t| self.gpa.free(t.elems);
         self.gpa.free(self.owned_tables);
         self.gpa.free(self.tables);
+        for (self.exn_pool.items) |rec| {
+            self.gpa.free(rec.payload);
+            self.gpa.destroy(rec);
+        }
+        self.exn_pool.deinit(self.gpa);
     }
 
     /// Read a global's raw cell by its index in the global index space
@@ -1004,7 +1024,6 @@ fn run(ip: *Interp) Error!void {
         // no handler anywhere it traps as uncaught.
         .throw => {
             const throw_op_ip = pc - 1;
-            const orig_nframes = ip.nframes;
             const throw_tag = readU32(body, &pc);
             const tt = ip.instance.module.tags[throw_tag];
             const npayload: u32 = @intCast(ip.instance.module.types[tt.type_index].params.len);
@@ -1014,43 +1033,37 @@ fn run(ip: *Interp) Error!void {
                 var qi: u32 = 0;
                 while (qi < npayload) : (qi += 1) payload[qi] = ip.stack[ip.sp - npayload + qi];
             }
-            var hi = ip.nhandlers;
-            while (hi > 0) {
-                hi -= 1;
-                const h = ip.handlers[hi];
-                const hframe = ip.frames[h.frame - 1];
-                // Active IP in the handler's frame: the throw site for the
-                // throwing frame, the saved call IP for an outer frame. If
-                // it lies outside the try_table's body the construct has
-                // already completed (or was branched out of) — the handler
-                // is stale and cannot catch.
-                const rip = if (h.frame == orig_nframes) throw_op_ip else hframe.ip;
-                if (rip < h.try_op_ip or rip >= h.end_ip) continue;
-                if (findCatch(hframe.func.body, hframe.instance, h, ip.instance, throw_tag)) |m| {
-                    // Discard frames above the handler's (no result move).
-                    ip.nframes = h.frame;
+            switch (try searchAndCatch(ip, ip.instance, throw_tag, payload[0..npayload], null, throw_op_ip)) {
+                .uncaught => return error.UncaughtException,
+                .caught => |c| {
                     f = &ip.frames[ip.nframes - 1];
-                    ip.instance = f.instance;
                     body = f.func.body;
                     side_table = f.func.side_table;
                     locals_base = f.locals_base;
-                    ip.sp = h.entry_sp;
-                    if (!m.is_all) {
-                        var qi: u32 = 0;
-                        while (qi < npayload) : (qi += 1) {
-                            ip.stack[ip.sp] = payload[qi];
-                            ip.sp += 1;
-                        }
-                    }
-                    const e = side_table[m.stp_idx];
-                    moveValues(ip, e);
-                    pc = @intCast(@as(i64, @intCast(h.try_op_ip)) + e.delta_ip);
-                    stp = @intCast(@as(i64, @intCast(m.stp_idx)) + e.delta_stp);
-                    ip.nhandlers = hi;
+                    pc = c.pc;
+                    stp = c.stp;
                     continue :dispatch nextOp(body, &pc);
-                }
+                },
             }
-            return error.UncaughtException;
+        },
+        // `throw_ref` re-raises a captured exnref (null traps).
+        .throw_ref => {
+            const throw_op_ip = pc - 1;
+            const cell = ip.popCell();
+            if (cell == REF_NULL) return error.NullExnRef;
+            const rec: *ExnRecord = @ptrFromInt(@as(usize, @truncate(cell)));
+            switch (try searchAndCatch(ip, rec.defining_instance, rec.tag, rec.payload, rec, throw_op_ip)) {
+                .uncaught => return error.UncaughtException,
+                .caught => |c| {
+                    f = &ip.frames[ip.nframes - 1];
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    pc = c.pc;
+                    stp = c.stp;
+                    continue :dispatch nextOp(body, &pc);
+                },
+            }
         },
         .@"if" => {
             const op_ip = pc - 1;
@@ -2008,14 +2021,14 @@ fn blockTypeParamCount(inst: *Instance, body: []const u8, pc: usize) u32 {
     return @intCast(inst.module.types[idx].params.len);
 }
 
-const CatchMatch = struct { stp_idx: usize, is_all: bool };
+const CatchMatch = struct { stp_idx: usize, is_all: bool, is_ref: bool };
 
 /// Re-parse a handler's catch clauses (from the owning frame's body) and
 /// return the first that matches the thrown tag, or a catch_all. The
 /// side-table index is `catch_base_stp + i`; a catch_all carries no
-/// payload. Tag identity is (instance, index): two instances can share a
-/// tag only via tag imports, which are not yet supported, so a
-/// cross-instance `catch` never matches.
+/// payload, a `*_ref` form additionally binds the exnref. Tag identity is
+/// (instance, index): two instances can share a tag only via tag imports,
+/// which are not yet supported, so a cross-instance `catch` never matches.
 fn findCatch(hbody: []const u8, hinst: *Instance, h: Handler, throw_inst: *Instance, throw_tag: u32) ?CatchMatch {
     var p = h.try_op_ip + 1; // past the try_table opcode
     p = skipBlockType(hbody, p);
@@ -2028,10 +2041,73 @@ fn findCatch(hbody: []const u8, hinst: *Instance, h: Handler, throw_inst: *Insta
         if (kind == 0 or kind == 1) ctag = readU32(hbody, &p);
         _ = readU32(hbody, &p); // label immediate
         const stp_idx = h.catch_base_stp + i;
-        if (kind == 2 or kind == 3) return .{ .stp_idx = stp_idx, .is_all = true };
-        if (hinst == throw_inst and ctag == throw_tag) return .{ .stp_idx = stp_idx, .is_all = false };
+        const is_ref = (kind == 1 or kind == 3);
+        if (kind == 2 or kind == 3) return .{ .stp_idx = stp_idx, .is_all = true, .is_ref = is_ref };
+        if (hinst == throw_inst and ctag == throw_tag) return .{ .stp_idx = stp_idx, .is_all = false, .is_ref = is_ref };
     }
     return null;
+}
+
+const UnwindOutcome = union(enum) {
+    caught: struct { pc: usize, stp: usize },
+    uncaught,
+};
+
+/// Materialize an exnref-backed exception owned by `definst`'s pool.
+fn buildExnRecord(definst: *Instance, tag: u32, payload: []const u128) !*ExnRecord {
+    const rec = try definst.gpa.create(ExnRecord);
+    errdefer definst.gpa.destroy(rec);
+    const pl = try definst.gpa.alloc(u128, payload.len);
+    @memcpy(pl, payload);
+    rec.* = .{ .defining_instance = definst, .tag = tag, .payload = pl };
+    try definst.exn_pool.append(definst.gpa, rec);
+    return rec;
+}
+
+/// Search the handler stack outward for a catch matching the exception
+/// (tag identity `definst`/`tag`), discarding inner frames as it goes. On
+/// a match it restores the handler's operand stack, pushes the payload
+/// (unless catch_all) and the exnref (for a `*_ref` form, reusing
+/// `existing` or materializing one), and returns the catch's branch
+/// target. `ip` (frame count, instance, sp, handler count) is left at the
+/// catch; the caller rebinds the dispatch locals.
+fn searchAndCatch(ip: *Interp, definst: *Instance, tag: u32, payload: []const u128, existing: ?*ExnRecord, throw_op_ip: usize) !UnwindOutcome {
+    const orig_nframes = ip.nframes;
+    var hi = ip.nhandlers;
+    while (hi > 0) {
+        hi -= 1;
+        const h = ip.handlers[hi];
+        const hframe = ip.frames[h.frame - 1];
+        // Active IP in the handler's frame: the throw site for the
+        // throwing frame, the saved call IP for an outer frame. Outside
+        // the try_table body the handler is stale and cannot catch.
+        const rip = if (h.frame == orig_nframes) throw_op_ip else hframe.ip;
+        if (rip < h.try_op_ip or rip >= h.end_ip) continue;
+        if (findCatch(hframe.func.body, hframe.instance, h, definst, tag)) |m| {
+            ip.nframes = h.frame;
+            ip.instance = ip.frames[ip.nframes - 1].instance;
+            ip.sp = h.entry_sp;
+            if (!m.is_all) {
+                for (payload) |c| {
+                    ip.stack[ip.sp] = c;
+                    ip.sp += 1;
+                }
+            }
+            if (m.is_ref) {
+                const rec = existing orelse try buildExnRecord(definst, tag, payload);
+                ip.stack[ip.sp] = @as(u128, @intFromPtr(rec));
+                ip.sp += 1;
+            }
+            const e = ip.frames[ip.nframes - 1].func.side_table[m.stp_idx];
+            moveValues(ip, e);
+            ip.nhandlers = hi;
+            return .{ .caught = .{
+                .pc = @intCast(@as(i64, @intCast(h.try_op_ip)) + e.delta_ip),
+                .stp = @intCast(@as(i64, @intCast(m.stp_idx)) + e.delta_stp),
+            } };
+        }
+    }
+    return .uncaught;
 }
 
 fn readU32(body: []const u8, pc: *usize) u32 {
