@@ -34,6 +34,44 @@ the box**. Code that polyfills `Array.prototype.flat`, stubs
 default. Users who actually need that flip `--unhardened` to
 disable the whole SES posture.
 
+## Positioning — hardened-by-default, WASM stacked (not flipped)
+
+A recurring question is whether to **flip** the posture — make Cynic
+mutable-by-default like XS and every production engine, with the
+`--allow=eval` / `--allow=wasm` gates default-on — and reposition it as
+a general-purpose JS+WASM engine.
+
+**Decision: don't flip (yet). Stack instead.**
+
+- Hardened-by-default is Cynic's one *unoccupied* niche. XS is
+  hardened-*ready* (mutable default, opt in via `lockdown`); the
+  `@endo/ses` shim is slow JS-on-top. "Ships hardened so you never call
+  `lockdown()`," on an edge-shaped runtime, is small but real and
+  unclaimed.
+- Flipping drops Cynic into the crowded general-purpose embeddable tier
+  (QuickJS-ng, XS, Hermes, Boa, Kiesel, engine262, Porffor), where it
+  leads on no axis and the frame foregrounds its two soft spots: **no
+  JIT** (Bistromath / Ohaimark are future work → capped speed) and
+  **pre-alpha maturity**.
+- The from-scratch WebAssembly engine (Sarcasm — 100 % on the spec
+  testsuite) is *additive*: a second differentiator stacked on the
+  niche, not a reason to flip. `--allow=wasm` default-off stays
+  consistent with the hardened posture and costs no conformance score
+  (the wasm-testsuite self-enables, as the test262 harness self-enables
+  eval).
+
+**Revisit trigger.** The flip is premature *because* of those two soft
+spots — and they aren't permanent. Reconsider repositioning as a
+general-purpose engine **once the JIT tiers ship and Cynic is past
+pre-alpha**; at that point the generic frame no longer spotlights the
+weak axes, and the flip becomes optional upside *from strength* rather
+than a moat spent from a gap. Not before.
+
+The flags follow the posture, never the reverse: `--allow=eval` /
+`--allow=wasm` (and the SES default itself) are *expressions* of
+hardened-by-default. If the posture is ever flipped, the gates flip
+with it; until then they stay opt-in.
+
 ## What SES `lockdown()` does (the full checklist)
 
 The `@endo/ses` reference defines SES operationally. Mapping each
