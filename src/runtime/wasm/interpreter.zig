@@ -41,6 +41,10 @@ pub const TrapError = error{
     /// A JS-backed host import threw; the exception is pending on the
     /// realm and is re-raised at the wasm->JS boundary.
     HostThrew,
+    /// A wasm `throw` reached the top of the call stack with no matching
+    /// `try_table` handler. (Handler matching is not yet implemented, so
+    /// every `throw` currently surfaces here.)
+    UncaughtException,
 };
 
 /// The null reference sentinel. A funcref always carries a non-null
@@ -913,6 +917,27 @@ fn run(ip: *Interp) Error!void {
         .block, .loop => {
             pc = skipBlockType(body, pc);
             continue :dispatch nextOp(body, &pc);
+        },
+        // Exception-handling. A `try_table` runs its body like a block;
+        // its catch clauses (and their side-table branch entries) are
+        // skipped — handler matching on `throw` is not yet wired, so a
+        // `throw` always surfaces as an uncaught trap.
+        .try_table => {
+            pc = skipBlockType(body, pc);
+            const ncatch = readU32(body, &pc);
+            var k: u32 = 0;
+            while (k < ncatch) : (k += 1) {
+                const kind = body[pc];
+                pc += 1;
+                if (kind == 0 or kind == 1) _ = readU32(body, &pc); // tag index
+                _ = readU32(body, &pc); // label
+            }
+            stp += ncatch; // skip the catch branch entries
+            continue :dispatch nextOp(body, &pc);
+        },
+        .throw => {
+            _ = readU32(body, &pc); // tag index
+            return error.UncaughtException;
         },
         .@"if" => {
             const op_ip = pc - 1;

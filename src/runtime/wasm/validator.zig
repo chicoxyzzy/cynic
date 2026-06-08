@@ -56,6 +56,9 @@ pub const ValidateError = error{
     UnknownType,
     UnknownTable,
     UnknownLabel,
+    UnknownTag,
+    BadCatchKind,
+    UnsupportedRefCatch,
     ImmutableGlobal,
     UnexpectedElse,
     UnbalancedEnd,
@@ -663,6 +666,16 @@ fn readBlockType(v: *Validator) !BlockType {
 
 /// Map an index in the function index space to its type signature,
 /// accounting for imported functions preceding the defined ones.
+/// The func type of a tag (its parameters are the exception payload).
+/// Tag imports are not yet supported, so the index is into the local
+/// tag section only.
+fn tagType(module: *const Module, tag_index: u32) !types.FuncType {
+    if (tag_index >= module.tags.len) return error.UnknownTag;
+    const ti = module.tags[tag_index].type_index;
+    if (ti >= module.types.len) return error.UnknownType;
+    return module.types[ti];
+}
+
 fn funcType(module: *const Module, func_index: u32) !types.FuncType {
     var imported: u32 = 0;
     for (module.imports) |imp| {
@@ -806,6 +819,48 @@ fn validateExpr(v: *Validator) ValidateError!void {
             .@"return" => {
                 try v.popVals(v.results);
                 v.setUnreachable();
+            },
+
+            // Exception-handling proposal. `throw $tag` pops the tag's
+            // payload, then control does not fall through.
+            .throw => {
+                const tag_idx = try v.r.uleb(u32);
+                const ft = try tagType(v.module, tag_idx);
+                try v.popVals(ft.params);
+                v.setUnreachable();
+            },
+            // `try_table bt catch* … end` — a block whose catch clauses
+            // are branches to outer labels, each carrying a tag's payload.
+            // Validated in the outer context, before the block label is
+            // pushed for the body.
+            .try_table => {
+                const bt = try readBlockType(v);
+                try v.popVals(bt.params);
+                const ncatch = try v.r.uleb(u32);
+                var k: u32 = 0;
+                while (k < ncatch) : (k += 1) {
+                    const kind = try v.r.byte();
+                    // 0 catch, 1 catch_ref, 2 catch_all, 3 catch_all_ref.
+                    // The `_ref` forms need `exnref` — a later step.
+                    if (kind == 1 or kind == 3) return error.UnsupportedRefCatch;
+                    if (kind > 3) return error.BadCatchKind;
+                    var payload: []const ValType = &.{};
+                    if (kind == 0) {
+                        const tag_idx = try v.r.uleb(u32);
+                        payload = (try tagType(v.module, tag_idx)).params;
+                    }
+                    const target = try v.label(try v.r.uleb(u32));
+                    if (!sameTypes(target.labelTypes(), payload)) return error.TypeMismatch;
+                    // Simulate the payload on the stack so the catch's
+                    // side-table branch gets the correct pop count (at
+                    // runtime the payload is pushed before the branch).
+                    const h = v.vals.items.len;
+                    try v.pushVals(payload);
+                    _ = try v.emitBranch(op_ip, target);
+                    v.vals.shrinkRetainingCapacity(h);
+                }
+                const body_ip: u32 = @intCast(v.r.pos);
+                try v.pushCtrl(.try_table, bt.params, bt.results, body_ip);
             },
             .call => {
                 const fidx = try v.r.uleb(u32);

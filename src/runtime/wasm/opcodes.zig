@@ -11,6 +11,10 @@ pub const Op = enum(u8) {
     loop = 0x03,
     @"if" = 0x04,
     @"else" = 0x05,
+    // exception-handling proposal (Wasm 3.0): the standardized try_table
+    // form (not the legacy try/catch/delegate/rethrow). `throw_ref` (0x0a)
+    // and the `*_ref` catch kinds arrive with exnref in a later step.
+    throw = 0x08,
     end = 0x0b,
     br = 0x0c,
     br_if = 0x0d,
@@ -25,6 +29,7 @@ pub const Op = enum(u8) {
     drop = 0x1a,
     select = 0x1b,
     select_t = 0x1c,
+    try_table = 0x1f, // exception-handling proposal (Wasm 3.0)
 
     local_get = 0x20,
     local_set = 0x21,

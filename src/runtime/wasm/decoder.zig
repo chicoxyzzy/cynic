@@ -22,6 +22,7 @@ const Export = module_mod.Export;
 const Global = module_mod.Global;
 const FuncBody = module_mod.FuncBody;
 const ExternKind = module_mod.ExternKind;
+const Tag = module_mod.Tag;
 const ValType = types.ValType;
 const RefType = types.RefType;
 const FuncType = types.FuncType;
@@ -76,6 +77,7 @@ const SectionId = enum(u8) {
     code = 10,
     data = 11,
     data_count = 12,
+    tag = 13, // exception-handling proposal
     _,
 };
 
@@ -84,19 +86,22 @@ const SectionId = enum(u8) {
 /// id order. A non-custom section must have a strictly greater position
 /// than every section before it.
 fn orderPos(id: SectionId) ?u32 {
+    // The tag section (id 13) is sequenced between memory and global,
+    // not by its numeric id.
     return switch (id) {
         .type => 1,
         .import => 2,
         .function => 3,
         .table => 4,
         .memory => 5,
-        .global => 6,
-        .@"export" => 7,
-        .start => 8,
-        .element => 9,
-        .data_count => 10,
-        .code => 11,
-        .data => 12,
+        .tag => 6,
+        .global => 7,
+        .@"export" => 8,
+        .start => 9,
+        .element => 10,
+        .data_count => 11,
+        .code => 12,
+        .data => 13,
         .custom, _ => null,
     };
 }
@@ -162,6 +167,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) DecodeError!Modul
                 sr.pos = payload.len;
             },
             .data_count => m.data_count = try sr.uleb(u32),
+            .tag => m.tags = try decodeTagSection(allocator, &sr),
             _ => return error.BadSectionId,
         }
 
@@ -238,6 +244,18 @@ fn decodeFunctionSection(allocator: std.mem.Allocator, r: *Reader) DecodeError![
     var i: u32 = 0;
     while (i < n) : (i += 1) idxs[i] = try r.uleb(u32);
     return idxs;
+}
+
+/// Exception-handling — the tag section: a vec of tags, each an
+/// attribute byte (must be 0x00) followed by a type index.
+fn decodeTagSection(allocator: std.mem.Allocator, r: *Reader) DecodeError![]const Tag {
+    const n = try r.uleb(u32);
+    const tags = try allocator.alloc(Tag, n);
+    for (tags) |*t| {
+        t.attribute = try r.byte();
+        t.type_index = try r.uleb(u32);
+    }
+    return tags;
 }
 
 fn decodeTableSection(allocator: std.mem.Allocator, r: *Reader) DecodeError![]const TableType {

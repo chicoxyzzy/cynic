@@ -439,7 +439,7 @@ test "wasm decoder: rejects an unknown value type" {
 }
 
 test "wasm decoder: rejects an unknown section id" {
-    const body = [_]u8{ 0x0d, 0x01, 0x00 }; // id 13 does not exist
+    const body = [_]u8{ 0x0e, 0x01, 0x00 }; // id 14 does not exist (13 is now the tag section)
     var buf: [8 + body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &body);
     try expectDecodeError(error.BadSectionId, bytes);
@@ -1894,4 +1894,44 @@ test "wasm relaxed-simd: i16x8.relaxed_dot_i8x16_i7x16_s" {
         0x0b,
     };
     try testing.expectEqual(@as(i32, 12), try runFunc(&.{ I32, I32 }, &.{I32}, &code, "f", &.{ 2, 3 })); // 2*3 + 2*3
+}
+
+test "wasm exceptions: a try_table around non-throwing code runs like a block" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // type 0: ()->i32 (the func); type 1: (i32)->() (the tag's signature).
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 }; // func 0 : type 0
+    const gbody = [_]u8{ 0x01, 0x00, 0x01 }; // tag 0: attribute 0, type 1
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 }; // export "f" func 0
+    // try_table (result i32) (catch tag0 -> label0) i32.const 42 end ; end
+    const cbody = [_]u8{ 0x01, 0x0b, 0x00, 0x1f, 0x7f, 0x01, 0x00, 0x00, 0x00, 0x41, 0x2a, 0x0b, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 42), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm exceptions: throw with no handler is an uncaught trap (Phase-1a)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const gbody = [_]u8{ 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x06, 0x00, 0x41, 0x05, 0x08, 0x00, 0x0b }; // i32.const 5; throw tag0
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectError(error.UncaughtException, runI32(bytes, "f", &.{}));
 }

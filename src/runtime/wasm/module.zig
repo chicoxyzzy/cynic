@@ -68,6 +68,14 @@ pub const FuncBody = struct {
     bytes: []const u8,
 };
 
+/// Exception-handling proposal — a tag declares an exception kind. Its
+/// `type_index` names a func type whose parameters are the exception's
+/// payload (results must be empty). `attribute` is 0x00 (the only kind).
+pub const Tag = struct {
+    attribute: u8,
+    type_index: u32,
+};
+
 /// A decoded module. All slices are owned by the allocator passed to
 /// `decode`; byte slices additionally borrow the input buffer, so the
 /// caller keeps that buffer alive for the module's lifetime.
@@ -76,6 +84,8 @@ pub const Module = struct {
 
     /// §5.5.4 — function signatures.
     types: []const FuncType = &.{},
+    /// Exception-handling — tag (exception) definitions (section id 13).
+    tags: []const Tag = &.{},
     /// §5.5.5 — imports, in declaration order.
     imports: []const Import = &.{},
     /// §5.5.6 — type index per locally-defined function. Paired
