@@ -37,14 +37,29 @@
 > **Consequences:**
 > - The whole "generational aging → alloc-churn medals" thesis does not
 >   pan out for Cynic. Do not re-chase aging for perf.
-> - The conservative-stack-scan work (`wip/gc-conservative-scan`,
->   `2aa3bf7`) is a real **correctness/robustness asset** — it eliminates
->   the native-rooting UAF class and adds alloc-provenance diagnostics —
->   but it costs +4–31% on alloc-heavy fixtures and buys no perf, so it
->   is **not worth merging for a perf-focused engine** as-is. Keep it
->   parked; revisit only if the rooting-UAF safety (not speed) is wanted,
->   ideally after a cheap no-hashmap (`isLiveHeapPointer` via pool
->   address-range + alignment) membership test removes most of the cost.
+> - The conservative-stack-scan work (branch
+>   `gc-conservative-membership`) is a real **correctness/robustness
+>   asset** — it eliminates the native-rooting UAF class and adds
+>   alloc-provenance diagnostics — but it costs **+12–31% on alloc-heavy
+>   fixtures** and buys no perf, so it is **not worth merging for a
+>   perf-focused engine** as-is. Keep it parked; revisit only if the
+>   rooting-UAF safety (not speed) is wanted.
+>   - **The no-hashmap membership was tried — it did not remove the
+>     tax.** `isLiveHeapPointer` was rewritten from a per-GC `live_ptr_set`
+>     hashmap rebuild to a chunk-range + per-slot allocated-bit test
+>     (commit `0f046b4`): *correct* (compiles; the finally crashers +
+>     Object/Promise gc-stress stay green single + multi), but the bench
+>     A/B is unchanged (object_alloc +30%, string_concat +21%,
+>     ctor_array_build +14%, promise_chain +12%). So the cost was **never
+>     the data structure** — it is **per-allocation liveness tracking
+>     itself** (the rebuild and the allocated-bit are both `O(allocs)` on
+>     alloc-heavy code) plus the scan. Near-neutral would require a
+>     **zero-per-alloc** design: no liveness tracking at allocation time,
+>     validating each candidate *per stack word* during the scan (few
+>     words, cheap) via chunk-range + alignment + a safe structural check
+>     distinguishing a real object from a free-list `Node` — a different,
+>     subtler implementation (per-kind sentinel) and the only open path to
+>     a mergeable rooting model.
 > - The alloc-fixture gaps (`object_alloc`, `ctor_array_build`,
 >   `string_concat`, `promise_chain`) are bottlenecked on **per-allocation
 >   cost and GC *marking* cost**, NOT premature promotion. A medal effort
