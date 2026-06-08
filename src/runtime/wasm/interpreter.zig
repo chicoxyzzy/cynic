@@ -756,6 +756,37 @@ const Interp = struct {
         self.nframes += 1;
     }
 
+    /// Tail call (return_call): *replace* the current frame with `func`
+    /// instead of pushing a new one, so the callee returns to this frame's
+    /// caller. `nframes` is unchanged — that is what makes deep tail
+    /// recursion run in constant stack. The top `param_count` operands are
+    /// the callee's arguments; everything else in this frame is discarded.
+    fn tailReplaceFrame(self: *Interp, instance: *Instance, func: *const CompiledFunc, param_count: u32) TrapError!void {
+        const f = &self.frames[self.nframes - 1];
+        const lb = f.locals_base;
+        // Move the args down over this frame's locals/operands. lb < src,
+        // so a forward copy never clobbers an unread source cell.
+        const src = self.sp - param_count;
+        var i: u32 = 0;
+        while (i < param_count) : (i += 1) self.stack[lb + i] = self.stack[src + i];
+        self.sp = lb + param_count;
+        // Zero-init the callee's declared (non-parameter) locals.
+        const total_locals: u32 = @intCast(func.local_types.len);
+        i = param_count;
+        while (i < total_locals) : (i += 1) try self.pushCell(0);
+        if (lb + total_locals + func.max_stack > self.stack.len)
+            return error.ValueStackOverflow;
+        const rc: u32 = @intCast(instance.module.types[func.type_index].results.len);
+        f.* = .{
+            .func = func,
+            .instance = instance,
+            .ip = 0,
+            .stp = 0,
+            .locals_base = lb,
+            .result_count = rc,
+        };
+    }
+
     /// Execute a host (imported native) function inline: pop its
     /// arguments, run it, push its results. No wasm frame is created.
     fn callHost(self: *Interp, h: anytype) TrapError!void {
@@ -1002,6 +1033,79 @@ fn run(ip: *Interp) Error!void {
                     f.ip = pc;
                     f.stp = stp;
                     try ip.pushFrame(w.instance, w.func, @intCast(actual.params.len));
+                    f = &ip.frames[ip.nframes - 1];
+                    ip.instance = f.instance;
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    pc = f.ip;
+                    stp = f.stp;
+                },
+            }
+            continue :dispatch nextOp(body, &pc);
+        },
+        .return_call => {
+            const fidx = readU32(body, &pc);
+            const ref = ip.instance.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
+            switch (ref) {
+                .host => |h| {
+                    // Tail call to a host fn: run it, then return its
+                    // results from this frame.
+                    try ip.callHost(h);
+                    if (ip.popFrame()) return;
+                    f = &ip.frames[ip.nframes - 1];
+                    ip.instance = f.instance;
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    pc = f.ip;
+                    stp = f.stp;
+                },
+                .wasm => |w| {
+                    const pcount: u32 = @intCast(w.instance.module.types[w.func.type_index].params.len);
+                    try ip.tailReplaceFrame(w.instance, w.func, pcount);
+                    f = &ip.frames[ip.nframes - 1];
+                    ip.instance = f.instance;
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    pc = f.ip;
+                    stp = f.stp;
+                },
+            }
+            continue :dispatch nextOp(body, &pc);
+        },
+        .return_call_indirect => {
+            const type_idx = readU32(body, &pc);
+            const table_idx = readU32(body, &pc);
+            const elem_index: u64 = @truncate(ip.popCell());
+            if (table_idx >= ip.instance.tables.len) return error.UnsupportedImportCall;
+            const table = ip.instance.tables[table_idx];
+            if (elem_index >= table.elems.len) return error.UndefinedElement;
+            const ref = table.elems[@as(usize, @intCast(elem_index))];
+            if (ref == REF_NULL) return error.UninitializedElement;
+            const fidx = funcRefIndex(ref);
+            const def_inst = if (ref >> 64 == 0) ip.instance else funcRefInstance(ref);
+            const target = def_inst.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
+            const expected = ip.instance.module.types[type_idx];
+            switch (target) {
+                .host => |h| {
+                    if (expected.params.len != h.params or expected.results.len != h.results)
+                        return error.IndirectCallTypeMismatch;
+                    try ip.callHost(h);
+                    if (ip.popFrame()) return;
+                    f = &ip.frames[ip.nframes - 1];
+                    ip.instance = f.instance;
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    pc = f.ip;
+                    stp = f.stp;
+                },
+                .wasm => |w| {
+                    const actual = w.instance.module.types[w.func.type_index];
+                    if (!funcTypesEqual(expected, actual)) return error.IndirectCallTypeMismatch;
+                    try ip.tailReplaceFrame(w.instance, w.func, @intCast(actual.params.len));
                     f = &ip.frames[ip.nframes - 1];
                     ip.instance = f.instance;
                     body = f.func.body;

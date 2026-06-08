@@ -27,9 +27,12 @@ Target the standardized baseline every modern toolchain emits: the
 any of these makes most real `.wasm` fail to validate, so they are the
 floor, not extensions.
 
-**Shipped beyond that floor:** `memory64` / `table64` (i64 addressing),
-the `extended-const` constant-expression operators, the
-function-references table-with-initializer encoding, and full
+**Shipped beyond that floor** (all now Phase 5 / WebAssembly 3.0):
+`memory64` / `table64` (i64 addressing), the `extended-const`
+constant-expression operators, the function-references
+table-with-initializer encoding, the **`tail-call`** proposal
+(`return_call` / `return_call_indirect` — the callee replaces the current
+frame, so deep tail recursion runs in constant stack), and full
 cross-module linking (imported functions / globals / tables / memories,
 shared tables, host functions). The engine scores **100.00%** on the
 official WebAssembly spec testsuite — see `wasm-results.md`.
@@ -43,9 +46,11 @@ reclaimed precisely (§5 — a transient stack pin cleared at the outermost
 return, plus per-container marking of externref tables / globals). `v128`
 is spec-mandated not to cross the JS boundary.
 
-Deferred: `threads` (sits on the existing `SharedArrayBuffer` /
-`Atomics` substrate), `exceptions`, `gc`, `tail-call` beyond the
-trivial case, `relaxed-simd`, the component model.
+Not yet implemented, in two groups. **Standardized (Phase 5, Wasm 3.0)
+but unimplemented** — real conformance gaps: `exceptions`, `gc` (WasmGC),
+`relaxed-simd`. **Still in flight** — `threads` (Phase 4; sits on the
+existing `SharedArrayBuffer` / `Atomics` substrate), shared-everything
+threads and the component model (Phase 1).
 
 Non-goals: a browser host, debugging surfaces, or any sloppy-mode
 affordance. Cynic is strict, non-browser, edge-runtime shaped — the
@@ -417,7 +422,7 @@ the measured design space:
 |---|---|
 | Decoder | §5 binary → parsed module — **done** |
 | Validate + side-table | single-pass validation emitting the O(1) branch side-table (§4) — **done** |
-| Interpreter | in-place **threaded** dispatch over bytecode + side-table — **done** (integer, control, floats, SIMD, references) |
+| Interpreter | in-place **threaded** dispatch over bytecode + side-table — **done** (integer, control, floats, SIMD, references, tail calls) |
 | Memory | loads/stores, bulk-memory, grow; memory64 i64 addressing — **done** (engine plain buffer; the JS `Memory.buffer` aliasing view + detach-on-grow ships in §8) |
 | References / tables | tables, funcref/externref, `call_indirect`, element segments — **done**; externref GC rooting precise (§5), value-stack ref tags a future micro-opt |
 | Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128 — **done** |

@@ -18,6 +18,9 @@ pub const Op = enum(u8) {
     @"return" = 0x0f,
     call = 0x10,
     call_indirect = 0x11,
+    // tail-call proposal (Wasm 3.0)
+    return_call = 0x12,
+    return_call_indirect = 0x13,
 
     drop = 0x1a,
     select = 0x1b,

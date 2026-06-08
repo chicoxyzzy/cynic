@@ -1800,3 +1800,57 @@ test "wasm interp: out-of-bounds load traps" {
     const code = [_]u8{ 0x00, 0x41, 0x80, 0x80, 0x04, 0x28, 0x02, 0x00, 0x0b }; // i32.const 65536; i32.load
     try testing.expectError(error.OutOfBoundsMemoryAccess, runMemFunc(&.{}, &.{I32}, &code, "f", 1, &.{}));
 }
+
+test "wasm tail call: return_call self-recursion is constant-stack (TCO)" {
+    // countdown(n) = n==0 ? 42 : return_call countdown(n-1).
+    // Depth 100000 ≫ MAX_FRAMES (4096): only a tail call (frame *replaced*,
+    // not pushed) lets this return instead of trapping CallStackExhausted.
+    const code = [_]u8{
+        0x00, // no extra locals
+        0x20, 0x00, // local.get 0
+        0x45, // i32.eqz
+        0x04, 0x7f, // if (result i32)
+        0x41, 0x2a, //   i32.const 42
+        0x05, // else
+        0x20, 0x00, //   local.get 0
+        0x41, 0x01, //   i32.const 1
+        0x6b, //   i32.sub
+        0x12, 0x00, //   return_call 0  (tail-call self)
+        0x0b, // end if
+        0x0b, // end func
+    };
+    try testing.expectEqual(@as(i32, 42), try runFunc(&.{I32}, &.{I32}, &code, "countdown", &.{100000}));
+}
+
+// Like `dispatcherModule`, but the dispatcher tail-calls via
+// `return_call_indirect` (0x13). The callee's result (i32) matches the
+// dispatcher's, so the tail call is well-typed.
+fn returnCallIndirectModule(a: std.mem.Allocator) ![]const u8 {
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x03, 0x00, 0x00, 0x01 };
+    const tabbody = [_]u8{ 0x01, 0x70, 0x00, 0x04 };
+    const xbody = [_]u8{ 0x01, 0x08, 0x64, 0x69, 0x73, 0x70, 0x61, 0x74, 0x63, 0x68, 0x00, 0x02 };
+    const ebody = [_]u8{ 0x01, 0x00, 0x41, 0x00, 0x0b, 0x02, 0x00, 0x01 };
+    const cbody = [_]u8{
+        0x03,
+        0x04, 0x00, 0x41, 0x2a, 0x0b, // func 0 → 42
+        0x05, 0x00, 0x41, 0xe3, 0x00, 0x0b, // func 1 → 99
+        0x07, 0x00, 0x20, 0x00, 0x13, 0x00, 0x00, 0x0b, // func 2: return_call_indirect type 0 table 0
+    };
+    return assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tabbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+}
+
+test "wasm tail call: return_call_indirect dispatches through the table" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try returnCallIndirectModule(arena.allocator());
+    try testing.expectEqual(@as(i32, 42), try runI32(bytes, "dispatch", &.{0}));
+    try testing.expectEqual(@as(i32, 99), try runI32(bytes, "dispatch", &.{1}));
+}

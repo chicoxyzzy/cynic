@@ -826,6 +826,28 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 try v.popVals(ft.params);
                 try v.pushVals(ft.results);
             },
+            // Tail-call proposal: like `call` / `call_indirect`, but the
+            // callee's results become this function's results, so they must
+            // match — and control does not fall through (stack-polymorphic).
+            .return_call => {
+                const fidx = try v.r.uleb(u32);
+                const ft = try funcType(v.module, fidx);
+                try v.popVals(ft.params);
+                if (!std.mem.eql(ValType, ft.results, v.results)) return error.TypeMismatch;
+                v.setUnreachable();
+            },
+            .return_call_indirect => {
+                const type_idx = try v.r.uleb(u32);
+                const table_idx = try v.r.uleb(u32);
+                const addr = try tableAddr(v.module, table_idx);
+                if (try tableElemType(v.module, table_idx) != .funcref) return error.TypeMismatch;
+                if (type_idx >= v.module.types.len) return error.UnknownType;
+                const ft = v.module.types[type_idx];
+                try v.popExpect(addr); // element index
+                try v.popVals(ft.params);
+                if (!std.mem.eql(ValType, ft.results, v.results)) return error.TypeMismatch;
+                v.setUnreachable();
+            },
 
             .select_t => {
                 const n = try v.r.uleb(u32);
