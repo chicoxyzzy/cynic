@@ -34,10 +34,16 @@ table-with-initializer encoding, the **`tail-call`** proposal
 (`return_call` / `return_call_indirect` — the callee replaces the current
 frame, so deep tail recursion runs in constant stack), **`relaxed-simd`**
 (the relaxed-SIMD opcodes, each computed to one deterministic valid
-result), and full cross-module linking (imported functions / globals /
-tables / memories, shared tables, host functions). The engine scores
-**100.00%** on the official WebAssembly spec testsuite — see
-`wasm-results.md`.
+result), the **`exception-handling`** proposal's *wasm instructions*
+(the tag section, `throw` / `throw_ref`, `try_table` with every catch
+form — `catch` / `catch_ref` / `catch_all` / `catch_all_ref` — and
+`exnref`, with cross-frame stack unwinding and precise handler scoping;
+the standardized `try_table` form, not the deprecated
+try/catch/delegate/rethrow), and full cross-module linking (imported
+functions / globals / tables / memories, shared tables, host functions).
+On the official spec testsuite the engine passes **100.00% of the
+commands it scores** — see `wasm-results.md` for what that does and does
+not mean (it excludes proposal tests for features not yet implemented).
 
 The **JS API** surface — `WebAssembly.*` objects (`Module`, `Instance`,
 `Memory`, `Table`, `Global`), `compile` / `instantiate` Promises,
@@ -49,8 +55,13 @@ return, plus per-container marking of externref tables / globals). `v128`
 is spec-mandated not to cross the JS boundary.
 
 Not yet implemented, in two groups. **Standardized (Phase 5, Wasm 3.0)
-but unimplemented** — the remaining real conformance gaps: `exceptions`
-and `gc` (WasmGC). **Still in flight** — `threads` (Phase 4; sits on the
+but unimplemented** — `gc` (WasmGC), and the *JS-API surface* of
+exception handling: `WebAssembly.Tag` / `WebAssembly.Exception`, tag
+imports/exports, and the JS↔wasm exception boundary (an uncaught wasm
+exception surfacing to JS, a JS exception caught by a `try_table`). The
+wasm instructions themselves are shipped (above); only the interop layer
+remains, so an `exnref` currently raises a TypeError if it would cross
+the JS boundary. **Still in flight** — `threads` (Phase 4; sits on the
 existing `SharedArrayBuffer` / `Atomics` substrate), shared-everything
 threads and the component model (Phase 1).
 
