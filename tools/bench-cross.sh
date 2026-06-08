@@ -294,6 +294,7 @@ emit() {
   echo "Subprocess wall-clock; times in **ms**, **median of N=$RUNS timed"
   echo "runs** after $WARMUP discarded warmup run. \`*\` flags a fixture"
   echo "whose max-min spread exceeded ${SPREAD_LIMIT}% — treat that cell as noisy."
+  echo "**Bold** marks the fastest engine on each fixture row."
   echo
   echo "All JIT engines run JIT-disabled (interpreter tier only): v8"
   echo "\`--jitless\`, sm \`--no-baseline --no-ion\`, jsc \`JSC_useJIT=0\`."
@@ -314,12 +315,37 @@ emit() {
   for _ in "${ENGINE_NAMES[@]}"; do printf '%s' '---:|'; done
   printf '\n'
 
-  # Body.
+  # Body. The fastest (minimum-ms) engine on each fixture row is
+  # bolded so the winner is visible at a glance; ties bold every
+  # joint leader. `ERR` / `—` cells never win. A noisy winner keeps
+  # its `*` spread flag outside the bold (renders as `**10***`).
   for fixture in "${FIXTURES[@]}"; do
     base="$(basename "$fixture" .js)"
+    # First pass — row minimum across the numeric cells.
+    rowmin=""
+    for name in "${ENGINE_NAMES[@]}"; do
+      cell="${CELL["$name|$base"]:-—}"
+      num="${cell%\*}"
+      case "$num" in
+        ''|*[!0-9]*) continue ;;   # ERR / — / non-numeric: never a winner
+      esac
+      if [ -z "$rowmin" ] || [ "$num" -lt "$rowmin" ]; then rowmin="$num"; fi
+    done
+    # Second pass — emit, bolding every cell equal to the minimum.
     printf '| %s |' "$base"
     for name in "${ENGINE_NAMES[@]}"; do
-      printf ' %s |' "${CELL["$name|$base"]:-—}"
+      cell="${CELL["$name|$base"]:-—}"
+      num="${cell%\*}"
+      star=""; [ "$cell" != "$num" ] && star="*"
+      case "$num" in
+        ''|*[!0-9]*) printf ' %s |' "$cell" ;;
+        *)
+          if [ -n "$rowmin" ] && [ "$num" -eq "$rowmin" ]; then
+            printf ' **%s**%s |' "$num" "$star"
+          else
+            printf ' %s |' "$cell"
+          fi ;;
+      esac
     done
     printf '\n'
   done
