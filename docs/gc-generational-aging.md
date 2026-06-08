@@ -1,5 +1,61 @@
 # Generational aging via card marking — design note
 
+> ## DECISIVE (2026-06-08): aging gives ~0% win on this GC — the premise is refuted
+>
+> The rooting blocker (below) was *solved* — a conservative native-stack
+> scan (`origin/wip/gc-conservative-scan`) makes the rooting
+> complete-by-construction and passes the full gc-stress gate (all the
+> finally crashers, Object/Array/Promise/class/expressions, single +
+> multi, leak-clean, 45166 baseline). With rooting solved, aging
+> (`promote_age = 1`, survive two minor cycles) was measured **directly,
+> isolated from the scan cost** (build with `conservative_scan = false`).
+> Result, interleaved min-of-15 A/B vs `main`:
+>
+> | fixture | main | aging-only | aging's win |
+> |---|---:|---:|---:|
+> | object_alloc | 30.0 | 30.2 | +1% |
+> | ctor_array_build | 489.7 | 531.7 | **+9% (slower)** |
+> | string_concat | 41.7 | 40.9 | −2% |
+> | json_stringify | 39.2 | 39.4 | +1% |
+> | promise_chain | 16.0 | 15.7 | −2% |
+>
+> Aging delivers **no speedup** (−2% to +9%). This note predicted aging
+> would close the ~5× `ctor_array_build` gap; instead it is *slower*. A
+> win that large would be unmistakable even under load.
+>
+> **Why the premise was wrong:** the "Root cause" section below assumes
+> mature garbage is expensive ("only an `O(mature)` full cycle reclaims
+> it"). But Cynic's GC is **non-moving with promote-by-relink** —
+> tenuring a survivor is `O(1)` (a list move, address unchanged), mature
+> garbage costs **RSS, not CPU**, and full cycles are rare (the minor
+> cycle absorbs the churn). So keeping temps young longer (aging) only
+> adds **young-marking work** without saving meaningful reclamation —
+> net ≈ neutral. Premature promotion is cheap *on this collector*; the
+> big-engine analogy (JSC-Riptide / SpiderMonkey, where promotion copies)
+> does not transfer.
+>
+> **Consequences:**
+> - The whole "generational aging → alloc-churn medals" thesis does not
+>   pan out for Cynic. Do not re-chase aging for perf.
+> - The conservative-stack-scan work (`wip/gc-conservative-scan`,
+>   `2aa3bf7`) is a real **correctness/robustness asset** — it eliminates
+>   the native-rooting UAF class and adds alloc-provenance diagnostics —
+>   but it costs +4–31% on alloc-heavy fixtures and buys no perf, so it
+>   is **not worth merging for a perf-focused engine** as-is. Keep it
+>   parked; revisit only if the rooting-UAF safety (not speed) is wanted,
+>   ideally after a cheap no-hashmap (`isLiveHeapPointer` via pool
+>   address-range + alignment) membership test removes most of the cost.
+> - The alloc-fixture gaps (`object_alloc`, `ctor_array_build`,
+>   `string_concat`, `promise_chain`) are bottlenecked on **per-allocation
+>   cost and GC *marking* cost**, NOT premature promotion. A medal effort
+>   should profile and attack *those* (cheaper object allocation, less
+>   per-minor-cycle marking), which is a different investigation.
+>
+> The historical analysis below is retained for context, but its central
+> premise is superseded by this measurement.
+
+---
+
 Status: **barrier landed; aging still blocked — on rooting, not the
 barrier.** The card-marking design below shipped as the dirty-container
 write barrier (commit `4ce56ff`): a complete-by-construction barrier +
