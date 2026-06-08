@@ -1645,14 +1645,18 @@ pub const Realm = struct {
 
     /// Run a minor (young-generation) collection. Marks exactly the
     /// same realm roots as `collectGarbage`, then hands off to
-    /// `heap.collectYoung`, which additionally walks the remembered
-    /// set and every mature container's typed internal slots,
-    /// sweeps only the young lists, and promotes young survivors
-    /// into the mature generation by relink (non-moving).
+    /// `heap.collectYoung`, which additionally walks the dirty-
+    /// container list and every mature container's typed internal
+    /// slots, sweeps only the young lists, and promotes-or-ages young
+    /// survivors into the mature generation by relink (non-moving).
     pub fn collectGarbageYoung(self: *Realm) void {
         // Debug-only barrier audit — under Debug / ReleaseSafe this
-        // asserts every routed-setter mature→young edge is in the
-        // remembered set before the minor cycle consumes it.
+        // asserts every barriered (bag / element / slot / env-parent)
+        // mature→young edge has its container in the dirty list before
+        // the minor cycle scans it. The strongest guard that aging's
+        // dirty-list retention + promotion-time remembering stays
+        // complete (a swept young referent would otherwise surface as
+        // a 0xaa-poison crash inside the cycle).
         self.heap.verifyRememberedSet();
         // Arm the minor cycle BEFORE `markRoots` so the `live_color`
         // flip precedes any `markValue` call. `collectYoung` sees

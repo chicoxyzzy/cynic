@@ -130,9 +130,10 @@ pub const JSGenerator = struct {
     /// young generator surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list.
     generation: @import("heap.zig").Generation = .young,
-    /// Set when this generator is in the heap's remembered set as
-    /// a known old→young store source.
-    in_remembered_set: bool = false,
+    /// Set when this generator is a known mature→young store source
+    /// — it is in the heap's dirty-container list, scanned as a root
+    /// by the next minor cycle. Generators tenure on first survival.
+    dirty: bool = false,
     /// True when this generator backs an `async function`'s
     /// frame rather than a `function*`. Drives the await /
     /// return / throw paths to settle `result_promise` instead

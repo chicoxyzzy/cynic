@@ -57,10 +57,10 @@ pub const JSBigInt = struct {
     /// young bigint surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list.
     generation: @import("heap.zig").Generation = .young,
-    /// Set when this bigint is in the heap's remembered set as a
-    /// known old→young store source. BigInts are immutable so
-    /// this stays `false`; the field keeps headers uniform.
-    in_remembered_set: bool = false,
+    /// Set when this bigint is a known mature→young store source
+    /// (in the heap's dirty-container list). BigInts are immutable
+    /// so this stays `false`; the field keeps headers uniform.
+    dirty: bool = false,
 
     // ── Construction ────────────────────────────────────────────
 

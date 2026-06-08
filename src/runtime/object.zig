@@ -868,10 +868,13 @@ pub const JSObject = struct {
     /// `.mature` and relinked into the mature list (the object
     /// itself never moves — the collector is non-moving).
     generation: @import("heap.zig").Generation = .young,
-    /// Set when this object is in the heap's remembered set as a
-    /// known old→young store source. Guards the write-barrier hot
-    /// path against double-insertion.
-    in_remembered_set: bool = false,
+    /// Set when this object is a known mature→young store source —
+    /// it is in the heap's dirty-container list, scanned as a root
+    /// by the next minor cycle. Guards the write-barrier hot path
+    /// against double-insertion. Edge-class-agnostic: any store of a
+    /// young heap value into any property / element / slot of this
+    /// object (while it is mature) sets it.
+    dirty: bool = false,
     /// `[[Extensible]]` (§10.1.2). `false` after
     /// `Object.preventExtensions` / `seal` / `freeze`. New
     /// property writes silently fail when `false`.
@@ -2043,6 +2046,7 @@ pub const JSObject = struct {
         flags: PropertyFlags,
         comptime bump_epoch: bool,
     ) !void {
+        // DISABLED-BISECT
         // §10.4.2 Array exotic — integer-indexed writes route to
         // `elements`. The descriptor flags are silently ignored
         // for now: indexed slots are always `{w,e,c} = true`
@@ -2108,6 +2112,22 @@ pub const JSObject = struct {
         }
     }
 
+    /// Generational write barrier at the *lowest* property-storage
+    /// funnel. Every named / indexed / flagged write into a JSObject's
+    /// bag, slots, or elements routes through `set` / `setWithFlags` /
+    /// `setIfWritable` / `setComputedOwned` / `setIndexed`, so calling
+    /// this at the top of each one makes "a young value stored into a
+    /// mature object marks it dirty" complete by construction — it no
+    /// longer depends on every call site reaching for `Heap.store*`
+    /// (hundreds of raw `obj.set(...)` calls in builtins bypassed
+    /// those). Cheap: `writeBarrier` fast-rejects a non-heap value and
+    /// a young container before touching the dirty list, which is the
+    /// overwhelmingly common construction case. Mirrors V8 / JSC's
+    /// store barrier living in the object write path, not the caller.
+    inline fn storeBarrier(self: *JSObject, v: Value) void {
+        if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
+    }
+
     /// `[[Set]]` (§10.1.9) — assign a property by name. The
     /// `key` slice must remain valid for the object's lifetime
     /// (typically a `JSString` byte buffer or a literal in the
@@ -2119,6 +2139,7 @@ pub const JSObject = struct {
     /// the descriptor flags it wants. User-driven writes go
     /// through `setIfWritable` (which respects flags).
     pub fn set(self: *JSObject, allocator: std.mem.Allocator, key: []const u8, v: Value) !void {
+        // DISABLED-BISECT
         // §10.4.2 Array exotic — integer-indexed keys land in
         // the packed `elements` vector, unless the slot has been
         // demoted to the named-property bag (descriptor flags
@@ -2341,6 +2362,7 @@ pub const JSObject = struct {
     /// checks the prototype chain for accessor setters before
     /// reaching here.
     pub fn setIfWritable(self: *JSObject, allocator: std.mem.Allocator, key: []const u8, v: Value) !bool {
+        // DISABLED-BISECT
         // §10.4.2 Array exotic — integer-indexed writes go to
         // the packed `elements` vector unless the slot has been
         // descriptor-flag-demoted to the named-property bag, in

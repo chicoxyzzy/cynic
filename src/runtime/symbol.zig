@@ -62,10 +62,10 @@ pub const JSSymbol = struct {
     /// young symbol surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list.
     generation: @import("heap.zig").Generation = .young,
-    /// Set when this symbol is in the heap's remembered set as a
-    /// known old→young store source. Symbols are immutable so
-    /// this stays `false`; the field keeps headers uniform.
-    in_remembered_set: bool = false,
+    /// Set when this symbol is a known mature→young store source
+    /// (in the heap's dirty-container list). Symbols are immutable
+    /// so this stays `false`; the field keeps headers uniform.
+    dirty: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, description: ?[]const u8, prop_key: []const u8) !*JSSymbol {
         // Own the description: duplicate it so its lifetime is the

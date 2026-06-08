@@ -414,9 +414,13 @@ pub const JSFunction = struct {
     /// young function surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list.
     generation: @import("heap.zig").Generation = .young,
-    /// Set when this function is in the heap's remembered set as a
-    /// known old→young store source.
-    in_remembered_set: bool = false,
+    /// Set when this function is a known mature→young store source
+    /// — it is in the heap's dirty-container list, scanned as a root
+    /// by the next minor cycle. Functions tenure on first survival,
+    /// so they never carry a young referent across more than one
+    /// minor cycle, but the dirty bit still tracks an old→young store
+    /// made into an already-mature function.
+    dirty: bool = false,
     /// Owning heap, stamped at allocation (`allocateFunction` /
     /// `allocateFunctionNative`). Mirrors `JSObject.heap`; lets the
     /// property-bag store paths run the generational write barrier

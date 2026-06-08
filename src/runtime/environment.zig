@@ -37,9 +37,11 @@ pub const Environment = struct {
     /// young environment surviving a `collectYoung` is promoted to
     /// `.mature` and relinked into the mature list.
     generation: @import("heap.zig").Generation = .young,
-    /// Set when this environment is in the heap's remembered set
-    /// as a known old→young store source.
-    in_remembered_set: bool = false,
+    /// Set when this environment is a known mature→young store
+    /// source — it is in the heap's dirty-container list, scanned as
+    /// a root by the next minor cycle. Environments tenure on first
+    /// survival.
+    dirty: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, parent: ?*Environment, slot_count: u8) !*Environment {
         const env = try allocator.create(Environment);

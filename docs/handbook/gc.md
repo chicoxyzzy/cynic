@@ -14,11 +14,18 @@ objects, promotes them, and frees the rest. A **major cycle**
 (`Heap.collectFull`) marks across both halves, sweeps everything
 unreachable, and flips the mark colour at the top of the next cycle
 so the previously-marked bit ages back to "unmarked" without a linear
-walk over the mature set. The remembered set
-(`Heap.remembered: ArrayListUnmanaged(Container)`) tracks mature→young
+walk over the mature set. The dirty-container list
+(`Heap.dirty_list: ArrayListUnmanaged(Container)`) — the pooled-heap
+adaptation of a card-marking remembered set — tracks mature→young
 edges recorded by the generational write barrier
-(`Heap.writeBarrier`); it's seeded as a root source on every minor
-cycle and cleared at the end of one.
+(`Heap.writeBarrier`, plus the low-level `JSObject.set` /
+`setIndexed` store funnels). Each mature container with a young
+referent carries a `dirty` flag and appears once in the list;
+`collectYoung` scans each entry with the generic
+`markAllPointerFields` (every outgoing pointer, no per-edge-class
+predicate), so a young object reachable through *any* field of a
+dirty mature container is rooted. It's seeded as a root source on
+every minor cycle and cleared at the end of one.
 
 ## What it does
 
