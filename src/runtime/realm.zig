@@ -1975,6 +1975,20 @@ fn clearKeptObjectsNative(realm: *Realm, this_value: Value, args: []const Value)
 fn collectGarbageNative(realm: *Realm, this_value: Value, args: []const Value) @import("function.zig").NativeError!Value {
     _ = this_value;
     _ = args;
+    // §26.1 — the test/debug forced GC (`__collectGarbage`, installed
+    // only via `installTestGlobals`) must collect PRECISELY: its whole
+    // purpose is deterministic verification of weak semantics
+    // (WeakRef / WeakMap / FinalizationRegistry clearing a now-
+    // unreachable target). The conservative native-stack backstop
+    // would over-retain a target whose pointer lingers in a stale
+    // stack slot, making "deref() === undefined" flaky. Disable the
+    // backstop for this one forced cycle, then restore it.
+    // Allocation-pressure GC keeps the backstop (it needs the rooting
+    // completeness; non-determinism of a weak slot there is spec-OK,
+    // §26.1 "eventually").
+    const saved = realm.heap.conservative_scan;
+    realm.heap.conservative_scan = false;
+    defer realm.heap.conservative_scan = saved;
     realm.collectGarbage();
     return Value.undefined_;
 }

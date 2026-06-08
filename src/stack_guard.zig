@@ -130,3 +130,46 @@ pub inline fn nearLimit() bool {
     if (sp > stack_fallback_base) stack_fallback_base = sp;
     return stack_fallback_base - sp > stack_growth_budget;
 }
+
+/// The high (base) address of the running thread's native stack — the
+/// address the stack grew DOWN from. The conservative GC stack scanner
+/// walks `[current_sp, base)` looking for live heap pointers parked in
+/// native locals / saved registers. Returns `0` when the platform
+/// can't report precise per-thread bounds (the fallback-base heuristic
+/// `nearLimit` uses isn't a true base, so a scan over it would be
+/// unsound — the caller treats `0` as "no conservative scan
+/// available" and leans on the precise HandleScopes alone).
+///
+/// Same OS introspection as `nearLimit`: Darwin's
+/// `pthread_get_stackaddr_np` returns the high address directly; glibc /
+/// musl's `pthread_attr_getstack` returns the low address + size, so the
+/// base is `low + size`. Cached once per thread in `stack_base_addr`.
+threadlocal var stack_base_addr: usize = 0;
+
+pub fn stackBase() usize {
+    if (stack_base_addr != 0) return stack_base_addr;
+    if (builtin.os.tag.isDarwin()) {
+        const self = pthread_self();
+        const base = @intFromPtr(pthread_get_stackaddr_np(self)); // high addr
+        if (base != 0) {
+            stack_base_addr = base;
+            return base;
+        }
+    } else if (builtin.os.tag == .linux and builtin.link_libc) {
+        var attr: [128]u8 align(16) = undefined;
+        const attr_ptr: *anyopaque = @ptrCast(&attr);
+        if (pthread_getattr_np(pthread_self(), attr_ptr) == 0) {
+            defer _ = pthread_attr_destroy(attr_ptr);
+            var low_ptr: ?*anyopaque = null;
+            var size: usize = 0;
+            if (pthread_attr_getstack(attr_ptr, &low_ptr, &size) == 0) {
+                const low = @intFromPtr(low_ptr);
+                if (low != 0 and size != 0) {
+                    stack_base_addr = low + size;
+                    return stack_base_addr;
+                }
+            }
+        }
+    }
+    return 0;
+}

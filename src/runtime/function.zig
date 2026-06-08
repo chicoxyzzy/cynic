@@ -421,6 +421,10 @@ pub const JSFunction = struct {
     /// minor cycle, but the dirty bit still tracks an old→young store
     /// made into an already-mature function.
     dirty: bool = false,
+    /// Allocation-provenance stamp — see `JSObject.alloc_site`.
+    /// `@returnAddress` of the allocator caller, recorded under
+    /// `runtime_safety`, `void` in ReleaseFast.
+    alloc_site: @import("object.zig").AllocSite = if (@import("std").debug.runtime_safety) 0 else {},
     /// Owning heap, stamped at allocation (`allocateFunction` /
     /// `allocateFunctionNative`). Mirrors `JSObject.heap`; lets the
     /// property-bag store paths run the generational write barrier

@@ -21,6 +21,12 @@ const std = @import("std");
 const Value = @import("value.zig").Value;
 const HeapKind = @import("function.zig").HeapKind;
 
+/// Allocation-provenance field type. A `usize` (holding a
+/// `@returnAddress`) under `runtime_safety`; an empty `void` field
+/// otherwise, so ReleaseFast pays zero bytes / zero cost. Shared by
+/// `JSObject` and `JSFunction`. See `Heap.describeProvenance`.
+pub const AllocSite = if (std.debug.runtime_safety) usize else void;
+
 test {
     // Pull the property-shape module's unit tests into the suite.
     // `shape.zig` is not yet wired into `JSObject` storage; this
@@ -868,6 +874,19 @@ pub const JSObject = struct {
     /// `.mature` and relinked into the mature list (the object
     /// itself never moves — the collector is non-moving).
     generation: @import("heap.zig").Generation = .young,
+    /// Generational *aging* counter (§ generational nursery). A young
+    /// JSObject must survive `Heap.promote_age` minor cycles before it
+    /// tenures: each minor-cycle survival with `age < promote_age`
+    /// bumps `age` and keeps the object young; the next survival
+    /// tenures it (`age` reset to 0). This keeps per-iteration churn
+    /// (`new Point(...)`, the `[p.x,p.y]` temp) in cheap young space
+    /// for its short life instead of polluting mature space — the
+    /// alloc-churn win the big-engine interpreters get from a real
+    /// nursery. JSObject-only for now (it dominates churn); other
+    /// kinds still tenure on first survival. A *full* cycle ignores
+    /// `age` and tenures every survivor. See
+    /// docs/gc-generational-aging.md.
+    age: u8 = 0,
     /// Set when this object is a known mature→young store source —
     /// it is in the heap's dirty-container list, scanned as a root
     /// by the next minor cycle. Guards the write-barrier hot path
@@ -875,6 +894,16 @@ pub const JSObject = struct {
     /// young heap value into any property / element / slot of this
     /// object (while it is mature) sets it.
     dirty: bool = false,
+    /// Allocation-provenance stamp — the `@returnAddress` of the
+    /// `allocateObject` caller, recorded at allocation. Lets a GC
+    /// diagnostic turn a reused-slot crash ("swept object was a
+    /// JSObject allocated at <addr>") into a named call site
+    /// (`addr2line` / `atos` resolves it to file:line). Compiled out
+    /// entirely in ReleaseFast (`void` field, zero bytes) and only
+    /// materialised under `runtime_safety` (Debug / ReleaseSafe), the
+    /// same gating as the GC verifiers and the 0xaa poison — so
+    /// production stays clean. See `Heap.describeProvenance`.
+    alloc_site: AllocSite = if (@import("std").debug.runtime_safety) 0 else {},
     /// `[[Extensible]]` (§10.1.2). `false` after
     /// `Object.preventExtensions` / `seal` / `freeze`. New
     /// property writes silently fail when `false`.

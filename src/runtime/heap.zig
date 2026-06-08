@@ -37,6 +37,7 @@ const Chunk = @import("../bytecode/chunk.zig").Chunk;
 const JSGenerator = @import("generator.zig").JSGenerator;
 const JSSymbol = @import("symbol.zig").JSSymbol;
 const JSBigInt = @import("bigint.zig").JSBigInt;
+const stack_guard = @import("../stack_guard.zig");
 
 /// Monotonic nanosecond timestamp via libc `clock_gettime`.
 /// Used by `Heap.collect`'s diagnostic pause-time field; the
@@ -98,6 +99,22 @@ pub const FinalizationEnqueueFn = *const fn (
 /// Two-bit enum so it packs into the existing flag-byte padding
 /// next to each header's `marked` bit.
 pub const Generation = enum(u2) { young, mature };
+
+/// Heap-kind discriminator for a raw pointer recovered by the
+/// conservative stack scanner. The scanner finds a bare address; it
+/// must know which per-kind marker (`markValue` / `markString` /
+/// `markGenerator`) to drive. `live_ptr_set` maps each live pointer
+/// to its kind so a matched stack word marks the right object without
+/// re-tagging guesswork.
+pub const PtrKind = enum(u3) {
+    object,
+    function,
+    environment,
+    generator,
+    string,
+    symbol,
+    bigint,
+};
 
 pub fn taggedFunction(ptr: *JSFunction) Value {
     const p: u64 = @intFromPtr(ptr);
@@ -412,6 +429,19 @@ pub const Heap = struct {
     /// while running a `collectFull` often enough to keep RSS
     /// bounded and the remembered set drained.
     full_every_n_minor: u32 = 8,
+    /// Generational *aging* threshold — a young JSObject must survive
+    /// this many minor cycles before it tenures. `1` means "survive
+    /// two minor cycles" (age 0→1 on the first survival keeps it
+    /// young; the second survival tenures). Short-lived churn dies in
+    /// the cheap young sweep instead of being promoted-then-stranded
+    /// as mature garbage. `0` disables aging (tenure on first
+    /// survival — the pre-aging promote-on-first behaviour). See
+    /// docs/gc-generational-aging.md. The conservative native-stack
+    /// backstop (`scanConservativeStack`) is the prerequisite that
+    /// makes a surviving-but-still-young object safe: it can be held
+    /// in a native local across the cycle that would otherwise sweep
+    /// it.
+    promote_age: u8 = 1,
     /// Minor cycles run since the last major cycle. Reset to zero
     /// by `collectFull`; bumped by `collectYoung`. Drives the
     /// "promote to full every Nth minor" rule in the dispatch.
@@ -486,6 +516,50 @@ pub const Heap = struct {
     /// `collect()` cycle. Average pause = `gc_time_ns_total /
     /// gc_cycles_total`.
     gc_time_ns_total: u64 = 0,
+
+    // ── Conservative native-stack scanning ──────────────────────
+    // The completeness backstop UNDER the precise `HandleScope`s. A
+    // native that holds a young heap pointer in a Zig local across a
+    // re-entry into JS (a `.then` callback, an argument coercion, a
+    // `cap.resolve` call) but forgot to push it onto a HandleScope
+    // would have its referent swept by an intervening minor cycle and
+    // the slab slot reused — a use-after-free. Generational *aging*
+    // (a survivor staying young across a cycle) widens that window
+    // and made per-site HandleScope rooting diverge (each fix shifts
+    // GC timing and re-opens a different swept-handler window — see
+    // docs/gc-generational-aging.md). The principled fix is the
+    // rooting analogue of card marking: during every GC, scan the
+    // native call stack + saved registers and treat any aligned,
+    // live, pool-resident pointer found there as a root (JSC's
+    // conservative roots). A missing HandleScope then costs a
+    // retained-too-long object, never a UAF — the whole divergent
+    // rooting class disappears.
+    //
+    // Cynic's heap is POOLED and non-contiguous, so there's no
+    // address-indexed slab membership test. Liveness is instead the
+    // heap's own authoritative per-kind lists: a word is a live heap
+    // pointer iff it bit-equals a pointer currently in a young/mature
+    // list. `live_ptr_set` is that membership index, rebuilt at the
+    // top of each cycle's mark phase from every live list. It can
+    // never resurrect a freed slot (a freed object was `swapRemove`d
+    // from its list before destruction), so the invariant the design
+    // demands — "false-retention OK, treating a freed slot as live is
+    // a UAF" — holds by construction.
+    live_ptr_set: std.AutoHashMapUnmanaged(usize, PtrKind) = .empty,
+    /// Master switch for the conservative backstop. On by default
+    /// (the completeness guarantee aging relies on). The
+    /// precise-rooting-gap finder (`--precise-roots` harness flag)
+    /// turns it OFF so a missing precise `HandleScope` surfaces
+    /// deterministically as a sweep instead of being papered over by
+    /// the backstop — invaluable for finding rooting gaps the
+    /// backstop would otherwise hide.
+    conservative_scan: bool = true,
+    /// Diagnostic counter — conservative roots found in the most
+    /// recent cycle (a stack word that pinned an otherwise-unreachable
+    /// live object). Non-zero means the precise scopes weren't
+    /// complete on their own; `--gc-stats` surfaces it. Reset each
+    /// cycle.
+    conservative_roots_found: u32 = 0,
 
     /// Weak-aware marking mode. `collectFull` sets this `true` for
     /// the duration of its mark phase; `collectYoung` leaves it
@@ -710,6 +784,7 @@ pub const Heap = struct {
         self.finalization_registries_seen.deinit(self.allocator);
         self.mark_worklist.deinit(self.allocator);
         self.mark_env_worklist.deinit(self.allocator);
+        self.live_ptr_set.deinit(self.allocator);
     }
 
     pub fn allocateBigInt(self: *Heap, value: i128) !*JSBigInt {
@@ -821,6 +896,7 @@ pub const Heap = struct {
         }
         o.heap = self;
         o.mark_color = self.live_color;
+        if (std.debug.runtime_safety) o.alloc_site = @returnAddress();
         try self.objects_young.append(self.allocator, o);
         self.allocs_since_gc +|= 1;
         return o;
@@ -1979,6 +2055,214 @@ pub const Heap = struct {
         }
     }
 
+    // ── Conservative native-stack scanning ──────────────────────
+    // See the `live_ptr_set` field comment for the why. The flow:
+    //   1. `rebuildLivePtrSet` — index every live heap pointer
+    //      (young + mature, all 7 kinds) by address → kind.
+    //   2. `scanConservativeStack` — walk `[sp, base)` on the
+    //      running thread, mask each word to a header-aligned
+    //      candidate pointer, and mark any candidate the set knows.
+    // Both run inside the mark phase of every minor and major cycle.
+
+    /// True iff `addr` is the header address of a live heap object.
+    /// Reusable by the conservative scanner and by GC verifiers. The
+    /// membership test is exact (address equality against the live
+    /// lists), so it NEVER reports a freed slot as live — the
+    /// inviolable invariant: false-retention of a dead-but-unswept
+    /// object is fine, treating a freed slot as live is a UAF.
+    /// Returns the kind so the caller marks via the right per-kind
+    /// path. Requires `live_ptr_set` to be current (rebuilt this
+    /// cycle).
+    pub fn isLiveHeapPointer(self: *const Heap, addr: usize) ?PtrKind {
+        return self.live_ptr_set.get(addr);
+    }
+
+    /// Rebuild `live_ptr_set` from the authoritative per-kind live
+    /// lists. Address → kind for every young and mature object. Run
+    /// once per cycle at the top of the mark phase, before the
+    /// conservative stack scan. Retains capacity across cycles so the
+    /// steady-state rebuild is fill-only (no realloc churn). On OOM
+    /// the set is left as-rebuilt-so-far and the conservative scan is
+    /// skipped for the cycle (the precise scopes still root correctly;
+    /// a missing scope degrades to the pre-backstop behaviour for that
+    /// one cycle rather than crashing).
+    fn rebuildLivePtrSet(self: *Heap) error{OutOfMemory}!void {
+        self.live_ptr_set.clearRetainingCapacity();
+        const total =
+            self.objects_young.items.len + self.objects_mature.items.len +
+            self.functions_young.items.len + self.functions_mature.items.len +
+            self.environments_young.items.len + self.environments_mature.items.len +
+            self.generators_young.items.len + self.generators_mature.items.len +
+            self.strings_young.items.len + self.strings_mature.items.len +
+            self.symbols_young.items.len + self.symbols_mature.items.len +
+            self.bigints_young.items.len + self.bigints_mature.items.len;
+        try self.live_ptr_set.ensureTotalCapacity(self.allocator, @intCast(total));
+        for (self.objects_young.items) |o| self.live_ptr_set.putAssumeCapacity(@intFromPtr(o), .object);
+        for (self.objects_mature.items) |o| self.live_ptr_set.putAssumeCapacity(@intFromPtr(o), .object);
+        for (self.functions_young.items) |f| self.live_ptr_set.putAssumeCapacity(@intFromPtr(f), .function);
+        for (self.functions_mature.items) |f| self.live_ptr_set.putAssumeCapacity(@intFromPtr(f), .function);
+        for (self.environments_young.items) |e| self.live_ptr_set.putAssumeCapacity(@intFromPtr(e), .environment);
+        for (self.environments_mature.items) |e| self.live_ptr_set.putAssumeCapacity(@intFromPtr(e), .environment);
+        for (self.generators_young.items) |g| self.live_ptr_set.putAssumeCapacity(@intFromPtr(g), .generator);
+        for (self.generators_mature.items) |g| self.live_ptr_set.putAssumeCapacity(@intFromPtr(g), .generator);
+        for (self.strings_young.items) |s| self.live_ptr_set.putAssumeCapacity(@intFromPtr(s), .string);
+        for (self.strings_mature.items) |s| self.live_ptr_set.putAssumeCapacity(@intFromPtr(s), .string);
+        for (self.symbols_young.items) |s| self.live_ptr_set.putAssumeCapacity(@intFromPtr(s), .symbol);
+        for (self.symbols_mature.items) |s| self.live_ptr_set.putAssumeCapacity(@intFromPtr(s), .symbol);
+        for (self.bigints_young.items) |b| self.live_ptr_set.putAssumeCapacity(@intFromPtr(b), .bigint);
+        for (self.bigints_mature.items) |b| self.live_ptr_set.putAssumeCapacity(@intFromPtr(b), .bigint);
+    }
+
+    /// Mark the live object a conservatively-found stack word points
+    /// at, via the kind-appropriate marker. Counts the find so
+    /// `--gc-stats` can report how often the precise scopes weren't
+    /// self-sufficient.
+    inline fn markConservativeRoot(self: *Heap, addr: usize, kind: PtrKind) void {
+        switch (kind) {
+            .object => {
+                const o: *JSObject = @ptrFromInt(addr);
+                if (o.mark_color != self.live_color) self.conservative_roots_found +|= 1;
+                self.markValue(taggedObject(o));
+            },
+            .function => {
+                const f: *JSFunction = @ptrFromInt(addr);
+                if (f.mark_color != self.live_color) self.conservative_roots_found +|= 1;
+                self.markValue(taggedFunction(f));
+            },
+            .environment => {
+                const e: *Environment = @ptrFromInt(addr);
+                if (e.mark_color != self.live_color) self.conservative_roots_found +|= 1;
+                self.markEnvironment(e);
+            },
+            .generator => {
+                const g: *JSGenerator = @ptrFromInt(addr);
+                if (g.mark_color != self.live_color) self.conservative_roots_found +|= 1;
+                self.markGenerator(g);
+            },
+            .string => {
+                const s: *JSString = @ptrFromInt(addr);
+                if (s.mark_color != self.live_color) self.conservative_roots_found +|= 1;
+                self.markString(s);
+            },
+            .symbol => {
+                const s: *JSSymbol = @ptrFromInt(addr);
+                if (s.mark_color != self.live_color) self.conservative_roots_found +|= 1;
+                self.markValue(taggedSymbol(s));
+            },
+            .bigint => {
+                const b: *JSBigInt = @ptrFromInt(addr);
+                if (b.mark_color != self.live_color) self.conservative_roots_found +|= 1;
+                self.markValue(taggedBigInt(b));
+            },
+        }
+    }
+
+    /// Conservatively scan the running thread's native stack and mark
+    /// every live heap pointer parked in a native local or saved
+    /// register. The backstop that makes native young-object rooting
+    /// complete-by-construction (see the `live_ptr_set` field doc).
+    ///
+    /// Each worker thread runs its own realm + heap entirely on its
+    /// own stack, and GC fires synchronously from that thread's own
+    /// interpreter loop — so "the native stack to scan" is always the
+    /// current thread's, walked `[sp, base)`. No cross-thread stack
+    /// scanning, no stop-the-world handshake (the per-worker heap is
+    /// single-threaded; STW is implicit).
+    ///
+    /// Each machine word is masked to a header-aligned candidate
+    /// (`& pointer_mask & ~0x7`) — recovering the pointer from BOTH a
+    /// bare Zig `*JSObject` local AND a NaN-boxed `Value` (whose top
+    /// 16 bits carry the value tag and bottom up-to-3 bits a kind tag;
+    /// the heap pointer is 8-byte aligned). A candidate that hits
+    /// `live_ptr_set` is marked. False positives (an integer that
+    /// happens to alias a live address) only over-retain, never
+    /// corrupt — the set guarantees the address is a live object.
+    ///
+    /// A live heap pointer can hide in a callee-saved register that
+    /// was never spilled to the stack (the compiler kept it in a
+    /// register across the whole GC call chain). The stack walk alone
+    /// would miss it. `flushRegistersToStack` forces every
+    /// callee-saved register onto the current frame — Boehm GC's
+    /// register-flush trick — so the subsequent stack walk
+    /// (`[sp, base)` includes this frame) sees them. `@sizeOf` is
+    /// arch-sized; the buffer is on the stack, so it's covered by the
+    /// scan. The asm only *reads* the registers into memory (no
+    /// clobbers that change them), so it's semantically inert.
+    inline fn flushRegistersToStack(buf: *RegBuf) void {
+        switch (@import("builtin").cpu.arch) {
+            .x86_64 => asm volatile (
+                \\movq %%rbx, 0(%[b])
+                \\movq %%rbp, 8(%[b])
+                \\movq %%r12, 16(%[b])
+                \\movq %%r13, 24(%[b])
+                \\movq %%r14, 32(%[b])
+                \\movq %%r15, 40(%[b])
+                :
+                : [b] "r" (buf),
+                : .{ .memory = true }
+            ),
+            .aarch64 => asm volatile (
+                \\stp x19, x20, [%[b], #0]
+                \\stp x21, x22, [%[b], #16]
+                \\stp x23, x24, [%[b], #32]
+                \\stp x25, x26, [%[b], #48]
+                \\stp x27, x28, [%[b], #64]
+                :
+                : [b] "r" (buf),
+                : .{ .memory = true }
+            ),
+            // Other targets (wasm32-freestanding) have no native
+            // register set to flush and never run a conservative scan
+            // (`stackBase` returns 0 there). Leave the buffer zeroed.
+            else => {},
+        }
+    }
+
+    /// Callee-saved register spill buffer. 16 words is comfortable for
+    /// both x86-64 (6) and aarch64 (10). Zeroed before the flush so an
+    /// unused tail can't alias a stale value.
+    const RegBuf = [16]usize;
+
+    /// `@returnAddress` / `@frameAddress` give a starting SP just
+    /// below this frame; the loop starts from the address of a local
+    /// so the scan covers every caller frame up to the thread base.
+    fn scanConservativeStack(self: *Heap) void {
+        if (!self.conservative_scan) return;
+        const base = stack_guard.stackBase();
+        if (base == 0) return; // platform without precise bounds
+        // Flush callee-saved registers onto this frame so a heap
+        // pointer held only in a register is on the stack for the
+        // walk. `regs` is a local, so it lies within `[sp, base)` and
+        // the walk below also visits it.
+        var regs: RegBuf = @splat(0);
+        flushRegistersToStack(&regs);
+        // Probe a local for the current SP. Take it AFTER the flush so
+        // `regs` is below the probe and inside the scanned range.
+        var probe: usize = undefined;
+        const sp = @intFromPtr(&probe);
+        // Defensive: sp must be below base on a downward-growing
+        // stack. If the platform reported a base that's somehow below
+        // sp (a libc quirk), skip rather than walk a bogus range.
+        if (sp >= base) return;
+        const word_size = @sizeOf(usize);
+        // Word-aligned start (SP is already aligned on every ABI
+        // Cynic targets, but round up defensively).
+        var addr = std.mem.alignForward(usize, sp, word_size);
+        const mask = Value.pointer_mask & ~@as(u64, 0x7);
+        while (addr + word_size <= base) : (addr += word_size) {
+            const word: *const usize = @ptrFromInt(addr);
+            const raw = word.*;
+            const candidate: usize = @intCast(@as(u64, raw) & mask);
+            if (candidate == 0) continue;
+            if (self.live_ptr_set.get(candidate)) |kind| {
+                self.markConservativeRoot(candidate, kind);
+            }
+        }
+        // Keep `regs` live to its read so the optimizer can't elide
+        // the flush as dead.
+        std.mem.doNotOptimizeAway(&regs);
+    }
+
     // ── Live-count accessors ────────────────────────────────────
     // The per-kind lists are split young / mature; these report
     // the combined live count so diagnostics and callers don't
@@ -2208,6 +2492,18 @@ pub const Heap = struct {
         // loop the heap used to do over `symbol_registry` is
         // gone.
 
+        // Conservative native-stack backstop — root any live heap
+        // object held only in a native local / saved register
+        // (a HandleScope the builtin forgot, or one aging widened
+        // the window on). Runs DURING the mark phase so its marks
+        // feed the deferred-mark drain + the weak passes below. See
+        // `scanConservativeStack`.
+        self.conservative_roots_found = 0;
+        if (self.conservative_scan) {
+            self.rebuildLivePtrSet() catch {};
+            self.scanConservativeStack();
+        }
+
         // Drain deferred-mark items pushed during the main mark
         // walk (currently `promise_reactions[i].result_promise`)
         // BEFORE the ephemeron fixpoint, so its `isWeakReferentLive`
@@ -2264,16 +2560,16 @@ pub const Heap = struct {
         sweepList(&self.generators_mature, lc, sa);
         sweepList(&self.symbols_mature, lc, sa);
         sweepList(&self.bigints_mature, lc, sa);
-        // A full cycle tenures every survivor outright, so no
-        // mature→young edge can exist afterwards and the dirty list is
-        // trivially empty.
-        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, ba);
-        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, sa);
-        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
-        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, .{ self.allocator, &self.env_pool });
-        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, sa);
-        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, sa);
-        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, sa);
+        // A full cycle tenures every survivor outright (age_survivors
+        // = false), so no mature→young edge can exist afterwards and
+        // the dirty list is trivially empty.
+        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, false, 0, ba);
+        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, false, 0, sa);
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, false, 0, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
+        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, false, 0, .{ self.allocator, &self.env_pool });
+        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, false, 0, sa);
+        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, false, 0, sa);
+        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, false, 0, sa);
 
         // The dirty list is empty after a full cycle — a full mark
         // visited every mature object, and every survivor tenured, so
@@ -2313,10 +2609,11 @@ pub const Heap = struct {
             self.gc_stats_cycle += 1;
             const elapsed_us: i128 = @divTrunc(elapsed_ns_total, 1000);
             std.debug.print(
-                "[gc {d}] full {d}\u{00B5}s live={d}KB peak={d}KB alloc_total={d}KB obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
+                "[gc {d}] full {d}\u{00B5}s cons={d} live={d}KB peak={d}KB alloc_total={d}KB obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
                 .{
                     self.gc_stats_cycle,
                     elapsed_us,
+                    self.conservative_roots_found,
                     self.bytes_live / 1024,
                     self.bytes_live_peak / 1024,
                     self.bytes_alloc_total / 1024,
@@ -2439,6 +2736,20 @@ pub const Heap = struct {
         }
         for (self.generators_mature.items) |g| self.markGeneratorInternalSlots(g);
 
+        // Root source 4 — the conservative native-stack backstop.
+        // Any YOUNG heap object held only in a native local / saved
+        // register (a builtin's HandleScope gap) would otherwise be
+        // swept here and its slab slot reused — the exact UAF class
+        // that made per-site rooting diverge under aging. Scanning
+        // the native stack roots it completely-by-construction. See
+        // `scanConservativeStack`; runs before the deferred-mark
+        // drain below so its marks are honoured at sweep.
+        self.conservative_roots_found = 0;
+        if (self.conservative_scan) {
+            self.rebuildLivePtrSet() catch {};
+            self.scanConservativeStack();
+        }
+
         // Weak-clear the `call_method` IC — see `collectFull` for
         // the rationale. Young collection nulls cells whose callee
         // is young AND unmarked (about to be swept); mature callees
@@ -2469,23 +2780,30 @@ pub const Heap = struct {
         // defeating part of the generational promise: a "cheap"
         // minor cycle still cost O(mature_set) per cycle.)
         const lc = self.live_color;
-        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, .{ self.allocator, self.bytes_allocator, &self.string_pool });
-        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, .{self.allocator});
-        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
-        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, .{ self.allocator, &self.env_pool });
-        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, .{self.allocator});
-        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, .{self.allocator});
-        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, .{self.allocator});
+        // A minor cycle AGES survivors (age_survivors = true): a young
+        // JSObject with `age < promote_age` bumps its age and stays
+        // young; everything else tenures on first survival.
+        const ag = self.promote_age;
+        promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, true, ag, .{ self.allocator, self.bytes_allocator, &self.string_pool });
+        promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, true, ag, .{self.allocator});
+        promoteYoungList(*JSObject, &self.objects_young, &self.objects_mature, lc, self.allocator, true, ag, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
+        promoteYoungList(*Environment, &self.environments_young, &self.environments_mature, lc, self.allocator, true, ag, .{ self.allocator, &self.env_pool });
+        promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, true, ag, .{self.allocator});
+        promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, true, ag, .{self.allocator});
+        promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, true, ag, .{self.allocator});
 
-        // Promote-on-first ⇒ every young survivor tenured this cycle,
-        // so no young referent persists and the dirty list is consumed
-        // and cleared. Clear each surviving container's `dirty` bit so
-        // the next minor cycle starts clean; the barrier re-records any
-        // old→young store made afterward. (When aging lands, this
-        // consume-and-clear becomes the retention + promotion-time
-        // rebuild — see `rebuildDirtyList`, kept ready below.)
-        for (self.dirty_list.items) |container| container.setDirty(false);
-        self.dirty_list.clearRetainingCapacity();
+        // Rebuild the dirty list. Under aging a young JSObject can
+        // survive a minor cycle still young, so a mature→young edge
+        // (in a barriered field, OR formed THIS cycle when a container
+        // tenured while its referent aged) can now outlive the cycle
+        // that created it. The consume-and-clear that promote-on-first
+        // could rely on (every survivor tenured, so no young referent
+        // persisted) is no longer sound. `rebuildDirtyList` re-records
+        // every mature container that still holds a young referent —
+        // complete-by-construction over the same barriered edge set
+        // `verifyRememberedSet` audits, so the next minor cycle still
+        // roots through every persistent old→young edge.
+        self.rebuildDirtyList();
 
         // Reset allocation-pressure counters; count this minor
         // cycle toward the next forced major.
@@ -2502,10 +2820,11 @@ pub const Heap = struct {
             self.gc_stats_cycle += 1;
             const elapsed_us: i128 = @divTrunc(elapsed_ns_total, 1000);
             std.debug.print(
-                "[gc {d}] young {d}\u{00B5}s live={d}KB peak={d}KB alloc_total={d}KB obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
+                "[gc {d}] young {d}\u{00B5}s cons={d} live={d}KB peak={d}KB alloc_total={d}KB obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
                 .{
                     self.gc_stats_cycle,
                     elapsed_us,
+                    self.conservative_roots_found,
                     self.bytes_live / 1024,
                     self.bytes_live_peak / 1024,
                     self.bytes_alloc_total / 1024,
@@ -2536,33 +2855,64 @@ pub const Heap = struct {
     /// membership. A pinned string (chunk constant) is promoted
     /// without needing a mark (it is permanently live).
     ///
-    /// Promote-on-first: every live young survivor tenures
-    /// immediately. Generational *aging* (survive N minor cycles
-    /// before tenuring) is the planned next step — see
-    /// docs/gc-generational-aging.md — but is gated off here while a
-    /// pre-existing latent rooting gap in the Promise subclass-finally
-    /// settlement path is resolved; the dirty-list machinery below is
-    /// already complete-by-construction for it.
+    /// Sweep + promote-or-age. A live survivor either tenures (relink
+    /// into `mature_list`, `generation = .mature`) or, when
+    /// `age_survivors` is set AND the kind carries an `age` field AND
+    /// its `age < promote_age`, AGES: `age` is bumped and the object
+    /// STAYS in the young list. Aging keeps short-lived churn in cheap
+    /// young space for `promote_age + 1` minor cycles instead of
+    /// tenuring it on first survival. A *full* cycle passes
+    /// `age_survivors = false` so every survivor tenures outright (no
+    /// aged-young object exists after a full cycle, so the dirty-list
+    /// state is moot there). Only `JSObject` has an `age` field today,
+    /// so other kinds tenure on first survival regardless of the flag.
+    ///
+    /// Crucially the object's address never changes (Cynic's collector
+    /// is non-moving) whether it tenures or ages — there are no JIT
+    /// stack maps to fix up, which is exactly why aging-by-relink is
+    /// safe here. An aged-young object that is referenced by a mature
+    /// container forms a persistent mature→young edge; `rebuildDirtyList`
+    /// (run after this) re-records it so the next minor cycle still
+    /// roots through it. The conservative native-stack backstop covers
+    /// the rooting hazard of a survivor staying young across a cycle.
     fn promoteYoungList(
         comptime PtrT: type,
         young_list: *std.ArrayListUnmanaged(PtrT),
         mature_list: *std.ArrayListUnmanaged(PtrT),
         live_color: u1,
         allocator: std.mem.Allocator,
+        age_survivors: bool,
+        promote_age: u8,
         deinit_args: anytype,
     ) void {
         const EntryT = @typeInfo(PtrT).pointer.child;
         const has_pinned = @hasField(EntryT, "pinned");
+        const has_age = @hasField(EntryT, "age");
         var i: usize = young_list.items.len;
         while (i > 0) {
             i -= 1;
             const entry = young_list.items[i];
             const live = (has_pinned and entry.pinned) or entry.mark_color == live_color;
             if (live) {
+                // §generational aging — keep the survivor young for
+                // `promote_age` more minor cycles before tenuring.
+                // Pinned entries (chunk-constant strings) and a full
+                // cycle (`age_survivors == false`) skip aging.
+                if (has_age and age_survivors and !(has_pinned and entry.pinned) and entry.age < promote_age) {
+                    entry.age += 1;
+                    // Stays young: leave it in `young_list` (no
+                    // swapRemove), keep `generation = .young`. Its
+                    // `mark_color` is the current `live_color`, which
+                    // the next cycle's flip ages back to "unmarked".
+                    // The dirty-list rebuild after promotion handles
+                    // any mature→young edge into it.
+                    continue;
+                }
                 // Survivor — leave `mark_color` as the current
                 // `live_color`; the next cycle's flip ages it to
                 // "unmarked". Promote into mature.
                 entry.generation = .mature;
+                if (has_age) entry.age = 0;
                 if (@hasField(EntryT, "dirty")) {
                     entry.dirty = false;
                 }
@@ -3593,6 +3943,110 @@ pub const Heap = struct {
             container.setDirty(false);
         };
     }
+
+    /// Rebuild the dirty-container list after a minor cycle's
+    /// promotion phase. Under generational aging a young JSObject can
+    /// survive a minor cycle while STAYING young, so a mature→young
+    /// edge can now outlive the cycle that created it — the
+    /// consume-and-clear that promote-on-first relied on (every
+    /// survivor tenured ⇒ no young referent persisted) is unsound.
+    ///
+    /// This walks every mature container and re-records (sets `dirty`
+    /// + appends) any that still holds a young referent in a
+    /// *barriered* edge — the property bag, shape slots, array
+    /// elements, environment slots, or `env.parent`. That is exactly
+    /// the edge set `verifyRememberedSet` audits and the set the
+    /// minor-cycle dirty-list scan (`markAllPointerFields`) is
+    /// responsible for; the other mature→young edges (typed internal
+    /// slots, generator hot-path state) are caught by the
+    /// unconditional per-mature-container typed-slot scan in
+    /// `collectYoung`, so they need no dirty entry.
+    ///
+    /// Complete-by-construction: the scan is generic over the same
+    /// edges the verifier checks, so there is no per-edge-class
+    /// predicate to keep in lockstep (the patchwork that sank the two
+    /// prior aging attempts — docs/gc-generational-aging.md). Cost is
+    /// O(mature live slots) per minor cycle, the same order as the
+    /// existing typed-slot scan; with aging keeping churn young, most
+    /// mature objects hold no young referent and the scan is reject-
+    /// light.
+    fn rebuildDirtyList(self: *Heap) void {
+        // Clear the prior cycle's membership wholesale, then re-add.
+        for (self.dirty_list.items) |container| container.setDirty(false);
+        self.dirty_list.clearRetainingCapacity();
+
+        for (self.objects_mature.items) |o| {
+            if (objectHoldsYoungReferent(o)) self.recordDirty(.{ .object = o });
+        }
+        for (self.functions_mature.items) |f| {
+            if (functionHoldsYoungReferent(f)) self.recordDirty(.{ .function = f });
+        }
+        for (self.environments_mature.items) |e| {
+            if (environmentHoldsYoungReferent(e)) self.recordDirty(.{ .environment = e });
+        }
+    }
+
+    /// Re-add a container to the dirty list (set bit + append).
+    /// Helper shared by `rebuildDirtyList`; the bit guards against the
+    /// same container being appended twice in one rebuild (it can't,
+    /// since each list is walked once, but the guard keeps the
+    /// invariant explicit and matches `writeBarrier`).
+    fn recordDirty(self: *Heap, container: Container) void {
+        if (container.isDirty()) return;
+        container.setDirty(true);
+        self.dirty_list.append(self.allocator, container) catch {
+            container.setDirty(false);
+        };
+    }
+
+    /// True iff a mature JSObject holds a young referent in a
+    /// barriered edge (shape slots, property bag, array elements).
+    /// Mirrors the JSObject arm of `verifyRememberedSet`.
+    fn objectHoldsYoungReferent(o: *JSObject) bool {
+        var slot_idx: usize = 0;
+        while (slot_idx < o.slotCount()) : (slot_idx += 1) {
+            if (isYoungHeapValue(o.slotAt(slot_idx))) return true;
+        }
+        var it = o.iterOwnNamedKeys();
+        while (it.next()) |entry| {
+            if (isYoungHeapValue(entry.value_ptr.*)) return true;
+        }
+        if (o.is_array_exotic) {
+            if (o.is_sparse) {
+                var sit = o.sparse_elements.iterator();
+                while (sit.next()) |entry| {
+                    if (isYoungHeapValue(entry.value_ptr.*)) return true;
+                }
+            } else {
+                for (o.elements.items) |elem| {
+                    if (isYoungHeapValue(elem)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// True iff a mature JSFunction holds a young referent in its
+    /// property bag (the barriered edge the verifier audits).
+    fn functionHoldsYoungReferent(f: *JSFunction) bool {
+        var it = f.properties.iterator();
+        while (it.next()) |entry| {
+            if (isYoungHeapValue(entry.value_ptr.*)) return true;
+        }
+        return false;
+    }
+
+    /// True iff a mature Environment holds a young referent in a slot
+    /// or in `env.parent`.
+    fn environmentHoldsYoungReferent(e: *Environment) bool {
+        for (e.slots) |slot| {
+            if (isYoungHeapValue(slot)) return true;
+        }
+        if (e.parent) |p| {
+            if (p.generation == .young) return true;
+        }
+        return false;
+    }
 };
 
 /// True when `v` carries a pointer to a `.young` heap object.
@@ -3658,6 +4112,10 @@ const testing = std.testing;
 test "Heap: allocate then collect with empty roots frees the string" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    // Precise-sweep mechanism test: turn off the conservative stack
+    // backstop so an unrooted stack local is deterministically freed
+    // (otherwise the live Zig local would legitimately over-retain it).
+    heap.conservative_scan = false;
 
     _ = try heap.allocateString("transient");
     try testing.expectEqual(@as(usize, 1), heap.stringCount());
@@ -3683,6 +4141,7 @@ test "Heap: fresh allocations land in the young generation" {
 test "Heap: collectFull sweeps both generations" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     // A young string (garbage) plus a mature one (hand-promoted)
     // — collectFull with empty roots must free BOTH.
@@ -3832,6 +4291,7 @@ test "Heap: collectFull clears the remembered set and the bits" {
 test "Heap: collectYoung sweeps young garbage, leaves mature untouched" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     // One mature object (hand-promoted) and one young garbage.
     const mature = try heap.allocateObject();
@@ -3851,23 +4311,65 @@ test "Heap: collectYoung sweeps young garbage, leaves mature untouched" {
     try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
 }
 
-test "Heap: collectYoung promotes a young survivor by relink" {
+test "Heap: collectYoung ages a young survivor, then tenures by relink" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    // Precise mode: drive the promotion machinery deterministically
+    // without the conservative backstop re-rooting the stack local.
+    heap.conservative_scan = false;
+    // Default `promote_age = 1` ⇒ survive two minor cycles before
+    // tenuring (the generational nursery — short churn dies young).
 
     const survivor = try heap.allocateObject();
     const addr_before = @intFromPtr(survivor);
     try testing.expectEqual(Generation.young, survivor.generation);
+    try testing.expectEqual(@as(u8, 0), survivor.age);
     try testing.expectEqual(@as(usize, 1), heap.objects_young.items.len);
 
-    // Promote-on-first: a single survival tenures the object — relinked
-    // into mature, generation flipped, same address (non-moving).
+    // First survival: AGES (age 0→1), stays young, same address.
+    heap.collectYoung(&.{taggedObject(survivor)});
+    try testing.expectEqual(@as(usize, 1), heap.objects_young.items.len);
+    try testing.expectEqual(@as(usize, 0), heap.objects_mature.items.len);
+    try testing.expectEqual(Generation.young, survivor.generation);
+    try testing.expectEqual(@as(u8, 1), survivor.age);
+    try testing.expectEqual(addr_before, @intFromPtr(survivor));
+
+    // Second survival: TENURES — relinked into mature, generation
+    // flipped, age reset, same address (non-moving).
     heap.collectYoung(&.{taggedObject(survivor)});
     try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
     try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
     try testing.expectEqual(Generation.mature, survivor.generation);
+    try testing.expectEqual(@as(u8, 0), survivor.age);
     try testing.expectEqual(addr_before, @intFromPtr(survivor));
     try testing.expectEqual(heap.live_color, survivor.mark_color);
+}
+
+test "Heap: promote_age = 0 tenures a young survivor on first survival" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+    heap.conservative_scan = false;
+    heap.promote_age = 0; // aging off — pre-aging promote-on-first.
+
+    const survivor = try heap.allocateObject();
+    heap.collectYoung(&.{taggedObject(survivor)});
+    try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
+    try testing.expectEqual(Generation.mature, survivor.generation);
+}
+
+test "Heap: a full cycle tenures a young survivor outright, ignoring age" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+    heap.conservative_scan = false;
+
+    const survivor = try heap.allocateObject();
+    // A FULL cycle passes age_survivors = false, so the survivor
+    // tenures on the first survival regardless of `promote_age`.
+    heap.collectFull(&.{taggedObject(survivor)});
+    try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
+    try testing.expectEqual(Generation.mature, survivor.generation);
 }
 
 test "Heap: dirty barrier fires through every JSObject store funnel" {
@@ -3916,6 +4418,10 @@ test "Heap: dirty barrier fires through every JSObject store funnel" {
 test "Heap: generic dirty-list marking keeps a young child reachable only via a mature bag" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    // Root-source mechanism test: promote-on-first + no backstop so
+    // the assertions exercise the dirty-list bridge deterministically.
+    heap.conservative_scan = false;
+    heap.promote_age = 0;
 
     // A mature object holds a young value in its property bag — the
     // canonical old→young edge. The minor cycle's generic
@@ -3945,6 +4451,8 @@ test "Heap: generic dirty-list marking keeps a young child reachable only via a 
 test "Heap: minor cycle roots disposable-stack resource records on a mature stack" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false;
+    heap.promote_age = 0;
 
     // `DisposableStack` keeps its [[DisposeCapability]] records in a
     // typed slot, not the property bag, so the minor cycle's typed-slot
@@ -3977,6 +4485,8 @@ test "Heap: minor cycle roots disposable-stack resource records on a mature stac
 test "Heap: collectYoung keeps a young object reachable from the dirty list" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false;
+    heap.promote_age = 0;
 
     // A mature container holding a young value in its property bag —
     // the canonical old→young edge the dirty list exists to bridge
@@ -4004,6 +4514,8 @@ test "Heap: collectYoung keeps a young object reachable from the dirty list" {
 test "Heap: minor cycle scans both inline and overflow property slots" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false;
+    heap.promote_age = 0;
 
     // A mature container whose properties straddle the inline/
     // overflow slot seam: the first `inline_slot_cap` values live
@@ -4050,6 +4562,8 @@ test "Heap: minor cycle scans both inline and overflow property slots" {
 test "Heap: collectYoung keeps a young object reachable from a mature typed slot" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false;
+    heap.promote_age = 0;
 
     // A mature object whose `prototype` typed internal slot points
     // at a young object via a RAW write (no barrier, no dirty-list
@@ -4076,6 +4590,7 @@ test "Heap: collectYoung keeps a young object reachable from a mature typed slot
 test "Heap: collectYoung clears stale mark bits on mature objects" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     // A mature object reachable from a root: the minor cycle marks
     // it transitively. The cycle-end `live_color` flip ages every
@@ -4217,6 +4732,7 @@ test "Heap: markValue is idempotent within a cycle" {
 test "Heap: a mature object unreachable after a cycle is swept by the next cycle" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     // Tenure the object via a full cycle that holds it as a root.
     const o = try heap.allocateObject();
@@ -4262,6 +4778,7 @@ test "Heap: a pinned registered symbol survives multiple cycles with no roots" {
 test "Heap: an unpinned non-registered symbol is freed without roots" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     _ = try heap.allocateSymbol("x");
     heap.collect(&.{});
@@ -4329,6 +4846,7 @@ test "Heap: collect keeps an object reachable through roots" {
 test "Heap: collect honors the mark colour across cycles" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     const s = try heap.allocateString("kept");
     const v = Value.fromString(s);
@@ -4347,6 +4865,7 @@ test "Heap: collect honors the mark colour across cycles" {
 test "Heap: handle scope keeps an object alive without explicit roots" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     const s = try heap.allocateString("scoped");
     const v = Value.fromString(s);
@@ -4368,6 +4887,7 @@ test "Heap: handle scope keeps an object alive without explicit roots" {
 test "Heap: nested handle scopes both contribute roots" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     const a = try heap.allocateString("outer");
     const b = try heap.allocateString("inner");
@@ -4392,6 +4912,7 @@ test "Heap: nested handle scopes both contribute roots" {
 test "Heap: concatStrings tracks the result" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     const a = try heap.allocateString("foo");
     const b = try heap.allocateString("bar");
@@ -4408,6 +4929,7 @@ test "Heap: concatStrings tracks the result" {
 test "Heap: markString recurses through a hand-built cons node" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     // Two flat children, plus a cons parent. Stage 1 production
     // code never builds a cons — this exercises the mark recursion.
@@ -4517,6 +5039,7 @@ test "Heap: allocateConsString caps rope depth, eager-flattening one operand" {
 test "Heap: GC marks a real lazy cons tree built by allocateConsString" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
+    heap.conservative_scan = false; // precise-sweep mechanism test
 
     const a = try heap.allocateString("0123456789");
     const b = try heap.allocateString("abcdefghij");
@@ -4555,4 +5078,99 @@ test "tagging: object and function have distinct kind bits" {
     try std.testing.expect(!isPlainObject(fv));
     try std.testing.expect(!isFunction(ov));
     try std.testing.expect(isPlainObject(ov));
+}
+
+// ── Conservative native-stack scanning ─────────────────────────────
+
+test "conservative scan: isLiveHeapPointer reports live objects by kind" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const o = try heap.allocateObject();
+    const s = try heap.allocateString("hi");
+    const sym = try heap.allocateSymbol("d");
+    const b = try heap.allocateBigInt(1);
+
+    try heap.rebuildLivePtrSet();
+    try testing.expectEqual(PtrKind.object, heap.isLiveHeapPointer(@intFromPtr(o)).?);
+    try testing.expectEqual(PtrKind.string, heap.isLiveHeapPointer(@intFromPtr(s)).?);
+    try testing.expectEqual(PtrKind.symbol, heap.isLiveHeapPointer(@intFromPtr(sym)).?);
+    try testing.expectEqual(PtrKind.bigint, heap.isLiveHeapPointer(@intFromPtr(b)).?);
+}
+
+test "conservative scan: isLiveHeapPointer rejects a non-heap address" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+    _ = try heap.allocateObject();
+    try heap.rebuildLivePtrSet();
+    // A stack address is never a live heap pointer.
+    var local: usize = 0xdeadbeef;
+    try testing.expect(heap.isLiveHeapPointer(@intFromPtr(&local)) == null);
+    try testing.expect(heap.isLiveHeapPointer(0x1000) == null);
+}
+
+test "conservative scan: a NEVER-resurrects-freed-slot invariant" {
+    // The inviolable property: after an object is freed its address
+    // must not register as live. (Slot reuse could re-add the SAME
+    // address for a *different* live object, which is fine — it IS
+    // live then. What must never happen is a freed-and-not-reused
+    // address reading as live.)
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+    // Turn the backstop OFF so an unrooted local is genuinely freed
+    // (with it on, the test-frame stack word holding `garbage` would
+    // legitimately pin it — over-retention, which is allowed).
+    heap.conservative_scan = false;
+    const survivor = try heap.allocateObject();
+    const garbage = try heap.allocateObject();
+    const garbage_addr = @intFromPtr(garbage);
+    // Collect with only `survivor` rooted; `garbage` is freed.
+    heap.collect(&.{taggedObject(survivor)});
+    heap.rebuildLivePtrSet() catch {};
+    // `survivor` still live; `garbage`'s old address is not (unless
+    // the pool happened to hand it back to a new allocation, which it
+    // didn't here — no allocation between free and rebuild).
+    try testing.expect(heap.isLiveHeapPointer(@intFromPtr(survivor)) != null);
+    try testing.expect(heap.isLiveHeapPointer(garbage_addr) == null);
+}
+
+test "conservative scan: an object held only in a native local survives GC" {
+    // The completeness backstop in action: a heap object reachable
+    // ONLY through a Zig local (no HandleScope, not in any root) must
+    // survive a collection because the stack scan finds it.
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+    heap.conservative_scan = true;
+
+    // Hold the object in a local; never push it to a root or scope.
+    const held = try heap.allocateObject();
+    try held.setWithFlags(testing.allocator, "k", Value.fromInt32(42), .{});
+
+    // Collect with NO precise roots. Without the conservative scan
+    // this would free `held`; with it, the stack word holding `held`
+    // pins it. (We keep `held` live across the collect call so its
+    // address is on this frame's stack for the scan.)
+    heap.collect(&.{});
+    std.mem.doNotOptimizeAway(&held);
+
+    // `held` survived: it's still in the mature list and readable.
+    try testing.expect(heap.isLiveHeapPointer(@intFromPtr(held)) != null);
+    const got = held.get("k");
+    try testing.expect(got.isInt32());
+    try testing.expectEqual(@as(i32, 42), got.asInt32());
+}
+
+test "conservative scan: disabling the backstop frees an unrooted local" {
+    // The precise-rooting-gap finder mode: with `conservative_scan`
+    // off, an unrooted object IS freed — proving the backstop (not
+    // luck) is what kept it alive in the previous test.
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+    heap.conservative_scan = false;
+
+    _ = try heap.allocateObject();
+    const count_before = heap.objectCount();
+    try testing.expectEqual(@as(usize, 1), count_before);
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.objectCount());
 }
