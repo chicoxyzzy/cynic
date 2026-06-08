@@ -17,6 +17,39 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-08 — cynic `bd0fc8f`, host `Darwin 25.6.0 arm64`
+
+Same host as the `15a921a` row below, so directly comparable — but
+this run was on a **loaded machine** (load ~7; most fixtures show
+> 10 % spread vs the prior row's ≤ 9 %), so only the low-spread cells
+are trustworthy. The real signal is `ctor_array_build` 518.73 →
+486.30 (≈ −6 %, 6.1 % spread, clean): the array-literal dense-append
+fast path (`def_property` → `JSObject.appendDenseSequential`) landed
+in `43fde0c`, matching its quiet isolated A/B (≈ 540 → 480). The
+apparent rises on `prop_access` (13.36 → 14.22), `prop_write`
+(14.29 → 15.29 — one max-29.96 outlier, 102 % spread; median/min
+tight), `array_iter` (21.76 → 24.73, 18 %), `promise_chain`
+(13.38 → 16.76, 26 %) and `object_alloc` (26.81 → 30.46, 13 %) all
+track their own elevated spreads — load noise, not regressions; an
+idle re-run is needed to confirm. `class_instantiate` (30.65 →
+32.62) and `json_stringify` (36.25 → 39.50) are likewise within
+run-to-run noise.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 35.19 | 31.69 | 36.84 | 5320 |
+| prop_access | 14.22 | 13.82 | 16.22 | 5304 |
+| prop_write | 15.29 | 14.35 | 29.96 | 5392 |
+| array_iter | 24.73 | 24.40 | 28.86 | 6424 |
+| string_concat | 44.06 | 41.26 | 46.14 | 14600 |
+| promise_chain | 16.76 | 14.07 | 18.39 | 26624 |
+| object_alloc | 30.46 | 28.08 | 32.01 | 10376 |
+| method_call | 18.59 | 17.48 | 20.44 | 5504 |
+| class_instantiate | 32.62 | 31.34 | 33.47 | 10248 |
+| ctor_array_build | 486.30 | 472.02 | 501.68 | 13392 |
+| json_stringify | 39.50 | 37.35 | 41.30 | 9520 |
+| tail_recursion | 36.85 | 35.20 | 38.53 | 5232 |
+
 ### 2026-06-07 — cynic `15a921a`, host `Darwin 25.6.0 arm64`
 
 First row on `Darwin 25.6.0` — an OS point-bump from the `25.5.0`
