@@ -2086,30 +2086,41 @@ pub const Heap = struct {
     /// skipped for the cycle (the precise scopes still root correctly;
     /// a missing scope degrades to the pre-backstop behaviour for that
     /// one cycle rather than crashing).
-    fn rebuildLivePtrSet(self: *Heap) error{OutOfMemory}!void {
+    fn rebuildLivePtrSet(self: *Heap, young_only: bool) error{OutOfMemory}!void {
         self.live_ptr_set.clearRetainingCapacity();
-        const total =
-            self.objects_young.items.len + self.objects_mature.items.len +
-            self.functions_young.items.len + self.functions_mature.items.len +
-            self.environments_young.items.len + self.environments_mature.items.len +
-            self.generators_young.items.len + self.generators_mature.items.len +
-            self.strings_young.items.len + self.strings_mature.items.len +
-            self.symbols_young.items.len + self.symbols_mature.items.len +
-            self.bigints_young.items.len + self.bigints_mature.items.len;
+        // A minor cycle (`young_only`) only sweeps the young lists, so a
+        // conservatively-found stack word into a *mature* object needs no
+        // protection — it survives regardless. Indexing only the young
+        // generation makes the per-minor-cycle rebuild O(young) instead
+        // of O(young+mature); the mature set accumulates on alloc-heavy
+        // workloads (promote-on-first), so excluding it is the bulk of
+        // the conservative-scan cost on those fixtures. A full cycle
+        // sweeps everything and indexes both.
+        var total =
+            self.objects_young.items.len + self.functions_young.items.len +
+            self.environments_young.items.len + self.generators_young.items.len +
+            self.strings_young.items.len + self.symbols_young.items.len +
+            self.bigints_young.items.len;
+        if (!young_only) total +=
+            self.objects_mature.items.len + self.functions_mature.items.len +
+            self.environments_mature.items.len + self.generators_mature.items.len +
+            self.strings_mature.items.len + self.symbols_mature.items.len +
+            self.bigints_mature.items.len;
         try self.live_ptr_set.ensureTotalCapacity(self.allocator, @intCast(total));
         for (self.objects_young.items) |o| self.live_ptr_set.putAssumeCapacity(@intFromPtr(o), .object);
-        for (self.objects_mature.items) |o| self.live_ptr_set.putAssumeCapacity(@intFromPtr(o), .object);
         for (self.functions_young.items) |f| self.live_ptr_set.putAssumeCapacity(@intFromPtr(f), .function);
-        for (self.functions_mature.items) |f| self.live_ptr_set.putAssumeCapacity(@intFromPtr(f), .function);
         for (self.environments_young.items) |e| self.live_ptr_set.putAssumeCapacity(@intFromPtr(e), .environment);
-        for (self.environments_mature.items) |e| self.live_ptr_set.putAssumeCapacity(@intFromPtr(e), .environment);
         for (self.generators_young.items) |g| self.live_ptr_set.putAssumeCapacity(@intFromPtr(g), .generator);
-        for (self.generators_mature.items) |g| self.live_ptr_set.putAssumeCapacity(@intFromPtr(g), .generator);
         for (self.strings_young.items) |s| self.live_ptr_set.putAssumeCapacity(@intFromPtr(s), .string);
-        for (self.strings_mature.items) |s| self.live_ptr_set.putAssumeCapacity(@intFromPtr(s), .string);
         for (self.symbols_young.items) |s| self.live_ptr_set.putAssumeCapacity(@intFromPtr(s), .symbol);
-        for (self.symbols_mature.items) |s| self.live_ptr_set.putAssumeCapacity(@intFromPtr(s), .symbol);
         for (self.bigints_young.items) |b| self.live_ptr_set.putAssumeCapacity(@intFromPtr(b), .bigint);
+        if (young_only) return;
+        for (self.objects_mature.items) |o| self.live_ptr_set.putAssumeCapacity(@intFromPtr(o), .object);
+        for (self.functions_mature.items) |f| self.live_ptr_set.putAssumeCapacity(@intFromPtr(f), .function);
+        for (self.environments_mature.items) |e| self.live_ptr_set.putAssumeCapacity(@intFromPtr(e), .environment);
+        for (self.generators_mature.items) |g| self.live_ptr_set.putAssumeCapacity(@intFromPtr(g), .generator);
+        for (self.strings_mature.items) |s| self.live_ptr_set.putAssumeCapacity(@intFromPtr(s), .string);
+        for (self.symbols_mature.items) |s| self.live_ptr_set.putAssumeCapacity(@intFromPtr(s), .symbol);
         for (self.bigints_mature.items) |b| self.live_ptr_set.putAssumeCapacity(@intFromPtr(b), .bigint);
     }
 
@@ -2500,7 +2511,7 @@ pub const Heap = struct {
         // `scanConservativeStack`.
         self.conservative_roots_found = 0;
         if (self.conservative_scan) {
-            self.rebuildLivePtrSet() catch {};
+            self.rebuildLivePtrSet(false) catch {};
             self.scanConservativeStack();
         }
 
@@ -2746,7 +2757,7 @@ pub const Heap = struct {
         // drain below so its marks are honoured at sweep.
         self.conservative_roots_found = 0;
         if (self.conservative_scan) {
-            self.rebuildLivePtrSet() catch {};
+            self.rebuildLivePtrSet(true) catch {};
             self.scanConservativeStack();
         }
 
@@ -5091,7 +5102,7 @@ test "conservative scan: isLiveHeapPointer reports live objects by kind" {
     const sym = try heap.allocateSymbol("d");
     const b = try heap.allocateBigInt(1);
 
-    try heap.rebuildLivePtrSet();
+    try heap.rebuildLivePtrSet(false);
     try testing.expectEqual(PtrKind.object, heap.isLiveHeapPointer(@intFromPtr(o)).?);
     try testing.expectEqual(PtrKind.string, heap.isLiveHeapPointer(@intFromPtr(s)).?);
     try testing.expectEqual(PtrKind.symbol, heap.isLiveHeapPointer(@intFromPtr(sym)).?);
@@ -5102,7 +5113,7 @@ test "conservative scan: isLiveHeapPointer rejects a non-heap address" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
     _ = try heap.allocateObject();
-    try heap.rebuildLivePtrSet();
+    try heap.rebuildLivePtrSet(false);
     // A stack address is never a live heap pointer.
     var local: usize = 0xdeadbeef;
     try testing.expect(heap.isLiveHeapPointer(@intFromPtr(&local)) == null);
@@ -5126,7 +5137,7 @@ test "conservative scan: a NEVER-resurrects-freed-slot invariant" {
     const garbage_addr = @intFromPtr(garbage);
     // Collect with only `survivor` rooted; `garbage` is freed.
     heap.collect(&.{taggedObject(survivor)});
-    heap.rebuildLivePtrSet() catch {};
+    heap.rebuildLivePtrSet(false) catch {};
     // `survivor` still live; `garbage`'s old address is not (unless
     // the pool happened to hand it back to a new allocation, which it
     // didn't here — no allocation between free and rebuild).
