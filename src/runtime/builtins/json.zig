@@ -612,6 +612,120 @@ fn serializeJSONProperty(
     return false;
 }
 
+/// §25.5.2.5 fast path over a plain shape-mode object. Walks the
+/// shape's value slots directly instead of materializing the key
+/// list (`ownPropertyKeysOrdered`) and doing a per-property
+/// `[[Get]]` + `flagsFor`. The caller guarantees eligibility
+/// (ordinary holder, no array-form replacer, no dictionary bag,
+/// no accessors, no integer-index / exotic keys), so `leaf`'s
+/// slots are the complete §10.1.11 OrdinaryOwnPropertyKeys set.
+///
+/// Observability (§7.3.23 + §25.5.2.4 step 1) is preserved:
+///   - the (key, slot, enumerable) set is SNAPSHOTTED here, before
+///     any value read, so a key added by a later read isn't picked
+///     up and a deleted key is still visited;
+///   - each value is read LIVE at its turn off the slot, but only
+///     while `obj.shape` still equals the snapshot shape. The moment
+///     a value read structurally mutates the object (a nested
+///     `toJSON` adding / deleting a key), the cached slot indices are
+///     stale, so the read falls back to a by-key `Get` for that and
+///     every later key — identical to what the slow path observes.
+///
+/// Returns `true` once it has serialized the object; `false`
+/// (without touching `buf`) if the shape layout is unexpectedly
+/// non-dense, so the caller falls through to the slow path.
+fn serializeShapeObject(
+    state: *StringifyState,
+    obj_v: Value,
+    obj: *JSObject,
+    leaf: *const @import("../shape.zig").Shape,
+    buf: *std.ArrayListUnmanaged(u8),
+    stepback: usize,
+) NativeError!bool {
+    const realm = state.realm;
+    const count = leaf.property_count;
+
+    // Snapshot (key, slot, enumerable) in slot order = insertion
+    // order. One chain walk: slot indices are append-only and
+    // stable, so `node.slot` indexes the snapshot directly; the
+    // leaf-most node for a slot wins (a later redefinition).
+    const Entry = struct { key: []const u8, slot: u32, enumerable: bool, filled: bool };
+    var stack_buf: [16]Entry = undefined;
+    const use_heap = count > stack_buf.len;
+    const snap: []Entry = if (use_heap)
+        (realm.allocator.alloc(Entry, count) catch return error.OutOfMemory)
+    else
+        stack_buf[0..count];
+    defer if (use_heap) realm.allocator.free(snap);
+    for (snap) |*e| e.filled = false;
+
+    var node: ?*const @import("../shape.zig").Shape = leaf;
+    while (node) |n| : (node = n.parent) {
+        if (n.parent == null) break; // root carries no key
+        if (n.slot >= count) return false; // unexpected — bail
+        if (n.kind != .data) return false; // caller gated accessors out; defensive
+        // §10.1.11.1 — array-index keys sort ascending AHEAD of the
+        // string keys; an object literal can stash them in the shape
+        // in insertion order, so the slot walk would mis-order them.
+        // Defer any such object to the ordered slow path.
+        if (JSObject.canonicalIntegerIndex(n.key) != null) return false;
+        if (!snap[n.slot].filled) {
+            snap[n.slot] = .{
+                .key = n.key,
+                .slot = n.slot,
+                .enumerable = n.attrs.enumerable,
+                .filled = true,
+            };
+        }
+    }
+    for (snap) |e| if (!e.filled) return false; // non-dense — bail
+
+    try buf.append(realm.allocator, '{');
+    var first = true;
+    var rendered_any = false;
+    for (snap) |e| {
+        if (!e.enumerable) continue;
+        // §25.5.2.5 step 5.a — synthetic symbol-encoded keys and the
+        // engine-internal slot keys never surface (mirrors the slow
+        // path's filter); defensive, as the gate excludes their
+        // usual carriers.
+        if (std.mem.startsWith(u8, e.key, "<sym:")) continue;
+        if (std.mem.startsWith(u8, e.key, "@@")) continue;
+        if (std.mem.startsWith(u8, e.key, "__cynic_")) continue;
+
+        // §25.5.2.4 step 1 — read the value LIVE. While the object's
+        // shape is unchanged the slot read equals `Get(obj, key)`;
+        // after a structural mutation, defer to the by-key Get.
+        const prefetched: ?Value = if (obj.shape == leaf and e.slot < obj.slotCount())
+            obj.slotAt(e.slot)
+        else
+            null;
+
+        const checkpoint = buf.items.len;
+        if (!first) try buf.append(realm.allocator, ',');
+        if (state.gap.len > 0) {
+            try buf.append(realm.allocator, '\n');
+            try buf.appendSlice(realm.allocator, state.indent.items);
+        }
+        try jsonAppendString(realm, buf, e.key);
+        try buf.append(realm.allocator, ':');
+        if (state.gap.len > 0) try buf.append(realm.allocator, ' ');
+        const ok = try serializeJSONProperty(state, e.key, obj_v, prefetched, buf);
+        if (!ok) {
+            buf.shrinkRetainingCapacity(checkpoint);
+            continue;
+        }
+        first = false;
+        rendered_any = true;
+    }
+    if (rendered_any and state.gap.len > 0) {
+        try buf.append(realm.allocator, '\n');
+        try buf.appendSlice(realm.allocator, state.indent.items[0..stepback]);
+    }
+    try buf.append(realm.allocator, '}');
+    return true;
+}
+
 /// §25.5.2.5 SerializeJSONObject. Walks the resolved property
 /// list (or own enumerable string keys when none) and emits each
 /// key:value pair, applying gap / indent for pretty-printing.
@@ -638,6 +752,29 @@ fn serializeJSONObject(
         try state.indent.appendSlice(realm.allocator, state.gap);
     }
     defer state.indent.shrinkRetainingCapacity(stepback);
+
+    // Fast path — when the holder is a plain shape-mode ordinary
+    // object (no proxy, no dictionary bag, no accessors, no
+    // integer-index / exotic keys) and there's no array-form
+    // replacer, the shape's value slots ARE the complete, correctly-
+    // ordered own-key set (§10.1.11 OrdinaryOwnPropertyKeys for an
+    // all-string-key object). `serializeShapeObject` walks them
+    // directly, skipping `ownPropertyKeysOrdered`'s key-array
+    // materialization and the per-property `[[Get]]` + `flagsFor`
+    // hashmap probes, while preserving §7.3.23 snapshot + §25.5.2.4
+    // live-read observability.
+    if (state.property_list == null and
+        obj.proxy_target == null and !obj.proxy_revoked and
+        !obj.is_array_exotic and obj.getTypedView() == null and
+        obj.properties.count() == 0 and obj.accessorCount() == 0)
+    {
+        if (obj.shape) |leaf| {
+            if (try serializeShapeObject(state, obj_v, obj, leaf, buf, stepback)) return true;
+            // `false` is a defensive bail (an unexpectedly non-dense
+            // shape layout) taken before any `buf` write — fall
+            // through to the spec-exact slow path below.
+        }
+    }
 
     // §25.5.2.5 step 5 — keys come from PropertyList when set,
     // else `? EnumerableOwnPropertyNames(value, "key")`. For a

@@ -11567,6 +11567,104 @@ test "JSON.stringify: circular structure still throws after key drops" {
     );
 }
 
+// ── SerializeJSONObject shape-walk contract ─────────────────────────
+//
+// The ordinary-object branch of §25.5.2.5 may walk the object's
+// shape slots directly (skipping the per-property `[[Get]]` +
+// key-array materialization) when the object is plain shape-mode.
+// These pin the observable semantics that fast path MUST preserve:
+// §7.3.23 snapshots the key set BEFORE any read, then reads each
+// value LIVE (§25.5.2.4 step 1 `Get(holder,key)`). They pass on the
+// slow path and must keep passing on the shape walk.
+
+test "JSON.stringify: plain object preserves insertion order" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ b: 1, a: 2, c: 3, name: "x" });
+    , "{\"b\":1,\"a\":2,\"c\":3,\"name\":\"x\"}");
+}
+
+test "JSON.stringify: non-enumerable own property is skipped" {
+    // §7.3.23 step 4.a.ii — only enumerable own keys surface. The
+    // shape carries the non-default `enumerable:false` attr, so the
+    // walk must honour it without a separate descriptor probe.
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1 };
+        \\Object.defineProperty(o, "hidden", { value: 2, enumerable: false });
+        \\o.b = 3;
+        \\JSON.stringify(o);
+    , "{\"a\":1,\"b\":3}");
+}
+
+test "JSON.stringify: enumerable getter is serialized via its getter value" {
+    // An accessor slot can't be read from the value slot — the walk
+    // must fall back to `Get` so the getter fires (§25.5.2.4 step 1).
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, get g() { return 42; }, b: 3 };
+        \\JSON.stringify(o);
+    , "{\"a\":1,\"g\":42,\"b\":3}");
+}
+
+test "JSON.stringify: key added by a getter mid-walk is NOT serialized" {
+    // §7.3.23 snapshots the key list first; a key added during a
+    // later value read is absent from the snapshot. The shape walk
+    // must NOT pick up `z` even though the live shape now has it.
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, get g() { o.z = 99; return 2; }, b: 3 };
+        \\JSON.stringify(o);
+    , "{\"a\":1,\"g\":2,\"b\":3}");
+}
+
+test "JSON.stringify: sibling value mutated mid-walk is read live" {
+    // §25.5.2.4 step 1 reads each value LIVE at its turn, NOT from a
+    // value snapshot taken up front. `a`'s toJSON sets `o.b` before
+    // `b` is reached, so `b` serializes the mutated value.
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: { toJSON() { o.b = 99; return 1; } }, b: 2 };
+        \\JSON.stringify(o);
+    , "{\"a\":1,\"b\":99}");
+}
+
+test "JSON.stringify: key deleted by a getter mid-walk drops via live Get" {
+    // The deleted key is still in the snapshot, so it's visited; the
+    // live `Get` returns undefined → §25.5.2.5 step 8.b.iii drops it.
+    // Forces the structural-mutation fallback off the slot read.
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, get g() { delete o.b; return 2; }, b: 3 };
+        \\JSON.stringify(o);
+    , "{\"a\":1,\"g\":2}");
+}
+
+test "JSON.stringify: nested toJSON structurally mutating an all-data parent" {
+    // The parent is pure-data (eligible for the shape walk), but a
+    // nested value's toJSON ADDS a key to the parent mid-walk. The
+    // snapshot excludes the new key (§7.3.23) and the surviving
+    // sibling is read live off the by-key fallback once the slot
+    // read sees the shape changed.
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: { toJSON() { o.c = 5; return 1; } }, b: 2 };
+        \\JSON.stringify(o);
+    , "{\"a\":1,\"b\":2}");
+}
+
+test "JSON.stringify: integer keys sort ahead of string keys" {
+    // §10.1.11.1 OrdinaryOwnPropertyKeys — array-index keys ascending
+    // first, then string keys in insertion order. Integer keys live
+    // in the dictionary bag, NOT the shape, so this must take the
+    // ordered slow path, not the shape walk.
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ b: 1, 2: "two", a: 3, 1: "one" });
+    , "{\"1\":\"one\",\"2\":\"two\",\"b\":1,\"a\":3}");
+}
+
+test "JSON.stringify: replacer function still applies under shape walk" {
+    // The replacer runs per value (§25.5.2.4 step 3). It must fire on
+    // every shape slot the walk yields, with the right key.
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, b: 2, c: 3 };
+        \\JSON.stringify(o, (k, v) => (k === "b" ? v * 10 : v));
+    , "{\"a\":1,\"b\":20,\"c\":3}");
+}
+
 // ── JSON.parse deep-nesting stack guard ─────────────────────────────
 //
 // `JSON.parse` is recursive descent (`parseValue` → `parseArray` /
