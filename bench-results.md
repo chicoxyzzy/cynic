@@ -17,6 +17,37 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-08 — cynic `4ce56ff` (post generational write-barrier), host `Darwin 25.6.0 arm64`
+
+Baseline row immediately after the dirty-container write barrier
+(`4ce56ff`) — the complete-by-construction barrier + generic marking
+that replaces the per-edge-class remembered set. The change is
+**behaviour-preserving** (survivors still promote on first survival),
+so this row is **perf-neutral** vs the `bd0fc8f` row below: every
+fixture is within run-to-run noise (`ctor_array_build` 497.45 here vs
+486.30 — its 15.5 % spread / min 477.82 brackets it; `object_alloc`
+29.55 vs 30.46; `json_stringify` 37.17 vs 39.50). This row exists as
+the **baseline for the upcoming generational-aging A/B** — aging is the
+step that should move the alloc-churn fixtures (`ctor_array_build`,
+`object_alloc`, `promise_chain`), and it's gated behind a pre-existing
+Promise subclass-finally rooting bug. Machine at load ~4.8, so several
+fixtures carry 11-28 % spread (flagged below by min/max).
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 33.71 | 32.42 | 35.56 | 5256 |
+| prop_access | 13.75 | 13.25 | 15.33 | 5296 |
+| prop_write | 13.50 | 12.90 | 14.40 | 5352 |
+| array_iter | 22.90 | 22.16 | 26.02 | 6376 |
+| string_concat | 40.18 | 39.22 | 45.60 | 14544 |
+| promise_chain | 14.69 | 14.14 | 16.42 | 27128 |
+| object_alloc | 29.55 | 28.70 | 30.42 | 10376 |
+| method_call | 18.04 | 17.39 | 19.13 | 5472 |
+| class_instantiate | 35.08 | 31.77 | 41.55 | 10240 |
+| ctor_array_build | 497.45 | 477.82 | 554.83 | 13432 |
+| json_stringify | 37.17 | 36.27 | 38.86 | 9488 |
+| tail_recursion | 35.59 | 34.09 | 38.45 | 5200 |
+
 ### 2026-06-08 — cynic `bd0fc8f`, host `Darwin 25.6.0 arm64`
 
 Same host as the `15a921a` row below, so directly comparable — but
