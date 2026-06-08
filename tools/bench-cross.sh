@@ -294,7 +294,8 @@ emit() {
   echo "Subprocess wall-clock; times in **ms**, **median of N=$RUNS timed"
   echo "runs** after $WARMUP discarded warmup run. \`*\` flags a fixture"
   echo "whose max-min spread exceeded ${SPREAD_LIMIT}% — treat that cell as noisy."
-  echo "**Bold** marks the fastest engine on each fixture row."
+  echo "🥇 🥈 🥉 mark the three fastest engines on each fixture row"
+  echo "(gold also bold); tied cells share a medal."
   echo
   echo "All JIT engines run JIT-disabled (interpreter tier only): v8"
   echo "\`--jitless\`, sm \`--no-baseline --no-ion\`, jsc \`JSC_useJIT=0\`."
@@ -315,23 +316,31 @@ emit() {
   for _ in "${ENGINE_NAMES[@]}"; do printf '%s' '---:|'; done
   printf '\n'
 
-  # Body. The fastest (minimum-ms) engine on each fixture row is
-  # bolded so the winner is visible at a glance; ties bold every
-  # joint leader. `ERR` / `—` cells never win. A noisy winner keeps
-  # its `*` spread flag outside the bold (renders as `**10***`).
+  # Body. The three fastest (lowest-ms) engines on each fixture row get
+  # 🥇 / 🥈 / 🥉 medals (gold also bold — bold alone is too subtle in a
+  # dark theme). Ranking is by DISTINCT value: cells that tie share a
+  # medal and the next distinct value takes the following place. `ERR` /
+  # `—` never place. A noisy medalist keeps its `*` outside the medal.
   for fixture in "${FIXTURES[@]}"; do
     base="$(basename "$fixture" .js)"
-    # First pass — row minimum across the numeric cells.
-    rowmin=""
+    # First pass — gather the row's numeric cells, then take the three
+    # smallest distinct values as gold / silver / bronze (any of the
+    # three may be empty when the row has fewer than three engines).
+    row_nums=""
     for name in "${ENGINE_NAMES[@]}"; do
       cell="${CELL["$name|$base"]:-—}"
       num="${cell%\*}"
       case "$num" in
-        ''|*[!0-9]*) continue ;;   # ERR / — / non-numeric: never a winner
+        ''|*[!0-9]*) continue ;;   # ERR / — / non-numeric: never places
       esac
-      if [ -z "$rowmin" ] || [ "$num" -lt "$rowmin" ]; then rowmin="$num"; fi
+      row_nums="$row_nums $num"
     done
-    # Second pass — emit, bolding every cell equal to the minimum.
+    gold=""; silver=""; bronze=""
+    read -r gold silver bronze <<EOF
+$(printf '%s\n' $row_nums | sort -nu | head -3 | tr '\n' ' ')
+EOF
+    # Second pass — emit, medaling each cell by which podium value it
+    # matches (gold also bold for extra emphasis).
     printf '| %s |' "$base"
     for name in "${ENGINE_NAMES[@]}"; do
       cell="${CELL["$name|$base"]:-—}"
@@ -340,10 +349,10 @@ emit() {
       case "$num" in
         ''|*[!0-9]*) printf ' %s |' "$cell" ;;
         *)
-          if [ -n "$rowmin" ] && [ "$num" -eq "$rowmin" ]; then
-            printf ' **%s**%s |' "$num" "$star"
-          else
-            printf ' %s |' "$cell"
+          if   [ -n "$gold" ]   && [ "$num" -eq "$gold" ];   then printf ' 🥇 **%s**%s |' "$num" "$star"
+          elif [ -n "$silver" ] && [ "$num" -eq "$silver" ]; then printf ' 🥈 %s%s |' "$num" "$star"
+          elif [ -n "$bronze" ] && [ "$num" -eq "$bronze" ]; then printf ' 🥉 %s%s |' "$num" "$star"
+          else printf ' %s |' "$cell"
           fi ;;
       esac
     done
