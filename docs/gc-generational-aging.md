@@ -1,9 +1,52 @@
 # Generational aging via card marking — design note
 
-Status: **deferred / design only.** Two implementation attempts (this
-is the write-up of why they failed and what the correct shape is) were
-reverted at the `--gc-threshold=1` gate. This note exists so the next
-effort starts from the root-cause diagnosis, not from scratch.
+Status: **barrier landed; aging still blocked — on rooting, not the
+barrier.** The card-marking design below shipped as the dirty-container
+write barrier (commit `4ce56ff`): a complete-by-construction barrier +
+generic marking that replaced the per-edge-class remembered set. That
+solved the *barrier* whack-a-mole. Aging on top is still blocked, and a
+later investigation (below) pinned why: a *second*, deeper whack-a-mole
+in **native young-object rooting** that the barrier does not address.
+
+## Post-barrier finding (2026-06-08): the rooting blocker is divergent
+
+With the complete barrier in place, the remaining aging blocker is a
+class of **unrooted young objects in native re-entrant code** — a young
+heap value (a Promise reaction handler, a capability promise, a
+value-thunk) held in a native local across a GC-triggering allocation
+or a `.then` / `cap.resolve` re-entry, swept by the next minor cycle and
+its slab slot reused (the crash surfaces later as a stale reaction
+calling a reused slot — e.g. a `runPromiseReaction` → reused
+ShadowRealm-trampoline segfault, which is a *symptom of slot reuse*, not
+a ShadowRealm bug).
+
+The decisive observation: **incremental `HandleScope` patches diverge.**
+Adding a scope to `chainFinallyResult` (rooting `wrapped` / `thunk_ctx`
+/ `thunk_fn` + the subclass `cap`) fixed `Promise/prototype/finally/
+subclass-reject-count` but its extra allocations shifted GC timing and
+broke `species-constructor` + `subclass-resolve-count` (both green on
+`main`). Adding a *second* scope to `promiseThen`'s subclass path then
+re-broke `subclass-reject-count`. Each correct rooting fix shifts timing
+and exposes (or re-exposes) more swept-handler windows faster than it
+closes them. Per-site rooting cannot be proven complete by inspection —
+exactly the property that made the per-edge-class barrier unworkable.
+
+**The correct fix is complete-by-construction rooting, not per-site
+scopes** — the rooting analogue of card marking. The principled option
+is **conservative native-stack scanning** (JSC-style): during GC, treat
+any aligned, pool-resident pointer found in the native call stack /
+registers as a root. Cynic's pooled heap makes the "is this a live heap
+pointer" membership test cheap, and it can layer *under* the existing
+precise `HandleScope`s as a completeness backstop — a missing scope then
+costs a retained-too-long object, never a use-after-free. With that
+backstop the aging recipe (below) becomes safe; without it, aging (or
+any GC-timing shift) re-opens the divergent rooting cascade.
+
+This blocker is **out of scope for an incremental rooting fix** and is
+the real prerequisite for aging + the alloc-churn medals.
+
+This note's lower half remains the card-marking diagnosis (now shipped)
+so the next effort starts from the root cause, not from scratch.
 
 ## The problem this targets
 
