@@ -1935,3 +1935,88 @@ test "wasm exceptions: throw with no handler is an uncaught trap (Phase-1a)" {
     });
     try testing.expectError(error.UncaughtException, runI32(bytes, "f", &.{}));
 }
+
+test "wasm exceptions: try_table catches its own throw, payload becomes the result" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const gbody = [_]u8{ 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // block $h (result i32) { try_table (result i32) (catch tag0 -> $h) i32.const 7; throw tag0 end } end
+    const cbody = [_]u8{ 0x01, 0x10, 0x00, 0x02, 0x7f, 0x1f, 0x7f, 0x01, 0x00, 0x00, 0x00, 0x41, 0x07, 0x08, 0x00, 0x0b, 0x0b, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 7), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm exceptions: catch_all catches a throw and resumes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const gbody = [_]u8{ 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // block { try_table (catch_all -> $block) i32.const 9; throw tag0 end } end ; i32.const 5
+    const cbody = [_]u8{ 0x01, 0x11, 0x00, 0x02, 0x40, 0x1f, 0x40, 0x01, 0x02, 0x00, 0x41, 0x09, 0x08, 0x00, 0x0b, 0x0b, 0x41, 0x05, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 5), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm exceptions: throw propagates across a call to the caller's try_table" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00 };
+    const fbody = [_]u8{ 0x02, 0x00, 0x00 }; // func0 (g) and func1 (f), both type 0
+    const gbody = [_]u8{ 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x01 }; // export "f" -> func 1
+    // func0 g: i32.const 8; throw tag0
+    // func1 f: block $h (result i32) { try_table (result i32) (catch tag0 -> $h) call g end } end
+    const cbody = [_]u8{
+        0x02,
+        0x06,
+        0x00,
+        0x41,
+        0x08,
+        0x08,
+        0x00,
+        0x0b,
+        0x0e,
+        0x00,
+        0x02,
+        0x7f,
+        0x1f,
+        0x7f,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0x10,
+        0x00,
+        0x0b,
+        0x0b,
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 8), try runI32(bytes, "f", &.{}));
+}

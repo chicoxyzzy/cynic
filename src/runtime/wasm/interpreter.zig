@@ -96,6 +96,26 @@ pub const Error = TrapError || validator.ValidateError || error{ NoSuchExport, O
 
 const STACK_CELLS = 1 << 16;
 const MAX_FRAMES = 1 << 12;
+/// Exception-handling — cap on simultaneously-active `try_table`
+/// handlers, and on a tag's payload arity captured during a `throw`.
+const MAX_HANDLERS = 1 << 10;
+const MAX_PAYLOAD = 64;
+
+/// An active `try_table` handler. Pushed on entry to the construct,
+/// searched on `throw`, popped when the owning frame returns or when a
+/// catch transfers control out of the construct.
+const Handler = struct {
+    /// `Interp.nframes` at entry — identifies the owning frame.
+    frame: usize,
+    /// Operand-stack height the catch branches restore to (the height
+    /// the `try_table`'s outer context sat at; its block params excluded).
+    entry_sp: usize,
+    /// Side-table index of this construct's first catch branch entry;
+    /// catch `i` uses `catch_base_stp + i`.
+    catch_base_stp: usize,
+    /// IP of the `try_table` opcode — the base for its catch branch deltas.
+    try_op_ip: usize,
+};
 /// Implementation cap on table size (§4.5.4 allows growth to fail).
 const MAX_TABLE_ELEMS = 1 << 24;
 
@@ -694,6 +714,8 @@ const Interp = struct {
     sp: usize,
     frames: []Frame,
     nframes: usize,
+    handlers: []Handler,
+    nhandlers: usize,
 
     inline fn pushCell(self: *Interp, v: Cell) TrapError!void {
         if (self.sp >= self.stack.len) return error.ValueStackOverflow;
@@ -816,6 +838,10 @@ const Interp = struct {
         }
         self.sp = f.locals_base + nres;
         self.nframes -= 1;
+        // Any `try_table` handlers still open in the returning frame go
+        // out of scope with it.
+        while (self.nhandlers > 0 and self.handlers[self.nhandlers - 1].frame > self.nframes)
+            self.nhandlers -= 1;
         return self.nframes == 0;
     }
 };
@@ -839,8 +865,10 @@ pub fn invoke(
     defer allocator.free(stack);
     const frames = try allocator.alloc(Frame, MAX_FRAMES);
     defer allocator.free(frames);
+    const handlers = try allocator.alloc(Handler, MAX_HANDLERS);
+    defer allocator.free(handlers);
 
-    var ip: Interp = .{ .instance = self, .stack = stack, .sp = 0, .frames = frames, .nframes = 0 };
+    var ip: Interp = .{ .instance = self, .stack = stack, .sp = 0, .frames = frames, .nframes = 0, .handlers = handlers, .nhandlers = 0 };
 
     // Seed the entry function's parameters as its first locals.
     const param_count: u32 = @intCast(self.module.types[entry.type_index].params.len);
@@ -918,12 +946,14 @@ fn run(ip: *Interp) Error!void {
             pc = skipBlockType(body, pc);
             continue :dispatch nextOp(body, &pc);
         },
-        // Exception-handling. A `try_table` runs its body like a block;
-        // its catch clauses (and their side-table branch entries) are
-        // skipped — handler matching on `throw` is not yet wired, so a
-        // `throw` always surfaces as an uncaught trap.
+        // Exception-handling. `try_table` runs its body like a block and
+        // registers a handler recording the catch clauses; the catch
+        // branch entries are skipped on the no-throw path.
         .try_table => {
+            const try_op_ip = pc - 1;
+            const param_count = blockTypeParamCount(ip.instance, body, pc);
             pc = skipBlockType(body, pc);
+            const catch_base_stp = stp;
             const ncatch = readU32(body, &pc);
             var k: u32 = 0;
             while (k < ncatch) : (k += 1) {
@@ -932,11 +962,62 @@ fn run(ip: *Interp) Error!void {
                 if (kind == 0 or kind == 1) _ = readU32(body, &pc); // tag index
                 _ = readU32(body, &pc); // label
             }
-            stp += ncatch; // skip the catch branch entries
+            if (ip.nhandlers >= ip.handlers.len) return error.CallStackExhausted;
+            ip.handlers[ip.nhandlers] = .{
+                .frame = ip.nframes,
+                .entry_sp = ip.sp - param_count,
+                .catch_base_stp = catch_base_stp,
+                .try_op_ip = try_op_ip,
+            };
+            ip.nhandlers += 1;
+            stp += ncatch; // skip the catch branch entries on the no-throw path
             continue :dispatch nextOp(body, &pc);
         },
+        // `throw $tag` captures the payload, then unwinds outward —
+        // through this frame's handlers and, failing a match, into the
+        // callers — until a `catch`/`catch_all` matches. On a match it
+        // restores that handler's operand stack, pushes the payload (none
+        // for catch_all), and takes the catch's side-table branch. With
+        // no handler anywhere it traps as uncaught.
         .throw => {
-            _ = readU32(body, &pc); // tag index
+            const throw_tag = readU32(body, &pc);
+            const tt = ip.instance.module.tags[throw_tag];
+            const npayload: u32 = @intCast(ip.instance.module.types[tt.type_index].params.len);
+            if (npayload > MAX_PAYLOAD) return error.CallStackExhausted;
+            var payload: [MAX_PAYLOAD]Cell = undefined;
+            {
+                var qi: u32 = 0;
+                while (qi < npayload) : (qi += 1) payload[qi] = ip.stack[ip.sp - npayload + qi];
+            }
+            var hi = ip.nhandlers;
+            while (hi > 0) {
+                hi -= 1;
+                const h = ip.handlers[hi];
+                const hframe = ip.frames[h.frame - 1];
+                if (findCatch(hframe.func.body, hframe.instance, h, ip.instance, throw_tag)) |m| {
+                    // Discard frames above the handler's (no result move).
+                    ip.nframes = h.frame;
+                    f = &ip.frames[ip.nframes - 1];
+                    ip.instance = f.instance;
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    ip.sp = h.entry_sp;
+                    if (!m.is_all) {
+                        var qi: u32 = 0;
+                        while (qi < npayload) : (qi += 1) {
+                            ip.stack[ip.sp] = payload[qi];
+                            ip.sp += 1;
+                        }
+                    }
+                    const e = side_table[m.stp_idx];
+                    moveValues(ip, e);
+                    pc = @intCast(@as(i64, @intCast(h.try_op_ip)) + e.delta_ip);
+                    stp = @intCast(@as(i64, @intCast(m.stp_idx)) + e.delta_stp);
+                    ip.nhandlers = hi;
+                    continue :dispatch nextOp(body, &pc);
+                }
+            }
             return error.UncaughtException;
         },
         .@"if" => {
@@ -1883,6 +1964,42 @@ fn skipBlockType(body: []const u8, pc: usize) usize {
     var p = pc;
     while (body[p] & 0x80 != 0) p += 1;
     return p + 1;
+}
+
+/// Parameter count of a block type — 0 for the empty and single-result
+/// forms, the referenced func type's param count for a type index.
+fn blockTypeParamCount(inst: *Instance, body: []const u8, pc: usize) u32 {
+    const b = body[pc];
+    if (b == 0x40 or ValType.fromByte(b) != null) return 0;
+    var p = pc;
+    const idx = readU32(body, &p);
+    return @intCast(inst.module.types[idx].params.len);
+}
+
+const CatchMatch = struct { stp_idx: usize, is_all: bool };
+
+/// Re-parse a handler's catch clauses (from the owning frame's body) and
+/// return the first that matches the thrown tag, or a catch_all. The
+/// side-table index is `catch_base_stp + i`; a catch_all carries no
+/// payload. Tag identity is (instance, index): two instances can share a
+/// tag only via tag imports, which are not yet supported, so a
+/// cross-instance `catch` never matches.
+fn findCatch(hbody: []const u8, hinst: *Instance, h: Handler, throw_inst: *Instance, throw_tag: u32) ?CatchMatch {
+    var p = h.try_op_ip + 1; // past the try_table opcode
+    p = skipBlockType(hbody, p);
+    const ncatch = readU32(hbody, &p);
+    var i: u32 = 0;
+    while (i < ncatch) : (i += 1) {
+        const kind = hbody[p];
+        p += 1;
+        var ctag: u32 = 0;
+        if (kind == 0 or kind == 1) ctag = readU32(hbody, &p);
+        _ = readU32(hbody, &p); // label immediate
+        const stp_idx = h.catch_base_stp + i;
+        if (kind == 2 or kind == 3) return .{ .stp_idx = stp_idx, .is_all = true };
+        if (hinst == throw_inst and ctag == throw_tag) return .{ .stp_idx = stp_idx, .is_all = false };
+    }
+    return null;
 }
 
 fn readU32(body: []const u8, pc: *usize) u32 {
