@@ -49,12 +49,14 @@ Ohaimark) and generational GC are future work. See
 ### Conformance
 
 Current scores, history, and per-bucket breakdown live in
-[`test262-results.md`](test262-results.md). `pass%` is
-`(passing + expected fails) / total` — a "correctly
-handled fail" is a fixture Cynic fails *by design* (Annex B not
-shipped, strict-only, no Intl, eval-off, or SES throw). The
-`failing` column is real engine work left. The unit-test suite
-(`zig build test`) runs alongside.
+[`test262-results.md`](test262-results.md). Scoring is binary under a
+single posture (`--unhardened --allow=eval`): `pass%` is
+`passing / (passing + failing)`, with **no** "expected fail"
+reclassification — an Annex B, no-Intl, strict-only, SES, or eval
+miss counts as a plain `failing`, the same as an engine bug. The
+denominator drops only structurally-unrunnable fixtures and the
+pre-Stage-4 proposals (which get their own per-feature scoreboard).
+The unit-test suite (`zig build test`) runs alongside.
 
 ### Build targets
 
