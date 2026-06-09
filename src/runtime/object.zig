@@ -577,6 +577,14 @@ pub const JSObjectExtension = struct {
     boxed_primitive: ?Value = null,
     capability_record: ?*PromiseCapabilityRecord = null,
     generator_ref: ?*@import("generator.zig").JSGenerator = null,
+    /// `Promise.prototype.finally` machinery — the captured callback,
+    /// the threaded value, and the species constructor. Set only on
+    /// the per-call finally bound-this objects (rare, cold). GC marks
+    /// `finally_callback` / `finally_constructor` (functions) and
+    /// `finally_value` (a Value) via the extension getters.
+    finally_callback: ?*@import("function.zig").JSFunction = null,
+    finally_value: Value = Value.undefined_,
+    finally_constructor: ?*@import("function.zig").JSFunction = null,
     // (`promise_waiters` + `promise_reactions` moved OUT of the
     // extension into `JSObject.promise_store` — a Promise touches
     // none of the extension's other cold fields, so they get a
@@ -943,22 +951,10 @@ pub const JSObject = struct {
     // to `JSObjectExtension` — only those rare exotics carry them, so
     // they no longer cost 32 bytes on every object. Access via the
     // `getWasm*` / `setWasm*` helpers below.
-    /// `Promise.prototype.finally` callback — set on the per-
-    /// `.finally()` context object the reaction closures capture
-    /// via `is_arrow + captured_this`. Hidden from JS.
-    finally_callback: ?*@import("function.zig").JSFunction = null,
-    /// `Promise.prototype.finally` carried value/reason — set on
-    /// the inner value-thunk's context so the §27.2.5.3 step 6.d
-    /// "return value" / step 7.d "throw reason" semantics keep
-    /// the original around while we await the user-supplied
-    /// onFinally's result. Hidden from JS.
-    finally_value: @import("value.zig").Value = @import("value.zig").Value.undefined_,
-    /// `Promise.prototype.finally` SpeciesConstructor (§27.2.5.3
-    /// step 3) — captured at finally() entry, threaded through the
-    /// thenFinally / catchFinally context so the `PromiseResolve(C,
-    /// result)` wrap uses the user-subclass ctor and not %Promise%.
-    /// `null` ≡ %Promise% (the fast path).
-    finally_constructor: ?*@import("function.zig").JSFunction = null,
+    // `Promise.prototype.finally` machinery (`finally_callback`,
+    // `finally_value`, `finally_constructor`) moved to
+    // `JSObjectExtension` — set only on the per-`.finally()` context
+    // objects. Access via `getFinally*` / `setFinally*`.
     // `date_ms` (§21.4.1 `[[DateValue]]`) and `generator_ref` (the
     // backing `JSGenerator` for a `function*` result) moved to
     // `JSObjectExtension` — Date / generator instances only. Access
@@ -1331,6 +1327,24 @@ pub const JSObject = struct {
     }
     pub fn setGeneratorRef(self: *JSObject, allocator: std.mem.Allocator, v: ?*@import("generator.zig").JSGenerator) !void {
         (try self.getOrCreateExtension(allocator)).generator_ref = v;
+    }
+    pub fn getFinallyCallback(self: *const JSObject) ?*@import("function.zig").JSFunction {
+        return if (self.extension) |ext| ext.finally_callback else null;
+    }
+    pub fn setFinallyCallback(self: *JSObject, allocator: std.mem.Allocator, v: ?*@import("function.zig").JSFunction) !void {
+        (try self.getOrCreateExtension(allocator)).finally_callback = v;
+    }
+    pub fn getFinallyValue(self: *const JSObject) Value {
+        return if (self.extension) |ext| ext.finally_value else Value.undefined_;
+    }
+    pub fn setFinallyValue(self: *JSObject, allocator: std.mem.Allocator, v: Value) !void {
+        (try self.getOrCreateExtension(allocator)).finally_value = v;
+    }
+    pub fn getFinallyConstructor(self: *const JSObject) ?*@import("function.zig").JSFunction {
+        return if (self.extension) |ext| ext.finally_constructor else null;
+    }
+    pub fn setFinallyConstructor(self: *JSObject, allocator: std.mem.Allocator, v: ?*@import("function.zig").JSFunction) !void {
+        (try self.getOrCreateExtension(allocator)).finally_constructor = v;
     }
 
     pub fn hasAccessor(self: *const JSObject, key: []const u8) bool {

@@ -732,8 +732,8 @@ fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeE
         const ctx = realm.heap.allocateObject() catch return error.OutOfMemory;
         realm.heap.setObjectPrototype(ctx, realm.intrinsics.object_prototype);
         fin_sc.push(heap_mod.taggedObject(ctx)) catch return error.OutOfMemory;
-        realm.heap.setFinallyCallback(ctx, on_finally_fn);
-        realm.heap.setFinallyConstructor(ctx, C);
+        try realm.heap.setFinallyCallback(ctx, on_finally_fn);
+        try realm.heap.setFinallyConstructor(ctx, C);
 
         const then_fn = realm.heap.allocateFunctionNative(realm, finallyThenReaction, 1, "") catch return error.OutOfMemory;
         then_fn.proto = realm.intrinsics.function_prototype;
@@ -784,7 +784,7 @@ fn promiseFinally(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn finallyThenReaction(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const value = argOr(args, 0, Value.undefined_);
     const ctx = heap_mod.valueAsPlainObject(this_value) orelse return value;
-    const cb = ctx.finally_callback orelse return value;
+    const cb = ctx.getFinallyCallback() orelse return value;
     const interp = @import("../lantern/interpreter.zig");
     const cb_outcome = interp.callJSFunction(realm.allocator, realm, cb, Value.undefined_, &.{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -797,7 +797,7 @@ fn finallyThenReaction(realm: *Realm, this_value: Value, args: []const Value) Na
             return error.NativeThrew;
         },
     };
-    return chainFinallyResult(realm, result, value, false, ctx.finally_constructor);
+    return chainFinallyResult(realm, result, value, false, ctx.getFinallyConstructor());
 }
 
 /// Step 7 of §27.2.5.3 — onFinally for rejected path. Same shape as
@@ -809,7 +809,7 @@ fn finallyCatchReaction(realm: *Realm, this_value: Value, args: []const Value) N
         realm.pending_exception = reason;
         return error.NativeThrew;
     };
-    const cb = ctx.finally_callback orelse {
+    const cb = ctx.getFinallyCallback() orelse {
         realm.pending_exception = reason;
         return error.NativeThrew;
     };
@@ -825,7 +825,7 @@ fn finallyCatchReaction(realm: *Realm, this_value: Value, args: []const Value) N
             return error.NativeThrew;
         },
     };
-    return chainFinallyResult(realm, result, reason, true, ctx.finally_constructor);
+    return chainFinallyResult(realm, result, reason, true, ctx.getFinallyConstructor());
 }
 
 /// Wrap `result` in a Promise (§27.2.4.7 PromiseResolve), then chain
@@ -919,7 +919,7 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
     // Build the value-thunk context (captures `carry` + the throw flag).
     const thunk_ctx = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(thunk_ctx, realm.intrinsics.object_prototype);
-    realm.heap.setFinallyValue(thunk_ctx, carry);
+    try realm.heap.setFinallyValue(thunk_ctx, carry);
     const thunk_fn = realm.heap.allocateFunctionNative(
         realm,
         if (is_throw) finallyThrowThunk else finallyReturnThunk,
@@ -956,7 +956,7 @@ fn finallyReturnThunk(realm: *Realm, this_value: Value, args: []const Value) Nat
     _ = realm;
     _ = args;
     const ctx = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
-    return ctx.finally_value;
+    return ctx.getFinallyValue();
 }
 
 /// `() => { throw carry }` — value-thunk for the §27.2.5.3 step 7.c
@@ -967,7 +967,7 @@ fn finallyThrowThunk(realm: *Realm, this_value: Value, args: []const Value) Nati
         realm.pending_exception = Value.undefined_;
         return error.NativeThrew;
     };
-    realm.pending_exception = ctx.finally_value;
+    realm.pending_exception = ctx.getFinallyValue();
     return error.NativeThrew;
 }
 

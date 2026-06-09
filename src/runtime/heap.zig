@@ -1486,9 +1486,9 @@ pub const Heap = struct {
                     self.enqueue(c.resolve);
                     self.enqueue(c.reject);
                 }
-                if (o.finally_callback) |f| self.enqueue(taggedFunction(f));
-                self.enqueue(o.finally_value);
-                if (o.finally_constructor) |f| self.enqueue(taggedFunction(f));
+                if (o.getFinallyCallback()) |f| self.enqueue(taggedFunction(f));
+                self.enqueue(o.getFinallyValue());
+                if (o.getFinallyConstructor()) |f| self.enqueue(taggedFunction(f));
                 if (o.getGeneratorRef()) |gen| self.markGenerator(gen);
                 // §10.4.2 Array exotic — packed indexed elements
                 // are part of the JSObject's own state; mark each
@@ -2809,9 +2809,9 @@ pub const Heap = struct {
                 self.markValue(w.outer);
             }
         }
-        if (o.finally_callback) |f| self.markValue(taggedFunction(f));
-        self.markValue(o.finally_value);
-        if (o.finally_constructor) |f| self.markValue(taggedFunction(f));
+        if (o.getFinallyCallback()) |f| self.markValue(taggedFunction(f));
+        self.markValue(o.getFinallyValue());
+        if (o.getFinallyConstructor()) |f| self.markValue(taggedFunction(f));
         if (o.getGeneratorRef()) |gen| self.markGenerator(gen);
         if (o.is_weak_ref) self.markValue(o.getWeakRefTarget());
         if (o.getFinalizationCells()) |fc| {
@@ -3492,24 +3492,24 @@ pub const Heap = struct {
     }
 
     /// `Promise.prototype.finally` reaction-context callback slot.
-    pub fn setFinallyCallback(self: *Heap, o: *JSObject, f: ?*JSFunction) void {
+    pub fn setFinallyCallback(self: *Heap, o: *JSObject, f: ?*JSFunction) !void {
         if (f) |fn_obj| self.writeBarrier(.{ .object = o }, taggedFunction(fn_obj));
-        o.finally_callback = f;
+        try o.setFinallyCallback(self.allocator, f);
     }
 
     /// `Promise.prototype.finally` thunk's carried value (the
     /// settlement to re-throw or re-return through).
-    pub fn setFinallyValue(self: *Heap, o: *JSObject, v: Value) void {
+    pub fn setFinallyValue(self: *Heap, o: *JSObject, v: Value) !void {
         self.writeBarrier(.{ .object = o }, v);
-        o.finally_value = v;
+        try o.setFinallyValue(self.allocator, v);
     }
 
     /// `Promise.prototype.finally` reaction-context constructor
     /// (the species `C` used to build the next Promise in the
     /// chain).
-    pub fn setFinallyConstructor(self: *Heap, o: *JSObject, f: ?*JSFunction) void {
+    pub fn setFinallyConstructor(self: *Heap, o: *JSObject, f: ?*JSFunction) !void {
         if (f) |fn_obj| self.writeBarrier(.{ .object = o }, taggedFunction(fn_obj));
-        o.finally_constructor = f;
+        try o.setFinallyConstructor(self.allocator, f);
     }
 
     /// §22.2.4 — original source pattern JSString anchored on a
