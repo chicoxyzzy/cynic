@@ -95,14 +95,14 @@ pub fn wrapGenerator(
     // null)) {}`). The real wrapper.prototype is rebound after the
     // prologue per the §9.1.14 read below.
     realm.heap.setObjectPrototype(wrapper, ensureGeneratorPrototype(realm) catch return error.OutOfMemory);
-    realm.heap.setGeneratorRef(wrapper, gen);
+    try realm.heap.setGeneratorRef(wrapper, gen);
 
     // The wrapper is the only handle linking the freshly allocated
     // `gen` to anything caller-visible. `resumeGenerator` runs the
     // generator body's prologue eagerly (§10.2.1.4), which can
     // allocate environments / closures / etc. and trip the GC
     // before this function returns — pin the wrapper so the mark
-    // walk reaches both it and `gen.generator_ref`.
+    // walk reaches both it and `gen.getGeneratorRef()`.
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     scope.push(heap_mod.taggedObject(wrapper)) catch return error.OutOfMemory;
@@ -195,7 +195,7 @@ pub fn wrapAsyncGenerator(
     // param evaluation runs (see `wrapGenerator` for the spec
     // rationale).
     realm.heap.setObjectPrototype(wrapper, ensureAsyncGeneratorPrototype(realm) catch return error.OutOfMemory);
-    realm.heap.setGeneratorRef(wrapper, gen);
+    try realm.heap.setGeneratorRef(wrapper, gen);
 
     // Same wrapper-pin rationale as `wrapGenerator`: the eager
     // prologue can allocate and trip the GC before we return.
@@ -485,7 +485,7 @@ fn asyncGenNext(realm: *Realm, this_value: Value, args: []const Value) @import("
     const brand_err = asyncGenBrandCheck(realm, this_value, "Async generator method called on a non-async-generator");
     if (brand_err) |ex| return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
     const obj = heap_mod.valueAsPlainObject(this_value).?;
-    const gen = obj.generator_ref.?;
+    const gen = obj.getGeneratorRef().?;
     const sent: Value = if (args.len > 0) args[0] else Value.undefined_;
     return asyncGenDispatch(realm, gen, .{ .normal = sent });
 }
@@ -854,12 +854,12 @@ pub fn isSyncRejectedPromise(v: Value) bool {
 /// and check that the returned promise rejects with TypeError.
 /// Returns the prebuilt TypeError value when `this` fails the
 /// check; null when it's a real async generator (caller proceeds
-/// with the unwrapped `obj.generator_ref`).
+/// with the unwrapped `obj.getGeneratorRef()`).
 fn asyncGenBrandCheck(realm: *Realm, this_value: Value, msg: []const u8) ?Value {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse {
         return makeTypeError(realm, msg) catch return null;
     };
-    const gen = obj.generator_ref orelse {
+    const gen = obj.getGeneratorRef() orelse {
         return makeTypeError(realm, msg) catch return null;
     };
     if (!gen.is_async) {
@@ -1077,7 +1077,7 @@ fn asyncGenReturn(realm: *Realm, this_value: Value, args: []const Value) @import
         return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
     }
     const obj = heap_mod.valueAsPlainObject(this_value).?;
-    const gen = obj.generator_ref.?;
+    const gen = obj.getGeneratorRef().?;
     const ret_v: Value = if (args.len > 0) args[0] else Value.undefined_;
     return asyncGenDispatch(realm, gen, .{ .return_value = ret_v });
 }
@@ -1088,14 +1088,14 @@ fn asyncGenThrow(realm: *Realm, this_value: Value, args: []const Value) @import(
         return intrinsics_mod.allocatePromiseFor(realm, null, .rejected, ex) catch return error.OutOfMemory;
     }
     const obj = heap_mod.valueAsPlainObject(this_value).?;
-    const gen = obj.generator_ref.?;
+    const gen = obj.getGeneratorRef().?;
     const ex_v: Value = if (args.len > 0) args[0] else Value.undefined_;
     return asyncGenDispatch(realm, gen, .{ .throw_value = ex_v });
 }
 
 /// §27.5.1 — Generator.prototype.{next,return,throw} require
 /// `this` to have a real `[[GeneratorState]]` slot. Cynic
-/// tracks it via `obj.generator_ref` (which must point at a
+/// tracks it via `obj.getGeneratorRef()` (which must point at a
 /// non-async generator). Wrong-receiver → TypeError per spec.
 fn genBrandCheckTypeError(realm: *Realm, this_value: Value, msg: []const u8) ?@import("../function.zig").NativeError {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse {
@@ -1103,7 +1103,7 @@ fn genBrandCheckTypeError(realm: *Realm, this_value: Value, msg: []const u8) ?@i
         realm.pending_exception = ex;
         return error.NativeThrew;
     };
-    const gen = obj.generator_ref orelse {
+    const gen = obj.getGeneratorRef() orelse {
         const ex = intrinsics_mod.newTypeError(realm, msg) catch return error.OutOfMemory;
         realm.pending_exception = ex;
         return error.NativeThrew;
@@ -1119,7 +1119,7 @@ fn genBrandCheckTypeError(realm: *Realm, this_value: Value, msg: []const u8) ?@i
 fn genNext(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     if (genBrandCheckTypeError(realm, this_value, "Generator method called on non-generator")) |err| return err;
     const obj = heap_mod.valueAsPlainObject(this_value).?;
-    const gen = obj.generator_ref.?;
+    const gen = obj.getGeneratorRef().?;
     const sent: Value = if (args.len > 0) args[0] else Value.undefined_;
     const outcome = resumeGenerator(realm.allocator, realm, gen, sent) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1148,7 +1148,7 @@ fn genNext(realm: *Realm, this_value: Value, args: []const Value) @import("../fu
 fn genReturn(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     if (genBrandCheckTypeError(realm, this_value, "Generator.prototype.return called on non-generator")) |err| return err;
     const obj = heap_mod.valueAsPlainObject(this_value).?;
-    const gen = obj.generator_ref.?;
+    const gen = obj.getGeneratorRef().?;
     const arg: Value = if (args.len > 0) args[0] else Value.undefined_;
     // §27.5.1.3 step 1 → §27.5.1.2 GeneratorValidate step 5 — a
     // re-entrant `iter.return(...)` from inside the generator
@@ -1211,7 +1211,7 @@ fn genReturn(realm: *Realm, this_value: Value, args: []const Value) @import("../
 fn genThrow(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     if (genBrandCheckTypeError(realm, this_value, "Generator.prototype.throw called on non-generator")) |err| return err;
     const obj = heap_mod.valueAsPlainObject(this_value).?;
-    const gen = obj.generator_ref.?;
+    const gen = obj.getGeneratorRef().?;
     const arg: Value = if (args.len > 0) args[0] else Value.undefined_;
     // §27.5.1.4 GeneratorResumeAbrupt(throw). State machine:
     //   • .initial   → close and rethrow

@@ -1420,7 +1420,7 @@ pub const Heap = struct {
                         self.enqueue(taggedObject(entry.value_ptr.target_ns));
                     }
                 }
-                if (o.boxed_primitive) |bp| self.enqueue(bp);
+                if (o.getBoxedPrimitive()) |bp| self.enqueue(bp);
                 // §22.1.3 `[[StringData]]` — the JSString a `String`
                 // wrapper boxes; a typed slot, not a property.
                 if (o.getBoxedString()) |bs| self.markString(bs);
@@ -1482,14 +1482,14 @@ pub const Heap = struct {
                         self.enqueue(zi.pad);
                     }
                 }
-                if (o.capability_record) |c| {
+                if (o.getCapabilityRecord()) |c| {
                     self.enqueue(c.resolve);
                     self.enqueue(c.reject);
                 }
                 if (o.finally_callback) |f| self.enqueue(taggedFunction(f));
                 self.enqueue(o.finally_value);
                 if (o.finally_constructor) |f| self.enqueue(taggedFunction(f));
-                if (o.generator_ref) |gen| self.markGenerator(gen);
+                if (o.getGeneratorRef()) |gen| self.markGenerator(gen);
                 // §10.4.2 Array exotic — packed indexed elements
                 // are part of the JSObject's own state; mark each
                 // slot to keep referenced values alive.
@@ -2741,7 +2741,7 @@ pub const Heap = struct {
                 self.markValue(taggedObject(entry.value_ptr.target_ns));
             }
         }
-        if (o.boxed_primitive) |bp| self.markValue(bp);
+        if (o.getBoxedPrimitive()) |bp| self.markValue(bp);
         if (o.getBoxedString()) |bs| self.markString(bs);
         if (o.getMapData()) |md| {
             for (md.entries.items) |entry| {
@@ -2782,7 +2782,7 @@ pub const Heap = struct {
                 self.markValue(zi.pad);
             }
         }
-        if (o.capability_record) |c| {
+        if (o.getCapabilityRecord()) |c| {
             self.markValue(c.resolve);
             self.markValue(c.reject);
         }
@@ -2812,7 +2812,7 @@ pub const Heap = struct {
         if (o.finally_callback) |f| self.markValue(taggedFunction(f));
         self.markValue(o.finally_value);
         if (o.finally_constructor) |f| self.markValue(taggedFunction(f));
-        if (o.generator_ref) |gen| self.markGenerator(gen);
+        if (o.getGeneratorRef()) |gen| self.markGenerator(gen);
         if (o.is_weak_ref) self.markValue(o.getWeakRefTarget());
         if (o.getFinalizationCells()) |fc| {
             self.markValue(fc.cleanup_callback);
@@ -3479,9 +3479,9 @@ pub const Heap = struct {
     /// §6.1.6.1 / §6.1.5 / §6.1.3 — boxed primitive (Number /
     /// BigInt / Boolean) stashed on a wrapper for `.valueOf` /
     /// `.toString` lookup.
-    pub fn setBoxedPrimitive(self: *Heap, o: *JSObject, v: Value) void {
+    pub fn setBoxedPrimitive(self: *Heap, o: *JSObject, v: Value) !void {
         self.writeBarrier(.{ .object = o }, v);
-        o.boxed_primitive = v;
+        try o.setBoxedPrimitive(self.allocator, v);
     }
 
     /// §22.1.4 String wrapper — the boxed code-unit source for
@@ -3574,7 +3574,7 @@ pub const Heap = struct {
     /// `*JSGenerator` payload. `*JSGenerator` is not Value-boxable,
     /// so the generation check is open-coded against `g.generation`
     /// (same shape as `setCapturedEnv` / `setEnvironmentParent`).
-    pub fn setGeneratorRef(self: *Heap, o: *JSObject, g: ?*JSGenerator) void {
+    pub fn setGeneratorRef(self: *Heap, o: *JSObject, g: ?*JSGenerator) !void {
         if (g) |gen| {
             if (o.generation == .mature and gen.generation == .young) {
                 if (!o.dirty) {
@@ -3585,7 +3585,7 @@ pub const Heap = struct {
                 }
             }
         }
-        o.generator_ref = g;
+        try o.setGeneratorRef(self.allocator, g);
     }
 
     /// Generational write barrier. Records an old→young store:

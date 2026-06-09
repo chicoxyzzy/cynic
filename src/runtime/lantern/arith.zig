@@ -145,7 +145,7 @@ pub fn toNumber(v: Value) f64 {
         return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
     }
     if (heap_mod.valueAsPlainObject(v)) |obj| {
-        if (obj.boxed_primitive) |p| return toNumber(p);
+        if (obj.getBoxedPrimitive()) |p| return toNumber(p);
     }
     return std.math.nan(f64);
 }
@@ -713,7 +713,7 @@ pub fn valueToOwnedString(realm: *Realm, v: Value, scratch: *[64]u8) RunError!St
     }
     if (heap_mod.valueAsPlainObject(v)) |obj| {
         // Primitive wrapper — unwrap.
-        if (obj.boxed_primitive) |p| {
+        if (obj.getBoxedPrimitive()) |p| {
             return valueToOwnedString(realm, p, scratch);
         }
     }

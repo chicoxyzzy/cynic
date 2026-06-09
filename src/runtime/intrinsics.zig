@@ -414,7 +414,7 @@ pub fn install(realm: *Realm) !void {
     // `.valueOf()` calls directly on the prototype unbox it.
     if (heap_mod.valueAsFunction(realm.globals.get("Boolean").?)) |bool_ctor| {
         if (bool_ctor.prototype) |bp| {
-            realm.heap.setBoxedPrimitive(bp, Value.false_);
+            try realm.heap.setBoxedPrimitive(bp, Value.false_);
             // §20.3.3.2 / §20.3.3.3 — install `valueOf` and
             // `toString` on `Boolean.prototype`. Without these,
             // `new Boolean(false) - 1` falls through to the
@@ -441,7 +441,7 @@ pub fn install(realm: *Realm) !void {
         // inherited `Object.prototype.toString.call(String.prototype)`
         // returning `"[object String]"`).
         const empty_str = realm.heap.allocateString("") catch return error.OutOfMemory;
-        realm.heap.setBoxedPrimitive(sp, Value.fromString(empty_str));
+        try realm.heap.setBoxedPrimitive(sp, Value.fromString(empty_str));
         try realm.heap.setBoxedString(sp, empty_str);
         // §22.1.4 — `String.prototype` has a `length` data property
         // whose initial value is 0 and whose attributes are
@@ -1266,7 +1266,7 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
     if (this_value.isInt32() or this_value.isDouble() or this_value.isBool() or
         heap_mod.isSymbol(this_value) or heap_mod.isBigInt(this_value))
     {
-        realm.heap.setBoxedPrimitive(w, this_value);
+        try realm.heap.setBoxedPrimitive(w, this_value);
     }
     return w;
 }
@@ -1703,7 +1703,7 @@ fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // function, `this` is undefined and we just return the
     // primitive.
     if (heap_mod.valueAsPlainObject(this_value)) |inst| {
-        realm.heap.setBoxedPrimitive(inst, primitive);
+        try realm.heap.setBoxedPrimitive(inst, primitive);
         // Also pin in the typed slot so
         // `String.prototype.toString` / `.valueOf` can unbox in
         // O(1) without an isString discriminator dance.
@@ -1769,7 +1769,7 @@ fn numberConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         break :blk try toNumber(realm, prim);
     };
     if (heap_mod.valueAsPlainObject(this_value)) |inst| {
-        realm.heap.setBoxedPrimitive(inst, primitive);
+        try realm.heap.setBoxedPrimitive(inst, primitive);
         return this_value;
     }
     return primitive;
@@ -1778,7 +1778,7 @@ fn numberConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
 fn booleanConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const primitive: Value = if (args.len == 0) Value.false_ else Value.fromBool(toBoolean(args[0]));
     if (heap_mod.valueAsPlainObject(this_value)) |inst| {
-        realm.heap.setBoxedPrimitive(inst, primitive);
+        try realm.heap.setBoxedPrimitive(inst, primitive);
         return this_value;
     }
     return primitive;
@@ -1791,7 +1791,7 @@ fn booleanProtoValueOf(realm: *Realm, this_value: Value, args: []const Value) Na
     _ = args;
     if (this_value.isBool()) return this_value;
     if (heap_mod.valueAsPlainObject(this_value)) |inst| {
-        if (inst.boxed_primitive) |bp| {
+        if (inst.getBoxedPrimitive()) |bp| {
             if (bp.isBool()) return bp;
         }
     }
@@ -1806,7 +1806,7 @@ fn booleanProtoToString(realm: *Realm, this_value: Value, args: []const Value) N
     const b = blk: {
         if (this_value.isBool()) break :blk this_value.asBool();
         if (heap_mod.valueAsPlainObject(this_value)) |inst| {
-            if (inst.boxed_primitive) |bp| {
+            if (inst.getBoxedPrimitive()) |bp| {
                 if (bp.isBool()) break :blk bp.asBool();
             }
         }

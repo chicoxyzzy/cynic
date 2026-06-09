@@ -153,7 +153,7 @@ const throwSyntaxError = intrinsics.throwSyntaxError;
 fn bigintToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const bi = heap_mod.valueAsBigInt(this_value) orelse blk: {
         if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-            if (obj.boxed_primitive) |bp| {
+            if (obj.getBoxedPrimitive()) |bp| {
                 if (heap_mod.valueAsBigInt(bp)) |inner| break :blk inner;
             }
         }
@@ -191,7 +191,7 @@ fn bigintValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     _ = args;
     if (heap_mod.valueAsBigInt(this_value)) |_| return this_value;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-        if (obj.boxed_primitive) |bp| {
+        if (obj.getBoxedPrimitive()) |bp| {
             if (heap_mod.valueAsBigInt(bp)) |_| return bp;
         }
     }

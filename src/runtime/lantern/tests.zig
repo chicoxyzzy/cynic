@@ -5358,7 +5358,7 @@ test "GC: generator wrapper iteration survives gc_threshold=1" {
     // `for (v of g())` opens an iterator on the wrapper JSObject
     // returned by the generator call. The wrapper sits in the
     // for-of's `r_iter` register; the underlying JSGenerator is
-    // reachable through `wrapper.generator_ref`. Each `next()`
+    // reachable through `wrapper.getGeneratorRef()`. Each `next()`
     // call descends into a nested `runFrames` that walks the
     // generator's saved frame state — that nested walk must keep
     // the OUTER frame's wrapper register alive so the next
@@ -7944,8 +7944,8 @@ test "later: Object(primitive) boxes on a cross-realm method-call receiver" {
     const wrapper = heap_mod.valueAsPlainObject(res.value).?;
     // The boxed primitive is recoverable — exactly what
     // §21.2.3.4 thisBigIntValue reads in `BigInt.prototype.valueOf`.
-    try testing.expect(wrapper.boxed_primitive != null);
-    try testing.expectEqual(bi_val.bits, wrapper.boxed_primitive.?.bits);
+    try testing.expect(wrapper.getBoxedPrimitive() != null);
+    try testing.expectEqual(bi_val.bits, wrapper.getBoxedPrimitive().?.bits);
 }
 
 test "later: new F() with non-object prototype falls back to %Object.prototype%" {

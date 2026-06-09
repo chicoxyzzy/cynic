@@ -52,7 +52,7 @@ pub fn install(realm: *Realm) !void {
             // `Number.prototype.toString(2)` directly returns
             // `"0"`; without this, `primitiveNumberValue` would
             // see no `boxed_primitive` and throw.
-            realm.heap.setBoxedPrimitive(np, Value.fromInt32(0));
+            try realm.heap.setBoxedPrimitive(np, Value.fromInt32(0));
         }
     }
     // Top-level parseInt / parseFloat / isNaN / isFinite globals.
@@ -91,7 +91,7 @@ fn primitiveNumberValue(this_value: Value) ?f64 {
     if (this_value.isInt32()) return @floatFromInt(this_value.asInt32());
     if (this_value.isDouble()) return this_value.asDouble();
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-        if (obj.boxed_primitive) |bp| {
+        if (obj.getBoxedPrimitive()) |bp| {
             if (bp.isInt32()) return @floatFromInt(bp.asInt32());
             if (bp.isDouble()) return bp.asDouble();
         }
@@ -655,7 +655,7 @@ fn numberValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     _ = args;
     if (this_value.isInt32() or this_value.isDouble()) return this_value;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-        if (obj.boxed_primitive) |bp| {
+        if (obj.getBoxedPrimitive()) |bp| {
             if (bp.isInt32() or bp.isDouble()) return bp;
         }
     }

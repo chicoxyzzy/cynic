@@ -566,6 +566,17 @@ pub const JSObjectExtension = struct {
     wasm_global: ?*anyopaque = null,
     wasm_table: ?*anyopaque = null,
     wasm_memory: ?*anyopaque = null,
+    /// Cold per-kind state moved off the base `JSObject` (each cost
+    /// 8-16 bytes on every object but is set by one rare kind):
+    /// a Date's [[DateValue]], a boxed-primitive wrapper's payload,
+    /// a Promise capability's record, a generator instance's engine
+    /// state. The GC marks `boxed_primitive` / `capability_record` /
+    /// `generator_ref` via the extension-marking block in `heap.zig`;
+    /// `date_ms` holds no GC value.
+    date_ms: ?f64 = null,
+    boxed_primitive: ?Value = null,
+    capability_record: ?*PromiseCapabilityRecord = null,
+    generator_ref: ?*@import("generator.zig").JSGenerator = null,
     // (`promise_waiters` + `promise_reactions` moved OUT of the
     // extension into `JSObject.promise_store` — a Promise touches
     // none of the extension's other cold fields, so they get a
@@ -889,11 +900,10 @@ pub const JSObject = struct {
     extensible: bool = true,
     /// Boxed primitive — set on objects produced by
     /// `new Number(v)`, `new String(v)`, `new Boolean(v)`.
-    /// `[[NumberData]]` / `[[StringData]]` / `[[BooleanData]]`
-    /// internal slots collapsed into one tagged Value. ToNumber
-    /// / ToString / ToBoolean coercions check this first to
-    /// return the underlying primitive.
-    boxed_primitive: ?Value = null,
+    // `boxed_primitive` (`[[NumberData]]`/`[[StringData]]`/
+    // `[[BooleanData]]`) moved to `JSObjectExtension` — only boxed
+    // wrappers carry it. Access via `getBoxedPrimitive` /
+    // `setBoxedPrimitive`.
     // (`map_data`, `set_data` moved to `JSObjectExtension` — only
     // Map/Set/WeakMap/WeakSet instances populate them. Access via
     // `getMapData` / `setMapData` / `getSetData` / `setSetData`
@@ -926,10 +936,9 @@ pub const JSObject = struct {
     /// Hidden from JS; mirrors §27.1.5's IteratorRecord internal
     /// state.
     iter_helper: ?*IteratorHelperState = null,
-    /// Promise §27.2.1.5 PromiseCapability state — set on the
-    /// transient bound-this object the capability executor closes
-    /// over. Hidden from JS.
-    capability_record: ?*PromiseCapabilityRecord = null,
+    // `capability_record` (§27.2.1.5 PromiseCapability state) moved to
+    // `JSObjectExtension` — set only on the transient capability
+    // bound-this. Access via `getCapabilityRecord` / `setCapabilityRecord`.
     // `WebAssembly.{Module,Global,Table,Memory}` host backings moved
     // to `JSObjectExtension` — only those rare exotics carry them, so
     // they no longer cost 32 bytes on every object. Access via the
@@ -950,16 +959,10 @@ pub const JSObject = struct {
     /// result)` wrap uses the user-subclass ctor and not %Promise%.
     /// `null` ≡ %Promise% (the fast path).
     finally_constructor: ?*@import("function.zig").JSFunction = null,
-    /// `[[DateValue]]` (§21.4.1) — milliseconds since Unix
-    /// epoch. NaN means an invalid date. Only set on `new Date()`
-    /// instances.
-    date_ms: ?f64 = null,
-    /// Pointer to the underlying `JSGenerator` for objects
-    /// returned from a `function*` invocation. The generator's
-    /// `next` / `return` / `throw` methods (installed on the
-    /// generator-prototype) read this slot to find the saved
-    /// frame state to resume.
-    generator_ref: ?*@import("generator.zig").JSGenerator = null,
+    // `date_ms` (§21.4.1 `[[DateValue]]`) and `generator_ref` (the
+    // backing `JSGenerator` for a `function*` result) moved to
+    // `JSObjectExtension` — Date / generator instances only. Access
+    // via `getDateMs`/`setDateMs` and `getGeneratorRef`/`setGeneratorRef`.
     // (`array_buffer`, `array_buffer_max_byte_length`, `typed_view`,
     // `data_view` moved to `JSObjectExtension` — only TypedArray /
     // ArrayBuffer / DataView instances populate them. Access via
@@ -1302,6 +1305,32 @@ pub const JSObject = struct {
     }
     pub fn setWasmMemory(self: *JSObject, allocator: std.mem.Allocator, v: ?*anyopaque) !void {
         (try self.getOrCreateExtension(allocator)).wasm_memory = v;
+    }
+
+    // ── Cold per-kind state — extension-backed (see migration note) ─
+    pub fn getDateMs(self: *const JSObject) ?f64 {
+        return if (self.extension) |ext| ext.date_ms else null;
+    }
+    pub fn setDateMs(self: *JSObject, allocator: std.mem.Allocator, v: ?f64) !void {
+        (try self.getOrCreateExtension(allocator)).date_ms = v;
+    }
+    pub fn getBoxedPrimitive(self: *const JSObject) ?Value {
+        return if (self.extension) |ext| ext.boxed_primitive else null;
+    }
+    pub fn setBoxedPrimitive(self: *JSObject, allocator: std.mem.Allocator, v: ?Value) !void {
+        (try self.getOrCreateExtension(allocator)).boxed_primitive = v;
+    }
+    pub fn getCapabilityRecord(self: *const JSObject) ?*PromiseCapabilityRecord {
+        return if (self.extension) |ext| ext.capability_record else null;
+    }
+    pub fn setCapabilityRecord(self: *JSObject, allocator: std.mem.Allocator, v: ?*PromiseCapabilityRecord) !void {
+        (try self.getOrCreateExtension(allocator)).capability_record = v;
+    }
+    pub fn getGeneratorRef(self: *const JSObject) ?*@import("generator.zig").JSGenerator {
+        return if (self.extension) |ext| ext.generator_ref else null;
+    }
+    pub fn setGeneratorRef(self: *JSObject, allocator: std.mem.Allocator, v: ?*@import("generator.zig").JSGenerator) !void {
+        (try self.getOrCreateExtension(allocator)).generator_ref = v;
     }
 
     pub fn hasAccessor(self: *const JSObject, key: []const u8) bool {
@@ -1850,7 +1879,7 @@ pub const JSObject = struct {
         if (self.regexp_string_iter) |s| s.deinit(allocator);
         if (self.iter_record) |s| s.deinit(allocator);
         if (self.iter_helper) |s| s.deinit(allocator);
-        if (self.capability_record) |s| s.deinit(allocator);
+        if (self.getCapabilityRecord()) |s| s.deinit(allocator);
         if (self.regex_perlex) |p| {
             p.deinit();
             allocator.destroy(p);

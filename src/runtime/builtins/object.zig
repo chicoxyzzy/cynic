@@ -4114,7 +4114,7 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
             // the native engine owns.
             if (obj.regexp_source != null) break :blk "RegExp";
             if (obj.getArrayBuffer() != null) break :blk "Object"; // ArrayBuffer uses @@toStringTag
-            if (obj.boxed_primitive) |bp| {
+            if (obj.getBoxedPrimitive()) |bp| {
                 if (bp.isBool()) break :blk "Boolean";
                 if (bp.isInt32() or bp.isDouble()) break :blk "Number";
             }
@@ -4132,7 +4132,7 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
             // instance (the inherited descriptor would otherwise be
             // writable:false and block the assignment per §10.1.9.2;
             // `built-ins/Object/prototype/toString/symbol-tag-override-instances.js`).
-            if (obj.date_ms != null) break :blk "Date";
+            if (obj.getDateMs() != null) break :blk "Date";
             break :blk "Object";
         }
         break :blk "Object";

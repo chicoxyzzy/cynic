@@ -124,7 +124,7 @@ fn symbolToPrimitive(realm: *Realm, this_value: Value, args: []const Value) Nati
 fn thisSymbolValue(this_value: Value) ?*@import("../symbol.zig").JSSymbol {
     if (heap_mod.valueAsSymbol(this_value)) |s| return s;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-        if (obj.boxed_primitive) |bp| {
+        if (obj.getBoxedPrimitive()) |bp| {
             if (heap_mod.valueAsSymbol(bp)) |s| return s;
         }
     }
@@ -146,7 +146,7 @@ fn symbolValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     _ = args;
     if (heap_mod.valueAsSymbol(this_value) != null) return this_value;
     if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-        if (obj.boxed_primitive) |bp| {
+        if (obj.getBoxedPrimitive()) |bp| {
             if (heap_mod.valueAsSymbol(bp) != null) return bp;
         }
     }

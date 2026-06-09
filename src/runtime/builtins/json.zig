@@ -303,7 +303,7 @@ fn resolvePropertyList(state: *StringifyState, replacer_v: Value) NativeError!vo
             if (o.getBoxedString() != null) {
                 const s = try stringifyArg(realm, v);
                 item_bytes = s.flatBytes();
-            } else if (o.boxed_primitive) |bp| {
+            } else if (o.getBoxedPrimitive()) |bp| {
                 if (bp.isInt32() or bp.isDouble()) {
                     const s = try stringifyArg(realm, v);
                     item_bytes = s.flatBytes();
@@ -343,7 +343,7 @@ fn resolveSpace(state: *StringifyState, space_v: Value) NativeError!void {
         if (obj.getBoxedString() != null) {
             const s = try stringifyArg(realm, space_v);
             space_resolved = Value.fromString(s);
-        } else if (obj.boxed_primitive) |bp| {
+        } else if (obj.getBoxedPrimitive()) |bp| {
             if (bp.isInt32() or bp.isDouble()) {
                 space_resolved = try toNumber(realm, space_v);
             }
@@ -548,7 +548,7 @@ fn serializeJSONProperty(
         if (o.getBoxedString() != null) {
             const s = try stringifyArg(realm, value);
             value = Value.fromString(s);
-        } else if (o.boxed_primitive) |bp| {
+        } else if (o.getBoxedPrimitive()) |bp| {
             if (bp.isInt32() or bp.isDouble()) {
                 value = try toNumber(realm, value);
             } else if (bp.isBool()) {

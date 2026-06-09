@@ -222,7 +222,7 @@ const SetterPrelude = struct {
 fn setterPrelude(realm: *Realm, this_value: Value, args: []const Value, arity: usize) NativeError!SetterPrelude {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "Date.prototype setter called on non-Date");
-    const snapshot = inst.date_ms orelse
+    const snapshot = inst.getDateMs() orelse
         return throwTypeError(realm, "Date.prototype setter called on non-Date");
     var coerced: [4]f64 = .{ std.math.nan(f64), std.math.nan(f64), std.math.nan(f64), std.math.nan(f64) };
     const present = @min(args.len, arity);
@@ -246,12 +246,12 @@ fn timeClip(t: f64) f64 {
 fn dateSetTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "Date.prototype.setTime called on non-Date");
-    if (inst.date_ms == null) return throwTypeError(realm, "Date.prototype.setTime called on non-Date");
+    if (inst.getDateMs() == null) return throwTypeError(realm, "Date.prototype.setTime called on non-Date");
     const arg_v = if (args.len == 0) Value.undefined_ else args[0];
     const v = try intrinsics.toNumber(realm, arg_v);
     const t = if (v.isInt32()) @as(f64, @floatFromInt(v.asInt32())) else v.asDouble();
     const clipped = timeClip(t);
-    inst.date_ms = clipped;
+    try inst.setDateMs(realm.allocator, clipped);
     return Value.fromDouble(clipped);
 }
 
@@ -262,7 +262,7 @@ fn dateSetMs(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     const new_ms_part = p.coerced[0];
     const old_ms_part = @floor(@mod(cur, 1000.0));
     const new_ms = timeClip(cur - old_ms_part + new_ms_part);
-    p.inst.date_ms = new_ms;
+    try p.inst.setDateMs(realm.allocator, new_ms);
     return Value.fromDouble(new_ms);
 }
 
@@ -274,7 +274,7 @@ fn dateSetSeconds(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const ms_arg = if (p.present_count > 1) p.coerced[1] else @floor(@mod(cur, 1000.0));
     const day_minute_part = @floor(cur / 60000.0) * 60000.0;
     const new_ms = timeClip(day_minute_part + sec * 1000.0 + ms_arg);
-    p.inst.date_ms = new_ms;
+    try p.inst.setDateMs(realm.allocator, new_ms);
     return Value.fromDouble(new_ms);
 }
 
@@ -287,7 +287,7 @@ fn dateSetMinutes(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const ms_arg = if (p.present_count > 2) p.coerced[2] else @floor(@mod(cur, 1000.0));
     const hour_part = @floor(cur / 3600000.0) * 3600000.0;
     const new_ms = timeClip(hour_part + minute * 60000.0 + sec * 1000.0 + ms_arg);
-    p.inst.date_ms = new_ms;
+    try p.inst.setDateMs(realm.allocator, new_ms);
     return Value.fromDouble(new_ms);
 }
 
@@ -301,7 +301,7 @@ fn dateSetHours(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const ms_arg = if (p.present_count > 3) p.coerced[3] else @floor(@mod(cur, 1000.0));
     const day_part = @floor(cur / 86400000.0) * 86400000.0;
     const new_ms = timeClip(day_part + hour * 3600000.0 + minute * 60000.0 + sec * 1000.0 + ms_arg);
-    p.inst.date_ms = new_ms;
+    try p.inst.setDateMs(realm.allocator, new_ms);
     return Value.fromDouble(new_ms);
 }
 
@@ -313,7 +313,7 @@ fn dateSetDate(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     const time_part = @mod(cur, 86400000.0);
     const new_day = p.coerced[0];
     const new_ms = timeClip(ymdToMs(@floatFromInt(ymd.year), @floatFromInt(ymd.month), new_day) * 86400000.0 + time_part);
-    p.inst.date_ms = new_ms;
+    try p.inst.setDateMs(realm.allocator, new_ms);
     return Value.fromDouble(new_ms);
 }
 
@@ -326,7 +326,7 @@ fn dateSetMonth(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     const new_month = p.coerced[0];
     const new_day = if (p.present_count > 1) p.coerced[1] else @as(f64, @floatFromInt(ymd.day));
     const new_ms = timeClip(ymdToMs(@floatFromInt(ymd.year), new_month, new_day) * 86400000.0 + time_part);
-    p.inst.date_ms = new_ms;
+    try p.inst.setDateMs(realm.allocator, new_ms);
     return Value.fromDouble(new_ms);
 }
 
@@ -343,7 +343,7 @@ fn dateSetFullYear(realm: *Realm, this_value: Value, args: []const Value) Native
     const new_month = if (p.present_count > 1) p.coerced[1] else @as(f64, @floatFromInt(ymd.month));
     const new_day = if (p.present_count > 2) p.coerced[2] else @as(f64, @floatFromInt(ymd.day));
     const new_ms = timeClip(ymdToMs(new_year, new_month, new_day) * 86400000.0 + time_part);
-    p.inst.date_ms = new_ms;
+    try p.inst.setDateMs(realm.allocator, new_ms);
     return Value.fromDouble(new_ms);
 }
 
@@ -411,7 +411,7 @@ fn ymdToMs(year_f: f64, month_f: f64, day_f: f64) f64 {
 /// receiver when invoked via `new`).
 fn dateConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst_opt = heap_mod.valueAsPlainObject(this_value);
-    const is_construct = inst_opt != null and inst_opt.?.date_ms == null;
+    const is_construct = inst_opt != null and inst_opt.?.getDateMs() == null;
 
     // §21.4.2.1 step 1 — `Date()` (no `new`) returns the current
     // time formatted as a date string, ignoring ALL arguments.
@@ -431,8 +431,8 @@ fn dateConstructor(realm: *Realm, this_value: Value, args: []const Value) Native
         // ToNumber.
         const arg = args[0];
         if (heap_mod.valueAsPlainObject(arg)) |o| {
-            if (o.date_ms) |dms| {
-                inst.date_ms = timeClip(dms);
+            if (o.getDateMs()) |dms| {
+                try inst.setDateMs(realm.allocator, timeClip(dms));
                 return this_value;
             }
         }
@@ -465,7 +465,7 @@ fn dateConstructor(realm: *Realm, this_value: Value, args: []const Value) Native
         const yr = applyYearOffset(y);
         ms = timeClip(makeUTC(yr, m, d, h, mi, sec, msec));
     }
-    inst.date_ms = ms;
+    try inst.setDateMs(realm.allocator, ms);
     return this_value;
 }
 
@@ -963,7 +963,7 @@ fn dateParts(ms_v: f64) DateParts {
 
 fn getDateMs(this_value: Value) ?f64 {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    return obj.date_ms;
+    return obj.getDateMs();
 }
 
 /// §21.4.4.X — every Date.prototype getter requires a brand-
@@ -971,7 +971,7 @@ fn getDateMs(this_value: Value) ?f64 {
 /// non-Date wrapper throws TypeError per spec.
 fn requireDateMs(realm: *Realm, this_value: Value) NativeError!f64 {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Date.prototype method called on non-Date");
-    return obj.date_ms orelse return throwTypeError(realm, "Date.prototype method called on non-Date");
+    return obj.getDateMs() orelse return throwTypeError(realm, "Date.prototype method called on non-Date");
 }
 
 fn dateGetTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

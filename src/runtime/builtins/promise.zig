@@ -175,7 +175,7 @@ pub const PromiseCapability = struct {
 /// through `bound_target` so `this_value` here is the state.
 fn capabilityExecutorImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const state = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "capability executor: state not bound");
-    const rec = state.capability_record orelse return throwTypeError(realm, "capability executor: state missing");
+    const rec = state.getCapabilityRecord() orelse return throwTypeError(realm, "capability executor: state missing");
     // §27.2.1.5.1 GetCapabilitiesExecutor Functions —
     //   3. If F.[[Capability]].[[Resolve]] is not undefined → TypeError.
     //   4. If F.[[Capability]].[[Reject]]  is not undefined → TypeError.
@@ -210,7 +210,7 @@ pub fn newPromiseCapability(realm: *Realm, ctor: *JSFunction) NativeError!Promis
     cap_sc.push(heap_mod.taggedObject(state)) catch return error.OutOfMemory;
     const rec = realm.allocator.create(@import("../object.zig").PromiseCapabilityRecord) catch return error.OutOfMemory;
     rec.* = .{};
-    state.capability_record = rec;
+    try state.setCapabilityRecord(realm.allocator, rec);
 
     // §27.2.1.5.1 GetCapabilitiesExecutor Functions — anonymous,
     // length 2, non-constructor. Observable when a subclass /
