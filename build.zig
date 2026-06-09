@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
     // use-after-free panics on the poisoned read instead of returning
     // garbage. Same reason `/gc-stress` reaches for the safe binary.
     const cynic_fuzz_mod = b.createModule(.{
-        .root_source_file = b.path("src/fuzz_main.zig"),
+        .root_source_file = b.path("tools/fuzz/fuzz_main.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
         .link_libc = true,
@@ -88,6 +88,26 @@ pub fn build(b: *std.Build) void {
     });
     lib_mod_fuzz.addOptions("build_options", lib_build_options);
     cynic_fuzz_mod.addImport("cynic", lib_mod_fuzz);
+    // `fuzz_coverage` and `fuzz_reprl` live in `src/cli/` — they are
+    // dual-use, also compiled into the regular `cynic` binary (the
+    // `cynic fuzz-reprl` subcommand + coverage symbols). The host
+    // entry in `tools/fuzz/` reaches them through the module graph so
+    // it doesn't relative-import across trees.
+    const fuzz_coverage_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/fuzz_coverage.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    const fuzz_reprl_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/fuzz_reprl.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    fuzz_reprl_mod.addImport("cynic", lib_mod_fuzz);
+    cynic_fuzz_mod.addImport("fuzz_coverage", fuzz_coverage_mod);
+    cynic_fuzz_mod.addImport("fuzz_reprl", fuzz_reprl_mod);
     const cynic_fuzz = b.addExecutable(.{
         .name = "cynic-fuzz",
         .root_module = cynic_fuzz_mod,
@@ -486,7 +506,7 @@ pub fn build(b: *std.Build) void {
     // -----------------------------------------------------------------
     // `zig build wasm` — the browser-playground WebAssembly module.
     //
-    // Builds `src/playground_wasm.zig` into a single `wasm32-freestanding`
+    // Builds `playground/playground_wasm.zig` into a single `wasm32-freestanding`
     // `ReleaseSmall` module (download size matters for a playground).
     // Pure Zig now that Perlex + the native Unicode tables replaced the
     // vendored QuickJS C — no libc shim, no C sources to link.
@@ -509,7 +529,7 @@ pub fn build(b: *std.Build) void {
 
     // The WASM entry module — C-ABI exports for the JS front-end.
     const wasm_mod = b.createModule(.{
-        .root_source_file = b.path("src/playground_wasm.zig"),
+        .root_source_file = b.path("playground/playground_wasm.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
@@ -577,7 +597,7 @@ pub fn build(b: *std.Build) void {
     // `gh-pages:/playground/`; the website half (index.html, app.js,
     // codemirror.bundle.js) lives on the `gh-pages` branch and imports
     // `cynic-engine.js` — the stable ABI binding that tracks
-    // `src/playground_wasm.zig`. See docs/playground.md.
+    // `playground/playground_wasm.zig`. See docs/playground.md.
     const wasm_into_playground = b.addInstallFileWithDir(
         wasm_bin,
         .{ .custom = "playground" },

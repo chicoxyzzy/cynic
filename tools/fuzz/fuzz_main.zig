@@ -13,8 +13,8 @@
 //!         — useful for protocol smoke tests.
 
 const std = @import("std");
-const coverage = @import("cli/fuzz_coverage.zig");
-const fuzz_reprl = @import("cli/fuzz_reprl.zig");
+const coverage = @import("fuzz_coverage");
+const fuzz_reprl = @import("fuzz_reprl");
 
 pub fn main(init: std.process.Init) !void {
     // Attach Fuzzilli's coverage bitmap when SHM_ID is set;
@@ -68,5 +68,5 @@ pub fn main(init: std.process.Init) !void {
 // run under `zig build test`. Same dodge as `main.zig` for the
 // REPRL protocol tests.
 test {
-    _ = @import("cli/fuzz_coverage.zig");
+    _ = @import("fuzz_coverage");
 }

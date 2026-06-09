@@ -1,6 +1,6 @@
 //! Diagnostics → playground-frame error text.
 //!
-//! Pulled out of `src/playground_wasm.zig` so `zig build test` can
+//! Pulled out of `playground/playground_wasm.zig` so `zig build test` can
 //! exercise it. The playground entry only compiles for wasm32-freestanding,
 //! but the format
 //! helpers themselves have no wasm-specific dependencies — they just

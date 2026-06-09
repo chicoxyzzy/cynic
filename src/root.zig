@@ -39,12 +39,12 @@ pub const perlex = @import("perlex/perlex.zig");
 /// Value → display-string formatter used by the playground panel.
 /// Lives at the library boundary (not under `runtime/`) because it
 /// is a display concern — the engine itself does not need it, but
-/// surfacing it here lets both `src/playground_wasm.zig` and host
+/// surfacing it here lets both `playground/playground_wasm.zig` and host
 /// unit tests reach the same code.
 pub const wasm_format = @import("wasm_format.zig");
 
 /// Diagnostics → playground-frame error text. Same rationale as
-/// `wasm_format`: extracted from `src/playground_wasm.zig` so
+/// `wasm_format`: extracted from `playground/playground_wasm.zig` so
 /// `zig build test` can exercise the helpers (the playground entry
 /// is wasm32-only).
 pub const wasm_diag = @import("wasm_diag.zig");
