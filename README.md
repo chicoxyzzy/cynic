@@ -114,9 +114,9 @@ The shape, in broad strokes — the per-bucket numbers live in the
   API (`Module` / `Instance` / `Memory` / `Table` / `Global` /
   `Tag` / `Exception`, `compile` / `instantiate`, host imports,
   cross-module linking), powered by **Sarcasm** — a from-scratch
-  in-place interpreter (SIMD, reference types, memory64,
-  multi-memory, tail calls, relaxed-SIMD, and the exception-handling
-  proposal — `try_table` / `throw` / `throw_ref` / `exnref`). **100 %
+  in-place interpreter (SIMD, reference types, memory64, tail
+  calls, relaxed-SIMD, and the exception-handling proposal —
+  `try_table` / `throw` / `throw_ref` / `exnref`). **100 %
   of the commands it scores (56510/56510)** on the official
   WebAssembly spec testsuite — the scored set excludes tests for
   not-yet-implemented proposals (see
