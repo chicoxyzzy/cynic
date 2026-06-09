@@ -115,6 +115,11 @@ pub fn install(realm: *Realm) !void {
     });
     try ns.set(realm.allocator, "Module", heap_mod.taggedFunction(module_ctor.ctor));
     realm.wasm_module_prototype = module_ctor.proto;
+    try intrinsics.installToStringTag(realm, module_ctor.proto, "WebAssembly.Module");
+    // §Module statics — introspection, ungated (no code is generated).
+    try intrinsics.installNativeMethod(realm, module_ctor.ctor, "exports", wasmModuleExports, 1);
+    try intrinsics.installNativeMethod(realm, module_ctor.ctor, "imports", wasmModuleImports, 1);
+    try intrinsics.installNativeMethod(realm, module_ctor.ctor, "customSections", wasmModuleCustomSections, 2);
 
     const instance_ctor = try intrinsics.installConstructor(realm, .{
         .ctor = instanceConstructor,
@@ -124,6 +129,7 @@ pub fn install(realm: *Realm) !void {
     });
     try ns.set(realm.allocator, "Instance", heap_mod.taggedFunction(instance_ctor.ctor));
     realm.wasm_instance_prototype = instance_ctor.proto;
+    try intrinsics.installToStringTag(realm, instance_ctor.proto, "WebAssembly.Instance");
 
     // §Errors — CompileError / LinkError / RuntimeError, Error subclasses
     // on the namespace.
@@ -139,6 +145,7 @@ pub fn install(realm: *Realm) !void {
     });
     try ns.set(realm.allocator, "Global", heap_mod.taggedFunction(global_ctor.ctor));
     realm.wasm_global_prototype = global_ctor.proto;
+    try intrinsics.installToStringTag(realm, global_ctor.proto, "WebAssembly.Global");
     {
         // `Global.prototype.value` — a getter / setter over the cell.
         const getter = try intrinsics.makeNativeFunction(realm, globalValueGet, 0, "get value");
@@ -160,6 +167,7 @@ pub fn install(realm: *Realm) !void {
     });
     try ns.set(realm.allocator, "Table", heap_mod.taggedFunction(table_ctor.ctor));
     realm.wasm_table_prototype = table_ctor.proto;
+    try intrinsics.installToStringTag(realm, table_ctor.proto, "WebAssembly.Table");
     try intrinsics.installNativeMethodOnProto(realm, table_ctor.proto, "get", tableGet, 1);
     try intrinsics.installNativeMethodOnProto(realm, table_ctor.proto, "set", tableSet, 2);
     try intrinsics.installNativeMethodOnProto(realm, table_ctor.proto, "grow", tableGrow, 1);
@@ -182,6 +190,7 @@ pub fn install(realm: *Realm) !void {
     });
     try ns.set(realm.allocator, "Memory", heap_mod.taggedFunction(memory_ctor.ctor));
     realm.wasm_memory_prototype = memory_ctor.proto;
+    try intrinsics.installToStringTag(realm, memory_ctor.proto, "WebAssembly.Memory");
     try intrinsics.installNativeMethodOnProto(realm, memory_ctor.proto, "grow", memoryGrow, 1);
     {
         const getter = try intrinsics.makeNativeFunction(realm, memoryBufferGet, 0, "get buffer");
@@ -202,6 +211,7 @@ pub fn install(realm: *Realm) !void {
     });
     try ns.set(realm.allocator, "Tag", heap_mod.taggedFunction(tag_ctor.ctor));
     realm.wasm_tag_prototype = tag_ctor.proto;
+    try intrinsics.installToStringTag(realm, tag_ctor.proto, "WebAssembly.Tag");
 
     const exception_ctor = try intrinsics.installConstructor(realm, .{
         .ctor = exceptionConstructor,
@@ -211,6 +221,7 @@ pub fn install(realm: *Realm) !void {
     });
     try ns.set(realm.allocator, "Exception", heap_mod.taggedFunction(exception_ctor.ctor));
     realm.wasm_exception_prototype = exception_ctor.proto;
+    try intrinsics.installToStringTag(realm, exception_ctor.proto, "WebAssembly.Exception");
     try intrinsics.installNativeMethodOnProto(realm, exception_ctor.proto, "is", exceptionIs, 1);
     try intrinsics.installNativeMethodOnProto(realm, exception_ctor.proto, "getArg", exceptionGetArg, 2);
 
@@ -1206,6 +1217,144 @@ fn throwLinkError(realm: *Realm, msg: []const u8) NativeError {
 }
 fn throwRuntimeError(realm: *Realm, msg: []const u8) NativeError {
     return throwWasmError(realm, realm.wasm_runtime_error_prototype, msg);
+}
+
+// ── WebAssembly.Module statics (introspection) ─────────────────────
+
+/// Resolve arg[0] to its decoded `ModuleState`, or throw a TypeError.
+/// Shared by `Module.exports` / `Module.imports` / `Module.customSections`.
+fn moduleStateArg(realm: *Realm, args: []const Value, who: []const u8) NativeError!*ModuleState {
+    const obj = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
+        return moduleArgTypeError(realm, who);
+    const raw = obj.getWasmModule() orelse return moduleArgTypeError(realm, who);
+    return @ptrCast(@alignCast(raw));
+}
+
+fn moduleArgTypeError(realm: *Realm, who: []const u8) NativeError {
+    var buf: [80]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "WebAssembly.Module.{s} expects a WebAssembly.Module", .{who}) catch
+        "WebAssembly.Module: expected a WebAssembly.Module";
+    return intrinsics.throwTypeError(realm, msg);
+}
+
+/// §ExternKind → the JS-API external-kind string ("function" / "table" /
+/// "memory" / "global" / "tag").
+fn externKindString(kind: wasm.module.ExternKind) []const u8 {
+    return switch (kind) {
+        .func => "function",
+        .table => "table",
+        .mem => "memory",
+        .global => "global",
+        .tag => "tag",
+    };
+}
+
+/// Set an array-exotic element `arr[i] = v` and (re)set `length`.
+fn arraySetElem(realm: *Realm, arr: *JSObject, i: usize, v: Value) NativeError!void {
+    var buf: [24]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+    arr.set(realm.allocator, key, v) catch return error.OutOfMemory;
+}
+
+/// `WebAssembly.Module.exports(module)` — an Array of `{ name, kind }`,
+/// one per export, in declaration order (JS-API ModuleExports). Ungated.
+fn wasmModuleExports(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const mstate = try moduleStateArg(realm, args, "exports");
+    const exports = mstate.module.exports;
+
+    const arr = intrinsics.allocateArray(realm) catch return error.OutOfMemory;
+    // Root the result array across the per-export object/string allocs.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(arr)) catch return error.OutOfMemory;
+
+    for (exports, 0..) |ex, i| {
+        const entry = realm.heap.allocateObject() catch return error.OutOfMemory;
+        realm.heap.setObjectPrototype(entry, realm.intrinsics.object_prototype);
+        // Root the in-flight entry while its two string values allocate.
+        const escope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer escope.close();
+        escope.push(heap_mod.taggedObject(entry)) catch return error.OutOfMemory;
+        // Property order is `name` then `kind`.
+        const name_str = realm.heap.allocateString(ex.name) catch return error.OutOfMemory;
+        entry.set(realm.allocator, "name", Value.fromString(name_str)) catch return error.OutOfMemory;
+        const kind_str = realm.heap.allocateString(externKindString(ex.desc)) catch return error.OutOfMemory;
+        entry.set(realm.allocator, "kind", Value.fromString(kind_str)) catch return error.OutOfMemory;
+        try arraySetElem(realm, arr, i, heap_mod.taggedObject(entry));
+    }
+    arr.set(realm.allocator, "length", Value.fromInt32(@intCast(exports.len))) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(arr);
+}
+
+/// `WebAssembly.Module.imports(module)` — an Array of `{ module, name,
+/// kind }`, one per import, in declaration order. Ungated.
+fn wasmModuleImports(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const mstate = try moduleStateArg(realm, args, "imports");
+    const imports = mstate.module.imports;
+
+    const arr = intrinsics.allocateArray(realm) catch return error.OutOfMemory;
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(arr)) catch return error.OutOfMemory;
+
+    for (imports, 0..) |imp, i| {
+        const entry = realm.heap.allocateObject() catch return error.OutOfMemory;
+        realm.heap.setObjectPrototype(entry, realm.intrinsics.object_prototype);
+        const escope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer escope.close();
+        escope.push(heap_mod.taggedObject(entry)) catch return error.OutOfMemory;
+        // Property order is `module`, `name`, `kind`.
+        const mod_str = realm.heap.allocateString(imp.module) catch return error.OutOfMemory;
+        entry.set(realm.allocator, "module", Value.fromString(mod_str)) catch return error.OutOfMemory;
+        const name_str = realm.heap.allocateString(imp.name) catch return error.OutOfMemory;
+        entry.set(realm.allocator, "name", Value.fromString(name_str)) catch return error.OutOfMemory;
+        const kind_str = realm.heap.allocateString(externKindString(imp.desc)) catch return error.OutOfMemory;
+        entry.set(realm.allocator, "kind", Value.fromString(kind_str)) catch return error.OutOfMemory;
+        try arraySetElem(realm, arr, i, heap_mod.taggedObject(entry));
+    }
+    arr.set(realm.allocator, "length", Value.fromInt32(@intCast(imports.len))) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(arr);
+}
+
+/// `WebAssembly.Module.customSections(module, sectionName)` — an Array of
+/// fresh `ArrayBuffer` copies of every custom section whose name equals
+/// `String(sectionName)`, in declaration order. Ungated.
+fn wasmModuleCustomSections(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = this_value;
+    const mstate = try moduleStateArg(realm, args, "customSections");
+
+    // §7.1.17 ToString(sectionName). Materialize into a stable buffer so
+    // the comparison key survives any GC during array/buffer allocation.
+    var scratch: [64]u8 = undefined;
+    const slice = arith.valueToOwnedString(realm, if (args.len > 1) args[1] else Value.undefined_, &scratch) catch
+        return error.OutOfMemory;
+    const want = realm.classAllocator().dupe(u8, slice.bytes) catch return error.OutOfMemory;
+    if (slice.allocated) realm.allocator.free(slice.bytes);
+    defer realm.classAllocator().free(want);
+
+    const arr = intrinsics.allocateArray(realm) catch return error.OutOfMemory;
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(arr)) catch return error.OutOfMemory;
+
+    var n: usize = 0;
+    for (mstate.module.custom_sections) |cs| {
+        if (!std.mem.eql(u8, cs.name, want)) continue;
+        const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+        realm.heap.setObjectPrototype(buf_obj, realm.intrinsics.array_buffer_prototype);
+        // A fresh, engine-owned copy of the payload (the §ArrayBuffer is
+        // mutable and outlives the borrowed wasm-arena slice).
+        const copy = realm.allocator.alloc(u8, cs.bytes.len) catch return error.OutOfMemory;
+        @memcpy(copy, cs.bytes);
+        buf_obj.setArrayBuffer(realm.allocator, copy) catch return error.OutOfMemory;
+        buf_obj.has_array_buffer_data = true;
+        try arraySetElem(realm, arr, n, heap_mod.taggedObject(buf_obj));
+        n += 1;
+    }
+    arr.set(realm.allocator, "length", Value.fromInt32(@intCast(n))) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(arr);
 }
 
 /// Borrow the bytes of a BufferSource argument — an `ArrayBuffer` or any

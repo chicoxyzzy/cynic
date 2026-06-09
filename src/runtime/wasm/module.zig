@@ -65,6 +65,15 @@ pub const Global = struct {
     init_expr: []const u8,
 };
 
+/// §5.5.3 — a custom section's decoded UTF-8 name and its opaque
+/// payload bytes (everything after the name). Both borrow the input
+/// buffer. Retained so `WebAssembly.Module.customSections` can expose
+/// them; the validator and interpreter ignore custom sections.
+pub const CustomSection = struct {
+    name: []const u8,
+    bytes: []const u8,
+};
+
 /// §5.5.13 — one function body from the code section: the raw bytes of
 /// its local declarations followed by its expression (including the
 /// terminating `end`). Borrowed from the input buffer.
@@ -120,4 +129,8 @@ pub const Module = struct {
     /// §5.5.15 — the declared data-segment count, present iff a data
     /// count section appeared. Cross-checked against the data section.
     data_count: ?u32 = null,
+
+    /// §5.5.3 — custom sections, in declaration order. Retained only
+    /// for `WebAssembly.Module.customSections`; not part of validation.
+    custom_sections: []const CustomSection = &.{},
 };

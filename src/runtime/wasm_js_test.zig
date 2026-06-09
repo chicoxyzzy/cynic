@@ -944,3 +944,138 @@ test "WebAssembly.Tag / Exception / tag-import reject bad arguments" {
         "r";
     try expectIntWasm(src, 111);
 }
+
+// ── @@toStringTag on every WebAssembly prototype ────────────────────
+
+// `(import "e" "f" (func (type 0)))` — module "e", name "f", a single
+// func import referencing the one `()->()` type. The import section's
+// size byte is 7 (count + 1-byte module + "e" + 1-byte name + "f" +
+// kind + typeidx).
+const import_ef_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,4,1,96,0,0, 2,7,1,1,101,1,102,0,0])";
+
+test "WebAssembly prototypes carry Symbol.toStringTag" {
+    // §Object.prototype.toString consults @@toStringTag on the
+    // receiver's prototype chain. Each WebAssembly prototype installs
+    // its own tag; assert all seven plus an instance toString result.
+    const src =
+        "let r = 0;" ++
+        "if (WebAssembly.Module.prototype[Symbol.toStringTag] === 'WebAssembly.Module') r += 1;" ++
+        "if (WebAssembly.Instance.prototype[Symbol.toStringTag] === 'WebAssembly.Instance') r += 1;" ++
+        "if (WebAssembly.Memory.prototype[Symbol.toStringTag] === 'WebAssembly.Memory') r += 1;" ++
+        "if (WebAssembly.Table.prototype[Symbol.toStringTag] === 'WebAssembly.Table') r += 1;" ++
+        "if (WebAssembly.Global.prototype[Symbol.toStringTag] === 'WebAssembly.Global') r += 1;" ++
+        "if (WebAssembly.Tag.prototype[Symbol.toStringTag] === 'WebAssembly.Tag') r += 1;" ++
+        "if (WebAssembly.Exception.prototype[Symbol.toStringTag] === 'WebAssembly.Exception') r += 1;" ++
+        "r";
+    try expectIntWasm(src, 7);
+}
+
+test "Object.prototype.toString.call on a WebAssembly.Memory uses the tag" {
+    const src =
+        "const m = new WebAssembly.Memory({ initial: 1 });" ++
+        "Object.prototype.toString.call(m) === '[object WebAssembly.Memory]' ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "WebAssembly prototype toStringTag is a non-enumerable data property" {
+    // The tag is installed `{w:false, e:false, c:true}`; the hardened-
+    // realm freeze pass (which runs after install) then makes it
+    // non-configurable. Assert the enumerability + value, which the
+    // freeze leaves intact.
+    const src =
+        "const d = Object.getOwnPropertyDescriptor(WebAssembly.Memory.prototype, Symbol.toStringTag);" ++
+        "(d && d.enumerable === false && d.writable === false && d.value === 'WebAssembly.Memory') ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+// ── WebAssembly.Module.exports / imports / customSections ───────────
+
+test "WebAssembly.Module.exports lists the adder's single export" {
+    const src =
+        "const m = new WebAssembly.Module(" ++ adder_bytes ++ ");" ++
+        "const e = WebAssembly.Module.exports(m);" ++
+        "let r = 0;" ++
+        "if (Array.isArray(e)) r += 1;" ++
+        "if (e.length === 1) r += 10;" ++
+        "if (e[0].name === 'add') r += 100;" ++
+        "if (e[0].kind === 'function') r += 1000;" ++
+        "r";
+    try expectIntWasm(src, 1111);
+}
+
+test "WebAssembly.Module.exports result objects order name before kind" {
+    const src =
+        "const m = new WebAssembly.Module(" ++ adder_bytes ++ ");" ++
+        "const keys = Object.keys(WebAssembly.Module.exports(m)[0]);" ++
+        "(keys[0] === 'name' && keys[1] === 'kind') ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "WebAssembly.Module.imports lists the import module's single import" {
+    const src =
+        "const m = new WebAssembly.Module(" ++ import_ef_bytes ++ ");" ++
+        "const i = WebAssembly.Module.imports(m);" ++
+        "let r = 0;" ++
+        "if (Array.isArray(i)) r += 1;" ++
+        "if (i.length === 1) r += 10;" ++
+        "if (i[0].module === 'e') r += 100;" ++
+        "if (i[0].name === 'f') r += 1000;" ++
+        "if (i[0].kind === 'function') r += 10000;" ++
+        "r";
+    try expectIntWasm(src, 11111);
+}
+
+test "WebAssembly.Module.imports result objects order module, name, kind" {
+    const src =
+        "const m = new WebAssembly.Module(" ++ import_ef_bytes ++ ");" ++
+        "const keys = Object.keys(WebAssembly.Module.imports(m)[0]);" ++
+        "(keys[0] === 'module' && keys[1] === 'name' && keys[2] === 'kind') ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "WebAssembly.Module.exports throws a TypeError on a non-Module" {
+    const src =
+        "try { WebAssembly.Module.exports({}); 0 } catch (e) { e instanceof TypeError ? 1 : 0 }";
+    try expectIntWasm(src, 1);
+}
+
+test "WebAssembly.Module.imports throws a TypeError on a non-Module" {
+    const src =
+        "try { WebAssembly.Module.imports(42); 0 } catch (e) { e instanceof TypeError ? 1 : 0 }";
+    try expectIntWasm(src, 1);
+}
+
+test "WebAssembly.Module.customSections returns an empty Array for a module with none" {
+    const src =
+        "const m = new WebAssembly.Module(" ++ adder_bytes ++ ");" ++
+        "const c = WebAssembly.Module.customSections(m, 'whatever');" ++
+        "(Array.isArray(c) && c.length === 0) ? 1 : 0";
+    try expectIntWasm(src, 1);
+}
+
+test "WebAssembly.Module.customSections returns ArrayBuffers of matching custom sections" {
+    // magic+version, then a custom section: id 0x00, size 8, name-len 4,
+    // name "meta", payload [1,2,3].
+    const src =
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 0,8,4,109,101,116,97,1,2,3]);" ++
+        "const m = new WebAssembly.Module(bytes);" ++
+        "const c = WebAssembly.Module.customSections(m, 'meta');" ++
+        "let r = 0;" ++
+        "if (Array.isArray(c) && c.length === 1) r += 1;" ++
+        "if (c[0] instanceof ArrayBuffer) r += 10;" ++
+        "const v = new Uint8Array(c[0]);" ++
+        "if (v.length === 3 && v[0] === 1 && v[1] === 2 && v[2] === 3) r += 100;" ++
+        // a non-matching name yields an empty array
+        "if (WebAssembly.Module.customSections(m, 'nope').length === 0) r += 1000;" ++
+        "r";
+    try expectIntWasm(src, 1111);
+}
+
+test "WebAssembly.Module.customSections coerces the section name argument" {
+    const src =
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 0,6,2,52,50,1,2,3]);" ++ // name "42", payload [1,2,3]
+        "const m = new WebAssembly.Module(bytes);" ++
+        "WebAssembly.Module.customSections(m, 42).length === 1 ? 1 : 0";
+    try expectIntWasm(src, 1);
+}

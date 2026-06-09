@@ -120,6 +120,10 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) DecodeError!Modul
     var m: Module = .{ .version = wire_version };
     var last_pos: u32 = 0;
     var saw_func_section = false;
+    // §5.5.3 — custom sections, accumulated in declaration order for
+    // `WebAssembly.Module.customSections`. Both the name and payload
+    // slices borrow `bytes`, which the caller keeps alive.
+    var custom: std.ArrayListUnmanaged(module_mod.CustomSection) = .empty;
 
     // §5.5 section sequence.
     while (!r.atEnd()) {
@@ -141,7 +145,8 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) DecodeError!Modul
         var sr = Reader.init(payload);
         switch (id) {
             .custom => { // §5.5.3 — a leading UTF-8 name, then opaque bytes.
-                _ = try sr.name();
+                const cname = try sr.name();
+                try custom.append(allocator, .{ .name = cname, .bytes = payload[sr.pos..] });
                 sr.pos = payload.len;
             },
             .type => m.types = try decodeTypeSection(allocator, &sr),
@@ -188,6 +193,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) DecodeError!Modul
         if (dc != m.data_count_in_section) return error.DataCountMismatch;
     }
 
+    m.custom_sections = try custom.toOwnedSlice(allocator);
     return m;
 }
 
