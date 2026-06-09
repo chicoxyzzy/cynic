@@ -148,6 +148,11 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
         else => {},
     };
 
+    // §3.4.11 — every export names an entity within the relevant index
+    // space. Out-of-bounds indices are otherwise resolved lazily (and
+    // bounds-checked) at lookup, so reject them up front here.
+    try validateExports(module);
+
     const declared = try buildDeclaredSet(arena, module);
 
     const out = try arena.alloc(CompiledFunc, module.code.len);
@@ -250,6 +255,46 @@ fn totalFuncs(module: *const Module) u32 {
         if (imp.desc == .func) imported += 1;
     }
     return imported + @as(u32, @intCast(module.funcs.len));
+}
+
+/// Number of tables in the index space (imports + defined).
+fn numTables(module: *const Module) u32 {
+    var n: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .table) n += 1;
+    }
+    return n + @as(u32, @intCast(module.tables.len));
+}
+
+/// Number of globals in the index space (imports + defined).
+fn numGlobals(module: *const Module) u32 {
+    var n: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .global) n += 1;
+    }
+    return n + @as(u32, @intCast(module.globals.len));
+}
+
+/// Number of tags in the index space (imports + defined).
+fn numTags(module: *const Module) u32 {
+    var n: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .tag) n += 1;
+    }
+    return n + @as(u32, @intCast(module.tags.len));
+}
+
+/// §3.4.11 — validate that every export references an entity that exists
+/// in its index space. Each kind reports the spec's "unknown <kind>"
+/// rejection through the matching `ValidateError`.
+fn validateExports(module: *const Module) ValidateError!void {
+    for (module.exports) |ex| switch (ex.desc) {
+        .func => |idx| if (idx >= totalFuncs(module)) return error.UnknownFunc,
+        .table => |idx| if (idx >= numTables(module)) return error.UnknownTable,
+        .mem => |idx| if (idx >= numMemories(module)) return error.UnknownMemory,
+        .global => |idx| if (idx >= numGlobals(module)) return error.UnknownGlobal,
+        .tag => |idx| if (idx >= numTags(module)) return error.UnknownTag,
+    };
 }
 
 /// Type of a global referenceable from a constant expression (§3.3.7):

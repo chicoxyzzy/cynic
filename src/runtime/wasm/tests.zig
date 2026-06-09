@@ -1228,6 +1228,75 @@ test "wasm validator: start function with a non-empty type is rejected" {
     });
 }
 
+// §3.4.11 — an export must name an entity that exists in the relevant
+// index space (imports followed by module-local definitions). An index
+// past the end of its space is rejected at validation time, even though
+// lookups are otherwise resolved lazily at instantiation/call time.
+
+test "wasm validator: export of an out-of-range function index is rejected" {
+    // export "a" (func 0) with no functions declared.
+    const xbody = [_]u8{ 0x01, 0x01, 0x61, 0x00, 0x00 };
+    try expectModuleInvalid(error.UnknownFunc, &.{.{ .id = 7, .body = &xbody }});
+}
+
+test "wasm validator: export of an out-of-range table index is rejected" {
+    // table (funcref) {min 0}; export "a" (table 1) — only table 0 exists.
+    const tbody = [_]u8{ 0x01, 0x70, 0x00, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x61, 0x01, 0x01 };
+    try expectModuleInvalid(error.UnknownTable, &.{
+        .{ .id = 4, .body = &tbody },
+        .{ .id = 7, .body = &xbody },
+    });
+}
+
+test "wasm validator: export of an out-of-range memory index is rejected" {
+    // export "a" (memory 0) with no memory declared.
+    const xbody = [_]u8{ 0x01, 0x01, 0x61, 0x02, 0x00 };
+    try expectModuleInvalid(error.UnknownMemory, &.{.{ .id = 7, .body = &xbody }});
+}
+
+test "wasm validator: export of an out-of-range global index is rejected" {
+    // export "a" (global 0) with no globals declared.
+    const xbody = [_]u8{ 0x01, 0x01, 0x61, 0x03, 0x00 };
+    try expectModuleInvalid(error.UnknownGlobal, &.{.{ .id = 7, .body = &xbody }});
+}
+
+test "wasm validator: export of an out-of-range tag index is rejected" {
+    // export "a" (tag 0) with no tags declared.
+    const xbody = [_]u8{ 0x01, 0x01, 0x61, 0x04, 0x00 };
+    try expectModuleInvalid(error.UnknownTag, &.{.{ .id = 7, .body = &xbody }});
+}
+
+test "wasm validator: in-range exports of every kind validate" {
+    // type ()->(); func 0; table (funcref){min 0}; memory {min 0};
+    // global i32 (i32.const 0); export each at its valid index 0.
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x00 }; // type 0: ()->()
+    const fbody = [_]u8{ 0x01, 0x00 }; // func 0 : type 0
+    const tabody = [_]u8{ 0x01, 0x70, 0x00, 0x00 }; // table 0: funcref {min 0}
+    const mbody = [_]u8{ 0x01, 0x00, 0x00 }; // memory 0: {min 0}
+    const gbody = [_]u8{ 0x01, 0x7f, 0x00, 0x41, 0x00, 0x0b }; // global 0: i32 (i32.const 0)
+    const xbody = [_]u8{
+        0x04,
+        0x01, 0x66, 0x00, 0x00, // "f" -> func 0
+        0x01, 0x74, 0x01, 0x00, // "t" -> table 0
+        0x01, 0x6d, 0x02, 0x00, // "m" -> mem 0
+        0x01, 0x67, 0x03, 0x00, // "g" -> global 0
+    };
+    const cbody = [_]u8{ 0x01, 0x02, 0x00, 0x0b }; // func 0: (empty)
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bytes = try assemble(arena.allocator(), &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tabody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 6, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try loadErr(bytes); // succeeds: every export index is in range
+}
+
 // ── execution: i32 / i64 arithmetic, bitwise, shifts ────────────────
 
 /// Run `(i32,i32)->i32` whose body is `local.get 0; local.get 1; op`.
