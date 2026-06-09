@@ -1623,12 +1623,12 @@ pub const Heap = struct {
                 // property walk wouldn't reach.
                 if (o.regexp_source) |s| s.mark_color = self.live_color;
                 if (o.regexp_flags) |s| s.mark_color = self.live_color;
-                if (o.instance_field_inits) |inits| {
+                if (o.getInstanceFieldInits()) |inits| {
                     for (inits) |fi| {
                         if (fi.init_fn) |fnp| self.enqueue(taggedFunction(fnp));
                     }
                 }
-                if (o.private_method_inits) |inits| {
+                if (o.getPrivateMethodInits()) |inits| {
                     for (inits) |fi| {
                         if (fi.init_fn) |fnp| self.enqueue(taggedFunction(fnp));
                     }
@@ -2840,12 +2840,12 @@ pub const Heap = struct {
         if (o.promise_state != .none) self.markValue(o.promise_value);
         if (o.regexp_source) |s| self.markString(s);
         if (o.regexp_flags) |s| self.markString(s);
-        if (o.instance_field_inits) |inits| {
+        if (o.getInstanceFieldInits()) |inits| {
             for (inits) |fi| {
                 if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
             }
         }
-        if (o.private_method_inits) |inits| {
+        if (o.getPrivateMethodInits()) |inits| {
             for (inits) |fi| {
                 if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
             }

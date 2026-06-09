@@ -215,8 +215,8 @@ pub fn buildClass(
     // prototype so the interpreter can translate a compile-time
     // private key into the runtime slot key when the executing
     // method's `home_object` is this prototype.
-    proto.private_brand = brand_prefix;
-    proto.private_compile_prefix = template.private_prefix;
+    try proto.setPrivateBrand(realm.allocator, brand_prefix);
+    try proto.setPrivateCompilePrefix(realm.allocator, template.private_prefix);
     // §15.7.14 step 6 — `proto.[[Prototype]]` is:
     //   • parent.prototype, if `extends X`
     //   • null, if `extends null`
@@ -252,8 +252,8 @@ pub fn buildClass(
     // §15.7.14 step 31 — mirror the brand on the constructor so
     // static-private accesses (which route via `home_function`)
     // route to the same per-evaluation identity.
-    ctor.private_brand = brand_prefix;
-    ctor.private_compile_prefix = template.private_prefix;
+    try ctor.setPrivateBrand(realm.allocator, brand_prefix);
+    try ctor.setPrivateCompilePrefix(realm.allocator, template.private_prefix);
     // §15.7.14 step 11 — when a ClassHeritage clause is present
     // (even `extends null`), the constructor's [[ConstructorKind]]
     // is "derived". That keeps the `this` binding uninitialized
@@ -489,7 +489,7 @@ pub fn buildClass(
             },
         }
     }
-    if (private_methods_count > 0) proto.private_method_inits = private_methods;
+    if (private_methods_count > 0) try proto.setPrivateMethodInits(realm.allocator, private_methods);
 
     // 6b. Compile instance-field initializers into JSFunctions
     // (each takes `this`, evaluates the init expression,
@@ -523,7 +523,7 @@ pub fn buildClass(
                 .is_private = is_private_field,
             };
         }
-        proto.instance_field_inits = inits;
+        try proto.setInstanceFieldInits(realm.allocator, inits);
     }
 
     // 7. Install static methods on the constructor.

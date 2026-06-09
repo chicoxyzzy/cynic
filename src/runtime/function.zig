@@ -378,7 +378,7 @@ pub const JSFunction = struct {
     /// data fields are absent from this set and remain writable.
     private_methods: std.StringArrayHashMapUnmanaged(void) = .empty,
     /// §15.7.14 step 31 [[PrivateBrand]] — per-class-evaluation
-    /// private-name prefix. See `JSObject.private_brand` for the
+    /// private-name prefix. See `JSObject.getPrivateBrand()` for the
     /// design. Set on the class constructor at ClassTail
     /// evaluation; the interpreter consults this via
     /// `home_function` when a private read/write runs inside a
@@ -518,6 +518,25 @@ pub const JSFunction = struct {
     /// caller", which matches the pre-multirealm behaviour and
     /// makes the install-path / make_function back-stamps that
     /// haven't been wired yet harmless.
+    // Private-brand accessors mirroring `JSObject`'s, so the
+    // interpreter's brand-resolution paths can read/write a brand on a
+    // `home_object` (JSObject, extension-backed) or a `home_function`
+    // (JSFunction, direct field) through one polymorphic call. The
+    // allocator parameter is ignored here (the field is inline on the
+    // function); it only matters on the JSObject side.
+    pub fn getPrivateBrand(self: *const JSFunction) []const u8 {
+        return self.private_brand;
+    }
+    pub fn setPrivateBrand(self: *JSFunction, _: std.mem.Allocator, v: []const u8) !void {
+        self.private_brand = v;
+    }
+    pub fn getPrivateCompilePrefix(self: *const JSFunction) []const u8 {
+        return self.private_compile_prefix;
+    }
+    pub fn setPrivateCompilePrefix(self: *JSFunction, _: std.mem.Allocator, v: []const u8) !void {
+        self.private_compile_prefix = v;
+    }
+
     pub fn getFunctionRealm(self: *JSFunction) ?*@import("realm.zig").Realm {
         var cur: *JSFunction = self;
         // Bound chain — `Function.prototype.bind` produces a chain

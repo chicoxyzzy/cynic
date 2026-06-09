@@ -590,6 +590,16 @@ pub const JSObjectExtension = struct {
     finally_callback: ?*@import("function.zig").JSFunction = null,
     finally_value: Value = Value.undefined_,
     finally_constructor: ?*@import("function.zig").JSFunction = null,
+    /// Class private-state machinery — instance-field / private-method
+    /// initializer lists (borrowed slices owned by the class arena),
+    /// the per-class-evaluation [[PrivateBrand]] prefix and its
+    /// compile-time prefix. Set only on class prototype / instance
+    /// objects (cold). GC marks the two init lists' `init_fn`s via
+    /// the extension getters; the brand strings are realm-arena bytes.
+    instance_field_inits: ?[]const FieldInit = null,
+    private_method_inits: ?[]const FieldInit = null,
+    private_brand: []const u8 = "",
+    private_compile_prefix: []const u8 = "",
     // (`promise_waiters` + `promise_reactions` moved OUT of the
     // extension into `JSObject.promise_store` — a Promise touches
     // none of the extension's other cold fields, so they get a
@@ -860,31 +870,12 @@ pub const JSObject = struct {
     // access via the `hasAccessor` / `getAccessor` /
     // `getOrPutAccessor` / `removeAccessor` / `accessorIterator`
     // helpers near the bottom of this struct.)
-    /// Class instance-field initializers — only meaningful on a
-    /// class prototype object. The constructor's
-    /// `init_instance_fields` op walks this list, calling each
-    /// `init_fn` with `this = current instance` and assigning
-    /// the result to `this.name`. `null` on non-prototype
-    /// objects.
-    instance_field_inits: ?[]const FieldInit = null,
-    /// Class private-method registrations — only meaningful on a
-    /// class prototype. Each (prefixed_name, fn) pair is
-    /// installed on every instance's private_properties at
-    /// constructor time, so brand checks succeed and the methods
-    /// are callable through `this.#name()`.
-    private_method_inits: ?[]const FieldInit = null,
-    /// §15.7.14 step 31 [[PrivateBrand]] — per-class-evaluation
-    /// private-name prefix (e.g. `"B7#"`). Every evaluation of a
-    /// ClassTail allocates a fresh prefix so two classes produced
-    /// by the same source-text (e.g. inside a `makeC()` factory)
-    /// get distinct brand identities. The interpreter rewrites the
-    /// compile-time `template.private_prefix` part of an
-    /// `lda_private` / `sta_private` key into this string before
-    /// looking up on `private_properties` / `private_accessors`.
-    /// Empty on non-class-related JSObjects. Borrowed from the
-    /// realm's class arena (realm-lifetime).
-    private_brand: []const u8 = "",
-    private_compile_prefix: []const u8 = "",
+    // Class private-state machinery (`instance_field_inits`,
+    // `private_method_inits`, `private_brand`, `private_compile_prefix`)
+    // moved to `JSObjectExtension` — set only on class prototype /
+    // instance objects. Access via `getInstanceFieldInits` /
+    // `getPrivateMethodInits` / `getPrivateBrand` /
+    // `getPrivateCompilePrefix` and their `set*` counterparts.
     /// Prototype object for prototype-chain lookups. later
     /// resolves member access through `[[Get]]` (§10.1.8) which
     /// walks this chain when the own property is absent.
@@ -1362,6 +1353,30 @@ pub const JSObject = struct {
     }
     pub fn setFinallyConstructor(self: *JSObject, allocator: std.mem.Allocator, v: ?*@import("function.zig").JSFunction) !void {
         (try self.getOrCreateExtension(allocator)).finally_constructor = v;
+    }
+    pub fn getInstanceFieldInits(self: *const JSObject) ?[]const FieldInit {
+        return if (self.extension) |ext| ext.instance_field_inits else null;
+    }
+    pub fn setInstanceFieldInits(self: *JSObject, allocator: std.mem.Allocator, v: ?[]const FieldInit) !void {
+        (try self.getOrCreateExtension(allocator)).instance_field_inits = v;
+    }
+    pub fn getPrivateMethodInits(self: *const JSObject) ?[]const FieldInit {
+        return if (self.extension) |ext| ext.private_method_inits else null;
+    }
+    pub fn setPrivateMethodInits(self: *JSObject, allocator: std.mem.Allocator, v: ?[]const FieldInit) !void {
+        (try self.getOrCreateExtension(allocator)).private_method_inits = v;
+    }
+    pub fn getPrivateBrand(self: *const JSObject) []const u8 {
+        return if (self.extension) |ext| ext.private_brand else "";
+    }
+    pub fn setPrivateBrand(self: *JSObject, allocator: std.mem.Allocator, v: []const u8) !void {
+        (try self.getOrCreateExtension(allocator)).private_brand = v;
+    }
+    pub fn getPrivateCompilePrefix(self: *const JSObject) []const u8 {
+        return if (self.extension) |ext| ext.private_compile_prefix else "";
+    }
+    pub fn setPrivateCompilePrefix(self: *JSObject, allocator: std.mem.Allocator, v: []const u8) !void {
+        (try self.getOrCreateExtension(allocator)).private_compile_prefix = v;
     }
 
     pub fn hasAccessor(self: *const JSObject, key: []const u8) bool {

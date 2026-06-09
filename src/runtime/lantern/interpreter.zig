@@ -420,14 +420,14 @@ fn classifyParseDiagnostics(diags: []const @import("../../diagnostic.zig").Diagn
 /// throws TypeError per §7.3.27 PrivateElementFind.
 ///
 /// At install time `class.zig` stamps the per-evaluation prefix
-/// (`"B{n}#"`) on `proto.private_brand` and `ctor.private_brand`,
+/// (`"B{n}#"`) on `proto.getPrivateBrand()` and `ctor.getPrivateBrand()`,
 /// and keys every private slot by that runtime prefix. At lookup
 /// time, this helper rewrites the compile-time-mangled key
 /// (`"P0#x"`) into the runtime key (`"B7#x"`) by stripping
 /// everything up to and including `#` and prepending the brand.
 ///
-/// `brand` is the executing method's `home_object.private_brand`
-/// (instance method / constructor) or `home_function.private_brand`
+/// `brand` is the executing method's `home_object.getPrivateBrand()`
+/// (instance method / constructor) or `home_function.getPrivateBrand()`
 /// (static method). When neither is set — e.g. private syntax
 /// reached outside a class body, which the parser already rejects —
 /// the original key is returned unchanged and the slot lookup
@@ -449,9 +449,9 @@ fn translatePrivateKey(buf: []u8, key: []const u8, brand: []const u8) []const u8
 
 /// §15.7.14 step 31 — pull the per-ClassTail-evaluation brand
 /// prefix relevant to a private access. Tried in order:
-///   1. `f.home_object.private_brand` — instance method body,
+///   1. `f.home_object.getPrivateBrand()` — instance method body,
 ///      field initializer, derived ctor.
-///   2. `f.home_function.private_brand` — static method body.
+///   2. `f.home_function.getPrivateBrand()` — static method body.
 ///   3. Walk the receiver's prototype chain (for the common case
 ///      where a plain inner function in a method does
 ///      `obj.#field`: the inner function has no `home_*`, but the
@@ -475,20 +475,20 @@ fn framePrivateBrand(f: anytype, recv_hint: Value, key: []const u8) []const u8 {
     const key_prefix: []const u8 = if (hash_idx) |hi| key[0 .. hi + 1] else "";
     if (key_prefix.len > 0) {
         if (f.home_object) |home| {
-            if (std.mem.eql(u8, home.private_compile_prefix, key_prefix) and home.private_brand.len > 0) return home.private_brand;
+            if (std.mem.eql(u8, home.getPrivateCompilePrefix(), key_prefix) and home.getPrivateBrand().len > 0) return home.getPrivateBrand();
         }
         if (f.home_function) |home_fn| {
-            if (std.mem.eql(u8, home_fn.private_compile_prefix, key_prefix) and home_fn.private_brand.len > 0) return home_fn.private_brand;
+            if (std.mem.eql(u8, home_fn.getPrivateCompilePrefix(), key_prefix) and home_fn.getPrivateBrand().len > 0) return home_fn.getPrivateBrand();
         }
         if (heap_mod.valueAsPlainObject(recv_hint)) |obj| {
             var cur: ?*JSObject = obj.prototype;
             while (cur) |c| {
-                if (std.mem.eql(u8, c.private_compile_prefix, key_prefix) and c.private_brand.len > 0) return c.private_brand;
+                if (std.mem.eql(u8, c.getPrivateCompilePrefix(), key_prefix) and c.getPrivateBrand().len > 0) return c.getPrivateBrand();
                 cur = c.prototype;
             }
         }
         if (heap_mod.valueAsFunction(recv_hint)) |fn_obj| {
-            if (std.mem.eql(u8, fn_obj.private_compile_prefix, key_prefix) and fn_obj.private_brand.len > 0) return fn_obj.private_brand;
+            if (std.mem.eql(u8, fn_obj.getPrivateCompilePrefix(), key_prefix) and fn_obj.getPrivateBrand().len > 0) return fn_obj.getPrivateBrand();
         }
     }
     // Legacy fallback: first brand found anywhere — preserves the
@@ -497,20 +497,20 @@ fn framePrivateBrand(f: anytype, recv_hint: Value, key: []const u8) []const u8 {
     // The brand lookup is best-effort; the slot lookup will throw
     // the spec-mandated TypeError if no match exists.
     if (f.home_object) |home| {
-        if (home.private_brand.len > 0) return home.private_brand;
+        if (home.getPrivateBrand().len > 0) return home.getPrivateBrand();
     }
     if (f.home_function) |home_fn| {
-        if (home_fn.private_brand.len > 0) return home_fn.private_brand;
+        if (home_fn.getPrivateBrand().len > 0) return home_fn.getPrivateBrand();
     }
     if (heap_mod.valueAsPlainObject(recv_hint)) |obj| {
         var cur: ?*JSObject = obj.prototype;
         while (cur) |c| {
-            if (c.private_brand.len > 0) return c.private_brand;
+            if (c.getPrivateBrand().len > 0) return c.getPrivateBrand();
             cur = c.prototype;
         }
     }
     if (heap_mod.valueAsFunction(recv_hint)) |fn_obj| {
-        if (fn_obj.private_brand.len > 0) return fn_obj.private_brand;
+        if (fn_obj.getPrivateBrand().len > 0) return fn_obj.getPrivateBrand();
     }
     return "";
 }
@@ -5589,7 +5589,7 @@ pub fn runFrames(
             // installs each private method binding on the
             // instance, then runs each field initializer.
             const home = f.home_object orelse return error.InvalidOpcode;
-            if (home.private_method_inits) |inits| {
+            if (home.getPrivateMethodInits()) |inits| {
                 if (heap_mod.valueAsPlainObject(f.this_value)) |inst| {
                     var thrown_method: bool = false;
                     for (inits) |entry| {
@@ -5683,7 +5683,7 @@ pub fn runFrames(
                     if (thrown_method) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
             }
-            if (home.instance_field_inits) |inits| {
+            if (home.getInstanceFieldInits()) |inits| {
                 for (inits) |entry| {
                     var v: Value = Value.undefined_;
                     if (entry.init_fn) |init_fn| {

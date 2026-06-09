@@ -438,12 +438,12 @@ pub const Op = enum(u8) {
     /// Run the class instance-field initializers on the current
     /// frame's `this`. Reads the executing function's
     /// `home_object` (which is the class prototype), iterates
-    /// `home_object.instance_field_inits`, and for each entry
+    /// `home_object.getInstanceFieldInits()`, and for each entry
     /// invokes `init_fn` with `this` bound to the instance and
     /// assigns the result to `this.name`. Also installs
     /// private-method bindings on the instance's
     /// `private_properties` from
-    /// `home_object.private_method_inits`. No operands.
+    /// `home_object.getPrivateMethodInits()`. No operands.
     /// §15.7.10 InitializeInstanceElements.
     init_instance_fields,
     /// `[op] [k:u16]` — private-property read. The constant pool
