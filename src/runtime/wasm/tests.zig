@@ -2495,3 +2495,67 @@ test "wasm exceptions: a loop re-entering a try_table does not accumulate handle
     });
     try testing.expectEqual(@as(i32, 2000), try runI32(bytes, "f", &.{}));
 }
+
+test "wasm exceptions: throw propagates across a return_call tail call to the grandparent's try_table" {
+    // PTC semantics: a `return_call` semantically pops the caller's frame
+    // before the callee runs (§4.4.10.1). A throw in the callee unwinds
+    // past the (now-gone) caller, so it's the *grandparent's* try_table
+    // that catches.
+    //
+    //   func $G (result i32): block (i32) { try_table (i32) (catch $t -> $h) call $F end } end
+    //   func $F:              return_call $F2                  ; caller frame popped first
+    //   func $F2:             i32.const 5 ; throw $t            ; payload 5 lands in G's catch
+    //
+    // (Validates both the host-arm fix and the `tailReplaceFrame`
+    // parallel fix that drops the replaced frame's handlers — without
+    // them this test would either bogus-match an F-installed handler or
+    // crash on a stale stp_idx.)
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00 };
+    const fbody = [_]u8{ 0x03, 0x00, 0x00, 0x00 }; // 3 funcs, all type 0
+    const gbody = [_]u8{ 0x01, 0x00, 0x01 }; // 1 tag, type 1
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 }; // export "f" -> func 0 ($G)
+    // func0 G: block (i32) { try_table (i32) (catch tag0 -> $block) call F end } end
+    // func1 F: return_call F2
+    // func2 F2: i32.const 5; throw tag0
+    const cbody = [_]u8{
+        0x03, // 3 funcs
+        0x0e,
+        0x00,
+        0x02,
+        0x7f,
+        0x1f,
+        0x7f,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0x10,
+        0x01,
+        0x0b,
+        0x0b,
+        0x0b,
+        0x04,
+        0x00,
+        0x12,
+        0x02,
+        0x0b,
+        0x06,
+        0x00,
+        0x41,
+        0x05,
+        0x08,
+        0x00,
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 5), try runI32(bytes, "f", &.{}));
+}

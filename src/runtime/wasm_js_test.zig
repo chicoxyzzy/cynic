@@ -1156,3 +1156,42 @@ test "an exnref returned to JS raises a TypeError" {
         "r";
     try expectIntWasm(src, 1);
 }
+
+// import "e"."f" (func ()->()); func $tail ()->() does `return_call $f`;
+// func $g (result i32) does `block $h { try_table (catch_all $h) call $tail end ; i32.const 0 ; return } i32.const 1`.
+// -> 1 if a host throw from the tail call was caught, 0 if the host returned normally.
+const host_catch_return_call_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,8,2,96,0,0,96,0,1,127, 2,7,1,1,101,1,102,0,0, 3,3,2,0,1, 7,5,1,1,103,0,2, 10,25,2, 4,0,18,0,11, 18,0,2,64,31,64,1,2,0,16,1,11,65,0,15,11,65,1,11])";
+
+test "a JS host exception thrown through a return_call tail call is caught by a wasm try_table" {
+    // The user-facing case: the bridge previously wrapped `call` /
+    // `call_indirect` but not `return_call`, so a host throw from the
+    // tail position escaped past every active wasm `try_table`. Fixed
+    // by wrapping the tail-call host arm in `catchHostThrow`, with the
+    // caller-frame handlers dropped first to honour PTC semantics.
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ host_catch_return_call_bytes ++ "), " ++
+        "{ e: { f: () => { throw new Error('boom'); } } });" ++
+        "inst.exports.g()";
+    try expectIntWasm(src, 1);
+}
+
+test "a non-throwing host call through return_call still completes normally" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ host_catch_return_call_bytes ++ "), " ++
+        "{ e: { f: () => {} } });" ++
+        "inst.exports.g()";
+    try expectIntWasm(src, 0);
+}
+
+test "a host exception from return_call with no surrounding try_table re-raises with identity" {
+    // No try_table around the tail call: the original JS value re-raises
+    // with its identity intact, the same as for `call` / `call_indirect`.
+    const src =
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 1,4,1,96,0,0, 2,7,1,1,101,1,102,0,0, 3,3,2,0,0, 7,5,1,1,103,0,2, 10,11,2,4,0,18,0,11,4,0,16,1,11]);" ++
+        "const boom = new Error('x');" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { f: () => { throw boom; } } });" ++
+        "let same = 0; try { inst.exports.g(); } catch (e) { same = (e === boom) ? 1 : 0; }" ++
+        "same";
+    try expectIntWasm(src, 1);
+}

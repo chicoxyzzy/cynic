@@ -932,6 +932,14 @@ const Interp = struct {
     fn tailReplaceFrame(self: *Interp, instance: *Instance, func: *const CompiledFunc, param_count: u32) TrapError!void {
         const f = &self.frames[self.nframes - 1];
         const lb = f.locals_base;
+        // PTC: the caller's frame is semantically popped before the
+        // callee runs (§4.4.10.1). Drop any `try_table` handlers it
+        // installed — parallel to `popFrame` — so a throw inside the
+        // callee is not bogusly caught by a now-gone try_table (and
+        // can't reach its stale `try_op_ip` / `stp_idx` through the
+        // replaced func's body).
+        while (self.nhandlers > 0 and self.handlers[self.nhandlers - 1].frame == self.nframes)
+            self.nhandlers -= 1;
         // Move the args down over this frame's locals/operands. lb < src,
         // so a forward copy never clobbers an unread source cell.
         const src = self.sp - param_count;
@@ -1362,13 +1370,36 @@ fn run(ip: *Interp) Error!void {
             continue :dispatch nextOp(body, &pc);
         },
         .return_call => {
+            const op_ip = pc - 1;
             const fidx = readU32(body, &pc);
             const ref = ip.instance.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
             switch (ref) {
                 .host => |h| {
-                    // Tail call to a host fn: run it, then return its
-                    // results from this frame.
-                    try ip.callHost(h);
+                    // Tail call to a host fn: PTC semantics say the
+                    // caller's frame is popped *before* the host runs,
+                    // so any `try_table` open in this frame is gone with
+                    // it. Drop its handlers first; on a host throw the
+                    // bridge then catches in the grandparent's
+                    // try_table (if any), or re-raises with identity.
+                    while (ip.nhandlers > 0 and ip.handlers[ip.nhandlers - 1].frame == ip.nframes)
+                        ip.nhandlers -= 1;
+                    ip.callHost(h) catch |e| {
+                        if (e != error.HostThrew) return e;
+                        switch (try catchHostThrow(ip, op_ip)) {
+                            .caught => |c| {
+                                f = &ip.frames[ip.nframes - 1];
+                                ip.instance = f.instance;
+                                body = f.func.body;
+                                side_table = f.func.side_table;
+                                locals_base = f.locals_base;
+                                pc = c.pc;
+                                stp = c.stp;
+                                continue :dispatch nextOp(body, &pc);
+                            },
+                            .reraise => return error.UncaughtException,
+                            .no_bridge => return e,
+                        }
+                    };
                     if (ip.popFrame()) return;
                     f = &ip.frames[ip.nframes - 1];
                     ip.instance = f.instance;
@@ -1393,6 +1424,7 @@ fn run(ip: *Interp) Error!void {
             continue :dispatch nextOp(body, &pc);
         },
         .return_call_indirect => {
+            const op_ip = pc - 1;
             const type_idx = readU32(body, &pc);
             const table_idx = readU32(body, &pc);
             const elem_index: u64 = @truncate(ip.popCell());
@@ -1409,7 +1441,28 @@ fn run(ip: *Interp) Error!void {
                 .host => |h| {
                     if (expected.params.len != h.params or expected.results.len != h.results)
                         return error.IndirectCallTypeMismatch;
-                    try ip.callHost(h);
+                    // PTC: same as `return_call` — drop the caller's
+                    // handlers so a host throw is caught in the
+                    // grandparent, never bogusly in the gone frame.
+                    while (ip.nhandlers > 0 and ip.handlers[ip.nhandlers - 1].frame == ip.nframes)
+                        ip.nhandlers -= 1;
+                    ip.callHost(h) catch |e| {
+                        if (e != error.HostThrew) return e;
+                        switch (try catchHostThrow(ip, op_ip)) {
+                            .caught => |c| {
+                                f = &ip.frames[ip.nframes - 1];
+                                ip.instance = f.instance;
+                                body = f.func.body;
+                                side_table = f.func.side_table;
+                                locals_base = f.locals_base;
+                                pc = c.pc;
+                                stp = c.stp;
+                                continue :dispatch nextOp(body, &pc);
+                            },
+                            .reraise => return error.UncaughtException,
+                            .no_bridge => return e,
+                        }
+                    };
                     if (ip.popFrame()) return;
                     f = &ip.frames[ip.nframes - 1];
                     ip.instance = f.instance;
