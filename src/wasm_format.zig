@@ -205,7 +205,7 @@ fn evalScriptValue(realm: *Realm, src: []const u8) !Value {
 fn expectFormat(src: []const u8, expected: []const u8) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    realm.feature_flags = features.FeatureSet.initFull();
+    realm.feature_flags = features.FeatureSet.full;
     try realm.installBuiltins();
 
     const v = try evalScriptValue(&realm, src);
@@ -367,7 +367,7 @@ test "wasm_format: long array truncates with tail" {
     // 60 elements — first 50 inline, then `, … (10 more)`.
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    realm.feature_flags = features.FeatureSet.initFull();
+    realm.feature_flags = features.FeatureSet.full;
     try realm.installBuiltins();
 
     const v = try evalScriptValue(&realm, "Array.from({length: 60}, (_, i) => i);");
@@ -385,7 +385,7 @@ test "wasm_format: exactly at truncation boundary — no tail" {
     // suffix. Guards against off-by-one in the `len > show_n` check.
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    realm.feature_flags = features.FeatureSet.initFull();
+    realm.feature_flags = features.FeatureSet.full;
     try realm.installBuiltins();
 
     const v = try evalScriptValue(&realm, "Array.from({length: 50}, (_, i) => i);");
@@ -402,7 +402,7 @@ test "wasm_format: one past truncation boundary" {
     // 51 elements — one over. The tail says "1 more".
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    realm.feature_flags = features.FeatureSet.initFull();
+    realm.feature_flags = features.FeatureSet.full;
     try realm.installBuiltins();
 
     const v = try evalScriptValue(&realm, "Array.from({length: 51}, (_, i) => i);");

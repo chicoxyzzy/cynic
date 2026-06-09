@@ -1,16 +1,15 @@
 # Zig idioms in Cynic
 
 Pinned to a specific 0.17-dev SHA — see `.minimum_zig_version`
-in `build.zig.zon` and the matching `version:` in
-`.github/workflows/ci.yml`. [anyzig](https://github.com/marler8997/anyzig)
-(via Homebrew) reads `.minimum_zig_version` to dispatch the
-local `zig` binary to the right compiler, so `which zig` is the
-anyzig shim and `zig version` reports whatever the zon pins.
-Bump both files in lockstep when a Zig parser/codegen change
-forces it — never let local and CI drift onto different
-compilers; the master parser is strict in ways the previous
-release isn't (see "Array repeat" below for an example that
-ate a debug session).
+in `build.zig.zon`. [anyzig](https://github.com/marler8997/anyzig)
+(via Homebrew) reads that field to dispatch the local `zig`
+binary to the right compiler, so `which zig` is the anyzig shim
+and `zig version` reports whatever the zon pins. CI uses
+`xyzzylabs/setup-zig` with no explicit `version:`, so it resolves
+the same field; keep the zon pin as the single source of truth.
+The master parser is strict in ways the previous release isn't
+(see "Array repeat" below for an example that ate a debug
+session).
 
 Things that surface during contribution:
 
@@ -87,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
 
 ## Comptime
 
-- **`inline for (@typeInfo(E).@"enum".fields)`** to walk every
+- **`inline for (@typeInfo(E).@"enum".field_names)`** to walk every
   variant of an enum at comptime. Cynic uses this in
   `Code.errorClass`'s pinning test.
 - **`comptime f: fn (...) ...`** parameters in generic helpers
@@ -124,10 +123,9 @@ distinct names: a function param `tok` plus a switch capture
 
 ## Build
 
-`build.zig` follows the 0.14+ shape: `b.createModule`,
+`build.zig` follows the pinned 0.17-dev shape: `b.createModule`,
 `b.addExecutable({ .name, .root_module })`, `b.addRunArtifact`,
-`b.step`. Argument forwarding via `if (b.args) |args|
-run.addArgs(args);`.
+`b.step`. Argument forwarding via `run.addPassthruArgs();`.
 
 `zig build run -- parse foo.js` forwards args after `--`. Same
 for `test262`, `gen-unicode`.

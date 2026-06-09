@@ -56,8 +56,8 @@ pub const FeatureFlag = enum {
     /// Reverse lookup: name → flag. Returns `null` for unknown
     /// names; callers surface a CLI error and exit.
     pub fn fromName(s: []const u8) ?FeatureFlag {
-        inline for (@typeInfo(FeatureFlag).@"enum".fields) |f| {
-            const tag: FeatureFlag = @enumFromInt(f.value);
+        inline for (@typeInfo(FeatureFlag).@"enum".field_names) |field_name| {
+            const tag: FeatureFlag = @field(FeatureFlag, field_name);
             if (std.mem.eql(u8, s, tag.name())) return tag;
         }
         return null;
@@ -70,13 +70,13 @@ pub const FeatureSet = std.EnumSet(FeatureFlag);
 /// (so every fixture sees the proposals enabled) and by
 /// `--enable-experimental` on the CLI.
 pub fn all() FeatureSet {
-    return FeatureSet.initFull();
+    return FeatureSet.full;
 }
 
 /// Iterate every flag in declaration order. Convenient for
 /// rendering tables and emitting `--list-features`.
 pub fn each(comptime visitor: fn (FeatureFlag) void) void {
-    inline for (@typeInfo(FeatureFlag).@"enum".fields) |f| {
-        visitor(@enumFromInt(f.value));
+    inline for (@typeInfo(FeatureFlag).@"enum".field_names) |field_name| {
+        visitor(@field(FeatureFlag, field_name));
     }
 }

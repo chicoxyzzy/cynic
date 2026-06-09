@@ -440,11 +440,14 @@ fn remapDefaultProtoToCtorRealm(
     const default = intrinsic_default orelse return intrinsic_default;
 
     // (1) Typed intrinsic-slot scan.
-    inline for (@typeInfo(intrinsics_mod.Intrinsics).@"struct".fields) |field| {
-        if (field.type == ?*JSObject) {
-            if (@field(owner.intrinsics, field.name)) |p| {
+    inline for (
+        @typeInfo(intrinsics_mod.Intrinsics).@"struct".field_names,
+        @typeInfo(intrinsics_mod.Intrinsics).@"struct".field_types,
+    ) |field_name, field_type| {
+        if (field_type == ?*JSObject) {
+            if (@field(owner.intrinsics, field_name)) |p| {
                 if (p == default) {
-                    return @field(ctor_realm.intrinsics, field.name) orelse intrinsic_default;
+                    return @field(ctor_realm.intrinsics, field_name) orelse intrinsic_default;
                 }
             }
         }

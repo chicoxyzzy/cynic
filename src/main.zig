@@ -240,8 +240,8 @@ fn listFeatures(io: std.Io) !void {
         \\
     );
     var buf: [256]u8 = undefined;
-    inline for (@typeInfo(FeatureFlag).@"enum".fields) |f| {
-        const tag: FeatureFlag = @enumFromInt(f.value);
+    inline for (@typeInfo(FeatureFlag).@"enum".field_names) |field_name| {
+        const tag: FeatureFlag = @field(FeatureFlag, field_name);
         const line = try std.fmt.bufPrint(&buf, "  {s:<24}  {s}\n", .{ tag.name(), tag.description() });
         try std.Io.File.stdout().writeStreamingAll(io, line);
     }
@@ -407,7 +407,7 @@ pub const ParsedFlags = struct {
 
 pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
     var out: ParsedFlags = .{
-        .feature_flags = FeatureSet.initEmpty(),
+        .feature_flags = FeatureSet.empty,
         .gc_threshold = null,
         .remaining = args,
     };
@@ -421,7 +421,7 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
             return out;
         } else if (std.mem.eql(u8, a, "--enable-experimental")) {
             rest = rest[1..];
-            out.feature_flags = FeatureSet.initFull();
+            out.feature_flags = FeatureSet.full;
         } else if (std.mem.startsWith(u8, a, "--enable=")) {
             const name = a["--enable=".len..];
             const flag = FeatureFlag.fromName(name) orelse {
@@ -488,7 +488,7 @@ test "parseTopLevelFlags: no flags returns empty feature set and null gc_thresho
     const args = [_][]const u8{ "run", "foo.js" };
     const parsed = parseTopLevelFlags(&args);
     try testing.expectEqual(@as(?FlagError, null), parsed.err);
-    try testing.expect(parsed.feature_flags.eql(FeatureSet.initEmpty()));
+    try testing.expect(parsed.feature_flags.eql(FeatureSet.empty));
     try testing.expectEqual(@as(?u32, null), parsed.gc_threshold);
     try testing.expectEqual(@as(usize, 2), parsed.remaining.len);
     try testing.expectEqualStrings("run", parsed.remaining[0]);
@@ -549,7 +549,7 @@ test "parseTopLevelFlags: --gc-threshold composes with other flags in any order"
     const args = [_][]const u8{ "--enable-experimental", "--gc-threshold=42", "run", "foo.js" };
     const parsed = parseTopLevelFlags(&args);
     try testing.expectEqual(@as(?FlagError, null), parsed.err);
-    try testing.expect(parsed.feature_flags.eql(FeatureSet.initFull()));
+    try testing.expect(parsed.feature_flags.eql(FeatureSet.full));
     try testing.expectEqual(@as(?u32, 42), parsed.gc_threshold);
     try testing.expectEqualStrings("run", parsed.remaining[0]);
 }

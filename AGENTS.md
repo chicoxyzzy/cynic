@@ -286,11 +286,12 @@ These are project rules — they apply to everyone.
 
 ## Build & test
 
-Zig 0.17-dev — pinned to a specific dev SHA in both `build.zig.zon`
-(`.minimum_zig_version`, read by [anyzig](https://github.com/marler8997/anyzig))
-and `.github/workflows/ci.yml` (`version:`). Bump both in
-lockstep when a Zig parser/codegen change forces it (use
-`anyzig` locally so `zig build` resolves to the pinned SHA).
+Zig 0.17-dev — pinned to a specific dev SHA in `build.zig.zon`
+(`.minimum_zig_version`, read by [anyzig](https://github.com/marler8997/anyzig)).
+CI uses `xyzzylabs/setup-zig` with no explicit `version:`, so it
+resolves the same field. Keep the zon pin as the single source of
+truth when a Zig parser/codegen change forces a bump (use `anyzig`
+locally so `zig build` resolves to the pinned SHA).
 One-time setup:
 
     git submodule update --init vendor/test262

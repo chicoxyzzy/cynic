@@ -1425,8 +1425,8 @@ pub const Op = enum(u8) {
 const testing = std.testing;
 
 test "Op: every variant has a stable mnemonic" {
-    inline for (@typeInfo(Op).@"enum".fields) |f| {
-        const op: Op = @field(Op, f.name);
+    inline for (@typeInfo(Op).@"enum".field_names) |field_name| {
+        const op: Op = @field(Op, field_name);
         const mnem = op.mnemonic();
         try testing.expect(mnem.len > 0);
     }

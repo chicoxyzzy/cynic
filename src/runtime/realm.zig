@@ -980,7 +980,7 @@ pub const Realm = struct {
     /// register their methods on the prototype, so a disabled
     /// feature is invisible at the property-lookup level rather
     /// than just throwing at call time.
-    feature_flags: FeatureSet = FeatureSet.initEmpty(),
+    feature_flags: FeatureSet = FeatureSet.empty,
     /// Heap-allocated bool cells tracking `[[ThisBindingStatus]]`
     /// for derived-class constructors that have outlived their
     /// frame's call site. Allocated on entry to a derived-ctor
@@ -1732,8 +1732,8 @@ pub const Realm = struct {
         // `*JSObject` / `*JSFunction` pointers; iterate fields
         // with comptime reflection so adding a new intrinsic
         // doesn't silently break GC roots.
-        inline for (@typeInfo(Intrinsics).@"struct".fields) |field| {
-            const v = @field(self.intrinsics, field.name);
+        inline for (@typeInfo(Intrinsics).@"struct".field_names) |field_name| {
+            const v = @field(self.intrinsics, field_name);
             const T = @TypeOf(v);
             if (T == ?*@import("object.zig").JSObject) {
                 if (v) |o| self.heap.markValue(heap_mod.taggedObject(o));

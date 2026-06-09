@@ -1288,7 +1288,7 @@ const Stats = struct {
     }
 };
 
-const skip_reason_count: usize = @typeInfo(SkipReason).@"enum".fields.len;
+const skip_reason_count: usize = @typeInfo(SkipReason).@"enum".field_names.len;
 
 /// What kind of outcome to record for a bucket. Mirrors the
 /// grouping the rolled-up `Stats` already uses.
@@ -1402,10 +1402,10 @@ const BucketMap = struct {
 /// frontmatter `features:` tag in upstream test262.
 const FeatureFlag = cynic.runtime.FeatureFlag;
 const tracked_pre_stage4_features = blk: {
-    const fields = @typeInfo(FeatureFlag).@"enum".fields;
-    var arr: [fields.len][]const u8 = undefined;
-    for (fields, 0..) |f, i| {
-        const tag: FeatureFlag = @enumFromInt(f.value);
+    const field_names = @typeInfo(FeatureFlag).@"enum".field_names;
+    var arr: [field_names.len][]const u8 = undefined;
+    for (field_names, 0..) |field_name, i| {
+        const tag: FeatureFlag = @field(FeatureFlag, field_name);
         arr[i] = tag.name();
     }
     break :blk arr;
@@ -1488,9 +1488,9 @@ const Phase = union(enum) {
     /// with only its flag.
     fn realmFeatures(self: Phase) cynic.runtime.FeatureSet {
         return switch (self) {
-            .main => cynic.runtime.FeatureSet.initEmpty(),
+            .main => cynic.runtime.FeatureSet.empty,
             .feature => |f| blk: {
-                var s = cynic.runtime.FeatureSet.initEmpty();
+                var s = cynic.runtime.FeatureSet.empty;
                 s.insert(f.flag);
                 break :blk s;
             },
@@ -1650,7 +1650,7 @@ pub fn main(init: std.process.Init) !void {
     // in its own sweep (only that one flag enabled) to populate the
     // per-feature scoreboard. An explicit `--phase` pins us to that
     // one.
-    const tracked_count = @typeInfo(cynic.runtime.FeatureFlag).@"enum".fields.len;
+    const tracked_count = @typeInfo(cynic.runtime.FeatureFlag).@"enum".field_names.len;
     // One sweep per tracked proposal, plus the main phase.
     var phases_buf: [tracked_count + 1]Phase = undefined;
     var phases_len: usize = 0;
@@ -1660,8 +1660,8 @@ pub fn main(init: std.process.Init) !void {
     } else if (opts.write_results) {
         phases_buf[0] = .main;
         phases_len = 1;
-        inline for (@typeInfo(cynic.runtime.FeatureFlag).@"enum".fields) |f| {
-            const flag: cynic.runtime.FeatureFlag = @enumFromInt(f.value);
+        inline for (@typeInfo(cynic.runtime.FeatureFlag).@"enum".field_names) |field_name| {
+            const flag: cynic.runtime.FeatureFlag = @field(cynic.runtime.FeatureFlag, field_name);
             phases_buf[phases_len] = .{ .feature = .{ .flag = flag } };
             phases_len += 1;
         }
@@ -3300,22 +3300,24 @@ fn printSkipBreakdown(io: std.Io, stats: *const Stats) !void {
     var buf: [1024]u8 = undefined;
     if (stats.skip > 0) {
         try std.Io.File.stdout().writeStreamingAll(io, "\nskip breakdown:\n");
-        inline for (@typeInfo(SkipReason).@"enum".fields) |f| {
-            const count = stats.skip_by_reason[f.value];
+        inline for (@typeInfo(SkipReason).@"enum".field_names) |field_name| {
+            const reason: SkipReason = @field(SkipReason, field_name);
+            const count = stats.skip_by_reason[@intFromEnum(reason)];
             if (count > 0) {
                 const pct: f64 = 100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(stats.skip));
-                const line = try std.fmt.bufPrint(&buf, "  {s:<24} {d:>6}  ({d:>5.2}%)\n", .{ f.name, count, pct });
+                const line = try std.fmt.bufPrint(&buf, "  {s:<24} {d:>6}  ({d:>5.2}%)\n", .{ field_name, count, pct });
                 try std.Io.File.stdout().writeStreamingAll(io, line);
             }
         }
     }
     if (stats.oos > 0) {
         try std.Io.File.stdout().writeStreamingAll(io, "\nout-of-scope (dropped from corpus):\n");
-        inline for (@typeInfo(SkipReason).@"enum".fields) |f| {
-            const count = stats.oos_by_reason[f.value];
+        inline for (@typeInfo(SkipReason).@"enum".field_names) |field_name| {
+            const reason: SkipReason = @field(SkipReason, field_name);
+            const count = stats.oos_by_reason[@intFromEnum(reason)];
             if (count > 0) {
                 const pct: f64 = 100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(stats.oos));
-                const line = try std.fmt.bufPrint(&buf, "  {s:<24} {d:>6}  ({d:>5.2}%)\n", .{ f.name, count, pct });
+                const line = try std.fmt.bufPrint(&buf, "  {s:<24} {d:>6}  ({d:>5.2}%)\n", .{ field_name, count, pct });
                 try std.Io.File.stdout().writeStreamingAll(io, line);
             }
         }

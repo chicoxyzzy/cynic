@@ -703,8 +703,8 @@ fn freezePrimordials(realm: *Realm) !void {
     // `%Object.prototype%` if Object's constructor was patched
     // mid-init, …). Iterate the struct via comptime reflection
     // so a future intrinsic addition is covered automatically.
-    inline for (@typeInfo(Intrinsics).@"struct".fields) |field| {
-        const v = @field(realm.intrinsics, field.name);
+    inline for (@typeInfo(Intrinsics).@"struct".field_names) |field_name| {
+        const v = @field(realm.intrinsics, field_name);
         const T = @TypeOf(v);
         if (T == ?*@import("object.zig").JSObject) {
             if (v) |o| try hardenWalk(realm, heap_mod.taggedObject(o), &visited);
@@ -723,8 +723,8 @@ fn freezePrimordials(realm: *Realm) !void {
     // throwing per the Phase 1 freeze.
     var proto_set: std.AutoHashMap(*JSObject, void) = .init(realm.allocator);
     defer proto_set.deinit();
-    inline for (@typeInfo(Intrinsics).@"struct".fields) |field| {
-        const v = @field(realm.intrinsics, field.name);
+    inline for (@typeInfo(Intrinsics).@"struct".field_names) |field_name| {
+        const v = @field(realm.intrinsics, field_name);
         const T = @TypeOf(v);
         if (T == ?*JSObject) {
             // Naming convention: every prototype intrinsic field
@@ -733,7 +733,7 @@ fn freezePrimordials(realm: *Realm) !void {
             // JSObject fields (`throw_type_error` is a JSFunction,
             // so it doesn't hit this arm; nothing else lives
             // here today) are skipped.
-            if (comptime std.mem.endsWith(u8, field.name, "_prototype")) {
+            if (comptime std.mem.endsWith(u8, field_name, "_prototype")) {
                 if (v) |o| try proto_set.put(o, {});
             }
         } else if (T == ?*JSFunction) {

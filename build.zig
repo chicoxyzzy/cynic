@@ -1,4 +1,4 @@
-//! Cynic build script. Requires Zig 0.14 or newer.
+//! Cynic build script. Requires the Zig dev build pinned in build.zig.zon.
 
 const std = @import("std");
 
@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) void {
     // `zig build run -- ...` runs the CLI with forwarded args.
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run the cynic executable");
     run_step.dependOn(&run_cmd.step);
 
@@ -180,7 +180,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_gen = b.addRunArtifact(gen_exe);
     run_gen.addFileArg(b.path("vendor/unicode/DerivedCoreProperties.txt"));
-    run_gen.addArg(b.pathFromRoot("src/unicode/ident_tables.zig"));
+    run_gen.addArg(sourceRootPath(b, "src/unicode/ident_tables.zig"));
     const gen_step = b.step("gen-unicode", "Regenerate src/unicode/{ident,property,case_fold,case_conv,normalization}_tables.zig from UCD");
     gen_step.dependOn(&run_gen.step);
 
@@ -194,7 +194,7 @@ pub fn build(b: *std.Build) void {
         .root_module = gen_props_mod,
     });
     const run_gen_props = b.addRunArtifact(gen_props_exe);
-    run_gen_props.addArg(b.pathFromRoot("src/unicode/property_tables.zig"));
+    run_gen_props.addArg(sourceRootPath(b, "src/unicode/property_tables.zig"));
     run_gen_props.addFileArg(b.path("vendor/unicode/DerivedGeneralCategory.txt"));
     run_gen_props.addFileArg(b.path("vendor/unicode/DerivedCoreProperties.txt"));
     run_gen_props.addFileArg(b.path("vendor/unicode/PropList.txt"));
@@ -220,7 +220,7 @@ pub fn build(b: *std.Build) void {
         .root_module = gen_cf_mod,
     });
     const run_gen_cf = b.addRunArtifact(gen_cf_exe);
-    run_gen_cf.addArg(b.pathFromRoot("src/unicode/case_fold_tables.zig"));
+    run_gen_cf.addArg(sourceRootPath(b, "src/unicode/case_fold_tables.zig"));
     run_gen_cf.addFileArg(b.path("vendor/unicode/CaseFolding.txt"));
     gen_step.dependOn(&run_gen_cf.step);
 
@@ -238,7 +238,7 @@ pub fn build(b: *std.Build) void {
         .root_module = gen_cc_mod,
     });
     const run_gen_cc = b.addRunArtifact(gen_cc_exe);
-    run_gen_cc.addArg(b.pathFromRoot("src/unicode/case_conv_tables.zig"));
+    run_gen_cc.addArg(sourceRootPath(b, "src/unicode/case_conv_tables.zig"));
     run_gen_cc.addFileArg(b.path("vendor/unicode/UnicodeData.txt"));
     run_gen_cc.addFileArg(b.path("vendor/unicode/SpecialCasing.txt"));
     run_gen_cc.addFileArg(b.path("vendor/unicode/DerivedCoreProperties.txt"));
@@ -258,7 +258,7 @@ pub fn build(b: *std.Build) void {
         .root_module = gen_nf_mod,
     });
     const run_gen_nf = b.addRunArtifact(gen_nf_exe);
-    run_gen_nf.addArg(b.pathFromRoot("src/unicode/normalization_tables.zig"));
+    run_gen_nf.addArg(sourceRootPath(b, "src/unicode/normalization_tables.zig"));
     run_gen_nf.addFileArg(b.path("vendor/unicode/UnicodeData.txt"));
     run_gen_nf.addFileArg(b.path("vendor/unicode/DerivedNormalizationProps.txt"));
     gen_step.dependOn(&run_gen_nf.step);
@@ -270,14 +270,14 @@ pub fn build(b: *std.Build) void {
     // tools` rewrites in place. Add new top-level dirs here as
     // they appear.
     const fmt_check = b.addFmt(.{
-        .paths = &.{ "src", "tools" },
+        .paths = b.pathList(&.{ "src", "tools" }),
         .check = true,
     });
     const fmt_check_step = b.step("fmt-check", "Verify src/ + tools/ are zig-fmt clean");
     fmt_check_step.dependOn(&fmt_check.step);
 
     const fmt_fix = b.addFmt(.{
-        .paths = &.{ "src", "tools" },
+        .paths = b.pathList(&.{ "src", "tools" }),
         .check = false,
     });
     const fmt_step = b.step("fmt", "Apply zig fmt to src/ + tools/ in place");
@@ -326,7 +326,7 @@ pub fn build(b: *std.Build) void {
     const install_t262 = b.addInstallArtifact(t262_exe, .{});
     const run_t262 = b.addRunArtifact(t262_exe);
     run_t262.step.dependOn(&install_t262.step);
-    if (b.args) |args| run_t262.addArgs(args);
+    run_t262.addPassthruArgs();
     const t262_step = b.step("test262", "Run the test262 conformance suite (parser-only)");
     t262_step.dependOn(&run_t262.step);
 
@@ -357,7 +357,7 @@ pub fn build(b: *std.Build) void {
     run_wts.step.dependOn(&install_wts.step);
     run_wts.step.dependOn(&wts_gen.step);
     run_wts.addArg(b.fmt("--gen-dir={s}", .{wts_gendir}));
-    if (b.args) |args| run_wts.addArgs(args);
+    run_wts.addPassthruArgs();
     const wts_step = b.step("wasm-testsuite", "Run the WebAssembly spec testsuite conformance harness");
     wts_step.dependOn(&run_wts.step);
 
@@ -375,7 +375,7 @@ pub fn build(b: *std.Build) void {
         .root_module = wbench_mod,
     });
     const run_wbench = b.addRunArtifact(wbench_exe);
-    if (b.args) |args| run_wbench.addArgs(args);
+    run_wbench.addPassthruArgs();
     const wbench_step = b.step("wasm-bench", "Run the WebAssembly interpreter micro-benchmark");
     wbench_step.dependOn(&run_wbench.step);
 
@@ -454,7 +454,7 @@ pub fn build(b: *std.Build) void {
     const install_t262_safe = b.addInstallArtifact(t262_exe_safe, .{});
     const run_t262_safe = b.addRunArtifact(t262_exe_safe);
     run_t262_safe.step.dependOn(&install_t262_safe.step);
-    if (b.args) |args| run_t262_safe.addArgs(args);
+    run_t262_safe.addPassthruArgs();
     const t262_safe_step = b.step("test262-safe", "Build + run the test262 harness in ReleaseSafe (GC verifiers + 0xaa poison live; for /gc-stress)");
     t262_safe_step.dependOn(&run_t262_safe.step);
 
@@ -495,7 +495,7 @@ pub fn build(b: *std.Build) void {
     run_bench.step.dependOn(&install_cynic_fast.step);
     // Forward args after `--` so `zig build bench -- --runs=40`
     // reaches the driver (tail-percentile sample-budget knob).
-    if (b.args) |args| run_bench.addArgs(args);
+    run_bench.addPassthruArgs();
     const bench_step = b.step("bench", "Run the micro-bench suite (p50 + spread + outliers; --runs=N for tail percentiles)");
     bench_step.dependOn(&run_bench.step);
 
@@ -570,7 +570,7 @@ pub fn build(b: *std.Build) void {
     // installs Binaryen, so the published artifact is always optimized
     // (~13% smaller than ReleaseSmall alone).
     const raw_wasm = wasm_exe.getEmittedBin();
-    const wasm_bin: std.Build.LazyPath = if (b.findProgram(&.{"wasm-opt"}, &.{})) |wasm_opt_path| blk: {
+    const wasm_bin: std.Build.LazyPath = if (b.findProgram(.{ .names = &.{"wasm-opt"} })) |wasm_opt_path| blk: {
         const opt = b.addSystemCommand(&.{
             wasm_opt_path,
             "-Oz",
@@ -584,7 +584,7 @@ pub fn build(b: *std.Build) void {
         opt.addFileArg(raw_wasm);
         opt.addArg("-o");
         break :blk opt.addOutputFileArg("cynic.wasm");
-    } else |_| raw_wasm;
+    } else raw_wasm;
 
     const install_wasm = b.addInstallFileWithDir(
         wasm_bin,
@@ -626,10 +626,14 @@ fn gitShortSha(b: *std.Build) []const u8 {
     // `catch` covers every failure path and `code` is never read.
     var code: u8 = undefined;
     const stdout = b.runAllowFail(
-        &.{ "git", "-C", b.build_root.path orelse ".", "rev-parse", "--short", "HEAD" },
+        &.{ "git", "-C", sourceRootPath(b, ""), "rev-parse", "--short", "HEAD" },
         &code,
         .ignore,
     ) catch return "unknown";
     const trimmed = std.mem.trim(u8, stdout, " \t\r\n");
     return if (trimmed.len == 0) "unknown" else trimmed;
+}
+
+fn sourceRootPath(b: *std.Build, sub_path: []const u8) []const u8 {
+    return b.root.joinString(b.graph.arena, sub_path) catch @panic("OOM");
 }

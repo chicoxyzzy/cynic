@@ -46,7 +46,7 @@ const cynic_diag = @import("../../diagnostic.zig");
 /// with every feature" pattern shared by every `*WithBuiltins`
 /// helper below.
 fn installBuiltinsAllFeatures(realm: *Realm) !void {
-    realm.feature_flags = features.FeatureSet.initFull();
+    realm.feature_flags = features.FeatureSet.full;
     try realm.installBuiltins();
     // Inline unit tests deliberately use `__collectGarbage` /
     // `__clearKeptObjects` / `__drainMicrotasks` for deterministic
@@ -1317,7 +1317,7 @@ test "later: harden on Array reaches nested values but not indexed slots (known 
 /// Phase 1 freeze pass is skipped, so primordials stay mutable.
 /// Used by the `--unhardened` parity tests below.
 fn installBuiltinsUnhardened(realm: *Realm) !void {
-    realm.feature_flags = features.FeatureSet.initFull();
+    realm.feature_flags = features.FeatureSet.full;
     realm.hardened = false;
     try realm.installBuiltins();
     try realm.installTestGlobals();
