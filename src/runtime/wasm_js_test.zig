@@ -1141,3 +1141,18 @@ test "a JS-thrown WebAssembly.Exception is caught by a matching wasm catch \\$ta
         "inst.exports.g()";
     try expectIntWasm(src, 42);
 }
+
+test "WebAssembly.Tag and Exception are gated behind --allow=wasm" {
+    try evalWasmExpectThrow("new WebAssembly.Tag({ parameters: [] })");
+    try evalWasmExpectThrow("new WebAssembly.Exception(null, [])");
+}
+
+test "an exnref returned to JS raises a TypeError" {
+    // func "f" (result exnref): ref.null exn -> returning it across the boundary is a TypeError.
+    const src =
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 1,5,1,96,0,1,105, 3,2,1,0, 7,5,1,1,102,0,0, 10,6,1,4,0,208,105,11]);" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes));" ++
+        "let r = 0; try { inst.exports.f(); } catch (e) { r = (e instanceof TypeError) ? 1 : 0; }" ++
+        "r";
+    try expectIntWasm(src, 1);
+}

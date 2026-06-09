@@ -2375,3 +2375,86 @@ test "wasm exceptions: catch_ref binds payload and exnref together (multi-value)
     });
     try testing.expectEqual(@as(i32, 5), try runI32(bytes, "f", &.{}));
 }
+
+test "wasm exceptions: a throw unwinds across three frames" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // type0 ()->() (h,g); type1 (i32)->() (tag); type2 ()->i32 (f).
+    const tbody = [_]u8{ 0x03, 0x60, 0x00, 0x00, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x03, 0x00, 0x00, 0x02 }; // h:t0, g:t0, f:t2
+    const gbody = [_]u8{ 0x01, 0x00, 0x01 }; // tag0:t1
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x02 }; // export "f" -> func 2
+    // h: i32.const 8; throw tag0 | g: call h | f: block(i32){ try_table(i32)(catch tag0 ->blk) call g; i32.const 0 end }
+    const cbody = [_]u8{
+        0x03,
+        0x06,
+        0x00,
+        0x41,
+        0x08,
+        0x08,
+        0x00,
+        0x0b,
+        0x04,
+        0x00,
+        0x10,
+        0x00,
+        0x0b,
+        0x10,
+        0x00,
+        0x02,
+        0x7f,
+        0x1f,
+        0x7f,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0x10,
+        0x01,
+        0x41,
+        0x00,
+        0x0b,
+        0x0b,
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody }, .{ .id = 3, .body = &fbody },  .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody }, .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 8), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm exceptions: a loop re-entering a try_table does not accumulate handlers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f }; // ()->i32
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // (local i32) loop { try_table end ; i++ ; if i<2000 br loop } ; return i
+    // 2000 iterations > MAX_HANDLERS (1024): completes only if entry-cleanup pops
+    // the prior handler each re-entry (else CallStackExhausted).
+    const cbody = [_]u8{
+        0x01, 0x1c,
+        0x01, 0x01,
+        0x7f, 0x03,
+        0x40, 0x1f,
+        0x40, 0x00,
+        0x0b, 0x20,
+        0x00, 0x41,
+        0x01, 0x6a,
+        0x21, 0x00,
+        0x20, 0x00,
+        0x41, 0xd0,
+        0x0f, 0x48,
+        0x0d, 0x00,
+        0x0b, 0x20,
+        0x00, 0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody }, .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody }, .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 2000), try runI32(bytes, "f", &.{}));
+}
