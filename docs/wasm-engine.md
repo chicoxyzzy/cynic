@@ -345,18 +345,23 @@ replaces.
 `validate` (ungated); the `Module` / `Instance` constructors and the
 `compile` / `instantiate` Promises; the `Memory` / `Table` / `Global`
 objects (standalone and as instance exports); imports — host functions,
-cross-module functions, and shared globals / memories / tables; and the
-`CompileError` / `LinkError` / `RuntimeError` types. The engine is also
-still exercised through its Zig API (`decode` / `instantiate` / `invoke`)
-and the conformance harness.
+cross-module functions, and shared globals / memories / tables; the
+`CompileError` / `LinkError` / `RuntimeError` types; and the exception
+surface — `Tag` (a canonical identity, imported/exported and shared
+across the boundary) and `Exception` (`.is` / `.getArg`), with an
+uncaught wasm exception surfacing to JS as a thrown `Exception` and its
+reference-typed payloads GC-rooted. The engine is also still exercised
+through its Zig API (`decode` / `instantiate` / `invoke`) and the
+conformance harness.
 
 `compile` / `instantiate` return Promises (built on the existing
 microtask queue via §27.2.1.5 NewPromiseCapability); compilation is
 synchronous, so they resolve — or, on an abrupt completion, reject with
 the proper error class. Argument and result marshalling is
 §ToWebAssemblyValue / §ToJSValue: `i32 ↔ Number`, `i64 ↔ BigInt`,
-`f32/f64 ↔ Number` (`v128` / references across the JS boundary are still
-TODO). **Every wasm→JS host call opens a `HandleScope`** — calling an
+`f32/f64 ↔ Number`, and `externref` as a live JS value; `v128` and a bare
+`exnref` are spec-rejected at the boundary with a TypeError (an
+`exnref`'s JS form is the `Exception` object). **Every wasm→JS host call opens a `HandleScope`** — calling an
 imported JS function re-enters Lantern, which allocates, so the gc.md
 re-entry contract applies; a JS throw propagates as the engine trap
 `HostThrew` and is re-raised at the boundary. To carry a JS callable
@@ -440,13 +445,14 @@ the measured design space:
 |---|---|
 | Decoder | §5 binary → parsed module — **done** |
 | Validate + side-table | single-pass validation emitting the O(1) branch side-table (§4) — **done** |
-| Interpreter | in-place **threaded** dispatch over bytecode + side-table — **done** (integer, control, floats, SIMD, references, tail calls) |
+| Interpreter | in-place **threaded** dispatch over bytecode + side-table — **done** (integer, control, floats, SIMD, references, tail calls, exceptions) |
 | Memory | loads/stores, bulk-memory, grow; memory64 i64 addressing — **done** (engine plain buffer; the JS `Memory.buffer` aliasing view + detach-on-grow ships in §8) |
 | References / tables | tables, funcref/externref, `call_indirect`, element segments — **done**; externref GC rooting precise (§5), value-stack ref tags a future micro-opt |
 | Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128, relaxed-SIMD — **done** |
 | Cross-module linking | imported funcs/globals/tables/memories, shared tables, cross-instance funcrefs, host functions, start functions — **done** |
-| Conformance | the WebAssembly spec testsuite harness → `wasm-results.md` — **done, 100.00%** |
-| JS API | `WebAssembly.*` typed-slot objects (`Module`/`Instance`/`Memory`/`Table`/`Global`), `compile`/`instantiate` Promises, imports incl. host functions, error types, i32/i64/f32/f64 marshalling, `--allow=wasm` — **done** (§8), incl. externref-across-JS (tables / globals / host round-trips), precisely GC-reclaimed (§5); v128 is spec-rejected at the boundary |
+| Conformance | the WebAssembly spec testsuite harness → `wasm-results.md` — **done — 100% of the commands it scores** (the scored set excludes tests for unimplemented proposals) |
+| JS API | `WebAssembly.*` typed-slot objects (`Module`/`Instance`/`Memory`/`Table`/`Global`/`Tag`/`Exception`), `compile`/`instantiate` Promises, imports incl. host functions, error types, i32/i64/f32/f64 marshalling, `--allow=wasm` — **done** (§8), incl. externref-across-JS (tables / globals / host round-trips), precisely GC-reclaimed (§5); v128 is spec-rejected at the boundary |
+| Exception handling | tag section, `throw` / `throw_ref` / `try_table` (every catch form), `exnref`, cross-frame unwind + precise handler scoping — **done**; JS API `Tag` / `Exception` (`.is` / `.getArg`), tag imports/exports, uncaught wasm → JS `Exception`, GC-rooted reference payloads — **done** (§1, §8); a JS exception caught by a wasm `try_table` (the JS→wasm direction) — **pending** (the realm-free interpreter needs a bridge to turn a thrown JS value into an `exnref`) |
 
 Conformance is scored against the official WebAssembly spec testsuite
 (the `.wast` corpus), the same way `test262-results.md` scores ECMA-262.

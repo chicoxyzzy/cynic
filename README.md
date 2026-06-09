@@ -111,13 +111,18 @@ The shape, in broad strokes — the per-bucket numbers live in the
   generators with promise-reaction chaining, `Promise.try` and
   `Promise.withResolvers`.
 - **WebAssembly** — Cynic runs Wasm through the `WebAssembly` JS
-  API (`Module` / `Instance` / `Memory` / `Table` / `Global`,
-  `compile` / `instantiate`, host imports, cross-module linking),
-  powered by **Sarcasm** — a from-scratch in-place interpreter
-  (SIMD, reference types, memory64, multi-memory). **100 %
-  (56510/56510)** on the official WebAssembly spec testsuite. Off
-  by default; opt in with `--allow=wasm` (same SES posture as
-  `eval` — see [`docs/wasm-engine.md`](docs/wasm-engine.md)).
+  API (`Module` / `Instance` / `Memory` / `Table` / `Global` /
+  `Tag` / `Exception`, `compile` / `instantiate`, host imports,
+  cross-module linking), powered by **Sarcasm** — a from-scratch
+  in-place interpreter (SIMD, reference types, memory64,
+  multi-memory, tail calls, relaxed-SIMD, and the exception-handling
+  proposal — `try_table` / `throw` / `throw_ref` / `exnref`). **100 %
+  of the commands it scores (56510/56510)** on the official
+  WebAssembly spec testsuite — the scored set excludes tests for
+  not-yet-implemented proposals (see
+  [`wasm-results.md`](wasm-results.md)). Off by default; opt in with
+  `--allow=wasm` (same SES posture as `eval` — see
+  [`docs/wasm-engine.md`](docs/wasm-engine.md)).
 - **Proper Tail Calls** (ES2015 §15.10) — calls in tail position
   reuse the caller's frame instead of pushing a fresh one;
   `function f(n) { return f(n - 1); }` recurses without growing

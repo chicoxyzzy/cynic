@@ -562,8 +562,11 @@ reviewed in PRs against `test262-results.md`.
                           re-exports the public API (`decode`,
                           `validateModule`, `instantiate`, `invoke`);
                           `interpreter.zig` holds the dispatch loop +
-                          runtime structs. 100% spec-testsuite conformant
-                          (wasm-results.md). See docs/wasm-engine.md.
+                          runtime structs. Passes 100% of the
+                          spec-testsuite commands it scores
+                          (wasm-results.md — the scored set excludes
+                          tests for unimplemented proposals). See
+                          docs/wasm-engine.md.
     tools/       gen_unicode_idents.zig (regenerates UCD tables);
                  test262/ (frontmatter + skip rules);
                  test262.zig (conformance harness — runs parse +
