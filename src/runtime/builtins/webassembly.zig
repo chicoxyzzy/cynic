@@ -306,6 +306,12 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
     wasm.instantiate(ip, a, a, mstate.module, imports) catch
         return throwLinkError(realm, "WebAssembly.Instance: instantiation failed");
 
+    // Let a `try_table` in this instance catch a JS exception thrown by a
+    // host import (the JS->wasm direction): the interpreter reifies the
+    // realm's pending exception through this bridge.
+    ip.host_exn_ctx = realm;
+    ip.host_exn_hook = convertHostException;
+
     // Register the instance's externref tables / globals as GC roots, so a
     // JS value a wasm body stores into one survives past the call that put
     // it there (its transient pin is dropped at the outermost return).
@@ -944,10 +950,16 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
         error.OutOfMemory => return error.OutOfMemory,
         // A JS-backed host import threw — re-raise its pending exception.
         error.HostThrew => return error.NativeThrew,
-        // An uncaught wasm exception surfaces to JS as a WebAssembly.Exception.
+        // An uncaught exception surfaces to JS. One that entered wasm as a
+        // JS throw is re-raised as its original value (identity preserved);
+        // a pure wasm throw is reified as a WebAssembly.Exception.
         error.UncaughtException => {
             if (rec.instance.pending_exn) |exn_rec| {
-                realm.pending_exception = try makeExceptionFromRecord(realm, exn_rec);
+                if (exn_rec.js_value != wasm.REF_NULL) {
+                    realm.pending_exception = Value{ .bits = @truncate(exn_rec.js_value) };
+                } else {
+                    realm.pending_exception = try makeExceptionFromRecord(realm, exn_rec);
+                }
                 return error.NativeThrew;
             }
             return throwRuntimeError(realm, "WebAssembly: uncaught exception");
@@ -1126,6 +1138,25 @@ fn makeExceptionFromRecord(realm: *Realm, rec: *const wasm.ExnRecord) NativeErro
     try obj.setWasmException(realm.allocator, st);
     try rootExceptionPayload(realm, rec.tag, payload);
     return heap_mod.taggedObject(obj);
+}
+
+/// Bridge the interpreter calls on a host import's `HostThrew`: reify the
+/// realm's pending JS exception as an `ExnRecord` a wasm `try_table` can
+/// match, clearing the pending slot. A `WebAssembly.Exception` keeps its
+/// tag identity (so `catch $tag` binds it); any other JS value gets the
+/// realm's foreign sentinel tag (only `catch_all` matches). The thrown
+/// value is rooted so a bound exnref or a re-raise keeps it alive.
+fn convertHostException(ctx: *anyopaque, owner: *wasm.Instance) ?*wasm.ExnRecord {
+    const realm: *Realm = @ptrCast(@alignCast(ctx));
+    const ex = realm.pending_exception orelse return null;
+    realm.pending_exception = null;
+    const js_bits: u128 = ex.bits;
+    const rec = if (exceptionStateOf(ex)) |st|
+        owner.internExnRecord(st.tag, st.payload, js_bits)
+    else
+        owner.internExnRecord(&realm.wasm_foreign_exn_tag, &.{}, js_bits);
+    if (rec) |r| realm.registerExternGlobalCell(&r.js_value) catch {};
+    return rec;
 }
 
 fn exceptionConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

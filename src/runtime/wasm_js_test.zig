@@ -1094,3 +1094,50 @@ test "WebAssembly.Module.customSections runs a full ToString on an object name" 
             "true",
     );
 }
+
+// import "e"."f" (func); func "g" (result i32):
+//   block $h { try_table (catch_all $h) call $f end ; i32.const 0; return } ; i32.const 1
+// -> 1 if the host call threw (caught), 0 if it returned normally.
+const host_catch_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,8,2,96,0,0,96,0,1,127, 2,7,1,1,101,1,102,0,0, 3,2,1,1, 7,5,1,1,103,0,1, 10,20,1,18,0,2,64,31,64,1,2,0,16,0,11,65,0,15,11,65,1,11])";
+
+test "a JS host exception is caught by a wasm catch_all" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ host_catch_bytes ++ "), " ++
+        "{ e: { f: () => { throw new Error('boom'); } } });" ++
+        "inst.exports.g()";
+    try expectIntWasm(src, 1);
+}
+
+test "a wasm catch_all lets a non-throwing host call through" {
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ host_catch_bytes ++ "), " ++
+        "{ e: { f: () => {} } });" ++
+        "inst.exports.g()";
+    try expectIntWasm(src, 0);
+}
+
+test "a host exception not caught by wasm propagates to JS with identity" {
+    // No try_table here: the same host throw re-raises the *same* Error object.
+    const src =
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 1,4,1,96,0,0, 2,7,1,1,101,1,102,0,0, 3,2,1,0, 7,5,1,1,103,0,1, 10,6,1,4,0,16,0,11]);" ++
+        "const boom = new Error('x');" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { f: () => { throw boom; } } });" ++
+        "let same = 0; try { inst.exports.g(); } catch (e) { same = (e === boom) ? 1 : 0; }" ++
+        "same";
+    try expectIntWasm(src, 1);
+}
+
+test "a JS-thrown WebAssembly.Exception is caught by a matching wasm catch \\$tag" {
+    // import "e"."t" (tag (param i32)) + "e"."f" (func); func "g" (result i32):
+    //   block $h (i32) { try_table (i32) (catch $t $h) call $f; i32.const 0 end } end
+    // host f throws new Exception(tag, [42]); the imported tag identity matches
+    // the catch, so the payload 42 is delivered.
+    const src =
+        "const tag = new WebAssembly.Tag({ parameters: ['i32'] });" ++
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 1,12,3,96,1,127,0,96,0,0,96,0,1,127, 2,14,2,1,101,1,116,4,0,0,1,101,1,102,0,1, 3,2,1,2, 7,5,1,1,103,0,1, 10,18,1,16,0,2,127,31,127,1,0,0,0,16,0,65,0,11,11,11]);" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), " ++
+        "{ e: { t: tag, f: () => { throw new WebAssembly.Exception(tag, [42]); } } });" ++
+        "inst.exports.g()";
+    try expectIntWasm(src, 42);
+}

@@ -57,15 +57,17 @@ identity), `WebAssembly.Exception` (`.is` / `.getArg`), tag
 imports/exports, and an uncaught wasm exception surfacing to JS as a
 thrown `WebAssembly.Exception` all work — a tag shared by import is
 caught across the boundary, and reference-typed exception payloads are
-GC-rooted. `v128` is spec-mandated not to cross the JS boundary; a bare
-`exnref` likewise raises a TypeError if it would.
+GC-rooted. The reverse direction works too: a JS exception thrown by a
+host import is caught by a wasm `try_table` (`catch_all`, or `catch
+$tag` when it is a `WebAssembly.Exception` of a matching tag), and an
+uncaught one re-raises the *original* JS value with its identity intact.
+`v128` is spec-mandated not to cross the JS boundary; a bare `exnref`
+likewise raises a TypeError if it would.
 
 Not yet implemented. **Standardized (Phase 5, Wasm 3.0) but
-unimplemented** — `gc` (WasmGC); and one corner of exception interop:
-a JS exception caught by a wasm `try_table` (the JS→wasm direction —
-the interpreter is realm-free, so converting a thrown JS value into an
-`exnref` needs a realm bridge it does not yet have). The wasm→JS
-direction and all wasm instructions are shipped (above). **Still in
+unimplemented** — `gc` (WasmGC) and multiple memories (the engine is
+single-memory). Exception handling — every wasm instruction and the
+full JS interop, both directions — is shipped (above). **Still in
 flight** — `threads` (Phase 4; sits on the existing `SharedArrayBuffer`
 / `Atomics` substrate), shared-everything threads and the component
 model (Phase 1).
@@ -468,7 +470,7 @@ the measured design space:
 | Cross-module linking | imported funcs/globals/tables/memories, shared tables, cross-instance funcrefs, host functions, start functions — **done** |
 | Conformance | the WebAssembly spec testsuite harness → `wasm-results.md` — **done — 100% of the commands it scores** (the scored set excludes tests for unimplemented proposals) |
 | JS API | `WebAssembly.*` typed-slot objects (`Module`/`Instance`/`Memory`/`Table`/`Global`/`Tag`/`Exception`), `compile`/`instantiate` Promises, imports incl. host functions, error types, i32/i64/f32/f64 marshalling, `--allow=wasm` — **done** (§8), incl. externref-across-JS (tables / globals / host round-trips), precisely GC-reclaimed (§5); v128 is spec-rejected at the boundary |
-| Exception handling | tag section, `throw` / `throw_ref` / `try_table` (every catch form), `exnref`, cross-frame unwind + precise handler scoping — **done**; JS API `Tag` / `Exception` (`.is` / `.getArg`), tag imports/exports, uncaught wasm → JS `Exception`, GC-rooted reference payloads — **done** (§1, §8); a JS exception caught by a wasm `try_table` (the JS→wasm direction) — **pending** (the realm-free interpreter needs a bridge to turn a thrown JS value into an `exnref`) |
+| Exception handling | tag section, `throw` / `throw_ref` / `try_table` (every catch form), `exnref`, cross-frame unwind + precise handler scoping — **done**; JS API `Tag` / `Exception` (`.is` / `.getArg`), tag imports/exports, uncaught wasm → JS `Exception`, GC-rooted reference payloads — **done** (§1, §8); a JS host exception caught by a wasm `try_table` (the JS→wasm direction), with identity-preserving re-raise — **done** (via an instance-set bridge over `call` / `call_indirect`; a host throw from a `return_call` tail call propagates but is not yet catchable — a rare edge) |
 
 Conformance is scored against the official WebAssembly spec testsuite
 (the `.wast` corpus), the same way `test262-results.md` scores ECMA-262.

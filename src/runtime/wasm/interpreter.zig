@@ -138,6 +138,12 @@ pub const TagType = struct {
 pub const ExnRecord = struct {
     tag: *const TagType,
     payload: []u128,
+    /// For an exception that entered wasm as a JS throw (caught by a
+    /// `try_table`): the original thrown JS value's bits, so re-raising it
+    /// (`throw_ref` that escapes, or an uncaught propagation) hands the
+    /// *same* JS value back to the host. `REF_NULL` for a pure wasm
+    /// `throw`, where the boundary instead reifies a `WebAssembly.Exception`.
+    js_value: u128 = REF_NULL,
 };
 /// Implementation cap on table size (§4.5.4 allows growth to fail).
 const MAX_TABLE_ELEMS = 1 << 24;
@@ -246,6 +252,33 @@ pub const Instance = struct {
     /// can reify it as a `WebAssembly.Exception`. Owned by some instance's
     /// `exn_pool` (lives as long as that instance).
     pending_exn: ?*const ExnRecord = null,
+    /// Bridge for catching a JS host exception in a wasm `try_table`. Set
+    /// by the JS API after instantiation; null on the bare engine path (no
+    /// realm), where a host throw just propagates. On `HostThrew` the
+    /// interpreter calls `host_exn_hook(host_exn_ctx, self)` to reify the
+    /// realm's pending JS exception as an `ExnRecord` (clearing it) — a
+    /// foreign value gets a sentinel tag (only `catch_all` matches), a
+    /// `WebAssembly.Exception` keeps its tag identity.
+    host_exn_ctx: ?*anyopaque = null,
+    host_exn_hook: ?*const fn (*anyopaque, *Instance) ?*ExnRecord = null,
+
+    /// Allocate an `ExnRecord` in this instance's pool — used by the JS
+    /// boundary to reify a thrown JS value for a `try_table` to catch.
+    pub fn internExnRecord(self: *Instance, tag: *const TagType, payload: []const u128, js_value: u128) ?*ExnRecord {
+        const rec = self.gpa.create(ExnRecord) catch return null;
+        const pl = self.gpa.alloc(u128, payload.len) catch {
+            self.gpa.destroy(rec);
+            return null;
+        };
+        @memcpy(pl, payload);
+        rec.* = .{ .tag = tag, .payload = pl, .js_value = js_value };
+        self.exn_pool.append(self.gpa, rec) catch {
+            self.gpa.free(pl);
+            self.gpa.destroy(rec);
+            return null;
+        };
+        return rec;
+    }
 
     pub fn deinit(self: *Instance) void {
         self.gpa.free(self.globals);
@@ -1218,10 +1251,30 @@ fn run(ip: *Interp) Error!void {
             continue :dispatch nextOp(body, &pc);
         },
         .call => {
+            const op_ip = pc - 1;
             const fidx = readU32(body, &pc);
             const ref = ip.instance.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
             switch (ref) {
-                .host => |h| try ip.callHost(h), // no frame change
+                .host => |h| ip.callHost(h) catch |e| {
+                    // A JS host import threw: try to catch it in an active
+                    // try_table; otherwise re-raise (the original value, or
+                    // HostThrew where there is no JS bridge).
+                    if (e != error.HostThrew) return e;
+                    switch (try catchHostThrow(ip, op_ip)) {
+                        .caught => |c| {
+                            f = &ip.frames[ip.nframes - 1];
+                            ip.instance = f.instance;
+                            body = f.func.body;
+                            side_table = f.func.side_table;
+                            locals_base = f.locals_base;
+                            pc = c.pc;
+                            stp = c.stp;
+                            continue :dispatch nextOp(body, &pc);
+                        },
+                        .reraise => return error.UncaughtException,
+                        .no_bridge => return e,
+                    }
+                },
                 .wasm => |w| {
                     const pcount: u32 = @intCast(w.instance.module.types[w.func.type_index].params.len);
                     f.ip = pc;
@@ -1239,6 +1292,7 @@ fn run(ip: *Interp) Error!void {
             continue :dispatch nextOp(body, &pc);
         },
         .call_indirect => {
+            const op_ip = pc - 1;
             const type_idx = readU32(body, &pc);
             const table_idx = readU32(body, &pc);
             const elem_index: u64 = @truncate(ip.popCell());
@@ -1258,7 +1312,23 @@ fn run(ip: *Interp) Error!void {
                 .host => |h| {
                     if (expected.params.len != h.params or expected.results.len != h.results)
                         return error.IndirectCallTypeMismatch;
-                    try ip.callHost(h);
+                    ip.callHost(h) catch |e| {
+                        if (e != error.HostThrew) return e;
+                        switch (try catchHostThrow(ip, op_ip)) {
+                            .caught => |c| {
+                                f = &ip.frames[ip.nframes - 1];
+                                ip.instance = f.instance;
+                                body = f.func.body;
+                                side_table = f.func.side_table;
+                                locals_base = f.locals_base;
+                                pc = c.pc;
+                                stp = c.stp;
+                                continue :dispatch nextOp(body, &pc);
+                            },
+                            .reraise => return error.UncaughtException,
+                            .no_bridge => return e,
+                        }
+                    };
                 },
                 .wasm => |w| {
                     const actual = w.instance.module.types[w.func.type_index];
@@ -2131,9 +2201,20 @@ fn findCatch(hbody: []const u8, hinst: *Instance, h: Handler, thrown_tag: *const
     return null;
 }
 
+const CaughtTarget = struct { pc: usize, stp: usize };
 const UnwindOutcome = union(enum) {
-    caught: struct { pc: usize, stp: usize },
+    caught: CaughtTarget,
     uncaught,
+};
+/// Result of trying to catch a host import's throw in a `try_table`.
+const HostCatchResult = union(enum) {
+    /// Caught — resume at this target.
+    caught: CaughtTarget,
+    /// Reified but no handler matched — re-raise the original JS value
+    /// (boundary reads `ip.uncaught`).
+    reraise,
+    /// No JS bridge on this instance — propagate the original `HostThrew`.
+    no_bridge,
 };
 
 /// Materialize an exnref-backed exception owned by `owner`'s pool.
@@ -2191,6 +2272,26 @@ fn searchAndCatch(ip: *Interp, owner: *Instance, tag: *const TagType, payload: [
         }
     }
     return .uncaught;
+}
+
+/// On a host import raising `HostThrew`, try to catch it in an active
+/// `try_table`. Reifies the realm's pending JS exception through the
+/// instance's bridge, then searches the handler stack. Returns the catch
+/// target on a match; returns null when there is no bridge, no pending
+/// exception, or no matching handler — the caller re-raises, with an
+/// uncaught record stashed on `ip.uncaught` for the JS boundary.
+fn catchHostThrow(ip: *Interp, throw_op_ip: usize) !HostCatchResult {
+    const inst = ip.instance;
+    const hook = inst.host_exn_hook orelse return .no_bridge;
+    const ctx = inst.host_exn_ctx orelse return .no_bridge;
+    const rec = hook(ctx, inst) orelse return .no_bridge;
+    return switch (try searchAndCatch(ip, inst, rec.tag, rec.payload, rec, throw_op_ip)) {
+        .caught => |c| .{ .caught = c },
+        .uncaught => blk: {
+            ip.uncaught = rec;
+            break :blk .reraise;
+        },
+    };
 }
 
 fn readU32(body: []const u8, pc: *usize) u32 {

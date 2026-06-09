@@ -1054,6 +1054,11 @@ pub const Realm = struct {
     /// install so exported tags + uncaught exceptions can be wrapped.
     wasm_tag_prototype: ?*@import("object.zig").JSObject = null,
     wasm_exception_prototype: ?*@import("object.zig").JSObject = null,
+    /// Sentinel tag identity for a foreign JS value caught by a wasm
+    /// `try_table` — its address is unique to this realm, so no wasm
+    /// `catch $tag` ever matches it and only `catch_all` / `catch_all_ref`
+    /// catch a plain JS throw.
+    wasm_foreign_exn_tag: @import("wasm/wasm.zig").TagType = .{ .params = &.{} },
     /// `WebAssembly.Module.prototype` / `Instance.prototype`, cached at
     /// install so `WebAssembly.compile` / `instantiate` can build those
     /// objects without `new`.
