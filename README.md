@@ -40,7 +40,8 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
 Pre-alpha. Lexer + parser + Lantern (T0 bytecode interpreter) +
 Metla (mark-sweep GC) ship, alongside Perlex (the native §22.2
 RegExp engine), Sarcasm (the from-scratch WebAssembly engine —
-100 % on the spec testsuite), the native §3 Unicode tables, and
+100 % of the spec-testsuite commands it scores), the native §3
+Unicode tables, and
 the hardened-by-default realm-boot pipeline. The runtime is filling
 in §19-§28 one bucket at a time. The JIT tiers (Bistromath,
 Ohaimark) and generational GC are future work. See
@@ -58,7 +59,8 @@ an engine bug. `total` excludes the upstream `harness/` / `staging/` /
 `annexB/` paths, every Stage ≤ 3 proposal, and structurally-unrunnable
 fixtures; shipped pre-Stage-4 proposals get their own per-feature
 scoreboard. The WebAssembly engine has its own conformance run
-([`wasm-results.md`](wasm-results.md) — 100 % of the spec testsuite).
+([`wasm-results.md`](wasm-results.md) — 100 % of the commands it scores;
+the scored set excludes tests for not-yet-implemented proposals).
 The unit-test suite (`zig build test`) runs alongside.
 
 ### Build targets
