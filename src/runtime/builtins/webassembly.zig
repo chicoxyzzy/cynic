@@ -238,7 +238,7 @@ fn decodeModuleInto(realm: *Realm, self: *JSObject, bytes: []const u8) NativeErr
         return throwCompileError(realm, "WebAssembly.Module: invalid module");
     const state = a.create(ModuleState) catch return error.OutOfMemory;
     state.* = .{ .module = mp };
-    self.wasm_module = state;
+    try self.setWasmModule(realm.allocator, state);
 }
 
 /// Build a fresh `WebAssembly.Module` object (no `new`), for the
@@ -258,7 +258,7 @@ fn instanceConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
         return intrinsics.throwTypeError(realm, "WebAssembly.Instance requires 'new'");
 
     const mod_obj = if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null;
-    const mstate_raw = (if (mod_obj) |o| o.wasm_module else null) orelse
+    const mstate_raw = (if (mod_obj) |o| o.getWasmModule() else null) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Instance expects a WebAssembly.Module");
     const mstate: *ModuleState = @ptrCast(@alignCast(mstate_raw));
     try populateInstance(realm, self, mstate, if (args.len > 1) args[1] else Value.undefined_);
@@ -366,7 +366,7 @@ fn instantiateToResult(realm: *Realm, args: []const Value) NativeError!Value {
     // A Module argument instantiates directly, resolving to the Instance.
     if (args.len > 0) {
         if (heap_mod.valueAsPlainObject(args[0])) |o| {
-            if (o.wasm_module) |raw| {
+            if (o.getWasmModule()) |raw| {
                 const mstate: *ModuleState = @ptrCast(@alignCast(raw));
                 return makeInstanceObject(realm, mstate, import_object);
             }
@@ -379,7 +379,7 @@ fn instantiateToResult(realm: *Realm, args: []const Value) NativeError!Value {
         return intrinsics.throwTypeError(realm, "WebAssembly.instantiate expects a BufferSource or Module");
     const module_v = try makeModuleObject(realm, bytes);
     const mobj = heap_mod.valueAsPlainObject(module_v) orelse unreachable;
-    const mstate: *ModuleState = @ptrCast(@alignCast(mobj.wasm_module orelse unreachable));
+    const mstate: *ModuleState = @ptrCast(@alignCast(mobj.getWasmModule() orelse unreachable));
     const instance_v = try makeInstanceObject(realm, mstate, import_object);
 
     const result = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -414,7 +414,7 @@ fn globalConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     const st = a.create(GlobalState) catch return error.OutOfMemory;
     st.* = .{ .cell = cell, .valtype = vt, .mutable = mutable };
-    self.wasm_global = st;
+    try self.setWasmGlobal(realm.allocator, st);
     if (vt == .externref) realm.registerExternGlobalCell(cell) catch return error.OutOfMemory;
     return this_value;
 }
@@ -429,7 +429,7 @@ fn readValType(v: Value) ?wasm.ValType {
 fn globalStateOf(realm: *Realm, this_value: Value) NativeError!*GlobalState {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Global");
-    const raw = obj.wasm_global orelse
+    const raw = obj.getWasmGlobal() orelse
         return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Global");
     return @ptrCast(@alignCast(raw));
 }
@@ -455,7 +455,7 @@ fn makeGlobal(realm: *Realm, valtype: wasm.ValType, mutable: bool, cell: *u128) 
     const a = realm.wasmAllocator();
     const st = a.create(GlobalState) catch return error.OutOfMemory;
     st.* = .{ .cell = cell, .valtype = valtype, .mutable = mutable };
-    obj.wasm_global = st;
+    try obj.setWasmGlobal(realm.allocator, st);
     return heap_mod.taggedObject(obj);
 }
 
@@ -490,7 +490,7 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     tbl.* = .{ .elems = elems, .max = max, .is_64 = false };
     const st = a.create(TableState) catch return error.OutOfMemory;
     st.* = .{ .table = tbl, .funcref = is_funcref };
-    self.wasm_table = st;
+    try self.setWasmTable(realm.allocator, st);
     if (!is_funcref) realm.registerExternTable(tbl) catch return error.OutOfMemory;
     return this_value;
 }
@@ -503,7 +503,7 @@ fn tableElemFromValue(realm: *Realm, is_funcref: bool, v: Value) NativeError!u12
 fn tableStateOf(realm: *Realm, this_value: Value) NativeError!*TableState {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Table");
-    const raw = obj.wasm_table orelse
+    const raw = obj.getWasmTable() orelse
         return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Table");
     return @ptrCast(@alignCast(raw));
 }
@@ -582,7 +582,7 @@ fn makeTable(realm: *Realm, table: *wasm.Table, funcref: bool) NativeError!Value
     realm.heap.setObjectPrototype(obj, realm.wasm_table_prototype);
     const st = realm.wasmAllocator().create(TableState) catch return error.OutOfMemory;
     st.* = .{ .table = table, .funcref = funcref };
-    obj.wasm_table = st;
+    try obj.setWasmTable(realm.allocator, st);
     return heap_mod.taggedObject(obj);
 }
 
@@ -608,14 +608,14 @@ fn memoryConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     mem.* = .{ .data = bytes, .max_pages = max, .is_64 = false };
     const st = a.create(MemoryState) catch return error.OutOfMemory;
     st.* = .{ .mem = mem, .buffer = null };
-    self.wasm_memory = st;
+    try self.setWasmMemory(realm.allocator, st);
     return this_value;
 }
 
 fn memoryStateOf(realm: *Realm, this_value: Value) NativeError!*MemoryState {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Memory");
-    const raw = obj.wasm_memory orelse
+    const raw = obj.getWasmMemory() orelse
         return intrinsics.throwTypeError(realm, "receiver is not a WebAssembly.Memory");
     return @ptrCast(@alignCast(raw));
 }
@@ -663,7 +663,7 @@ fn makeMemory(realm: *Realm, mem: *wasm.Memory) NativeError!Value {
     realm.heap.setObjectPrototype(obj, realm.wasm_memory_prototype);
     const st = realm.wasmAllocator().create(MemoryState) catch return error.OutOfMemory;
     st.* = .{ .mem = mem, .buffer = null };
-    obj.wasm_memory = st;
+    try obj.setWasmMemory(realm.allocator, st);
     return heap_mod.taggedObject(obj);
 }
 
@@ -793,7 +793,7 @@ fn resolveGlobalImport(realm: *Realm, v: Value, gt: anytype) NativeError!u128 {
     // A WebAssembly.Global shares its current cell value; a primitive is
     // marshalled to the global's declared type.
     if (heap_mod.valueAsPlainObject(v)) |obj| {
-        if (obj.wasm_global) |raw| {
+        if (obj.getWasmGlobal()) |raw| {
             const st: *GlobalState = @ptrCast(@alignCast(raw));
             return st.cell.*;
         }
@@ -804,7 +804,7 @@ fn resolveGlobalImport(realm: *Realm, v: Value, gt: anytype) NativeError!u128 {
 fn resolveTableImport(realm: *Realm, v: Value) NativeError!*wasm.Table {
     const obj = heap_mod.valueAsPlainObject(v) orelse
         return throwLinkError(realm, "WebAssembly.Instance: table import is not a WebAssembly.Table");
-    const raw = obj.wasm_table orelse
+    const raw = obj.getWasmTable() orelse
         return throwLinkError(realm, "WebAssembly.Instance: table import is not a WebAssembly.Table");
     const st: *TableState = @ptrCast(@alignCast(raw));
     return st.table;
@@ -813,7 +813,7 @@ fn resolveTableImport(realm: *Realm, v: Value) NativeError!*wasm.Table {
 fn resolveMemImport(realm: *Realm, v: Value) NativeError!*const wasm.Memory {
     const obj = heap_mod.valueAsPlainObject(v) orelse
         return throwLinkError(realm, "WebAssembly.Instance: memory import is not a WebAssembly.Memory");
-    const raw = obj.wasm_memory orelse
+    const raw = obj.getWasmMemory() orelse
         return throwLinkError(realm, "WebAssembly.Instance: memory import is not a WebAssembly.Memory");
     const st: *MemoryState = @ptrCast(@alignCast(raw));
     return st.mem;

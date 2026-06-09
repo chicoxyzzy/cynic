@@ -558,6 +558,14 @@ pub const JSObjectExtension = struct {
     /// `WeakSet` instances populate this. `null` means "not a Set
     /// instance".
     set_data: ?*SetData = null,
+    /// WebAssembly host-object backings (`WebAssembly.{Module,Global,
+    /// Table,Memory}`). Only those rare exotics populate them; the
+    /// base `JSObject` no longer carries the four pointers (they were
+    /// 32 bytes on every object — see `getWasmModule` etc.).
+    wasm_module: ?*anyopaque = null,
+    wasm_global: ?*anyopaque = null,
+    wasm_table: ?*anyopaque = null,
+    wasm_memory: ?*anyopaque = null,
     // (`promise_waiters` + `promise_reactions` moved OUT of the
     // extension into `JSObject.promise_store` — a Promise touches
     // none of the extension's other cold fields, so they get a
@@ -922,21 +930,10 @@ pub const JSObject = struct {
     /// transient bound-this object the capability executor closes
     /// over. Hidden from JS.
     capability_record: ?*PromiseCapabilityRecord = null,
-    /// A `WebAssembly.Module`'s decoded module record, set on the
-    /// constructed Module instance. Opaque here (the WebAssembly builtin
-    /// casts it); the record lives in the realm's `wasm_arena`, so it
-    /// holds no GC values and needs no marking or cleanup.
-    wasm_module: ?*anyopaque = null,
-    /// A `WebAssembly.Global`'s backing record (cell pointer + value
-    /// type + mutability). Opaque, arena-owned — same contract as
-    /// `wasm_module`.
-    wasm_global: ?*anyopaque = null,
-    /// A `WebAssembly.Table`'s backing record (the shared engine table +
-    /// element type). Opaque, arena-owned.
-    wasm_table: ?*anyopaque = null,
-    /// A `WebAssembly.Memory`'s backing record (the shared engine memory
-    /// + its cached `buffer` ArrayBuffer). Opaque, arena-owned.
-    wasm_memory: ?*anyopaque = null,
+    // `WebAssembly.{Module,Global,Table,Memory}` host backings moved
+    // to `JSObjectExtension` — only those rare exotics carry them, so
+    // they no longer cost 32 bytes on every object. Access via the
+    // `getWasm*` / `setWasm*` helpers below.
     /// `Promise.prototype.finally` callback — set on the per-
     /// `.finally()` context object the reaction closures capture
     /// via `is_arrow + captured_this`. Hidden from JS.
@@ -1275,6 +1272,37 @@ pub const JSObject = struct {
     // `extension.accessors`. The helpers below give every reader
     // a cheap "is there an extension at all?" guard so plain
     // `{a, b}` literals pay nothing for the migration.
+
+    // ── WebAssembly host backings — extension-backed cold pointers ─
+    //
+    // Only `WebAssembly.{Module,Global,Table,Memory}` exotics carry
+    // these; a plain object/array has no extension and reads `null`
+    // for free. Setters lazily allocate the extension. The records are
+    // realm-arena-owned opaque pointers (no GC marking / cleanup).
+    pub fn getWasmModule(self: *const JSObject) ?*anyopaque {
+        return if (self.extension) |ext| ext.wasm_module else null;
+    }
+    pub fn getWasmGlobal(self: *const JSObject) ?*anyopaque {
+        return if (self.extension) |ext| ext.wasm_global else null;
+    }
+    pub fn getWasmTable(self: *const JSObject) ?*anyopaque {
+        return if (self.extension) |ext| ext.wasm_table else null;
+    }
+    pub fn getWasmMemory(self: *const JSObject) ?*anyopaque {
+        return if (self.extension) |ext| ext.wasm_memory else null;
+    }
+    pub fn setWasmModule(self: *JSObject, allocator: std.mem.Allocator, v: ?*anyopaque) !void {
+        (try self.getOrCreateExtension(allocator)).wasm_module = v;
+    }
+    pub fn setWasmGlobal(self: *JSObject, allocator: std.mem.Allocator, v: ?*anyopaque) !void {
+        (try self.getOrCreateExtension(allocator)).wasm_global = v;
+    }
+    pub fn setWasmTable(self: *JSObject, allocator: std.mem.Allocator, v: ?*anyopaque) !void {
+        (try self.getOrCreateExtension(allocator)).wasm_table = v;
+    }
+    pub fn setWasmMemory(self: *JSObject, allocator: std.mem.Allocator, v: ?*anyopaque) !void {
+        (try self.getOrCreateExtension(allocator)).wasm_memory = v;
+    }
 
     pub fn hasAccessor(self: *const JSObject, key: []const u8) bool {
         if (self.extension) |ext| return ext.accessors.contains(key);
