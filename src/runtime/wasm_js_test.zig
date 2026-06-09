@@ -1079,3 +1079,18 @@ test "WebAssembly.Module.customSections coerces the section name argument" {
         "WebAssembly.Module.customSections(m, 42).length === 1 ? 1 : 0";
     try expectIntWasm(src, 1);
 }
+
+test "WebAssembly.Module.customSections runs a full ToString on an object name" {
+    // §7.1.17 ToString must invoke a user-defined `toString` / `@@toPrimitive`
+    // on an exotic object argument, not stringify it as "[object Object]".
+    // Custom section named "x" (0x78) with payload [9].
+    _ = try evalWasm(
+        "const m = new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0, 0,3,1,120,9]));" ++
+            "const cs = WebAssembly.Module.customSections(m, { toString() { return 'x'; } });" ++
+            "if (cs.length !== 1) throw new Error('object name not coerced via toString, got ' + cs.length);" ++
+            "if (new Uint8Array(cs[0])[0] !== 9) throw new Error('wrong payload');" ++
+            "const viaSym = WebAssembly.Module.customSections(m, { [Symbol.toPrimitive]() { return 'x'; } });" ++
+            "if (viaSym.length !== 1) throw new Error('@@toPrimitive not honoured');" ++
+            "true",
+    );
+}

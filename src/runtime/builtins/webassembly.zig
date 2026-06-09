@@ -1325,13 +1325,13 @@ fn wasmModuleCustomSections(realm: *Realm, this_value: Value, args: []const Valu
     _ = this_value;
     const mstate = try moduleStateArg(realm, args, "customSections");
 
-    // §7.1.17 ToString(sectionName). Materialize into a stable buffer so
-    // the comparison key survives any GC during array/buffer allocation.
-    var scratch: [64]u8 = undefined;
-    const slice = arith.valueToOwnedString(realm, if (args.len > 1) args[1] else Value.undefined_, &scratch) catch
-        return error.OutOfMemory;
-    const want = realm.classAllocator().dupe(u8, slice.bytes) catch return error.OutOfMemory;
-    if (slice.allocated) realm.allocator.free(slice.bytes);
+    // §7.1.17 ToString(sectionName) — the full abstract operation, so a
+    // user-defined `toString` / `@@toPrimitive` on an object argument is
+    // observed per spec (not the primitive-only coercion). Copy the key
+    // into a stable buffer: it must survive the GC the array / ArrayBuffer
+    // allocations below may trigger (the JSString is not rooted past here).
+    const name_js = try intrinsics.stringifyArg(realm, if (args.len > 1) args[1] else Value.undefined_);
+    const want = realm.classAllocator().dupe(u8, name_js.flatBytes()) catch return error.OutOfMemory;
     defer realm.classAllocator().free(want);
 
     const arr = intrinsics.allocateArray(realm) catch return error.OutOfMemory;

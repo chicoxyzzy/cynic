@@ -311,9 +311,9 @@ index; tables are held by pointer (`[]*Table`) so an imported table is
 genuinely shared — a write through one instance is visible to the other.
 Memory is a plain owned `[]u8`; bounds are checked on every access.
 
-**Planned: a realm-owned store.** When the JS API (§8) lands, the
-§4.2.1 store becomes realm-scoped and lazily created, so non-wasm
-programs pay nothing:
+**Planned: a realm-owned store.** Today the JS-API records live in the
+realm's `wasm_arena` (§8); a future refactor makes the §4.2.1 store
+realm-scoped and lazily created, so non-wasm programs pay nothing:
 
 ```zig
 // realm.zig (planned — not yet built)
@@ -353,6 +353,22 @@ uncaught wasm exception surfacing to JS as a thrown `Exception` and its
 reference-typed payloads GC-rooted. The engine is also still exercised
 through its Zig API (`decode` / `instantiate` / `invoke`) and the
 conformance harness.
+
+The `Module` constructor carries the JS-API's static introspection
+methods (ungated — no code is generated): `Module.exports(module)` and
+`Module.imports(module)` return descriptor arrays in declaration order
+(`{ name, kind }` and `{ module, name, kind }`, `kind` the external-kind
+string `"function"` / `"table"` / `"memory"` / `"global"` / `"tag"`),
+and `Module.customSections(module, name)` returns fresh `ArrayBuffer`
+copies of every custom section whose name matches. Custom sections are
+retained for this by the decoder (a `CustomSection { name, bytes }`
+slice borrowing the kept-alive input buffer; validation still ignores
+them). The section name is coerced through the full §7.1.17 ToString, so
+a user-defined `toString` / `@@toPrimitive` on an object argument fires.
+Each constructor prototype (`Module`, `Instance`, `Memory`, `Table`,
+`Global`, `Tag`, `Exception`) carries its `@@toStringTag`
+(`"WebAssembly.Module"`, …), installed before the hardened-realm freeze
+so the brand survives on the frozen prototype.
 
 `compile` / `instantiate` return Promises (built on the existing
 microtask queue via §27.2.1.5 NewPromiseCapability); compilation is
