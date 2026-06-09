@@ -17,6 +17,40 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-09 — cynic `bb5703b` (JSON shape-walk + small-int toString cache), host `Darwin 25.6.0 arm64`
+
+Two contained allocation-cut wins, both measured against the `4ce56ff`
+baseline below (same host):
+
+- **`string_concat` 40.18 → 24.57 (−39 %)** — the pinned small-integer
+  `toString` cache (`bb5703b`). `(i & 0xff).toString()` no longer
+  allocates a fresh `JSString` per call; the 0-255 range is served from
+  a per-realm pinned, shared cache.
+- **`json_stringify` 37.17 → 28.17 (−24 %)** — the shape-walk fast path
+  for `SerializeJSONObject` (`2623f8b`): plain shape-mode objects
+  serialize straight off their value slots, skipping the key-array
+  materialization + the per-property `[[Get]]` + `flagsFor` probes.
+
+Both deltas track their isolated min-of-31 interleaved A/B measurements
+(−35 % / −23 %). The other fixtures sit within run-to-run noise of the
+baseline. Machine at load ~4.1, so spreads are tight — ≤10 % everywhere
+except `ctor_array_build` (18.8 %, min 436.58 brackets it).
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 29.72 | 29.15 | 30.46 | 5296 |
+| prop_access | 12.27 | 11.96 | 12.38 | 5368 |
+| prop_write | 12.56 | 12.33 | 13.26 | 5392 |
+| array_iter | 21.86 | 21.49 | 22.25 | 6496 |
+| string_concat | 24.57 | 24.10 | 25.20 | 15464 |
+| promise_chain | 14.49 | 13.99 | 15.03 | 27152 |
+| object_alloc | 28.04 | 27.52 | 30.31 | 10440 |
+| method_call | 18.58 | 17.98 | 19.53 | 5560 |
+| class_instantiate | 34.90 | 34.13 | 35.66 | 10336 |
+| ctor_array_build | 443.80 | 436.58 | 519.91 | 13520 |
+| json_stringify | 28.17 | 27.66 | 30.41 | 9480 |
+| tail_recursion | 32.80 | 32.43 | 33.02 | 5264 |
+
 ### 2026-06-08 — cynic `4ce56ff` (post generational write-barrier), host `Darwin 25.6.0 arm64`
 
 Baseline row immediately after the dirty-container write barrier
