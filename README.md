@@ -32,7 +32,8 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
   (`obj.x = 2` shadows a frozen prototype's data slot instead of
   throwing TypeError). `--unhardened` opts the whole posture out
   atomically for code that genuinely needs `OrdinarySet` semantics.
-  Compartments are deferred until multi-realm lands. See
+  Compartments are deferred (a TC39 Stage 1 proposal — the multi-realm
+  substrate they need largely ships). See
   [`docs/ses-alignment.md`](docs/ses-alignment.md).
 
 ## Status
@@ -98,6 +99,7 @@ The shape, in broad strokes — the per-bucket numbers live in the
 - **Built-ins** — `Object`, `Array`, `String` / `Number` /
   `Boolean` / `BigInt` / `Symbol` (real primitives, not polyfills),
   `Math`, `JSON`, `Map` / `Set` / `WeakMap` / `WeakSet`,
+  `WeakRef` / `FinalizationRegistry`,
   `Reflect`, ES2025 `Set` ops (`union` / `intersection` / …),
   `Iterator` helpers (`map` / `filter` / `take` / `drop` /
   `flatMap` / etc.),
@@ -105,6 +107,10 @@ The shape, in broad strokes — the per-bucket numbers live in the
   standard error hierarchy with `error-cause`.
 - **TypedArrays** — `ArrayBuffer`, `DataView`, the typed-array
   family backed by the canonical `%TypedArray%.prototype`.
+- **Shared memory & atomics** — `SharedArrayBuffer` (growable) and the
+  full `Atomics` surface (`wait` / `notify` / `waitAsync` /
+  `compareExchange` / `isLockFree` / …), with real cross-thread
+  `wait` / `notify` over OS threads, not a single-threaded stub.
 - **RegExp** — full ECMA-262 via **Perlex**, Cynic's own native
   engine (named groups, lookbehind, `u` / `v` flags, indices). String
   methods dispatch through it.
