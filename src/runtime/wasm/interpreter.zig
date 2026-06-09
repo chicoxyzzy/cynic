@@ -135,7 +135,7 @@ pub const TagType = struct {
 /// directly by `throw_ref`. Identity is the `*TagType`; the payload is a
 /// copy of the tag's argument values. Owned by the throwing instance's
 /// pool.
-const ExnRecord = struct {
+pub const ExnRecord = struct {
     tag: *const TagType,
     payload: []u128,
 };
@@ -242,6 +242,10 @@ pub const Instance = struct {
     /// Backing for the identities this instance owns (defined tags, and
     /// any unprovided imports); imported identities point elsewhere.
     owned_tag_types: []TagType = &.{},
+    /// The exception an `invoke` left uncaught — set so the JS boundary
+    /// can reify it as a `WebAssembly.Exception`. Owned by some instance's
+    /// `exn_pool` (lives as long as that instance).
+    pending_exn: ?*const ExnRecord = null,
 
     pub fn deinit(self: *Instance) void {
         self.gpa.free(self.globals);
@@ -795,6 +799,9 @@ const Interp = struct {
     nframes: usize,
     handlers: []Handler,
     nhandlers: usize,
+    /// The exception record built when a throw escapes the whole call —
+    /// handed to the entry instance's `pending_exn` for the JS boundary.
+    uncaught: ?*const ExnRecord = null,
 
     inline fn pushCell(self: *Interp, v: Cell) TrapError!void {
         if (self.sp >= self.stack.len) return error.ValueStackOverflow;
@@ -955,7 +962,12 @@ pub fn invoke(
     for (args) |a| try ip.pushCell(a);
     try ip.pushFrame(self, entry, param_count);
 
-    try run(&ip);
+    run(&ip) catch |e| {
+        // Hand an uncaught exception to the entry instance so the JS
+        // boundary can reify it as a WebAssembly.Exception.
+        if (e == error.UncaughtException) self.pending_exn = ip.uncaught;
+        return e;
+    };
 
     // Results sit at the bottom of the stack after the final pop, one
     // 128-bit cell each (scalars in the low bits).
@@ -1089,7 +1101,10 @@ fn run(ip: *Interp) Error!void {
                 while (qi < npayload) : (qi += 1) payload[qi] = ip.stack[ip.sp - npayload + qi];
             }
             switch (try searchAndCatch(ip, ip.instance, tag_id, payload[0..npayload], null, throw_op_ip)) {
-                .uncaught => return error.UncaughtException,
+                .uncaught => {
+                    ip.uncaught = buildExnRecord(ip.instance, tag_id, payload[0..npayload]) catch null;
+                    return error.UncaughtException;
+                },
                 .caught => |c| {
                     f = &ip.frames[ip.nframes - 1];
                     body = f.func.body;
@@ -1108,7 +1123,10 @@ fn run(ip: *Interp) Error!void {
             if (cell == REF_NULL) return error.NullExnRef;
             const rec: *ExnRecord = @ptrFromInt(@as(usize, @truncate(cell)));
             switch (try searchAndCatch(ip, ip.instance, rec.tag, rec.payload, rec, throw_op_ip)) {
-                .uncaught => return error.UncaughtException,
+                .uncaught => {
+                    ip.uncaught = rec;
+                    return error.UncaughtException;
+                },
                 .caught => |c| {
                     f = &ip.frames[ip.nframes - 1];
                     body = f.func.body;

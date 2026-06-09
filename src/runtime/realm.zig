@@ -1050,6 +1050,10 @@ pub const Realm = struct {
     /// `WebAssembly.Memory.prototype`, cached at install so memory
     /// exports can be wrapped as `Memory` objects.
     wasm_memory_prototype: ?*@import("object.zig").JSObject = null,
+    /// `WebAssembly.Tag.prototype` / `Exception.prototype`, cached at
+    /// install so exported tags + uncaught exceptions can be wrapped.
+    wasm_tag_prototype: ?*@import("object.zig").JSObject = null,
+    wasm_exception_prototype: ?*@import("object.zig").JSObject = null,
     /// `WebAssembly.Module.prototype` / `Instance.prototype`, cached at
     /// install so `WebAssembly.compile` / `instantiate` can build those
     /// objects without `new`.

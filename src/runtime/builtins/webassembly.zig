@@ -194,6 +194,26 @@ pub fn install(realm: *Realm) !void {
         });
     }
 
+    const tag_ctor = try intrinsics.installConstructor(realm, .{
+        .ctor = tagConstructor,
+        .arity = 1,
+        .name = "Tag",
+        .install_global = false,
+    });
+    try ns.set(realm.allocator, "Tag", heap_mod.taggedFunction(tag_ctor.ctor));
+    realm.wasm_tag_prototype = tag_ctor.proto;
+
+    const exception_ctor = try intrinsics.installConstructor(realm, .{
+        .ctor = exceptionConstructor,
+        .arity = 2,
+        .name = "Exception",
+        .install_global = false,
+    });
+    try ns.set(realm.allocator, "Exception", heap_mod.taggedFunction(exception_ctor.ctor));
+    realm.wasm_exception_prototype = exception_ctor.proto;
+    try intrinsics.installNativeMethodOnProto(realm, exception_ctor.proto, "is", exceptionIs, 1);
+    try intrinsics.installNativeMethodOnProto(realm, exception_ctor.proto, "getArg", exceptionGetArg, 2);
+
     try realm.globals.put(realm.allocator, "WebAssembly", heap_mod.taggedObject(ns));
 }
 
@@ -715,12 +735,13 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
     var nfunc: usize = 0;
     var nglob: usize = 0;
     var ntab: usize = 0;
+    var ntag: usize = 0;
     for (module.imports) |imp| switch (imp.desc) {
         .func => nfunc += 1,
         .global => nglob += 1,
         .table => ntab += 1,
         .mem => {},
-        .tag => {}, // tags carry no engine cell; linked via identity below
+        .tag => ntag += 1,
     };
     if (module.imports.len == 0) return .{};
 
@@ -731,10 +752,12 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
     const funcs = a.alloc(wasm.FuncRef, nfunc) catch return error.OutOfMemory;
     const globals = a.alloc(u128, nglob) catch return error.OutOfMemory;
     const tables = a.alloc(*wasm.Table, ntab) catch return error.OutOfMemory;
+    const tags = a.alloc(*const wasm.TagType, ntag) catch return error.OutOfMemory;
     var memory: ?*const wasm.Memory = null;
     var fi: usize = 0;
     var gi: usize = 0;
     var ti: usize = 0;
+    var tgi: usize = 0;
 
     for (module.imports) |imp| {
         const v = try lookupImport(realm, import_obj, imp.module, imp.name);
@@ -752,12 +775,16 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
                 ti += 1;
             },
             .mem => memory = try resolveMemImport(realm, v),
-            .tag => {}, // tag identity resolution wired with the Tag object
+            .tag => {
+                tags[tgi] = tagTypeOf(v) orelse
+                    return throwLinkError(realm, "WebAssembly.Instance: tag import is not a WebAssembly.Tag");
+                tgi += 1;
+            },
         }
     }
     // JS-API imports share the provider's linear memory (writes are
     // mutually visible), unlike the spectest harness's snapshot.
-    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory, .share_memory = true };
+    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory, .share_memory = true, .tags = tags };
 }
 
 /// `importObject[module][name]`.
@@ -852,7 +879,10 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
                 const mobj = try makeMemory(realm, mem);
                 obj.set(realm.allocator, ex.name, mobj) catch return error.OutOfMemory;
             },
-            .tag => {}, // exposed as WebAssembly.Tag once the object lands
+            .tag => |tidx| {
+                const tobj = try makeTagForInstance(realm, ip, tidx);
+                obj.set(realm.allocator, ex.name, tobj) catch return error.OutOfMemory;
+            },
         }
     }
     return heap_mod.taggedObject(obj);
@@ -903,6 +933,15 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
         error.OutOfMemory => return error.OutOfMemory,
         // A JS-backed host import threw — re-raise its pending exception.
         error.HostThrew => return error.NativeThrew,
+        // An uncaught wasm exception surfaces to JS as a WebAssembly.Exception.
+        error.UncaughtException => {
+            if (rec.instance.pending_exn) |exn_rec| {
+                realm.pending_exception = try makeExceptionFromRecord(realm, exn_rec);
+                return error.NativeThrew;
+            }
+            return throwRuntimeError(realm, "WebAssembly: uncaught exception");
+        },
+        error.NullExnRef => return throwRuntimeError(realm, "WebAssembly: throw_ref of a null exnref"),
         else => return throwRuntimeError(realm, "WebAssembly exported function trapped"),
     };
     defer realm.allocator.free(results);
@@ -993,6 +1032,121 @@ fn marshalResult(realm: *Realm, vt: wasm.ValType, cell: u128) NativeError!Value 
 /// The `--allow=wasm` host refusal (HostEnsureCanCompileWasmBytes).
 fn wasmDisabled(realm: *Realm) NativeError {
     return intrinsics.throwEvalError(realm, "WebAssembly is not enabled; pass --allow=wasm to enable");
+}
+
+// ── WebAssembly.Tag / WebAssembly.Exception ────────────────────────
+
+const TagState = struct { tag_type: *const wasm.TagType };
+const ExceptionState = struct { tag: *const wasm.TagType, payload: []u128 };
+
+fn tagTypeOf(v: Value) ?*const wasm.TagType {
+    const obj = heap_mod.valueAsPlainObject(v) orelse return null;
+    const slot = obj.getWasmTag() orelse return null;
+    const st: *TagState = @ptrCast(@alignCast(slot));
+    return st.tag_type;
+}
+
+fn exceptionStateOf(v: Value) ?*ExceptionState {
+    const obj = heap_mod.valueAsPlainObject(v) orelse return null;
+    const slot = obj.getWasmException() orelse return null;
+    return @ptrCast(@alignCast(slot));
+}
+
+/// Wrap a canonical tag identity as a `WebAssembly.Tag` object.
+fn makeTagFromType(realm: *Realm, tt: *const wasm.TagType) NativeError!Value {
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, realm.wasm_tag_prototype);
+    const a = realm.wasmAllocator();
+    const st = a.create(TagState) catch return error.OutOfMemory;
+    st.* = .{ .tag_type = tt };
+    try obj.setWasmTag(realm.allocator, st);
+    return heap_mod.taggedObject(obj);
+}
+
+/// A wasm instance's exported tag, exposed as a `WebAssembly.Tag`.
+fn makeTagForInstance(realm: *Realm, ip: *wasm.Instance, tag_idx: u32) NativeError!Value {
+    if (tag_idx >= ip.tag_identities.len) return error.OutOfMemory;
+    return makeTagFromType(realm, ip.tag_identities[tag_idx]);
+}
+
+fn tagConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (!realm.allow_wasm) return wasmDisabled(realm);
+    const self = heap_mod.valueAsPlainObject(this_value) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Tag requires 'new'");
+    const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Tag expects a descriptor object");
+    const params_obj = heap_mod.valueAsPlainObject(desc.get("parameters")) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Tag: 'parameters' must be an array");
+    const n = params_obj.arrayLength();
+    const a = realm.wasmAllocator();
+    const params = a.alloc(wasm.ValType, n) catch return error.OutOfMemory;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        params[i] = readValType(params_obj.tryGetIndexedOwn(i) orelse Value.undefined_) orelse
+            return intrinsics.throwTypeError(realm, "WebAssembly.Tag: invalid parameter type");
+    }
+    const tt = a.create(wasm.TagType) catch return error.OutOfMemory;
+    tt.* = .{ .params = params };
+    const st = a.create(TagState) catch return error.OutOfMemory;
+    st.* = .{ .tag_type = tt };
+    try self.setWasmTag(realm.allocator, st);
+    return this_value;
+}
+
+/// Reify a thrown exception record as a `WebAssembly.Exception` — the JS
+/// view of an exception that escaped a wasm call uncaught.
+fn makeExceptionFromRecord(realm: *Realm, rec: *const wasm.ExnRecord) NativeError!Value {
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, realm.wasm_exception_prototype);
+    const a = realm.wasmAllocator();
+    const payload = a.alloc(u128, rec.payload.len) catch return error.OutOfMemory;
+    @memcpy(payload, rec.payload);
+    const st = a.create(ExceptionState) catch return error.OutOfMemory;
+    st.* = .{ .tag = rec.tag, .payload = payload };
+    try obj.setWasmException(realm.allocator, st);
+    return heap_mod.taggedObject(obj);
+}
+
+fn exceptionConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    if (!realm.allow_wasm) return wasmDisabled(realm);
+    const self = heap_mod.valueAsPlainObject(this_value) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Exception requires 'new'");
+    const tt = tagTypeOf(if (args.len > 0) args[0] else Value.undefined_) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Exception expects a WebAssembly.Tag");
+    const payload_obj = heap_mod.valueAsPlainObject(if (args.len > 1) args[1] else Value.undefined_) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Exception expects a payload array");
+    const n: u32 = @intCast(tt.params.len);
+    const a = realm.wasmAllocator();
+    const payload = a.alloc(u128, n) catch return error.OutOfMemory;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        payload[i] = try marshalArg(realm, tt.params[i], payload_obj.tryGetIndexedOwn(i) orelse Value.undefined_);
+    }
+    const st = a.create(ExceptionState) catch return error.OutOfMemory;
+    st.* = .{ .tag = tt, .payload = payload };
+    try self.setWasmException(realm.allocator, st);
+    return this_value;
+}
+
+fn exceptionIs(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const st = exceptionStateOf(this_value) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Exception.prototype.is called on a non-Exception");
+    const tt = tagTypeOf(if (args.len > 0) args[0] else Value.undefined_);
+    return Value.fromBool(tt != null and st.tag == tt.?);
+}
+
+fn exceptionGetArg(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const st = exceptionStateOf(this_value) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Exception.prototype.getArg called on a non-Exception");
+    const tt = tagTypeOf(if (args.len > 0) args[0] else Value.undefined_) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Exception.prototype.getArg expects a WebAssembly.Tag");
+    if (st.tag != tt)
+        return intrinsics.throwTypeError(realm, "WebAssembly.Exception.prototype.getArg: tag does not match this exception");
+    const idx_f = arith.toNumber(if (args.len > 1) args[1] else Value.undefined_);
+    if (!(idx_f >= 0) or idx_f >= @as(f64, @floatFromInt(st.payload.len)))
+        return intrinsics.throwRangeError(realm, "WebAssembly.Exception.prototype.getArg: index out of range");
+    const idx: usize = @intFromFloat(idx_f);
+    return marshalResult(realm, st.tag.params[idx], st.payload[idx]);
 }
 
 // ── WebAssembly.CompileError / LinkError / RuntimeError ─────────────

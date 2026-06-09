@@ -873,3 +873,39 @@ test "an externref still in a table survives an explicit GC" {
         "globalThis.__r = (t.get(0) === o && t.get(0).tag === 5) ? 1 : 0;";
     try expectIntWasmGc(setup, 1);
 }
+
+test "an uncaught wasm exception surfaces to JS as a WebAssembly.Exception" {
+    // (tag $t (param i32)) (func (export "f") i32.const 42; throw $t) (export "t" tag $t)
+    const src =
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 1,8,2,96,0,0,96,1,127,0, 3,2,1,0, 13,3,1,0,1, 7,9,2,1,102,0,0,1,116,4,0, 10,8,1,6,0,65,42,8,0,11]);" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes));" ++
+        "const tag = inst.exports.t;" ++
+        "let r = -1;" ++
+        "try { inst.exports.f(); } catch (e) {" ++
+        "  if (e instanceof WebAssembly.Exception && e.is(tag)) r = e.getArg(tag, 0);" ++
+        "}" ++
+        "r";
+    try expectIntWasm(src, 42);
+}
+
+test "WebAssembly.Tag and Exception round-trip from JS" {
+    const src =
+        "const tag = new WebAssembly.Tag({ parameters: ['i32', 'f64'] });" ++
+        "const ex = new WebAssembly.Exception(tag, [7, 2.5]);" ++
+        "(ex.is(tag) ? 1 : 0) + (ex.getArg(tag, 0) === 7 ? 10 : 0) + (ex.getArg(tag, 1) === 2.5 ? 100 : 0)";
+    try expectIntWasm(src, 111);
+}
+
+test "a JS WebAssembly.Tag imported into wasm shares identity across the boundary" {
+    // import "e"."t" (tag (param i32)); func (export "f") i32.const 9; throw $t
+    const src =
+        "const tag = new WebAssembly.Tag({ parameters: ['i32'] });" ++
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 1,8,2,96,0,0,96,1,127,0, 2,8,1,1,101,1,116,4,0,1, 3,2,1,0, 7,5,1,1,102,0,0, 10,8,1,6,0,65,9,8,0,11]);" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { t: tag } });" ++
+        "let r = -1;" ++
+        "try { inst.exports.f(); } catch (ex) {" ++
+        "  if (ex instanceof WebAssembly.Exception && ex.is(tag)) r = ex.getArg(tag, 0);" ++
+        "}" ++
+        "r";
+    try expectIntWasm(src, 9);
+}

@@ -566,6 +566,11 @@ pub const JSObjectExtension = struct {
     wasm_global: ?*anyopaque = null,
     wasm_table: ?*anyopaque = null,
     wasm_memory: ?*anyopaque = null,
+    /// A `WebAssembly.Tag`'s backing record (its canonical `*TagType`)
+    /// and a `WebAssembly.Exception`'s (tag identity + payload copy).
+    /// Opaque, arena-owned.
+    wasm_tag: ?*anyopaque = null,
+    wasm_exception: ?*anyopaque = null,
     /// Cold per-kind state moved off the base `JSObject` (each cost
     /// 8-16 bytes on every object but is set by one rare kind):
     /// a Date's [[DateValue]], a boxed-primitive wrapper's payload,
@@ -947,10 +952,10 @@ pub const JSObject = struct {
     // `capability_record` (§27.2.1.5 PromiseCapability state) moved to
     // `JSObjectExtension` — set only on the transient capability
     // bound-this. Access via `getCapabilityRecord` / `setCapabilityRecord`.
-    // `WebAssembly.{Module,Global,Table,Memory}` host backings moved
-    // to `JSObjectExtension` — only those rare exotics carry them, so
-    // they no longer cost 32 bytes on every object. Access via the
-    // `getWasm*` / `setWasm*` helpers below.
+    // `WebAssembly.{Module,Global,Table,Memory,Tag,Exception}` host
+    // backings moved to `JSObjectExtension` — only those rare exotics
+    // carry them, so they no longer cost 32 bytes on every object. Access
+    // via the `getWasm*` / `setWasm*` helpers below.
     // `Promise.prototype.finally` machinery (`finally_callback`,
     // `finally_value`, `finally_constructor`) moved to
     // `JSObjectExtension` — set only on the per-`.finally()` context
@@ -1301,6 +1306,18 @@ pub const JSObject = struct {
     }
     pub fn setWasmMemory(self: *JSObject, allocator: std.mem.Allocator, v: ?*anyopaque) !void {
         (try self.getOrCreateExtension(allocator)).wasm_memory = v;
+    }
+    pub fn getWasmTag(self: *const JSObject) ?*anyopaque {
+        return if (self.extension) |ext| ext.wasm_tag else null;
+    }
+    pub fn setWasmTag(self: *JSObject, allocator: std.mem.Allocator, v: ?*anyopaque) !void {
+        (try self.getOrCreateExtension(allocator)).wasm_tag = v;
+    }
+    pub fn getWasmException(self: *const JSObject) ?*anyopaque {
+        return if (self.extension) |ext| ext.wasm_exception else null;
+    }
+    pub fn setWasmException(self: *JSObject, allocator: std.mem.Allocator, v: ?*anyopaque) !void {
+        (try self.getOrCreateExtension(allocator)).wasm_exception = v;
     }
 
     // ── Cold per-kind state — extension-backed (see migration note) ─

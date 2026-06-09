@@ -670,11 +670,22 @@ fn readBlockType(v: *Validator) !BlockType {
 /// Map an index in the function index space to its type signature,
 /// accounting for imported functions preceding the defined ones.
 /// The func type of a tag (its parameters are the exception payload).
-/// Tag imports are not yet supported, so the index is into the local
-/// tag section only.
+/// The index runs over the tag space — imported tags first, then the
+/// tag section.
 fn tagType(module: *const Module, tag_index: u32) !types.FuncType {
-    if (tag_index >= module.tags.len) return error.UnknownTag;
-    const ti = module.tags[tag_index].type_index;
+    var imported: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .tag) {
+            if (tag_index == imported) {
+                if (imp.desc.tag >= module.types.len) return error.UnknownType;
+                return module.types[imp.desc.tag];
+            }
+            imported += 1;
+        }
+    }
+    const local = tag_index - imported;
+    if (local >= module.tags.len) return error.UnknownTag;
+    const ti = module.tags[local].type_index;
     if (ti >= module.types.len) return error.UnknownType;
     return module.types[ti];
 }
