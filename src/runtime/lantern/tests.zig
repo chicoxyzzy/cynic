@@ -5340,6 +5340,26 @@ fn expectScriptIntUnderAlternatingGcPressure(source: []const u8, expected: i32) 
     } else return error.NotANumber;
 }
 
+/// String-result counterpart of `expectScriptIntUnderAlternatingGcPressure`.
+/// Uses `setGcThreshold(1)` so both minor (every allocation) and
+/// major (every 8) cycles fire — the only way a native local that
+/// gets promoted to the mature generation on a minor cycle is then
+/// reclaimed. Plain `gc_threshold = 1` never fires a major cycle, so
+/// an unrooted-but-promoted pointer survives there and the bug hides.
+fn expectScriptStringUnderAlternatingGcPressure(source: []const u8, expected: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    realm.heap.setGcThreshold(1);
+    const v = switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isString());
+    const s: *JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings(expected, s.flatBytes());
+}
+
 fn expectScriptStringUnderGcPressure(source: []const u8, expected: []const u8) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
@@ -5891,6 +5911,60 @@ test "GC: RegExp.prototype[@@split] with captures survives gc_threshold=1" {
     try expectScriptStringUnderGcPressure(
         \\"a1b2c".split(/(\d)/).join("-");
     , "a-1-b-2-c");
+}
+
+test "GC: RegExp.prototype[@@split] fresh subject survives gc_threshold=1" {
+    // §22.2.5.13 step 3 — `Let S be ? ToString(string)`. Calling
+    // `@@split` directly with a *non-string* makes S a freshly
+    // allocated JSString that nothing on the caller frame roots —
+    // unlike the `"literal".split(...)` form above, whose subject is
+    // pinned in the constant pool. Step 6 then runs `ToString(?
+    // Get(rx, "flags"))`; with `flags` an object carrying a user
+    // `toString`, that ToString re-enters bytecode — a GC safe point.
+    // Under threshold=1 the sweep there freed S before step 15's
+    // `lengthInCodeUnits(s.flatBytes())`, segfaulting on the dangling
+    // pointer (test262 `Symbol.split/coerce-flags.js`). S must be
+    // rooted at entry.
+    try expectScriptStringUnderAlternatingGcPressure(
+        \\var rx = /0/;
+        \\Object.defineProperty(rx, "flags", { value: { toString() {
+        \\  var t = ""; for (var i = 0; i < 300; i++) { t = ("" + i).padStart(6, "0"); }
+        \\  return "y";
+        \\} } });
+        \\rx[Symbol.split](10203).join("-");
+    , "1-2-3");
+}
+
+test "GC: RegExp.prototype[@@match] fresh subject survives gc_threshold=1" {
+    // §22.2.5.8 step 4 — same fresh-S hazard as @@split: a non-string
+    // argument forces ToString to allocate S inside the method with no
+    // caller-frame root, and `ToString(? Get(rx, "flags"))` re-enters
+    // bytecode (the object `flags`' `toString`) before the match loop
+    // dereferences S via RegExpExec. A threshold=1 sweep freed S unless
+    // it is rooted at entry.
+    try expectScriptStringUnderAlternatingGcPressure(
+        \\var rx = /\d/g;
+        \\Object.defineProperty(rx, "flags", { value: { toString() {
+        \\  var t = ""; for (var i = 0; i < 300; i++) { t = ("" + i).padStart(6, "0"); }
+        \\  return "g";
+        \\} } });
+        \\rx[Symbol.match](12345).join("-");
+    , "1-2-3-4-5");
+}
+
+test "GC: RegExp.prototype[@@search] fresh subject survives gc_threshold=1" {
+    // §22.2.6.13 — `@@search` holds the fresh ToString'd subject S
+    // across the `lastIndex` get (a user getter here → bytecode → GC
+    // safe point) and then passes S into RegExpExec via the user
+    // `exec`. Under threshold=1 a sweep at the getter freed S, and the
+    // dangling string reached `exec`. S must be rooted at entry.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\var rx = { get lastIndex() {
+        \\  var t = ""; for (var i = 0; i < 300; i++) { t = ("" + i).padStart(6, "0"); }
+        \\  return 0;
+        \\}, exec(str) { return /3/.exec(str); } };
+        \\RegExp.prototype[Symbol.search].call(rx, 10203);
+    , 4);
 }
 
 test "GC: TypedArray.prototype.map species result survives gc_threshold=1" {

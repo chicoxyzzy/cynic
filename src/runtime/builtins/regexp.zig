@@ -156,6 +156,17 @@ fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // step 3 — `Let S be ? ToString(string)`.
     const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
 
+    // Root the subject string S now — and the result array A below.
+    // Every step from here re-enters user JS (the `flags` getter +
+    // ToString, the `lastIndex` Set) and allocates (A), any of which
+    // can GC and sweep S, a bare native local, before the match loop
+    // reads it (§22.2.5.8 step 6). S is unreachable from the moment
+    // ToString returns until pushed here — a `flags` whose `toString`
+    // re-enters bytecode frees it.
+    const match_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer match_scope.close();
+    match_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
+
     // step 4 — `Let flags be ? ToString(? Get(rx, "flags"))`. The
     // `flags-tostring-error` / `get-flags-err` fixtures rely on
     // the `flags` getter / its `toString` propagating through the
@@ -182,21 +193,15 @@ fn regexpProtoMatch(realm: *Realm, this_value: Value, args: []const Value) Nativ
     try setPropertyChainOrThrow(realm, rx, "lastIndex", Value.fromInt32(0));
 
     // step 6.c — `Let A be ! ArrayCreate(0)`. Allocate an array-
-    // exotic JSObject so `Array.isArray(result)` is true.
+    // exotic JSObject so `Array.isArray(result)` is true. Root it on
+    // the scope opened above; the match loop re-enters user JS
+    // (RegExpExec, the `Get(result, "0")` accessor walk, ToString)
+    // and allocates the per-match index/value strings, any of which
+    // can drive a GC mid-build (§22.2.5.8 step 6).
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-
-    // Root the result array A and the subject string S across the
-    // match loop. Each iteration re-enters user JS (RegExpExec, the
-    // `Get(result, "0")` accessor walk, ToString) and allocates the
-    // per-match index/value strings — any allocation can drive a GC
-    // that would otherwise sweep these bare locals while the loop is
-    // still building A (§22.2.5.8 step 6).
-    const match_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer match_scope.close();
     match_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
-    match_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
 
     // step 6.d — `Let n be 0`.
     var n: i32 = 0;
@@ -744,10 +749,24 @@ fn regexpProtoSearch(realm: *Realm, this_value: Value, args: []const Value) Nati
     // step 3 — `Let S be ? ToString(string)`.
     const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
 
+    // Root S, the cached previous `lastIndex`, and (below) the exec
+    // result for the whole operation. §22.2.6.13 re-enters user JS at
+    // the `lastIndex` getter, the SameValue-gated `lastIndex` Set,
+    // `RegExpExec` (via the user `exec`), and the `index` getter —
+    // each of which can GC. S is consumed inside RegExpExec before
+    // the exec call frame roots it (a `lastIndex` getter that
+    // re-enters bytecode frees S first); `previousLastIndex` and the
+    // result object are held across the post-exec get/restore. None
+    // is reachable from a GC root without this scope.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(Value.fromString(s)) catch return error.OutOfMemory;
+
     // step 4 — `Let previousLastIndex be ? Get(rx, "lastIndex")`.
     // The `get-lastindex-err` fixture throws from the getter; it
     // surfaces through `getPropertyChain`.
     const previous_last_index = try intrinsics.getPropertyChain(realm, rx, "lastIndex");
+    scope.push(previous_last_index) catch return error.OutOfMemory;
 
     // step 5 — `If SameValue(previousLastIndex, +0𝔽) is false,
     // perform ? Set(rx, "lastIndex", +0𝔽, true)`. The SameValue
@@ -766,6 +785,7 @@ fn regexpProtoSearch(realm: *Realm, this_value: Value, args: []const Value) Nati
     // `cstm-exec-return-invalid` fixture asserts the post-call
     // Object-or-Null check raises TypeError.
     const result_v = try regExpExecGeneric(realm, rx, s);
+    scope.push(result_v) catch return error.OutOfMemory;
 
     // step 7 — `Let currentLastIndex be ? Get(rx, "lastIndex")`.
     const current_last_index = try intrinsics.getPropertyChain(realm, rx, "lastIndex");
@@ -812,6 +832,21 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // step 3 — `Let S be ? ToString(string)`.
     const s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
 
+    // Root the subject string S — and below it the cloned flags
+    // string, the species-built splitter, and the result array A —
+    // for the whole operation. Every step from here re-enters user
+    // JS (SpeciesConstructor's `constructor` / `@@species` gets, the
+    // `flags` getter + ToString, `Construct(C, «rx, newFlags»)`) and
+    // allocates, any of which can drive a GC that would otherwise
+    // sweep these bare native locals before step 15 reads
+    // `s.flatBytes()` and the loop builds A (§22.2.5.13). S in
+    // particular is dead the moment ToString returns until it is
+    // pushed here — a `flags` whose `toString` re-enters bytecode
+    // (test262 `Symbol.split/coerce-flags.js`) freed it mid-build.
+    const split_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer split_scope.close();
+    split_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
+
     // step 4 — `Let C be ? SpeciesConstructor(rx, %RegExp%)`.
     const builtin_regexp = blk: {
         const ctor_v = realm.globals.get("RegExp") orelse return throwTypeError(realm, "RegExp.prototype[Symbol.split]: %RegExp% missing");
@@ -838,6 +873,10 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
         buf.append(realm.allocator, 'y') catch return error.OutOfMemory;
         break :nf realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     };
+    // `newFlags` is held across the species `Construct` re-entry just
+    // below; root it so that re-entry's GC can't sweep it before the
+    // splitter args are copied into the constructor's frame.
+    split_scope.push(Value.fromString(new_flags_js)) catch return error.OutOfMemory;
 
     // step 10 — `Let splitter be ? Construct(C, « rx, newFlags »)`.
     const splitter_args = [_]Value{ heap_mod.taggedObject(rx), Value.fromString(new_flags_js) };
@@ -859,26 +898,19 @@ fn regexpProtoSplit(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // constructors, but a user-supplied species constructor that
     // returns a primitive would land here. Be defensive.
     const splitter = heap_mod.valueAsPlainObject(splitter_v) orelse return throwTypeError(realm, "RegExp.prototype[Symbol.split]: species constructor returned non-Object");
+    split_scope.push(splitter_v) catch return error.OutOfMemory;
 
     // step 11 — `Let A be ! ArrayCreate(0)`. Allocate an array-
-    // exotic JSObject so `Array.isArray(result)` is true.
+    // exotic JSObject so `Array.isArray(result)` is true. Root it on
+    // the scope opened above; the split loop re-enters user JS
+    // (RegExpExec via the splitter's `exec`, the `lastIndex` /
+    // `length` / capture Gets, ToLength) and allocates the
+    // per-segment substrings and index keys, any of which can drive
+    // a GC mid-build (§22.2.5.13 step 19).
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-
-    // Root the result array A, the subject string S, and the
-    // species-constructed splitter across the split loop. Each
-    // iteration re-enters user JS (RegExpExec via the splitter's
-    // `exec`, the `lastIndex` / `length` / capture Gets, ToLength)
-    // and allocates the per-segment substrings and index keys — any
-    // allocation can drive a GC that would otherwise sweep these
-    // bare locals while the loop is still building A (§22.2.5.13
-    // step 19).
-    const split_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer split_scope.close();
     split_scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
-    split_scope.push(Value.fromString(s)) catch return error.OutOfMemory;
-    split_scope.push(heap_mod.taggedObject(splitter)) catch return error.OutOfMemory;
 
     // step 12 — `Let lengthA be 0`.
     var length_a: i32 = 0;
