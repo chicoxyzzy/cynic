@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) void {
 
     // `zig build fuzz` — the Fuzzilli REPRL host binary. Built with
     // `-fsanitize-coverage=trace-pc-guard` so every basic block calls
-    // into `src/cli/fuzz_coverage.zig`'s edge-tracking hooks (LLVM
+    // into `tools/fuzz/fuzz_coverage.zig`'s edge-tracking hooks (LLVM
     // emits the calls; Zig's `sanitize_coverage_trace_pc_guard` flag
     // wires it on). Kept separate from `cynic` because the
     // instrumentation imposes a per-edge function-call overhead that
@@ -88,26 +88,6 @@ pub fn build(b: *std.Build) void {
     });
     lib_mod_fuzz.addOptions("build_options", lib_build_options);
     cynic_fuzz_mod.addImport("cynic", lib_mod_fuzz);
-    // `fuzz_coverage` and `fuzz_reprl` live in `src/cli/` — they are
-    // dual-use, also compiled into the regular `cynic` binary (the
-    // `cynic fuzz-reprl` subcommand + coverage symbols). The host
-    // entry in `tools/fuzz/` reaches them through the module graph so
-    // it doesn't relative-import across trees.
-    const fuzz_coverage_mod = b.createModule(.{
-        .root_source_file = b.path("src/cli/fuzz_coverage.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-    });
-    const fuzz_reprl_mod = b.createModule(.{
-        .root_source_file = b.path("src/cli/fuzz_reprl.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-    });
-    fuzz_reprl_mod.addImport("cynic", lib_mod_fuzz);
-    cynic_fuzz_mod.addImport("fuzz_coverage", fuzz_coverage_mod);
-    cynic_fuzz_mod.addImport("fuzz_reprl", fuzz_reprl_mod);
     const cynic_fuzz = b.addExecutable(.{
         .name = "cynic-fuzz",
         .root_module = cynic_fuzz_mod,
@@ -116,14 +96,14 @@ pub fn build(b: *std.Build) void {
     // to `__sanitizer_cov_trace_pc_guard(*u32)` at every edge,
     // plus a one-time `__sanitizer_cov_trace_pc_guard_init` over
     // the `__sancov_guards` section — both defined in
-    // `src/cli/fuzz_coverage.zig`.
+    // `tools/fuzz/fuzz_coverage.zig`.
     cynic_fuzz.sanitize_coverage_trace_pc_guard = true;
     // LLVM's stack-depth probe destination (`__sancov_lowest_stack`)
     // is defined as a C `__thread` global — Zig's TLS layout on
     // macOS doesn't quite line up with the symbol shape LLVM's
-    // sancov pass emits. See `src/cli/fuzz_coverage_sancov.c`.
+    // sancov pass emits. See `tools/fuzz/fuzz_coverage_sancov.c`.
     cynic_fuzz_mod.addCSourceFile(.{
-        .file = b.path("src/cli/fuzz_coverage_sancov.c"),
+        .file = b.path("tools/fuzz/fuzz_coverage_sancov.c"),
         .flags = &.{},
     });
     const install_cynic_fuzz = b.addInstallArtifact(cynic_fuzz, .{});
@@ -149,6 +129,27 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all unit tests");
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // `zig build test-fuzz` runs the Fuzzilli REPRL host unit tests
+    // (the REPRL protocol encoder + the coverage-hook arithmetic).
+    // These live in `tools/fuzz/`, outside `src/`, so the production
+    // `cynic` binary carries no fuzzing code; they gate separately
+    // from `zig build test`. A plain (uninstrumented) optimize mode
+    // is deliberate — the tests cover the protocol/arithmetic logic,
+    // not the sancov instrumentation, and `fuzz_coverage.zig`'s
+    // `export fn` sancov hooks compile fine without the `.c` shim in
+    // a non-instrumented build.
+    const fuzz_tests_mod = b.createModule(.{
+        .root_source_file = b.path("tools/fuzz/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    fuzz_tests_mod.addImport("cynic", lib_mod);
+    const fuzz_tests = b.addTest(.{ .root_module = fuzz_tests_mod, .filters = test_filters });
+    const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
+    const test_fuzz_step = b.step("test-fuzz", "Run the Fuzzilli REPRL host unit tests");
+    test_fuzz_step.dependOn(&run_fuzz_tests.step);
 
     // `zig build test-ses` — hand-written SES positive-coverage
     // tests in `tests/ses/`. Each fixture is a standalone JS file

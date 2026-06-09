@@ -9,12 +9,12 @@
 //!         `SHM_ID` env var pointing at a POSIX shared-memory
 //!         coverage bitmap. Running directly (no FDs, no SHM_ID)
 //!         maps no bitmap, then bombs out of `fuzz_reprl.run`
-//!         with the same focused error `cynic fuzz-reprl` prints
-//!         — useful for protocol smoke tests.
+//!         with a focused error naming the expected FDs — useful
+//!         for protocol smoke tests.
 
 const std = @import("std");
-const coverage = @import("fuzz_coverage");
-const fuzz_reprl = @import("fuzz_reprl");
+const coverage = @import("fuzz_coverage.zig");
+const fuzz_reprl = @import("fuzz_reprl.zig");
 
 pub fn main(init: std.process.Init) !void {
     // Attach Fuzzilli's coverage bitmap when SHM_ID is set;
@@ -62,11 +62,4 @@ pub fn main(init: std.process.Init) !void {
         },
         else => return err,
     };
-}
-
-// Force test discovery into the coverage module so its unit tests
-// run under `zig build test`. Same dodge as `main.zig` for the
-// REPRL protocol tests.
-test {
-    _ = @import("fuzz_coverage");
 }

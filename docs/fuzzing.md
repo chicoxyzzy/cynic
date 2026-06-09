@@ -113,30 +113,37 @@ profile changes in `CynicProfile.swift`.
 
 `cynic-fuzz` builds with `-fsanitize-coverage=trace-pc-guard` so
 every basic block calls into the LLVM SanitizerCoverage runtime.
-The hooks in `src/cli/fuzz_coverage.zig` map the POSIX shared-memory
+The hooks in `tools/fuzz/fuzz_coverage.zig` map the POSIX shared-memory
 region Fuzzilli sets up via `$SHM_ID`, publish edge-hit bits into
 its bitmap, and reset between iterations. Fuzzilli reads the
 bitmap to grow the corpus toward un-covered edges.
 
 The thread-local `__sancov_lowest_stack` symbol that LLVM's
 stack-depth probe references is defined via a tiny C file
-(`src/cli/fuzz_coverage_sancov.c`); Zig's TLS emission on Mach-O
+(`tools/fuzz/fuzz_coverage_sancov.c`); Zig's TLS emission on Mach-O
 didn't line up with the symbol shape LLVM expected, and C's
 `__thread` does. See the file for the rationale.
+
+The REPRL protocol encoder and the coverage-hook arithmetic carry
+unit tests; they live with the host in `tools/fuzz/` (outside `src/`,
+so the production `cynic` binary ships no fuzzing code) and run via:
+
+    zig build test-fuzz
 
 ## Pre-Fuzzilli sanity
 
 Before launching a long run, smoke-test the REPRL protocol with
-a fake parent — no need to wait for Fuzzilli to build:
+a fake parent — no need to wait for Fuzzilli to build. Run the
+`cynic-fuzz` binary bare: it speaks the same protocol, and without
+the inherited FDs it surfaces the documented error instead of
+looping.
 
-    # The `cynic fuzz-reprl` subcommand on the regular cynic binary
-    # uses the same protocol but without sancov instrumentation.
-    # Invoking without inherited FDs surfaces the documented error.
-    cynic fuzz-reprl
-    # → error: `fuzz-reprl` expects FDs 100/101/102/103 inherited
+    zig build fuzz
+    ./zig-out/bin/cynic-fuzz
+    # → error: `cynic-fuzz` expects FDs 100/101/102/103 inherited
     #          from Fuzzilli; invoke via the Fuzzilli harness, not
     #          directly.
 
 That error message is the smoke test — if the binary instead
 panics or segfaults, the engine has a regression. Worth running
-after any rebase or refactor that touches `src/cli/fuzz_reprl.zig`.
+after any rebase or refactor that touches `tools/fuzz/fuzz_reprl.zig`.

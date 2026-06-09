@@ -127,6 +127,14 @@ jobs:
         # failure exits 1.
         run: zig build test-ses
 
+      - name: Fuzzilli REPRL host tests
+        # The Fuzzilli REPRL host lives in `tools/fuzz/` (outside
+        # `src/`, so the production `cynic` binary ships no fuzzing
+        # code). Its REPRL protocol encoder + coverage-hook
+        # arithmetic unit tests left the main test binary in that
+        # move, so gate them here. Gating: any failure exits 1.
+        run: zig build test-fuzz
+
   fmt-check:
     name: zig fmt
     runs-on: ubuntu-latest

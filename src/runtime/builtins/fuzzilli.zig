@@ -2,8 +2,8 @@
 //! `Realm.installTestGlobals`; reachable only from a debug-enabled
 //! realm (production `cynic` CLI never installs it). The REPRL
 //! protocol loop that drives this from Fuzzilli's parent lives in
-//! `src/cli/fuzz_reprl.zig` — split because the runtime library
-//! must not depend on the CLI module.
+//! `tools/fuzz/fuzz_reprl.zig` — kept outside `src/` so the runtime
+//! library and the production `cynic` binary carry no fuzzing code.
 //!
 //! Two ops, both tracking Fuzzilli's convention so the upstream
 //! profile's `additionalCode` stays portable across engines:
@@ -32,7 +32,7 @@ const fuzzilli_host = builtin.target.os.tag != .freestanding and builtin.target.
 
 /// Fuzzilli's differential output sink (data-write fd). Engine
 /// writes `FUZZILLI_PRINT` output here; Fuzzilli reads it for
-/// differential comparison. Must stay in sync with `cli/fuzz_reprl.zig`'s
+/// differential comparison. Must stay in sync with `tools/fuzz/fuzz_reprl.zig`'s
 /// fd constants — the REPRL protocol mandates the exact numbers. Typed
 /// as `i32` (== `std.posix.fd_t` on POSIX) so the declaration is valid
 /// on `freestanding`, where `fd_t` is `void`.

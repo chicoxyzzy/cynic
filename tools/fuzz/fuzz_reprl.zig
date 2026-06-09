@@ -1,8 +1,8 @@
-//! `cynic fuzz-reprl` — Fuzzilli REPRL (Read-Eval-Print-Reset Loop)
-//! host. Implements the protocol Fuzzilli expects from a target
-//! engine: a 4-FD pipe pair (control + data) inherited from the
-//! parent, a `HELO` handshake, then a length-prefixed exec loop
-//! with a 4-byte status word per sample.
+//! `cynic-fuzz` REPRL (Read-Eval-Print-Reset Loop) host. Implements
+//! the protocol Fuzzilli expects from a target engine: a 4-FD pipe
+//! pair (control + data) inherited from the parent, a `HELO`
+//! handshake, then a length-prefixed exec loop with a 4-byte status
+//! word per sample.
 //!
 //! The runner is invoked by Fuzzilli with the FDs preset, not by
 //! the user directly. Outside that context the FDs are unopened
@@ -13,7 +13,7 @@
 //! Posture is fixed: `--unhardened` + `--allow=eval` +
 //! `installTestGlobals` (so the `fuzzilli(op, arg)` host hook is
 //! reachable). Hardened fuzzing — frozen primordials confining
-//! mutation — gets its own subcommand later if it's worth the
+//! mutation — can get its own host entry later if it's worth the
 //! reduced reachable behavior.
 //!
 //! Protocol summary (V8 / JSC / SpiderMonkey converge on this):
@@ -213,8 +213,8 @@ fn executeOne(allocator: std.mem.Allocator, source: []const u8, gc_threshold: ?u
 /// `on_iteration_start`, when non-null, fires at the top of every
 /// iteration — before the sample executes. The `cynic-fuzz`
 /// binary passes `fuzz_coverage.reset` here to clear Fuzzilli's
-/// bitmap and re-arm the sancov guards between samples; the
-/// regular `cynic fuzz-reprl` smoke-test path passes null.
+/// bitmap and re-arm the sancov guards between samples; an
+/// uninstrumented host (e.g. a protocol smoke test) passes null.
 pub fn run(
     allocator: std.mem.Allocator,
     gc_threshold: ?u32,

@@ -1910,7 +1910,7 @@ pub const Realm = struct {
         // `fuzzilli(op, arg)` — Fuzzilli's host hook. Exposed only
         // through the test-globals path; the production `cynic`
         // CLI never installs it. Native lives in `builtins/fuzzilli.zig`;
-        // the REPRL loop that drives it sits in `cli/fuzz_reprl.zig`.
+        // the REPRL loop that drives it sits in `tools/fuzz/fuzz_reprl.zig`.
         const fuzzilli_fn = try self.heap.allocateFunctionNative(self, @import("builtins/fuzzilli.zig").fuzzilliNative, 2, "fuzzilli");
         try self.globals.put(self.allocator, "fuzzilli", heap_mod.taggedFunction(fuzzilli_fn));
 
