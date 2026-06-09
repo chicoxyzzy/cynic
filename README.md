@@ -125,7 +125,7 @@ The shape, in broad strokes — the per-bucket numbers live in the
   in-place interpreter (SIMD, reference types, memory64, tail
   calls, relaxed-SIMD, and the exception-handling proposal —
   `try_table` / `throw` / `throw_ref` / `exnref`). **100 %
-  of the commands it scores (56510/56510)** on the official
+  of the commands it scores (56868/56868)** on the official
   WebAssembly spec testsuite — the scored set excludes tests for
   not-yet-implemented proposals (see
   [`wasm-results.md`](wasm-results.md)). Off by default; opt in with

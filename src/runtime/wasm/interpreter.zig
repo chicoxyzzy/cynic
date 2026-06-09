@@ -455,6 +455,20 @@ pub const Instance = struct {
         }
         return null;
     }
+
+    /// The canonical identity of an exported tag — so another module
+    /// importing it shares the same exception kind (cross-module catch).
+    pub fn exportedTag(self: *const Instance, name: []const u8) ?*const TagType {
+        for (self.module.exports) |ex| {
+            switch (ex.desc) {
+                .tag => |idx| if (std.mem.eql(u8, ex.name, name)) {
+                    if (idx < self.tag_identities.len) return self.tag_identities[idx];
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
 };
 
 /// Validate every function and lay out runtime state into `self` (which

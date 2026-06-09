@@ -254,16 +254,14 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
     var nfunc: usize = 0;
     var nglob: usize = 0;
     var ntab: usize = 0;
+    var ntag: usize = 0;
     for (modp.imports) |imp| {
         switch (imp.desc) {
             .func => nfunc += 1,
             .global => nglob += 1,
             .table => ntab += 1,
             .mem => {},
-            // The harness has no host tag objects to link against, so a
-            // tag import is unlinkable (reported as a load failure, not a
-            // crash) rather than counted into an index space.
-            .tag => return error.Unlinkable,
+            .tag => ntag += 1,
         }
     }
     if (modp.imports.len == 0) return .{};
@@ -271,10 +269,12 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
     const funcs = try arena.alloc(wasm.FuncRef, nfunc);
     const globals = try arena.alloc(u128, nglob);
     const tables = try arena.alloc(*wasm.Table, ntab);
+    const tags = try arena.alloc(*const wasm.TagType, ntag);
     var memory: ?*const wasm.Memory = null;
     var fi: usize = 0;
     var gi: usize = 0;
     var tj: usize = 0;
+    var tk: usize = 0;
     for (modp.imports) |imp| {
         switch (imp.desc) {
             .func => |type_idx| {
@@ -317,12 +317,14 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
                     memory = provider.exportedMemory(imp.name) orelse return error.Unlinkable;
                 }
             },
-            // Unreachable in practice — the counting pass above bails on a
-            // tag import — but kept explicit so the switch stays total.
-            .tag => return error.Unlinkable,
+            .tag => {
+                const provider = registry.get(imp.module) orelse return error.Unlinkable;
+                tags[tk] = provider.exportedTag(imp.name) orelse return error.Unlinkable;
+                tk += 1;
+            },
         }
     }
-    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory };
+    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory, .tags = tags };
 }
 
 fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap, registry: *const Registry) !?Loaded {
@@ -408,6 +410,20 @@ fn scoreReturn(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*was
             return;
         },
     };
+    // Relaxed-SIMD ops are non-deterministic: the spec permits a range of
+    // valid results, which wast2json emits as an `either` list (no single
+    // `expected`). Accept the engine's result if it matches any option —
+    // Sarcasm computes one deterministic value that must be among them.
+    if (cmd.get("either")) |ei| {
+        for (ei.array.items) |opt| {
+            if (values.len == 1 and matchValue(opt.object, values[0])) {
+                counts.pass += 1;
+                return;
+            }
+        }
+        counts.fail += 1;
+        return;
+    }
     const expected = (cmd.get("expected") orelse {
         counts.fail += 1;
         return;
@@ -641,11 +657,27 @@ fn writeResults(gpa: std.mem.Allocator, io: std.Io, total: Counts, files: u32) !
     const content = try std.fmt.allocPrint(gpa,
         \\# Sarcasm — WebAssembly spec testsuite results
         \\
-        \\Scored by `zig build wasm-testsuite` against the official
-        \\WebAssembly spec testsuite (the `.wast` corpus, preprocessed with
-        \\`wast2json`). Each `assert_*` / `action` command is a plain pass or
-        \\fail; commands that need cross-module linking or v128/ref values
-        \\Sarcasm does not yet support are counted as skips.
+        \\Scored by `zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite`
+        \\against the official WebAssembly spec testsuite (the `.wast` corpus,
+        \\preprocessed with `wast2json --enable-tail-call --enable-relaxed-simd
+        \\--enable-memory64 --enable-extended-const`). Each `assert_*` / `action`
+        \\command is a plain pass or fail. Commands are counted as skips when they
+        \\cannot be scored: `assert_unlinkable` fixtures, text/quoted-module
+        \\commands `wast2json` does not lower, a few value comparisons the harness
+        \\does not model, and — importantly — **every command whose module uses a
+        \\feature Sarcasm does not implement**: that module fails to decode /
+        \\validate, so its assertions are *skipped, not failed*.
+        \\
+        \\**What `pass%` does and does not mean.** `pass%` is `100 ×
+        \\passing / (passing + failing)` — the fraction of *scored* commands that
+        \\pass, **not** "fraction of all of WebAssembly implemented". An
+        \\unimplemented standardized proposal (`gc`) sits in the *skip* column,
+        \\not *fail*, so the headline stays 100% regardless. Implementing a
+        \\proposal moves its assertions **skip → pass** — that, not the
+        \\percentage, is the real coverage signal. Exception handling is
+        \\implemented but unscored here: this `wast2json` cannot parse the
+        \\proposal's `(ref exn)` text syntax, so its `.wast` files don't lower
+        \\(its coverage is the engine unit tests instead).
         \\
         \\## Current scores
         \\

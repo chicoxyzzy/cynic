@@ -32,10 +32,17 @@ n=0
 for f in "$corpus"/*.wast; do
     [ -e "$f" ] || continue
     base=$(basename "$f" .wast)
-    if wast2json "$f" -o "$out/$base.json" >/dev/null 2>&1; then
+    # Enable the proposals Sarcasm implements so wast2json lowers their
+    # `.wast` files and the harness scores them. We deliberately do NOT
+    # `--enable-all`: that also lowers `gc` / `function-references` tests,
+    # which use features the engine doesn't implement and don't all reduce
+    # to a clean decode-time skip. (Exception-handling can't be lowered by
+    # this wabt regardless — its `(ref exn)` text syntax is unsupported.)
+    if wast2json --enable-tail-call --enable-relaxed-simd \
+        --enable-memory64 --enable-extended-const \
+        "$f" -o "$out/$base.json" >/dev/null 2>&1; then
         n=$((n + 1))
     else
-        # A .wast using a proposal wast2json rejects — skip it.
         echo "wasm-testsuite: wast2json could not convert $base.wast (skipped)" >&2
         rm -f "$out/$base.json" 2>/dev/null
     fi
