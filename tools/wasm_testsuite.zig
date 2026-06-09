@@ -260,6 +260,10 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
             .global => nglob += 1,
             .table => ntab += 1,
             .mem => {},
+            // The harness has no host tag objects to link against, so a
+            // tag import is unlinkable (reported as a load failure, not a
+            // crash) rather than counted into an index space.
+            .tag => return error.Unlinkable,
         }
     }
     if (modp.imports.len == 0) return .{};
@@ -313,6 +317,9 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
                     memory = provider.exportedMemory(imp.name) orelse return error.Unlinkable;
                 }
             },
+            // Unreachable in practice — the counting pass above bails on a
+            // tag import — but kept explicit so the switch stays total.
+            .tag => return error.Unlinkable,
         }
     }
     return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory };

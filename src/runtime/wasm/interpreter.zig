@@ -518,6 +518,15 @@ pub fn instantiate(
         var k: usize = 0;
         for (module.imports) |imp| {
             if (imp.desc != .table) continue;
+            // §4.5.4 — a declared table import must be matched by a host
+            // provision. Guard the provider slice so an under-supplied
+            // `Imports` (an embedder that wired too few tables, or the
+            // conformance harness's reject-path probe that instantiates
+            // with no imports) surfaces a catchable error instead of an
+            // out-of-bounds read that aborts the host. Mirrors the
+            // length guards the global, memory, and tag wiring already
+            // apply above and below.
+            if (k >= imports.tables.len) return error.UnsupportedImportCall;
             tables[ti] = imports.tables[k];
             ti += 1;
             k += 1;

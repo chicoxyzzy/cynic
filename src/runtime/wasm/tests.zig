@@ -445,6 +445,74 @@ test "wasm decoder: rejects an unknown section id" {
     try expectDecodeError(error.BadSectionId, bytes);
 }
 
+// ── unimplemented post-MVP features are rejected, never crash ─────────
+//
+// Sarcasm decodes the standardized MVP-plus baseline (see wasm.zig). A
+// module using a feature outside that scope — WasmGC, function-references
+// — must surface a catchable decode/validate error, never an
+// `@enumFromInt` trap, an `unreachable`, or an out-of-bounds access. The
+// engine runs untrusted modules inside the host process, so an
+// unsupported construct is ordinary input, not an exceptional one.
+
+test "wasm validator: rejects a WasmGC opcode (struct.new) as an unknown opcode" {
+    // §5.4 — `struct.new` is the 0xFB GC prefix (0xFB 0x00 <typeidx>),
+    // unimplemented here. The validator's instruction switch must fall
+    // through to the unknown-opcode error rather than mis-decode it.
+    // body: 0 locals, struct.new 0, drop, end
+    const code_body = [_]u8{ 0x00, 0xfb, 0x00, 0x00, 0x1a, 0x0b };
+    try expectFuncInvalid(error.UnknownOpcode, &.{}, &.{}, &code_body);
+}
+
+test "wasm validator: rejects a function-references opcode (call_ref) as an unknown opcode" {
+    // §5.4 — `call_ref` (0x14) belongs to the function-references
+    // proposal, unimplemented here. It must be refused as an unknown
+    // opcode, not @enumFromInt-trapped.
+    // body: 0 locals, call_ref 0, end
+    const code_body = [_]u8{ 0x00, 0x14, 0x00, 0x0b };
+    try expectFuncInvalid(error.UnknownOpcode, &.{}, &.{}, &code_body);
+}
+
+test "wasm decoder: rejects a function-references typed reference value type" {
+    // §5.3.1 — `(ref null $t)` is encoded as 0x63 followed by a heap
+    // type. The function-references proposal is unimplemented, so the
+    // value-type decoder refuses the 0x63 tag rather than mis-parsing it.
+    // type section: 1 type (func ()->((ref null 0)))
+    const body = [_]u8{ 0x01, 0x06, 0x01, 0x60, 0x00, 0x01, 0x63, 0x00 };
+    var buf: [8 + body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &body);
+    try expectDecodeError(error.BadValType, bytes);
+}
+
+test "wasm instantiate: an under-provided table import is a catchable error, not a host abort" {
+    // §4.5.4 — a declared table import must be matched by a host
+    // provision. Instantiating with an empty `Imports` (the shape the
+    // conformance harness's assert_invalid probe uses, and any embedder
+    // that wires too few tables) must surface a catchable error rather
+    // than read past the zero-length provider slice and abort the host.
+    // import section: 1 import "a"."t" : (table funcref {min 0})
+    const body = [_]u8{
+        0x02, 0x09, 0x01, // import section, size 9, 1 import
+        0x01, 0x61, // module "a"
+        0x01, 0x74, // field "t"
+        0x01, // external kind: table
+        0x70, 0x00, 0x00, // funcref element, limits {min 0}
+    };
+    var buf: [8 + body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+    var instance: interp.Instance = undefined;
+    try testing.expectError(
+        error.UnsupportedImportCall,
+        interp.instantiate(&instance, a, a, mp, .{}),
+    );
+}
+
 test "wasm decoder: rejects function count without matching code" {
     // function section declares one func; no code section follows.
     const body = [_]u8{
