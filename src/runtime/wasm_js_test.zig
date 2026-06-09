@@ -909,3 +909,13 @@ test "a JS WebAssembly.Tag imported into wasm shares identity across the boundar
         "r";
     try expectIntWasm(src, 9);
 }
+
+test "an externref in a WebAssembly.Exception payload survives an explicit GC" {
+    const setup =
+        "const tag = new WebAssembly.Tag({ parameters: ['externref'] });" ++
+        "const o = { tag: 9 };" ++
+        "const ex = new WebAssembly.Exception(tag, [o]);" ++
+        "__clearKeptObjects(); __collectGarbage();" ++
+        "globalThis.__r = (ex.getArg(tag, 0) === o && ex.getArg(tag, 0).tag === 9) ? 1 : 0;";
+    try expectIntWasmGc(setup, 1);
+}

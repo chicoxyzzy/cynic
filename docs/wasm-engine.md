@@ -46,24 +46,29 @@ commands it scores** — see `wasm-results.md` for what that does and does
 not mean (it excludes proposal tests for features not yet implemented).
 
 The **JS API** surface — `WebAssembly.*` objects (`Module`, `Instance`,
-`Memory`, `Table`, `Global`), `compile` / `instantiate` Promises,
-imports incl. host functions, the error types, and i32/i64/f32/f64
-marshalling — is shipped (§8), and `externref` holds live JS objects
-(externref tables / globals, reference round-trips through host calls),
-reclaimed precisely (§5 — a transient stack pin cleared at the outermost
-return, plus per-container marking of externref tables / globals). `v128`
-is spec-mandated not to cross the JS boundary.
+`Memory`, `Table`, `Global`, `Tag`, `Exception`), `compile` /
+`instantiate` Promises, imports incl. host functions, the error types,
+and i32/i64/f32/f64 marshalling — is shipped (§8), and `externref` holds
+live JS objects (externref tables / globals, reference round-trips
+through host calls), reclaimed precisely (§5 — a transient stack pin
+cleared at the outermost return, plus per-container marking of externref
+tables / globals). For exceptions: `WebAssembly.Tag` (a canonical
+identity), `WebAssembly.Exception` (`.is` / `.getArg`), tag
+imports/exports, and an uncaught wasm exception surfacing to JS as a
+thrown `WebAssembly.Exception` all work — a tag shared by import is
+caught across the boundary, and reference-typed exception payloads are
+GC-rooted. `v128` is spec-mandated not to cross the JS boundary; a bare
+`exnref` likewise raises a TypeError if it would.
 
-Not yet implemented, in two groups. **Standardized (Phase 5, Wasm 3.0)
-but unimplemented** — `gc` (WasmGC), and the *JS-API surface* of
-exception handling: `WebAssembly.Tag` / `WebAssembly.Exception`, tag
-imports/exports, and the JS↔wasm exception boundary (an uncaught wasm
-exception surfacing to JS, a JS exception caught by a `try_table`). The
-wasm instructions themselves are shipped (above); only the interop layer
-remains, so an `exnref` currently raises a TypeError if it would cross
-the JS boundary. **Still in flight** — `threads` (Phase 4; sits on the
-existing `SharedArrayBuffer` / `Atomics` substrate), shared-everything
-threads and the component model (Phase 1).
+Not yet implemented. **Standardized (Phase 5, Wasm 3.0) but
+unimplemented** — `gc` (WasmGC); and one corner of exception interop:
+a JS exception caught by a wasm `try_table` (the JS→wasm direction —
+the interpreter is realm-free, so converting a thrown JS value into an
+`exnref` needs a realm bridge it does not yet have). The wasm→JS
+direction and all wasm instructions are shipped (above). **Still in
+flight** — `threads` (Phase 4; sits on the existing `SharedArrayBuffer`
+/ `Atomics` substrate), shared-everything threads and the component
+model (Phase 1).
 
 Non-goals: a browser host, debugging surfaces, or any sloppy-mode
 affordance. Cynic is strict, non-browser, edge-runtime shaped — the

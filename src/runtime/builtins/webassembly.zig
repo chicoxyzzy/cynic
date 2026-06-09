@@ -1039,6 +1039,15 @@ fn wasmDisabled(realm: *Realm) NativeError {
 const TagState = struct { tag_type: *const wasm.TagType };
 const ExceptionState = struct { tag: *const wasm.TagType, payload: []u128 };
 
+/// Root any externref slots in an exception's payload so the JS values
+/// they hold survive GC for the exception's lifetime (the payload lives
+/// in the realm's wasm arena, so the cell pointers stay stable).
+fn rootExceptionPayload(realm: *Realm, tt: *const wasm.TagType, payload: []u128) NativeError!void {
+    for (tt.params, 0..) |pt, i| {
+        if (pt == .externref) realm.registerExternGlobalCell(&payload[i]) catch return error.OutOfMemory;
+    }
+}
+
 fn tagTypeOf(v: Value) ?*const wasm.TagType {
     const obj = heap_mod.valueAsPlainObject(v) orelse return null;
     const slot = obj.getWasmTag() orelse return null;
@@ -1104,6 +1113,7 @@ fn makeExceptionFromRecord(realm: *Realm, rec: *const wasm.ExnRecord) NativeErro
     const st = a.create(ExceptionState) catch return error.OutOfMemory;
     st.* = .{ .tag = rec.tag, .payload = payload };
     try obj.setWasmException(realm.allocator, st);
+    try rootExceptionPayload(realm, rec.tag, payload);
     return heap_mod.taggedObject(obj);
 }
 
@@ -1125,6 +1135,7 @@ fn exceptionConstructor(realm: *Realm, this_value: Value, args: []const Value) N
     const st = a.create(ExceptionState) catch return error.OutOfMemory;
     st.* = .{ .tag = tt, .payload = payload };
     try self.setWasmException(realm.allocator, st);
+    try rootExceptionPayload(realm, tt, payload);
     return this_value;
 }
 
