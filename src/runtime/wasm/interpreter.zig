@@ -122,13 +122,21 @@ const Handler = struct {
     end_ip: usize,
 };
 
+/// A tag's canonical identity. Two tags catch each other iff they share
+/// one `*TagType` — a defined tag gets a fresh one at instantiation, an
+/// imported tag borrows the provider's, and a `WebAssembly.Tag` allocates
+/// its own. `params` is the exception payload's value types.
+pub const TagType = struct {
+    params: []const ValType,
+};
+
 /// A reified thrown exception that an `exnref` refers to. Materialized
 /// when a `catch_ref` / `catch_all_ref` binds the exception, or carried
-/// directly by `throw_ref`. Identity is (defining_instance, tag); the
-/// payload is a copy of the tag's argument values.
+/// directly by `throw_ref`. Identity is the `*TagType`; the payload is a
+/// copy of the tag's argument values. Owned by the throwing instance's
+/// pool.
 const ExnRecord = struct {
-    defining_instance: *Instance,
-    tag: u32,
+    tag: *const TagType,
     payload: []u128,
 };
 /// Implementation cap on table size (§4.5.4 allows growth to fail).
@@ -176,6 +184,9 @@ pub const Imports = struct {
     /// Imported tables, in table-import order — the provider's own
     /// `*Table` (shared), so writes are mutually visible.
     tables: []const *Table = &.{},
+    /// Imported tag identities, in tag-import order. A wasm tag imported
+    /// from JS or another module shares that provider's `*TagType`.
+    tags: []const *const TagType = &.{},
 };
 
 /// Linear memory: a byte-addressable, page-granular buffer. (The
@@ -225,6 +236,12 @@ pub const Instance = struct {
     /// an `exnref` points at one. Held for the instance's lifetime so an
     /// exnref stored in a global / table / handed to JS never dangles.
     exn_pool: std.ArrayListUnmanaged(*ExnRecord) = .empty,
+    /// Tag space (imported then defined): the canonical identity per tag
+    /// index, used to match a throw against a catch.
+    tag_identities: []*const TagType = &.{},
+    /// Backing for the identities this instance owns (defined tags, and
+    /// any unprovided imports); imported identities point elsewhere.
+    owned_tag_types: []TagType = &.{},
 
     pub fn deinit(self: *Instance) void {
         self.gpa.free(self.globals);
@@ -237,6 +254,8 @@ pub const Instance = struct {
             self.gpa.destroy(rec);
         }
         self.exn_pool.deinit(self.gpa);
+        self.gpa.free(self.tag_identities);
+        self.gpa.free(self.owned_tag_types);
     }
 
     /// Read a global's raw cell by its index in the global index space
@@ -505,6 +524,40 @@ pub fn instantiate(
         }
     }
 
+    // Tag identities: imported tags borrow the provider's identity (from
+    // `imports.tags`); defined tags get a fresh one. `owned_tag_types`
+    // backs the defined ones (and any unprovided import, defensively).
+    var tag_imports: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .tag) tag_imports += 1;
+    }
+    const owned_tag_types = try allocator.alloc(TagType, tag_imports + module.tags.len);
+    errdefer allocator.free(owned_tag_types);
+    const tag_identities = try allocator.alloc(*const TagType, tag_imports + module.tags.len);
+    errdefer allocator.free(tag_identities);
+    {
+        var idx: usize = 0;
+        var imp_i: usize = 0;
+        for (module.imports) |imp| switch (imp.desc) {
+            .tag => |type_idx| {
+                if (imp_i < imports.tags.len) {
+                    tag_identities[idx] = imports.tags[imp_i];
+                } else {
+                    owned_tag_types[idx] = .{ .params = module.types[type_idx].params };
+                    tag_identities[idx] = &owned_tag_types[idx];
+                }
+                imp_i += 1;
+                idx += 1;
+            },
+            else => {},
+        };
+        for (module.tags) |tag| {
+            owned_tag_types[idx] = .{ .params = module.types[tag.type_index].params };
+            tag_identities[idx] = &owned_tag_types[idx];
+            idx += 1;
+        }
+    }
+
     self.* = .{
         .module = module,
         .funcs = funcs,
@@ -517,6 +570,8 @@ pub fn instantiate(
         .elem_segments = &.{},
         .data_segments = &.{},
         .gpa = allocator,
+        .tag_identities = tag_identities,
+        .owned_tag_types = owned_tag_types,
     };
 
     // With `self` now stable, apply element + data segments. Element
@@ -1025,15 +1080,15 @@ fn run(ip: *Interp) Error!void {
         .throw => {
             const throw_op_ip = pc - 1;
             const throw_tag = readU32(body, &pc);
-            const tt = ip.instance.module.tags[throw_tag];
-            const npayload: u32 = @intCast(ip.instance.module.types[tt.type_index].params.len);
+            const tag_id = ip.instance.tag_identities[throw_tag];
+            const npayload: u32 = @intCast(tag_id.params.len);
             if (npayload > MAX_PAYLOAD) return error.CallStackExhausted;
             var payload: [MAX_PAYLOAD]Cell = undefined;
             {
                 var qi: u32 = 0;
                 while (qi < npayload) : (qi += 1) payload[qi] = ip.stack[ip.sp - npayload + qi];
             }
-            switch (try searchAndCatch(ip, ip.instance, throw_tag, payload[0..npayload], null, throw_op_ip)) {
+            switch (try searchAndCatch(ip, ip.instance, tag_id, payload[0..npayload], null, throw_op_ip)) {
                 .uncaught => return error.UncaughtException,
                 .caught => |c| {
                     f = &ip.frames[ip.nframes - 1];
@@ -1052,7 +1107,7 @@ fn run(ip: *Interp) Error!void {
             const cell = ip.popCell();
             if (cell == REF_NULL) return error.NullExnRef;
             const rec: *ExnRecord = @ptrFromInt(@as(usize, @truncate(cell)));
-            switch (try searchAndCatch(ip, rec.defining_instance, rec.tag, rec.payload, rec, throw_op_ip)) {
+            switch (try searchAndCatch(ip, ip.instance, rec.tag, rec.payload, rec, throw_op_ip)) {
                 .uncaught => return error.UncaughtException,
                 .caught => |c| {
                     f = &ip.frames[ip.nframes - 1];
@@ -2026,10 +2081,10 @@ const CatchMatch = struct { stp_idx: usize, is_all: bool, is_ref: bool };
 /// Re-parse a handler's catch clauses (from the owning frame's body) and
 /// return the first that matches the thrown tag, or a catch_all. The
 /// side-table index is `catch_base_stp + i`; a catch_all carries no
-/// payload, a `*_ref` form additionally binds the exnref. Tag identity is
-/// (instance, index): two instances can share a tag only via tag imports,
-/// which are not yet supported, so a cross-instance `catch` never matches.
-fn findCatch(hbody: []const u8, hinst: *Instance, h: Handler, throw_inst: *Instance, throw_tag: u32) ?CatchMatch {
+/// payload, a `*_ref` form additionally binds the exnref. A `catch`
+/// matches when its tag resolves (through the handler frame's instance)
+/// to the same canonical `*TagType` as the thrown exception.
+fn findCatch(hbody: []const u8, hinst: *Instance, h: Handler, thrown_tag: *const TagType) ?CatchMatch {
     var p = h.try_op_ip + 1; // past the try_table opcode
     p = skipBlockType(hbody, p);
     const ncatch = readU32(hbody, &p);
@@ -2043,7 +2098,8 @@ fn findCatch(hbody: []const u8, hinst: *Instance, h: Handler, throw_inst: *Insta
         const stp_idx = h.catch_base_stp + i;
         const is_ref = (kind == 1 or kind == 3);
         if (kind == 2 or kind == 3) return .{ .stp_idx = stp_idx, .is_all = true, .is_ref = is_ref };
-        if (hinst == throw_inst and ctag == throw_tag) return .{ .stp_idx = stp_idx, .is_all = false, .is_ref = is_ref };
+        if (ctag < hinst.tag_identities.len and hinst.tag_identities[ctag] == thrown_tag)
+            return .{ .stp_idx = stp_idx, .is_all = false, .is_ref = is_ref };
     }
     return null;
 }
@@ -2053,14 +2109,14 @@ const UnwindOutcome = union(enum) {
     uncaught,
 };
 
-/// Materialize an exnref-backed exception owned by `definst`'s pool.
-fn buildExnRecord(definst: *Instance, tag: u32, payload: []const u128) !*ExnRecord {
-    const rec = try definst.gpa.create(ExnRecord);
-    errdefer definst.gpa.destroy(rec);
-    const pl = try definst.gpa.alloc(u128, payload.len);
+/// Materialize an exnref-backed exception owned by `owner`'s pool.
+fn buildExnRecord(owner: *Instance, tag: *const TagType, payload: []const u128) !*ExnRecord {
+    const rec = try owner.gpa.create(ExnRecord);
+    errdefer owner.gpa.destroy(rec);
+    const pl = try owner.gpa.alloc(u128, payload.len);
     @memcpy(pl, payload);
-    rec.* = .{ .defining_instance = definst, .tag = tag, .payload = pl };
-    try definst.exn_pool.append(definst.gpa, rec);
+    rec.* = .{ .tag = tag, .payload = pl };
+    try owner.exn_pool.append(owner.gpa, rec);
     return rec;
 }
 
@@ -2071,7 +2127,7 @@ fn buildExnRecord(definst: *Instance, tag: u32, payload: []const u128) !*ExnReco
 /// `existing` or materializing one), and returns the catch's branch
 /// target. `ip` (frame count, instance, sp, handler count) is left at the
 /// catch; the caller rebinds the dispatch locals.
-fn searchAndCatch(ip: *Interp, definst: *Instance, tag: u32, payload: []const u128, existing: ?*ExnRecord, throw_op_ip: usize) !UnwindOutcome {
+fn searchAndCatch(ip: *Interp, owner: *Instance, tag: *const TagType, payload: []const u128, existing: ?*ExnRecord, throw_op_ip: usize) !UnwindOutcome {
     const orig_nframes = ip.nframes;
     var hi = ip.nhandlers;
     while (hi > 0) {
@@ -2083,7 +2139,7 @@ fn searchAndCatch(ip: *Interp, definst: *Instance, tag: u32, payload: []const u1
         // the try_table body the handler is stale and cannot catch.
         const rip = if (h.frame == orig_nframes) throw_op_ip else hframe.ip;
         if (rip < h.try_op_ip or rip >= h.end_ip) continue;
-        if (findCatch(hframe.func.body, hframe.instance, h, definst, tag)) |m| {
+        if (findCatch(hframe.func.body, hframe.instance, h, tag)) |m| {
             ip.nframes = h.frame;
             ip.instance = ip.frames[ip.nframes - 1].instance;
             ip.sp = h.entry_sp;
@@ -2094,7 +2150,7 @@ fn searchAndCatch(ip: *Interp, definst: *Instance, tag: u32, payload: []const u1
                 }
             }
             if (m.is_ref) {
-                const rec = existing orelse try buildExnRecord(definst, tag, payload);
+                const rec = existing orelse try buildExnRecord(owner, tag, payload);
                 ip.stack[ip.sp] = @as(u128, @intFromPtr(rec));
                 ip.sp += 1;
             }
