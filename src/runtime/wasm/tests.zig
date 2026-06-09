@@ -1297,6 +1297,43 @@ test "wasm validator: in-range exports of every kind validate" {
     try loadErr(bytes); // succeeds: every export index is in range
 }
 
+// §2.5.10 — the names of all exports in a module must be distinct, even
+// when the repeated name points at the same (valid) entity.
+
+test "wasm validator: duplicate export name is rejected" {
+    // (table 0 funcref) exported twice under the same name "a". Both
+    // indices are in range, so the distinctness rule is what rejects it.
+    const tbody = [_]u8{ 0x01, 0x70, 0x00, 0x00 }; // one table: funcref, {min 0}
+    const xbody = [_]u8{
+        0x02, // two exports
+        0x01, 0x61, 0x01, 0x00, // "a" -> table 0
+        0x01, 0x61, 0x01, 0x00, // "a" -> table 0 (duplicate name)
+    };
+    try expectModuleInvalid(error.DuplicateExportName, &.{
+        .{ .id = 4, .body = &tbody },
+        .{ .id = 7, .body = &xbody },
+    });
+}
+
+test "wasm validator: distinct export names sharing one target are accepted" {
+    // The same table exported under two different names is valid — only
+    // the names must be distinct, not their targets. Guards the
+    // duplicate-name check against over-rejecting.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const tbody = [_]u8{ 0x01, 0x70, 0x00, 0x00 };
+    const xbody = [_]u8{
+        0x02,
+        0x01, 0x61, 0x01, 0x00, // "a" -> table 0
+        0x01, 0x62, 0x01, 0x00, // "b" -> table 0
+    };
+    const bytes = try assemble(arena.allocator(), &.{
+        .{ .id = 4, .body = &tbody },
+        .{ .id = 7, .body = &xbody },
+    });
+    try loadErr(bytes);
+}
+
 // ── execution: i32 / i64 arithmetic, bitwise, shifts ────────────────
 
 /// Run `(i32,i32)->i32` whose body is `local.get 0; local.get 1; op`.

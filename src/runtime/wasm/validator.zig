@@ -57,6 +57,7 @@ pub const ValidateError = error{
     UnknownTable,
     UnknownLabel,
     UnknownTag,
+    DuplicateExportName,
     BadCatchKind,
     UnsupportedRefCatch,
     ImmutableGlobal,
@@ -149,9 +150,8 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
     };
 
     // §3.4.11 — every export names an entity within the relevant index
-    // space. Out-of-bounds indices are otherwise resolved lazily (and
-    // bounds-checked) at lookup, so reject them up front here.
-    try validateExports(module);
+    // space, and §2.5.10 — every export name is distinct.
+    try validateExports(arena, module);
 
     const declared = try buildDeclaredSet(arena, module);
 
@@ -285,16 +285,26 @@ fn numTags(module: *const Module) u32 {
 }
 
 /// §3.4.11 — validate that every export references an entity that exists
-/// in its index space. Each kind reports the spec's "unknown <kind>"
-/// rejection through the matching `ValidateError`.
-fn validateExports(module: *const Module) ValidateError!void {
-    for (module.exports) |ex| switch (ex.desc) {
-        .func => |idx| if (idx >= totalFuncs(module)) return error.UnknownFunc,
-        .table => |idx| if (idx >= numTables(module)) return error.UnknownTable,
-        .mem => |idx| if (idx >= numMemories(module)) return error.UnknownMemory,
-        .global => |idx| if (idx >= numGlobals(module)) return error.UnknownGlobal,
-        .tag => |idx| if (idx >= numTags(module)) return error.UnknownTag,
-    };
+/// in its index space, and §2.5.10 — that all export names are distinct.
+/// Each index kind reports the spec's "unknown <kind>" rejection through
+/// the matching `ValidateError`; a repeated name is `DuplicateExportName`
+/// (invalid even when both exports point at the same entity). The name
+/// set is tracked through a hash map so a module with many exports can't
+/// degrade to O(n²) comparisons; names borrow the module's input buffer
+/// and the set lives in the validation arena.
+fn validateExports(arena: std.mem.Allocator, module: *const Module) ValidateError!void {
+    var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
+    for (module.exports) |ex| {
+        switch (ex.desc) {
+            .func => |idx| if (idx >= totalFuncs(module)) return error.UnknownFunc,
+            .table => |idx| if (idx >= numTables(module)) return error.UnknownTable,
+            .mem => |idx| if (idx >= numMemories(module)) return error.UnknownMemory,
+            .global => |idx| if (idx >= numGlobals(module)) return error.UnknownGlobal,
+            .tag => |idx| if (idx >= numTags(module)) return error.UnknownTag,
+        }
+        const gop = try seen.getOrPut(arena, ex.name);
+        if (gop.found_existing) return error.DuplicateExportName;
+    }
 }
 
 /// Type of a global referenceable from a constant expression (§3.3.7):
