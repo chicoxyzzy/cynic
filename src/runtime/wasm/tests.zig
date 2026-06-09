@@ -2139,3 +2139,102 @@ test "wasm exceptions: catch_ref binds an exnref for an empty-payload tag" {
     });
     try testing.expectEqual(@as(i32, 7), try runI32(bytes, "f", &.{}));
 }
+
+test "wasm exceptions: a non-matching catch falls through to a later catch_all" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // type0 ()->i32; type1 ()->() (both tags). tag0, tag1.
+    const tbody = [_]u8{ 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x00, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const gbody = [_]u8{ 0x02, 0x00, 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // block $b { try_table (catch tag0 -> $b)(catch_all -> $b) throw tag1 end } end ; i32.const 42
+    // throw tag1 skips the tag0 catch and is taken by catch_all -> 42 (else: uncaught trap).
+    const cbody = [_]u8{ 0x01, 0x12, 0x00, 0x02, 0x40, 0x1f, 0x40, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x08, 0x01, 0x0b, 0x0b, 0x41, 0x2a, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody }, .{ .id = 3, .body = &fbody },  .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody }, .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 42), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm exceptions: try_table with block-type params restores the operand stack" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // type0 ()->i32; type1 (i32)->() (tag); type2 (i32)->(i32) (the try_table block type).
+    const tbody = [_]u8{ 0x03, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const gbody = [_]u8{ 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // block $h (i32) { i32.const 9; try_table (type2)(catch tag0 -> $h) throw tag0 end } end
+    // the param 9 is the throw payload, delivered to $h -> result 9.
+    const cbody = [_]u8{ 0x01, 0x10, 0x00, 0x02, 0x7f, 0x41, 0x09, 0x1f, 0x02, 0x01, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0b, 0x0b, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody }, .{ .id = 3, .body = &fbody },  .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody }, .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 9), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm exceptions: throw_ref of a null exnref traps" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // ref.null exn ; throw_ref
+    const cbody = [_]u8{ 0x01, 0x05, 0x00, 0xd0, 0x69, 0x0a, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody }, .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody }, .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectError(error.NullExnRef, runI32(bytes, "f", &.{}));
+}
+
+test "wasm exceptions: validator rejects throw of an out-of-range tag" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x04, 0x00, 0x08, 0x00, 0x0b }; // throw tag0 — no tags defined
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody }, .{ .id = 3, .body = &fbody }, .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectError(error.UnknownTag, loadErr(bytes));
+}
+
+test "wasm exceptions: validator rejects a bad catch kind" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x07, 0x00, 0x1f, 0x40, 0x01, 0x05, 0x0b, 0x0b }; // try_table catch kind 5
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody }, .{ .id = 3, .body = &fbody }, .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectError(error.BadCatchKind, loadErr(bytes));
+}
+
+test "wasm exceptions: catch_ref binds payload and exnref together (multi-value)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // type0 ()->i32; type1 (i32)->() (tag); type2 ()->(i32 exnref) (the multi-value block type).
+    const tbody = [_]u8{ 0x03, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x00, 0x02, 0x7f, 0x69 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const gbody = [_]u8{ 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // block $h (i32 exnref) { try_table (type2)(catch_ref tag0 -> $h) i32.const 5; throw tag0 end } end
+    // $h receives [i32(5), exnref]; drop the exnref, return the payload 5.
+    const cbody = [_]u8{ 0x01, 0x11, 0x00, 0x02, 0x02, 0x1f, 0x02, 0x01, 0x01, 0x00, 0x00, 0x41, 0x05, 0x08, 0x00, 0x0b, 0x0b, 0x1a, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody }, .{ .id = 3, .body = &fbody },  .{ .id = 13, .body = &gbody },
+        .{ .id = 7, .body = &xbody }, .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 5), try runI32(bytes, "f", &.{}));
+}

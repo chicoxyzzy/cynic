@@ -919,3 +919,28 @@ test "an externref in a WebAssembly.Exception payload survives an explicit GC" {
         "globalThis.__r = (ex.getArg(tag, 0) === o && ex.getArg(tag, 0).tag === 9) ? 1 : 0;";
     try expectIntWasmGc(setup, 1);
 }
+
+test "WebAssembly.Exception is/getArg reject a foreign tag and out-of-range index" {
+    const src =
+        "const t1 = new WebAssembly.Tag({ parameters: ['i32'] });" ++
+        "const t2 = new WebAssembly.Tag({ parameters: ['i32'] });" ++
+        "const ex = new WebAssembly.Exception(t1, [5]);" ++
+        "let r = 0;" ++
+        "if (ex.is(t1) && !ex.is(t2)) r += 1;" ++ // is: own tag true, foreign false
+        "try { ex.getArg(t2, 0); } catch (e) { if (e instanceof TypeError) r += 10; }" ++
+        "try { ex.getArg(t1, 5); } catch (e) { if (e instanceof RangeError) r += 100; }" ++
+        "r";
+    try expectIntWasm(src, 111);
+}
+
+test "WebAssembly.Tag / Exception / tag-import reject bad arguments" {
+    const src =
+        "let r = 0;" ++
+        "try { new WebAssembly.Tag({ parameters: ['nope'] }); } catch (e) { if (e instanceof TypeError) r += 1; }" ++
+        "try { new WebAssembly.Exception({}, []); } catch (e) { if (e instanceof TypeError) r += 10; }" ++
+        // a module importing tag "e"."t"; provide a non-Tag for it -> LinkError
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 1,8,2,96,0,0,96,1,127,0, 2,8,1,1,101,1,116,4,0,1, 3,2,1,0, 7,5,1,1,102,0,0, 10,8,1,6,0,65,9,8,0,11]);" ++
+        "try { new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { t: 42 } }); } catch (e) { if (e instanceof WebAssembly.LinkError) r += 100; }" ++
+        "r";
+    try expectIntWasm(src, 111);
+}
