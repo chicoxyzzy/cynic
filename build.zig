@@ -506,7 +506,7 @@ pub fn build(b: *std.Build) void {
     // -----------------------------------------------------------------
     // `zig build wasm` — the browser-playground WebAssembly module.
     //
-    // Builds `playground/playground_wasm.zig` into a single `wasm32-freestanding`
+    // Builds `playground/wasm.zig` into a single `wasm32-freestanding`
     // `ReleaseSmall` module (download size matters for a playground).
     // Pure Zig now that Perlex + the native Unicode tables replaced the
     // vendored QuickJS C — no libc shim, no C sources to link.
@@ -529,7 +529,7 @@ pub fn build(b: *std.Build) void {
 
     // The WASM entry module — C-ABI exports for the JS front-end.
     const wasm_mod = b.createModule(.{
-        .root_source_file = b.path("playground/playground_wasm.zig"),
+        .root_source_file = b.path("playground/wasm.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
@@ -597,7 +597,7 @@ pub fn build(b: *std.Build) void {
     // `gh-pages:/playground/`; the website half (index.html, app.js,
     // codemirror.bundle.js) lives on the `gh-pages` branch and imports
     // `cynic-engine.js` — the stable ABI binding that tracks
-    // `playground/playground_wasm.zig`. See docs/playground.md.
+    // `playground/wasm.zig`. See docs/playground.md.
     const wasm_into_playground = b.addInstallFileWithDir(
         wasm_bin,
         .{ .custom = "playground" },

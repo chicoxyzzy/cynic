@@ -39,12 +39,12 @@ pub const perlex = @import("perlex/perlex.zig");
 /// Value → display-string formatter used by the playground panel.
 /// Lives at the library boundary (not under `runtime/`) because it
 /// is a display concern — the engine itself does not need it, but
-/// surfacing it here lets both `playground/playground_wasm.zig` and host
+/// surfacing it here lets both `playground/wasm.zig` and host
 /// unit tests reach the same code.
 pub const wasm_format = @import("wasm_format.zig");
 
 /// Diagnostics → playground-frame error text. Same rationale as
-/// `wasm_format`: extracted from `playground/playground_wasm.zig` so
+/// `wasm_format`: extracted from `playground/wasm.zig` so
 /// `zig build test` can exercise the helpers (the playground entry
 /// is wasm32-only).
 pub const wasm_diag = @import("wasm_diag.zig");
@@ -53,7 +53,7 @@ pub const wasm_diag = @import("wasm_diag.zig");
 /// Implements §1-§5 of the WebAssembly Core specification natively;
 /// the JS API surface (`WebAssembly.Module/Instance/Memory/...`)
 /// lives in `src/runtime/builtins/webassembly.zig`. Strictly distinct
-/// from `playground_wasm.zig`, which is Cynic compiled *as* a wasm
+/// from `wasm.zig`, which is Cynic compiled *as* a wasm
 /// module for the in-browser playground.
 pub const wasm = @import("runtime/wasm/wasm.zig");
 

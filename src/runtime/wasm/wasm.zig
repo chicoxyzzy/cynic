@@ -6,11 +6,11 @@
 //! whole subsystem (decoder + validator + interpreter), the way
 //! SpiderMonkey's Baldr names all of its wasm support.
 //!
-//! Strictly distinct from `playground/playground_wasm.zig`, which is Cynic
+//! Strictly distinct from `playground/wasm.zig`, which is Cynic
 //! compiled *as* a wasm32-freestanding module for the in-browser
 //! playground:
 //!
-//!   playground/playground_wasm.zig    Cynic ➜ WASM   (an output target)
+//!   playground/wasm.zig    Cynic ➜ WASM   (an output target)
 //!   src/runtime/wasm/          WASM ➜ Cynic   (an execution surface)
 //!
 //! The decoder + validator + interpreter live here; the JS-visible

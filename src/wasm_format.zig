@@ -7,7 +7,7 @@
 //! their natural form. Lives in `src/` (not `src/runtime/`) because
 //! it is a display concern — the engine itself does not need it.
 //!
-//! Lifted out of `playground/playground_wasm.zig` so `zig build test` can
+//! Lifted out of `playground/wasm.zig` so `zig build test` can
 //! exercise it. The playground entry only compiles for
 //! `wasm32-freestanding`, but the formatter has no wasm-specific
 //! dependencies — it just walks

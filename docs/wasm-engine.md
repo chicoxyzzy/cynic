@@ -11,11 +11,11 @@ decisions, the prior art behind them, and the data structures the
 implementation builds on. Read it before touching the decoder,
 validator, or interpreter.
 
-> Not to be confused with `playground/playground_wasm.zig`, which compiles
+> Not to be confused with `playground/wasm.zig`, which compiles
 > Cynic *to* a `wasm32-freestanding` module for the browser
 > playground. That is an output target; this is an execution surface.
 >
->     playground/playground_wasm.zig   Cynic ➜ WASM   (a build target)
+>     playground/wasm.zig   Cynic ➜ WASM   (a build target)
 >     src/runtime/wasm/         WASM ➜ Cynic   (an execution surface)
 
 ## 1. Scope
