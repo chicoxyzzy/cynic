@@ -720,6 +720,7 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
         .global => nglob += 1,
         .table => ntab += 1,
         .mem => {},
+        .tag => {}, // tags carry no engine cell; linked via identity below
     };
     if (module.imports.len == 0) return .{};
 
@@ -751,6 +752,7 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
                 ti += 1;
             },
             .mem => memory = try resolveMemImport(realm, v),
+            .tag => {}, // tag identity resolution wired with the Tag object
         }
     }
     // JS-API imports share the provider's linear memory (writes are
@@ -850,6 +852,7 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
                 const mobj = try makeMemory(realm, mem);
                 obj.set(realm.allocator, ex.name, mobj) catch return error.OutOfMemory;
             },
+            .tag => {}, // exposed as WebAssembly.Tag once the object lands
         }
     }
     return heap_mod.taggedObject(obj);

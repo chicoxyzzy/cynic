@@ -231,6 +231,10 @@ fn decodeImportSection(allocator: std.mem.Allocator, r: *Reader) DecodeError![]c
             0x01 => .{ .table = try decodeTableType(r) },
             0x02 => .{ .mem = try decodeMemType(r) },
             0x03 => .{ .global = try decodeGlobalType(r) },
+            0x04 => blk: {
+                _ = try r.byte(); // tag attribute (exception kind, 0x00)
+                break :blk .{ .tag = try r.uleb(u32) };
+            },
             else => return error.BadImportDesc,
         };
         out.appendAssumeCapacity(.{ .module = mod_name, .name = field, .desc = desc });
@@ -316,6 +320,7 @@ fn decodeExportSection(allocator: std.mem.Allocator, r: *Reader) DecodeError![]c
             0x01 => .{ .table = idx },
             0x02 => .{ .mem = idx },
             0x03 => .{ .global = idx },
+            0x04 => .{ .tag = idx },
             else => return error.BadExportDesc,
         };
         out.appendAssumeCapacity(.{ .name = field, .desc = desc });

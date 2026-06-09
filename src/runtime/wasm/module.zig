@@ -21,7 +21,7 @@ pub const magic: [4]u8 = .{ 0x00, 0x61, 0x73, 0x6d };
 pub const version: u32 = 1;
 
 /// §2.5.11 — the four import/export sorts.
-pub const ExternKind = enum { func, table, mem, global };
+pub const ExternKind = enum { func, table, mem, global, tag };
 
 /// §5.5.5 — an import names a module/field pair and the type of the
 /// imported entity.
@@ -36,6 +36,8 @@ pub const Import = struct {
         table: TableType,
         mem: MemType,
         global: GlobalType,
+        /// Type index into `Module.types` (the tag's signature).
+        tag: u32,
     };
 };
 
@@ -50,6 +52,8 @@ pub const Export = struct {
         table: u32,
         mem: u32,
         global: u32,
+        /// Index into the tag space.
+        tag: u32,
     };
 };
 
