@@ -376,6 +376,12 @@ reference-typed payloads GC-rooted. The engine is also still exercised
 through its Zig API (`decode` / `instantiate` / `invoke`) and the
 conformance harness.
 
+Boundary *performance* under the JIT tiers — per-signature
+entry/exit thunks in the shared code region, IC-integrated dispatch
+on both sides, and the conversion-cost ledger (i64 ↔ BigInt is the
+allocating one) — is pinned in [jit.md](jit.md) §7.1; the
+`wasm_boundary` micros land with Spasm (jit.md §12).
+
 The `Module` constructor carries the JS-API's static introspection
 methods (ungated — no code is generated): `Module.exports(module)` and
 `Module.imports(module)` return descriptor arrays in declaration order
@@ -474,7 +480,11 @@ the measured design space:
   value stack. The real throughput jump comes from a **baseline JIT
   tier** later (the ~10×→~2–3× step), which would consume the validated
   module + side-table — exactly where V8/JSC/SM add Liftoff/BBQ over
-  their interpreters.
+  their interpreters. That tier is **Spasm** — it buries *asm* the
+  way its parent does — single-pass, side-table-driven, on the
+  codegen substrate shared with the JS tiers; pinned in
+  [jit.md](jit.md) §6, with the JS↔wasm call-boundary fast path
+  (per-signature thunks, IC-integrated dispatch) in §7.1.
 - **Narrowing the operand cell was measured and declined** (2026-06).
   Splitting the 128-bit `Cell` into parallel 64-bit lanes (scalars in
   the low lane only) was prototyped and benchmarked on Apple Silicon:

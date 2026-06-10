@@ -243,6 +243,11 @@ A pure-stack design (QuickJS) was considered and rejected: higher
 dispatch counts, and worse fit for Bistromath, which wants a register
 file (Sparkplug, JSC Baseline both work that way).
 
+The tier architecture itself — Bistromath, Ohaimark, Spasm
+(Sarcasm's wasm baseline tier), the codegen substrate all three
+share, and the JS↔wasm call-boundary fast path — is pinned in
+[jit.md](jit.md).
+
 ## Object model
 
 Plain hashtable-backed properties at later, with a prototype-pointer

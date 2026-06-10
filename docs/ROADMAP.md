@@ -1235,6 +1235,15 @@ and the per-builtin checklist; this section tracks status.
 - **Ohaimark** — optimizing JIT (T2). IR (SSA), type speculation
   from inline caches, deopt back to Lantern on guard failure.
   Modeled on JSC DFG / V8 TurboFan or Maglev.
+- **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
+  Single-pass over the validated module + branch side-table,
+  Liftoff / Wizard-SPC shape; buries *asm* like its parent.
+
+  The architecture for all three tiers — the shared codegen
+  substrate and the JS↔wasm call-boundary fast path included — is
+  pinned in [jit.md](jit.md) (prior-art survey, frame-identity
+  rule, per-signature boundary thunks, executable-memory
+  mechanics, verification gates, M5 delivery order).
 
 ## Considered and declined
 
