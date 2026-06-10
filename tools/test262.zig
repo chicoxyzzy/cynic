@@ -1258,6 +1258,9 @@ const Stats = struct {
     pass_neg: u32 = 0,
     fail_reject: u32 = 0,
     fail_accept: u32 = 0,
+    /// Per-`FailClass` histogram of the failures. Sums to
+    /// `fail_reject + fail_accept`.
+    fail_by_class: [FailClass.count]u32 = @splat(0),
     skip: u32 = 0,
     pos_attempted: u32 = 0,
     neg_attempted: u32 = 0,
@@ -1304,7 +1307,40 @@ const Bucket = struct {
     fail: u32 = 0,
     skip: u32 = 0,
     total: u32 = 0,
+    /// Failures NOT explained by a policy class (`FailClass.gap`) —
+    /// the engine's actual bug count for this area.
+    gap_fail: u32 = 0,
 };
+
+/// Why a fixture fails. Everything but `gap` is a by-design or
+/// unimplemented-subsystem policy fail under the binary scoring
+/// posture; `gap` is a real engine bug.
+const FailClass = enum(u3) {
+    gap, // engine bug — the work list
+    intl, // intl402/* — ECMA-402 not implemented
+    no_strict, // flags: [noStrict] — sloppy-mode-only, strict-only by design
+    annex_b, // Annex B builtins (__proto__ accessor, __define/__lookup{Getter,Setter}__)
+    can_block, // flags: [CanBlockIsFalse] — non-blocking-agent semantics
+
+    const count = std.enums.values(FailClass).len;
+};
+
+/// Classify a fixture's failure from its path and frontmatter flags.
+fn failClassOf(rel: []const u8, flags: frontmatter.Flags) FailClass {
+    if (std.mem.startsWith(u8, rel, "intl402/")) return .intl;
+    if (flags.no_strict) return .no_strict;
+    if (flags.can_block_is_false) return .can_block;
+    for ([_][]const u8{ "__proto__", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__" }) |marker| {
+        if (std.mem.indexOf(u8, rel, marker) != null) return .annex_b;
+    }
+    return .gap;
+}
+
+/// Path-only fallback for the rare spots where frontmatter is not in
+/// scope (harness-level errors).
+fn failClassOfPath(rel: []const u8) FailClass {
+    return failClassOf(rel, .{});
+}
 
 /// Bucket the relative test path on its first two components
 /// (or the first one if that's all there is). Returns a slice
@@ -1344,6 +1380,16 @@ const BucketMap = struct {
             .skip => gop.value_ptr.skip += 1,
         }
         gop.value_ptr.total += 1;
+    }
+
+    /// Count a failure as an engine gap (not policy) for its area.
+    fn bumpGap(self: *BucketMap, name: []const u8) !void {
+        const gop = try self.map.getOrPut(self.gpa, name);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try self.gpa.dupe(u8, name);
+            gop.value_ptr.* = .{ .name = gop.key_ptr.* };
+        }
+        gop.value_ptr.gap_fail += 1;
     }
 
     /// Materialise an owned slice of buckets sorted into
@@ -2186,6 +2232,9 @@ const MemAggregate = struct {
 const RunResult = struct {
     kind: Outcome,
     skip_reason: ?SkipReason = null,
+    /// Why this fixture fails (meaningful only for the fail kinds).
+    /// Stamped by `classifyAndRun` once the frontmatter is parsed.
+    fail_class: FailClass = .gap,
 };
 
 /// One sweep's rolled-up state — what `runSweep` returns and
@@ -2280,6 +2329,7 @@ fn recordOutcome(
         .pass_negative => stats.pass_neg += 1,
         .fail_false_reject => {
             stats.fail_reject += 1;
+            stats.fail_by_class[@intFromEnum(outcome.fail_class)] += 1;
             try failures.append(gpa, .{
                 .path = try gpa.dupe(u8, rel),
                 .kind = .fail_false_reject,
@@ -2287,6 +2337,7 @@ fn recordOutcome(
         },
         .fail_false_accept => {
             stats.fail_accept += 1;
+            stats.fail_by_class[@intFromEnum(outcome.fail_class)] += 1;
             try failures.append(gpa, .{
                 .path = try gpa.dupe(u8, rel),
                 .kind = .fail_false_accept,
@@ -2300,8 +2351,12 @@ fn recordOutcome(
         },
     }
     // Bump the per-area bucket (`pass` / `fail` / `skip`) so the
-    // scoreboard reflects this fixture's outcome.
+    // breakdown reflects this fixture's outcome; an unexplained
+    // (non-policy) failure also counts toward the area's engine gaps.
     try buckets.bump(bucketName(rel), bucket_kind);
+    if (bucket_kind == .fail and outcome.fail_class == .gap) {
+        try buckets.bumpGap(bucketName(rel));
+    }
     if (outcome.kind == .pass_positive or outcome.kind == .fail_false_reject) {
         stats.pos_attempted += 1;
     } else if (outcome.kind == .pass_negative or outcome.kind == .fail_false_accept) {
@@ -2454,7 +2509,7 @@ fn workerLoop(
         // (single-thread only — those flags pin `--threads=1` upstream).
         const outcome = classifyAndRun(arena, ctx.gpa, ctx.io, ctx.corpus, rel, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats, null, ctx.phase) catch |err| {
             if (err == error.OutOfMemory) return err;
-            try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject }, ctx.is_full_run);
+            try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject, .fail_class = failClassOfPath(rel) }, ctx.is_full_run);
             continue;
         };
         if (ctx.opts.top_slow > 0) {
@@ -2480,6 +2535,7 @@ fn mergeStats(dst: *Stats, src: *const Stats) void {
     dst.pass_pos += src.pass_pos;
     dst.pass_neg += src.pass_neg;
     dst.fail_reject += src.fail_reject;
+    for (&dst.fail_by_class, src.fail_by_class) |*d, v| d.* += v;
     dst.fail_accept += src.fail_accept;
     dst.skip += src.skip;
     dst.pos_attempted += src.pos_attempted;
@@ -2502,12 +2558,42 @@ fn mergeBuckets(dst: *BucketMap, src: *const BucketMap) !void {
         }
         gop.value_ptr.pass += v.pass;
         gop.value_ptr.fail += v.fail;
+        gop.value_ptr.gap_fail += v.gap_fail;
         gop.value_ptr.skip += v.skip;
         gop.value_ptr.total += v.total;
     }
 }
 
+/// Run one fixture and stamp the failure classification (the inner
+/// function has many return points; classifying here covers them all
+/// with one frontmatter parse — cheap relative to the run itself).
 fn classifyAndRun(
+    arena: std.mem.Allocator,
+    bytes_allocator: std.mem.Allocator,
+    io: std.Io,
+    corpus: std.Io.Dir,
+    rel: []const u8,
+    harness_pair: ?harness_mod.HarnessSources,
+    gc_threshold: u32,
+    gc_stats: bool,
+    mem_out: ?*FixtureMem,
+    phase: Phase,
+) !RunResult {
+    var r = try classifyAndRunInner(arena, bytes_allocator, io, corpus, rel, harness_pair, gc_threshold, gc_stats, mem_out, phase);
+    if (r.kind == .fail_false_reject or r.kind == .fail_false_accept) {
+        // Re-derive the flags for classification; the fixture source is
+        // small and arena-cached relative to the run that just happened.
+        const src = corpus.readFileAlloc(io, rel, arena, .limited(8 * 1024 * 1024)) catch return r;
+        const fm = frontmatter.parse(arena, src) catch {
+            r.fail_class = failClassOfPath(rel);
+            return r;
+        };
+        r.fail_class = failClassOf(rel, fm.flags);
+    }
+    return r;
+}
+
+fn classifyAndRunInner(
     arena: std.mem.Allocator,
     /// Page-returning allocator for large heap-owned byte payloads
     /// (`JSString.bytes`, ArrayBuffer slabs). The per-fixture arena
@@ -3550,7 +3636,7 @@ fn makeRow(
 /// Update test262-results.md with today's row for the run that just
 /// finished. Single posture (`--unhardened --allow=eval`), binary
 /// pass/fail. Layout: `## Current scores` (one row), `## Legend`,
-/// `## Where the engine fails, by area`, `## Pre-Stage-4 proposals
+/// `## What is not passing, and why`, `## Pre-Stage-4 proposals
 /// shipped`, then `## History` (one mini-table per date, newest first).
 /// Re-running on the same date replaces that day's row.
 fn writeResults(
@@ -3609,7 +3695,7 @@ fn writeResults(
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
-    try writeFileBody(gpa, &buf, rows.items, buckets, pre_stage4, &prev_bucket_pass);
+    try writeFileBody(gpa, &buf, rows.items, buckets, stats, pre_stage4, &prev_bucket_pass);
 
     try cwd.writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
@@ -3725,6 +3811,7 @@ fn writeFileBody(
     out: *std.ArrayListUnmanaged(u8),
     rows: []Row,
     buckets: *const BucketMap,
+    stats: *const Stats,
     pre_stage4: *const PreStage4Stats,
     prev_bucket_pass: *const std.StringHashMapUnmanaged(u32),
 ) !void {
@@ -3816,7 +3903,7 @@ fn writeFileBody(
     );
 
     if (buckets.map.count() > 0) {
-        try writeScoreboard(gpa, out, buckets);
+        try writeNotPassing(gpa, out, buckets, stats);
     }
     if (preStage4HasData(pre_stage4)) {
         try writePreStage4Scoreboard(gpa, out, pre_stage4);
@@ -3915,47 +4002,80 @@ fn priorRowPass(rows: []const Row, idx: usize) ?u32 {
     return null;
 }
 
-fn writeScoreboard(
+fn writeNotPassing(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
     buckets: *const BucketMap,
+    stats: *const Stats,
 ) !void {
     const sorted = try buckets.sortedByFailTiered(gpa);
     defer gpa.free(sorted);
 
     try out.appendSlice(gpa,
         \\
-        \\## Where the engine fails, by area
+        \\## What is not passing, and why
         \\
-        \\Areas are grouped into fail-magnitude tiers (most fails
-        \\first); within a tier they're sorted by pass% ascending.
-        \\Bucketed on the first two path components (`built-ins/Set`,
-        \\`language/expressions`, …). `pass%` = `passing / (passing +
-        \\failing)` per area. The `1+ fails` tiers are the engine-work
-        \\list.
+        \\Every failure, classified. The policy classes are by-design
+        \\fails under the binary posture — fixtures that need sloppy
+        \\mode, Annex B surfaces, or ECMA-402, none of which Cynic
+        \\ships, on purpose. The **engine gaps** row is the real bug
+        \\count; the per-area table below it is the work list.
         \\
+        \\| why | failing | detail |
+        \\|---|---:|---|
         \\
     );
 
     var buf: [512]u8 = undefined;
-    var prev_tier: u8 = 255;
+    const cls = stats.fail_by_class;
+    const class_rows = [_]struct { idx: FailClass, label: []const u8, detail: []const u8 }{
+        .{ .idx = .intl, .label = "ECMA-402 not implemented", .detail = "the whole `intl402/` tree — `Intl` (and the `intl402/Temporal` twins of the excluded Temporal proposal) is an unbuilt subsystem" },
+        .{ .idx = .no_strict, .label = "sloppy-mode-only fixtures", .detail = "`flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...)" },
+        .{ .idx = .annex_b, .label = "Annex B builtins", .detail = "`__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design" },
+        .{ .idx = .can_block, .label = "cannot-block agent semantics", .detail = "`flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent" },
+        .{ .idx = .gap, .label = "**engine gaps**", .detail = "real conformance bugs — see the per-area breakdown below" },
+    };
+    for (class_rows) |row| {
+        const n = cls[@intFromEnum(row.idx)];
+        if (n == 0) continue;
+        const line = try std.fmt.bufPrint(&buf, "| {s} | {d} | {s} |\n", .{ row.label, n, row.detail });
+        try out.appendSlice(gpa, line);
+    }
+
+    try out.appendSlice(gpa,
+        \\
+        \\**Failing areas.** Only areas with at least one failure are
+        \\listed (everything else passes). `gaps` is the slice of the
+        \\area's failures the policy classes above do not explain —
+        \\sorted to the top, because that column is the engine work
+        \\list. Bucketed on the first two path components.
+        \\
+        \\| area | passing | failing | gaps | pass% |
+        \\|---|---:|---:|---:|---:|
+        \\
+    );
+
+    // Sort: engine gaps desc, then total fails desc, then name.
+    const Sorted = Bucket;
+    const rows_buf = try gpa.alloc(Sorted, sorted.len);
+    defer gpa.free(rows_buf);
+    var nrows: usize = 0;
     for (sorted) |b| {
-        const tier: u8 = if (b.fail == 0) 4 else if (b.fail < 10) 3 else if (b.fail < 100) 2 else if (b.fail < 1000) 1 else 0;
-        if (tier != prev_tier) {
-            const label: []const u8 = switch (tier) {
-                0 => "1000+ fails",
-                1 => "100–999 fails",
-                2 => "10–99 fails",
-                3 => "1–9 fails",
-                else => "0 fails — fully passing",
-            };
-            const hdr = try std.fmt.bufPrint(&buf, "\n**{s}**\n\n| area | passing | failing | pass% |\n|---|---:|---:|---:|\n", .{label});
-            try out.appendSlice(gpa, hdr);
-            prev_tier = tier;
+        if (b.fail == 0) continue;
+        rows_buf[nrows] = b;
+        nrows += 1;
+    }
+    std.mem.sort(Sorted, rows_buf[0..nrows], {}, struct {
+        fn lt(_: void, a: Sorted, b: Sorted) bool {
+            if (a.gap_fail != b.gap_fail) return a.gap_fail > b.gap_fail;
+            if (a.fail != b.fail) return a.fail > b.fail;
+            return std.mem.order(u8, a.name, b.name) == .lt;
         }
+    }.lt);
+    for (rows_buf[0..nrows]) |b| {
         const den: u32 = b.pass + b.fail;
         const pct: f64 = if (den == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(den));
-        const line = try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d:.0} % |\n", .{ b.name, b.pass, b.fail, pct });
+        const line = try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.0} % |\n", .{ b.name, b.pass, b.fail, b.gap_fail, pct });
         try out.appendSlice(gpa, line);
     }
     try out.appendSlice(gpa, "\n");
@@ -4053,7 +4173,8 @@ fn writeBiggestMovers(
 }
 
 /// Read per-area passing counts from the most recent
-/// `## Where the engine fails, by area` section, keyed by area name.
+/// `## What is not passing, and why` section (or the pre-2026-06
+/// `## Where the engine fails, by area` layout), keyed by area name.
 /// Earlier file versions without the section yield an empty map,
 /// making "biggest movers" a no-op.
 fn parsePrevBucketPass(
@@ -4061,9 +4182,19 @@ fn parsePrevBucketPass(
     out: *std.StringHashMapUnmanaged(u32),
     existing: []const u8,
 ) !void {
-    const heading = "## Where the engine fails, by area";
-    const start = std.mem.indexOf(u8, existing, heading) orelse return;
-    var cursor = start + heading.len;
+    // Current heading first; fall back to the pre-2026-06 layout so
+    // the first run after the format change still diffs movers.
+    const headings = [_][]const u8{ "## What is not passing, and why", "## Where the engine fails, by area" };
+    var start: usize = 0;
+    var hlen: usize = 0;
+    for (headings) |heading| {
+        if (std.mem.indexOf(u8, existing, heading)) |at| {
+            start = at;
+            hlen = heading.len;
+            break;
+        }
+    } else return;
+    var cursor = start + hlen;
     const stop = std.mem.indexOfPos(u8, existing, cursor, "\n## ") orelse existing.len;
 
     while (cursor < stop) {

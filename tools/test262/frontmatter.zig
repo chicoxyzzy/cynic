@@ -29,6 +29,10 @@ pub const Flags = packed struct {
     raw: bool = false,
     async_flag: bool = false,
     generated: bool = false,
+    /// `CanBlockIsFalse` — the fixture requires an agent that cannot
+    /// block (Atomics.wait must throw). Used only to classify a
+    /// failure as a policy fail in the results breakdown.
+    can_block_is_false: bool = false,
 };
 
 pub const Frontmatter = struct {
@@ -215,6 +219,7 @@ fn parseBlockListItem(content: []const u8) ?[]const u8 {
 fn applyFlag(flags: *Flags, name: []const u8) void {
     if (std.mem.eql(u8, name, "onlyStrict")) flags.only_strict = true;
     if (std.mem.eql(u8, name, "noStrict")) flags.no_strict = true;
+    if (std.mem.eql(u8, name, "CanBlockIsFalse")) flags.can_block_is_false = true;
     if (std.mem.eql(u8, name, "module")) flags.module = true;
     if (std.mem.eql(u8, name, "raw")) flags.raw = true;
     if (std.mem.eql(u8, name, "async")) flags.async_flag = true;

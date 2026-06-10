@@ -420,8 +420,10 @@ fixtures (no / malformed frontmatter). Re-running for the same
 date replaces that day's row. Each row records `passing`,
 `failing`, `total`, and `pass%`. `test262-results.md` opens with
 a `## Current scores` snapshot (one row — the single posture), a
-`## Legend`, a `## Where the engine fails, by area` per-bucket
-scoreboard (`area | passing | failing | pass%`, fail-tiered), a
+`## Legend`, a `## What is not passing, and why` breakdown (a
+failure-class table — ECMA-402 / sloppy-only / Annex B builtins /
+cannot-block / **engine gaps** — followed by a failing-areas-only
+table whose `gaps` column is the engine work list), a
 `## Pre-Stage-4 proposals shipped` section (one binary row per
 shipped proposal), and a `## History` section of per-day
 mini-tables — newest first. Each history row shows `Δ pass`

@@ -52,149 +52,79 @@ concrete fixtures, and we run a filtered subset of it. So
 it's a lower bound on spec coverage.
 
 
-## Where the engine fails, by area
+## What is not passing, and why
 
-Areas are grouped into fail-magnitude tiers (most fails
-first); within a tier they're sorted by pass% ascending.
-Bucketed on the first two path components (`built-ins/Set`,
-`language/expressions`, …). `pass%` = `passing / (passing +
-failing)` per area. The `1+ fails` tiers are the engine-work
-list.
+Every failure, classified. The policy classes are by-design
+fails under the binary posture — fixtures that need sloppy
+mode, Annex B surfaces, or ECMA-402, none of which Cynic
+ships, on purpose. The **engine gaps** row is the real bug
+count; the per-area table below it is the work list.
 
+| why | failing | detail |
+|---|---:|---|
+| ECMA-402 not implemented | 3250 | the whole `intl402/` tree — `Intl` (and the `intl402/Temporal` twins of the excluded Temporal proposal) is an unbuilt subsystem |
+| sloppy-mode-only fixtures | 1148 | `flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...) |
+| Annex B builtins | 69 | `__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design |
+| cannot-block agent semantics | 2 | `flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent |
+| **engine gaps** | 173 | real conformance bugs — see the per-area breakdown below |
 
-**1000+ fails**
+**Failing areas.** Only areas with at least one failure are
+listed (everything else passes). `gaps` is the slice of the
+area's failures the policy classes above do not explain —
+sorted to the top, because that column is the engine work
+list. Bucketed on the first two path components.
 
-| area | passing | failing | pass% |
-|---|---:|---:|---:|
-| `intl402/Temporal` | 49 | 1957 | 2 % |
-
-**100–999 fails**
-
-| area | passing | failing | pass% |
-|---|---:|---:|---:|
-| `intl402/DateTimeFormat` | 0 | 248 | 0 % |
-| `intl402/DurationFormat` | 0 | 111 | 0 % |
-| `intl402/Locale` | 0 | 152 | 0 % |
-| `intl402/NumberFormat` | 0 | 253 | 0 % |
-| `language/eval-code` | 162 | 185 | 47 % |
-| `language/expressions` | 10253 | 429 | 96 % |
-| `language/statements` | 8967 | 356 | 96 % |
-
-**10–99 fails**
-
-| area | passing | failing | pass% |
-|---|---:|---:|---:|
-| `intl402` | 0 | 22 | 0 % |
-| `intl402/Collator` | 0 | 65 | 0 % |
-| `intl402/DisplayNames` | 0 | 57 | 0 % |
-| `intl402/Intl` | 0 | 66 | 0 % |
-| `intl402/ListFormat` | 0 | 81 | 0 % |
-| `intl402/PluralRules` | 0 | 52 | 0 % |
-| `intl402/RelativeTimeFormat` | 0 | 80 | 0 % |
-| `intl402/Segmenter` | 0 | 79 | 0 % |
-| `intl402/String` | 7 | 12 | 37 % |
-| `language/directive-prologue` | 37 | 25 | 60 % |
-| `language/function-code` | 155 | 62 | 71 % |
-| `built-ins/Function` | 422 | 87 | 83 % |
-| `language/arguments-object` | 225 | 38 | 86 % |
-| `built-ins/Proxy` | 300 | 11 | 96 % |
-| `built-ins/Object` | 3329 | 82 | 98 % |
-| `built-ins/TypedArrayConstructors` | 719 | 17 | 98 % |
-| `built-ins/Array` | 3054 | 27 | 99 % |
-
-**1–9 fails**
-
-| area | passing | failing | pass% |
-|---|---:|---:|---:|
-| `intl402/Number` | 3 | 4 | 43 % |
-| `intl402/BigInt` | 5 | 6 | 45 % |
-| `intl402/Array` | 1 | 1 | 50 % |
-| `built-ins/undefined` | 5 | 3 | 63 % |
-| `language/identifier-resolution` | 9 | 5 | 64 % |
-| `built-ins/Infinity` | 4 | 2 | 67 % |
-| `built-ins/NaN` | 4 | 2 | 67 % |
-| `intl402/Date` | 8 | 4 | 67 % |
-| `language/future-reserved-words` | 48 | 7 | 87 % |
-| `language/global-code` | 37 | 5 | 88 % |
-| `language/types` | 104 | 9 | 92 % |
-| `language/destructuring` | 18 | 1 | 95 % |
-| `built-ins/Symbol` | 96 | 2 | 98 % |
-| `language/comments` | 51 | 1 | 98 % |
-| `language/module-code` | 587 | 8 | 99 % |
-| `language/literals` | 527 | 7 | 99 % |
-| `built-ins/JSON` | 164 | 1 | 99 % |
-| `built-ins/TypedArray` | 1430 | 8 | 99 % |
-| `built-ins/Atomics` | 380 | 2 | 99 % |
-| `built-ins/Map` | 203 | 1 | 100 % |
-| `built-ins/Promise` | 637 | 3 | 100 % |
-| `built-ins/String` | 1219 | 4 | 100 % |
-| `built-ins/Set` | 382 | 1 | 100 % |
-| `built-ins/RegExp` | 1878 | 1 | 100 % |
-
-**0 fails — fully passing**
-
-| area | passing | failing | pass% |
-|---|---:|---:|---:|
-| `built-ins/AggregateError` | 25 | 0 | 100 % |
-| `built-ins/ArrayBuffer` | 192 | 0 | 100 % |
-| `built-ins/ArrayIteratorPrototype` | 27 | 0 | 100 % |
-| `built-ins/AsyncDisposableStack` | 104 | 0 | 100 % |
-| `built-ins/AsyncFromSyncIteratorPrototype` | 38 | 0 | 100 % |
-| `built-ins/AsyncFunction` | 18 | 0 | 100 % |
-| `built-ins/AsyncGeneratorFunction` | 23 | 0 | 100 % |
-| `built-ins/AsyncGeneratorPrototype` | 48 | 0 | 100 % |
-| `built-ins/AsyncIteratorPrototype` | 13 | 0 | 100 % |
-| `built-ins/BigInt` | 77 | 0 | 100 % |
-| `built-ins/Boolean` | 51 | 0 | 100 % |
-| `built-ins/DataView` | 550 | 0 | 100 % |
-| `built-ins/Date` | 594 | 0 | 100 % |
-| `built-ins/DisposableStack` | 93 | 0 | 100 % |
-| `built-ins/Error` | 58 | 0 | 100 % |
-| `built-ins/FinalizationRegistry` | 47 | 0 | 100 % |
-| `built-ins/GeneratorFunction` | 23 | 0 | 100 % |
-| `built-ins/GeneratorPrototype` | 61 | 0 | 100 % |
-| `built-ins/Iterator` | 432 | 0 | 100 % |
-| `built-ins/MapIteratorPrototype` | 11 | 0 | 100 % |
-| `built-ins/Math` | 327 | 0 | 100 % |
-| `built-ins/NativeErrors` | 94 | 0 | 100 % |
-| `built-ins/Number` | 340 | 0 | 100 % |
-| `built-ins/Reflect` | 153 | 0 | 100 % |
-| `built-ins/RegExpStringIteratorPrototype` | 17 | 0 | 100 % |
-| `built-ins/SetIteratorPrototype` | 11 | 0 | 100 % |
-| `built-ins/SharedArrayBuffer` | 104 | 0 | 100 % |
-| `built-ins/StringIteratorPrototype` | 7 | 0 | 100 % |
-| `built-ins/SuppressedError` | 22 | 0 | 100 % |
-| `built-ins/Temporal` | 4588 | 0 | 100 % |
-| `built-ins/ThrowTypeError` | 14 | 0 | 100 % |
-| `built-ins/Uint8Array` | 68 | 0 | 100 % |
-| `built-ins/WeakMap` | 141 | 0 | 100 % |
-| `built-ins/WeakRef` | 29 | 0 | 100 % |
-| `built-ins/WeakSet` | 85 | 0 | 100 % |
-| `built-ins/decodeURI` | 55 | 0 | 100 % |
-| `built-ins/decodeURIComponent` | 56 | 0 | 100 % |
-| `built-ins/encodeURI` | 31 | 0 | 100 % |
-| `built-ins/encodeURIComponent` | 31 | 0 | 100 % |
-| `built-ins/eval` | 10 | 0 | 100 % |
-| `built-ins/global` | 29 | 0 | 100 % |
-| `built-ins/isFinite` | 15 | 0 | 100 % |
-| `built-ins/isNaN` | 15 | 0 | 100 % |
-| `built-ins/parseFloat` | 54 | 0 | 100 % |
-| `built-ins/parseInt` | 55 | 0 | 100 % |
-| `intl402/TypedArray` | 1 | 0 | 100 % |
-| `language/asi` | 102 | 0 | 100 % |
-| `language/block-scope` | 145 | 0 | 100 % |
-| `language/computed-property-names` | 48 | 0 | 100 % |
-| `language/export` | 3 | 0 | 100 % |
-| `language/identifiers` | 268 | 0 | 100 % |
-| `language/import` | 21 | 0 | 100 % |
-| `language/keywords` | 25 | 0 | 100 % |
-| `language/line-terminators` | 41 | 0 | 100 % |
-| `language/punctuators` | 11 | 0 | 100 % |
-| `language/reserved-words` | 27 | 0 | 100 % |
-| `language/rest-parameters` | 11 | 0 | 100 % |
-| `language/source-text` | 1 | 0 | 100 % |
-| `language/statementList` | 80 | 0 | 100 % |
-| `language/white-space` | 67 | 0 | 100 % |
+| area | passing | failing | gaps | pass% |
+|---|---:|---:|---:|---:|
+| `built-ins/Function` | 422 | 87 | 56 | 83 % |
+| `language/expressions` | 10253 | 429 | 51 | 96 % |
+| `language/statements` | 8967 | 356 | 41 | 96 % |
+| `language/module-code` | 587 | 8 | 8 | 99 % |
+| `language/eval-code` | 162 | 185 | 4 | 47 % |
+| `language/function-code` | 155 | 62 | 4 | 71 % |
+| `built-ins/Object` | 3329 | 82 | 2 | 98 % |
+| `language/literals` | 527 | 7 | 2 | 99 % |
+| `built-ins/String` | 1219 | 4 | 2 | 100 % |
+| `built-ins/TypedArrayConstructors` | 719 | 17 | 1 | 98 % |
+| `built-ins/JSON` | 164 | 1 | 1 | 99 % |
+| `language/comments` | 51 | 1 | 1 | 98 % |
+| `intl402/Temporal` | 49 | 1957 | 0 | 2 % |
+| `intl402/NumberFormat` | 0 | 253 | 0 | 0 % |
+| `intl402/DateTimeFormat` | 0 | 248 | 0 | 0 % |
+| `intl402/Locale` | 0 | 152 | 0 | 0 % |
+| `intl402/DurationFormat` | 0 | 111 | 0 | 0 % |
+| `intl402/ListFormat` | 0 | 81 | 0 | 0 % |
+| `intl402/RelativeTimeFormat` | 0 | 80 | 0 | 0 % |
+| `intl402/Segmenter` | 0 | 79 | 0 | 0 % |
+| `intl402/Intl` | 0 | 66 | 0 | 0 % |
+| `intl402/Collator` | 0 | 65 | 0 | 0 % |
+| `intl402/DisplayNames` | 0 | 57 | 0 | 0 % |
+| `intl402/PluralRules` | 0 | 52 | 0 | 0 % |
+| `language/arguments-object` | 225 | 38 | 0 | 86 % |
+| `built-ins/Array` | 3054 | 27 | 0 | 99 % |
+| `language/directive-prologue` | 37 | 25 | 0 | 60 % |
+| `intl402` | 0 | 22 | 0 | 0 % |
+| `intl402/String` | 7 | 12 | 0 | 37 % |
+| `built-ins/Proxy` | 300 | 11 | 0 | 96 % |
+| `language/types` | 104 | 9 | 0 | 92 % |
+| `built-ins/TypedArray` | 1430 | 8 | 0 | 99 % |
+| `language/future-reserved-words` | 48 | 7 | 0 | 87 % |
+| `intl402/BigInt` | 5 | 6 | 0 | 45 % |
+| `language/global-code` | 37 | 5 | 0 | 88 % |
+| `language/identifier-resolution` | 9 | 5 | 0 | 64 % |
+| `intl402/Date` | 8 | 4 | 0 | 67 % |
+| `intl402/Number` | 3 | 4 | 0 | 43 % |
+| `built-ins/Promise` | 637 | 3 | 0 | 100 % |
+| `built-ins/undefined` | 5 | 3 | 0 | 63 % |
+| `built-ins/Atomics` | 380 | 2 | 0 | 99 % |
+| `built-ins/Infinity` | 4 | 2 | 0 | 67 % |
+| `built-ins/NaN` | 4 | 2 | 0 | 67 % |
+| `built-ins/Symbol` | 96 | 2 | 0 | 98 % |
+| `built-ins/Map` | 203 | 1 | 0 | 100 % |
+| `built-ins/RegExp` | 1878 | 1 | 0 | 100 % |
+| `built-ins/Set` | 382 | 1 | 0 | 100 % |
+| `intl402/Array` | 1 | 1 | 0 | 50 % |
+| `language/destructuring` | 18 | 1 | 0 | 95 % |
 
 
 ## Pre-Stage-4 proposals shipped
@@ -213,6 +143,12 @@ top-line score.
 
 
 ## History
+
+### 2026-06-10 — cynic `4bb809d`, test262 `d0c1b4555b`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 45166 | 4642 | 49808 | 90.68 % | ±0 | 35.1 s |
 
 ### 2026-06-07 — cynic `690388f`, test262 `d0c1b455`
 
