@@ -272,7 +272,7 @@ These are project rules — they apply to everyone.
 | Touch realm setup / intrinsic install / hardening | [docs/ses-alignment.md](docs/ses-alignment.md) (SES-by-default position, frozen primordials, `harden()`, override-mistake fix, the `--unhardened` opt-out + the separate `--allow=eval`) |
 | Verify a shared-machinery change without missing regressions | [docs/handbook/agent-checks.md](docs/handbook/agent-checks.md) (the `--only-failing` trap, per-touch bucket filters, harness threading invariant) |
 | Look up a Zig idiom Cynic uses | [docs/handbook/zig.md](docs/handbook/zig.md) |
-| Touch the WebAssembly engine (Sarcasm) or its JS API | [docs/wasm-engine.md](docs/wasm-engine.md) (in-place interpreter + side-table, the reference encoding + externref pin set, `WebAssembly.*` surface, `--allow=wasm`); score in [wasm-results.md](wasm-results.md) |
+| Touch the WebAssembly engine (Sarcasm) or its JS API | [docs/wasm-engine.md](docs/wasm-engine.md) (in-place interpreter + side-table, the reference encoding + externref pin set, `WebAssembly.*` surface, `--allow=wasm`); score in [wasm-results.md](wasm-results.md); perf baselines in [wasm-bench-results.md](wasm-bench-results.md) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |
 | Measure perf (micros) | `zig build bench` (or `/perf`); design in [docs/benchmarking.md](docs/benchmarking.md) |
 | Find a hot function | `tools/profile.sh "<filter>"` (or `/profile`); requires `samply` |

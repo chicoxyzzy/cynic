@@ -461,7 +461,8 @@ the measured design space:
   target actually rewards. Threaded dispatch is now in (§3 Decision 3);
   `zig build wasm-bench` is a standalone ReleaseFast harness for the
   dispatch-bound loop and recursive `fib` so future hot-loop changes
-  stay measured.
+  stay measured; recorded baselines live in
+  [`wasm-bench-results.md`](../wasm-bench-results.md).
 - Honest trade: `wasm3` is ~2–3× faster as an interpreter via a
   register rewrite + stack caching, paying 2–4× memory and a compile
   pass. We decline that trade on purpose.
