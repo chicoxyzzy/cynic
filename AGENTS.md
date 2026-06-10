@@ -557,9 +557,13 @@ reviewed in PRs against `test262-results.md`.
                           siblings hold arithmetic + coercion (`arith.zig`),
                           accessor lookup + error makers + array-length
                           coercion (`helpers.zig`), and the test suite
-                          (`tests.zig`). Future JIT tiers will live
-                          alongside as `bistromath/` (T1, planned) and
-                          `ohaimark/` (T2, planned).
+                          (`tests.zig`). Bistromath (T1) lives
+                          alongside in `bistromath/` (behind `--jit`
+                          — docs/jit.md); `ohaimark/` (T2) is planned.
+    src/runtime/jit/      The shared codegen substrate (docs/jit.md
+                          §7-§8): per-ISA encoders, the masm facade,
+                          and the executable-memory allocator under
+                          Bistromath / Ohaimark / Spasm.
     src/runtime/builtins/ JS-visible API surface, one file per global /
                           prototype family. Each exports `pub fn install(realm)`
                           (or named installers) wired from `intrinsics.install`.

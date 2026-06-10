@@ -96,9 +96,11 @@ Three observable properties, in priority order:
 
 Non-goals for this plan:
 
-- **Per-realm JIT compilation scope.** When Bistromath / Ohaimark
-  ship, the code-cache scoping decision is its own design doc.
-  This plan stays interpreter-only (Lantern).
+- **Per-realm JIT compilation scope.** Bistromath ships behind
+  `--jit` with chunk-owned code in the heap's engine-wide region
+  (docs/jit.md §8); the per-realm scoping decision stays its own
+  design doc. Nothing in this plan depends on the tier — compiled
+  frames are Lantern frames (docs/jit.md §4.2).
 - **Concurrent execution across realms.** Realms coexist; only
   one runs at a time per OS thread. The microtask drain owner
   is the active realm.
@@ -1031,7 +1033,7 @@ sweep gains ~N fixtures (count TBD per submodule version).
 
 | | Why |
 |---|---|
-| **Per-realm JIT scope** (Bistromath / Ohaimark) | The JITs aren't shipped. Code-cache scoping decision is its own ADR when the tiers land. |
+| **Per-realm JIT scope** (Bistromath / Ohaimark) | Bistromath ships behind `--jit` on the heap's engine-wide code region (docs/jit.md §8); the scoping ADR stays deferred — nothing in the current shape forecloses either answer. |
 | **Concurrent execution across realms** | Realms coexist; only one runs at a time per OS thread. Multi-threaded JS is its own design. |
 | **Cross-process realms** | Process boundary is the embedder's job (Worker per process, etc.). |
 | **Per-realm GC** (separate heaps) | Single heap, multiple roots — what we already have, scaled. Per-realm heaps would be a Mark IV change. |

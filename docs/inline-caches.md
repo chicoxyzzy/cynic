@@ -22,10 +22,13 @@ Two pieces, in order:
    the read becomes `if obj.shape == cell.shape: load
    slots[cell.slot]`.
 
-Target model is **Hermes**: shapes + a monomorphic interpreter IC,
-no JIT. Polymorphic ICs are deliberately out of scope today —
-their main consumer is JIT speculation. Revisit only if profiling
-shows polymorphic callsites dominate, or if a JIT ever lands.
+Target model was **Hermes**: shapes + a monomorphic interpreter
+IC. Bistromath — the baseline JIT, behind `--jit` — now reads the
+same cells as data (the docs/jit.md §4.4 design), so one IC
+substrate serves both tiers unchanged. Polymorphic ICs stay
+deliberately out of scope: their consumer is Ohaimark-tier
+speculation (docs/jit.md §5); revisit when that ADR lands or when
+profiling shows polymorphic callsites dominating.
 
 ## Shipped
 
@@ -312,10 +315,12 @@ shape-mode reads independent of `properties`.
 
 ### Tier 3 — niche
 
-**Polymorphic IC.** Allow 2-4 cells per callsite. Mostly a
-JIT-speculation optimization; marginal in a pure interpreter
-unless profiling shows polymorphic sites dominating a workload
-we care about.
+**Polymorphic IC.** Allow 2-4 cells per callsite. An
+optimizing-tier speculation feature: Bistromath deliberately reads
+the monomorphic cells as-is (docs/jit.md §4.4) and Ohaimark is the
+intended consumer (docs/jit.md §5). Marginal below that tier
+unless profiling shows polymorphic sites dominating a workload we
+care about.
 
 **`hasOwn` / `in` ICs.** Cache shape-presence for
 `Object.hasOwn(obj, "x")` and `"x" in obj`. Niche.

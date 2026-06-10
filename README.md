@@ -44,8 +44,10 @@ RegExp engine), Sarcasm (the from-scratch WebAssembly engine —
 100 % of the spec-testsuite commands it scores), the native §3
 Unicode tables, and
 the hardened-by-default realm-boot pipeline. The runtime is filling
-in §19-§28 one bucket at a time. The JIT tiers (Bistromath,
-Ohaimark) and generational GC are future work. See
+in §19-§28 one bucket at a time. Bistromath (the baseline JIT)
+runs behind `--jit` while its coverage lands
+([`docs/jit.md`](docs/jit.md)); Ohaimark (the optimizing tier) and
+a moving generational GC are future work. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance

@@ -184,8 +184,10 @@ Substrate facts the design builds on (verified 2026-06):
   decline explicitly parks the value-representation question "as
   part of a baseline JIT's value representation" (§6).
 
-One gap: **no profiling state exists** — no invocation counters, no
-back-edge counters. Tier-up state is new surface (§4.7).
+The one gap this survey found — no profiling state — is now
+closed: `Chunk.JitState` carries the warmth counters (entries +16,
+including §15.10 PTC re-entries; back-edges +1) and the tier state
+(§4.7), measured sub-noise on the bench suite.
 
 ## 4. Bistromath — the T1 baseline JIT
 
@@ -214,9 +216,10 @@ cells today. Tier state rides the same mutable-side-state pattern as
 
 ```zig
 // On Chunk, mutable side-state (chunk stays semantically immutable):
-warmth: u32 = 0,            // entry +K, back-edge +1 (§4.7)
+warmth: u32 = 0,            // entry +16, back-edge +1 (§4.7)
 tier: enum(u8) { cold, compiled, dont_compile } = .cold,
-code: ?*CompiledCode = null, // owned by the code allocator (§8)
+entry: ?*const anyopaque = null, // type-erased EntryFn; the code
+                                 // bytes live in the allocator (§8)
 ```
 
 `dont_compile` is the permanent opt-out for chunks the v1 compiler

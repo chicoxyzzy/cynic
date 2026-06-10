@@ -235,8 +235,10 @@ The choices in this doc reflect what landed:
   shapes yet (the next major perf win, per
   [../ROADMAP.md](../ROADMAP.md) "Performance"). Inline caches
   are also pending shapes.
-- **No JIT** — interpreter only. Baseline + optimizing JIT are
-  named tiers in `ROADMAP.md` "Future work"; not staffed.
+- **Bistromath** — the baseline JIT, shipped behind `--jit` (off
+  by default while coverage lands); design + delivery order in
+  [../jit.md](../jit.md). Ohaimark, the optimizing tier, stays a
+  named future tier.
 
 Cite this file when arguing for changes to the underlying
 shape — e.g. moving to shapes, switching to a stack VM,

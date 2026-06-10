@@ -50,9 +50,10 @@ a general-purpose JS+WASM engine.
   unclaimed.
 - Flipping drops Cynic into the crowded general-purpose embeddable tier
   (QuickJS-ng, XS, Hermes, Boa, Kiesel, engine262, Porffor), where it
-  leads on no axis and the frame foregrounds its two soft spots: **no
-  JIT** (Bistromath / Ohaimark are future work → capped speed) and
-  **pre-alpha maturity**.
+  leads on no axis and the frame foregrounds its two soft spots:
+  **capped speed** (Bistromath is young and behind `--jit`;
+  Ohaimark is future work — docs/jit.md §12) and **pre-alpha
+  maturity**.
 - The from-scratch WebAssembly engine (Sarcasm — 100 % on the spec
   testsuite) is *additive*: a second differentiator stacked on the
   niche, not a reason to flip. `--allow=wasm` default-off stays

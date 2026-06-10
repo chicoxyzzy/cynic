@@ -994,7 +994,8 @@ matching the JIT engines at full speed is a separate track (see
    kind-check dispatch overhead eats most of the per-element
    memory savings, and Hermes (the interpreter-tier engine Cynic
    most resembles) deliberately doesn't do this. Worth doing
-   only when a baseline JIT lands and can speculate on the kind.
+   once a tier speculates on element kinds — Ohaimark territory
+   (docs/jit.md §5); Bistromath alone doesn't move it.
 
 4. **Interpreter-core tuning for `arith_loop`** — Cynic is
    already within ~10 % of QuickJS-NG here; the remaining
