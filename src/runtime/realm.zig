@@ -1036,6 +1036,12 @@ pub const Realm = struct {
     /// `allow_eval`). `WebAssembly.validate` is ungated — it only
     /// inspects bytes. Set `true` to open the gate.
     allow_wasm: bool = false,
+    /// `--jit` posture toggle (docs/jit.md §10). When `true` the
+    /// engine tiers hot chunks up to Bistromath-compiled code; when
+    /// `false` (the default while the tier lands) everything stays
+    /// on Lantern and the chunk warmth counters merely accumulate.
+    /// Targets without codegen support (docs/jit.md §8) ignore it.
+    jit_enabled: bool = false,
     /// Lazily-created arena owning every realm-resident WebAssembly
     /// artifact (decoded modules, instances, their store state). Freed
     /// wholesale at realm teardown, so wasm objects need no per-object

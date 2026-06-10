@@ -109,6 +109,7 @@ pub fn run(
     unhardened: bool,
     allow_eval: bool,
     allow_wasm: bool,
+    jit: bool,
 ) !void {
     std.debug.assert(paths.len > 0);
 
@@ -134,6 +135,8 @@ pub fn run(
     // before `installBuiltins`. See `Realm.allow_eval`.
     if (allow_eval) realm.allow_eval = true;
     if (allow_wasm) realm.allow_wasm = true;
+    // `--jit` — enable the Bistromath tier-up path (docs/jit.md §10).
+    if (jit) realm.jit_enabled = true;
     // Apply the `--gc-threshold` knob before `installBuiltins`
     // so the builtin-install allocations themselves run at the
     // requested cadence (matters at `--gc-threshold=1` where every
