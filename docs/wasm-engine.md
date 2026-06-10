@@ -466,9 +466,7 @@ the measured design space:
   register rewrite + stack caching, paying 2–4× memory and a compile
   pass. We decline that trade on purpose.
 - Documented future refinements (none change the in-place design),
-  roughly in leverage order: **narrow the operand cell** — the uniform
-  128-bit `Cell` doubles scalar bandwidth; an 8-byte scalar slot with a
-  side `v128` lane is the next win (§5); **hoist the memarg align/offset
+  roughly in leverage order: **hoist the memarg align/offset
   and the memory `is_64` flag** out of the per-access path into the
   side-table; **stack caching** (top-of-stack in a register, like
   Lantern); **superinstructions** for common opcode pairs; a guard-page
@@ -476,6 +474,18 @@ the measured design space:
   tier** later (the ~10×→~2–3× step), which would consume the validated
   module + side-table — exactly where V8/JSC/SM add Liftoff/BBQ over
   their interpreters.
+- **Narrowing the operand cell was measured and declined** (2026-06).
+  Splitting the 128-bit `Cell` into parallel 64-bit lanes (scalars in
+  the low lane only) was prototyped and benchmarked on Apple Silicon:
+  the dispatch-bound arithmetic loop got ~5% faster, but recursive
+  `fib` got ~5% *slower* — a u128 slot copy is a single 16-byte vector
+  move on ARM64, and the split turns every type-blind move
+  (`local.get`, frame argument/result shuffles — which dominate
+  call-heavy code) into two loads + two stores on two distant cache
+  lines. Net wash at best, plus a stale-high-lane discipline every
+  full-width read must follow. Revisit only for a target where 128-bit
+  moves are genuinely two ops, or as part of a baseline JIT's value
+  representation.
 
 ## 11. Implementation map
 
