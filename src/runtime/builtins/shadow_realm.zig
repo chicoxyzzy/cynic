@@ -156,13 +156,14 @@ fn shadowRealmConstructor(
     };
     const proto: ?*@import("../object.zig").JSObject = switch (proto_lookup) {
         .proto => |p| p,
+        .proto_fn => null, // function-valued proto — applied via the parallel slot below
         .thrown => |ex| {
             realm.pending_exception = ex;
             return error.NativeThrew;
         },
     };
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(inst, proto);
+    if (proto_lookup == .proto_fn) realm.heap.setObjectPrototypeFn(inst, proto_lookup.proto_fn) else realm.heap.setObjectPrototype(inst, proto);
 
     // §3.8.1.1 step 3 — allocate a fresh child realm sharing the
     // parent's heap. Mirrors `test262CreateRealm` in tools/test262.zig.

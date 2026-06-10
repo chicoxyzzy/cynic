@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 90.68 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 90.69 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **45166 passing** — Cynic produced the spec-expected result.
-- **4642 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **45170 passing** — Cynic produced the spec-expected result.
+- **4638 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 45166 | 4642 | 49808 | 90.68 % |
+| **`--unhardened --allow=eval`** | 45170 | 4638 | 49808 | 90.69 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -66,7 +66,7 @@ count; the per-area table below it is the work list.
 | sloppy-mode-only fixtures | 1148 | `flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...) |
 | Annex B builtins | 69 | `__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design |
 | cannot-block agent semantics | 2 | `flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent |
-| **engine gaps** | 173 | real conformance bugs — see the per-area breakdown below |
+| **engine gaps** | 169 | failures the policy classes do not explain — the work list (an upper bound: it includes a residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter) |
 
 **Failing areas.** Only areas with at least one failure are
 listed (everything else passes). `gaps` is the slice of the
@@ -76,9 +76,9 @@ list. Bucketed on the first two path components.
 
 | area | passing | failing | gaps | pass% |
 |---|---:|---:|---:|---:|
-| `built-ins/Function` | 422 | 87 | 56 | 83 % |
+| `built-ins/Function` | 424 | 85 | 54 | 83 % |
 | `language/expressions` | 10253 | 429 | 51 | 96 % |
-| `language/statements` | 8967 | 356 | 41 | 96 % |
+| `language/statements` | 8969 | 354 | 39 | 96 % |
 | `language/module-code` | 587 | 8 | 8 | 99 % |
 | `language/eval-code` | 162 | 185 | 4 | 47 % |
 | `language/function-code` | 155 | 62 | 4 | 71 % |
@@ -144,11 +144,19 @@ top-line score.
 
 ## History
 
-### 2026-06-10 — cynic `4bb809d`, test262 `d0c1b4555b`
+### 2026-06-10 — cynic `f7fc36c`, test262 `d0c1b4555b`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 45166 | 4642 | 49808 | 90.68 % | ±0 | 35.1 s |
+| 45170 | 4638 | 49808 | 90.69 % | +4 | 45.1 s |
+
+Biggest movers:
+
+- `built-ins/Temporal` +4588
+- `built-ins/Date` +594
+- `built-ins/DataView` +550
+- `built-ins/Iterator` +432
+- `built-ins/Number` +340
 
 ### 2026-06-07 — cynic `690388f`, test262 `d0c1b455`
 

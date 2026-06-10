@@ -449,13 +449,14 @@ fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value)
     };
     const proto: ?*JSObject = switch (proto_lookup) {
         .proto => |p| p,
+        .proto_fn => null, // function-valued proto — applied via the parallel slot below
         .thrown => |ex| {
             realm.pending_exception = ex;
             return error.NativeThrew;
         },
     };
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(inst, proto);
+    if (proto_lookup == .proto_fn) realm.heap.setObjectPrototypeFn(inst, proto_lookup.proto_fn) else realm.heap.setObjectPrototype(inst, proto);
 
     // §25.1.3.1 step 7 — CreateByteDataBlock(len). Allocates
     // `len` bytes (or `max_len` for resizable buffers so growing
@@ -857,13 +858,14 @@ fn sharedArrayBufferConstructor(realm: *Realm, this_value: Value, args: []const 
     };
     const proto: ?*JSObject = switch (proto_lookup) {
         .proto => |p| p,
+        .proto_fn => null, // function-valued proto — applied via the parallel slot below
         .thrown => |ex| {
             realm.pending_exception = ex;
             return error.NativeThrew;
         },
     };
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(inst, proto);
+    if (proto_lookup == .proto_fn) realm.heap.setObjectPrototypeFn(inst, proto_lookup.proto_fn) else realm.heap.setObjectPrototype(inst, proto);
 
     // §25.2.1.1 step 5 — CreateSharedByteDataBlock(byteLength). The
     // bytes live in a refcounted, non-GC shared block (see
@@ -1047,13 +1049,14 @@ fn allocateTypedArrayInstance(realm: *Realm, new_target: Value, default_proto: ?
     };
     const proto: ?*JSObject = switch (proto_lookup) {
         .proto => |p| p,
+        .proto_fn => null, // function-valued proto — applied via the parallel slot below
         .thrown => |ex| {
             realm.pending_exception = ex;
             return error.NativeThrew;
         },
     };
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(inst, proto);
+    if (proto_lookup == .proto_fn) realm.heap.setObjectPrototypeFn(inst, proto_lookup.proto_fn) else realm.heap.setObjectPrototype(inst, proto);
     return inst;
 }
 
@@ -3284,6 +3287,7 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     };
     const proto: ?*JSObject = switch (proto_lookup) {
         .proto => |p| p,
+        .proto_fn => null, // function-valued proto — applied via the parallel slot below
         .thrown => |ex| {
             realm.pending_exception = ex;
             return error.NativeThrew;
@@ -3301,7 +3305,7 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
         if (byte_length > buf3.len - byte_offset) return throwRangeError(realm, "DataView: byteLength exceeds buffer");
     }
     const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(inst, proto);
+    if (proto_lookup == .proto_fn) realm.heap.setObjectPrototypeFn(inst, proto_lookup.proto_fn) else realm.heap.setObjectPrototype(inst, proto);
     inst.setDataView(realm.allocator, .{ .viewed = buf_obj, .byte_offset = byte_offset, .byte_length = byte_length, .length_tracking = length_tracking }) catch return error.OutOfMemory;
     return heap_mod.taggedObject(inst);
 }

@@ -3934,6 +3934,7 @@ pub fn runFrames(
                 const proto_lookup = try getPrototypeFromConstructor(allocator, realm, resolved_callee, baseConstructIntrinsicDefaultProto(realm, resolved_callee), baseConstructDefaultProtoOwner(realm, resolved_callee));
                 const resolved_proto: ?*JSObject = switch (proto_lookup) {
                     .proto => |p| p,
+                    .proto_fn => null, // function-valued proto — applied via the parallel slot below
                     .thrown => |ex| {
                         f.ip = ip;
                         f.accumulator = acc;
@@ -3945,7 +3946,7 @@ pub fn runFrames(
                     },
                 };
                 const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
-                realm.heap.setObjectPrototype(inst, resolved_proto);
+                if (proto_lookup == .proto_fn) realm.heap.setObjectPrototypeFn(inst, proto_lookup.proto_fn) else realm.heap.setObjectPrototype(inst, resolved_proto);
                 const this_v = heap_mod.taggedObject(inst);
                 // §10.4.1.2 [[Construct]] step 5 — for a
                 // `new C()` where C is bound, the original
@@ -4040,6 +4041,7 @@ pub fn runFrames(
             const proto_lookup_main = try getPrototypeFromConstructor(allocator, realm, callee_fn, baseConstructIntrinsicDefaultProto(realm, callee_fn), baseConstructDefaultProtoOwner(realm, callee_fn));
             const resolved_proto_main: ?*JSObject = switch (proto_lookup_main) {
                 .proto => |p| p,
+                .proto_fn => null, // function-valued proto — applied via the parallel slot below
                 .thrown => |ex| {
                     f.ip = ip;
                     f.accumulator = acc;
@@ -4051,7 +4053,7 @@ pub fn runFrames(
                 },
             };
             const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-            realm.heap.setObjectPrototype(instance, resolved_proto_main);
+            if (proto_lookup_main == .proto_fn) realm.heap.setObjectPrototypeFn(instance, proto_lookup_main.proto_fn) else realm.heap.setObjectPrototype(instance, resolved_proto_main);
             const this_value = heap_mod.taggedObject(instance);
 
             // Native fast path — same calling shape as `Call`,
@@ -4376,9 +4378,9 @@ pub fn runFrames(
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
             } else if (heap_mod.valueAsPlainObject(lhs)) |lhs_obj| {
-                var cursor: ?*JSObject = lhs_obj.prototype;
+                var cursor: ?*JSObject = lhs_obj.prototype orelse if (lhs_obj.prototype_fn) |pf| pf.proto else null;
                 var found = false;
-                while (cursor) |p| : (cursor = p.prototype) {
+                while (cursor) |p| : (cursor = p.prototype orelse if (p.prototype_fn) |pf| pf.proto else null) {
                     if (p == target_proto.?) {
                         found = true;
                         break;

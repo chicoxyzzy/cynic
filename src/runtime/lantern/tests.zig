@@ -12694,3 +12694,49 @@ test "class constructor body resets finally_chain at function boundary" {
         \\out;
     , 8);
 }
+
+// §10.1.8 OrdinaryGet / §10.1.1 OrdinaryGetPrototypeOf — a function
+// object can BE a [[Prototype]] link; the chain continues through the
+// function's own properties and on into %Function.prototype%.
+
+test "prototype chain: own property of a function-valued [[Prototype]]" {
+    try expectScriptStringWithBuiltins(
+        \\function f() {}
+        \\f.tag = "from-fn";
+        \\Object.create(f).tag;
+    , "from-fn");
+}
+
+test "prototype chain: Function.prototype methods reach through a function link" {
+    try expectScriptStringWithBuiltins(
+        \\const o = Object.create(function () {});
+        \\typeof o.apply;
+    , "function");
+}
+
+test "prototype chain: new F with a function-valued F.prototype" {
+    try expectScriptStringWithBuiltins(
+        \\function P() {}
+        \\function F() {}
+        \\F.prototype = P;
+        \\const o = new F();
+        \\typeof o.call;
+    , "function");
+}
+
+test "prototype chain: getPrototypeOf returns the function itself" {
+    try expectScriptStringWithBuiltins(
+        \\function f() {}
+        \\"" + (Object.getPrototypeOf(Object.create(f)) === f);
+    , "true");
+}
+
+test "prototype chain: setPrototypeOf to a function" {
+    try expectScriptStringWithBuiltins(
+        \\function f() {}
+        \\f.x = 42;
+        \\const o = {};
+        \\Object.setPrototypeOf(o, f);
+        \\"" + o.x + "," + (Object.getPrototypeOf(o) === f);
+    , "42,true");
+}

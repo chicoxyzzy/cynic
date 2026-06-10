@@ -1284,13 +1284,14 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     };
     const resolved_proto: ?*@import("../object.zig").JSObject = switch (proto_lookup) {
         .proto => |p| p,
+        .proto_fn => null, // function-valued proto — applied via the parallel slot below
         .thrown => |ex| {
             realm.pending_exception = ex;
             return error.NativeThrew;
         },
     };
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(instance, resolved_proto);
+    if (proto_lookup == .proto_fn) realm.heap.setObjectPrototypeFn(instance, proto_lookup.proto_fn) else realm.heap.setObjectPrototype(instance, resolved_proto);
     const this_arg = heap_mod.taggedObject(instance);
 
     // §10.5.14 [[Construct]] — invoke the target with the supplied

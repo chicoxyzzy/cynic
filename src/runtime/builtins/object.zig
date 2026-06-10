@@ -1109,6 +1109,7 @@ pub fn objectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
             return objectGetPrototypeOf(realm, Value.undefined_, &inner_args);
         }
         if (obj.prototype) |p| return heap_mod.taggedObject(p);
+        if (obj.prototype_fn) |pf| return heap_mod.taggedFunction(pf);
         return Value.null_;
     }
     if (heap_mod.valueAsFunction(arg)) |fn_obj| {
@@ -2674,7 +2675,10 @@ fn objectCreate(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     } else if (heap_mod.valueAsPlainObject(proto_v)) |p| {
         realm.heap.setObjectPrototype(obj, p);
     } else if (heap_mod.valueAsFunction(proto_v)) |fn_obj| {
-        realm.heap.setObjectPrototype(obj, fn_obj.prototype);
+        // §10.2 — a function IS an object and can be a prototype;
+        // the chain hops through the function's own properties and
+        // on into %Function.prototype%.
+        realm.heap.setObjectPrototypeFn(obj, fn_obj);
     } else {
         return throwTypeError(realm, "Object.create prototype must be an Object or null");
     }
@@ -3708,18 +3712,14 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
         // create a cycle and every subsequent chain walk would
         // spin. Spec says return false, which Object.setPrototypeOf
         // turns into TypeError.
-        const new_proto: ?*@import("../object.zig").JSObject = blk: {
-            if (proto_v.isNull()) break :blk null;
-            if (heap_mod.valueAsPlainObject(proto_v)) |p| break :blk p;
-            if (heap_mod.valueAsFunction(proto_v)) |fn_obj| break :blk fn_obj.prototype;
-            break :blk null;
-        };
+        const new_proto: ?*@import("../object.zig").JSObject = heap_mod.valueAsPlainObject(proto_v);
+        const new_proto_fn: ?*@import("../function.zig").JSFunction = heap_mod.valueAsFunction(proto_v);
         // §10.4.7 — `%Object.prototype%` is an Immutable Prototype
         // Exotic Object: [[SetPrototypeOf]] only succeeds if the
         // new value SameValue's the current one. Object.setPrototypeOf
         // then translates the `false` return into TypeError.
         if (obj == realm.intrinsics.object_prototype.?) {
-            if (new_proto != obj.prototype) {
+            if (new_proto != obj.prototype or new_proto_fn != obj.prototype_fn) {
                 return throwTypeError(realm, "Immutable prototype object cannot have its prototype set");
             }
             return target_v;
@@ -3735,19 +3735,26 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
         // IsExtensible-false signal here so a `Object.setPrototypeOf
         // (ns, anything)` always rejects per the spec.
         if (!obj.extensible or obj.is_module_namespace) {
-            if (new_proto != obj.prototype) {
+            if (new_proto != obj.prototype or new_proto_fn != obj.prototype_fn) {
                 return throwTypeError(realm, "Cannot set prototype on non-extensible object");
             }
             return target_v;
         }
-        var cursor: ?*@import("../object.zig").JSObject = new_proto;
+        // Cycle check walks through function links too: a function
+        // node itself can't equal `obj` (different heap types), but
+        // the chain continues through its `proto`.
+        var cursor: ?*@import("../object.zig").JSObject = new_proto orelse if (new_proto_fn) |pf| pf.proto else null;
         while (cursor) |node| {
             if (node == obj) {
                 return throwTypeError(realm, "cyclic __proto__ value");
             }
-            cursor = node.prototype;
+            cursor = node.prototype orelse if (node.prototype_fn) |pf| pf.proto else null;
         }
-        realm.heap.setObjectPrototype(obj, new_proto);
+        if (new_proto_fn) |pf| {
+            realm.heap.setObjectPrototypeFn(obj, pf);
+        } else {
+            realm.heap.setObjectPrototype(obj, new_proto);
+        }
         // §10.1.2.1 — every cached IC cell that resolved through
         // the prototype chain may now point at a stale link. Bump
         // the revision counter so all proto-load cells miss + refill

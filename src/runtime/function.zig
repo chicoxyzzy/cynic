@@ -757,6 +757,19 @@ pub const JSFunction = struct {
         return Value.undefined_;
     }
 
+    /// `[[HasProperty]]` — own, then the class-static parent chain,
+    /// then the function-object [[Prototype]] (typically
+    /// `%Function.prototype%`). Mirrors `get`'s resolution order.
+    pub fn hasProperty(self: *const JSFunction, key: []const u8) bool {
+        if (self.hasOwn(key)) return true;
+        var sp: ?*JSFunction = self.static_parent;
+        while (sp) |p| : (sp = p.static_parent) {
+            if (p.hasOwn(key)) return true;
+        }
+        if (self.proto) |p| return p.hasProperty(key);
+        return false;
+    }
+
     pub fn hasOwn(self: *const JSFunction, key: []const u8) bool {
         if (self.properties.contains(key)) return true;
         if (self.accessors.contains(key)) return true;

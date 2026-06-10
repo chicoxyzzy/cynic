@@ -286,6 +286,10 @@ pub fn callValue(
 /// caller can propagate the abrupt completion.
 pub const ProtoLookup = union(enum) {
     proto: ?*JSObject,
+    /// §10.1.14 — `Get(constructor, "prototype")` produced a function:
+    /// functions are objects, so the instance's [[Prototype]] is the
+    /// function itself (stored on the `prototype_fn` parallel slot).
+    proto_fn: *JSFunction,
     thrown: Value,
 };
 
@@ -514,6 +518,7 @@ pub fn getPrototypeFromConstructor(
             switch (outcome) {
                 .value, .yielded => |v| {
                     if (heap_mod.valueAsPlainObject(v)) |po| return .{ .proto = po };
+                    if (heap_mod.valueAsFunction(v)) |pf| return .{ .proto_fn = pf };
                     return .{ .proto = default_proto };
                 },
                 .thrown => |ex| return .{ .thrown = ex },
@@ -529,6 +534,7 @@ pub fn getPrototypeFromConstructor(
     // when the value isn't an Object.
     if (new_target.properties.get("prototype")) |v| {
         if (heap_mod.valueAsPlainObject(v)) |po| return .{ .proto = po };
+        if (heap_mod.valueAsFunction(v)) |pf| return .{ .proto_fn = pf };
         return .{ .proto = default_proto };
     }
     if (new_target.prototype) |p| return .{ .proto = p };
@@ -677,10 +683,15 @@ pub fn constructValue(
     const base_default = baseConstructIntrinsicDefaultProto(realm, target);
     const base_default_owner = baseConstructDefaultProtoOwner(realm, target);
     var resolved_proto: ?*JSObject = undefined;
+    var resolved_proto_fn: ?*JSFunction = null;
     if (heap_mod.valueAsFunction(new_target)) |new_target_fn| {
         const proto_lookup = try getPrototypeFromConstructor(allocator, realm, new_target_fn, base_default, base_default_owner);
         resolved_proto = switch (proto_lookup) {
             .proto => |p| p,
+            .proto_fn => |pf| blk: {
+                resolved_proto_fn = pf;
+                break :blk null;
+            },
             .thrown => |ex| return .{ .thrown = ex },
         };
     } else if (heap_mod.valueAsPlainObject(new_target)) |nt_proxy| {
@@ -714,7 +725,7 @@ pub fn constructValue(
         resolved_proto = base_default;
     }
     const instance = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(instance, resolved_proto);
+    if (resolved_proto_fn) |pf| realm.heap.setObjectPrototypeFn(instance, pf) else realm.heap.setObjectPrototype(instance, resolved_proto);
     const this_arg = heap_mod.taggedObject(instance);
     // §10.2.2 [[Construct]] — body runs with NewTarget bound to
     // `new_target`. The frame must carry it so `new.target`

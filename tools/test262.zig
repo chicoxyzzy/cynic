@@ -4033,7 +4033,7 @@ fn writeNotPassing(
         .{ .idx = .no_strict, .label = "sloppy-mode-only fixtures", .detail = "`flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...)" },
         .{ .idx = .annex_b, .label = "Annex B builtins", .detail = "`__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design" },
         .{ .idx = .can_block, .label = "cannot-block agent semantics", .detail = "`flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent" },
-        .{ .idx = .gap, .label = "**engine gaps**", .detail = "real conformance bugs — see the per-area breakdown below" },
+        .{ .idx = .gap, .label = "**engine gaps**", .detail = "failures the policy classes do not explain — the work list (an upper bound: it includes a residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter)" },
     };
     for (class_rows) |row| {
         const n = cls[@intFromEnum(row.idx)];

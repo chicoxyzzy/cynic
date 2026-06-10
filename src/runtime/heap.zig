@@ -1684,6 +1684,9 @@ pub const Heap = struct {
                         self.enqueue(taggedObject(p));
                     };
                 }
+                // A function-valued [[Prototype]] link keeps the
+                // function (and through it, its own chain) alive.
+                if (o.prototype_fn) |pf| self.enqueue(taggedFunction(pf));
                 // §10.5 Proxy exotic — `[[ProxyTarget]]` /
                 // `[[ProxyHandler]]` are typed slots, not properties;
                 // a reachable Proxy must keep both alive.
@@ -2898,6 +2901,7 @@ pub const Heap = struct {
                 self.markValue(taggedObject(p));
             };
         }
+        if (o.prototype_fn) |pf| self.markValue(taggedFunction(pf));
         if (o.proxy_target) |pt| self.markValue(taggedObject(pt));
         if (o.proxy_handler) |ph| self.markValue(taggedObject(ph));
         if (o.proxy_target_fn) |ptf| self.markValue(taggedFunction(ptf));
@@ -3347,6 +3351,16 @@ pub const Heap = struct {
     pub fn setObjectPrototype(self: *Heap, o: *JSObject, proto: ?*JSObject) void {
         if (proto) |p| self.writeBarrier(.{ .object = o }, taggedObject(p));
         o.prototype = proto;
+        o.prototype_fn = null;
+    }
+
+    /// Function-valued `[[Prototype]]` link (§10.2 — functions are
+    /// objects and can be prototypes). Clears the object-typed slot;
+    /// exactly one of the two is ever set.
+    pub fn setObjectPrototypeFn(self: *Heap, o: *JSObject, pf: ?*JSFunction) void {
+        if (pf) |f| self.writeBarrier(.{ .object = o }, taggedFunction(f));
+        o.prototype = null;
+        o.prototype_fn = pf;
     }
 
     /// `fn_obj.prototype = proto` — same shape, JSFunction

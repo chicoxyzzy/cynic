@@ -880,6 +880,15 @@ pub const JSObject = struct {
     /// resolves member access through `[[Get]]` (§10.1.8) which
     /// walks this chain when the own property is absent.
     prototype: ?*JSObject = null,
+    /// Function-valued `[[Prototype]]` link (§10.2 — functions are
+    /// objects and can sit in a prototype chain: `Object.create(f)`,
+    /// `F.prototype = someFunction`). `JSFunction` is a distinct heap
+    /// type, so it needs this parallel slot — exactly one of
+    /// `prototype` / `prototype_fn` is non-null. The walk hops into
+    /// the function's own properties and continues through its
+    /// `proto` (`%Function.prototype%`) chain. Mirrors the
+    /// `static_parent` pattern on `JSFunction`.
+    prototype_fn: ?*@import("function.zig").JSFunction = null,
     /// Mark color. `obj.mark_color == heap.live_color` means "live
     /// this cycle". The mark phase sets it to `heap.live_color`; the
     /// sweep keeps survivors and frees mismatches. No explicit clear
@@ -2664,6 +2673,7 @@ pub const JSObject = struct {
             return Value.undefined_;
         }
         if (self.prototype) |proto| return proto.get(key);
+        if (self.prototype_fn) |pf| return pf.get(key);
         return Value.undefined_;
     }
 
@@ -2797,6 +2807,7 @@ pub const JSObject = struct {
             }
         }
         if (self.prototype) |proto| return proto.hasProperty(key);
+        if (self.prototype_fn) |pf| return pf.hasProperty(key);
         return false;
     }
 

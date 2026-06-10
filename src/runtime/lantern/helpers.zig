@@ -49,6 +49,10 @@ pub fn lookupAccessor(obj: *JSObject, key: []const u8) ?Accessor {
     while (cursor) |c| : (cursor = c.prototype) {
         if (c.getAccessor(key)) |a| return a;
         if (c.hasOwn(key)) return null;
+        // A function-valued [[Prototype]] link: hop into the
+        // function-side walk (own accessors -> static parents ->
+        // %Function.prototype% chain) and stop here.
+        if (c.prototype_fn) |pf| return lookupFunctionAccessor(pf, key);
         // §10.4.5.4 Integer-Indexed Exotic Object [[GetOwnProperty]]:
         // a typed array owns every canonical numeric index in
         // [0, length) as a writable data descriptor, even though the
