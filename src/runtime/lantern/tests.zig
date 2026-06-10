@@ -541,26 +541,16 @@ test "later: compound assignment *=" {
     try expectScriptInt("let x = 4; x *= 5; x;", 20);
 }
 
-test "later: const reassignment in a local scope is rejected at compile time" {
-    // Local `const` is a static binding whose immutability is
-    // statically knowable — Cynic upgrades the spec's runtime
-    // TypeError into a compile-time SyntaxError for the local
-    // case. Global `const`, by contrast, defers to runtime per
-    // §9.1.1.4 SetMutableBinding so fixtures can wrap the throw
-    // in `assert.throws(TypeError, () => { c = 1; })`.
-    var realm = Realm.init(testing.allocator);
-    defer realm.deinit();
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const src = "{ const x = 1; x = 2; }";
-    const program = try parser_mod.parseScript(arena.allocator(), src, null);
-
-    var diags: cynic_diag.Diagnostics = .empty;
-    defer diags.deinit(testing.allocator);
-    const result = compileScriptAsChunk(testing.allocator, &realm, &program, src, &diags);
-    try testing.expectError(error.AssignmentToConst, result);
-    try testing.expect(diags.items.len >= 1);
-    try testing.expectEqual(cynic_diag.Code.assignment_to_const, diags.items[0].code);
+test "later: const reassignment in a local scope throws TypeError at runtime" {
+    // §13.15.2 / §8.1.1.1.4 step 9.b — assignment to a const binding
+    // is the spec's RUNTIME TypeError in every position; there is no
+    // early error, so the block must compile and the write must throw
+    // when it executes (matches V8 / JSC / SM).
+    try expectScriptStringWithBuiltins(
+        \\let r = "no-throw";
+        \\{ const x = 1; try { x = 2; } catch (e) { r = e.constructor.name; } }
+        \\r;
+    , "TypeError");
 }
 
 test "later: top-level const reassignment throws TypeError at runtime" {
@@ -12894,4 +12884,25 @@ test "jit warmth: entries, back-edges, and PTC re-entries heat the chunk" {
     }
     const g_state = chunk2.function_templates[0].chunk.jit_state.?;
     try testing.expect(g_state.warmth >= 30 * 16);
+}
+
+// §13.15.2 / §8.1.1.1.4 step 9.b — assignment to a const binding is
+// the spec's RUNTIME TypeError in every position; there is no early
+// error, so `assert.throws(TypeError, ...)` shapes must compile.
+
+test "const assignment: same-scope reassignment throws TypeError at runtime" {
+    try expectScriptStringWithBuiltins(
+        \\let r = "no-throw";
+        \\function f() { const a = 1; try { a = 2; } catch (e) { r = e.constructor.name; } return a; }
+        \\f() + "," + r;
+    , "1,TypeError");
+}
+
+test "const assignment: top-level script const written from a function throws at runtime" {
+    try expectScriptStringWithBuiltins(
+        \\const c = 5;
+        \\let r = "no-throw";
+        \\(function () { try { c = 6; } catch (e) { r = e.constructor.name; } })();
+        \\r + "," + c;
+    , "TypeError,5");
 }

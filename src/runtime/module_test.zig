@@ -187,3 +187,58 @@ test "module namespace: a named default-function export is a live binding" {
     try testing.expect(after.isInt32());
     try testing.expectEqual(@as(i32, 2), after.asInt32());
 }
+
+/// Loader for the const-binding tests (§16.2.1.6.4 step 17 —
+/// module-level `const` is an immutable binding; writes are runtime
+/// TypeErrors, and the assert.throws shape must COMPILE).
+fn constBindingLoader(
+    realm: *Realm,
+    specifier: []const u8,
+    base_url: ?[]const u8,
+    attribute_type: ?[]const u8,
+) realm_mod.ModuleLoaderError!realm_mod.ModuleLoadResult {
+    _ = realm;
+    _ = base_url;
+    _ = attribute_type;
+    if (std.mem.eql(u8, specifier, "./c.js")) {
+        return .{ .url = "./c.js", .source =
+        \\const t = 23;
+        \\export let r = "no-throw";
+        \\(function () { try { t = 9; } catch (e) { r = e.constructor.name; } })();
+        };
+    }
+    if (std.mem.eql(u8, specifier, "./star.js")) {
+        return .{ .url = "./star.js", .source =
+        \\import * as ns from './c.js';
+        \\export let r2 = "no-throw";
+        \\try { ns = null; } catch (e) { r2 = e.constructor.name; }
+        };
+    }
+    return error.ModuleNotFound;
+}
+
+test "module const binding: reassignment from a closure is a runtime TypeError" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    realm.module_loader = constBindingLoader;
+    const out = try lantern.loadModule(testing.allocator, &realm, "./c.js", null, null);
+    try testing.expect(out.mr != null);
+    const r = out.mr.?.exports.get("r");
+    try testing.expect(r.isString());
+    const rs: *@import("string.zig").JSString = @ptrCast(@alignCast(r.asString()));
+    try testing.expectEqualStrings("TypeError", rs.flatBytes());
+}
+
+test "module star-import binding: reassignment is a runtime TypeError" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    realm.module_loader = constBindingLoader;
+    const out = try lantern.loadModule(testing.allocator, &realm, "./star.js", null, null);
+    try testing.expect(out.mr != null);
+    const r2 = out.mr.?.exports.get("r2");
+    try testing.expect(r2.isString());
+    const r2s: *@import("string.zig").JSString = @ptrCast(@alignCast(r2.asString()));
+    try testing.expectEqualStrings("TypeError", r2s.flatBytes());
+}

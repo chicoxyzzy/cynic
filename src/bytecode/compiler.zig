@@ -750,16 +750,14 @@ pub const Compiler = struct {
             return;
         }
         // §9.1.1.1.4 SetMutableBinding step 9.b — assignment to a
-        // const captured from an outer function-like scope is the
-        // spec's *runtime* TypeError, not an early error. The
-        // `compileAssignment` / `compileUpdate` paths defer to us
-        // for cross-function const writes (see `cross_fn_capture`);
-        // emit the runtime throw so `assert.throws(TypeError, () =>
-        // { c = 1; })` from a nested function rounds-trips per spec.
-        // `is_init` writes (declarator initializers, named-fn-expr
-        // self-bindings, etc.) are NOT assignments and must stay on
-        // the regular `sta_env` / `sta_global_init` path.
-        if (!is_init and binding.kind == .const_ and !binding.is_global and !binding.is_import and binding.env_depth < self.env_depth) {
+        // const binding is the spec's *runtime* TypeError, not an
+        // early error, in EVERY position (same scope, nested
+        // function, class body, module top level). `is_init` writes
+        // (declarator initializers, named-fn-expr self-bindings,
+        // etc.) are NOT assignments and must stay on the regular
+        // `sta_env` / `sta_global_init` path. Global lex bindings
+        // keep their slot-side runtime check.
+        if (!is_init and binding.kind == .const_ and !binding.is_global and !binding.is_import) {
             try self.builder.emitOp(.throw_assign_const, span);
             return;
         }
@@ -4684,28 +4682,16 @@ pub const Compiler = struct {
             .span = a.target.span(),
             .is_global = true,
         };
-        // §13.15.2 — assignment to a `const` binding is a runtime
-        // TypeError per spec, but Cynic upgrades it to a compile-
-        // time SyntaxError for local lex bindings (where the
-        // binding's identity is statically known and unambiguous).
-        // Global lex bindings stay runtime-checked: per §9.1.1.4
-        // SetMutableBinding the type / immutability test lives at
-        // `sta_global` time, which lets fixtures wrap the throw
-        // in `assert.throws(TypeError, () => { c = 1; })` without
-        // the script's outer compile imploding. Named function-
-        // expression self-bindings (§15.6.5) also defer to runtime
-        // via `throw_assign_const`. Cross-function captures (the
-        // binding lives in an outer function-like scope, e.g. a
-        // module-top `const` written from inside a nested function)
-        // also defer to runtime: the assignment only executes when
-        // the inner function runs, so the spec's runtime TypeError
-        // is the right shape and lets `assert.throws(TypeError, ()
-        // => { c = 1; })` round-trip — matches V8 / JSC / SM.
-        const cross_fn_capture = binding.env_depth < self.env_depth;
-        if (binding.kind == .const_ and !binding.is_import and !binding.is_global and !binding.is_fn_expr_name and !binding.is_using and !cross_fn_capture) {
-            try self.report(.assignment_to_const, a.span);
-            return error.AssignmentToConst;
-        }
+        // §13.15.2 — assignment to a `const` binding is the spec's
+        // RUNTIME TypeError (§8.1.1.1.4 SetMutableBinding step 9.b)
+        // in every position; there is NO early error, so the
+        // `assert.throws(TypeError, () => { c = 1; })` shapes must
+        // compile. An earlier design upgraded same-scope cases to a
+        // compile-time error, but the depth heuristic it needed is
+        // unreliable in class bodies and module mode — and every
+        // production engine (V8 / JSC / SM) throws at runtime.
+        // `emitStoreBindingMode` lowers every non-init const write
+        // to `throw_assign_const`.
         // `using` / `await using` bindings carry `.kind = .const_`
         // for env-shape purposes but the spec demands a *runtime*
         // TypeError on reassignment, not a compile-time SyntaxError

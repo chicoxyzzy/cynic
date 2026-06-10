@@ -2,15 +2,15 @@
 
 **Cynic passes 90.79 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **45220 passing** — Cynic produced the spec-expected result.
-- **4588 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **45222 passing** — Cynic produced the spec-expected result.
+- **4586 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 45220 | 4588 | 49808 | 90.79 % |
+| **`--unhardened --allow=eval`** | 45222 | 4586 | 49808 | 90.79 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -75,7 +75,7 @@ count; the per-area table below it is the work list.
 | sloppy-mode-only fixtures | 1148 | `flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...) |
 | Annex B builtins | 69 | `__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design |
 | cannot-block agent semantics | 2 | `flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent |
-| **engine gaps** | 119 | failures the policy classes do not explain — the work list (an upper bound: it includes a residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter) |
+| **engine gaps** | 117 | failures the policy classes do not explain — the work list (an upper bound: it includes a residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter) |
 
 **Failing areas.** Only areas with at least one failure are
 listed (everything else passes). `gaps` is the slice of the
@@ -88,7 +88,7 @@ list. Bucketed on the first two path components.
 | `built-ins/Function` | 424 | 85 | 54 | 83 % |
 | `language/expressions` | 10276 | 406 | 28 | 96 % |
 | `language/statements` | 8995 | 328 | 13 | 96 % |
-| `language/module-code` | 588 | 7 | 7 | 99 % |
+| `language/module-code` | 590 | 5 | 5 | 99 % |
 | `language/eval-code` | 162 | 185 | 4 | 47 % |
 | `language/function-code` | 155 | 62 | 4 | 71 % |
 | `built-ins/Object` | 3329 | 82 | 2 | 98 % |
@@ -153,11 +153,11 @@ top-line score.
 
 ## History
 
-### 2026-06-10 — cynic `47e09c9`, test262 `d0c1b4555b`
+### 2026-06-10 — cynic `7a494db`, test262 `d0c1b4555b`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 45220 | 4588 | 49808 | 90.79 % | +54 | 40.1 s |
+| 45222 | 4586 | 49808 | 90.79 % | +56 | 50.1 s |
 
 Biggest movers:
 
