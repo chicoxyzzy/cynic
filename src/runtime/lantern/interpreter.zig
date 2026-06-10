@@ -10689,55 +10689,55 @@ noinline fn strictArraySetLength(
     obj: *JSObject,
     value: Value,
 ) RunError!SetOutcome {
-        // Check the existing length is writable. If a prior
-        // `Object.defineProperty(arr, "length", {writable:false})`
-        // froze it, any future length-write must throw.
-        if (!obj.array_length_writable) {
-            const ex = try makeTypeError(realm, "Cannot assign to read-only property 'length'");
+    // Check the existing length is writable. If a prior
+    // `Object.defineProperty(arr, "length", {writable:false})`
+    // froze it, any future length-write must throw.
+    if (!obj.array_length_writable) {
+        const ex = try makeTypeError(realm, "Cannot assign to read-only property 'length'");
+        return throwInSetter(realm, frames, f, ip, value, ex);
+    }
+    // §10.4.2.4 ArraySetLength — drives two observable
+    // ToNumber calls (step 3 via ToUint32, step 4 standalone).
+    // A user-side valueOf / toString throw surfaces via
+    // `error.NativeThrew` + `realm.pending_exception`; we
+    // translate that into the strict-set's setter throw path.
+    const coerce_result = arrayLengthCoerceSpec(realm, value) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => {
+            const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+            realm.pending_exception = null;
             return throwInSetter(realm, frames, f, ip, value, ex);
-        }
-        // §10.4.2.4 ArraySetLength — drives two observable
-        // ToNumber calls (step 3 via ToUint32, step 4 standalone).
-        // A user-side valueOf / toString throw surfaces via
-        // `error.NativeThrew` + `realm.pending_exception`; we
-        // translate that into the strict-set's setter throw path.
-        const coerce_result = arrayLengthCoerceSpec(realm, value) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.NativeThrew => {
-                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
-                realm.pending_exception = null;
-                return throwInSetter(realm, frames, f, ip, value, ex);
-            },
-        };
-        const new_len = coerce_result orelse {
-            const ex = try makeRangeError(realm, "Invalid array length");
-            return throwInSetter(realm, frames, f, ip, value, ex);
-        };
-        // Re-check writability AFTER the coercion — a user
-        // valueOf may have flipped `length: { writable: false }`
-        // between the two ToNumber calls (§10.4.2.4 step 17.b
-        // gates the actual write on the *current* writability,
-        // not the pre-coercion state).
-        if (!obj.array_length_writable) {
-            const ex = try makeTypeError(realm, "Cannot assign to read-only property 'length'");
-            return throwInSetter(realm, frames, f, ip, value, ex);
-        }
-        const truncate_result = truncateArrayAtLength(allocator, obj, new_len);
-        const final_len = truncate_result.final_length;
-        // §10.4.2.4 ArraySetLength step 16 — write the final
-        // length THROUGH the array-exotic storage so the indexed
-        // backing matches. `setArrayLength` calls
-        // `ensureElementsLen` on grow (so the virtual length —
-        // which tracks the indexed storage — reads as the new
-        // value immediately) and is a
-        // no-op truncate on shrink (the descending walk above
-        // already cleared the slots up to `final_len`).
-        obj.setArrayLength(allocator, final_len) catch return error.OutOfMemory;
-        if (truncate_result.blocked) {
-            const ex = try makeTypeError(realm, "Cannot delete non-configurable array index");
-            return throwInSetter(realm, frames, f, ip, value, ex);
-        }
-        return .ok;
+        },
+    };
+    const new_len = coerce_result orelse {
+        const ex = try makeRangeError(realm, "Invalid array length");
+        return throwInSetter(realm, frames, f, ip, value, ex);
+    };
+    // Re-check writability AFTER the coercion — a user
+    // valueOf may have flipped `length: { writable: false }`
+    // between the two ToNumber calls (§10.4.2.4 step 17.b
+    // gates the actual write on the *current* writability,
+    // not the pre-coercion state).
+    if (!obj.array_length_writable) {
+        const ex = try makeTypeError(realm, "Cannot assign to read-only property 'length'");
+        return throwInSetter(realm, frames, f, ip, value, ex);
+    }
+    const truncate_result = truncateArrayAtLength(allocator, obj, new_len);
+    const final_len = truncate_result.final_length;
+    // §10.4.2.4 ArraySetLength step 16 — write the final
+    // length THROUGH the array-exotic storage so the indexed
+    // backing matches. `setArrayLength` calls
+    // `ensureElementsLen` on grow (so the virtual length —
+    // which tracks the indexed storage — reads as the new
+    // value immediately) and is a
+    // no-op truncate on shrink (the descending walk above
+    // already cleared the slots up to `final_len`).
+    obj.setArrayLength(allocator, final_len) catch return error.OutOfMemory;
+    if (truncate_result.blocked) {
+        const ex = try makeTypeError(realm, "Cannot delete non-configurable array index");
+        return throwInSetter(realm, frames, f, ip, value, ex);
+    }
+    return .ok;
 }
 
 fn strictSetPropertyAnchored(
