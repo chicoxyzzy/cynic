@@ -27,7 +27,7 @@ Target the standardized baseline every modern toolchain emits: the
 any of these makes most real `.wasm` fail to validate, so they are the
 floor, not extensions.
 
-**Shipped beyond that floor** (all now Phase 5 / WebAssembly 3.0):
+**Shipped beyond that floor** (all standardized in WebAssembly 3.0):
 `memory64` / `table64` (i64 addressing), the `extended-const`
 constant-expression operators, the **`function-references`** proposal
 (typed references `(ref [null] $t)`, `call_ref` / `return_call_ref`,
@@ -84,13 +84,13 @@ global's writes are visible through every importer — including a JS
 `WebAssembly.Global`, whose `.value` accessor reads and writes the
 same cell the instances use.
 
-Not yet implemented. **Standardized (Phase 5, Wasm 3.0) but
+Not yet implemented. **Standardized (WebAssembly 3.0) but
 unimplemented** — `gc` (WasmGC: struct/array/i31 heap types, rec
 groups, casts). Exception handling — every wasm instruction and the
-full JS interop, both directions — is shipped (above). **Still in
-flight** — `threads` (Phase 4; sits on the existing
-`SharedArrayBuffer` / `Atomics` substrate), shared-everything threads
-and the component model (Phase 1).
+full JS interop, both directions — is shipped (above). **Still
+pre-standard upstream** — `threads` (would sit on the existing
+`SharedArrayBuffer` / `Atomics` substrate), and the early-stage
+shared-everything-threads and component-model proposals.
 
 Non-goals: a browser host, debugging surfaces, or any sloppy-mode
 affordance. Cynic is strict, non-browser, edge-runtime shaped — the

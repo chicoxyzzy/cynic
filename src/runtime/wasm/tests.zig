@@ -2094,7 +2094,7 @@ test "wasm exceptions: a try_table around non-throwing code runs like a block" {
     try testing.expectEqual(@as(i32, 42), try runI32(bytes, "f", &.{}));
 }
 
-test "wasm exceptions: throw with no handler is an uncaught trap (Phase-1a)" {
+test "wasm exceptions: throw with no handler is an uncaught trap" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

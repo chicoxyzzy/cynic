@@ -33,9 +33,8 @@
 //! MVP plus the universally-shipped post-MVP features
 //! (`mutable-globals`, `sign-extension-ops`,
 //! `non-trapping-float-to-int`, `multi-value`, `bulk-memory`,
-//! `reference-types`, `simd`). Phased: integer + control first, then
-//! memory, then JS API, then refs, then floats, then SIMD; spec
-//! testsuite harness scores progress in `wasm-results.md`.
+//! `reference-types`, `simd`). The spec-testsuite harness scores
+//! conformance in `wasm-results.md`.
 
 pub const reader = @import("reader.zig");
 pub const types = @import("types.zig");
