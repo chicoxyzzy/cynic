@@ -757,14 +757,21 @@ useful:
    fixup-patched loop, a helper call, and a hand-emitted NaN-boxed
    "add two Smis" at the `Value` level. The `--jit` flag arrives
    with step 2, where it first gates real behavior.
-2. **Bistromath MVP** — the §4.3 inline set (moves, Smi arith,
-   compares, jumps, `loop_inc_lt`) + helper calls for property ICs
-   and calls; everything else `dont_compile`. Differential sweep
-   (§10.2) wired into CI behind the flag. This step alone should
-   move `arith_loop` decisively.
-3. **Coverage + OSR** — property/call IC inline fast paths,
-   exception tier-down, the remaining opcode emitters, OSR entry at
-   back-edges; `dont_compile` shrinks to generators/async.
+2. **Bistromath MVP** — the §4.3 inline set (moves, constants,
+   int32 arithmetic/bitwise/compares, branches, `loop_inc_lt`,
+   `return_`); everything else — calls, property ICs, heap-env
+   locals — honestly `dont_compile`, and anything the fast path
+   can't prove tiers down mid-function. The `--jit` CLI/harness
+   flags land here, and the differential sweep (§10.2) is wired
+   into CI as the advisory macos-arm64 job. Shipped 2026-06:
+   full-corpus pass-sets byte-identical under force-compile
+   (45166 passing / 4642 failing, both postures).
+3. **Coverage + OSR** — the helper-call layer (property ICs,
+   calls, environment slots), exception tier-down, the remaining
+   opcode emitters, OSR entry at back-edges; `dont_compile`
+   shrinks to generators/async. This is where the bench wins
+   arrive — the MVP only enters at call boundaries, so
+   hot-loop-called-once shapes (`arith_loop`) wait for OSR.
    Differential + gc-stress + bench gates all green → default-on
    conversation.
 4. **Spasm** — `wasm/spasm.zig` on the same substrate (§6) plus
