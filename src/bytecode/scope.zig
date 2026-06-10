@@ -87,13 +87,14 @@ pub const Binding = struct {
     /// the parameter binding stand and the redundant var is
     /// dropped.
     is_param: bool = false,
-    /// §15.6.5 — true for the self-name slot of a named function
-    /// expression (`let r = function G() { ... }` exposes `G` as an
-    /// immutable binding to its own body). Lives in a one-slot
-    /// declarative env between the function's own env and the
-    /// captured outer env; the slot is initialised at
-    /// `make_named_function_expr` time. User-visible writes lower
-    /// to `throw_assign_const` (TypeError) per §8.1.1.1.4 step 9.b.
+    /// True for an immutable self-name slot: the named-function-
+    /// expression name (§15.6.5 — `function G() {}` exposes `G` to
+    /// its own body) and the class self-name (§16.3.1.4 step 8 —
+    /// `class C {}` exposes `C` to the class body). Both live in a
+    /// one-slot declarative env around the body. User-visible
+    /// writes lower to `throw_assign_const` (a runtime TypeError
+    /// per §8.1.1.1.4 SetMutableBinding step 9.b), never a compile
+    /// error — fixtures wrap the write in assert.throws.
     is_fn_expr_name: bool = false,
     /// §9.5.3 / §14.3.x ES2026 explicit-resource-management — true
     /// when the binding was declared by `using` / `await using`.

@@ -12784,3 +12784,33 @@ test "completion value: zero-iteration C-style for yields undefined" {
 test "completion value: iterating loop still surfaces the body value" {
     try expectScriptIntWithBuiltins("6; for (var d in { x: 1 }) { 9; }", 9);
 }
+
+// §16.3.1.4 step 8 — the class self-name is an IMMUTABLE binding
+// in the classScope; assigning to it from inside the class body is
+// a RUNTIME TypeError (§8.1.1.1.4 step 9.b), never a compile error
+// — the fixtures wrap the call in assert.throws(TypeError, ...).
+
+test "class self-name: assignment from a method throws TypeError at runtime" {
+    try expectScriptStringWithBuiltins(
+        \\class C { m() { C = 1; } }
+        \\let r = "no-throw";
+        \\try { new C().m(); } catch (e) { r = e.constructor.name; }
+        \\r;
+    , "TypeError");
+}
+
+test "class self-name: assignment from the constructor throws TypeError at runtime" {
+    try expectScriptStringWithBuiltins(
+        \\class C { constructor() { C = 1; } }
+        \\let r = "no-throw";
+        \\try { new C(); } catch (e) { r = e.constructor.name; }
+        \\r;
+    , "TypeError");
+}
+
+test "class self-name: the class compiles and is usable when never assigned" {
+    try expectScriptStringWithBuiltins(
+        \\class C { m() { return typeof C; } }
+        \\new C().m();
+    , "function");
+}

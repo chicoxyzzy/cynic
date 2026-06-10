@@ -7258,11 +7258,17 @@ pub const Compiler = struct {
         defer self.env_slot_count = saved_slot_count;
 
         // §15.7.1 step 8 — `classScopeEnvRec.CreateImmutableBinding
-        // (className, true)`. We model the immutable-ness via the
-        // `const_` BindingKind so the compiler rejects `C = …`
-        // *from inside the class body* at compile time.
+        // (className, true)`. Like the named-function-expression
+        // self-name (§15.6.5), assignment to it is the spec's
+        // RUNTIME TypeError (§8.1.1.1.4 SetMutableBinding step 9.b
+        // on an immutable record), never a compile error — the
+        // fixtures wrap `C = …` in `assert.throws(TypeError, …)`,
+        // so the enclosing program must compile. Reuse the
+        // fn-expr-name flag: every consumer lowers writes to
+        // `throw_assign_const`.
         self.env_depth = saved_env_depth + 1;
         const inner_slot = try self.declareBinding(name, .const_, span);
+        class_scope.bindings.items[class_scope.bindings.items.len - 1].is_fn_expr_name = true;
 
         try self.builder.emitOp(.make_environment, span);
         try self.builder.emitU8(1);
