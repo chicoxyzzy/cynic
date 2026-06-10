@@ -20,6 +20,84 @@ const Value = cynic.runtime.Value;
 const JSString = cynic.runtime.JSString;
 const FeatureSet = cynic.runtime.FeatureSet;
 
+/// `std.Io` handle for `cliModuleLoader` — the `ModuleLoader`
+/// signature is context-free (realm + specifier only), so the CLI
+/// stashes its Io here before wiring the loader. Single-threaded
+/// CLI; set once per `run` invocation.
+var cli_loader_io: ?std.Io = null;
+/// Source-lifetime allocator for loaded module files — the run
+/// command's `source_arena`, which outlives the realm (module
+/// chunks borrow name/identifier slices into their sources).
+var cli_loader_arena: ?std.mem.Allocator = null;
+
+/// Resolve a module specifier against the importing module's URL
+/// (§16.2.1.8 HostLoadImportedModule, file-system flavour). Only
+/// relative ("./", "../") and absolute ("/") specifiers resolve —
+/// bare specifiers have no registry to consult and fail as
+/// not-found. The result is the canonical cache key, so two
+/// specifiers naming the same file must produce the same string;
+/// `std.fs.path.resolve` normalises `..` / `.` segments for that.
+fn resolveModulePath(
+    allocator: std.mem.Allocator,
+    base_url: ?[]const u8,
+    specifier: []const u8,
+) error{ OutOfMemory, ModuleNotFound }![]const u8 {
+    if (std.mem.startsWith(u8, specifier, "/")) {
+        return allocator.dupe(u8, specifier) catch return error.OutOfMemory;
+    }
+    const is_relative = std.mem.startsWith(u8, specifier, "./") or
+        std.mem.startsWith(u8, specifier, "../");
+    if (!is_relative) return error.ModuleNotFound;
+    const dir = if (base_url) |b| std.fs.path.dirname(b) orelse "." else ".";
+    return std.fs.path.resolve(allocator, &.{ dir, specifier }) catch return error.OutOfMemory;
+}
+
+/// File-system module loader for `cynic run` — serves static
+/// `import` declarations in `.mjs` entry files and dynamic
+/// `import()` from any file. Sources are allocated from the
+/// realm's allocator (module chunks borrow into them for the
+/// realm's lifetime).
+fn cliModuleLoader(
+    realm: *Realm,
+    specifier: []const u8,
+    base_url: ?[]const u8,
+    attribute_type: ?[]const u8,
+) cynic.runtime.realm.ModuleLoaderError!cynic.runtime.realm.ModuleLoadResult {
+    _ = realm;
+    const io = cli_loader_io orelse return error.ModuleNotFound;
+    const sa = cli_loader_arena orelse return error.ModuleNotFound;
+    const resolved = try resolveModulePath(sa, base_url, specifier);
+    const source = std.Io.Dir.cwd().readFileAlloc(io, resolved, sa, .limited(64 * 1024 * 1024)) catch {
+        return error.ModuleNotFound;
+    };
+    const module_type: cynic.runtime.realm.ModuleType = blk: {
+        const t = attribute_type orelse break :blk .javascript;
+        if (std.mem.eql(u8, t, "json")) break :blk .json;
+        if (std.mem.eql(u8, t, "text")) break :blk .text;
+        // Unknown attribute type — host-defined error (§16.2.1.4).
+        return error.ModuleLoadError;
+    };
+    return .{ .url = resolved, .source = source, .module_type = module_type };
+}
+
+test "resolveModulePath: relative against the importer's directory" {
+    const a = std.testing.allocator;
+    const r = try resolveModulePath(a, "/proj/src/main.mjs", "./util/helper.mjs");
+    defer a.free(r);
+    try std.testing.expectEqualStrings("/proj/src/util/helper.mjs", r);
+}
+
+test "resolveModulePath: parent traversal normalises" {
+    const a = std.testing.allocator;
+    const r = try resolveModulePath(a, "/proj/src/main.mjs", "../lib/x.mjs");
+    defer a.free(r);
+    try std.testing.expectEqualStrings("/proj/lib/x.mjs", r);
+}
+
+test "resolveModulePath: bare specifiers are not found" {
+    try std.testing.expectError(error.ModuleNotFound, resolveModulePath(std.testing.allocator, "/proj/main.mjs", "lodash"));
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -69,6 +147,12 @@ pub fn run(
     // for an untrusted script — see Realm.installTestGlobals).
     if (debug_globals) try realm.installTestGlobals();
 
+    // Wire the file-system module loader so `.mjs` entries (and
+    // dynamic `import()` from any file) can load relative modules.
+    cli_loader_io = io;
+    cli_loader_arena = sa;
+    realm.module_loader = cliModuleLoader;
+
     // `--dump-bytecode` — parse + compile each file and print the
     // disassembly; don't execute. Matches V8's `d8 --print-bytecode`
     // shape for "what did the compiler emit?" inspection. Side
@@ -105,6 +189,46 @@ pub fn run(
 
     for (paths) |path| {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, sa, .limited(64 * 1024 * 1024));
+
+        // `.mjs` runs as a module (matching `cynic parse`'s
+        // auto-detection): load through the module pipeline —
+        // static imports resolve via the file-system loader, and
+        // the namespace machinery applies. Modules have no
+        // completion value; an uncaught throw surfaces like the
+        // script path's.
+        if (std.mem.endsWith(u8, path, ".mjs")) {
+            var m_arena: std.heap.ArenaAllocator = .init(allocator);
+            defer m_arena.deinit();
+            var m_diags: cynic.diagnostic.Diagnostics = .empty;
+            const m_parse = cynic.parser.parseModule(m_arena.allocator(), bytes, &m_diags);
+            const m_hard_err: ?anyerror = if (m_parse) |_| null else |err| err;
+            var m_had_err = false;
+            for (m_diags.items) |d| if (d.severity == .err) {
+                m_had_err = true;
+                break;
+            };
+            if (m_hard_err != null or m_had_err) {
+                try printParseDiagnostics(io, path, bytes, m_diags.items);
+                if (m_hard_err) |err| {
+                    var line_buf: [256]u8 = undefined;
+                    const msg = try std.fmt.bufPrint(&line_buf, "{s}: parse error: {t}\n", .{ path, err });
+                    try std.Io.File.stderr().writeStreamingAll(io, msg);
+                }
+                std.process.exit(1);
+            }
+            const out = cynic.runtime.lantern.loadModule(allocator, &realm, path, null, null) catch |err| {
+                var line_buf: [256]u8 = undefined;
+                const msg = try std.fmt.bufPrint(&line_buf, "{s}: {t}\n", .{ path, err });
+                try std.Io.File.stderr().writeStreamingAll(io, msg);
+                std.process.exit(1);
+            };
+            if (out.threw) {
+                last_outcome = .{ .thrown = out.value };
+                break;
+            }
+            last_outcome = .{ .value = Value.undefined_ };
+            continue;
+        }
 
         // Surface parser diagnostics. `cynic.runtime.evaluateScript`
         // collects them internally then drops the arena, so the CLI

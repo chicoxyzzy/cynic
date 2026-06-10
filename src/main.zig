@@ -179,9 +179,14 @@ fn printUsage(io: std.Io) !void {
         \\  eval <expr>                      Compile and execute a single
         \\                                   expression; print the result.
         \\  run [--dump-bytecode] [--debug-globals] <file>...
-        \\                                   Compile and execute each <file> as a
-        \\                                   script against one realm; print the
-        \\                                   final completion value.
+        \\                                   Compile and execute each <file>
+        \\                                   against one realm; print the final
+        \\                                   completion value. Files ending in
+        \\                                   `.mjs` run as ES modules — static
+        \\                                   imports resolve relative to the
+        \\                                   importing file; dynamic `import()`
+        \\                                   works from scripts too (relative
+        \\                                   to the working directory).
         \\                                   `--dump-bytecode` prints the compiled
         \\                                   chunk and exits without executing.
         \\                                   `--debug-globals` installs
