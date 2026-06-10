@@ -34,13 +34,14 @@ for f in "$corpus"/*.wast; do
     base=$(basename "$f" .wast)
     # Enable the proposals Sarcasm implements so wast2json lowers their
     # `.wast` files and the harness scores them. We deliberately do NOT
-    # `--enable-all`: that also lowers `gc` / `function-references` tests,
-    # which use features the engine doesn't implement — and it switches
-    # wabt to a non-standard compressed import-section encoding that no
-    # standard decoder accepts. (Exception-handling can't be lowered by
-    # this wabt regardless — its `(ref exn)` text syntax is unsupported.)
+    # `--enable-all`: that also lowers `gc` tests (unimplemented) — and
+    # it switches wabt to a non-standard compressed import-section
+    # encoding that no standard decoder accepts. (Exception-handling
+    # can't be lowered by this wabt regardless — its `(ref exn)` text
+    # syntax is unsupported.)
     if wast2json --enable-tail-call --enable-relaxed-simd \
         --enable-memory64 --enable-extended-const --enable-multi-memory \
+        --enable-function-references \
         "$f" -o "$out/$base.json" >/dev/null 2>&1; then
         n=$((n + 1))
     else

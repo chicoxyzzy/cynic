@@ -1221,3 +1221,27 @@ test "a JS Memory.grow is visible to the importing instance" {
         "inst.exports.size()";
     try expectIntWasm(src, 3);
 }
+
+test "a mutable WebAssembly.Global import is aliased, not snapshotted" {
+    // §4.5.4 — the instance and the JS object share one cell: a write
+    // through `g.value` is visible to wasm, and `global.set` back.
+    const src =
+        "const g = new WebAssembly.Global({ value: 'i32', mutable: true }, 1);" ++
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 1,9,2,96,0,1,127,96,1,127,0, 2,8,1,1,101,1,103,3,127,1, 3,3,2,0,1, 7,13,2,3,103,101,116,0,0,3,115,101,116,0,1, 10,13,2,4,0,35,0,11,6,0,32,0,36,0,11]);" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { g } });" ++
+        "g.value = 42;" ++
+        "const a = inst.exports.get();" ++
+        "inst.exports.set(7);" ++
+        "a * 10 + g.value";
+    try expectIntWasm(src, 427);
+}
+
+test "a typed function reference result marshals to a callable JS function" {
+    // (func (export "f") (result (ref 0)) ref.func $self) — the
+    // constructed (ref $t) result crosses the boundary like a funcref.
+    const src =
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 1,6,1,96,0,1,100,0, 3,2,1,0, 7,5,1,1,102,0,0, 9,5,1,3,0,1,0, 10,6,1,4,0,210,0,11]);" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes));" ++
+        "(typeof inst.exports.f() === 'function') ? 1 : 0";
+    try expectIntWasm(src, 1);
+}

@@ -391,7 +391,7 @@ test "wasm decoder: decodes table and memory sections" {
     const m = try wasm.decode(arena.allocator(), bytes);
 
     try testing.expectEqual(@as(usize, 1), m.tables.len);
-    try testing.expectEqual(@import("types.zig").RefType.funcref, m.tables[0].elem);
+    try testing.expectEqual(@import("types.zig").ValType.funcref, m.tables[0].elem);
     try testing.expectEqual(@as(u64, 1), m.tables[0].limits.min);
     try testing.expectEqual(@as(?u64, 2), m.tables[0].limits.max);
 
@@ -463,24 +463,27 @@ test "wasm validator: rejects a WasmGC opcode (struct.new) as an unknown opcode"
     try expectFuncInvalid(error.UnknownOpcode, &.{}, &.{}, &code_body);
 }
 
-test "wasm validator: rejects a function-references opcode (call_ref) as an unknown opcode" {
-    // §5.4 — `call_ref` (0x14) belongs to the function-references
-    // proposal, unimplemented here. It must be refused as an unknown
-    // opcode, not @enumFromInt-trapped.
+test "wasm validator: call_ref on an empty stack is a type error" {
+    // §3.3 — `call_ref $t` pops a (ref null $t); with nothing on the
+    // stack the function is invalid (the opcode itself is implemented).
     // body: 0 locals, call_ref 0, end
     const code_body = [_]u8{ 0x00, 0x14, 0x00, 0x0b };
-    try expectFuncInvalid(error.UnknownOpcode, &.{}, &.{}, &code_body);
+    try expectFuncInvalid(error.StackUnderflow, &.{}, &.{}, &code_body);
 }
 
-test "wasm decoder: rejects a function-references typed reference value type" {
-    // §5.3.1 — `(ref null $t)` is encoded as 0x63 followed by a heap
-    // type. The function-references proposal is unimplemented, so the
-    // value-type decoder refuses the 0x63 tag rather than mis-parsing it.
+test "wasm decoder: accepts a typed reference value type (function-references)" {
+    // §5.3.1 — `(ref null $t)` is 0x63 + an s33 heap type. The decoder
+    // parses it; the type index is range-checked at validation.
     // type section: 1 type (func ()->((ref null 0)))
     const body = [_]u8{ 0x01, 0x06, 0x01, 0x60, 0x00, 0x01, 0x63, 0x00 };
     var buf: [8 + body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &body);
-    try expectDecodeError(error.BadValType, bytes);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const m = try wasm.decode(arena.allocator(), bytes);
+    try testing.expectEqual(@as(usize, 1), m.types.len);
+    try testing.expect(m.types[0].results[0].isRef());
+    try testing.expectEqual(@as(?u32, 0), m.types[0].results[0].concreteIndex());
 }
 
 test "wasm instantiate: an under-provided table import is a catchable error, not a host abort" {
@@ -1708,7 +1711,7 @@ test "wasm link: an imported global value is read" {
         .{ .id = 7, .body = &xbody },
         .{ .id = 10, .body = &cbody },
     });
-    const importer = try instOf(a, ibytes, .{ .globals = &.{provider.exportedGlobalValue("g").?} });
+    const importer = try instOf(a, ibytes, .{ .globals = &.{provider.exportedGlobal("g").?} });
     try testing.expectEqual(@as(i32, 42), try invokeInst(a, importer, "run", &.{}));
 }
 
@@ -2687,4 +2690,199 @@ test "wasm multi-memory: a memarg memory index past the count is rejected" {
         .{ .id = 10, .body = &cbody },
     });
     try testing.expectError(error.UnknownMemory, runI32(bytes, "f", &.{}));
+}
+
+// ── function references (typed refs, call_ref, br_on_*) ─────────────
+
+test "wasm function-references: call_ref calls through a typed reference" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x02, 0x00, 0x01 };
+    const ebody = [_]u8{ 0x01, 0x03, 0x00, 0x01, 0x00 }; // declarative: func 0 referenced
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x01 };
+    // func0 (type 0): doubles its arg. func1 "f": 5; ref.func 0; call_ref 0 -> 10.
+    const cbody = [_]u8{
+        0x02,
+        0x07,
+        0x00,
+        0x20,
+        0x00,
+        0x20,
+        0x00,
+        0x6a,
+        0x0b,
+        0x08,
+        0x00,
+        0x41,
+        0x05,
+        0xd2,
+        0x00,
+        0x14,
+        0x00,
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 10), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm function-references: call_ref on a null reference traps" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x02, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x01 };
+    // func1 "f": 5; ref.null (type 0); call_ref 0 -> traps.
+    const cbody = [_]u8{
+        0x02,
+        0x07,
+        0x00,
+        0x20,
+        0x00,
+        0x20,
+        0x00,
+        0x6a,
+        0x0b,
+        0x08,
+        0x00,
+        0x41,
+        0x05,
+        0xd0,
+        0x00,
+        0x14,
+        0x00,
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectError(error.NullReference, runI32(bytes, "f", &.{}));
+}
+
+test "wasm function-references: br_on_null branches on a null reference" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // block (i32) { 7; ref.null func; br_on_null 0; drop; drop; 99 } -> 7.
+    const cbody = [_]u8{
+        0x01, 0x10, 0x00,
+        0x02, 0x7f, 0x41,
+        0x07, 0xd0, 0x70,
+        0xd5, 0x00, 0x1a,
+        0x1a, 0x41, 0xe3,
+        0x00, 0x0b, 0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 7), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm function-references: br_on_non_null carries the reference to the label" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const ebody = [_]u8{ 0x01, 0x03, 0x00, 0x01, 0x00 }; // declarative: func 0
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // block (funcref) { ref.func 0; br_on_non_null 0; ref.null func } ; ref.is_null -> 0.
+    const cbody = [_]u8{
+        0x01, 0x0c, 0x00,
+        0x02, 0x70, 0xd2,
+        0x00, 0xd6, 0x00,
+        0xd0, 0x70, 0x0b,
+        0xd1, 0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 0), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm function-references: ref.as_non_null traps on null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // ref.null func; ref.as_non_null -> traps before the result matters.
+    const cbody = [_]u8{ 0x01, 0x08, 0x00, 0xd0, 0x70, 0xd4, 0x1a, 0x41, 0x2a, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectError(error.NullReference, runI32(bytes, "f", &.{}));
+}
+
+test "wasm function-references: a non-defaultable local must be set before use" {
+    // §3.4.12 — a (ref $t) local has no default; local.get before
+    // local.set is invalid.
+    try expectFuncInvalid(error.UninitializedLocal, &.{}, &.{}, &.{ 0x01, 0x01, 0x64, 0x00, 0x20, 0x00, 0x1a, 0x0b });
+}
+
+test "wasm link: a mutable imported global is shared, not snapshotted" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // provider: (global (export "g") (mut i32) (i32.const 1))
+    //           (func (export "bump") (global.set 0 (i32.const 42)))
+    const ptbody = [_]u8{ 0x01, 0x60, 0x00, 0x00 };
+    const pfbody = [_]u8{ 0x01, 0x00 };
+    const pgbody = [_]u8{ 0x01, 0x7f, 0x01, 0x41, 0x01, 0x0b };
+    const pxbody = [_]u8{ 0x02, 0x01, 0x67, 0x03, 0x00, 0x04, 0x62, 0x75, 0x6d, 0x70, 0x00, 0x00 };
+    const pcbody = [_]u8{ 0x01, 0x06, 0x00, 0x41, 0x2a, 0x24, 0x00, 0x0b };
+    const pbytes = try assemble(a, &.{
+        .{ .id = 1, .body = &ptbody },
+        .{ .id = 3, .body = &pfbody },
+        .{ .id = 6, .body = &pgbody },
+        .{ .id = 7, .body = &pxbody },
+        .{ .id = 10, .body = &pcbody },
+    });
+    const provider = try instOf(a, pbytes, .{});
+
+    // importer: import "p"."g" (global (mut i32)); (func (export "run") global.get 0)
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const ibody = [_]u8{ 0x01, 0x01, 0x70, 0x01, 0x67, 0x03, 0x7f, 0x01 }; // mut i32
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x04, 0x00, 0x23, 0x00, 0x0b };
+    const ibytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 2, .body = &ibody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    const importer = try instOf(a, ibytes, .{ .globals = &.{provider.exportedGlobal("g").?} });
+
+    // §4.5.4 — the provider's later write is visible through the importer.
+    try testing.expectEqual(@as(i32, 1), try invokeInst(a, importer, "run", &.{}));
+    _ = try interp.invoke(provider, a, funcExport(provider.module, "bump").?, &.{});
+    try testing.expectEqual(@as(i32, 42), try invokeInst(a, importer, "run", &.{}));
 }

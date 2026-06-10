@@ -24,7 +24,6 @@ const FuncBody = module_mod.FuncBody;
 const ExternKind = module_mod.ExternKind;
 const Tag = module_mod.Tag;
 const ValType = types.ValType;
-const RefType = types.RefType;
 const FuncType = types.FuncType;
 const Limits = types.Limits;
 const TableType = types.TableType;
@@ -218,7 +217,7 @@ fn decodeValTypeVec(allocator: std.mem.Allocator, r: *Reader) DecodeError![]cons
     const vts = try allocator.alloc(ValType, n);
     var i: u32 = 0;
     while (i < n) : (i += 1) {
-        vts[i] = ValType.fromByte(try r.byte()) orelse return error.BadValType;
+        vts[i] = types.readValType(r) catch return error.BadValType;
     }
     return vts;
 }
@@ -284,7 +283,8 @@ fn decodeTableSection(allocator: std.mem.Allocator, r: *Reader) DecodeError![]co
             tt.init_expr = try captureConstExpr(r); // explicit initializer
             tabs[i] = tt;
         } else {
-            const elem = RefType.fromByte(first) orelse return error.BadRefType;
+            const elem = try valTypeFromFirstByte(first, r);
+            if (!elem.isRef()) return error.BadRefType;
             tabs[i] = .{ .elem = elem, .limits = try decodeLimits(r) };
         }
     }
@@ -364,8 +364,22 @@ fn decodeLimits(r: *Reader) DecodeError!Limits {
 }
 
 fn decodeTableType(r: *Reader) DecodeError!TableType {
-    const elem = RefType.fromByte(try r.byte()) orelse return error.BadRefType;
+    const elem = types.readValType(r) catch return error.BadRefType;
+    if (!elem.isRef()) return error.BadRefType;
     return .{ .elem = elem, .limits = try decodeLimits(r) };
+}
+
+/// Finish reading a value type whose first byte is already consumed
+/// (0x63/0x64 take an s33 heap-type payload).
+fn valTypeFromFirstByte(first: u8, r: *Reader) DecodeError!ValType {
+    if (ValType.fromByte(first)) |vt| return vt;
+    const nullable = switch (first) {
+        0x63 => true,
+        0x64 => false,
+        else => return error.BadRefType,
+    };
+    const heap = types.readHeapType(r) catch return error.BadRefType;
+    return ValType.refType(nullable, heap);
 }
 
 fn decodeMemType(r: *Reader) DecodeError!MemType {
@@ -373,7 +387,7 @@ fn decodeMemType(r: *Reader) DecodeError!MemType {
 }
 
 fn decodeGlobalType(r: *Reader) DecodeError!GlobalType {
-    const vt = ValType.fromByte(try r.byte()) orelse return error.BadValType;
+    const vt = types.readValType(r) catch return error.BadValType;
     const mut = Mutability.fromByte(try r.byte()) orelse return error.BadMutability;
     return .{ .val = vt, .mut = mut };
 }
@@ -393,7 +407,7 @@ fn captureConstExpr(r: *Reader) DecodeError![]const u8 {
             0x43 => _ = try r.bytesN(4), // f32.const
             0x44 => _ = try r.bytesN(8), // f64.const
             0x23 => _ = try r.uleb(u32), // global.get
-            0xd0 => _ = try r.byte(), // ref.null reftype
+            0xd0 => _ = try r.sleb(i64), // ref.null heaptype (s33)
             0xd2 => _ = try r.uleb(u32), // ref.func
             // extended-const proposal: i32/i64 add, sub, mul are
             // admissible in a constant expression (no immediate).

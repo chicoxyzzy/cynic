@@ -29,8 +29,11 @@ floor, not extensions.
 
 **Shipped beyond that floor** (all now Phase 5 / WebAssembly 3.0):
 `memory64` / `table64` (i64 addressing), the `extended-const`
-constant-expression operators, the function-references
-table-with-initializer encoding, the **`tail-call`** proposal
+constant-expression operators, the **`function-references`** proposal
+(typed references `(ref [null] $t)`, `call_ref` / `return_call_ref`,
+`br_on_null` / `br_on_non_null`, `ref.as_non_null`, value-type
+subtyping, non-defaultable-local initialization tracking, typed
+tables/globals with explicit table initializers), the **`tail-call`** proposal
 (`return_call` / `return_call_indirect` — the callee replaces the current
 frame, so deep tail recursion runs in constant stack), **`relaxed-simd`**
 (the relaxed-SIMD opcodes, each computed to one deterministic valid
@@ -75,13 +78,19 @@ instance is visible through the other (which also means a JS
 `Memory.grow` can no longer leave an importing instance reading a
 stale buffer).
 
+Globals are aliased across instances the way memories and tables are:
+an imported global IS the provider's global (§4.5.4), so a mutable
+global's writes are visible through every importer — including a JS
+`WebAssembly.Global`, whose `.value` accessor reads and writes the
+same cell the instances use.
+
 Not yet implemented. **Standardized (Phase 5, Wasm 3.0) but
-unimplemented** — `gc` (WasmGC, with its typed function references).
-Exception handling — every wasm instruction and the full JS interop,
-both directions — is shipped (above). **Still in flight** — `threads`
-(Phase 4; sits on the existing `SharedArrayBuffer` / `Atomics`
-substrate), shared-everything threads and the component model
-(Phase 1).
+unimplemented** — `gc` (WasmGC: struct/array/i31 heap types, rec
+groups, casts). Exception handling — every wasm instruction and the
+full JS interop, both directions — is shipped (above). **Still in
+flight** — `threads` (Phase 4; sits on the existing
+`SharedArrayBuffer` / `Atomics` substrate), shared-everything threads
+and the component model (Phase 1).
 
 Non-goals: a browser host, debugging surfaces, or any sloppy-mode
 affordance. Cynic is strict, non-browser, edge-runtime shaped — the
@@ -476,7 +485,7 @@ the measured design space:
 | Validate + side-table | single-pass validation emitting the O(1) branch side-table (§4) — **done** |
 | Interpreter | in-place **threaded** dispatch over bytecode + side-table — **done** (integer, control, floats, SIMD, references, tail calls, exceptions) |
 | Memory | loads/stores, bulk-memory, grow; memory64 i64 addressing; **multiple memories** (memarg memory index, per-memory size/grow/fill/init, cross-memory copy, flag-2 data segments, aliased imports) — **done** (engine plain buffer; the JS `Memory.buffer` aliasing view + detach-on-grow ships in §8) |
-| References / tables | tables, funcref/externref, `call_indirect`, element segments — **done**; externref GC rooting precise (§5), value-stack ref tags a future micro-opt |
+| References / tables | tables, funcref/externref, `call_indirect`, element segments — **done**; typed function references (`(ref [null] $t)`, `call_ref` / `return_call_ref`, `br_on_null` / `br_on_non_null`, `ref.as_non_null`, subtyping, local-init tracking, table initializers) — **done**; externref GC rooting precise (§5), value-stack ref tags a future micro-opt |
 | Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128, relaxed-SIMD — **done** |
 | Cross-module linking | imported funcs/globals/tables/memories, shared tables, cross-instance funcrefs, host functions, start functions — **done** |
 | Conformance | the WebAssembly spec testsuite harness → `wasm-results.md` — **done — 100% of the commands it scores** (the scored set excludes tests for unimplemented proposals) |

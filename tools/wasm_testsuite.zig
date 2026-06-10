@@ -269,7 +269,7 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
     if (modp.imports.len == 0) return .{};
 
     const funcs = try arena.alloc(wasm.FuncRef, nfunc);
-    const globals = try arena.alloc(u128, nglob);
+    const globals = try arena.alloc(*wasm.Global, nglob);
     const tables = try arena.alloc(*wasm.Table, ntab);
     const tags = try arena.alloc(*const wasm.TagType, ntag);
     const memories = try arena.alloc(*wasm.Memory, nmem);
@@ -296,10 +296,15 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
             },
             .global => {
                 if (std.mem.eql(u8, imp.module, "spectest")) {
-                    globals[gi] = spectestGlobal(imp.name) orelse return error.Unlinkable;
+                    const v = spectestGlobal(imp.name) orelse return error.Unlinkable;
+                    const g = try arena.create(wasm.Global);
+                    g.* = .{ .value = v, .mutable = false };
+                    globals[gi] = g;
                 } else {
+                    // Alias the provider's global (§4.5.4) — a mutable
+                    // global's writes are visible through the importer.
                     const provider = registry.get(imp.module) orelse return error.Unlinkable;
-                    globals[gi] = provider.exportedGlobalValue(imp.name) orelse return error.Unlinkable;
+                    globals[gi] = provider.exportedGlobal(imp.name) orelse return error.Unlinkable;
                 }
                 gi += 1;
             },
@@ -565,7 +570,14 @@ fn matchValue(v: std.json.ObjectMap, got: u128) bool {
         const want = std.fmt.parseInt(u64, s, 10) catch return false;
         return lo == want;
     }
-    if (std.mem.eql(u8, t, "funcref") or std.mem.eql(u8, t, "externref")) {
+    if (std.mem.eql(u8, t, "funcref")) {
+        // A function reference's index cannot round-trip through the
+        // JSON (`(ref.func)` means "some non-null funcref"), so match
+        // on nullness only.
+        if (std.mem.eql(u8, s, "null")) return got == REF_NULL;
+        return got != REF_NULL;
+    }
+    if (std.mem.eql(u8, t, "externref")) {
         if (std.mem.eql(u8, s, "null")) return got == REF_NULL;
         const want = std.fmt.parseInt(u32, s, 10) catch return false;
         return @as(u32, @truncate(got)) == want;
@@ -668,8 +680,8 @@ fn writeResults(gpa: std.mem.Allocator, io: std.Io, total: Counts, files: u32) !
         \\Scored by `zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite`
         \\against the official WebAssembly spec testsuite (the `.wast` corpus,
         \\preprocessed with `wast2json --enable-tail-call --enable-relaxed-simd
-        \\--enable-memory64 --enable-extended-const --enable-multi-memory`).
-        \\Each `assert_*` / `action`
+        \\--enable-memory64 --enable-extended-const --enable-multi-memory
+        \\--enable-function-references`). Each `assert_*` / `action`
         \\command is a plain pass or fail. Commands are counted as skips when they
         \\cannot be scored: `assert_unlinkable` fixtures, text/quoted-module
         \\commands `wast2json` does not lower, a few value comparisons the harness

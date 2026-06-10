@@ -25,6 +25,9 @@ pub const Op = enum(u8) {
     // tail-call proposal (Wasm 3.0)
     return_call = 0x12,
     return_call_indirect = 0x13,
+    // Function-references proposal.
+    call_ref = 0x14,
+    return_call_ref = 0x15,
 
     drop = 0x1a,
     select = 0x1b,
@@ -42,6 +45,10 @@ pub const Op = enum(u8) {
     ref_null = 0xd0,
     ref_is_null = 0xd1,
     ref_func = 0xd2,
+    // Function-references proposal.
+    ref_as_non_null = 0xd4,
+    br_on_null = 0xd5,
+    br_on_non_null = 0xd6,
 
     // Memory access (§5.4.6). Each carries a memarg (align, offset).
     i32_load = 0x28,

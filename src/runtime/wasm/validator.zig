@@ -51,6 +51,8 @@ pub const ValidateError = error{
     TypeMismatch,
     StackUnderflow,
     UnknownLocal,
+    UninitializedLocal,
+    UnknownElemSegment,
     UnknownGlobal,
     UnknownFunc,
     UnknownType,
@@ -98,6 +100,7 @@ const Ctrl = struct {
     if_entry: ?u32 = null, // `if`'s own entry, patched at else/end
     if_ip: u32 = 0,
     op_ip: u32 = 0, // IP of the construct's opcode (used for try_table extents)
+    init_mark: usize = 0, // init_log length at entry (§3.4.12 local-init scope)
 
     fn labelTypes(self: *const Ctrl) []const ValType {
         return if (self.op == .loop) self.start_types else self.end_types;
@@ -125,16 +128,30 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
     // constant expressions of the target's address type, and their
     // memory / table indices must exist.
     try validateData(module, total_globals);
-    try validateElements(module, total_globals);
+    const elem_types = try validateElements(arena, module, total_globals);
 
     // §3.4.2 — a table's explicit element initializer is a constant
     // expression of the table's element type. Only imported globals
     // precede the table section, so defined globals are out of scope.
     for (module.tables) |t| {
         if (t.init_expr) |expr| {
-            try validateConstExpr(module, expr, t.elem.toValType(), glob_imports);
+            try validateConstExpr(module, expr, t.elem, glob_imports);
         }
     }
+
+    // Function-references: every concrete `(ref [null] $t)` written in
+    // a declaration must name an existing type ("unknown type").
+    for (module.types) |ft| {
+        for (ft.params) |t| try checkTypeUse(module, t);
+        for (ft.results) |t| try checkTypeUse(module, t);
+    }
+    for (module.globals) |g| try checkTypeUse(module, g.type.val);
+    for (module.tables) |t| try checkTypeUse(module, t.elem);
+    for (module.imports) |imp| switch (imp.desc) {
+        .global => |gt| try checkTypeUse(module, gt.val),
+        .table => |tt| try checkTypeUse(module, tt.elem),
+        else => {},
+    };
 
     // §3.4.9 — the start function must exist and have type [] -> [].
     if (module.start) |s| {
@@ -158,7 +175,7 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
     for (module.code, 0..) |body, i| {
         const type_index = module.funcs[i];
         if (type_index >= module.types.len) return error.UnknownType;
-        out[i] = try validateFunc(arena, module, type_index, body.bytes, declared);
+        out[i] = try validateFunc(arena, module, type_index, body.bytes, declared, elem_types);
     }
     return out;
 }
@@ -191,7 +208,7 @@ fn markRefFuncsInExpr(r: *Reader, declared: []bool) ValidateError!void {
             0x43 => _ = try r.bytesN(4),
             0x44 => _ = try r.bytesN(8),
             0x23 => _ = try r.uleb(u32),
-            0xd0 => _ = try r.byte(),
+            0xd0 => _ = try r.sleb(i64), // ref.null heaptype (s33)
             0xd2 => {
                 const fi = try r.uleb(u32);
                 if (fi < declared.len) declared[fi] = true;
@@ -231,7 +248,12 @@ fn buildDeclaredSet(arena: std.mem.Allocator, module: *const Module) ValidateErr
             const is_active = (kind == 0 or kind == 2);
             if (kind == 2) _ = try r.uleb(u32); // table index
             if (is_active) try markRefFuncsInExpr(&r, declared); // offset (no ref.func)
-            if (kind != 0) _ = try r.byte(); // elemkind / reftype
+            if (kind != 0) {
+                // Index form: a 1-byte elemkind. Expression form: a full
+                // reference type, possibly 0x63/0x64 + an s33 heap type.
+                const b = try r.byte();
+                if (use_exprs and (b == 0x63 or b == 0x64)) _ = try r.sleb(i64);
+            }
             const n = try r.uleb(u32);
             var j: u32 = 0;
             while (j < n) : (j += 1) {
@@ -382,14 +404,14 @@ fn validateConstExprR(module: *const Module, r: *Reader, expected: ValType, glob
                 const gi = try r.uleb(u32);
                 try push(&stack, &sp, try constGlobalType(module, gi, global_limit));
             },
-            0xd0 => { // ref.null
-                const rt = types.RefType.fromByte(try r.byte()) orelse return error.BadRefType;
-                try push(&stack, &sp, rt.toValType());
+            0xd0 => { // ref.null ht — produces (ref null ht)
+                const heap = types.readHeapType(r) catch return error.BadRefType;
+                try push(&stack, &sp, ValType.refType(true, heap));
             },
-            0xd2 => { // ref.func
+            0xd2 => { // ref.func — the precise non-nullable (ref $t)
                 const fi = try r.uleb(u32);
                 if (fi >= totalFuncs(module)) return error.UnknownFunc;
-                try push(&stack, &sp, .funcref);
+                try push(&stack, &sp, ValType.refType(false, try funcTypeIndex(module, fi)));
             },
             0x6a, 0x6b, 0x6c => { // i32.add / sub / mul
                 try pop(&stack, &sp, .i32);
@@ -410,7 +432,7 @@ fn validateConstExprR(module: *const Module, r: *Reader, expected: ValType, glob
             else => return error.BadConstExpr, // not a constant instruction
         }
     }
-    if (sp != 1 or stack[0] != expected) return error.TypeMismatch;
+    if (sp != 1 or !isSubtype(stack[0], expected)) return error.TypeMismatch;
 }
 
 /// Number of memories in the index space (imports + defined).
@@ -460,9 +482,11 @@ fn validateData(module: *const Module, global_limit: u32) ValidateError!void {
 }
 
 /// §3.4.5 — validate active element segment offsets and the function
-/// indices a segment references.
-fn validateElements(module: *const Module, global_limit: u32) ValidateError!void {
-    if (module.elements_count == 0) return;
+/// indices a segment references; give back each segment's element type
+/// (for `table.init`'s §3.4.8 type check).
+fn validateElements(arena: std.mem.Allocator, module: *const Module, global_limit: u32) ValidateError![]const ValType {
+    const seg_types = try arena.alloc(ValType, module.elements_count);
+    if (module.elements_count == 0) return seg_types;
     var r = Reader.init(module.elements_raw);
     var i: u32 = 0;
     while (i < module.elements_count) : (i += 1) {
@@ -484,9 +508,26 @@ fn validateElements(module: *const Module, global_limit: u32) ValidateError!void
         if (kind != 0) {
             const b = try r.byte();
             if (use_exprs) {
-                const rt = types.RefType.fromByte(b) orelse return error.BadRefType;
-                elem_type = rt.toValType();
+                if (ValType.fromByte(b)) |vt| {
+                    elem_type = vt;
+                } else {
+                    const nullable = switch (b) {
+                        0x63 => true,
+                        0x64 => false,
+                        else => return error.BadRefType,
+                    };
+                    const heap = types.readHeapType(&r) catch return error.BadRefType;
+                    elem_type = ValType.refType(nullable, heap);
+                }
+                if (!elem_type.isRef()) return error.BadRefType;
+                try checkTypeUse(module, elem_type);
             }
+        }
+        seg_types[i] = elem_type;
+        // §3.4.5 — an active segment's element type must match the
+        // target table's element type.
+        if (is_active) {
+            if (!isSubtype(elem_type, try tableElemType(module, table_idx))) return error.TypeMismatch;
         }
 
         const n = try r.uleb(u32);
@@ -501,6 +542,7 @@ fn validateElements(module: *const Module, global_limit: u32) ValidateError!void
         }
     }
     if (r.pos != module.elements_raw.len) return error.SectionSizeMismatch;
+    return seg_types;
 }
 
 const Validator = struct {
@@ -513,6 +555,14 @@ const Validator = struct {
     mem_is64: []const bool,
     declared_funcs: []const bool, // §3.4.1.3 ref.func reference set
     r: Reader, // over the body's expression bytes
+    /// §3.4.12 (function-references) — per-local initialization
+    /// status. A non-defaultable (non-nullable reference) local starts
+    /// uninitialized; `local.set`/`tee` initializes it until the end
+    /// of the enclosing block.
+    local_init: []bool = &.{},
+    init_log: std.ArrayListUnmanaged(u32) = .empty,
+    /// Element-segment element types, for `table.init`'s type check.
+    elem_types: []const ValType = &.{},
     vals: std.ArrayListUnmanaged(AbsVal) = .empty,
     ctrls: std.ArrayListUnmanaged(Ctrl) = .empty,
     side_table: std.ArrayListUnmanaged(BranchEntry) = .empty,
@@ -541,7 +591,7 @@ const Validator = struct {
     fn popExpect(self: *Validator, expect: ValType) !void {
         const actual = try self.popVal();
         if (actual) |a| {
-            if (a != expect) return error.TypeMismatch;
+            if (!isSubtype(a, expect)) return error.TypeMismatch;
         }
     }
 
@@ -567,6 +617,7 @@ const Validator = struct {
             .entered_reachable = parent_reachable,
             .start_ip = start_ip,
             .start_stp = @intCast(self.side_table.items.len),
+            .init_mark = self.init_log.items.len,
         };
         try self.ctrls.append(self.arena, c);
         try self.pushVals(in);
@@ -578,7 +629,15 @@ const Validator = struct {
         try self.popVals(c.end_types);
         if (self.vals.items.len != c.height) return error.TypeMismatch;
         _ = self.ctrls.pop();
+        self.resetLocalInit(c.init_mark);
         return c;
+    }
+
+    /// Forget local initializations recorded past `mark` — a set's
+    /// effect ends with its enclosing block (§3.4.12).
+    fn resetLocalInit(self: *Validator, mark: usize) void {
+        for (self.init_log.items[mark..]) |x| self.local_init[x] = false;
+        self.init_log.shrinkRetainingCapacity(mark);
     }
 
     fn setUnreachable(self: *Validator) void {
@@ -639,6 +698,7 @@ fn validateFunc(
     type_index: u32,
     body_bytes: []const u8,
     declared: []const bool,
+    elem_types: []const ValType,
 ) ValidateError!CompiledFunc {
     const ft = module.types[type_index];
 
@@ -650,13 +710,22 @@ fn validateFunc(
     var g: u32 = 0;
     while (g < group_count) : (g += 1) {
         const n = try br.uleb(u32);
-        const vt = ValType.fromByte(try br.byte()) orelse return error.BadValType;
+        const vt = types.readValType(&br) catch return error.BadValType;
+        if (vt.concreteIndex()) |ci| {
+            if (ci >= module.types.len) return error.UnknownType;
+        }
         // Guard against a pathological local count blowing up memory.
         if (n > 1_000_000) return error.InvalidLocalCount;
         var k: u32 = 0;
         while (k < n) : (k += 1) try locals.append(arena, vt);
     }
     const local_types = try locals.toOwnedSlice(arena);
+    // §3.4.12 — parameters arrive initialized; a declared local is
+    // initialized iff its type is defaultable.
+    const local_init = try arena.alloc(bool, local_types.len);
+    for (local_types, 0..) |lt, li| {
+        local_init[li] = li < ft.params.len or lt.isDefaultable();
+    }
     const expr = body_bytes[br.pos..];
 
     // Per-memory address types over the index space, imports first.
@@ -670,6 +739,8 @@ fn validateFunc(
         .arena = arena,
         .module = module,
         .local_types = local_types,
+        .local_init = local_init,
+        .elem_types = elem_types,
         .results = ft.results,
         .mem_is64 = mem_is64.items,
         .declared_funcs = declared,
@@ -712,6 +783,14 @@ fn readBlockType(v: *Validator) !BlockType {
         _ = try v.r.byte();
         const one = try v.arena.alloc(ValType, 1);
         one[0] = vt;
+        return .{ .params = &.{}, .results = one };
+    }
+    if (peek == 0x63 or peek == 0x64) {
+        _ = try v.r.byte();
+        const heap = types.readHeapType(&v.r) catch return error.BadBlockType;
+        if (heap < types.heap_concrete_max and heap >= v.module.types.len) return error.BadBlockType;
+        const one = try v.arena.alloc(ValType, 1);
+        one[0] = ValType.refType(peek == 0x63, heap);
         return .{ .params = &.{}, .results = one };
     }
     const idx = try v.r.sleb(i33);
@@ -826,6 +905,7 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 c.if_entry = null;
                 v.ctrls.items[v.ctrls.items.len - 1] = c;
                 v.vals.shrinkRetainingCapacity(c.height);
+                v.resetLocalInit(c.init_mark);
                 try v.pushVals(c.start_types);
             },
             .end => {
@@ -883,7 +963,24 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 for (labels) |l| {
                     if ((try v.label(l)).labelTypes().len != def_arity) return error.TypeMismatch;
                 }
-                try v.popVals(def.labelTypes());
+                // Pop the carried values once, capturing the actual
+                // types; each must satisfy EVERY target's label types
+                // (the operand sits below the meet of the targets).
+                const actuals = try v.arena.alloc(AbsVal, def_arity);
+                {
+                    var k: usize = def_arity;
+                    while (k > 0) {
+                        k -= 1;
+                        actuals[k] = try v.popVal();
+                    }
+                }
+                for (actuals, 0..) |a, pos| {
+                    const av = a orelse continue;
+                    if (!isSubtype(av, def.labelTypes()[pos])) return error.TypeMismatch;
+                    for (labels) |l| {
+                        if (!isSubtype(av, (try v.label(l)).labelTypes()[pos])) return error.TypeMismatch;
+                    }
+                }
                 v.setUnreachable();
             },
             .@"return" => {
@@ -958,7 +1055,7 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 // The table must exist and be funcref-typed; the element
                 // index is that table's address type (i64 for a table64).
                 const addr = try tableAddr(v.module, table_idx);
-                if (try tableElemType(v.module, table_idx) != .funcref) return error.TypeMismatch;
+                if (!isSubtype(try tableElemType(v.module, table_idx), .funcref)) return error.TypeMismatch;
                 if (type_idx >= v.module.types.len) return error.UnknownType;
                 const ft = v.module.types[type_idx];
                 try v.popExpect(addr); // element index
@@ -975,11 +1072,71 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 if (!std.mem.eql(ValType, ft.results, v.results)) return error.TypeMismatch;
                 v.setUnreachable();
             },
+            // Function-references proposal: call through a typed
+            // function reference. The callee ref sits on top of its
+            // arguments; null traps at runtime.
+            .call_ref => {
+                const type_idx = try v.r.uleb(u32);
+                if (type_idx >= v.module.types.len) return error.UnknownType;
+                const ft = v.module.types[type_idx];
+                try v.popExpect(ValType.refType(true, type_idx));
+                try v.popVals(ft.params);
+                try v.pushVals(ft.results);
+            },
+            .return_call_ref => {
+                const type_idx = try v.r.uleb(u32);
+                if (type_idx >= v.module.types.len) return error.UnknownType;
+                const ft = v.module.types[type_idx];
+                try v.popExpect(ValType.refType(true, type_idx));
+                try v.popVals(ft.params);
+                if (!std.mem.eql(ValType, ft.results, v.results)) return error.TypeMismatch;
+                v.setUnreachable();
+            },
+            // `ref.as_non_null` traps on null, refining the type.
+            .ref_as_non_null => {
+                const t = try v.popVal();
+                if (t) |a| {
+                    const heap = a.heapOf() orelse return error.TypeMismatch;
+                    try v.pushVal(ValType.refType(false, heap));
+                } else try v.pushVal(null);
+            },
+            // `br_on_null l` branches (without the ref) when null;
+            // otherwise the non-null ref stays: [t* (ref null ht)] ->
+            // [t* (ref ht)] with labeltypes(l) = t*.
+            .br_on_null => {
+                const n = try v.r.uleb(u32);
+                const target = try v.label(n);
+                const t = try v.popVal();
+                var heap: ?u32 = null;
+                if (t) |a| heap = a.heapOf() orelse return error.TypeMismatch;
+                _ = try v.emitBranch(op_ip, target);
+                try v.popVals(target.labelTypes());
+                try v.pushVals(target.labelTypes());
+                if (heap) |h| try v.pushVal(ValType.refType(false, h)) else try v.pushVal(null);
+            },
+            // `br_on_non_null l` branches WITH the non-null ref:
+            // [t* (ref null ht)] -> [t*], labeltypes(l) = [t* (ref ht)].
+            .br_on_non_null => {
+                const n = try v.r.uleb(u32);
+                const target = try v.label(n);
+                const lt = target.labelTypes();
+                if (lt.len == 0) return error.TypeMismatch;
+                if (!lt[lt.len - 1].isRef()) return error.TypeMismatch;
+                const t = try v.popVal();
+                if (t) |a| {
+                    const heap = a.heapOf() orelse return error.TypeMismatch;
+                    if (!isSubtype(ValType.refType(false, heap), lt[lt.len - 1])) return error.TypeMismatch;
+                    try v.pushVal(ValType.refType(false, heap));
+                } else try v.pushVal(null);
+                _ = try v.emitBranch(op_ip, target);
+                try v.popVals(lt);
+                try v.pushVals(lt[0 .. lt.len - 1]);
+            },
             .return_call_indirect => {
                 const type_idx = try v.r.uleb(u32);
                 const table_idx = try v.r.uleb(u32);
                 const addr = try tableAddr(v.module, table_idx);
-                if (try tableElemType(v.module, table_idx) != .funcref) return error.TypeMismatch;
+                if (!isSubtype(try tableElemType(v.module, table_idx), .funcref)) return error.TypeMismatch;
                 if (type_idx >= v.module.types.len) return error.UnknownType;
                 const ft = v.module.types[type_idx];
                 try v.popExpect(addr); // element index
@@ -991,7 +1148,8 @@ fn validateExpr(v: *Validator) ValidateError!void {
             .select_t => {
                 const n = try v.r.uleb(u32);
                 if (n != 1) return error.TypeMismatch; // exactly one result type
-                const t = ValType.fromByte(try v.r.byte()) orelse return error.BadValType;
+                const t = types.readValType(&v.r) catch return error.BadValType;
+                try checkTypeUse(v.module, t);
                 try v.popExpect(.i32);
                 try v.popExpect(t);
                 try v.popExpect(t);
@@ -999,8 +1157,9 @@ fn validateExpr(v: *Validator) ValidateError!void {
             },
 
             .ref_null => {
-                const rt = types.RefType.fromByte(try v.r.byte()) orelse return error.BadRefType;
-                try v.pushVal(rt.toValType());
+                const heap = types.readHeapType(&v.r) catch return error.BadRefType;
+                if (heap < types.heap_concrete_max and heap >= v.module.types.len) return error.UnknownType;
+                try v.pushVal(ValType.refType(true, heap));
             },
             .ref_is_null => {
                 try popRef(v);
@@ -1009,9 +1168,11 @@ fn validateExpr(v: *Validator) ValidateError!void {
             .ref_func => {
                 // §3.4.1.3 — the function must exist and be in the
                 // module's reference set (declared outside a body).
+                // Its type is the precise non-nullable (ref $t)
+                // (function-references), a subtype of funcref.
                 const fi = try v.r.uleb(u32);
                 if (fi >= v.declared_funcs.len or !v.declared_funcs[fi]) return error.UnknownFunc;
-                try v.pushVal(.funcref);
+                try v.pushVal(ValType.refType(false, try funcTypeIndex(v.module, fi)));
             },
 
             .table_get => {
@@ -1045,17 +1206,26 @@ fn validateExpr(v: *Validator) ValidateError!void {
             .local_get => {
                 const x = try v.r.uleb(u32);
                 if (x >= v.local_types.len) return error.UnknownLocal;
+                if (!v.local_init[x]) return error.UninitializedLocal;
                 try v.pushVal(v.local_types[x]);
             },
             .local_set => {
                 const x = try v.r.uleb(u32);
                 if (x >= v.local_types.len) return error.UnknownLocal;
                 try v.popExpect(v.local_types[x]);
+                if (!v.local_init[x]) {
+                    v.local_init[x] = true;
+                    try v.init_log.append(v.arena, x);
+                }
             },
             .local_tee => {
                 const x = try v.r.uleb(u32);
                 if (x >= v.local_types.len) return error.UnknownLocal;
                 try v.popExpect(v.local_types[x]);
+                if (!v.local_init[x]) {
+                    v.local_init[x] = true;
+                    try v.init_log.append(v.arena, x);
+                }
                 try v.pushVal(v.local_types[x]);
             },
             .global_get => {
@@ -1181,8 +1351,12 @@ fn validateExpr(v: *Validator) ValidateError!void {
 
                     // Bulk table operations (reference-types).
                     12 => { // table.init
-                        _ = try v.r.uleb(u32); // element segment index
+                        const eidx = try v.r.uleb(u32); // element segment index
                         const tidx = try v.r.uleb(u32);
+                        if (eidx >= v.elem_types.len) return error.UnknownElemSegment;
+                        // §3.4.8 — the segment's element type must match
+                        // the table's.
+                        if (!isSubtype(v.elem_types[eidx], try tableElemType(v.module, tidx))) return error.TypeMismatch;
                         try v.popExpect(.i32); // n
                         try v.popExpect(.i32); // src
                         try v.popExpect(try tableAddr(v.module, tidx)); // dst
@@ -1191,6 +1365,9 @@ fn validateExpr(v: *Validator) ValidateError!void {
                     14 => { // table.copy
                         const dst_t = try v.r.uleb(u32);
                         const src_t = try v.r.uleb(u32);
+                        // §3.4.8 — the source table's element type must
+                        // match the destination's.
+                        if (!isSubtype(try tableElemType(v.module, src_t), try tableElemType(v.module, dst_t))) return error.TypeMismatch;
                         try v.popExpect(try tableAddr(v.module, dst_t)); // n
                         try v.popExpect(try tableAddr(v.module, src_t)); // src
                         try v.popExpect(try tableAddr(v.module, dst_t)); // dst
@@ -1525,13 +1702,13 @@ fn tableElemType(module: *const Module, table_index: u32) !ValType {
     var imported: u32 = 0;
     for (module.imports) |imp| {
         if (imp.desc == .table) {
-            if (table_index == imported) return imp.desc.table.elem.toValType();
+            if (table_index == imported) return imp.desc.table.elem;
             imported += 1;
         }
     }
     const local_index = table_index - imported;
     if (local_index >= module.tables.len) return error.UnknownTable;
-    return module.tables[local_index].elem.toValType();
+    return module.tables[local_index].elem;
 }
 
 /// The index type of a table — i64 for a 64-bit table, else i32.
@@ -1559,6 +1736,26 @@ fn globalType(module: *const Module, global_index: u32) !types.GlobalType {
     const local_index = global_index - imported;
     if (local_index >= module.globals.len) return error.UnknownGlobal;
     return module.globals[local_index].type;
+}
+
+/// A declared value type may only name an existing concrete type.
+fn checkTypeUse(module: *const Module, t: ValType) ValidateError!void {
+    if (t.concreteIndex()) |ci| {
+        if (ci >= module.types.len) return error.UnknownType;
+    }
+}
+
+/// §3.3 — value-type subtyping for the function-references subset:
+/// every type matches itself; a non-nullable reference matches its
+/// nullable form; a concrete `(ref [null] $t)` matches the abstract
+/// func heap (every concrete type is a function type pre-GC).
+fn isSubtype(a: ValType, b: ValType) bool {
+    if (a == b) return true;
+    const ah = a.heapOf() orelse return false;
+    const bh = b.heapOf() orelse return false;
+    if (a.isNullable() and !b.isNullable()) return false;
+    if (ah == bh) return true;
+    return bh == types.heap_abs_func and ah < types.heap_concrete_max;
 }
 
 fn sameTypes(a: []const ValType, b: []const ValType) bool {

@@ -26,6 +26,7 @@ const CompiledFunc = code_mod.CompiledFunc;
 const Op = opcodes.Op;
 
 pub const TrapError = error{
+    NullReference,
     Unreachable,
     IntegerDivideByZero,
     IntegerOverflow,
@@ -152,8 +153,9 @@ const MAX_TABLE_ELEMS = 1 << 24;
 pub const PAGE_SIZE = 1 << 16;
 
 /// A runtime global cell. 128-bit to hold a `v128` (scalars use the
-/// low bits).
-const Global = struct {
+/// low bits). Public so an embedder (the JS API, the conformance
+/// harness) can provide and alias globals across instances.
+pub const Global = struct {
     value: u128,
     mutable: bool,
 };
@@ -177,9 +179,11 @@ pub const FuncRef = union(enum) {
 /// module.
 pub const Imports = struct {
     funcs: []const FuncRef = &.{},
-    /// Imported global values, in global-import declaration order. Each
-    /// occupies the front of the importing module's global index space.
-    globals: []const u128 = &.{},
+    /// Imported globals, in global-import declaration order — the
+    /// provider's own `*Global`, so a mutable global's writes are
+    /// mutually visible (§4.5.4). Each occupies the front of the
+    /// importing module's global index space.
+    globals: []const *Global = &.{},
     /// Sources for the imported linear memories, in memory-import
     /// declaration order. By default each one's bytes are snapshotted
     /// (duped) at instantiate; with `share_memory` the importing
@@ -215,7 +219,13 @@ pub const Memory = struct {
 pub const Instance = struct {
     module: *const Module,
     funcs: []const CompiledFunc,
-    globals: []Global,
+    /// The global index space: imported globals (shared pointers into
+    /// the providing instance) followed by pointers into
+    /// `owned_globals` for the defined ones.
+    globals: []*Global,
+    /// Backing storage for this module's own (defined) globals, plus
+    /// any unprovided import's default slot.
+    owned_globals: []Global,
     /// Number of imported functions preceding the defined ones in the
     /// function index space.
     func_import_count: u32,
@@ -290,6 +300,7 @@ pub const Instance = struct {
 
     pub fn deinit(self: *Instance) void {
         self.gpa.free(self.globals);
+        self.gpa.free(self.owned_globals);
         for (self.owned_memories) |m| self.gpa.free(m.data);
         self.gpa.free(self.owned_memories);
         self.gpa.free(self.memories);
@@ -374,7 +385,7 @@ pub const Instance = struct {
     }
 
     /// A table's element reference type by index (imports first).
-    pub fn tableElemType(self: *const Instance, idx: u32) ?types.RefType {
+    pub fn tableElemType(self: *const Instance, idx: u32) ?types.ValType {
         var k: u32 = 0;
         for (self.module.imports) |imp| switch (imp.desc) {
             .table => |tt| {
@@ -394,6 +405,27 @@ pub const Instance = struct {
     pub fn globalCellPtr(self: *Instance, idx: u32) ?*u128 {
         if (idx >= self.globals.len) return null;
         return &self.globals[idx].value;
+    }
+
+    /// The live (shared) global at `idx`, for importing one instance's
+    /// global into another — writes through either side are visible.
+    pub fn globalRef(self: *Instance, idx: u32) ?*Global {
+        if (idx >= self.globals.len) return null;
+        return self.globals[idx];
+    }
+
+    /// Resolve an exported global by name to its live `*Global` (for
+    /// cross-module linking — a mutable global is genuinely shared).
+    pub fn exportedGlobal(self: *Instance, name: []const u8) ?*Global {
+        for (self.module.exports) |ex| {
+            switch (ex.desc) {
+                .global => |idx| if (std.mem.eql(u8, ex.name, name)) {
+                    if (idx < self.globals.len) return self.globals[idx];
+                },
+                else => {},
+            }
+        }
+        return null;
     }
 
     /// A global's declared type (value type + mutability) by index,
@@ -502,20 +534,27 @@ pub fn instantiate(
 
     // The global index space is imported globals followed by defined
     // ones; a defined initializer may `global.get` any earlier global.
+    // An imported global aliases the provider's `*Global` (a mutable
+    // global's writes are mutually visible, §4.5.4); an unprovided
+    // import defensively gets an owned zero slot.
     var glob_imports: u32 = 0;
     for (module.imports) |imp| {
         if (imp.desc == .global) glob_imports += 1;
     }
-    const globals = try allocator.alloc(Global, glob_imports + module.globals.len);
+    const owned_globals = try allocator.alloc(Global, glob_imports + module.globals.len);
+    errdefer allocator.free(owned_globals);
+    const globals = try allocator.alloc(*Global, glob_imports + module.globals.len);
     errdefer allocator.free(globals);
     {
         var k: usize = 0;
         for (module.imports) |imp| switch (imp.desc) {
             .global => |gt| {
-                globals[k] = .{
-                    .value = if (k < imports.globals.len) imports.globals[k] else 0,
-                    .mutable = gt.mut == .mutable,
-                };
+                if (k < imports.globals.len) {
+                    globals[k] = imports.globals[k];
+                } else {
+                    owned_globals[k] = .{ .value = 0, .mutable = gt.mut == .mutable };
+                    globals[k] = &owned_globals[k];
+                }
                 k += 1;
             },
             else => {},
@@ -523,10 +562,11 @@ pub fn instantiate(
     }
     for (module.globals, 0..) |g, i| {
         const idx = glob_imports + i;
-        globals[idx] = .{
-            .value = evalConstExpr(g.init_expr, globals[0..idx]),
+        owned_globals[idx] = .{
+            .value = evalConstExpr(g.init_expr, globals[0..idx], self),
             .mutable = g.type.mut == .mutable,
         };
+        globals[idx] = &owned_globals[idx];
     }
 
     // The memory index space (§2.5.8, multi-memory): imported memories
@@ -579,12 +619,14 @@ pub fn instantiate(
         }
     }
 
-    // Defined tables, each sized to its minimum and null-filled.
+    // Defined tables, each sized to its minimum — filled with the
+    // function-references explicit initializer when present, else null.
     const owned_tables = try allocator.alloc(Table, module.tables.len);
     errdefer allocator.free(owned_tables);
     for (module.tables, 0..) |t, i| {
         const elems = try allocator.alloc(u128, @intCast(t.limits.min));
-        @memset(elems, REF_NULL);
+        const fill: u128 = if (t.init_expr) |expr| evalConstExpr(expr, globals, self) else REF_NULL;
+        @memset(elems, fill);
         owned_tables[i] = .{ .elems = elems, .max = t.limits.max, .is_64 = t.limits.is_64 };
     }
 
@@ -659,6 +701,7 @@ pub fn instantiate(
         .module = module,
         .funcs = funcs,
         .globals = globals,
+        .owned_globals = owned_globals,
         .func_import_count = func_imports,
         .imported_funcs = imports.funcs,
         .memories = memories,
@@ -681,7 +724,7 @@ pub fn instantiate(
 /// Parse the data section, applying active segments into their target
 /// linear memory and returning the (passive-keeping) segments for
 /// `memory.init`.
-fn parseData(arena: std.mem.Allocator, module: *const Module, memories: []const *Memory, globals: []const Global) Error![]DataSegment {
+fn parseData(arena: std.mem.Allocator, module: *const Module, memories: []const *Memory, globals: []const *Global) Error![]DataSegment {
     const count = module.data_count_in_section;
     const segs = try arena.alloc(DataSegment, count);
     var r = reader_mod.Reader.init(module.data_raw);
@@ -715,7 +758,7 @@ fn parseData(arena: std.mem.Allocator, module: *const Module, memories: []const 
 /// `table.init`. A `ref.func` element captures `self` as the funcref's
 /// defining instance, so the function stays callable after the funcref
 /// is copied into another module's table.
-fn parseElements(self: *Instance, arena: std.mem.Allocator, module: *const Module, globals: []const Global) Error![]ElemSegment {
+fn parseElements(self: *Instance, arena: std.mem.Allocator, module: *const Module, globals: []const *Global) Error![]ElemSegment {
     const count = module.elements_count;
     const segs = try arena.alloc(ElemSegment, count);
     var r = reader_mod.Reader.init(module.elements_raw);
@@ -730,7 +773,12 @@ fn parseElements(self: *Instance, arena: std.mem.Allocator, module: *const Modul
         if (kind == 2) table_idx = try r.uleb(u32);
         var offset: u64 = 0;
         if (is_active) offset = try readOffsetExpr(&r, globals);
-        if (kind != 0) _ = try r.byte(); // elemkind / reftype
+        if (kind != 0) {
+            // Index form: a 1-byte elemkind. Expression form: a full
+            // reference type, possibly 0x63/0x64 + s33 heap type.
+            const b = try r.byte();
+            if (use_exprs and (b == 0x63 or b == 0x64)) _ = try r.sleb(i64);
+        }
 
         const n = try r.uleb(u32);
         const values = try arena.alloc(u128, n);
@@ -760,12 +808,12 @@ fn parseElements(self: *Instance, arena: std.mem.Allocator, module: *const Modul
 
 /// Evaluate a single element reference expression — `ref.func` (encoding
 /// `self`), `ref.null`, or `global.get` — consuming up to `end`.
-fn readElemRefExpr(self: *Instance, r: *reader_mod.Reader, globals: []const Global) Error!u128 {
+fn readElemRefExpr(self: *Instance, r: *reader_mod.Reader, globals: []const *Global) Error!u128 {
     const op: Op = @enumFromInt(try r.byte());
     var val: u128 = REF_NULL;
     switch (op) {
         .ref_func => val = makeFuncRef(self, try r.uleb(u32)),
-        .ref_null => _ = try r.byte(), // reftype
+        .ref_null => _ = try r.sleb(i64), // heap type (s33)
         .global_get => {
             const gi = try r.uleb(u32);
             val = if (gi < globals.len) globals[gi].value else REF_NULL;
@@ -782,7 +830,7 @@ fn readElemRefExpr(self: *Instance, r: *reader_mod.Reader, globals: []const Glob
 /// `global.get` of an already-initialized (imported or earlier) global,
 /// and the extended-const proposal's `i32`/`i64` `add` / `sub` / `mul`.
 /// Returns the result as a raw cell (scalars in the low bits).
-fn evalConstReader(r: *reader_mod.Reader, globals: []const Global) Error!u128 {
+fn evalConstReader(r: *reader_mod.Reader, globals: []const *Global, inst: ?*Instance) Error!u128 {
     var stack: [16]u128 = undefined;
     var sp: usize = 0;
     while (true) {
@@ -812,13 +860,15 @@ fn evalConstReader(r: *reader_mod.Reader, globals: []const Global) Error!u128 {
                 stack[sp] = if (gi < globals.len) globals[gi].value else 0;
                 sp += 1;
             },
-            0xd0 => { // ref.null
-                _ = try r.byte(); // reftype
+            0xd0 => { // ref.null ht
+                _ = try r.sleb(i64); // heap type (s33)
                 stack[sp] = REF_NULL;
                 sp += 1;
             },
-            0xd2 => { // ref.func
-                stack[sp] = try r.uleb(u32);
+            0xd2 => { // ref.func — encode the defining instance so the
+                // funcref stays callable when exported/imported.
+                const fi = try r.uleb(u32);
+                stack[sp] = if (inst) |self| makeFuncRef(self, fi) else fi;
                 sp += 1;
             },
             0x6a, 0x6b, 0x6c => { // i32.add / sub / mul
@@ -858,15 +908,15 @@ fn evalConstReader(r: *reader_mod.Reader, globals: []const Global) Error!u128 {
 
 /// An active segment's offset is a constant expression yielding an
 /// address (its low bits).
-fn readOffsetExpr(r: *reader_mod.Reader, globals: []const Global) Error!u64 {
-    return @truncate(try evalConstReader(r, globals));
+fn readOffsetExpr(r: *reader_mod.Reader, globals: []const *Global) Error!u64 {
+    return @truncate(try evalConstReader(r, globals, null));
 }
 
 /// Evaluate a global's constant initializer (§3.3.7) over the globals
 /// initialized so far (imports + earlier defined globals).
-fn evalConstExpr(expr: []const u8, globals: []const Global) u128 {
+fn evalConstExpr(expr: []const u8, globals: []const *Global, inst: ?*Instance) u128 {
     var r = reader_mod.Reader.init(expr);
-    return evalConstReader(&r, globals) catch 0;
+    return evalConstReader(&r, globals, inst) catch 0;
 }
 
 const Frame = struct {
@@ -1532,8 +1582,148 @@ fn run(ip: *Interp) Error!void {
             continue :dispatch nextOp(body, &pc);
         },
 
+        // Function-references proposal: call through a typed function
+        // reference. The validator pinned the callee's type; a null
+        // reference traps (§4.4.8).
+        .call_ref => {
+            const op_ip = pc - 1;
+            _ = readU32(body, &pc); // type index (validated statically)
+            const ref = ip.popCell();
+            if (ref == REF_NULL) return error.NullReference;
+            const fidx = funcRefIndex(ref);
+            const def_inst = if (ref >> 64 == 0) ip.instance else funcRefInstance(ref);
+            const target = def_inst.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
+            switch (target) {
+                .host => |h| ip.callHost(h) catch |e| {
+                    if (e != error.HostThrew) return e;
+                    switch (try catchHostThrow(ip, op_ip)) {
+                        .caught => |c| {
+                            f = &ip.frames[ip.nframes - 1];
+                            ip.instance = f.instance;
+                            body = f.func.body;
+                            side_table = f.func.side_table;
+                            locals_base = f.locals_base;
+                            pc = c.pc;
+                            stp = c.stp;
+                            continue :dispatch nextOp(body, &pc);
+                        },
+                        .reraise => return error.UncaughtException,
+                        .no_bridge => return e,
+                    }
+                },
+                .wasm => |w| {
+                    const pcount: u32 = @intCast(w.instance.module.types[w.func.type_index].params.len);
+                    f.ip = pc;
+                    f.stp = stp;
+                    try ip.pushFrame(w.instance, w.func, pcount);
+                    f = &ip.frames[ip.nframes - 1];
+                    ip.instance = f.instance;
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    pc = f.ip;
+                    stp = f.stp;
+                },
+            }
+            continue :dispatch nextOp(body, &pc);
+        },
+        .return_call_ref => {
+            const op_ip = pc - 1;
+            _ = readU32(body, &pc); // type index
+            const ref = ip.popCell();
+            if (ref == REF_NULL) return error.NullReference;
+            const fidx = funcRefIndex(ref);
+            const def_inst = if (ref >> 64 == 0) ip.instance else funcRefInstance(ref);
+            const target = def_inst.resolveFunc(fidx) orelse return error.UnsupportedImportCall;
+            switch (target) {
+                .host => |h| {
+                    // PTC: as in `return_call` — the caller's frame (and
+                    // its try_table handlers) are gone before the host
+                    // runs.
+                    while (ip.nhandlers > 0 and ip.handlers[ip.nhandlers - 1].frame == ip.nframes)
+                        ip.nhandlers -= 1;
+                    ip.callHost(h) catch |e| {
+                        if (e != error.HostThrew) return e;
+                        switch (try catchHostThrow(ip, op_ip)) {
+                            .caught => |c| {
+                                f = &ip.frames[ip.nframes - 1];
+                                ip.instance = f.instance;
+                                body = f.func.body;
+                                side_table = f.func.side_table;
+                                locals_base = f.locals_base;
+                                pc = c.pc;
+                                stp = c.stp;
+                                continue :dispatch nextOp(body, &pc);
+                            },
+                            .reraise => return error.UncaughtException,
+                            .no_bridge => return e,
+                        }
+                    };
+                    if (ip.popFrame()) return;
+                    f = &ip.frames[ip.nframes - 1];
+                    ip.instance = f.instance;
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    pc = f.ip;
+                    stp = f.stp;
+                },
+                .wasm => |w| {
+                    const pcount: u32 = @intCast(w.instance.module.types[w.func.type_index].params.len);
+                    try ip.tailReplaceFrame(w.instance, w.func, pcount);
+                    f = &ip.frames[ip.nframes - 1];
+                    ip.instance = f.instance;
+                    body = f.func.body;
+                    side_table = f.func.side_table;
+                    locals_base = f.locals_base;
+                    pc = f.ip;
+                    stp = f.stp;
+                },
+            }
+            continue :dispatch nextOp(body, &pc);
+        },
+        .ref_as_non_null => {
+            const v = ip.popCell();
+            if (v == REF_NULL) return error.NullReference;
+            try ip.pushCell(v);
+            continue :dispatch nextOp(body, &pc);
+        },
+        // `br_on_null` branches (without the ref) on null; otherwise
+        // the non-null ref stays on the stack.
+        .br_on_null => {
+            const op_ip = pc - 1;
+            _ = readU32(body, &pc); // label immediate (unused at runtime)
+            const v = ip.popCell();
+            if (v == REF_NULL) {
+                const e = side_table[stp];
+                moveValues(ip, e);
+                pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
+            } else {
+                try ip.pushCell(v);
+                stp += 1;
+            }
+            continue :dispatch nextOp(body, &pc);
+        },
+        // `br_on_non_null` branches WITH the ref as the label's operand.
+        .br_on_non_null => {
+            const op_ip = pc - 1;
+            _ = readU32(body, &pc);
+            const v = ip.popCell();
+            if (v != REF_NULL) {
+                try ip.pushCell(v);
+                const e = side_table[stp];
+                moveValues(ip, e);
+                pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
+            } else {
+                stp += 1;
+            }
+            continue :dispatch nextOp(body, &pc);
+        },
+
         .ref_null => {
-            pc += 1; // reftype byte
+            skipS33(body, &pc); // heap type (s33)
             try ip.pushV128(REF_NULL);
             continue :dispatch nextOp(body, &pc);
         },
@@ -1548,7 +1738,8 @@ fn run(ip: *Interp) Error!void {
 
         .select_t => {
             const n = readU32(body, &pc);
-            pc += n; // skip the result-type vector
+            var ti: u32 = 0;
+            while (ti < n) : (ti += 1) skipValType(body, &pc);
             const cond = ip.popI32();
             const b = ip.popCell();
             const a = ip.popCell();
@@ -2282,17 +2473,36 @@ fn tableFill(ip: *Interp, tidx: u32) TrapError!void {
 fn skipBlockType(body: []const u8, pc: usize) usize {
     const b = body[pc];
     if (b == 0x40 or ValType.fromByte(b) != null) return pc + 1;
+    if (b == 0x63 or b == 0x64) {
+        // Constructed reference type: tag byte + s33 heap type.
+        var p = pc + 1;
+        skipS33(body, &p);
+        return p;
+    }
     // s33 type index — skip the LEB.
     var p = pc;
     while (body[p] & 0x80 != 0) p += 1;
     return p + 1;
 }
 
+/// Advance past one (possibly multi-byte) value type.
+fn skipValType(body: []const u8, pc: *usize) void {
+    const b = body[pc.*];
+    pc.* += 1;
+    if (b == 0x63 or b == 0x64) skipS33(body, pc);
+}
+
+/// Advance past an s33/LEB immediate without decoding it.
+fn skipS33(body: []const u8, pc: *usize) void {
+    while (body[pc.*] & 0x80 != 0) pc.* += 1;
+    pc.* += 1;
+}
+
 /// Parameter count of a block type — 0 for the empty and single-result
 /// forms, the referenced func type's param count for a type index.
 fn blockTypeParamCount(inst: *Instance, body: []const u8, pc: usize) u32 {
     const b = body[pc];
-    if (b == 0x40 or ValType.fromByte(b) != null) return 0;
+    if (b == 0x40 or ValType.fromByte(b) != null or b == 0x63 or b == 0x64) return 0;
     var p = pc;
     const idx = readU32(body, &p);
     return @intCast(inst.module.types[idx].params.len);

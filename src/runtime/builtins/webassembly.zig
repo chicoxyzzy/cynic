@@ -50,6 +50,7 @@ const call = @import("../lantern/call.zig");
 const promise_mod = @import("promise.zig");
 const error_mod = @import("error.zig");
 const wasm = @import("../wasm/wasm.zig");
+const wasm_types = @import("../wasm/types.zig");
 
 /// A `WebAssembly.Module`'s decoded record. Arena-owned.
 const ModuleState = struct {
@@ -67,7 +68,10 @@ const ExportRecord = struct {
 /// cell (an instance's global for an export, or a standalone arena cell),
 /// plus its value type and mutability. Arena-owned.
 const GlobalState = struct {
-    cell: *u128,
+    /// The engine global behind this object — aliased on import so a
+    /// mutable global's writes are mutually visible (§4.5.4).
+    g: *wasm.Global,
+    cell: *u128, // == &g.value (kept for the value accessor paths)
     valtype: wasm.ValType,
     mutable: bool,
 };
@@ -442,15 +446,19 @@ fn globalConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     const mutable = arith.toBoolean(desc.get("mutable"));
 
     const a = realm.wasmAllocator();
-    const cell = a.create(u128) catch return error.OutOfMemory;
+    const g = a.create(wasm.Global) catch return error.OutOfMemory;
     // A missing initial value is the type's default: the null ref for
     // reference types, else the zero bit pattern (i32 0 / i64 0n /
     // f32 +0 / f64 +0).
     const default_cell: u128 = if (vt == .externref or vt == .funcref) wasm.REF_NULL else 0;
-    cell.* = if (args.len > 1) try marshalArg(realm, vt, args[1]) else default_cell;
+    g.* = .{
+        .value = if (args.len > 1) try marshalArg(realm, vt, args[1]) else default_cell,
+        .mutable = mutable,
+    };
+    const cell = &g.value;
 
     const st = a.create(GlobalState) catch return error.OutOfMemory;
-    st.* = .{ .cell = cell, .valtype = vt, .mutable = mutable };
+    st.* = .{ .g = g, .cell = cell, .valtype = vt, .mutable = mutable };
     try self.setWasmGlobal(realm.allocator, st);
     if (vt == .externref) realm.registerExternGlobalCell(cell) catch return error.OutOfMemory;
     return this_value;
@@ -486,12 +494,12 @@ fn globalValueSet(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 /// Wrap an instance's live global cell as a `WebAssembly.Global` object
 /// (for global exports). Reads / writes go straight to the cell.
-fn makeGlobal(realm: *Realm, valtype: wasm.ValType, mutable: bool, cell: *u128) NativeError!Value {
+fn makeGlobal(realm: *Realm, valtype: wasm.ValType, mutable: bool, g: *wasm.Global) NativeError!Value {
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, realm.wasm_global_prototype);
     const a = realm.wasmAllocator();
     const st = a.create(GlobalState) catch return error.OutOfMemory;
-    st.* = .{ .cell = cell, .valtype = valtype, .mutable = mutable };
+    st.* = .{ .g = g, .cell = &g.value, .valtype = valtype, .mutable = mutable };
     try obj.setWasmGlobal(realm.allocator, st);
     return heap_mod.taggedObject(obj);
 }
@@ -768,7 +776,7 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
 
     const a = realm.wasmAllocator();
     const funcs = a.alloc(wasm.FuncRef, nfunc) catch return error.OutOfMemory;
-    const globals = a.alloc(u128, nglob) catch return error.OutOfMemory;
+    const globals = a.alloc(*wasm.Global, nglob) catch return error.OutOfMemory;
     const tables = a.alloc(*wasm.Table, ntab) catch return error.OutOfMemory;
     const tags = a.alloc(*const wasm.TagType, ntag) catch return error.OutOfMemory;
     const memories = a.alloc(*wasm.Memory, nmem) catch return error.OutOfMemory;
@@ -840,16 +848,19 @@ fn resolveFuncImport(realm: *Realm, v: Value, module: *const wasm.Module, type_i
     } };
 }
 
-fn resolveGlobalImport(realm: *Realm, v: Value, gt: anytype) NativeError!u128 {
-    // A WebAssembly.Global shares its current cell value; a primitive is
-    // marshalled to the global's declared type.
+fn resolveGlobalImport(realm: *Realm, v: Value, gt: anytype) NativeError!*wasm.Global {
+    // A WebAssembly.Global is aliased — a mutable global's writes are
+    // visible both ways (§4.5.4); a primitive is marshalled into a
+    // fresh engine global of the declared type.
     if (heap_mod.valueAsPlainObject(v)) |obj| {
         if (obj.getWasmGlobal()) |raw| {
             const st: *GlobalState = @ptrCast(@alignCast(raw));
-            return st.cell.*;
+            return st.g;
         }
     }
-    return marshalArg(realm, gt.val, v);
+    const g = realm.wasmAllocator().create(wasm.Global) catch return error.OutOfMemory;
+    g.* = .{ .value = try marshalArg(realm, gt.val, v), .mutable = gt.mut == .mutable };
+    return g;
 }
 
 fn resolveTableImport(realm: *Realm, v: Value) NativeError!*wasm.Table {
@@ -885,9 +896,9 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
                 obj.set(realm.allocator, ex.name, fv) catch return error.OutOfMemory;
             },
             .global => |gidx| {
-                const cell = ip.globalCellPtr(gidx) orelse continue;
+                const g = ip.globalRef(gidx) orelse continue;
                 const gt = ip.globalTypeAt(gidx) orelse continue;
-                const gobj = try makeGlobal(realm, gt.val, gt.mut == .mutable, cell);
+                const gobj = try makeGlobal(realm, gt.val, gt.mut == .mutable, g);
                 obj.set(realm.allocator, ex.name, gobj) catch return error.OutOfMemory;
             },
             .table => |tidx| {
@@ -1023,6 +1034,23 @@ fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
         .v128 => return intrinsics.throwTypeError(realm, "WebAssembly: a v128 value cannot cross the JS boundary"),
         // exnref interop is the WebAssembly.Exception surface (not yet built).
         .exnref => return intrinsics.throwTypeError(realm, "WebAssembly: an exnref cannot yet cross the JS boundary"),
+        // Constructed reference types (function-references proposal):
+        // route by heap — a func-typed ref marshals like funcref, an
+        // extern one like externref — refusing null for non-nullable.
+        _ => {
+            const heap = vt.heapOf() orelse
+                return intrinsics.throwTypeError(realm, "WebAssembly: unsupported parameter type");
+            if (v.isNull() and !vt.isNullable())
+                return intrinsics.throwTypeError(realm, "WebAssembly: null is not valid for a non-nullable reference");
+            if (heap == wasm_types.heap_abs_extern) {
+                if (v.isNull()) return wasm.REF_NULL;
+                if (realm.wasm_call_depth > 0) realm.pinExternRefTransient(v) catch return error.OutOfMemory;
+                return @as(u128, v.bits);
+            }
+            if (heap == wasm_types.heap_abs_exn)
+                return intrinsics.throwTypeError(realm, "WebAssembly: an exnref cannot yet cross the JS boundary");
+            return funcRefFromValue(realm, v);
+        },
     }
 }
 
@@ -1054,6 +1082,16 @@ fn marshalResult(realm: *Realm, vt: wasm.ValType, cell: u128) NativeError!Value 
         .v128 => return intrinsics.throwTypeError(realm, "WebAssembly: a v128 value cannot cross the JS boundary"),
         // exnref interop is the WebAssembly.Exception surface (not yet built).
         .exnref => return intrinsics.throwTypeError(realm, "WebAssembly: an exnref cannot yet cross the JS boundary"),
+        // Constructed reference types route by heap, as in marshalArg.
+        _ => {
+            const heap = vt.heapOf() orelse
+                return intrinsics.throwTypeError(realm, "WebAssembly: unsupported result type");
+            if (heap == wasm_types.heap_abs_exn)
+                return intrinsics.throwTypeError(realm, "WebAssembly: an exnref cannot yet cross the JS boundary");
+            if (cell == wasm.REF_NULL) return Value.null_;
+            if (heap == wasm_types.heap_abs_extern) return Value{ .bits = @truncate(cell) };
+            return makeExportedFunction(realm, wasm.funcRefInstance(cell), wasm.funcRefIndex(cell), "");
+        },
     }
 }
 
