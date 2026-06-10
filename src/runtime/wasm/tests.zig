@@ -1103,7 +1103,7 @@ test "wasm validator: over-aligned load is rejected" {
 
 test "wasm validator: load without a memory is rejected" {
     // i32.const 0; i32.load — no memory section.
-    try expectFuncInvalid(error.NoMemory, &.{}, &.{I32}, &.{ 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x0b });
+    try expectFuncInvalid(error.UnknownMemory, &.{}, &.{I32}, &.{ 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x0b });
 }
 
 test "wasm validator: unreachable makes following code polymorphic" {
@@ -2558,4 +2558,133 @@ test "wasm exceptions: throw propagates across a return_call tail call to the gr
         .{ .id = 10, .body = &cbody },
     });
     try testing.expectEqual(@as(i32, 5), try runI32(bytes, "f", &.{}));
+}
+
+// ── multiple memories (§2.5.8 — Wasm 3.0 multi-memory) ───────────────
+
+test "wasm multi-memory: stores route to distinct memories via the memarg index" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x02, 0x00, 0x01, 0x00, 0x01 }; // two memories, min 1 page each
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // store 42 -> mem1[0] (memarg bit 6 + memidx 1); store 7 -> mem0[0];
+    // return load(mem1)[0] * 100 + load(mem0)[0]  ->  4207.
+    const cbody = [_]u8{
+        0x01, 0x21, 0x00,
+        0x41, 0x00, 0x41, 0x2a, 0x36, 0x42, 0x01, 0x00, // i32.store (mem 1)
+        0x41, 0x00, 0x41, 0x07, 0x36, 0x02, 0x00, // i32.store (mem 0)
+        0x41, 0x00, 0x28, 0x42, 0x01, 0x00, // i32.load (mem 1)
+        0x41, 0xe4, 0x00, 0x6c, // * 100
+        0x41, 0x00, 0x28, 0x02, 0x00, // i32.load (mem 0)
+        0x6a, 0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 4207), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm multi-memory: memory.size and memory.grow take a memory index" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x02, 0x00, 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // grow(mem1, 2) -> 1 (old);  * 10;  + size(mem1) -> 3  ->  13.
+    // mem0 stays 1 page, proving the grow targeted mem1 only.
+    const cbody = [_]u8{
+        0x01, 0x0f, 0x00,
+        0x41, 0x02, 0x40, 0x01, // memory.grow (mem 1)
+        0x41, 0x0a, 0x6c, // * 10
+        0x3f, 0x01, // memory.size (mem 1)
+        0x6a, 0x3f, 0x00, 0x6c, // + size; * size(mem 0) == *1
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 13), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm multi-memory: memory.copy moves bytes across distinct memories" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x02, 0x00, 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // store 42 -> mem0[0]; memory.copy mem1 <- mem0 (4 bytes); load mem1[0].
+    const cbody = [_]u8{
+        0x01, 0x19, 0x00,
+        0x41, 0x00, 0x41, 0x2a, 0x36, 0x02, 0x00, // i32.store (mem 0)
+        0x41, 0x00, 0x41, 0x00, 0x41, 0x04, // dst, src, n
+        0xfc, 0x0a, 0x01, 0x00, // memory.copy dst-mem 1, src-mem 0
+        0x41, 0x00, 0x28, 0x42, 0x01, 0x00, // i32.load (mem 1)
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 42), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm multi-memory: an active data segment targets memory 1 via flag 2" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x02, 0x00, 0x01, 0x00, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // load mem1[0] -> 44 (placed there by the flag-2 data segment).
+    const cbody = [_]u8{ 0x01, 0x08, 0x00, 0x41, 0x00, 0x28, 0x42, 0x01, 0x00, 0x0b };
+    // flag 2, memidx 1, offset i32.const 0, one byte 0x2c (44).
+    const dbody = [_]u8{ 0x01, 0x02, 0x01, 0x41, 0x00, 0x0b, 0x01, 0x2c };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+        .{ .id = 11, .body = &dbody },
+    });
+    try testing.expectEqual(@as(i32, 44), try runI32(bytes, "f", &.{}));
+}
+
+test "wasm multi-memory: a memarg memory index past the count is rejected" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x01, 0x00, 0x01 }; // one memory
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // i32.load with memarg memidx 1 in a one-memory module.
+    const cbody = [_]u8{ 0x01, 0x08, 0x00, 0x41, 0x00, 0x28, 0x42, 0x01, 0x00, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectError(error.UnknownMemory, runI32(bytes, "f", &.{}));
 }

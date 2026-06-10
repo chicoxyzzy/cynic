@@ -64,7 +64,6 @@ pub const ValidateError = error{
     UnexpectedElse,
     UnbalancedEnd,
     InvalidLocalCount,
-    NoMemory,
     OutOfMemory,
 };
 
@@ -423,17 +422,22 @@ fn numMemories(module: *const Module) u32 {
     return n + @as(u32, @intCast(module.mems.len));
 }
 
-/// Address type (i32, or i64 for a memory64) of memory 0.
-fn memAddrType(module: *const Module) ValType {
+/// Address type (i32, or i64 for a memory64) of the memory at `idx` in
+/// the memory index space (imports first, then defined).
+fn memAddrTypeAt(module: *const Module, idx: u32) ValidateError!ValType {
+    var k: u32 = 0;
     for (module.imports) |imp| {
-        if (imp.desc == .mem) return if (imp.desc.mem.limits.is_64) .i64 else .i32;
+        if (imp.desc != .mem) continue;
+        if (k == idx) return if (imp.desc.mem.limits.is_64) .i64 else .i32;
+        k += 1;
     }
-    if (module.mems.len > 0) return if (module.mems[0].limits.is_64) .i64 else .i32;
-    return .i32;
+    const local = idx - k;
+    if (local >= module.mems.len) return error.UnknownMemory;
+    return if (module.mems[local].limits.is_64) .i64 else .i32;
 }
 
 /// §3.4.6 — validate active data segment offsets (constant expressions
-/// of the memory's address type) and their memory indices.
+/// of the target memory's address type) and their memory indices.
 fn validateData(module: *const Module, global_limit: u32) ValidateError!void {
     if (module.data_count_in_section == 0) return;
     var r = Reader.init(module.data_raw);
@@ -445,7 +449,7 @@ fn validateData(module: *const Module, global_limit: u32) ValidateError!void {
         if (flag == 2) memidx = try r.uleb(u32);
         if (is_active) {
             if (memidx >= numMemories(module)) return error.UnknownMemory;
-            try validateConstExprR(module, &r, memAddrType(module), global_limit);
+            try validateConstExprR(module, &r, try memAddrTypeAt(module, memidx), global_limit);
         }
         const n = try r.uleb(u32);
         _ = try r.bytesN(n);
@@ -504,8 +508,9 @@ const Validator = struct {
     module: *const Module,
     local_types: []const ValType,
     results: []const ValType,
-    has_memory: bool,
-    mem_addr: ValType, // i32, or i64 for a 64-bit memory
+    /// Per-memory address-width flags over the memory index space
+    /// (imports first): `true` for a memory64. Length = memory count.
+    mem_is64: []const bool,
     declared_funcs: []const bool, // §3.4.1.3 ref.func reference set
     r: Reader, // over the body's expression bytes
     vals: std.ArrayListUnmanaged(AbsVal) = .empty,
@@ -654,26 +659,19 @@ fn validateFunc(
     const local_types = try locals.toOwnedSlice(arena);
     const expr = body_bytes[br.pos..];
 
-    var has_memory = false;
-    var mem_addr: ValType = .i32;
-    if (module.mems.len > 0) {
-        has_memory = true;
-        if (module.mems[0].limits.is_64) mem_addr = .i64;
-    }
+    // Per-memory address types over the index space, imports first.
+    var mem_is64: std.ArrayListUnmanaged(bool) = .empty;
     for (module.imports) |imp| {
-        if (imp.desc == .mem) {
-            has_memory = true;
-            if (imp.desc.mem.limits.is_64) mem_addr = .i64;
-        }
+        if (imp.desc == .mem) try mem_is64.append(arena, imp.desc.mem.limits.is_64);
     }
+    for (module.mems) |m| try mem_is64.append(arena, m.limits.is_64);
 
     var v: Validator = .{
         .arena = arena,
         .module = module,
         .local_types = local_types,
         .results = ft.results,
-        .has_memory = has_memory,
-        .mem_addr = mem_addr,
+        .mem_is64 = mem_is64.items,
         .declared_funcs = declared,
         .r = Reader.init(expr),
     };
@@ -1144,42 +1142,40 @@ fn validateExpr(v: *Validator) ValidateError!void {
             .f64_store => try store(v, .f64, op),
 
             .memory_size => {
-                try requireMemory(v);
-                _ = try v.r.byte(); // reserved memory index
-                try v.pushVal(v.mem_addr);
+                const addr = try memAddr(v, try v.r.uleb(u32));
+                try v.pushVal(addr);
             },
             .memory_grow => {
-                try requireMemory(v);
-                _ = try v.r.byte();
-                try v.popExpect(v.mem_addr);
-                try v.pushVal(v.mem_addr);
+                const addr = try memAddr(v, try v.r.uleb(u32));
+                try v.popExpect(addr);
+                try v.pushVal(addr);
             },
 
             .prefix_fc => {
                 const sub = try v.r.uleb(u32);
                 switch (sub) {
                     10 => { // memory.copy
-                        try requireMemory(v);
-                        _ = try v.r.byte(); // dst memidx
-                        _ = try v.r.byte(); // src memidx
-                        try v.popExpect(v.mem_addr); // n
-                        try v.popExpect(v.mem_addr); // src
-                        try v.popExpect(v.mem_addr); // dst
+                        const dst_addr = try memAddr(v, try v.r.uleb(u32));
+                        const src_addr = try memAddr(v, try v.r.uleb(u32));
+                        // The length's type is the narrower of the two
+                        // address types (i32 unless both are memory64).
+                        const n_addr: ValType = if (dst_addr == .i64 and src_addr == .i64) .i64 else .i32;
+                        try v.popExpect(n_addr); // n
+                        try v.popExpect(src_addr); // src
+                        try v.popExpect(dst_addr); // dst
                     },
                     11 => { // memory.fill
-                        try requireMemory(v);
-                        _ = try v.r.byte(); // memidx
-                        try v.popExpect(v.mem_addr); // n
+                        const addr = try memAddr(v, try v.r.uleb(u32));
+                        try v.popExpect(addr); // n
                         try v.popExpect(.i32); // value byte
-                        try v.popExpect(v.mem_addr); // dst
+                        try v.popExpect(addr); // dst
                     },
                     8 => { // memory.init
-                        try requireMemory(v);
                         try checkDataSeg(v, try v.r.uleb(u32)); // data segment index
-                        _ = try v.r.byte(); // reserved memidx
+                        const addr = try memAddr(v, try v.r.uleb(u32));
                         try v.popExpect(.i32); // n
                         try v.popExpect(.i32); // src
-                        try v.popExpect(v.mem_addr); // dst
+                        try v.popExpect(addr); // dst
                     },
                     9 => try checkDataSeg(v, try v.r.uleb(u32)), // data.drop
 
@@ -1242,16 +1238,14 @@ fn validateSimd(v: *Validator) !void {
     const sub = try v.r.uleb(u32);
     switch (sub) {
         0 => { // v128.load
-            try requireMemory(v);
-            try skipMemarg(v, simdMemAlign(sub));
-            try v.popExpect(v.mem_addr);
+            const addr = try readMemarg(v, simdMemAlign(sub));
+            try v.popExpect(addr);
             try v.pushVal(.v128);
         },
         11 => { // v128.store
-            try requireMemory(v);
-            try skipMemarg(v, simdMemAlign(sub));
+            const addr = try readMemarg(v, simdMemAlign(sub));
             try v.popExpect(.v128);
-            try v.popExpect(v.mem_addr);
+            try v.popExpect(addr);
         },
         12 => { // v128.const
             _ = try v.r.bytesN(16);
@@ -1392,35 +1386,35 @@ fn validateSimd(v: *Validator) !void {
         135, 136, 137, 138, 167, 168, 169, 170, 199, 200, 201, 202, 124, 125, 126, 127 => try unop(v, .v128, .v128),
         // load_splat / load_extend / load_zero: pop address (+ memarg), push v128.
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 92, 93 => {
-            try requireMemory(v);
-            try skipMemarg(v, simdMemAlign(sub));
-            try v.popExpect(v.mem_addr);
+            const addr = try readMemarg(v, simdMemAlign(sub));
+            try v.popExpect(addr);
             try v.pushVal(.v128);
         },
         // load_lane: memarg + range-checked lane; pop v128, pop addr, push v128.
         84, 85, 86, 87 => {
-            try requireMemory(v);
-            try skipMemarg(v, simdMemAlign(sub));
+            const addr = try readMemarg(v, simdMemAlign(sub));
             try checkLane(v, laneCount(sub));
             try v.popExpect(.v128);
-            try v.popExpect(v.mem_addr);
+            try v.popExpect(addr);
             try v.pushVal(.v128);
         },
         // store_lane: memarg + range-checked lane; pop v128, pop addr.
         88, 89, 90, 91 => {
-            try requireMemory(v);
-            try skipMemarg(v, simdMemAlign(sub));
+            const addr = try readMemarg(v, simdMemAlign(sub));
             try checkLane(v, laneCount(sub));
             try v.popExpect(.v128);
-            try v.popExpect(v.mem_addr);
+            try v.popExpect(addr);
         },
 
         else => return error.UnknownOpcode,
     }
 }
 
-fn requireMemory(v: *Validator) !void {
-    if (!v.has_memory) return error.NoMemory;
+/// Validate a memory index and give its address type (i32, or i64 for
+/// a memory64).
+fn memAddr(v: *Validator, mi: u32) !ValType {
+    if (mi >= v.mem_is64.len) return error.UnknownMemory;
+    return if (v.mem_is64[mi]) .i64 else .i32;
 }
 
 /// Read a SIMD lane-index immediate and require it to be in range.
@@ -1447,30 +1441,34 @@ fn laneCount(sub: u32) u8 {
 }
 
 fn load(v: *Validator, result: ValType, op: Op) !void {
-    try requireMemory(v);
-    try skipMemarg(v, memAlign(op));
-    try v.popExpect(v.mem_addr); // address
+    const addr = try readMemarg(v, memAlign(op));
+    try v.popExpect(addr); // address
     try v.pushVal(result);
 }
 
 fn store(v: *Validator, value: ValType, op: Op) !void {
-    try requireMemory(v);
-    try skipMemarg(v, memAlign(op));
+    const addr = try readMemarg(v, memAlign(op));
     try v.popExpect(value); // value
-    try v.popExpect(v.mem_addr); // address
+    try v.popExpect(addr); // address
 }
 
-fn skipMemarg(v: *Validator, max_align: u8) !void {
-    // §3.3.6 — the alignment (log2 of bytes) may not exceed the access's
-    // natural alignment.
+/// Read and validate a memarg, giving the target memory's address
+/// type. Bit 6 of the align field signals an explicit memory index
+/// (multi-memory); the index must exist and the alignment (log2 of
+/// bytes) may not exceed the access's natural alignment (§3.3.6).
+fn readMemarg(v: *Validator, max_align: u8) !ValType {
     const a = try v.r.uleb(u32);
-    if (a > max_align) return error.BadAlign;
+    var mi: u32 = 0;
+    if (a & 0x40 != 0) mi = try v.r.uleb(u32);
+    if ((a & ~@as(u32, 0x40)) > max_align) return error.BadAlign;
+    const addr = try memAddr(v, mi);
     // The offset is a 64-bit immediate for a memory64 access.
-    if (v.mem_addr == .i64) {
+    if (addr == .i64) {
         _ = try v.r.uleb(u64);
     } else {
         _ = try v.r.uleb(u32);
     }
+    return addr;
 }
 
 /// Natural alignment (log2 of the access width in bytes) of a scalar

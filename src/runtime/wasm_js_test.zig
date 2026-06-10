@@ -1195,3 +1195,29 @@ test "a host exception from return_call with no surrounding try_table re-raises 
         "same";
     try expectIntWasm(src, 1);
 }
+
+test "a module with two memories exports each as a distinct WebAssembly.Memory" {
+    // memory 0 gets 7 via a flag-0 data segment; memory 1 gets 42 via a
+    // flag-2 (explicit memidx) segment. Exports "a" (mem 0) and "b"
+    // (mem 1) must expose different buffers.
+    const src =
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 5,5,2,0,1,0,1, 7,9,2,1,97,2,0,1,98,2,1, 11,14,2, 0,65,0,11,1,7, 2,1,65,0,11,1,42]);" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes));" ++
+        "const a = new Uint8Array(inst.exports.a.buffer)[0];" ++
+        "const b = new Uint8Array(inst.exports.b.buffer)[0];" ++
+        "a * 100 + b";
+    try expectIntWasm(src, 742);
+}
+
+test "a JS Memory.grow is visible to the importing instance" {
+    // The instance aliases the provider's `*Memory`, so a grow through
+    // the JS object must be observable via the instance's memory.size
+    // (and the old buffer must not be read after the grow reallocates).
+    const src =
+        "const mem = new WebAssembly.Memory({ initial: 1, maximum: 4 });" ++
+        "const bytes = new Uint8Array([0,97,115,109,1,0,0,0, 1,5,1,96,0,1,127, 2,9,1,1,101,1,109,2,1,1,4, 3,2,1,0, 7,8,1,4,115,105,122,101,0,0, 10,6,1,4,0,63,0,11]);" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { m: mem } });" ++
+        "mem.grow(2);" ++
+        "inst.exports.size()";
+    try expectIntWasm(src, 3);
+}

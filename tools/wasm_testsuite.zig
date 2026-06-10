@@ -249,18 +249,20 @@ fn spectestGlobal(name: []const u8) ?u128 {
 /// Resolve a module's imports for cross-module linking. Functions and
 /// globals link to `spectest` host definitions or a registered
 /// instance's exports; memory and table imports link to the `spectest`
-/// host objects or a registered export (snapshotted by the importer).
+/// host objects or a registered export (aliased — §4.5.4 — so writes
+/// are mutually visible).
 fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const Registry) !wasm.Imports {
     var nfunc: usize = 0;
     var nglob: usize = 0;
     var ntab: usize = 0;
     var ntag: usize = 0;
+    var nmem: usize = 0;
     for (modp.imports) |imp| {
         switch (imp.desc) {
             .func => nfunc += 1,
             .global => nglob += 1,
             .table => ntab += 1,
-            .mem => {},
+            .mem => nmem += 1,
             .tag => ntag += 1,
         }
     }
@@ -270,11 +272,12 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
     const globals = try arena.alloc(u128, nglob);
     const tables = try arena.alloc(*wasm.Table, ntab);
     const tags = try arena.alloc(*const wasm.TagType, ntag);
-    var memory: ?*const wasm.Memory = null;
+    const memories = try arena.alloc(*wasm.Memory, nmem);
     var fi: usize = 0;
     var gi: usize = 0;
     var tj: usize = 0;
     var tk: usize = 0;
+    var mj: usize = 0;
     for (modp.imports) |imp| {
         switch (imp.desc) {
             .func => |type_idx| {
@@ -311,11 +314,12 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
             },
             .mem => {
                 if (std.mem.eql(u8, imp.module, "spectest")) {
-                    memory = registry.spectest_mem orelse return error.Unlinkable;
+                    memories[mj] = registry.spectest_mem orelse return error.Unlinkable;
                 } else {
                     const provider = registry.get(imp.module) orelse return error.Unlinkable;
-                    memory = provider.exportedMemory(imp.name) orelse return error.Unlinkable;
+                    memories[mj] = provider.exportedMemory(imp.name) orelse return error.Unlinkable;
                 }
+                mj += 1;
             },
             .tag => {
                 const provider = registry.get(imp.module) orelse return error.Unlinkable;
@@ -324,7 +328,11 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
             },
         }
     }
-    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory, .tags = tags };
+    // Memory imports alias the provider's `*Memory` (§4.5.4 — an
+    // imported memory IS the provider's memory): a store through the
+    // provider's exports is visible through the importer and vice
+    // versa, which linking and the multi-memory split files assert.
+    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memories = memories, .share_memory = true, .tags = tags };
 }
 
 fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap, registry: *const Registry) !?Loaded {
@@ -660,7 +668,8 @@ fn writeResults(gpa: std.mem.Allocator, io: std.Io, total: Counts, files: u32) !
         \\Scored by `zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite`
         \\against the official WebAssembly spec testsuite (the `.wast` corpus,
         \\preprocessed with `wast2json --enable-tail-call --enable-relaxed-simd
-        \\--enable-memory64 --enable-extended-const`). Each `assert_*` / `action`
+        \\--enable-memory64 --enable-extended-const --enable-multi-memory`).
+        \\Each `assert_*` / `action`
         \\command is a plain pass or fail. Commands are counted as skips when they
         \\cannot be scored: `assert_unlinkable` fixtures, text/quoted-module
         \\commands `wast2json` does not lower, a few value comparisons the harness

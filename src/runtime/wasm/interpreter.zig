@@ -180,12 +180,13 @@ pub const Imports = struct {
     /// Imported global values, in global-import declaration order. Each
     /// occupies the front of the importing module's global index space.
     globals: []const u128 = &.{},
-    /// Source for the imported linear memory. By default its bytes are
-    /// snapshotted (duped) at instantiate; with `share_memory` the
-    /// importing instance aliases the provider's byte slice instead, so
-    /// writes are mutually visible (the JS API shares; the spectest
-    /// harness snapshots).
-    memory: ?*const Memory = null,
+    /// Sources for the imported linear memories, in memory-import
+    /// declaration order. By default each one's bytes are snapshotted
+    /// (duped) at instantiate; with `share_memory` the importing
+    /// instance aliases the provider's `*Memory` instead, so writes —
+    /// and grows — are mutually visible (the JS API shares; the
+    /// spectest harness snapshots).
+    memories: []const *Memory = &.{},
     share_memory: bool = false,
     /// Imported tables, in table-import order — the provider's own
     /// `*Table` (shared), so writes are mutually visible.
@@ -221,8 +222,15 @@ pub const Instance = struct {
     /// Resolved function imports (cross-module linking). Empty for a
     /// self-contained module. Index `i` is function-space index `i`.
     imported_funcs: []const FuncRef = &.{},
-    /// The module's single linear memory (multi-memory is post-1.0).
-    memory: ?Memory,
+    /// The memory index space: imported memories (shared pointers into
+    /// the providing instance, or snapshots in `owned_memories`)
+    /// followed by pointers into `owned_memories` for the defined ones.
+    /// Pointers make an imported memory genuinely shared — a store or
+    /// grow through one instance is visible through the other.
+    memories: []*Memory,
+    /// Backing storage for the memories this instance owns (defined
+    /// ones, plus snapshotted imports), pointed into by `memories`.
+    owned_memories: []Memory,
     /// The table index space: imported tables (shared pointers into the
     /// providing instance) followed by pointers into `owned_tables`.
     /// Tables are pointers so an imported table is genuinely shared —
@@ -282,7 +290,9 @@ pub const Instance = struct {
 
     pub fn deinit(self: *Instance) void {
         self.gpa.free(self.globals);
-        if (self.memory) |m| self.gpa.free(m.data);
+        for (self.owned_memories) |m| self.gpa.free(m.data);
+        self.gpa.free(self.owned_memories);
+        self.gpa.free(self.memories);
         for (self.owned_tables) |t| self.gpa.free(t.elems);
         self.gpa.free(self.owned_tables);
         self.gpa.free(self.tables);
@@ -331,11 +341,12 @@ pub const Instance = struct {
         return self.resolveFunc(idx);
     }
 
-    /// A pointer to the instance's live linear memory, for the JS API's
-    /// `Memory` object (its `buffer` aliases these bytes).
-    pub fn memoryPtr(self: *Instance) ?*Memory {
-        if (self.memory) |*m| return m;
-        return null;
+    /// A pointer to a live linear memory by its index in the memory
+    /// index space (imports first), for the JS API's `Memory` object
+    /// (its `buffer` aliases these bytes).
+    pub fn memoryPtr(self: *Instance, idx: u32) ?*Memory {
+        if (idx >= self.memories.len) return null;
+        return self.memories[idx];
     }
 
     /// The function type (params / results) of a function-index-space
@@ -431,11 +442,11 @@ pub const Instance = struct {
 
     /// The exported linear memory named `name`, for a later module
     /// importing it (duped or, with `Imports.share_memory`, aliased).
-    pub fn exportedMemory(self: *Instance, name: []const u8) ?*const Memory {
+    pub fn exportedMemory(self: *Instance, name: []const u8) ?*Memory {
         for (self.module.exports) |ex| {
             switch (ex.desc) {
-                .mem => if (std.mem.eql(u8, ex.name, name)) {
-                    if (self.memory) |*m| return m;
+                .mem => |idx| if (std.mem.eql(u8, ex.name, name)) {
+                    if (idx < self.memories.len) return self.memories[idx];
                 },
                 else => {},
             }
@@ -518,28 +529,54 @@ pub fn instantiate(
         };
     }
 
-    // The single linear memory (multi-memory is post-1.0): an imported
-    // memory occupies memory index 0 — its bytes are shared (aliased)
-    // when `share_memory` is set, else snapshotted (duped) from the
-    // provider; otherwise a defined memory is zero-filled to its minimum.
-    var memory: ?Memory = null;
-    var has_mem_import = false;
+    // The memory index space (§2.5.8, multi-memory): imported memories
+    // precede defined ones. A shared import aliases the provider's
+    // `*Memory` (stores and grows are mutually visible); a snapshotted
+    // import dupes its bytes into an owned slot; a defined memory is
+    // zero-filled to its minimum.
+    var mem_imports: u32 = 0;
     for (module.imports) |imp| {
-        if (imp.desc == .mem) {
-            has_mem_import = true;
-            break;
-        }
+        if (imp.desc == .mem) mem_imports += 1;
     }
-    if (has_mem_import) {
-        if (imports.memory) |src| {
-            const data = if (imports.share_memory) src.data else try allocator.dupe(u8, src.data);
-            memory = .{ .data = data, .max_pages = src.max_pages, .is_64 = src.is_64 };
+    const owned_count = (if (imports.share_memory) 0 else mem_imports) + module.mems.len;
+    const owned_memories = try allocator.alloc(Memory, owned_count);
+    errdefer allocator.free(owned_memories);
+    const memories = try allocator.alloc(*Memory, mem_imports + module.mems.len);
+    errdefer allocator.free(memories);
+    {
+        var mi: usize = 0; // memories[] cursor
+        var oi: usize = 0; // owned_memories[] cursor
+        var k: usize = 0; // memory-import counter
+        for (module.imports) |imp| {
+            if (imp.desc != .mem) continue;
+            // §4.5.4 — a declared memory import must be matched by a
+            // host provision; an under-supplied `Imports` surfaces a
+            // catchable error, not an out-of-bounds read.
+            if (k >= imports.memories.len) return error.UnsupportedImportCall;
+            const src = imports.memories[k];
+            if (imports.share_memory) {
+                memories[mi] = src;
+            } else {
+                owned_memories[oi] = .{
+                    .data = try allocator.dupe(u8, src.data),
+                    .max_pages = src.max_pages,
+                    .is_64 = src.is_64,
+                };
+                memories[mi] = &owned_memories[oi];
+                oi += 1;
+            }
+            mi += 1;
+            k += 1;
         }
-    } else if (module.mems.len > 0) {
-        const lim = module.mems[0].limits;
-        const bytes = try allocator.alloc(u8, @as(usize, @intCast(lim.min)) * PAGE_SIZE);
-        @memset(bytes, 0);
-        memory = .{ .data = bytes, .max_pages = lim.max, .is_64 = lim.is_64 };
+        for (module.mems) |m| {
+            const lim = m.limits;
+            const bytes = try allocator.alloc(u8, @as(usize, @intCast(lim.min)) * PAGE_SIZE);
+            @memset(bytes, 0);
+            owned_memories[oi] = .{ .data = bytes, .max_pages = lim.max, .is_64 = lim.is_64 };
+            memories[mi] = &owned_memories[oi];
+            oi += 1;
+            mi += 1;
+        }
     }
 
     // Defined tables, each sized to its minimum and null-filled.
@@ -624,7 +661,8 @@ pub fn instantiate(
         .globals = globals,
         .func_import_count = func_imports,
         .imported_funcs = imports.funcs,
-        .memory = memory,
+        .memories = memories,
+        .owned_memories = owned_memories,
         .tables = tables,
         .owned_tables = owned_tables,
         .elem_segments = &.{},
@@ -637,12 +675,13 @@ pub fn instantiate(
     // With `self` now stable, apply element + data segments. Element
     // funcrefs capture `self` as their defining instance.
     self.elem_segments = try parseElements(self, arena, module, globals);
-    self.data_segments = try parseData(arena, module, if (self.memory) |*m| m else null, globals);
+    self.data_segments = try parseData(arena, module, self.memories, globals);
 }
 
-/// Parse the data section, applying active segments into linear memory
-/// and returning the (passive-keeping) segments for `memory.init`.
-fn parseData(arena: std.mem.Allocator, module: *const Module, memory: ?*Memory, globals: []const Global) Error![]DataSegment {
+/// Parse the data section, applying active segments into their target
+/// linear memory and returning the (passive-keeping) segments for
+/// `memory.init`.
+fn parseData(arena: std.mem.Allocator, module: *const Module, memories: []const *Memory, globals: []const Global) Error![]DataSegment {
     const count = module.data_count_in_section;
     const segs = try arena.alloc(DataSegment, count);
     var r = reader_mod.Reader.init(module.data_raw);
@@ -650,14 +689,16 @@ fn parseData(arena: std.mem.Allocator, module: *const Module, memory: ?*Memory, 
     while (i < count) : (i += 1) {
         const flag = try r.uleb(u32);
         const is_active = (flag != 1); // flags 0 and 2 are active
-        if (flag == 2) _ = try r.uleb(u32); // explicit memory index
+        var memidx: u32 = 0;
+        if (flag == 2) memidx = try r.uleb(u32); // explicit memory index
         var offset: u64 = 0;
         if (is_active) offset = try readOffsetExpr(&r, globals);
         const n = try r.uleb(u32);
         const bytes = try r.bytesN(n);
 
         if (is_active) {
-            const mem = memory orelse return error.OutOfBoundsMemoryAccess;
+            if (memidx >= memories.len) return error.OutOfBoundsMemoryAccess;
+            const mem = memories[memidx];
             const off: usize = @intCast(offset);
             if (off + n > mem.data.len) return error.OutOfBoundsMemoryAccess;
             @memcpy(mem.data[off..][0..n], bytes);
@@ -1005,9 +1046,12 @@ pub fn invoke(
     func_index: u32,
     args: []const u128,
 ) Error![]u128 {
+    // Resolve through the import chain: a re-exported import names a
+    // function whose body, types, and state (memories, globals,
+    // tables) belong to the *defining* instance, not `self`.
     const entry_ref = self.resolveFunc(func_index) orelse return error.UnsupportedImportCall;
-    const entry = switch (entry_ref) {
-        .wasm => |w| w.func,
+    const target = switch (entry_ref) {
+        .wasm => |w| w,
         .host => return error.UnsupportedImportCall,
     };
 
@@ -1018,13 +1062,13 @@ pub fn invoke(
     const handlers = try allocator.alloc(Handler, MAX_HANDLERS);
     defer allocator.free(handlers);
 
-    var ip: Interp = .{ .instance = self, .stack = stack, .sp = 0, .frames = frames, .nframes = 0, .handlers = handlers, .nhandlers = 0 };
+    var ip: Interp = .{ .instance = target.instance, .stack = stack, .sp = 0, .frames = frames, .nframes = 0, .handlers = handlers, .nhandlers = 0 };
 
     // Seed the entry function's parameters as its first locals.
-    const param_count: u32 = @intCast(self.module.types[entry.type_index].params.len);
+    const param_count: u32 = @intCast(target.instance.module.types[target.func.type_index].params.len);
     if (args.len != param_count) return error.UnsupportedImportCall;
     for (args) |a| try ip.pushCell(a);
-    try ip.pushFrame(self, entry, param_count);
+    try ip.pushFrame(target.instance, target.func, param_count);
 
     run(&ip) catch |e| {
         // Hand an uncaught exception to the entry instance so the JS
@@ -1792,8 +1836,8 @@ fn run(ip: *Interp) Error!void {
         .i32_reinterpret_f32, .i64_reinterpret_f64, .f32_reinterpret_i32, .f64_reinterpret_i64 => continue :dispatch nextOp(body, &pc),
 
         .i32_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u, .i64_load, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u, .f32_load, .f64_load => |op| {
-            const ea = memEa(ip, body, &pc);
-            try execLoad(ip, op, ea);
+            const m = memEa(ip, body, &pc);
+            try execLoad(ip, op, m);
             continue :dispatch nextOp(body, &pc);
         },
         .i32_store, .i32_store8, .i32_store16, .i64_store, .i64_store8, .i64_store16, .i64_store32, .f32_store, .f64_store => |op| {
@@ -1801,31 +1845,32 @@ fn run(ip: *Interp) Error!void {
             continue :dispatch nextOp(body, &pc);
         },
         .memory_size => {
-            pc += 1; // reserved memory index
-            const mem = ip.instance.memory.?;
+            const mi = readU32(body, &pc); // memory index (multi-memory)
+            const mem = ip.instance.memories[mi];
             if (mem.is_64) try ip.pushI64(@bitCast(mem.pages())) else try ip.pushI32(@intCast(mem.pages()));
             continue :dispatch nextOp(body, &pc);
         },
         .memory_grow => {
-            pc += 1; // reserved memory index
-            try memGrow(ip);
+            const mi = readU32(body, &pc); // memory index (multi-memory)
+            try memGrow(ip, mi);
             continue :dispatch nextOp(body, &pc);
         },
         .prefix_fc => {
             const sub = readU32(body, &pc);
             switch (sub) {
                 10 => { // memory.copy
-                    pc += 2; // dst, src reserved memidx
-                    try memCopy(ip);
+                    const dst_mi = readU32(body, &pc);
+                    const src_mi = readU32(body, &pc);
+                    try memCopy(ip, dst_mi, src_mi);
                 },
                 11 => { // memory.fill
-                    pc += 1; // reserved memidx
-                    try memFill(ip);
+                    const mi = readU32(body, &pc);
+                    try memFill(ip, mi);
                 },
                 8 => { // memory.init
                     const data_idx = readU32(body, &pc);
-                    pc += 1; // reserved memidx
-                    try memInit(ip, data_idx);
+                    const mi = readU32(body, &pc);
+                    try memInit(ip, data_idx, mi);
                 },
                 9 => { // data.drop
                     const data_idx = readU32(body, &pc);
@@ -1903,18 +1948,26 @@ inline fn moveValues(ip: *Interp, e: code_mod.BranchEntry) void {
 
 // ── linear memory ───────────────────────────────────────────────────
 
-/// Read a memarg (align, offset) and pop the i32 base address, giving
-/// the effective byte address (§4.4.7).
-inline fn memEa(ip: *Interp, body: []const u8, pc: *usize) u64 {
-    _ = readU32(body, pc); // align hint (ignored)
-    const is_64 = if (ip.instance.memory) |m| m.is_64 else false;
-    const offset: u64 = if (is_64) readU64(body, pc) else readU32(body, pc);
+/// A resolved memory access: the target memory's bytes plus the
+/// effective address.
+const MemAccess = struct { data: []u8, ea: u64 };
+
+/// Read a memarg (align flags, optional memory index, offset) and pop
+/// the base address, giving the target memory and the effective byte
+/// address (§4.4.7). Bit 6 of the align field signals an explicit
+/// memory index (multi-memory); otherwise memory 0.
+inline fn memEa(ip: *Interp, body: []const u8, pc: *usize) MemAccess {
+    const flags = readU32(body, pc); // align hint (ignored) + memidx bit
+    var mi: u32 = 0;
+    if (flags & 0x40 != 0) mi = readU32(body, pc);
+    const mem = ip.instance.memories[mi];
+    const offset: u64 = if (mem.is_64) readU64(body, pc) else readU32(body, pc);
     // The i32 address zero-extends in its cell, so reading the low 64
     // bits gives the correct unsigned address for both 32- and 64-bit
     // memories. Saturate on overflow so an oversized effective address
     // fails the bounds check rather than wrapping.
     const addr: u64 = @truncate(ip.popCell());
-    return std.math.add(u64, addr, offset) catch std.math.maxInt(u64);
+    return .{ .data = mem.data, .ea = std.math.add(u64, addr, offset) catch std.math.maxInt(u64) };
 }
 
 /// Overflow-safe `[start, start+n)` ⊆ `[0, len)`. memory64/table64
@@ -1929,8 +1982,9 @@ inline fn checkBounds(len: usize, ea: u64, n: u64) TrapError!void {
     if (!rangeInBounds(len, ea, n)) return error.OutOfBoundsMemoryAccess;
 }
 
-fn execLoad(ip: *Interp, op: Op, ea: u64) TrapError!void {
-    const data = ip.instance.memory.?.data;
+fn execLoad(ip: *Interp, op: Op, m: MemAccess) TrapError!void {
+    const data = m.data;
+    const ea = m.ea;
     const e: usize = @intCast(ea);
     switch (op) {
         .i32_load => {
@@ -1997,8 +2051,9 @@ fn execStore(ip: *Interp, op: Op, body: []const u8, pc: *usize) TrapError!void {
     switch (op) {
         .i32_store, .i32_store8, .i32_store16 => {
             const v: u32 = @bitCast(ip.popI32());
-            const ea = memEa(ip, body, pc);
-            const data = ip.instance.memory.?.data;
+            const m = memEa(ip, body, pc);
+            const data = m.data;
+            const ea = m.ea;
             const e: usize = @intCast(ea);
             switch (op) {
                 .i32_store => {
@@ -2018,8 +2073,9 @@ fn execStore(ip: *Interp, op: Op, body: []const u8, pc: *usize) TrapError!void {
         },
         .i64_store, .i64_store8, .i64_store16, .i64_store32 => {
             const v: u64 = @bitCast(ip.popI64());
-            const ea = memEa(ip, body, pc);
-            const data = ip.instance.memory.?.data;
+            const m = memEa(ip, body, pc);
+            const data = m.data;
+            const ea = m.ea;
             const e: usize = @intCast(ea);
             switch (op) {
                 .i64_store => {
@@ -2043,17 +2099,15 @@ fn execStore(ip: *Interp, op: Op, body: []const u8, pc: *usize) TrapError!void {
         },
         .f32_store => {
             const v: u32 = @truncate(ip.popCell());
-            const ea = memEa(ip, body, pc);
-            const data = ip.instance.memory.?.data;
-            try checkBounds(data.len, ea, 4);
-            std.mem.writeInt(u32, data[@intCast(ea)..][0..4], v, .little);
+            const m = memEa(ip, body, pc);
+            try checkBounds(m.data.len, m.ea, 4);
+            std.mem.writeInt(u32, m.data[@intCast(m.ea)..][0..4], v, .little);
         },
         .f64_store => {
             const v: u64 = @truncate(ip.popCell());
-            const ea = memEa(ip, body, pc);
-            const data = ip.instance.memory.?.data;
-            try checkBounds(data.len, ea, 8);
-            std.mem.writeInt(u64, data[@intCast(ea)..][0..8], v, .little);
+            const m = memEa(ip, body, pc);
+            try checkBounds(m.data.len, m.ea, 8);
+            std.mem.writeInt(u64, m.data[@intCast(m.ea)..][0..8], v, .little);
         },
         else => unreachable,
     }
@@ -2061,9 +2115,9 @@ fn execStore(ip: *Interp, op: Op, body: []const u8, pc: *usize) TrapError!void {
 
 /// memory.grow: pushes the previous page count, or -1, with the result
 /// width matching the memory's address type (§4.4.7).
-fn memGrow(ip: *Interp) TrapError!void {
+fn memGrow(ip: *Interp, mi: u32) TrapError!void {
     const delta: u64 = @truncate(ip.popCell());
-    const mem = &ip.instance.memory.?;
+    const mem = ip.instance.memories[mi];
     const result = growMem(ip, mem, delta);
     if (mem.is_64) {
         try ip.pushI64(if (result) |r| @bitCast(r) else -1);
@@ -2086,46 +2140,50 @@ fn growMem(ip: *Interp, mem: *Memory, delta: u64) ?u64 {
     return old;
 }
 
-fn memCopy(ip: *Interp) TrapError!void {
+fn memCopy(ip: *Interp, dst_mi: u32, src_mi: u32) TrapError!void {
     const n: u64 = @truncate(ip.popCell());
     const src: u64 = @truncate(ip.popCell());
     const dst: u64 = @truncate(ip.popCell());
-    const data = ip.instance.memory.?.data;
-    try checkBounds(data.len, src, n);
-    try checkBounds(data.len, dst, n);
+    const dst_data = ip.instance.memories[dst_mi].data;
+    const src_data = ip.instance.memories[src_mi].data;
+    try checkBounds(src_data.len, src, n);
+    try checkBounds(dst_data.len, dst, n);
     if (n == 0) return;
     const d: usize = @intCast(dst);
     const s: usize = @intCast(src);
     const cnt: usize = @intCast(n);
-    if (dst <= src) {
+    // Same memory may overlap; copy in the direction that never reads
+    // an already-written byte. Distinct memories never overlap, so
+    // either direction is fine.
+    if (dst <= src or dst_mi != src_mi) {
         var i: usize = 0;
-        while (i < cnt) : (i += 1) data[d + i] = data[s + i];
+        while (i < cnt) : (i += 1) dst_data[d + i] = src_data[s + i];
     } else {
         var i: usize = cnt;
         while (i > 0) {
             i -= 1;
-            data[d + i] = data[s + i];
+            dst_data[d + i] = src_data[s + i];
         }
     }
 }
 
-fn memFill(ip: *Interp) TrapError!void {
+fn memFill(ip: *Interp, mi: u32) TrapError!void {
     const n: u64 = @truncate(ip.popCell());
     const val: u32 = @bitCast(ip.popI32());
     const dst: u64 = @truncate(ip.popCell());
-    const data = ip.instance.memory.?.data;
+    const data = ip.instance.memories[mi].data;
     try checkBounds(data.len, dst, n);
     if (n == 0) return;
     @memset(data[@intCast(dst)..][0..@intCast(n)], @truncate(val));
 }
 
-fn memInit(ip: *Interp, data_idx: u32) TrapError!void {
+fn memInit(ip: *Interp, data_idx: u32, mi: u32) TrapError!void {
     const n: u32 = @bitCast(ip.popI32());
     const src: u32 = @bitCast(ip.popI32());
     const dst: u64 = @truncate(ip.popCell());
     if (data_idx >= ip.instance.data_segments.len) return error.OutOfBoundsMemoryAccess;
     const seg = ip.instance.data_segments[data_idx].bytes;
-    const mem = ip.instance.memory orelse return error.OutOfBoundsMemoryAccess;
+    const mem = ip.instance.memories[mi];
     if (!rangeInBounds(seg.len, src, n) or !rangeInBounds(mem.data.len, dst, n)) return error.OutOfBoundsMemoryAccess;
     const base: usize = @intCast(dst);
     var k: u32 = 0;
@@ -2679,17 +2737,15 @@ fn ishift(comptime N: usize, comptime S: type, comptime U: type, comptime op: Sh
 fn execSimd(ip: *Interp, sub: u32, body: []const u8, pc: *usize) TrapError!void {
     switch (sub) {
         0 => { // v128.load
-            const ea = memEa(ip, body, pc);
-            const data = ip.instance.memory.?.data;
-            try checkBounds(data.len, ea, 16);
-            try ip.pushV128(std.mem.readInt(u128, data[@intCast(ea)..][0..16], .little));
+            const m = memEa(ip, body, pc);
+            try checkBounds(m.data.len, m.ea, 16);
+            try ip.pushV128(std.mem.readInt(u128, m.data[@intCast(m.ea)..][0..16], .little));
         },
         11 => { // v128.store
             const val = ip.popV128();
-            const ea = memEa(ip, body, pc);
-            const data = ip.instance.memory.?.data;
-            try checkBounds(data.len, ea, 16);
-            std.mem.writeInt(u128, data[@intCast(ea)..][0..16], val, .little);
+            const m = memEa(ip, body, pc);
+            try checkBounds(m.data.len, m.ea, 16);
+            std.mem.writeInt(u128, m.data[@intCast(m.ea)..][0..16], val, .little);
         },
         12 => { // v128.const
             const val = std.mem.readInt(u128, body[pc.*..][0..16], .little);
@@ -3348,57 +3404,52 @@ fn vextadd(comptime SrcN: usize, comptime Src: type, comptime Dst: type, a: u128
 }
 
 fn loadSplat(ip: *Interp, body: []const u8, pc: *usize, comptime N: usize, comptime T: type) TrapError!u128 {
-    const ea = memEa(ip, body, pc);
-    const data = ip.instance.memory.?.data;
+    const m = memEa(ip, body, pc);
     const nbytes = @sizeOf(T);
-    try checkBounds(data.len, ea, nbytes);
-    const x = std.mem.readInt(T, data[@intCast(ea)..][0..nbytes], .little);
+    try checkBounds(m.data.len, m.ea, nbytes);
+    const x = std.mem.readInt(T, m.data[@intCast(m.ea)..][0..nbytes], .little);
     return vsplat(N, T, x);
 }
 
 fn loadExtend(ip: *Interp, body: []const u8, pc: *usize, comptime DstN: usize, comptime Src: type, comptime Dst: type) TrapError!u128 {
-    const ea = memEa(ip, body, pc);
-    const data = ip.instance.memory.?.data;
-    try checkBounds(data.len, ea, 8); // always reads 8 source bytes
+    const m = memEa(ip, body, pc);
+    try checkBounds(m.data.len, m.ea, 8); // always reads 8 source bytes
     const src_bytes = @sizeOf(Src);
-    const base: usize = @intCast(ea);
+    const base: usize = @intCast(m.ea);
     var r: [DstN]Dst = undefined;
     inline for (0..DstN) |i| {
-        r[i] = std.mem.readInt(Src, data[base + i * src_bytes ..][0..src_bytes], .little);
+        r[i] = std.mem.readInt(Src, m.data[base + i * src_bytes ..][0..src_bytes], .little);
     }
     return @bitCast(r);
 }
 
 fn loadZero(ip: *Interp, body: []const u8, pc: *usize, comptime nbytes: usize) TrapError!u128 {
-    const ea = memEa(ip, body, pc);
-    const data = ip.instance.memory.?.data;
-    try checkBounds(data.len, ea, nbytes);
-    const base: usize = @intCast(ea);
-    if (nbytes == 4) return std.mem.readInt(u32, data[base..][0..4], .little);
-    return std.mem.readInt(u64, data[base..][0..8], .little);
+    const m = memEa(ip, body, pc);
+    try checkBounds(m.data.len, m.ea, nbytes);
+    const base: usize = @intCast(m.ea);
+    if (nbytes == 4) return std.mem.readInt(u32, m.data[base..][0..4], .little);
+    return std.mem.readInt(u64, m.data[base..][0..8], .little);
 }
 
 fn loadLane(ip: *Interp, body: []const u8, pc: *usize, comptime N: usize, comptime T: type) TrapError!u128 {
     const vector = ip.popV128();
-    const ea = memEa(ip, body, pc);
+    const m = memEa(ip, body, pc);
     const lane = readLane(body, pc);
-    const data = ip.instance.memory.?.data;
     const nbytes = @sizeOf(T);
-    try checkBounds(data.len, ea, nbytes);
+    try checkBounds(m.data.len, m.ea, nbytes);
     var arr: [N]T = @bitCast(vector);
-    arr[lane] = std.mem.readInt(T, data[@intCast(ea)..][0..nbytes], .little);
+    arr[lane] = std.mem.readInt(T, m.data[@intCast(m.ea)..][0..nbytes], .little);
     return @bitCast(arr);
 }
 
 fn storeLane(ip: *Interp, body: []const u8, pc: *usize, comptime N: usize, comptime T: type) TrapError!void {
     const vector = ip.popV128();
-    const ea = memEa(ip, body, pc);
+    const m = memEa(ip, body, pc);
     const lane = readLane(body, pc);
-    const data = ip.instance.memory.?.data;
     const nbytes = @sizeOf(T);
-    try checkBounds(data.len, ea, nbytes);
+    try checkBounds(m.data.len, m.ea, nbytes);
     const arr: [N]T = @bitCast(vector);
-    std.mem.writeInt(T, data[@intCast(ea)..][0..nbytes], arr[lane], .little);
+    std.mem.writeInt(T, m.data[@intCast(m.ea)..][0..nbytes], arr[lane], .little);
 }
 
 // ── arithmetic ──────────────────────────────────────────────────────

@@ -753,11 +753,12 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
     var nglob: usize = 0;
     var ntab: usize = 0;
     var ntag: usize = 0;
+    var nmem: usize = 0;
     for (module.imports) |imp| switch (imp.desc) {
         .func => nfunc += 1,
         .global => nglob += 1,
         .table => ntab += 1,
-        .mem => {},
+        .mem => nmem += 1,
         .tag => ntag += 1,
     };
     if (module.imports.len == 0) return .{};
@@ -770,11 +771,12 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
     const globals = a.alloc(u128, nglob) catch return error.OutOfMemory;
     const tables = a.alloc(*wasm.Table, ntab) catch return error.OutOfMemory;
     const tags = a.alloc(*const wasm.TagType, ntag) catch return error.OutOfMemory;
-    var memory: ?*const wasm.Memory = null;
+    const memories = a.alloc(*wasm.Memory, nmem) catch return error.OutOfMemory;
     var fi: usize = 0;
     var gi: usize = 0;
     var ti: usize = 0;
     var tgi: usize = 0;
+    var mi: usize = 0;
 
     for (module.imports) |imp| {
         const v = try lookupImport(realm, import_obj, imp.module, imp.name);
@@ -791,7 +793,10 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
                 tables[ti] = try resolveTableImport(realm, v);
                 ti += 1;
             },
-            .mem => memory = try resolveMemImport(realm, v),
+            .mem => {
+                memories[mi] = try resolveMemImport(realm, v);
+                mi += 1;
+            },
             .tag => {
                 tags[tgi] = tagTypeOf(v) orelse
                     return throwLinkError(realm, "WebAssembly.Instance: tag import is not a WebAssembly.Tag");
@@ -799,9 +804,9 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
             },
         }
     }
-    // JS-API imports share the provider's linear memory (writes are
+    // JS-API imports share the provider's linear memories (writes are
     // mutually visible), unlike the spectest harness's snapshot.
-    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memory = memory, .share_memory = true, .tags = tags };
+    return .{ .funcs = funcs, .globals = globals, .tables = tables, .memories = memories, .share_memory = true, .tags = tags };
 }
 
 /// `importObject[module][name]`.
@@ -856,7 +861,7 @@ fn resolveTableImport(realm: *Realm, v: Value) NativeError!*wasm.Table {
     return st.table;
 }
 
-fn resolveMemImport(realm: *Realm, v: Value) NativeError!*const wasm.Memory {
+fn resolveMemImport(realm: *Realm, v: Value) NativeError!*wasm.Memory {
     const obj = heap_mod.valueAsPlainObject(v) orelse
         return throwLinkError(realm, "WebAssembly.Instance: memory import is not a WebAssembly.Memory");
     const raw = obj.getWasmMemory() orelse
@@ -891,8 +896,8 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
                 const tobj = try makeTable(realm, tbl, et == .funcref);
                 obj.set(realm.allocator, ex.name, tobj) catch return error.OutOfMemory;
             },
-            .mem => {
-                const mem = ip.memoryPtr() orelse continue;
+            .mem => |midx| {
+                const mem = ip.memoryPtr(midx) orelse continue;
                 const mobj = try makeMemory(realm, mem);
                 obj.set(realm.allocator, ex.name, mobj) catch return error.OutOfMemory;
             },

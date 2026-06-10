@@ -64,13 +64,24 @@ uncaught one re-raises the *original* JS value with its identity intact.
 `v128` is spec-mandated not to cross the JS boundary; a bare `exnref`
 likewise raises a TypeError if it would.
 
+Multiple memories (Wasm 3.0) is shipped: a module declares or imports
+any number of linear memories; every load/store carries an optional
+memory index in its memarg (bit 6 of the align field), `memory.size` /
+`grow` / `fill` / `init` take a memory index, `memory.copy` copies
+across two memories, active data segments target any memory (flag 2),
+and the JS API exports each memory as its own `WebAssembly.Memory`. An
+imported memory aliases the provider's — a store or grow through one
+instance is visible through the other (which also means a JS
+`Memory.grow` can no longer leave an importing instance reading a
+stale buffer).
+
 Not yet implemented. **Standardized (Phase 5, Wasm 3.0) but
-unimplemented** — `gc` (WasmGC) and multiple memories (the engine is
-single-memory). Exception handling — every wasm instruction and the
-full JS interop, both directions — is shipped (above). **Still in
-flight** — `threads` (Phase 4; sits on the existing `SharedArrayBuffer`
-/ `Atomics` substrate), shared-everything threads and the component
-model (Phase 1).
+unimplemented** — `gc` (WasmGC, with its typed function references).
+Exception handling — every wasm instruction and the full JS interop,
+both directions — is shipped (above). **Still in flight** — `threads`
+(Phase 4; sits on the existing `SharedArrayBuffer` / `Atomics`
+substrate), shared-everything threads and the component model
+(Phase 1).
 
 Non-goals: a browser host, debugging surfaces, or any sloppy-mode
 affordance. Cynic is strict, non-browser, edge-runtime shaped — the
@@ -464,7 +475,7 @@ the measured design space:
 | Decoder | §5 binary → parsed module — **done** |
 | Validate + side-table | single-pass validation emitting the O(1) branch side-table (§4) — **done** |
 | Interpreter | in-place **threaded** dispatch over bytecode + side-table — **done** (integer, control, floats, SIMD, references, tail calls, exceptions) |
-| Memory | loads/stores, bulk-memory, grow; memory64 i64 addressing — **done** (engine plain buffer; the JS `Memory.buffer` aliasing view + detach-on-grow ships in §8) |
+| Memory | loads/stores, bulk-memory, grow; memory64 i64 addressing; **multiple memories** (memarg memory index, per-memory size/grow/fill/init, cross-memory copy, flag-2 data segments, aliased imports) — **done** (engine plain buffer; the JS `Memory.buffer` aliasing view + detach-on-grow ships in §8) |
 | References / tables | tables, funcref/externref, `call_indirect`, element segments — **done**; externref GC rooting precise (§5), value-stack ref tags a future micro-opt |
 | Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128, relaxed-SIMD — **done** |
 | Cross-module linking | imported funcs/globals/tables/memories, shared tables, cross-instance funcrefs, host functions, start functions — **done** |

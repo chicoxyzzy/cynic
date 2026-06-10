@@ -3,7 +3,8 @@
 Scored by `zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite`
 against the official WebAssembly spec testsuite (the `.wast` corpus,
 preprocessed with `wast2json --enable-tail-call --enable-relaxed-simd
---enable-memory64 --enable-extended-const`). Each `assert_*` / `action`
+--enable-memory64 --enable-extended-const --enable-multi-memory`).
+Each `assert_*` / `action`
 command is a plain pass or fail. Commands are counted as skips when they
 cannot be scored: `assert_unlinkable` fixtures, text/quoted-module
 commands `wast2json` does not lower, a few value comparisons the harness
@@ -26,4 +27,4 @@ proposal's `(ref exn)` text syntax, so its `.wast` files don't lower
 
 | passing | failing | pass% | skipped | files |
 |---|---|---|---|---|
-| 56868 | 0 | 100.00 | 1159 | 169 |
+| 57644 | 0 | 100.00 | 1166 | 204 |
