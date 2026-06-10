@@ -996,10 +996,12 @@ const Interp = struct {
     fn pushFrame(self: *Interp, instance: *Instance, func: *const CompiledFunc, param_count: u32) TrapError!void {
         if (self.nframes >= self.frames.len) return error.CallStackExhausted;
         const locals_base = self.sp - param_count;
-        // Zero-init declared (non-parameter) locals.
+        // Init declared (non-parameter) locals to their type's default
+        // (§4.4.10): ref.null for a reference type, else zero.
         const total_locals: u32 = @intCast(func.local_types.len);
         var i = param_count;
-        while (i < total_locals) : (i += 1) try self.pushCell(0);
+        while (i < total_locals) : (i += 1)
+            try self.pushCell(if (func.local_types[i].isRef()) REF_NULL else 0);
         // Reserve operand headroom check.
         if (locals_base + total_locals + func.max_stack > self.stack.len)
             return error.ValueStackOverflow;
@@ -1037,10 +1039,12 @@ const Interp = struct {
         var i: u32 = 0;
         while (i < param_count) : (i += 1) self.stack[lb + i] = self.stack[src + i];
         self.sp = lb + param_count;
-        // Zero-init the callee's declared (non-parameter) locals.
+        // Init the callee's declared (non-parameter) locals to their
+        // type's default (§4.4.10): ref.null for a reference type.
         const total_locals: u32 = @intCast(func.local_types.len);
         i = param_count;
-        while (i < total_locals) : (i += 1) try self.pushCell(0);
+        while (i < total_locals) : (i += 1)
+            try self.pushCell(if (func.local_types[i].isRef()) REF_NULL else 0);
         if (lb + total_locals + func.max_stack > self.stack.len)
             return error.ValueStackOverflow;
         const rc: u32 = @intCast(instance.module.types[func.type_index].results.len);

@@ -2886,3 +2886,24 @@ test "wasm link: a mutable imported global is shared, not snapshotted" {
     _ = try interp.invoke(provider, a, funcExport(provider.module, "bump").?, &.{});
     try testing.expectEqual(@as(i32, 42), try invokeInst(a, importer, "run", &.{}));
 }
+
+test "wasm locals: a reference-typed local defaults to null" {
+    // §4.4.10 — locals are initialized to their type's default value;
+    // for a reference type that is ref.null, not the zero bit pattern
+    // (REF_NULL is not zero in this engine).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    // (local funcref) local.get 0; ref.is_null  ->  1
+    const cbody = [_]u8{ 0x01, 0x07, 0x01, 0x01, 0x70, 0x20, 0x00, 0xd1, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    try testing.expectEqual(@as(i32, 1), try runI32(bytes, "f", &.{}));
+}
