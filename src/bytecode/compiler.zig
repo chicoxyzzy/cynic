@@ -300,15 +300,14 @@ pub const Compiler = struct {
     /// `ns.<exported>` observe the live mutation rather than the
     /// declaration-time snapshot. `null` outside module-mode.
     ///
-    /// Limitation: the `module_export` opcode writes to
-    /// `realm.current_module`. Mutations made from inside a
-    /// callback invoked across a module boundary (e.g. importer
-    /// calls a setter exported by this module) land on the
-    /// *caller's* current module if any — which is rare in the
-    /// corpus but a spec divergence (true live bindings would
-    /// follow the binding's *defining* module). Same-module
-    /// mutation, the case the corpus and the spec
-    /// (get-str-update.js) actually exercise, works.
+    /// The `module_export` opcode publishes to the executing
+    /// frame's `owning_module` (falling back to
+    /// `realm.current_module` for module top-level frames), so a
+    /// mutation made from inside a callback invoked across a
+    /// module boundary (importer calls an exported function that
+    /// reassigns its own module-level binding) updates the
+    /// *defining* module's namespace — true live-binding
+    /// semantics (§9.4.6.7).
     module_exports_by_local: ?*std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = null,
     /// Sticky flag set by `compileAwait` whenever an `await`
     /// emits at module top level (lexically outside any function /
@@ -13067,13 +13066,19 @@ fn collectLiveExports(
                     try addLiveExportAlias(c, out, local_name, exported_name);
                 }
             },
-            // `export default <expr>` — anonymous defaults have no
-            // observable local binding; named defaults
-            // (`export default function F() {}` /
-            // `export default class F {}`) create a local F that
-            // user code can't reassign (no `let` form), so live-
-            // binding propagation has no observable effect today.
-            .default_value => {},
+            // `export default function fn() {}` (and the generator /
+            // async variants) binds a MUTABLE local `fn` — function
+            // declarations are var-like, so `fn = 2` anywhere in the
+            // module (including inside `fn` itself) must be observed
+            // through `ns.default` (§9.4.6.7 live bindings). Register
+            // the alias so stores to the local re-publish. Anonymous
+            // defaults have no user-visible binding to mutate.
+            .default_value => |dv| if (dv == .function_expr) {
+                if (dv.function_expr.name) |n| {
+                    const name = try c.bindingName(n.span);
+                    try addLiveExportAlias(c, out, name, "default");
+                }
+            },
             .all => {},
         },
         else => {},

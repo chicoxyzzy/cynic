@@ -123,3 +123,67 @@ test "phase 2: module errored in realm A doesn't poison realm B" {
     const out_b = try lantern.loadModule(testing.allocator, &rb, "./mod.js", null, null);
     try testing.expect(!out_b.threw);
 }
+
+/// Loader for the live-default test: the default-exported NAMED
+/// function reassigns its own binding when called.
+fn liveDefaultLoader(
+    realm: *Realm,
+    specifier: []const u8,
+    base_url: ?[]const u8,
+    attribute_type: ?[]const u8,
+) realm_mod.ModuleLoaderError!realm_mod.ModuleLoadResult {
+    _ = realm;
+    _ = base_url;
+    _ = attribute_type;
+    if (std.mem.eql(u8, specifier, "./m.js")) {
+        return .{ .url = "./m.js", .source = "export default function fn() { fn = 2; return 1; }\nexport function probe() { return fn; }" };
+    }
+    if (std.mem.eql(u8, specifier, "./main.js")) {
+        return .{ .url = "./main.js", .source =
+        \\import * as ns from './m.js';
+        \\const a = ns.default();
+        \\const b = ns.default;
+        \\export const ok = (a === 1) && (b === 2);
+        };
+    }
+    return error.ModuleNotFound;
+}
+
+test "module namespace: a named default-function export is a live binding" {
+    // §9.4.6.7 [[Get]] — `export default function fn() {}` binds a
+    // MUTABLE local `fn` (function declarations are var-like); after
+    // `fn = 2` runs inside the function, `ns.default` must read 2,
+    // not the declaration-time closure.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    realm.module_loader = liveDefaultLoader;
+
+    const out = try lantern.loadModule(testing.allocator, &realm, "./m.js", null, null);
+    try testing.expect(out.mr != null);
+    const ns = out.mr.?.exports;
+
+    const before = ns.get("default");
+    const heap_mod = @import("heap.zig");
+    const fn_obj = heap_mod.valueAsFunction(before) orelse return error.TestUnexpectedResult;
+
+    const call_mod = @import("lantern/call.zig");
+    const outcome = try call_mod.callJSFunction(testing.allocator, &realm, fn_obj, .undefined_, &.{});
+    switch (outcome) {
+        .value, .yielded => |v| try testing.expectEqual(@as(i32, 1), v.asInt32()),
+        .thrown => return error.TestUnexpectedResult,
+    }
+
+    // The module-level binding observes the write...
+    const probe_fn = heap_mod.valueAsFunction(ns.get("probe")) orelse return error.TestUnexpectedResult;
+    const probe_out = try call_mod.callJSFunction(testing.allocator, &realm, probe_fn, .undefined_, &.{});
+    switch (probe_out) {
+        .value, .yielded => |v| try testing.expectEqual(@as(i32, 2), v.asInt32()),
+        .thrown => return error.TestUnexpectedResult,
+    }
+
+    // ...and so does the namespace's `default` (§9.4.6.7 [[Get]]).
+    const after = ns.get("default");
+    try testing.expect(after.isInt32());
+    try testing.expectEqual(@as(i32, 2), after.asInt32());
+}

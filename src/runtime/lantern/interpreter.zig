@@ -6931,7 +6931,16 @@ pub fn runFrames(
                     }
                 }
             }
-            if (realm.current_module) |mr| {
+            // §9.4.6.7 live bindings — publish to the module that
+            // DEFINED this code (the frame's `owning_module`), not
+            // whatever module happens to be current in the caller:
+            // an exported function mutating its own module-level
+            // binding may be invoked from another module, from
+            // script code, or from a host callback, and the
+            // namespace it must update is always its defining
+            // module's. Module top-level frames fall back to
+            // `realm.current_module` (set by module evaluation).
+            if (f.owning_module orelse realm.current_module) |mr| {
                 mr.exports.set(realm.allocator, name_s.flatBytes(), acc) catch return error.OutOfMemory;
             }
             // No-op outside module context (e.g. running
