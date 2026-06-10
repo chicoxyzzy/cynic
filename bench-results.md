@@ -17,6 +17,61 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-11 — cynic `89d80a1` (first `--jit` columns: lda_this + IC coverage), host `Darwin 25.6.0 arm64`
+
+First recorded Bistromath run — `zig build bench -- --jit`, the
+tier at its natural tier-up thresholds (the user posture, not
+force-compile). From here every bench session records both tables;
+the `--jit` column becomes the headline once OSR (docs/jit.md §12
+step 3f) lets the rest of the suite enter the tier. Loaded machine
+(spreads 16-35%), so only the mechanism-backed delta counts:
+
+- **`method_call` 32.12 → 23.17 p50 (−28%; mins 25.82 → 20.36,
+  −21%)** — the one fixture whose hot path crosses a call boundary
+  per iteration into a fully-supported callee: `Counter.inc`'s
+  `this.n += 1` compiles (lda_this + the property ICs + add_smi)
+  and enters through the call-arm hook. The first measured
+  Bistromath win.
+- Everything else sits inside the loaded-machine band in both
+  directions — expected pre-OSR: those fixtures' hot loops are
+  top-level and never enter the tier.
+- RSS +~50 KB under `--jit` — the touched pages of the lazily
+  reserved code region.
+
+Interpreter tier:
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 53.94 | 42.88 | 62.03 | 5456 |
+| prop_access | 18.04 | 17.24 | 20.92 | 5504 |
+| prop_write | 22.86 | 18.20 | 26.49 | 5520 |
+| array_iter | 36.69 | 31.10 | 42.09 | 6528 |
+| string_concat | 40.88 | 36.26 | 44.36 | 16000 |
+| promise_chain | 19.82 | 18.74 | 22.27 | 24024 |
+| object_alloc | 47.09 | 34.12 | 50.73 | 9280 |
+| method_call | 32.12 | 25.82 | 35.45 | 5680 |
+| class_instantiate | 50.61 | 46.58 | 62.95 | 9184 |
+| ctor_array_build | 528.82 | 459.18 | 553.06 | 9880 |
+| json_stringify | 42.77 | 39.38 | 51.98 | 8976 |
+| tail_recursion | 53.61 | 47.69 | 60.13 | 5464 |
+
+`--jit` (Bistromath, natural thresholds):
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 52.35 | 47.66 | 56.19 | 5440 |
+| prop_access | 21.56 | 19.44 | 25.76 | 5472 |
+| prop_write | 21.72 | 17.03 | 24.70 | 5568 |
+| array_iter | 39.71 | 31.25 | 42.88 | 6600 |
+| string_concat | 47.96 | 37.62 | 58.53 | 15856 |
+| promise_chain | 25.63 | 20.70 | 31.14 | 24096 |
+| object_alloc | 42.55 | 33.52 | 47.87 | 9240 |
+| method_call | 23.17 | 20.36 | 27.87 | 5728 |
+| class_instantiate | 51.24 | 42.36 | 60.94 | 9152 |
+| ctor_array_build | 509.02 | 483.68 | 554.04 | 9880 |
+| json_stringify | 41.36 | 37.34 | 50.26 | 9016 |
+| tail_recursion | 58.51 | 47.09 | 67.90 | 5520 |
+
 ### 2026-06-09 — cynic `bb5703b` (JSON shape-walk + small-int toString cache), host `Darwin 25.6.0 arm64`
 
 Two contained allocation-cut wins, both measured against the `4ce56ff`

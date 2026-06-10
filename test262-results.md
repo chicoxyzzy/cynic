@@ -28,6 +28,15 @@ fixtures run for real. The default `cynic run` posture
 (hardened, eval off) is stricter; this row measures the
 engine's spec coverage with the policy knobs out of the way.
 
+The Bistromath JIT (`--jit`) is deliberately **not** a second
+score row: its contract is an invariant, not a score — a full
+sweep with every eligible chunk force-compiled must produce the
+byte-identical pass-set of this row (docs/jit.md §10.2; verified
+by the advisory `test262-jit-differential` CI job and locally
+before JIT-touching commits). A row that must always equal this
+one carries no information, and a divergence is a bug to fix,
+not a number to publish.
+
 ### Columns
 
 - **`passing`** — Cynic produced the spec-expected result.
