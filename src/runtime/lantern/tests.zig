@@ -12906,3 +12906,28 @@ test "const assignment: top-level script const written from a function throws at
         \\r + "," + c;
     , "TypeError,5");
 }
+
+test "call: a missing method on an undefined base throws before arguments evaluate" {
+    // §13.3.6.1 EvaluateCall — the callee reference (including the
+    // property GET) is evaluated before ArgumentListEvaluation, so
+    // `o.bar.gar(foo())` throws on the `.gar` access with `foo`
+    // never called.
+    try expectScriptStringWithBuiltins(
+        \\var fooCalled = false;
+        \\function foo() { fooCalled = true; }
+        \\var o = {};
+        \\let r = "no-throw";
+        \\try { o.bar.gar(foo()); } catch (e) { r = e.constructor.name; }
+        \\r + "," + fooCalled;
+    , "TypeError,false");
+}
+
+test "call: a getter-valued callee runs before arguments evaluate" {
+    try expectScriptStringWithBuiltins(
+        \\const order = [];
+        \\const o = { get m() { order.push("get"); return function () {}; } };
+        \\function arg() { order.push("arg"); return 1; }
+        \\o.m(arg());
+        \\order.join(",");
+    , "get,arg");
+}

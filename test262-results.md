@@ -72,10 +72,10 @@ count; the per-area table below it is the work list.
 | why | failing | detail |
 |---|---:|---|
 | ECMA-402 not implemented | 3250 | the whole `intl402/` tree — `Intl` (and the `intl402/Temporal` twins of the excluded Temporal proposal) is an unbuilt subsystem |
-| sloppy-mode-only fixtures | 1148 | `flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...) |
+| sloppy-mode-only fixtures | 1149 | `flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...) |
 | Annex B builtins | 69 | `__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design |
 | cannot-block agent semantics | 2 | `flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent |
-| **engine gaps** | 117 | failures the policy classes do not explain — the work list (an upper bound: it includes a residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter) |
+| **engine gaps** | 116 | failures the policy classes do not explain — the work list (an upper bound: it includes a residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter) |
 
 **Failing areas.** Only areas with at least one failure are
 listed (everything else passes). `gaps` is the slice of the
@@ -86,7 +86,7 @@ list. Bucketed on the first two path components.
 | area | passing | failing | gaps | pass% |
 |---|---:|---:|---:|---:|
 | `built-ins/Function` | 424 | 85 | 54 | 83 % |
-| `language/expressions` | 10276 | 406 | 28 | 96 % |
+| `language/expressions` | 10276 | 406 | 27 | 96 % |
 | `language/statements` | 8995 | 328 | 13 | 96 % |
 | `language/module-code` | 590 | 5 | 5 | 99 % |
 | `language/eval-code` | 162 | 185 | 4 | 47 % |
@@ -153,11 +153,11 @@ top-line score.
 
 ## History
 
-### 2026-06-10 — cynic `7a494db`, test262 `d0c1b4555b`
+### 2026-06-10 — cynic `dc2b05e`, test262 `d0c1b4555b`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 45222 | 4586 | 49808 | 90.79 % | +56 | 50.1 s |
+| 45222 | 4586 | 49808 | 90.79 % | +56 | 45.1 s |
 
 Biggest movers:
 

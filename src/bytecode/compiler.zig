@@ -4088,6 +4088,19 @@ pub const Compiler = struct {
         const fused_ident: ?u16 = blk: {
             if (emit_tail) break :blk null;
             if (m.optional or c.optional) break :blk null;
+            // §13.3.6.1 — the callee reference's property GET evaluates
+            // BEFORE ArgumentListEvaluation: a TypeError from a missing
+            // base (`o.bar.gar(args)`) or a getter's side effects must
+            // precede the arguments. The fused op performs the lookup
+            // at call time — AFTER the args were materialised — so it
+            // is only admissible when no argument evaluation can throw
+            // or observe ordering: zero args, literals, and `this`.
+            // (`a.push(x)` and friends take the four-op sequence whose
+            // GET is emitted before the args.)
+            for (c.arguments) |*arg| switch (arg.*) {
+                .null_literal, .boolean_literal, .numeric_literal, .bigint_literal, .string_literal, .this_expr => {},
+                else => break :blk null,
+            };
             switch (m.property) {
                 .ident => |span| {
                     const key_slice = self.source[span.start..span.end];
