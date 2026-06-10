@@ -12814,3 +12814,52 @@ test "class self-name: the class compiles and is usable when never assigned" {
         \\new C().m();
     , "function");
 }
+
+test "jit warmth: entries, back-edges, and PTC re-entries heat the chunk" {
+    // Entries (+16 each) and loop back-edges (+1 each) accumulate
+    // on the chunk's JitState — docs/jit.md §4.7. The chunk is
+    // compiled and run by hand (not via the helpers) so it stays
+    // alive for inspection. Exact counts are dispatch-shape-
+    // dependent (loop fusion, jump threading), so assert floors,
+    // not figures.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const src =
+        \\function f(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s; }
+        \\f(50); f(50); f(50);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    switch (try run(testing.allocator, &realm, &chunk)) {
+        .value, .yielded => {},
+        .thrown => return error.UncaughtException,
+    }
+    try testing.expectEqual(@as(usize, 1), chunk.function_templates.len);
+    const f_state = chunk.function_templates[0].chunk.jit_state.?;
+    // Three entries (3 × 16) plus ~150 back-edges.
+    try testing.expect(f_state.warmth >= 3 * 16 + 100);
+    try testing.expectEqual(.cold, f_state.tier);
+
+    // §15.10 PTC: each tail re-entry reframes to ip 0 and counts
+    // as an entry — a tail-recursive loop heats like a call-heavy
+    // function, not like dead code.
+    var realm2 = Realm.init(testing.allocator);
+    defer realm2.deinit();
+    const src2 =
+        \\function g(n, a) { if (n === 0) return a; return g(n - 1, a + n); }
+        \\g(30, 0);
+    ;
+    const program2 = try parser_mod.parseScript(arena.allocator(), src2, null);
+    var chunk2 = try compileScriptAsChunk(testing.allocator, &realm2, &program2, src2, null);
+    defer chunk2.deinit(testing.allocator);
+    switch (try run(testing.allocator, &realm2, &chunk2)) {
+        .value, .yielded => {},
+        .thrown => return error.UncaughtException,
+    }
+    const g_state = chunk2.function_templates[0].chunk.jit_state.?;
+    try testing.expect(g_state.warmth >= 30 * 16);
+}

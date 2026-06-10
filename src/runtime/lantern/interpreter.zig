@@ -912,6 +912,13 @@ inline fn reEnterDispatch(
     registers.* = fr.registers;
     ip.* = fr.ip;
     acc.* = fr.accumulator;
+    if (fr.ip == 0) {
+        // Fresh frame entry — a call push seeds ip 0, a §15.10 PTC
+        // re-entry reframes in place to ip 0, and a generator's
+        // first resume starts at 0. Returns and unwind landings
+        // resume mid-chunk and don't re-heat. docs/jit.md §4.7.
+        if (fr.chunk.jit_state) |js| js.warmth +|= Chunk.JitState.entry_weight;
+    }
     if (ip.* >= code.*.len) return error.InvalidOpcode;
     const b = code.*[ip.*];
     ip.* += 1;
@@ -991,6 +998,9 @@ inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
 inline fn loopSafePoint(realm: *Realm, f: *CallFrame, ip: usize, acc: Value) RunError!?RunResult {
     f.ip = ip;
     f.accumulator = acc;
+    // Back-edges heat the chunk's tier counter (+1 per crossing;
+    // entries weigh 16) — docs/jit.md §4.7.
+    if (f.chunk.jit_state) |js| js.warmth +|= 1;
     return runSafePoint(realm);
 }
 

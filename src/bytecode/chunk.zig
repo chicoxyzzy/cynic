@@ -524,6 +524,30 @@ pub const Chunk = struct {
     /// per-key `def_property`s downstream skip the per-key
     /// `ShapeTree.transition` lookup.
     literal_shape_templates: []LiteralShapeTemplate = &.{},
+    /// JIT tier state — mutable side-state on the otherwise-
+    /// immutable chunk, following the `inline_caches` pattern
+    /// (docs/jit.md §4.1). Allocated unconditionally at `finish`
+    /// (8 bytes per template; the counter costs one saturating add
+    /// per frame entry and loop back-edge). Bistromath's tier-up
+    /// check consumes `warmth` when it lands; until then the heat
+    /// signal just accumulates. Null only on hand-built chunks
+    /// that never went through `Builder.finish`.
+    jit_state: ?*JitState = null,
+
+    /// Per-template tier state (docs/jit.md §4.1, §4.7). `warmth`
+    /// is a heat signal, not an exact count: entries — including
+    /// §15.10 PTC re-entries, which reframe to ip 0 — weigh
+    /// `entry_weight`, loop back-edges weigh 1, and adds saturate
+    /// rather than wrap.
+    pub const JitState = struct {
+        warmth: u32 = 0,
+        tier: Tier = .cold,
+
+        pub const Tier = enum(u8) { cold, compiled, dont_compile };
+        /// JSC weights +15 per entry / +1 per back-edge; 16 keeps
+        /// the entry bump a shift (docs/jit.md §4.7).
+        pub const entry_weight: u32 = 16;
+    };
 
     pub fn deinit(self: *Chunk, allocator: std.mem.Allocator) void {
         allocator.free(self.code);
@@ -543,6 +567,7 @@ pub const Chunk = struct {
         allocator.free(self.inline_call_caches);
         for (self.literal_shape_templates) |*t| allocator.free(t.keys);
         allocator.free(self.literal_shape_templates);
+        if (self.jit_state) |js| allocator.destroy(js);
     }
 };
 
@@ -980,6 +1005,8 @@ pub const Builder = struct {
         for (ics) |*c| c.* = .{};
         const call_ics = try self.allocator.alloc(CallICCell, self.inline_call_cache_count);
         for (call_ics) |*c| c.* = .{};
+        const jit_state = try self.allocator.create(Chunk.JitState);
+        jit_state.* = .{};
         return .{
             .code = try self.code.toOwnedSlice(self.allocator),
             .constants = try self.constants.toOwnedSlice(self.allocator),
@@ -995,6 +1022,7 @@ pub const Builder = struct {
             .global_lexical_base = self.global_lexical_base,
             .inline_caches = ics,
             .inline_call_caches = call_ics,
+            .jit_state = jit_state,
         };
     }
 };
