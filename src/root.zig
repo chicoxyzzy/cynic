@@ -144,5 +144,6 @@ test {
     _ = @import("runtime/jit/code_alloc.zig");
     _ = @import("runtime/jit/asm_aarch64.zig");
     _ = @import("runtime/jit/masm.zig");
+    _ = @import("runtime/jit/layout.zig");
     _ = @import("runtime/bistromath/bistromath.zig");
 }

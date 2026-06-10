@@ -70,11 +70,13 @@ fn monotonicNs() i128 {
 /// The tag-object value tag (`0xFFF9`) is shared across all
 /// four; predicate selection uses the pointer-tag bits. Real
 /// pointers are reconstructed by masking out the tag bits.
-const kind_mask: u64 = 0x3;
-const kind_function: u64 = 0x0;
-const kind_object: u64 = 0x1;
-const kind_symbol: u64 = 0x2;
-const kind_bigint: u64 = 0x3;
+// Pub: the JIT layout contract (`jit/layout.zig`) re-exports these
+// so compiled tag checks and the Zig-side taggers can never drift.
+pub const kind_mask: u64 = 0x3;
+pub const kind_function: u64 = 0x0;
+pub const kind_object: u64 = 0x1;
+pub const kind_symbol: u64 = 0x2;
+pub const kind_bigint: u64 = 0x3;
 
 /// §26.2 FinalizationRegistry cleanup-job scheduler. The collector
 /// discovers a dead registry target during the post-mark weak pass

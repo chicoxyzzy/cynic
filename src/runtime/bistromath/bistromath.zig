@@ -38,6 +38,8 @@ const code_alloc = @import("../jit/code_alloc.zig");
 const masm_mod = @import("../jit/masm.zig");
 const Masm = masm_mod.Masm;
 const a64 = @import("../jit/asm_aarch64.zig");
+const layout = @import("../jit/layout.zig");
+const JSObject = @import("../object.zig").JSObject;
 
 /// Bistromath needs both an executable-memory target and an
 /// emitter for the host ISA. x86_64 hosts run the engine fine but
@@ -141,14 +143,25 @@ const int32_tag_reg: a64.Reg = .x23;
 /// and `jmp_if_*` truthiness.
 const bool_tag_reg: a64.Reg = .x24;
 
-const acc_off: u15 = @offsetOf(CallFrame, "accumulator");
-const ip_off: u15 = @offsetOf(CallFrame, "ip");
-const step_budget_off: usize = @offsetOf(Realm, "step_budget");
-const interrupt_off: usize =
-    @offsetOf(Realm, "interrupt") + @offsetOf(std.atomic.Value(bool), "raw");
+// Struct offsets come from the layout contract (docs/jit.md §12
+// step 3a) — never derived locally.
+const acc_off: u15 = layout.frame.accumulator;
+const ip_off: u15 = layout.frame.ip;
+const step_budget_off: usize = layout.realm.step_budget;
+const interrupt_off: usize = layout.realm.interrupt_raw;
 
 const int32_tag_bits: u64 = @as(u64, Value.tag_int32) << 48;
 const bool_tag_bits: u64 = Value.false_.bits;
+
+/// The §9 barrier rule: the compiled `sta_property` hit emits
+/// exactly what the interpreter's hit path does — the slot store
+/// inline, then this call, which is `Heap.storeInternalSlot`
+/// behind a C ABI. Infallible (the interpreter calls it without
+/// `try`) and never ticks the GC counters, so it is safe to call
+/// while the accumulator lives unsynced in its pinned register.
+fn storeBarrier(r: *Realm, obj: *JSObject, bits: u64) callconv(.c) void {
+    r.heap.storeInternalSlot(.{ .object = obj }, .{ .bits = bits });
+}
 
 const Compiler = struct {
     m: Masm,
@@ -226,6 +239,8 @@ const Compiler = struct {
                 .mov, .add, .sub, .mul, .add_smi, .to_int32,
                 .bit_and, .bit_or, .bit_xor,
                 .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq,
+                .lda_property, .sta_property,
+                .lda_global, .lda_global_or_undef,
                 .throw_if_hole, .return_ => {},
                 // zig fmt: on
                 .jmp, .jmp_if_true, .jmp_if_false => {
@@ -360,6 +375,109 @@ const Compiler = struct {
                         else => .ne,
                     }));
                     try m.emit(a64.orrReg(acc_reg, .x11, bool_tag_reg));
+                },
+
+                .lda_property => {
+                    // Mirrors the interpreter's two IC hit modes
+                    // exactly — own-data and proto-load — reading
+                    // the cell as data (docs/jit.md §4.4); any miss
+                    // (cold cell, shape change, proto swap, exotic
+                    // receiver) tiers down and Lantern refills.
+                    const td = try self.tdFor(bc);
+                    const ic_idx = readU16(code, i + 3);
+                    try self.emitPlainObject(acc_reg, .x9, td);
+                    try self.emitCellAddr(.x10, ic_idx);
+                    try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.shape));
+                    try m.jumpCbz(.x11, td);
+                    try m.emit(a64.ldrImm(.x12, .x9, layout.object.shape));
+                    try m.emit(a64.cmpReg(.x11, .x12));
+                    try m.jumpCond(.ne, td);
+                    var proto_path = Masm.Label{};
+                    defer proto_path.fixups.deinit(m.gpa);
+                    var next = Masm.Label{};
+                    defer next.fixups.deinit(m.gpa);
+                    try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.proto));
+                    try m.jumpCbnz(.x11, &proto_path);
+                    // Own-data hit: acc = recv.slots[cell.slot].
+                    try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
+                    try self.emitSlotRead(acc_reg, .x9, .x11);
+                    try m.jump(&next);
+                    // Proto-load hit: identity of the cached proto,
+                    // the proto's own shape, AND the realm-wide
+                    // §10.1.1-mutation counter, exactly per the
+                    // interpreter's predicate.
+                    m.bind(&proto_path);
+                    try m.emit(a64.ldrImm(.x12, .x9, layout.object.prototype));
+                    try m.emit(a64.cmpReg(.x12, .x11));
+                    try m.jumpCond(.ne, td);
+                    try m.emit(a64.ldrImm(.x9, .x10, layout.ic_cell.proto_shape));
+                    try m.emit(a64.ldrImm(.x13, .x12, layout.object.shape));
+                    try m.emit(a64.cmpReg(.x9, .x13));
+                    try m.jumpCond(.ne, td);
+                    try self.loadRealmU64(.x9, layout.realm.proto_revision_counter);
+                    try m.emit(a64.ldrImm(.x13, .x10, layout.ic_cell.proto_rev));
+                    try m.emit(a64.cmpReg(.x9, .x13));
+                    try m.jumpCond(.ne, td);
+                    try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
+                    try self.emitSlotRead(acc_reg, .x12, .x11);
+                    m.bind(&next);
+                },
+                .sta_property => {
+                    // Same-shape hit only; the transition mode
+                    // resizes slots and tiers down. The §9 rule:
+                    // emit exactly what the interpreter's hit path
+                    // does — the slot store, then the same
+                    // storeInternalSlot barrier through a C shim.
+                    const td = try self.tdFor(bc);
+                    const r_obj = code[i + 3];
+                    const ic_idx = readU16(code, i + 4);
+                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_obj)));
+                    try self.emitPlainObject(.x9, .x9, td);
+                    try self.emitCellAddr(.x10, ic_idx);
+                    try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.shape));
+                    try m.jumpCbz(.x11, td);
+                    try m.emit(a64.ldrImm(.x12, .x9, layout.object.shape));
+                    try m.emit(a64.cmpReg(.x11, .x12));
+                    try m.jumpCond(.ne, td);
+                    try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
+                    try self.emitSlotWrite(acc_reg, .x9, .x11);
+                    try m.emit(a64.movReg(.x0, realm_reg));
+                    try m.emit(a64.movReg(.x1, .x9));
+                    try m.emit(a64.movReg(.x2, acc_reg));
+                    try m.callAbs(.x16, @intFromPtr(&storeBarrier));
+                },
+                .lda_global, .lda_global_or_undef => {
+                    // The interpreter's predicate verbatim: resolve
+                    // the global env through the executing frame's
+                    // realm (§8.3 — ShadowRealm children differ from
+                    // the dispatch realm), then shape + decl_revision
+                    // + proto==null on the cell. The two opcodes
+                    // differ only on the miss path, which tiers down
+                    // either way.
+                    const td = try self.tdFor(bc);
+                    const ic_idx = readU16(code, i + 3);
+                    var have_gr = Masm.Label{};
+                    defer have_gr.fixups.deinit(m.gpa);
+                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.running_realm));
+                    try m.jumpCbnz(.x9, &have_gr);
+                    try m.emit(a64.movReg(.x9, realm_reg));
+                    m.bind(&have_gr);
+                    try self.emitCellAddr(.x10, ic_idx);
+                    try self.loadFieldU64(.x12, .x9, layout.realm.globals_target);
+                    try m.jumpCbz(.x12, td);
+                    try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.shape));
+                    try m.jumpCbz(.x11, td);
+                    try m.emit(a64.ldrImm(.x13, .x12, layout.object.shape));
+                    try m.emit(a64.cmpReg(.x11, .x13));
+                    try m.jumpCond(.ne, td);
+                    try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.proto));
+                    try m.jumpCbnz(.x11, td);
+                    try self.loadFieldU64(.x13, .x9, layout.realm.globals_decl_revision);
+                    try m.emit(a64.ldrImm(.x9, .x10, layout.ic_cell.proto_rev));
+                    try m.emit(a64.cmpReg(.x13, .x9));
+                    try m.jumpCond(.ne, td);
+                    try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
+                    try self.emitSlotRead(acc_reg, .x12, .x11);
                 },
 
                 .jmp => {
@@ -498,16 +616,23 @@ const Compiler = struct {
         return &self.labels.items[idx];
     }
 
-    fn loadRealmU64(self: *Compiler, dst: a64.Reg, off: usize) CompileError!void {
+    /// 64-bit field load from `base + off`; the big-offset path
+    /// stages through `dst`, so no scratch is clobbered.
+    fn loadFieldU64(self: *Compiler, dst: a64.Reg, base: a64.Reg, off: usize) CompileError!void {
         const m = &self.m;
         if (off <= 32760) {
-            try m.emit(a64.ldrImm(dst, realm_reg, @intCast(off)));
+            try m.emit(a64.ldrImm(dst, base, @intCast(off)));
         } else {
-            try m.emit(a64.addImm(.x13, realm_reg, @intCast(off >> 12), true));
-            try m.emit(a64.ldrImm(dst, .x13, @intCast(off & 0xFFF)));
+            try m.emit(a64.addImm(dst, base, @intCast(off >> 12), true));
+            try m.emit(a64.ldrImm(dst, dst, @intCast(off & 0xFFF)));
         }
     }
 
+    fn loadRealmU64(self: *Compiler, dst: a64.Reg, off: usize) CompileError!void {
+        try self.loadFieldU64(dst, realm_reg, off);
+    }
+
+    /// Clobbers x13 on the big-offset path.
     fn storeRealmU64(self: *Compiler, src: a64.Reg, off: usize) CompileError!void {
         const m = &self.m;
         if (off <= 32760) {
@@ -523,9 +648,88 @@ const Compiler = struct {
         if (off <= 4095) {
             try m.emit(a64.ldrbImm(dst, realm_reg, @intCast(off)));
         } else {
-            try m.emit(a64.addImm(.x13, realm_reg, @intCast(off >> 12), true));
-            try m.emit(a64.ldrbImm(dst, .x13, @intCast(off & 0xFFF)));
+            try m.emit(a64.addImm(dst, realm_reg, @intCast(off >> 12), true));
+            try m.emit(a64.ldrbImm(dst, dst, @intCast(off & 0xFFF)));
         }
+    }
+
+    /// Decode a plain-`JSObject` value (the `valueAsPlainObject`
+    /// predicate): object NaN-box tag AND kind bits == object —
+    /// functions, symbols, and BigInts share the tag and tier
+    /// down. On success `dst` holds the object pointer (kind bits
+    /// cleared). `src` survives; x12/x13 are clobbered.
+    fn emitPlainObject(self: *Compiler, src: a64.Reg, dst: a64.Reg, td: *Masm.Label) CompileError!void {
+        const m = &self.m;
+        try m.movImm64(.x13, layout.value_bits.tag_object_shifted);
+        try m.emit(a64.eorReg(.x13, src, .x13));
+        try m.emit(a64.lsrImm(.x12, .x13, 48));
+        try m.jumpCbnz(.x12, td);
+        // Kind bits live in the pointer's alignment slack (low 2).
+        try m.emit(a64.lslImm(.x12, .x13, 62));
+        try m.emit(a64.lsrImm(.x12, .x12, 62));
+        try m.emit(a64.cmpImm(.x12, @intCast(layout.value_bits.kind_object), false));
+        try m.jumpCond(.ne, td);
+        try m.emit(a64.lsrImm(dst, .x13, 2));
+        try m.emit(a64.lslImm(dst, dst, 2));
+    }
+
+    /// `JSObject.slotAt` in machine code: inline slot when
+    /// `slot < inline_slot_cap`, overflow buffer otherwise (the
+    /// layout-contract slice witness covers the latter). `obj` and
+    /// `slot` survive; x12/x13 are clobbered; `dst` may be the
+    /// accumulator.
+    fn emitSlotRead(self: *Compiler, dst: a64.Reg, obj: a64.Reg, slot: a64.Reg) CompileError!void {
+        const m = &self.m;
+        var ovf = Masm.Label{};
+        defer ovf.fixups.deinit(m.gpa);
+        var done = Masm.Label{};
+        defer done.fixups.deinit(m.gpa);
+        try m.emit(a64.cmpImm(slot, @intCast(layout.object.inline_slot_cap), false));
+        try m.jumpCond(.cs, &ovf);
+        try m.emit(a64.lslImm(.x13, slot, 3));
+        try m.emit(a64.addReg(.x13, .x13, obj));
+        try m.emit(a64.ldrImm(dst, .x13, layout.object.inline_slots));
+        try m.jump(&done);
+        m.bind(&ovf);
+        try m.emit(a64.ldrImm(.x12, obj, layout.object.overflow_items_ptr));
+        try m.emit(a64.subImm(.x13, slot, @intCast(layout.object.inline_slot_cap), false));
+        try m.emit(a64.lslImm(.x13, .x13, 3));
+        try m.emit(a64.addReg(.x13, .x13, .x12));
+        try m.emit(a64.ldrImm(dst, .x13, 0));
+        m.bind(&done);
+    }
+
+    /// `JSObject.setSlot` in machine code — the mirror of
+    /// `emitSlotRead` with stores.
+    fn emitSlotWrite(self: *Compiler, src: a64.Reg, obj: a64.Reg, slot: a64.Reg) CompileError!void {
+        const m = &self.m;
+        var ovf = Masm.Label{};
+        defer ovf.fixups.deinit(m.gpa);
+        var done = Masm.Label{};
+        defer done.fixups.deinit(m.gpa);
+        try m.emit(a64.cmpImm(slot, @intCast(layout.object.inline_slot_cap), false));
+        try m.jumpCond(.cs, &ovf);
+        try m.emit(a64.lslImm(.x13, slot, 3));
+        try m.emit(a64.addReg(.x13, .x13, obj));
+        try m.emit(a64.strImm(src, .x13, layout.object.inline_slots));
+        try m.jump(&done);
+        m.bind(&ovf);
+        try m.emit(a64.ldrImm(.x12, obj, layout.object.overflow_items_ptr));
+        try m.emit(a64.subImm(.x13, slot, @intCast(layout.object.inline_slot_cap), false));
+        try m.emit(a64.lslImm(.x13, .x13, 3));
+        try m.emit(a64.addReg(.x13, .x13, .x12));
+        try m.emit(a64.strImm(src, .x13, 0));
+        m.bind(&done);
+    }
+
+    /// Bake the address of this site's IC cell into `dst`. Cells
+    /// are chunk-owned mutable side-state; the chunk outlives the
+    /// code, and compiled code only loads through the pointer, so
+    /// the GC weak-clear protocol is untouched (docs/jit.md §4.4).
+    fn emitCellAddr(self: *Compiler, dst: a64.Reg, ic_idx: u16) CompileError!void {
+        if (ic_idx >= self.chunk.inline_caches.len) return error.UnsupportedOp;
+        const addr: u64 = @intFromPtr(&self.chunk.inline_caches[ic_idx]);
+        try self.m.movImm64(dst, addr);
     }
 };
 
@@ -667,10 +871,10 @@ test "jit bistromath: unsupported opcodes mark the chunk dont_compile" {
     realm.jit_enabled = true;
 
     const src =
-        \\function g(o) { return o.x; }
+        \\function g(a, b) { return a / b; }
         \\let i = 0;
         \\let r = 0;
-        \\while (i < 200) { r = g({ x: i }); i = i + 1; }
+        \\while (i < 200) { r = g(i, 2); i = i + 1; }
         \\r;
     ;
     const program = try parser_mod.parseScript(arena.allocator(), src, null);
@@ -681,8 +885,191 @@ test "jit bistromath: unsupported opcodes mark the chunk dont_compile" {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,
     };
-    try testing.expectEqual(@as(i32, 199), v.asInt32());
+    try testing.expect(v.isDouble());
+    try testing.expectEqual(@as(f64, 99.5), v.asDouble());
     const js = chunk.function_templates[0].chunk.jit_state.?;
     try testing.expectEqual(Chunk.JitState.Tier.dont_compile, js.tier);
     try testing.expect(js.entry == null);
+}
+
+test "jit bistromath ic: own-property reads compile; shape miss tiers down" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // Same-shape receivers heat `get` into compiled code reading
+    // through the own-data IC; the final differently-shaped
+    // receiver misses the shape compare, tiers down, and Lantern
+    // serves (and refills) — the answer must be right either way.
+    const src =
+        \\function get(o) { return o.x; }
+        \\let i = 0;
+        \\let r = 0;
+        \\while (i < 200) { r = r + get({ x: 1 }); i = i + 1; }
+        \\r + get({ y: 0, x: 42 });
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 242), v.asInt32());
+    const js = chunk.function_templates[0].chunk.jit_state.?;
+    try testing.expectEqual(Chunk.JitState.Tier.compiled, js.tier);
+}
+
+test "jit bistromath ic: proto-load reads serve through the chain" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // `m` lives on C.prototype — the IC fills in proto-load mode,
+    // and the compiled fast path must verify proto identity, the
+    // proto's shape, and the realm revision counter, then read the
+    // PROTO's slots.
+    const src =
+        \\function C() {}
+        \\C.prototype.m = 42;
+        \\function getm(o) { return o.m; }
+        \\let i = 0;
+        \\let r = 0;
+        \\while (i < 200) { r = getm(new C()); i = i + 1; }
+        \\r;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 42), v.asInt32());
+    const getm_js = chunk.function_templates[1].chunk.jit_state.?;
+    try testing.expectEqual(Chunk.JitState.Tier.compiled, getm_js.tier);
+}
+
+test "jit bistromath ic: global reads compile and respect decl_revision" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    const src1 =
+        \\var G = 7;
+        \\function g() { return G; }
+        \\let i = 0;
+        \\let r = 0;
+        \\while (i < 200) { r = g(); i = i + 1; }
+        \\r;
+    ;
+    const program1 = try parser_mod.parseScript(arena.allocator(), src1, null);
+    var chunk1 = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program1, src1, null);
+    defer chunk1.deinit(testing.allocator);
+    const out1 = try interpreter.run(testing.allocator, &realm, &chunk1);
+    const v1 = switch (out1) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 7), v1.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk1.function_templates[0].chunk.jit_state.?.tier,
+    );
+
+    // A fresh global `let` bumps decl_revision — the compiled fast
+    // path must miss, tier down, and still answer correctly after
+    // Lantern refills against the new revision.
+    const src2 =
+        \\let H = 1;
+        \\g();
+    ;
+    const program2 = try parser_mod.parseScript(arena.allocator(), src2, null);
+    var chunk2 = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program2, src2, null);
+    defer chunk2.deinit(testing.allocator);
+    const out2 = try interpreter.run(testing.allocator, &realm, &chunk2);
+    const v2 = switch (out2) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 7), v2.asInt32());
+}
+
+test "jit bistromath ic: compiled writes hit the same barrier as Lantern" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // Heat `put` into compiled code, mature the receiver, then have
+    // COMPILED code store freshly-allocated (young) strings into it
+    // and collect. The §9 barrier mirror is what keeps the
+    // mature→young edge remembered; under ReleaseSafe the
+    // remembered-set verifier audits exactly this, and the read-back
+    // proves the value survived.
+    const src1 =
+        \\var target = { x: 0 };
+        \\function put(o, v) { o.x = v; }
+        \\let i = 0;
+        \\while (i < 200) { put(target, i); i = i + 1; }
+        \\target.x;
+    ;
+    const program1 = try parser_mod.parseScript(arena.allocator(), src1, null);
+    var chunk1 = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program1, src1, null);
+    defer chunk1.deinit(testing.allocator);
+    const out1 = try interpreter.run(testing.allocator, &realm, &chunk1);
+    const v1 = switch (out1) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 199), v1.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk1.function_templates[0].chunk.jit_state.?.tier,
+    );
+
+    // Promote `target` to the mature generation.
+    realm.collectGarbage();
+
+    // Compiled writes of young heap values into the mature object,
+    // then a minor collection: a missed barrier would sweep the
+    // string (ReleaseSafe poisons it 0xaa) before the read.
+    const src2 =
+        \\put(target, "young-" + 1234);
+        \\target.x;
+    ;
+    const program2 = try parser_mod.parseScript(arena.allocator(), src2, null);
+    var chunk2 = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program2, src2, null);
+    defer chunk2.deinit(testing.allocator);
+    const out2 = try interpreter.run(testing.allocator, &realm, &chunk2);
+    _ = switch (out2) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    realm.collectGarbageYoung();
+    const src3 = "target.x;";
+    const program3 = try parser_mod.parseScript(arena.allocator(), src3, null);
+    var chunk3 = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program3, src3, null);
+    defer chunk3.deinit(testing.allocator);
+    const out3 = try interpreter.run(testing.allocator, &realm, &chunk3);
+    const v3 = switch (out3) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v3.isString());
+    const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(v3.asString()));
+    try testing.expectEqualStrings("young-1234", s.flatBytes());
 }

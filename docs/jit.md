@@ -780,28 +780,35 @@ useful:
 
    3a. **Layout contract** — `src/runtime/jit/layout.zig`, the
        one module holding every offset machine code may read:
-       `CallFrame.{ip, accumulator}` (migrating Bistromath's
-       ad-hoc uses), `JSObject.{shape, slots}`,
-       `Environment.{parent, slots}`, `Realm.{step_budget,
-       interrupt}`, the `ICCell` / `CallICCell` fields. Comptime
-       asserts plus an executable proof test that `ldr`-walks
-       live objects and compares against Zig-side reads — the
-       slice-layout assumption gets a runtime witness, not a
-       comment.
+       `CallFrame.{ip, accumulator, running_realm}`,
+       `JSObject.{shape, prototype, inline/overflow slots}`,
+       `Realm.{step_budget, interrupt, proto_revision_counter,
+       globals}`, the `ICCell` / `CallICCell` fields, and the
+       NaN-box kind bits. Comptime asserts plus an executable
+       proof test that `ldr`-walks live objects and compares
+       against Zig-side reads — the slice-layout assumption gets
+       a runtime witness, not a comment. Shipped 2026-06.
    3b. **Bench `--jit` mode** — `cynic-bench` grows the flag so
-       every increment below lands with a measured number.
+       increments land with measured numbers. Deferred to land
+       with 3f: without OSR the bench fixtures' hot loops never
+       enter the tier, so there is nothing honest to measure yet.
    3c. **Property/global IC reads** — `lda_property` own-data
        and proto-load hits, `lda_global[_or_undef]`: inline
-       cell-hit fast paths reading the cells as data (§4.4); any
-       miss tiers down — Lantern re-runs the op and fills the
-       cell, so the next activation hits. Reads need no helper
-       ABI at all. Unlocks `prop_access`.
+       cell-hit fast paths reading the cells as data (§4.4),
+       including the split inline/overflow slot accessor and the
+       executing frame's realm for globals (§8.3); any miss
+       tiers down — Lantern re-runs the op and fills the cell,
+       so the next activation hits. Reads need no helper ABI at
+       all. Shipped 2026-06: full-corpus pass-sets identical
+       under force-compile (45193).
    3d. **Property IC writes** — `sta_property` same-shape hit,
        emitting exactly what the interpreter's hit path does
-       barrier-wise (§9 — audit the hit path first, mirror it
-       precisely, `verifyRememberedSet` under a `--jit`
-       gc-stress lane as the net); the transition mode tiers
-       down (it resizes slots). Unlocks `prop_write`.
+       barrier-wise (§9 — the slot store inline plus the same
+       `storeInternalSlot` call through a C shim); the
+       transition mode tiers down (it resizes slots). Shipped
+       2026-06; `verifyRememberedSet` audits the mirror under
+       the `--jit` gc-stress CI lane and a young-string-into-
+       mature-object unit test.
    3e. **Calls from compiled code** — the §4.5 helper-mediated
        design: materialize the args window, enter through the
        `call.zig` entry points (the audited-signature slow

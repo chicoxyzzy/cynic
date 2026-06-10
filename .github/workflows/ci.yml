@@ -411,6 +411,52 @@ jobs:
           diff -u /tmp/pass-interp.txt .test262-pass-cache.txt
           echo "pass-sets identical: $(wc -l < /tmp/pass-interp.txt) fixtures"
 
+  test262-gc-stress-jit:
+    name: test262 GC stress + JIT / ${{ matrix.bucket }} (advisory)
+    # The docs/jit.md §12 step-3d net: ReleaseSafe arms
+    # `verifyRememberedSet`, `--gc-threshold=1` collects on every
+    # allocation, and `--jit` force-compiles every eligible chunk —
+    # so a compiled property write whose barrier mirror drifted
+    # from the interpreter's (the §9 rule) trips the verifier with
+    # the offending (container, field, target) instead of slipping
+    # through as a rare flake. macos-latest because Bistromath is
+    # aarch64-only (see test262-jit-differential above). Buckets
+    # are the property-write-heavy surfaces; advisory like its
+    # sibling gc-stress job.
+    runs-on: macos-latest
+    timeout-minutes: 25
+    needs: build-and-test
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        bucket:
+          - built-ins/Object
+          - built-ins/Array
+          - language/expressions/object
+    steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up Zig
+        uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
+        with:
+          cache-key: gc-stress-jit
+
+      - name: GC stress sweep (ReleaseSafe, --gc-threshold=1, --jit)
+        timeout-minutes: 20
+        run: |
+          zig build test262-safe -- \
+            --quiet --jit --gc-threshold=1 --threads=3 \
+            --filter=${{ matrix.bucket }}
+
   test262-gc-stress:
     name: test262 GC stress / ${{ matrix.bucket }} (advisory)
     # Advisory, runs on PRs and main: gc-stress is a per-bucket
