@@ -766,14 +766,68 @@ useful:
    into CI as the advisory macos-arm64 job. Shipped 2026-06:
    full-corpus pass-sets byte-identical under force-compile
    (45166 passing / 4642 failing, both postures).
-3. **Coverage + OSR** — the helper-call layer (property ICs,
-   calls, environment slots), exception tier-down, the remaining
-   opcode emitters, OSR entry at back-edges; `dont_compile`
-   shrinks to generators/async. This is where the bench wins
-   arrive — the MVP only enters at call boundaries, so
-   hot-loop-called-once shapes (`arith_loop`) wait for OSR.
-   Differential + gc-stress + bench gates all green → default-on
-   conversation.
+3. **Coverage + OSR** — where the bench wins arrive. Expanded
+   into landable increments, each gated by the §10.2 differential
+   before it commits, ordered by which bench fixture it unlocks.
+   The register promotion of non-captured body `let`/`const`
+   (shipped 2026-06: env elision + TDZ-window `throw_if_hole`,
+   conformance-neutral at 45193) was this step's preamble — it
+   made whole register-only functions compilable before a single
+   new emitter existed.
+
+   3a. **Layout contract** — `src/runtime/jit/layout.zig`, the
+       one module holding every offset machine code may read:
+       `CallFrame.{ip, accumulator}` (migrating Bistromath's
+       ad-hoc uses), `JSObject.{shape, slots}`,
+       `Environment.{parent, slots}`, `Realm.{step_budget,
+       interrupt}`, the `ICCell` / `CallICCell` fields. Comptime
+       asserts plus an executable proof test that `ldr`-walks
+       live objects and compares against Zig-side reads — the
+       slice-layout assumption gets a runtime witness, not a
+       comment.
+   3b. **Bench `--jit` mode** — `cynic-bench` grows the flag so
+       every increment below lands with a measured number.
+   3c. **Property/global IC reads** — `lda_property` own-data
+       and proto-load hits, `lda_global[_or_undef]`: inline
+       cell-hit fast paths reading the cells as data (§4.4); any
+       miss tiers down — Lantern re-runs the op and fills the
+       cell, so the next activation hits. Reads need no helper
+       ABI at all. Unlocks `prop_access`.
+   3d. **Property IC writes** — `sta_property` same-shape hit,
+       emitting exactly what the interpreter's hit path does
+       barrier-wise (§9 — audit the hit path first, mirror it
+       precisely, `verifyRememberedSet` under a `--jit`
+       gc-stress lane as the net); the transition mode tiers
+       down (it resizes slots). Unlocks `prop_write`.
+   3e. **Calls from compiled code** — the §4.5 helper-mediated
+       design: materialize the args window, enter through the
+       `call.zig` entry points (the audited-signature slow
+       paths land here, with their consumer); a third
+       `EntryResult.threw` routes callee exceptions to the
+       dispatcher's unwind. `CallICCell` hits inline as a callee
+       compare. Self-recursive `tail_call` compiles as
+       frame-rebuild + jump-to-entry — §15.10 PTC without
+       native-stack growth; cross-function PTC tiers down for
+       now. Unlocks `method_call`.
+   3f. **OSR entry** — the loop-header `bytecode offset → code
+       offset` table (§4.6), consulted at Lantern's back-edges
+       and at `reEnterDispatch`'s ip-0 entry, which also brings
+       PTC-reframed and first-resume frames into the tier.
+       Unlocks `arith_loop` / `tail_recursion` — the
+       hot-loop-called-once shapes.
+   3g. **Long tail** — unary int32/bool ops; `lda_env` /
+       `sta_env` fixed-depth walks on the 3a contract
+       (nested-block lets, closures as callees, with the
+       `storeEnvSlot` barrier mirrored per §9); promotion
+       extended to methods / constructors / `var`; compiled
+       handler dispatch so hot try-loops stop tier-down
+       ping-ponging. Generators/async stay last.
+
+   Step exit: the §10 gates green with the tier doing real work —
+   full-corpus differential compared as pass-*sets* (a sorted
+   `comm`, never counts: counts let compensating flips hide), a
+   `--jit` lane in the gc-stress matrix, bench at the §11
+   targets — then the default-on conversation.
 4. **Spasm** — `wasm/spasm.zig` on the same substrate (§6) plus
    the §7.1 per-signature boundary thunks, gated by the wasm
    spec-testsuite at 100% with tiering forced, scored against the
