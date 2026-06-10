@@ -538,9 +538,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // length (the strict-mode bytecode path throws TypeError).
     if (target.is_array_exotic and std.mem.eql(u8, key_slice, "length")) {
         const lantern = @import("../lantern/interpreter.zig");
-        if (target.property_flags.get("length")) |flags| {
-            if (!flags.writable) return Value.false_;
-        }
+        if (!target.array_length_writable) return Value.false_;
         const new_len = (try lantern.arrayLengthCoerceSpec(realm, v)) orelse {
             return throwRangeError(realm, "Invalid array length");
         };
@@ -548,9 +546,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // a user-side toPrimitive can flip `length: { writable: false }`
         // mid-flight; per sec-10.4.2.4 step 12 the set then returns
         // false (not throws) when reached via [[Set]].
-        if (target.property_flags.get("length")) |flags| {
-            if (!flags.writable) return Value.false_;
-        }
+        if (!target.array_length_writable) return Value.false_;
         const tr = lantern.truncateArrayAtLength(realm.allocator, target, new_len);
         target.setArrayLength(realm.allocator, tr.final_length) catch return error.OutOfMemory;
         if (tr.blocked) return Value.false_;

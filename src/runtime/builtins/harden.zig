@@ -128,6 +128,11 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         // already non-configurable by construction.
         if (obj.is_module_namespace) return;
         obj.extensible = false;
+        // §23.1.4 — an array exotic's virtual `length` carries its
+        // [[Writable]] in the dedicated bit (it has no bag entry for
+        // the flag walk below to catch); freezing must clear it or
+        // `push` on a hardened array could still grow length.
+        if (obj.is_array_exotic) obj.array_length_writable = false;
         // Shape-mode write fast path (Phase 3 of
         // [docs/lazy-property-bag.md]) stores the live descriptor
         // attrs in the shape entry, NOT in `property_flags`. Shapes

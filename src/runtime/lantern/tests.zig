@@ -8341,6 +8341,99 @@ test "array literal: length is correct across hole patterns" {
     try expectScriptStringWithBuiltins("Object.keys([1,,3]).join(',')", "0,2");
 }
 
+// ── §10.4.2 Array exotic `length` — virtual-slot contract ───────────
+//
+// An Array's `length` is synthesized from the element storage
+// (`arrayLength()` + the length-writability bit), never materialized
+// as a bag property. These pin the §23.1.4 / §10.4.2.1 observable
+// surface that synthesis must preserve; they pass on the materialized
+// representation too (written first, TDD).
+
+test "array length: read, grow-with-holes, truncate" {
+    try expectScriptInt("var a=[1,2,3]; a.length", 3);
+    // §10.4.2.4 — shrinking truncates storage.
+    try expectScriptInt("var a=[1,2,3]; a.length=1; a[0] + (a[1]===undefined?10:0) + a.length", 12);
+    // Growing adds holes (reads fall to undefined).
+    try expectScriptInt("var a=[1]; a.length=4; a.length + (a[3]===undefined?10:0)", 14);
+    // Appending past the end extends length.
+    try expectScriptInt("var a=[1,2]; a[5]=9; a.length", 6);
+}
+
+test "array length: getOwnPropertyDescriptor synthesizes §23.1.4 flags" {
+    try expectScriptStringWithBuiltins(
+        \\const d = Object.getOwnPropertyDescriptor([1,2], "length");
+        \\d.value + ":" + d.writable + ":" + d.enumerable + ":" + d.configurable;
+    , "2:true:false:false");
+}
+
+test "array length: in, hasOwn, keys exclusion, getOwnPropertyNames inclusion" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [7,8];
+        \\("length" in a) + ":" + Object.hasOwn(a, "length") + ":" +
+        \\Object.keys(a).join(",") + ":" + Object.getOwnPropertyNames(a).join(",");
+    , "true:true:0,1:0,1,length");
+}
+
+test "array length: defineProperty writable:false freezes length, write then throws" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1,2,3];
+        \\Object.defineProperty(a, "length", { writable: false });
+        \\const d = Object.getOwnPropertyDescriptor(a, "length");
+        \\let threw = false;
+        \\try { a.length = 0; } catch (e) { threw = e instanceof TypeError; }
+        \\d.writable + ":" + threw + ":" + a.length;
+    , "false:true:3");
+}
+
+test "array length: non-writable length also blocks the implicit append extend" {
+    // §10.4.2.1 step 2 — a write past the end must fail (strict:
+    // TypeError) once length is non-writable, because it would
+    // implicitly grow length.
+    try expectScriptStringWithBuiltins(
+        \\const a = [1];
+        \\Object.defineProperty(a, "length", { writable: false });
+        \\let threw = false;
+        \\try { a[5] = 9; } catch (e) { threw = e instanceof TypeError; }
+        \\threw + ":" + a.length + ":" + (a[5] === undefined);
+    , "true:1:true");
+}
+
+test "array length: delete refused (non-configurable), strict TypeError" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1];
+        \\let threw = false;
+        \\try { delete a.length; } catch (e) { threw = e instanceof TypeError; }
+        \\threw + ":" + a.length;
+    , "true:1");
+}
+
+test "array length: defineProperty value performs ArraySetLength truncate" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1,2,3,4];
+        \\Object.defineProperty(a, "length", { value: 2 });
+        \\a.length + ":" + (a[2] === undefined) + ":" + a.join(",");
+    , "2:true:1,2");
+}
+
+test "array length: JSON.stringify and for-in never surface length" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1,2];
+        \\let keys = "";
+        \\for (const k in a) keys += k;
+        \\JSON.stringify(a) + ":" + keys;
+    , "[1,2]:01");
+}
+
+test "array length: Object.freeze covers length, push then throws" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1];
+        \\Object.freeze(a);
+        \\let threw = false;
+        \\try { a.push(2); } catch (e) { threw = e instanceof TypeError; }
+        \\threw + ":" + a.length;
+    , "true:1");
+}
+
 test "def_property dense-append fast path: array-literal element init" {
     // §13.2.4.1 ArrayAccumulation — a dense literal's elements append
     // straight onto `elements` (skipping the `hasOwn` precheck, the

@@ -310,6 +310,16 @@ pub fn ownPropertyKeysOrdered(
     // in the maps but were never recorded). The map iteration
     // order is itself insertion-ordered, so the leftover sweep
     // is deterministic.
+    //
+    // §23.1.4 — an array exotic's `length` is a VIRTUAL own
+    // property (synthesized, never in `own_key_order` or the bag).
+    // It is created at array birth, before any user-added string
+    // key, so it sorts first among the string keys (§10.1.11.1
+    // chronological order). Static slice — no allocation, no
+    // rooting.
+    if (obj.is_array_exotic) {
+        string_keys.append(realm.allocator, "length") catch return error.OutOfMemory;
+    }
     for (obj.own_key_order.items) |k| {
         if (std.mem.startsWith(u8, k, "__cynic_")) continue;
         // The order list refuses integer-index keys at recordKey
@@ -1764,7 +1774,6 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
                     const new_len: usize = @as(usize, idx) + 1;
                     if (target.arrayLength() < new_len) {
                         target.ensureElementsLen(realm.allocator, new_len) catch return error.OutOfMemory;
-                        target.syncLengthProperty(realm.allocator) catch return error.OutOfMemory;
                     }
                 }
             }
@@ -3047,6 +3056,12 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // see the override. Same dance for `seal` (configurable
     // only).
     try freezeArrayIndexedSlots(realm, obj);
+    // §23.1.4 — the array exotic's virtual `length` carries its
+    // [[Writable]] in the dedicated bit, not in `property_flags`;
+    // freezing must clear it or `push` past the frozen length
+    // would still extend. (Seal leaves writability alone, and
+    // `length` is already non-configurable, so seal needs nothing.)
+    if (obj.is_array_exotic) obj.array_length_writable = false;
     // §10.1.4.1 SetIntegrityLevel(O, frozen) — mark every own
     // data property `{ writable: false, configurable: false }`
     // and every accessor `{ configurable: false }`. The shape

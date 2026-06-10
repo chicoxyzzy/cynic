@@ -592,10 +592,8 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // to u32, throws RangeError on invalid value, and truncates
     // descending indexed slots. Non-writable length blocks.
     if (std.mem.eql(u8, key, "length") and o.is_array_exotic) {
-        if (o.property_flags.get("length")) |flags| {
-            if (!flags.writable) {
-                return throwTypeError(realm, "Cannot assign to read-only property 'length'");
-            }
+        if (!o.array_length_writable) {
+            return throwTypeError(realm, "Cannot assign to read-only property 'length'");
         }
         // §10.4.2.4 ArraySetLength — drives the spec-mandated TWO
         // ToNumber calls (step 3 via ToUint32, step 4 standalone).
@@ -605,10 +603,8 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
         };
         // Re-check writability — a user valueOf could have flipped
         // `length: { writable: false }` between the two coercions.
-        if (o.property_flags.get("length")) |flags| {
-            if (!flags.writable) {
-                return throwTypeError(realm, "Cannot assign to read-only property 'length'");
-            }
+        if (!o.array_length_writable) {
+            return throwTypeError(realm, "Cannot assign to read-only property 'length'");
         }
         const tr = lantern.truncateArrayAtLength(realm.allocator, o, new_len);
         o.setArrayLength(realm.allocator, tr.final_length) catch return error.OutOfMemory;
@@ -623,13 +619,10 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     if (o.is_array_exotic) {
         if (JSObject.canonicalIntegerIndex(key)) |idx| {
             if (!o.ownDataContains(key)) {
-                if (o.property_flags.get("length")) |flags| {
-                    if (!flags.writable) {
-                        const cur_len_v = o.lookupOwn("length") orelse Value.fromInt32(0);
-                        const cur_len: u32 = if (cur_len_v.isInt32()) @intCast(@max(0, cur_len_v.asInt32())) else 0;
-                        if (idx >= cur_len) {
-                            return throwTypeError(realm, "Cannot extend non-writable array length");
-                        }
+                if (!o.array_length_writable) {
+                    const cur_len: u32 = o.arrayLength();
+                    if (idx >= cur_len) {
+                        return throwTypeError(realm, "Cannot extend non-writable array length");
                     }
                 }
                 realm.heap.writeBarrier(.{ .object = o }, value);

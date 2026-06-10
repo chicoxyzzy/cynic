@@ -1089,12 +1089,25 @@ pub const JSObject = struct {
     /// canonical-integer-index dispatch in `set` / `get` / etc.,
     /// so user code never needs to think about it.
     ///
-    /// `length` (§23.1.4) is still a real own property in
-    /// `properties`; the indexed-write helpers keep
-    /// `properties["length"]` in sync with `elements.items.len`.
-    /// `Object.getOwnPropertyDescriptor(arr, "length")` returns a
-    /// data descriptor as the spec demands.
+    /// `length` (§23.1.4) is a VIRTUAL own property: synthesized
+    /// from `arrayLength()` (the indexed-storage size) plus the
+    /// `array_length_writable` bit below at every consult point
+    /// (`get` / `hasOwn` / `flagsFor` / key enumeration) — never
+    /// materialized in `properties`. This kills the per-element
+    /// `length` hashmap sync and the per-array bag allocation the
+    /// materialized form paid on every array literal, and makes
+    /// `a.length` reads O(1) with no hashing.
+    /// `Object.getOwnPropertyDescriptor(arr, "length")` still
+    /// returns the §23.1.4 data descriptor.
     is_array_exotic: bool = false,
+    /// §10.4.2 `length`.[[Writable]] for an array exotic — cleared
+    /// by `Object.defineProperty(arr, "length", {writable:false})`
+    /// (and `Object.freeze`); §10.4.2.4 step 17.b gates length
+    /// writes and §10.4.2.1 step 2 gates the implicit grow on
+    /// index-past-end writes against it. [[Enumerable]] /
+    /// [[Configurable]] are constant `false` per §23.1.4, so one
+    /// bit carries the whole mutable descriptor state.
+    array_length_writable: bool = true,
     /// §10.4.4 — Arguments exotic brand. `Object.prototype.toString`
     /// reads this to produce `"[object Arguments]"` per §22.1.3.6
     /// step 4 (the "Arguments" case keyed off the internal slot
@@ -1213,6 +1226,8 @@ pub const JSObject = struct {
     /// through `lda_property`'s helper stack (or
     /// `lookupAccessor` for the accessor half).
     pub fn lookupOwn(self: *const JSObject, key: []const u8) ?Value {
+        // §23.1.4 — the array exotic's virtual `length`.
+        if (self.isVirtualLengthKey(key)) return self.arrayLengthValue();
         if (self.shape) |sh| {
             if (sh.lookup(key)) |entry| {
                 if (entry.kind == .data and entry.slot < self.slotCount()) {
@@ -1233,6 +1248,9 @@ pub const JSObject = struct {
     /// callsites that were ambiguous about which representation
     /// is authoritative under [docs/lazy-property-bag.md].
     pub fn ownDataContains(self: *const JSObject, key: []const u8) bool {
+        // §23.1.4 — the array exotic's virtual `length` is an own
+        // data property.
+        if (self.isVirtualLengthKey(key)) return true;
         if (self.shape) |sh| {
             if (sh.lookup(key)) |entry| {
                 if (entry.kind == .data) return true;
@@ -2078,6 +2096,16 @@ pub const JSObject = struct {
     /// shape first and only fall back to `property_flags` for
     /// dictionary-mode keys.
     pub fn flagsFor(self: *const JSObject, key: []const u8) PropertyFlags {
+        // §23.1.4 — the array exotic's virtual `length` descriptor:
+        // only [[Writable]] is mutable (the bit); [[Enumerable]] and
+        // [[Configurable]] are constant false.
+        if (self.isVirtualLengthKey(key)) {
+            return .{
+                .writable = self.array_length_writable,
+                .enumerable = false,
+                .configurable = false,
+            };
+        }
         if (self.shape) |sh| {
             if (sh.lookup(key)) |entry| {
                 if (entry.kind == .data) return entry.attrs;
@@ -2171,6 +2199,18 @@ pub const JSObject = struct {
         if (bump_epoch and !is_default) {
             if (self.heap) |h| h.bumpProtoStructEpoch();
         }
+        // §23.1.4 / §10.4.2.1 — the array exotic's virtual `length`.
+        // A flagged install (defineProperty machinery, freeze) lands
+        // here: the value routes to the indexed storage and the only
+        // mutable descriptor field, [[Writable]], lands in the bit.
+        // ([[Enumerable]] / [[Configurable]] are constant false; the
+        // defineProperty builtin validates illegal descriptors before
+        // calling down.)
+        if (self.isVirtualLengthKey(key)) {
+            if (valueToArrayLength(v)) |n| try self.setArrayLength(allocator, n);
+            self.array_length_writable = flags.writable;
+            return;
+        }
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 if (is_default) {
@@ -2188,7 +2228,6 @@ pub const JSObject = struct {
                 const new_len: usize = @as(usize, idx) + 1;
                 if (self.arrayLength() < new_len) {
                     try self.ensureElementsLen(allocator, new_len);
-                    try self.syncLengthProperty(allocator);
                 }
                 self.holeIndexed(idx);
             }
@@ -2241,6 +2280,25 @@ pub const JSObject = struct {
     /// constructor wiring, etc.) where the caller already knows
     /// the descriptor flags it wants. User-driven writes go
     /// through `setIfWritable` (which respects flags).
+    /// Coerce an already-numeric Value to an array length, or `null`
+    /// when it isn't one (negative, fractional, out of u32 range, or
+    /// not a number). The JS-visible length writes do the full
+    /// §10.4.2.4 ToUint32 + RangeError dance in the interpreter
+    /// BEFORE reaching the storage funnels here; this covers the
+    /// native builders that pass a known-good integer.
+    fn valueToArrayLength(v: Value) ?u32 {
+        if (v.isInt32()) {
+            const i = v.asInt32();
+            return if (i >= 0) @intCast(i) else null;
+        }
+        if (v.isDouble()) {
+            const d = v.asDouble();
+            if (d >= 0 and d <= 4294967295.0 and d == @trunc(d))
+                return @intFromFloat(d);
+        }
+        return null;
+    }
+
     pub fn set(self: *JSObject, allocator: std.mem.Allocator, key: []const u8, v: Value) !void {
         // DISABLED-BISECT
         // §10.4.2 Array exotic — integer-indexed keys land in
@@ -2249,6 +2307,14 @@ pub const JSObject = struct {
         // override). The bypass `set` skips the writability gate
         // by design (internal installers).
         if (self.is_array_exotic) {
+            // The virtual `length` slot — route to the indexed
+            // storage (§10.4.2.4's storage effect). This bypass API
+            // skips the writability gate by design, like every other
+            // key through it.
+            if (self.isVirtualLengthKey(key)) {
+                if (valueToArrayLength(v)) |n| return self.setArrayLength(allocator, n);
+                return; // non-length-shaped value: nothing to store
+            }
             if (canonicalIntegerIndex(key)) |idx| {
                 if (self.properties.contains(key)) {
                     try self.bagPut(allocator, key, v);
@@ -2471,6 +2537,13 @@ pub const JSObject = struct {
         // descriptor-flag-demoted to the named-property bag, in
         // which case the bag's `writable` gate applies.
         if (self.is_array_exotic) {
+            // The virtual `length` slot — §10.4.2.4 step 17.b gates
+            // on the writability bit, then the storage effect.
+            if (self.isVirtualLengthKey(key)) {
+                if (!self.array_length_writable) return false;
+                if (valueToArrayLength(v)) |n| try self.setArrayLength(allocator, n);
+                return true;
+            }
             if (canonicalIntegerIndex(key)) |idx| {
                 if (self.properties.contains(key)) {
                     const flags = self.flagsFor(key);
@@ -2527,15 +2600,31 @@ pub const JSObject = struct {
     /// that need full §10.1.8 semantics must use
     /// `intrinsics.getPropertyChain` (realm-aware) or
     /// `lda_property` (interpreter-hot).
+    /// Whether `key` is the virtual `length` of an array exotic.
+    pub inline fn isVirtualLengthKey(self: *const JSObject, key: []const u8) bool {
+        return self.is_array_exotic and key.len == 6 and std.mem.eql(u8, key, "length");
+    }
+
+    /// §23.1.4 — the array exotic's `length` as a Value, computed
+    /// from the indexed storage (the virtual slot's current value).
+    pub fn arrayLengthValue(self: *const JSObject) Value {
+        const n: u32 = self.arrayLength();
+        return if (n <= std.math.maxInt(i32))
+            Value.fromInt32(@intCast(n))
+        else
+            Value.fromDouble(@floatFromInt(n));
+    }
+
     pub fn get(self: *const JSObject, key: []const u8) Value {
         // §10.4.2 Array exotic — integer-indexed reads come from
         // the indexed storage (packed `elements` or `sparse_elements`).
         // Holes (§10.4.2.1) fall through to the prototype chain.
-        // `length` stays in `properties` and is read by the regular
-        // path below.
+        // `length` is the virtual §23.1.4 slot, synthesized here.
         if (self.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 if (self.tryGetIndexedOwn(idx)) |v| return v;
+            } else if (self.isVirtualLengthKey(key)) {
+                return self.arrayLengthValue();
             }
         }
         // §10.1 own named-property read. Shape-first when present:
@@ -2585,6 +2674,9 @@ pub const JSObject = struct {
     /// `getAccessor` separately — this helper is for the data
     /// lookup that closes out an `OrdinaryGet` chain walk.
     pub fn ownDataLookup(self: *const JSObject, key: []const u8) ?Value {
+        // §23.1.4 — an array exotic's `length` is an own data
+        // property, but virtual (computed, never stored).
+        if (self.isVirtualLengthKey(key)) return self.arrayLengthValue();
         if (self.shape) |sh| {
             if (sh.lookup(key)) |entry| {
                 if (entry.kind == .data and entry.slot < self.slotCount()) {
@@ -2621,6 +2713,8 @@ pub const JSObject = struct {
         // include them.
         if (self.is_module_namespace and self.hasNamespaceRedirect(key)) return true;
         if (self.is_array_exotic) {
+            // §23.1.4 — the virtual `length` is an own property.
+            if (self.isVirtualLengthKey(key)) return true;
             if (canonicalIntegerIndex(key)) |idx| {
                 return self.hasOwnIndexedSlot(idx);
             }
@@ -2834,7 +2928,6 @@ pub const JSObject = struct {
         // only in the wrapper. Idempotent + O(1)-rejected for the
         // young-array / primitive-element common case.
         if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
-        try self.syncLengthProperty(allocator);
     }
 
     /// Mirror of `setIndexed` for the hole sentinel — used by
@@ -2919,14 +3012,9 @@ pub const JSObject = struct {
     /// Write `length === arrayLength()` into `properties`.
     /// Called from every indexed mutator so the data property
     /// stays in sync with the storage's logical length.
-    pub fn syncLengthProperty(self: *JSObject, allocator: std.mem.Allocator) !void {
-        const len_now: u64 = self.arrayLength();
-        const len_v: Value = if (len_now <= std.math.maxInt(i32))
-            Value.fromInt32(@intCast(len_now))
-        else
-            Value.fromDouble(@floatFromInt(len_now));
-        try self.properties.put(allocator, "length", len_v);
-    }
+    // (`syncLengthProperty` is gone — `length` is the virtual
+    // §23.1.4 slot computed by `arrayLengthValue`; the indexed
+    // storage IS the length, so there is nothing to keep in sync.)
 
     /// Truncate indexed storage to `new_len`. Used by
     /// §10.4.2.4 ArraySetLength and the `length`-write fast path.
@@ -2979,7 +3067,6 @@ pub const JSObject = struct {
         } else if (new_len > cur_len) {
             try self.ensureElementsLen(allocator, new_len);
         }
-        try self.syncLengthProperty(allocator);
     }
 
     /// §10.4.2 — flip an already-allocated JSObject into an
@@ -2989,20 +3076,14 @@ pub const JSObject = struct {
     /// flag, installs `length: 0` with §23.1.4 flags, and is a
     /// no-op if already an array exotic.
     pub fn markAsArrayExotic(self: *JSObject, allocator: std.mem.Allocator) !void {
+        _ = allocator;
         if (self.is_array_exotic) return;
         self.is_array_exotic = true;
-        // Install the exotic's own `length` (§23.1.4 — non-enumerable,
-        // non-configurable) without bumping `heap.proto_struct_epoch`:
-        // the object is freshly created here (every caller marks a just-
-        // allocated JSObject) and so is never a live prototype, making
-        // the bump a false-positive transition-IC invalidation that
-        // deopts hot constructor loops building arrays. See
-        // `setWithFlagsNoEpochBump`.
-        try self.setWithFlagsNoEpochBump(allocator, "length", Value.fromInt32(0), .{
-            .writable = true,
-            .enumerable = false,
-            .configurable = false,
-        });
+        // `length` (§23.1.4) is the VIRTUAL slot — synthesized from the
+        // indexed storage by `arrayLengthValue` / `flagsFor` / the key
+        // walks — so there is nothing to install: no bag entry, no
+        // hashmap traffic, no per-array allocation. The writability
+        // bit `array_length_writable` defaults true per §23.1.4.
     }
 
     /// Drop the indexed slot at `idx` — sets it to the hole
@@ -3035,6 +3116,9 @@ pub const JSObject = struct {
             if (self.heap) |h| h.bumpProtoStructEpoch();
         }
         if (self.is_array_exotic) {
+            // §23.1.4 — `length` is non-configurable; the virtual
+            // slot can never be deleted.
+            if (self.isVirtualLengthKey(key)) return false;
             if (canonicalIntegerIndex(key)) |idx| {
                 _ = self.removeIndexed(idx);
                 if (self.ownDataContains(key)) {
