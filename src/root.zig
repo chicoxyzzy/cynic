@@ -141,4 +141,7 @@ test {
     _ = @import("runtime/wasm/validator.zig");
     _ = @import("runtime/wasm/interpreter.zig");
     _ = @import("runtime/wasm/tests.zig");
+    _ = @import("runtime/jit/code_alloc.zig");
+    _ = @import("runtime/jit/asm_aarch64.zig");
+    _ = @import("runtime/jit/masm.zig");
 }

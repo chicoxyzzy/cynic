@@ -752,8 +752,11 @@ by then) before the next starts; every step is independently
 useful:
 
 1. **Substrate** — `src/runtime/jit/`: arm64 encoder + masm +
-   code allocator + golden tests + a `cynic --jit eval`-reachable
-   smoke stub (compile a hand-built "add two Smis" chunk, call it).
+   code allocator, golden-tested, with executable smoke proofs in
+   the unit suite — install-and-run stubs up through a
+   fixup-patched loop, a helper call, and a hand-emitted NaN-boxed
+   "add two Smis" at the `Value` level. The `--jit` flag arrives
+   with step 2, where it first gates real behavior.
 2. **Bistromath MVP** — the §4.3 inline set (moves, Smi arith,
    compares, jumps, `loop_inc_lt`) + helper calls for property ICs
    and calls; everything else `dont_compile`. Differential sweep

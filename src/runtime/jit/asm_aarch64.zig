@@ -1,0 +1,253 @@
+//! AArch64 (A64) instruction encoders for the JIT substrate — pure
+//! functions from operands to 32-bit instruction words. Buffering,
+//! labels, and branch fixups live in masm.zig; this file knows only
+//! bit layouts. Encodings follow the Arm ARM (DDI 0487) A64 ISA;
+//! every encoder is pinned by a golden test, and masm.zig's
+//! execution tests run the same words on real silicon.
+//! Design record: docs/jit.md §7.
+//!
+//! Scope grows on demand (docs/jit.md §12 step 1): the set below is
+//! what the substrate smoke and the Bistromath MVP need — moves,
+//! 64-bit immediate halves, add/sub (register + immediate, flag
+//! variants), logical ops, shifts, scaled loads/stores, and branches.
+
+const std = @import("std");
+
+/// General-purpose X registers. Encodings that need register 31
+/// (XZR as operand, SP never) spell it internally — keeping 31 out
+/// of the public enum avoids the classic XZR/SP confusion.
+pub const Reg = enum(u5) {
+    // zig fmt: off
+    x0, x1, x2, x3, x4, x5, x6, x7,
+    x8, x9, x10, x11, x12, x13, x14, x15,
+    x16, x17, x18, x19, x20, x21, x22, x23,
+    x24, x25, x26, x27, x28,
+    /// x29 — the frame pointer in the AAPCS64 ABI.
+    fp,
+    /// x30 — the link register.
+    lr,
+    // zig fmt: on
+};
+
+/// Condition codes for `b.cond` (Arm ARM C1.2.4).
+pub const Cond = enum(u4) {
+    eq, ne, cs, cc, mi, pl, vs, vc, hi, ls, ge, lt, gt, le, al, nv,
+};
+
+const xzr: u32 = 31;
+
+inline fn r(reg: Reg) u32 {
+    return @intFromEnum(reg);
+}
+
+// ---- moves and immediates -------------------------------------------------
+
+/// MOVZ Xd, #imm16, LSL #(hw*16)
+pub fn movz(rd: Reg, imm16: u16, hw: u2) u32 {
+    return 0xD2800000 | (@as(u32, hw) << 21) | (@as(u32, imm16) << 5) | r(rd);
+}
+
+/// MOVK Xd, #imm16, LSL #(hw*16)
+pub fn movk(rd: Reg, imm16: u16, hw: u2) u32 {
+    return 0xF2800000 | (@as(u32, hw) << 21) | (@as(u32, imm16) << 5) | r(rd);
+}
+
+/// MOVN Xd, #imm16, LSL #(hw*16)
+pub fn movn(rd: Reg, imm16: u16, hw: u2) u32 {
+    return 0x92800000 | (@as(u32, hw) << 21) | (@as(u32, imm16) << 5) | r(rd);
+}
+
+/// MOV Xd, Xm — alias of ORR Xd, XZR, Xm.
+pub fn movReg(rd: Reg, rm: Reg) u32 {
+    return 0xAA000000 | (r(rm) << 16) | (xzr << 5) | r(rd);
+}
+
+// ---- arithmetic ------------------------------------------------------------
+
+/// ADD Xd, Xn, Xm
+pub fn addReg(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x8B000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// SUB Xd, Xn, Xm
+pub fn subReg(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0xCB000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// ADDS Xd, Xn, Xm (flag-setting — the Smi overflow check's friend)
+pub fn addsReg(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0xAB000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// SUBS Xd, Xn, Xm
+pub fn subsReg(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0xEB000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// CMP Xn, Xm — alias of SUBS XZR, Xn, Xm.
+pub fn cmpReg(rn: Reg, rm: Reg) u32 {
+    return 0xEB000000 | (r(rm) << 16) | (r(rn) << 5) | xzr;
+}
+
+/// ADD Xd, Xn, #imm12 (optionally LSL #12)
+pub fn addImm(rd: Reg, rn: Reg, imm12: u12, lsl12: bool) u32 {
+    return 0x91000000 | (@as(u32, @intFromBool(lsl12)) << 22) |
+        (@as(u32, imm12) << 10) | (r(rn) << 5) | r(rd);
+}
+
+/// SUB Xd, Xn, #imm12 (optionally LSL #12)
+pub fn subImm(rd: Reg, rn: Reg, imm12: u12, lsl12: bool) u32 {
+    return 0xD1000000 | (@as(u32, @intFromBool(lsl12)) << 22) |
+        (@as(u32, imm12) << 10) | (r(rn) << 5) | r(rd);
+}
+
+/// CMP Xn, #imm12 — alias of SUBS XZR, Xn, #imm12.
+pub fn cmpImm(rn: Reg, imm12: u12, lsl12: bool) u32 {
+    return 0xF1000000 | (@as(u32, @intFromBool(lsl12)) << 22) |
+        (@as(u32, imm12) << 10) | (r(rn) << 5) | xzr;
+}
+
+// ---- logical and shifts ----------------------------------------------------
+
+/// AND Xd, Xn, Xm
+pub fn andReg(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x8A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// ORR Xd, Xn, Xm
+pub fn orrReg(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0xAA000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// EOR Xd, Xn, Xm
+pub fn eorReg(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0xCA000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// LSL Xd, Xn, #shift — alias of UBFM Xd, Xn, #(-shift MOD 64), #(63-shift).
+pub fn lslImm(rd: Reg, rn: Reg, shift: u6) u32 {
+    const immr: u32 = @as(u32, 64 - @as(u32, shift)) & 0x3F;
+    const imms: u32 = 63 - @as(u32, shift);
+    return 0xD3400000 | (immr << 16) | (imms << 10) | (r(rn) << 5) | r(rd);
+}
+
+/// LSR Xd, Xn, #shift — alias of UBFM Xd, Xn, #shift, #63.
+pub fn lsrImm(rd: Reg, rn: Reg, shift: u6) u32 {
+    return 0xD340FC00 | (@as(u32, shift) << 16) | (r(rn) << 5) | r(rd);
+}
+
+// ---- memory ----------------------------------------------------------------
+
+/// LDR Xt, [Xn, #byte_off] — unsigned scaled offset; `byte_off`
+/// must be 8-byte aligned and ≤ 32760 (imm12 × 8).
+pub fn ldrImm(rt: Reg, rn: Reg, byte_off: u15) u32 {
+    std.debug.assert(byte_off % 8 == 0);
+    return 0xF9400000 | (@as(u32, byte_off / 8) << 10) | (r(rn) << 5) | r(rt);
+}
+
+/// STR Xt, [Xn, #byte_off] — unsigned scaled offset, same limits.
+pub fn strImm(rt: Reg, rn: Reg, byte_off: u15) u32 {
+    std.debug.assert(byte_off % 8 == 0);
+    return 0xF9000000 | (@as(u32, byte_off / 8) << 10) | (r(rn) << 5) | r(rt);
+}
+
+/// STR Xt, [SP, #simm9]! — pre-indexed push through SP. Keep SP
+/// 16-byte aligned per AAPCS64 (use multiples of -16).
+pub fn strPreIdxSp(rt: Reg, simm9: i9) u32 {
+    const sp: u32 = 31;
+    return 0xF8000C00 | (@as(u32, @as(u9, @bitCast(simm9))) << 12) | (sp << 5) | r(rt);
+}
+
+/// LDR Xt, [SP], #simm9 — post-indexed pop through SP.
+pub fn ldrPostIdxSp(rt: Reg, simm9: i9) u32 {
+    const sp: u32 = 31;
+    return 0xF8400400 | (@as(u32, @as(u9, @bitCast(simm9))) << 12) | (sp << 5) | r(rt);
+}
+
+// ---- branches --------------------------------------------------------------
+
+/// B #(off_words*4) — PC-relative, in instruction words.
+pub fn b(off_words: i26) u32 {
+    return 0x14000000 | (@as(u32, @as(u26, @bitCast(off_words))));
+}
+
+/// BL #(off_words*4)
+pub fn bl(off_words: i26) u32 {
+    return 0x94000000 | (@as(u32, @as(u26, @bitCast(off_words))));
+}
+
+/// B.cond #(off_words*4)
+pub fn bCond(cond: Cond, off_words: i19) u32 {
+    return 0x54000000 | (@as(u32, @as(u19, @bitCast(off_words))) << 5) |
+        @intFromEnum(cond);
+}
+
+/// CBZ Xt, #(off_words*4)
+pub fn cbz(rt: Reg, off_words: i19) u32 {
+    return 0xB4000000 | (@as(u32, @as(u19, @bitCast(off_words))) << 5) | r(rt);
+}
+
+/// CBNZ Xt, #(off_words*4)
+pub fn cbnz(rt: Reg, off_words: i19) u32 {
+    return 0xB5000000 | (@as(u32, @as(u19, @bitCast(off_words))) << 5) | r(rt);
+}
+
+/// BR Xn
+pub fn br(rn: Reg) u32 {
+    return 0xD61F0000 | (r(rn) << 5);
+}
+
+/// BLR Xn
+pub fn blr(rn: Reg) u32 {
+    return 0xD63F0000 | (r(rn) << 5);
+}
+
+/// RET (x30)
+pub fn ret() u32 {
+    return 0xD65F03C0;
+}
+
+/// NOP
+pub fn nop() u32 {
+    return 0xD503201F;
+}
+
+/// BRK #imm16 — debug trap; handy as a poison filler in tests.
+pub fn brk(imm16: u16) u32 {
+    return 0xD4200000 | (@as(u32, imm16) << 5);
+}
+
+// ---- golden tests ----------------------------------------------------------
+// Byte-exact encodings, cross-checked against `llvm-mc -triple
+// arm64 -show-encoding` output. These pin the bit layouts; the
+// execution tests in masm.zig prove them on hardware.
+
+test "jit asm_aarch64: golden encodings" {
+    const expectEqual = std.testing.expectEqual;
+    try expectEqual(@as(u32, 0xD65F03C0), ret());
+    try expectEqual(@as(u32, 0xD503201F), nop());
+    try expectEqual(@as(u32, 0xD2800540), movz(.x0, 42, 0)); // movz x0, #42
+    try expectEqual(@as(u32, 0xF2B7DDE0), movk(.x0, 0xBEEF, 1)); // movk x0, #0xbeef, lsl #16
+    try expectEqual(@as(u32, 0xAA0103E0), movReg(.x0, .x1)); // mov x0, x1
+    try expectEqual(@as(u32, 0x8B010000), addReg(.x0, .x0, .x1)); // add x0, x0, x1
+    try expectEqual(@as(u32, 0xCB020021), subReg(.x1, .x1, .x2)); // sub x1, x1, x2
+    try expectEqual(@as(u32, 0xEB02003F), cmpReg(.x1, .x2)); // cmp x1, x2
+    try expectEqual(@as(u32, 0x91000820), addImm(.x0, .x1, 2, false)); // add x0, x1, #2
+    try expectEqual(@as(u32, 0xF100043F), cmpImm(.x1, 1, false)); // cmp x1, #1
+    try expectEqual(@as(u32, 0x8A020020), andReg(.x0, .x1, .x2)); // and x0, x1, x2
+    try expectEqual(@as(u32, 0xD370BC20), lslImm(.x0, .x1, 16)); // lsl x0, x1, #16
+    try expectEqual(@as(u32, 0xD350FC20), lsrImm(.x0, .x1, 16)); // lsr x0, x1, #16
+    try expectEqual(@as(u32, 0xF9400020), ldrImm(.x0, .x1, 0)); // ldr x0, [x1]
+    try expectEqual(@as(u32, 0xF9000020), strImm(.x0, .x1, 0)); // str x0, [x1]
+    try expectEqual(@as(u32, 0xF9400C20), ldrImm(.x0, .x1, 24)); // ldr x0, [x1, #24]
+    try expectEqual(@as(u32, 0xF81F0FFE), strPreIdxSp(.lr, -16)); // str x30, [sp, #-16]!
+    try expectEqual(@as(u32, 0xF84107FE), ldrPostIdxSp(.lr, 16)); // ldr x30, [sp], #16
+    try expectEqual(@as(u32, 0x14000001), b(1)); // b .+4
+    try expectEqual(@as(u32, 0x17FFFFFF), b(-1)); // b .-4
+    try expectEqual(@as(u32, 0x54000040), bCond(.eq, 2)); // b.eq .+8
+    try expectEqual(@as(u32, 0x54FFFFEB), bCond(.lt, -1)); // b.lt .-4
+    try expectEqual(@as(u32, 0xB4000041), cbz(.x1, 2)); // cbz x1, .+8
+    try expectEqual(@as(u32, 0xD63F0200), blr(.x16)); // blr x16
+    try expectEqual(@as(u32, 0xD61F0220), br(.x17)); // br x17
+    try expectEqual(@as(u32, 0xD43E0000), brk(0xF000)); // brk #0xf000
+}
