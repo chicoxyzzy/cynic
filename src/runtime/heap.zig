@@ -1267,7 +1267,40 @@ pub const Heap = struct {
     /// recursion — a missed mark would be a use-after-free, far worse
     /// than a deep frame on an already-failing allocator.
     inline fn enqueue(self: *Heap, v: Value) void {
+        // Primitives carry no heap pointer — nothing to mark. One tag
+        // test here keeps them off the worklist entirely; un-filtered,
+        // each costs an append + pop + the full `markValue` cast chain
+        // to reach a no-op (≈16 % of the promise_chain profile was
+        // exactly this worklist traffic — int results, undefined
+        // `captured_this`, boolean flags).
+        if (!v.isHeapValue()) return;
+        // Already-marked referent — `markValue` would short-circuit on
+        // the colour at pop; skip the push+pop round-trip now. High
+        // fan-in graphs (promise ↔ reaction ↔ capability) and the
+        // per-minor-cycle root scan of mature globals re-reference
+        // marked nodes constantly. A duplicate that races between this
+        // check and the pop is still filtered by `markValue`'s own
+        // idempotent colour check, so this is purely a traffic cut.
+        if (self.alreadyMarked(v)) return;
         self.mark_worklist.append(self.allocator, v) catch self.markValue(v);
+    }
+
+    /// Whether the heap value behind `v` already carries this cycle's
+    /// mark colour — i.e. `markValue(v)` would be a no-op (or, for a
+    /// symbol / bigint, an idempotent re-store). Mirrors `markValue`'s
+    /// dispatch; any heap kind it doesn't recognise reports `false` so
+    /// the value still flows to `markValue` for the authoritative
+    /// treatment.
+    inline fn alreadyMarked(self: *const Heap, v: Value) bool {
+        if (v.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(v.asString()));
+            return s.mark_color == self.live_color;
+        }
+        if (valueAsSymbol(v)) |sym| return sym.mark_color == self.live_color;
+        if (valueAsBigInt(v)) |bi| return bi.mark_color == self.live_color;
+        if (valueAsFunction(v)) |f| return f.mark_color == self.live_color;
+        if (valueAsPlainObject(v)) |o| return o.mark_color == self.live_color;
+        return false;
     }
 
     /// Mark a single value if it carries a heap pointer. Idempotent.
@@ -3607,7 +3640,7 @@ pub const Heap = struct {
     /// everything. In practice the list append almost never OOMs
     /// (amortised growth, tiny entries); a real OOM here means the
     /// process is already failing.
-    pub fn writeBarrier(self: *Heap, container: Container, v: Value) void {
+    pub inline fn writeBarrier(self: *Heap, container: Container, v: Value) void {
         // Fast reject 1 — non-heap value can't create any
         // generational edge. The fixture-heavy
         // `o.x = i` (int32) case hits this in O(1) without
@@ -3616,11 +3649,25 @@ pub const Heap = struct {
         // sample time on the un-fast-pathed barrier; the cheap
         // tag-compare here collapses it to ~0 % for primitive
         // stores. Doubles, ints, bools, null, undefined, hole.
+        //
+        // The two rejects inline at every store site (the union
+        // tag is comptime-known there, so `generation()` folds to
+        // a single field load); only a heap value stored into a
+        // mature container pays the outlined remember path. The
+        // pre-split, non-inlined barrier was ~6 % of the
+        // class_instantiate / object_alloc profiles — pure call +
+        // union-marshalling overhead on all-primitive stores.
         if (!v.isHeapValue()) return;
         // Fast reject 2 — young container can't create an
         // old→young edge (a young→young store is reclaimed
         // wholesale by the young sweep).
         if (container.generation() != .mature) return;
+        self.writeBarrierRemember(container, v);
+    }
+
+    /// Outlined slow path of `writeBarrier` — only reached for a
+    /// heap value stored into a mature container.
+    fn writeBarrierRemember(self: *Heap, container: Container, v: Value) void {
         // Only a young heap pointer needs remembering. Primitives
         // (number, bool, null, undefined) and already-mature
         // referents are fine.
