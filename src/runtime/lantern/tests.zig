@@ -12076,6 +12076,100 @@ test "JSON.stringify: circular structure still throws after key drops" {
     );
 }
 
+// ── §25.5.2.3 QuoteJSONString escape contract ───────────────────────
+//
+// QuoteJSONString walks the WTF-8 payload emitting escapes for `"`,
+// `\`, controls below U+0020 (shorthand for \b \t \n \f \r, \u00xx
+// for the rest), and `\uXXXX` for lone surrogates (well-formed
+// JSON.stringify, ES2019); every other code point passes through as
+// its WTF-8 bytes. These pin the exact byte-level output across every
+// escape class so a bulk-copy fast path over clean runs can't drift.
+
+test "JSON.stringify: quote and backslash escape" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify('he said "hi" c:\\dir');
+    , "\"he said \\\"hi\\\" c:\\\\dir\"");
+}
+
+test "JSON.stringify: shorthand control escapes b t n f r" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify("a\bb\tc\nd\fe\rf");
+    , "\"a\\bb\\tc\\nd\\fe\\rf\"");
+}
+
+test "JSON.stringify: non-shorthand controls escape as lowercase u00xx" {
+    // §25.5.2.3 step 2.b.ii — C < U+0020 without a shorthand uses
+    // UnicodeEscape (four lowercase hex digits). U+000B (vertical
+    // tab) deliberately has NO \v shorthand in JSON.
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify("\u0000|\u0001|\u000b|\u001f");
+    , "\"\\u0000|\\u0001|\\u000b|\\u001f\"");
+}
+
+test "JSON.stringify: multibyte UTF-8 passes through unescaped" {
+    // 2-byte (é), 3-byte (世), 4-byte (𝄞 U+1D11E) sequences all pass
+    // through as raw bytes — JSON.stringify never escapes above
+    // U+001F except surrogates.
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify("héllo 世界 𝄞");
+    , "\"héllo 世界 𝄞\"");
+}
+
+test "JSON.stringify: U+D7FF (0xED lead, below surrogate range) passes through" {
+    // 0xED-lead 3-byte sequences cover U+D000..U+DFFF; only the
+    // U+D800..U+DFFF half is CESU-8 surrogate territory. U+D7FF
+    // (ED 9F BF) must pass through verbatim.
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify("퟿");
+    , "\"\u{D7FF}\"");
+}
+
+test "JSON.stringify: lone surrogates escape as lowercase uXXXX" {
+    // Well-formed JSON.stringify (§25.5.2.3 step 2.b.i): a lone
+    // surrogate — stored as 3-byte CESU-8 in WTF-8 — emits as a
+    // \uXXXX escape with lowercase hex.
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify("a\uD800b" + "c\uDFFFd");
+    , "\"a\\ud800bc\\udfffd\"");
+}
+
+test "JSON.stringify: paired surrogates pass through as the supplementary character" {
+    // A valid pair re-encodes as the 4-byte UTF-8 supplementary
+    // form at string-build time; QuoteJSONString passes it through.
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify("😀");
+    , "\"\u{1F600}\"");
+}
+
+test "JSON.stringify: long clean run is byte-identical" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify("abcdefghijklmnopqrstuvwxyz0123456789".repeat(3));
+    , "\"" ++
+        "abcdefghijklmnopqrstuvwxyz0123456789" ++
+        "abcdefghijklmnopqrstuvwxyz0123456789" ++
+        "abcdefghijklmnopqrstuvwxyz0123456789" ++ "\"");
+}
+
+test "JSON.stringify: escapes interleaved with clean runs" {
+    // Escape at the start, mid-string, and end — the bulk-copy path
+    // must flush each clean run around them.
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify("\tstart" + "x".repeat(40) + '"' + "end\n");
+    , "\"\\tstart" ++ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++ "\\\"end\\n\"");
+}
+
+test "JSON.stringify: object key with escapes routes through QuoteJSONString" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ "a\tb": 1, 'q"q': 2 });
+    , "{\"a\\tb\":1,\"q\\\"q\":2}");
+}
+
+test "JSON.stringify: empty string serializes as bare quotes" {
+    try expectScriptStringWithBuiltins(
+        \\JSON.stringify({ "": "" });
+    , "{\"\":\"\"}");
+}
+
 // ── SerializeJSONObject shape-walk contract ─────────────────────────
 //
 // The ordinary-object branch of §25.5.2.5 may walk the object's
