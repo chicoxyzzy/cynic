@@ -360,6 +360,57 @@ jobs:
           zig build test262 -- --quiet --threads=4 \
             --filter=language/expressions --top-rss=10
 
+  test262-jit-differential:
+    name: test262 JIT differential (advisory)
+    # docs/jit.md §10.2 — the heart of Bistromath verification: a
+    # full sweep with every eligible chunk force-compiled (`--jit`
+    # runs each realm at tier-up threshold 1) must produce the
+    # EXACT pass-set of the interpreter-only sweep. Lantern is the
+    # executable spec; the tier is correct exactly when the corpus
+    # can't tell them apart. The pass-cache each full run rewrites
+    # is the comparison artifact — a `diff` over it compares the
+    # actual fixture sets, not just the counts, so compensating
+    # flips can't hide.
+    #
+    # macos-latest, not ubuntu: GitHub's macOS runners are Apple
+    # Silicon, and Bistromath emits aarch64 only today (docs/jit.md
+    # §14 keeps x86_64 a mechanical follow-up). On x86_64 the tier
+    # is comptime-off and the diff would compare the interpreter
+    # with itself.
+    #
+    # Advisory like gc-stress while the tier lands: a divergence
+    # surfaces as a pre-merge annotation, not a merge-gate. Flips
+    # to gating when the `--jit` default-on conversation happens
+    # (docs/jit.md §10.5).
+    runs-on: macos-latest
+    timeout-minutes: 30
+    needs: build-and-test
+    continue-on-error: true
+    steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up Zig
+        uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
+        with:
+          cache-key: jit-differential
+
+      - name: Differential sweep (interpreter vs force-compiled)
+        timeout-minutes: 25
+        run: |
+          zig build test262 -- --quiet --threads=0
+          cp .test262-pass-cache.txt /tmp/pass-interp.txt
+          zig build test262 -- --quiet --threads=0 --jit
+          diff -u /tmp/pass-interp.txt .test262-pass-cache.txt
+          echo "pass-sets identical: $(wc -l < /tmp/pass-interp.txt) fixtures"
+
   test262-gc-stress:
     name: test262 GC stress / ${{ matrix.bucket }} (advisory)
     # Advisory, runs on PRs and main: gc-stress is a per-bucket

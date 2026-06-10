@@ -340,6 +340,12 @@ on, only its tagged fixtures included. Default: main;
 `--write-results` additionally runs every tracked feature in
 sequence), `--no-harness` (disable the `sta.js` +
 `assert.js` preamble in runtime mode),
+`--jit` (run every realm with Bistromath enabled and the tier-up
+threshold forced to 1 — the docs/jit.md §10 differential gate: a
+full sweep with this flag must produce the exact pass-set of one
+without it; aarch64 hosts only, a comptime no-op elsewhere. CI
+runs the comparison as the advisory `test262-jit-differential`
+job),
 `--write-results` (updates `test262-results.md`),
 `--only-failing` (skip-as-pass any test path listed in
 `.test262-pass-cache.txt` — iterative-dev shortcut; cache is
