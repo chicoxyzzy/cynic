@@ -484,7 +484,7 @@ the measured design space:
   way its parent does — single-pass, side-table-driven, on the
   codegen substrate shared with the JS tiers; pinned in
   [jit.md](jit.md) §6, with the JS↔wasm call-boundary fast path
-  (per-signature thunks, IC-integrated dispatch) in §7.1.
+  (per-signature thunks, IC-integrated dispatch) in jit.md §7.1.
 - **Narrowing the operand cell was measured and declined** (2026-06).
   Splitting the 128-bit `Cell` into parallel 64-bit lanes (scalars in
   the low lane only) was prototyped and benchmarked on Apple Silicon:

@@ -3,8 +3,8 @@
 //! opcode: inline fast paths for Smi arithmetic and moves, and a
 //! tier-down to the interpreter for everything the fast path can't
 //! prove. No IR, no register allocation, no speculation, no deopt
-//! metadata — the frame-identity rule (§4.2) makes "give up" a
-//! synced store and a return.
+//! metadata — the frame-identity rule (docs/jit.md §4.2) makes
+//! "give up" a synced store and a return.
 //!
 //! Execution contract: a compiled activation drives the SAME
 //! `CallFrame` Lantern would (registers in the same pooled slice,
@@ -108,7 +108,8 @@ pub fn tryEnterTop(
     }
 }
 
-/// Compile `chunk` synchronously (Sparkplug-class cost — §4.7).
+/// Compile `chunk` synchronously (Sparkplug-class cost —
+/// docs/jit.md §4.7).
 /// Every failure path — unsupported opcode, allocator exhaustion,
 /// emit OOM — leaves the chunk `dont_compile` and the engine
 /// interpreted: degrading is the contract, aborting never is.

@@ -273,7 +273,7 @@ These are project rules — they apply to everyone.
 | Verify a shared-machinery change without missing regressions | [docs/handbook/agent-checks.md](docs/handbook/agent-checks.md) (the `--only-failing` trap, per-touch bucket filters, harness threading invariant) |
 | Look up a Zig idiom Cynic uses | [docs/handbook/zig.md](docs/handbook/zig.md) |
 | Touch the WebAssembly engine (Sarcasm) or its JS API | [docs/wasm-engine.md](docs/wasm-engine.md) (in-place interpreter + side-table, the reference encoding + externref pin set, `WebAssembly.*` surface, `--allow=wasm`); score in [wasm-results.md](wasm-results.md); perf baselines in [wasm-bench-results.md](wasm-bench-results.md) |
-| Touch the JIT tiers (Bistromath / Ohaimark / Spasm) or the codegen substrate | [docs/jit.md](docs/jit.md) (tier architecture, the frame-identity rule, data-driven ICs, shared `src/runtime/jit/` substrate + the JS/wasm reuse boundary, the JS↔wasm call-boundary thunks (§7.1), executable-memory mechanics, differential verification gates) |
+| Touch the JIT tiers (Bistromath / Ohaimark / Spasm) or the codegen substrate | [docs/jit.md](docs/jit.md) (tier architecture, the frame-identity rule, data-driven ICs, shared `src/runtime/jit/` substrate + the JS/wasm reuse boundary, the JS↔wasm call-boundary thunks (jit.md §7.1), executable-memory mechanics, differential verification gates) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |
 | Measure perf (micros) | `zig build bench` (or `/perf`); design in [docs/benchmarking.md](docs/benchmarking.md) |
 | Find a hot function | `tools/profile.sh "<filter>"` (or `/profile`); requires `samply` |
