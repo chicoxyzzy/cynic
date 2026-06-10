@@ -53,6 +53,7 @@ const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
 const Op = @import("../../bytecode/op.zig").Op;
 const chunk_mod = @import("../../bytecode/chunk.zig");
+const bistromath = @import("../bistromath/bistromath.zig");
 const Chunk = chunk_mod.Chunk;
 const Handler = chunk_mod.Handler;
 const scope_mod = @import("../../bytecode/scope.zig");
@@ -2692,6 +2693,15 @@ pub fn runFrames(
             // frame changed. reEnterDispatch loads the callee's
             // chunk / registers / ip=0. decodeNext would keep
             // running the caller against a reallocated stack.
+            //
+            // Bistromath first (docs/jit.md §4): a hot compiled
+            // callee runs to completion here and hands its result
+            // to the caller frame exactly as `return_` would; a
+            // tier-down leaves the frame mid-chunk for
+            // reEnterDispatch. Cold chunks fall straight through.
+            if (bistromath.tryEnterTop(allocator, realm, frames)) |jit_ret| {
+                frames.items[frames.items.len - 1].accumulator = jit_ret;
+            }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 
@@ -2988,6 +2998,15 @@ pub fn runFrames(
             // frame changed. reEnterDispatch loads the callee's
             // chunk / registers / ip=0. decodeNext would keep
             // running the caller against a reallocated stack.
+            //
+            // Bistromath first (docs/jit.md §4): a hot compiled
+            // callee runs to completion here and hands its result
+            // to the caller frame exactly as `return_` would; a
+            // tier-down leaves the frame mid-chunk for
+            // reEnterDispatch. Cold chunks fall straight through.
+            if (bistromath.tryEnterTop(allocator, realm, frames)) |jit_ret| {
+                frames.items[frames.items.len - 1].accumulator = jit_ret;
+            }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 
@@ -4307,6 +4326,15 @@ pub fn runFrames(
             // frame changed. reEnterDispatch loads the callee's
             // chunk / registers / ip=0. decodeNext would keep
             // running the caller against a reallocated stack.
+            //
+            // Bistromath first (docs/jit.md §4): a hot compiled
+            // callee runs to completion here and hands its result
+            // to the caller frame exactly as `return_` would; a
+            // tier-down leaves the frame mid-chunk for
+            // reEnterDispatch. Cold chunks fall straight through.
+            if (bistromath.tryEnterTop(allocator, realm, frames)) |jit_ret| {
+                frames.items[frames.items.len - 1].accumulator = jit_ret;
+            }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 

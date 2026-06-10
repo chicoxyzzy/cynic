@@ -542,6 +542,13 @@ pub const Chunk = struct {
     pub const JitState = struct {
         warmth: u32 = 0,
         tier: Tier = .cold,
+        /// Bistromath entry point once `tier == .compiled` — stored
+        /// type-erased so the bytecode layer doesn't import runtime
+        /// types; the dispatcher casts to its concrete signature.
+        /// The code bytes live in the heap's code allocator and are
+        /// reclaimed wholesale with it (per-chunk code free is a
+        /// recorded follow-up, docs/jit.md §8).
+        entry: ?*const anyopaque = null,
 
         pub const Tier = enum(u8) { cold, compiled, dont_compile };
         /// JSC weights +15 per entry / +1 per back-edge; 16 keeps

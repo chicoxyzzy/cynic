@@ -109,9 +109,68 @@ pub fn cmpImm(rn: Reg, imm12: u12, lsl12: bool) u32 {
 
 // ---- logical and shifts ----------------------------------------------------
 
+/// ADDS Wd, Wn, Wm — 32-bit flag-setting add (the Smi fast path's
+/// overflow detector: V flags an i32 overflow).
+pub fn addsRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x2B000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// SUBS Wd, Wn, Wm
+pub fn subsRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x6B000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// CMP Wn, Wm — alias of SUBS WZR, Wn, Wm (32-bit signed compare).
+pub fn cmpRegW(rn: Reg, rm: Reg) u32 {
+    return 0x6B000000 | (r(rm) << 16) | (r(rn) << 5) | xzr;
+}
+
+/// ADDS Wd, Wn, #imm12
+pub fn addsImmW(rd: Reg, rn: Reg, imm12: u12) u32 {
+    return 0x31000000 | (@as(u32, imm12) << 10) | (r(rn) << 5) | r(rd);
+}
+
+/// CSET Wd, cond — alias of CSINC Wd, WZR, WZR, invert(cond).
+pub fn csetW(rd: Reg, cond: Cond) u32 {
+    const inverted: u32 = @as(u32, @intFromEnum(cond)) ^ 1;
+    return 0x1A9F07E0 | (inverted << 12) | r(rd);
+}
+
+/// SMULL Xd, Wn, Wm — 64-bit product of 32-bit operands; pair with
+/// `sxtw` + a 64-bit compare to detect i32 overflow.
+pub fn smull(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x9B207C00 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// SXTW Xd, Wn — alias of SBFM Xd, Xn, #0, #31.
+pub fn sxtw(rd: Reg, rn: Reg) u32 {
+    return 0x93407C00 | (r(rn) << 5) | r(rd);
+}
+
 /// AND Xd, Xn, Xm
 pub fn andReg(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x8A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// AND Wd, Wn, Wm
+pub fn andRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x0A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// ORR Wd, Wn, Wm
+pub fn orrRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x2A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// MOV Wd, Wm — alias of ORR Wd, WZR, Wm; zero-extends into the
+/// 64-bit register (the cheap "drop the high bits" move).
+pub fn movRegW(rd: Reg, rm: Reg) u32 {
+    return 0x2A000000 | (r(rm) << 16) | (xzr << 5) | r(rd);
+}
+
+/// EOR Wd, Wn, Wm
+pub fn eorRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x4A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
 }
 
 /// ORR Xd, Xn, Xm
@@ -151,6 +210,29 @@ pub fn strImm(rt: Reg, rn: Reg, byte_off: u15) u32 {
     return 0xF9000000 | (@as(u32, byte_off / 8) << 10) | (r(rn) << 5) | r(rt);
 }
 
+/// LDRB Wt, [Xn, #imm12] — unsigned byte load (atomic-flag reads;
+/// plain monotonic load is enough for a monitor flag the consumer
+/// re-checks with proper ordering after tier-down).
+pub fn ldrbImm(rt: Reg, rn: Reg, imm12: u12) u32 {
+    return 0x39400000 | (@as(u32, imm12) << 10) | (r(rn) << 5) | r(rt);
+}
+
+/// STP Xt, Xt2, [SP, #simm7×8]! — pre-indexed pair push through SP.
+pub fn stpPreIdxSp(rt: Reg, rt2: Reg, byte_off: i10) u32 {
+    std.debug.assert(@rem(byte_off, 8) == 0);
+    const imm7: u32 = @as(u32, @as(u7, @bitCast(@as(i7, @intCast(@divExact(byte_off, 8))))));
+    const sp: u32 = 31;
+    return 0xA9800000 | (imm7 << 15) | (r(rt2) << 10) | (sp << 5) | r(rt);
+}
+
+/// LDP Xt, Xt2, [SP], #simm7×8 — post-indexed pair pop through SP.
+pub fn ldpPostIdxSp(rt: Reg, rt2: Reg, byte_off: i10) u32 {
+    std.debug.assert(@rem(byte_off, 8) == 0);
+    const imm7: u32 = @as(u32, @as(u7, @bitCast(@as(i7, @intCast(@divExact(byte_off, 8))))));
+    const sp: u32 = 31;
+    return 0xA8C00000 | (imm7 << 15) | (r(rt2) << 10) | (sp << 5) | r(rt);
+}
+
 /// STR Xt, [SP, #simm9]! — pre-indexed push through SP. Keep SP
 /// 16-byte aligned per AAPCS64 (use multiples of -16).
 pub fn strPreIdxSp(rt: Reg, simm9: i9) u32 {
@@ -185,6 +267,22 @@ pub fn bCond(cond: Cond, off_words: i19) u32 {
 /// CBZ Xt, #(off_words*4)
 pub fn cbz(rt: Reg, off_words: i19) u32 {
     return 0xB4000000 | (@as(u32, @as(u19, @bitCast(off_words))) << 5) | r(rt);
+}
+
+/// TBZ Xt, #bit, #(off_words*4) — test bit and branch if zero.
+pub fn tbz(rt: Reg, bit: u6, off_words: i14) u32 {
+    const b5: u32 = @as(u32, bit >> 5) << 31;
+    const b40: u32 = @as(u32, bit & 0x1F) << 19;
+    return 0x36000000 | b5 | b40 |
+        (@as(u32, @as(u14, @bitCast(off_words))) << 5) | r(rt);
+}
+
+/// TBNZ Xt, #bit, #(off_words*4)
+pub fn tbnz(rt: Reg, bit: u6, off_words: i14) u32 {
+    const b5: u32 = @as(u32, bit >> 5) << 31;
+    const b40: u32 = @as(u32, bit & 0x1F) << 19;
+    return 0x37000000 | b5 | b40 |
+        (@as(u32, @as(u14, @bitCast(off_words))) << 5) | r(rt);
 }
 
 /// CBNZ Xt, #(off_words*4)
@@ -242,6 +340,20 @@ test "jit asm_aarch64: golden encodings" {
     try expectEqual(@as(u32, 0xF9400C20), ldrImm(.x0, .x1, 24)); // ldr x0, [x1, #24]
     try expectEqual(@as(u32, 0xF81F0FFE), strPreIdxSp(.lr, -16)); // str x30, [sp, #-16]!
     try expectEqual(@as(u32, 0xF84107FE), ldrPostIdxSp(.lr, 16)); // ldr x30, [sp], #16
+    try expectEqual(@as(u32, 0xA9BF7BFD), stpPreIdxSp(.fp, .lr, -16)); // stp x29, x30, [sp, #-16]!
+    try expectEqual(@as(u32, 0xA8C17BFD), ldpPostIdxSp(.fp, .lr, 16)); // ldp x29, x30, [sp], #16
+    try expectEqual(@as(u32, 0x2B010002), addsRegW(.x2, .x0, .x1)); // adds w2, w0, w1
+    try expectEqual(@as(u32, 0x6B02003F), cmpRegW(.x1, .x2)); // cmp w1, w2
+    try expectEqual(@as(u32, 0x31000420), addsImmW(.x0, .x1, 1)); // adds w0, w1, #1
+    try expectEqual(@as(u32, 0x1A9F17E0), csetW(.x0, .eq)); // cset w0, eq
+    try expectEqual(@as(u32, 0x1A9FA7E0), csetW(.x0, .lt)); // cset w0, lt
+    try expectEqual(@as(u32, 0x9B227C20), smull(.x0, .x1, .x2)); // smull x0, w1, w2
+    try expectEqual(@as(u32, 0x93407C20), sxtw(.x0, .x1)); // sxtw x0, w1
+    try expectEqual(@as(u32, 0x2A020020), orrRegW(.x0, .x1, .x2)); // orr w0, w1, w2
+    try expectEqual(@as(u32, 0x2A0103E0), movRegW(.x0, .x1)); // mov w0, w1
+    try expectEqual(@as(u32, 0x39400020), ldrbImm(.x0, .x1, 0)); // ldrb w0, [x1]
+    try expectEqual(@as(u32, 0x36000040), tbz(.x0, 0, 2)); // tbz x0, #0, .+8
+    try expectEqual(@as(u32, 0x37000041), tbnz(.x1, 0, 2)); // tbnz x1, #0, .+8
     try expectEqual(@as(u32, 0x14000001), b(1)); // b .+4
     try expectEqual(@as(u32, 0x17FFFFFF), b(-1)); // b .-4
     try expectEqual(@as(u32, 0x54000040), bCond(.eq, 2)); // b.eq .+8

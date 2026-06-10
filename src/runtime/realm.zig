@@ -1042,6 +1042,12 @@ pub const Realm = struct {
     /// on Lantern and the chunk warmth counters merely accumulate.
     /// Targets without codegen support (docs/jit.md §8) ignore it.
     jit_enabled: bool = false,
+    /// Tier-up threshold override for the differential gate
+    /// (docs/jit.md §10 step 2): `1` force-compiles every eligible
+    /// chunk on its first call so a test262 sweep exercises
+    /// Bistromath everywhere. `null` uses the size-scaled default
+    /// (docs/jit.md §4.7).
+    jit_threshold_override: ?u32 = null,
     /// Lazily-created arena owning every realm-resident WebAssembly
     /// artifact (decoded modules, instances, their store state). Freed
     /// wholesale at realm teardown, so wasm objects need no per-object

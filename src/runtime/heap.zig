@@ -35,6 +35,7 @@ const ShapeTree = @import("shape.zig").ShapeTree;
 const Environment = @import("environment.zig").Environment;
 const Chunk = @import("../bytecode/chunk.zig").Chunk;
 const JSGenerator = @import("generator.zig").JSGenerator;
+const jit_code_alloc = @import("jit/code_alloc.zig");
 const JSSymbol = @import("symbol.zig").JSSymbol;
 const JSBigInt = @import("bigint.zig").JSBigInt;
 
@@ -225,6 +226,13 @@ pub const Heap = struct {
     /// each object's `heap` back-pointer. Realm-lifetime arena —
     /// the GC does not trace into shapes.
     shapes: ShapeTree,
+    /// Executable-code region for the JIT tiers, lazily reserved on
+    /// the first tier-up (docs/jit.md §8 — one reservation per
+    /// engine, all tiers install through it). Null until then, and
+    /// permanently null on targets without codegen support or when
+    /// the reservation fails (tier-up then degrades to "stay
+    /// interpreted").
+    jit_code: ?jit_code_alloc.CodeAllocator = null,
     // Per-kind live-object lists. Each kind is split into a
     // `young` list (fresh allocations — reclaimable by the cheap
     // `collectYoung` cycle) and a `mature` list (objects that
@@ -675,7 +683,26 @@ pub const Heap = struct {
 
     /// Free every tracked object and the bookkeeping arrays.
     /// Idempotent — safe to call on a partially-initialized heap.
+    /// The lazily-created code allocator, or null when the target
+    /// can't host a JIT / the reservation failed. Callers degrade
+    /// to the interpreter on null — never abort.
+    pub fn jitCodeAllocator(self: *Heap) ?*jit_code_alloc.CodeAllocator {
+        if (comptime !jit_code_alloc.supported) return null;
+        if (self.jit_code == null) {
+            self.jit_code = jit_code_alloc.CodeAllocator.init(
+                self.allocator,
+                jit_code_region_bytes,
+            ) catch return null;
+        }
+        return &self.jit_code.?;
+    }
+
+    /// 64 MiB virtual reservation (docs/jit.md §8) — well under the
+    /// arm64 ±128 MiB direct-branch span, lazily committed by the OS.
+    const jit_code_region_bytes: usize = 64 << 20;
+
     pub fn deinit(self: *Heap) void {
+        if (self.jit_code) |*ca| ca.deinit();
         self.shapes.deinit();
         // JSString headers live in the slab pool — free each
         // owned byte payload first, then let `string_pool.deinit`

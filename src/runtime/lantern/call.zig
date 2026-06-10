@@ -30,6 +30,7 @@ const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
+const bistromath = @import("../bistromath/bistromath.zig");
 
 // Circular back to interpreter.zig for shared types + the dispatch
 // loop entry + a handful of helpers that bracket call/construct.
@@ -964,6 +965,12 @@ pub fn callJSFunction(
         return error.OutOfMemory;
     };
 
+    // Bistromath (docs/jit.md §4): a hot compiled callee completes
+    // without ever entering the dispatch loop; tier-downs and cold
+    // chunks fall through to Lantern below.
+    if (bistromath.tryEnterTop(allocator, realm, &frames)) |jit_ret| {
+        return .{ .value = jit_ret };
+    }
     return runFrames(allocator, realm, &frames);
 }
 

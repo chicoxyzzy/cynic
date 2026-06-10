@@ -691,6 +691,12 @@ fn poolWorkerMain(slot: *PoolWorker) void {
     // Match the scored posture so the agent's SAB / Atomics / eval work.
     realm.hardened = false;
     realm.allow_eval = true;
+    if (g_jit_force) {
+        // `--jit` — the docs/jit.md §10 differential gate: Bistromath
+        // on, every eligible chunk force-compiled on first call.
+        realm.jit_enabled = true;
+        realm.jit_threshold_override = 1;
+    }
     realm.installBuiltins() catch return;
     // `install262` (no `current_agent` here) records its `$262.agent`
     // group as this thread's `reap_group`; the worker never reaps, so
@@ -742,6 +748,12 @@ fn agentMainPrivate(state: *AgentThreadState) void {
     var realm = cynic.runtime.Realm.init(std.heap.c_allocator);
     realm.hardened = false;
     realm.allow_eval = true;
+    if (g_jit_force) {
+        // `--jit` — the docs/jit.md §10 differential gate: Bistromath
+        // on, every eligible chunk force-compiled on first call.
+        realm.jit_enabled = true;
+        realm.jit_threshold_override = 1;
+    }
     if (realm.installBuiltins()) |_| {} else |_| {
         realm.deinit();
         std.heap.page_allocator.free(state.src);
@@ -1012,6 +1024,12 @@ test "agent realm reset: a reused realm isolates one agent from the next" {
     defer realm.deinit();
     realm.hardened = false;
     realm.allow_eval = true;
+    if (g_jit_force) {
+        // `--jit` — the docs/jit.md §10 differential gate: Bistromath
+        // on, every eligible chunk force-compiled on first call.
+        realm.jit_enabled = true;
+        realm.jit_threshold_override = 1;
+    }
     try realm.installBuiltins();
     try install262(&realm);
     // `install262` recorded its `$262.agent` group as this thread's
@@ -1118,6 +1136,13 @@ const SkipReason = enum {
     /// sweeps, each with only its one flag enabled.
     out_of_phase,
 };
+
+/// `--jit` — run every realm with Bistromath enabled and the
+/// tier-up threshold forced to 1, so each eligible chunk compiles
+/// on its first call. The docs/jit.md §10 differential gate: a
+/// sweep with this flag must produce identical pass/fail results
+/// to one without it. Read-only after flag parsing.
+var g_jit_force: bool = false;
 
 const Options = struct {
     corpus: []const u8 = "vendor/test262/test",
@@ -2765,6 +2790,12 @@ fn classifyAndRunInner(
     // §20.2.1.1.1) is opened so eval-dependent fixtures run for real.
     realm.hardened = false;
     realm.allow_eval = true;
+    if (g_jit_force) {
+        // `--jit` — the docs/jit.md §10 differential gate: Bistromath
+        // on, every eligible chunk force-compiled on first call.
+        realm.jit_enabled = true;
+        realm.jit_threshold_override = 1;
+    }
     realm.installBuiltins() catch return fail_reject_or_ch;
     // test262 fixtures use `__collectGarbage` / `__clearKeptObjects`
     // / `__drainMicrotasks` for deterministic triggering — debug
@@ -4301,6 +4332,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.threads = std.fmt.parseInt(u32, arg["--threads=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--timeout=")) {
             opts.timeout_s = std.fmt.parseInt(u32, arg["--timeout=".len..], 10) catch 60;
+        } else if (std.mem.eql(u8, arg, "--jit")) {
+            g_jit_force = true;
         } else if (std.mem.startsWith(u8, arg, "--gc-threshold=")) {
             opts.gc_threshold = std.fmt.parseInt(u32, arg["--gc-threshold=".len..], 10) catch 32768;
         } else if (std.mem.eql(u8, arg, "--gc-stats")) {

@@ -62,7 +62,7 @@ pub const Masm = struct {
             at: usize,
             kind: Kind,
         };
-        const Kind = enum { imm26, imm19 };
+        const Kind = enum { imm26, imm19, imm14 };
 
         pub fn deinit(self: *Label, gpa: std.mem.Allocator) void {
             self.fixups.deinit(gpa);
@@ -94,6 +94,46 @@ pub const Masm = struct {
         } else {
             try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm19 });
             try self.emit(a64.bCond(cond, 0));
+        }
+    }
+
+    /// CBZ Xt, <label>
+    pub fn jumpCbz(self: *Masm, rt: Reg, label: *Label) error{OutOfMemory}!void {
+        if (label.bound) |target| {
+            try self.emit(a64.cbz(rt, deltaWords(i19, self.offset(), target)));
+        } else {
+            try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm19 });
+            try self.emit(a64.cbz(rt, 0));
+        }
+    }
+
+    /// CBNZ Xt, <label>
+    pub fn jumpCbnz(self: *Masm, rt: Reg, label: *Label) error{OutOfMemory}!void {
+        if (label.bound) |target| {
+            try self.emit(a64.cbnz(rt, deltaWords(i19, self.offset(), target)));
+        } else {
+            try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm19 });
+            try self.emit(a64.cbnz(rt, 0));
+        }
+    }
+
+    /// TBZ Xt, #bit, <label>
+    pub fn jumpTbz(self: *Masm, rt: Reg, bit: u6, label: *Label) error{OutOfMemory}!void {
+        if (label.bound) |target| {
+            try self.emit(a64.tbz(rt, bit, deltaWords(i14, self.offset(), target)));
+        } else {
+            try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm14 });
+            try self.emit(a64.tbz(rt, bit, 0));
+        }
+    }
+
+    /// TBNZ Xt, #bit, <label>
+    pub fn jumpTbnz(self: *Masm, rt: Reg, bit: u6, label: *Label) error{OutOfMemory}!void {
+        if (label.bound) |target| {
+            try self.emit(a64.tbnz(rt, bit, deltaWords(i14, self.offset(), target)));
+        } else {
+            try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm14 });
+            try self.emit(a64.tbnz(rt, bit, 0));
         }
     }
 
@@ -141,6 +181,10 @@ pub const Masm = struct {
             .imm19 => {
                 const d = deltaWords(i19, fixup.at, target);
                 word |= @as(u32, @as(u19, @bitCast(d))) << 5;
+            },
+            .imm14 => {
+                const d = deltaWords(i14, fixup.at, target);
+                word |= @as(u32, @as(u14, @bitCast(d))) << 5;
             },
         }
         std.mem.writeInt(u32, slot, word, .little);
