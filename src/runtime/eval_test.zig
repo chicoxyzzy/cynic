@@ -701,3 +701,49 @@ test "eval: Function constructor with deeply nested body throws RangeError" {
         \\r;
     , 1);
 }
+
+// §13.3.6.1 EvaluateCall — the direct-eval determination is on the
+// CALLEE REFERENCE (unqualified `eval` naming %eval%), independent of
+// the argument-list shape: `eval(...args)` is a DIRECT eval. Only the
+// first spread element is source text; an empty list yields undefined.
+
+test "direct eval through spread arguments reads and writes the caller scope" {
+    try expectIntAllow(
+        \\var out = 0;
+        \\(function () {
+        \\  var x = 10;
+        \\  eval(...["x = x + 32;", "ignored"]);
+        \\  out = x;
+        \\})();
+        \\out;
+    , 42);
+}
+
+test "direct eval through a spread custom iterator stays direct" {
+    try expectIntAllow(
+        \\var iter = {};
+        \\iter[Symbol.iterator] = function () {
+        \\  var done = false;
+        \\  return { next: function () {
+        \\    if (done) return { done: true, value: undefined };
+        \\    done = true;
+        \\    return { done: false, value: "x = 7;" };
+        \\  } };
+        \\};
+        \\var out = 0;
+        \\(function () {
+        \\  var x = 0;
+        \\  eval(...iter);
+        \\  out = x;
+        \\})();
+        \\out;
+    , 7);
+}
+
+test "direct eval with an empty spread returns undefined" {
+    const v = try evalAllow(
+        \\var r = eval(...[]);
+        \\r === undefined ? 1 : 0;
+    );
+    try testing.expectEqual(@as(i32, 1), v.asInt32());
+}

@@ -320,6 +320,11 @@ pub const Op = enum(u8) {
     /// `new.target` / home object (Cynic is strict-only, so eval'd
     /// `var` / `let` stay in the eval body's own env per §19.2.1.3).
     direct_eval,
+    /// §13.3.6.1 — direct eval whose argument list contains a spread.
+    /// The args were materialised into a real array (the spread-call
+    /// lowering); the first element is the source text. Encoding:
+    /// `[op] [scope:u16] [r_callee:u8] [r_args:u8]`.
+    direct_eval_spread,
     /// Load `this` from the current call frame into acc. Top-level
     /// `this` is `undefined` in strict mode (§10.2.1.2). Arrow
     /// functions inherit `this` from their captured frame; the
@@ -1244,6 +1249,7 @@ pub const Op = enum(u8) {
             .new_call => 4, // r_callee:u8 + argc:u8 + ic:u16
             .tail_call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
             .direct_eval => 4, // scope:u16 + r_callee:u8 + argc:u8
+            .direct_eval_spread => 4, // scope:u16 + r_callee:u8 + r_args:u8
             .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
             .def_template_property => 5, // k:u16 + r_obj:u8 + slot:u16
             .add_smi => 5, // r:u8 + imm:i32
@@ -1331,6 +1337,7 @@ pub const Op = enum(u8) {
             .tail_call => "TailCall",
             .tail_call_method => "TailCallMethod",
             .direct_eval => "DirectEval",
+            .direct_eval_spread => "DirectEvalSpread",
             .lda_this => "LdaThis",
             .lda_new_target => "LdaNewTarget",
             .instanceof_ => "InstanceOf",

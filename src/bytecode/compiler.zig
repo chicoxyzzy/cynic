@@ -3826,6 +3826,37 @@ pub const Compiler = struct {
     /// callee value is actually this realm's %eval% and otherwise
     /// falls back to an ordinary call.
     fn compileDirectEvalCall(self: *Compiler, c: ast.expression.CallExpr) CompileError!void {
+        const scope_k = try self.buildDirectEvalScopeK();
+
+        // Stage the callee + args exactly like `call`: compile the
+        // `eval` reference (→ `lda_global "eval"`) into r_callee, then
+        // each arg into consecutive temps `r_callee+1 ..`.
+        try self.compileExpression(c.callee);
+        const r_callee = try self.reserveTemp();
+        try self.builder.emitOp(.star, c.span);
+        try self.builder.emitU8(r_callee);
+        var reserved: u8 = 0;
+        for (c.arguments) |*arg| {
+            try self.compileExpression(arg);
+            const r = try self.reserveTemp();
+            reserved += 1;
+            try self.builder.emitOp(.star, c.span);
+            try self.builder.emitU8(r);
+        }
+        try self.builder.emitOp(.direct_eval, c.span);
+        try self.builder.emitU16(scope_k);
+        try self.builder.emitU8(r_callee);
+        try self.builder.emitU8(@intCast(c.arguments.len));
+        var j: u8 = 0;
+        while (j < reserved) : (j += 1) self.releaseTemp();
+        self.releaseTemp(); // r_callee
+    }
+
+    /// Build (and intern on the chunk) the caller-scope snapshot a
+    /// direct-eval site needs — shared by the plain and spread
+    /// argument forms (§13.3.6.1 makes the determination on the
+    /// callee reference, not the argument shape).
+    fn buildDirectEvalScopeK(self: *Compiler) CompileError!u16 {
         // Capture visible env-slot bindings, innermost-first, deduped
         // by name (innermost shadows). Globals / register-promoted /
         // import bindings are skipped — a free name the eval body
@@ -3895,29 +3926,7 @@ pub const Compiler = struct {
             self.allocator.free(bindings);
             return err;
         };
-
-        // Stage the callee + args exactly like `call`: compile the
-        // `eval` reference (→ `lda_global "eval"`) into r_callee, then
-        // each arg into consecutive temps `r_callee+1 ..`.
-        try self.compileExpression(c.callee);
-        const r_callee = try self.reserveTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_callee);
-        var reserved: u8 = 0;
-        for (c.arguments) |*arg| {
-            try self.compileExpression(arg);
-            const r = try self.reserveTemp();
-            reserved += 1;
-            try self.builder.emitOp(.star, c.span);
-            try self.builder.emitU8(r);
-        }
-        try self.builder.emitOp(.direct_eval, c.span);
-        try self.builder.emitU16(scope_k);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitU8(@intCast(c.arguments.len));
-        var j: u8 = 0;
-        while (j < reserved) : (j += 1) self.releaseTemp();
-        self.releaseTemp(); // r_callee
+        return scope_k;
     }
 
     /// `f(...args)` / `f(a,...rest, b)` — desugar to
@@ -3926,6 +3935,21 @@ pub const Compiler = struct {
     /// array literals, then look up `.apply` on the callee and
     /// invoke it with `this = undefined` and the args array.
     fn compileSpreadCall(self: *Compiler, c: ast.expression.CallExpr) CompileError!void {
+        // §13.3.6.1 — the direct-eval determination is on the callee
+        // REFERENCE, independent of the argument shape: `eval(...x)`
+        // is a direct eval (only `eval?.()` demotes to indirect).
+        // Detect it up front so the materialised args array routes
+        // into `direct_eval_spread` instead of the `.apply` lowering.
+        const direct_eval_scope_k: ?u16 = blk: {
+            if (c.optional) break :blk null;
+            if (c.callee.* != .identifier_reference) break :blk null;
+            const id_span = c.callee.identifier_reference.span;
+            if (!std.mem.eql(u8, self.source[id_span.start..id_span.end], "eval")) break :blk null;
+            const shadowed = if (self.scope) |sc| sc.resolve("eval") != null else false;
+            if (shadowed) break :blk null;
+            break :blk try self.buildDirectEvalScopeK();
+        };
+
         // 1. callee → r_callee.
         try self.compileExpression(c.callee);
         const r_callee = try self.reserveTemp();
@@ -3977,6 +4001,17 @@ pub const Compiler = struct {
                 self.releaseTemp(); // r_idx
                 self.releaseTemp(); // r_val
             }
+        }
+
+        // Direct-eval-with-spread: hand the callee + args array to
+        // the dedicated opcode (it re-checks the callee is %eval% at
+        // runtime and falls back to an ordinary call otherwise).
+        if (direct_eval_scope_k) |sk| {
+            try self.builder.emitOp(.direct_eval_spread, c.span);
+            try self.builder.emitU16(sk);
+            try self.builder.emitU8(r_callee);
+            try self.builder.emitU8(r_args);
+            return;
         }
 
         // 3. Look up `.apply` on the callee → r_apply.

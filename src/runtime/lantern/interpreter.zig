@@ -2204,6 +2204,122 @@ pub fn runFrames(
                 },
             }
         },
+        .direct_eval_spread => {
+            // §13.3.6.1 / §19.2.1 — direct eval whose argument list
+            // contained a spread: the args were materialised into a
+            // real array by the spread-call lowering. Mirrors the
+            // `.direct_eval` arm; only the argument sourcing differs.
+            // Operands: scope:u16, r_callee:u8, r_args:u8.
+            const scope_idx = readU16(code, ip);
+            const r_callee = code[ip + 2];
+            const r_args = code[ip + 3];
+            ip += 4;
+
+            const callee_v = registers[r_callee];
+            const args_obj = heap_mod.valueAsPlainObject(registers[r_args]) orelse return error.InvalidOpcode;
+            const argc_v = args_obj.get("length");
+            const argc_n: u32 = if (argc_v.isInt32()) @intCast(@max(0, argc_v.asInt32())) else 0;
+
+            const is_intrinsic_eval = blk: {
+                const fnobj = heap_mod.valueAsFunction(callee_v) orelse break :blk false;
+                break :blk realm.intrinsics.eval_function == fnobj;
+            };
+            if (!is_intrinsic_eval) {
+                // Reassigned / cross-realm `eval` — ordinary call with
+                // the unpacked array elements (cold path).
+                const args_slice = try allocator.alloc(Value, argc_n);
+                defer allocator.free(args_slice);
+                var ai: u32 = 0;
+                while (ai < argc_n) : (ai += 1) {
+                    var kbuf: [12]u8 = undefined;
+                    const key = std.fmt.bufPrint(&kbuf, "{d}", .{ai}) catch unreachable;
+                    args_slice[ai] = args_obj.get(key);
+                }
+                const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, Value.undefined_, args_slice);
+                switch (cresult) {
+                    .value, .yielded => |v| {
+                        acc = v;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    },
+                    .thrown => |ex| {
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) {
+                            return .{ .thrown = ex };
+                        }
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                }
+            }
+
+            // §19.2.1 step 2 — a non-String first argument is returned
+            // unchanged; an empty argument list yields undefined.
+            const arg0 = if (argc_n > 0) args_obj.get("0") else Value.undefined_;
+            if (!arg0.isString()) {
+                acc = arg0;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+
+            if (!realm.allow_eval) {
+                const ex = try makeEvalError(realm, intrinsics_mod.eval_disabled_msg);
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .thrown = ex };
+                }
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+
+            const src_str: *JSString = @ptrCast(@alignCast(arg0.asString()));
+            const snapshot = &local_chunk.direct_eval_scopes[scope_idx];
+            const ctx: DirectEvalContext = .{
+                .this_value = f.this_value,
+                .new_target = f.new_target,
+                .home_object = f.home_object,
+                .home_function = f.home_function,
+                .running_realm = f.running_realm,
+                .owning_module = f.owning_module,
+                .parent_env = f.env,
+                .is_derived_ctor = f.is_derived_ctor,
+                .super_called_cell = f.super_called_cell,
+            };
+            f.ip = ip;
+            f.accumulator = acc;
+            committed = true;
+            const eresult = evaluateDirectEval(allocator, realm, src_str.flatBytes(), snapshot, ctx) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidOpcode => return error.InvalidOpcode,
+                error.ParseRangeError => {
+                    const ex = try makeRangeError(realm, "Maximum call stack size exceeded");
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
+                error.ParseError, error.CompileError => {
+                    const ex = try makeSyntaxError(realm, "eval: SyntaxError in evaluated source");
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
+            };
+            switch (eresult) {
+                .value, .yielded => |v| {
+                    acc = v;
+                    f.accumulator = v;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
+                .thrown => |ex| {
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
+            }
+        },
         .call => {
             const r_callee = code[ip];
             const argc = code[ip + 1];
