@@ -130,6 +130,23 @@ fn expectScriptIntUnhardened(source: []const u8, expected: i32) !void {
 
 /// Unhardened-realm variant of `expectScriptStringWithBuiltins`.
 /// See `expectScriptIntUnhardened` for when to use this.
+/// Unhardened + `--allow=eval` variant — for fixtures that both
+/// mutate globalThis descriptors and run indirect eval.
+fn expectScriptStringUnhardenedEval(source: []const u8, expected: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    realm.allow_eval = true;
+    try installBuiltinsUnhardened(&realm);
+    const v = switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isString());
+    const sres: *JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings(expected, sres.flatBytes());
+}
+
 fn expectScriptStringUnhardened(source: []const u8, expected: []const u8) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
@@ -12930,4 +12947,19 @@ test "call: a getter-valued callee runs before arguments evaluate" {
         \\o.m(arg());
         \\order.join(",");
     , "get,arg");
+}
+
+test "indirect eval: a global function decl over a non-configurable property keeps its attributes" {
+    // §9.1.1.4.18 CreateGlobalFunctionBinding step 6 — when the
+    // existing global property is non-configurable, the install is a
+    // value-only define: writable/enumerable/configurable are
+    // preserved, not re-stamped.
+    try expectScriptStringUnhardenedEval(
+        \\Object.defineProperty(globalThis, "f", {
+        \\  enumerable: true, writable: true, configurable: false, value: 1,
+        \\});
+        \\(0, eval)('function f() { return 2222; }');
+        \\const d = Object.getOwnPropertyDescriptor(globalThis, "f");
+        \\"" + d.configurable + "," + d.writable + "," + d.enumerable + "," + (typeof f) + "," + f();
+    , "false,true,true,function,2222");
 }

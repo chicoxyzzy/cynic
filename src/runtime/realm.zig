@@ -569,6 +569,19 @@ pub const GlobalBindings = struct {
     ) !void {
         try self.var_names.put(allocator, key, {});
         if (self.target) |t| {
+            // §9.1.1.4.18 CreateGlobalFunctionBinding step 6 — when an
+            // existing own DATA property is non-configurable, the
+            // install is a value-only define: its writable /
+            // enumerable / configurable attributes are preserved, not
+            // re-stamped (an indirect eval's function decl over a
+            // pre-defined `{configurable: false}` global must leave
+            // the descriptor intact).
+            if (t.hasOwn(key) and t.getAccessor(key) == null and !t.flagsFor(key).configurable) {
+                if (self.heap) |h| h.writeBarrier(.{ .object = t }, value);
+                const fl = t.flagsFor(key);
+                try t.setWithFlags(allocator, key, value, fl);
+                return;
+            }
             _ = t.removeAccessor(key);
             // Generational write barrier — `setWithFlags` bypasses
             // the routed `heap.storeProperty` path.
