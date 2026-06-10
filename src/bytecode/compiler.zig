@@ -180,11 +180,13 @@ pub const Compiler = struct {
     /// boundary). When non-null, each ExpressionStatement stores its
     /// value here (`star`), and the chunk tail returns it (`ldar`).
     /// This implements StatementList completion + UpdateEmpty: only
-    /// value-producing statements move the result, so a no-iteration
-    /// loop / empty statement / declaration / `switch` with no clause
-    /// yields the prior value (or `undefined`), never the leftover
-    /// loop condition or `switch` discriminant. §19.2.1.3 PerformEval
-    /// returns this for `eval`.
+    /// value-producing statements move the result, so an empty
+    /// statement / declaration leaves the prior value in place —
+    /// while iteration statements and `switch` are NEVER empty
+    /// (§14.7 LoopEvaluation's `V` and §14.12.2 CaseBlockEvaluation's
+    /// `V` start at undefined), so they reset the register at entry
+    /// (`emitCompletionUndefined`) and let body statements update it
+    /// per iteration. §19.2.1.3 PerformEval returns this for `eval`.
     completion_reg: ?u8 = null,
     /// True when the enclosing function is `async function` /
     /// `async function*` / async arrow / async method. `yield*`
@@ -6013,6 +6015,7 @@ pub const Compiler = struct {
         // The surrounding function must be async (or async generator)
         // for `await` to suspend; the parser already enforces that.
         const labels = try self.drainPendingLabels();
+        try self.emitCompletionUndefined(s.span);
 
         // Determine the binding shape early — we need it before
         // opening the loop scope so we know whether to mark it as
@@ -10792,11 +10795,25 @@ pub const Compiler = struct {
         }
     };
 
+    /// §14.7 LoopEvaluation — an iteration statement's completion is
+    /// `NormalCompletion(V)` with `V` initialized to undefined, never
+    /// EMPTY: a zero-iteration loop must yield undefined, not let the
+    /// preceding statement's value show through. In completion-value
+    /// position, store undefined into the register at loop entry; the
+    /// body's value-producing statements then update it per iteration.
+    fn emitCompletionUndefined(self: *Compiler, span: Span) CompileError!void {
+        const reg = self.completion_reg orelse return;
+        try self.builder.emitOp(.lda_undefined, span);
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(reg);
+    }
+
     fn compileWhile(self: *Compiler, s: ast.statement.WhileStmt) CompileError!void {
         // §14.13 — claim any `LABEL :` that wrapped us BEFORE we
         // emit the loop body, so `break LABEL ;` inside the body
         // resolves to *this* LoopContext.
         const labels = try self.drainPendingLabels();
+        try self.emitCompletionUndefined(s.span);
         const loop_start = self.builder.here();
         try self.compileExpression(&s.test_);
         try self.builder.emitOp(.jmp_if_false, s.span);
@@ -10831,6 +10848,7 @@ pub const Compiler = struct {
 
     fn compileDoWhile(self: *Compiler, s: ast.statement.DoWhileStmt) CompileError!void {
         const labels = try self.drainPendingLabels();
+        try self.emitCompletionUndefined(s.span);
         const loop_start = self.builder.here();
         var ctx: LoopContext = .{
             .continue_target = 0,
@@ -12048,6 +12066,7 @@ pub const Compiler = struct {
     }
 
     fn compileFor(self: *Compiler, s: ast.statement.ForStmt) CompileError!void {
+        try self.emitCompletionUndefined(s.span);
         // §13.2.4.6 / §14.3.x — when the C-style for head declares
         // a `using` / `await using` binding, the entire for-
         // statement counts as one block-scope for disposal:

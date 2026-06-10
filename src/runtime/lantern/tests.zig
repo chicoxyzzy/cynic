@@ -12740,3 +12740,47 @@ test "prototype chain: setPrototypeOf to a function" {
         \\"" + o.x + "," + (Object.getPrototypeOf(o) === f);
     , "42,true");
 }
+
+// §14.7 LoopEvaluation — an iteration statement's completion value is
+// `V` (initialized to undefined), never empty: a zero-iteration loop
+// REPLACES the preceding statement's completion value with undefined.
+// Observable as the script's own completion value (and through
+// §19.2.1.3 PerformEval, which the for-in/of `cptn-*` fixtures use).
+
+/// The script's completion value must be `undefined` — for the
+/// zero-iteration loop shapes where a stale preceding value would
+/// otherwise show through.
+fn expectScriptCompletionUndefined(source: []const u8) !void {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const v = switch (try evaluateScriptResult(&realm, source)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isUndefined());
+}
+
+test "completion value: zero-iteration for-in yields undefined" {
+    try expectScriptCompletionUndefined("var a; 1; for (a in undefined) { }");
+}
+
+test "completion value: zero-iteration while yields undefined" {
+    try expectScriptCompletionUndefined("2; while (false) { }");
+}
+
+test "completion value: empty-body do-while yields undefined" {
+    try expectScriptCompletionUndefined("3; do { } while (false)");
+}
+
+test "completion value: zero-iteration for-of yields undefined" {
+    try expectScriptCompletionUndefined("4; for (const x of []) { }");
+}
+
+test "completion value: zero-iteration C-style for yields undefined" {
+    try expectScriptCompletionUndefined("5; for (; false;) { }");
+}
+
+test "completion value: iterating loop still surfaces the body value" {
+    try expectScriptIntWithBuiltins("6; for (var d in { x: 1 }) { 9; }", 9);
+}
