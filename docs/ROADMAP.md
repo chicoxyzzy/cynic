@@ -1180,12 +1180,15 @@ main ECMA-262 sweep.
    from the chain. Stack traces become harder to read. This is
    the spec-prescribed cost.
 
-Cynic ships PTC tractably for reasons that don't apply to V8 /
-SpiderMonkey: no JIT (no TurboFan / Ion retrofit cost), no
-sloppy mode (no §15.10.1 carve-outs), no `eval` (no §15.10.1
-direct-eval interaction), no `with` (drops out of the spec
-walk), no DevTools surface today (no installed expectation
-that `Error.stack` shows eliminated frames).
+Cynic shipped PTC tractably for reasons that didn't apply to V8 /
+SpiderMonkey at the time: no JIT yet (no TurboFan / Ion retrofit
+cost — Bistromath then arrived PTC-aware: self-recursive tail
+calls compile as jump-to-entry, the rest tier down, docs/jit.md
+§12), no sloppy mode (no §15.10.1 carve-outs), eval off by
+default (no §15.10.1 direct-eval interaction on the default
+posture), no `with` (drops out of the spec walk), no DevTools
+surface today (no installed expectation that `Error.stack` shows
+eliminated frames).
 
 ## Robustness & host-safety
 
