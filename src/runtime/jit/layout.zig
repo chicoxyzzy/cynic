@@ -33,6 +33,8 @@ pub const frame = struct {
     pub const ip: u15 = @offsetOf(CallFrame, "ip");
     pub const accumulator: u15 = @offsetOf(CallFrame, "accumulator");
     pub const running_realm: u15 = @offsetOf(CallFrame, "running_realm");
+    pub const this_value: u15 = @offsetOf(CallFrame, "this_value");
+    pub const super_called_cell: u15 = @offsetOf(CallFrame, "super_called_cell");
 };
 
 /// `Realm` fields the back-edge safepoint and the global IC read.
@@ -98,7 +100,8 @@ comptime {
     // offsets; the slot accessors additionally index Value arrays.
     for ([_]usize{
         frame.ip,                frame.accumulator,
-        frame.running_realm,     object.shape,
+        frame.running_realm,     frame.this_value,
+        frame.super_called_cell, object.shape,
         object.prototype,        object.inline_slots,
         object.overflow_items_ptr,
         ic_cell.shape,           ic_cell.proto,

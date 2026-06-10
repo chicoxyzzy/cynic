@@ -359,6 +359,9 @@ test "jit asm_aarch64: golden encodings" {
     try expectEqual(@as(u32, 0x9B227C20), smull(.x0, .x1, .x2)); // smull x0, w1, w2
     try expectEqual(@as(u32, 0x93407C20), sxtw(.x0, .x1)); // sxtw x0, w1
     try expectEqual(@as(u32, 0x2A020020), orrRegW(.x0, .x1, .x2)); // orr w0, w1, w2
+    try expectEqual(@as(u32, 0x0A020020), andRegW(.x0, .x1, .x2)); // and w0, w1, w2
+    try expectEqual(@as(u32, 0x4A020020), eorRegW(.x0, .x1, .x2)); // eor w0, w1, w2
+    try expectEqual(@as(u32, 0x6B020020), subsRegW(.x0, .x1, .x2)); // subs w0, w1, w2
     try expectEqual(@as(u32, 0x2A0103E0), movRegW(.x0, .x1)); // mov w0, w1
     try expectEqual(@as(u32, 0x39400020), ldrbImm(.x0, .x1, 0)); // ldrb w0, [x1]
     try expectEqual(@as(u32, 0x36000040), tbz(.x0, 0, 2)); // tbz x0, #0, .+8

@@ -114,16 +114,21 @@ fn runOnce(
     io: std.Io,
     cynic_bin: []const u8,
     fixture: []const u8,
+    jit: bool,
 ) !Sample {
     const t0 = std.Io.Clock.now(.awake, io);
+    // `--enable-experimental` flips every tracked pre-Stage-4
+    // proposal on (joint-iteration, upsert, tail-call-optimization)
+    // so fixtures gated on those flags execute the gated path. No
+    // effect on the older arith / alloc / promise fixtures, which
+    // don't touch any gated surface. `--jit` (opt-in, mirroring the
+    // engine default) measures the Bistromath posture with its
+    // natural tier-up thresholds — what a user gets, not a forced
+    // compile.
+    const argv_jit: []const []const u8 = &.{ cynic_bin, "--enable-experimental", "--jit", "run", fixture };
+    const argv_interp: []const []const u8 = &.{ cynic_bin, "--enable-experimental", "run", fixture };
     var child = try std.process.spawn(io, .{
-        // `--enable-experimental` flips every tracked pre-Stage-4
-        // proposal on (joint-iteration, upsert,
-        // tail-call-optimization) so fixtures gated on those flags
-        // execute the gated path. No effect on the older arith /
-        // alloc / promise fixtures, which don't touch any gated
-        // surface.
-        .argv = &.{ cynic_bin, "--enable-experimental", "run", fixture },
+        .argv = if (jit) argv_jit else argv_interp,
         // Suppress the fixture's print() output — the bench harness
         // doesn't care, and dumping it would scramble the report.
         .stdout = .ignore,
@@ -223,6 +228,7 @@ pub fn main(init: std.process.Init) !void {
     // Parse `--runs=<N>` (default DEFAULT_RUNS, clamped to MAX_RUNS).
     // Anything else on the line is ignored — this driver has one knob.
     var runs: usize = DEFAULT_RUNS;
+    var jit = false;
     {
         var args_iter = init.minimal.args.iterate();
         _ = args_iter.next(); // skip the binary path
@@ -231,6 +237,10 @@ pub fn main(init: std.process.Init) !void {
                 runs = std.fmt.parseInt(usize, a["--runs=".len..], 10) catch DEFAULT_RUNS;
                 if (runs < 1) runs = 1;
                 if (runs > MAX_RUNS) runs = MAX_RUNS;
+            } else if (std.mem.eql(u8, a, "--jit")) {
+                // Run every fixture with Bistromath enabled at its
+                // natural thresholds (docs/jit.md §12 step 3b).
+                jit = true;
             }
         }
     }
@@ -275,7 +285,7 @@ pub fn main(init: std.process.Init) !void {
         // the first recorded sample.
         var w: usize = 0;
         while (w < WARMUP_RUNS) : (w += 1) {
-            _ = runOnce(io, cynic_bin, b.path) catch |err| {
+            _ = runOnce(io, cynic_bin, b.path, jit) catch |err| {
                 const fail = try std.fmt.bufPrint(&buf, "{s:<16}  warmup failed: {s}\n", .{ b.name, @errorName(err) });
                 try std.Io.File.stderr().writeStreamingAll(io, fail);
             };
@@ -285,7 +295,7 @@ pub fn main(init: std.process.Init) !void {
         var any_failed = false;
         var i: usize = 0;
         while (i < runs) : (i += 1) {
-            samples[i] = runOnce(io, cynic_bin, b.path) catch |err| {
+            samples[i] = runOnce(io, cynic_bin, b.path, jit) catch |err| {
                 const fail = try std.fmt.bufPrint(&buf, "{s:<16}  run {d} failed: {s}\n", .{ b.name, i, @errorName(err) });
                 try std.Io.File.stderr().writeStreamingAll(io, fail);
                 any_failed = true;

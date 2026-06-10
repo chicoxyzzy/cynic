@@ -241,8 +241,18 @@ const Compiler = struct {
                 .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq,
                 .lda_property, .sta_property,
                 .lda_global, .lda_global_or_undef,
+                .lda_this,
                 .throw_if_hole, .return_ => {},
                 // zig fmt: on
+                .make_environment => {
+                    // A zero-slot env is unobservable from a
+                    // supported chunk — no env reads/writes or
+                    // closure creation can be in the set — so
+                    // compiled code elides the allocation. Any real
+                    // slot count means env-resident bindings:
+                    // dont_compile.
+                    if (code[i + 1] != 0) return error.UnsupportedOp;
+                },
                 .jmp, .jmp_if_true, .jmp_if_false => {
                     const off = readI16(code, i + 1);
                     _ = try self.labelFor(targetOf(after, off));
@@ -377,6 +387,25 @@ const Compiler = struct {
                     try m.emit(a64.orrReg(acc_reg, .x11, bool_tag_reg));
                 },
 
+                .make_environment => {
+                    // Zero-slot env (scan-enforced) — unobservable
+                    // from this chunk; elided.
+                },
+                .lda_this => {
+                    // §9.1.1.3.4 GetThisBinding — the only abrupt
+                    // case is the derived-constructor TDZ, and
+                    // construct frames never enter compiled code
+                    // (tryEnterTop refuses them). What CAN enter is
+                    // an arrow whose lexical `this` belongs to a
+                    // derived ctor — those frames carry
+                    // `super_called_cell`, so tier down on its
+                    // presence and read the (always-initialised)
+                    // `this_value` otherwise.
+                    const td = try self.tdFor(bc);
+                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.super_called_cell));
+                    try m.jumpCbnz(.x9, td);
+                    try m.emit(a64.ldrImm(acc_reg, frame_reg, layout.frame.this_value));
+                },
                 .lda_property => {
                     // Mirrors the interpreter's two IC hit modes
                     // exactly — own-data and proto-load — reading
@@ -1072,4 +1101,263 @@ test "jit bistromath ic: compiled writes hit the same barrier as Lantern" {
     try testing.expect(v3.isString());
     const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(v3.asString()));
     try testing.expectEqualStrings("young-1234", s.flatBytes());
+}
+
+test "jit bistromath: loop_inc_lt compiles; int32 overflow tiers down" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // `lp` exercises the fused counter loop in compiled form — the
+    // fusion (and the counter's register promotion) requires the
+    // literal-bound `for (let i = 0; i < INT; i++)` shape; a
+    // variable bound keeps the header `let` env-resident and the
+    // chunk honestly dont_compiles. `ovf` and `movf` push add/mul
+    // past i32 — the overflow checks must tier down and Lantern's
+    // double math must produce the spec answers.
+    const src =
+        \\function lp() { let s = 0; for (let i = 0; i < 100; i++) { s = (s + i) | 0; } return s; }
+        \\function ovf(a) { return a + 1; }
+        \\function movf(a) { return a * a; }
+        \\let i = 0;
+        \\while (i < 200) { lp(); ovf(1); movf(2); i = i + 1; }
+        \\"" + lp() + "," + ovf(2147483647) + "," + movf(65536);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isString());
+    const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings("4950,2147483648,4294967296", s.flatBytes());
+    for (0..3) |t| {
+        try testing.expectEqual(
+            Chunk.JitState.Tier.compiled,
+            chunk.function_templates[t].chunk.jit_state.?.tier,
+        );
+    }
+}
+
+test "jit bistromath ic: overflow-slot property reads and writes" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // Six properties push `f` past the inline_slot_cap — the
+    // compiled slot accessor's overflow branch (the slice-layout
+    // witness's consumer) serves both directions.
+    const src =
+        \\var o = { a: 0, b: 1, c: 2, d: 3, e: 4, f: 5 };
+        \\function rd(x) { return x.f; }
+        \\function wr(x, v) { x.f = v; }
+        \\let i = 0;
+        \\while (i < 200) { wr(o, i); rd(o); i = i + 1; }
+        \\wr(o, 4242);
+        \\rd(o);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 4242), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.function_templates[0].chunk.jit_state.?.tier,
+    );
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.function_templates[1].chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath: a TDZ read in compiled code tiers down and throws" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // §13.3.1 — `y` is a promoted register seeded with the Hole;
+    // the b=true path reads it before the declaration. Compiled
+    // code's throw_if_hole tiers down and Lantern raises the
+    // ReferenceError.
+    const src =
+        \\function f(b) { if (b) { return y; } let y = 1; return y; }
+        \\let i = 0;
+        \\while (i < 300) { f(false); i = i + 1; }
+        \\f(true);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    try testing.expect(out == .thrown);
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.function_templates[0].chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath: a hot function stays correct under `new`" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // tryEnterTop refuses construct frames — `new F()` must run the
+    // §10.2.2 verdict path in Lantern and yield the fresh `this`
+    // even while plain calls of F run compiled.
+    const src =
+        \\function F(x) { return x + 1; }
+        \\let i = 0;
+        \\while (i < 200) { F(i); i = i + 1; }
+        \\typeof new F(1);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isString());
+    const s: *@import("../string.zig").JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings("object", s.flatBytes());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.function_templates[0].chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath: baked heap constants survive a full GC" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // The string constant's Value bits are baked into the code as
+    // an immediate (docs/jit.md §9) — legal because the chunk roots
+    // its constants and the heap never moves. A full collection
+    // between activations is the audit.
+    const src1 =
+        \\function s() { return "lit-const"; }
+        \\let i = 0;
+        \\while (i < 300) { s(); i = i + 1; }
+        \\s();
+    ;
+    const program1 = try parser_mod.parseScript(arena.allocator(), src1, null);
+    var chunk1 = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program1, src1, null);
+    defer chunk1.deinit(testing.allocator);
+    _ = switch (try interpreter.run(testing.allocator, &realm, &chunk1)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk1.function_templates[0].chunk.jit_state.?.tier,
+    );
+
+    realm.collectGarbage();
+
+    const src2 = "s();";
+    const program2 = try parser_mod.parseScript(arena.allocator(), src2, null);
+    var chunk2 = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program2, src2, null);
+    defer chunk2.deinit(testing.allocator);
+    const out2 = try interpreter.run(testing.allocator, &realm, &chunk2);
+    const v2 = switch (out2) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v2.isString());
+    const s2: *@import("../string.zig").JSString = @ptrCast(@alignCast(v2.asString()));
+    try testing.expectEqualStrings("lit-const", s2.flatBytes());
+}
+
+test "jit bistromath: a non-bool branch condition tiers down correctly" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // `if (n)` puts an int32 in the condition — the compiled
+    // bool-tag check tiers down every time and §7.1.2 ToBoolean
+    // runs in Lantern; both arms must stay right.
+    const src =
+        \\function c(n) { if (n) { return 1; } return 2; }
+        \\let i = 0;
+        \\while (i < 300) { c(5); i = i + 1; }
+        \\c(7) * 10 + c(0);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 12), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.function_templates[0].chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath: methods reading `this` compile" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // The method_call-bench shape: a hot method whose body is
+    // lda_this + property read/write. A plain frame's `this` is
+    // always initialised, so the compiled path is a frame-field
+    // load; arrows under derived ctors tier down via
+    // super_called_cell (untestable without class builtins here;
+    // the differential covers it).
+    const src =
+        \\function inc() { this.n = this.n + 1; return this.n; }
+        \\var o = { n: 0 };
+        \\o.inc = inc;
+        \\let i = 0;
+        \\while (i < 300) { o.inc(); i = i + 1; }
+        \\o.inc();
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 301), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.function_templates[0].chunk.jit_state.?.tier,
+    );
 }

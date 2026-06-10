@@ -3340,6 +3340,12 @@ pub fn runFrames(
                 }
                 return error.OutOfMemory;
             };
+            // Bistromath first (docs/jit.md §4) — same hook as the
+            // `.call` / `.call_method` arms; this is the
+            // own-property method-call push site.
+            if (bistromath.tryEnterTop(allocator, realm, frames)) |jit_ret| {
+                frames.items[frames.items.len - 1].accumulator = jit_ret;
+            }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 
