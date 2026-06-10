@@ -71,8 +71,10 @@ const paramsReferenceArguments = arguments_scan.paramsReferenceArguments;
 
 const function_scope_scan = @import("function_scope_scan.zig");
 const functionEntryEnvNeeded = function_scope_scan.functionEntryEnvNeeded;
+const topLevelLexIsPromotable = function_scope_scan.topLevelLexIsPromotable;
 const param_register_scan = @import("param_register_scan.zig");
 const paramsCanBeRegisters = param_register_scan.paramsCanBeRegisters;
+const bodyIsRegisterSafe = param_register_scan.bodyIsRegisterSafe;
 
 pub const CompileError = error{
     OutOfMemory,
@@ -621,12 +623,16 @@ pub const Compiler = struct {
     /// / `const` to enforce §13.3.1 TDZ.
     fn emitLoadBinding(self: *Compiler, binding: Binding, span: Span) !void {
         if (binding.is_register) {
-            // Register-promoted binding — used by the fused
-            // counter-loop path. No TDZ probe: the loop's init
-            // writes the slot before any read, and the body is
-            // statically verified to neither shadow nor write `i`.
+            // Register-promoted binding. The fused counter-loop and
+            // param promotions need no TDZ probe (their writers
+            // provably initialise before any read); the body-locals
+            // promotion seeds the register with Hole and keeps the
+            // §13.3.1 check, mirroring the env path below.
             try self.builder.emitOp(.ldar, span);
             try self.builder.emitU8(binding.register);
+            if (binding.register_tdz and binding.kind != .var_) {
+                try self.builder.emitOp(.throw_if_hole, span);
+            }
             return;
         }
         if (binding.is_import) {
@@ -695,12 +701,27 @@ pub const Compiler = struct {
 
     fn emitStoreBindingMode(self: *Compiler, binding: Binding, span: Span, is_init: bool) !void {
         if (binding.is_register) {
-            // Register-promoted binding (fused counter-loop). All
-            // writes go straight to the register file; const /
-            // TDZ checks don't apply because the path that creates
-            // this binding statically guarantees a single init
-            // followed by interpreter-managed updates inside
-            // `loop_inc_lt`. `is_init` distinction is irrelevant.
+            // Register-promoted binding. The fused counter-loop and
+            // param promotions need no checks (single init before
+            // any read, statically verified). Body-local promotions
+            // carry `register_tdz` until their declarator's
+            // InitializeBinding store is emitted; a non-init store
+            // inside that window is §9.1.1.1.5 SetMutableBinding on
+            // an uninitialized binding (`let x = (x = 1)`) and must
+            // throw ReferenceError. Probe through a temp so the
+            // value in `acc` survives in the (statically
+            // unreachable) non-throwing case.
+            if (binding.register_tdz and !is_init) {
+                const tmp = try self.reserveTemp();
+                defer self.releaseTemp();
+                try self.builder.emitOp(.star, span);
+                try self.builder.emitU8(tmp);
+                try self.builder.emitOp(.ldar, span);
+                try self.builder.emitU8(binding.register);
+                try self.builder.emitOp(.throw_if_hole, span);
+                try self.builder.emitOp(.ldar, span);
+                try self.builder.emitU8(tmp);
+            }
             try self.builder.emitOp(.star, span);
             try self.builder.emitU8(binding.register);
             return;
@@ -5167,6 +5188,11 @@ pub const Compiler = struct {
         const scope = self.scope orelse return null;
         const binding = scope.resolve(name) orelse return null;
         if (!binding.is_register) return null;
+        // Body-locals promotion: a read inside the binding's own
+        // §13.3.1 TDZ window must route through `emitLoadBinding`
+        // and its `throw_if_hole`; the peephole would treat the
+        // Hole seed as an operand value.
+        if (binding.register_tdz) return null;
         return binding.register;
     }
 
@@ -6859,7 +6885,7 @@ pub const Compiler = struct {
             // every case body so a `switch (x) { case 1: let y = 1; }`
             // resolves when the body runs.
             for (s.cases) |case| {
-                try self.hoistLetConst(case.body);
+                try self.hoistLetConst(case.body, false);
             }
         }
 
@@ -7919,7 +7945,7 @@ pub const Compiler = struct {
         // Static block has no params. Reuse the function-entry
         // discovery pass to decide whether the body declares
         // anything that would need the env.
-        const needs_entry_env = functionEntryEnvNeeded(self.source, &.{}, body, false);
+        const needs_entry_env = functionEntryEnvNeeded(self.source, &.{}, body, false, false);
         self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
         self.completion_reg = null;
@@ -7953,7 +7979,7 @@ pub const Compiler = struct {
             try self.builder.emitU8(0);
             break :blk here;
         } else null;
-        try self.hoistLetConst(body);
+        try self.hoistLetConst(body, false);
         try self.hoistVarAndFunctions(body);
         try self.emitVarInits(span);
         for (body) |*s| if (s.* == .function_decl) try self.compileStatement(s);
@@ -8060,6 +8086,7 @@ pub const Compiler = struct {
             if (params_register_only) &.{} else params,
             body_stmts,
             false,
+            false,
         );
         self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
@@ -8154,7 +8181,7 @@ pub const Compiler = struct {
         // hoistVarAndFunctions + emitVarInits, `class C { constructor() {
         // var x = 1; this.x = x; } }` raised CompileError because `x`
         // was undeclared at the use site.
-        try self.hoistLetConst(body_stmts);
+        try self.hoistLetConst(body_stmts, false);
         try self.hoistVarAndFunctions(body_stmts);
         try self.emitVarInits(span);
         // Same two-pass order as the function path: function
@@ -8278,6 +8305,7 @@ pub const Compiler = struct {
             if (params_register_only) &.{} else params,
             body_stmts,
             false,
+            false,
         );
         self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
@@ -8366,7 +8394,7 @@ pub const Compiler = struct {
         }
 
         // Body.
-        try self.hoistLetConst(body_stmts);
+        try self.hoistLetConst(body_stmts, false);
         try self.hoistVarAndFunctions(body_stmts);
         try self.emitVarInits(span);
         for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
@@ -8491,7 +8519,7 @@ pub const Compiler = struct {
         // Pre-pass: hoist `let` / `const` slots so any reference
         // inside the block (including from forward declarations)
         // sees the binding in the TDZ rather than as undeclared.
-        try self.hoistLetConst(body);
+        try self.hoistLetConst(body, false);
 
         // §13.2.4.6 BlockStatement Runtime Semantics — ES2026
         // explicit-resource-management. If the block carries any
@@ -8711,7 +8739,17 @@ pub const Compiler = struct {
     /// pre-pass therefore adds slots without emitting any per-block
     /// runtime initialisation — the function-entry MakeEnvironment
     /// already filled the env with `hole` values.
-    fn hoistLetConst(self: *Compiler, body: []ast.statement.Statement) CompileError!void {
+    fn hoistLetConst(
+        self: *Compiler,
+        body: []ast.statement.Statement,
+        /// True only from `compileFunctionTemplateExtNamed`'s body
+        /// hoist when `locals_register_only` holds: top-level simple
+        /// `let` / `const` declarators are promoted to registers via
+        /// `declareRegisterLocal` instead of env slots. Every other
+        /// caller (blocks, switch cases, ctors/methods, script and
+        /// module top levels) passes false.
+        promote_top_lex: bool,
+    ) CompileError!void {
         for (body) |*s| {
             // sec-moduledeclarationinstantiation step 17 -- export <lexical-decl>
             // participates in the module's LexicallyScopedDeclarations the same way
@@ -8752,9 +8790,75 @@ pub const Compiler = struct {
             // `emitStoreBindingMode` lowers writes to
             // `throw_assign_const`.
             const is_using = ld.kind == .using_ or ld.kind == .await_using_;
+            if (promote_top_lex and !is_using and topLevelLexIsPromotable(target)) {
+                // Register-promoted body locals: the register is
+                // claimed permanently below the temp stack and the
+                // Hole seed + `throw_if_hole` on reads keep §13.3.1
+                // TDZ observably identical to the env path.
+                for (ld.declarators) |d| {
+                    const name = try self.bindingName(d.name.identifier.span);
+                    try self.declareRegisterLocal(name, kind, d.name.identifier.span);
+                }
+                continue;
+            }
             for (ld.declarators) |d| {
                 try self.declarePatternBindings(d.name, kind);
                 if (is_using) self.markLastBindingUsing(d.name);
+            }
+        }
+    }
+
+    /// Declare a function-body-top-level `let` / `const` whose value
+    /// lives in a permanently-reserved register instead of an env
+    /// slot (the body-locals promotion — see `hoistLetConst`).
+    /// Duplicate detection mirrors `declareBindingFull`'s
+    /// lexical arm. The register comes from `reserveTemp` at body
+    /// top — before any expression temp exists — and is never
+    /// released, so the temp stack grows above it for the whole
+    /// template. The Hole seed emitted here is what
+    /// `make_environment` would have provided; `emitLoadBinding`
+    /// appends `throw_if_hole` on reads via `register_tdz`.
+    fn declareRegisterLocal(
+        self: *Compiler,
+        name: []const u8,
+        kind: BindingKind,
+        span: Span,
+    ) CompileError!void {
+        const target = self.scope.?;
+        if (target.lookupLocal(name)) |_| {
+            try self.report(.unexpected_token, span);
+            return error.DuplicateBinding;
+        }
+        const reg = try self.reserveTemp();
+        try target.bindings.append(self.allocator, .{
+            .name = name,
+            .env_slot = 0,
+            .env_depth = self.env_depth,
+            .kind = kind,
+            .span = span,
+            .is_register = true,
+            .register = reg,
+            .register_tdz = true,
+        });
+        // §13.3.1 — seed the TDZ sentinel.
+        try self.builder.emitOp(.lda_hole, span);
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(reg);
+    }
+
+    /// Close a register-promoted binding's §13.3.1 TDZ window once
+    /// its declarator's InitializeBinding store has been emitted.
+    /// Scans the current scope only — `compileLexicalDecl` resolved
+    /// the binding there via `lookupLocal` a moment earlier.
+    fn markRegisterBindingInitialized(self: *Compiler, name: []const u8) void {
+        const scope = self.scope orelse return;
+        var i: usize = scope.bindings.items.len;
+        while (i > 0) {
+            i -= 1;
+            const b = &scope.bindings.items[i];
+            if (std.mem.eql(u8, b.name, name)) {
+                if (b.is_register) b.register_tdz = false;
+                return;
             }
         }
     }
@@ -9443,6 +9547,16 @@ pub const Compiler = struct {
                     // §9.1.1.4 InitializeBinding — initializer write,
                     // not assignment.
                     try self.emitStoreBindingInit(binding, d.span);
+                    // Body-locals promotion: the declarator has now
+                    // initialised the register — close the §13.3.1
+                    // TDZ window so later reads drop `throw_if_hole`
+                    // and later writes drop the §9.1.1.1.5 probe.
+                    // Sound for function-body-top-level bindings:
+                    // straight-line, executed once per call, no way
+                    // to jump back before the declaration.
+                    if (binding.is_register and binding.register_tdz) {
+                        self.markRegisterBindingInitialized(name);
+                    }
                     if (is_using) {
                         // §13.2.4.6 BlockStatement Runtime Semantics +
                         // §9.5.3 AddDisposableResource — every `using`
@@ -13343,11 +13457,31 @@ fn compileFunctionTemplateExtNamed(
         is_generator,
         is_async,
     );
+    // Body-locals-to-register promotion. When the body is
+    // register-safe (no nested function shape, no direct eval, no
+    // `arguments` — see `bodyIsRegisterSafe`), its top-level simple
+    // `let` / `const` declarators live in permanently-reserved
+    // registers instead of env slots: reads emit `Ldar` +
+    // `throw_if_hole` (§13.3.1 TDZ intact), writes emit `Star`.
+    // Pays twice — the interpreter skips the env allocation and
+    // chain walk, and a chunk whose every binding is a register is
+    // Bistromath-compilable (docs/jit.md §12). Capped so promoted
+    // registers plus params leave the temp allocator headroom.
+    const locals_register_only = !is_generator and !is_async and blk: {
+        const stmts = body_stmts orelse break :blk false;
+        if (!bodyIsRegisterSafe(self.source, stmts, is_arrow)) break :blk false;
+        var promotable: usize = 0;
+        for (stmts) |*s| {
+            if (topLevelLexIsPromotable(s)) promotable += s.lexical.declarators.len;
+        }
+        break :blk promotable > 0 and params.len + promotable <= 192;
+    };
     const needs_entry_env = functionEntryEnvNeeded(
         self.source,
         if (params_register_only) &.{} else params,
         body_stmts,
         is_arrow,
+        locals_register_only,
     );
     self.env_depth = saved_env_depth +
         (if (has_fn_name_env) @as(u8, 1) else @as(u8, 0)) +
@@ -13484,7 +13618,7 @@ fn compileFunctionTemplateExtNamed(
     // Compile body.
     switch (body) {
         .block => |stmts| {
-            try self.hoistLetConst(stmts);
+            try self.hoistLetConst(stmts, locals_register_only);
             try self.hoistVarAndFunctions(stmts);
             try self.emitVarInits(span);
             // Function decls go first — see compileScriptAsChunk.
@@ -13776,7 +13910,7 @@ fn compileScriptLikeChunk(
         try c.builder.emitOp(.lda_undefined, start_span);
         try c.builder.emitOp(.star, start_span);
         try c.builder.emitU8(c.completion_reg.?);
-        try c.hoistLetConst(program.body);
+        try c.hoistLetConst(program.body, false);
         try c.hoistVarAndFunctions(program.body);
         try c.emitVarInits(start_span);
 
@@ -13862,7 +13996,7 @@ pub fn compileModuleAsChunk(
     const slot_count_patch = c.builder.here();
     try c.builder.emitU8(0);
 
-    try c.hoistLetConst(program.body);
+    try c.hoistLetConst(program.body, false);
     try c.hoistVarAndFunctions(program.body);
     try c.emitVarInits(start_span);
 

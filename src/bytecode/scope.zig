@@ -164,6 +164,13 @@ pub const Binding = struct {
     /// Register index when `is_register` is true. Otherwise
     /// `env_slot` is the live field.
     register: u8 = 0,
+    /// True when this register-promoted binding still needs §13.3.1
+    /// TDZ enforcement: the body-locals promotion seeds the register
+    /// with the Hole sentinel at function entry and reads append
+    /// `throw_if_hole`, mirroring the env path exactly. The param /
+    /// fused-loop promotions leave this false — their writers
+    /// provably initialise before any read.
+    register_tdz: bool = false,
 };
 
 pub const ScopeKind = enum {

@@ -50,6 +50,7 @@ pub fn functionEntryEnvNeeded(
     params: []const ast.statement.FunctionParam,
     body_stmts: ?[]ast.statement.Statement,
     is_arrow: bool,
+    top_lex_promoted: bool,
 ) bool {
     // §10.2.4 IteratorBindingInitialization — every parameter
     // becomes an env binding, so the env must exist whenever the
@@ -64,9 +65,33 @@ pub fn functionEntryEnvNeeded(
     if (!is_arrow and arguments_scan.referencesArguments(source, stmts)) return true;
 
     for (stmts) |*s| {
+        // Body-locals register promotion: when the caller promotes
+        // top-level simple `let` / `const` declarators into
+        // registers (`hoistLetConst`'s `promote_top_lex` path),
+        // those statements stop being env consumers. The predicate
+        // here must mirror the hoist's promotion predicate exactly
+        // — both call `topLevelLexIsPromotable`.
+        if (top_lex_promoted and topLevelLexIsPromotable(s)) continue;
         if (statementIntroducesBinding(s)) return true;
     }
     return false;
+}
+
+/// The shared promotion predicate for one function-body-top-level
+/// statement: a `let` / `const` declaration (not `var`, not
+/// `using` — dispose machinery needs real scope semantics) whose
+/// declarators are all simple identifiers. Used by
+/// `functionEntryEnvNeeded` above and the compiler's
+/// `hoistLetConst` so the env-elision decision and the actual
+/// declaration path can never disagree.
+pub fn topLevelLexIsPromotable(s: *const ast.statement.Statement) bool {
+    if (s.* != .lexical) return false;
+    const ld = s.lexical;
+    if (ld.kind != .let_ and ld.kind != .const_) return false;
+    for (ld.declarators) |d| {
+        if (d.name != .identifier) return false;
+    }
+    return true;
 }
 
 /// Walk `s` looking for any declaration that would land in the

@@ -65,25 +65,29 @@ pub fn paramsCanBeRegisters(
     // slot 0 — incompatible with skipping the env.
     if (!is_arrow and arguments_scan.paramsReferenceArguments(source, params)) return false;
     const stmts = body_stmts orelse return false;
+    return bodyIsRegisterSafe(source, stmts, is_arrow);
+}
+
+/// The body half of the register-promotion predicate, shared by the
+/// param promotion above and the body-locals promotion
+/// (`hoistLetConst`'s `promote_top_lex` path):
+///   * `arguments` reference (non-arrow) ⇒ reject — the implicit
+///     binding reifies into env slot 0.
+///   * Any nested function-shape construct ⇒ reject. Function
+///     expression, function declaration, arrow, class decl/expr,
+///     object-literal method — an inner scope MIGHT read a promoted
+///     name through the chain and would see a stale register copy
+///     (or, with the env elided, an out-of-bounds slot).
+///   * §19.2.1 — a bare `eval(…)` call anywhere ⇒ reject. Direct
+///     eval reads bindings through the surrounding env chain that
+///     register promotion skips.
+pub fn bodyIsRegisterSafe(
+    source: []const u8,
+    stmts: []ast.statement.Statement,
+    is_arrow: bool,
+) bool {
     if (!is_arrow and arguments_scan.referencesArguments(source, stmts)) return false;
-    // Body must not contain any nested function-shape construct.
-    // The conservative version below catches every common closure
-    // shape: function expression, function declaration, arrow,
-    // class declaration (constructor + methods), class expression.
-    // A nested anything ⇒ a chance the inner reads one of our
-    // param names through scope walk; the optimization would
-    // serve a stale register copy. Cheap to reject; precise
-    // capture analysis is a follow-up.
     for (stmts) |*s| if (statementHasNestedFunctionShape(s)) return false;
-    // §19.2.1 — a direct eval reads bindings through the surrounding
-    // env chain. Register-only params skip the env entirely, so
-    // `function f(n) { return eval('n + 1'); }` couldn't resolve
-    // `n` from inside the eval. Reject when the body contains a
-    // bare `eval(…)` call — the env-bound path stays as the
-    // fallback. Indirect eval (`(0, eval)(…)`) doesn't see the
-    // caller's scope per §19.2.1, but it's cheap to reject both
-    // by detecting any call whose callee is the bare identifier
-    // `eval`.
     for (stmts) |*s| if (statementHasDirectEvalCall(source, s)) return false;
     return true;
 }

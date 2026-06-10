@@ -225,7 +225,7 @@ const Compiler = struct {
                 .mov, .add, .sub, .mul, .add_smi, .to_int32,
                 .bit_and, .bit_or, .bit_xor,
                 .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq,
-                .return_ => {},
+                .throw_if_hole, .return_ => {},
                 // zig fmt: on
                 .jmp, .jmp_if_true, .jmp_if_false => {
                     const off = readI16(code, i + 1);
@@ -411,6 +411,16 @@ const Compiler = struct {
                     if (off < 0) try self.backEdgeSafePoint(target);
                     try m.jump(try self.labelForExisting(target));
                     m.bind(&skip);
+                },
+
+                .throw_if_hole => {
+                    // §13.3.1 — a Hole in the accumulator is a TDZ
+                    // read; tier down and let Lantern raise the
+                    // ReferenceError with its proper message.
+                    const td = try self.tdFor(bc);
+                    try m.movImm64(.x9, Value.hole_.bits);
+                    try m.emit(a64.cmpReg(acc_reg, .x9));
+                    try m.jumpCond(.eq, td);
                 },
 
                 .return_ => try m.jump(&self.done_label),
@@ -616,12 +626,11 @@ test "jit bistromath: the step budget interrupts a compiled loop" {
     realm.jit_enabled = true;
 
     // Heat + tier up: the first call's 2000 back-edges alone clear
-    // the threshold; the second call runs compiled. Params are
-    // register-bound; a `let` local would live in a heap
-    // Environment and honestly dont_compile (env opcodes are
-    // step-3 territory).
+    // the threshold; the second call runs compiled. The `let` local
+    // is register-promoted (body-locals promotion), so the chunk
+    // carries no env opcodes and compiles whole.
     const src1 =
-        \\function spin(n) { while (0 < n) { n = n - 1; } return n; }
+        \\function spin(n) { let i = 0; while (i < n) { i = i + 1; } return i; }
         \\spin(2000); spin(10);
     ;
     const program1 = try parser_mod.parseScript(arena.allocator(), src1, null);
@@ -632,7 +641,7 @@ test "jit bistromath: the step budget interrupts a compiled loop" {
         .value, .yielded => |val| val,
         .thrown => return error.UncaughtException,
     };
-    try testing.expectEqual(@as(i32, 0), v1.asInt32());
+    try testing.expectEqual(@as(i32, 10), v1.asInt32());
     const js = chunk1.function_templates[0].chunk.jit_state.?;
     try testing.expectEqual(Chunk.JitState.Tier.compiled, js.tier);
 

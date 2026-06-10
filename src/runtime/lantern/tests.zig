@@ -12815,6 +12815,38 @@ test "class self-name: the class compiles and is usable when never assigned" {
     , "function");
 }
 
+test "register locals: §13.3.1 TDZ survives body-local promotion" {
+    // `x` is hoisted into a register seeded with the Hole sentinel;
+    // the read before the declaration must still raise
+    // ReferenceError exactly as the env path does.
+    try expectScriptThrows(
+        \\function f() { x; let x = 1; return x; }
+        \\f();
+    );
+}
+
+test "register locals: a captured let stays on the env path" {
+    // The nested arrow makes the body register-unsafe; `c` must
+    // stay env-bound and the closure must read it live.
+    try expectScriptInt(
+        \\function g() { let c = 5; return () => c; }
+        \\g()();
+    , 5);
+}
+
+test "register locals: promoted let/const compute correctly" {
+    try expectScriptInt(
+        \\function sum(n) {
+        \\    const step = 1;
+        \\    let s = 0;
+        \\    let i = 0;
+        \\    while (i < n) { s = s + i; i = i + step; }
+        \\    return s;
+        \\}
+        \\sum(10) + sum(100);
+    , 45 + 4950);
+}
+
 test "jit warmth: entries, back-edges, and PTC re-entries heat the chunk" {
     // Entries (+16 each) and loop back-edges (+1 each) accumulate
     // on the chunk's JitState — docs/jit.md §4.7. The chunk is
