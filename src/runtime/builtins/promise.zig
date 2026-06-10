@@ -98,6 +98,7 @@ pub fn install(realm: *Realm) !void {
     // `"get [Symbol.species]"`; the `get ` prefix is required by
     // §10.2.10 SetFunctionName for accessor functions.
     const species_getter = try intrinsics.makeNativeFunction(realm, promiseSpeciesGetter, 0, "get [Symbol.species]");
+    realm.intrinsics.promise_species_getter = species_getter;
     const sp_entry = try fn_obj.accessors.getOrPut(realm.allocator, "@@species");
     sp_entry.value_ptr.* = .{ .getter = species_getter };
     try fn_obj.property_flags.put(realm.allocator, "@@species", .{
@@ -585,7 +586,20 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     const ctor_v = getPropertyChain(realm, source, "constructor") catch return error.NativeThrew;
     if (!ctor_v.isUndefined()) {
         if (heap_mod.valueAsFunction(ctor_v)) |c_obj| {
-            const species_v = ctorGetMember(realm, c_obj, "@@species") catch return error.NativeThrew;
+            // §27.2.4.6 pristine-species short-circuit — the original
+            // native getter's body is `return this`, so when the
+            // constructor's `@@species` accessor still IS that getter,
+            // invoking it through a JS call frame is pure overhead
+            // (it ran on every `.then`). A user-replaced getter never
+            // matches the stashed intrinsic and takes the full call.
+            const species_v = blk: {
+                if (c_obj.accessors.get("@@species")) |acc| {
+                    if (acc.getter) |g| {
+                        if (realm.intrinsics.promise_species_getter == g) break :blk ctor_v;
+                    }
+                }
+                break :blk ctorGetMember(realm, c_obj, "@@species") catch return error.NativeThrew;
+            };
             if (!species_v.isUndefined() and !species_v.isNull()) {
                 const s_fn = heap_mod.valueAsFunction(species_v) orelse return throwTypeError(realm, "Promise.prototype.then: species is not a constructor");
                 if (!s_fn.has_construct or s_fn.is_arrow) return throwTypeError(realm, "Promise.prototype.then: species is not a constructor");

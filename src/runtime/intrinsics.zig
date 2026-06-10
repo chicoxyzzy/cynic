@@ -164,6 +164,14 @@ pub const Intrinsics = struct {
     /// microtask queue; the prototype carries `.then` / `.catch`
     /// / `.finally`.
     promise_prototype: ?*JSObject = null,
+    /// §27.2.4.6 `get Promise [ @@species ]` — the ORIGINAL native
+    /// getter, stashed at install. `Promise.prototype.then` compares
+    /// the constructor's current `@@species` getter against this to
+    /// skip the getter invocation when it's pristine (the native
+    /// body is `return this`, so the short-circuit is unobservable);
+    /// a user-replaced getter never matches and takes the full
+    /// §7.3.22 SpeciesConstructor path.
+    promise_species_getter: ?*@import("function.zig").JSFunction = null,
     /// `%GeneratorFunction.prototype%` — JSFunction objects with
     /// `is_generator=true` (and not `is_async`) get this as
     /// their `.proto`. `Object.getPrototypeOf(function*(){}).constructor`

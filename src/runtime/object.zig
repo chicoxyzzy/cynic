@@ -1626,7 +1626,14 @@ pub const JSObject = struct {
     /// — a Promise pays only this ~small node, not the full extension.
     fn getOrCreatePromiseStore(self: *JSObject, allocator: std.mem.Allocator) !*PromiseReactionStore {
         if (self.promise_store) |s| return s;
-        const s = try allocator.create(PromiseReactionStore);
+        // Heap-stamped objects draw the node from the slab pool (an
+        // O(1) free-list pop after warmup); the rare heap-less object
+        // (unit-test construction) falls back to the raw allocator —
+        // `deinitFields` mirrors the split on the destroy side.
+        const s = if (self.heap) |h|
+            try h.promise_store_pool.create(h.allocator)
+        else
+            try allocator.create(PromiseReactionStore);
         s.* = .{};
         self.promise_store = s;
         return s;
@@ -1954,7 +1961,7 @@ pub const JSObject = struct {
         // Promise reaction/waiter lists live in their own node.
         if (self.promise_store) |s| {
             s.deinit(allocator);
-            allocator.destroy(s);
+            if (self.heap) |h| h.promise_store_pool.destroy(s) else allocator.destroy(s);
         }
         self.key_anchors.deinit(allocator);
         self.own_key_order.deinit(allocator);

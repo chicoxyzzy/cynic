@@ -8424,6 +8424,22 @@ test "array length: JSON.stringify and for-in never surface length" {
     , "[1,2]:01");
 }
 
+test "Promise.then: user-replaced @@species getter is still honored" {
+    // §27.2.5.4 step 3 SpeciesConstructor — the pristine-species
+    // short-circuit in `then` compares the constructor's @@species
+    // getter against the stashed intrinsic; a user-installed getter
+    // must never match, so its species constructor (and the
+    // observable getter call) still happen.
+    try expectScriptStringUnhardened(
+        \\let getter_ran = false;
+        \\class MyP extends Promise {
+        \\  static get [Symbol.species]() { getter_ran = true; return Promise; }
+        \\}
+        \\const p = MyP.resolve(1).then(v => v);
+        \\getter_ran + ":" + (p instanceof Promise) + ":" + !(p instanceof MyP);
+    , "true:true:true");
+}
+
 test "array length: Object.freeze covers length, push then throws" {
     try expectScriptStringWithBuiltins(
         \\const a = [1];

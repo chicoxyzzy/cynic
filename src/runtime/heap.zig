@@ -594,6 +594,14 @@ pub const Heap = struct {
     /// `sweepList` and `promoteYoungList`.
     string_pool: std.heap.MemoryPool(JSString) = .empty,
 
+    /// Slab pool for `PromiseReactionStore` nodes — every pending
+    /// promise that gains a reaction or waiter allocates one; a
+    /// `.then` chain allocates one per link, so the libc round-trip
+    /// was a measurable slice of promise-heavy profiles. Same
+    /// lifecycle as the sibling pools: `deinitFields` returns nodes
+    /// via `destroy`, teardown frees the slabs wholesale.
+    promise_store_pool: std.heap.MemoryPool(@import("object.zig").PromiseReactionStore) = .empty,
+
     /// Cache of pinned `JSString`s for the decimal forms of small
     /// non-negative integers `[0, small_int_cache_max)`. Number-to-
     /// string on a small integer (`(i & 0xff).toString()`, an array
@@ -697,6 +705,7 @@ pub const Heap = struct {
         self.realms.deinit(self.allocator);
         self.pending_realm_teardown.deinit(self.allocator);
         self.object_pool.deinit(self.allocator);
+        self.promise_store_pool.deinit(self.allocator);
         // Free each environment's slot vector first (the only
         // sub-field the env owns separately). The Environment
         // header itself is slab-pooled — `env_pool.deinit` below
