@@ -107,8 +107,11 @@ register() {
 
 echo "Discovering interpreter-tier engines ..." >&2
 
-# Cynic first — the engine under test. `run` subcommand.
-register cynic - "$CYNIC_BIN" run
+# Cynic first — the engine under test. `--no-jit` pins the Lantern
+# interpreter (Bistromath is on by default since docs/jit.md §12's
+# step-3 exit) so the table stays interpreter-tier vs
+# interpreter-tier, same as every peer's no-JIT flags below.
+register cynic - "$CYNIC_BIN" --no-jit run
 
 # QuickJS-NG — headline non-JIT peer, no flag needed.
 register qjs - "$JSVU_BIN/qjs"

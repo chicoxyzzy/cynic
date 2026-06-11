@@ -346,8 +346,10 @@ sequence), `--no-harness` (disable the `sta.js` +
 threshold forced to 1 — the docs/jit.md §10 differential gate: a
 full sweep with this flag must produce the exact pass-set of one
 without it; aarch64 hosts only, a comptime no-op elsewhere. CI
-runs the comparison as the advisory `test262-jit-differential`
-job),
+runs the comparison as the gating `test262-jit-differential`
+job. The harness flag is independent of the `cynic` CLI, where
+the tier is on by default at natural thresholds and `--no-jit`
+opts out),
 `--write-results` (updates `test262-results.md`),
 `--only-failing` (skip-as-pass any test path listed in
 `.test262-pass-cache.txt` — iterative-dev shortcut; cache is
@@ -553,8 +555,10 @@ a previously-passing fixture to fail outside the touched bucket
 — a session-end full sweep is the safety net. Don't use
 `--only-failing` for score rows; they must be authoritative.
 
-CI runs `zig build` and `zig build test-fast` as gating jobs, plus
-`zig build test262 -- --quiet` as an advisory job
+CI runs `zig build`, `zig build test-fast`, and the
+`test262-jit-differential` pass-set comparison as gating jobs
+(gating since the docs/jit.md §12 step-3 exit flipped the JIT
+default on), plus `zig build test262 -- --quiet` as an advisory job
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)). A
 test262 score regression isn't a CI failure today — that's
 reviewed in PRs against `test262-results.md`.

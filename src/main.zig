@@ -401,12 +401,13 @@ pub const ParsedFlags = struct {
     /// `--allow=wasm` — open the WebAssembly code-construction policy
     /// gate. When set, `realm.allow_wasm` is flipped to `true`.
     allow_wasm: bool = false,
-    /// `--jit` — enable the Bistromath tier-up path
-    /// (docs/jit.md §10 flag posture: off by default while the tier
-    /// lands; the default flips only once the differential,
-    /// gc-stress, and bench gates hold, leaving `--no-jit` behind).
-    /// Sets `realm.jit_enabled`.
-    jit: bool = false,
+    /// Bistromath (docs/jit.md) — ON by default since the §12
+    /// step-3 exit (2026-06-11: differential pass-sets held
+    /// byte-identical through every increment, gc-stress and bench
+    /// gates green). `--no-jit` is the permanent escape hatch;
+    /// `--jit` is still accepted as an explicit no-op. Sets
+    /// `realm.jit_enabled`; a comptime no-op off aarch64.
+    jit: bool = true,
     /// The unconsumed tail of the argv slice (subcommand + its
     /// arguments). Empty when no subcommand was supplied — the
     /// caller prints usage in that case.
@@ -454,6 +455,9 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
             rest = rest[1..];
         } else if (std.mem.eql(u8, a, "--jit")) {
             out.jit = true;
+            rest = rest[1..];
+        } else if (std.mem.eql(u8, a, "--no-jit")) {
+            out.jit = false;
             rest = rest[1..];
         } else if (std.mem.startsWith(u8, a, "--allow=")) {
             // `--allow=<name>` relaxes a default-on restriction
@@ -551,19 +555,27 @@ test "parseTopLevelFlags: an unknown --allow=<target> is rejected" {
     try testing.expectEqualStrings("bogus", parsed.bad_token.?);
 }
 
-test "parseTopLevelFlags: jit — --jit enables the tier flag" {
-    const args = [_][]const u8{ "--jit", "eval", "1" };
+test "parseTopLevelFlags: jit — defaults to on (docs/jit.md §12 step exit)" {
+    const args = [_][]const u8{ "run", "foo.js" };
     const parsed = parseTopLevelFlags(&args);
     try testing.expectEqual(@as(?FlagError, null), parsed.err);
     try testing.expect(parsed.jit);
+}
+
+test "parseTopLevelFlags: jit — --no-jit is the permanent escape hatch" {
+    const args = [_][]const u8{ "--no-jit", "eval", "1" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expectEqual(@as(?FlagError, null), parsed.err);
+    try testing.expect(!parsed.jit);
     try testing.expectEqual(@as(usize, 2), parsed.remaining.len);
     try testing.expectEqualStrings("eval", parsed.remaining[0]);
 }
 
-test "parseTopLevelFlags: jit — defaults to off when absent" {
-    const args = [_][]const u8{ "run", "foo.js" };
+test "parseTopLevelFlags: jit — explicit --jit is still accepted" {
+    const args = [_][]const u8{ "--jit", "run", "foo.js" };
     const parsed = parseTopLevelFlags(&args);
-    try testing.expect(!parsed.jit);
+    try testing.expectEqual(@as(?FlagError, null), parsed.err);
+    try testing.expect(parsed.jit);
 }
 
 test "parseTopLevelFlags: --gc-threshold=0 is rejected" {

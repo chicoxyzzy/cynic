@@ -412,7 +412,7 @@ jobs:
             --filter=language/expressions --top-rss=10
 
   test262-jit-differential:
-    name: test262 JIT differential (advisory)
+    name: test262 JIT differential
     # docs/jit.md §10.2 — the heart of Bistromath verification: a
     # full sweep with every eligible chunk force-compiled (`--jit`
     # runs each realm at tier-up threshold 1) must produce the
@@ -429,14 +429,12 @@ jobs:
     # is comptime-off and the diff would compare the interpreter
     # with itself.
     #
-    # Advisory like gc-stress while the tier lands: a divergence
-    # surfaces as a pre-merge annotation, not a merge-gate. Flips
-    # to gating when the `--jit` default-on conversation happens
-    # (docs/jit.md §10.5).
+    # GATING since the 2026-06-11 default-on decision (docs/jit.md
+    # §10.5): the tier ships on by default, so a pass-set
+    # divergence is a build failure, not an annotation.
     runs-on: macos-latest
     timeout-minutes: 30
     needs: build-and-test
-    continue-on-error: true
     steps:
       - name: Audit egress (advisory)
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2

@@ -45,7 +45,7 @@ RegExp engine), Sarcasm (the from-scratch WebAssembly engine —
 Unicode tables, and
 the hardened-by-default realm-boot pipeline. The runtime is filling
 in §19-§28 one bucket at a time. Bistromath (the baseline JIT)
-runs behind `--jit` while its coverage lands
+runs by default (`--no-jit` opts out) since the step-3 exit
 ([`docs/jit.md`](docs/jit.md)); Ohaimark (the optimizing tier) and
 a moving generational GC are future work. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.

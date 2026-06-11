@@ -38,7 +38,7 @@ that will be settled with an ADR when the time comes.
         │  hot
         ▼
    ┌──────────────────┐
-   │ Bistromath (T1)  │  ◄── behind --jit (M5)
+   │ Bistromath (T1)  │  ◄── default-on (M5)
    └────┬─────────────┘
         │  hotter
         ▼
@@ -236,7 +236,7 @@ later; see [src/bytecode/op.zig](../src/bytecode/op.zig).
 Per-frame register file; an implicit accumulator threads through
 binary and unary ops to keep Lantern's dispatch loop tight. One-byte
 opcodes for the common case. Bytecode is the source of truth for IR
-— Bistromath (shipping behind `--jit`) and Ohaimark (future)
+— Bistromath (default-on since 2026-06; `--no-jit` opts out) and Ohaimark (future)
 consume bytecode + warmth/IC data, not the AST.
 
 A pure-stack design (QuickJS) was considered and rejected: higher

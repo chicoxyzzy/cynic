@@ -21,7 +21,8 @@
 //! eshost-cli) integration is Phase 2.
 //!
 //! Usage:
-//!   zig build bench
+//!   zig build bench                 # engine default (Bistromath on)
+//!   zig build bench -- --no-jit     # Lantern-only baseline column
 //!   zig build bench -- --runs=40    # wider budget; lights up p95
 //!   zig build bench -- --runs=200   # lights up p95 + p99
 //!
@@ -116,6 +117,7 @@ fn runOnce(
     cynic_bin: []const u8,
     fixture: []const u8,
     jit: bool,
+    no_jit: bool,
 ) !Sample {
     const t0 = std.Io.Clock.now(.awake, io);
     // `--enable-experimental` flips every tracked pre-Stage-4
@@ -127,9 +129,10 @@ fn runOnce(
     // natural tier-up thresholds — what a user gets, not a forced
     // compile.
     const argv_jit: []const []const u8 = &.{ cynic_bin, "--enable-experimental", "--jit", "run", fixture };
-    const argv_interp: []const []const u8 = &.{ cynic_bin, "--enable-experimental", "run", fixture };
+    const argv_no_jit: []const []const u8 = &.{ cynic_bin, "--enable-experimental", "--no-jit", "run", fixture };
+    const argv_default: []const []const u8 = &.{ cynic_bin, "--enable-experimental", "run", fixture };
     var child = try std.process.spawn(io, .{
-        .argv = if (jit) argv_jit else argv_interp,
+        .argv = if (jit) argv_jit else if (no_jit) argv_no_jit else argv_default,
         // Suppress the fixture's print() output — the bench harness
         // doesn't care, and dumping it would scramble the report.
         .stdout = .ignore,
@@ -230,6 +233,7 @@ pub fn main(init: std.process.Init) !void {
     // Anything else on the line is ignored — this driver has one knob.
     var runs: usize = DEFAULT_RUNS;
     var jit = false;
+    var no_jit = false;
     {
         var args_iter = init.minimal.args.iterate();
         _ = args_iter.next(); // skip the binary path
@@ -239,9 +243,13 @@ pub fn main(init: std.process.Init) !void {
                 if (runs < 1) runs = 1;
                 if (runs > MAX_RUNS) runs = MAX_RUNS;
             } else if (std.mem.eql(u8, a, "--jit")) {
-                // Run every fixture with Bistromath enabled at its
-                // natural thresholds (docs/jit.md §12 step 3b).
+                // The engine default since 2026-06-11 — accepted
+                // for symmetry; spawns pass the flag through.
                 jit = true;
+            } else if (std.mem.eql(u8, a, "--no-jit")) {
+                // Interpreter-only baseline column
+                // (docs/jit.md §12 step 3b).
+                no_jit = true;
             }
         }
     }
@@ -286,7 +294,7 @@ pub fn main(init: std.process.Init) !void {
         // the first recorded sample.
         var w: usize = 0;
         while (w < WARMUP_RUNS) : (w += 1) {
-            _ = runOnce(io, cynic_bin, b.path, jit) catch |err| {
+            _ = runOnce(io, cynic_bin, b.path, jit, no_jit) catch |err| {
                 const fail = try std.fmt.bufPrint(&buf, "{s:<16}  warmup failed: {s}\n", .{ b.name, @errorName(err) });
                 try std.Io.File.stderr().writeStreamingAll(io, fail);
             };
@@ -296,7 +304,7 @@ pub fn main(init: std.process.Init) !void {
         var any_failed = false;
         var i: usize = 0;
         while (i < runs) : (i += 1) {
-            samples[i] = runOnce(io, cynic_bin, b.path, jit) catch |err| {
+            samples[i] = runOnce(io, cynic_bin, b.path, jit, no_jit) catch |err| {
                 const fail = try std.fmt.bufPrint(&buf, "{s:<16}  run {d} failed: {s}\n", .{ b.name, i, @errorName(err) });
                 try std.Io.File.stderr().writeStreamingAll(io, fail);
                 any_failed = true;

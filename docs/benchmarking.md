@@ -210,16 +210,15 @@ field" for the developer running it.
 
 ### Interpreter tier only — the hard rule
 
-Cynic runs the Lantern interpreter by default — Bistromath, the
-baseline JIT, ships behind `--jit` and stays off until its coverage
-lands (docs/jit.md §10). Comparing the default posture against a
-JIT-warm engine measures nothing useful: the JIT engine wins by an
-order of magnitude and the number says only "JIT beats interpreter,"
-which we already know. So **every JIT engine is run with its JIT
-disabled**, leaving interpreter-tier vs interpreter-tier. A
-baseline-tier table (Cynic `--jit` vs Sparkplug-class peer configs)
-gets added when the `--jit` default flips (docs/jit.md §10.6), not
-before:
+Comparing a JIT-warm engine against an interpreter measures
+nothing useful: the JIT engine wins by an order of magnitude and
+the number says only "JIT beats interpreter," which we already
+know. So **every engine is run interpreter-tier** — each JIT peer
+with its JIT disabled, and Cynic with `--no-jit` (Bistromath has
+been on by default since docs/jit.md §12's step-3 exit). A
+baseline-tier table (default Cynic vs Sparkplug-class peer
+configs) is now unlockable per docs/jit.md §10.6 and gets added
+when the wasm/Spasm work settles, not piecemeal:
 
 | Engine | No-JIT invocation | Notes |
 |---|---|---|
@@ -229,7 +228,7 @@ before:
 | QuickJS-NG (`qjs`) | none needed | non-JIT C interpreter |
 | Hermes (`hermes`) | none needed | natively interpreter-only |
 | XS (`xst`) | none needed | natively interpreter-only |
-| Cynic | none needed | Lantern by default; `--jit` deliberately stays off here |
+| Cynic | `--no-jit` | pins Lantern; Bistromath is the default tier since the step-3 exit |
 
 The headline peer is **QuickJS-NG** — a non-JIT C interpreter, the
 fairest comparison point (an interpreter-only engine, matching
@@ -327,14 +326,14 @@ host (separate from the GitHub-Actions runners, which vary in CPU).
 ## What's NOT in scope
 
 - DOM benchmarks (Cynic doesn't target browsers).
-- JIT-warm comparison. Bistromath stays off by default
-  (docs/jit.md §10); the cross-engine runner
+- JIT-warm comparison. The cross-engine runner
   (`tools/bench-cross.sh`) pins every JIT peer to its no-JIT flags
-  so the comparison stays interpreter-tier vs interpreter-tier. A
-  JIT-warm peer number against Lantern is meaningless and is never
-  recorded or published; the baseline-tier table arrives with the
-  `--jit` default flip (docs/jit.md §10.6) — see "Interpreter-tier
-  cross-engine runs" above.
+  AND pins Cynic with `--no-jit` (the tier defaults on since the
+  step-3 exit), so the comparison stays interpreter-tier vs
+  interpreter-tier. A JIT-warm peer number against Lantern is
+  meaningless and is never recorded or published; the
+  baseline-tier table (docs/jit.md §10.6) is tracked separately —
+  see "Interpreter-tier cross-engine runs" above.
 - Microbenchmarking individual opcodes from outside the engine —
   see `src/bytecode/op.zig`'s in-tree perf tests instead.
 - Multi-isolate or multi-thread workloads — single-agent-per-isolate

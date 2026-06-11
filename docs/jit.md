@@ -766,7 +766,8 @@ useful:
    locals — honestly `dont_compile`, and anything the fast path
    can't prove tiers down mid-function. The `--jit` CLI/harness
    flags land here, and the differential sweep (§10.2) is wired
-   into CI as the advisory macos-arm64 job. Shipped 2026-06:
+   into CI as the macos-arm64 job (advisory at first; gating
+   since the step-3 exit). Shipped 2026-06:
    full-corpus pass-sets byte-identical under force-compile
    (45166 passing / 4642 failing, both postures).
 3. **Coverage + OSR** — where the bench wins arrive. Expanded
@@ -874,7 +875,11 @@ useful:
        handler dispatch so hot try-loops stop tier-down
        ping-ponging. Generators/async stay last.
 
-   Step exit: the §10 gates green with the tier doing real work —
+   Step exit — taken 2026-06-11: `--jit` flipped to default-on
+   (`--no-jit` is the permanent escape hatch; `--jit` stays
+   accepted as an explicit no-op) and the CI differential flipped
+   from advisory to gating, on the evidence below. The §10 gates
+   green with the tier doing real work —
    full-corpus differential compared as pass-*sets* (a sorted
    `comm`, never counts: counts let compensating flips hide), a
    `--jit` lane in the gc-stress matrix, bench at the §11
