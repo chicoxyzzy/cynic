@@ -87,6 +87,13 @@ jobs:
         uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
         with:
           cache-key: ${{ matrix.os }}
+          # The Linux `.zig-cache` grows to ~2.3 GB (Debug binary +
+          # ReleaseSafe test bins + the exhaustive-Unicode artifacts),
+          # over setup-zig's 2048 MB default — so it was cleared and
+          # never saved, forcing a near-cold recompile every run. Raise
+          # the limit so the cache persists and Linux builds stay warm
+          # (incremental). macOS (~1.8 GB) is already under and unaffected.
+          cache-size-limit: 3072
 
       - name: Show Zig version
         run: zig version
