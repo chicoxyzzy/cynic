@@ -143,7 +143,7 @@ top-line score.
 
 ## History
 
-### 2026-06-11 — cynic `392a272`, test262 `d0c1b455`
+### 2026-06-11 — cynic `b2adad7`, test262 `d0c1b4555b`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|

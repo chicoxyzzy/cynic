@@ -858,9 +858,10 @@ built-ins, accessor / legacy-global aliases), and the
   `std.heap.DebugAllocator`; stack trace per unfreed allocation
   at exit), `--max-rss=<mb>` (abort with the offending fixture
   path when RSS crosses budget).
-- CI: `zig build` + `zig build test` gating; test262 advisory
-  + a `test262-rss-smoke` advisory job that prints per-fixture
-  RSS deltas via `--top-rss`.
+- CI: `zig build`, `zig build test-fast`, and the
+  `test262-jit-differential` pass-set comparison gating; the full
+  test262 sweep advisory + a `test262-rss-smoke` advisory job
+  that prints per-fixture RSS deltas via `--top-rss`.
 
 **Planned.**
 

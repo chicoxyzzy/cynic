@@ -235,8 +235,9 @@ The choices in this doc reflect what landed:
   shapes yet (the next major perf win, per
   [../ROADMAP.md](../ROADMAP.md) "Performance"). Inline caches
   are also pending shapes.
-- **Bistromath** — the baseline JIT, shipped behind `--jit` (off
-  by default while coverage lands); design + delivery order in
+- **Bistromath** — the baseline JIT, on by default since the
+  delivery-order step-3 exit (`--no-jit` opts out); design +
+  delivery ledger in
   [../jit.md](../jit.md). Ohaimark, the optimizing tier, stays a
   named future tier.
 
