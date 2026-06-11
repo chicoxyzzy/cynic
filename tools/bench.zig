@@ -20,6 +20,16 @@
 //! to surface regressions per commit. Cross-engine (jsvu /
 //! eshost-cli) integration is Phase 2.
 //!
+//! Cold-start semantics, by design: every sample is a fresh
+//! process, so the JIT cannot persist across runs — the only
+//! in-process warmup is the fixture's own loop, and the discarded
+//! warmup run warms OS caches, not the tier. Default-posture
+//! numbers are therefore "cold start, what a user gets," NOT
+//! steady-state JIT throughput. The fixed run count serves both
+//! postures: measured spreads have been comparable (the variance
+//! is machine-dominated); if the default column's spread% ever
+//! diverges from the --no-jit column's, bump --runs for it.
+//!
 //! Usage:
 //!   zig build bench                 # engine default (Bistromath on)
 //!   zig build bench -- --no-jit     # Lantern-only baseline column

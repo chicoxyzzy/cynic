@@ -1235,7 +1235,9 @@ and the per-builtin checklist; this section tracks status.
 
 - **Bistromath** — baseline JIT (T1). Direct opcode-to-native,
   inline caches for property access. Modeled on JSC Baseline /
-  V8 Sparkplug.
+  V8 Sparkplug. **Shipped** (M5, 2026-06) and on by default —
+  `--no-jit` opts out; coverage, gates, and measured wins are
+  tracked in docs/jit.md's delivery-order section.
 - **Ohaimark** — optimizing JIT (T2). IR (SSA), type speculation
   from inline caches, deopt back to Lantern on guard failure.
   Modeled on JSC DFG / V8 TurboFan or Maglev.

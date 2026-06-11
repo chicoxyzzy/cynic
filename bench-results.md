@@ -45,7 +45,7 @@ off in this measurement).
 | json_stringify | 27.82 | 27.37 | 30.12 | 8896 |
 | tail_recursion | 36.27 | 35.72 | 38.86 | 5400 |
 
-### 2026-06-11 — cynic (script chunks compile: docs/jit.md §12 3g first slice), host `Darwin 25.6.0 arm64`
+### 2026-06-11 — cynic (script chunks compile: jit.md delivery step 3g, first slice), host `Darwin 25.6.0 arm64`
 
 Top-level script chunks now compile (`lda/sta_global_slot[_init]`
 over the realm's declarative-record slot caches), so the bench
@@ -60,7 +60,7 @@ sign between pairs and are machine drift, not signal:
 | method_call | 18.19 / 18.89 | 14.41 / 13.58 | −24%, stable |
 | (all others) | — | — | flat within historic spread |
 
-### 2026-06-11 — cynic (calls + OSR: docs/jit.md §12 3e+3f), host `Darwin 25.6.0 arm64`
+### 2026-06-11 — cynic (calls + OSR: jit.md delivery steps 3e+3f), host `Darwin 25.6.0 arm64`
 
 Same-day follow-up to the entry below — compiled calls (all three
 shapes) and OSR landed. Back-to-back quiet-machine pair this time
@@ -69,7 +69,7 @@ were invalid):
 
 | bench | interp p50 | `--jit` p50 | note |
 |---|---:|---:|---|
-| arith_loop | 39.73 | 42.52 | top-level loop — can't compile until script chunks do (docs/jit.md §12 3g); the ~+7% is the back-edge precheck tax at 5M iterations |
+| arith_loop | 39.73 | 42.52 | top-level loop — can't compile until script chunks do (jit.md delivery step 3g); the ~+7% is the back-edge precheck tax at 5M iterations |
 | method_call | 22.19 | 17.90 | −19% — callee compiled + per-iteration entry |
 | class_instantiate | 35.59 | 32.74 | −8% |
 | tail_recursion | 42.51 | 41.54 | enters per PTC reframe; the tail-call tier-down round-trip eats the win until jump-to-entry |
@@ -89,7 +89,7 @@ back-edge warmth:
 First recorded Bistromath run — `zig build bench -- --jit`, the
 tier at its natural tier-up thresholds (the user posture, not
 force-compile). From here every bench session records both tables;
-the `--jit` column becomes the headline once OSR (docs/jit.md §12
+the `--jit` column becomes the headline once OSR (jit.md delivery
 step 3f) lets the rest of the suite enter the tier. Loaded machine
 (spreads 16-35%), so only the mechanism-backed delta counts:
 

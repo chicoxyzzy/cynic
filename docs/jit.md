@@ -1,9 +1,11 @@
 # JIT tiers — Bistromath (T1), Ohaimark (T2), Spasm (wasm T1), and the shared substrate
 
-Status: **design record, pre-implementation** (2026-06). No tier code
-exists yet; this document pins the architecture before the first
-emitter is written, so that the early commits don't foreclose the
-later ones. It is the durable output of a prior-art survey (per
+Status: **Bistromath shipped and on by default** (2026-06; `--no-jit`
+opts out, the CI differential gates merges). Ohaimark and Spasm
+remain future tiers; the document doubles as the design record that
+pinned the architecture before the first emitter was written and as
+the delivery ledger (the "Delivery order" section tracks what each
+increment shipped). It is the durable output of a prior-art survey (per
 [handbook/prior-art.md](handbook/prior-art.md)) across V8, JSC,
 SpiderMonkey, Hermes, LuaJIT, YJIT/ZJIT, CPython's copy-and-patch
 JIT, LibJS, ChakraCore, wasmtime (Winch), Wizard, and the papers in

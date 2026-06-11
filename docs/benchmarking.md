@@ -231,8 +231,16 @@ when the wasm/Spasm work settles, not piecemeal:
 | Cynic | `--no-jit` | pins Lantern; Bistromath is the default tier since the step-3 exit |
 
 The headline peer is **QuickJS-NG** — a non-JIT C interpreter, the
-fairest comparison point (an interpreter-only engine, matching
-Cynic's default tier).
+fairest comparison point for the Lantern tier.
+
+The full-speed table is produced separately by
+`tools/bench-cross.sh --tier jit` — Cynic's default posture
+(Bistromath) against the peers with their JITs enabled — and is
+never merged with the interpreter table: the two answer different
+questions. One cold-start caveat applies to every per-process
+harness here: each sample is a fresh process, so JIT numbers are
+"cold start, what a user gets," not steady-state throughput — the
+tier warms inside each run.
 
 ### Install the engines
 
