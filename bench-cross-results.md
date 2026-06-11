@@ -126,6 +126,6 @@ Noisy cells (>10% spread):
 - hermes/prop_access: 18% spread
 - hermes/string_concat: 119% spread
 
-_Interpreter-tier-only, internal compass. Do not publish; do_
+_Full-speed-tier, internal compass. Do not publish; do_
 _not append to bench-results.md (that file is the single-engine_
 _`zig build bench` artifact)._

@@ -424,7 +424,11 @@ EOF
     for f in "${FLAGGED[@]}"; do echo "- $f"; done
   fi
   echo
-  echo "_Interpreter-tier-only, internal compass. Do not publish; do_"
+  if [ "$TIER" = "jit" ]; then
+    echo "_Full-speed-tier, internal compass. Do not publish; do_"
+  else
+    echo "_Interpreter-tier-only, internal compass. Do not publish; do_"
+  fi
   echo "_not append to bench-results.md (that file is the single-engine_"
   echo "_\`zig build bench\` artifact)._"
 }
