@@ -213,6 +213,12 @@ pub const Compiler = struct {
     /// `MakeEnvironment` entirely if the body has no other
     /// env-needing bindings.
     current_params_register_only: bool = false,
+    /// §14.3.2 `var` register promotion — set only while
+    /// `hoistVarAndFunctions` runs for a register-safe body whose
+    /// every `var` declarator is a simple identifier: the hoist
+    /// declares each var as a register seeded with undefined (no
+    /// TDZ) instead of an env slot.
+    current_promote_vars: bool = false,
     /// §15.10.1 IsInTailPosition. True at the moment a call-
     /// emission site is about to compile a syntactic tail-position
     /// CallExpression: the expression of a ReturnStatement, the
@@ -8112,6 +8118,12 @@ pub const Compiler = struct {
             }
             break :blk promotable > 0 and params.len + promotable <= 192;
         };
+        const vars_register_only = blk: {
+            if (!bodyIsRegisterSafe(self.source, body_stmts, false)) break :blk false;
+            var vs: VarScan = .{};
+            for (body_stmts) |*st| scanPromotableVars(st, &vs);
+            break :blk vs.ok and vs.count > 0 and params.len + vs.count <= 160;
+        };
         // Function-entry env elision — same logic as the function /
         // method paths. A user-written `constructor` with no params,
         // no `arguments`, and no body decls (still runs
@@ -8218,7 +8230,9 @@ pub const Compiler = struct {
         // var x = 1; this.x = x; } }` raised CompileError because `x`
         // was undeclared at the use site.
         try self.hoistLetConst(body_stmts, locals_register_only);
+        self.current_promote_vars = vars_register_only;
         try self.hoistVarAndFunctions(body_stmts);
+        self.current_promote_vars = false;
         try self.emitVarInits(span);
         // Same two-pass order as the function path: function
         // declarations first (so later code can call them), then the
@@ -8345,6 +8359,12 @@ pub const Compiler = struct {
             }
             break :blk promotable > 0 and params.len + promotable <= 192;
         };
+        const vars_register_only = !is_generator and !is_async and blk: {
+            if (!bodyIsRegisterSafe(self.source, body_stmts, false)) break :blk false;
+            var vs: VarScan = .{};
+            for (body_stmts) |*st| scanPromotableVars(st, &vs);
+            break :blk vs.ok and vs.count > 0 and params.len + vs.count <= 160;
+        };
         // Function-entry env elision — same logic as
         // `compileFunctionTemplateExtNamed`. Methods follow the
         // same §10.2.10 FunctionDeclarationInstantiation shape,
@@ -8447,7 +8467,9 @@ pub const Compiler = struct {
 
         // Body.
         try self.hoistLetConst(body_stmts, locals_register_only);
+        self.current_promote_vars = vars_register_only;
         try self.hoistVarAndFunctions(body_stmts);
+        self.current_promote_vars = false;
         try self.emitVarInits(span);
         for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
         try self.compileFunctionBodyTail(body_stmts, span);
@@ -8899,6 +8921,29 @@ pub const Compiler = struct {
         try self.builder.emitU8(reg);
     }
 
+    /// §14.3.2 — `var` register promotion: function-scoped, no TDZ
+    /// (the register is seeded with undefined at hoist time, which
+    /// IS the spec's hoisted-var initial value), and re-declaration
+    /// aliases the existing register.
+    fn declareRegisterVar(self: *Compiler, name: []const u8, span: Span) CompileError!void {
+        const target = self.functionScope();
+        if (target.lookupLocal(name)) |_| return;
+        const reg = try self.reserveTemp();
+        try target.bindings.append(self.allocator, .{
+            .name = name,
+            .env_slot = 0,
+            .env_depth = self.env_depth,
+            .kind = .var_,
+            .span = span,
+            .is_register = true,
+            .register = reg,
+            .register_tdz = false,
+        });
+        try self.builder.emitOp(.lda_undefined, span);
+        try self.builder.emitOp(.star, span);
+        try self.builder.emitU8(reg);
+    }
+
     /// Close a register-promoted binding's §13.3.1 TDZ window once
     /// its declarator's InitializeBinding store has been emitted.
     /// Scans the current scope only — `compileLexicalDecl` resolved
@@ -9332,6 +9377,68 @@ pub const Compiler = struct {
     /// the surrounding code might rely on legacy `var` visibility for
     /// plain `function`, the three async/gen forms in a nested block
     /// must NOT hoist to the enclosing function/script scope.
+    /// §14.3.2 var-promotion pre-scan — mirrors `hoistStatement`'s
+    /// walk. `ok` survives only when every reachable `var`
+    /// declarator binds a simple identifier (destructuring vars
+    /// keep the env path); `count` tallies declarators for the
+    /// register-budget cap (duplicates over-count, which only errs
+    /// toward keeping the env path).
+    const VarScan = struct { ok: bool = true, count: usize = 0 };
+
+    fn scanPromotableVars(s: *const ast.statement.Statement, acc: *VarScan) void {
+        switch (s.*) {
+            .lexical => |ld| {
+                if (ld.kind != .var_) return;
+                for (ld.declarators) |d| {
+                    if (d.name == .identifier) acc.count += 1 else acc.ok = false;
+                }
+            },
+            .export_decl => |ed| switch (ed.body) {
+                .declaration => |inner| scanPromotableVars(inner, acc),
+                else => {},
+            },
+            .block => |b| for (b.body) |*inner| scanPromotableVars(inner, acc),
+            .if_ => |i| {
+                scanPromotableVars(i.consequent, acc);
+                if (i.alternate) |alt| scanPromotableVars(alt, acc);
+            },
+            .while_ => |w| scanPromotableVars(w.body, acc),
+            .do_while => |dw| scanPromotableVars(dw.body, acc),
+            .for_ => |f| {
+                if (f.init) |head| switch (head) {
+                    .lexical => |ld| if (ld.kind == .var_) {
+                        for (ld.declarators) |d| {
+                            if (d.name == .identifier) acc.count += 1 else acc.ok = false;
+                        }
+                    },
+                    .expression => {},
+                };
+                scanPromotableVars(f.body, acc);
+            },
+            .for_in_of => |f| {
+                switch (f.left) {
+                    .lexical => |ld| if (ld.kind == .var_) {
+                        for (ld.declarators) |d| {
+                            if (d.name == .identifier) acc.count += 1 else acc.ok = false;
+                        }
+                    },
+                    .expression => {},
+                }
+                scanPromotableVars(f.body, acc);
+            },
+            .try_ => |t| {
+                for (t.block.body) |*inner| scanPromotableVars(inner, acc);
+                if (t.handler) |h| for (h.body.body) |*inner| scanPromotableVars(inner, acc);
+                if (t.finalizer) |fin| for (fin.body) |*inner| scanPromotableVars(inner, acc);
+            },
+            .switch_ => |sw| {
+                for (sw.cases) |case| for (case.body) |*inner| scanPromotableVars(inner, acc);
+            },
+            .labeled => |lb| scanPromotableVars(lb.body, acc),
+            else => {},
+        }
+    }
+
     fn hoistStatement(self: *Compiler, s: *ast.statement.Statement, inside_nested_block: bool) CompileError!void {
         switch (s.*) {
             .lexical => |ld| {
@@ -9424,7 +9531,11 @@ pub const Compiler = struct {
         switch (target) {
             .identifier => |id| {
                 const name = try self.bindingName(id.span);
-                _ = try self.declareBindingFull(name, .var_, id.span);
+                if (self.current_promote_vars) {
+                    try self.declareRegisterVar(name, id.span);
+                } else {
+                    _ = try self.declareBindingFull(name, .var_, id.span);
+                }
             },
             .array => |arr| {
                 for (arr.elements) |maybe_elem| {
@@ -9453,7 +9564,7 @@ pub const Compiler = struct {
         const fn_scope = self.functionScope();
         var emitted_undef = false;
         for (fn_scope.bindings.items) |b| {
-            if (b.kind != .var_ or b.is_global) continue;
+            if (b.kind != .var_ or b.is_global or b.is_register) continue;
             if (!emitted_undef) {
                 try self.builder.emitOp(.lda_undefined, span);
                 emitted_undef = true;
@@ -13558,6 +13669,16 @@ fn compileFunctionTemplateExtNamed(
         }
         break :blk promotable > 0 and params.len + promotable <= 192;
     };
+    // §14.3.2 `var` promotion — same register-safety core; the
+    // tighter cap leaves headroom for promoted lex bindings under
+    // the same 192-register budget.
+    const vars_register_only = !is_generator and !is_async and blk: {
+        const stmts = body_stmts orelse break :blk false;
+        if (!bodyIsRegisterSafe(self.source, stmts, is_arrow)) break :blk false;
+        var vs: Compiler.VarScan = .{};
+        for (stmts) |*st| Compiler.scanPromotableVars(st, &vs);
+        break :blk vs.ok and vs.count > 0 and params.len + vs.count <= 160;
+    };
     const needs_entry_env = functionEntryEnvNeeded(
         self.source,
         if (params_register_only) &.{} else params,
@@ -13702,7 +13823,9 @@ fn compileFunctionTemplateExtNamed(
     switch (body) {
         .block => |stmts| {
             try self.hoistLetConst(stmts, locals_register_only);
+            self.current_promote_vars = vars_register_only;
             try self.hoistVarAndFunctions(stmts);
+            self.current_promote_vars = false;
             try self.emitVarInits(span);
             // Function decls go first — see compileScriptAsChunk.
             for (stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);

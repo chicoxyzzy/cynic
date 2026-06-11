@@ -13417,6 +13417,31 @@ test "register locals: constructor-body promotion computes correctly" {
     , 20);
 }
 
+test "register locals: var promotion — hoisting, block aliasing, capture stays env" {
+    // §14.3.2: a read before the write sees undefined (no TDZ);
+    // `var` in a nested block aliases the function-scoped binding;
+    // a captured var keeps the env path for its closure.
+    try expectScriptStringWithBuiltins(
+        \\function h() { var r = x; var x = 1; return "" + r + "," + x; }
+        \\h();
+    , "undefined,1");
+    try expectScriptIntWithBuiltins(
+        \\function f() { var x = 1; { var x = 2; } return x; }
+        \\f();
+    , 2);
+    try expectScriptIntWithBuiltins(
+        \\function g() { var c = 5; return function () { return c; }; }
+        \\g()();
+    , 5);
+}
+
+test "register locals: for(var) loop counters compute correctly" {
+    try expectScriptIntWithBuiltins(
+        \\function sum(n) { var s = 0; for (var i = 0; i < n; i++) { s = s + i; } return s; }
+        \\sum(10) + sum(100);
+    , 45 + 4950);
+}
+
 test "register locals: promoted let/const compute correctly" {
     try expectScriptInt(
         \\function sum(n) {

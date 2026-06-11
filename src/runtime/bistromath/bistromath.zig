@@ -2334,6 +2334,39 @@ test "jit bistromath calls: the call-IC compare misses correctly" {
     );
 }
 
+test "jit bistromath: var-local bodies compile" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // The last promotion class (jit.md delivery step 3g): simple
+    // function-scoped `var` locals live in registers seeded with
+    // undefined (§14.3.2 — vars have no TDZ), so var-style bodies
+    // compile like their let/const twins.
+    const src =
+        \\function v(n) { var s = 0; var i = 0; while (i < n) { s = (s + i) | 0; i = i + 1; } return s; }
+        \\let k = 0;
+        \\while (k < 300) { v(50); k = k + 1; }
+        \\v(100);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 4950), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "v").jit_state.?.tier,
+    );
+}
+
 test "jit bistromath calls: method calls bind `this` through the tier" {
     if (comptime !supported) return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
