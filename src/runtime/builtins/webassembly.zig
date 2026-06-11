@@ -100,6 +100,9 @@ const TableState = struct {
 const MemoryState = struct {
     mem: *wasm.Memory,
     buffer: ?*JSObject,
+    /// `shared: true` in the descriptor — `buffer` is exposed as a
+    /// SharedArrayBuffer (JS-API §Memory), required to carry a maximum.
+    shared: bool = false,
 };
 
 pub fn install(realm: *Realm) !void {
@@ -523,8 +526,16 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     if (!is_funcref and !std.mem.eql(u8, elem, "externref"))
         return intrinsics.throwTypeError(realm, "WebAssembly.Table: invalid element type");
 
-    const initial = try indexArg(realm, desc.get("initial"));
+    // JS-API §Table — `initial` is required; `maximum`, when present,
+    // must be ≥ `initial`.
+    const initial_v = desc.get("initial");
+    if (initial_v.isUndefined())
+        return intrinsics.throwTypeError(realm, "WebAssembly.Table: missing required 'initial'");
+    const initial = try indexArg(realm, initial_v);
     const max = try optionalIndexArg(realm, desc.get("maximum"));
+    if (max) |m| {
+        if (m < initial) return intrinsics.throwRangeError(realm, "WebAssembly.Table: maximum is less than initial");
+    }
 
     const a = realm.wasmAllocator();
     const elems = a.alloc(u128, initial) catch return error.OutOfMemory;
@@ -576,7 +587,9 @@ fn tableSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 fn tableGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const st = try tableStateOf(realm, this_value);
     const delta = try indexArg(realm, if (args.len > 0) args[0] else Value.undefined_);
-    const fill = if (args.len > 1) try funcRefFromValue(realm, args[1]) else wasm.REF_NULL;
+    // The fill value is coerced per the table's element type — an
+    // externref table accepts any JS value, not just a funcref.
+    const fill = if (args.len > 1) try tableElemFromValue(realm, st.funcref, args[1]) else wasm.REF_NULL;
     const old_len = st.table.elems.len;
     const new_len = old_len + delta;
     if (st.table.max) |m| {
@@ -643,8 +656,22 @@ fn memoryConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Memory expects a descriptor object");
 
-    const initial = try indexArg(realm, desc.get("initial"));
+    // JS-API §Memory — `initial` is a required descriptor member; a
+    // missing one is a TypeError, not a default-to-zero.
+    const initial_v = desc.get("initial");
+    if (initial_v.isUndefined())
+        return intrinsics.throwTypeError(realm, "WebAssembly.Memory: missing required 'initial'");
+    const initial = try indexArg(realm, initial_v);
     const max = try optionalIndexArg(realm, desc.get("maximum"));
+    // §Memory — `maximum`, when present, must be ≥ `initial`.
+    if (max) |m| {
+        if (m < initial) return intrinsics.throwRangeError(realm, "WebAssembly.Memory: maximum is less than initial");
+    }
+    // A shared memory exposes its buffer as a SharedArrayBuffer and must
+    // declare a maximum (the buffer can never move).
+    const shared = arith.toBoolean(desc.get("shared"));
+    if (shared and max == null)
+        return intrinsics.throwTypeError(realm, "WebAssembly.Memory: a shared memory requires a maximum");
 
     const a = realm.wasmAllocator();
     const bytes = a.alloc(u8, initial * wasm.PAGE_SIZE) catch return error.OutOfMemory;
@@ -652,7 +679,7 @@ fn memoryConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     const mem = a.create(wasm.Memory) catch return error.OutOfMemory;
     mem.* = .{ .data = bytes, .max_pages = max, .is_64 = false };
     const st = a.create(MemoryState) catch return error.OutOfMemory;
-    st.* = .{ .mem = mem, .buffer = null };
+    st.* = .{ .mem = mem, .buffer = null, .shared = shared };
     try self.setWasmMemory(realm.allocator, st);
     return this_value;
 }
@@ -672,9 +699,17 @@ fn memoryBufferGet(realm: *Realm, this_value: Value, args: []const Value) Native
     const st = try memoryStateOf(realm, this_value);
     if (st.buffer) |b| return heap_mod.taggedObject(b);
     const buf = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(buf, realm.intrinsics.array_buffer_prototype);
+    // A shared memory's buffer is a SharedArrayBuffer (JS-API §Memory):
+    // the SAB prototype plus the `array_buffer_shared` flag, over the
+    // same non-owning view of the live linear bytes.
+    const ab_proto: ?*JSObject = if (st.shared) blk: {
+        if (heap_mod.valueAsFunction(realm.globals.get("SharedArrayBuffer") orelse Value.undefined_)) |c| break :blk c.prototype;
+        break :blk realm.intrinsics.array_buffer_prototype;
+    } else realm.intrinsics.array_buffer_prototype;
+    realm.heap.setObjectPrototype(buf, ab_proto);
     buf.setExternalArrayBuffer(realm.allocator, st.mem.data) catch return error.OutOfMemory;
     buf.has_array_buffer_data = true;
+    if (st.shared) buf.array_buffer_shared = true;
     st.buffer = buf;
     return heap_mod.taggedObject(buf);
 }

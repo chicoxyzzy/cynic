@@ -1245,3 +1245,45 @@ test "a typed function reference result marshals to a callable JS function" {
         "(typeof inst.exports.f() === 'function') ? 1 : 0";
     try expectIntWasm(src, 1);
 }
+
+test "Memory and Table reject a maximum below the initial with a RangeError" {
+    _ = try evalWasm(
+        "function rangeErr(f){let ok=false;try{f()}catch(e){ok=e instanceof RangeError}if(!ok)throw new Error('expected RangeError');}" ++
+            "rangeErr(()=>new WebAssembly.Memory({initial:2,maximum:1}));" ++
+            "rangeErr(()=>new WebAssembly.Table({element:'anyfunc',initial:2,maximum:1}));" ++
+            "true",
+    );
+}
+
+test "Memory and Table require the initial descriptor member" {
+    _ = try evalWasm(
+        "function typeErr(f){let ok=false;try{f()}catch(e){ok=e instanceof TypeError}if(!ok)throw new Error('expected TypeError');}" ++
+            "typeErr(()=>new WebAssembly.Memory({}));" ++
+            "typeErr(()=>new WebAssembly.Table({element:'anyfunc'}));" ++
+            "true",
+    );
+}
+
+test "Table.prototype.grow fills new externref slots with a JS value" {
+    _ = try evalWasm(
+        "const t = new WebAssembly.Table({element:'externref', initial:1});" ++
+            "const o = {};" ++
+            "const old = t.grow(2, o);" ++
+            "if (old !== 1) throw new Error('grow should return the old length, got ' + old);" ++
+            "if (t.length !== 3) throw new Error('length after grow: ' + t.length);" ++
+            "if (t.get(1) !== o || t.get(2) !== o) throw new Error('new slots not filled with the value');" ++
+            "true",
+    );
+}
+
+test "a shared WebAssembly.Memory exposes a SharedArrayBuffer" {
+    _ = try evalWasm(
+        "const m = new WebAssembly.Memory({initial:1, maximum:1, shared:true});" ++
+            "if (!(m.buffer instanceof SharedArrayBuffer)) throw new Error('shared memory buffer is not a SharedArrayBuffer');" ++
+            "if (m.buffer.byteLength !== 65536) throw new Error('wrong byteLength: ' + m.buffer.byteLength);" ++
+            // A shared memory must declare a maximum.
+            "let ok=false; try{ new WebAssembly.Memory({initial:1, shared:true}) }catch(e){ ok = e instanceof TypeError }" ++
+            "if(!ok) throw new Error('shared memory without maximum should throw TypeError');" ++
+            "true",
+    );
+}
