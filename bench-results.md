@@ -17,6 +17,33 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-12 — cynic `ea84c54` (ctor campaign complete), host `Darwin 25.6.0 arm64`
+
+Quiet-machine row (load ~2.7-3.0, spreads ≤10%) closing the
+ctor_array_build effort: **189.38 median — down from 497.45 at the
+`4ce56ff` baseline (−62 %)** via virtual length, the GC traffic cut,
+the lda_computed dense-read fast path, the fused `make_array_n`
+literal, and the pooled element buffers (docs/ctor-array-build-gap.md
+has the measured per-lever ledger). Also vs that baseline:
+json_stringify 37.17 → 24.61, promise_chain 14.69 → 11.26,
+class_instantiate 35.08 → 27.44. Default tier (Bistromath on);
+arith_loop/method_call carry the tier's compiled-loop wins.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 14.34 | 14.04 | 15.20 | 5520 |
+| prop_access | 12.48 | 12.21 | 12.70 | 5488 |
+| prop_write | 12.73 | 12.62 | 12.83 | 5544 |
+| array_iter | 20.14 | 19.73 | 20.51 | 6616 |
+| string_concat | 24.92 | 24.74 | 25.51 | 15896 |
+| promise_chain | 11.26 | 10.78 | 11.77 | 23920 |
+| object_alloc | 23.78 | 23.46 | 24.45 | 9288 |
+| method_call | 14.04 | 13.81 | 14.79 | 5752 |
+| class_instantiate | 27.44 | 27.04 | 28.67 | 9152 |
+| ctor_array_build | 189.38 | 185.79 | 192.58 | 9808 |
+| json_stringify | 24.61 | 24.00 | 26.42 | 9000 |
+| tail_recursion | 33.48 | 32.88 | 33.92 | 5544 |
+
 ### 2026-06-11 — cynic `42ca813` (default-on checkpoint), host `Darwin 25.6.0 arm64`
 
 First post-flip recording: the default column IS Bistromath now;
