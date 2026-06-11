@@ -34,6 +34,7 @@ const Value = @import("../value.zig").Value;
 const Realm = @import("../realm.zig").Realm;
 const interpreter = @import("../lantern/interpreter.zig");
 const CallFrame = interpreter.CallFrame;
+const RunError = interpreter.RunError;
 const code_alloc = @import("../jit/code_alloc.zig");
 const masm_mod = @import("../jit/masm.zig");
 const Masm = masm_mod.Masm;
@@ -55,6 +56,31 @@ pub const EntryResult = enum(u32) {
     /// The function ran to completion; the return value is in
     /// `frame.accumulator` and the caller pops the frame.
     done = 1,
+    /// A callee (or a nested call) threw: `realm.pending_exception`
+    /// holds the value and `frame.ip` sits at the faulting call op,
+    /// so `unwindThrow` checks this frame's own handlers first —
+    /// catching tiers the frame down at the handler (docs/jit.md
+    /// §4.5), and an unhandled throw keeps unwinding the caller
+    /// stack. The frame stays pushed.
+    threw = 2,
+    /// The host ran out of memory inside a call — propagated as
+    /// `error.OutOfMemory` (never re-executed: the callee may have
+    /// had side effects).
+    host_oom = 3,
+};
+
+/// What the dispatcher hook tells its caller.
+pub const EnterOutcome = union(enum) {
+    /// The tier didn't take the frame — proceed into Lantern as if
+    /// no JIT existed (also the tier-down case: the frame stays
+    /// pushed mid-chunk and `reEnterDispatch` resumes it).
+    not_entered,
+    /// The callee ran to completion and its frame was popped; hand
+    /// the value to the caller exactly as `return_` would.
+    completed: Value,
+    /// The frame (still pushed) has a pending exception at
+    /// `frame.ip` — dispatch `unwindThrow` against the frame stack.
+    threw: Value,
 };
 
 /// Entry ABI: `(realm, frame, registers_base)`. The register-file
@@ -81,22 +107,22 @@ pub fn tryEnterTop(
     allocator: std.mem.Allocator,
     realm: *Realm,
     frames: *std.ArrayListUnmanaged(CallFrame),
-) ?Value {
-    if (comptime !supported) return null;
-    if (!realm.jit_enabled) return null;
+) RunError!EnterOutcome {
+    if (comptime !supported) return .not_entered;
+    if (!realm.jit_enabled) return .not_entered;
     const fr = &frames.items[frames.items.len - 1];
     // Plain calls only: constructor return verdicts (§10.2.2 steps
     // 7-11), generator resumes, and async Promise wrapping all stay
     // Lantern's business (docs/jit.md §4.5).
-    if (fr.is_construct or fr.generator != null or fr.wrap_return_in_promise) return null;
-    const js = fr.chunk.jit_state orelse return null;
+    if (fr.is_construct or fr.generator != null or fr.wrap_return_in_promise) return .not_entered;
+    const js = fr.chunk.jit_state orelse return .not_entered;
     if (js.entry == null) {
-        if (js.tier != .cold) return null;
+        if (js.tier != .cold) return .not_entered;
         const threshold = realm.jit_threshold_override orelse
             tierUpThreshold(fr.chunk.code.len);
-        if (js.warmth < threshold) return null;
+        if (js.warmth < threshold) return .not_entered;
         compile(realm, fr.chunk, js);
-        if (js.entry == null) return null;
+        if (js.entry == null) return .not_entered;
     }
     const entry: EntryFn = @ptrCast(@alignCast(js.entry.?));
     switch (@as(EntryResult, @enumFromInt(entry(realm, fr, fr.registers.ptr)))) {
@@ -104,9 +130,15 @@ pub fn tryEnterTop(
             const ret = fr.accumulator;
             fr.releaseRegisters(realm, allocator);
             _ = frames.pop();
-            return ret;
+            return .{ .completed = ret };
         },
-        .resume_interp => return null,
+        .resume_interp => return .not_entered,
+        .threw => {
+            const ex = realm.pending_exception orelse Value.undefined_;
+            realm.pending_exception = null;
+            return .{ .threw = ex };
+        },
+        .host_oom => return error.OutOfMemory,
     }
 }
 
@@ -163,6 +195,58 @@ fn storeBarrier(r: *Realm, obj: *JSObject, bits: u64) callconv(.c) void {
     r.heap.storeInternalSlot(.{ .object = obj }, .{ .bits = bits });
 }
 
+const call_mod = @import("../lantern/call.zig");
+
+/// What `helperCall` reports back to the emitted call sequence.
+const HelperCallStatus = enum(u32) { value = 0, threw = 1, host_oom = 2 };
+
+/// The docs/jit.md §4.5 helper-mediated call: compiled code syncs
+/// its accumulator (the callee may allocate and GC; the frame is
+/// the root — §4.2), marshals the args window straight off the
+/// register file, and re-enters the engine through the same generic
+/// dispatcher every native uses. `callValue` handles every callee
+/// kind — plain functions (including compiled ones, recursively,
+/// via the `callJSFunction` hook), natives, bound functions,
+/// proxies — and the nested `runFrames` carries the native-re-entry
+/// stack guard, so deep compiled recursion throws the catchable
+/// RangeError instead of faulting the host.
+fn helperCall(
+    realm: *Realm,
+    frame: *CallFrame,
+    callee_bits: u64,
+    args_ptr: [*]const Value,
+    argc: u64,
+    result_out: *Value,
+) callconv(.c) u32 {
+    // §9.4 — attribute cross-realm-observable throws to the
+    // executing function's realm (ShadowRealm children).
+    const running = frame.running_realm orelse realm;
+    const res = call_mod.callValue(
+        realm.heap.allocator,
+        realm,
+        running,
+        .{ .bits = callee_bits },
+        // Plain `call`: strict-mode `this` is undefined (§10.2.1.2).
+        Value.undefined_,
+        args_ptr[0..@intCast(argc)],
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return @intFromEnum(HelperCallStatus.host_oom),
+        // Corrupted-chunk class — should never happen; surface as
+        // the host-abort path rather than a JS value.
+        error.InvalidOpcode => return @intFromEnum(HelperCallStatus.host_oom),
+    };
+    switch (res) {
+        .value, .yielded => |v| {
+            result_out.* = v;
+            return @intFromEnum(HelperCallStatus.value);
+        },
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return @intFromEnum(HelperCallStatus.threw);
+        },
+    }
+}
+
 const Compiler = struct {
     m: Masm,
     chunk: *const Chunk,
@@ -173,8 +257,14 @@ const Compiler = struct {
     /// out-of-line after the body so the fast path stays straight.
     td_by_off: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     tds: std.ArrayListUnmanaged(Td) = .empty,
+    /// Per-call-site throw stubs (EntryResult.threw with `ip` at
+    /// the faulting call op — docs/jit.md §4.5), same out-of-line
+    /// shape as the tier-down stubs.
+    threws: std.ArrayListUnmanaged(Td) = .empty,
     done_label: Masm.Label = .{},
     tier_down_label: Masm.Label = .{},
+    threw_label: Masm.Label = .{},
+    oom_label: Masm.Label = .{},
 
     const Td = struct { label: Masm.Label, resume_off: u32 };
 
@@ -190,8 +280,12 @@ const Compiler = struct {
         self.labels.deinit(gpa);
         for (self.tds.items) |*t| t.label.fixups.deinit(gpa);
         self.tds.deinit(gpa);
+        for (self.threws.items) |*t| t.label.fixups.deinit(gpa);
+        self.threws.deinit(gpa);
         self.done_label.fixups.deinit(gpa);
         self.tier_down_label.fixups.deinit(gpa);
+        self.threw_label.fixups.deinit(gpa);
+        self.oom_label.fixups.deinit(gpa);
         self.m.deinit();
     }
 
@@ -215,6 +309,14 @@ const Compiler = struct {
             try self.tds.append(self.m.gpa, .{ .label = .{}, .resume_off = resume_off });
         }
         return &self.tds.items[gop.value_ptr.*].label;
+    }
+
+    /// Throw stub label for a call site. The returned pointer is
+    /// only valid until the next `threws` append — use it within
+    /// the same opcode's emit, like `tdFor`.
+    fn threwFor(self: *Compiler, call_off: u32) !*Masm.Label {
+        try self.threws.append(self.m.gpa, .{ .label = .{}, .resume_off = call_off });
+        return &self.threws.items[self.threws.items.len - 1].label;
     }
 
     fn run(self: *Compiler) CompileError!void {
@@ -241,7 +343,7 @@ const Compiler = struct {
                 .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq,
                 .lda_property, .sta_property,
                 .lda_global, .lda_global_or_undef,
-                .lda_this,
+                .lda_this, .call,
                 .throw_if_hole, .return_ => {},
                 // zig fmt: on
                 .make_environment => {
@@ -390,6 +492,40 @@ const Compiler = struct {
                 .make_environment => {
                     // Zero-slot env (scan-enforced) — unobservable
                     // from this chunk; elided.
+                },
+                .call => {
+                    // docs/jit.md §4.5 — helper-mediated: the helper
+                    // runs the whole §7.3 call dance (every exotic
+                    // callee kind included) through callValue, so
+                    // this site only marshals the args window from
+                    // the register file. The CallICCell inline
+                    // compare is the recorded follow-up
+                    // optimization.
+                    const r_callee = code[i + 1];
+                    const argc = code[i + 2];
+                    const threw = try self.threwFor(bc);
+                    // Root the live accumulator through the frame —
+                    // the callee may allocate and GC (§4.2).
+                    try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
+                    try m.emit(a64.movReg(.x0, realm_reg));
+                    try m.emit(a64.movReg(.x1, frame_reg));
+                    try m.emit(a64.ldrImm(.x2, regs_reg, regSlot(r_callee)));
+                    try m.emit(a64.addImm(.x3, regs_reg, @intCast(@as(u32, regSlot(r_callee)) + 8), false));
+                    try m.movImm64(.x4, argc);
+                    try m.emit(a64.addImm(.x5, frame_reg, acc_off, false));
+                    try m.callAbs(.x16, @intFromPtr(&helperCall));
+                    // The u32 status returns in w0; the upper half
+                    // of x0 is unspecified per AAPCS64 — zero-extend
+                    // before testing the full register.
+                    try m.emit(a64.movRegW(.x0, .x0));
+                    var ok = Masm.Label{};
+                    defer ok.fixups.deinit(m.gpa);
+                    try m.jumpCbz(.x0, &ok);
+                    try m.emit(a64.cmpImm(.x0, @intFromEnum(HelperCallStatus.threw), false));
+                    try m.jumpCond(.eq, threw);
+                    try m.jump(&self.oom_label);
+                    m.bind(&ok);
+                    try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
                 },
                 .lda_this => {
                     // §9.1.1.3.4 GetThisBinding — the only abrupt
@@ -594,11 +730,25 @@ const Compiler = struct {
             try m.movImm64(.x9, t.resume_off);
             try m.jump(&self.tier_down_label);
         }
+        for (self.threws.items) |*t| {
+            m.bind(&t.label);
+            try m.movImm64(.x9, t.resume_off);
+            try m.jump(&self.threw_label);
+        }
         m.bind(&self.done_label);
         try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
         try m.emit(a64.movz(.x0, 1, 0)); // EntryResult.done
         var epilogue = Masm.Label{};
         defer epilogue.fixups.deinit(m.gpa);
+        try m.jump(&epilogue);
+        // x9 = the faulting call op's offset; the accumulator was
+        // synced before the call, so only ip needs the store.
+        m.bind(&self.threw_label);
+        try m.emit(a64.strImm(.x9, frame_reg, ip_off));
+        try m.emit(a64.movz(.x0, 2, 0)); // EntryResult.threw
+        try m.jump(&epilogue);
+        m.bind(&self.oom_label);
+        try m.emit(a64.movz(.x0, 3, 0)); // EntryResult.host_oom
         try m.jump(&epilogue);
         // x9 = bytecode offset to resume at.
         m.bind(&self.tier_down_label);
@@ -1322,6 +1472,81 @@ test "jit bistromath: a non-bool branch condition tiers down correctly" {
     try testing.expectEqual(
         Chunk.JitState.Tier.compiled,
         chunk.function_templates[0].chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath calls: a hot caller invokes through the tier" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // docs/jit.md §12 step 3e — the helper-mediated call: a caller
+    // containing `call` opcodes must itself compile, marshal the
+    // args window, and receive the callee's result in the
+    // accumulator. The callee is also hot, so the nested entry
+    // exercises compiled→helper→compiled.
+    const src =
+        \\function add1(x) { return x + 1; }
+        \\function caller(n) { return add1(n) + add1(n); }
+        \\let i = 0;
+        \\while (i < 300) { caller(i); i = i + 1; }
+        \\caller(20);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 42), v.asInt32());
+    // add1 is template 0, caller is template 1.
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.function_templates[0].chunk.jit_state.?.tier,
+    );
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.function_templates[1].chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath calls: callee exceptions unwind through compiled callers" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // A TDZ ReferenceError raised two compiled frames down must
+    // unwind through the compiled `mid` (EntryResult.threw routing)
+    // and land in the top-level catch with the right answer.
+    const src =
+        \\function boom(b) { if (b) { return zz; } let zz = 1; return zz; }
+        \\function mid(b) { return boom(b) + 1; }
+        \\let i = 0;
+        \\while (i < 300) { mid(false); i = i + 1; }
+        \\let r = 0;
+        \\try { mid(true); } catch (e) { r = 9; }
+        \\r;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 9), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.function_templates[1].chunk.jit_state.?.tier,
     );
 }
 

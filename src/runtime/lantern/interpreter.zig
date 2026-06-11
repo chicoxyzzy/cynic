@@ -2699,8 +2699,16 @@ pub fn runFrames(
             // to the caller frame exactly as `return_` would; a
             // tier-down leaves the frame mid-chunk for
             // reEnterDispatch. Cold chunks fall straight through.
-            if (bistromath.tryEnterTop(allocator, realm, frames)) |jit_ret| {
-                frames.items[frames.items.len - 1].accumulator = jit_ret;
+            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+                .not_entered => {},
+                .completed => |jit_ret| {
+                    frames.items[frames.items.len - 1].accumulator = jit_ret;
+                },
+                .threw => |ex| {
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                },
             }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
@@ -3004,8 +3012,16 @@ pub fn runFrames(
             // to the caller frame exactly as `return_` would; a
             // tier-down leaves the frame mid-chunk for
             // reEnterDispatch. Cold chunks fall straight through.
-            if (bistromath.tryEnterTop(allocator, realm, frames)) |jit_ret| {
-                frames.items[frames.items.len - 1].accumulator = jit_ret;
+            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+                .not_entered => {},
+                .completed => |jit_ret| {
+                    frames.items[frames.items.len - 1].accumulator = jit_ret;
+                },
+                .threw => |ex| {
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                },
             }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
@@ -3343,8 +3359,16 @@ pub fn runFrames(
             // Bistromath first (docs/jit.md §4) — same hook as the
             // `.call` / `.call_method` arms; this is the
             // own-property method-call push site.
-            if (bistromath.tryEnterTop(allocator, realm, frames)) |jit_ret| {
-                frames.items[frames.items.len - 1].accumulator = jit_ret;
+            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+                .not_entered => {},
+                .completed => |jit_ret| {
+                    frames.items[frames.items.len - 1].accumulator = jit_ret;
+                },
+                .threw => |ex| {
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                },
             }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
@@ -4338,8 +4362,16 @@ pub fn runFrames(
             // to the caller frame exactly as `return_` would; a
             // tier-down leaves the frame mid-chunk for
             // reEnterDispatch. Cold chunks fall straight through.
-            if (bistromath.tryEnterTop(allocator, realm, frames)) |jit_ret| {
-                frames.items[frames.items.len - 1].accumulator = jit_ret;
+            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+                .not_entered => {},
+                .completed => |jit_ret| {
+                    frames.items[frames.items.len - 1].accumulator = jit_ret;
+                },
+                .threw => |ex| {
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                },
             }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
