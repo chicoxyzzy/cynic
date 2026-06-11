@@ -189,6 +189,21 @@ Estimates are against the profile ledger above; they overlap (L2
 shrinks the same element-append bucket L3b touches), so the sum is
 an upper bound, not a forecast.
 
+**Outcomes (measured after landing, interleaved min-of-31 vs the
+prior commit, `--no-jit`):** L1 shipped at **−25.9 %** (302.5 →
+224.1 ms). L2 shipped at **−9.9 % on both tiers** (229.4 → 206.6
+interpreted). L3b-pooling shipped at **−8.9 %** (203.8 → 185.6) as a
+fixed-class element-buffer slab pool with an `elements_pooled`
+provenance bit. L3a (the plain-corpse `deinitFields` skip) was
+implemented and **refuted**: every delta sat inside the noise band,
+because the cost is the cache-miss loads across the object header,
+which a grouped capacity check still performs — only a smaller
+header or a segregated array kind removes them. End state: the
+fixture runs ~188 ms (~125 ns/iter), down from 499 at the start of
+the effort (−62 %); what remains is the dispatch bucket (the tier's
+ceiling — JIT-track territory), the per-cycle GC mark/root-scan
+economics, and the allocation-init floor, all documented above.
+
 ### L1 — int32-keyed dense-element fast path in `lda_computed` (validated)
 
 When the key value is a non-negative int32 and the receiver is a

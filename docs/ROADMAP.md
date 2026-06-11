@@ -940,8 +940,11 @@ matching the JIT engines at full speed is a separate track (see
    currently slow.
 
 2. **Leaner `JSObject` allocation — shipped.**
-   `@sizeOf(JSObject)` dropped 960 → 512 bytes (-47 %, nearly
-   halved) by moving every cold field (`accessors`, `private_*`,
+   `@sizeOf(JSObject)` dropped 960 → 512 bytes, then to 400 (-58 %
+   from the original) as the wasm host backings, Date/boxed-
+   primitive/capability/generator state, the Promise.finally
+   machinery, and the class private-state fields followed the same
+   route. Achieved by moving every cold field (`accessors`, `private_*`,
    `namespace_*`, `map_data`, `set_data`, `promise_*`,
    `weak_ref_target`, `finalization_cells`, `array_buffer`,
    `typed_view`, `data_view`) behind a lazy
