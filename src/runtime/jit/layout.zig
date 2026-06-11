@@ -99,16 +99,15 @@ comptime {
     // The scaled 64-bit loads (`ldr Xt, [Xn, #imm]`) need 8-aligned
     // offsets; the slot accessors additionally index Value arrays.
     for ([_]usize{
-        frame.ip,                frame.accumulator,
-        frame.running_realm,     frame.this_value,
-        frame.super_called_cell, object.shape,
-        object.prototype,        object.inline_slots,
-        object.overflow_items_ptr,
-        ic_cell.shape,           ic_cell.proto,
-        ic_cell.proto_shape,     ic_cell.proto_rev,
-        call_ic_cell.callee,
-        realm.step_budget,       realm.proto_revision_counter,
-        realm.globals_target,    realm.globals_decl_revision,
+        frame.ip,                  frame.accumulator,
+        frame.running_realm,       frame.this_value,
+        frame.super_called_cell,   object.shape,
+        object.prototype,          object.inline_slots,
+        object.overflow_items_ptr, ic_cell.shape,
+        ic_cell.proto,             ic_cell.proto_shape,
+        ic_cell.proto_rev,         call_ic_cell.callee,
+        realm.step_budget,         realm.proto_revision_counter,
+        realm.globals_target,      realm.globals_decl_revision,
     }) |off| std.debug.assert(off % 8 == 0);
     // `slot` is a u32 field — 4-aligned is enough (loaded via ldr-w
     // by the emitters... which use the 64-bit scaled form on an
@@ -182,7 +181,7 @@ test "jit layout: machine loads match Zig reads on live values" {
     obj.setSlot(1, Value.fromInt32(11));
     obj.setSlot(object.inline_slot_cap + 1, Value.fromInt32(99));
     try testing.expectEqual(
-        @as(u64, @intFromPtr(obj.prototype orelse @as(?*JSObject, null)) ),
+        @as(u64, @intFromPtr(obj.prototype orelse @as(?*JSObject, null))),
         try loadVia(&ca, object.prototype, obj),
     );
     const inline1 = try loadVia(&ca, object.inline_slots + 8, obj);

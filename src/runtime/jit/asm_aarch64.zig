@@ -31,7 +31,22 @@ pub const Reg = enum(u5) {
 
 /// Condition codes for `b.cond` (Arm ARM C1.2.4).
 pub const Cond = enum(u4) {
-    eq, ne, cs, cc, mi, pl, vs, vc, hi, ls, ge, lt, gt, le, al, nv,
+    eq,
+    ne,
+    cs,
+    cc,
+    mi,
+    pl,
+    vs,
+    vc,
+    hi,
+    ls,
+    ge,
+    lt,
+    gt,
+    le,
+    al,
+    nv,
 };
 
 const xzr: u32 = 31;

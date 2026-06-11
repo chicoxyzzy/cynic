@@ -98,6 +98,11 @@ pub const CodeAllocator = struct {
     }
 
     pub fn deinit(self: *CodeAllocator) void {
+        // Comptime-pruned on unsupported targets (the playground's
+        // wasm32-freestanding build reaches this through
+        // `Heap.deinit`, where `munmap` doesn't exist; `init` can
+        // never have succeeded there).
+        if (comptime !supported) return;
         self.free_list.deinit(self.gpa);
         std.posix.munmap(self.region);
         self.* = undefined;
@@ -172,7 +177,7 @@ pub const CodeAllocator = struct {
             self.region.len,
         );
         const pages = self.region[lo..hi];
-        const rc = std.c.mprotect(@alignCast(@ptrCast(pages.ptr)), pages.len, prot);
+        const rc = std.c.mprotect(@ptrCast(@alignCast(pages.ptr)), pages.len, prot);
         // mprotect over pages this allocator owns, with a valid
         // protection, cannot fail recoverably; a failure would leave
         // the new code non-executable and fault at the call site.
@@ -185,10 +190,10 @@ pub const CodeAllocator = struct {
 fn flushICache(code: []const u8) void {
     switch (comptime builtin.cpu.arch) {
         .aarch64 => if (comptime builtin.os.tag == .macos) {
-            sys_icache_invalidate(@constCast(@ptrCast(code.ptr)), code.len);
+            sys_icache_invalidate(@ptrCast(@constCast(code.ptr)), code.len);
         } else {
-            const start: *anyopaque = @constCast(@ptrCast(code.ptr));
-            const end: *anyopaque = @constCast(@ptrCast(code.ptr + code.len));
+            const start: *anyopaque = @ptrCast(@constCast(code.ptr));
+            const end: *anyopaque = @ptrCast(@constCast(code.ptr + code.len));
             __clear_cache(start, end);
         },
         else => {},
