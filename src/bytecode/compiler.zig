@@ -11957,7 +11957,32 @@ pub const Compiler = struct {
         if (bin.lhs.* != .identifier_reference) return false;
         const lhs_name = try self.bindingName(bin.lhs.identifier_reference.span);
         if (!std.mem.eql(u8, lhs_name, counter_name)) return false;
-        const bound_val = self.intLiteralValue(bin.rhs) orelse return false;
+        // The bound is an int literal (cached in a temp) or a
+        // register-bound identifier like `n` in `i < n` (used in
+        // place — `loop_inc_lt` re-reads it every iteration, so a body
+        // that mutates the bound is observed per §14.7.4.1 step 3.a's
+        // per-iteration test re-evaluation). An env-allocated, TDZ, or
+        // global bound bails to the general path.
+        const BoundSrc = union(enum) { literal: i32, register: u8 };
+        const bound_src: BoundSrc = blk: {
+            if (self.intLiteralValue(bin.rhs)) |v| break :blk BoundSrc{ .literal = v };
+            if (bin.rhs.* == .identifier_reference) {
+                const bname = try self.bindingName(bin.rhs.identifier_reference.span);
+                // The loop counter is not yet in scope here, so a bound
+                // naming it can't resolve to the right binding — bail
+                // rather than capture an outer same-named one.
+                if (!std.mem.eql(u8, bname, counter_name)) {
+                    if (self.scope) |sc| {
+                        if (sc.resolve(bname)) |bnd| {
+                            if (bnd.is_register and !bnd.register_tdz) {
+                                break :blk BoundSrc{ .register = bnd.register };
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        };
 
         // 3. Update shape.
         const upd_expr = s.update orelse return false;
@@ -11982,8 +12007,20 @@ pub const Compiler = struct {
 
         const r_counter = try self.reserveTemp();
         errdefer self.releaseTemp();
-        const r_bound = try self.reserveTemp();
-        errdefer self.releaseTemp();
+        // A literal bound gets a cached temp; a register-bound
+        // identifier is used in place (no temp, no reload).
+        var r_bound: u8 = undefined;
+        var bound_is_temp = false;
+        var bound_lit: i32 = 0;
+        switch (bound_src) {
+            .register => |reg| r_bound = reg,
+            .literal => |v| {
+                r_bound = try self.reserveTemp();
+                bound_is_temp = true;
+                bound_lit = v;
+            },
+        }
+        errdefer if (bound_is_temp) self.releaseTemp();
 
         const init_span = init_expr.numeric_literal.span;
         try self.builder.emitOp(.lda_smi, init_span);
@@ -11991,11 +12028,13 @@ pub const Compiler = struct {
         try self.builder.emitOp(.star, init_span);
         try self.builder.emitU8(r_counter);
 
-        const bound_span = bin.rhs.numeric_literal.span;
-        try self.builder.emitOp(.lda_smi, bound_span);
-        try self.builder.emitI32(bound_val);
-        try self.builder.emitOp(.star, bound_span);
-        try self.builder.emitU8(r_bound);
+        if (bound_is_temp) {
+            const bound_span = bin.rhs.numeric_literal.span;
+            try self.builder.emitOp(.lda_smi, bound_span);
+            try self.builder.emitI32(bound_lit);
+            try self.builder.emitOp(.star, bound_span);
+            try self.builder.emitU8(r_bound);
+        }
 
         // Open the loop's lexical scope and register `i` as a
         // register-promoted binding so `compileIdentRef` reads
@@ -12060,8 +12099,8 @@ pub const Compiler = struct {
         for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_pc);
         for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, update_pc);
 
-        // r_bound, then r_counter — LIFO.
-        self.releaseTemp();
+        // r_bound (if a temp), then r_counter — LIFO.
+        if (bound_is_temp) self.releaseTemp();
         self.releaseTemp();
         return true;
     }

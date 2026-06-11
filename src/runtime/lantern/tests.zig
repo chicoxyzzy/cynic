@@ -2745,6 +2745,47 @@ test "for: closure over a body lexical keeps per-iteration values" {
     , "0,10,20");
 }
 
+test "for: register-promoted counter with a variable bound sums correctly" {
+    // §14.7.4 — `for (let i = 0; i < n; i++)` with `n` a register-bound
+    // param fuses to `loop_inc_lt` with `i` in a register (no per-iter
+    // env / TDZ check). Regression for the counter being heap-promoted
+    // when the bound is non-literal.
+    try expectScriptStringWithBuiltins(
+        \\function sum(n){ let s = 0; for (let i = 0; i < n; i++) s += i; return s; }
+        \\"" + sum(10);
+    , "45");
+}
+
+test "for: a variable counter bound is re-read each iteration (shrink)" {
+    // §14.7.4.1 step 3.a — the test expression is re-evaluated every
+    // iteration, so a body that mutates the bound `n` is observed. A
+    // cached bound would run 5 iterations (c=5); re-reading exits early.
+    try expectScriptStringWithBuiltins(
+        \\function f(){ let n = 5, c = 0; for (let i = 0; i < n; i++) { c++; if (i === 2) n = 3; } return c; }
+        \\"" + f();
+    , "3");
+}
+
+test "for: a variable counter bound is re-read each iteration (grow)" {
+    // Mutating the bound upward extends the loop — a cached bound would
+    // stop at the original value (c=2); re-reading runs to the new one.
+    try expectScriptStringWithBuiltins(
+        \\function g(){ let n = 2, c = 0; for (let i = 0; i < n; i++) { c++; if (i === 0) n = 4; } return c; }
+        \\"" + g();
+    , "4");
+}
+
+test "for: closure capture with a variable bound keeps per-iteration values" {
+    // The register fast path must still bail to the per-iteration env
+    // when a body closure captures the counter — `() => i` makes each
+    // arrow see its own `i`, so [0,1,2], not [3,3,3].
+    try expectScriptStringWithBuiltins(
+        \\const fns = []; let n = 3;
+        \\for (let i = 0; i < n; i++) fns.push(() => i);
+        \\fns.map(f => f()).join(",");
+    , "0,1,2");
+}
+
 test "later: new Number(5) wraps a primitive that ToNumber unwraps" {
     try expectScriptIntWithBuiltins(
         \\const n = new Number(5);
