@@ -877,7 +877,28 @@ useful:
        seed with undefined, no TDZ; re-declaration aliases;
        destructuring vars keep the env path). Still open:
        compiled handler dispatch so hot try-loops stop tier-down
-       ping-ponging. Generators/async stay last.
+       ping-ponging. Generators/async stay last. Two defects the
+       lean-call-path work unearthed shipped 2026-06: frames whose
+       dispatch starts at a fresh `runFrames` (every callee of a
+       compiled caller) now receive the §4.7 entry weight — without
+       it such callees could never tier up; and `callJSFunction`
+       registers its local frames list in `realm.frame_stacks`
+       across the compiled-entry window — the GC marker walks only
+       that list, and an unregistered compiled frame's registers
+       held invisible (sweepable) references; the regression test
+       reproduces the use-after-free via a forced full collection
+       with the only reference in a compiled frame's register.
+       Known gap, measured while probing: on HARDENED realms
+       (the product default) script-declared global functions
+       resolve through the `GlobalBindings.fallback` map, which
+       never fills `lda_global` cells — compiled code tiers down
+       at every global-function reference, so compiled→compiled
+       call chains effectively require `--unhardened` (or
+       lexically-declared functions, which use the decl-slot
+       path). The fix shape is a `fallback_slots` stable-index
+       mirror of the decl_slots design; until it lands, bench
+       call-chain verdicts on the default posture understate the
+       tier.
 
    Step exit — taken 2026-06-11: `--jit` flipped to default-on
    (`--no-jit` is the permanent escape hatch; `--jit` stays

@@ -1165,6 +1165,15 @@ pub const JSObject = struct {
     /// in dense mode). Once sparse, stays sparse — no re-pack on
     /// shrink. Off by default; only Array exotics flip this.
     is_sparse: bool = false,
+    /// `elements.items.ptr` came from the heap's `element_buf_pool`
+    /// (capacity exactly `Heap.element_buf_cap`) rather than the
+    /// general-purpose allocator. Growth past the class migrates to a
+    /// GPA buffer (`elementsUnpool`) and frees/teardown return the
+    /// buffer to the pool — a pooled pointer must NEVER reach
+    /// `allocator.free`/realloc. Set only by the fused array-literal
+    /// arm; in-place reads/writes and shrinks need no special
+    /// handling (`ArrayList.resize` within capacity never reallocs).
+    elements_pooled: bool = false,
     sparse_elements: std.AutoHashMapUnmanaged(u32, Value) = .empty,
     sparse_length: u32 = 0,
     /// Heap-allocated JSStrings whose `bytes` slice backs a key
@@ -1974,7 +1983,14 @@ pub const JSObject = struct {
         }
         self.key_anchors.deinit(allocator);
         self.own_key_order.deinit(allocator);
-        self.elements.deinit(allocator);
+        if (self.elements_pooled) {
+            // Pool-owned buffer — must not reach `allocator.free`.
+            const heap_ty = @import("heap.zig");
+            const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(self.elements.items.ptr);
+            if (self.heap) |h| h.element_buf_pool.destroy(buf);
+        } else {
+            self.elements.deinit(allocator);
+        }
         self.sparse_elements.deinit(allocator);
         // `shape` itself is realm-lifetime arena memory (ShapeTree),
         // not freed per-object; only the overflow slot vector is
@@ -3026,6 +3042,32 @@ pub const JSObject = struct {
     /// back to the general indexed path when the array is sparse or
     /// `idx` is not the next slot (a hole-creating or overwriting
     /// write). Does NOT touch `length`; the caller syncs it. §10.4.2.1.
+    /// Migrate pooled elements to a general-purpose buffer sized for
+    /// at least `min_cap`, returning the pooled buffer. No-op when the
+    /// buffer is already GPA-owned. Must run before ANY operation that
+    /// could grow the buffer past `Heap.element_buf_cap`.
+    fn elementsUnpool(self: *JSObject, allocator: std.mem.Allocator, min_cap: usize) !void {
+        if (!self.elements_pooled) return;
+        const heap_ty = @import("heap.zig");
+        var fresh: std.ArrayListUnmanaged(Value) = .empty;
+        try fresh.ensureTotalCapacity(allocator, @max(min_cap, self.elements.items.len));
+        fresh.appendSliceAssumeCapacity(self.elements.items);
+        const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(self.elements.items.ptr);
+        if (self.heap) |h| h.element_buf_pool.destroy(buf);
+        self.elements = fresh;
+        self.elements_pooled = false;
+    }
+
+    /// Release pooled elements back to the pool and reset to empty.
+    /// Mirrors `clearAndFree` for the pooled representation.
+    fn elementsFreePooled(self: *JSObject) void {
+        const heap_ty = @import("heap.zig");
+        const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(self.elements.items.ptr);
+        if (self.heap) |h| h.element_buf_pool.destroy(buf);
+        self.elements = .empty;
+        self.elements_pooled = false;
+    }
+
     pub fn appendDenseSequential(
         self: *JSObject,
         allocator: std.mem.Allocator,
@@ -3034,6 +3076,9 @@ pub const JSObject = struct {
     ) !bool {
         if (self.is_sparse) return false;
         if (idx != self.elements.items.len) return false;
+        if (self.elements_pooled and self.elements.items.len == self.elements.capacity) {
+            try self.elementsUnpool(allocator, self.elements.items.len + 1);
+        }
         try self.elements.append(allocator, v);
         if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
         return true;
@@ -3058,6 +3103,9 @@ pub const JSObject = struct {
             try self.promoteToSparse(allocator, new_len);
             return;
         }
+        if (self.elements_pooled and new_len > self.elements.capacity) {
+            try self.elementsUnpool(allocator, new_len);
+        }
         try self.elements.resize(allocator, new_len);
         var i = old_len;
         while (i < new_len) : (i += 1) {
@@ -3078,7 +3126,11 @@ pub const JSObject = struct {
             if (isElementHole(v)) continue;
             try self.sparse_elements.put(allocator, i, v);
         }
-        self.elements.clearAndFree(allocator);
+        if (self.elements_pooled) {
+            self.elementsFreePooled();
+        } else {
+            self.elements.clearAndFree(allocator);
+        }
         self.sparse_length = @intCast(new_len);
         self.is_sparse = true;
     }

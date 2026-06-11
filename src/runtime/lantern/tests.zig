@@ -2457,6 +2457,46 @@ test "later: prefix ++obj.x returns new" {
 // fall through to the full path. Written red-first against the
 // slow-path-only interpreter.
 
+test "pooled elements: literal grows past the pool class via push" {
+    // A fused literal's element buffer may come from the heap's
+    // small-buffer pool; growing past its capacity must migrate to a
+    // general-purpose buffer with contents intact.
+    try expectScriptStringWithBuiltins(
+        \\const a = [1, 2, 3];
+        \\for (let i = 3; i < 40; i++) a.push(i * 10);
+        \\a.length + ":" + a[0] + ":" + a[2] + ":" + a[3] + ":" + a[39];
+    , "40:1:3:30:390");
+}
+
+test "pooled elements: shrink, regrow, and in-place writes" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [9, 8, 7, 6];
+        \\a.length = 2;        // shrink in place
+        \\a[1] = 80;           // in-place write
+        \\a[2] = 70; a[3] = 60; a[4] = 50; // regrow within + past
+        \\a.length + ":" + a.join(",");
+    , "5:9,80,70,60,50");
+}
+
+test "pooled elements: sparse promotion releases the small buffer" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1, 2];
+        \\a[100000] = 3;       // promoteToSparse frees the dense buffer
+        \\a.length + ":" + a[0] + ":" + a[1] + ":" + a[100000];
+    , "100001:1:2:3");
+}
+
+test "pooled elements: many short-lived literals recycle buffers under GC" {
+    try expectScriptStringUnderGcPressure(
+        \\let s = 0;
+        \\for (let i = 0; i < 60; i++) {
+        \\  const a = [i, i + 1, i + 2, i + 3, i + 4];
+        \\  s += a[0] + a[4];
+        \\}
+        \\"" + s;
+    , "3780");
+}
+
 test "make_array_n: element side effects run left-to-right before the array exists" {
     // §13.2.4.1 — element expressions evaluate in source order; the
     // fused lowering stages them in registers before the array is

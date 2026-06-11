@@ -8736,7 +8736,15 @@ pub fn runFrames(
             const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
             realm.heap.setObjectPrototype(obj, realm.intrinsics.array_prototype);
             obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
-            obj.elements.ensureTotalCapacityPrecise(allocator, n) catch return error.OutOfMemory;
+            // The element buffer comes from the heap's fixed-class
+            // slab pool (the compiler caps fused literals at the
+            // pool's capacity), so the common literal array performs
+            // NO general-purpose allocation at all — and returns the
+            // buffer to the pool at death. Growth past the class
+            // migrates once via `elementsUnpool`.
+            const buf = realm.heap.element_buf_pool.create(realm.heap.allocator) catch return error.OutOfMemory;
+            obj.elements = .{ .items = buf[0..0], .capacity = heap_mod.Heap.element_buf_cap };
+            obj.elements_pooled = true;
             obj.elements.appendSliceAssumeCapacity(registers[r_base .. @as(usize, r_base) + n]);
             acc = heap_mod.taggedObject(obj);
             continue :dispatch try decodeNext(code, &ip, &committed);

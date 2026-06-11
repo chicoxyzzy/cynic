@@ -212,6 +212,11 @@ pub const Heap = struct {
     /// the integers actually stringified allocate a backing string.
     pub const small_int_cache_max = 256;
 
+    /// Capacity (in Values) of one pooled dense-element buffer —
+    /// matches the compiler's fused-literal cap so every
+    /// `make_array_n` array fits one pool item exactly.
+    pub const element_buf_cap = 16;
+
     allocator: std.mem.Allocator,
     /// Monotonic counter for per-ClassTail-evaluation private brand
     /// prefixes (§15.7.14 step 31; `"B{n}#"`). Lives on the Heap, not
@@ -621,6 +626,15 @@ pub const Heap = struct {
     /// via `destroy`, teardown frees the slabs wholesale.
     promise_store_pool: std.heap.MemoryPool(@import("object.zig").PromiseReactionStore) = .empty,
 
+    /// Slab pool of small dense-element buffers — one fixed class of
+    /// `element_buf_cap` Values (128 bytes). The fused array-literal
+    /// arm draws from it instead of a libc malloc per array, and the
+    /// sweep returns it on death; an array that outgrows the class
+    /// migrates to a general-purpose buffer once (see
+    /// `JSObject.elements_pooled`). Most literal arrays live and die
+    /// entirely inside the pool.
+    element_buf_pool: std.heap.MemoryPool([element_buf_cap]Value) = .empty,
+
     /// Cache of pinned `JSString`s for the decimal forms of small
     /// non-negative integers `[0, small_int_cache_max)`. Number-to-
     /// string on a small integer (`(i & 0xff).toString()`, an array
@@ -744,6 +758,7 @@ pub const Heap = struct {
         self.pending_realm_teardown.deinit(self.allocator);
         self.object_pool.deinit(self.allocator);
         self.promise_store_pool.deinit(self.allocator);
+        self.element_buf_pool.deinit(self.allocator);
         // Free each environment's slot vector first (the only
         // sub-field the env owns separately). The Environment
         // header itself is slab-pooled — `env_pool.deinit` below
