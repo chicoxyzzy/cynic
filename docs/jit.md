@@ -873,8 +873,10 @@ useful:
        and constructors (the same predicate and cap as plain
        functions; constructors still run in Lantern — the tier
        refuses construct frames — but skip the env allocation
-       and chain walks). Still open: `var` promotion; compiled
-       handler dispatch so hot try-loops stop tier-down
+       and chain walks) and `var` promotion (§14.3.2 — registers
+       seed with undefined, no TDZ; re-declaration aliases;
+       destructuring vars keep the env path). Still open:
+       compiled handler dispatch so hot try-loops stop tier-down
        ping-ponging. Generators/async stay last.
 
    Step exit — taken 2026-06-11: `--jit` flipped to default-on
