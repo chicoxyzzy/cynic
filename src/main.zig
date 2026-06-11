@@ -233,11 +233,15 @@ fn printUsage(io: std.Io) !void {
         \\                                   `Instance` throw; `WebAssembly.validate`
         \\                                   stays available. Orthogonal to
         \\                                   --allow=eval (docs/wasm-engine.md §9).
-        \\  --jit                            Enable the Bistromath baseline JIT
-        \\                                   tier (docs/jit.md). Off by default
-        \\                                   while the tier lands; hot functions
-        \\                                   tier up from the Lantern interpreter
-        \\                                   once enabled.
+        \\  --no-jit                         Disable the Bistromath baseline JIT
+        \\                                   tier (docs/jit.md). The tier is ON
+        \\                                   by default: hot functions tier up
+        \\                                   from the Lantern interpreter. Use
+        \\                                   this to stay interpreter-only, e.g.
+        \\                                   when benchmarking the interpreter
+        \\                                   or isolating a suspected JIT bug.
+        \\                                   --jit is accepted as an explicit
+        \\                                   no-op.
         \\
     );
 }
