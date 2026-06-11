@@ -9815,6 +9815,35 @@ pub fn runFrames(
                 }
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
+            // §10.1.8.1 OrdinaryGet step 1 — an int32 non-negative
+            // key on a non-proxy dense Array exotic resolves to the
+            // own element when present, shadowing everything behind
+            // it. §7.1.19 ToPropertyKey of an int32 is side-effect-
+            // free and §7.1.21 CanonicalNumericIndexString of any
+            // non-negative int32 is exactly its decimal string, so
+            // serving `elements[idx]` directly is observably
+            // identical to the full stringify + chain walk (which
+            // was ~23 % of the ctor_array_build profile — see
+            // docs/ctor-array-build-gap.md). Every miss class —
+            // hole, out-of-bounds, sparse storage, proxy receiver,
+            // accessor-promoted slot — falls through unchanged.
+            if (acc.isInt32()) {
+                const ik = acc.asInt32();
+                if (ik >= 0) {
+                    if (heap_mod.valueAsPlainObject(recv)) |aobj| {
+                        if (aobj.is_array_exotic and !aobj.is_sparse and
+                            aobj.proxy_target == null and !aobj.proxy_revoked)
+                        {
+                            const idx: usize = @intCast(ik);
+                            const els = aobj.elements.items;
+                            if (idx < els.len and !@import("../object.zig").JSObject.isElementHole(els[idx])) {
+                                acc = els[idx];
+                                continue :dispatch try decodeNext(code, &ip, &committed);
+                            }
+                        }
+                    }
+                }
+            }
             // §7.1.19 ToPropertyKey — for object keys (e.g.
             // `obj[arr]`), run ToPrimitive(string) so user-
             // defined `toString` / `valueOf` / `[@@toPrimitive]`

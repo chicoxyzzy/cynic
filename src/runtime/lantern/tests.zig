@@ -2408,6 +2408,84 @@ test "later: prefix ++obj.x returns new" {
     , 12);
 }
 
+// ── int32-keyed dense-element computed reads ────────────────────────
+//
+// `a[k]` with an int32 non-negative key on a non-proxy Array exotic
+// may serve `elements[k]` directly (a dense in-bounds non-hole own
+// element shadows everything per §10.1.8.1 OrdinaryGet step 1, and
+// §7.1.19 ToPropertyKey of an int32 is side-effect-free). These pin
+// the observable surface that fast path must preserve; every miss
+// class (hole, out-of-bounds, sparse, proxy, accessor-at-hole) must
+// fall through to the full path. Written red-first against the
+// slow-path-only interpreter.
+
+test "computed int read: dense in-bounds hits own elements" {
+    try expectScriptInt("var a=[10,20,30]; a[0]+a[1]+a[2]", 60);
+    try expectScriptInt("var a=[10,20,30]; var i=2; a[i]", 30);
+    try expectScriptInt("var a=[5,6,7,8]; var i=0; var s=0; for(;i<4;i++) s+=a[i&3]; s", 26);
+}
+
+test "computed int read: out-of-bounds falls to prototype then undefined" {
+    try expectScriptStringUnhardened(
+        \\const a = [1,2];
+        \\"" + a[5] + ":" + a[2];
+    , "undefined:undefined");
+    try expectScriptStringUnhardened(
+        \\Array.prototype[5] = "proto5";
+        \\const a = [1,2];
+        \\const r = a[5];
+        \\delete Array.prototype[5];
+        \\r;
+    , "proto5");
+}
+
+test "computed int read: hole falls through to an inherited element" {
+    try expectScriptStringUnhardened(
+        \\Array.prototype[1] = "inherited";
+        \\const a = [0, , 2]; // middle hole
+        \\const r = "" + a[1] + ":" + a[0] + ":" + a[2];
+        \\delete Array.prototype[1];
+        \\r;
+    , "inherited:0:2");
+}
+
+test "computed int read: inherited accessor fires at a hole, shadowed by own element" {
+    try expectScriptStringUnhardened(
+        \\let calls = 0;
+        \\Object.defineProperty(Array.prototype, "1", {
+        \\  get() { calls++; return "acc"; }, configurable: true,
+        \\});
+        \\const holed = [0, , 2];
+        \\const dense = [0, 9, 2];
+        \\const r = holed[1] + ":" + dense[1] + ":" + calls;
+        \\delete Array.prototype["1"];
+        \\r;
+    , "acc:9:1");
+}
+
+test "computed int read: sparse array reads its sparse storage" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [];
+        \\a[100000] = "far";
+        \\"" + a[100000] + ":" + a[0] + ":" + a.length;
+    , "far:undefined:100001");
+}
+
+test "computed int read: negative and non-integer keys take the string path" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1,2,3];
+        \\a[-1] = "neg"; a[1.5] = "frac";
+        \\"" + a[-1] + ":" + a[1.5] + ":" + a.length;
+    , "neg:frac:3");
+}
+
+test "computed int read: proxy receiver still fires the get trap" {
+    try expectScriptStringWithBuiltins(
+        \\const p = new Proxy([10, 20], { get(t, k, r) { return k === "1" ? "trapped" : Reflect.get(t, k, r); } });
+        \\"" + p[0] + ":" + p[1];
+    , "10:trapped");
+}
+
 test "later: arr[i]-- works on computed member" {
     try expectScriptIntWithBuiltins(
         \\const a = [10, 20, 30];
