@@ -861,7 +861,7 @@ pub const Heap = struct {
     pub fn allocateGenerator(
         self: *Heap,
         chunk: *const Chunk,
-        register_count: u8,
+        register_count: u32,
         captured_env: ?*Environment,
         this_value: Value,
     ) !*JSGenerator {

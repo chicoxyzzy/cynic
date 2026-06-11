@@ -281,8 +281,11 @@ pub const CallFrame = struct {
     /// at frame-push time so a synthesised
     /// `class B extends A {}` default constructor (which lowers
     /// to `super_call_forward`) can replay the caller's full
-    /// arg list without parsing rest params.
-    argc: u8 = 0,
+    /// arg list without parsing rest params. u32: apply / spread
+    /// arg counts are dynamic (§10.4.4 `arguments.length` reflects
+    /// the actual count), so the field must not saturate at the
+    /// call opcodes' u8 operand range.
+    argc: u32 = 0,
     /// The generator that owns this frame, if running a
     /// `function*` body. Set on resume; null for ordinary
     /// frames. When `gen_yield` fires, the dispatch loop saves
@@ -7594,7 +7597,7 @@ pub fn runFrames(
             const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
             realm.heap.setObjectPrototype(obj, arg_realm.intrinsics.object_prototype);
             obj.is_arguments_exotic = true;
-            var i: u8 = 0;
+            var i: u32 = 0;
             while (i < f.argc) : (i += 1) {
                 var ibuf: [16]u8 = undefined;
                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
@@ -7662,7 +7665,7 @@ pub fn runFrames(
             obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
             var len: i32 = 0;
             if (start < f.argc) {
-                var i: u8 = start;
+                var i: u32 = start;
                 while (i < f.argc) : (i += 1) {
                     var ibuf: [16]u8 = undefined;
                     const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;

@@ -59,11 +59,13 @@ pub fn wrapGenerator(
     callee: ?*JSFunction,
 ) RunError!RunResult {
     // Generator's register file must hold the function body's
-    // declared registers AND any extra inbound argument values.
-    // Cap at u8 max — over-arity gracefully drops trailing args
-    // rather than overflowing the slot count.
+    // declared registers AND every inbound argument value — the
+    // §10.4.4 `arguments` / §15.2.4 rest materialisers read args
+    // back out of the registers on resume, so dropping trailing
+    // args would truncate them (the u32 saturation is unreachable:
+    // allocating that many Values OOM-throws first).
     const wanted: usize = @max(@as(usize, chunk.register_count), args.len);
-    const reg_count: u8 = @intCast(@min(wanted, std.math.maxInt(u8)));
+    const reg_count: u32 = @intCast(@min(wanted, std.math.maxInt(u32)));
     const gen = realm.heap.allocateGenerator(
         chunk,
         reg_count,
@@ -86,7 +88,7 @@ pub fn wrapGenerator(
     while (i < args.len and i < gen.registers.len) : (i += 1) {
         gen.registers[i] = args[i];
     }
-    gen.argc = @intCast(@min(args.len, std.math.maxInt(u8)));
+    gen.argc = @intCast(@min(args.len, std.math.maxInt(u32)));
 
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
     // Seed a safe default [[Prototype]] for the duration of the
@@ -163,7 +165,7 @@ pub fn wrapAsyncGenerator(
     callee: ?*JSFunction,
 ) RunError!RunResult {
     const wanted: usize = @max(@as(usize, chunk.register_count), args.len);
-    const reg_count: u8 = @intCast(@min(wanted, std.math.maxInt(u8)));
+    const reg_count: u32 = @intCast(@min(wanted, std.math.maxInt(u32)));
     const gen = realm.heap.allocateGenerator(
         chunk,
         reg_count,
@@ -187,7 +189,7 @@ pub fn wrapAsyncGenerator(
     while (i < args.len and i < gen.registers.len) : (i += 1) {
         gen.registers[i] = args[i];
     }
-    gen.argc = @intCast(@min(args.len, std.math.maxInt(u8)));
+    gen.argc = @intCast(@min(args.len, std.math.maxInt(u32)));
 
     const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
     // Seed a safe default [[Prototype]] for the duration of the

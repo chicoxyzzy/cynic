@@ -831,7 +831,7 @@ pub fn constructValue(
         .home_object = target.home_object,
         .home_function = target.home_function,
         .super_called_cell = target.super_called_cell,
-        .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
+        .argc = @intCast(@min(args.len, std.math.maxInt(u32))),
         .wrap_return_in_promise = false,
         .running_realm = target.realm,
         .is_stack_alloc = is_stack_alloc,
@@ -978,7 +978,7 @@ pub fn callJSFunction(
         .home_object = callee.home_object,
         .home_function = callee.home_function,
         .super_called_cell = callee.super_called_cell,
-        .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
+        .argc = @intCast(@min(args.len, std.math.maxInt(u32))),
         .wrap_return_in_promise = false,
         .owning_module = callee.owning_module,
         .running_realm = callee.realm,
@@ -1102,7 +1102,7 @@ pub fn callJSFunctionAsSuper(
         // its own ConstructResult after the super_call returns).
         .home_object = callee.home_object,
         .home_function = callee.home_function,
-        .argc = @intCast(@min(args.len, std.math.maxInt(u8))),
+        .argc = @intCast(@min(args.len, std.math.maxInt(u32))),
         .wrap_return_in_promise = false,
         .owning_module = callee.owning_module,
         .running_realm = callee.realm,
@@ -1147,7 +1147,7 @@ pub fn startAsyncCall(
     const result_promise = heap_mod.taggedObject(promise_obj);
 
     const wanted: usize = @max(@as(usize, chunk.register_count), args.len);
-    const reg_count: u8 = @intCast(@min(wanted, std.math.maxInt(u8)));
+    const reg_count: u32 = @intCast(@min(wanted, std.math.maxInt(u32)));
     const gen = realm.heap.allocateGenerator(chunk, reg_count, captured_env, this_value) catch return error.OutOfMemory;
     gen.is_async = true;
     gen.result_promise = result_promise;
@@ -1178,7 +1178,7 @@ pub fn startAsyncCall(
     while (i < args.len and i < gen.registers.len) : (i += 1) {
         gen.registers[i] = args[i];
     }
-    gen.argc = @intCast(@min(args.len, std.math.maxInt(u8)));
+    gen.argc = @intCast(@min(args.len, std.math.maxInt(u32)));
 
     try resumeAsyncFunction(allocator, realm, gen, Value.undefined_, false);
     return .{ .value = result_promise };

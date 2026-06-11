@@ -3843,6 +3843,74 @@ test "later: Function.prototype.bind chained" {
     , 10);
 }
 
+// ── argc past 255: the frame's argument count must not saturate ─────────────
+//
+// §10.4.4 CreateUnmappedArgumentsObject reflects the ACTUAL argument
+// count; §15.2.4 rest parameters collect every trailing argument. The
+// register file already holds all dynamically-supplied args (apply /
+// spread size the frame by args.len), so a clamped count silently
+// under-reports `arguments.length` and truncates rest arrays past 255.
+
+test "argc: arguments.length reports 300 applied args (§10.4.4)" {
+    try expectScriptIntWithBuiltins(
+        \\function f() { return arguments.length; }
+        \\var arr = [];
+        \\for (var i = 0; i < 300; i++) arr.push(1);
+        \\f.apply(null, arr);
+    , 300);
+}
+
+test "argc: arguments elements stay addressable past index 255 (§10.4.4)" {
+    // arguments[299] must hold the 300th arg, not undefined — the
+    // indexed slots are driven by the same count as `length`.
+    try expectScriptIntWithBuiltins(
+        \\function f() { return arguments[299]; }
+        \\var arr = [];
+        \\for (var i = 0; i < 300; i++) arr.push(i);
+        \\f.apply(null, arr);
+    , 299);
+}
+
+test "argc: rest parameter materialises all 300 applied args (§15.2.4)" {
+    try expectScriptIntWithBuiltins(
+        \\function f(...a) { return a.length; }
+        \\var arr = [];
+        \\for (var i = 0; i < 300; i++) arr.push(1);
+        \\f.apply(null, arr);
+    , 300);
+}
+
+test "argc: spread call delivers 300 args to arguments.length (§13.3.8.1)" {
+    try expectScriptIntWithBuiltins(
+        \\function f() { return arguments.length; }
+        \\var arr = [];
+        \\for (var i = 0; i < 300; i++) arr.push(1);
+        \\f(...arr);
+    , 300);
+}
+
+test "argc: Math.max.apply over 300 numbers stays correct (§21.3.2.24)" {
+    // Native callees receive the args slice directly (no frame), so
+    // this guards the path stays length-exact alongside the frame fix.
+    try expectScriptIntWithBuiltins(
+        \\var arr = [];
+        \\for (var i = 1; i <= 300; i++) arr.push(i);
+        \\Math.max.apply(null, arr);
+    , 300);
+}
+
+test "argc: generator body observes 300 applied args (§27.5 / §10.4.4)" {
+    // Generators snapshot the frame into JSGenerator state (argc +
+    // registers) — both the count and the register copy must carry
+    // all 300 args across the suspend/resume boundary.
+    try expectScriptIntWithBuiltins(
+        \\function* g() { yield arguments.length + (arguments[299] === 7 ? 0 : 1000); }
+        \\var arr = [];
+        \\for (var i = 0; i < 300; i++) arr.push(7);
+        \\g.apply(null, arr).next().value;
+    , 300);
+}
+
 test "later: bound function [[Construct]] threads new.target to target (§10.4.1.2)" {
     // Mirrors built-ins/Function/prototype/bind/instance-construct-newtarget-self-new.js:
     // `new C()` where C = B.bind() and B = A.bind() — per step 5

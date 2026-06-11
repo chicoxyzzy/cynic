@@ -121,7 +121,10 @@ pub const JSGenerator = struct {
     this_value: Value = Value.undefined_,
     home_object: ?*JSObject = null,
     home_function: ?*@import("function.zig").JSFunction = null,
-    argc: u8 = 0,
+    /// Caller-supplied argument count, mirroring `CallFrame.argc`
+    /// (u32 — apply / spread counts are dynamic and must not
+    /// saturate; §10.4.4 `arguments.length` reads it on resume).
+    argc: u32 = 0,
     state: GeneratorState = .initial,
     /// Mark color. `gen.mark_color == heap.live_color` means "live
     /// this cycle". See `JSObject.mark_color` for the protocol.
@@ -249,7 +252,7 @@ pub const JSGenerator = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         chunk: *const Chunk,
-        register_count: u8,
+        register_count: u32,
         captured_env: ?*Environment,
         this_value: Value,
     ) !*JSGenerator {
