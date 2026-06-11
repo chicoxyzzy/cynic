@@ -2456,6 +2456,31 @@ pub const JSObject = struct {
                 }
             }
         }
+        // The bag must not carry a *named* key the shape doesn't
+        // account for. A shape-mode object reads shape-first, so a
+        // stray `properties.put(newKey, …)` that bypassed `shadowSet` /
+        // `demoteFromShape` would leave a bag-only data key invisible to
+        // the shape — the runtime form of the "bag non-empty ⟹
+        // dictionary mode" guarantee the optional-field flip would make
+        // static. (Empty for pure shape-mode objects, so this loop is
+        // free for them.) Element/index keys and the well-known-symbol
+        // form are not shape-tracked, so they're exempt.
+        var bit = self.properties.iterator();
+        while (bit.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (canonicalIntegerIndex(key) != null) continue;
+            var sn: ?*const @import("shape.zig").Shape = shape;
+            const in_shape = while (sn) |n| : (sn = n.parent) {
+                if (n.parent == null) break false;
+                if (n.kind == .data and std.mem.eql(u8, n.key, key)) break true;
+            } else false;
+            if (!in_shape) {
+                std.debug.panic(
+                    "shape invariant: shape-mode object carries bag-only key '{s}' (stray properties.put bypassing shadowSet/demoteFromShape)",
+                    .{key},
+                );
+            }
+        }
     }
 
     /// Try to absorb a named-data write into the shape chain.
