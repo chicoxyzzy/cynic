@@ -143,11 +143,11 @@ top-line score.
 
 ## History
 
-### 2026-06-11 — cynic `7f273d1`, test262 `d0c1b4555b`
+### 2026-06-11 — cynic `392a272`, test262 `d0c1b455`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 45241 | 4567 | 49808 | 90.83 % | +18 | 45.1 s |
+| 45241 | 4567 | 49808 | 90.83 % | +18 | 40.1 s |
 
 Biggest movers:
 
