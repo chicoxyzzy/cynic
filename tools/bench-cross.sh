@@ -197,6 +197,32 @@ if [ "${#ENGINE_NAMES[@]}" -eq 0 ]; then
   echo "  \`jsvu --engines=quickjs,v8,spidermonkey\` (Cynic builds above)." >&2
   exit 1
 fi
+
+# Column order: Cynic first (the engine under test), then peers
+# alphabetically — stable regardless of discovery order.
+sort_engines() {
+  local n=${#ENGINE_NAMES[@]} i name
+  local names=() envs=() cmds=()
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    if [ "${ENGINE_NAMES[$i]}" = "cynic" ]; then
+      names+=("${ENGINE_NAMES[$i]}"); envs+=("${ENGINE_ENVS[$i]}"); cmds+=("${ENGINE_CMDS[$i]}")
+    fi
+    i=$((i + 1))
+  done
+  for name in $(printf '%s
+' "${ENGINE_NAMES[@]}" | grep -v '^cynic$' | sort); do
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      if [ "${ENGINE_NAMES[$i]}" = "$name" ]; then
+        names+=("${ENGINE_NAMES[$i]}"); envs+=("${ENGINE_ENVS[$i]}"); cmds+=("${ENGINE_CMDS[$i]}")
+      fi
+      i=$((i + 1))
+    done
+  done
+  ENGINE_NAMES=("${names[@]}"); ENGINE_ENVS=("${envs[@]}"); ENGINE_CMDS=("${cmds[@]}")
+}
+sort_engines
 echo >&2
 
 # ---------------------------------------------------------------------
