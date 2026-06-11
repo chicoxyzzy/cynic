@@ -1278,3 +1278,41 @@ the corpus under the relevant section's directory before adding.
   value is in *not crashing*. The overflow depth is host-stack-dependent,
   so it may fit better as an engine-internal robustness test than a
   portable test262 fixture (cf. the deep-nesting parser cases).
+
+### `arguments.length` and rest parameters saturated at 255 arguments
+
+- **Fixed in:** `41f0fa1` (2026-06-11)
+- **Spec:** §10.4.4 CreateUnmappedArgumentsObject (stamps the actual
+  argument count); §15.2.4 rest-parameter binding collects every
+  trailing argument
+- **Reproducer:**
+
+  ```js
+  var arr = [];
+  for (var i = 0; i < 300; i++) arr.push(i);
+  function f() { return arguments.length + ":" + arguments[299]; }
+  function r(...a) { return a.length; }
+  function* g() { yield arguments[299]; }
+  f.apply(null, arr);          // "255:undefined" — must be "300:299"
+  r.apply(null, arr);          // 255 — must be 300
+  f(...arr);                   // same truncation via spread
+  g.apply(null, arr).next();   // the value was lost across suspension
+  ```
+
+- **Before fix:** the call frame recorded the argument count in a
+  byte-sized slot and every dynamic call path (`Function.prototype.
+  apply`, spread argument lists, `Reflect.apply`) clamped it to 255,
+  so `arguments.length` and rest-array lengths under-reported.
+  Generator / async frames also sized their saved register file at
+  ≤255 slots, dropping the argument *values* past index 255 across
+  suspension. No fixture catches it: the corpus never passes more
+  than a few dozen dynamic arguments through apply / spread.
+- **After fix:** the recorded count and the generator register file
+  carry the full dynamic argument count — `arguments.length === 300`,
+  `arguments[299] === 299`, rest arrays materialise every element,
+  and a resumed generator body still observes them.
+- **Suggested fixture shape:** positive · runtime · under
+  `language/arguments-object/` (apply / spread a >255-element list,
+  assert `length` and the final indexed element), with siblings under
+  `language/rest-parameters/` and a generator variant asserting the
+  value survives resume.
