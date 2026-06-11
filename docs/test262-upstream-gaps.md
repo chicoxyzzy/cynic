@@ -1316,3 +1316,45 @@ the corpus under the relevant section's directory before adding.
   assert `length` and the final indexed element), with siblings under
   `language/rest-parameters/` and a generator variant asserting the
   value survives resume.
+
+### `Array.prototype.flat` stamped an own `length` on a plain-object @@species result
+
+- **Fixed in:** `2cc99b2` (2026-06-11)
+- **Spec:** §23.1.3.13 Array.prototype.flat / §23.1.3.13.1
+  FlattenIntoArray — the algorithm performs only per-element
+  `CreateDataPropertyOrThrow(A, Pk, element)`; no step writes
+  `length` on the result, so only an Array exotic's `length`
+  auto-extends as a side effect
+- **Reproducer:**
+
+  ```js
+  var A = function(_len) {};
+  var arr = [[2]];
+  arr.constructor = {};
+  arr.constructor[Symbol.species] = A;
+  var res = arr.flat(1);
+  Object.prototype.hasOwnProperty.call(res, "length"); // true — must be false
+  res[0];                                              // 2 (flatten still lands)
+  ```
+
+- **Before fix:** flat stamped `length` on the result
+  unconditionally after the flatten walk, so a non-Array @@species
+  result (a plain-object constructor) came back with a phantom own
+  `length: 1` data property. Engine-shape side effect: the stamp
+  was a raw property-bag write that bypassed the shape-aware write
+  funnels, so a shape-mode receiver (the species constructor body
+  had assigned an instance property) tripped the GC shape-invariant
+  verifier under allocation-pressure stress. Verified divergent:
+  engine262 + V8 / JSC / SpiderMonkey / QuickJS / XS / GraalJS all
+  return no own `length`; Hermes shares Cynic's pre-fix stamp.
+- **After fix:** flat performs no `length` write — the plain-object
+  species result has no own `length`, while Array results are
+  unaffected (their length auto-extends per §10.4.2.1). flatMap
+  already had the gate, and the corpus covers *it*
+  (`flatMap/this-value-ctor-object-species-custom-ctor.js`); flat
+  has no analogous fixture.
+- **Suggested fixture shape:** positive · runtime · under
+  `built-ins/Array/prototype/flat/` mirroring the flatMap fixture —
+  `features: [Symbol.species]`, assert the plain-object species
+  result lacks own `length` and still receives the flattened
+  elements.
