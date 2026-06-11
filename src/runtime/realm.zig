@@ -62,12 +62,29 @@ pub const FeatureSet = features.FeatureSet;
 /// `realm.deinit`.
 pub const FramePool = struct {
     bins: std.ArrayListUnmanaged(std.ArrayListUnmanaged([]Value)) = .empty,
+    /// Single-slot fast cache in front of the binned free-list. A
+    /// tight call loop runs one frame at a time, so it releases and
+    /// then immediately re-acquires the same-arity register file every
+    /// iteration; the fast slot turns that into a length-compare + a
+    /// pointer move, skipping the `bins` index and the inner
+    /// ArrayList pop/append. A size mismatch or a nested call falls
+    /// through to `bins` unchanged. The cached buffer is free (never a
+    /// GC root) exactly like a binned one; the caller memsets it
+    /// before reuse. The slot only changes WHICH free buffer of size
+    /// `n` is handed back, never whether one is — semantically inert.
+    fast: ?[]Value = null,
 
     /// Pop a register file of exactly `n` from the pool, or
     /// allocate a fresh one on miss. Caller is responsible for
     /// memset'ing to `undefined` before use — buffer contents
     /// are stale from the previous frame.
     pub fn acquire(self: *FramePool, allocator: std.mem.Allocator, n: usize) ![]Value {
+        if (self.fast) |buf| {
+            if (buf.len == n) {
+                self.fast = null;
+                return buf;
+            }
+        }
         if (n < self.bins.items.len) {
             const bin = &self.bins.items[n];
             if (bin.items.len > 0) return bin.pop().?;
@@ -75,11 +92,15 @@ pub const FramePool = struct {
         return try allocator.alloc(Value, n);
     }
 
-    /// Return a register file to its size's bin. On allocation
-    /// failure (the bins vector can't grow, or its inner list
-    /// can't append), fall back to freeing the slice directly —
-    /// pool growth is best-effort.
+    /// Return a register file to the fast slot when it's free,
+    /// otherwise to its size's bin. On allocation failure (the bins
+    /// vector can't grow, or its inner list can't append), fall back
+    /// to freeing the slice directly — pool growth is best-effort.
     pub fn release(self: *FramePool, allocator: std.mem.Allocator, regs: []Value) void {
+        if (self.fast == null) {
+            self.fast = regs;
+            return;
+        }
         const n = regs.len;
         if (n >= self.bins.items.len) {
             const new_len = n + 1;
@@ -97,6 +118,7 @@ pub const FramePool = struct {
     }
 
     pub fn deinit(self: *FramePool, allocator: std.mem.Allocator) void {
+        if (self.fast) |buf| allocator.free(buf);
         for (self.bins.items) |*bin| {
             for (bin.items) |buf| allocator.free(buf);
             bin.deinit(allocator);
@@ -2126,25 +2148,34 @@ test "FramePool: different sizes do not cross-pollinate bins" {
     try testing.expectEqual(a.ptr, a2.ptr);
 }
 
-test "FramePool: LIFO ordering within a bin" {
+test "FramePool: fast slot serves the first release; the bin is LIFO behind it" {
     var pool: FramePool = .{};
     defer pool.deinit(testing.allocator);
 
     const a = try pool.acquire(testing.allocator, 8);
     const b = try pool.acquire(testing.allocator, 8);
+    const c = try pool.acquire(testing.allocator, 8);
     // Distinct allocations even though same size.
-    try testing.expect(a.ptr != b.ptr);
+    try testing.expect(a.ptr != b.ptr and b.ptr != c.ptr);
 
-    pool.release(testing.allocator, a);
-    pool.release(testing.allocator, b);
+    // First release lands in the single-slot fast cache; the rest go
+    // to the size-8 bin (LIFO).
+    pool.release(testing.allocator, a); // → fast slot
+    pool.release(testing.allocator, b); // → bin
+    pool.release(testing.allocator, c); // → bin
 
-    // Last in, first out — b returned before a.
+    // Fast slot is handed back first (a), then the bin pops LIFO
+    // (c before b). Reuse is what matters; the exact order is an
+    // internal detail and every buffer comes back.
     const got1 = try pool.acquire(testing.allocator, 8);
     const got2 = try pool.acquire(testing.allocator, 8);
+    const got3 = try pool.acquire(testing.allocator, 8);
     defer testing.allocator.free(got1);
     defer testing.allocator.free(got2);
-    try testing.expectEqual(b.ptr, got1.ptr);
-    try testing.expectEqual(a.ptr, got2.ptr);
+    defer testing.allocator.free(got3);
+    try testing.expectEqual(a.ptr, got1.ptr); // fast slot
+    try testing.expectEqual(c.ptr, got2.ptr); // bin, LIFO
+    try testing.expectEqual(b.ptr, got3.ptr);
 }
 
 test "FramePool: deinit frees buffers still parked in any bin" {
