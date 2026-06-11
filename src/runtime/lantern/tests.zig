@@ -3874,6 +3874,113 @@ test "later: Reflect.construct(BoundFn, args, NT) threads explicit newTarget (§
     , "ok");
 }
 
+// ── §10.4.1.1 [[Call]] bound-argument assembly: exact ordering ──────────────
+//
+// §10.4.1.1 step 4 list-concatenates `[[BoundArguments]]` with the
+// call-site args, target-ward. Chaining N binds nests N such
+// concatenations: the call to the *outermost* bound function passes
+// its args to its target (the next bound function), which prepends
+// its own, and so on inward — so the *innermost* bind's args end up
+// first and the call-site args last. These guards pin that order (and
+// the §10.4.1.1 step 2 `[[BoundThis]]` rule) so the O(n) call-time
+// assembly that replaced the per-level front-insert can't transpose
+// groups or pick the wrong `this`.
+
+test "bound chain: §10.4.1.1 args concatenate innermost-first, call args last" {
+    // f.bind(_,a).bind(_,b).bind(_,c) called with d → f(a,b,c,d).
+    try expectScriptStringWithBuiltins(
+        \\function f() { return Array.prototype.join.call(arguments, ","); }
+        \\var g = f.bind(null, "a").bind(null, "b").bind(null, "c");
+        \\g("d");
+    , "a,b,c,d");
+}
+
+test "bound chain: §10.4.1.1 multiple bound args per level keep intra-level order" {
+    try expectScriptStringWithBuiltins(
+        \\function f() { return Array.prototype.join.call(arguments, ","); }
+        \\var g = f.bind(null, 1, 2).bind(null, 3, 4).bind(null, 5, 6);
+        \\g(7, 8);
+    , "1,2,3,4,5,6,7,8");
+}
+
+test "bound chain: §10.4.1.1 innermost [[BoundThis]] wins through the chain" {
+    // Each outer bind's boundThis becomes the inner bound call's
+    // thisArgument, which the inner bound function ignores in favour
+    // of its own [[BoundThis]] — so the first bind's `this` reaches
+    // the target.
+    try expectScriptStringWithBuiltins(
+        \\function f() { return this.tag; }
+        \\var inner = { tag: "inner" }, mid = { tag: "mid" }, outer = { tag: "outer" };
+        \\var g = f.bind(inner).bind(mid).bind(outer);
+        \\g();
+    , "inner");
+}
+
+test "bound chain: every level's args accumulate (exact count, §10.4.1.1)" {
+    // 250 single-arg binds + one call → the target sees 251 args.
+    // Kept under the u8 `argc` cap (arguments.length saturates at 255)
+    // so the sum is exact; verifies the count + single-fill passes
+    // produce the full concatenation, not a truncated one.
+    try expectScriptIntWithBuiltins(
+        \\function add() {
+        \\  var s = 0;
+        \\  for (var i = 0; i < arguments.length; i++) s += arguments[i];
+        \\  return s;
+        \\}
+        \\var g = add;
+        \\for (var i = 0; i < 250; i++) g = g.bind(null, 1);
+        \\g(1000);
+    , 1250);
+}
+
+test "bound chain: deep chain preserves front order + innermost this (§10.4.1.1)" {
+    // 10001-deep chain: innermost binds this=T and the first arg "X";
+    // 10000 outer binds each prepend a "Y" target-ward, so the target
+    // sees this=T, arg0="X" (innermost), arg1="Y" (next level). Stresses
+    // the count + single-fill passes at the depth where the retired
+    // per-level front-insert was quadratic, without leaning on the u8
+    // `argc`-capped arguments.length.
+    try expectScriptStringWithBuiltins(
+        \\function f(a, b) { return this.tag + ":" + a + ":" + b; }
+        \\var g = f.bind({ tag: "T" }, "X");
+        \\for (var i = 0; i < 10000; i++) g = g.bind(null, "Y");
+        \\g("Z");
+    , "T:X:Y");
+}
+
+test "bound chain: §10.4.1.2 [[Construct]] ignores [[BoundThis]], keeps bound args" {
+    // `new` on a bound function discards the bound `this` (the fresh
+    // instance wins) but still prepends the bound args.
+    try expectScriptIntWithBuiltins(
+        \\function C(a, b) { this.sum = a + b; }
+        \\var B = C.bind({ ignored: true }, 10);
+        \\(new B(5)).sum;
+    , 15);
+}
+
+test "bound chain: §10.4.1.2 [[Construct]] over a chain concatenates all bound args" {
+    try expectScriptIntWithBuiltins(
+        \\function C() { this.n = arguments.length; }
+        \\var B = C.bind(null, 1).bind(null, 2).bind(null, 3);
+        \\(new B(4, 5)).n;
+    , 5);
+}
+
+test "bound chain: §20.2.3.2 .length subtracts each level's bound-arg count" {
+    try expectScriptIntWithBuiltins(
+        \\function f(a, b, c, d) { return 0; }
+        \\var g = f.bind(null, 1).bind(null, 2, 3);
+        \\g.length;
+    , 1);
+}
+
+test "bound chain: §20.2.3.2 .name prepends \"bound \" per level" {
+    try expectScriptStringWithBuiltins(
+        \\function foo() {}
+        \\foo.bind().bind().name;
+    , "bound bound foo");
+}
+
 test "later: Reflect.apply accepts a callable argumentsList with a length getter (§7.3.18 / §6.1.7)" {
     // built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js:
     // §7.3.18 CreateListFromArrayLike requires `argumentsList` to be

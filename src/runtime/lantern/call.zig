@@ -135,28 +135,53 @@ pub fn unwrapBoundCall(
     args: []const Value,
     for_construct: bool,
 ) RunError!struct { target: *JSFunction, this_value: Value, args: []const Value, owns_args: bool } {
-    var target = callee;
+    // §10.4.1.1 [[Call]] step 4 nests one list-concatenation per bound
+    // layer: the call to the outermost bound function hands its args to
+    // its target (the next bound function), which prepends its own bound
+    // args, and so on inward — so the *innermost* bind's args end up
+    // first, each outer layer's follow target-ward, and the call-site
+    // args come last. Reassembling an accumulator at every layer (a
+    // front-insert per layer) reshifts the whole prefix N times, making
+    // a depth-N chain O(N²). Instead size the result and locate the
+    // innermost target + [[BoundThis]] in one walk, then fill the single
+    // output slice in a second — O(total bound args + call args).
     var bound_this = this_value;
-    var prefix_args: std.ArrayListUnmanaged(Value) = .empty;
-    errdefer prefix_args.deinit(allocator);
-
-    while (target.bound_target) |inner_target| {
-        if (target.bound_args) |ba| {
-            // Bind chain: outer bind's prefix args come BEFORE
-            // inner bind's prefix args. Walk from the outermost
-            // inward.
-            try prefix_args.insertSlice(allocator, 0, ba);
-        }
+    var total_bound: usize = 0;
+    var target = callee;
+    while (target.bound_target) |inner| {
+        if (target.bound_args) |ba| total_bound += ba.len;
+        // §10.4.1.1 step 2 — the innermost [[BoundThis]] reaches the
+        // target; each outer layer's bound this becomes an inner bound
+        // call's (ignored) thisArgument. §10.4.1.2 [[Construct]] keeps
+        // the freshly-created `this` (step 4 ignores [[BoundThis]]), so
+        // leave it untouched when `for_construct`.
         if (!for_construct) bound_this = target.bound_this;
-        target = inner_target;
+        target = inner;
     }
 
-    if (prefix_args.items.len == 0) {
+    // The whole chain carried no bound args (the common `f.bind(thisArg)`
+    // shape) — forward the call args untouched, no allocation.
+    if (total_bound == 0) {
         return .{ .target = target, .this_value = bound_this, .args = args, .owns_args = false };
     }
-    try prefix_args.appendSlice(allocator, args);
-    const owned = try prefix_args.toOwnedSlice(allocator);
-    return .{ .target = target, .this_value = bound_this, .args = owned, .owns_args = true };
+
+    const out = try allocator.alloc(Value, total_bound + args.len);
+    // Fill the bound region back-to-front: walking outer→inner, each
+    // layer's args take the slots just before the layers already placed,
+    // so the innermost layer lands at offset 0 — yielding the
+    // [innermost … outermost] order the nested concatenations produce.
+    var write_end: usize = total_bound;
+    var cur = callee;
+    while (cur.bound_target) |inner| : (cur = inner) {
+        if (cur.bound_args) |ba| {
+            write_end -= ba.len;
+            @memcpy(out[write_end .. write_end + ba.len], ba);
+        }
+    }
+    std.debug.assert(write_end == 0);
+    // Call-site args follow every bound layer (§10.4.1.1 step 4).
+    @memcpy(out[total_bound..], args);
+    return .{ .target = target, .this_value = bound_this, .args = out, .owns_args = true };
 }
 
 /// Reentrant entry point: invoke `callee` with the supplied
