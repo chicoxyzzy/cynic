@@ -474,10 +474,9 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // §20.2.3.2 step 4-6 — name = "bound " + (target.name if String else "").
     // Per spec: `? Get(Target, "name")` — accessor-aware, abrupt
     // propagates. The previous data-bag-only fallback swallowed
-    // a thrown getter (test262 `instance-name-error`).
-    var name_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer name_buf.deinit(realm.allocator);
-    name_buf.appendSlice(realm.allocator, "bound ") catch return error.OutOfMemory;
+    // a thrown getter (test262 `instance-name-error`). Capture the
+    // target's name value now; it is joined into a rope below rather
+    // than flattened here, so a deep bind chain stays O(N).
     const target_name_v = switch (try getAccessorAwareOnFunction(realm, target, "name")) {
         .value => |v| v,
         .thrown => |ex| {
@@ -485,10 +484,6 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             return error.NativeThrew;
         },
     };
-    if (target_name_v.isString()) {
-        const ts: *JSString = @ptrCast(@alignCast(target_name_v.asString()));
-        name_buf.appendSlice(realm.allocator, ts.flatBytes()) catch return error.OutOfMemory;
-    }
 
     // The bound function carries no chunk; call sites detect
     // `bound_target` and route through that.
@@ -522,7 +517,22 @@ fn functionBind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     else
         Value.fromDouble(bound_length);
     try bound.setWithFlags(realm.allocator, "length", len_v, fn_flags);
-    const name_str = realm.heap.allocateString(name_buf.items) catch return error.OutOfMemory;
+    // §20.2.3.2 step 6 — name = "bound " + targetName (or "bound " when
+    // the target name isn't a String). Build it as a ConsString (rope)
+    // rather than a flat copy: a depth-N bind chain (`f.bind()…`)
+    // otherwise reads and re-copies an O(N)-byte name at every level —
+    // O(N²) time + live bytes (multi-GB for N≈10⁴). `allocateConsString`
+    // shares the target's name node (amortised O(1); the flat "bound "
+    // left child keeps the seam-check spine walk O(1)), so the chain's
+    // names cost O(N) total and only materialise when the bytes are read.
+    // GC-safe without rooting: no JS re-enters between the target-name
+    // read and here, and allocation-pressure GC fires only at bytecode
+    // safepoints, never inside these heap allocations.
+    const bound_prefix = realm.heap.allocateString("bound ") catch return error.OutOfMemory;
+    const name_str: *JSString = if (target_name_v.isString()) blk: {
+        const ts: *JSString = @ptrCast(@alignCast(target_name_v.asString()));
+        break :blk realm.heap.allocateConsString(bound_prefix, ts) catch return error.OutOfMemory;
+    } else bound_prefix;
     try bound.setWithFlags(realm.allocator, "name", Value.fromString(name_str), fn_flags);
 
     return heap_mod.taggedFunction(bound);
@@ -875,7 +885,9 @@ fn functionToString(realm: *Realm, this_value: Value, args: []const Value) Nativ
         const s = realm.heap.allocateString(src) catch return error.OutOfMemory;
         return Value.fromString(s);
     }
-    const display_name: []const u8 = if (fn_obj.name) |n| n else "";
+    // `nameBytes` (not the raw `name` slice): a bound function's
+    // "bound …" rope name is left lazy by `bind`, so flatten it here.
+    const display_name: []const u8 = fn_obj.nameBytes() orelse "";
     const formatted = if (display_name.len == 0)
         std.fmt.allocPrint(realm.allocator, "function () {{ [native code] }}", .{}) catch return error.OutOfMemory
     else

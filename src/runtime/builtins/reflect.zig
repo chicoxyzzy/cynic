@@ -177,7 +177,7 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
         if (fn_obj.ownDataContains(key_slice)) return Value.true_;
         if (fn_obj.accessors.contains(key_slice)) return Value.true_;
         if (std.mem.eql(u8, key_slice, "prototype") and fn_obj.prototype != null) return Value.true_;
-        if (std.mem.eql(u8, key_slice, "name") and fn_obj.name != null) return Value.true_;
+        if (std.mem.eql(u8, key_slice, "name") and (fn_obj.name != null or fn_obj.name_string != null)) return Value.true_;
         var cursor: ?*@import("../object.zig").JSObject = fn_obj.proto;
         while (cursor) |c| : (cursor = c.prototype) {
             if (c.ownDataContains(key_slice)) return Value.true_;

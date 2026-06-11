@@ -643,7 +643,9 @@ pub const JSFunction = struct {
         if (std.mem.eql(u8, key, "name")) {
             if (v.isString()) {
                 const s: *@import("string.zig").JSString = @ptrCast(@alignCast(v.asString()));
-                self.name = s.flatBytes();
+                // See `setWithFlags`: keep a rope name unflattened until
+                // read (`nameBytes`) so deep bound chains stay O(N).
+                self.name = s.flatBytesIfFlat();
                 self.name_string = s;
             } else {
                 self.name = null;
@@ -673,7 +675,12 @@ pub const JSFunction = struct {
         if (std.mem.eql(u8, key, "name")) {
             if (v.isString()) {
                 const s: *@import("string.zig").JSString = @ptrCast(@alignCast(v.asString()));
-                self.name = s.flatBytes();
+                // Cache the flat slice only when the string is already
+                // flat; a rope (`Function.prototype.bind`'s lazily-joined
+                // "bound …" name) stays unmaterialised here and is
+                // flattened on demand via `nameBytes`. Flattening every
+                // bind would make a deep chain O(N²) again (§20.2.3.2).
+                self.name = s.flatBytesIfFlat();
                 self.name_string = s;
             } else {
                 self.name = null;
@@ -769,6 +776,26 @@ pub const JSFunction = struct {
         }
         if (self.proto) |p| return p.get(key);
         return Value.undefined_;
+    }
+
+    /// The function's `name` as flat bytes. `Function.prototype.bind`
+    /// stores the "bound …" name as a rope (ConsString) and leaves the
+    /// flat `name` slice slot lazy (so a depth-N chain stays O(N) rather
+    /// than flattening an O(N)-byte name at every bind); this
+    /// materialises the rope on first read and caches the flat slice.
+    /// Returns `null` only for a function with no name at all. Read the
+    /// flat bytes through here — never the raw `name` field — so a
+    /// lazily-named bound function still reports its name (`toString`,
+    /// diagnostics). User reads of the `name` *property* go through the
+    /// property bag (`get`) and see the rope `Value` directly.
+    pub fn nameBytes(self: *JSFunction) ?[]const u8 {
+        if (self.name) |n| return n;
+        if (self.name_string) |s| {
+            const bytes = s.flatBytes();
+            self.name = bytes;
+            return bytes;
+        }
+        return null;
     }
 
     /// `[[HasProperty]]` — own, then the class-static parent chain,

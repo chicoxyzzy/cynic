@@ -3981,6 +3981,73 @@ test "bound chain: §20.2.3.2 .name prepends \"bound \" per level" {
     , "bound bound foo");
 }
 
+// ── §20.2.3.2 SetFunctionName: the bound name is built lazily ───────────────
+//
+// `name` = "bound " + target.name is assembled as a ConsString (rope)
+// rather than a flat per-level copy, so a depth-N chain costs O(N), not
+// O(N²) time + live bytes. These guards pin that the rope still
+// materialises the exact spec string on every observation path — direct
+// read, `.length`, reflection, `toString`, and the bind-time snapshot of
+// the target's then-current name — so the laziness stays invisible.
+
+test "bound chain: §20.2.3.2 .name materialises the full \"bound \"-prefix string" {
+    // depth-3 ⇒ a ≥16-byte ConsString name; verify the exact bytes and
+    // the O(1) code-unit length both come back off the rope.
+    try expectScriptStringWithBuiltins(
+        \\function f(a, b, c) {}
+        \\var b3 = f.bind(null, 1).bind(null).bind(null, 2);
+        \\b3.name + "/" + b3.name.length;
+    , "bound bound bound f/19");
+}
+
+test "bound chain: deep .name rope materialises the exact string (§20.2.3.2)" {
+    // 50-deep ⇒ name = "bound "×50 + "f"; exercises the cons-tree build +
+    // on-read flatten at a depth where eager per-level copy was quadratic.
+    try expectScriptStringWithBuiltins(
+        \\function f() {}
+        \\var g = f;
+        \\for (var i = 0; i < 50; i++) g = g.bind(null);
+        \\(g.name.length === 6 * 50 + 1 && g.name.slice(0, 12) === "bound bound " &&
+        \\ g.name.slice(-7) === "bound f") ? "ok" : g.name;
+    , "ok");
+}
+
+test "bound chain: .name snapshots the target's name at bind time (§20.2.3.2)" {
+    // An intermediate override is captured when the next bind reads it —
+    // the rope holds the then-current name node, not a live reference.
+    try expectScriptStringWithBuiltins(
+        \\function f() {}
+        \\var B1 = f.bind();
+        \\Object.defineProperty(B1, "name", { value: "custom", configurable: true });
+        \\B1.bind().name;
+    , "bound custom");
+}
+
+test "bound chain: deep bound .name stays an own, reflectable property (§20.2.3.2)" {
+    try expectScriptStringWithBuiltins(
+        \\function f(a, b, c) {}
+        \\var b3 = f.bind(null, 1).bind(null).bind(null, 2);
+        \\var d = Object.getOwnPropertyDescriptor(b3, "name");
+        \\[Reflect.has(b3, "name"), Reflect.ownKeys(b3).join(","),
+        \\ d.value, d.writable, d.enumerable, d.configurable].join("|");
+    , "true|length,name|bound bound bound f|false|false|true");
+}
+
+test "bound chain: deeply-bound function toString shows the bound name" {
+    // Exercises the flat-name-slice reader (which flattens the rope on
+    // demand) through the native-code toString placeholder.
+    try expectScriptStringWithBuiltins(
+        \\function f() {}
+        \\f.bind(null, 1).bind(null).bind(null, 2).toString();
+    , "function bound bound bound f() { [native code] }");
+}
+
+test "bound chain: anonymous innermost .name is \"bound \" repeated" {
+    try expectScriptStringWithBuiltins(
+        \\(function(){}).bind().bind().name;
+    , "bound bound ");
+}
+
 test "later: Reflect.apply accepts a callable argumentsList with a length getter (§7.3.18 / §6.1.7)" {
     // built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js:
     // §7.3.18 CreateListFromArrayLike requires `argumentsList` to be

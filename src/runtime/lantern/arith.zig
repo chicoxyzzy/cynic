@@ -724,7 +724,9 @@ pub fn valueToOwnedString(realm: *Realm, v: Value, scratch: *[64]u8) RunError!St
         if (fn_obj.source) |src| {
             return .{ .bytes = src, .allocated = false };
         }
-        const display_name: []const u8 = if (fn_obj.name) |n| n else "";
+        // `nameBytes` (not the raw `name` slice) so a bound function
+        // whose "bound …" rope name was left lazy still prints its name.
+        const display_name: []const u8 = fn_obj.nameBytes() orelse "";
         const formatted = if (display_name.len == 0)
             std.fmt.allocPrint(realm.allocator, "function () {{ [native code] }}", .{}) catch return error.OutOfMemory
         else
