@@ -214,6 +214,7 @@ fn helperCall(
     realm: *Realm,
     frame: *CallFrame,
     callee_bits: u64,
+    this_bits: u64,
     args_ptr: [*]const Value,
     argc: u64,
     result_out: *Value,
@@ -226,8 +227,9 @@ fn helperCall(
         realm,
         running,
         .{ .bits = callee_bits },
-        // Plain `call`: strict-mode `this` is undefined (§10.2.1.2).
-        Value.undefined_,
+        // Plain `call` passes undefined (§10.2.1.2 strict); the
+        // method forms pass the receiver (§13.3.6).
+        .{ .bits = this_bits },
         args_ptr[0..@intCast(argc)],
     ) catch |err| switch (err) {
         error.OutOfMemory => return @intFromEnum(HelperCallStatus.host_oom),
@@ -343,7 +345,8 @@ const Compiler = struct {
                 .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq,
                 .lda_property, .sta_property,
                 .lda_global, .lda_global_or_undef,
-                .lda_this, .call,
+                .lda_this, .call, .call_method, .call_property,
+                .tail_call, .tail_call_method,
                 .throw_if_hole, .return_ => {},
                 // zig fmt: on
                 .make_environment => {
@@ -510,22 +513,74 @@ const Compiler = struct {
                     try m.emit(a64.movReg(.x0, realm_reg));
                     try m.emit(a64.movReg(.x1, frame_reg));
                     try m.emit(a64.ldrImm(.x2, regs_reg, regSlot(r_callee)));
-                    try m.emit(a64.addImm(.x3, regs_reg, @intCast(@as(u32, regSlot(r_callee)) + 8), false));
-                    try m.movImm64(.x4, argc);
-                    try m.emit(a64.addImm(.x5, frame_reg, acc_off, false));
+                    try m.movImm64(.x3, Value.undefined_.bits);
+                    try m.emit(a64.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(r_callee)) + 8), false));
+                    try m.movImm64(.x5, argc);
+                    try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
                     try m.callAbs(.x16, @intFromPtr(&helperCall));
-                    // The u32 status returns in w0; the upper half
-                    // of x0 is unspecified per AAPCS64 — zero-extend
-                    // before testing the full register.
-                    try m.emit(a64.movRegW(.x0, .x0));
-                    var ok = Masm.Label{};
-                    defer ok.fixups.deinit(m.gpa);
-                    try m.jumpCbz(.x0, &ok);
-                    try m.emit(a64.cmpImm(.x0, @intFromEnum(HelperCallStatus.threw), false));
-                    try m.jumpCond(.eq, threw);
-                    try m.jump(&self.oom_label);
-                    m.bind(&ok);
-                    try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
+                    try self.emitCallStatus(threw);
+                },
+                .call_method => {
+                    // §13.3.6 — like `call` with `this` bound to the
+                    // receiver register. The callee was loaded by
+                    // preceding ops (the GET-before-arguments
+                    // evaluation order), so this site only marshals.
+                    const r_recv = code[i + 1];
+                    const r_callee = code[i + 2];
+                    const argc = code[i + 3];
+                    const threw = try self.threwFor(bc);
+                    try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
+                    try m.emit(a64.movReg(.x0, realm_reg));
+                    try m.emit(a64.movReg(.x1, frame_reg));
+                    try m.emit(a64.ldrImm(.x2, regs_reg, regSlot(r_callee)));
+                    try m.emit(a64.ldrImm(.x3, regs_reg, regSlot(r_recv)));
+                    try m.emit(a64.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(r_callee)) + 8), false));
+                    try m.movImm64(.x5, argc);
+                    try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
+                    try m.callAbs(.x16, @intFromPtr(&helperCall));
+                    try self.emitCallStatus(threw);
+                },
+                .call_property => {
+                    // The fused load+call (`obj.method(args)`): the
+                    // §4.4 property-IC read into a scratch the call
+                    // marshal then consumes, `this` = the receiver.
+                    // Any load miss tiers down at the op — Lantern
+                    // re-runs the whole fused sequence.
+                    const k_off = i + 1; // k:u16 (unused — the cells carry the resolution)
+                    _ = k_off;
+                    const r_recv = code[i + 3];
+                    const argc = code[i + 4];
+                    const ic_load = readU16(code, i + 5);
+                    // ic_call at i+7 — the CallICCell compare is the
+                    // recorded follow-up; the helper dispatches.
+                    const td = try self.tdFor(bc);
+                    const threw = try self.threwFor(bc);
+                    // Sync the PRE-op accumulator before any
+                    // clobber: a later tier-down stub re-stores
+                    // acc_reg, so acc_reg must stay the pre-op value
+                    // until the call commits (x14 carries the
+                    // callee instead).
+                    try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
+                    try m.emit(a64.ldrImm(.x14, regs_reg, regSlot(r_recv)));
+                    try self.emitPropertyIcLoad(.x14, .x14, ic_load, td);
+                    try m.emit(a64.movReg(.x0, realm_reg));
+                    try m.emit(a64.movReg(.x1, frame_reg));
+                    try m.emit(a64.movReg(.x2, .x14));
+                    try m.emit(a64.ldrImm(.x3, regs_reg, regSlot(r_recv)));
+                    try m.emit(a64.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(r_recv)) + 8), false));
+                    try m.movImm64(.x5, argc);
+                    try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
+                    try m.callAbs(.x16, @intFromPtr(&helperCall));
+                    try self.emitCallStatus(threw);
+                },
+                .tail_call, .tail_call_method => {
+                    // §15.10 — PTC must run in constant stack; the
+                    // helper-mediated path would recurse natively,
+                    // so tail calls tier down unconditionally and
+                    // Lantern's frame-reuse reframe takes over.
+                    // Jump-to-entry for the self-recursive case is
+                    // the recorded follow-up (docs/jit.md §12 3e).
+                    try m.jump(try self.tdFor(bc));
                 },
                 .lda_this => {
                     // §9.1.1.3.4 GetThisBinding — the only abrupt
@@ -543,49 +598,9 @@ const Compiler = struct {
                     try m.emit(a64.ldrImm(acc_reg, frame_reg, layout.frame.this_value));
                 },
                 .lda_property => {
-                    // Mirrors the interpreter's two IC hit modes
-                    // exactly — own-data and proto-load — reading
-                    // the cell as data (docs/jit.md §4.4); any miss
-                    // (cold cell, shape change, proto swap, exotic
-                    // receiver) tiers down and Lantern refills.
                     const td = try self.tdFor(bc);
                     const ic_idx = readU16(code, i + 3);
-                    try self.emitPlainObject(acc_reg, .x9, td);
-                    try self.emitCellAddr(.x10, ic_idx);
-                    try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.shape));
-                    try m.jumpCbz(.x11, td);
-                    try m.emit(a64.ldrImm(.x12, .x9, layout.object.shape));
-                    try m.emit(a64.cmpReg(.x11, .x12));
-                    try m.jumpCond(.ne, td);
-                    var proto_path = Masm.Label{};
-                    defer proto_path.fixups.deinit(m.gpa);
-                    var next = Masm.Label{};
-                    defer next.fixups.deinit(m.gpa);
-                    try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.proto));
-                    try m.jumpCbnz(.x11, &proto_path);
-                    // Own-data hit: acc = recv.slots[cell.slot].
-                    try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
-                    try self.emitSlotRead(acc_reg, .x9, .x11);
-                    try m.jump(&next);
-                    // Proto-load hit: identity of the cached proto,
-                    // the proto's own shape, AND the realm-wide
-                    // §10.1.1-mutation counter, exactly per the
-                    // interpreter's predicate.
-                    m.bind(&proto_path);
-                    try m.emit(a64.ldrImm(.x12, .x9, layout.object.prototype));
-                    try m.emit(a64.cmpReg(.x12, .x11));
-                    try m.jumpCond(.ne, td);
-                    try m.emit(a64.ldrImm(.x9, .x10, layout.ic_cell.proto_shape));
-                    try m.emit(a64.ldrImm(.x13, .x12, layout.object.shape));
-                    try m.emit(a64.cmpReg(.x9, .x13));
-                    try m.jumpCond(.ne, td);
-                    try self.loadRealmU64(.x9, layout.realm.proto_revision_counter);
-                    try m.emit(a64.ldrImm(.x13, .x10, layout.ic_cell.proto_rev));
-                    try m.emit(a64.cmpReg(.x9, .x13));
-                    try m.jumpCond(.ne, td);
-                    try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
-                    try self.emitSlotRead(acc_reg, .x12, .x11);
-                    m.bind(&next);
+                    try self.emitPropertyIcLoad(acc_reg, acc_reg, ic_idx, td);
                 },
                 .sta_property => {
                     // Same-shape hit only; the transition mode
@@ -901,6 +916,75 @@ const Compiler = struct {
         m.bind(&done);
     }
 
+    /// The named-property IC read — mirrors the interpreter's two
+    /// hit modes exactly, own-data and proto-load, reading the cell
+    /// as data (docs/jit.md §4.4); any miss (cold cell, shape
+    /// change, proto swap, exotic receiver) jumps to `td` and
+    /// Lantern refills. `src_val` holds the receiver Value (read
+    /// first; must not be x9-x13); `dst` receives the loaded Value
+    /// (written last; may equal `src_val`). Clobbers x9-x13.
+    fn emitPropertyIcLoad(
+        self: *Compiler,
+        src_val: a64.Reg,
+        dst: a64.Reg,
+        ic_idx: u16,
+        td: *Masm.Label,
+    ) CompileError!void {
+        const m = &self.m;
+        try self.emitPlainObject(src_val, .x9, td);
+        try self.emitCellAddr(.x10, ic_idx);
+        try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.shape));
+        try m.jumpCbz(.x11, td);
+        try m.emit(a64.ldrImm(.x12, .x9, layout.object.shape));
+        try m.emit(a64.cmpReg(.x11, .x12));
+        try m.jumpCond(.ne, td);
+        var proto_path = Masm.Label{};
+        defer proto_path.fixups.deinit(m.gpa);
+        var next = Masm.Label{};
+        defer next.fixups.deinit(m.gpa);
+        try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.proto));
+        try m.jumpCbnz(.x11, &proto_path);
+        // Own-data hit: dst = recv.slots[cell.slot].
+        try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
+        try self.emitSlotRead(dst, .x9, .x11);
+        try m.jump(&next);
+        // Proto-load hit: identity of the cached proto, the proto's
+        // own shape, AND the realm-wide §10.1.1-mutation counter,
+        // exactly per the interpreter's predicate.
+        m.bind(&proto_path);
+        try m.emit(a64.ldrImm(.x12, .x9, layout.object.prototype));
+        try m.emit(a64.cmpReg(.x12, .x11));
+        try m.jumpCond(.ne, td);
+        try m.emit(a64.ldrImm(.x9, .x10, layout.ic_cell.proto_shape));
+        try m.emit(a64.ldrImm(.x13, .x12, layout.object.shape));
+        try m.emit(a64.cmpReg(.x9, .x13));
+        try m.jumpCond(.ne, td);
+        try self.loadRealmU64(.x9, layout.realm.proto_revision_counter);
+        try m.emit(a64.ldrImm(.x13, .x10, layout.ic_cell.proto_rev));
+        try m.emit(a64.cmpReg(.x9, .x13));
+        try m.jumpCond(.ne, td);
+        try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
+        try self.emitSlotRead(dst, .x12, .x11);
+        m.bind(&next);
+    }
+
+    /// The shared helperCall result dispatch: zero-extend the u32
+    /// status (AAPCS64 leaves x0's upper half unspecified), then
+    /// route value/threw/oom, reloading the accumulator from the
+    /// frame on success.
+    fn emitCallStatus(self: *Compiler, threw: *Masm.Label) CompileError!void {
+        const m = &self.m;
+        try m.emit(a64.movRegW(.x0, .x0));
+        var ok = Masm.Label{};
+        defer ok.fixups.deinit(m.gpa);
+        try m.jumpCbz(.x0, &ok);
+        try m.emit(a64.cmpImm(.x0, @intFromEnum(HelperCallStatus.threw), false));
+        try m.jumpCond(.eq, threw);
+        try m.jump(&self.oom_label);
+        m.bind(&ok);
+        try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
+    }
+
     /// Bake the address of this site's IC cell into `dst`. Cells
     /// are chunk-owned mutable side-state; the chunk outlives the
     /// code, and compiled code only loads through the pointer, so
@@ -939,6 +1023,18 @@ fn readI32(code: []const u8, at: usize) i32 {
 const testing = std.testing;
 const parser_mod = @import("../../parser/parser.zig");
 const bc_compiler = @import("../../bytecode/compiler.zig");
+
+/// Look a function template up by its declared name — template
+/// indices mix hoisted declarations and source-order expressions,
+/// so positional asserts lie.
+fn templateNamed(chunk: *const Chunk, name: []const u8) *const Chunk {
+    for (chunk.function_templates) |*t| {
+        if (t.name) |n| {
+            if (std.mem.eql(u8, n, name)) return &t.chunk;
+        }
+    }
+    unreachable;
+}
 
 test "jit bistromath: hot int function compiles and computes" {
     if (comptime !supported) return error.SkipZigTest;
@@ -1547,6 +1643,84 @@ test "jit bistromath calls: callee exceptions unwind through compiled callers" {
     try testing.expectEqual(
         Chunk.JitState.Tier.compiled,
         chunk.function_templates[1].chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath calls: method calls bind `this` through the tier" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // The fused `call_property` shape (`o.pm(a)` with a plain
+    // identifier name) in compiled callers, for both proto- and
+    // own-resolved methods, with `this`-dependent results. The
+    // `+ 0` keeps the calls out of tail position (a tail call is
+    // its own opcode).
+    const src =
+        \\function C() { this.v = 10; }
+        \\C.prototype.pm = function (x) { return this.v + x; };
+        \\var o = new C();
+        \\o.om = function (x) { return this.v + x + 100; };
+        \\function callsProto(a) { return o.pm(a) + 0; }
+        \\function callsOwn(a) { return o.om(a) + 0; }
+        \\let i = 0;
+        \\while (i < 300) { callsProto(1); callsOwn(1); i = i + 1; }
+        \\callsProto(5) * 1000 + callsOwn(5);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    // callsProto(5) = 10+5 = 15; callsOwn(5) = 10+5+100 = 115.
+    try testing.expectEqual(@as(i32, 15 * 1000 + 115), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "callsProto").jit_state.?.tier,
+    );
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "callsOwn").jit_state.?.tier,
+    );
+}
+
+test "jit bistromath calls: tail calls tier down and keep constant stack" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // §15.10 — a compiled function containing `tail_call` must
+    // still recurse in constant stack: the op tiers down and
+    // Lantern's frame-reuse reframe takes over (jump-to-entry for
+    // the self-recursive case is the recorded follow-up). The
+    // 200000 depth blows any native-stack scheme.
+    const src =
+        \\function spin(n, a) { if (n === 0) return a; return spin(n - 1, a + 1); }
+        \\let i = 0;
+        \\while (i < 300) { spin(3, 0); i = i + 1; }
+        \\spin(200000, 0);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 200000), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.function_templates[0].chunk.jit_state.?.tier,
     );
 }
 
