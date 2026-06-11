@@ -1245,3 +1245,36 @@ the corpus under the relevant section's directory before adding.
   same function. The function-body placement is the load-bearing part:
   it puts the binding in the exact position register-promoting engines
   optimize.
+
+### Deep prototype / static-inheritance chain crashed the host on property read
+
+- **Fixed in:** `8f7ae3e` (2026-06-11)
+- **Spec:** §10.1.8.1 OrdinaryGet / §7.3.12 HasProperty — the
+  prototype-chain walk
+- **Reproducer:**
+
+  ```js
+  var o = null;
+  for (var i = 0; i < 200000; i++) o = Object.create(o);
+  o.nope;          // a missing-property read walks the whole chain
+  ```
+
+- **Before fix:** `JSObject.get` / `hasProperty` and `JSFunction.get`
+  walked the prototype chain by native recursion (`return
+  proto.get(key)`). A chain this deep — trivially built with
+  `Object.create` in a loop, or a deep `class … extends …` tower —
+  recursed once per link and overflowed the native C stack, SIGSEGV'ing
+  the host process. Untrusted JS could thereby abort the embedding host
+  (a denial-of-service), violating the never-abort-the-host contract.
+  The corpus doesn't catch it: no fixture builds a multi-100k-deep
+  chain, and a process crash is invisible to a conformance assertion
+  regardless.
+- **After fix:** each walk iterates the chain in a loop (the
+  realm-aware getter-firing `getPropertyChain` was already iterative);
+  a deep chain resolves to `undefined` / `false` in bounded stack.
+- **Suggested fixture shape:** a runtime positive under
+  `built-ins/Object/create/` building a deep `Object.create` chain in a
+  loop and asserting a missing-property read returns `undefined` — the
+  value is in *not crashing*. The overflow depth is host-stack-dependent,
+  so it may fit better as an engine-internal robustness test than a
+  portable test262 fixture (cf. the deep-nesting parser cases).
