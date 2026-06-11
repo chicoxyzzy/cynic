@@ -25,7 +25,8 @@
 //!   zig build bench -- --runs=40    # wider budget; lights up p95
 //!   zig build bench -- --runs=200   # lights up p95 + p99
 //!
-//! Bench host expectations (see docs/benchmarking.md §Stability):
+//! Bench host expectations (see the "Stability hardening" section of
+//! docs/benchmarking.md):
 //!   - Quiet machine; CPU affinity helps on Linux (`taskset -c 0`)
 //!   - macOS: `sudo pmset -a sleep 0 disablesleep 1` for the bench
 //!     window
