@@ -731,14 +731,6 @@ pub const Realm = struct {
     /// per-class private-name prefix strings) that live for the
     /// lifetime of the realm. Avoids per-allocation tracking.
     class_arena: ?std.heap.ArenaAllocator = null,
-    /// Monotonic counter for per-ClassTail-evaluation private
-    /// brand prefixes (§15.7.14 step 31). Each `buildClass` call
-    /// reserves a fresh value and formats `"B{n}#"` into the
-    /// `class_arena`. Two evaluations of the same source-text
-    /// ClassTail (e.g. inside a `makeC()` factory) produce
-    /// distinct brand identities so cross-instance private reads
-    /// raise the spec-mandated TypeError.
-    class_brand_counter: u32 = 0,
     /// Monotonic invalidation counter for the prototype-load path
     /// of the property IC. Bumped on every operation that swaps a
     /// receiver's `[[Prototype]]` link — `Object.setPrototypeOf`,

@@ -12963,3 +12963,14 @@ test "indirect eval: a global function decl over a non-configurable property kee
         \\"" + d.configurable + "," + d.writable + "," + d.enumerable + "," + (typeof f) + "," + f();
     , "false,true,true,function,2222");
 }
+
+test "JSON.stringify: BigInt with a toJSON method serializes through it" {
+    // §25.5.2.2 SerializeJSONProperty step 2 — the `toJSON` lookup
+    // happens for BigInt values too, BEFORE the step-12 BigInt
+    // rejection: with `BigInt.prototype.toJSON` installed, a BigInt
+    // serializes through it; without one, TypeError.
+    try expectScriptStringUnhardened(
+        \\BigInt.prototype.toJSON = function () { return this.toString(); };
+        \\JSON.stringify({ a: 1n }) + "|" + JSON.stringify(2n) + "|" + JSON.stringify(Object(3n));
+    , "{\"a\":\"1\"}|\"2\"|\"3\"");
+}

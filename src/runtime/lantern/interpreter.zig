@@ -2195,7 +2195,7 @@ pub fn runFrames(
             // caller-realm's `Array.prototype.map` falls back
             // to `%Array%` instead of forwarding to the child
             // constructor.
-            fn_obj.realm = realm;
+            fn_obj.realm = f.running_realm orelse realm;
             if (op_tag == .make_named_function_expr) {
                 // Routed through `storeEnvSlot` so the
                 // generational write barrier sees the
@@ -2650,7 +2650,7 @@ pub fn runFrames(
                 // caches a class-constructor callee (the next call
                 // would skip this check and try to invoke it).
                 if (fn_v.is_class_constructor) {
-                    const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
+                    const ex = try makeTypeError(fn_v.realm orelse realm, "Class constructor cannot be invoked without 'new'");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -2711,7 +2711,7 @@ pub fn runFrames(
                     var inner_target = fn_v;
                     while (inner_target.bound_target) |i_t| inner_target = i_t;
                     if (inner_target.is_class_constructor) {
-                        const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
+                        const ex = try makeTypeError(inner_target.realm orelse realm, "Class constructor cannot be invoked without 'new'");
                         f.ip = ip;
                         f.accumulator = acc;
                         committed = true;
@@ -3529,7 +3529,7 @@ pub fn runFrames(
 
             // §15.7.14 step 1 — class constructors are not callable.
             if (callee_fn.is_class_constructor) {
-                const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
+                const ex = try makeTypeError(callee_fn.realm orelse realm, "Class constructor cannot be invoked without 'new'");
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
@@ -3679,7 +3679,7 @@ pub fn runFrames(
             // §15.7.14 step 1 — class constructors are not
             // callable without `new`.
             if (callee_fn.is_class_constructor) {
-                const ex = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'");
+                const ex = try makeTypeError(callee_fn.realm orelse realm, "Class constructor cannot be invoked without 'new'");
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
@@ -5415,7 +5415,7 @@ pub fn runFrames(
                 }
             }
             const class_mod = @import("../class.zig");
-            acc = class_mod.buildClass(realm, tmpl, f.env, heritage, keys_buf[0..key_count], inner_class_slot) catch |err| switch (err) {
+            acc = class_mod.buildClass(f.running_realm orelse realm, tmpl, f.env, heritage, keys_buf[0..key_count], inner_class_slot) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.HeritageNotConstructor => blk: {
                     const ex = try makeTypeError(realm, "Class extends value is not a constructor");
@@ -6059,7 +6059,7 @@ pub fn runFrames(
                             // `Object.preventExtensions(this)`
                             // before instance elements install.
                             if (!inst.extensible) {
-                                const ex = try makeTypeError(realm, "Cannot install private element on non-extensible object");
+                                const ex = try makeTypeError(f.running_realm orelse realm, "Cannot install private element on non-extensible object");
                                 f.ip = ip;
                                 f.accumulator = acc;
                                 committed = true;
@@ -6105,7 +6105,7 @@ pub fn runFrames(
                                 },
                             };
                             if (already_present) {
-                                const ex = try makeTypeError(realm, "Cannot install duplicate private method on object");
+                                const ex = try makeTypeError(f.running_realm orelse realm, "Cannot install duplicate private method on object");
                                 f.ip = ip;
                                 f.accumulator = acc;
                                 committed = true;
@@ -6163,7 +6163,7 @@ pub fn runFrames(
                             // (base-class `#g = (prevent(this), …)`),
                             // so re-check before each put.
                             if (!inst.extensible) {
-                                const ex = try makeTypeError(realm, "Cannot add private field to non-extensible object");
+                                const ex = try makeTypeError(f.running_realm orelse realm, "Cannot add private field to non-extensible object");
                                 f.ip = ip;
                                 f.accumulator = acc;
                                 committed = true;
@@ -6178,7 +6178,7 @@ pub fn runFrames(
                             // `new C(obj); new C(obj)` patterns where
                             // C's base returns an existing instance.
                             if (inst.hasPrivateProperty(entry.name) or inst.hasPrivateAccessor(entry.name)) {
-                                const ex = try makeTypeError(realm, "Cannot install duplicate private field on object");
+                                const ex = try makeTypeError(f.running_realm orelse realm, "Cannot install duplicate private field on object");
                                 f.ip = ip;
                                 f.accumulator = acc;
                                 committed = true;
@@ -6300,7 +6300,7 @@ pub fn runFrames(
                     }
                     // §10.1.8.1 PrivateFieldGet step 6.b —
                     // accessor without [[Get]] throws TypeError.
-                    const ex = try makeTypeError(realm, "Cannot read from private accessor with no getter");
+                    const ex = try makeTypeError(f.running_realm orelse realm, "Cannot read from private accessor with no getter");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -6313,7 +6313,7 @@ pub fn runFrames(
                     acc = v;
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
-                const ex = try makeTypeError(realm, "Cannot read private field — brand check failed");
+                const ex = try makeTypeError(f.running_realm orelse realm, "Cannot read private field — brand check failed");
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
@@ -6323,7 +6323,7 @@ pub fn runFrames(
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
             const recv = heap_mod.valueAsPlainObject(acc) orelse {
-                const ex = try makeTypeError(realm, "Cannot read private field on non-object");
+                const ex = try makeTypeError(f.running_realm orelse realm, "Cannot read private field on non-object");
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
@@ -6352,7 +6352,7 @@ pub fn runFrames(
                         },
                     }
                 } else {
-                    const ex = try makeTypeError(realm, "Cannot read from private accessor with no getter");
+                    const ex = try makeTypeError(f.running_realm orelse realm, "Cannot read from private accessor with no getter");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -6364,7 +6364,7 @@ pub fn runFrames(
             } else if (recv.getPrivateProperty(lookup_key)) |v| {
                 acc = v;
             } else {
-                const ex = try makeTypeError(realm, "Cannot read private field — brand check failed");
+                const ex = try makeTypeError(f.running_realm orelse realm, "Cannot read private field — brand check failed");
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
@@ -7897,7 +7897,7 @@ pub fn runFrames(
                             },
                         }
                     } else {
-                        const ex = try makeTypeError(realm, "Cannot write to private accessor with no setter");
+                        const ex = try makeTypeError(f.running_realm orelse realm, "Cannot write to private accessor with no setter");
                         f.ip = ip;
                         f.accumulator = acc;
                         committed = true;
@@ -7907,7 +7907,7 @@ pub fn runFrames(
                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 } else if (!fn_recv.private_properties.contains(lookup_key)) {
-                    const ex = try makeTypeError(realm, "Cannot write private field — brand check failed");
+                    const ex = try makeTypeError(f.running_realm orelse realm, "Cannot write private field — brand check failed");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -7940,7 +7940,7 @@ pub fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
             const recv = heap_mod.valueAsPlainObject(registers[r_obj]) orelse {
-                const ex = try makeTypeError(realm, "Cannot write private field on non-object");
+                const ex = try makeTypeError(f.running_realm orelse realm, "Cannot write private field on non-object");
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;
@@ -7970,7 +7970,7 @@ pub fn runFrames(
                         },
                     }
                 } else {
-                    const ex = try makeTypeError(realm, "Cannot write to private accessor with no setter");
+                    const ex = try makeTypeError(f.running_realm orelse realm, "Cannot write to private accessor with no setter");
                     f.ip = ip;
                     f.accumulator = acc;
                     committed = true;
@@ -7980,7 +7980,7 @@ pub fn runFrames(
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
             } else if (!recv.hasPrivateProperty(lookup_key)) {
-                const ex = try makeTypeError(realm, "Cannot write private field — brand check failed");
+                const ex = try makeTypeError(f.running_realm orelse realm, "Cannot write private field — brand check failed");
                 f.ip = ip;
                 f.accumulator = acc;
                 committed = true;

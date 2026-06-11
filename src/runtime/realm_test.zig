@@ -588,3 +588,120 @@ test "cross-realm teardown: a collected ShadowRealm frees its child realm record
     parent.collectGarbage();
     try testing.expectEqual(before, parent.child_realms.items.len);
 }
+
+test "cross-realm: private brand-check TypeError comes from the method's realm" {
+    // §7.3.30 PrivateGet / PrivateBrandCheck — the TypeError raised
+    // by a failed brand check is created in the running method's
+    // realm (the realm the class was evaluated in), not the realm
+    // that initiated the outer dispatch. Mirrors the test262
+    // private-*-brand-check-multiple-evaluations-of-class-realm
+    // fixtures: a class from realm B, brand-checked while realm A
+    // drives dispatch, must throw B's TypeError.
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const class_src =
+        \\(function () {
+        \\  class C { #m() { return 'x'; } access(o) { return o.#m(); } }
+        \\  return new C();
+        \\})()
+    ;
+    // c_child carries an `access` method whose [[Realm]] is child.
+    const c_child = (try lantern.evaluateScript(testing.allocator, &child, class_src)).value;
+    // A same-shape instance from parent's own evaluation — wrong brand.
+    const c_parent = (try lantern.evaluateScript(testing.allocator, &parent, class_src)).value;
+
+    try parent.globals.put(testing.allocator, "cChild", c_child);
+    try parent.globals.put(testing.allocator, "cParent", c_parent);
+    const child_te = child.globals.get("TypeError") orelse return error.TestFailed;
+    try parent.globals.put(testing.allocator, "ChildTypeError", child_te);
+
+    // Drive from parent: the access method runs in child's realm and
+    // its brand check must throw child's TypeError.
+    const probe = (try lantern.evaluateScript(testing.allocator, &parent,
+        \\let kind = "no-throw";
+        \\try { cChild.access(cParent); } catch (e) {
+        \\  kind = (e.constructor === ChildTypeError) ? "child" :
+        \\         (e.constructor === TypeError) ? ("parent: " + e.message) : "other";
+        \\}
+        \\kind
+    )).value;
+    try testing.expect(probe.isString());
+    const ps: *@import("string.zig").JSString = @ptrCast(@alignCast(probe.asString()));
+    try testing.expectEqualStrings("child", ps.flatBytes());
+}
+
+test "cross-realm: JSON.stringify of another realm's BigInt wrapper honours its toJSON" {
+    // §25.5.2.2 step 2 — the toJSON lookup walks the value's own
+    // prototype chain (the OTHER realm's BigInt.prototype), and the
+    // step-12 BigInt rejection only applies when that lookup misses.
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    parent.hardened = false;
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    // Mirror the test262 fixture exactly: the parent script calls the
+    // CHILD realm's constructors — `other.Object(other.BigInt(100))` —
+    // so §7.1.18 ToObject must mint the wrapper from the *running
+    // native's* realm (child), not the dispatching parent's.
+    const child_object = child.globals.get("Object") orelse return error.TestFailed;
+    const child_bigint = child.globals.get("BigInt") orelse return error.TestFailed;
+    try parent.globals.put(testing.allocator, "ChildObject", child_object);
+    try parent.globals.put(testing.allocator, "ChildBigInt", child_bigint);
+    const wrapped = (try lantern.evaluateScript(testing.allocator, &parent, "ChildObject(ChildBigInt(100))")).value;
+    try parent.globals.put(testing.allocator, "wrapped", wrapped);
+
+    // Without toJSON: TypeError.
+    const r1 = (try lantern.evaluateScript(testing.allocator, &parent,
+        \\let k = "no-throw";
+        \\try { JSON.stringify(wrapped); } catch (e) { k = e.constructor.name; }
+        \\k
+    )).value;
+    const r1s: *@import("string.zig").JSString = @ptrCast(@alignCast(r1.asString()));
+    try testing.expectEqualStrings("TypeError", r1s.flatBytes());
+
+    // Install toJSON on the CHILD's BigInt.prototype; stringify from parent.
+    _ = try lantern.evaluateScript(testing.allocator, &child, "BigInt.prototype.toJSON = function () { return this.toString(); };");
+    const r2 = (try lantern.evaluateScript(testing.allocator, &parent, "JSON.stringify(wrapped)")).value;
+    try testing.expect(r2.isString());
+    const r2s: *@import("string.zig").JSString = @ptrCast(@alignCast(r2.asString()));
+    try testing.expectEqualStrings("\"100\"", r2s.flatBytes());
+}
+
+test "cross-realm: calling a class constructor without new throws the class's realm's TypeError" {
+    // §10.2.1 [[Call]] step 2 — the TypeError for invoking a class
+    // constructor without `new` is raised in the constructor's own
+    // realm, not the caller's.
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try child.installBuiltins();
+
+    const child_class = (try lantern.evaluateScript(testing.allocator, &child, "(class {})")).value;
+    const child_te = child.globals.get("TypeError") orelse return error.TestFailed;
+    try parent.globals.put(testing.allocator, "ChildClass", child_class);
+    try parent.globals.put(testing.allocator, "ChildTypeError", child_te);
+
+    const probe = (try lantern.evaluateScript(testing.allocator, &parent,
+        \\let kind = "no-throw";
+        \\try { ChildClass(); } catch (e) {
+        \\  kind = (e.constructor === ChildTypeError) ? "child" :
+        \\         (e.constructor === TypeError) ? "parent" : "other";
+        \\}
+        \\kind
+    )).value;
+    const ps: *@import("string.zig").JSString = @ptrCast(@alignCast(probe.asString()));
+    try testing.expectEqualStrings("child", ps.flatBytes());
+}

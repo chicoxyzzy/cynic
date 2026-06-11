@@ -255,7 +255,9 @@ pub fn callValue(
         var target_fn = fn_obj;
         while (target_fn.bound_target) |inner| target_fn = inner;
         if (target_fn.is_class_constructor) {
-            return .{ .thrown = try makeTypeError(realm, "Class constructor cannot be invoked without 'new'") };
+            // §10.2.1 step 2 — raised in the constructor's own
+            // realm (its [[Realm]]), not the dispatching caller's.
+            return .{ .thrown = try makeTypeError(target_fn.realm orelse realm, "Class constructor cannot be invoked without 'new'") };
         }
         return callJSFunction(allocator, realm, fn_obj, this_value, args);
     }

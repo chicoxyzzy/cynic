@@ -104,7 +104,14 @@ pub fn objectConstructor(realm: *Realm, this_value: Value, args: []const Value) 
     // object and `wrap.toString()` → "[object Object]" instead
     // of "42".
     if (!arg.isUndefined() and !arg.isNull()) {
-        const w = try intrinsics.toObjectThis(realm, arg);
+        // §7.1.18 ToObject runs in the current Realm Record — the
+        // realm of the running Object native, not the realm whose
+        // dispatch loop invoked it. `parentRealm.eval("other.Object(
+        // other.BigInt(100n))")` must mint the wrapper from the
+        // OTHER realm's %BigInt.prototype% so a `toJSON` installed
+        // there is on the wrapper's chain.
+        const run_realm = realm.active_native_fn_realm orelse realm;
+        const w = try intrinsics.toObjectThis(run_realm, arg);
         return heap_mod.taggedObject(w);
     }
     // `new Object(...)` path — `this_value` is the freshly
@@ -115,8 +122,9 @@ pub fn objectConstructor(realm: *Realm, this_value: Value, args: []const Value) 
     }
     // Plain `Object()` / `Object(undefined)` / `Object(null)` —
     // build a fresh empty object.
-    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
+    const run_realm = realm.active_native_fn_realm orelse realm;
+    const obj = run_realm.heap.allocateObject() catch return error.OutOfMemory;
+    run_realm.heap.setObjectPrototype(obj, run_realm.intrinsics.object_prototype);
     return heap_mod.taggedObject(obj);
 }
 

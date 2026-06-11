@@ -213,6 +213,15 @@ pub const Heap = struct {
     pub const small_int_cache_max = 256;
 
     allocator: std.mem.Allocator,
+    /// Monotonic counter for per-ClassTail-evaluation private brand
+    /// prefixes (§15.7.14 step 31; `"B{n}#"`). Lives on the Heap, not
+    /// the Realm: sibling realms over one shared heap exchange objects
+    /// freely, so brand identity must be unique across the whole
+    /// object-identity domain — two realms each minting their own
+    /// "B0#" would alias distinct classes' private brands and let a
+    /// cross-realm `A.read(new B())` slip past §7.3.27
+    /// PrivateElementFind's brand check.
+    class_brand_counter: u32 = 0,
     /// Allocator backing large heap-owned payloads (JSString.bytes,
     /// ArrayBuffer slabs) that the mark-sweep collector will free
     /// during `sweep`. Defaults to `allocator`, but hosts running

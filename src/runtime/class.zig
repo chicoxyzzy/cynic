@@ -74,8 +74,8 @@ pub const ClassError = error{
 ///
 /// Returns a `"B{n}#"` slice owned by the realm's class arena.
 fn allocateBrandPrefix(realm: *Realm) ClassError![]const u8 {
-    const n = realm.class_brand_counter;
-    realm.class_brand_counter += 1;
+    const n = realm.heap.class_brand_counter;
+    realm.heap.class_brand_counter += 1;
     return std.fmt.allocPrint(realm.classAllocator(), "B{d}#", .{n}) catch return error.OutOfMemory;
 }
 
@@ -241,6 +241,7 @@ pub fn buildClass(
         false, // is_arrow
         captured_env,
     );
+    ctor.realm = realm;
     // §15.7.7 FunctionLength — class constructor exposes
     // `C.length` as the count of params before the first one
     // with a default / rest / destructuring.
@@ -362,6 +363,7 @@ pub fn buildClass(
             false,
             captured_env,
         );
+        fn_obj.realm = realm;
         // §15.4.4 MethodDefinitionEvaluation → §10.2.10
         // OrdinaryFunctionCreate with FunctionKind = method (or
         // generator-method / async-method / accessor) — none of
@@ -505,6 +507,7 @@ pub fn buildClass(
             else
                 null;
             if (init_fn) |fp| {
+                fp.realm = realm;
                 realm.heap.setHomeObject(fp, proto);
                 fp.proto = realm.intrinsics.function_prototype;
             }
@@ -559,6 +562,7 @@ pub fn buildClass(
             false,
             captured_env,
         );
+        fn_obj.realm = realm;
         // §15.4.4 MethodDefinitionEvaluation — static methods
         // (including their generator / async variants and the
         // accessor halves) all run through OrdinaryFunctionCreate
@@ -727,6 +731,7 @@ pub fn buildClass(
         if (is_block) {
             const c = &template.static_blocks[idx];
             const blk_fn = try realm.heap.allocateFunction(c, 0, null, false, captured_env);
+            blk_fn.realm = realm;
             // §15.7.13 ClassStaticBlockDefinitionEvaluation step
             // 4 — MakeMethod(body, homeObject) where homeObject
             // is the class constructor F. The interpreter's
@@ -762,6 +767,7 @@ pub fn buildClass(
         var v: Value = Value.undefined_;
         if (ft.init_chunk) |*c| {
             const init_fn = try realm.heap.allocateFunction(c, 0, resolved.display_name, false, captured_env);
+            init_fn.realm = realm;
             // §15.7.14 step 34 / §15.4 — static field initializer
             // is a method whose [[HomeObject]] is the class
             // constructor F. Set ONLY `home_function = ctor` so
