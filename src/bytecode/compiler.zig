@@ -722,6 +722,15 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.ldar, span);
                 try self.builder.emitU8(tmp);
             }
+            // §8.1.1.1.4 SetMutableBinding step 4 — a non-init
+            // store to a promoted `const` is the runtime TypeError,
+            // exactly as on the env path below. Ordered after the
+            // TDZ probe: an uninitialized binding throws
+            // ReferenceError first (step 2).
+            if (!is_init and binding.kind == .const_) {
+                try self.builder.emitOp(.throw_assign_const, span);
+                return;
+            }
             try self.builder.emitOp(.star, span);
             try self.builder.emitU8(binding.register);
             return;

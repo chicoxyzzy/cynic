@@ -28,15 +28,6 @@ fixtures run for real. The default `cynic run` posture
 (hardened, eval off) is stricter; this row measures the
 engine's spec coverage with the policy knobs out of the way.
 
-The Bistromath JIT (`--jit`) is deliberately **not** a second
-score row: its contract is an invariant, not a score — a full
-sweep with every eligible chunk force-compiled must produce the
-byte-identical pass-set of this row (docs/jit.md §10.2; verified
-by the advisory `test262-jit-differential` CI job and locally
-before JIT-touching commits). A row that must always equal this
-one carries no information, and a divergence is a bug to fix,
-not a number to publish.
-
 ### Columns
 
 - **`passing`** — Cynic produced the spec-expected result.
@@ -153,11 +144,11 @@ top-line score.
 
 ## History
 
-### 2026-06-10 — cynic `288c1a0`, test262 `d0c1b4555b`
+### 2026-06-11 — cynic `9e4fb70`, test262 `d0c1b4555b`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 45223 | 4585 | 49808 | 90.79 % | +57 | 45.4 s |
+| 45223 | 4585 | 49808 | 90.79 % | ±0 | 35.1 s |
 
 Biggest movers:
 
@@ -166,6 +157,12 @@ Biggest movers:
 - `built-ins/DataView` +550
 - `built-ins/Iterator` +432
 - `built-ins/Number` +340
+
+### 2026-06-10 — cynic `288c1a0`, test262 `d0c1b4555b`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 45223 | 4585 | 49808 | 90.79 % | +57 | 45.4 s |
 
 ### 2026-06-07 — cynic `690388f`, test262 `d0c1b455`
 
