@@ -888,15 +888,24 @@ useful:
        held invisible (sweepable) references; the regression test
        reproduces the use-after-free via a forced full collection
        with the only reference in a compiled frame's register.
-       Known gap, measured while probing: on HARDENED realms
-       (the product default) script-declared global functions
-       resolve through the `GlobalBindings.fallback` map, which
-       never fills `lda_global` cells — compiled code tiers down
-       at every global-function reference, so compiled→compiled
-       call chains effectively require `--unhardened` (or
-       lexically-declared functions, which use the decl-slot
-       path). The fix shape is a `fallback_slots` stable-index
-       mirror of the decl_slots design; until it lands, bench
+       Known gap, measured and root-caused: on HARDENED realms
+       (the product default) script-declared global functions and
+       vars land on the frozen globalThis as BAG-ONLY properties —
+       the freeze stops shape transitions, the privileged
+       installScript*Binding writes fall through to the property
+       bag, and `slowLdaGlobal` fills `lda_global` cells only from
+       shape entries — so the cells stay cold forever (probe:
+       622 cold-cell slow paths, zero filled-cell misses) and
+       compiled code tiers down at every global-function
+       reference. Compiled→compiled call chains on the default
+       posture effectively require lexically-declared functions
+       (the decl-slot path) or `--unhardened`. Two candidate
+       fixes, parked for coordination with the shape-invariant
+       work: let privileged host adds transition the shape even on
+       non-extensible targets (zero IC changes; [[Extensible]]
+       stays observably false), or mirror script-declared names
+       into a stable `script_slots` array (decl_slots-shaped, but
+       a double-write consistency hazard). Until one lands, bench
        call-chain verdicts on the default posture understate the
        tier.
 
