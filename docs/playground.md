@@ -20,11 +20,11 @@ binding.
 
 ```
 ENGINE HALF (main, built + published by CI)
-  src/wasm.zig               WASM entry module — C-ABI exports
+  playground/wasm.zig               WASM entry module — C-ABI exports
   playground/cynic-engine.js the stable ABI binding the UI imports
                              (loadEngine / evalSource / parseSource /
                              parseAst / engineVersion); tracks the
-                             src/wasm.zig exports, so an ABI change is
+                             playground/wasm.zig exports, so an ABI change is
                              absorbed here, not in the UI
   playground/build.sh        convenience wrapper over `zig build wasm`
 
@@ -51,7 +51,7 @@ zig build wasm
 
 This:
 
-1. compiles the Cynic library + `src/wasm.zig` for
+1. compiles the Cynic library + `playground/wasm.zig` for
    `wasm32-freestanding`, `ReleaseSmall` (no C sources to compile);
 2. links into `zig-out/bin/cynic.wasm`;
 3. assembles the engine half at `zig-out/playground/` containing
@@ -101,7 +101,7 @@ freestanding — GC pause-time and `Date.now()` degrade to 0).
 
 ## Export ABI
 
-`src/wasm.zig` exports a small C-ABI surface. All pointers are
+`playground/wasm.zig` exports a small C-ABI surface. All pointers are
 byte offsets into the module's linear memory.
 
 | Export | Signature | Purpose |

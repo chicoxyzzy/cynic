@@ -304,6 +304,7 @@ Common commands:
     zig build test-fast                             # all unit tests, ReleaseSafe (~3 min vs 10+; safety checks + GC verifiers + leak detection kept)
     zig build test -Dtest-filter=<name>             # run only unit tests whose name matches (also works on test-fast)
     zig build test-ses                              # hand-written SES positive-coverage tests
+    zig build test-fuzz                             # Fuzzilli REPRL host unit tests (the host lives in tools/fuzz/)
     zig build test262                               # full conformance run (runtime mode)
     zig build test262-safe                          # same harness, ReleaseSafe (GC verifiers + poison live)
     zig build wasm-testsuite -- --quiet             # WebAssembly spec-testsuite conformance (needs tools/wasm-testsuite-gen.sh first)

@@ -308,7 +308,7 @@ refinement.
 `InvalidConversionToInteger`, `UndefinedElement` /
 `UninitializedElement` / `IndirectCallTypeMismatch` for
 `call_indirect`, `CallStackExhausted`, …), propagated out of the loop.
-At the future JS boundary these become a thrown
+At the JS boundary these become a thrown
 `WebAssembly.RuntimeError`.
 
 **GC roots.** Live `externref` JS values are marked in `realm.markRoots`
