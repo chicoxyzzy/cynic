@@ -138,10 +138,10 @@ if [ "$TIER" = "jit" ]; then
   # against the peers with their JITs ENABLED. Kept strictly
   # separate from the interpreter table below — the two answer
   # different questions and must never share a table. The
-  # natively interpreter-only engines (qjs, hermes, xst) appear
-  # unchanged in both tiers.
+  # natively interpreter-only engines (qjs, hermes, xst) carry no
+  # JIT to enable and already appear in the interpreter table, so
+  # they are omitted here.
   register cynic - "$CYNIC_BIN" run
-  register qjs - "$JSVU_BIN/qjs"
   register v8 - "$JSVU_BIN/v8"
   register sm - "$JSVU_BIN/sm"
 else
@@ -176,11 +176,16 @@ else
   register jsc "JSC_useJIT=0" "$jsc_bin"
 fi
 
-# Hermes — natively interpreter-only.
-register hermes - "$JSVU_BIN/hermes"
+# Natively interpreter-only engines — interpreter table only (no
+# JIT to enable; identical numbers would just pad the full-speed
+# table).
+if [ "$TIER" != "jit" ]; then
+  # Hermes — natively interpreter-only.
+  register hermes - "$JSVU_BIN/hermes"
 
-# XS (Moddable xst) — natively interpreter-only.
-register xs - "$JSVU_BIN/xst"
+  # XS (Moddable xst) — natively interpreter-only.
+  register xs - "$JSVU_BIN/xst"
+fi
 
 if [ "${#ENGINE_NAMES[@]}" -eq 0 ]; then
   echo "bench-cross: no engines available — install peers with" >&2
