@@ -549,7 +549,20 @@ pub const Chunk = struct {
         /// reclaimed wholesale with it (per-chunk code free is a
         /// recorded follow-up, docs/jit.md §8).
         entry: ?*const anyopaque = null,
+        /// On-stack-replacement table (docs/jit.md §12 3f): one
+        /// entry per loop header, mapping its bytecode offset to a
+        /// stub offset relative to `entry`. Lives in the code
+        /// region next to the code itself (same wholesale-reclaim
+        /// lifetime), so the chunk never owns the allocation.
+        osr_ptr: ?[*]const OsrEntry = null,
+        osr_len: u32 = 0,
+        /// Each OSR entry that immediately tiers back down is a
+        /// strike; past the limit the back-edge precheck stops
+        /// paying the entry cost (the enter-and-bail ping-pong
+        /// would otherwise tax every iteration).
+        osr_strikes: u8 = 0,
 
+        pub const OsrEntry = extern struct { bc: u32, code_off: u32 };
         pub const Tier = enum(u8) { cold, compiled, dont_compile };
         /// JSC weights +15 per entry / +1 per back-edge; 16 keeps
         /// the entry bump a shift (docs/jit.md §4.7).

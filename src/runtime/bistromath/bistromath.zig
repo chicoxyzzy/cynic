@@ -91,9 +91,19 @@ pub const EntryFn = *const fn (*Realm, *CallFrame, [*]Value) callconv(.c) u32;
 /// Size-scaled tier-up threshold (docs/jit.md §4.7): a tiny helper
 /// compiles after ~30 calls, a big function waits for real heat.
 /// Starting constants, tuned against the bench suite — not gospel.
+/// The size-independent floor of `tierUpThreshold` — the back-edge
+/// precheck uses it to skip the OSR call while a chunk is plainly
+/// still heating.
+pub const tier_up_base: u32 = 512;
+
+/// One immediate tier-down after an OSR entry is a strike; at this
+/// limit the back-edge precheck stops entering (the enter-and-bail
+/// ping-pong would tax every loop iteration).
+pub const osr_strike_limit: u8 = 8;
+
 pub fn tierUpThreshold(code_len: usize) u32 {
     const len: u32 = @intCast(@min(code_len, 1 << 20));
-    return 512 +| (8 *| len);
+    return tier_up_base +| (8 *| len);
 }
 
 /// The dispatcher hook: called right after a frame push, before
@@ -156,7 +166,70 @@ fn compile(realm: *Realm, chunk: *const Chunk, js: *Chunk.JitState) void {
     c.run() catch return;
     const code = ca.install(c.m.code.items) catch return;
     js.entry = @ptrCast(code.ptr);
+    // The OSR table rides in the code region (same wholesale
+    // lifetime as the code). If its install fails the chunk still
+    // works — entry-time tier-up only, no mid-loop entries.
+    if (c.osr_entries.items.len != 0) {
+        if (ca.install(std.mem.sliceAsBytes(c.osr_entries.items))) |blob| {
+            js.osr_ptr = @ptrCast(@alignCast(blob.ptr));
+            js.osr_len = @intCast(c.osr_entries.items.len);
+        } else |_| {}
+    }
     js.tier = .compiled;
+}
+
+pub const OsrOutcome = union(enum) { not_entered, resumed, completed: Value, threw: Value };
+
+/// docs/jit.md §12 3f — on-stack replacement at a loop back-edge.
+/// The caller (a Lantern back-edge that just ran `loopSafePoint`,
+/// so `frame.ip` / `frame.accumulator` are synced at the loop
+/// header) hands the top frame to compiled code mid-activation.
+/// Tier-up here counts back-edge warmth, so a single-call hot loop
+/// compiles from inside its own run — the arith_loop shape.
+pub fn tryOsrEnterTop(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+) RunError!OsrOutcome {
+    if (comptime !supported) return .not_entered;
+    if (!realm.jit_enabled) return .not_entered;
+    const fr = &frames.items[frames.items.len - 1];
+    if (fr.is_construct or fr.generator != null or fr.wrap_return_in_promise) return .not_entered;
+    const js = fr.chunk.jit_state orelse return .not_entered;
+    if (js.entry == null) {
+        if (js.tier != .cold) return .not_entered;
+        const threshold = realm.jit_threshold_override orelse
+            tierUpThreshold(fr.chunk.code.len);
+        if (js.warmth < threshold) return .not_entered;
+        compile(realm, fr.chunk, js);
+        if (js.entry == null) return .not_entered;
+    }
+    if (js.osr_strikes >= osr_strike_limit) return .not_entered;
+    const tbl = js.osr_ptr orelse return .not_entered;
+    const target: u32 = @intCast(fr.ip);
+    const code_off: u32 = blk: {
+        for (tbl[0..js.osr_len]) |e| {
+            if (e.bc == target) break :blk e.code_off;
+        }
+        return .not_entered;
+    };
+    const base: [*]const u8 = @ptrCast(js.entry.?);
+    const stub: EntryFn = @ptrCast(@alignCast(base + code_off));
+    switch (@as(EntryResult, @enumFromInt(stub(realm, fr, fr.registers.ptr)))) {
+        .done => {
+            const ret = fr.accumulator;
+            fr.releaseRegisters(realm, allocator);
+            _ = frames.pop();
+            return .{ .completed = ret };
+        },
+        .resume_interp => return .resumed,
+        .threw => {
+            const ex = realm.pending_exception orelse Value.undefined_;
+            realm.pending_exception = null;
+            return .{ .threw = ex };
+        },
+        .host_oom => return error.OutOfMemory,
+    }
 }
 
 const CompileError = error{ OutOfMemory, UnsupportedOp };
@@ -263,6 +336,10 @@ const Compiler = struct {
     /// the faulting call op — docs/jit.md §4.5), same out-of-line
     /// shape as the tier-down stubs.
     threws: std.ArrayListUnmanaged(Td) = .empty,
+    /// Loop headers (backward-branch targets) — each gets an OSR
+    /// entry stub; insertion-ordered for a deterministic table.
+    osr_headers: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
+    osr_entries: std.ArrayListUnmanaged(Chunk.JitState.OsrEntry) = .empty,
     done_label: Masm.Label = .{},
     tier_down_label: Masm.Label = .{},
     threw_label: Masm.Label = .{},
@@ -284,6 +361,8 @@ const Compiler = struct {
         self.tds.deinit(gpa);
         for (self.threws.items) |*t| t.label.fixups.deinit(gpa);
         self.threws.deinit(gpa);
+        self.osr_headers.deinit(gpa);
+        self.osr_entries.deinit(gpa);
         self.done_label.fixups.deinit(gpa);
         self.tier_down_label.fixups.deinit(gpa);
         self.threw_label.fixups.deinit(gpa);
@@ -361,10 +440,14 @@ const Compiler = struct {
                 .jmp, .jmp_if_true, .jmp_if_false => {
                     const off = readI16(code, i + 1);
                     _ = try self.labelFor(targetOf(after, off));
+                    // A backward branch's target is a loop header —
+                    // an OSR entry point (docs/jit.md §12 3f).
+                    if (off < 0) try self.osr_headers.put(self.m.gpa, targetOf(after, off), {});
                 },
                 .loop_inc_lt => {
                     const off = readI16(code, i + 3);
                     _ = try self.labelFor(targetOf(after, off));
+                    if (off < 0) try self.osr_headers.put(self.m.gpa, targetOf(after, off), {});
                 },
                 else => return error.UnsupportedOp,
             }
@@ -776,6 +859,20 @@ const Compiler = struct {
         try m.emit(a64.ldpPostIdxSp(.x19, .x20, 16));
         try m.emit(a64.ldpPostIdxSp(.fp, .lr, 16));
         try m.emit(a64.ret());
+        // OSR entry stubs (docs/jit.md §12 3f): one per loop
+        // header — the same prologue, then a jump into the body at
+        // the header. The dispatcher enters here from a Lantern
+        // back-edge whose loopSafePoint already synced ip and
+        // accumulator; frame identity makes the switch a jump.
+        for (self.osr_headers.keys()) |hdr| {
+            try self.osr_entries.append(m.gpa, .{
+                .bc = hdr,
+                .code_off = @intCast(m.code.items.len),
+            });
+            try self.prologue();
+            const idx = self.target_labels.get(hdr).?;
+            try m.jump(&self.labels.items[idx]);
+        }
     }
 
     /// docs/jit.md §4.6 — every loop back-edge re-checks the step
@@ -1643,6 +1740,38 @@ test "jit bistromath calls: callee exceptions unwind through compiled callers" {
     try testing.expectEqual(
         Chunk.JitState.Tier.compiled,
         chunk.function_templates[1].chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath osr: a single-call hot loop enters mid-loop" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // The arith_loop shape (docs/jit.md §12 3f): one call, one hot
+    // loop. Entry-time tier-up never fires (warmth is 16 at the
+    // call); the back-edges heat the chunk mid-run and OSR must
+    // compile + enter at the loop header. 60000 iterations keep
+    // `s` inside int32 (sum = 1_799_970_000).
+    const src =
+        \\function big() { let s = 0; for (let i = 0; i < 60000; i++) { s = (s + i) | 0; } return s; }
+        \\big();
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 1_799_970_000), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "big").jit_state.?.tier,
     );
 }
 

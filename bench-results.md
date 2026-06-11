@@ -17,6 +17,30 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-11 — cynic (calls + OSR: docs/jit.md §12 3e+3f), host `Darwin 25.6.0 arm64`
+
+Same-day follow-up to the entry below — compiled calls (all three
+shapes) and OSR landed. Back-to-back quiet-machine pair this time
+(the morning baseline was loaded-machine; cross-session deltas
+were invalid):
+
+| bench | interp p50 | `--jit` p50 | note |
+|---|---:|---:|---|
+| arith_loop | 39.73 | 42.52 | top-level loop — can't compile until script chunks do (docs/jit.md §12 3g); the ~+7% is the back-edge precheck tax at 5M iterations |
+| method_call | 22.19 | 17.90 | −19% — callee compiled + per-iteration entry |
+| class_instantiate | 35.59 | 32.74 | −8% |
+| tail_recursion | 42.51 | 41.54 | enters per PTC reframe; the tail-call tier-down round-trip eats the win until jump-to-entry |
+| (others) | ±3% | ±3% | noise band |
+
+The honest OSR number needs the function-wrapped shape (what the
+fixture becomes once script chunks compile): `function big() { 5M
+× (s+i)|0 } big();` — single call, compiled mid-run from
+back-edge warmth:
+
+- ReleaseFast (`cynic-bench`): 58.9 → 40.6 ms per process,
+  ~1.55× on the loop after spawn overhead.
+- Debug `cynic`: 1493 → 724 ms — 2.06×.
+
 ### 2026-06-11 — cynic `89d80a1` (first `--jit` columns: lda_this + IC coverage), host `Darwin 25.6.0 arm64`
 
 First recorded Bistromath run — `zig build bench -- --jit`, the

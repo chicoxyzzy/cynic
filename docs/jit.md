@@ -789,9 +789,10 @@ useful:
        against Zig-side reads — the slice-layout assumption gets
        a runtime witness, not a comment. Shipped 2026-06.
    3b. **Bench `--jit` mode** — `cynic-bench` grows the flag so
-       increments land with measured numbers. Deferred to land
-       with 3f: without OSR the bench fixtures' hot loops never
-       enter the tier, so there is nothing honest to measure yet.
+       increments land with measured numbers. Shipped 2026-06
+       (natural tier-up thresholds — the user posture);
+       bench-results.md records both tables per entry from the
+       first IC coverage onward.
    3c. **Property/global IC reads** — `lda_property` own-data
        and proto-load hits, `lda_global[_or_undef]`: inline
        cell-hit fast paths reading the cells as data (§4.4),
@@ -810,21 +811,37 @@ useful:
        the `--jit` gc-stress CI lane and a young-string-into-
        mature-object unit test.
    3e. **Calls from compiled code** — the §4.5 helper-mediated
-       design: materialize the args window, enter through the
-       `call.zig` entry points (the audited-signature slow
-       paths land here, with their consumer); a third
-       `EntryResult.threw` routes callee exceptions to the
-       dispatcher's unwind. `CallICCell` hits inline as a callee
-       compare. Self-recursive `tail_call` compiles as
-       frame-rebuild + jump-to-entry — §15.10 PTC without
-       native-stack growth; cross-function PTC tiers down for
-       now. Unlocks `method_call`.
-   3f. **OSR entry** — the loop-header `bytecode offset → code
-       offset` table (§4.6), consulted at Lantern's back-edges
-       and at `reEnterDispatch`'s ip-0 entry, which also brings
-       PTC-reframed and first-resume frames into the tier.
-       Unlocks `arith_loop` / `tail_recursion` — the
-       hot-loop-called-once shapes.
+       design: materialize the args window, enter through
+       `callValue` (every callee kind day one — natives, bound,
+       proxies, compiled callees recursively; the nested
+       `runFrames` carries the native-re-entry stack guard); a
+       third `EntryResult.threw` keeps the frame pushed at the
+       faulting call op so `unwindThrow` checks its own handlers
+       first — catching tiers down at the handler. `call`,
+       `call_method`, and the fused `call_property` (IC load into
+       a spare scratch, then the marshal) all compile; tail calls
+       tier down unconditionally — §15.10 demands constant stack
+       and the helper path recurses natively. Shipped 2026-06
+       (pass-sets identical at 45223). Recorded follow-ups: the
+       `CallICCell` inline callee compare, and self-recursive
+       `tail_call` as frame-rebuild + jump-to-entry.
+   3f. **OSR entry** — per-loop-header prologue stubs with a
+       `bytecode offset → stub offset` table riding in the code
+       region; Lantern back-edges consult it through an inline
+       precheck (a function call per back-edge costs ~+20% on a
+       5M-iteration interpreted loop — the precheck is loads and
+       branches, with a `dont_compile` early-out and an
+       `osr_strikes` limit against the enter-and-bail ping-pong),
+       and the PTC re-entry hooks `tryEnterTop` at ip 0. Tier-up
+       counts back-edge warmth, so a function called once with a
+       hot loop compiles from inside its own run. Shipped
+       2026-06: the wrapped-arith_loop shape (5M iterations, one
+       call) runs ~1.5× faster ReleaseFast, ~2× Debug. The bench
+       fixture `arith_loop` itself stays interpreted — its loop
+       is top-level, and script chunks carry global-slot ops
+       (3g). `tail_recursion` enters per-reframe but the
+       tail-call tier-down round-trip eats the win until
+       jump-to-entry lands.
    3g. **Long tail** — unary int32/bool ops; `lda_env` /
        `sta_env` fixed-depth walks on the 3a contract
        (nested-block lets, closures as callees, with the

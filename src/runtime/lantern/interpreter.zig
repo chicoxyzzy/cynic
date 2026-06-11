@@ -1810,6 +1810,45 @@ pub fn runFrames(
             ip = applyOffset(ip, off);
             if (off < 0) {
                 if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                // docs/jit.md §12 3f — OSR: a loop hot enough to
+                // tier up enters compiled code at this back-edge's
+                // header; loopSafePoint synced the frame, so the
+                // switch is a jump. Inline-guarded — back-edges are
+                // the hottest dispatch path.
+                // Cheap precheck — a 5M-iteration interpreted loop
+                // cannot afford a function call per back-edge: call
+                // only when tier-up is plausibly due (cold and past
+                // the threshold floor) or an OSR table exists and is
+                // not striking out.
+                const osr_worth = realm.jit_enabled and worth: {
+                    const js_ = f.chunk.jit_state orelse break :worth false;
+                    if (js_.tier == .dont_compile) break :worth false;
+                    if (js_.tier == .cold) {
+                        const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
+                        break :worth js_.warmth >= floor;
+                    }
+                    break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
+                };
+                if (osr_worth) {
+                    switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
+                        .not_entered => {},
+                        .resumed => {
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                        .completed => |ret| {
+                            if (frames.items.len == 0) return .{ .value = ret };
+                            frames.items[frames.items.len - 1].accumulator = ret;
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                        .threw => |ex| {
+                            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    }
+                }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -1820,6 +1859,45 @@ pub fn runFrames(
                 ip = applyOffset(ip, off);
                 if (off < 0) {
                     if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                    // docs/jit.md §12 3f — OSR: a loop hot enough to
+                    // tier up enters compiled code at this back-edge's
+                    // header; loopSafePoint synced the frame, so the
+                    // switch is a jump. Inline-guarded — back-edges are
+                    // the hottest dispatch path.
+                    // Cheap precheck — a 5M-iteration interpreted loop
+                    // cannot afford a function call per back-edge: call
+                    // only when tier-up is plausibly due (cold and past
+                    // the threshold floor) or an OSR table exists and is
+                    // not striking out.
+                    const osr_worth = realm.jit_enabled and worth: {
+                        const js_ = f.chunk.jit_state orelse break :worth false;
+                        if (js_.tier == .dont_compile) break :worth false;
+                        if (js_.tier == .cold) {
+                            const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
+                            break :worth js_.warmth >= floor;
+                        }
+                        break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
+                    };
+                    if (osr_worth) {
+                        switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
+                            .not_entered => {},
+                            .resumed => {
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                            .completed => |ret| {
+                                if (frames.items.len == 0) return .{ .value = ret };
+                                frames.items[frames.items.len - 1].accumulator = ret;
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                            .threw => |ex| {
+                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                        }
+                    }
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
@@ -1831,6 +1909,45 @@ pub fn runFrames(
                 ip = applyOffset(ip, off);
                 if (off < 0) {
                     if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                    // docs/jit.md §12 3f — OSR: a loop hot enough to
+                    // tier up enters compiled code at this back-edge's
+                    // header; loopSafePoint synced the frame, so the
+                    // switch is a jump. Inline-guarded — back-edges are
+                    // the hottest dispatch path.
+                    // Cheap precheck — a 5M-iteration interpreted loop
+                    // cannot afford a function call per back-edge: call
+                    // only when tier-up is plausibly due (cold and past
+                    // the threshold floor) or an OSR table exists and is
+                    // not striking out.
+                    const osr_worth = realm.jit_enabled and worth: {
+                        const js_ = f.chunk.jit_state orelse break :worth false;
+                        if (js_.tier == .dont_compile) break :worth false;
+                        if (js_.tier == .cold) {
+                            const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
+                            break :worth js_.warmth >= floor;
+                        }
+                        break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
+                    };
+                    if (osr_worth) {
+                        switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
+                            .not_entered => {},
+                            .resumed => {
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                            .completed => |ret| {
+                                if (frames.items.len == 0) return .{ .value = ret };
+                                frames.items[frames.items.len - 1].accumulator = ret;
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                            .threw => |ex| {
+                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                        }
+                    }
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
@@ -1842,6 +1959,45 @@ pub fn runFrames(
                 ip = applyOffset(ip, off);
                 if (off < 0) {
                     if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                    // docs/jit.md §12 3f — OSR: a loop hot enough to
+                    // tier up enters compiled code at this back-edge's
+                    // header; loopSafePoint synced the frame, so the
+                    // switch is a jump. Inline-guarded — back-edges are
+                    // the hottest dispatch path.
+                    // Cheap precheck — a 5M-iteration interpreted loop
+                    // cannot afford a function call per back-edge: call
+                    // only when tier-up is plausibly due (cold and past
+                    // the threshold floor) or an OSR table exists and is
+                    // not striking out.
+                    const osr_worth = realm.jit_enabled and worth: {
+                        const js_ = f.chunk.jit_state orelse break :worth false;
+                        if (js_.tier == .dont_compile) break :worth false;
+                        if (js_.tier == .cold) {
+                            const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
+                            break :worth js_.warmth >= floor;
+                        }
+                        break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
+                    };
+                    if (osr_worth) {
+                        switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
+                            .not_entered => {},
+                            .resumed => {
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                            .completed => |ret| {
+                                if (frames.items.len == 0) return .{ .value = ret };
+                                frames.items[frames.items.len - 1].accumulator = ret;
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                            .threw => |ex| {
+                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                        }
+                    }
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
@@ -1866,6 +2022,45 @@ pub fn runFrames(
                         ip = applyOffset(ip, off);
                         if (off < 0) {
                             if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                            // docs/jit.md §12 3f — OSR: a loop hot enough to
+                            // tier up enters compiled code at this back-edge's
+                            // header; loopSafePoint synced the frame, so the
+                            // switch is a jump. Inline-guarded — back-edges are
+                            // the hottest dispatch path.
+                            // Cheap precheck — a 5M-iteration interpreted loop
+                            // cannot afford a function call per back-edge: call
+                            // only when tier-up is plausibly due (cold and past
+                            // the threshold floor) or an OSR table exists and is
+                            // not striking out.
+                            const osr_worth = realm.jit_enabled and worth: {
+                                const js_ = f.chunk.jit_state orelse break :worth false;
+                                if (js_.tier == .dont_compile) break :worth false;
+                                if (js_.tier == .cold) {
+                                    const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
+                                    break :worth js_.warmth >= floor;
+                                }
+                                break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
+                            };
+                            if (osr_worth) {
+                                switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
+                                    .not_entered => {},
+                                    .resumed => {
+                                        committed = true;
+                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                    },
+                                    .completed => |ret| {
+                                        if (frames.items.len == 0) return .{ .value = ret };
+                                        frames.items[frames.items.len - 1].accumulator = ret;
+                                        committed = true;
+                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                    },
+                                    .threw => |ex| {
+                                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                                        committed = true;
+                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                    },
+                                }
+                            }
                         }
                     }
                     continue :dispatch try decodeNext(code, &ip, &committed);
@@ -1915,6 +2110,45 @@ pub fn runFrames(
                 ip = applyOffset(ip, off);
                 if (off < 0) {
                     if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                    // docs/jit.md §12 3f — OSR: a loop hot enough to
+                    // tier up enters compiled code at this back-edge's
+                    // header; loopSafePoint synced the frame, so the
+                    // switch is a jump. Inline-guarded — back-edges are
+                    // the hottest dispatch path.
+                    // Cheap precheck — a 5M-iteration interpreted loop
+                    // cannot afford a function call per back-edge: call
+                    // only when tier-up is plausibly due (cold and past
+                    // the threshold floor) or an OSR table exists and is
+                    // not striking out.
+                    const osr_worth = realm.jit_enabled and worth: {
+                        const js_ = f.chunk.jit_state orelse break :worth false;
+                        if (js_.tier == .dont_compile) break :worth false;
+                        if (js_.tier == .cold) {
+                            const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
+                            break :worth js_.warmth >= floor;
+                        }
+                        break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
+                    };
+                    if (osr_worth) {
+                        switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
+                            .not_entered => {},
+                            .resumed => {
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                            .completed => |ret| {
+                                if (frames.items.len == 0) return .{ .value = ret };
+                                frames.items[frames.items.len - 1].accumulator = ret;
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                            .threw => |ex| {
+                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                                committed = true;
+                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                            },
+                        }
+                    }
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
@@ -3670,6 +3904,19 @@ pub fn runFrames(
             // synced above, so a GC fired here sees the reframed
             // frame (still the top-of-stack slot) as a root.
             if (try runSafePoint(realm)) |r| return r;
+            // The reframed frame sits at ip 0 — a tail-recursive
+            // function enters the tier exactly like a fresh call
+            // (docs/jit.md §12 3f).
+            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+                .not_entered => {},
+                .completed => |jit_ret| {
+                    if (frames.items.len == 0) return .{ .value = jit_ret };
+                    frames.items[frames.items.len - 1].accumulator = jit_ret;
+                },
+                .threw => |ex| {
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                },
+            }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 
@@ -3907,6 +4154,19 @@ pub fn runFrames(
             // `.tail_call`. A method tail call flattens recursion
             // the same way, so it must cross the safe point too.
             if (try runSafePoint(realm)) |r| return r;
+            // The reframed frame sits at ip 0 — a tail-recursive
+            // function enters the tier exactly like a fresh call
+            // (docs/jit.md §12 3f).
+            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+                .not_entered => {},
+                .completed => |jit_ret| {
+                    if (frames.items.len == 0) return .{ .value = jit_ret };
+                    frames.items[frames.items.len - 1].accumulator = jit_ret;
+                },
+                .threw => |ex| {
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                },
+            }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 
