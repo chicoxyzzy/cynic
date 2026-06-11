@@ -1,0 +1,72 @@
+name: Main CI status
+
+# Surface a red `main` without blocking the direct-push workflow. When
+# the CI workflow concludes on `main`, this opens (or comments on) a
+# single tracking issue on failure and closes it on the next green run —
+# so there is exactly one open issue, present only while `main` is
+# actually broken. A lighter touch than branch protection / a merge
+# queue, which would block the constant direct pushes to `main`.
+#
+# `workflow_run` runs from the default branch's copy of this file and
+# gets a token scoped by the `permissions` below — it does not inherit
+# the triggering run's permissions.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+
+# Serialize so an open-on-red and a later close-on-green can't race;
+# don't cancel — each conclusion must be processed.
+concurrency:
+  group: main-ci-status
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    name: Open on red / close on green
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Reconcile the tracking issue
+        run: |
+          set -euo pipefail
+          # Ensure the dedupe label exists (idempotent).
+          gh label create ci-failure --repo "$REPO" --color B60205 \
+            --description "CI is failing on main" --force >/dev/null 2>&1 || true
+
+          short="${HEAD_SHA:0:7}"
+          existing=$(gh issue list --repo "$REPO" --state open --label ci-failure \
+            --json number --jq '.[0].number // empty')
+
+          case "$CONCLUSION" in
+            failure|timed_out)
+              body="CI failed on \`main\` at ${short} — ${RUN_URL}"
+              if [ -n "$existing" ]; then
+                gh issue comment "$existing" --repo "$REPO" --body "$body"
+              else
+                gh issue create --repo "$REPO" --label ci-failure \
+                  --title "🔴 CI is failing on main" --body "$body"
+              fi
+              ;;
+            success)
+              if [ -n "$existing" ]; then
+                gh issue close "$existing" --repo "$REPO" \
+                  --comment "Green again on \`main\` at ${short} — ${RUN_URL}"
+              fi
+              ;;
+            *)
+              echo "Conclusion '${CONCLUSION}' — no action."
+              ;;
+          esac
