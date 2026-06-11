@@ -495,6 +495,28 @@ test "interpreter: Array subclass methods honour @@species (§23.1.3.34)" {
     , "false,true");
 }
 
+test "interpreter: Array.prototype.flat leaves length off a plain-object species result (§23.1.3.13)" {
+    // §23.1.3.13 flat never writes `length` on the result —
+    // FlattenIntoArray (§23.1.3.13.1) only performs per-element
+    // CreateDataPropertyOrThrow, and only an Array exotic's length
+    // auto-extends from those. A non-Array @@species result (a
+    // plain-object constructor) must come back with NO own
+    // `length`. flatMap already gates its length stamp on the
+    // receiver being an Array exotic; flat stamped unconditionally
+    // — observable as a phantom own property, and a raw bag write
+    // that broke the shape invariant on shape-mode receivers.
+    // Unhardened realm: `arr.constructor = {}` shadows the frozen
+    // %Array.prototype%.constructor in the hardened default.
+    try expectScriptStringUnhardenedEval(
+        \\var A = function(_len) { this.mark = 1; };
+        \\var arr = [[2]];
+        \\arr.constructor = {};
+        \\arr.constructor[Symbol.species] = A;
+        \\var res = arr.flat(1);
+        \\Object.prototype.hasOwnProperty.call(res, 'length') + ',' + res[0];
+    , "false,2");
+}
+
 test "interpreter: String.prototype methods honour @@symbol = undefined opt-out (#24)" {
     // §22.1.3.{19,13,14,21} — setting rx[@@replace/@@match/@@search/
     // @@split] to undefined opts the object OUT of regex-aware dispatch:

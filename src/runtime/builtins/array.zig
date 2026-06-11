@@ -2149,7 +2149,16 @@ fn arrayFlat(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     scope.push(heap_mod.taggedObject(obj)) catch return error.OutOfMemory;
     var write_idx: i64 = 0;
     try flattenInto(realm, obj, source_len, depth, out, &write_idx);
-    setLength(realm, out, write_idx) catch return error.OutOfMemory;
+    // §23.1.3.13.1 FlattenIntoArray relies on `CreateDataPropertyOrThrow`
+    // for the per-index write; an Array exotic's `length` auto-extends
+    // as a side effect. For a non-Array species result (e.g.
+    // `arr.constructor = { [Symbol.species]: ctor }` returning a plain
+    // object) the spec never writes `length` — stamping it added a
+    // phantom own property (and bypassed the shape-aware write funnels
+    // on a shape-mode receiver). Mirror the flatMap gate below.
+    if (out.is_array_exotic) {
+        setLength(realm, out, write_idx) catch return error.OutOfMemory;
+    }
     return out_v;
 }
 

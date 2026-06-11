@@ -3127,12 +3127,22 @@ pub const JSObject = struct {
     /// is the storage-level effect.
     pub fn setArrayLength(self: *JSObject, allocator: std.mem.Allocator, new_len: u32) !void {
         if (!self.is_array_exotic) {
-            // Plain object — length is just a data property.
+            // Plain object — length is just a data property. Route
+            // through the shape-aware funnel (`shadowSet` then bag),
+            // not a raw `properties.put`: a shape-mode receiver must
+            // take the write in its shape slot, or the bag gains a
+            // key the shape-first read path can't see
+            // (verifyShapeInvariant flags exactly that under GC
+            // stress). Mirrors `set`'s named-key tail — not `set`
+            // itself, whose inferred error set already depends on
+            // this function via the exotic virtual-length path.
             const v: Value = if (new_len <= std.math.maxInt(i32))
                 Value.fromInt32(@intCast(new_len))
             else
                 Value.fromDouble(@floatFromInt(new_len));
-            try self.properties.put(allocator, "length", v);
+            const absorbed = try self.shadowSet(allocator, "length", v, PropertyFlags.default);
+            _ = try self.recordKey(allocator, "length");
+            if (!absorbed) try self.bagPut(allocator, "length", v);
             return;
         }
         const cur_len = self.arrayLength();
