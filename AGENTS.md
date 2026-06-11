@@ -275,6 +275,7 @@ These are project rules — they apply to everyone.
 | Touch the WebAssembly engine (Sarcasm) or its JS API | [docs/wasm-engine.md](docs/wasm-engine.md) (in-place interpreter + side-table, the reference encoding + externref pin set, `WebAssembly.*` surface, `--allow=wasm`); score in [wasm-results.md](wasm-results.md); perf baselines in [wasm-bench-results.md](wasm-bench-results.md) |
 | Touch the JIT tiers (Bistromath / Ohaimark / Spasm) or the codegen substrate | [docs/jit.md](docs/jit.md) (tier architecture, the frame-identity rule, data-driven ICs, shared `src/runtime/jit/` substrate + the JS/wasm reuse boundary, the JS↔wasm call-boundary thunks (jit.md §7.1), executable-memory mechanics, differential verification gates) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |
+| See why the remaining engine-gap failures are by-design | [docs/test262-gap-audit.md](docs/test262-gap-audit.md) (per-fixture audit — sloppy-via-dynamic-code and Annex-B-in-body classes the path/flag classifier can't see; don't re-triage these) |
 | Measure perf (micros) | `zig build bench` (or `/perf`); design in [docs/benchmarking.md](docs/benchmarking.md) |
 | Find a hot function | `tools/profile.sh "<filter>"` (or `/profile`); requires `samply` |
 | See engine memory shape | `zig build test262 -- --filter=<x> --mem-summary --top-alloc=10` (engine-side counters) |

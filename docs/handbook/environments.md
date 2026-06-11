@@ -136,11 +136,13 @@ the function's body env and the outer captured env:
   import-binding TypeError path) so `G = 1` from inside the body
   throws TypeError at runtime per §8.1.1.1.4 step 9.b.
 
-The compile-time `const` reassignment diagnostic
-(`assignment_to_const`) skips when `is_fn_expr_name = true` —
-the spec rejects at PutValue (runtime), not at parse, so user
-code can `try { G = 1; } catch (e) { assert(e instanceof TypeError) }`
-from inside the body.
+Every non-init `const` write lowers to `throw_assign_const` —
+the spec rejects at PutValue (runtime, §8.1.1.1.4 step 4), not at
+parse, in every position (an earlier design upgraded same-scope
+cases to a compile-time error; the depth heuristic it needed was
+unreliable in class bodies and module mode, so the eager check is
+gone). User code can `try { G = 1; } catch (e) { assert(e
+instanceof TypeError) }` from inside the body.
 
 ## Module environments
 
