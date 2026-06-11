@@ -334,6 +334,17 @@ pub const Parser = struct {
             if (in_prologue) {
                 if (markIfDirective(&stmt)) |_| {} else in_prologue = false;
             }
+            // UsingDeclaration early error — a Syntax Error when the
+            // goal symbol is Script and the declaration sits directly
+            // in the ScriptBody StatementList (eval code parses at the
+            // Script goal, so this covers `eval('using x = …')` too;
+            // module top level and any nested Block / body stay legal).
+            if (source_kind != .module and stmt == .lexical and
+                (stmt.lexical.kind == .using_ or stmt.lexical.kind == .await_using_))
+            {
+                try self.report(.using_at_script_top_level, stmt.lexical.span);
+                return error.ParseError;
+            }
             try body.append(self.arena, stmt);
         }
         const end: u32 = self.current.span.end;

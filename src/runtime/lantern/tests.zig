@@ -12974,3 +12974,13 @@ test "JSON.stringify: BigInt with a toJSON method serializes through it" {
         \\JSON.stringify({ a: 1n }) + "|" + JSON.stringify(2n) + "|" + JSON.stringify(Object(3n));
     , "{\"a\":\"1\"}|\"2\"|\"3\"");
 }
+
+test "Object.getOwnPropertyDescriptors accepts a function target" {
+    // §20.1.2.9 step 1 — ToObject(O): a function is already an
+    // object; the walk returns its own keys (length, name, …).
+    try expectScriptStringWithBuiltins(
+        \\function pick(a, b) { return a; }
+        \\const d = Object.getOwnPropertyDescriptors(pick);
+        \\"" + d.length.value + "," + d.name.value + "," + d.length.configurable;
+    , "2,pick,true");
+}

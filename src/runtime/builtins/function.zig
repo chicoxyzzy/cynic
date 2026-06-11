@@ -731,13 +731,12 @@ fn createDynamicFunction(realm: *Realm, this_value: Value, args: []const Value, 
     // §20.2.1.1.1 steps 8-16 — split args into parameter strings (all
     // but the last) and the body (the last, or "" when no args). Each
     // is coerced via §7.1.17 ToString (`stringifyArg`), which throws
-    // TypeError on a Symbol and fires a user `toString` per spec.
-    const body_str: []const u8 = if (args.len == 0)
-        ""
-    else
-        (try intrinsics.stringifyArg(realm, args[args.len - 1])).flatBytes();
-
-    // Build the comma-joined parameter list from args[0 .. len-1].
+    // TypeError on a Symbol and fires a user `toString` per spec —
+    // PARAMETERS FIRST, in argument order, then bodyArg (steps 9-13),
+    // so a throwing param-toString wins over a throwing body-toString.
+    // Copying each param into `params_buf` (rather than borrowing the
+    // JSString bytes) also keeps no heap slice live across the next
+    // user `toString` re-entry.
     var params_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer params_buf.deinit(realm.allocator);
     if (args.len > 1) {
@@ -747,6 +746,11 @@ fn createDynamicFunction(realm: *Realm, this_value: Value, args: []const Value, 
             params_buf.appendSlice(realm.allocator, ps.flatBytes()) catch return error.OutOfMemory;
         }
     }
+
+    const body_str: []const u8 = if (args.len == 0)
+        ""
+    else
+        (try intrinsics.stringifyArg(realm, args[args.len - 1])).flatBytes();
 
     // §20.2.1.1.1 step 22 — assemble the source. The wrapping parens
     // make it an expression whose completion value is the function.

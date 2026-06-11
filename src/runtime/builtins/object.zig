@@ -2396,6 +2396,36 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
         heap_mod.taggedObject(try intrinsics.toObjectThis(realm, raw))
     else
         raw;
+    // §17 — Function objects are also ordinary objects; walk their
+    // own keys directly (the JSFunction heap struct isn't a JSObject
+    // so the plain-object path below can't accept it). Each key
+    // routes through the singular GOPD, which handles functions.
+    if (heap_mod.valueAsFunction(target)) |fn_obj| {
+        const fout = realm.heap.allocateObject() catch return error.OutOfMemory;
+        realm.heap.setObjectPrototype(fout, realm.intrinsics.object_prototype);
+        const fscope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer fscope.close();
+        fscope.push(target) catch return error.OutOfMemory;
+        fscope.push(heap_mod.taggedObject(fout)) catch return error.OutOfMemory;
+        var fit = fn_obj.properties.iterator();
+        while (fit.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (std.mem.startsWith(u8, key, "__cynic_")) continue;
+            const k_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+            const key_arg: Value = if (isSymbolKey(key))
+                if (realm.heap.symbolForKey(key)) |sym| heap_mod.taggedSymbol(sym) else Value.fromString(k_str)
+            else
+                Value.fromString(k_str);
+            const inner_args = [_]Value{ target, key_arg };
+            const desc = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &inner_args);
+            if (desc.isUndefined()) continue;
+            fout.set(realm.allocator, k_str.flatBytes(), desc) catch return error.OutOfMemory;
+            if (fout.ownDataContains(k_str.flatBytes())) {
+                fout.key_anchors.append(realm.allocator, k_str) catch return error.OutOfMemory;
+            }
+        }
+        return heap_mod.taggedObject(fout);
+    }
     const obj = heap_mod.valueAsPlainObject(target) orelse return throwTypeError(realm, "Object.getOwnPropertyDescriptors target is not an object");
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(out, realm.intrinsics.object_prototype);

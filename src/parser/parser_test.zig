@@ -4092,3 +4092,21 @@ test "Parser: doubled split/regex token storm terminates with error" {
         \\try { var r = "x".split(/try { var r = "x".split(/\d/); } catch(e) { print('THROW "x".split(/\d/) => ' + e); }
     );
 }
+
+test "using: not allowed at the top level of a Script" {
+    // UsingDeclaration early error — a Syntax Error when the goal
+    // symbol is Script and the declaration is not contained within a
+    // Block / ForStatement / FunctionBody / ClassStaticBlockBody / …
+    // (explicit-resource-management; module top level stays legal).
+    try expectParseError("using x = null;");
+    try expectParseError("await using y = null;");
+}
+
+test "using: allowed at module top level and inside script blocks" {
+    // Positive shapes: just assert they parse without diagnostics.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    _ = try parseModule(arena.allocator(), "using x = null;", null);
+    _ = try parseScript(arena.allocator(), "{ using x = null; }", null);
+    _ = try parseScript(arena.allocator(), "function f() { using x = null; }", null);
+}

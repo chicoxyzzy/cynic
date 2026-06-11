@@ -96,7 +96,7 @@ pub fn bodyIsRegisterSafe(
 /// call whose callee is the bare identifier `eval`. Used as a
 /// rejection condition by `paramsCanBeRegisters` — see the
 /// matching call site for the §19.2.1 motivation.
-fn statementHasDirectEvalCall(source: []const u8, s: *const ast.statement.Statement) bool {
+pub fn statementHasDirectEvalCall(source: []const u8, s: *const ast.statement.Statement) bool {
     return switch (s.*) {
         .expression => |es| expressionHasDirectEvalCall(source, &es.expression),
         .block => |b| blk: {
@@ -165,7 +165,7 @@ fn statementHasDirectEvalCall(source: []const u8, s: *const ast.statement.Statem
     };
 }
 
-fn expressionHasDirectEvalCall(source: []const u8, e: *const Expression) bool {
+pub fn expressionHasDirectEvalCall(source: []const u8, e: *const Expression) bool {
     return switch (e.*) {
         .call => |c| blk: {
             // §19.2.1 — direct eval requires the callee to be the

@@ -449,6 +449,9 @@ pub const DirectEvalScope = struct {
     /// `arguments` reference stays ordinary code (a runtime
     /// ReferenceError at worst, never an early SyntaxError).
     in_field_initializer: bool = false,
+    /// §13.3.1.1 — the call site is inside non-arrow function code,
+    /// so the eval body may contain `new.target`.
+    in_function_code: bool = false,
 };
 
 pub const Chunk = struct {

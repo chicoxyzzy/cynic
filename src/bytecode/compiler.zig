@@ -256,6 +256,12 @@ pub const Compiler = struct {
     /// has no own `arguments`), matching the spec's ContainsArguments
     /// recursion.
     in_field_initializer: bool = false,
+    /// §13.3.1.1 — `new.target` is legal in direct-eval code when the
+    /// eval call site is contained in function code that is not the
+    /// function code of an ArrowFunction. True while compiling any
+    /// non-arrow function / method / constructor body; arrows inherit
+    /// (their eval resolves the enclosing function's new.target).
+    in_function_code: bool = false,
     /// True when compiling eval code (§3.8.3.7 PerformShadowRealmEval
     /// today; §19.2.1.1 PerformEval when `eval` ships). Top-level
     /// **lexical** declarations (`let` / `const` / `class`) then bind
@@ -3950,6 +3956,9 @@ pub const Compiler = struct {
             // block so the eval body applies the ContainsArguments early
             // error.
             .in_field_initializer = self.in_field_initializer,
+            // §13.3.1.1 — whether this call site sits in non-arrow
+            // function code (new.target legality in the eval body).
+            .in_function_code = self.in_function_code,
         }) catch |err| {
             self.allocator.free(bindings);
             return err;
@@ -7856,6 +7865,7 @@ pub const Compiler = struct {
         // this field initializer applies the ContainsArguments early
         // error. Set the flag for the whole sub-compile.
         const saved_in_field_initializer = self.in_field_initializer;
+        const saved_in_function_code = self.in_function_code;
 
         self.builder = self.freshSubBuilder();
         var fn_scope: Scope = .{ .parent = self.scope, .kind = .function };
@@ -7883,6 +7893,7 @@ pub const Compiler = struct {
                 self.current_loop = saved_current_loop;
                 self.completion_reg = saved_completion_reg;
                 self.in_field_initializer = saved_in_field_initializer;
+                self.in_function_code = saved_in_function_code;
             }
         }
 
@@ -7906,6 +7917,7 @@ pub const Compiler = struct {
         self.current_loop = saved_current_loop;
         self.completion_reg = saved_completion_reg;
         self.in_field_initializer = saved_in_field_initializer;
+        self.in_function_code = saved_in_function_code;
 
         return inner_chunk;
     }
@@ -7928,6 +7940,7 @@ pub const Compiler = struct {
         // §sec-performeval-rules-in-initializer — a direct eval inside
         // this static block applies the ContainsArguments early error.
         const saved_in_field_initializer = self.in_field_initializer;
+        const saved_in_function_code = self.in_function_code;
         // §15.10 / §14.13 / §9.5.4 — the static block runs as its
         // own function-shape chunk at class-definition time, so
         // `return` / `break` / `continue` / inline-finally inside
@@ -7973,6 +7986,7 @@ pub const Compiler = struct {
                 self.current_loop = saved_current_loop;
                 self.completion_reg = saved_completion_reg;
                 self.in_field_initializer = saved_in_field_initializer;
+                self.in_function_code = saved_in_function_code;
                 self.in_tail_position = saved_in_tail_position;
                 self.try_with_handler_depth = saved_try_with_handler_depth;
                 self.pending_labels = saved_pending_labels;
@@ -8015,6 +8029,7 @@ pub const Compiler = struct {
         self.current_loop = saved_current_loop;
         self.completion_reg = saved_completion_reg;
         self.in_field_initializer = saved_in_field_initializer;
+        self.in_function_code = saved_in_function_code;
         self.in_tail_position = saved_in_tail_position;
         self.try_with_handler_depth = saved_try_with_handler_depth;
         self.pending_labels = saved_pending_labels;
@@ -8265,6 +8280,7 @@ pub const Compiler = struct {
         // method body introduces its own `arguments`, so the "eval inside
         // an initializer" early error does not reach into it.
         const saved_in_field_initializer = self.in_field_initializer;
+        const saved_in_function_code = self.in_function_code;
         // §15.10 / §14.13 / §9.5.4 — these all anchor to the enclosing
         // function: a `return` / `break` / `continue` / inline-finally
         // emitted inside a method body must not walk an OUTER function's
@@ -8321,6 +8337,7 @@ pub const Compiler = struct {
         self.current_is_async = is_async;
         self.current_params_register_only = params_register_only;
         self.in_field_initializer = false;
+        self.in_function_code = true;
 
         var inner_finished = false;
         defer {
@@ -8338,6 +8355,7 @@ pub const Compiler = struct {
                 self.current_is_async = saved_is_async;
                 self.current_params_register_only = saved_params_register_only;
                 self.in_field_initializer = saved_in_field_initializer;
+                self.in_function_code = saved_in_function_code;
                 self.in_tail_position = saved_in_tail_position;
                 self.try_with_handler_depth = saved_try_with_handler_depth;
                 self.pending_labels = saved_pending_labels;
@@ -8436,6 +8454,7 @@ pub const Compiler = struct {
         self.current_is_async = saved_is_async;
         self.current_params_register_only = saved_params_register_only;
         self.in_field_initializer = saved_in_field_initializer;
+        self.in_function_code = saved_in_function_code;
         self.in_tail_position = saved_in_tail_position;
         self.try_with_handler_depth = saved_try_with_handler_depth;
         self.pending_labels = saved_pending_labels;
@@ -11905,6 +11924,11 @@ pub const Compiler = struct {
     /// state and skips a vanishingly rare pattern.
     fn bodyCounterHazard(self: *Compiler, stmt: *const ast.statement.Statement, name: []const u8) CompileError!bool {
         if (self.bodyHasClosure(stmt)) return true;
+        // §19.2.1.3 — a possible direct eval in the body resolves the
+        // counter through the caller's lexical environment, so the
+        // counter cannot live in a register. Mirrors
+        // `bodyIsRegisterSafe`'s rejection.
+        if (@import("param_register_scan.zig").statementHasDirectEvalCall(self.source, stmt)) return true;
         return self.stmtCounterHazard(stmt, name);
     }
 
@@ -12346,6 +12370,28 @@ pub const Compiler = struct {
                         if (s.update) |*u| {
                             if (try self.exprMentionsNamesInNestedFn(u, names_buf.items)) captured = true;
                         }
+                    }
+                    // §19.2.1.3 — a possible direct eval anywhere in
+                    // the loop (head inits, test, update, body) reads
+                    // the caller's lexical environment, so the loop
+                    // bindings must stay env-allocated (and eval can
+                    // itself create capturing closures, so the
+                    // per-iteration env stays too). Mirrors
+                    // `bodyIsRegisterSafe`'s rejection.
+                    if (!captured) {
+                        const prs = @import("param_register_scan.zig");
+                        for (ld.declarators) |di| {
+                            if (di.init) |*ie| {
+                                if (prs.expressionHasDirectEvalCall(self.source, ie)) captured = true;
+                            }
+                        }
+                        if (s.test_) |*t| {
+                            if (prs.expressionHasDirectEvalCall(self.source, t)) captured = true;
+                        }
+                        if (s.update) |*u| {
+                            if (prs.expressionHasDirectEvalCall(self.source, u)) captured = true;
+                        }
+                        if (!captured and prs.statementHasDirectEvalCall(self.source, s.body)) captured = true;
                     }
                     per_iter_env = captured;
                     if (!captured) {
@@ -13404,7 +13450,9 @@ fn compileFunctionTemplateExtNamed(
     // initializer context (it has no own `arguments`), so it keeps the
     // flag and a direct eval inside the arrow still applies the rule.
     const saved_in_field_initializer = self.in_field_initializer;
+    const saved_in_function_code = self.in_function_code;
     if (!is_arrow) self.in_field_initializer = false;
+    if (!is_arrow) self.in_function_code = true;
 
     // Reset to a fresh inner state.
     self.builder = self.freshSubBuilder();
@@ -13524,6 +13572,7 @@ fn compileFunctionTemplateExtNamed(
             self.finally_chain = saved_finally_chain;
             self.current_dispose_stack = saved_dispose_stack;
             self.in_field_initializer = saved_in_field_initializer;
+            self.in_function_code = saved_in_function_code;
         }
     }
 
@@ -13685,6 +13734,7 @@ fn compileFunctionTemplateExtNamed(
     self.finally_chain = saved_finally_chain;
     self.current_dispose_stack = saved_dispose_stack;
     self.in_field_initializer = saved_in_field_initializer;
+    self.in_function_code = saved_in_function_code;
 
     const sp_len = computeSpecLength(params);
     return self.builder.addFunctionTemplate(.{

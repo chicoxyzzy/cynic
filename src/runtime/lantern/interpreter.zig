@@ -648,7 +648,7 @@ pub fn evaluateDirectEval(
     const program = parser_mod.parseDirectEval(aa, stable, &diags, .{
         .allow_super_property = has_home,
         .allow_super_call = ctx.is_derived_ctor,
-        .allow_new_target = has_home or ctx.is_derived_ctor,
+        .allow_new_target = has_home or ctx.is_derived_ctor or snapshot.in_function_code,
         .private_names = private_names_buf.items,
         // §sec-performeval-rules-in-initializer — when the call site is a
         // class field initializer / static block, the eval body rejects

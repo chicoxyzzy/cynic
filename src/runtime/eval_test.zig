@@ -747,3 +747,70 @@ test "direct eval with an empty spread returns undefined" {
     );
     try testing.expectEqual(@as(i32, 1), v.asInt32());
 }
+
+fn expectStringAllow(source: []const u8, want: []const u8) !void {
+    // Compare while the realm (and its heap strings) are still alive —
+    // returning the Value out of the realm's scope would dangle.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_eval = true;
+    try realm.installBuiltins();
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, source);
+    const v = switch (outcome) {
+        .value, .yielded => |val| val,
+        .thrown => return error.EvalThrewUnexpectedly,
+    };
+    if (!v.isString()) return error.EvalResultNotString;
+    const js: *@import("string.zig").JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings(want, js.flatBytes());
+}
+
+test "CreateDynamicFunction: parameter args stringify before the body arg" {
+    // §20.2.1.1.1 steps 9-13 — the parameter strings are coerced via
+    // ToString in argument order BEFORE bodyArg, so a throwing
+    // param-toString wins over a throwing body-toString.
+    try expectStringAllow(
+        \\var p = { toString: function () { throw "param"; } };
+        \\var b = { toString: function () { throw "body"; } };
+        \\var r = "no-throw";
+        \\try { new Function(p, b); } catch (e) { r = e; }
+        \\r;
+    , "param");
+}
+
+test "direct eval: new.target is legal inside any non-arrow function code" {
+    // §13.3.1.1 — `new.target` is a Syntax Error UNLESS the source is
+    // eval code processed by a direct eval contained in function code
+    // that is not the function code of an ArrowFunction. A plain
+    // function qualifies; an arrow inside one inherits.
+    try expectStringAllow(
+        \\function f() { return "" + eval("new.target"); }
+        \\function g() { this.r = typeof (() => eval("new.target"))(); return undefined; }
+        \\var viaCall = (function () { return typeof (() => eval("new.target"))(); })();
+        \\f() + "," + viaCall + "," + new g().r;
+    , "undefined,undefined,function");
+}
+
+test "direct eval: new.target at script top level stays a SyntaxError" {
+    try expectStringAllow(
+        \\var r = "no-throw";
+        \\try { (0, eval)("new.target"); } catch (e) { r = e.constructor.name; }
+        \\var r2 = "no-throw";
+        \\try { eval("new.target"); } catch (e) { r2 = e.constructor.name; }
+        \\r + "," + r2;
+    , "SyntaxError,SyntaxError");
+}
+
+test "direct eval: reads a for-let loop binding and a register-promotable local" {
+    // §19.2.1.3 — direct eval code resolves bindings in the caller's
+    // lexical environment, so any binding visible at the call site
+    // must stay env-addressable: a possible direct eval poisons
+    // register promotion (for-let counter fusion and body-local
+    // let/const promotion alike).
+    try expectStringAllow(
+        \\var got = "";
+        \\for (let a = 7; a < 8; a++) { got += eval("a"); }
+        \\function f() { const c = 41; return eval("c + 1"); }
+        \\got + "," + f();
+    , "7,42");
+}

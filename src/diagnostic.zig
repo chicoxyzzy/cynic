@@ -60,6 +60,10 @@ pub const Code = enum {
 
     // ── Parser ─────────────────────────────────────────────────────────
     unexpected_token,
+    /// UsingDeclaration at the top level of a Script (goal-symbol
+    /// early error; legal at module top level and inside any Block /
+    /// FunctionBody / ClassStaticBlockBody / …).
+    using_at_script_top_level,
     /// `a && b ?? c` without parens — §13.13 forbids mixing logical
     /// operators of different kinds without grouping.
     mixed_logical_operators,
@@ -152,6 +156,7 @@ pub const Code = enum {
             .invalid_identifier_escape,
             .escape_in_reserved_word,
             .unexpected_token,
+            .using_at_script_top_level,
             .mixed_logical_operators,
             .delete_of_unqualified_identifier,
             .delete_of_private_name,

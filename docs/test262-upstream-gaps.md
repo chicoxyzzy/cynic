@@ -1207,3 +1207,41 @@ the corpus under the relevant section's directory before adding.
   it as a SyntaxError; the value is catching the host-abort
   variant. No existing fixture pairs a parsed StatementListItem
   with a trailing lone backslash inside a nested block.
+
+### Const reassignment silently succeeded for register-promoted locals
+
+- **Fixed in:** `30dca94` (2026-06-11)
+- **Spec:** §8.1.1.1.4 SetMutableBinding step 4 (immutable binding →
+  TypeError when S is true; const bindings are created
+  strict-immutable per §14.3.1.1)
+- **Reproducer:**
+
+  ```js
+  function f() {
+    const a = 1;
+    try { a = 2; } catch (e) { return e instanceof TypeError; }
+    return "no-throw: " + a;
+  }
+  f();
+  ```
+
+- **Before fix:** when an engine promotes non-captured function-body
+  `let`/`const` bindings into registers (Cynic's body-local register
+  promotion; analogous fast paths exist in production tiers), the
+  promoted store path bypassed the const-immutability lowering: the
+  write landed in the register and `f()` returned `"no-throw: 2"`.
+  The corpus didn't catch it because the existing
+  `const-invalid-assignment` shapes either sit at top level / in
+  blocks (not promotable positions) or assert the error from a
+  *non-promoted* context.
+- **After fix:** every non-init store to a const binding lowers to the
+  runtime TypeError regardless of storage (env slot, global slot, or
+  promoted register), ordered after the §8.1.1.1.4 step 2
+  uninitialized-binding ReferenceError.
+- **Suggested fixture shape:** runtime positive under
+  `language/statements/const/` — a *function-body* const with no
+  closure capture, reassigned inside `assert.throws(TypeError, …)`,
+  plus a sibling where the reassignment sits in a nested block of the
+  same function. The function-body placement is the load-bearing part:
+  it puts the binding in the exact position register-promoting engines
+  optimize.
