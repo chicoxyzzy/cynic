@@ -2042,6 +2042,43 @@ test "jit bistromath: unary negate/bit_not/logical_not compile with the edge tie
     );
 }
 
+test "jit bistromath: class methods with body locals compile" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // Method bodies get the same non-captured let/const register
+    // promotion as plain functions (docs/jit.md §12 3g) — without
+    // it every method with a local is env-resident and the tier
+    // never sees it.
+    const src =
+        \\class A { step(n) { let t = n + 1; let u = t * 2; return u - n; } }
+        \\var a = new A();
+        \\let i = 0;
+        \\while (i < 300) { a.step(i); i = i + 1; }
+        \\a.step(10);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 12), v.asInt32());
+    // Method chunks live on the class template, not in
+    // function_templates.
+    const step_chunk = &chunk.class_templates[0].instance_methods[0].chunk;
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        step_chunk.jit_state.?.tier,
+    );
+}
+
 test "jit bistromath calls: method calls bind `this` through the tier" {
     if (comptime !supported) return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

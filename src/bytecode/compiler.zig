@@ -8099,6 +8099,19 @@ pub const Compiler = struct {
             false,
             false,
         );
+        // Body-locals-to-register promotion — same predicate as the
+        // function / method paths (constructors are never generators
+        // or async). Constructors themselves run in Lantern (the
+        // tier refuses construct frames) but the interpreter still
+        // skips the env allocation and chain walks.
+        const locals_register_only = blk: {
+            if (!bodyIsRegisterSafe(self.source, body_stmts, false)) break :blk false;
+            var promotable: usize = 0;
+            for (body_stmts) |*st| {
+                if (topLevelLexIsPromotable(st)) promotable += st.lexical.declarators.len;
+            }
+            break :blk promotable > 0 and params.len + promotable <= 192;
+        };
         // Function-entry env elision — same logic as the function /
         // method paths. A user-written `constructor` with no params,
         // no `arguments`, and no body decls (still runs
@@ -8109,7 +8122,7 @@ pub const Compiler = struct {
             if (params_register_only) &.{} else params,
             body_stmts,
             false,
-            false,
+            locals_register_only,
         );
         self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
@@ -8204,7 +8217,7 @@ pub const Compiler = struct {
         // hoistVarAndFunctions + emitVarInits, `class C { constructor() {
         // var x = 1; this.x = x; } }` raised CompileError because `x`
         // was undeclared at the use site.
-        try self.hoistLetConst(body_stmts, false);
+        try self.hoistLetConst(body_stmts, locals_register_only);
         try self.hoistVarAndFunctions(body_stmts);
         try self.emitVarInits(span);
         // Same two-pass order as the function path: function
@@ -8319,6 +8332,19 @@ pub const Compiler = struct {
             is_generator,
             is_async,
         );
+        // Body-locals-to-register promotion — the same predicate
+        // and cap as `compileFunctionTemplateExtNamed`; methods
+        // follow the identical §10.2.10 shape, so a register-safe
+        // body's top-level let/const live in registers (and the
+        // chunk becomes Bistromath-compilable, docs/jit.md §12 3g).
+        const locals_register_only = !is_generator and !is_async and blk: {
+            if (!bodyIsRegisterSafe(self.source, body_stmts, false)) break :blk false;
+            var promotable: usize = 0;
+            for (body_stmts) |*st| {
+                if (topLevelLexIsPromotable(st)) promotable += st.lexical.declarators.len;
+            }
+            break :blk promotable > 0 and params.len + promotable <= 192;
+        };
         // Function-entry env elision — same logic as
         // `compileFunctionTemplateExtNamed`. Methods follow the
         // same §10.2.10 FunctionDeclarationInstantiation shape,
@@ -8329,7 +8355,7 @@ pub const Compiler = struct {
             if (params_register_only) &.{} else params,
             body_stmts,
             false,
-            false,
+            locals_register_only,
         );
         self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
@@ -8420,7 +8446,7 @@ pub const Compiler = struct {
         }
 
         // Body.
-        try self.hoistLetConst(body_stmts, false);
+        try self.hoistLetConst(body_stmts, locals_register_only);
         try self.hoistVarAndFunctions(body_stmts);
         try self.emitVarInits(span);
         for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);

@@ -853,10 +853,13 @@ useful:
        `sta_env` fixed-depth walks (closures as callees; the
        env store runs `storeEnvSlot` — barrier + store —
        through a C shim per §9; unroll capped at depth 8)
-       shipped 2026-06. Still open: promotion extended to
-       methods / constructors / `var`; compiled handler
-       dispatch so hot try-loops stop tier-down ping-ponging.
-       Generators/async stay last.
+       shipped 2026-06, as did body-local promotion for methods
+       and constructors (the same predicate and cap as plain
+       functions; constructors still run in Lantern — the tier
+       refuses construct frames — but skip the env allocation
+       and chain walks). Still open: `var` promotion; compiled
+       handler dispatch so hot try-loops stop tier-down
+       ping-ponging. Generators/async stay last.
 
    Step exit: the §10 gates green with the tier doing real work —
    full-corpus differential compared as pass-*sets* (a sorted

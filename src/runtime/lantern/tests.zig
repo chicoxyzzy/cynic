@@ -12841,6 +12841,29 @@ test "register locals: a captured let stays on the env path" {
     , 5);
 }
 
+test "register locals: method-body promotion keeps §13.3.1 TDZ" {
+    try expectScriptStringWithBuiltins(
+        \\class C { m(b) { if (b) { return q; } let q = 1; return q; } }
+        \\let r = "no-throw";
+        \\try { new C().m(true); } catch (e) { r = e.constructor.name; }
+        \\r;
+    , "ReferenceError");
+}
+
+test "register locals: a method's captured let stays on the env path" {
+    try expectScriptIntWithBuiltins(
+        \\class C { m() { let c = 5; return () => c; } }
+        \\new C().m()();
+    , 5);
+}
+
+test "register locals: constructor-body promotion computes correctly" {
+    try expectScriptIntWithBuiltins(
+        \\class P { constructor(x) { const k = 2; let acc = 0; let i = 0; while (i < x) { acc = acc + k; i = i + 1; } this.v = acc; } }
+        \\new P(10).v;
+    , 20);
+}
+
 test "register locals: promoted let/const compute correctly" {
     try expectScriptInt(
         \\function sum(n) {
