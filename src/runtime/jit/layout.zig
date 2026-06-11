@@ -50,6 +50,13 @@ pub const realm = struct {
         @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "target");
     pub const globals_decl_revision: usize =
         @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "decl_revision");
+    /// The §9.1.1.4 declarative-record slot caches (slice pointers
+    /// at offset 0 — the same layout assumption the proof test
+    /// witnesses for `overflow_slots`).
+    pub const globals_decl_slots_ptr: usize =
+        @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "decl_slots");
+    pub const globals_decl_const_flags_ptr: usize =
+        @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "decl_const_flags");
 };
 
 /// `JSObject` — the property-IC fast path's contact surface. Slots
@@ -99,15 +106,16 @@ comptime {
     // The scaled 64-bit loads (`ldr Xt, [Xn, #imm]`) need 8-aligned
     // offsets; the slot accessors additionally index Value arrays.
     for ([_]usize{
-        frame.ip,                  frame.accumulator,
-        frame.running_realm,       frame.this_value,
-        frame.super_called_cell,   object.shape,
-        object.prototype,          object.inline_slots,
-        object.overflow_items_ptr, ic_cell.shape,
-        ic_cell.proto,             ic_cell.proto_shape,
-        ic_cell.proto_rev,         call_ic_cell.callee,
-        realm.step_budget,         realm.proto_revision_counter,
-        realm.globals_target,      realm.globals_decl_revision,
+        frame.ip,                     frame.accumulator,
+        frame.running_realm,          frame.this_value,
+        frame.super_called_cell,      object.shape,
+        object.prototype,             object.inline_slots,
+        object.overflow_items_ptr,    ic_cell.shape,
+        ic_cell.proto,                ic_cell.proto_shape,
+        ic_cell.proto_rev,            call_ic_cell.callee,
+        realm.step_budget,            realm.proto_revision_counter,
+        realm.globals_target,         realm.globals_decl_revision,
+        realm.globals_decl_slots_ptr, realm.globals_decl_const_flags_ptr,
     }) |off| std.debug.assert(off % 8 == 0);
     // `slot` is a u32 field — 4-aligned is enough (loaded via ldr-w
     // by the emitters... which use the 64-bit scaled form on an

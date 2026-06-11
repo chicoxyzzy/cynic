@@ -426,6 +426,7 @@ const Compiler = struct {
                 .lda_global, .lda_global_or_undef,
                 .lda_this, .call, .call_method, .call_property,
                 .tail_call, .tail_call_method,
+                .lda_global_slot, .sta_global_slot, .sta_global_slot_init,
                 .throw_if_hole, .return_ => {},
                 // zig fmt: on
                 .make_environment => {
@@ -664,6 +665,60 @@ const Compiler = struct {
                     // Jump-to-entry for the self-recursive case is
                     // the recorded follow-up (docs/jit.md §12 3e).
                     try m.jump(try self.tdFor(bc));
+                },
+                .lda_global_slot => {
+                    // §9.1.1.4 declarative-record slot read through
+                    // the executing frame's realm; the absolute
+                    // index (chunk base + slot) is compile-time.
+                    // TDZ is the compiler-emitted throw_if_hole
+                    // that follows.
+                    const abs_idx: usize = @as(usize, self.chunk.global_lexical_base) + readU32(code, i + 1);
+                    var have_gr = Masm.Label{};
+                    defer have_gr.fixups.deinit(m.gpa);
+                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.running_realm));
+                    try m.jumpCbnz(.x9, &have_gr);
+                    try m.emit(a64.movReg(.x9, realm_reg));
+                    m.bind(&have_gr);
+                    try self.loadFieldU64(.x10, .x9, layout.realm.globals_decl_slots_ptr);
+                    try self.loadFieldU64(acc_reg, .x10, abs_idx * 8);
+                },
+                .sta_global_slot_init => {
+                    // §9.1.1.4 InitializeBinding — fills the TDZ
+                    // hole; no checks by construction.
+                    const abs_idx: usize = @as(usize, self.chunk.global_lexical_base) + readU32(code, i + 1);
+                    var have_gr = Masm.Label{};
+                    defer have_gr.fixups.deinit(m.gpa);
+                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.running_realm));
+                    try m.jumpCbnz(.x9, &have_gr);
+                    try m.emit(a64.movReg(.x9, realm_reg));
+                    m.bind(&have_gr);
+                    try self.loadFieldU64(.x10, .x9, layout.realm.globals_decl_slots_ptr);
+                    try self.storeFieldU64(acc_reg, .x10, abs_idx * 8);
+                },
+                .sta_global_slot => {
+                    // §9.1.1.4 SetMutableBinding: hole (§13.3.1
+                    // TDZ) and const (§13.15.2) both tier down —
+                    // Lantern re-runs the op and raises the right
+                    // error; the hit path is a plain slot store
+                    // (the record is a GC root, no barrier).
+                    const abs_idx: usize = @as(usize, self.chunk.global_lexical_base) + readU32(code, i + 1);
+                    if (abs_idx > 4095) return error.UnsupportedOp; // ldrb imm12 ceiling
+                    const td = try self.tdFor(bc);
+                    var have_gr = Masm.Label{};
+                    defer have_gr.fixups.deinit(m.gpa);
+                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.running_realm));
+                    try m.jumpCbnz(.x9, &have_gr);
+                    try m.emit(a64.movReg(.x9, realm_reg));
+                    m.bind(&have_gr);
+                    try self.loadFieldU64(.x10, .x9, layout.realm.globals_decl_slots_ptr);
+                    try self.loadFieldU64(.x11, .x10, abs_idx * 8);
+                    try m.movImm64(.x12, Value.hole_.bits);
+                    try m.emit(a64.cmpReg(.x11, .x12));
+                    try m.jumpCond(.eq, td);
+                    try self.loadFieldU64(.x12, .x9, layout.realm.globals_decl_const_flags_ptr);
+                    try m.emit(a64.ldrbImm(.x13, .x12, @intCast(abs_idx)));
+                    try m.jumpCbnz(.x13, td);
+                    try self.storeFieldU64(acc_reg, .x10, abs_idx * 8);
                 },
                 .lda_this => {
                     // §9.1.1.3.4 GetThisBinding — the only abrupt
@@ -923,6 +978,18 @@ const Compiler = struct {
         try self.loadFieldU64(dst, realm_reg, off);
     }
 
+    /// Clobbers x13 on the big-offset path (the source register
+    /// must be preserved, unlike `loadFieldU64`'s dst-staging).
+    fn storeFieldU64(self: *Compiler, src: a64.Reg, base: a64.Reg, off: usize) CompileError!void {
+        const m = &self.m;
+        if (off <= 32760) {
+            try m.emit(a64.strImm(src, base, @intCast(off)));
+        } else {
+            try m.emit(a64.addImm(.x13, base, @intCast(off >> 12), true));
+            try m.emit(a64.strImm(src, .x13, @intCast(off & 0xFFF)));
+        }
+    }
+
     /// Clobbers x13 on the big-offset path.
     fn storeRealmU64(self: *Compiler, src: a64.Reg, off: usize) CompileError!void {
         const m = &self.m;
@@ -1103,6 +1170,10 @@ fn targetOf(after_operand: usize, off: i16) u32 {
 
 fn readI16(code: []const u8, at: usize) i16 {
     return std.mem.readInt(i16, code[at..][0..2], .little);
+}
+
+fn readU32(code: []const u8, at: usize) u32 {
+    return std.mem.readInt(u32, code[at..][0..4], .little);
 }
 
 fn readU16(code: []const u8, at: usize) u16 {
@@ -1772,6 +1843,38 @@ test "jit bistromath osr: a single-call hot loop enters mid-loop" {
     try testing.expectEqual(
         Chunk.JitState.Tier.compiled,
         templateNamed(&chunk, "big").jit_state.?.tier,
+    );
+}
+
+test "jit bistromath osr: top-level script loops enter the tier" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // The arith_loop bench fixture's own shape (docs/jit.md §12
+    // 3g): a script-chunk fused loop over a top-level `let`
+    // accumulator — `lda/sta_global_slot` against the §9.1.1.4
+    // declarative record, OSR-entered mid-run.
+    const src =
+        \\let sum = 0;
+        \\for (let i = 0; i < 60000; i++) { sum = (sum + i) | 0; }
+        \\sum;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 1_799_970_000), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        chunk.jit_state.?.tier,
     );
 }
 

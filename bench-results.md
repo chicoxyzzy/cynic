@@ -17,6 +17,21 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-11 — cynic (script chunks compile: docs/jit.md §12 3g first slice), host `Darwin 25.6.0 arm64`
+
+Top-level script chunks now compile (`lda/sta_global_slot[_init]`
+over the realm's declarative-record slot caches), so the bench
+fixtures' own top-level loops finally OSR into the tier. Two
+back-to-back pairs this time — single-pair deltas on the GC-heavy
+fixtures (string_concat, promise_chain, json_stringify) flipped
+sign between pairs and are machine drift, not signal:
+
+| bench | interp (pair 1 / 2) | `--jit` (pair 1 / 2) | verdict |
+|---|---:|---:|---|
+| arith_loop | 35.53 / 32.52 | 15.65 / 15.06 | **~2.2× — stable in both pairs** |
+| method_call | 18.19 / 18.89 | 14.41 / 13.58 | −24%, stable |
+| (all others) | — | — | flat within historic spread |
+
 ### 2026-06-11 — cynic (calls + OSR: docs/jit.md §12 3e+3f), host `Darwin 25.6.0 arm64`
 
 Same-day follow-up to the entry below — compiled calls (all three

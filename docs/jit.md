@@ -842,13 +842,19 @@ useful:
        (3g). `tail_recursion` enters per-reframe but the
        tail-call tier-down round-trip eats the win until
        jump-to-entry lands.
-   3g. **Long tail** — unary int32/bool ops; `lda_env` /
-       `sta_env` fixed-depth walks on the 3a contract
-       (nested-block lets, closures as callees, with the
-       `storeEnvSlot` barrier mirrored per §9); promotion
-       extended to methods / constructors / `var`; compiled
-       handler dispatch so hot try-loops stop tier-down
-       ping-ponging. Generators/async stay last.
+   3g. **Long tail** — script-chunk global-slot ops
+       (`lda/sta_global_slot[_init]` against per-realm
+       `decl_slots` slice caches on `GlobalBindings`, refreshed
+       at `createLexBinding`, the only growth site) shipped
+       2026-06: top-level loops OSR-enter, and the arith_loop
+       bench fixture runs ~2.2× faster under `--jit`. Still
+       open: unary int32/bool ops; `lda_env` / `sta_env`
+       fixed-depth walks on the 3a contract (nested-block lets,
+       closures as callees, with the `storeEnvSlot` barrier
+       mirrored per §9); promotion extended to methods /
+       constructors / `var`; compiled handler dispatch so hot
+       try-loops stop tier-down ping-ponging. Generators/async
+       stay last.
 
    Step exit: the §10 gates green with the tier doing real work —
    full-corpus differential compared as pass-*sets* (a sorted

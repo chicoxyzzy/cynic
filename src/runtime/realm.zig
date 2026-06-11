@@ -285,6 +285,13 @@ pub const GlobalBindings = struct {
     /// TypeError on write. Keyed by the same string slices as
     /// `decl_env`; lifetimes are tied to the script chunk.
     decl_consts: std.StringArrayHashMapUnmanaged(bool) = .empty,
+    /// Stable views of `decl_env.values()` / `decl_consts.values()`
+    /// for compiled code's slot ops (docs/jit.md §4.4) — machine
+    /// code loads a slice pointer instead of walking ArrayHashMap
+    /// internals. Refreshed in `createLexBinding`, the only growth
+    /// site; in-place slot writes never move the backing array.
+    decl_slots: []Value = &.{},
+    decl_const_flags: []bool = &.{},
     /// §9.1.1.4 [[VarNames]] — the set of names that have been
     /// declared as top-level `var` or `function` in any script
     /// run against this realm. Distinct from the object env's
@@ -625,6 +632,8 @@ pub const GlobalBindings = struct {
             self.decl_revision +%= 1;
         }
         try self.decl_consts.put(allocator, key, is_const);
+        self.decl_slots = self.decl_env.values();
+        self.decl_const_flags = self.decl_consts.values();
     }
 
     pub fn deinit(self: *GlobalBindings, allocator: std.mem.Allocator) void {
