@@ -32,13 +32,15 @@
 # proves the plumbing.
 #
 # Usage:
-#   tools/bench-cross.sh                 # interpreter tier, table to stdout
-#   tools/bench-cross.sh --tier jit      # full-speed tier: Cynic default
-#                                        # (Bistromath) vs peers with their
-#                                        # JITs ENABLED — a separate table,
-#                                        # never mixed with the interpreter
-#                                        # one (different fairness baseline)
-#   tools/bench-cross.sh -o results.md   # also write table to a file
+#   tools/bench-cross.sh                 # BOTH tiers (two separate tables)
+#   tools/bench-cross.sh --tier interp   # interpreter tier only
+#   tools/bench-cross.sh --tier jit      # full-speed tier only: Cynic
+#                                        # default (Bistromath) vs peers
+#                                        # with their JITs ENABLED. The two
+#                                        # tiers are different fairness
+#                                        # baselines — always separate
+#                                        # tables, never one merged table.
+#   tools/bench-cross.sh -o results.md   # also write table(s) to a file
 #   tools/bench-cross.sh --runs 5        # override timed-run count
 #
 # Does NOT touch bench-results.md (that file is the single-engine
@@ -63,7 +65,7 @@ RUNS=10
 WARMUP=1
 SPREAD_LIMIT=10   # percent
 OUT_FILE=""
-TIER="interp"
+TIER="both"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -111,6 +113,22 @@ register() {
   ENGINE_CMDS+=("$bin $*")
   echo "  found $name  ->  $bin $*" >&2
 }
+
+# `both` composes the two single-tier runs — interpreter table
+# first (the headline), full-speed second — into one artifact with
+# two separately-headed sections.
+if [ "$TIER" = "both" ]; then
+  tmp_i="$(mktemp)" tmp_j="$(mktemp)"
+  trap 'rm -f "$tmp_i" "$tmp_j"' EXIT
+  "$0" --tier interp --runs "$RUNS" > "$tmp_i"
+  "$0" --tier jit --runs "$RUNS" > "$tmp_j"
+  if [ -n "$OUT_FILE" ]; then
+    { cat "$tmp_i"; echo; cat "$tmp_j"; } > "$OUT_FILE"
+    echo "wrote $OUT_FILE" >&2
+  fi
+  cat "$tmp_i"; echo; cat "$tmp_j"
+  exit 0
+fi
 
 echo "Discovering $TIER-tier engines ..." >&2
 
