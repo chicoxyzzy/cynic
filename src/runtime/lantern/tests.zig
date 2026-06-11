@@ -2457,6 +2457,30 @@ test "later: prefix ++obj.x returns new" {
 // fall through to the full path. Written red-first against the
 // slow-path-only interpreter.
 
+test "flat into a plain species target keeps the shape invariant under GC" {
+    // §23.1.3.13 Array.prototype.flat with an @@species constructor
+    // that is a PLAIN function: the result target is a non-exotic
+    // shape-mode object. FlattenIntoArray only does per-element
+    // CreateDataPropertyOrThrow — it never writes `length` on the
+    // target, so `res.length` stays undefined for a plain object.
+    // The buggy form wrote `length` through a raw bag
+    // `properties.put`, leaving a shape-mode object with a bag-only
+    // key, which `verifyShapeInvariant` trapped at the next
+    // collection (gc_threshold=1 here forces one per allocation).
+    try expectScriptStringUnderGcPressure(
+        \\var A = function(_len) {
+        \\  Object.defineProperty(this, "0", {
+        \\    value: 1, writable: false, enumerable: false, configurable: true,
+        \\  });
+        \\};
+        \\var arr = [[2]];
+        \\arr.constructor = {};
+        \\arr.constructor[Symbol.species] = A;
+        \\var res = arr.flat(1);
+        \\"" + res[0] + ":" + res.length;
+    , "2:undefined");
+}
+
 test "computed int read: dense in-bounds hits own elements" {
     try expectScriptInt("var a=[10,20,30]; a[0]+a[1]+a[2]", 60);
     try expectScriptInt("var a=[10,20,30]; var i=2; a[i]", 30);
