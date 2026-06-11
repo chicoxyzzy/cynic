@@ -453,6 +453,22 @@ and the 0xaa free-poison — all gated on `runtime_safety`, hence
 no-ops in ReleaseFast — while running ~2-3× faster than Debug.
 The right binary for `/gc-stress` use-after-free hunts.
 
+**Perf-measuring the `cynic` CLI? Confirm it's ReleaseFast first.**
+The same same-path clobber applies to `zig-out/bin/cynic`: `zig build`
+(Debug) and `zig build -Doptimize=ReleaseFast` write the *same* binary,
+so a Debug build run for any reason — a stack trace, a quick check —
+silently leaves a Debug binary at that path. Measuring it then misleads
+badly, and not by the usual 5-10×: in Debug / ReleaseSafe the CLI's
+`init.gpa` is a `DebugAllocator` that captures a DWARF stack trace on
+*every allocation* (leak detection), so allocation-heavy JS (object /
+class / array churn) runs **~1000× slower** — a benign 30k-class micro
+that is 0.1 s in ReleaseFast takes ~90 s in Debug. Before any timing or
+`samply` / `sample` profile, rebuild ReleaseFast immediately before the
+run with nothing in between, and sanity-check the magnitude. A profile
+dominated by `captureStackTrace` / `SelfUnwinder` / `Dwarf` is the tell
+that you are on a Debug binary, not a real hot path — rebuild and
+re-measure.
+
 **Unit tests: `test` vs `test-fast`.** The same Debug penalty
 hits the unit suite — most tests `eval` JS through the engine, so
 a full Debug `zig build test` is *run-bound* and can exceed ten
@@ -560,7 +576,8 @@ reviewed in PRs against `test262-results.md`.
                           accessor lookup + error makers + array-length
                           coercion (`helpers.zig`), and the test suite
                           (`tests.zig`). Bistromath (T1) lives
-                          alongside in `bistromath/` (behind `--jit`
+                          alongside in `bistromath/` (default-on;
+                          `--no-jit` opts out
                           — docs/jit.md); `ohaimark/` (T2) is planned.
     src/runtime/jit/      The shared codegen substrate (docs/jit.md
                           §7-§8): per-ISA encoders, the masm facade,
