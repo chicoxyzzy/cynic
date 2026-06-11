@@ -228,10 +228,28 @@ when the wasm/Spasm work settles, not piecemeal:
 | QuickJS-NG (`qjs`) | none needed | non-JIT C interpreter |
 | Hermes (`hermes`) | none needed | natively interpreter-only |
 | XS (`xst`) | none needed | natively interpreter-only |
+| Boa (`boa`) | none needed | Rust from-scratch engine, interpreter-only (`cargo install boa_cli`) |
 | Cynic | `--no-jit` | pins Lantern; Bistromath is the default tier since the step-3 exit |
 
 The headline peer is **QuickJS-NG** — a non-JIT C interpreter, the
 fairest comparison point for the Lantern tier.
+
+A third comparison — the **baseline-tier table** — is the
+recorded idea most relevant to Bistromath itself: pin each big
+engine to its *baseline* JIT tier and compare Sparkplug-class to
+Sparkplug-class. The peer configs:
+
+| Engine | Baseline-tier invocation | Leaves enabled |
+|---|---|---|
+| V8 (`d8`) | `--no-opt --no-maglev` | Ignition + Sparkplug |
+| SpiderMonkey (`sm`) | `--no-ion` | interpreter + Baseline |
+| JavaScriptCore (`jsc`) | env `JSC_useDFGJIT=0 JSC_useFTLJIT=0` | LLInt + Baseline |
+| Cynic | default | Lantern + Bistromath |
+
+This answers "is Bistromath in the right ballpark against peer
+baselines" rather than against full optimizing stacks. Not wired
+into `tools/bench-cross.sh` yet — when it lands it becomes a
+`--tier baseline` third section, same never-merge rule.
 
 The full-speed table — Cynic's default posture (Bistromath)
 against the peers with their JITs enabled — lives in the same
