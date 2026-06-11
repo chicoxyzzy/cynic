@@ -2232,6 +2232,45 @@ pub fn doubleToI64Saturating(d: f64) i64 {
     return @intFromFloat(truncated);
 }
 
+// ── Saturating float→int casts (host-safety) ────────────────────────────────
+//
+// Companions to `doubleToI64Saturating` for the other integer widths
+// builtins coerce user-controlled Numbers into. A raw `@intFromFloat`
+// traps (SIGABRT, uncatchable by JS) for any finite value outside the
+// destination range — see issues #22 / #23. These clamp instead, so a
+// length / index / count op on a pathological argument lands at a
+// boundary the caller's own range check then turns into a spec result
+// or a catchable RangeError. Prefer these over a raw cast for any
+// `@intFromFloat` on a value reachable from user JS.
+
+/// §7.1.20 ToLength-flavoured saturating cast `f64` → `usize`. NaN and
+/// non-positive values → 0; anything at or above `usize`'s max clamps.
+pub fn doubleToUsizeSaturating(d: f64) usize {
+    if (std.math.isNan(d) or d <= 0) return 0;
+    const truncated = @trunc(d);
+    const usize_max_f: f64 = @floatFromInt(std.math.maxInt(usize));
+    if (truncated >= usize_max_f) return std.math.maxInt(usize);
+    return @intFromFloat(truncated);
+}
+
+/// Saturating cast `f64` → `u32` (array lengths, code-unit counts).
+/// NaN / negative → 0; above 2^32-1 clamps to the max.
+pub fn doubleToU32Saturating(d: f64) u32 {
+    if (std.math.isNan(d) or d <= 0) return 0;
+    const truncated = @trunc(d);
+    if (truncated >= 4294967295.0) return std.math.maxInt(u32);
+    return @intFromFloat(truncated);
+}
+
+/// Saturating cast `f64` → `i32`. NaN → 0; clamps to the i32 range.
+pub fn doubleToI32Saturating(d: f64) i32 {
+    if (std.math.isNan(d)) return 0;
+    const truncated = @trunc(d);
+    if (truncated >= 2147483647.0) return std.math.maxInt(i32);
+    if (truncated <= -2147483648.0) return std.math.minInt(i32);
+    return @intFromFloat(truncated);
+}
+
 /// Allocate an Error-shaped constructor (`name`) plus its prototype
 /// chained to `parent_proto`. Registers the constructor as a global
 /// under `name`. Returns the constructor. The prototype's

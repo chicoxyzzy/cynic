@@ -35,9 +35,14 @@ range — e.g. `@as(i64, @intFromFloat(1e30))`. Every JS number is a
 user-controlled `f64`, so a bare cast on an argument is a host-abort
 waiting to happen.
 
-- Route §7.1.5 ToIntegerOrInfinity / §7.1.20 ToLength sites through
-  `doubleToI64Saturating` (saturates ±∞ and out-of-range finites to
-  the i64 bounds, which is where the spec's clamping lands anyway).
+- Route §7.1.5 ToIntegerOrInfinity / §7.1.20 ToLength sites through the
+  saturating-cast family in `intrinsics.zig` —
+  `doubleToI64Saturating` and its width companions
+  `doubleToUsizeSaturating` / `doubleToU32Saturating` /
+  `doubleToI32Saturating` (each saturates NaN / ±∞ / out-of-range
+  finites to the destination bounds, which is where the spec's
+  clamping lands anyway). Pick the variant matching the cast's target
+  type rather than writing a raw `@intFromFloat`.
 - For a radix / digit count / index, range-check *before* the cast
   and emit the spec value (or `RangeError`) explicitly.
 - Guard length × element-size multiplies (`byte_len * count`) against
@@ -47,7 +52,17 @@ Precedent: `cd1d038` (eight Number/String/Array/TypedArray sites),
 the array-like iterator and ShadowRealm-arity follow-ups. When you
 add a builtin that coerces a number, grep your diff for
 `@intFromFloat` / `@intCast(` and confirm each is range-checked or
-saturating.
+saturating. Two backstops keep the class closed:
+
+- **`tools/lint-builtin-safety.sh [base]`** — advisory, diff-scoped:
+  flags a *newly-added* raw `@intFromFloat` under `builtins/` that
+  doesn't route through a `*Saturating` helper (annotate a provably-
+  bounded cast with `// safety: <reason>` to silence it). The ~70
+  historical guarded sites are grandfathered.
+- The **`no host-abort on huge numeric args` unit test** (in
+  `lantern/tests.zig`) drives 1e21-magnitude arguments at the whole
+  surface; a regressing unguarded cast panics there under ReleaseSafe
+  and fails `test-fast`.
 
 ### 2. Recursion depth
 

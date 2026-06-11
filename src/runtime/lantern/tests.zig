@@ -7831,6 +7831,61 @@ test "huge numeric args on String/Array/TypedArray builtins don't panic (#23)" {
     , 10);
 }
 
+test "doubleTo{Usize,U32,I32}Saturating clamp instead of trapping (host-safety)" {
+    const I = @import("../intrinsics.zig");
+    // usize — NaN / non-positive → 0, over-range → max, normal truncates.
+    try testing.expectEqual(@as(usize, 0), I.doubleToUsizeSaturating(-1e21));
+    try testing.expectEqual(@as(usize, 0), I.doubleToUsizeSaturating(std.math.nan(f64)));
+    try testing.expectEqual(@as(usize, 5), I.doubleToUsizeSaturating(5.9));
+    try testing.expectEqual(std.math.maxInt(usize), I.doubleToUsizeSaturating(1e30));
+    try testing.expectEqual(std.math.maxInt(usize), I.doubleToUsizeSaturating(std.math.inf(f64)));
+    // u32
+    try testing.expectEqual(@as(u32, 0), I.doubleToU32Saturating(-3));
+    try testing.expectEqual(@as(u32, 42), I.doubleToU32Saturating(42.0));
+    try testing.expectEqual(std.math.maxInt(u32), I.doubleToU32Saturating(1e21));
+    // i32 — clamps both ends.
+    try testing.expectEqual(@as(i32, 0), I.doubleToI32Saturating(std.math.nan(f64)));
+    try testing.expectEqual(@as(i32, -7), I.doubleToI32Saturating(-7.2));
+    try testing.expectEqual(std.math.maxInt(i32), I.doubleToI32Saturating(1e21));
+    try testing.expectEqual(std.math.minInt(i32), I.doubleToI32Saturating(-1e21));
+}
+
+test "no host-abort on huge numeric args across builtins (host-safety invariant)" {
+    // AGENTS.md "Never abort the host on untrusted input": a pathological
+    // user-controlled Number must produce a normal completion or a
+    // catchable JS exception — never an `@intFromFloat` SIGABRT. This
+    // pins the surface issues #22 / #23 closed; a future unguarded cast
+    // on any of these ops panics HERE under ReleaseSafe. The `t` wrapper
+    // counts a completion whether the op returns or throws — a host
+    // abort would crash the test binary instead, so `ok === 20` proves
+    // none aborted.
+    try expectScriptIntWithBuiltins(
+        \\var ok = 0; var H = 1e21, N = -1e21;
+        \\function t(fn) { try { fn(); } catch (e) {} ok++; }
+        \\t(function(){ new Uint8Array(4).set([1], H); });
+        \\t(function(){ new Uint8Array(8).subarray(H); });
+        \\t(function(){ new Uint8Array(8).slice(H); });
+        \\t(function(){ new Uint8Array(8).copyWithin(H, 0); });
+        \\t(function(){ new Uint8Array(8).at(H); });
+        \\t(function(){ var a = new Uint8Array(4); a[H] = 1; });
+        \\t(function(){ Array.from({ length: H }); });
+        \\t(function(){ Array(H); });
+        \\t(function(){ (1).toPrecision(H); });
+        \\t(function(){ (1).toExponential(H); });
+        \\t(function(){ (1).toFixed(H); });
+        \\t(function(){ (N).toString(16); });
+        \\t(function(){ JSON.stringify(1e308); });
+        \\t(function(){ var r = /x/g; r.lastIndex = H; r.exec("x"); });
+        \\t(function(){ new Date(H, N); });
+        \\t(function(){ new Date().setFullYear(H); });
+        \\t(function(){ new Date(H); });
+        \\t(function(){ String.fromCharCode(H); });
+        \\t(function(){ String.fromCodePoint(H); });
+        \\t(function(){ "x".padEnd(H); });
+        \\ok;
+    , 20);
+}
+
 test "huge length on array-like iter and ShadowRealm wrap don't panic" {
     // §23.1.5.2.1 step 6 LengthOfArrayLike and §3.8.3.5.1 step 4.b
     // WrappedFunction-length each consume a Number whose magnitude
