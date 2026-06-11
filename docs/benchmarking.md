@@ -228,7 +228,6 @@ when the wasm/Spasm work settles, not piecemeal:
 | QuickJS-NG (`qjs`) | none needed | non-JIT C interpreter |
 | Hermes (`hermes`) | none needed | natively interpreter-only |
 | XS (`xst`) | none needed | natively interpreter-only |
-| Boa (`boa`) | none needed | Rust from-scratch engine, interpreter-only (`cargo install boa_cli`) |
 | Cynic | `--no-jit` | pins Lantern; Bistromath is the default tier since the step-3 exit |
 
 The headline peer is **QuickJS-NG** — a non-JIT C interpreter, the

@@ -50,7 +50,6 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JSVU_BIN="${JSVU_BIN:-$HOME/.jsvu/bin}"
-BOA_BIN="${BOA_BIN:-$HOME/.cargo/bin/boa}"
 MICROS_DIR="$REPO_ROOT/bench/micros"
 CYNIC_BIN="$REPO_ROOT/zig-out/bin/cynic"
 
@@ -186,10 +185,6 @@ if [ "$TIER" != "jit" ]; then
 
   # XS (Moddable xst) — natively interpreter-only.
   register xs - "$JSVU_BIN/xst"
-
-  # Boa — the Rust from-scratch engine (`cargo install boa_cli`),
-  # interpreter-only. The fellow-young-engine yardstick.
-  register boa - "$BOA_BIN"
 fi
 
 if [ "${#ENGINE_NAMES[@]}" -eq 0 ]; then
@@ -379,7 +374,6 @@ engine_version() {
   local name="$1" bin="$2" v=""
   case "$name" in
     cynic)  v="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)" ;;
-    boa)    v="$("$bin" --version 2>/dev/null | awk '{print $2}')" ;;
     sm)     v="$("$bin" --version 2>/dev/null | head -1)" ;;
     v8)     v="$(jsvu_ver v8)"
             [ -z "$v" ] && v="$("$bin" -e 'print(version())' 2>/dev/null | head -1)" ;;
