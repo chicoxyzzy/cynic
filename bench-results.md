@@ -17,6 +17,34 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-11 — cynic `6dc91a5` (post conformance batch + JIT-era interp), host `Darwin 25.6.0 arm64`
+
+Quiet-machine single-engine row (interp mode, no `--jit`), the first
+classic baseline since `bb5703b` — two days of landings between
+(warmth counters, register promotion of body locals + fused-call
+gating, IC coverage, the conformance batch). Movers vs `bb5703b`:
+`ctor_array_build` **−30.5 %**, `class_instantiate` **−18.3 %**,
+`promise_chain` **−14.2 %**, `object_alloc` **−11.5 %** (register
+promotion + IC work); `tail_recursion` **+10.6 %**, `arith_loop`
+**+6.6 %**, `prop_access` **+7.3 %** (the interp-side warmth-counter
+tax on back-edges / PTC re-entries — the tier those counters feed is
+off in this measurement).
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 31.69 | 31.56 | 32.10 | 5344 |
+| prop_access | 13.16 | 12.68 | 13.69 | 5392 |
+| prop_write | 12.89 | 12.74 | 13.38 | 5472 |
+| array_iter | 21.32 | 20.61 | 21.78 | 6464 |
+| string_concat | 25.47 | 24.86 | 25.87 | 15800 |
+| promise_chain | 12.43 | 12.26 | 13.27 | 23720 |
+| object_alloc | 24.82 | 24.24 | 25.95 | 9160 |
+| method_call | 18.76 | 17.87 | 19.19 | 5704 |
+| class_instantiate | 28.52 | 27.75 | 31.96 | 9144 |
+| ctor_array_build | 308.40 | 302.79 | 314.54 | 9800 |
+| json_stringify | 27.82 | 27.37 | 30.12 | 8896 |
+| tail_recursion | 36.27 | 35.72 | 38.86 | 5400 |
+
 ### 2026-06-11 — cynic (script chunks compile: docs/jit.md §12 3g first slice), host `Darwin 25.6.0 arm64`
 
 Top-level script chunks now compile (`lda/sta_global_slot[_init]`
