@@ -829,8 +829,15 @@ useful:
        body — constant native stack by construction, with the
        budget poll before any mutation (tail_recursion ~-18%);
        every other callee still tiers down to Lantern's general
-       reframe. Recorded follow-up: the `CallICCell` inline callee
-       compare.
+       reframe. The `CallICCell` inline compare shipped 2026-06:
+       a cell hit (vetted plain function, pointer match) skips
+       callValue's whole dispatch chain into callJSFunction
+       directly — and the bench verdict is that it bought ~nothing
+       (method_call held at -24%): the remaining per-call cost is
+       callJSFunction's frames-list + register-file ceremony, not
+       the dispatch checks. A leaner compiled→compiled frame path
+       is the measured next target if call-bound workloads demand
+       it; until then this is recorded as done-and-evaluated.
    3f. **OSR entry** — per-loop-header prologue stubs with a
        `bytecode offset → stub offset` table riding in the code
        region; Lantern back-edges consult it through an inline

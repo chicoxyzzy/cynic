@@ -270,6 +270,7 @@ fn storeBarrier(r: *Realm, obj: *JSObject, bits: u64) callconv(.c) void {
 
 const call_mod = @import("../lantern/call.zig");
 const Environment = @import("../environment.zig").Environment;
+const JSFunction = @import("../function.zig").JSFunction;
 
 /// The §9 rule for env-resident bindings: compiled sta_env runs
 /// exactly the interpreter's `storeEnvSlot` — barrier plus store —
@@ -291,6 +292,44 @@ const HelperCallStatus = enum(u32) { value = 0, threw = 1, host_oom = 2 };
 /// proxies — and the nested `runFrames` carries the native-re-entry
 /// stack guard, so deep compiled recursion throws the catchable
 /// RangeError instead of faulting the host.
+/// The CallICCell-hit fast path (docs/jit.md §12 3e follow-up):
+/// the cell only ever holds a vetted, directly-callable plain
+/// JSFunction, so a pointer match skips callValue's whole §7.3
+/// dispatch chain (proxy probe, bound unwrap, class-ctor check)
+/// and enters callJSFunction — which still runs the compiled
+/// callee through its own hook, recursively.
+fn helperCallDirect(
+    realm: *Realm,
+    frame: *CallFrame,
+    callee_fn: *JSFunction,
+    this_bits: u64,
+    args_ptr: [*]const Value,
+    argc: u64,
+    result_out: *Value,
+) callconv(.c) u32 {
+    _ = frame;
+    const res = call_mod.callJSFunction(
+        realm.heap.allocator,
+        realm,
+        callee_fn,
+        .{ .bits = this_bits },
+        args_ptr[0..@intCast(argc)],
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return @intFromEnum(HelperCallStatus.host_oom),
+        error.InvalidOpcode => return @intFromEnum(HelperCallStatus.host_oom),
+    };
+    switch (res) {
+        .value, .yielded => |v| {
+            result_out.* = v;
+            return @intFromEnum(HelperCallStatus.value);
+        },
+        .thrown => |ex| {
+            realm.pending_exception = ex;
+            return @intFromEnum(HelperCallStatus.threw);
+        },
+    }
+}
+
 fn helperCall(
     realm: *Realm,
     frame: *CallFrame,
@@ -606,19 +645,13 @@ const Compiler = struct {
                     // optimization.
                     const r_callee = code[i + 1];
                     const argc = code[i + 2];
+                    const ic_call = readU16(code, i + 3);
                     const threw = try self.threwFor(bc);
                     // Root the live accumulator through the frame —
                     // the callee may allocate and GC (§4.2).
                     try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
-                    try m.emit(a64.movReg(.x0, realm_reg));
-                    try m.emit(a64.movReg(.x1, frame_reg));
-                    try m.emit(a64.ldrImm(.x2, regs_reg, regSlot(r_callee)));
-                    try m.movImm64(.x3, Value.undefined_.bits);
-                    try m.emit(a64.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(r_callee)) + 8), false));
-                    try m.movImm64(.x5, argc);
-                    try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
-                    try m.callAbs(.x16, @intFromPtr(&helperCall));
-                    try self.emitCallStatus(threw);
+                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_callee)));
+                    try self.emitCallDispatch(.x9, null, r_callee + 1, argc, ic_call, threw);
                 },
                 .call_method => {
                     // §13.3.6 — like `call` with `this` bound to the
@@ -628,17 +661,11 @@ const Compiler = struct {
                     const r_recv = code[i + 1];
                     const r_callee = code[i + 2];
                     const argc = code[i + 3];
+                    const ic_call = readU16(code, i + 4);
                     const threw = try self.threwFor(bc);
                     try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
-                    try m.emit(a64.movReg(.x0, realm_reg));
-                    try m.emit(a64.movReg(.x1, frame_reg));
-                    try m.emit(a64.ldrImm(.x2, regs_reg, regSlot(r_callee)));
-                    try m.emit(a64.ldrImm(.x3, regs_reg, regSlot(r_recv)));
-                    try m.emit(a64.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(r_callee)) + 8), false));
-                    try m.movImm64(.x5, argc);
-                    try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
-                    try m.callAbs(.x16, @intFromPtr(&helperCall));
-                    try self.emitCallStatus(threw);
+                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_callee)));
+                    try self.emitCallDispatch(.x9, r_recv, r_callee + 1, argc, ic_call, threw);
                 },
                 .call_property => {
                     // The fused load+call (`obj.method(args)`): the
@@ -651,8 +678,7 @@ const Compiler = struct {
                     const r_recv = code[i + 3];
                     const argc = code[i + 4];
                     const ic_load = readU16(code, i + 5);
-                    // ic_call at i+7 — the CallICCell compare is the
-                    // recorded follow-up; the helper dispatches.
+                    const ic_call = readU16(code, i + 7);
                     const td = try self.tdFor(bc);
                     const threw = try self.threwFor(bc);
                     // Sync the PRE-op accumulator before any
@@ -663,15 +689,7 @@ const Compiler = struct {
                     try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
                     try m.emit(a64.ldrImm(.x14, regs_reg, regSlot(r_recv)));
                     try self.emitPropertyIcLoad(.x14, .x14, ic_load, td);
-                    try m.emit(a64.movReg(.x0, realm_reg));
-                    try m.emit(a64.movReg(.x1, frame_reg));
-                    try m.emit(a64.movReg(.x2, .x14));
-                    try m.emit(a64.ldrImm(.x3, regs_reg, regSlot(r_recv)));
-                    try m.emit(a64.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(r_recv)) + 8), false));
-                    try m.movImm64(.x5, argc);
-                    try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
-                    try m.callAbs(.x16, @intFromPtr(&helperCall));
-                    try self.emitCallStatus(threw);
+                    try self.emitCallDispatch(.x14, r_recv, r_recv + 1, argc, ic_call, threw);
                 },
                 .tail_call => {
                     // §15.10 jump-to-entry for the self-recursive
@@ -1321,6 +1339,83 @@ const Compiler = struct {
         if (ic_idx >= self.chunk.inline_caches.len) return error.UnsupportedOp;
         const addr: u64 = @intFromPtr(&self.chunk.inline_caches[ic_idx]);
         try self.m.movImm64(dst, addr);
+    }
+
+    /// Like `emitCellAddr` for the call-IC table.
+    fn emitCallCellAddr(self: *Compiler, dst: a64.Reg, ic_idx: u16) CompileError!void {
+        if (ic_idx >= self.chunk.inline_call_caches.len) return error.UnsupportedOp;
+        const addr: u64 = @intFromPtr(&self.chunk.inline_call_caches[ic_idx]);
+        try self.m.movImm64(dst, addr);
+    }
+
+    /// The shared compiled-call tail (docs/jit.md §4.5 + the
+    /// CallICCell fast path): callee Value in `callee_val`, `this`
+    /// from a register or undefined, args window at
+    /// `args_base..+argc`. A cell hit (vetted plain JSFunction,
+    /// pointer match) dispatches through helperCallDirect; any
+    /// miss — cold cell, different callee, non-function — takes
+    /// the generic helperCall, which handles every callee kind.
+    /// Clobbers x9-x13 and the argument registers.
+    fn emitCallDispatch(
+        self: *Compiler,
+        callee_val: a64.Reg,
+        this_from: ?u8,
+        args_base: u8,
+        argc: u8,
+        ic_call: u16,
+        threw: *Masm.Label,
+    ) CompileError!void {
+        const m = &self.m;
+        var generic = Masm.Label{};
+        defer generic.fixups.deinit(m.gpa);
+        var joined = Masm.Label{};
+        defer joined.fixups.deinit(m.gpa);
+        // Function-kind heap pointer? (kind bits 0) — else generic.
+        try m.movImm64(.x13, layout.value_bits.tag_object_shifted);
+        try m.emit(a64.eorReg(.x13, callee_val, .x13));
+        try m.emit(a64.lsrImm(.x12, .x13, 48));
+        try m.jumpCbnz(.x12, &generic);
+        try m.emit(a64.lslImm(.x12, .x13, 62));
+        try m.emit(a64.lsrImm(.x12, .x12, 62));
+        try m.jumpCbnz(.x12, &generic);
+        try m.emit(a64.lsrImm(.x10, .x13, 2));
+        try m.emit(a64.lslImm(.x10, .x10, 2));
+        // Cell compare.
+        try self.emitCallCellAddr(.x11, ic_call);
+        try m.emit(a64.ldrImm(.x12, .x11, layout.call_ic_cell.callee));
+        try m.jumpCbz(.x12, &generic);
+        try m.emit(a64.cmpReg(.x10, .x12));
+        try m.jumpCond(.ne, &generic);
+        // Hit: the vetted-function direct path.
+        try m.emit(a64.movReg(.x2, .x10));
+        try m.emit(a64.movReg(.x0, realm_reg));
+        try m.emit(a64.movReg(.x1, frame_reg));
+        if (this_from) |r_this| {
+            try m.emit(a64.ldrImm(.x3, regs_reg, regSlot(r_this)));
+        } else {
+            try m.movImm64(.x3, Value.undefined_.bits);
+        }
+        try m.emit(a64.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(args_base))), false));
+        try m.movImm64(.x5, argc);
+        try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
+        try m.callAbs(.x16, @intFromPtr(&helperCallDirect));
+        try m.jump(&joined);
+        // Miss: generic dispatch on the raw Value.
+        m.bind(&generic);
+        try m.emit(a64.movReg(.x2, callee_val));
+        try m.emit(a64.movReg(.x0, realm_reg));
+        try m.emit(a64.movReg(.x1, frame_reg));
+        if (this_from) |r_this| {
+            try m.emit(a64.ldrImm(.x3, regs_reg, regSlot(r_this)));
+        } else {
+            try m.movImm64(.x3, Value.undefined_.bits);
+        }
+        try m.emit(a64.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(args_base))), false));
+        try m.movImm64(.x5, argc);
+        try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
+        try m.callAbs(.x16, @intFromPtr(&helperCall));
+        m.bind(&joined);
+        try self.emitCallStatus(threw);
     }
 };
 
@@ -2197,6 +2292,46 @@ test "jit bistromath calls: self-tail-call dispatch follows callee identity" {
     try testing.expect(v.isString());
     const sres: *@import("../string.zig").JSString = @ptrCast(@alignCast(v.asString()));
     try testing.expectEqualStrings("200000,100,7", sres.flatBytes());
+}
+
+test "jit bistromath calls: the call-IC compare misses correctly" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // Guard for the CallICCell inline compare (docs/jit.md §12
+    // 3e follow-up): the cell warms on `a`, then the same hot
+    // site receives a different function (compare miss → generic
+    // dispatch) and a non-function (kind miss → the §7.3.x
+    // TypeError through the generic path).
+    const src =
+        \\function a(x) { return x + 1; }
+        \\function b(x) { return x * 10; }
+        \\function site(g, x) { return g(x) + 0; }
+        \\let i = 0;
+        \\while (i < 300) { site(a, i); i = i + 1; }
+        \\let r = "no-throw";
+        \\try { site(7, 1); } catch (e) { r = "threw"; }
+        \\"" + site(a, 5) + "," + site(b, 5) + "," + r;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isString());
+    const sres: *@import("../string.zig").JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings("6,50,threw", sres.flatBytes());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "site").jit_state.?.tier,
+    );
 }
 
 test "jit bistromath calls: method calls bind `this` through the tier" {
