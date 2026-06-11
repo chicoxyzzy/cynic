@@ -26,6 +26,7 @@ const chunk_mod = @import("../../bytecode/chunk.zig");
 const ICCell = chunk_mod.ICCell;
 const CallICCell = chunk_mod.CallICCell;
 const CallFrame = @import("../lantern/interpreter.zig").CallFrame;
+const Environment = @import("../environment.zig").Environment;
 
 /// `CallFrame` — the frame-identity rule's contact surface
 /// (docs/jit.md §4.2).
@@ -35,6 +36,15 @@ pub const frame = struct {
     pub const running_realm: u15 = @offsetOf(CallFrame, "running_realm");
     pub const this_value: u15 = @offsetOf(CallFrame, "this_value");
     pub const super_called_cell: u15 = @offsetOf(CallFrame, "super_called_cell");
+    pub const env: u15 = @offsetOf(CallFrame, "env");
+};
+
+/// `Environment` — the lda_env / sta_env fixed-depth walks
+/// (docs/jit.md §12 3g). `slots` is a []Value: pointer at +0
+/// (the witnessed slice assumption), length at +8.
+pub const env = struct {
+    pub const parent: u15 = @offsetOf(Environment, "parent");
+    pub const slots: u15 = @offsetOf(Environment, "slots");
 };
 
 /// `Realm` fields the back-edge safepoint and the global IC read.

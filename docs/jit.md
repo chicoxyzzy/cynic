@@ -847,14 +847,16 @@ useful:
        `decl_slots` slice caches on `GlobalBindings`, refreshed
        at `createLexBinding`, the only growth site) shipped
        2026-06: top-level loops OSR-enter, and the arith_loop
-       bench fixture runs ~2.2× faster under `--jit`. Still
-       open: unary int32/bool ops; `lda_env` / `sta_env`
-       fixed-depth walks on the 3a contract (nested-block lets,
-       closures as callees, with the `storeEnvSlot` barrier
-       mirrored per §9); promotion extended to methods /
-       constructors / `var`; compiled handler dispatch so hot
-       try-loops stop tier-down ping-ponging. Generators/async
-       stay last.
+       bench fixture runs ~2.2× faster under `--jit`. Unary
+       int32/bool ops (negate with the -0 / INT32_MIN
+       tier-downs, bit_not, logical_not) and the `lda_env` /
+       `sta_env` fixed-depth walks (closures as callees; the
+       env store runs `storeEnvSlot` — barrier + store —
+       through a C shim per §9; unroll capped at depth 8)
+       shipped 2026-06. Still open: promotion extended to
+       methods / constructors / `var`; compiled handler
+       dispatch so hot try-loops stop tier-down ping-ponging.
+       Generators/async stay last.
 
    Step exit: the §10 gates green with the tier doing real work —
    full-corpus differential compared as pass-*sets* (a sorted

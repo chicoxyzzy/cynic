@@ -269,6 +269,14 @@ fn storeBarrier(r: *Realm, obj: *JSObject, bits: u64) callconv(.c) void {
 }
 
 const call_mod = @import("../lantern/call.zig");
+const Environment = @import("../environment.zig").Environment;
+
+/// The §9 rule for env-resident bindings: compiled sta_env runs
+/// exactly the interpreter's `storeEnvSlot` — barrier plus store —
+/// through this shim. No allocation, no GC, no JS re-entry.
+fn envStoreBarrier(r: *Realm, env: *Environment, slot: u64, bits: u64) callconv(.c) void {
+    r.heap.storeEnvSlot(env, @intCast(slot), .{ .bits = bits });
+}
 
 /// What `helperCall` reports back to the emitted call sequence.
 const HelperCallStatus = enum(u32) { value = 0, threw = 1, host_oom = 2 };
@@ -427,7 +435,12 @@ const Compiler = struct {
                 .lda_this, .call, .call_method, .call_property,
                 .tail_call, .tail_call_method,
                 .lda_global_slot, .sta_global_slot, .sta_global_slot_init,
+                .negate, .bit_not, .logical_not,
                 .throw_if_hole, .return_ => {},
+                .lda_env, .sta_env => {
+                    // Fixed-depth walks unroll; cap the unroll.
+                    if (code[i + 1] > 8) return error.UnsupportedOp;
+                },
                 // zig fmt: on
                 .make_environment => {
                     // A zero-slot env is unobservable from a
@@ -665,6 +678,82 @@ const Compiler = struct {
                     // Jump-to-entry for the self-recursive case is
                     // the recorded follow-up (docs/jit.md §12 3e).
                     try m.jump(try self.tdFor(bc));
+                },
+                .negate => {
+                    // §13.5.5 — int32 negate; 0 (the result is -0,
+                    // a double) and INT32_MIN (out of range) tier
+                    // down.
+                    const td = try self.tdFor(bc);
+                    try self.checkInt32(acc_reg, td);
+                    try m.emit(a64.movRegW(.x11, acc_reg));
+                    try m.jumpCbz(.x11, td);
+                    try m.emit(a64.movz(.x13, 0, 0));
+                    try m.emit(a64.subsRegW(.x11, .x13, .x11));
+                    try m.jumpCond(.vs, td);
+                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                },
+                .bit_not => {
+                    // §13.5.6 — ~int32 stays int32 always.
+                    const td = try self.tdFor(bc);
+                    try self.checkInt32(acc_reg, td);
+                    try m.emit(a64.movn(.x13, 0, 0));
+                    try m.emit(a64.eorRegW(.x11, acc_reg, .x13));
+                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                },
+                .logical_not => {
+                    // §13.5.7 on an already-Boolean acc — payload
+                    // bit 0 flips and the tag bits are untouched, so
+                    // no retag. Non-bool acc tiers down to ToBoolean.
+                    const td = try self.tdFor(bc);
+                    try m.emit(a64.eorReg(.x13, acc_reg, bool_tag_reg));
+                    try m.emit(a64.cmpImm(.x13, 1, false));
+                    try m.jumpCond(.hi, td);
+                    try m.emit(a64.movz(.x13, 1, 0));
+                    try m.emit(a64.eorReg(acc_reg, acc_reg, .x13));
+                },
+                .lda_env => {
+                    // Fixed-depth chain walk (the compiler
+                    // guarantees the chain is long enough; a broken
+                    // chain or short slot array tiers down and
+                    // Lantern surfaces its own error).
+                    const depth = code[i + 1];
+                    const slot = code[i + 2];
+                    const td = try self.tdFor(bc);
+                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.env));
+                    try m.jumpCbz(.x9, td);
+                    var d = depth;
+                    while (d > 0) : (d -= 1) {
+                        try m.emit(a64.ldrImm(.x9, .x9, layout.env.parent));
+                        try m.jumpCbz(.x9, td);
+                    }
+                    try m.emit(a64.ldrImm(.x11, .x9, layout.env.slots + 8));
+                    try m.emit(a64.cmpImm(.x11, slot, false));
+                    try m.jumpCond(.ls, td);
+                    try m.emit(a64.ldrImm(.x10, .x9, layout.env.slots));
+                    try m.emit(a64.ldrImm(acc_reg, .x10, @as(u15, slot) * 8));
+                },
+                .sta_env => {
+                    // Same walk; the store runs the interpreter's
+                    // storeEnvSlot (barrier + store) through the C
+                    // shim — the §9 rule verbatim.
+                    const depth = code[i + 1];
+                    const slot = code[i + 2];
+                    const td = try self.tdFor(bc);
+                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.env));
+                    try m.jumpCbz(.x9, td);
+                    var d = depth;
+                    while (d > 0) : (d -= 1) {
+                        try m.emit(a64.ldrImm(.x9, .x9, layout.env.parent));
+                        try m.jumpCbz(.x9, td);
+                    }
+                    try m.emit(a64.ldrImm(.x11, .x9, layout.env.slots + 8));
+                    try m.emit(a64.cmpImm(.x11, slot, false));
+                    try m.jumpCond(.ls, td);
+                    try m.emit(a64.movReg(.x0, realm_reg));
+                    try m.emit(a64.movReg(.x1, .x9));
+                    try m.movImm64(.x2, slot);
+                    try m.emit(a64.movReg(.x3, acc_reg));
+                    try m.callAbs(.x16, @intFromPtr(&envStoreBarrier));
                 },
                 .lda_global_slot => {
                     // §9.1.1.4 declarative-record slot read through
@@ -1875,6 +1964,81 @@ test "jit bistromath osr: top-level script loops enter the tier" {
     try testing.expectEqual(
         Chunk.JitState.Tier.compiled,
         chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath env: closures over captured locals compile" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // The closure-callee shape (docs/jit.md §12 3g): the inner
+    // function reads and writes `c` through lda_env / sta_env
+    // depth-1 walks; the env store runs the same storeEnvSlot
+    // barrier as the interpreter (§9).
+    const src =
+        \\function make() { let c = 0; return function () { c = c + 1; return c; }; }
+        \\var inc = make();
+        \\let i = 0;
+        \\while (i < 300) { inc(); i = i + 1; }
+        \\inc();
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 301), v.asInt32());
+    // The inner closure is anonymous — it is make's template 0.
+    const make_chunk = templateNamed(&chunk, "make");
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        make_chunk.function_templates[0].chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath: unary negate/bit_not/logical_not compile with the edge tier-downs" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // §13.5.5 unary minus: -0 is a double and INT32_MIN negates
+    // out of range — both tier down; §13.5.6 / §13.5.7 stay int32
+    // and bool. The string assembles all four answers.
+    const src =
+        \\function u(b, x) { if (b) { return !b; } return (-x) + (~x); }
+        \\function nz(x) { return -x; }
+        \\let i = 0;
+        \\while (i < 300) { u(true, 1); u(false, 5); nz(5); i = i + 1; }
+        \\"" + u(true, 9) + "," + u(false, 7) + "," + ((1 / nz(0)) < 0) + "," + nz(-2147483648);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(v.isString());
+    const sres: *@import("../string.zig").JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings("false,-15,true,2147483648", sres.flatBytes());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "u").jit_state.?.tier,
+    );
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "nz").jit_state.?.tier,
     );
 }
 
