@@ -26,22 +26,26 @@ treat those cells as noisy), but every median corroborates the
 quiet-pair history: arith_loop 2.07×, method_call −24%, the rest
 flat.
 
-One table, both postures (Δ = default vs `--no-jit`):
+Lantern (`--no-jit`) vs Bistromath (the default), one run each:
 
-| bench | `--no-jit` p50 | default p50 | Δ p50 | `--no-jit` min | default min | rss kb (nj→jit) |
-|---|---:|---:|---:|---:|---:|---:|
-| arith_loop | 33.42 | 16.14 | -52% | 32.43 | 14.03 | 5248→5384 |
-| prop_access | 13.16 | 12.01 | -9% | 12.11 | 11.93 | 5304→5328 |
-| prop_write | 12.39 | 11.61 | -6% | 11.73 | 11.54 | 5384→5432 |
-| array_iter | 20.29 | 20.11 | -1% | 20.01 | 19.49 | 6320→6408 |
-| string_concat | 23.51 | 24.36 | +4% | 23.15 | 24.15 | 15712→15856 |
-| promise_chain | 10.05 | 10.42 | +4% | 9.86 | 10.16 | 23760→23728 |
-| object_alloc | 22.86 | 23.38 | +2% | 22.43 | 22.78 | 9112→9072 |
-| method_call | 18.52 | 14.06 | -24% | 16.97 | 13.69 | 5576→5672 |
-| class_instantiate | 26.44 | 29.90 | +13% | 25.91 | 27.65 | 9024→9072 |
-| ctor_array_build | 314.18 | 339.84 | +8% | 301.36 | 312.87 | 9768→9768 |
-| json_stringify | 28.68 | 27.17 | -5% | 27.38 | 26.63 | 8824→8840 |
-| tail_recursion | 39.93 | 36.91 | -8% | 35.36 | 34.54 | 5368→5400 |
+| bench | Lantern p50 | Bistromath p50 | speedup | min (L→B) | RSS KiB (L→B) |
+|---|---:|---:|---:|---:|---:|
+| arith_loop† | 33.42 | **16.14** | **2.07×** | 32.4→14.0 | 5248→5384 |
+| method_call | 18.52 | **14.06** | **1.32×** | 17.0→13.7 | 5576→5672 |
+| prop_access | 13.16 | **12.01** | **1.10×** | 12.1→11.9 | 5304→5328 |
+| tail_recursion† | 39.93 | 36.91 | 1.08× | 35.4→34.5 | 5368→5400 |
+| prop_write | 12.39 | **11.61** | **1.07×** | 11.7→11.5 | 5384→5432 |
+| json_stringify | 28.68 | **27.17** | **1.06×** | 27.4→26.6 | 8824→8840 |
+| array_iter | 20.29 | 20.11 | 1.01× | 20.0→19.5 | 6320→6408 |
+| object_alloc | 22.86 | 23.38 | 0.98× | 22.4→22.8 | 9112→9072 |
+| string_concat | 23.51 | 24.36 | 0.97× | 23.1→24.1 | 15712→15856 |
+| promise_chain | 10.05 | 10.42 | 0.96× | 9.9→10.2 | 23760→23728 |
+| ctor_array_build† | 314.18 | 339.84 | 0.92× | 301.4→312.9 | 9768→9768 |
+| class_instantiate† | 26.44 | 29.90 | 0.88× | 25.9→27.6 | 9024→9072 |
+
+Speedup = Lantern p50 / Bistromath p50 (>1× = the tier is
+faster); **bold** marks movers ≥1.05×. † = loaded-machine
+spread >15% in at least one posture — direction matches the quiet-pair history; treat the magnitude as noisy.
 
 ### 2026-06-11 — cynic `6dc91a5` (post conformance batch + JIT-era interp), host `Darwin 25.6.0 arm64`
 
@@ -131,22 +135,26 @@ step 3f) lets the rest of the suite enter the tier. Loaded machine
 - RSS +~50 KB under `--jit` — the touched pages of the lazily
   reserved code region.
 
-One table, both postures (Δ = `--jit` vs interpreter; pre-flip naming — the tier was opt-in then):
+Lantern vs Bistromath (`--jit` — pre-flip, the tier was opt-in then), one run each:
 
-| bench | `--no-jit` p50 | default p50 | Δ p50 | `--no-jit` min | default min | rss kb (nj→jit) |
-|---|---:|---:|---:|---:|---:|---:|
-| arith_loop | 53.94 | 52.35 | -3% | 42.88 | 47.66 | 5456→5440 |
-| prop_access | 18.04 | 21.56 | +20% | 17.24 | 19.44 | 5504→5472 |
-| prop_write | 22.86 | 21.72 | -5% | 18.20 | 17.03 | 5520→5568 |
-| array_iter | 36.69 | 39.71 | +8% | 31.10 | 31.25 | 6528→6600 |
-| string_concat | 40.88 | 47.96 | +17% | 36.26 | 37.62 | 16000→15856 |
-| promise_chain | 19.82 | 25.63 | +29% | 18.74 | 20.70 | 24024→24096 |
-| object_alloc | 47.09 | 42.55 | -10% | 34.12 | 33.52 | 9280→9240 |
-| method_call | 32.12 | 23.17 | -28% | 25.82 | 20.36 | 5680→5728 |
-| class_instantiate | 50.61 | 51.24 | +1% | 46.58 | 42.36 | 9184→9152 |
-| ctor_array_build | 528.82 | 509.02 | -4% | 459.18 | 483.68 | 9880→9880 |
-| json_stringify | 42.77 | 41.36 | -3% | 39.38 | 37.34 | 8976→9016 |
-| tail_recursion | 53.61 | 58.51 | +9% | 47.69 | 47.09 | 5464→5520 |
+| bench | Lantern p50 | Bistromath p50 | speedup | min (L→B) | RSS KiB (L→B) |
+|---|---:|---:|---:|---:|---:|
+| method_call | 32.12 | **23.17** | **1.39×** | 25.8→20.4 | 5680→5728 |
+| object_alloc | 47.09 | **42.55** | **1.11×** | 34.1→33.5 | 9280→9240 |
+| prop_write | 22.86 | **21.72** | **1.05×** | 18.2→17.0 | 5520→5568 |
+| ctor_array_build† | 528.82 | 509.02 | 1.04× | 459.2→483.7 | 9880→9880 |
+| json_stringify | 42.77 | 41.36 | 1.03× | 39.4→37.3 | 8976→9016 |
+| arith_loop† | 53.94 | **52.35** | **1.03×** | 42.9→47.7 | 5456→5440 |
+| class_instantiate† | 50.61 | 51.24 | 0.99× | 46.6→42.4 | 9184→9152 |
+| array_iter | 36.69 | 39.71 | 0.92× | 31.1→31.2 | 6528→6600 |
+| tail_recursion | 53.61 | 58.51 | 0.92× | 47.7→47.1 | 5464→5520 |
+| string_concat | 40.88 | 47.96 | 0.85× | 36.3→37.6 | 16000→15856 |
+| prop_access | 18.04 | 21.56 | 0.84× | 17.2→19.4 | 5504→5472 |
+| promise_chain | 19.82 | 25.63 | 0.77× | 18.7→20.7 | 24024→24096 |
+
+Speedup = Lantern p50 / Bistromath p50 (>1× = the tier is
+faster); **bold** marks movers ≥1.05×. † = loaded-machine
+spread >15% in at least one posture — that session's machine was loaded throughout; the entry text carries the caveats.
 
 ### 2026-06-09 — cynic `bb5703b` (JSON shape-walk + small-int toString cache), host `Darwin 25.6.0 arm64`
 

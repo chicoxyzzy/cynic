@@ -127,17 +127,22 @@ Row format — mirror the existing sections verbatim:
 `object_alloc -38 %`, `class_instantiate -45 %`; or
 "no fixture moved ≥5 % vs <prev sha>" when flat>
 
-One table, both postures (Δ = default vs `--no-jit`):
+Lantern (`--no-jit`) vs Bistromath (the default), one run each:
 
-| bench | `--no-jit` p50 | default p50 | Δ p50 | `--no-jit` min | default min | rss kb (nj→jit) |
-|---|---:|---:|---:|---:|---:|---:|
-| <fixture> | <p50> | <p50> | <±N%> | <min> | <min> | <kb>→<kb> |
-… one line per fixture, in the driver's table order …
+| bench | Lantern p50 | Bistromath p50 | speedup | min (L→B) | RSS KiB (L→B) |
+|---|---:|---:|---:|---:|---:|
+| <fixture><†?> | <p50> | <p50, **bold** if mover> | <L÷B as N.NN×, **bold** if mover> | <min>→<min> | <kb>→<kb> |
+… one line per fixture, SORTED by speedup descending …
+
+Speedup = Lantern p50 / Bistromath p50 (>1× = the tier is
+faster); **bold** marks movers ≥1.05×. † = loaded-machine
+spread >15% in at least one posture — <one-line noise caveat>.
 ```
 
 The p50/min values are the driver's `p50_ms`/`min_ms` columns per
-posture; Δ = (default − no-jit) / no-jit, negative = the tier is
-faster. If a row already exists for the same date + host, replace
+posture. Winners sort to the top so the tier's story reads at a
+glance; flag noisy rows with † rather than dropping them. If a
+row already exists for the same date + host, replace
 it (don't stack duplicates). Writing the file is a working-tree
 change only — the final "Stage and commit?" still lets the user
 decide whether it lands.
