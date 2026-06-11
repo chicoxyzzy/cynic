@@ -33,7 +33,7 @@ permissions:
 # the queue from piling up when the user pushes a flurry of fixes.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Opt the JavaScript actions (github/codeql-action, step-security/
 # harden-runner, …) into Node 24 now. GitHub forces this on
@@ -72,7 +72,7 @@ jobs:
         # baseline data, with the observed hosts in `allowed-endpoints`.
         # Defense in depth against a compromised transitive
         # dependency exfiltrating source or credentials.
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
         with:
           egress-policy: audit
 
@@ -81,7 +81,7 @@ jobs:
         # the test262 corpus (the only submodule). The inline
         # `tools/test262/*` tests are pure skip-rule / frontmatter
         # logic. Only the `test262` job below needs the submodule.
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
 
       - name: Set up Zig
         uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
@@ -148,12 +148,12 @@ jobs:
     # never reintroduces drift.
     steps:
       - name: Audit egress (advisory)
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
 
       - name: Set up Zig
         uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
@@ -172,12 +172,12 @@ jobs:
     # regression can't ship.
     steps:
       - name: Audit egress (advisory)
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
 
       - name: Run actionlint
         # The official docker image pins a release; safer than
@@ -200,12 +200,12 @@ jobs:
     # deploy. We just want the compile signal.
     steps:
       - name: Audit egress (advisory)
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
 
       - name: Set up Zig
         uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
@@ -214,6 +214,50 @@ jobs:
 
       - name: zig build wasm
         run: zig build wasm
+
+  wasm-testsuite:
+    name: WASM spec testsuite (Sarcasm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build-and-test
+    # The Sarcasm WASM engine scores 100% of the spec-testsuite commands
+    # it runs (wasm-results.md), but nothing gated that — a decoder /
+    # validator / interpreter regression would slip past the unit suite.
+    # The gen step converts the `.wast` corpus to the `.wasm` + JSON the
+    # harness reads, using wabt's `wast2json`; then we score the full
+    # submodule corpus. `--min-pass-pct=100` gates: a command that flips
+    # from passing to failing drops pass% below the floor and exits 2.
+    # Commands for proposals Sarcasm doesn't implement fail to decode /
+    # validate and so *skip* rather than fail — they don't count against
+    # pass%, so the 100 floor is stable across wabt versions and only a
+    # real regression trips it.
+    steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - name: Fetch the wasm-testsuite corpus
+        # Only this submodule — not the large test262 one — holds the
+        # `.wast` spec corpus this job scores.
+        run: git submodule update --init --depth 1 vendor/wasm-testsuite
+
+      - name: Install wabt (wast2json)
+        run: sudo apt-get update && sudo apt-get install -y wabt
+
+      - name: Set up Zig
+        uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
+        with:
+          cache-key: wasm-testsuite
+
+      - name: Score the spec testsuite (gating)
+        timeout-minutes: 12
+        run: |
+          zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite -- \
+            --quiet --min-pass-pct=100
 
   cross-build:
     name: Cross-build (${{ matrix.target }})
@@ -254,12 +298,12 @@ jobs:
           - aarch64-macos
     steps:
       - name: Audit egress (advisory)
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
 
       - name: Set up Zig
         uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
@@ -307,12 +351,12 @@ jobs:
     # --write-results` and commit it like any other source change.
     steps:
       - name: Audit egress (advisory)
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           submodules: recursive
 
@@ -388,12 +432,12 @@ jobs:
     continue-on-error: true
     steps:
       - name: Audit egress (advisory)
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           submodules: recursive
 
@@ -436,12 +480,12 @@ jobs:
           - language/expressions/object
     steps:
       - name: Audit egress (advisory)
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           submodules: recursive
 
@@ -537,12 +581,12 @@ jobs:
           - built-ins/Proxy
     steps:
       - name: Audit egress (advisory)
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           submodules: recursive
 

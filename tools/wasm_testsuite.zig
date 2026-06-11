@@ -41,6 +41,9 @@ const Options = struct {
     filter: ?[]const u8 = null,
     quiet: bool = false,
     write_results: bool = false,
+    /// Headline floor. Exit 2 if `pass%` falls below it (0 = no gate).
+    /// Mirrors the test262 harness so CI can gate the Sarcasm engine.
+    min_pass_pct: f64 = 0.0,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -60,6 +63,8 @@ pub fn main(init: std.process.Init) !void {
                 opts.quiet = true;
             } else if (std.mem.eql(u8, a, "--write-results")) {
                 opts.write_results = true;
+            } else if (std.mem.startsWith(u8, a, "--min-pass-pct=")) {
+                opts.min_pass_pct = std.fmt.parseFloat(f64, a["--min-pass-pct=".len..]) catch 0.0;
             } else if (std.mem.eql(u8, a, "--debug-loads")) {
                 debug_loads = true;
             }
@@ -113,6 +118,18 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.File.stdout().writeStreamingAll(io, summary);
 
     if (opts.write_results) try writeResults(gpa, io, total, files);
+
+    // `--min-pass-pct` — gate the run on the headline pass% floor (the
+    // same contract as the test262 harness). A regression that flips a
+    // previously-passing command to failing drops `pct` below the floor
+    // and exits 2 so CI fails; skipped commands (unimplemented proposals)
+    // don't count against `pct`, so the floor stays meaningful.
+    if (opts.filter == null and opts.min_pass_pct > 0.0 and pct < opts.min_pass_pct) {
+        var fline: [256]u8 = undefined;
+        const fmsg = try std.fmt.bufPrint(&fline, "wasm spec testsuite: pass% {d:.2} below --min-pass-pct floor {d:.2} (pass {d} / {d})\n", .{ pct, opts.min_pass_pct, total.pass, scored });
+        try std.Io.File.stderr().writeStreamingAll(io, fmsg);
+        std.process.exit(2);
+    }
 }
 
 // ── per-manifest execution ──────────────────────────────────────────
