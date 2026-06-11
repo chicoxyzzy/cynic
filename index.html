@@ -526,7 +526,7 @@
       <div class="mascot-panel">
         <div class="panel-note">
           <span class="pin"></span>
-          <span><b>Pre-alpha.</b> Parser, interpreter, and GC ship; spec coverage is still climbing and there's no JIT yet. Read <code>docs/ROADMAP.md</code> before opening issues. Better yet, don't.</span>
+          <span><b>Pre-alpha.</b> Parser, interpreter, and GC ship; a baseline JIT (Bistromath) hides behind <code>--jit</code>; spec coverage is still climbing. Read <code>docs/ROADMAP.md</code> before opening issues. Better yet, don't.</span>
         </div>
         <div class="stage">
           <div class="head mascot-head">
@@ -640,7 +640,7 @@
     <section class="compare" id="status">
       <div class="section-num">§02 · WHERE WE ARE</div>
       <h2 class="section-title">Pre-alpha. <span class="accent">Not pretending otherwise.</span></h2>
-      <p class="section-sub">Lexer, parser, and bytecode interpreter ship. The runtime is filling in. Generational GC landed; JIT tiers are still future work. Below is what works, what kind-of works, and what Cynic refuses to pretend works yet.</p>
+      <p class="section-sub">Lexer, parser, and bytecode interpreter ship. The runtime is filling in. Mark-sweep GC ships; a baseline JIT runs behind <code>--jit</code>, with the optimising tier and a generational GC still future. Below is what works, what kind-of works, and what Cynic refuses to pretend works yet.</p>
 
       <div class="compare-table">
         <div class="compare-row compare-head">
@@ -877,10 +877,10 @@
         <div class="compare-row">
           <div>
             <div class="feature-name">JIT tiers</div>
-            <div class="compare-note">bytecode interpreter today; baseline / optimising tiers on the long road</div>
+            <div class="compare-note">bytecode interpreter by default; Bistromath — a baseline JIT — runs behind <code>--jit</code> while its coverage lands; the optimising tier is still future</div>
           </div>
-          <div class="cross">Future Cynic's problem.</div>
-          <div>The plan is real. The plan is also not the code.</div>
+          <div class="check">In progress.</div>
+          <div>There's a JIT now. It's shy — hides behind <code>--jit</code>.</div>
         </div>
       </div>
 
