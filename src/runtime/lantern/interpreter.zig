@@ -8719,6 +8719,28 @@ pub fn runFrames(
             acc = heap_mod.taggedObject(obj);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
+        .make_array_n => {
+            // §13.2.4.1 fused dense literal — the compiler staged the
+            // n element values left-to-right in consecutive registers
+            // (GC-rooted frame slots, so the allocation below can
+            // collect safely), and the array is unreachable until
+            // this arm returns it. One exact-capacity reserve, one
+            // bulk copy, no per-element canonical-index parse, and no
+            // write barriers: the array is young by construction, so
+            // no old→young edge can form (the barrier's generation
+            // reject, taken statically).
+            const r_base = code[ip];
+            ip += 1;
+            const n = code[ip];
+            ip += 1;
+            const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+            realm.heap.setObjectPrototype(obj, realm.intrinsics.array_prototype);
+            obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
+            obj.elements.ensureTotalCapacityPrecise(allocator, n) catch return error.OutOfMemory;
+            obj.elements.appendSliceAssumeCapacity(registers[r_base .. @as(usize, r_base) + n]);
+            acc = heap_mod.taggedObject(obj);
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
         .array_spread => {
             // `acc` holds the source; `r_arr` holds the target.
             // Open an iterator (§7.4.1) on the source and append

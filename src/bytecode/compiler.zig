@@ -2449,7 +2449,49 @@ pub const Compiler = struct {
     /// Elisions (`[1,, 3]`) leave the slot unwritten — reading
     /// it falls through to the prototype chain (which yields
     /// `undefined` for an unowned key), matching §10.4.2.4.
+    /// Element-count cap for the fused `make_array_n` lowering. Each
+    /// element occupies one temp register for the literal's duration,
+    /// so the cap bounds register pressure (registers are u8-indexed);
+    /// 16 covers essentially every hand-written literal while leaving
+    /// the register file roomy for nesting.
+    const max_fused_array_literal = 16;
+
     fn compileArrayLiteral(self: *Compiler, lit: ast.expression.ArrayLit) CompileError!void {
+        // Â§13.2.4.1 fused lowering â a hole-free, spread-free literal
+        // of 1..max_fused_array_literal elements evaluates each
+        // element expression left-to-right into consecutive temps and
+        // builds the array in ONE `make_array_n` arm: the array is
+        // unreachable while elements evaluate, so deferring its
+        // creation past them is unobservable, and the per-element
+        // CreateDataPropertyOrThrow on a fresh extensible array can't
+        // fail or hit an accessor (same reasoning as the
+        // `def_property` dense-append fast path, hoisted to compile
+        // time). Holes, spreads, oversize, and empty literals keep
+        // the general lowering below.
+        fused: {
+            if (lit.elements.len == 0 or lit.elements.len > max_fused_array_literal) break :fused;
+            for (lit.elements) |maybe_elem| {
+                const elem = maybe_elem orelse break :fused; // hole
+                if (elem == .spread) break :fused;
+            }
+            var r_base: ?u8 = null;
+            var reserved: u8 = 0;
+            for (lit.elements) |maybe_elem| {
+                try self.compileExpression(&maybe_elem.?);
+                const r = try self.reserveTemp();
+                if (r_base == null) r_base = r;
+                reserved += 1;
+                try self.builder.emitOp(.star, lit.span);
+                try self.builder.emitU8(r);
+            }
+            try self.builder.emitOp(.make_array_n, lit.span);
+            try self.builder.emitU8(r_base.?);
+            try self.builder.emitU8(@intCast(lit.elements.len));
+            var j: u8 = 0;
+            while (j < reserved) : (j += 1) self.releaseTemp();
+            return;
+        }
+
         try self.builder.emitOp(.make_array, lit.span);
         const r_arr = try self.reserveTemp();
         defer self.releaseTemp();

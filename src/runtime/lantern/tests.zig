@@ -2457,6 +2457,51 @@ test "later: prefix ++obj.x returns new" {
 // fall through to the full path. Written red-first against the
 // slow-path-only interpreter.
 
+test "make_array_n: element side effects run left-to-right before the array exists" {
+    // §13.2.4.1 — element expressions evaluate in source order; the
+    // fused lowering stages them in registers before the array is
+    // created, which is unobservable because no binding to the array
+    // exists during element evaluation.
+    try expectScriptStringWithBuiltins(
+        \\let log = "";
+        \\function t(x) { log += x; return x; }
+        \\const a = [t(1), t(2), t(3)];
+        \\log + ":" + a.join(",");
+    , "123:1,2,3");
+}
+
+test "make_array_n: nested literals and computed elements" {
+    try expectScriptStringWithBuiltins(
+        \\const i = 1;
+        \\const a = [[i, i + 1], [i * 10, [i]]];
+        \\a[0][1] + ":" + a[1][0] + ":" + a[1][1][0] + ":" + a.length + ":" + a[0].length;
+    , "2:10:1:2:2");
+}
+
+test "make_array_n: cap boundary fuses at 16, falls back at 17" {
+    // Both shapes must produce identical arrays regardless of which
+    // lowering runs (the 17th element forces the general path).
+    try expectScriptStringWithBuiltins(
+        \\const a16 = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];
+        \\const a17 = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17];
+        \\a16.length + ":" + a16[15] + ":" + a17.length + ":" + a17[16];
+    , "16:16:17:17");
+}
+
+test "make_array_n: literal in a loop under GC pressure" {
+    // The element values sit in frame registers (GC roots) across the
+    // arm's allocation; gc_threshold=1 forces a collection at that
+    // allocation every iteration.
+    try expectScriptStringUnderGcPressure(
+        \\let s = 0;
+        \\for (let i = 0; i < 50; i++) {
+        \\  const a = [{ v: i }, { v: i + 1 }, i + 2];
+        \\  s += a[0].v + a[1].v + a[2];
+        \\}
+        \\"" + s;
+    , "3825");
+}
+
 test "flat into a plain species target keeps the shape invariant under GC" {
     // §23.1.3.13 Array.prototype.flat with an @@species constructor
     // that is a PLAIN function: the result target is a non-exotic

@@ -900,6 +900,21 @@ pub const Op = enum(u8) {
     /// dispatch through `Array.prototype`. (later: a real
     /// `JSArray` heap kind for fast indexed access.)
     make_array,
+    /// `[op] [r_base:u8] [n:u8]` — §13.2.4.1 fused dense array
+    /// literal: allocate a fresh Array exotic and copy the `n`
+    /// element values from consecutive registers `r_base ..
+    /// r_base+n-1` into its packed elements in one arm. Emitted by
+    /// the compiler only for hole-free, spread-free literals with
+    /// `1 <= n <= max_fused_array_literal` — one dispatch instead of
+    /// `make_array` + n× `def_property`, one exact-capacity reserve
+    /// instead of growth reallocs, no per-element canonical-index
+    /// parse, and no write barriers (the array is young by
+    /// construction, so no old→young edge can form). Element
+    /// expressions were already evaluated left-to-right into the
+    /// registers, and the array is unreachable until this op
+    /// completes, so the batching is unobservable (the JSC
+    /// `new_array argv/argc` shape). Result in `acc`.
+    make_array_n,
     /// `[op] [r_arr:u8]` — append every own indexed element of
     /// `acc` (the source iterable) to the array in `r_arr`,
     /// updating `r_arr.length`. §13.2.4 SpreadElement lowering.
@@ -1194,6 +1209,7 @@ pub const Op = enum(u8) {
             .rest_args_from,
             => 1, // single u8 register operand
             .set_fn_name_from => 2, // r_key:u8 + prefix:u8
+            .make_array_n => 2, // r_base:u8 + n:u8
             .mov,
             .array_rest_from,
             .object_rest_from,
@@ -1389,6 +1405,7 @@ pub const Op = enum(u8) {
             .make_object => "MakeObject",
             .make_object_shape => "MakeObjectShape",
             .make_array => "MakeArray",
+            .make_array_n => "MakeArrayN",
             .array_spread => "ArraySpread",
             .object_spread => "ObjectSpread",
             .lda_property => "LdaProperty",
