@@ -27,6 +27,7 @@ const ICCell = chunk_mod.ICCell;
 const CallICCell = chunk_mod.CallICCell;
 const CallFrame = @import("../lantern/interpreter.zig").CallFrame;
 const Environment = @import("../environment.zig").Environment;
+const JSFunction = @import("../function.zig").JSFunction;
 
 /// `CallFrame` — the frame-identity rule's contact surface
 /// (docs/jit.md §4.2).
@@ -37,6 +38,23 @@ pub const frame = struct {
     pub const this_value: u15 = @offsetOf(CallFrame, "this_value");
     pub const super_called_cell: u15 = @offsetOf(CallFrame, "super_called_cell");
     pub const env: u15 = @offsetOf(CallFrame, "env");
+    pub const new_target: u15 = @offsetOf(CallFrame, "new_target");
+    pub const home_object: u15 = @offsetOf(CallFrame, "home_object");
+    pub const home_function: u15 = @offsetOf(CallFrame, "home_function");
+    pub const owning_module: u15 = @offsetOf(CallFrame, "owning_module");
+};
+
+/// `JSFunction` — the self-tail-call jump-to-entry rebuild
+/// (docs/jit.md §12 3e follow-up) reads the callee's capture set.
+pub const function = struct {
+    pub const chunk: u15 = @offsetOf(JSFunction, "chunk");
+    pub const captured_env: u15 = @offsetOf(JSFunction, "captured_env");
+    pub const home_object: u15 = @offsetOf(JSFunction, "home_object");
+    pub const home_function: u15 = @offsetOf(JSFunction, "home_function");
+    pub const super_called_cell: u15 = @offsetOf(JSFunction, "super_called_cell");
+    pub const owning_module: u15 = @offsetOf(JSFunction, "owning_module");
+    pub const realm: u15 = @offsetOf(JSFunction, "realm");
+    pub const is_arrow: u15 = @offsetOf(JSFunction, "is_arrow");
 };
 
 /// `Environment` — the lda_env / sta_env fixed-depth walks
@@ -134,6 +152,8 @@ comptime {
     std.debug.assert(ic_cell.slot % 4 == 0);
     // The kind bits live inside the 8-byte alignment slack.
     std.debug.assert(heap_mod.kind_mask < 8);
+    // `is_arrow` is a byte load (ldrb imm12).
+    std.debug.assert(function.is_arrow < 4096);
 }
 
 // ── Executable proof ────────────────────────────────────────────────

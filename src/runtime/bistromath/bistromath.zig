@@ -348,6 +348,7 @@ const Compiler = struct {
     /// entry stub; insertion-ordered for a deterministic table.
     osr_headers: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
     osr_entries: std.ArrayListUnmanaged(Chunk.JitState.OsrEntry) = .empty,
+    body_start: Masm.Label = .{},
     done_label: Masm.Label = .{},
     tier_down_label: Masm.Label = .{},
     threw_label: Masm.Label = .{},
@@ -371,6 +372,7 @@ const Compiler = struct {
         self.threws.deinit(gpa);
         self.osr_headers.deinit(gpa);
         self.osr_entries.deinit(gpa);
+        self.body_start.fixups.deinit(gpa);
         self.done_label.fixups.deinit(gpa);
         self.tier_down_label.fixups.deinit(gpa);
         self.threw_label.fixups.deinit(gpa);
@@ -485,6 +487,7 @@ const Compiler = struct {
 
     fn body(self: *Compiler) CompileError!void {
         const m = &self.m;
+        m.bind(&self.body_start);
         const code = self.chunk.code;
         var i: usize = 0;
         while (i < code.len) {
@@ -670,13 +673,85 @@ const Compiler = struct {
                     try m.callAbs(.x16, @intFromPtr(&helperCall));
                     try self.emitCallStatus(threw);
                 },
-                .tail_call, .tail_call_method => {
-                    // §15.10 — PTC must run in constant stack; the
-                    // helper-mediated path would recurse natively,
-                    // so tail calls tier down unconditionally and
-                    // Lantern's frame-reuse reframe takes over.
-                    // Jump-to-entry for the self-recursive case is
-                    // the recorded follow-up (docs/jit.md §12 3e).
+                .tail_call => {
+                    // §15.10 jump-to-entry for the self-recursive
+                    // case: a plain (non-arrow) callee over THIS
+                    // chunk rebuilds the frame in place — the
+                    // callee's capture set replaces ours, the args
+                    // window shifts down, and control branches to
+                    // the body. Constant native stack by
+                    // construction. Any other callee tiers down to
+                    // Lantern's general PTC reframe; the pre-check
+                    // safepoint mirrors the interpreter's
+                    // runSafePoint poll at the reframe.
+                    const r_callee = code[i + 1];
+                    const argc = code[i + 2];
+                    const td = try self.tdFor(bc);
+                    if (argc > 8) {
+                        try m.jump(td);
+                    } else {
+                        // Budget / interrupt poll FIRST — it shares
+                        // the x9-x13 scratch set, so it must run
+                        // before the callee pointer is computed. A
+                        // trip re-runs this tail_call in Lantern.
+                        try self.backEdgeSafePoint(bc);
+                        try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_callee)));
+                        // Function-kind heap pointer (kind bits 0).
+                        try m.movImm64(.x13, layout.value_bits.tag_object_shifted);
+                        try m.emit(a64.eorReg(.x13, .x9, .x13));
+                        try m.emit(a64.lsrImm(.x12, .x13, 48));
+                        try m.jumpCbnz(.x12, td);
+                        try m.emit(a64.lslImm(.x12, .x13, 62));
+                        try m.emit(a64.lsrImm(.x12, .x12, 62));
+                        try m.jumpCbnz(.x12, td);
+                        try m.emit(a64.lsrImm(.x10, .x13, 2));
+                        try m.emit(a64.lslImm(.x10, .x10, 2));
+                        // Same chunk, not an arrow.
+                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.chunk));
+                        try m.movImm64(.x12, @intFromPtr(self.chunk));
+                        try m.emit(a64.cmpReg(.x11, .x12));
+                        try m.jumpCond(.ne, td);
+                        try m.emit(a64.ldrbImm(.x11, .x10, layout.function.is_arrow));
+                        try m.jumpCbnz(.x11, td);
+                        // Args window down to r0..argc-1 (dest is
+                        // always below source — forward copy safe).
+                        var k: u8 = 0;
+                        while (k < argc) : (k += 1) {
+                            try m.emit(a64.ldrImm(.x11, regs_reg, regSlot(r_callee + 1 + k)));
+                            try m.emit(a64.strImm(.x11, regs_reg, regSlot(k)));
+                        }
+                        // Frame rebuild from the callee's capture
+                        // set — the interpreter's reframe store set,
+                        // minus the fields a plain compiled frame
+                        // already holds (is_construct, generator,
+                        // wrap flags) and argc (only the arguments
+                        // machinery reads it, which register-safe
+                        // bodies cannot contain).
+                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.captured_env));
+                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.env));
+                        try m.movImm64(.x12, Value.undefined_.bits);
+                        try m.emit(a64.strImm(.x12, frame_reg, layout.frame.this_value));
+                        try m.emit(a64.strImm(.x12, frame_reg, layout.frame.new_target));
+                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.home_object));
+                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.home_object));
+                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.home_function));
+                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.home_function));
+                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.super_called_cell));
+                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.super_called_cell));
+                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.owning_module));
+                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.owning_module));
+                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.realm));
+                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.running_realm));
+                        // A fresh activation's accumulator.
+                        try m.movImm64(acc_reg, Value.undefined_.bits);
+                        try m.jump(&self.body_start);
+                    }
+                },
+                .tail_call_method => {
+                    // §15.10 — the method form keeps the
+                    // unconditional tier-down (rare, and `this`
+                    // re-binding adds a receiver path the plain
+                    // form doesn't need).
                     try m.jump(try self.tdFor(bc));
                 },
                 .negate => {
@@ -2077,6 +2152,51 @@ test "jit bistromath: class methods with body locals compile" {
         Chunk.JitState.Tier.compiled,
         step_chunk.jit_state.?.tier,
     );
+}
+
+test "jit bistromath calls: self-tail-call dispatch follows callee identity" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    // Guard for the §15.10 jump-to-entry optimization: the tail
+    // call dispatches on the VALUE in the callee register, not the
+    // textual self-reference — after `swap`, the same hot site
+    // must call the replacement. And an arrow's self-recursion
+    // (captured `this` / new.target) must stay correct and
+    // constant-stack at depth 200000.
+    const src =
+        \\function make() {
+        \\  let self = null;
+        \\  function inner(n, acc) { if (n === 0) { return acc; } return self(n - 1, acc + 1); }
+        \\  self = inner;
+        \\  return { run: inner, swap: function (f) { self = f; } };
+        \\}
+        \\var m = make();
+        \\let i = 0;
+        \\while (i < 300) { m.run(3, 0); i = i + 1; }
+        \\var deep = m.run(200000, 0);
+        \\m.swap(function (n, acc) { return acc * 100; });
+        \\var swapped = m.run(3, 0);
+        \\const arrow = (n) => n === 0 ? 7 : arrow(n - 1);
+        \\"" + deep + "," + swapped + "," + arrow(200000);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    // deep = 200000; swapped: inner(3,0) -> self(2,1) -> 1*100 = 100;
+    // arrow = 7.
+    try testing.expect(v.isString());
+    const sres: *@import("../string.zig").JSString = @ptrCast(@alignCast(v.asString()));
+    try testing.expectEqualStrings("200000,100,7", sres.flatBytes());
 }
 
 test "jit bistromath calls: method calls bind `this` through the tier" {

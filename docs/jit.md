@@ -822,9 +822,15 @@ useful:
        a spare scratch, then the marshal) all compile; tail calls
        tier down unconditionally — §15.10 demands constant stack
        and the helper path recurses natively. Shipped 2026-06
-       (pass-sets identical at 45223). Recorded follow-ups: the
-       `CallICCell` inline callee compare, and self-recursive
-       `tail_call` as frame-rebuild + jump-to-entry.
+       (pass-sets identical at 45223). Self-recursive `tail_call`
+       as frame-rebuild + jump-to-entry shipped 2026-06: a plain
+       non-arrow callee over the same chunk swaps its capture set
+       into the frame, shifts the args window, and branches to the
+       body — constant native stack by construction, with the
+       budget poll before any mutation (tail_recursion ~-18%);
+       every other callee still tiers down to Lantern's general
+       reframe. Recorded follow-up: the `CallICCell` inline callee
+       compare.
    3f. **OSR entry** — per-loop-header prologue stubs with a
        `bytecode offset → stub offset` table riding in the code
        region; Lantern back-edges consult it through an inline
