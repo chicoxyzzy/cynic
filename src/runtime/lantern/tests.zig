@@ -495,6 +495,22 @@ test "interpreter: Array subclass methods honour @@species (§23.1.3.34)" {
     , "false,true");
 }
 
+test "SES: override-mistake fix covers `constructor` shadowing" {
+    // The synthetic-accessor demotion that lets `f.toString = …`
+    // shadow a frozen prototype slot must cover `constructor` too
+    // — the slot the override mistake classically bites on
+    // (`this.constructor = …`, `Sub.prototype.constructor = Sub`
+    // over an Object.create'd primordial prototype). A carve-out
+    // left it a frozen data slot, so the assignment threw
+    // TypeError in the hardened default.
+    try expectScriptStringWithBuiltins(
+        \\var o = {}; o.constructor = 1;
+        \\var a = []; a.constructor = Array;
+        \\"" + o.constructor + "," + (a.constructor === Array) + "," +
+        \\  (({}).constructor === Object) + "," + (Object.prototype.constructor === Object);
+    , "1,true,true,true");
+}
+
 test "interpreter: Array.prototype.flat leaves length off a plain-object species result (§23.1.3.13)" {
     // §23.1.3.13 flat never writes `length` on the result —
     // FlattenIntoArray (§23.1.3.13.1) only performs per-element

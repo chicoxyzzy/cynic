@@ -336,10 +336,17 @@ namespace objects (`Math`, `JSON`, `Reflect`), and `globalThis`
 keep their data descriptors so direct intrinsic mutation
 (`Math.PI = 4`) still throws.
 
-The `constructor` back-edge is left as a frozen data slot to
-avoid routing every `instance.constructor` read through a
-getter — that property is on every prototype and would
-multiply IC misses.
+The `constructor` back-edge is demoted like every other data
+slot. An earlier iteration left it frozen to keep
+`instance.constructor` reads off the getter path, but the
+override mistake classically bites on exactly that property
+(`this.constructor = …` in legacy hierarchies,
+`Sub.prototype.constructor = Sub` over an `Object.create`'d
+primordial prototype), and `@endo/ses` lockdown's enablements
+demote it on every primordial prototype for the same reason.
+Reads stay cheap — the get path short-circuits on
+`synth_accessor` (a pointer load, not a JS call) before any
+dispatch.
 
 The synthetic setter throws if asked to redefine on the frozen
 holder (`Array.prototype.flat = badImpl`), since the accessor

@@ -780,15 +780,14 @@ fn installOverrideMistakeFix(realm: *Realm, proto: *JSObject) !void {
         });
     }
     for (snapshot.items) |s| {
-        // §15.7.14 / §17 — `constructor` is the back-edge that
-        // makes `instance.constructor === MyClass` work. Demoting
-        // it to a synth accessor would route every
-        // `someInst.constructor` read through the getter. Cheap
-        // to read in cycle terms but it shows up in IC misses;
-        // leave it as a frozen data slot (and accept the
-        // override mistake for the rare `Foo.prototype.constructor
-        // = …` reassignment — that's not a hot path).
-        if (std.mem.eql(u8, s.key, "constructor")) continue;
+        // `constructor` is covered too — the override mistake
+        // classically bites on it (`this.constructor = …`,
+        // `Sub.prototype.constructor = Sub` over an
+        // `Object.create`'d primordial prototype), and SES
+        // lockdown's enablements demote it on every primordial
+        // prototype for that reason. Reads stay cheap: the get
+        // path short-circuits on `synth_accessor` (a native
+        // branch, not a JS call) before any dispatch.
         try installSyntheticAccessorPair(realm, proto, s.key, s.value, s.enumerable);
     }
 }
