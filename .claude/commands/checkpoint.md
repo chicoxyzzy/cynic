@@ -94,7 +94,13 @@ Output: `bench-results.md`
 
 ```sh
 tools/guarded-run.sh --timeout=300 -- zig build bench
+tools/guarded-run.sh --timeout=300 -- zig build bench -- --no-jit
 ```
+
+Both postures: the engine default is Bistromath (the JIT) since
+the step-3 exit of jit.md's delivery order; `--no-jit` is the
+Lantern interpreter baseline. One run each, recorded as ONE
+comparison table (see the row format below).
 
 **Capture and print the entire table** to the user verbatim. Then
 compare against the most-recent row in `bench-results.md` for the
@@ -121,14 +127,17 @@ Row format — mirror the existing sections verbatim:
 `object_alloc -38 %`, `class_instantiate -45 %`; or
 "no fixture moved ≥5 % vs <prev sha>" when flat>
 
-| bench | median_ms | min_ms | max_ms | rss_kb |
-|---|---:|---:|---:|---:|
-| <fixture> | <p50> | <min> | <max> | <rss_kb> |
+One table, both postures (Δ = default vs `--no-jit`):
+
+| bench | `--no-jit` p50 | default p50 | Δ p50 | `--no-jit` min | default min | rss kb (nj→jit) |
+|---|---:|---:|---:|---:|---:|---:|
+| <fixture> | <p50> | <p50> | <±N%> | <min> | <min> | <kb>→<kb> |
 … one line per fixture, in the driver's table order …
 ```
 
-`median_ms` is the driver's `p50_ms` column; `rss_kb` is its
-`rss_kb`. If a row already exists for the same date + host, replace
+The p50/min values are the driver's `p50_ms`/`min_ms` columns per
+posture; Δ = (default − no-jit) / no-jit, negative = the tier is
+faster. If a row already exists for the same date + host, replace
 it (don't stack duplicates). Writing the file is a working-tree
 change only — the final "Stage and commit?" still lets the user
 decide whether it lands.

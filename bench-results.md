@@ -26,39 +26,22 @@ treat those cells as noisy), but every median corroborates the
 quiet-pair history: arith_loop 2.07×, method_call −24%, the rest
 flat.
 
-Default (Bistromath):
+One table, both postures (Δ = default vs `--no-jit`):
 
-| bench | median_ms | min_ms | max_ms | rss_kb |
-|---|---:|---:|---:|---:|
-| arith_loop | 16.14 | 14.03 | 21.68 | 5384 |
-| prop_access | 12.01 | 11.93 | 13.67 | 5328 |
-| prop_write | 11.61 | 11.54 | 13.48 | 5432 |
-| array_iter | 20.11 | 19.49 | 22.71 | 6408 |
-| string_concat | 24.36 | 24.15 | 25.68 | 15856 |
-| promise_chain | 10.42 | 10.16 | 10.93 | 23728 |
-| object_alloc | 23.38 | 22.78 | 24.37 | 9072 |
-| method_call | 14.06 | 13.69 | 15.05 | 5672 |
-| class_instantiate | 29.90 | 27.65 | 52.02 | 9072 |
-| ctor_array_build | 339.84 | 312.87 | 510.43 | 9768 |
-| json_stringify | 27.17 | 26.63 | 27.99 | 8840 |
-| tail_recursion | 36.91 | 34.54 | 42.81 | 5400 |
-
-`--no-jit` (Lantern):
-
-| bench | median_ms | min_ms | max_ms | rss_kb |
-|---|---:|---:|---:|---:|
-| arith_loop | 33.42 | 32.43 | 37.12 | 5248 |
-| prop_access | 13.16 | 12.11 | 13.32 | 5304 |
-| prop_write | 12.39 | 11.73 | 13.25 | 5384 |
-| array_iter | 20.29 | 20.01 | 21.33 | 6320 |
-| string_concat | 23.51 | 23.15 | 24.73 | 15712 |
-| promise_chain | 10.05 | 9.86 | 10.35 | 23760 |
-| object_alloc | 22.86 | 22.43 | 23.72 | 9112 |
-| method_call | 18.52 | 16.97 | 19.16 | 5576 |
-| class_instantiate | 26.44 | 25.91 | 28.14 | 9024 |
-| ctor_array_build | 314.18 | 301.36 | 434.93 | 9768 |
-| json_stringify | 28.68 | 27.38 | 30.55 | 8824 |
-| tail_recursion | 39.93 | 35.36 | 40.83 | 5368 |
+| bench | `--no-jit` p50 | default p50 | Δ p50 | `--no-jit` min | default min | rss kb (nj→jit) |
+|---|---:|---:|---:|---:|---:|---:|
+| arith_loop | 33.42 | 16.14 | -52% | 32.43 | 14.03 | 5248→5384 |
+| prop_access | 13.16 | 12.01 | -9% | 12.11 | 11.93 | 5304→5328 |
+| prop_write | 12.39 | 11.61 | -6% | 11.73 | 11.54 | 5384→5432 |
+| array_iter | 20.29 | 20.11 | -1% | 20.01 | 19.49 | 6320→6408 |
+| string_concat | 23.51 | 24.36 | +4% | 23.15 | 24.15 | 15712→15856 |
+| promise_chain | 10.05 | 10.42 | +4% | 9.86 | 10.16 | 23760→23728 |
+| object_alloc | 22.86 | 23.38 | +2% | 22.43 | 22.78 | 9112→9072 |
+| method_call | 18.52 | 14.06 | -24% | 16.97 | 13.69 | 5576→5672 |
+| class_instantiate | 26.44 | 29.90 | +13% | 25.91 | 27.65 | 9024→9072 |
+| ctor_array_build | 314.18 | 339.84 | +8% | 301.36 | 312.87 | 9768→9768 |
+| json_stringify | 28.68 | 27.17 | -5% | 27.38 | 26.63 | 8824→8840 |
+| tail_recursion | 39.93 | 36.91 | -8% | 35.36 | 34.54 | 5368→5400 |
 
 ### 2026-06-11 — cynic `6dc91a5` (post conformance batch + JIT-era interp), host `Darwin 25.6.0 arm64`
 
@@ -148,39 +131,22 @@ step 3f) lets the rest of the suite enter the tier. Loaded machine
 - RSS +~50 KB under `--jit` — the touched pages of the lazily
   reserved code region.
 
-Interpreter tier:
+One table, both postures (Δ = `--jit` vs interpreter; pre-flip naming — the tier was opt-in then):
 
-| bench | median_ms | min_ms | max_ms | rss_kb |
-|---|---:|---:|---:|---:|
-| arith_loop | 53.94 | 42.88 | 62.03 | 5456 |
-| prop_access | 18.04 | 17.24 | 20.92 | 5504 |
-| prop_write | 22.86 | 18.20 | 26.49 | 5520 |
-| array_iter | 36.69 | 31.10 | 42.09 | 6528 |
-| string_concat | 40.88 | 36.26 | 44.36 | 16000 |
-| promise_chain | 19.82 | 18.74 | 22.27 | 24024 |
-| object_alloc | 47.09 | 34.12 | 50.73 | 9280 |
-| method_call | 32.12 | 25.82 | 35.45 | 5680 |
-| class_instantiate | 50.61 | 46.58 | 62.95 | 9184 |
-| ctor_array_build | 528.82 | 459.18 | 553.06 | 9880 |
-| json_stringify | 42.77 | 39.38 | 51.98 | 8976 |
-| tail_recursion | 53.61 | 47.69 | 60.13 | 5464 |
-
-`--jit` (Bistromath, natural thresholds):
-
-| bench | median_ms | min_ms | max_ms | rss_kb |
-|---|---:|---:|---:|---:|
-| arith_loop | 52.35 | 47.66 | 56.19 | 5440 |
-| prop_access | 21.56 | 19.44 | 25.76 | 5472 |
-| prop_write | 21.72 | 17.03 | 24.70 | 5568 |
-| array_iter | 39.71 | 31.25 | 42.88 | 6600 |
-| string_concat | 47.96 | 37.62 | 58.53 | 15856 |
-| promise_chain | 25.63 | 20.70 | 31.14 | 24096 |
-| object_alloc | 42.55 | 33.52 | 47.87 | 9240 |
-| method_call | 23.17 | 20.36 | 27.87 | 5728 |
-| class_instantiate | 51.24 | 42.36 | 60.94 | 9152 |
-| ctor_array_build | 509.02 | 483.68 | 554.04 | 9880 |
-| json_stringify | 41.36 | 37.34 | 50.26 | 9016 |
-| tail_recursion | 58.51 | 47.09 | 67.90 | 5520 |
+| bench | `--no-jit` p50 | default p50 | Δ p50 | `--no-jit` min | default min | rss kb (nj→jit) |
+|---|---:|---:|---:|---:|---:|---:|
+| arith_loop | 53.94 | 52.35 | -3% | 42.88 | 47.66 | 5456→5440 |
+| prop_access | 18.04 | 21.56 | +20% | 17.24 | 19.44 | 5504→5472 |
+| prop_write | 22.86 | 21.72 | -5% | 18.20 | 17.03 | 5520→5568 |
+| array_iter | 36.69 | 39.71 | +8% | 31.10 | 31.25 | 6528→6600 |
+| string_concat | 40.88 | 47.96 | +17% | 36.26 | 37.62 | 16000→15856 |
+| promise_chain | 19.82 | 25.63 | +29% | 18.74 | 20.70 | 24024→24096 |
+| object_alloc | 47.09 | 42.55 | -10% | 34.12 | 33.52 | 9280→9240 |
+| method_call | 32.12 | 23.17 | -28% | 25.82 | 20.36 | 5680→5728 |
+| class_instantiate | 50.61 | 51.24 | +1% | 46.58 | 42.36 | 9184→9152 |
+| ctor_array_build | 528.82 | 509.02 | -4% | 459.18 | 483.68 | 9880→9880 |
+| json_stringify | 42.77 | 41.36 | -3% | 39.38 | 37.34 | 8976→9016 |
+| tail_recursion | 53.61 | 58.51 | +9% | 47.69 | 47.09 | 5464→5520 |
 
 ### 2026-06-09 — cynic `bb5703b` (JSON shape-walk + small-int toString cache), host `Darwin 25.6.0 arm64`
 
