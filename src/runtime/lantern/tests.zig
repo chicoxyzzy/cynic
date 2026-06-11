@@ -7886,6 +7886,28 @@ test "no host-abort on huge numeric args across builtins (host-safety invariant)
     , 20);
 }
 
+test "deep prototype / static chains don't overflow the native stack (host-safety)" {
+    // §10.1.8.1 OrdinaryGet / §7.3.12 HasProperty walk the prototype
+    // chain; a *recursive* walk (the old JSObject.get / hasProperty /
+    // JSFunction.get) SIGSEGV'd the host on a pathological deep chain
+    // built by user JS (`for (…) o = Object.create(o)`, or a deep
+    // `class … extends …` tower). The never-abort-the-host invariant
+    // requires these walks to be iterative. A regression segfaults this
+    // test under ReleaseSafe — which still fails the suite, loudly.
+    try expectScriptIntWithBuiltins(
+        \\var ok = 0;
+        \\var o = null;
+        \\for (var i = 0; i < 200000; i++) o = Object.create(o);
+        \\if (o.nope === undefined) ok++;        // get() walks 200k deep
+        \\if (("nope" in o) === false) ok++;     // hasProperty() walks 200k deep
+        \\class A { static foo() { return 7; } }
+        \\class B extends A {}
+        \\class C extends B {}
+        \\if (C.foo() === 7) ok++;               // JSFunction.get static chain (iterative)
+        \\ok;
+    , 3);
+}
+
 test "huge length on array-like iter and ShadowRealm wrap don't panic" {
     // §23.1.5.2.1 step 6 LengthOfArrayLike and §3.8.3.5.1 step 4.b
     // WrappedFunction-length each consume a Number whose magnitude

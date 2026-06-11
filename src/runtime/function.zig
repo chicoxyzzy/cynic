@@ -749,9 +749,23 @@ pub const JSFunction = struct {
                 return heap_mod.taggedObject(p);
             }
         }
-        if (self.static_parent) |sp| {
-            const v = sp.get(key);
-            if (!v.isUndefined()) return v;
+        // Class-static-inheritance chain, walked ITERATIVELY (own
+        // members at each level) — a recursive `sp.get(key)` over a
+        // deep `class … extends …` chain would overflow the native
+        // stack and abort the host (the never-abort-the-host invariant;
+        // see docs/handbook/host-safety.md). Mirrors `hasProperty`'s
+        // loop; the shared `%Function.prototype%` is consulted once
+        // below, so dropping the per-level proto re-check is observably
+        // equivalent.
+        var sp: ?*JSFunction = self.static_parent;
+        while (sp) |p| : (sp = p.static_parent) {
+            if (p.properties.get(key)) |v| return v;
+            if (std.mem.eql(u8, key, "prototype")) {
+                if (p.prototype) |pp| {
+                    const heap_mod = @import("heap.zig");
+                    return heap_mod.taggedObject(pp);
+                }
+            }
         }
         if (self.proto) |p| return p.get(key);
         return Value.undefined_;

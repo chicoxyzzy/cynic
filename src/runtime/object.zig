@@ -2657,49 +2657,66 @@ pub const JSObject = struct {
     }
 
     pub fn get(self: *const JSObject, key: []const u8) Value {
-        // §10.4.2 Array exotic — integer-indexed reads come from
-        // the indexed storage (packed `elements` or `sparse_elements`).
-        // Holes (§10.4.2.1) fall through to the prototype chain.
-        // `length` is the virtual §23.1.4 slot, synthesized here.
-        if (self.is_array_exotic) {
-            if (canonicalIntegerIndex(key)) |idx| {
-                if (self.tryGetIndexedOwn(idx)) |v| return v;
-            } else if (self.isVirtualLengthKey(key)) {
-                return self.arrayLengthValue();
-            }
-        }
-        // §10.1 own named-property read. Shape-first when present:
-        // `slots[entry.slot]` is the source of truth for shape-stable
-        // objects. The bag is consulted only as the fallback (object
-        // not shape-managed, or the key isn't covered by the shape
-        // — possible during an in-flight transition or on a demoted
-        // object). This contract lets `sta_property` skip the bag
-        // mirror on IC hits without leaving slow-path readers stale.
-        if (self.shape) |sh| {
-            if (sh.lookup(key)) |entry| {
-                if (entry.kind == .data and entry.slot < self.slotCount()) {
-                    return self.slotAt(entry.slot);
+        // §10.1.8.1 OrdinaryGet — walk the prototype chain ITERATIVELY.
+        // A recursive `proto.get(key)` overflowed the native stack on a
+        // pathological deep chain (a `for (…) o = Object.create(o)`
+        // loop, then a missing-property read) and SIGSEGV'd the host —
+        // user JS must never abort the host (the never-abort-the-host
+        // invariant; see docs/handbook/host-safety.md). Each level runs
+        // the same own-read checks the recursive form did.
+        var cur: *const JSObject = self;
+        while (true) {
+            // §10.4.2 Array exotic — integer-indexed reads come from
+            // the indexed storage (packed `elements` or `sparse_elements`).
+            // Holes (§10.4.2.1) fall through to the prototype chain.
+            // `length` is the virtual §23.1.4 slot, synthesized here.
+            if (cur.is_array_exotic) {
+                if (canonicalIntegerIndex(key)) |idx| {
+                    if (cur.tryGetIndexedOwn(idx)) |v| return v;
+                } else if (cur.isVirtualLengthKey(key)) {
+                    return cur.arrayLengthValue();
                 }
             }
-        }
-        if (self.properties.get(key)) |v| return v;
-        // Synthetic-accessor fast path — see the method-level
-        // doc above for why this lives in the data-shaped
-        // shortcut rather than as a realm-aware general
-        // accessor walk.
-        if (self.getAccessor(key)) |acc| {
-            if (acc.getter) |getter| {
-                if (getter.synth_accessor) |sa| return sa.value;
+            // §10.1 own named-property read. Shape-first when present:
+            // `slots[entry.slot]` is the source of truth for shape-stable
+            // objects. The bag is consulted only as the fallback (object
+            // not shape-managed, or the key isn't covered by the shape
+            // — possible during an in-flight transition or on a demoted
+            // object). This contract lets `sta_property` skip the bag
+            // mirror on IC hits without leaving slow-path readers stale.
+            if (cur.shape) |sh| {
+                if (sh.lookup(key)) |entry| {
+                    if (entry.kind == .data and entry.slot < cur.slotCount()) {
+                        return cur.slotAt(entry.slot);
+                    }
+                }
             }
-            // Non-synthetic accessor or write-only — caller must
-            // route through a realm-aware path; surface `undefined`
-            // (matches the legacy pre-SES behaviour for any
-            // unreachable accessor).
+            if (cur.properties.get(key)) |v| return v;
+            // Synthetic-accessor fast path — see the method-level
+            // doc above for why this lives in the data-shaped
+            // shortcut rather than as a realm-aware general
+            // accessor walk.
+            if (cur.getAccessor(key)) |acc| {
+                if (acc.getter) |getter| {
+                    if (getter.synth_accessor) |sa| return sa.value;
+                }
+                // Non-synthetic accessor or write-only — caller must
+                // route through a realm-aware path; surface `undefined`
+                // (matches the legacy pre-SES behaviour for any
+                // unreachable accessor).
+                return Value.undefined_;
+            }
+            // Advance to the prototype. A function prototype (a class's
+            // proto) is a single shallow hop — `Object.create` can only
+            // deepen the JSObject `prototype` link, so delegating the
+            // `prototype_fn` case keeps the deep-chain walk loop-bounded.
+            if (cur.prototype) |proto| {
+                cur = proto;
+                continue;
+            }
+            if (cur.prototype_fn) |pf| return pf.get(key);
             return Value.undefined_;
         }
-        if (self.prototype) |proto| return proto.get(key);
-        if (self.prototype_fn) |pf| return pf.get(key);
-        return Value.undefined_;
     }
 
     /// Own-data lookup, NOT walking the prototype chain. Shape-first:
@@ -2784,56 +2801,70 @@ pub const JSObject = struct {
     /// distinguishes "field not present" from "field is undefined")
     /// and other specs that observe inherited fields.
     pub fn hasProperty(self: *const JSObject, key: []const u8) bool {
-        // §15.2.1.16.3 / §15.2.1.18 — ambiguous star-export keys
-        // are omitted from the namespace.
-        if (self.is_module_namespace and self.hasAmbiguousNamespaceKey(key)) return false;
-        if (self.ownDataContains(key)) return true;
-        if (self.hasAccessor(key)) return true;
-        // §15.2.1.16.3 ResolveExport — re-export redirects appear
-        // as own properties on a Module Namespace exotic.
-        if (self.is_module_namespace and self.hasNamespaceRedirect(key)) return true;
-        if (self.is_array_exotic) {
-            if (canonicalIntegerIndex(key)) |idx| {
-                if (self.hasOwnIndexedSlot(idx)) return true;
+        // §7.3.12 HasProperty — walk the prototype chain ITERATIVELY.
+        // A recursive `proto.hasProperty(key)` shares `get`'s deep-chain
+        // native-stack-overflow hazard (host SIGSEGV on a pathological
+        // `Object.create` chain), so loop instead.
+        var cur: *const JSObject = self;
+        while (true) {
+            // §15.2.1.16.3 / §15.2.1.18 — ambiguous star-export keys
+            // are omitted from the namespace.
+            if (cur.is_module_namespace and cur.hasAmbiguousNamespaceKey(key)) return false;
+            if (cur.ownDataContains(key)) return true;
+            if (cur.hasAccessor(key)) return true;
+            // §15.2.1.16.3 ResolveExport — re-export redirects appear
+            // as own properties on a Module Namespace exotic.
+            if (cur.is_module_namespace and cur.hasNamespaceRedirect(key)) return true;
+            if (cur.is_array_exotic) {
+                if (canonicalIntegerIndex(key)) |idx| {
+                    if (cur.hasOwnIndexedSlot(idx)) return true;
+                }
             }
-        }
-        // §10.4.5.2 Integer-Indexed Exotic [[HasProperty]] — if the
-        // key is a CanonicalNumericIndexString, the lookup ends at
-        // the typed-array view (no proto-chain fallthrough for the
-        // numeric form). Out-of-bounds / detached / non-integer /
-        // negative / -0 all resolve to `false` *without* walking
-        // the prototype chain.
-        if (self.getTypedView()) |tv| {
-            const ta_mod = @import("builtins/typed_array.zig");
-            if (ta_mod.canonicalNumericIndex(key)) |num| {
-                if (std.math.isNan(num) or std.math.isInf(num)) return false;
-                if (@trunc(num) != num) return false;
-                if (num == 0.0 and std.math.signbit(num)) return false;
-                if (num < 0) return false;
-                const idx_u: usize = @intFromFloat(num);
-                const buf = tv.viewed.getArrayBuffer() orelse return false;
-                // §10.4.5.16 IsValidIntegerIndex — for a length-
-                // tracking view, the live length is recomputed from
-                // the current buffer size; for a fixed-length view
-                // the snapshot, gated on IsTypedArrayOutOfBounds
-                // (the view may be entirely OOB after a resizable-
-                // buffer shrink).
-                const elem_size = tv.kind.elementSize();
-                const live_len: usize = if (tv.length_tracking) blk: {
-                    if (tv.byte_offset > buf.len) break :blk 0;
-                    break :blk (buf.len - tv.byte_offset) / elem_size;
-                } else blk: {
-                    if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
-                    break :blk tv.length;
-                };
-                if (idx_u >= live_len) return false;
-                if (tv.byte_offset + (idx_u + 1) * elem_size > buf.len) return false;
-                return true;
+            // §10.4.5.2 Integer-Indexed Exotic [[HasProperty]] — if the
+            // key is a CanonicalNumericIndexString, the lookup ends at
+            // the typed-array view (no proto-chain fallthrough for the
+            // numeric form). Out-of-bounds / detached / non-integer /
+            // negative / -0 all resolve to `false` *without* walking
+            // the prototype chain.
+            if (cur.getTypedView()) |tv| {
+                const ta_mod = @import("builtins/typed_array.zig");
+                if (ta_mod.canonicalNumericIndex(key)) |num| {
+                    if (std.math.isNan(num) or std.math.isInf(num)) return false;
+                    if (@trunc(num) != num) return false;
+                    if (num == 0.0 and std.math.signbit(num)) return false;
+                    if (num < 0) return false;
+                    // Host-safety: a huge finite index outruns any view
+                    // length, so saturate the cast rather than trap.
+                    const usize_max_f: f64 = @floatFromInt(std.math.maxInt(usize));
+                    if (num >= usize_max_f) return false;
+                    const idx_u: usize = @intFromFloat(num);
+                    const buf = tv.viewed.getArrayBuffer() orelse return false;
+                    // §10.4.5.16 IsValidIntegerIndex — for a length-
+                    // tracking view, the live length is recomputed from
+                    // the current buffer size; for a fixed-length view
+                    // the snapshot, gated on IsTypedArrayOutOfBounds
+                    // (the view may be entirely OOB after a resizable-
+                    // buffer shrink).
+                    const elem_size = tv.kind.elementSize();
+                    const live_len: usize = if (tv.length_tracking) blk: {
+                        if (tv.byte_offset > buf.len) break :blk 0;
+                        break :blk (buf.len - tv.byte_offset) / elem_size;
+                    } else blk: {
+                        if (tv.byte_offset + tv.length * elem_size > buf.len) break :blk 0;
+                        break :blk tv.length;
+                    };
+                    if (idx_u >= live_len) return false;
+                    if (tv.byte_offset + (idx_u + 1) * elem_size > buf.len) return false;
+                    return true;
+                }
             }
+            if (cur.prototype) |proto| {
+                cur = proto;
+                continue;
+            }
+            if (cur.prototype_fn) |pf| return pf.hasProperty(key);
+            return false;
         }
-        if (self.prototype) |proto| return proto.hasProperty(key);
-        if (self.prototype_fn) |pf| return pf.hasProperty(key);
-        return false;
     }
 
     // ── §7.1.21 / §10.4.2 — Array exotic indexed storage ───────────────
