@@ -17,6 +17,49 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-11 — cynic `42ca813` (default-on checkpoint), host `Darwin 25.6.0 arm64`
+
+First post-flip recording: the default column IS Bistromath now;
+`--no-jit` is the Lantern baseline. Loaded machine (load avg 4-6;
+arith_loop/class_instantiate/ctor_array_build spreads 42-81% —
+treat those cells as noisy), but every median corroborates the
+quiet-pair history: arith_loop 2.07×, method_call −24%, the rest
+flat.
+
+Default (Bistromath):
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 16.14 | 14.03 | 21.68 | 5384 |
+| prop_access | 12.01 | 11.93 | 13.67 | 5328 |
+| prop_write | 11.61 | 11.54 | 13.48 | 5432 |
+| array_iter | 20.11 | 19.49 | 22.71 | 6408 |
+| string_concat | 24.36 | 24.15 | 25.68 | 15856 |
+| promise_chain | 10.42 | 10.16 | 10.93 | 23728 |
+| object_alloc | 23.38 | 22.78 | 24.37 | 9072 |
+| method_call | 14.06 | 13.69 | 15.05 | 5672 |
+| class_instantiate | 29.90 | 27.65 | 52.02 | 9072 |
+| ctor_array_build | 339.84 | 312.87 | 510.43 | 9768 |
+| json_stringify | 27.17 | 26.63 | 27.99 | 8840 |
+| tail_recursion | 36.91 | 34.54 | 42.81 | 5400 |
+
+`--no-jit` (Lantern):
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 33.42 | 32.43 | 37.12 | 5248 |
+| prop_access | 13.16 | 12.11 | 13.32 | 5304 |
+| prop_write | 12.39 | 11.73 | 13.25 | 5384 |
+| array_iter | 20.29 | 20.01 | 21.33 | 6320 |
+| string_concat | 23.51 | 23.15 | 24.73 | 15712 |
+| promise_chain | 10.05 | 9.86 | 10.35 | 23760 |
+| object_alloc | 22.86 | 22.43 | 23.72 | 9112 |
+| method_call | 18.52 | 16.97 | 19.16 | 5576 |
+| class_instantiate | 26.44 | 25.91 | 28.14 | 9024 |
+| ctor_array_build | 314.18 | 301.36 | 434.93 | 9768 |
+| json_stringify | 28.68 | 27.38 | 30.55 | 8824 |
+| tail_recursion | 39.93 | 35.36 | 40.83 | 5368 |
+
 ### 2026-06-11 — cynic `6dc91a5` (post conformance batch + JIT-era interp), host `Darwin 25.6.0 arm64`
 
 Quiet-machine single-engine row (interp mode, no `--jit`), the first
