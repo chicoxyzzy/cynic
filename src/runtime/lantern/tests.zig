@@ -2849,6 +2849,81 @@ test "for: register-promoted counter with a variable bound sums correctly" {
     , "45");
 }
 
+// §14.7.4 / §13.3.1 — block-scoped `let`/`const` declared inside a
+// register-safe function's loop / block body. L4 Stage 1 promotes
+// these from env slots to registers; the semantics below must hold
+// identically across that change (they pass on the env path too).
+
+test "block-lex: register-safe loop body with consts computes correctly" {
+    // The promotion target — `p` and `a` are uncaptured loop-body
+    // consts in a closure-free function.
+    try expectScriptStringWithBuiltins(
+        \\function f(n){
+        \\  let acc = 0;
+        \\  for (let i = 0; i < n; i++){
+        \\    const p = i & 3;
+        \\    const a = [p, p + 1, p + 2];
+        \\    acc += a[0] + a[1] + a[2];
+        \\  }
+        \\  return acc;
+        \\}
+        \\"" + f(6);
+    , "39");
+}
+
+test "block-lex: TDZ on a block const read before its declarator throws" {
+    // §13.3.1 — the Hole seed + throw_if_hole must survive register
+    // promotion (register_tdz path).
+    try expectScriptThrows("function f(){ { x; const x = 1; } } f();");
+}
+
+test "block-lex: inner block const shadows an outer binding" {
+    try expectScriptIntWithBuiltins(
+        \\function f(){
+        \\  let x = 1;
+        \\  for (let i = 0; i < 1; i++){ const x = 9; if (x !== 9) return -1; }
+        \\  return x;
+        \\}
+        \\f();
+    , 1);
+}
+
+test "block-lex: loop-body const is value-fresh each iteration" {
+    try expectScriptStringWithBuiltins(
+        \\function f(){
+        \\  let out = "";
+        \\  for (let i = 0; i < 3; i++){ const v = i * 10; out += v + ","; }
+        \\  return out;
+        \\}
+        \\f();
+    , "0,10,20,");
+}
+
+test "block-lex: nested blocks keep distinct consts" {
+    try expectScriptIntWithBuiltins(
+        \\function f(){
+        \\  let s = 0;
+        \\  { const a = 1; { const b = 10; { const c = 100; s = a + b + c; } } }
+        \\  return s;
+        \\}
+        \\f();
+    , 111);
+}
+
+test "block-lex: a capturing closure keeps per-iteration env semantics" {
+    // The body has a closure over the block const `j`, so the
+    // function is NOT register-safe — the env path (per-iteration
+    // freshness) must stand: each closure sees its own `j`.
+    try expectScriptStringWithBuiltins(
+        \\function f(){
+        \\  const fns = [];
+        \\  for (let i = 0; i < 3; i++){ const j = i * 10; fns.push(() => j); }
+        \\  return fns.map(g => g()).join(",");
+        \\}
+        \\f();
+    , "0,10,20");
+}
+
 test "for: a variable counter bound is re-read each iteration (shrink)" {
     // §14.7.4.1 step 3.a — the test expression is re-evaluated every
     // iteration, so a body that mutates the bound `n` is observed. A

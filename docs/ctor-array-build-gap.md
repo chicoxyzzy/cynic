@@ -309,6 +309,40 @@ initialized before every read in the same block. Compiler-only;
 medium effort; benefits every block-scoped hot loop, not just this
 fixture.
 
+**Scope correction (investigated 2026-06-12).** The "medium effort"
+estimate was optimistic — the work splits into two stages, and only
+the second helps *this* fixture:
+
+- Block-scoped lexicals are register-promoted **nowhere** today. The
+  existing body-locals promotion (`hoistLetConst`'s `promote_top_lex`)
+  fires only for function-body-*top* `let`/`const` via
+  `topLevelLexIsPromotable`; a `const` inside a loop / `if` / plain
+  block always takes the env-slot path (`compileBlock` calls
+  `hoistLetConst(…, false)`). Verified: a fully register-safe,
+  class-free function with a loop body of `const p` / `const a` still
+  emits `StaEnv`/`LdaEnv`+`ThrowIfHole` per access (the bindings flatten
+  into the function-entry env — blocks have no runtime env of their
+  own in Cynic). So **Stage 1** = extend the promotion to block-nested
+  lexicals under the existing coarse `bodyIsRegisterSafe` gate. Touches
+  `functionEntryEnvNeeded` (whether to emit the entry env at all), the
+  per-iteration TDZ re-seed (a shared register reseeded with the Hole
+  at each block entry), register lifetime, and must leave the
+  captured-closure per-iteration-env path untouched. A real
+  multi-commit change, not a flag flip.
+- The coarse gate `bodyIsRegisterSafe` rejects a function body that
+  contains **any** nested function / class. `ctor_array_build`'s script
+  declares `class Point`, so the whole script is non-register-safe and
+  Stage 1 does nothing for it. Firing on the actual fixture needs
+  **Stage 2** = per-*binding* capture analysis (a top-level class that
+  never closes over `p`/`a` shouldn't block their promotion) — a new
+  escape-analysis pass replacing the function-level predicate. The
+  larger, higher-risk half.
+
+Net: Stage 1 is the tractable win for register-safe functions (and the
+function-wrapped form the JIT sees); Stage 2 is what the headline
+fixture number needs. The −8 to −12 ns/iter magnitude still holds; the
+effort re-rates upward.
+
 ### L5 — smaller residuals
 
 - Leaner `allocateObject` init: the `o.* = .{…}` field-init writes

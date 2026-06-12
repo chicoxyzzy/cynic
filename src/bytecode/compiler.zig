@@ -213,6 +213,20 @@ pub const Compiler = struct {
     /// `MakeEnvironment` entirely if the body has no other
     /// env-needing bindings.
     current_params_register_only: bool = false,
+    /// True while compiling the body of a register-safe function (no
+    /// nested function / class / `arguments` / direct eval — the
+    /// `bodyIsRegisterSafe` guarantee). In that body, block-scoped
+    /// `let` / `const` declared inside a loop / `if` / plain block are
+    /// register-promoted like the function-body-top locals (L4 Stage 1,
+    /// docs/ctor-array-build-gap.md): with no closure able to capture
+    /// them, per-iteration freshness is unobservable, so a single
+    /// reused register per binding is spec-identical to a fresh env
+    /// slot. `compileBlock` gates its `hoistLetConst` promotion on
+    /// this. Always false outside a register-safe body — such a body
+    /// contains no nested function, so the flag never has to nest, and
+    /// a `defer` reset to false at the owning function's exit restores
+    /// the (always-false) outer value.
+    body_register_safe: bool = false,
     /// §14.3.2 `var` register promotion — set only while
     /// `hoistVarAndFunctions` runs for a register-safe body whose
     /// every `var` declarator is a simple identifier: the hoist
@@ -8662,7 +8676,25 @@ pub const Compiler = struct {
         // Pre-pass: hoist `let` / `const` slots so any reference
         // inside the block (including from forward declarations)
         // sees the binding in the TDZ rather than as undeclared.
-        try self.hoistLetConst(body, false);
+        //
+        // L4 Stage 1 — in a register-safe function body, this block's
+        // direct simple-ident `let` / `const` are promoted to
+        // registers (no closure can capture them). Promoted registers
+        // are never released, so bound the total against the temp
+        // budget; fall back to env slots otherwise. `using` blocks
+        // keep real scope semantics. The function-entry env is present
+        // regardless (`functionEntryEnvNeeded` counts nested block
+        // bindings), so the env fallback is always valid.
+        var block_lex: usize = 0;
+        if (self.body_register_safe) {
+            for (body) |*s| {
+                if (topLevelLexIsPromotable(s)) block_lex += s.lexical.declarators.len;
+            }
+        }
+        const promote_block = self.body_register_safe and block_lex > 0 and
+            !blockHasUsing(body) and
+            @as(usize, self.temps_in_use) + block_lex <= 192;
+        try self.hoistLetConst(body, promote_block);
 
         // §13.2.4.6 BlockStatement Runtime Semantics — ES2026
         // explicit-resource-management. If the block carries any
@@ -13801,6 +13833,14 @@ fn compileFunctionTemplateExtNamed(
         is_arrow,
         locals_register_only,
     );
+    // L4 Stage 1 — enable block-scoped lexical register promotion for
+    // this body when it is register-safe (no nested function can
+    // capture a block binding). Reset to false at function exit; a
+    // register-safe body never compiles a nested function, so the
+    // outer value is always false and the reset restores it.
+    self.body_register_safe = !is_generator and !is_async and
+        if (body_stmts) |st| bodyIsRegisterSafe(self.source, st, is_arrow) else false;
+    defer self.body_register_safe = false;
     self.env_depth = saved_env_depth +
         (if (has_fn_name_env) @as(u8, 1) else @as(u8, 0)) +
         (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
