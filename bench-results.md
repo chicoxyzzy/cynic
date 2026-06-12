@@ -17,6 +17,31 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-12 — cynic `cd2dd5c` (L4 register promotion complete + neg-fold), host `Darwin 25.6.0 arm64`
+
+Closes the ctor_array_build campaign: **176.60 median — from 497.45 at
+`4ce56ff` (−64.5 %)**. The full L4 line (block-lexical register promotion
+across functions / arrows / methods / constructors + the per-binding
+Stage 2 capture analysis + script-top-level wiring) now fires on the
+fixture itself; plus virtual array length, the GC traffic cut, L1/L2/L3a,
+the update-expr / compound-assign peepholes, and the unary-minus fold.
+Quiet machine (load ~2.6). Default tier (Bistromath on).
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 15.24 | 14.30 | 18.77 | 5624 |
+| prop_access | 13.55 | 12.61 | 20.03 | 5608 |
+| prop_write | 12.66 | 12.30 | 13.00 | 5672 |
+| array_iter | 20.29 | 20.03 | 20.82 | 6744 |
+| string_concat | 25.45 | 24.91 | 25.71 | 15744 |
+| promise_chain | 10.73 | 10.49 | 11.21 | 23856 |
+| object_alloc | 24.60 | 23.75 | 25.22 | 9448 |
+| method_call | 13.90 | 13.61 | 14.25 | 5912 |
+| class_instantiate | 27.14 | 26.54 | 28.28 | 9344 |
+| ctor_array_build | 176.60 | 173.57 | 180.38 | 9928 |
+| json_stringify | 23.72 | 23.40 | 24.84 | 9136 |
+| tail_recursion | 5.37 | 5.28 | 5.60 | 5680 |
+
 ### 2026-06-12 — cynic `dd4a0ce`, host `Darwin 25.6.0 arm64`
 
 `tail_recursion` 33.48 → 6.13 (−82 %) — frame-rooting / OSR work
