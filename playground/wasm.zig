@@ -30,12 +30,22 @@
 //!   [u8  error_len bytes]       error text (empty unless status != 0)
 //!   [u32 error_span_start]      big-endian, byte offset into source
 //!   [u32 error_span_end]        big-endian, byte offset into source
+//!   [u32 stats_len]   big-endian
+//!   [u8  stats_len bytes]       runtime stats footer (see `cynic_eval`)
 //!
 //! `error_span_start == error_span_end` means "no source range" —
 //! the playground falls back to a panel-level error message. Today
 //! the span is populated for parse-error diagnostics (the first
 //! error-severity diagnostic's span); compile-time and runtime
 //! errors carry an empty span.
+//!
+//! `stats` is populated only by `cynic_eval` on a successful run —
+//! a single line of "chunk: …\nGC: …" telling the visitor how much
+//! the snippet compiled to and what the heap did during the run.
+//! Empty on parse/compile failure, on `cynic_parse`, and on
+//! `cynic_parse_ast`. The two `u32`s for `error_span` AND the
+//! `stats` section both ride at the end of the frame so older JS
+//! clients that stop after `error_len` keep working.
 //!
 //! `cynic_parse` and `cynic_parse_ast` return the same frame shape;
 //! their `value` section carries the bytecode disassembly or the
@@ -148,6 +158,10 @@ const Status = enum(u8) {
 /// playground then renders the error without an underline). The two
 /// `u32`s ride at the very end of the frame so older JS clients that
 /// stop after `error_len` keep working.
+/// Thin shim that passes an empty `stats` section. Used by every
+/// error path and by `cynic_parse` / `cynic_parse_ast`; only
+/// `cynic_eval` on a successful run / runtime throw populates stats
+/// (via `buildFrameWithStats`).
 fn buildFrame(
     status: Status,
     stdout: []const u8,
@@ -155,8 +169,19 @@ fn buildFrame(
     err: []const u8,
     error_span: cynic.source.Span,
 ) [*]u8 {
+    return buildFrameWithStats(status, stdout, value, err, error_span, "");
+}
+
+fn buildFrameWithStats(
+    status: Status,
+    stdout: []const u8,
+    value: []const u8,
+    err: []const u8,
+    error_span: cynic.source.Span,
+    stats: []const u8,
+) [*]u8 {
     freeResultFrame();
-    const total = 1 + 4 + stdout.len + 4 + value.len + 4 + err.len + 8;
+    const total = 1 + 4 + stdout.len + 4 + value.len + 4 + err.len + 8 + 4 + stats.len;
     const buf = gpa.alloc(u8, total) catch {
         return @ptrFromInt(8); // non-null sentinel; len() reports 0
     };
@@ -173,6 +198,10 @@ fn buildFrame(
     w += 4;
     std.mem.writeInt(u32, buf[w..][0..4], error_span.end, .big);
     w += 4;
+    std.mem.writeInt(u32, buf[w..][0..4], @intCast(stats.len), .big);
+    w += 4;
+    @memcpy(buf[w..][0..stats.len], stats);
+    w += stats.len;
     result_frame = buf;
     return buf.ptr;
 }
@@ -181,6 +210,49 @@ fn buildFrame(
 /// means "no source range" on the wire. Used for compile-time and
 /// runtime errors that aren't yet plumbed through to a span.
 const empty_span: cynic.source.Span = .{ .start = 0, .end = 0 };
+
+/// Append a two-line runtime-stats footer to `buf`:
+///
+///     chunk: <code> B · <consts> consts · <regs> regs
+///     GC: <cycles> cycles · <pause> ms · peak <bytes> · alloc <bytes>
+///
+/// Reads chunk shape and the heap's running totals
+/// (`gc_cycles_total`, `gc_time_ns_total`, `bytes_live_peak`,
+/// `bytes_alloc_total`). The pause is printed as `<int>.<tenth>` ms
+/// — tight enough for the playground footer.
+fn appendStats(
+    buf: *std.ArrayListUnmanaged(u8),
+    realm: *const Realm,
+    chunk: *const cynic.bytecode.Chunk,
+) !void {
+    var scratch: [64]u8 = undefined;
+    try buf.appendSlice(gpa, try std.fmt.bufPrint(&scratch, "chunk: {d} B · {d} consts · {d} regs\n", .{
+        chunk.code.len, chunk.constants.len, chunk.register_count,
+    }));
+    const h = &realm.heap;
+    try buf.appendSlice(gpa, try std.fmt.bufPrint(&scratch, "GC: {d} cycles · ", .{h.gc_cycles_total}));
+    const ms_x10 = h.gc_time_ns_total / 100_000;
+    try buf.appendSlice(gpa, try std.fmt.bufPrint(&scratch, "{d}.{d} ms pause · ", .{ ms_x10 / 10, ms_x10 % 10 }));
+    try buf.appendSlice(gpa, "peak ");
+    try appendByteSize(buf, h.bytes_live_peak);
+    try buf.appendSlice(gpa, " · alloc ");
+    try appendByteSize(buf, h.bytes_alloc_total);
+}
+
+/// Format `n` bytes as `<int> B` / `<int>.<tenth> KB` / `<int>.<tenth> MB`.
+fn appendByteSize(buf: *std.ArrayListUnmanaged(u8), n: u64) !void {
+    var scratch: [64]u8 = undefined;
+    const s = if (n < 1024) blk: {
+        break :blk try std.fmt.bufPrint(&scratch, "{d} B", .{n});
+    } else if (n < 1024 * 1024) blk: {
+        const x10 = (n * 10) / 1024;
+        break :blk try std.fmt.bufPrint(&scratch, "{d}.{d} KB", .{ x10 / 10, x10 % 10 });
+    } else blk: {
+        const x10 = (n * 10) / (1024 * 1024);
+        break :blk try std.fmt.bufPrint(&scratch, "{d}.{d} MB", .{ x10 / 10, x10 % 10 });
+    };
+    try buf.appendSlice(gpa, s);
+}
 
 // ---------------------------------------------------------------------------
 // cynic_eval — run source through the host evaluateScript path
@@ -299,14 +371,22 @@ export fn cynic_eval(src: [*]const u8, len: u32, hardened: u32) [*]u8 {
     var error_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer error_buf.deinit(gpa);
 
+    // Runtime stats footer — populated on a successful run AND on
+    // an uncaught throw (the GC churn the snippet caused up to the
+    // throw is still meaningful). Best-effort: a `bufPrint` overflow
+    // here just leaves the footer empty rather than failing the eval.
+    var stats_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer stats_buf.deinit(gpa);
+    appendStats(&stats_buf, &realm, chunk_ptr) catch {};
+
     switch (outcome) {
         .value, .yielded => |v| {
             appendValueText(&value_buf, v) catch {};
-            return buildFrame(.ok, realm.output.items, value_buf.items, "", empty_span);
+            return buildFrameWithStats(.ok, realm.output.items, value_buf.items, "", empty_span, stats_buf.items);
         },
         .thrown => |v| {
             appendThrownText(&error_buf, v) catch {};
-            return buildFrame(.threw, realm.output.items, "", error_buf.items, empty_span);
+            return buildFrameWithStats(.threw, realm.output.items, "", error_buf.items, empty_span, stats_buf.items);
         },
     }
 }
