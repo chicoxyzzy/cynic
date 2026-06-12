@@ -369,7 +369,20 @@ function-wrapped form the JIT actually compiles is covered.
   next step.
 - `sta_this_property` fusion (ctor body is 10 ops where JSC does 5;
   the `LdaThis,Star` pairs around each store are pure shuffle):
-  ~2-4 dispatches ≈ −2-3 ns. Tentative.
+  ~2-4 dispatches ≈ −2-3 ns. **Attempted and reverted (2026-06-12) —
+  must be a coordinated interp+JIT change, NOT interpreter-only.** A
+  prototype added the `sta_this_property` opcode (encoding
+  `k:u16 + ic:u16`, receiver from the frame), wired the compiler
+  intercept and the interpreter handler with the transition IC; the
+  fusion emitted correctly and the unit tests passed. But Bistromath
+  treats the unknown opcode as `UnsupportedOp → dont_compile`, so any
+  method that writes `this.x` (the method_call-bench shape:
+  `this.n = this.n + 1`) stops tiering up — the bistromath test "methods
+  reading `this` compile" (which asserts `jit_state.tier == .compiled`)
+  fails. That trades the campaign's smallest tentative interp gain for a
+  real JIT-tier regression on a common, hot method shape. Ship only
+  alongside Bistromath support for the opcode (JIT track); the
+  interpreter-only form is net-negative.
 - A segregated `JSArray` heap kind (V8/JSC-style separate type):
   **not recommended** — the unified-JSObject costs this fixture
   still pays (header init breadth, per-corpse deinit walk) are
