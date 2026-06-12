@@ -63,6 +63,17 @@ const op_local_tee: u8 = 0x22;
 const op_i32_add: u8 = 0x6a;
 const op_i32_sub: u8 = 0x6b;
 const op_i32_mul: u8 = 0x6c;
+const op_i32_eqz: u8 = 0x45;
+const op_i32_eq: u8 = 0x46;
+const op_i32_ne: u8 = 0x47;
+const op_i32_lt_s: u8 = 0x48;
+const op_i32_lt_u: u8 = 0x49;
+const op_i32_gt_s: u8 = 0x4a;
+const op_i32_gt_u: u8 = 0x4b;
+const op_i32_le_s: u8 = 0x4c;
+const op_i32_le_u: u8 = 0x4d;
+const op_i32_ge_s: u8 = 0x4e;
+const op_i32_ge_u: u8 = 0x4f;
 const op_i32_and: u8 = 0x71;
 const op_i32_or: u8 = 0x72;
 const op_i32_xor: u8 = 0x73;
@@ -157,6 +168,64 @@ pub fn compile(
                 };
                 try m.emit(a64.strImm(reg, .x0, @intCast(cell_off)));
                 if (op == op_local_set) sp -= 1;
+            },
+            op_i32_eqz => {
+                // §4.3.10 i32.eqz — unary: 1 if the operand is zero.
+                if (sp < 1) return null;
+                if (stack[sp - 1] == .const_i32) {
+                    stack[sp - 1] = .{ .const_i32 = @intFromBool(stack[sp - 1].const_i32 == 0) };
+                    continue;
+                }
+                const ra = stack[sp - 1].reg;
+                try m.movImm64(.x16, 0);
+                try m.emit(a64.cmpRegW(ra, .x16));
+                try m.emit(a64.csetW(ra, .eq));
+            },
+            op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u => {
+                // §4.3.10 i32 relops — push 1/0. The signed ops use the
+                // AArch64 signed conditions (lt/gt/le/ge), the unsigned
+                // ops the carry-based ones (cc/hi/ls/cs).
+                if (sp < 2) return null;
+                const b = stack[sp - 1];
+                const a = stack[sp - 2];
+                sp -= 1;
+                if (a == .const_i32 and b == .const_i32) {
+                    const x = a.const_i32;
+                    const y = b.const_i32;
+                    const xu: u32 = @bitCast(x);
+                    const yu: u32 = @bitCast(y);
+                    const r: i32 = @intFromBool(switch (op) {
+                        op_i32_eq => x == y,
+                        op_i32_ne => x != y,
+                        op_i32_lt_s => x < y,
+                        op_i32_lt_u => xu < yu,
+                        op_i32_gt_s => x > y,
+                        op_i32_gt_u => xu > yu,
+                        op_i32_le_s => x <= y,
+                        op_i32_le_u => xu <= yu,
+                        op_i32_ge_s => x >= y,
+                        else => xu >= yu,
+                    });
+                    stack[sp - 1] = .{ .const_i32 = r };
+                    continue;
+                }
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                try m.emit(a64.cmpRegW(ra, rb));
+                const cond: a64.Cond = switch (op) {
+                    op_i32_eq => .eq,
+                    op_i32_ne => .ne,
+                    op_i32_lt_s => .lt,
+                    op_i32_lt_u => .cc,
+                    op_i32_gt_s => .gt,
+                    op_i32_gt_u => .hi,
+                    op_i32_le_s => .le,
+                    op_i32_le_u => .ls,
+                    op_i32_ge_s => .ge,
+                    else => .cs,
+                };
+                try m.emit(a64.csetW(ra, cond));
+                stack[sp - 1] = .{ .reg = ra };
             },
             op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor => {
                 if (sp < 2) return null;
@@ -458,14 +527,66 @@ test "spasm: local.tee stores and leaves the value on the stack" {
     try testing.expectEqual(@as(u32, 14), @as(u32, @truncate(results[0])));
 }
 
+test "spasm: i32 comparisons distinguish signed from unsigned" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    const ftype: FuncType = .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} };
+    const local2: []const ValType = &.{ .i32, .i32 };
+    // -1 (0xFFFFFFFF) vs 0: lt_s true (1), lt_u false (0).
+    const cases = [_]struct { op: u8, a: i32, b: i32, want: u32 }{
+        .{ .op = 0x48, .a = -1, .b = 0, .want = 1 }, // lt_s: -1 < 0
+        .{ .op = 0x49, .a = -1, .b = 0, .want = 0 }, // lt_u: 0xFFFFFFFF < 0
+        .{ .op = 0x4b, .a = -1, .b = 0, .want = 1 }, // gt_u: 0xFFFFFFFF > 0
+        .{ .op = 0x4e, .a = -1, .b = -1, .want = 1 }, // ge_s: -1 >= -1
+        .{ .op = 0x46, .a = 42, .b = 42, .want = 1 }, // eq
+        .{ .op = 0x47, .a = 42, .b = 42, .want = 0 }, // ne
+    };
+    for (cases) |c| {
+        const body = [_]u8{ 0x20, 0x00, 0x20, 0x01, c.op, op_end };
+        const func: CompiledFunc = .{ .type_index = 0, .local_types = local2, .body = &body, .side_table = &.{}, .max_stack = 2 };
+        const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+        var locals: [2]Cell = .{ @as(u32, @bitCast(c.a)), @as(u32, @bitCast(c.b)) };
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(c.want, @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: i32.eqz computes and folds" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    inline for (.{ .{ 0, 1 }, .{ 5, 0 } }) |pair| {
+        const body = [_]u8{ 0x20, 0x00, 0x45, op_end };
+        const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = &.{}, .max_stack = 1 };
+        const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+        var locals: [1]Cell = .{pair[0]};
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
+    // folded: i32.const 0; i32.eqz -> 1
+    const body = [_]u8{ op_i32_const, 0, 0x45, op_end };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{}, .body = &body, .side_table = &.{}, .max_stack = 1 };
+    const fty: FuncType = .{ .params = &.{}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
+    var locals: [1]Cell = .{0};
+    var results: [1]Cell = .{0};
+    entry(&locals, &results);
+    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(results[0])));
+}
+
 test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
     if (comptime !supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
 
-    // `i32.eqz` (0x45) is not in this increment's set — Spasm must
-    // refuse the whole function, not abort. The interpreter runs it.
-    const body = [_]u8{ op_i32_const, 1, 0x45, op_end };
+    // `call` (0x10) is far outside the baseline's current set —
+    // Spasm must refuse the whole function, not abort. The
+    // interpreter runs it.
+    const body = [_]u8{ 0x10, 0x00, op_end };
     const func: CompiledFunc = .{
         .type_index = 0,
         .local_types = &.{},
