@@ -8743,19 +8743,15 @@ pub fn runFrames(
             ip += 1;
             const n = code[ip];
             ip += 1;
-            const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-            realm.heap.setObjectPrototype(obj, realm.intrinsics.array_prototype);
-            obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
-            // The element buffer comes from the heap's fixed-class
-            // slab pool (the compiler caps fused literals at the
-            // pool's capacity), so the common literal array performs
-            // NO general-purpose allocation at all — and returns the
-            // buffer to the pool at death. Growth past the class
-            // migrates once via `elementsUnpool`.
-            const buf = realm.heap.element_buf_pool.create(realm.heap.allocator) catch return error.OutOfMemory;
-            obj.elements = .{ .items = buf[0..0], .capacity = heap_mod.Heap.element_buf_cap };
-            obj.elements_pooled = true;
-            obj.elements.appendSliceAssumeCapacity(registers[r_base .. @as(usize, r_base) + n]);
+            // Construction shared with Bistromath via
+            // `Heap.makeDenseArray` so both tiers build a
+            // byte-identical object — same exotic shape, pooled
+            // element buffer (NO general-purpose alloc for a
+            // literal that fits the slab class), and virtual length.
+            // The n element values sit in consecutive GC-rooted
+            // frame registers, so the allocation inside can collect
+            // safely.
+            const obj = realm.heap.makeDenseArray(realm.intrinsics.array_prototype, registers[r_base .. @as(usize, r_base) + n]) catch return error.OutOfMemory;
             acc = heap_mod.taggedObject(obj);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
