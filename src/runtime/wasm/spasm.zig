@@ -58,9 +58,14 @@ pub const CompileError = error{ OutOfMemory, UnsupportedOp };
 const op_end: u8 = 0x0b;
 const op_local_get: u8 = 0x20;
 const op_i32_const: u8 = 0x41;
+const op_local_set: u8 = 0x21;
+const op_local_tee: u8 = 0x22;
 const op_i32_add: u8 = 0x6a;
 const op_i32_sub: u8 = 0x6b;
 const op_i32_mul: u8 = 0x6c;
+const op_i32_and: u8 = 0x71;
+const op_i32_or: u8 = 0x72;
+const op_i32_xor: u8 = 0x73;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -132,7 +137,28 @@ pub fn compile(
                 stack[sp] = .{ .reg = regForDepth(sp) };
                 sp += 1;
             },
-            op_i32_add, op_i32_sub, op_i32_mul => {
+            op_local_set, op_local_tee => {
+                const idx = readUleb32(body, &i) orelse return null;
+                if (sp < 1) return null;
+                if (idx >= func.local_types.len) return null;
+                if (func.local_types[idx] != .i32) return null;
+                const cell_off = @as(u64, idx) * @sizeOf(Cell);
+                if (cell_off > 32760) return null; // strImm scaled-imm ceiling
+                // Materialize the top value (its slot register, or a
+                // scratch for a folded constant) and store its low 64
+                // bits (i32 in the low word, zeros above) to the local
+                // cell. `tee` leaves the value on the stack; `set` pops.
+                const reg = switch (stack[sp - 1]) {
+                    .reg => |r| r,
+                    .const_i32 => |v| blk: {
+                        try m.movImm64(.x16, @as(u32, @bitCast(v)));
+                        break :blk .x16;
+                    },
+                };
+                try m.emit(a64.strImm(reg, .x0, @intCast(cell_off)));
+                if (op == op_local_set) sp -= 1;
+            },
+            op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor => {
                 if (sp < 2) return null;
                 const b = stack[sp - 1];
                 const a = stack[sp - 2];
@@ -145,7 +171,10 @@ pub fn compile(
                     stack[sp - 1] = .{ .const_i32 = switch (op) {
                         op_i32_add => x +% y,
                         op_i32_sub => x -% y,
-                        else => x *% y,
+                        op_i32_mul => x *% y,
+                        op_i32_and => x & y,
+                        op_i32_or => x | y,
+                        else => x ^ y,
                     } };
                     continue;
                 }
@@ -157,6 +186,9 @@ pub fn compile(
                 switch (op) {
                     op_i32_add => try m.emit(a64.addsRegW(ra, ra, rb)),
                     op_i32_sub => try m.emit(a64.subsRegW(ra, ra, rb)),
+                    op_i32_and => try m.emit(a64.andRegW(ra, ra, rb)),
+                    op_i32_or => try m.emit(a64.orrRegW(ra, ra, rb)),
+                    op_i32_xor => try m.emit(a64.eorRegW(ra, ra, rb)),
                     else => {
                         // §4.3 imul wants the low 32 bits of the product;
                         // smull's full 64-bit product holds them, then a
@@ -366,6 +398,64 @@ test "spasm: i32 arithmetic folds two constants at compile time" {
     var results: [1]Cell = .{0};
     entry(&locals, &results);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
+}
+
+test "spasm: i32 bitwise and/or/xor compute and fold" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    const ftype: FuncType = .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} };
+    // and: 0b1110 & 0b1011 = 0b1010 = 10
+    {
+        const body = [_]u8{ 0x20, 0x00, 0x20, 0x01, 0x71, op_end };
+        const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = &.{}, .max_stack = 2 };
+        const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+        var locals: [2]Cell = .{ 0b1110, 0b1011 };
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, 0b1010), @as(u32, @truncate(results[0])));
+    }
+    // or | xor folded: (5 | 2) ^ 3 = 7 ^ 3 = 4, all constant
+    {
+        const body = [_]u8{ op_i32_const, 5, op_i32_const, 2, 0x72, op_i32_const, 3, 0x73, op_end };
+        const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{}, .body = &body, .side_table = &.{}, .max_stack = 2 };
+        const fty: FuncType = .{ .params = &.{}, .results = &.{.i32} };
+        const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
+        var locals: [1]Cell = .{0};
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, 4), @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: local.set writes a local that local.get reads back" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32) i32.const 5; local.set 0; local.get 0)
+    const body = [_]u8{ op_i32_const, 5, 0x21, 0x00, 0x20, 0x00, op_end };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = &.{}, .max_stack = 1 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    var locals: [1]Cell = .{99}; // overwritten by local.set
+    var results: [1]Cell = .{0};
+    entry(&locals, &results);
+    try testing.expectEqual(@as(u32, 5), @as(u32, @truncate(results[0])));
+}
+
+test "spasm: local.tee stores and leaves the value on the stack" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32) i32.const 7; local.tee 0; local.get 0; i32.add) -> 14
+    const body = [_]u8{ op_i32_const, 7, 0x22, 0x00, 0x20, 0x00, 0x6a, op_end };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = &.{}, .max_stack = 2 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    var locals: [1]Cell = .{99};
+    var results: [1]Cell = .{0};
+    entry(&locals, &results);
+    try testing.expectEqual(@as(u32, 14), @as(u32, @truncate(results[0])));
 }
 
 test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
