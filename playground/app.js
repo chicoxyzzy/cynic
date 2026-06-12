@@ -263,6 +263,8 @@ const els = {
   share: document.getElementById('share'),
   status: document.getElementById('status'),
   output: document.getElementById('output'),
+  spanEdgeUp: document.getElementById('span-edge-up'),
+  spanEdgeDown: document.getElementById('span-edge-down'),
   snippets: document.getElementById('snippets'),
   version: document.getElementById('version'),
   unhardened: document.getElementById('unhardened'),
@@ -817,6 +819,11 @@ function wireInspectorHover() {
 // `view.posAtCoords` (CodeMirror's hit-test) and walks the cached
 // `lastSpanLines` set; output DOM is at most a few hundred elements
 // so a linear scan per mousemove is fine.
+// Tracks the editor hot-range the reverse-hover last set, so we only
+// dispatch a CodeMirror transaction when the highlighted span actually
+// changes (mousemove fires per pixel; transactions are not free).
+let lastSourceHotKey = null;
+
 function wireSourceToSpanHover() {
   els.editorHost.addEventListener('mousemove', (e) => {
     if (lastSpanLines.length === 0) return;
@@ -826,22 +833,93 @@ function wireSourceToSpanHover() {
       clearSpanActive();
       return;
     }
+    // First pass: find the narrowest span width that brackets the
+    // cursor — the most-specific node / instruction. Ties (several
+    // lines tagged with the same minimal span) share it.
+    let best = null;
+    let bestSize = Infinity;
+    for (const el of lastSpanLines) {
+      const from = Number(el.dataset.from);
+      const to = Number(el.dataset.to);
+      if (pos >= from && pos < to) {
+        const size = to - from;
+        if (size < bestSize) {
+          bestSize = size;
+          best = el;
+        }
+      }
+    }
+    // Second pass: tier the right panel. Lines tagged with the narrowest
+    // span get the strong `.span-active`; wider enclosing spans get the
+    // faint `.span-active-ancestor`. Every containing line still lights
+    // up (the all-spans view is preserved), but depth is now legible —
+    // hovering `console` makes its own load op strong and the call ops
+    // it's nested inside faint, rather than all of them equal.
+    const activeEls = [];
     for (const el of lastSpanLines) {
       const from = Number(el.dataset.from);
       const to = Number(el.dataset.to);
       const inside = pos >= from && pos < to;
-      el.classList.toggle('span-active', inside);
+      const primary = inside && to - from === bestSize;
+      el.classList.toggle('span-active', primary);
+      el.classList.toggle('span-active-ancestor', inside && !primary);
+      if (inside) activeEls.push(el);
     }
-    // No autoscroll: hovering the source only highlights the matching
-    // output line(s) in place. Auto-scrolling the panel to reveal an
-    // off-screen match shifted content under the pointer and read as a
-    // jump — the highlight alone is enough of a cross-reference cue.
+    updateOffscreenHints(activeEls);
+    // Left panel: mirror the narrowest containing span back onto the
+    // source as the hot-range mark, so hovering the editor shows the
+    // exact extent of the node / instruction under the cursor — not
+    // just which output line it maps to. Reuses `setEditorHotRange`,
+    // the same decoration the forward (right-panel) hover draws; the
+    // pointer is only ever in one panel at a time, so they don't fight.
+    const key = best ? `${best.dataset.from}:${best.dataset.to}` : null;
+    if (key !== lastSourceHotKey) {
+      lastSourceHotKey = key;
+      setEditorHotRange(
+        best
+          ? { from: Number(best.dataset.from), to: Number(best.dataset.to) }
+          : null,
+      );
+    }
+    // No autoscroll. Auto-scrolling the output panel to reveal an
+    // off-screen match read as a jolt; instead `updateOffscreenHints`
+    // (above) flags the direction with an edge pill the reader can act
+    // on at their own pace — the highlight stays in place.
   });
   els.editorHost.addEventListener('mouseleave', clearSpanActive);
 }
 
+// Toggle the top / bottom edge pills based on whether any highlighted
+// output line sits outside the panel's visible scroll window. A pure
+// hint — the pills are `pointer-events: none` and vanish with the
+// highlight on mouse-leave, so the reader knows a match is up / down
+// without anything moving under the cursor.
+function updateOffscreenHints(activeEls) {
+  if (!els.spanEdgeUp || !els.spanEdgeDown) return;
+  let above = false;
+  let below = false;
+  if (activeEls.length > 0) {
+    const view = els.output.getBoundingClientRect();
+    for (const el of activeEls) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom <= view.top + 1) above = true;
+      else if (r.top >= view.bottom - 1) below = true;
+    }
+  }
+  els.spanEdgeUp.hidden = !above;
+  els.spanEdgeDown.hidden = !below;
+}
+
 function clearSpanActive() {
-  for (const el of lastSpanLines) el.classList.remove('span-active');
+  for (const el of lastSpanLines) {
+    el.classList.remove('span-active', 'span-active-ancestor');
+  }
+  if (lastSourceHotKey !== null) {
+    lastSourceHotKey = null;
+    setEditorHotRange(null);
+  }
+  if (els.spanEdgeUp) els.spanEdgeUp.hidden = true;
+  if (els.spanEdgeDown) els.spanEdgeDown.hidden = true;
 }
 
 // --------------------------------------------------------------------------

@@ -235,6 +235,17 @@
   #editor-host .cm-editor { height: 100%; }
   #editor-host .cm-scroller { font-family: var(--mono); }
 
+  /* Positioning context for the off-screen-match edge hints. Takes
+     over the flex-fill role the bare <pre> used to have so the output
+     still scrolls inside the panel. */
+  .output-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
   pre.output {
     margin: 0;
     padding: 14px;
@@ -247,6 +258,33 @@
     white-space: pre-wrap;
     word-break: break-word;
   }
+
+  /* Off-screen-match hint. When the editor cursor highlights output
+     lines scrolled out of the panel, a faint caption at the top /
+     bottom edge points the way. Deliberately not a pill/button — no
+     border, no shadow, soft corners, low-opacity wash with a touch of
+     blur so the label reads over the disasm without looking tappable.
+     `pointer-events: none` so it never eats a scroll or click; it
+     vanishes with the highlight on mouse-leave. */
+  .span-edge {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 5;
+    pointer-events: none;
+    background: rgba(255, 213, 33, 0.45);
+    backdrop-filter: blur(2px);
+    border-radius: 4px;
+    padding: 1px 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    color: var(--ink-soft);
+    opacity: 0.85;
+  }
+  .span-edge[hidden] { display: none; }
+  .span-edge-up { top: 8px; }
+  .span-edge-down { bottom: 8px; }
 
   /* Each eval-output segment is its own block (like .bc-line and
      .out-hint). An inline <span> drops vertical margin/padding and
@@ -305,6 +343,12 @@
   .bc-line { display: block; }
   .span-line { cursor: pointer; border-radius: 2px; }
   .span-line:hover, .span-active { background: var(--skin); }
+  /* Reverse-hover depth tiers. When the editor cursor sits inside
+     several nested spans, the narrowest (most-specific) match gets the
+     strong `.span-active`; the wider enclosing spans get this faint
+     tint — so "what you're pointing at" reads louder than "what region
+     it's part of", instead of every containing line looking equal. */
+  .span-active-ancestor { background: rgba(255, 213, 33, 0.30); }
 
   /* Disasm token coloring — same families as the CodeMirror syntax
      palette so the two panels feel like they speak the same
@@ -410,7 +454,11 @@
         </div>
         <span class="status" id="status" aria-live="polite">loading engine…</span>
       </div>
-      <pre class="output" id="output" role="tabpanel" tabindex="0" aria-labelledby="tab-eval"><span class="out-empty">Run something. Cynic will judge it.</span></pre>
+      <div class="output-wrap">
+        <pre class="output" id="output" role="tabpanel" tabindex="0" aria-labelledby="tab-eval"><span class="out-empty">Run something. Cynic will judge it.</span></pre>
+        <div class="span-edge span-edge-up" id="span-edge-up" aria-hidden="true" hidden>▲ highlighted above</div>
+        <div class="span-edge span-edge-down" id="span-edge-down" aria-hidden="true" hidden>▼ highlighted below</div>
+      </div>
     </div>
   </div>
 
