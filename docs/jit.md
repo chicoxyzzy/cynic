@@ -945,7 +945,15 @@ useful:
    the §7.1 per-signature boundary thunks, gated by the wasm
    spec-testsuite at 100% with tiering forced, scored against the
    §11 targets; the `wasm_boundary` micros land here and gate the
-   boundary number.
+   boundary number. *Started 2026-06:* the compiler skeleton +
+   the trivial function class (constant-return) compile on the
+   shared substrate, with the v1 boundary ABI (params/results as
+   the interpreter's `Cell` arrays, the §7.1 native-register
+   thunks deferred) and the degrade-to-interpreter contract
+   (`compile → ?EntryFn`, null = stay interpreted). Not yet wired
+   into `interpreter.invoke` — the next increments grow the
+   class (i32 arithmetic, locals, control flow via the side-table)
+   before the interpreter hands hot functions over.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.
