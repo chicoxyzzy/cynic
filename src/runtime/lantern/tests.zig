@@ -2566,6 +2566,44 @@ test "flat into a plain species target keeps the shape invariant under GC" {
     , "2:undefined");
 }
 
+test "RegExp @@split roots subject + segments across GC re-entry" {
+    // §22.2.5.13 RegExp.prototype[Symbol.split] — the subject S, the
+    // result array A, and every freshly-built segment / capture
+    // substring must stay rooted across the re-entrant Get / RegExpExec
+    // / ToLength steps that allocate and can drive a GC. The buggy
+    // form left S a bare native local: ToString returned it dead until
+    // a later step re-read `s.flatBytes()`, so a collection mid-build
+    // swept it (a use-after-free). gc_threshold=1 forces a collection
+    // at every allocation, so each segment + capture is built against a
+    // live sweep — a missing root corrupts the output or faults.
+    try expectScriptStringUnderGcPressure(
+        \\const parts = "2016-01-02T15:04".split(/([-:T])/);
+        \\parts.join("|") + "#" + parts.length;
+    , "2016|-|01|-|02|T|15|:|04#9");
+}
+
+test "RegExp @@split roots splitter across an allocating flags getter" {
+    // §22.2.5.13 steps 5-10 — a species RegExp subclass whose `flags`
+    // getter re-enters bytecode and allocates (the test262
+    // `Symbol.split/coerce-flags.js` shape) drives a GC between the
+    // flags read and the `Construct(C, «rx, newFlags»)` that consumes
+    // `newFlags`. Both the cloned flags string and the splitter built
+    // from it must survive that collection. Under gc_threshold=1 the
+    // getter's allocations collect on every step.
+    try expectScriptStringUnderGcPressure(
+        \\class R extends RegExp {
+        \\  get flags() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 40; i++) junk.push({ i });
+        \\    return super.flags;
+        \\  }
+        \\}
+        \\const re = new R(",", "");
+        \\const out = RegExp.prototype[Symbol.split].call(re, "a,bb,ccc,dddd");
+        \\out.join("|") + "#" + out.length;
+    , "a|bb|ccc|dddd#4");
+}
+
 test "computed int read: dense in-bounds hits own elements" {
     try expectScriptInt("var a=[10,20,30]; a[0]+a[1]+a[2]", 60);
     try expectScriptInt("var a=[10,20,30]; var i=2; a[i]", 30);
