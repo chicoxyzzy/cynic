@@ -952,10 +952,16 @@ useful:
    thunks deferred) and the degrade-to-interpreter contract
    (`compile → ?EntryFn`, null = stay interpreted). Not yet wired
    into `interpreter.invoke` — the next increments grow the
-   class (now: i32 arithmetic with constant folding + `local.get`
-   on the depth→register operand-stack machine; still to come:
-   the rest of the i32/i64 ops, control flow via the side-table)
-   before the interpreter hands hot functions over.
+   class (now: the complete straight-line i32 tier — const,
+   `local.get`/`set`/`tee`, the i32 ALU, the ten comparisons +
+   `eqz`, branchless `select`, `nop`/`drop` — on the
+   depth→register operand-stack machine, plus the first structured
+   control flow: `block`/`end` with a forward conditional `br_if`,
+   merging register-resident at the canonical depth registers via a
+   native-label control stack; still to come: `br`/`loop`/`if`-
+   `else`/`br_table` and the side-table-as-control-oracle wiring
+   (§6) that makes valcnt/popcnt and multi-target branches cheap,
+   then i64) before the interpreter hands hot functions over.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.

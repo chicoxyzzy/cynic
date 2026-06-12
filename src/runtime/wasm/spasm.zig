@@ -57,6 +57,8 @@ pub const CompileError = error{ OutOfMemory, UnsupportedOp };
 // ── wasm opcodes this increment understands ─────────────────────────
 const op_end: u8 = 0x0b;
 const op_nop: u8 = 0x01;
+const op_block: u8 = 0x02;
+const op_br_if: u8 = 0x0d;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
 const op_local_get: u8 = 0x20;
@@ -103,6 +105,24 @@ fn regForDepth(d: usize) a64.Reg {
     return @enumFromInt(@as(u5, @intCast(9 + d)));
 }
 
+/// One open structured-control frame (§6 — the operand-stack machine's
+/// control oracle). `block`/`loop`/`if` push a frame and `end` pops it;
+/// a `br`/`br_if` to relative depth N targets the Nth-from-top frame.
+/// The `label` is the native merge point (bound at `end` for a `block`,
+/// at the header for a `loop` — loops arrive later). `height` is the
+/// operand-stack depth when the frame opened, so the carried results
+/// land in the canonical depth registers `regForDepth(height ..)`.
+const Ctrl = struct {
+    label: masm_mod.Masm.Label,
+    height: usize,
+    arity: u32,
+};
+
+/// Nesting cap. Deeper structured control degrades to the interpreter
+/// (never aborts — AGENTS.md robustness contract); real bodies nest far
+/// shallower than this.
+const max_ctrl_depth = 64;
+
 /// Compile `func` to native code, or return `null` when the body uses
 /// anything this increment can't emit yet — exactly Bistromath's
 /// `dont_compile` contract: degrading to the interpreter is always
@@ -128,6 +148,13 @@ pub fn compile(
     // x1 = results (the boundary ABI).
     var stack: [operand_reg_count]Loc = undefined;
     var sp: usize = 0;
+
+    // The structured-control stack. Frames hold a native merge label
+    // bound at their `end`; an early degrade (`return null`) with frames
+    // still open frees their forward-fixup buffers here.
+    var ctrl: [max_ctrl_depth]Ctrl = undefined;
+    var ctrl_len: usize = 0;
+    defer for (ctrl[0..ctrl_len]) |*c| c.label.deinit(gpa);
 
     const body = func.body;
     var i: usize = 0;
@@ -331,7 +358,73 @@ pub fn compile(
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
-            op_end => break,
+            op_block => {
+                // §3.3.5 — push a control frame. The block's result
+                // arity comes from its block type; a `block` consumes no
+                // operand values (only multi-value param blocks would,
+                // and those degrade), so the merge base is the current
+                // height.
+                const arity = readBlockArity(body, &i) orelse return null;
+                if (ctrl_len >= max_ctrl_depth) return null;
+                ctrl[ctrl_len] = .{ .label = .{}, .height = sp, .arity = arity };
+                ctrl_len += 1;
+            },
+            op_br_if => {
+                // §3.3.8 — pop the condition, branch to the target
+                // frame's merge label when it is non-zero, else fall
+                // through (always reachable — no dead code follows).
+                const depth = readUleb32(body, &i) orelse return null;
+                if (sp < 1) return null;
+                sp -= 1;
+                const cond = stack[sp];
+                if (depth >= ctrl_len) return null;
+                const target = &ctrl[ctrl_len - 1 - depth];
+                const arity = target.arity;
+                // v1 keeps the merge entirely register-resident: require
+                // the stack to sit exactly at the target's base + arity
+                // (pop_count == 0), so the carried values already occupy
+                // their canonical depth registers. Live values beneath
+                // the carried set degrade to the interpreter.
+                if (sp != target.height + arity) return null;
+                // Canonicalize the carried values (materialize folded
+                // constants; a `.reg` is already in place by the
+                // depth→register invariant). The register is hoisted out
+                // of the union initializer on purpose: writing
+                // `stack[d] = .{ .reg = materialize(.., stack[d], ..) }`
+                // would let result-location semantics stamp the `.reg` tag
+                // onto stack[d] before `materialize` reads it, turning a
+                // folded constant into a garbage register.
+                var d: usize = target.height;
+                while (d < target.height + arity) : (d += 1) {
+                    const r = try materialize(&m, stack[d], d);
+                    stack[d] = .{ .reg = r };
+                }
+                // The condition lands in its own register, disjoint and
+                // above the carried set; branch when non-zero.
+                const rc = try materialize(&m, cond, sp);
+                try m.jumpCbnz(rc, &target.label);
+            },
+            op_end => {
+                // An `end` with no open frame terminates the function
+                // body; otherwise it closes the innermost block.
+                if (ctrl_len == 0) break;
+                ctrl_len -= 1;
+                const c = &ctrl[ctrl_len];
+                // Validation guarantees the fallthrough reaches `end`
+                // with the stack at base + arity. Canonicalize the
+                // results into the merge registers so this path agrees
+                // with every `br_if` that jumped here, then bind the
+                // label at the merge point (after the materializing
+                // moves, which only the fallthrough path executes).
+                if (sp != c.height + c.arity) return null;
+                var d: usize = c.height;
+                while (d < c.height + c.arity) : (d += 1) {
+                    const r = try materialize(&m, stack[d], d);
+                    stack[d] = .{ .reg = r };
+                }
+                m.bind(&c.label);
+                c.label.deinit(gpa);
+            },
             else => return null, // not yet emittable — stay interpreted
         }
     }
@@ -373,6 +466,29 @@ fn materialize(m: *masm_mod.Masm, loc: Loc, depth: usize) CompileError!a64.Reg {
             try m.movImm64(reg, @as(u32, @bitCast(v)));
             return reg;
         },
+    }
+}
+
+/// Parse a block type (§5.3.6) and return the block's result arity,
+/// advancing `i` past it. The empty type (`0x40`) carries nothing; a
+/// single `i32` value type carries one result. Any other value type,
+/// or a (positive sLEB128) type-index block — which can take params and
+/// return many — degrades the whole function to the interpreter by
+/// returning null, keeping this increment's merges single-i32 and
+/// param-free.
+fn readBlockArity(body: []const u8, i: *usize) ?u32 {
+    if (i.* >= body.len) return null;
+    const b = body[i.*];
+    switch (b) {
+        0x40 => {
+            i.* += 1;
+            return 0;
+        },
+        0x7f => {
+            i.* += 1;
+            return 1;
+        },
+        else => return null,
     }
 }
 
@@ -708,6 +824,110 @@ test "spasm: drop pops a value; nop is a no-op" {
     var results: [1]Cell = .{0};
     entry(&locals, &results);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
+}
+
+test "spasm: block with br_if picks a result by condition (forward branch)" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32)
+    //   (block (result i32)
+    //     i32.const 10
+    //     local.get 0      ;; cond
+    //     br_if 0          ;; cond != 0 -> exit block carrying 10
+    //     drop
+    //     i32.const 20))   ;; -> cond ? 10 : 20
+    const body = [_]u8{
+        0x02,         0x7f, // block (result i32)
+        op_i32_const, 10,
+        0x20, 0x00, // local.get 0
+        0x0d,    0x00, // br_if 0
+        op_drop, op_i32_const,
+        20,
+        op_end, // end block
+        op_end, // end function
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 1, .pop_count = 0 },
+    };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = side, .max_stack = 2 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
+        var locals: [1]Cell = .{pair[0]};
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: empty block with br_if as an early break (arity 0)" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32) (local i32)
+    //   i32.const 42  local.set 1
+    //   (block                      ;; empty block type
+    //     local.get 0  br_if 0      ;; cond != 0 -> break, keep 42
+    //     i32.const 99  local.set 1) ;; else override with 99
+    //   local.get 1))               ;; -> cond ? 42 : 99
+    const body = [_]u8{
+        op_i32_const, 42, 0x21, 0x01, // i32.const 42 ; local.set 1
+        0x02, 0x40, // block (empty)
+        0x20, 0x00, 0x0d, 0x00, // local.get 0 ; br_if 0
+        op_i32_const, 0xe3, 0x00, 0x21, 0x01, // i32.const 99 (2-byte SLEB) ; local.set 1
+        op_end, // end block
+        0x20, 0x01, // local.get 1
+        op_end, // end function
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 0, .pop_count = 0 },
+    };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 1 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 1, 42 }, .{ 0, 99 } }) |pair| {
+        var locals: [2]Cell = .{ pair[0], 0 };
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: nested block, br_if 1 exits two levels carrying a result" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32)
+    //   (block (result i32)         ;; outer, arity 1
+    //     i32.const 10
+    //     (block                    ;; inner, empty
+    //       local.get 0  br_if 1)   ;; cond -> outer end carrying 10
+    //     drop  i32.const 20))      ;; else -> 20
+    const body = [_]u8{
+        0x02,         0x7f, // outer block (result i32)
+        op_i32_const, 10,
+        0x02, 0x40, // inner block (empty)
+        0x20, 0x00, 0x0d, 0x01, // local.get 0 ; br_if 1
+        op_end, // end inner
+        op_drop,
+        op_i32_const,
+        20,
+        op_end, // end outer
+        op_end, // end function
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 1, .pop_count = 0 },
+    };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = side, .max_stack = 2 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
+        var locals: [1]Cell = .{pair[0]};
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
 }
 
 test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
