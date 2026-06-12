@@ -21,8 +21,13 @@
 //   parseAst(src)                  — parse to an S-expression AST.
 //
 // Every `*Source` / `parse*` call returns a frame:
-//   { status, stdout, value, error, errorSpan }
-// where `errorSpan` is `{ startByte, endByte }` or `null`.
+//   { status, stdout, value, error, errorSpan, stats }
+// where `errorSpan` is `{ startByte, endByte }` or `null` and
+// `stats` is a short multi-line string (e.g. `chunk: 24 B · 1 consts
+// · 2 regs\nGC: 0 cycles · 0.0 ms pause · peak 0 B · alloc 24 B`)
+// or the empty string. Only `evalSource` populates `stats` today;
+// `parseSource` / `parseAst` always return `''` so the UI can
+// uniformly render or hide it.
 
 let wasm = null; // { instance, exports, memory }
 
@@ -161,5 +166,20 @@ function readFrame() {
     if (end > start) errorSpan = { startByte: start, endByte: end };
   }
 
-  return { status, stdout, value, error, errorSpan };
+  // Same backwards-compatibility shape as the error_span tail above:
+  // the stats section is `[u32 len][bytes]` and rides at the very end
+  // of the frame. Older WASM bundles without it simply leave `off`
+  // past the available bytes — we default to empty string.
+  let stats = '';
+  if (off + 4 <= frameLen) {
+    const len = view.getUint32(off, false); off += 4;
+    if (off + len <= frameLen) {
+      stats = decoder.decode(
+        new Uint8Array(wasm.memory.buffer, framePtr + off, len),
+      );
+      off += len;
+    }
+  }
+
+  return { status, stdout, value, error, errorSpan, stats };
 }
