@@ -561,6 +561,14 @@ function renderEvalResult(frame) {
   if (!printedAnything) {
     appendLine('(no output — the script produced undefined)', 'out-empty');
   }
+
+  // Runtime stats footer — chunk shape + GC totals the engine reports
+  // after a successful run or an uncaught throw. Empty on parse/compile
+  // errors and on older WASM bundles (cynic-engine.js defaults the
+  // field to ''), so the footer is conditional.
+  if (frame.stats && frame.stats.length > 0) {
+    appendLine(frame.stats, 'out-stats');
+  }
 }
 
 // --------------------------------------------------------------------------

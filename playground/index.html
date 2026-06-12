@@ -258,6 +258,21 @@
   .out-error { display: block; color: var(--bart); font-weight: 700; }
   .out-empty { display: block; color: var(--ink-soft); font-style: italic; }
 
+  /* Runtime stats footer — two-line "chunk: …" / "GC: …" summary the
+     engine appends to every successful eval. Muted + smaller so it
+     sits below the result without competing; the dotted rule visually
+     separates "what the snippet did" from "what it produced". */
+  .out-stats {
+    display: block;
+    color: var(--ink-soft);
+    font-size: 12px;
+    white-space: pre;
+    opacity: 0.85;
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dotted rgba(0, 0, 0, 0.25);
+  }
+
   /* The dashed rule + spacing set the completion value (or a thrown
      error) off from the stdout above it — so it applies only when
      the value/error actually follows stdout, never when it is the
