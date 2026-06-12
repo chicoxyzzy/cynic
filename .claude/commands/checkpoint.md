@@ -59,6 +59,11 @@ Healthy: top deltas ≤ ~20 MiB. STOP and bisect if >20 MiB.
 Inputs: `src/`, `vendor/test262/`, `tools/test262.zig`
 Output: `test262-results.md`
 
+> **Do NOT prepend a bare `zig build test262` "to refresh the
+> harness."** That step builds AND runs a full sweep (~95 s); the
+> commands below already trigger a rebuild on stale inputs. If the
+> binary is missing, step 2b builds + runs in one shot.
+
 **a. Smoke first (~5 s)** — does the pass count match the latest
 runtime row?
 
