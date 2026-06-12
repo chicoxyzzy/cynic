@@ -961,14 +961,17 @@ useful:
    dead-code skipper (the rest of the frame after a `br` is
    unreachable — scanned to its `end`, degrading on any opcode whose
    immediate width the baseline doesn't know) — so `br`-continue plus
-   `br_if`-break compiles a full `while` loop; and `if`/`else` (a
+   `br_if`-break compiles a full `while` loop; `if`/`else` (a
    two-label frame: `cbz` to the else arm, then both arms canonicalize
-   into the same result registers). Merges are
+   into the same result registers); and `br_table` as an indexed
+   multi-way dispatch (a linear compare chain to each target plus a
+   default jump, targets carrying no values for now — the common
+   switch shape). Structured control flow is complete. Merges are
    register-resident at the canonical depth registers via a
    native-label control stack; the compilable block types carry no
    loop params, so a back-edge carries nothing and loop-carried state
    lives in locals, keeping the header merge spill-free. Still to
-   come: `br_table`, the side-table-as-control-oracle
+   come: the side-table-as-control-oracle
    wiring (§6) that makes valcnt/popcnt and multi-target branches
    cheap, then i64) before the interpreter hands hot functions over.
 5. **Ohaimark ADR** — written against measured Bistromath data

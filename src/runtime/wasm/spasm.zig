@@ -63,6 +63,7 @@ const op_if: u8 = 0x04;
 const op_else: u8 = 0x05;
 const op_br: u8 = 0x0c;
 const op_br_if: u8 = 0x0d;
+const op_br_table: u8 = 0x0e;
 const op_return: u8 = 0x0f;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
@@ -523,6 +524,47 @@ pub fn compile(
                 const rc = try materialize(&m, cond, sp);
                 try m.jumpCbnz(rc, &target.label);
             },
+            op_br_table => {
+                // §3.3.8 — pop the index and dispatch: a linear compare
+                // chain branches to table[index] for index < n, else to
+                // the default label. v1 requires every target to carry no
+                // values (the common switch shape — a switch dispatches on
+                // a scalar, carrying no operands), so the targets' differing
+                // merge bases need no register shuffle.
+                if (sp < 1) return null;
+                sp -= 1;
+                const index_reg = try materialize(&m, stack[sp], sp);
+                const n = readUleb32(body, &i) orelse return null;
+                var j: u32 = 0;
+                while (j < n) : (j += 1) {
+                    const lbl = readUleb32(body, &i) orelse return null;
+                    if (lbl >= ctrl_len) return null;
+                    const t = &ctrl[ctrl_len - 1 - lbl];
+                    if (t.branch_arity != 0) return null;
+                    if (j > std.math.maxInt(u12)) return null; // cmpImm imm12 ceiling
+                    try m.emit(a64.cmpImm(index_reg, @intCast(j), false));
+                    try m.jumpCond(.eq, &t.label);
+                }
+                const def = readUleb32(body, &i) orelse return null;
+                if (def >= ctrl_len) return null;
+                const dt = &ctrl[ctrl_len - 1 - def];
+                if (dt.branch_arity != 0) return null;
+                try m.jump(&dt.label);
+                // An unconditional multi-branch — the rest of the current
+                // frame is unreachable. Close it exactly as `br` does.
+                const cur = &ctrl[ctrl_len - 1];
+                if (cur.kind == .if_then or cur.kind == .if_else) return null;
+                skipToFrameEnd(body, &i) orelse return null;
+                if (cur.kind == .block) m.bind(&cur.label);
+                cur.label.deinit(gpa);
+                cur.else_label.deinit(gpa);
+                sp = cur.height + cur.result_arity;
+                var r: usize = cur.height;
+                while (r < cur.height + cur.result_arity) : (r += 1) {
+                    stack[r] = .{ .reg = regForDepth(r) };
+                }
+                ctrl_len -= 1;
+            },
             op_end => {
                 // An `end` with no open frame terminates the function
                 // body; otherwise it closes the innermost block.
@@ -628,6 +670,13 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
             op_else => {}, // stays within the enclosing `if`'s nesting
             op_br, op_br_if, op_local_get, op_local_set, op_local_tee => {
                 _ = readUleb32(body, i) orelse return null;
+            },
+            op_br_table => {
+                const n = readUleb32(body, i) orelse return null;
+                var k: u32 = 0;
+                while (k <= n) : (k += 1) { // n table labels + 1 default
+                    _ = readUleb32(body, i) orelse return null;
+                }
             },
             op_i32_const => {
                 _ = readSleb32(body, i) orelse return null;
@@ -1292,6 +1341,45 @@ test "spasm: if without else conditionally overwrites a local" {
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 1, 9 }, .{ 0, 5 } }) |pair| {
+        var locals: [2]Cell = .{ pair[0], 0 };
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: br_table dispatches by index to distinct block ends" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32) (local i32)         ;; i=p0, r=l1
+    //   i32.const 7  local.set 1            ;; r = 7 (default)
+    //   (block            ;; B_outer (default target)
+    //     (block          ;; B0
+    //       local.get 0
+    //       br_table 0 1) ;; i==0 -> B0.end ; else -> B_outer.end
+    //     i32.const 10  local.set 1)        ;; B0.end: r = 10, fall to B_outer.end
+    //   local.get 1)                        ;; -> i==0 ? 10 : 7
+    const body = [_]u8{
+        op_i32_const, 7, 0x21, 0x01, // i32.const 7 ; local.set 1
+        0x02, 0x40, // block B_outer
+        0x02, 0x40, // block B0
+        0x20, 0x00, // local.get 0
+        0x0e, 0x01, 0x00, 0x01, // br_table {0} default 1
+        op_end, // end B0
+        op_i32_const, 10, 0x21, 0x01, // i32.const 10 ; local.set 1
+        op_end, // end B_outer
+        0x20, 0x01, // local.get 1
+        op_end, // end function
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 0, .pop_count = 0 },
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 0, .pop_count = 0 },
+    };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 1 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 0, 10 }, .{ 1, 7 }, .{ 3, 7 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
         entry(&locals, &results);
