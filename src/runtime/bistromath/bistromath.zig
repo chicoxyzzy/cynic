@@ -272,6 +272,19 @@ const bool_tag_bits: u64 = Value.false_.bits;
 /// `regs[r_base .. r_base + n]`. Writes the new array into `out` (the
 /// frame's accumulator slot, so it is rooted the instant it exists);
 /// returns 0 on success, 1 on host OOM.
+/// docs/ctor-array-build-gap.md L1 — the int32-keyed dense read,
+/// shared with the interpreter via `Heap.denseElementFastGet`. Pure
+/// (no allocation), so the compiled site needs no rooting. Returns 1
+/// and writes the element to `out` on a hit; 0 on any miss (the
+/// caller tiers down to re-run the full `lda_computed`).
+fn denseGetShim(recv_bits: u64, key_bits: u64, out: *Value) callconv(.c) u32 {
+    if (heap_mod.Heap.denseElementFastGet(.{ .bits = recv_bits }, .{ .bits = key_bits })) |v| {
+        out.* = v;
+        return 1;
+    }
+    return 0;
+}
+
 fn makeArrayShim(r: *Realm, regs: [*]const Value, r_base: u64, n: u64, out: *Value) callconv(.c) u32 {
     const lo: usize = @intCast(r_base);
     const obj = r.heap.makeDenseArray(r.intrinsics.array_prototype, regs[lo .. lo + @as(usize, @intCast(n))]) catch return 1;
@@ -492,7 +505,7 @@ const Compiler = struct {
                 .tail_call, .tail_call_method,
                 .lda_global_slot, .sta_global_slot, .sta_global_slot_init,
                 .negate, .bit_not, .logical_not,
-                .make_array_n,
+                .make_array_n, .lda_computed,
                 .throw_if_hole, .return_ => {},
                 .lda_env, .sta_env => {
                     // Fixed-depth walks unroll; cap the unroll.
@@ -1058,6 +1071,24 @@ const Compiler = struct {
                     try m.jumpCond(.eq, td);
                 },
 
+                .lda_computed => {
+                    // docs/ctor-array-build-gap.md L1 — the int32-keyed
+                    // dense read. recv is in r_obj, the key is in acc.
+                    // The shared check is pure (no alloc), so no
+                    // rooting: a hit writes the element to the frame
+                    // accumulator slot and we reload acc; any miss
+                    // (non-int / negative key, non-dense receiver, OOB,
+                    // hole) tiers down to re-run the full op in Lantern.
+                    const r_obj = code[i + 1];
+                    const td = try self.tdFor(bc);
+                    try m.emit(a64.ldrImm(.x0, regs_reg, regSlot(r_obj)));
+                    try m.emit(a64.movReg(.x1, acc_reg));
+                    try m.emit(a64.addImm(.x2, frame_reg, acc_off, false));
+                    try m.callAbs(.x16, @intFromPtr(&denseGetShim));
+                    try m.emit(a64.movRegW(.x0, .x0));
+                    try m.jumpCbz(.x0, td);
+                    try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
+                },
                 .make_array_n => {
                     // docs/ctor-array-build-gap.md L2 — helper-mediated
                     // dense literal. Sync the live accumulator so the
@@ -2369,6 +2400,42 @@ test "jit bistromath calls: the call-IC compare misses correctly" {
     try testing.expectEqual(
         Chunk.JitState.Tier.compiled,
         templateNamed(&chunk, "site").jit_state.?.tier,
+    );
+}
+
+test "jit bistromath: dense indexed reads compile via lda_computed fast path" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+
+    // A hot loop summing dense int32-indexed reads (`arr[j]`,
+    // `lda_computed`). Before this op was taught to Bistromath the
+    // function tiered DOWN at every indexed read
+    // (docs/ctor-array-build-gap.md L1). The sum is correct either
+    // way; the tier assertion is the red->green signal.
+    const src =
+        \\function sumArr(arr, n) { let s = 0; let j = 0; while (j < n) { s = s + arr[j]; j = j + 1; } return s; }
+        \\var a = [10, 20, 30, 40, 50];
+        \\let i = 0;
+        \\while (i < 300) { sumArr(a, 5); i = i + 1; }
+        \\sumArr(a, 5);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 150), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "sumArr").jit_state.?.tier,
     );
 }
 

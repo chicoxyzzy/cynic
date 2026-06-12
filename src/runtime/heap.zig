@@ -935,6 +935,32 @@ pub const Heap = struct {
         return obj;
     }
 
+    /// §10.1.8.1 / §13.3.4.1 — the int32-keyed dense-element fast
+    /// read. A non-negative int32 `key` on a non-proxy, non-sparse
+    /// Array exotic resolves to its own element when present (no
+    /// hole), shadowing the prototype chain: ToPropertyKey of an
+    /// int32 is side-effect-free and CanonicalNumericIndexString of a
+    /// non-negative int32 is exactly its decimal string, so this is
+    /// observably identical to the full stringify + OrdinaryGet
+    /// (docs/ctor-array-build-gap.md L1). Returns null on every miss
+    /// class — non-int / negative key, non-array / sparse / proxy
+    /// receiver, out-of-bounds, or a hole — leaving the caller to
+    /// take the full path. Pure: no allocation, no side effects.
+    /// Shared by Lantern's `lda_computed` arm and Bistromath's
+    /// codegen (L1: coordinate, don't fork).
+    pub fn denseElementFastGet(recv: Value, key: Value) ?Value {
+        if (!key.isInt32()) return null;
+        const ik = key.asInt32();
+        if (ik < 0) return null;
+        const aobj = valueAsPlainObject(recv) orelse return null;
+        if (!aobj.is_array_exotic or aobj.is_sparse or
+            aobj.proxy_target != null or aobj.proxy_revoked) return null;
+        const idx: usize = @intCast(ik);
+        const els = aobj.elements.items;
+        if (idx >= els.len or JSObject.isElementHole(els[idx])) return null;
+        return els[idx];
+    }
+
     /// Allocate a new `Environment` chained to `parent`, with
     /// `slot_count` bindings initialised to the TDZ Hole. Header
     /// comes from the per-heap slab pool (O(1) after warmup);

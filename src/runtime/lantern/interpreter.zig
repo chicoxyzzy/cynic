@@ -9863,22 +9863,12 @@ pub fn runFrames(
             // docs/ctor-array-build-gap.md). Every miss class —
             // hole, out-of-bounds, sparse storage, proxy receiver,
             // accessor-promoted slot — falls through unchanged.
-            if (acc.isInt32()) {
-                const ik = acc.asInt32();
-                if (ik >= 0) {
-                    if (heap_mod.valueAsPlainObject(recv)) |aobj| {
-                        if (aobj.is_array_exotic and !aobj.is_sparse and
-                            aobj.proxy_target == null and !aobj.proxy_revoked)
-                        {
-                            const idx: usize = @intCast(ik);
-                            const els = aobj.elements.items;
-                            if (idx < els.len and !@import("../object.zig").JSObject.isElementHole(els[idx])) {
-                                acc = els[idx];
-                                continue :dispatch try decodeNext(code, &ip, &committed);
-                            }
-                        }
-                    }
-                }
+            // Shared with Bistromath via `Heap.denseElementFastGet`
+            // (a pure, allocation-free check) so the compiled tier's
+            // codegen is byte-identical (L1: don't fork).
+            if (heap_mod.Heap.denseElementFastGet(recv, acc)) |v| {
+                acc = v;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             }
             // §7.1.19 ToPropertyKey — for object keys (e.g.
             // `obj[arr]`), run ToPrimitive(string) so user-
