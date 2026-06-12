@@ -401,6 +401,24 @@ cannot catch JSC's 15 ms without them. JIT-side levers beyond that
 bump-allocation sequences) belong to the Bistromath/Ohaimark track
 and are intentionally not specced here.
 
+**Update (2026-06, JIT track).** The two JIT-coordination items
+flagged above shipped as Bistromath codegen: **L2 `make_array_n`**
+(via a shared `Heap.makeDenseArray` so the compiled array is
+byte-identical to the interpreted one) and **L1 `lda_computed`**
+int32-keyed dense read (via a shared `Heap.denseElementFastGet`).
+Both are gated (filtered `--jit` differential byte-identical;
+gc-stress clean). They pay off where they should — a dense-read
+hot loop runs **2.6× faster** under `--jit`. But the measurement
+above is now precise about *why the JIT row doesn't move
+ctor_array_build*: not the shared helpers — the fixture's hot loop
+is **top-level and `new Point()`-dominated**, and the baseline
+tier refuses construct frames, so the chunk bails on `new_call`
+regardless of the array codegen. The residual JIT lever for *this
+fixture* is **construct (`new_call`) support in Bistromath** — a
+separate, larger increment (lifting the construct-frame refusal),
+not array/indexed codegen. L1/L2 close the array-coverage gap; the
+ctor row waits on construct support.
+
 ## Recommended sequence
 
 1. **L1** int32-keyed dense read fast path (validated −24%; do
