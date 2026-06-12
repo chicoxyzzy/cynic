@@ -433,7 +433,14 @@ jobs:
     # §10.5): the tier ships on by default, so a pass-set
     # divergence is a build failure, not an annotation.
     runs-on: macos-latest
-    timeout-minutes: 30
+    # Two full test262 sweeps on a macOS runner, and the `--jit` pass
+    # force-compiles every eligible chunk (tier-up threshold 1) — that
+    # second sweep dominates and grows as Bistromath's coverage widens,
+    # so the 25-min step budget started timing out. Raised to keep the
+    # gate gating on a *divergence*, not on wall time. The durable fix
+    # (scoping the differential / speeding the force-compile pass) is a
+    # JIT-track concern — see docs/jit.md §10.
+    timeout-minutes: 55
     needs: build-and-test
     steps:
       - name: Audit egress (advisory)
@@ -452,7 +459,7 @@ jobs:
           cache-key: jit-differential
 
       - name: Differential sweep (interpreter vs force-compiled)
-        timeout-minutes: 25
+        timeout-minutes: 50
         run: |
           zig build test262 -- --quiet --threads=0
           cp .test262-pass-cache.txt /tmp/pass-interp.txt
