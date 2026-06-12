@@ -903,9 +903,34 @@ useful:
        gates and the cross-realm default-proto remap read
        shape-first, and `installTestGlobals` re-locks in-shape.
        Frozen PROTOTYPES still convert to synthetic accessor pairs
-       (the override-mistake fix) and accessor entries are not yet
-       shape-resident — builtin-method proto-load ICs on hardened
-       realms remain the recorded follow-up.
+       (the override-mistake fix), so a builtin-method read on a
+       hardened realm — `o.hasOwnProperty(k)`, `arr.slice(…)` —
+       resolves to a synth accessor on a dict-mode frozen proto,
+       and the proto-load IC fill bails on it twice
+       (interpreter.zig: `break` on `proto.hasAccessor(key)`, and
+       the fill requires a non-null `proto.shape`). The cell never
+       fills, so compiled code tiers down at the method read EVERY
+       call. Measured 2026-06 and the priority is higher than this
+       note first implied: a tiny-body method in a hot loop
+       (`o.hasOwnProperty("x")`, 5M iterations) runs 119 ms
+       `--unhardened` (IC fills, data on a frozen-in-shape proto)
+       vs 281 ms hardened — a 2.3× penalty on the PRODUCT DEFAULT,
+       and hardened is actually slower than `--no-jit` (252 ms)
+       because the per-iteration tier-down/re-enter costs more than
+       interpreting the whole op. The native body masks it when
+       it's heavy (`arr.indexOf` over a real scan shows no gap);
+       predicates / getters / comparators are the hot spot. The
+       fix is SES-substrate-deep — either an ICCell mode that
+       caches a synth-accessor's constant value (a synth getter
+       returns `sa.value` regardless of receiver, stable on a
+       frozen proto; needs a new ICCell field rippling through
+       chunk.zig + the interpreter fast path/fill + the Bistromath
+       emit + layout.zig), or rearchitecting the override-mistake
+       fix to keep methods as frozen DATA and move the shadow to
+       the `sta_property` write path (drops synth accessors
+       entirely; touches intrinsics.zig + the write path +
+       test-ses). Worth a dedicated session coordinated with the
+       shapes/SES work; not a tail-end change.
 
    Step exit — taken 2026-06-11: `--jit` flipped to default-on
    (`--no-jit` is the permanent escape hatch; `--jit` stays
