@@ -17,6 +17,37 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-12 — cynic `dd4a0ce`, host `Darwin 25.6.0 arm64`
+
+`tail_recursion` 33.48 → 6.13 (−82 %) — frame-rooting / OSR work
+on the JIT track has landed since `ea84c54`. 7–13 % drift up on
+`prop_access` / `promise_chain` / `string_concat` / `arith_loop` /
+`class_instantiate` is within the noise envelope (every fixture
+spread ≤ 14.9 % in both postures; load avg 4.1).
+
+Lantern (`--no-jit`) vs Bistromath (the default), one run each:
+
+| bench | Lantern p50 | Bistromath p50 | speedup | min (L→B) | RSS KiB (L→B) |
+|---|---:|---:|---:|---:|---:|
+| tail_recursion | 23.55 | **6.13** | **3.84×** | 23.26→5.89 | 5560→5656 |
+| arith_loop | 32.34 | **15.62** | **2.07×** | 31.98→15.09 | 5536→5608 |
+| method_call | 17.09 | **14.72** | **1.16×** | 16.77→14.15 | 5816→5904 |
+| object_alloc | 24.21 | 24.11 | 1.00× | 23.90→23.83 | 9416→9432 |
+| array_iter | 20.74 | 20.98 | 0.99× | 20.34→20.72 | 6696→6696 |
+| ctor_array_build | 188.99 | 193.27 | 0.98× | 187.63→190.90 | 9976→9984 |
+| prop_write | 12.62 | 13.02 | 0.97× | 12.31→12.84 | 5616→5656 |
+| json_stringify | 24.29 | 25.19 | 0.96× | 23.65→24.26 | 9096→9160 |
+| string_concat | 25.68 | 27.21 | 0.94× | 25.38→26.99 | 15688→15808 |
+| class_instantiate | 27.37 | 29.27 | 0.94× | 27.06→28.37 | 9304→9336 |
+| promise_chain | 11.82 | 12.73 | 0.93× | 11.47→11.62 | 23864→23912 |
+| prop_access | 12.46 | 13.55 | 0.92× | 12.22→13.34 | 5520→5576 |
+
+Speedup = Lantern p50 / Bistromath p50 (>1× = the tier is faster);
+**bold** marks movers ≥1.05×. Bistromath dominates the loops
+(`tail_recursion` 3.8×, `arith_loop` 2.1×) and edges `method_call`;
+the IC-heavy property / call / string fixtures sit slightly below
+Lantern this run — within envelope, not a regression.
+
 ### 2026-06-12 — cynic `ea84c54` (ctor campaign complete), host `Darwin 25.6.0 arm64`
 
 Quiet-machine row (load ~2.7-3.0, spreads ≤10%) closing the
