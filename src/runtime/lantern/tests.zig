@@ -2940,6 +2940,30 @@ test "block-lex: method TDZ on block const read before declarator throws" {
     try expectScriptThrows("class C { m(){ { x; const x = 1; } } } new C().m();");
 }
 
+// §12.5.5 unary minus on a numeric literal — folded to a single
+// `LdaSmi -n` when n is a non-zero exact i32. `-0` and out-of-range
+// literals keep the `<literal>; negate` path; the values below must
+// stay identical across the fold.
+
+test "neg-fold: integer literals fold and stay correct" {
+    try expectScriptInt("-1", -1);
+    try expectScriptInt("-42", -42);
+    try expectScriptInt("let x = 5; x + -3", 2);
+}
+
+test "neg-fold: negative zero is preserved (not folded to 0)" {
+    // §6.1.6.1 — `-0` is observably distinct from `0`.
+    try expectScriptStringWithBuiltins("`${Object.is(-0, 0)}:${1 / -0}`", "false:-Infinity");
+    try expectScriptStringWithBuiltins("`${Object.is(-0, -0)}`", "true");
+}
+
+test "neg-fold: non-integer and large literals stay correct" {
+    try expectScriptStringWithBuiltins("`${-2.5}:${-0.0 === 0}`", "-2.5:true");
+    // 2147483648 exceeds i32 max, so the literal isn't an exact smi —
+    // the general negate path handles it.
+    try expectScriptStringWithBuiltins("`${-2147483648}`", "-2147483648");
+}
+
 // L4 Stage 2 — per-binding capture analysis. A block-scoped lexical is
 // register-promoted even when the function contains OTHER nested
 // functions / classes, as long as no closure captures THAT binding.

@@ -5159,6 +5159,25 @@ pub const Compiler = struct {
                 }
             }
         }
+        // §12.5.5 — fold `-<numeric literal>` to a single `LdaSmi -n`
+        // when n is a non-zero exact i32. `-0` must stay `LdaSmi 0;
+        // Negate` (negative zero is observably distinct per §6.1.6.1
+        // and LdaSmi can't represent it); a literal too large for i32
+        // keeps the general `<literal>; negate` path. The literal is
+        // always non-negative here — negatives are this very unary.
+        if (u.op == .minus and u.operand.* == .numeric_literal) {
+            const lit = u.operand.numeric_literal;
+            const text = self.source[lit.span.start..lit.span.end];
+            if (parseNumericLiteral(text)) |num| {
+                if (num != 0) {
+                    if (asExactSmi(num)) |i| {
+                        try self.builder.emitOp(.lda_smi, u.span);
+                        try self.builder.emitI32(-i); // i ∈ [1, maxInt] ⇒ -i in range
+                        return;
+                    }
+                }
+            } else |_| {}
+        }
         try self.compileExpression(u.operand);
         const op: Op = switch (u.op) {
             .minus => .negate,
