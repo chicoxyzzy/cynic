@@ -14408,6 +14408,13 @@ fn compileScriptLikeChunk(
         try c.builder.emitOp(.lda_undefined, start_span);
         try c.builder.emitOp(.star, start_span);
         try c.builder.emitU8(c.completion_reg.?);
+        // L4 Stage 2 — record the script top-level body so loop-body
+        // block consts promote to registers (per-binding capture
+        // check in compileBlock), the `ctor_array_build` script shape.
+        // Top-level lexicals are global, but block-scoped consts inside
+        // a loop body are block-local and register-eligible.
+        c.current_fn_body = program.body;
+        c.current_fn_has_eval = Compiler.fnBodyHasEval(c.source, program.body);
         try c.hoistLetConst(program.body, false);
         try c.hoistVarAndFunctions(program.body);
         try c.emitVarInits(start_span);
