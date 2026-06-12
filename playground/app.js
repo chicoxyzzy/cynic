@@ -826,30 +826,14 @@ function wireSourceToSpanHover() {
       clearSpanActive();
       return;
     }
-    // Pick the *smallest* span that brackets the cursor and mark only
-    // that line. AST spans nest heavily (an outer BinaryExpression
-    // wraps an Identifier wraps a Token), and disasm spans likewise
-    // overlap by statement; marking every containing line reads as
-    // "everything is highlighted." The narrowest containing span is
-    // almost always the one the user is pointing at.
-    let best = null;
-    let bestSize = Infinity;
     for (const el of lastSpanLines) {
       const from = Number(el.dataset.from);
       const to = Number(el.dataset.to);
-      if (pos >= from && pos < to) {
-        const size = to - from;
-        if (size < bestSize) {
-          bestSize = size;
-          best = el;
-        }
-      }
-    }
-    for (const el of lastSpanLines) {
-      el.classList.toggle('span-active', el === best);
+      const inside = pos >= from && pos < to;
+      el.classList.toggle('span-active', inside);
     }
     // No autoscroll: hovering the source only highlights the matching
-    // output line in place. Auto-scrolling the panel to reveal an
+    // output line(s) in place. Auto-scrolling the panel to reveal an
     // off-screen match shifted content under the pointer and read as a
     // jump — the highlight alone is enough of a cross-reference cue.
   });
