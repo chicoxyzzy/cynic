@@ -952,7 +952,9 @@ useful:
    thunks deferred) and the degrade-to-interpreter contract
    (`compile → ?EntryFn`, null = stay interpreted). Not yet wired
    into `interpreter.invoke` — the next increments grow the
-   class (i32 arithmetic, locals, control flow via the side-table)
+   class (now: i32 arithmetic with constant folding + `local.get`
+   on the depth→register operand-stack machine; still to come:
+   the rest of the i32/i64 ops, control flow via the side-table)
    before the interpreter hands hot functions over.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
