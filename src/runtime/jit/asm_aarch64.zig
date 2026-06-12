@@ -188,6 +188,22 @@ pub fn eorRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x4A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
 }
 
+/// LSLV Wd, Wn, Wm — logical shift left by the low 5 bits of Wm
+/// (i.e. count mod 32), which is exactly wasm i32.shl's masking.
+pub fn lslvW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x1AC02000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// LSRV Wd, Wn, Wm — logical (zero-fill) shift right; wasm i32.shr_u.
+pub fn lsrvW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x1AC02400 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// ASRV Wd, Wn, Wm — arithmetic (sign-fill) shift right; wasm i32.shr_s.
+pub fn asrvW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x1AC02800 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
 /// ORR Xd, Xn, Xm
 pub fn orrReg(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0xAA000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
@@ -371,6 +387,9 @@ test "jit asm_aarch64: golden encodings" {
     try expectEqual(@as(u32, 0x31000420), addsImmW(.x0, .x1, 1)); // adds w0, w1, #1
     try expectEqual(@as(u32, 0x1A9F17E0), csetW(.x0, .eq)); // cset w0, eq
     try expectEqual(@as(u32, 0x1A9FA7E0), csetW(.x0, .lt)); // cset w0, lt
+    try expectEqual(@as(u32, 0x1AC22020), lslvW(.x0, .x1, .x2)); // lslv w0, w1, w2
+    try expectEqual(@as(u32, 0x1AC22420), lsrvW(.x0, .x1, .x2)); // lsrv w0, w1, w2
+    try expectEqual(@as(u32, 0x1AC22820), asrvW(.x0, .x1, .x2)); // asrv w0, w1, w2
     try expectEqual(@as(u32, 0x9B227C20), smull(.x0, .x1, .x2)); // smull x0, w1, w2
     try expectEqual(@as(u32, 0x93407C20), sxtw(.x0, .x1)); // sxtw x0, w1
     try expectEqual(@as(u32, 0x2A020020), orrRegW(.x0, .x1, .x2)); // orr w0, w1, w2

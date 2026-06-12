@@ -77,6 +77,9 @@ const op_i32_ge_u: u8 = 0x4f;
 const op_i32_and: u8 = 0x71;
 const op_i32_or: u8 = 0x72;
 const op_i32_xor: u8 = 0x73;
+const op_i32_shl: u8 = 0x74;
+const op_i32_shr_s: u8 = 0x75;
+const op_i32_shr_u: u8 = 0x76;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -225,6 +228,35 @@ pub fn compile(
                     else => .cs,
                 };
                 try m.emit(a64.csetW(ra, cond));
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_i32_shl, op_i32_shr_s, op_i32_shr_u => {
+                // §4.3.10 i32 shifts — the count is masked to 5 bits
+                // (mod 32), which the AArch64 variable-shift W-forms do
+                // for free. Operands: [value, count].
+                if (sp < 2) return null;
+                const b = stack[sp - 1]; // count
+                const a = stack[sp - 2]; // value
+                sp -= 1;
+                if (a == .const_i32 and b == .const_i32) {
+                    const sh: u5 = @intCast(b.const_i32 & 31);
+                    const xu: u32 = @bitCast(a.const_i32);
+                    stack[sp - 1] = .{
+                        .const_i32 = switch (op) {
+                            op_i32_shl => @bitCast(xu << sh),
+                            op_i32_shr_u => @bitCast(xu >> sh),
+                            else => a.const_i32 >> sh, // shr_s arithmetic
+                        },
+                    };
+                    continue;
+                }
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                switch (op) {
+                    op_i32_shl => try m.emit(a64.lslvW(ra, ra, rb)),
+                    op_i32_shr_u => try m.emit(a64.lsrvW(ra, ra, rb)),
+                    else => try m.emit(a64.asrvW(ra, ra, rb)), // shr_s
+                }
                 stack[sp - 1] = .{ .reg = ra };
             },
             op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor => {
@@ -576,6 +608,38 @@ test "spasm: i32.eqz computes and folds" {
     var results: [1]Cell = .{0};
     entry(&locals, &results);
     try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(results[0])));
+}
+
+test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    const ftype: FuncType = .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} };
+    const local2: []const ValType = &.{ .i32, .i32 };
+    const cases = [_]struct { op: u8, a: i32, b: i32, want: u32 }{
+        .{ .op = 0x74, .a = 1, .b = 4, .want = 16 }, // shl: 1<<4
+        .{ .op = 0x74, .a = 1, .b = 33, .want = 2 }, // shl: count mod 32 -> 1<<1
+        .{ .op = 0x75, .a = -16, .b = 2, .want = @bitCast(@as(i32, -4)) }, // shr_s arithmetic
+        .{ .op = 0x76, .a = -16, .b = 2, .want = 0x3ffffffc }, // shr_u logical
+    };
+    for (cases) |c| {
+        const body = [_]u8{ 0x20, 0x00, 0x20, 0x01, c.op, op_end };
+        const func: CompiledFunc = .{ .type_index = 0, .local_types = local2, .body = &body, .side_table = &.{}, .max_stack = 2 };
+        const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+        var locals: [2]Cell = .{ @as(u32, @bitCast(c.a)), @as(u32, @bitCast(c.b)) };
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(c.want, @as(u32, @truncate(results[0])));
+    }
+    // folded: i32.const 3; i32.const 2; i32.shl -> 12
+    const body = [_]u8{ op_i32_const, 3, op_i32_const, 2, 0x74, op_end };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{}, .body = &body, .side_table = &.{}, .max_stack = 2 };
+    const fty: FuncType = .{ .params = &.{}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
+    var locals: [1]Cell = .{0};
+    var results: [1]Cell = .{0};
+    entry(&locals, &results);
+    try testing.expectEqual(@as(u32, 12), @as(u32, @truncate(results[0])));
 }
 
 test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
