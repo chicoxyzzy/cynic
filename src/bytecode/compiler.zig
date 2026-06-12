@@ -8311,6 +8311,16 @@ pub const Compiler = struct {
         // hoistVarAndFunctions + emitVarInits, `class C { constructor() {
         // var x = 1; this.x = x; } }` raised CompileError because `x`
         // was undeclared at the use site.
+        // L4 Stage 1 — block-scoped lexical register promotion for a
+        // register-safe constructor body. The ctor body compiles
+        // inline here (not in a dedicated per-body function like
+        // methods / ordinary functions), interleaved with method and
+        // field-initializer compiles, so the flag is set tightly
+        // around just this body region and restored after — a
+        // function-level `defer` would leak it into a sibling compile.
+        // Constructors are never generators / async.
+        const saved_body_register_safe = self.body_register_safe;
+        self.body_register_safe = bodyIsRegisterSafe(self.source, body_stmts, false);
         try self.hoistLetConst(body_stmts, locals_register_only);
         self.current_promote_vars = vars_register_only;
         try self.hoistVarAndFunctions(body_stmts);
@@ -8321,6 +8331,7 @@ pub const Compiler = struct {
         // remaining statements (using-aware).
         for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
         try self.compileFunctionBodyTail(body_stmts, span);
+        self.body_register_safe = saved_body_register_safe;
         try self.builder.emitOp(.lda_undefined, span);
         try self.builder.emitOp(.return_, span);
 
