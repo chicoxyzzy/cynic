@@ -907,6 +907,34 @@ pub const Heap = struct {
         return o;
     }
 
+    /// §13.2.4.1 — build a dense Array exotic holding exactly `elems`,
+    /// drawing its element buffer from the fixed-class slab pool
+    /// (`element_buf_pool`). The single source of truth for the fused
+    /// dense-literal construction: Lantern's `make_array_n` arm and
+    /// Bistromath's codegen both call this, so the object they build is
+    /// byte-identical — same array-exotic shape, same pooled buffer
+    /// with `elements_pooled` set, same virtual length. `elems.len`
+    /// must be `<= element_buf_cap` (the compiler caps fused literals
+    /// there). The array is young and holds only `elems`' values, so
+    /// no write barrier is needed. The CALLER keeps `elems`' backing
+    /// store GC-rooted across this call — it allocates (the JIT's
+    /// frame-identity register file; the interpreter's frame
+    /// registers).
+    pub fn makeDenseArray(
+        self: *Heap,
+        array_prototype: ?*JSObject,
+        elems: []const Value,
+    ) error{OutOfMemory}!*JSObject {
+        const obj = self.allocateObject() catch return error.OutOfMemory;
+        self.setObjectPrototype(obj, array_prototype);
+        obj.markAsArrayExotic(self.allocator) catch return error.OutOfMemory;
+        const buf = self.element_buf_pool.create(self.allocator) catch return error.OutOfMemory;
+        obj.elements = .{ .items = buf[0..0], .capacity = element_buf_cap };
+        obj.elements_pooled = true;
+        obj.elements.appendSliceAssumeCapacity(elems);
+        return obj;
+    }
+
     /// Allocate a new `Environment` chained to `parent`, with
     /// `slot_count` bindings initialised to the TDZ Hole. Header
     /// comes from the per-heap slab pool (O(1) after warmup);

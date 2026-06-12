@@ -41,6 +41,7 @@ const Masm = masm_mod.Masm;
 const a64 = @import("../jit/asm_aarch64.zig");
 const layout = @import("../jit/layout.zig");
 const JSObject = @import("../object.zig").JSObject;
+const heap_mod = @import("../heap.zig");
 
 /// Bistromath needs both an executable-memory target and an
 /// emitter for the host ISA. x86_64 hosts run the engine fine but
@@ -264,6 +265,20 @@ const bool_tag_bits: u64 = Value.false_.bits;
 /// behind a C ABI. Infallible (the interpreter calls it without
 /// `try`) and never ticks the GC counters, so it is safe to call
 /// while the accumulator lives unsynced in its pinned register.
+/// docs/ctor-array-build-gap.md L2 — the fused dense-literal builder,
+/// shared with the interpreter via `Heap.makeDenseArray` so the
+/// compiled path produces a byte-identical object. `regs` is the
+/// (GC-rooted) register file; the n source values live at
+/// `regs[r_base .. r_base + n]`. Writes the new array into `out` (the
+/// frame's accumulator slot, so it is rooted the instant it exists);
+/// returns 0 on success, 1 on host OOM.
+fn makeArrayShim(r: *Realm, regs: [*]const Value, r_base: u64, n: u64, out: *Value) callconv(.c) u32 {
+    const lo: usize = @intCast(r_base);
+    const obj = r.heap.makeDenseArray(r.intrinsics.array_prototype, regs[lo .. lo + @as(usize, @intCast(n))]) catch return 1;
+    out.* = heap_mod.taggedObject(obj);
+    return 0;
+}
+
 fn storeBarrier(r: *Realm, obj: *JSObject, bits: u64) callconv(.c) void {
     r.heap.storeInternalSlot(.{ .object = obj }, .{ .bits = bits });
 }
@@ -477,6 +492,7 @@ const Compiler = struct {
                 .tail_call, .tail_call_method,
                 .lda_global_slot, .sta_global_slot, .sta_global_slot_init,
                 .negate, .bit_not, .logical_not,
+                .make_array_n,
                 .throw_if_hole, .return_ => {},
                 .lda_env, .sta_env => {
                     // Fixed-depth walks unroll; cap the unroll.
@@ -1040,6 +1056,28 @@ const Compiler = struct {
                     try m.movImm64(.x9, Value.hole_.bits);
                     try m.emit(a64.cmpReg(acc_reg, .x9));
                     try m.jumpCond(.eq, td);
+                },
+
+                .make_array_n => {
+                    // docs/ctor-array-build-gap.md L2 — helper-mediated
+                    // dense literal. Sync the live accumulator so the
+                    // frame slot holds a valid Value during the
+                    // helper's allocation-GC (the helper then
+                    // overwrites it with the new array, rooting it);
+                    // the n source values are already in the GC-rooted
+                    // register file (regs_reg == f.registers).
+                    const r_base = code[i + 1];
+                    const n = code[i + 2];
+                    try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
+                    try m.emit(a64.movReg(.x0, realm_reg));
+                    try m.emit(a64.movReg(.x1, regs_reg));
+                    try m.movImm64(.x2, r_base);
+                    try m.movImm64(.x3, n);
+                    try m.emit(a64.addImm(.x4, frame_reg, acc_off, false));
+                    try m.callAbs(.x16, @intFromPtr(&makeArrayShim));
+                    try m.emit(a64.movRegW(.x0, .x0));
+                    try m.jumpCbnz(.x0, &self.oom_label);
+                    try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
                 },
 
                 .return_ => try m.jump(&self.done_label),
@@ -2331,6 +2369,48 @@ test "jit bistromath calls: the call-IC compare misses correctly" {
     try testing.expectEqual(
         Chunk.JitState.Tier.compiled,
         templateNamed(&chunk, "site").jit_state.?.tier,
+    );
+}
+
+test "jit bistromath: dense array literals compile via make_array_n" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+
+    // A hot function whose body builds a dense 3-element literal from
+    // its params (`make_array_n`) and returns it. Before this opcode
+    // was taught to Bistromath, the function tiered DOWN — make_array_n
+    // was UnsupportedOp, so a hot loop containing any array literal
+    // never compiled (docs/ctor-array-build-gap.md L2). The result is
+    // correct either way (interpreted or compiled); the tier assertion
+    // is the red->green signal, and the element checks pin parity.
+    const src =
+        \\function build(a, b, c) { return [a, b, c]; }
+        \\let i = 0;
+        \\while (i < 300) { build(i, i + 1, i + 2); i = i + 1; }
+        \\build(10, 20, 30);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    const arr = heap_mod.valueAsPlainObject(v) orelse return error.NotAnArray;
+    try testing.expect(arr.is_array_exotic);
+    try testing.expectEqual(@as(usize, 3), arr.elements.items.len);
+    try testing.expectEqual(@as(i32, 10), arr.elements.items[0].asInt32());
+    try testing.expectEqual(@as(i32, 20), arr.elements.items[1].asInt32());
+    try testing.expectEqual(@as(i32, 30), arr.elements.items[2].asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "build").jit_state.?.tier,
     );
 }
 
