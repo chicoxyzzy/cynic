@@ -1255,6 +1255,24 @@ and the per-builtin checklist; this section tracks status.
   rule, per-signature boundary thunks, executable-memory
   mechanics, verification gates, M5 delivery order).
 
+- **Embedder build flags** — advertised, V8/QJS/Duktape-style
+  `-D<name>` options that comptime-strip optional surfaces from a
+  Cynic library build. Today the strip works implicitly via Zig
+  DCE (an entry module that doesn't reference `disasm` / the AST
+  printer / `installTestGlobals` doesn't pull them into the binary)
+  and via the runtime install-gate (`Realm.installBuiltins` is
+  production-clean; `installTestGlobals` is the explicit demo /
+  test opt-in). Embedders generally prefer an explicit contract
+  over "trust the dead-code eliminator." Tier-1 flags would gate
+  three debug surfaces — `embed-disasm`, `embed-ast-printer`,
+  `embed-test-globals` — each `@compileError`-ing inside the
+  stripped function so misuse fails at the embedder's compile
+  time. Defaults stay `true` (CLI + playground shape preserved);
+  embedders opt out. Tier-2 (Temporal, Sarcasm, the typed-array
+  family) is bigger surface and lands incrementally once the
+  pattern is proven. JIT-tier strips (`embed-jit`, `embed-spasm`)
+  slot into the same namespace, owned by the JIT track.
+
 ## Considered and declined
 
 - **Constant-time / timing-attack-resistant mode.** No source
