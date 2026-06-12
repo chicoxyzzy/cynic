@@ -8459,6 +8459,16 @@ pub const Compiler = struct {
             false,
             locals_register_only,
         );
+        // L4 Stage 1 — block-scoped lexical register promotion for a
+        // register-safe method body (same safety as the function path:
+        // no nested function can capture a block binding). Generators /
+        // async methods reify the env, so they stay out. Reset at exit;
+        // a register-safe body compiles no nested function, so the
+        // outer value is always false. `compileMethodBody` is a
+        // dedicated per-body function, so the defer scopes correctly.
+        self.body_register_safe = !is_generator and !is_async and
+            bodyIsRegisterSafe(self.source, body_stmts, false);
+        defer self.body_register_safe = false;
         self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
         self.completion_reg = null;

@@ -2910,6 +2910,36 @@ test "block-lex: nested blocks keep distinct consts" {
     , 111);
 }
 
+test "block-lex: register-safe method body promotes loop consts" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  run(n){
+        \\    let acc = 0;
+        \\    for (let i = 0; i < n; i++){ const p = i & 3; const a = [p, p + 1]; acc += a[0] + a[1]; }
+        \\    return acc;
+        \\  }
+        \\}
+        \\new C().run(4);
+    , 16);
+}
+
+test "block-lex: register-safe constructor body promotes loop consts" {
+    try expectScriptIntWithBuiltins(
+        \\class C {
+        \\  constructor(n){
+        \\    let acc = 0;
+        \\    for (let i = 0; i < n; i++){ const p = i + 1; const a = [p, p * 2]; acc += a[0] + a[1]; }
+        \\    this.total = acc;
+        \\  }
+        \\}
+        \\new C(3).total;
+    , 18);
+}
+
+test "block-lex: method TDZ on block const read before declarator throws" {
+    try expectScriptThrows("class C { m(){ { x; const x = 1; } } } new C().m();");
+}
+
 test "block-lex: a capturing closure keeps per-iteration env semantics" {
     // The body has a closure over the block const `j`, so the
     // function is NOT register-safe — the env path (per-iteration
