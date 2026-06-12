@@ -2426,6 +2426,13 @@ pub const JSObject = struct {
             if (n.parent == null) break; // root carries no key
             if (n.kind != .data) continue;
             if (n.slot >= self.slotCount()) continue;
+            // Leaf→root is lookup order, so the FIRST node seen for
+            // a key is authoritative — a redefinition transition
+            // (the SES freeze's descriptor lock) shadows its
+            // original append node deeper in the chain; without
+            // this guard the deeper node re-puts the pre-freeze
+            // attrs and `delete` sees configurable:true again.
+            if (self.properties.contains(n.key)) continue;
             const v = self.slotAt(n.slot);
             try self.properties.put(allocator, n.key, v);
             const is_default = n.attrs.writable and n.attrs.enumerable and n.attrs.configurable;
@@ -2511,6 +2518,80 @@ pub const JSObject = struct {
     /// longer a mirror; either the shape or the bag holds the
     /// data, never both. Shape-eligible writes skip the bag
     /// entirely (the headline `class_instantiate` perf win).
+    /// Rebuild shape residency for a dictionary-mode object whose
+    /// bag holds plain data properties only: walk the own-key
+    /// order, transition per key with its current flags, move the
+    /// values into slots, and clear the bag + flag map (the shape
+    /// carries the attrs now). Returns false — object untouched —
+    /// for exotics, accessor-bearing objects, engine-internal
+    /// keys, or anything already shaped. The intrinsics installer
+    /// uses this on the global object, which is built
+    /// dictionary-mode: without shape residency its `lda_global`
+    /// cells can never fill and compiled global reads tier down
+    /// forever, on every posture.
+    pub fn promoteToShape(self: *JSObject, allocator: std.mem.Allocator) !bool {
+        const heap = self.heap orelse return false;
+        if (self.shape != null) return true;
+        if (self.accessorCount() != 0) return false;
+        if (self.is_array_exotic or self.getTypedView() != null or
+            self.is_module_namespace or self.proxy_target != null)
+        {
+            return false;
+        }
+        for (self.own_key_order.items) |k| {
+            if (std.mem.startsWith(u8, k, "__cynic_")) return false;
+            if (!self.properties.contains(k)) return false;
+        }
+        var sh = heap.shapes.root;
+        for (self.own_key_order.items) |k| {
+            sh = try heap.shapes.transition(sh, k, self.flagsFor(k), .data);
+        }
+        try self.resizeSlots(allocator, sh.property_count);
+        for (self.own_key_order.items) |k| {
+            const e = sh.lookup(k).?;
+            self.setSlot(e.slot, self.properties.get(k).?);
+        }
+        self.shape = sh;
+        self.properties.clearRetainingCapacity();
+        self.property_flags.clearRetainingCapacity();
+        return true;
+    }
+
+    /// §20.1.2.5 descriptor locking that preserves shape
+    /// residency: every shape-resident data key
+    /// redefine-transitions (same slot) to {writable:false,
+    /// enumerable:kept, configurable:false}. Returns false when
+    /// the object is not in shape mode — the caller falls back to
+    /// the dictionary stamp. The previous demote-to-dictionary
+    /// here was what kept every IC on a frozen object permanently
+    /// cold (the global object's `lda_global` cells most visibly).
+    pub fn freezeOwnDataInShape(self: *JSObject) !bool {
+        const heap = self.heap orelse return false;
+        var sh = self.shape orelse return false;
+        // Collect the chain's keys first — redefines splice new
+        // nodes onto the chain while we walk. A chain holding a
+        // prior redefine lists its key twice; the second pass
+        // no-ops on equal attrs.
+        var keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer keys.deinit(heap.allocator);
+        var node: ?*const @import("shape.zig").Shape = sh;
+        while (node) |n| : (node = n.parent) {
+            if (n.parent == null) break;
+            try keys.append(heap.allocator, n.key);
+        }
+        for (keys.items) |k| {
+            const cur = sh.lookup(k) orelse continue;
+            if (cur.kind != .data) continue;
+            sh = try heap.shapes.redefineTransition(sh, k, .{
+                .writable = false,
+                .enumerable = cur.attrs.enumerable,
+                .configurable = false,
+            });
+        }
+        self.shape = sh;
+        return true;
+    }
+
     pub fn shadowSet(
         self: *JSObject,
         allocator: std.mem.Allocator,

@@ -485,15 +485,31 @@ fn remapDefaultProtoToCtorRealm(
         }
     }
 
-    // (2) Global-constructor scan keyed by binding name.
-    var it = owner.globals.iterator();
-    while (it.next()) |entry| {
-        const f = heap_mod.valueAsFunction(entry.value_ptr.*) orelse continue;
-        const fp = f.prototype orelse continue;
-        if (fp == default) {
-            const child_v = ctor_realm.globals.get(entry.key_ptr.*) orelse return intrinsic_default;
-            const child_f = heap_mod.valueAsFunction(child_v) orelse return intrinsic_default;
-            return child_f.prototype orelse intrinsic_default;
+    // (2) Global-constructor scan keyed by binding name. The
+    // global object is shape-resident (its bag is empty), so the
+    // scan walks `iterOwnNamedKeys` — the representation-agnostic
+    // own iterator — rather than the raw bag.
+    if (owner.globals.target) |owner_gt| {
+        var it = owner_gt.iterOwnNamedKeys();
+        while (it.next()) |entry| {
+            const f = heap_mod.valueAsFunction(entry.value_ptr.*) orelse continue;
+            const fp = f.prototype orelse continue;
+            if (fp == default) {
+                const child_v = ctor_realm.globals.get(entry.key_ptr.*) orelse return intrinsic_default;
+                const child_f = heap_mod.valueAsFunction(child_v) orelse return intrinsic_default;
+                return child_f.prototype orelse intrinsic_default;
+            }
+        }
+    } else {
+        var it = owner.globals.iterator();
+        while (it.next()) |entry| {
+            const f = heap_mod.valueAsFunction(entry.value_ptr.*) orelse continue;
+            const fp = f.prototype orelse continue;
+            if (fp == default) {
+                const child_v = ctor_realm.globals.get(entry.key_ptr.*) orelse return intrinsic_default;
+                const child_f = heap_mod.valueAsFunction(child_v) orelse return intrinsic_default;
+                return child_f.prototype orelse intrinsic_default;
+            }
         }
     }
 

@@ -135,29 +135,34 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         if (obj.is_array_exotic) obj.array_length_writable = false;
         // Shape-mode write fast path (Phase 3 of
         // [docs/lazy-property-bag.md]) stores the live descriptor
-        // attrs in the shape entry, NOT in `property_flags`. Shapes
-        // are immutable transition nodes — flipping a slot to
-        // non-writable in place would corrupt every other object
-        // sharing the shape. The cheap, correct fix is to demote
-        // out of shape mode before stamping: `demoteFromShape`
-        // back-fills `properties` + `property_flags` from the
-        // shape chain and clears the shape pointer, so subsequent
-        // `flagsFor` lookups consult `property_flags` (the source
-        // of truth in dict mode) and see the locked attrs harden
-        // is about to install. The object now reads + writes
-        // through the dictionary-mode path, which is fine: a
-        // hardened object can never gain new properties so it
-        // won't benefit from further shape transitions anyway.
-        obj.demoteFromShape(realm.allocator) catch return error.OutOfMemory;
-        var it = obj.iterOwnNamedKeys();
-        while (it.next()) |e| {
-            const k = e.key_ptr.*;
-            const cur = obj.flagsFor(k);
-            obj.property_flags.put(realm.allocator, k, .{
-                .writable = false,
-                .enumerable = cur.enumerable,
-                .configurable = false,
-            }) catch return error.OutOfMemory;
+        // attrs in the shape entry, NOT in `property_flags`.
+        // Shapes are immutable transition nodes, so descriptor
+        // locking REDEFINE-TRANSITIONS each data key to its frozen
+        // attrs (same slot, new shape) and the object stays
+        // shape-resident — the previous demote-to-dictionary kept
+        // every IC on a frozen object permanently cold, most
+        // visibly the global object's `lda_global` cells, which
+        // could then never fill for script-declared functions.
+        // Anything not in shape mode (bag residue, accessors-only,
+        // exotics) takes the dictionary stamp below, as before;
+        // the object then "can never gain new properties so it
+        // won't benefit from further shape transitions" — which is
+        // true for everything EXCEPT the global object, whose
+        // privileged script-decl installs keep extending the
+        // (frozen-attrs) shape.
+        const shape_frozen = obj.freezeOwnDataInShape() catch return error.OutOfMemory;
+        if (!shape_frozen) {
+            obj.demoteFromShape(realm.allocator) catch return error.OutOfMemory;
+            var it = obj.iterOwnNamedKeys();
+            while (it.next()) |e| {
+                const k = e.key_ptr.*;
+                const cur = obj.flagsFor(k);
+                obj.property_flags.put(realm.allocator, k, .{
+                    .writable = false,
+                    .enumerable = cur.enumerable,
+                    .configurable = false,
+                }) catch return error.OutOfMemory;
+            }
         }
         // Accessor descriptors need their own flag stamp — the
         // data-property loop above only touches keys in

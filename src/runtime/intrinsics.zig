@@ -654,6 +654,15 @@ pub fn install(realm: *Realm) !void {
     // (default true; `--unhardened` flips it). Reuses the same
     // walker `harden(value)` does so the freeze shape stays in
     // lockstep with user-invoked hardening.
+    // Promote the global object to shape residency on EVERY
+    // posture — it is built dictionary-mode during install, and a
+    // dictionary global means `lda_global` cells can never fill,
+    // so compiled global reads tier down forever. On hardened
+    // realms the freeze below then locks descriptors via
+    // redefinition transitions, keeping the shape.
+    if (realm.globals.target) |global_obj| {
+        _ = global_obj.promoteToShape(realm.allocator) catch {};
+    }
     if (realm.hardened) try freezePrimordials(realm);
 
     // No catch-up pass needed — `realm.globals` is a live view

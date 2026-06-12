@@ -8490,7 +8490,12 @@ pub fn runFrames(
                 // (`undefined = 1`, `NaN = 1`, `Infinity = 1`)
                 // and any host-installed read-only data slot.
                 if (gr.globals.target) |gt| {
-                    if (gt.property_flags.get(key_s.flatBytes())) |flags| {
+                    // Shape-first: a frozen-in-shape global carries
+                    // its locked attrs in the shape entry, not in
+                    // `property_flags` (empty in shape mode) —
+                    // `flagsFor` consults both representations.
+                    if (gt.ownDataContains(key_s.flatBytes())) {
+                        const flags = gt.flagsFor(key_s.flatBytes());
                         if (!flags.writable) {
                             const ex = try makeTypeError(gr, "Cannot assign to read-only property on globalThis");
                             f.ip = ip;
@@ -8617,7 +8622,12 @@ pub fn runFrames(
                 // data property of the global object refuses
                 // the write with TypeError.
                 if (gr.globals.target) |gt| {
-                    if (gt.property_flags.get(key_s.flatBytes())) |flags| {
+                    // Shape-first: a frozen-in-shape global carries
+                    // its locked attrs in the shape entry, not in
+                    // `property_flags` (empty in shape mode) —
+                    // `flagsFor` consults both representations.
+                    if (gt.ownDataContains(key_s.flatBytes())) {
+                        const flags = gt.flagsFor(key_s.flatBytes());
                         if (!flags.writable) {
                             const ex = try makeTypeError(gr, "Cannot assign to read-only property on globalThis");
                             f.ip = ip;

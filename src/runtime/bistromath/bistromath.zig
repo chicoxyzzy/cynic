@@ -2367,6 +2367,52 @@ test "jit bistromath: var-local bodies compile" {
     );
 }
 
+test "jit bistromath: hardened realms keep global ICs warm" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    // HARDENED (the default) — installBuiltins freezes globalThis.
+    try realm.installBuiltins();
+
+    // Script-declared global functions must stay shape-resident on
+    // the frozen global object so `lda_global` cells fill and
+    // compiled code reads them without tiering down — while the
+    // §20.1.2.5 freeze semantics stay intact (the script asserts
+    // both observable halves).
+    const src =
+        \\function leaf(x) { return x + 1; }
+        \\function callr(x) { return leaf(x) + 0; }
+        \\let i = 0;
+        \\while (i < 300) { callr(i); i = i + 1; }
+        \\let frozen_ok = 0;
+        \\if (Object.isFrozen(Object) === false) { frozen_ok = 1; }
+        \\if (Object.isExtensible(Math)) { frozen_ok = 2; }
+        \\callr(5) * 10 + frozen_ok;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    // callr(5) = 6; frozen_ok must stay 0.
+    try testing.expectEqual(@as(i32, 60), v.asInt32());
+    // The compiled-call gate: callr's global cell for `leaf` must
+    // have FILLED during heating (a cold cell means every compiled
+    // read tiers down — the hardened-realm IC hole).
+    const callr_chunk = templateNamed(&chunk, "callr");
+    var any_filled = false;
+    for (callr_chunk.inline_caches) |cell| {
+        if (cell.shape != null) any_filled = true;
+    }
+    try testing.expect(any_filled);
+}
+
 test "jit bistromath calls: method calls bind `this` through the tier" {
     if (comptime !supported) return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

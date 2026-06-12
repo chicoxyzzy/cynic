@@ -1991,6 +1991,13 @@ pub const Realm = struct {
                         .configurable = false,
                     });
                 }
+                // The global object is shape-resident, where attrs
+                // live in the shape entries and shadow the
+                // `property_flags` stamp above (kept for the
+                // dictionary fallback) — re-lock every own data key
+                // in-shape; already-frozen keys no-op through the
+                // redefinition cache.
+                _ = try gt.freezeOwnDataInShape();
             }
         }
     }

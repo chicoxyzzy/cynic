@@ -152,6 +152,57 @@ pub const ShapeTree = struct {
         });
         return child;
     }
+
+    /// Return the shape reached by REDEFINING `key`'s attributes
+    /// to `attrs` in `from` — same slot, same property count, new
+    /// attrs shadowing the ancestor entry on the lookup walk. The
+    /// SES freeze (§20.1.2.5 descriptor locking via hardenWalk)
+    /// uses this to lock descriptors WITHOUT demoting the object
+    /// to dictionary mode — the demote was what kept every IC on
+    /// a frozen object (most visibly the global object's
+    /// `lda_global` cells) permanently cold. Cached in the same
+    /// per-node transition list as appends: a key present in
+    /// `from` can never collide with an append edge, because no
+    /// caller appends an existing key. Redefining to the attrs
+    /// the shape already has is the identity; a missing or
+    /// accessor-kind key returns `from` unchanged (defensive — the
+    /// callers only pass shape-resident data keys).
+    pub fn redefineTransition(
+        self: *ShapeTree,
+        from: *Shape,
+        key: []const u8,
+        attrs: PropertyFlags,
+    ) !*Shape {
+        const existing = from.lookup(key) orelse return from;
+        if (existing.kind != .data) return from;
+        if (flagsEql(existing.attrs, attrs)) return from;
+        for (from.transitions.items) |t| {
+            if (t.kind == .data and flagsEql(t.attrs, attrs) and
+                std.mem.eql(u8, t.key, key))
+            {
+                return t.child;
+            }
+        }
+        const a = self.arena.allocator();
+        const owned_key = try a.dupe(u8, key);
+        const child = try a.create(Shape);
+        child.* = .{
+            .parent = from,
+            .key = owned_key,
+            .attrs = attrs,
+            .kind = .data,
+            .slot = existing.slot,
+            .property_count = from.property_count,
+            .transitions = .empty,
+        };
+        try from.transitions.append(a, .{
+            .key = owned_key,
+            .attrs = attrs,
+            .kind = .data,
+            .child = child,
+        });
+        return child;
+    }
 };
 
 const testing = std.testing;
@@ -212,6 +263,41 @@ test "differing attributes or kind fork the transition" {
     // The cache still dedups within each variant.
     try testing.expectEqual(data_default, try tree.transition(tree.root, "x", .{}, .data));
     try testing.expectEqual(accessor, try tree.transition(tree.root, "x", .{}, .accessor));
+}
+
+test "redefine transition keeps slot and count, shadows attrs" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const s1 = try tree.transition(tree.root, "x", .{}, .data);
+    const s2 = try tree.transition(s1, "y", .{}, .data);
+
+    const frozen_attrs: PropertyFlags = .{ .writable = false, .enumerable = true, .configurable = false };
+    const s3 = try tree.redefineTransition(s2, "x", frozen_attrs);
+
+    // Same layout — no new slot, no count change.
+    try testing.expectEqual(@as(u32, 2), s3.property_count);
+    const e = s3.lookup("x").?;
+    try testing.expectEqual(@as(u32, 0), e.slot);
+    try testing.expect(!e.attrs.writable);
+    try testing.expect(!e.attrs.configurable);
+    // The sibling key is untouched.
+    try testing.expectEqual(@as(u32, 1), s3.lookup("y").?.slot);
+    try testing.expect(s3.lookup("y").?.attrs.writable);
+}
+
+test "redefine transition is cached and no-ops on same attrs" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const s1 = try tree.transition(tree.root, "x", .{}, .data);
+    const frozen_attrs: PropertyFlags = .{ .writable = false, .enumerable = true, .configurable = false };
+    const a = try tree.redefineTransition(s1, "x", frozen_attrs);
+    const b = try tree.redefineTransition(s1, "x", frozen_attrs);
+    try testing.expectEqual(a, b);
+    // Redefining to the attrs the shape already has is the
+    // identity.
+    try testing.expectEqual(a, try tree.redefineTransition(a, "x", frozen_attrs));
 }
 
 test "lookup resolves attributes and kind, not just the slot" {
