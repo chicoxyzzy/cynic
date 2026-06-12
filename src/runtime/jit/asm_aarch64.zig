@@ -204,6 +204,12 @@ pub fn asrvW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x1AC02800 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
 }
 
+/// CSEL Wd, Wn, Wm, cond — Wd = cond ? Wn : Wm. Branchless select,
+/// wasm `select` (cond on top picks the deeper-but-one operand).
+pub fn cselW(rd: Reg, rn: Reg, rm: Reg, cond: Cond) u32 {
+    return 0x1A800000 | (r(rm) << 16) | (@as(u32, @intFromEnum(cond)) << 12) | (r(rn) << 5) | r(rd);
+}
+
 /// ORR Xd, Xn, Xm
 pub fn orrReg(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0xAA000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
@@ -390,6 +396,7 @@ test "jit asm_aarch64: golden encodings" {
     try expectEqual(@as(u32, 0x1AC22020), lslvW(.x0, .x1, .x2)); // lslv w0, w1, w2
     try expectEqual(@as(u32, 0x1AC22420), lsrvW(.x0, .x1, .x2)); // lsrv w0, w1, w2
     try expectEqual(@as(u32, 0x1AC22820), asrvW(.x0, .x1, .x2)); // asrv w0, w1, w2
+    try expectEqual(@as(u32, 0x1A821020), cselW(.x0, .x1, .x2, .ne)); // csel w0, w1, w2, ne
     try expectEqual(@as(u32, 0x9B227C20), smull(.x0, .x1, .x2)); // smull x0, w1, w2
     try expectEqual(@as(u32, 0x93407C20), sxtw(.x0, .x1)); // sxtw x0, w1
     try expectEqual(@as(u32, 0x2A020020), orrRegW(.x0, .x1, .x2)); // orr w0, w1, w2

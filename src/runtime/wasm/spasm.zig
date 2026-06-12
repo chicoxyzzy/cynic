@@ -56,6 +56,9 @@ pub const CompileError = error{ OutOfMemory, UnsupportedOp };
 
 // ── wasm opcodes this increment understands ─────────────────────────
 const op_end: u8 = 0x0b;
+const op_nop: u8 = 0x01;
+const op_drop: u8 = 0x1a;
+const op_select: u8 = 0x1b;
 const op_local_get: u8 = 0x20;
 const op_i32_const: u8 = 0x41;
 const op_local_set: u8 = 0x21;
@@ -137,6 +140,34 @@ pub fn compile(
                 if (sp >= operand_reg_count) return null;
                 stack[sp] = .{ .const_i32 = v };
                 sp += 1;
+            },
+            op_nop => {},
+            op_drop => {
+                // Pop and discard. The only side-effecting ops (memory,
+                // calls) aren't in the set, so a drop is pure stack
+                // bookkeeping — the abandoned register/const just frees.
+                if (sp < 1) return null;
+                sp -= 1;
+            },
+            op_select => {
+                // wasm `select`: [v1, v2, c] -> c != 0 ? v1 : v2.
+                if (sp < 3) return null;
+                const c = stack[sp - 1];
+                const v2 = stack[sp - 2];
+                const v1 = stack[sp - 3];
+                sp -= 2; // pop 3, push 1; result slot is now sp-1
+                if (c == .const_i32 and v1 == .const_i32 and v2 == .const_i32) {
+                    stack[sp - 1] = .{ .const_i32 = if (c.const_i32 != 0) v1.const_i32 else v2.const_i32 };
+                    continue;
+                }
+                const r1 = try materialize(&m, v1, sp - 1);
+                const r2 = try materialize(&m, v2, sp);
+                const rc = try materialize(&m, c, sp + 1);
+                try m.movImm64(.x16, 0);
+                try m.emit(a64.cmpRegW(rc, .x16));
+                // r1 = (c != 0) ? v1 : v2.
+                try m.emit(a64.cselW(r1, r1, r2, .ne));
+                stack[sp - 1] = .{ .reg = r1 };
             },
             op_local_get => {
                 const idx = readUleb32(body, &i) orelse return null;
@@ -640,6 +671,43 @@ test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
     var results: [1]Cell = .{0};
     entry(&locals, &results);
     try testing.expectEqual(@as(u32, 12), @as(u32, @truncate(results[0])));
+}
+
+test "spasm: select picks an operand by the condition (branchless)" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32 i32 i32) (result i32)
+    //   local.get 0; local.get 1; local.get 2; select)
+    // -> cond (param2) != 0 ? val1 (param0) : val2 (param1)
+    const body = [_]u8{ 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x1b, op_end };
+    const local3: []const ValType = &.{ .i32, .i32, .i32 };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = local3, .body = &body, .side_table = &.{}, .max_stack = 3 };
+    const ftype: FuncType = .{ .params = local3, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
+        var locals: [3]Cell = .{ 10, 20, pair[0] };
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: drop pops a value; nop is a no-op" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32 i32) (result i32) nop; local.get 0; local.get 1; drop; nop)
+    // -> drops param1, leaves param0.
+    const body = [_]u8{ 0x01, 0x20, 0x00, 0x20, 0x01, 0x1a, 0x01, op_end };
+    const local2: []const ValType = &.{ .i32, .i32 };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = local2, .body = &body, .side_table = &.{}, .max_stack = 2 };
+    const ftype: FuncType = .{ .params = local2, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    var locals: [2]Cell = .{ 42, 99 };
+    var results: [1]Cell = .{0};
+    entry(&locals, &results);
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
 test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
