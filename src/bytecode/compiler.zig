@@ -922,7 +922,7 @@ pub const Compiler = struct {
             // §13.3.4 TaggedTemplate is a function call — same
             // §15.10.1 tail-position rules apply.
             .tagged_template => |tt| try self.compileTaggedTemplate(tt, tail),
-            .update => |u| try self.compileUpdate(u),
+            .update => |u| try self.compileUpdate(u, true),
             .class_expr => |c| try self.compileClassExpr(c),
             .yield => |y| try self.compileYield(y),
             .await_ => |a| try self.compileAwait(a),
@@ -1717,7 +1717,7 @@ pub const Compiler = struct {
     /// Lowers to `acc = ToNumber(x); x = acc ± 1; result =
     /// (prefix ? acc_new : acc_old)`. Both identifier and
     /// member-access targets are supported.
-    fn compileUpdate(self: *Compiler, u: ast.expression.UpdateExpr) CompileError!void {
+    fn compileUpdate(self: *Compiler, u: ast.expression.UpdateExpr, result_used: bool) CompileError!void {
         // §13.4 / §13.15.3 — `(x)++` is a CoverParenthesizedExpression
         // covering an IdentifierReference. IsValidSimpleAssignmentTarget
         // sees through parentheses, so unwrap any layers before
@@ -1725,6 +1725,10 @@ pub const Compiler = struct {
         var operand: *const ast.expression.Expression = u.operand;
         while (operand.* == .parenthesized) operand = operand.parenthesized.expression;
         if (operand.* == .member) {
+            // The member path (`obj.x++`) keeps materializing the old
+            // value regardless of `result_used` — the result-discard
+            // elision is wired only for the identifier (loop-counter)
+            // path for now.
             var unwrapped = u;
             unwrapped.operand = @constCast(operand);
             return self.compileUpdateMember(unwrapped);
@@ -1769,14 +1773,26 @@ pub const Compiler = struct {
         try self.emitLoadBinding(binding, span);
 
         // §13.4.4.1 step 2.b — ToNumeric (BigInt-tolerant; the
-        // `inc` / `dec` bump dispatches on Number vs BigInt).
+        // `inc` / `dec` bump dispatches on Number vs BigInt). Stays
+        // even when the old value is discarded: `inc` / `dec` assume a
+        // pre-coerced operand (`incOrDec` does not ToNumeric an object
+        // — it would yield NaN), so this performs the §13.4 coercion.
         try self.builder.emitOp(.to_numeric, span);
 
-        // Save the coerced original for the result-of-postfix.
-        const r_orig = try self.reserveTemp();
-        defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_orig);
+        // The coerced OLD value is the result only for a postfix whose
+        // result is consumed (`x++` in an expression). For a prefix
+        // (`++x` → bumped value) or any discarded-result update (`x++;`
+        // statement, `for (;; x++)` update clause), the save + reload
+        // is dead — skip it (V8 / Hermes likewise emit a bare bump
+        // when the postfix result is unused).
+        const need_old = !u.prefix and result_used;
+        const r_orig: u8 = if (need_old) blk: {
+            const r = try self.reserveTemp();
+            try self.builder.emitOp(.star, span);
+            try self.builder.emitU8(r);
+            break :blk r;
+        } else 0;
+        defer if (need_old) self.releaseTemp();
 
         // §13.4 bump = oldValue + Type(oldValue)::unit. Inc / Dec
         // dispatch on Number vs BigInt so the unit matches; the
@@ -1786,14 +1802,14 @@ pub const Compiler = struct {
         try self.builder.emitOp(op, u.span);
         try self.emitStoreBinding(binding, u.span);
 
-        if (u.prefix) {
-            // Result = bumped value (still in acc after sta_env /
-            // sta_global — neither disturbs the accumulator).
-        } else {
-            // Result = original.
+        if (need_old) {
+            // Result = original (consumed postfix).
             try self.builder.emitOp(.ldar, u.span);
             try self.builder.emitU8(r_orig);
         }
+        // Otherwise the result is the bumped value, still in acc after
+        // the store (sta_env / sta_global leave the accumulator
+        // undisturbed) — and discarded by the caller anyway.
     }
 
     /// `obj.x++`, `--arr[i]`, etc. The receiver is evaluated
@@ -5520,18 +5536,28 @@ pub const Compiler = struct {
     pub fn compileStatement(self: *Compiler, stmt: *const Statement) CompileError!void {
         switch (stmt.*) {
             .expression => |es| {
-                try self.compileExpression(&es.expression);
-                // §13.2 ExpressionStatement completion value. In a
-                // top-level script / eval statement list, capture the
-                // value into the completion register so the chunk tail
-                // returns it (§19.2.1.3 PerformEval / §16.1.6). Only
-                // value-producing statements move it, so a trailing
-                // loop / empty / declaration leaves the prior value.
-                // Null inside function bodies — they return `undefined`
-                // (or an explicit `return`), not a completion value.
-                if (self.completion_reg) |r| {
-                    try self.builder.emitOp(.star, es.span);
-                    try self.builder.emitU8(r);
+                // A bare `x++;` / `++x;` discards the update's result
+                // unless this statement's completion value is captured
+                // (top-level script / eval). Compile it for effect in
+                // that case so the dead old-value save is skipped
+                // (§13.4) — the loop-counter idiom is the hot case.
+                if (self.completion_reg == null and es.expression == .update) {
+                    try self.compileUpdate(es.expression.update, false);
+                } else {
+                    try self.compileExpression(&es.expression);
+                    // §13.2 ExpressionStatement completion value. In a
+                    // top-level script / eval statement list, capture
+                    // the value into the completion register so the
+                    // chunk tail returns it (§19.2.1.3 PerformEval /
+                    // §16.1.6). Only value-producing statements move it,
+                    // so a trailing loop / empty / declaration leaves
+                    // the prior value. Null inside function bodies —
+                    // they return `undefined` (or an explicit
+                    // `return`), not a completion value.
+                    if (self.completion_reg) |r| {
+                        try self.builder.emitOp(.star, es.span);
+                        try self.builder.emitU8(r);
+                    }
                 }
             },
             .empty => {},
@@ -12796,7 +12822,15 @@ pub const Compiler = struct {
             }
         }
         if (s.update) |*u| {
-            try self.compileExpression(u);
+            // §14.7.4 — the for-update expression is evaluated for
+            // effect, its value discarded. A bare `i++` / `i--` update
+            // (the loop-counter idiom that didn't qualify for the fused
+            // LoopIncLt path) can skip the dead old-value save.
+            if (u.* == .update) {
+                try self.compileUpdate(u.update, false);
+            } else {
+                try self.compileExpression(u);
+            }
         }
 
         try self.builder.emitOp(.jmp, s.span);

@@ -2325,6 +2325,61 @@ test "later: postfix-increment expression value equals the pre-update read" {
     , 41);
 }
 
+// §13.4 update-expression result discipline. The compiler skips the
+// dead old-value save (`to_numeric; star r_orig`) when the old value
+// is not the result — for any prefix, and for a postfix whose result
+// is discarded (statement / for-update). These pin that the visible
+// values stay correct across that elision: prefix yields the BUMPED
+// value, a consumed postfix yields the OLD value, and the ToNumeric
+// coercion (which `inc`/`dec` rely on — they don't coerce objects)
+// still runs.
+
+test "update result: prefix yields bumped, postfix-consumed yields old" {
+    try expectScriptStringWithBuiltins(
+        \\let i = 5;
+        \\const pre = ++i;          // 6, i now 6
+        \\let j = 5;
+        \\const post = j++;         // 5, j now 6
+        \\`${pre}:${i}:${post}:${j}`;
+    , "6:6:5:6");
+}
+
+test "update result: discarded postfix still increments" {
+    try expectScriptInt("var i = 5; i++; i++; i", 7);
+    try expectScriptInt("var i = 5; ++i; i", 6);
+}
+
+test "update: ToNumeric coercion of an object operand survives the elision" {
+    // `o` holds an object with valueOf; `++o`/`o++` must ToNumeric it
+    // (inc/dec assume a pre-coerced operand). If the to_numeric were
+    // wrongly dropped, the bump would see a raw object and yield NaN.
+    try expectScriptStringWithBuiltins(
+        \\let o = { valueOf() { return 41; } };
+        \\++o;                 // o -> 42 (number)
+        \\let p = { valueOf() { return 41; } };
+        \\const old = p++;     // old -> 41, p -> 42
+        \\`${o}:${old}:${p}`;
+    , "42:41:42");
+}
+
+test "update: BigInt postfix in a statement and consumed" {
+    try expectScriptStringWithBuiltins(
+        \\let b = 5n; b++;                 // 6n, discarded result
+        \\let c = 5n; const r = c++;       // r = 5n, c = 6n
+        \\`${b}:${r}:${c}`;
+    , "6:5:6");
+}
+
+test "update: non-fused for-update postfix counts correctly" {
+    // `<=` test does not qualify for the fused LoopIncLt path, so the
+    // `i++` update goes through the general (discarded-result) path.
+    try expectScriptInt(
+        \\let s = 0;
+        \\for (let i = 0; i <= 4; i++) s += i;
+        \\s
+    , 10);
+}
+
 test "later: private field prefix decrement returns new value" {
     try expectScriptIntWithBuiltins(
         \\class C {
