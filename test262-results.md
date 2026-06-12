@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 90.83 % of the 49808 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 90.79 % of the 49895 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **45241 passing** — Cynic produced the spec-expected result.
-- **4567 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **45299 passing** — Cynic produced the spec-expected result.
+- **4596 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 45241 | 4567 | 49808 | 90.83 % |
+| **`--unhardened --allow=eval`** | 45299 | 4596 | 49895 | 90.79 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -62,11 +62,11 @@ count; the per-area table below it is the work list.
 
 | why | failing | detail |
 |---|---:|---|
-| ECMA-402 not implemented | 3250 | the whole `intl402/` tree — `Intl` (and the `intl402/Temporal` twins of the excluded Temporal proposal) is an unbuilt subsystem |
+| ECMA-402 not implemented | 3245 | the whole `intl402/` tree — `Intl` (and the `intl402/Temporal` twins of the excluded Temporal proposal) is an unbuilt subsystem |
 | sloppy-mode-only fixtures | 1142 | `flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...) |
 | Annex B builtins | 69 | `__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design |
 | cannot-block agent semantics | 2 | `flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent |
-| **engine gaps** | 104 | failures the policy classes do not explain — the work list (an upper bound: it includes a residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter) |
+| **engine gaps** | 138 | failures the policy classes do not explain — the work list (an upper bound: it includes a residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter) |
 
 **Failing areas.** Only areas with at least one failure are
 listed (everything else passes). `gaps` is the slice of the
@@ -77,7 +77,8 @@ list. Bucketed on the first two path components.
 | area | passing | failing | gaps | pass% |
 |---|---:|---:|---:|---:|
 | `built-ins/Function` | 428 | 81 | 50 | 84 % |
-| `language/expressions` | 10287 | 395 | 23 | 96 % |
+| `built-ins/Error` | 59 | 34 | 34 | 63 % |
+| `language/expressions` | 10308 | 395 | 23 | 96 % |
 | `language/statements` | 8996 | 327 | 12 | 96 % |
 | `language/module-code` | 590 | 5 | 5 | 99 % |
 | `language/function-code` | 155 | 62 | 4 | 71 % |
@@ -87,18 +88,18 @@ list. Bucketed on the first two path components.
 | `built-ins/String` | 1219 | 4 | 2 | 100 % |
 | `built-ins/TypedArrayConstructors` | 719 | 17 | 1 | 98 % |
 | `language/comments` | 51 | 1 | 1 | 98 % |
-| `intl402/Temporal` | 49 | 1957 | 0 | 2 % |
-| `intl402/NumberFormat` | 0 | 253 | 0 | 0 % |
-| `intl402/DateTimeFormat` | 0 | 248 | 0 | 0 % |
+| `intl402/Temporal` | 71 | 1958 | 0 | 3 % |
+| `intl402/NumberFormat` | 0 | 249 | 0 | 0 % |
+| `intl402/DateTimeFormat` | 0 | 244 | 0 | 0 % |
 | `intl402/Locale` | 0 | 152 | 0 | 0 % |
-| `intl402/DurationFormat` | 0 | 111 | 0 | 0 % |
+| `intl402/DurationFormat` | 0 | 110 | 0 | 0 % |
 | `intl402/ListFormat` | 0 | 81 | 0 | 0 % |
 | `intl402/RelativeTimeFormat` | 0 | 80 | 0 | 0 % |
 | `intl402/Segmenter` | 0 | 79 | 0 | 0 % |
 | `intl402/Intl` | 0 | 66 | 0 | 0 % |
 | `intl402/Collator` | 0 | 65 | 0 | 0 % |
 | `intl402/DisplayNames` | 0 | 57 | 0 | 0 % |
-| `intl402/PluralRules` | 0 | 52 | 0 | 0 % |
+| `intl402/PluralRules` | 0 | 53 | 0 | 0 % |
 | `language/arguments-object` | 225 | 38 | 0 | 86 % |
 | `built-ins/Array` | 3054 | 27 | 0 | 99 % |
 | `language/directive-prologue` | 37 | 25 | 0 | 60 % |
@@ -115,10 +116,11 @@ list. Bucketed on the first two path components.
 | `intl402/Number` | 3 | 4 | 0 | 43 % |
 | `built-ins/Promise` | 637 | 3 | 0 | 100 % |
 | `built-ins/undefined` | 5 | 3 | 0 | 63 % |
-| `built-ins/Atomics` | 380 | 2 | 0 | 99 % |
+| `built-ins/Atomics` | 379 | 2 | 0 | 99 % |
 | `built-ins/Infinity` | 4 | 2 | 0 | 67 % |
 | `built-ins/NaN` | 4 | 2 | 0 | 67 % |
 | `built-ins/Symbol` | 96 | 2 | 0 | 98 % |
+| `intl402/FallbackSymbol` | 0 | 2 | 0 | 0 % |
 | `built-ins/Map` | 203 | 1 | 0 | 100 % |
 | `built-ins/RegExp` | 1878 | 1 | 0 | 100 % |
 | `built-ins/Set` | 382 | 1 | 0 | 100 % |
@@ -137,25 +139,31 @@ top-line score.
 
 | feature | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| `joint-iteration` | 78 | 0 | 78 | 100 % |
+| `joint-iteration` | 82 | 0 | 82 | 100 % |
 | `ShadowRealm` | 63 | 1 | 64 | 98 % |
 
 
 ## History
+
+### 2026-06-12 — cynic `ae12744`, test262 `de8e621c`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 45299 | 4596 | 49895 | 90.79 % | +58 | 1m 00s |
+
+Biggest movers:
+
+- `built-ins/Temporal` +4603
+- `built-ins/Date` +594
+- `built-ins/DataView` +550
+- `built-ins/Iterator` +432
+- `built-ins/Number` +340
 
 ### 2026-06-11 — cynic `b2adad7`, test262 `d0c1b4555b`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
 | 45241 | 4567 | 49808 | 90.83 % | +18 | 40.1 s |
-
-Biggest movers:
-
-- `built-ins/Temporal` +4588
-- `built-ins/Date` +594
-- `built-ins/DataView` +550
-- `built-ins/Iterator` +432
-- `built-ins/Number` +340
 
 ### 2026-06-10 — cynic `288c1a0`, test262 `d0c1b4555b`
 
