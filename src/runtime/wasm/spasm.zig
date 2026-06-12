@@ -58,6 +58,7 @@ pub const CompileError = error{ OutOfMemory, UnsupportedOp };
 const op_end: u8 = 0x0b;
 const op_nop: u8 = 0x01;
 const op_block: u8 = 0x02;
+const op_loop: u8 = 0x03;
 const op_br_if: u8 = 0x0d;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
@@ -108,14 +109,28 @@ fn regForDepth(d: usize) a64.Reg {
 /// One open structured-control frame (§6 — the operand-stack machine's
 /// control oracle). `block`/`loop`/`if` push a frame and `end` pops it;
 /// a `br`/`br_if` to relative depth N targets the Nth-from-top frame.
-/// The `label` is the native merge point (bound at `end` for a `block`,
-/// at the header for a `loop` — loops arrive later). `height` is the
-/// operand-stack depth when the frame opened, so the carried results
-/// land in the canonical depth registers `regForDepth(height ..)`.
+/// The `label` is the native branch destination: bound at `end` for a
+/// `block` (a forward merge), bound at the header for a `loop` (the
+/// back-edge target). `height` is the operand-stack depth when the
+/// frame opened, so carried values land in the canonical depth
+/// registers `regForDepth(height ..)`.
 const Ctrl = struct {
     label: masm_mod.Masm.Label,
     height: usize,
-    arity: u32,
+    /// Values a `br`/`br_if` to this frame carries. A `block`/`if`
+    /// branches forward to its `end`, carrying its result arity; a
+    /// `loop` branches backward to its header, carrying its param arity
+    /// — 0 for every block type Spasm compiles (only a type-index block
+    /// has params, and those degrade), so a back-edge carries nothing
+    /// and loop-carried state lives in locals.
+    branch_arity: u32,
+    /// Values on the stack when the frame's `end` is reached by
+    /// fall-through (the result arity). Equals `branch_arity` for a
+    /// `block`/`if`; a `loop` differs (params vs results).
+    result_arity: u32,
+    kind: Kind,
+
+    const Kind = enum { block, loop };
 };
 
 /// Nesting cap. Deeper structured control degrades to the interpreter
@@ -363,10 +378,26 @@ pub fn compile(
                 // arity comes from its block type; a `block` consumes no
                 // operand values (only multi-value param blocks would,
                 // and those degrade), so the merge base is the current
-                // height.
+                // height. The label binds forward, at the block's `end`.
                 const arity = readBlockArity(body, &i) orelse return null;
                 if (ctrl_len >= max_ctrl_depth) return null;
-                ctrl[ctrl_len] = .{ .label = .{}, .height = sp, .arity = arity };
+                ctrl[ctrl_len] = .{ .label = .{}, .height = sp, .branch_arity = arity, .result_arity = arity, .kind = .block };
+                ctrl_len += 1;
+            },
+            op_loop => {
+                // §3.3.5 — a loop's branch target is its header, so the
+                // label binds here, at the back-edge destination, before
+                // the body. The compilable block types have no params, so
+                // a back-edge carries nothing (branch_arity 0) and the
+                // header merge stays register-resident: the operand
+                // registers below `height` are frozen across the loop
+                // (validation forbids the body reaching beneath its base)
+                // and nothing is carried in, so entry and every back-edge
+                // agree with no spill.
+                const arity = readBlockArity(body, &i) orelse return null;
+                if (ctrl_len >= max_ctrl_depth) return null;
+                ctrl[ctrl_len] = .{ .label = .{}, .height = sp, .branch_arity = 0, .result_arity = arity, .kind = .loop };
+                m.bind(&ctrl[ctrl_len].label);
                 ctrl_len += 1;
             },
             op_br_if => {
@@ -379,7 +410,7 @@ pub fn compile(
                 const cond = stack[sp];
                 if (depth >= ctrl_len) return null;
                 const target = &ctrl[ctrl_len - 1 - depth];
-                const arity = target.arity;
+                const arity = target.branch_arity;
                 // v1 keeps the merge entirely register-resident: require
                 // the stack to sit exactly at the target's base + arity
                 // (pop_count == 0), so the carried values already occupy
@@ -416,13 +447,17 @@ pub fn compile(
                 // with every `br_if` that jumped here, then bind the
                 // label at the merge point (after the materializing
                 // moves, which only the fallthrough path executes).
-                if (sp != c.height + c.arity) return null;
+                if (sp != c.height + c.result_arity) return null;
                 var d: usize = c.height;
-                while (d < c.height + c.arity) : (d += 1) {
+                while (d < c.height + c.result_arity) : (d += 1) {
                     const r = try materialize(&m, stack[d], d);
                     stack[d] = .{ .reg = r };
                 }
-                m.bind(&c.label);
+                // A `block`'s `end` is a forward-branch merge — bind it
+                // here. A `loop`'s label was already bound at its header,
+                // so only release it (no back-edge fixups: a back-edge
+                // jumps to an already-bound label).
+                if (c.kind == .block) m.bind(&c.label);
                 c.label.deinit(gpa);
             },
             else => return null, // not yet emittable — stay interpreted
@@ -924,6 +959,72 @@ test "spasm: nested block, br_if 1 exits two levels carrying a result" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: loop with backward br_if accumulates (do-while)" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32) (local i32)
+    //   (loop                               ;; empty block type
+    //     local.get 1  local.get 0  i32.add  local.set 1   ;; sum += n
+    //     local.get 0  i32.const 1  i32.sub  local.set 0   ;; n  -= 1
+    //     local.get 0  br_if 0)             ;; repeat while n != 0
+    //   local.get 1))                       ;; -> n + (n-1) + ... + 1
+    const body = [_]u8{
+        0x03, 0x40, // loop (empty)
+        0x20, 0x01, 0x20, 0x00, 0x6a, 0x21, 0x01, // local.get 1 ; local.get 0 ; i32.add ; local.set 1
+        0x20, 0x00, 0x41, 0x01, 0x6b, 0x21, 0x00, // local.get 0 ; i32.const 1 ; i32.sub ; local.set 0
+        0x20, 0x00, 0x0d, 0x00, // local.get 0 ; br_if 0
+        op_end, // end loop
+        0x20, 0x01, // local.get 1
+        op_end, // end function
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 0, .pop_count = 0 },
+    };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 2 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 1, 1 }, .{ 3, 6 }, .{ 5, 15 }, .{ 10, 55 } }) |pair| {
+        var locals: [2]Cell = .{ pair[0], 0 };
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: loop (result i32) iterates then yields its result" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32) (local i32)
+    //   (loop (result i32)            ;; result arity 1, branch arity 0
+    //     local.get 1 local.get 0 i32.add local.set 1   ;; sum += n
+    //     local.get 0 i32.const 1 i32.sub local.set 0   ;; n -= 1
+    //     local.get 0 br_if 0          ;; repeat while n != 0 (back-edge carries 0)
+    //     local.get 1))                ;; fall-through: yield sum (result)
+    const body = [_]u8{
+        0x03, 0x7f, // loop (result i32)
+        0x20, 0x01, 0x20, 0x00, 0x6a, 0x21, 0x01, // sum += n
+        0x20, 0x00, 0x41, 0x01, 0x6b, 0x21, 0x00, // n -= 1
+        0x20, 0x00, 0x0d, 0x00, // local.get 0 ; br_if 0
+        0x20, 0x01, // local.get 1 (loop result)
+        op_end, // end loop
+        op_end, // end function
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 0, .pop_count = 0 },
+    };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 2 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 4, 10 }, .{ 6, 21 } }) |pair| {
+        var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
         entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));

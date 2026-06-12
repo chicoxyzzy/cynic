@@ -955,11 +955,15 @@ useful:
    class (now: the complete straight-line i32 tier — const,
    `local.get`/`set`/`tee`, the i32 ALU, the ten comparisons +
    `eqz`, branchless `select`, `nop`/`drop` — on the
-   depth→register operand-stack machine, plus the first structured
-   control flow: `block`/`end` with a forward conditional `br_if`,
-   merging register-resident at the canonical depth registers via a
-   native-label control stack; still to come: `br`/`loop`/`if`-
-   `else`/`br_table` and the side-table-as-control-oracle wiring
+   depth→register operand-stack machine, plus structured control
+   flow: `block`/`end` with a forward conditional `br_if`, and
+   `loop` with a backward `br_if` (do-while), both merging
+   register-resident at the canonical depth registers via a
+   native-label control stack — the compilable block types carry no
+   loop params, so a back-edge carries nothing and loop-carried
+   state lives in locals, keeping the header merge spill-free; still
+   to come: unconditional `br` (with unreachable-code handling),
+   `if`/`else`, `br_table`, the side-table-as-control-oracle wiring
    (§6) that makes valcnt/popcnt and multi-target branches cheap,
    then i64) before the interpreter hands hot functions over.
 5. **Ohaimark ADR** — written against measured Bistromath data
