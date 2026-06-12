@@ -2940,6 +2940,54 @@ test "block-lex: method TDZ on block const read before declarator throws" {
     try expectScriptThrows("class C { m(){ { x; const x = 1; } } } new C().m();");
 }
 
+// L4 Stage 2 — per-binding capture analysis. A block-scoped lexical is
+// register-promoted even when the function contains OTHER nested
+// functions / classes, as long as no closure captures THAT binding.
+// These pin the correctness boundary: an uncaptured block const beside
+// an unrelated closure promotes and stays correct; a captured one keeps
+// the env path with per-iteration freshness.
+
+test "stage2: uncaptured loop const beside an unrelated top-level class" {
+    // The ctor_array_build shape — `class Point` makes the coarse gate
+    // reject the whole body, but Point never references p/a, so Stage 2
+    // promotes them. Result must be correct regardless of path.
+    try expectScriptIntWithBuiltins(
+        \\class Point { constructor(x){ this.x = x; } get2(){ return this.x * 2; } }
+        \\let acc = 0;
+        \\for (let i = 0; i < 5; i++){ const p = new Point(i); const a = [p.x, p.get2()]; acc += a[0] + a[1]; }
+        \\acc;
+    , 30);
+}
+
+test "stage2: a closure capturing the block const keeps per-iteration value" {
+    // `j` IS captured by the pushed arrow — Stage 2 must NOT promote it;
+    // each closure sees its own iteration's j.
+    try expectScriptStringWithBuiltins(
+        \\function f(){
+        \\  const fns = [];
+        \\  const noise = () => 99;          // unrelated closure
+        \\  for (let i = 0; i < 3; i++){ const j = i * 10; fns.push(() => j); }
+        \\  return fns.map(g => g()).join(",") + ":" + noise();
+        \\}
+        \\f();
+    , "0,10,20:99");
+}
+
+test "stage2: shadowing — nested fn's own binding doesn't block the outer const" {
+    // The nested function has its own `p`; the outer loop-body `p` is
+    // not captured. Conservative name-based analysis may keep the outer
+    // on the env path, but the value must be correct either way.
+    try expectScriptIntWithBuiltins(
+        \\function f(){
+        \\  const id = (p) => p + 1;         // nested fn uses name `p`
+        \\  let s = 0;
+        \\  for (let i = 0; i < 4; i++){ const p = i; s += id(p); }
+        \\  return s;
+        \\}
+        \\f();
+    , 10);
+}
+
 // §13.15.2 compound assignment with a register-bound LHS. The peephole
 // fuses `s op= y` to `<eval y>; op r_s; star r_s`, skipping the
 // `Ldar; Star` save of `s`. `op reg` = `acc = reg op acc`, so operand

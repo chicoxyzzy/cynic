@@ -227,6 +227,18 @@ pub const Compiler = struct {
     /// a `defer` reset to false at the owning function's exit restores
     /// the (always-false) outer value.
     body_register_safe: bool = false,
+    /// L4 Stage 2 — the enclosing function's body statements and a
+    /// precomputed "has a direct eval anywhere" flag. When the coarse
+    /// `body_register_safe` gate fails *because the function contains a
+    /// nested function / class* (not eval), `compileBlock` falls back
+    /// to per-binding analysis: a block lexical promotes iff no nested
+    /// closure captures THAT name (checked via `stmtCounterHazard`
+    /// against this body) — so `ctor_array_build`'s loop consts promote
+    /// despite the unrelated top-level `class Point`. These nest (a
+    /// nested function resets them to its own body), so they save /
+    /// restore at every function entry point.
+    current_fn_body: ?[]const ast.statement.Statement = null,
+    current_fn_has_eval: bool = false,
     /// §14.3.2 `var` register promotion — set only while
     /// `hoistVarAndFunctions` runs for a register-safe body whose
     /// every `var` declarator is a simple identifier: the hoist
@@ -8346,6 +8358,13 @@ pub const Compiler = struct {
         // Constructors are never generators / async.
         const saved_body_register_safe = self.body_register_safe;
         self.body_register_safe = bodyIsRegisterSafe(self.source, body_stmts, false);
+        // L4 Stage 2 — record the ctor body for the per-binding
+        // fallback, tightly scoped around the body region (restored
+        // below alongside body_register_safe).
+        const saved_ctor_fn_body = self.current_fn_body;
+        const saved_ctor_fn_has_eval = self.current_fn_has_eval;
+        self.current_fn_body = body_stmts;
+        self.current_fn_has_eval = fnBodyHasEval(self.source, body_stmts);
         try self.hoistLetConst(body_stmts, locals_register_only);
         self.current_promote_vars = vars_register_only;
         try self.hoistVarAndFunctions(body_stmts);
@@ -8357,6 +8376,8 @@ pub const Compiler = struct {
         for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
         try self.compileFunctionBodyTail(body_stmts, span);
         self.body_register_safe = saved_body_register_safe;
+        self.current_fn_body = saved_ctor_fn_body;
+        self.current_fn_has_eval = saved_ctor_fn_has_eval;
         try self.builder.emitOp(.lda_undefined, span);
         try self.builder.emitOp(.return_, span);
 
@@ -8505,6 +8526,16 @@ pub const Compiler = struct {
         self.body_register_safe = !is_generator and !is_async and
             bodyIsRegisterSafe(self.source, body_stmts, false);
         defer self.body_register_safe = false;
+        // L4 Stage 2 — record this method body for compileBlock's
+        // per-binding fallback. Save/restore (nests).
+        const saved_fn_body = self.current_fn_body;
+        const saved_fn_has_eval = self.current_fn_has_eval;
+        self.current_fn_body = if (!is_generator and !is_async) body_stmts else null;
+        self.current_fn_has_eval = fnBodyHasEval(self.source, body_stmts);
+        defer {
+            self.current_fn_body = saved_fn_body;
+            self.current_fn_has_eval = saved_fn_has_eval;
+        }
         self.env_depth = saved_env_depth + (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));
         self.current_loop = null;
         self.completion_reg = null;
@@ -8731,15 +8762,33 @@ pub const Compiler = struct {
         // keep real scope semantics. The function-entry env is present
         // regardless (`functionEntryEnvNeeded` counts nested block
         // bindings), so the env fallback is always valid.
+        // Count this block's direct simple-ident lexicals (used by both
+        // the Stage 1 and Stage 2 gates), unconditionally — Stage 2
+        // fires when body_register_safe is false.
         var block_lex: usize = 0;
-        if (self.body_register_safe) {
-            for (body) |*s| {
-                if (topLevelLexIsPromotable(s)) block_lex += s.lexical.declarators.len;
-            }
+        for (body) |*s| {
+            if (topLevelLexIsPromotable(s)) block_lex += s.lexical.declarators.len;
         }
-        const promote_block = self.body_register_safe and block_lex > 0 and
+        var promote_block = self.body_register_safe and block_lex > 0 and
             !blockHasUsing(body) and
             @as(usize, self.temps_in_use) + block_lex <= 192;
+        // L4 Stage 2 — additive per-binding promotion. When the coarse
+        // Stage 1 gate rejected this block (the function has a nested
+        // function / class, so `body_register_safe` is false) but there
+        // is no direct eval, a block lexical is still register-safe iff
+        // no nested closure captures THAT name. `stmtCounterHazard`
+        // (the fused-counter-loop's capture/write probe) checks exactly
+        // that against the enclosing function body; reads aren't
+        // hazards, and a block `const` is never written, so it reduces
+        // to "uncaptured". All-or-nothing per block keeps register /
+        // env from mixing in one scope. Reuses a proven primitive.
+        if (!promote_block and !self.body_register_safe and block_lex > 0 and
+            !blockHasUsing(body) and self.current_fn_body != null and
+            !self.current_fn_has_eval and
+            @as(usize, self.temps_in_use) + block_lex <= 192)
+        {
+            if (!try self.blockLexCapturedInFn(body)) promote_block = true;
+        }
         try self.hoistLetConst(body, promote_block);
 
         // §13.2.4.6 BlockStatement Runtime Semantics — ES2026
@@ -11351,6 +11400,36 @@ pub const Compiler = struct {
     /// that sharing; with none in the body, hoisting is sound. The
     /// exhaustive switches make a newly-added AST node a compile
     /// error here rather than a silent miss.
+    /// L4 Stage 2 — true iff any of `body`'s direct simple-ident
+    /// lexical names is captured by a nested closure (or written) in
+    /// the enclosing function (`current_fn_body`). `stmtCounterHazard`
+    /// flags writes + nested-closure references of a name (reads are
+    /// not hazards), so for a block `const` this is precisely "some
+    /// nested function closes over it" — the case that must stay on the
+    /// per-iteration env path.
+    /// True iff any statement in `stmts` contains a direct `eval(...)`
+    /// call (§19.2.1.3) — a per-function precondition for L4 Stage 2,
+    /// since direct eval can capture any binding by name.
+    fn fnBodyHasEval(source: []const u8, stmts: []const ast.statement.Statement) bool {
+        const prs = @import("param_register_scan.zig");
+        for (stmts) |*s| if (prs.statementHasDirectEvalCall(source, s)) return true;
+        return false;
+    }
+
+    fn blockLexCapturedInFn(self: *Compiler, body: []const ast.statement.Statement) CompileError!bool {
+        const fn_body = self.current_fn_body orelse return true;
+        for (body) |*s| {
+            if (!topLevelLexIsPromotable(s)) continue;
+            for (s.lexical.declarators) |d| {
+                const name = self.bindingName(d.name.identifier.span) catch return true;
+                for (fn_body) |*fs| {
+                    if (try self.stmtCounterHazard(fs, name)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
     fn bodyHasClosure(self: *Compiler, stmt: *const ast.statement.Statement) bool {
         return switch (stmt.*) {
             .function_decl, .class_decl => true,
@@ -13887,6 +13966,17 @@ fn compileFunctionTemplateExtNamed(
     self.body_register_safe = !is_generator and !is_async and
         if (body_stmts) |st| bodyIsRegisterSafe(self.source, st, is_arrow) else false;
     defer self.body_register_safe = false;
+    // L4 Stage 2 — record this function body + its eval status for the
+    // per-binding fallback in compileBlock. Generators / async reify
+    // the env, so leave the body null there. Save/restore (these nest).
+    const saved_fn_body = self.current_fn_body;
+    const saved_fn_has_eval = self.current_fn_has_eval;
+    self.current_fn_body = if (!is_generator and !is_async) body_stmts else null;
+    self.current_fn_has_eval = if (body_stmts) |st| Compiler.fnBodyHasEval(self.source, st) else false;
+    defer {
+        self.current_fn_body = saved_fn_body;
+        self.current_fn_has_eval = saved_fn_has_eval;
+    }
     self.env_depth = saved_env_depth +
         (if (has_fn_name_env) @as(u8, 1) else @as(u8, 0)) +
         (if (needs_entry_env) @as(u8, 1) else @as(u8, 0));

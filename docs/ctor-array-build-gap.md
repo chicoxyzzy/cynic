@@ -343,6 +343,23 @@ function-wrapped form the JIT sees); Stage 2 is what the headline
 fixture number needs. The −8 to −12 ns/iter magnitude still holds; the
 effort re-rates upward.
 
+**Both stages shipped (2026-06-12).** Stage 1 covers all four
+function-like body types (ordinary functions, arrows, methods,
+constructors). Stage 2 added an additive per-binding fallback in
+`compileBlock`: when the coarse gate fails *because the function has a
+nested function / class* (not eval), each block lexical promotes iff no
+nested closure captures THAT name — reusing the fused-counter-loop's
+`stmtCounterHazard` probe (writes + nested-closure references; reads
+aren't hazards) against the enclosing function body. So a loop-body
+`const` promotes even beside an unrelated `class`/closure. Measured
+−10.1 % on a function with an unrelated closure + loop consts
+(--no-jit; arith control −3.0 %, net ~−7 %). FULL test262 sweep
+unchanged. **Remaining gap:** Stage 2 is wired at the three *function*
+entry points, not the **script top level**, so `ctor_array_build`'s
+own script (class + loop at top level) still doesn't promote — a small
+follow-up (thread `current_fn_body` through the script-chunk path). The
+function-wrapped form the JIT actually compiles is covered.
+
 ### L5 — smaller residuals
 
 - Leaner `allocateObject` init: the `o.* = .{…}` field-init writes
