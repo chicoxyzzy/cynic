@@ -229,7 +229,7 @@ fn appendStats(
     try buf.appendSlice(gpa, try std.fmt.bufPrint(&scratch, "chunk: {d} B · {d} consts · {d} regs\n", .{
         chunk.code.len, chunk.constants.len, chunk.register_count,
     }));
-    const h = &realm.heap;
+    const h = realm.heap; // `Realm.heap` is `*Heap` (shared-heap multi-realm).
     try buf.appendSlice(gpa, try std.fmt.bufPrint(&scratch, "GC: {d} cycles · ", .{h.gc_cycles_total}));
     const ms_x10 = h.gc_time_ns_total / 100_000;
     try buf.appendSlice(gpa, try std.fmt.bufPrint(&scratch, "{d}.{d} ms pause · ", .{ ms_x10 / 10, ms_x10 % 10 }));
