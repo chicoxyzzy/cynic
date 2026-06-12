@@ -59,7 +59,11 @@ const op_end: u8 = 0x0b;
 const op_nop: u8 = 0x01;
 const op_block: u8 = 0x02;
 const op_loop: u8 = 0x03;
+const op_if: u8 = 0x04;
+const op_else: u8 = 0x05;
+const op_br: u8 = 0x0c;
 const op_br_if: u8 = 0x0d;
+const op_return: u8 = 0x0f;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
 const op_local_get: u8 = 0x20;
@@ -400,6 +404,44 @@ pub fn compile(
                 m.bind(&ctrl[ctrl_len].label);
                 ctrl_len += 1;
             },
+            op_br => {
+                // §3.3.8 — unconditional branch. Canonicalize the carried
+                // values into the target frame's merge registers, jump,
+                // then skip the now-unreachable rest of the current frame.
+                const depth = readUleb32(body, &i) orelse return null;
+                if (depth >= ctrl_len) return null;
+                const target = &ctrl[ctrl_len - 1 - depth];
+                const arity = target.branch_arity;
+                if (sp < arity) return null;
+                // v1 register-resident merge (pop_count == 0), as br_if.
+                if (sp != target.height + arity) return null;
+                var d: usize = target.height;
+                while (d < target.height + arity) : (d += 1) {
+                    const r = try materialize(&m, stack[d], d);
+                    stack[d] = .{ .reg = r };
+                }
+                try m.jump(&target.label);
+                // The rest of the current frame is dead (§3.3 — code
+                // after an unconditional branch is unreachable until the
+                // frame closes). Skip it to the matching `end`.
+                const cur = &ctrl[ctrl_len - 1];
+                skipToFrameEnd(body, &i) orelse return null;
+                // The skipper consumed the current frame's `end`. No
+                // fall-through reaches it, so bind the label (resolving
+                // any forward branch that targeted it) without
+                // materializing, then restore the stack to the frame's
+                // result type for the continuation — those result values
+                // were placed in the canonical registers by whatever
+                // branch reaches the merge.
+                if (cur.kind == .block) m.bind(&cur.label);
+                cur.label.deinit(gpa);
+                sp = cur.height + cur.result_arity;
+                var r: usize = cur.height;
+                while (r < cur.height + cur.result_arity) : (r += 1) {
+                    stack[r] = .{ .reg = regForDepth(r) };
+                }
+                ctrl_len -= 1;
+            },
             op_br_if => {
                 // §3.3.8 — pop the condition, branch to the target
                 // frame's merge label when it is non-zero, else fall
@@ -502,6 +544,43 @@ fn materialize(m: *masm_mod.Masm, loc: Loc, depth: usize) CompileError!a64.Reg {
             return reg;
         },
     }
+}
+
+/// Skip the unreachable code following an unconditional `br` (or
+/// `return`) up to and including the `end` that closes the current
+/// control frame, advancing `i` past it. Tracks structured nesting so a
+/// nested `block`/`loop`/`if` inside the dead region is skipped whole.
+/// Returns null — degrading the whole function to the interpreter, which
+/// is always correct — on any opcode whose immediate width this baseline
+/// doesn't know, rather than risk misreading an immediate byte as an
+/// opcode.
+fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
+    var depth: usize = 0;
+    while (i.* < body.len) {
+        const op = body[i.*];
+        i.* += 1;
+        switch (op) {
+            op_block, op_loop, op_if => {
+                _ = readSleb32(body, i) orelse return null; // block type
+                depth += 1;
+            },
+            op_end => {
+                if (depth == 0) return; // closes the current frame
+                depth -= 1;
+            },
+            op_else => {}, // stays within the enclosing `if`'s nesting
+            op_br, op_br_if, op_local_get, op_local_set, op_local_tee => {
+                _ = readUleb32(body, i) orelse return null;
+            },
+            op_i32_const => {
+                _ = readSleb32(body, i) orelse return null;
+            },
+            // No-immediate opcodes in the baseline's set.
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u => {},
+            else => return null, // unknown immediate width — degrade
+        }
+    }
+    return null; // ran off the body without closing the frame — degrade
 }
 
 /// Parse a block type (§5.3.6) and return the block's result arity,
@@ -1029,6 +1108,75 @@ test "spasm: loop (result i32) iterates then yields its result" {
         entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
+}
+
+test "spasm: while loop — br as continue, br_if as break" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32) (local i32)        ;; n = p0, sum = l1
+    //   (block
+    //     (loop
+    //       local.get 0  i32.eqz  br_if 1     ;; if n == 0, break out of block
+    //       local.get 1  local.get 0  i32.add  local.set 1   ;; sum += n
+    //       local.get 0  i32.const 1  i32.sub  local.set 0   ;; n  -= 1
+    //       br 0)))                            ;; continue the loop
+    //   local.get 1)                           ;; -> n*(n+1)/2 (0 when n == 0)
+    const body = [_]u8{
+        0x02, 0x40, // block
+        0x03, 0x40, // loop
+        0x20, 0x00, 0x45, 0x0d, 0x01, // local.get 0 ; i32.eqz ; br_if 1
+        0x20, 0x01, 0x20, 0x00, 0x6a, 0x21, 0x01, // sum += n
+        0x20, 0x00, 0x41, 0x01, 0x6b, 0x21, 0x00, // n -= 1
+        0x0c, 0x00, // br 0 (continue)
+        op_end, // end loop
+        op_end, // end block
+        0x20, 0x01, // local.get 1
+        op_end, // end function
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 0, .pop_count = 0 }, // br_if 1
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 0, .pop_count = 0 }, // br 0
+    };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 2 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 0, 0 }, .{ 1, 1 }, .{ 5, 15 }, .{ 6, 21 } }) |pair| {
+        var locals: [2]Cell = .{ pair[0], 0 };
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: br exits a block forward; dead code (nested block) is skipped" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (result i32)
+    //   (block (result i32)
+    //     i32.const 42  br 0       ;; exit the block carrying 42
+    //     ;; --- unreachable ---
+    //     (block i32.const 7 drop) ;; nested dead block (depth tracking)
+    //     i32.const 99))           ;; dead 2-byte SLEB -> 42
+    const body = [_]u8{
+        0x02, 0x7f, // block (result i32)
+        op_i32_const, 42, op_br, 0x00, // i32.const 42 ; br 0
+        0x02, 0x40, op_i32_const, 7, op_drop, op_end, // dead nested block
+        op_i32_const, 0xe3, 0x00, // dead i32.const 99 (2-byte SLEB)
+        op_end, // end block
+        op_end, // end function
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 1, .pop_count = 0 },
+    };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{}, .body = &body, .side_table = side, .max_stack = 1 };
+    const ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    var locals: [1]Cell = .{0};
+    var results: [1]Cell = .{0};
+    entry(&locals, &results);
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
 test "spasm: an unsupported opcode degrades to null (stay interpreted)" {

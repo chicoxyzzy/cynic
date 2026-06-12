@@ -956,16 +956,19 @@ useful:
    `local.get`/`set`/`tee`, the i32 ALU, the ten comparisons +
    `eqz`, branchless `select`, `nop`/`drop` — on the
    depth→register operand-stack machine, plus structured control
-   flow: `block`/`end` with a forward conditional `br_if`, and
-   `loop` with a backward `br_if` (do-while), both merging
+   flow: `block`/`end` + forward conditional `br_if`, `loop` +
+   backward `br_if` (do-while), and unconditional `br` with a
+   dead-code skipper (the rest of the frame after a `br` is
+   unreachable — scanned to its `end`, degrading on any opcode whose
+   immediate width the baseline doesn't know) — so `br`-continue plus
+   `br_if`-break compiles a full `while` loop. Merges are
    register-resident at the canonical depth registers via a
-   native-label control stack — the compilable block types carry no
-   loop params, so a back-edge carries nothing and loop-carried
-   state lives in locals, keeping the header merge spill-free; still
-   to come: unconditional `br` (with unreachable-code handling),
-   `if`/`else`, `br_table`, the side-table-as-control-oracle wiring
-   (§6) that makes valcnt/popcnt and multi-target branches cheap,
-   then i64) before the interpreter hands hot functions over.
+   native-label control stack; the compilable block types carry no
+   loop params, so a back-edge carries nothing and loop-carried state
+   lives in locals, keeping the header merge spill-free. Still to
+   come: `if`/`else`, `br_table`, the side-table-as-control-oracle
+   wiring (§6) that makes valcnt/popcnt and multi-target branches
+   cheap, then i64) before the interpreter hands hot functions over.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.
