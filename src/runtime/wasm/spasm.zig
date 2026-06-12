@@ -120,6 +120,10 @@ fn regForDepth(d: usize) a64.Reg {
 /// registers `regForDepth(height ..)`.
 const Ctrl = struct {
     label: masm_mod.Masm.Label,
+    /// The `else`-arm target of an `if` (unused — and left `.empty` — for
+    /// `block`/`loop`). Bound at `else`, or at the `if`'s `end` when it
+    /// has no `else` (a false condition then falls straight through).
+    else_label: masm_mod.Masm.Label,
     height: usize,
     /// Values a `br`/`br_if` to this frame carries. A `block`/`if`
     /// branches forward to its `end`, carrying its result arity; a
@@ -134,7 +138,9 @@ const Ctrl = struct {
     result_arity: u32,
     kind: Kind,
 
-    const Kind = enum { block, loop };
+    /// `if_then`/`if_else` track which arm of an `if` is being compiled
+    /// (the `else` opcode flips one to the other).
+    const Kind = enum { block, loop, if_then, if_else };
 };
 
 /// Nesting cap. Deeper structured control degrades to the interpreter
@@ -173,7 +179,10 @@ pub fn compile(
     // still open frees their forward-fixup buffers here.
     var ctrl: [max_ctrl_depth]Ctrl = undefined;
     var ctrl_len: usize = 0;
-    defer for (ctrl[0..ctrl_len]) |*c| c.label.deinit(gpa);
+    defer for (ctrl[0..ctrl_len]) |*c| {
+        c.label.deinit(gpa);
+        c.else_label.deinit(gpa); // `.empty` for non-`if` frames — safe
+    };
 
     const body = func.body;
     var i: usize = 0;
@@ -385,7 +394,7 @@ pub fn compile(
                 // height. The label binds forward, at the block's `end`.
                 const arity = readBlockArity(body, &i) orelse return null;
                 if (ctrl_len >= max_ctrl_depth) return null;
-                ctrl[ctrl_len] = .{ .label = .{}, .height = sp, .branch_arity = arity, .result_arity = arity, .kind = .block };
+                ctrl[ctrl_len] = .{ .label = .{}, .else_label = .{}, .height = sp, .branch_arity = arity, .result_arity = arity, .kind = .block };
                 ctrl_len += 1;
             },
             op_loop => {
@@ -400,9 +409,41 @@ pub fn compile(
                 // agree with no spill.
                 const arity = readBlockArity(body, &i) orelse return null;
                 if (ctrl_len >= max_ctrl_depth) return null;
-                ctrl[ctrl_len] = .{ .label = .{}, .height = sp, .branch_arity = 0, .result_arity = arity, .kind = .loop };
+                ctrl[ctrl_len] = .{ .label = .{}, .else_label = .{}, .height = sp, .branch_arity = 0, .result_arity = arity, .kind = .loop };
                 m.bind(&ctrl[ctrl_len].label);
                 ctrl_len += 1;
+            },
+            op_if => {
+                // §3.3.5 — pop the condition; when it is zero, branch to
+                // the `else` arm (or, for an `if` with no `else`, straight
+                // to the `end`). The then-arm runs on the fall-through.
+                if (sp < 1) return null;
+                sp -= 1;
+                const cond = stack[sp];
+                const arity = readBlockArity(body, &i) orelse return null;
+                if (ctrl_len >= max_ctrl_depth) return null;
+                const rc = try materialize(&m, cond, sp);
+                ctrl[ctrl_len] = .{ .label = .{}, .else_label = .{}, .height = sp, .branch_arity = arity, .result_arity = arity, .kind = .if_then };
+                try m.jumpCbz(rc, &ctrl[ctrl_len].else_label);
+                ctrl_len += 1;
+            },
+            op_else => {
+                // §3.3.5 — end of the then-arm: canonicalize its results,
+                // jump past the else-arm to the merge, then bind the
+                // else label so a false condition lands at the else-arm.
+                if (ctrl_len == 0) return null;
+                const c = &ctrl[ctrl_len - 1];
+                if (c.kind != .if_then) return null;
+                if (sp != c.height + c.result_arity) return null;
+                var d: usize = c.height;
+                while (d < c.height + c.result_arity) : (d += 1) {
+                    const r = try materialize(&m, stack[d], d);
+                    stack[d] = .{ .reg = r };
+                }
+                try m.jump(&c.label);
+                m.bind(&c.else_label);
+                c.kind = .if_else;
+                sp = c.height; // the else-arm starts with a fresh stack
             },
             op_br => {
                 // §3.3.8 — unconditional branch. Canonicalize the carried
@@ -423,8 +464,12 @@ pub fn compile(
                 try m.jump(&target.label);
                 // The rest of the current frame is dead (§3.3 — code
                 // after an unconditional branch is unreachable until the
-                // frame closes). Skip it to the matching `end`.
+                // frame closes). The terminator is the frame's `end` for
+                // a block/loop; for an `if`'s then-arm it is the `else`,
+                // which the skipper doesn't track — so a `br` directly
+                // inside an `if` arm degrades for now.
                 const cur = &ctrl[ctrl_len - 1];
+                if (cur.kind == .if_then or cur.kind == .if_else) return null;
                 skipToFrameEnd(body, &i) orelse return null;
                 // The skipper consumed the current frame's `end`. No
                 // fall-through reaches it, so bind the label (resolving
@@ -435,6 +480,7 @@ pub fn compile(
                 // branch reaches the merge.
                 if (cur.kind == .block) m.bind(&cur.label);
                 cur.label.deinit(gpa);
+                cur.else_label.deinit(gpa); // `.empty` for block/loop — safe
                 sp = cur.height + cur.result_arity;
                 var r: usize = cur.height;
                 while (r < cur.height + cur.result_arity) : (r += 1) {
@@ -495,12 +541,23 @@ pub fn compile(
                     const r = try materialize(&m, stack[d], d);
                     stack[d] = .{ .reg = r };
                 }
-                // A `block`'s `end` is a forward-branch merge — bind it
-                // here. A `loop`'s label was already bound at its header,
-                // so only release it (no back-edge fixups: a back-edge
-                // jumps to an already-bound label).
-                if (c.kind == .block) m.bind(&c.label);
+                switch (c.kind) {
+                    // A `block`/`if` `end` is a forward-branch merge —
+                    // bind it here. A `loop`'s label was already bound at
+                    // its header (no back-edge fixups: a back-edge jumps
+                    // to an already-bound label).
+                    .block, .if_else => m.bind(&c.label),
+                    .loop => {},
+                    // An `if` with no `else`: a false condition jumped to
+                    // the else label, which lands straight at the `end`
+                    // alongside the then-arm's fall-through.
+                    .if_then => {
+                        m.bind(&c.label);
+                        m.bind(&c.else_label);
+                    },
+                }
                 c.label.deinit(gpa);
+                c.else_label.deinit(gpa);
             },
             else => return null, // not yet emittable — stay interpreted
         }
@@ -1177,6 +1234,69 @@ test "spasm: br exits a block forward; dead code (nested block) is skipped" {
     var results: [1]Cell = .{0};
     entry(&locals, &results);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
+}
+
+test "spasm: if/else picks a result arm by the condition" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32)
+    //   local.get 0
+    //   (if (result i32) (then i32.const 10) (else i32.const 20)))
+    //   -> cond ? 10 : 20
+    const body = [_]u8{
+        0x20, 0x00, // local.get 0 (cond)
+        op_if,        0x7f, // if (result i32)
+        op_i32_const, 10,
+        op_else,      op_i32_const,
+        20,
+        op_end, // end if
+        op_end, // end function
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 1, .pop_count = 0 },
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 1, .pop_count = 0 },
+    };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = side, .max_stack = 1 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
+        var locals: [1]Cell = .{pair[0]};
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: if without else conditionally overwrites a local" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // (func (param i32) (result i32) (local i32)
+    //   i32.const 5  local.set 1
+    //   local.get 0  (if (then i32.const 9  local.set 1))
+    //   local.get 1)                  ;; cond ? 9 : 5
+    const body = [_]u8{
+        op_i32_const, 5, 0x21, 0x01, // i32.const 5 ; local.set 1
+        0x20, 0x00, // local.get 0
+        op_if, 0x40, // if (empty)
+        op_i32_const, 9, 0x21, 0x01, // i32.const 9 ; local.set 1
+        op_end, // end if
+        0x20, 0x01, // local.get 1
+        op_end, // end function
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 0, .pop_count = 0 },
+    };
+    const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 1 };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 1, 9 }, .{ 0, 5 } }) |pair| {
+        var locals: [2]Cell = .{ pair[0], 0 };
+        var results: [1]Cell = .{0};
+        entry(&locals, &results);
+        try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
+    }
 }
 
 test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
