@@ -2940,6 +2940,48 @@ test "block-lex: method TDZ on block const read before declarator throws" {
     try expectScriptThrows("class C { m(){ { x; const x = 1; } } } new C().m();");
 }
 
+// §13.15.2 compound assignment with a register-bound LHS. The peephole
+// fuses `s op= y` to `<eval y>; op r_s; star r_s`, skipping the
+// `Ldar; Star` save of `s`. `op reg` = `acc = reg op acc`, so operand
+// order is preserved; the RHS-clobber gate keeps `s op= (s = …)` on the
+// safe (read-s-first) path.
+
+test "compound-reg: accumulator loop sums correctly" {
+    try expectScriptIntWithBuiltins(
+        \\function f(n){ let s = 0; for (let i = 0; i < n; i++) s += i; return s; }
+        \\f(10);
+    , 45);
+}
+
+test "compound-reg: non-commutative op preserves operand order" {
+    // s - i must be s minus i, not i minus s.
+    try expectScriptIntWithBuiltins(
+        \\function f(s, i){ s -= i; return s; }
+        \\f(10, 3);
+    , 7);
+    try expectScriptStringWithBuiltins(
+        \\function f(s, x){ s += x; return s; }
+        \\f("a", "b");
+    , "ab");
+}
+
+test "compound-reg: RHS that writes the LHS uses the pre-write value" {
+    // §13.15.2 — `s += (s = 100)` reads s (5) BEFORE evaluating the
+    // RHS, so the result is 5 + 100 = 105, not 100 + 100. The clobber
+    // gate must reject the reorder here.
+    try expectScriptIntWithBuiltins(
+        \\function f(s){ s += (s = 100); return s; }
+        \\f(5);
+    , 105);
+}
+
+test "compound-reg: add of a small-int literal still folds (add_smi)" {
+    try expectScriptIntWithBuiltins(
+        \\function f(s){ s += 1; s += 41; return s; }
+        \\f(0);
+    , 42);
+}
+
 test "block-lex: a capturing closure keeps per-iteration env semantics" {
     // The body has a closure over the block const `j`, so the
     // function is NOT register-safe — the env path (per-iteration

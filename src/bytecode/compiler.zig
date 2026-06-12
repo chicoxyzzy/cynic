@@ -4923,17 +4923,42 @@ pub const Compiler = struct {
             try self.builder.patchI16(skip_patch, skip_target);
             return;
         } else {
-            // Compound assignment: `x += y` ⇔ `x = x op y`.
-            // Materialise `x` into a temp, compile `y` into acc,
-            // then run the op. The TDZ check still gates the
-            // initial read for `let`/`const`.
+            const op = compoundOp(a.op) orelse return error.UnsupportedExpression;
+            // Register-LHS peephole (mirrors `compileBinary`): when `x`
+            // is a register-bound local past its §13.3.1 TDZ window and
+            // the RHS can't write x's slot, fuse to `<eval y>; op r_x;
+            // star r_x` — skipping the `Ldar; Star` save-trip. `op reg`
+            // = `acc = reg op acc`, so operand order holds for
+            // non-commutative ops; the clobber gate keeps `x op= (x =
+            // …)` on the safe read-x-first path. Globals (the
+            // `r_unresolved_flag` snapshot path below) are excluded.
+            if (binding.is_register and !binding.register_tdz and
+                r_unresolved_flag == null and !self.exprMayWriteRegister(a.value))
+            {
+                if (op == .add) {
+                    if (self.tryGetSmiLiteralValue(a.value.*)) |imm| {
+                        try self.builder.emitOp(.add_smi, a.span);
+                        try self.builder.emitU8(binding.register);
+                        try self.builder.emitI32(imm);
+                        try self.emitStoreBinding(binding, a.span);
+                        return;
+                    }
+                }
+                try self.compileExpression(a.value);
+                try self.builder.emitOp(op, a.span);
+                try self.builder.emitU8(binding.register);
+                try self.emitStoreBinding(binding, a.span);
+                return;
+            }
+            // Standard path: `x += y` ⇔ `x = x op y`. Materialise `x`
+            // into a temp, compile `y` into acc, then run the op. The
+            // TDZ check still gates the initial read for `let`/`const`.
             const t = try self.reserveTemp();
             defer self.releaseTemp();
             try self.emitLoadBinding(binding, a.target.span());
             try self.builder.emitOp(.star, a.target.span());
             try self.builder.emitU8(t);
             try self.compileExpression(a.value);
-            const op = compoundOp(a.op) orelse return error.UnsupportedExpression;
             try self.builder.emitOp(op, a.span);
             try self.builder.emitU8(t);
         }
