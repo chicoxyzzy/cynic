@@ -351,7 +351,17 @@ in one pre-pass over the opcodes): generator and async-function
 chunks (suspend/resume rebuilds frames around `JSGenerator`-owned
 register files — compile these later, the way every engine did
 generators last), and any chunk containing an opcode the emitter
-doesn't support yet. Function-granularity fallback means the
+doesn't support yet. One carve-out lives *inside* the supported
+set: the emitter elides a zero-slot `make_environment` as a no-op
+(no own bindings to store), but `lda_env`/`sta_env` carry depth
+operands computed relative to that pushed env — so a chunk holding
+both would resolve every env read one scope too shallow. The
+pre-pass therefore `dont_compile`s any chunk that mixes
+`make_environment` with an env read/write; the §10 differential
+caught the gap when a 0-slot block-scope env shared a chunk with
+`lda_env ^1` reads of an outer closure var and miscompiled an
+`await using` async path (a spurious `throw undefined`).
+Function-granularity fallback means the
 compiler never needs a mid-function bailout mechanism — the absence
 of which is most of why T1 stays small.
 
