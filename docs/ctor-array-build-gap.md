@@ -383,6 +383,28 @@ function-wrapped form the JIT actually compiles is covered.
   real JIT-tier regression on a common, hot method shape. Ship only
   alongside Bistromath support for the opcode (JIT track); the
   interpreter-only form is net-negative.
+- `new_call` (construct) codegen in Bistromath: **attempted and
+  reverted (2026-06-13) — a measured regression.** A prototype taught
+  Bistromath to compile `new_call` by routing the construct through the
+  shared `constructValue`, mirroring `helperCall` / `emitCallDispatch`'s
+  generic path (marshal callee + args + new.target into a
+  `helperConstruct`, re-enter, `emitCallStatus` for the throw). It was
+  *correct* — the construct-bucket differential was byte-identical
+  jit-vs-interpreter (`language/statements/class` 4347/4347,
+  `language/expressions/new` 73/73, `Reflect/construct` 10/10) and
+  gc-stress at `--gc-threshold=1 --jit` was clean both threadings — but
+  **~18% slower** than interpreted on `bench/micros/construct_loop.js`
+  (min-of-41, arith_loop control-validated). The compiled path takes the
+  *general* [[Construct]] every time, whereas the interpreter's
+  `new_call` has an inline construct-IC fast path (cached callee +
+  `.prototype`, skipping §10.1.14 GetPrototypeFromConstructor and the
+  proxy / has_construct gates). Compiling construct only pays off **with
+  a compiled construct IC** — a `helperConstructDirect` behind a
+  `CallICCell` compare in an `emitConstructDispatch`, reusing the
+  construct cell Lantern already filled during warm-up (so the compiled
+  site only *checks* the cell, never fills it). Until that lands,
+  `new_call` stays dont_compile; the general-helper form is net-negative
+  on construct-heavy code — the same lesson as `sta_this_property`.
 - A segregated `JSArray` heap kind (V8/JSC-style separate type):
   **not recommended** — the unified-JSObject costs this fixture
   still pays (header init breadth, per-corpse deinit walk) are
