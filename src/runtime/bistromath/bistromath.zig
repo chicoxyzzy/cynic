@@ -489,6 +489,13 @@ const Compiler = struct {
     fn scanTargets(self: *Compiler) CompileError!void {
         const code = self.chunk.code;
         var i: usize = 0;
+        // A `make_environment 0` is emitted into the same chunk as the
+        // env reads it scopes — the elision below is only sound when
+        // there are none. Track both and reject the combination after
+        // the scan (the `make_environment` can lexically precede or
+        // follow the `lda_env`/`sta_env`).
+        var has_make_env = false;
+        var has_env_access = false;
         while (i < code.len) {
             const op: Op = @enumFromInt(code[i]);
             const after = i + 1 + Op.operandSize(op);
@@ -510,16 +517,24 @@ const Compiler = struct {
                 .lda_env, .sta_env => {
                     // Fixed-depth walks unroll; cap the unroll.
                     if (code[i + 1] > 8) return error.UnsupportedOp;
+                    has_env_access = true;
                 },
                 // zig fmt: on
                 .make_environment => {
-                    // A zero-slot env is unobservable from a
-                    // supported chunk — no env reads/writes or
-                    // closure creation can be in the set — so
-                    // compiled code elides the allocation. Any real
-                    // slot count means env-resident bindings:
-                    // dont_compile.
+                    // Compiled code elides a zero-slot env allocation
+                    // (no own bindings to store). Any real slot count
+                    // means env-resident bindings: dont_compile. The
+                    // elision is only sound when the chunk has NO
+                    // `lda_env`/`sta_env` — those opcodes' depth
+                    // operands are computed relative to the pushed
+                    // env, so dropping it shifts every env read/write
+                    // one scope too shallow (the await-using getter
+                    // regression: a `make_environment 0` for an empty
+                    // block scope sat in the same chunk as `lda_env ^1`
+                    // reads of an outer closure var). The cross-check
+                    // is done after the scan.
                     if (code[i + 1] != 0) return error.UnsupportedOp;
+                    has_make_env = true;
                 },
                 .jmp, .jmp_if_true, .jmp_if_false => {
                     const off = readI16(code, i + 1);
@@ -537,6 +552,10 @@ const Compiler = struct {
             }
             i = after;
         }
+        // The elided `make_environment 0` would leave `frame.env` one
+        // scope shallower than the bytecode's `lda_env`/`sta_env`
+        // depths assume — dont_compile rather than read the wrong slot.
+        if (has_make_env and has_env_access) return error.UnsupportedOp;
     }
 
     fn prologue(self: *Compiler) CompileError!void {
@@ -1661,6 +1680,51 @@ test "jit bistromath: unsupported opcodes mark the chunk dont_compile" {
     const js = chunk.function_templates[0].chunk.jit_state.?;
     try testing.expectEqual(Chunk.JitState.Tier.dont_compile, js.tier);
     try testing.expect(js.entry == null);
+}
+
+test "jit bistromath: make_environment(0) with env reads dont_compiles" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    // Force-compile every eligible chunk on its first call (the §10
+    // differential posture) so `inner` reaches the compiler.
+    realm.jit_threshold_override = 1;
+
+    // `inner` pushes a 0-slot lexical env for the empty block scope AND
+    // reads `a` from `outer` through it via `lda_env ^1`. Eliding the
+    // 0-slot env would leave `frame.env` one scope too shallow, so that
+    // read would resolve to the wrong slot — the chunk must dont_compile
+    // instead. Regression for the await-using force-compile divergence
+    // (docs/jit.md §10): the shared `assert.deepEqual` helper carried
+    // exactly this shape and, compiled, read an outer var as garbage and
+    // unwound as a spurious `throw undefined`, rejecting the async test.
+    const src =
+        \\function outer(a) {
+        \\  function inner() { { let z = 0; z; } return a; }
+        \\  return inner;
+        \\}
+        \\let f = outer(42);
+        \\let i = 0;
+        \\let r = 0;
+        \\while (i < 10) { r = f(); i = i + 1; }
+        \\r;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    // `inner` keeps reading `a` correctly (served by Lantern).
+    try testing.expectEqual(@as(i32, 42), v.asInt32());
+    // And it refused compilation rather than emitting the wrong env read.
+    const inner_js = chunk.function_templates[0].chunk.function_templates[0].chunk.jit_state.?;
+    try testing.expectEqual(Chunk.JitState.Tier.dont_compile, inner_js.tier);
 }
 
 test "jit bistromath ic: own-property reads compile; shape miss tiers down" {
