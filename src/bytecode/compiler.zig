@@ -12135,7 +12135,14 @@ pub const Compiler = struct {
             .lexical => |ld| ld,
             .expression => return false,
         };
-        if (lex.kind != .let_) return false;
+        // §14.7.4 — `let` (block-scoped, fresh per iteration) and `var`
+        // (function-scoped, single binding) both fuse. `const` can't be
+        // the `i++` target. The two diverge only in counter ownership:
+        // a `let` counter gets a fresh loop-local register below; a `var`
+        // counter is already function-scoped and register-promoted, so
+        // it's reused in place (see `var_counter_reg`).
+        if (lex.kind != .let_ and lex.kind != .var_) return false;
+        const is_var = lex.kind == .var_;
         if (lex.declarators.len != 1) return false;
         const decl = lex.declarators[0];
         const counter_ident = switch (decl.name) {
@@ -12207,8 +12214,18 @@ pub const Compiler = struct {
         var labels_owned = labels;
         errdefer if (labels_owned.len > 0) self.allocator.free(labels_owned);
 
-        const r_counter = try self.reserveTemp();
-        errdefer self.releaseTemp();
+        // `var` counter: reuse its existing function-scoped register
+        // (hoisted + promoted at function entry). Bail when it's
+        // env-bound — i.e. captured / the function isn't register-safe —
+        // since the fused path can't drive an env slot. `let` reserves a
+        // fresh loop-local register.
+        const var_counter_reg: ?u8 = if (is_var) blk: {
+            const b = (self.scope orelse return false).resolve(counter_name) orelse return false;
+            if (!b.is_register or b.register_tdz) return false;
+            break :blk b.register;
+        } else null;
+        const r_counter = var_counter_reg orelse try self.reserveTemp();
+        errdefer if (var_counter_reg == null) self.releaseTemp();
         // A literal bound gets a cached temp; a register-bound
         // identifier is used in place (no temp, no reload).
         var r_bound: u8 = undefined;
@@ -12243,15 +12260,22 @@ pub const Compiler = struct {
         // route to `ldar r_counter`.
         var for_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = false };
         defer for_scope.deinit(self.allocator);
-        try for_scope.bindings.append(self.allocator, .{
-            .name = counter_name,
-            .env_slot = 0,
-            .env_depth = self.env_depth,
-            .kind = .let_,
-            .span = counter_ident.span,
-            .is_register = true,
-            .register = r_counter,
-        });
+        // `let`: register the block-scoped counter so body reads route to
+        // `ldar r_counter`. `var`: the counter is already a
+        // function-scoped register binding in an enclosing scope — adding
+        // a block shadow would wrongly hide it after the loop, so leave
+        // the (empty) for_scope to fall through to the var binding.
+        if (!is_var) {
+            try for_scope.bindings.append(self.allocator, .{
+                .name = counter_name,
+                .env_slot = 0,
+                .env_depth = self.env_depth,
+                .kind = .let_,
+                .span = counter_ident.span,
+                .is_register = true,
+                .register = r_counter,
+            });
+        }
         const saved_scope = self.scope;
         self.scope = &for_scope;
         defer self.scope = saved_scope;
@@ -12301,9 +12325,11 @@ pub const Compiler = struct {
         for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_pc);
         for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, update_pc);
 
-        // r_bound (if a temp), then r_counter — LIFO.
+        // r_bound (if a temp), then r_counter — LIFO. A `var` counter
+        // reuses a permanent function-scoped register, so only release
+        // what we reserved here.
         if (bound_is_temp) self.releaseTemp();
-        self.releaseTemp();
+        if (var_counter_reg == null) self.releaseTemp();
         return true;
     }
 

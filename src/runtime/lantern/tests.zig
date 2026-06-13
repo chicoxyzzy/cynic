@@ -2838,6 +2838,57 @@ test "for: closure over a body lexical keeps per-iteration values" {
     , "0,10,20");
 }
 
+// §14.7.4 — `for (var i …)` fuses to LoopIncLt like `for (let i …)`, but
+// the counter is function-scoped (a single binding, register-promoted at
+// function entry), so it must be readable after the loop and never gets
+// a per-iteration / block-scoped shadow. These pin the semantics across
+// the fusion extension.
+
+test "for-var: fused counter loop sums correctly" {
+    try expectScriptIntWithBuiltins(
+        \\function s(n){ var t = 0; for (var i = 0; i < n; i++) t += i; return t; }
+        \\s(10);
+    , 45);
+    try expectScriptIntWithBuiltins(
+        \\function s(){ var t = 0; for (var i = 0; i < 100; i++) t += i; return t; }
+        \\s();
+    , 4950);
+}
+
+test "for-var: counter is function-scoped — readable after the loop" {
+    // §14.7.4 — `var i` survives the loop with its final value (the
+    // register must NOT be released / block-shadowed by the fused path).
+    try expectScriptIntWithBuiltins(
+        \\function f(){ for (var i = 0; i < 5; i++) {} return i; }
+        \\f();
+    , 5);
+}
+
+test "for-var: a closure over the counter sees the single final value" {
+    // §13.3.2 — `var` has no per-iteration binding; a closure capturing
+    // `i` sees the one function-scoped slot's final value. The body has a
+    // closure, so this takes the general (non-fused) path — which must
+    // still give correct var semantics.
+    try expectScriptIntWithBuiltins(
+        \\function f(){ var g; for (var i = 0; i < 3; i++){ if (i === 0) g = () => i; } return g(); }
+        \\f();
+    , 3);
+}
+
+test "for-let: counter still fuses (no regression on the let path)" {
+    try expectScriptIntWithBuiltins(
+        \\function s(n){ var t = 0; for (let i = 0; i < n; i++) t += i; return t; }
+        \\s(10);
+    , 45);
+    // §13.3.2 — let counter is block-scoped: a closure per iteration sees
+    // its own value.
+    try expectScriptStringWithBuiltins(
+        \\const fns = [];
+        \\for (let i = 0; i < 3; i++) fns.push(() => i);
+        \\fns.map(f => f()).join(",");
+    , "0,1,2");
+}
+
 test "for: register-promoted counter with a variable bound sums correctly" {
     // §14.7.4 — `for (let i = 0; i < n; i++)` with `n` a register-bound
     // param fuses to `loop_inc_lt` with `i` in a register (no per-iter
