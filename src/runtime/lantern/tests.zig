@@ -1210,6 +1210,35 @@ test "reg-move: completion reload is kept across a branch join" {
     // existing eval_test; it's the case the branch-join guard restores.)
 }
 
+// Argc-specialized FREE-call opcodes (Call0-3): pure dispatch
+// specialization — values, argument order, spread, and tail calls are
+// identical to the generic `call`. (Only the free-call family is
+// specialized; the method/property families regressed the dispatch
+// layout and were dropped — see the commit message.)
+test "argc-calls: free calls 0-3 args + generic fallback (>3)" {
+    try expectScriptInt("function s(){let t=0;for(let i=0;i<arguments.length;i++)t+=arguments[i];return t;} s()+s(1)+s(1,2)+s(1,2,3)+s(1,2,3,4);", 0 + 1 + 3 + 6 + 10);
+}
+
+test "argc-calls: method/property calls (generic) still bind `this` correctly" {
+    // Not specialized, but must keep working through the generic
+    // call_method / call_property the free-call change leaves untouched.
+    try expectScriptInt("let o={n:10,add(a,b){return this.n+a+b;}}; let x=1,y=2; o.add(x,y);", 13);
+    try expectScriptIntWithBuiltins("Math.max(1, 2) + Math.min(5, 3, 9);", 2 + 3);
+    try expectScriptInt("let o={n:7,get(){return this.n;}}; o.get();", 7);
+}
+
+test "argc-calls: spread free call stays on the generic path and is correct" {
+    // Spread doesn't lower to a fixed-argc op (argc is runtime). Needs
+    // builtins — the spread iterates via Array.prototype[Symbol.iterator].
+    try expectScriptIntWithBuiltins("function f(a,b,c){return a+b+c;} f(...[1,2,3]);", 6);
+}
+
+test "argc-calls: tail-call forms are untouched" {
+    // §15.10 — tail calls keep their own opcodes (not specialized);
+    // deep self-recursion in tail position must not overflow.
+    try expectScriptInt("'use strict'; function f(n,acc){ if(n===0) return acc; return f(n-1, acc+1); } f(100000, 0);", 100000);
+}
+
 test "later: assigning new property" {
     try expectScriptInt("let o = {}; o.x = 99; o.x;", 99);
 }

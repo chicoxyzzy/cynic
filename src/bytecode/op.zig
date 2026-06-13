@@ -218,6 +218,19 @@ pub const Op = enum(u8) {
     /// dispatch chain and calls the function directly. Same cell
     /// shape as `call_method`'s call IC.
     call,
+    /// `[op] [r_callee:u8] [ic:u16]` — free call with the argument
+    /// count fixed by the opcode (`call0` = 0 args … `call3` = 3).
+    /// Identical to `call` in every other respect — same callee
+    /// register, same `r_callee + 1 ..` argument window, same call IC,
+    /// same dispatch. Folding argc into the opcode drops the `argc:u8`
+    /// operand byte for the common ≤3-arg case; calls with >3 args use
+    /// the generic `call`. These share `call`'s interpreter arm (the
+    /// handler can't be factored — its body is threaded with
+    /// `continue :dispatch`), so the only saving is bytecode size.
+    call0,
+    call1,
+    call2,
+    call3,
     /// `[op] [r_recv:u8] [r_callee:u8] [argc:u8] [ic:u16]` — method
     /// call. Identical to `Call` except `this` is bound to the value
     /// in `r_recv` (§13.3.6 — `obj.method()` produces a Reference
@@ -1275,6 +1288,7 @@ pub const Op = enum(u8) {
             .sta_env,
             => 2, // u8 + u8
             .call => 4, // r_callee:u8 + argc:u8 + ic:u16
+            .call0, .call1, .call2, .call3 => 3, // r_callee:u8 + ic:u16 (argc in opcode)
             .new_call => 4, // r_callee:u8 + argc:u8 + ic:u16
             .tail_call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
             .direct_eval => 4, // scope:u16 + r_callee:u8 + argc:u8
@@ -1362,6 +1376,10 @@ pub const Op = enum(u8) {
             .make_function => "MakeFunction",
             .make_named_function_expr => "MakeNamedFunctionExpr",
             .call => "Call",
+            .call0 => "Call0",
+            .call1 => "Call1",
+            .call2 => "Call2",
+            .call3 => "Call3",
             .call_method => "CallMethod",
             .call_property => "CallProperty",
             .new_call => "NewCall",

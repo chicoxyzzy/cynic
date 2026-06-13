@@ -903,6 +903,22 @@ pub const Builder = struct {
         r_callee: u8,
         argc: u8,
     ) !void {
+        // ≤3 args: fold argc into the opcode (`call0..3`), dropping the
+        // `argc:u8` operand byte. Same callee register, argument
+        // window, and call IC as the generic `call`.
+        const specialized: ?Op = switch (argc) {
+            0 => .call0,
+            1 => .call1,
+            2 => .call2,
+            3 => .call3,
+            else => null,
+        };
+        if (specialized) |op| {
+            try self.emitOp(op, span);
+            try self.emitU8(r_callee);
+            try self.emitU16(try self.allocCallIC());
+            return;
+        }
         try self.emitOp(.call, span);
         try self.emitU8(r_callee);
         try self.emitU8(argc);

@@ -2568,11 +2568,26 @@ pub fn runFrames(
                 },
             }
         },
-        .call => {
+        .call, .call0, .call1, .call2, .call3 => {
             const r_callee = code[ip];
-            const argc = code[ip + 1];
-            const ic_idx = readU16(code, ip + 2);
-            ip += 4;
+            // Generic `call` carries an `argc:u8` operand; `call0..3`
+            // fold argc into the opcode (one byte smaller bytecode for
+            // the common ≤3-arg case). Decode both into the same
+            // `argc` / `ic_idx`; the OrdinaryCall body below is shared
+            // verbatim (it can't be factored — threaded with
+            // `continue :dispatch`).
+            const op_byte = code[ip - 1];
+            var argc: u8 = undefined;
+            var ic_idx: u16 = undefined;
+            if (op_byte == @intFromEnum(Op.call)) {
+                argc = code[ip + 1];
+                ic_idx = readU16(code, ip + 2);
+                ip += 4;
+            } else {
+                argc = op_byte - @intFromEnum(Op.call0);
+                ic_idx = readU16(code, ip + 1);
+                ip += 3;
+            }
 
             const callee_v = registers[r_callee];
             const call_cell = &local_chunk.inline_call_caches[ic_idx];

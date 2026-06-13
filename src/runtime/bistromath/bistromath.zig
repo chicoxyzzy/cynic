@@ -508,7 +508,8 @@ const Compiler = struct {
                 .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq,
                 .lda_property, .lda_property_reg, .sta_property,
                 .lda_global, .lda_global_or_undef,
-                .lda_this, .call, .call_method, .call_property,
+                .lda_this, .call, .call0, .call1, .call2, .call3,
+                .call_method, .call_property,
                 .tail_call, .tail_call_method,
                 .lda_global_slot, .sta_global_slot, .sta_global_slot_init,
                 .negate, .bit_not, .logical_not,
@@ -683,7 +684,7 @@ const Compiler = struct {
                     // Zero-slot env (scan-enforced) — unobservable
                     // from this chunk; elided.
                 },
-                .call => {
+                .call, .call0, .call1, .call2, .call3 => {
                     // docs/jit.md §4.5 — helper-mediated: the helper
                     // runs the whole §7.3 call dance (every exotic
                     // callee kind included) through callValue, so
@@ -692,8 +693,12 @@ const Compiler = struct {
                     // compare is the recorded follow-up
                     // optimization.
                     const r_callee = code[i + 1];
-                    const argc = code[i + 2];
-                    const ic_call = readU16(code, i + 3);
+                    // `call0..3` fold argc into the opcode (ic at i+2);
+                    // generic `call` reads argc:u8 then ic at i+3.
+                    const op_byte = code[i];
+                    const is_generic = op_byte == @intFromEnum(Op.call);
+                    const argc: u8 = if (is_generic) code[i + 2] else op_byte - @intFromEnum(Op.call0);
+                    const ic_call = if (is_generic) readU16(code, i + 3) else readU16(code, i + 2);
                     const threw = try self.threwFor(bc);
                     // Root the live accumulator through the frame —
                     // the callee may allocate and GC (§4.2).
@@ -721,8 +726,6 @@ const Compiler = struct {
                     // marshal then consumes, `this` = the receiver.
                     // Any load miss tiers down at the op — Lantern
                     // re-runs the whole fused sequence.
-                    const k_off = i + 1; // k:u16 (unused — the cells carry the resolution)
-                    _ = k_off;
                     const r_recv = code[i + 3];
                     const argc = code[i + 4];
                     const ic_load = readU16(code, i + 5);

@@ -14929,3 +14929,23 @@ test "compiler: trailing expression statement drops the redundant completion rel
     try testing.expect(std.mem.indexOf(u8, got, "Star r0") != null);
     try testing.expect(std.mem.indexOf(u8, got, "Ldar r0") == null);
 }
+
+test "compiler: ≤3-arg free calls fold argc into the opcode (CallN), >3 stay generic" {
+    // §13.3.6 — a free call with ≤3 args folds argc into the opcode
+    // (`call0..3`), dropping the operand byte; >3 args use generic
+    // `call`. (Only the free-call family is specialized — adding the
+    // method/property families too regressed the dispatch layout ~23%,
+    // so they stay generic; see the commit message.)
+    const g3 = try dumpScript("function g(){} g(1,2,3);");
+    defer testing.allocator.free(g3);
+    try testing.expect(std.mem.indexOf(u8, g3, "Call3 ") != null);
+
+    const g0 = try dumpScript("function g(){} g();");
+    defer testing.allocator.free(g0);
+    try testing.expect(std.mem.indexOf(u8, g0, "Call0 ") != null);
+
+    const g4 = try dumpScript("function g(){} g(1,2,3,4);");
+    defer testing.allocator.free(g4);
+    try testing.expect(std.mem.indexOf(u8, g4, "Call ") != null); // generic for >3
+    try testing.expect(std.mem.indexOf(u8, g4, "Call4") == null);
+}

@@ -143,6 +143,11 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const argc = chunk.code[i + 2];
                 try buf.print(allocator, " r{d} ({d} args)", .{ r, argc });
             },
+            .call0, .call1, .call2, .call3 => {
+                const r = chunk.code[i + 1];
+                const argc = @intFromEnum(op) - @intFromEnum(Op.call0);
+                try buf.print(allocator, " r{d} ({d} args)", .{ r, argc });
+            },
             .call_method => {
                 const r_recv = chunk.code[i + 1];
                 const r_callee = chunk.code[i + 2];
