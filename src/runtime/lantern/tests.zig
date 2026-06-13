@@ -294,6 +294,64 @@ test "interpreter: shifts" {
     try expectDouble("-1 >>> 0;", 4294967295.0);
 }
 
+// ── Compile-time constant folding (§12.9 / §13.15) ──────────────────
+// The fold reuses the exact `arith.zig` routines the interpreter's
+// opcode arms call, so a folded constant is byte-identical to running
+// the operator at runtime. The dump-side proof that folding actually
+// happens lives in `compiler.zig`; these pin the observable VALUES so
+// a wrong fold (the real risk of this optimization) regresses loudly.
+
+test "const-fold: numeric tree folds to the exact spec value" {
+    try expectInt("1 + 2*3;", 7);
+    try expectInt("2 ** 10;", 1024);
+    try expectInt("5 % 3;", 2);
+    try expectInt("-5 % 3;", -2); // §6.1.6.1.5 — sign follows the dividend
+    try expectInt("(7 & 3) | 8;", 11);
+    try expectInt("1 << 31;", -2147483648); // wraps to i32 min
+    try expectDouble("-1 >>> 0;", 4294967295.0); // §6.1.6.1.10 — uint32 result
+    try expectDouble("0.1 + 0.2;", 0.30000000000000004);
+}
+
+test "const-fold: -0 / NaN / Infinity survive folding bit-exactly" {
+    // §6.1.6.1 — `expectDouble` compares bit patterns, so +0 vs -0 and
+    // ±Infinity are all distinguished.
+    try expectDouble("1 / 0;", std.math.inf(f64));
+    // -0 must NOT collapse to +0 on emit: `1 / -0 === -Infinity`.
+    try expectDouble("1 / -0;", -std.math.inf(f64));
+    // The int32 fast path returns +0 for `-1 * 0` (sign is lost); the
+    // fold must MATCH the runtime, not synthesize spec's -0. This guards
+    // the canonical-Value leaf choice (fromInt32, not fromDouble) — with
+    // double leaves this would fold to -0 and diverge from the engine.
+    try expectDouble("-1 * 0;", 0.0);
+    // NaN folds and propagates: NaN !== NaN is true.
+    try expectBool("(0/0) !== (0/0);", true);
+    // §6.1.6.1.3 — |1| ** ±Infinity is NaN (the jsPow special case),
+    // reached entirely through folding (`1/0` folds to Infinity).
+    try expectBool("(1 ** (1/0)) !== (1 ** (1/0));", true);
+}
+
+test "const-fold: string concat / comparisons / equality on literals" {
+    try expectString("'a' + 'b';", "ab");
+    try expectBool("1 < 2;", true);
+    try expectBool("2 <= 2;", true);
+    try expectBool("'a' < 'b';", true); // §6.1.4 — UTF-16 code-unit order
+    try expectBool("3 === 3;", true);
+    try expectBool("'x' === 'x';", true);
+    try expectBool("1 == '1';", true); // §7.2.14 coercion, reused verbatim
+    try expectBool("!0;", true);
+    try expectBool("!'';", true);
+    try expectBool("!'x';", false);
+}
+
+test "const-fold: BigInt is never folded but still evaluates" {
+    // §12.9.5 — `1n + 2n` stays a runtime BigInt add (folding it to the
+    // Number 3 would change the type); the comparison still works.
+    try expectBool("1n + 2n === 3n;", true);
+    // Mixed BigInt + Number is a TypeError — the fold bails, the runtime
+    // throws (§6.1.6.2).
+    try expectScriptThrows("1n + 1;");
+}
+
 test "interpreter: strict equality across types" {
     try expectBool("1 === 1;", true);
     try expectBool("1 === 2;", false);

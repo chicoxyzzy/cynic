@@ -63,6 +63,10 @@ const literals = @import("literals.zig");
 const asExactSmi = literals.asExactSmi;
 const parseNumericLiteral = literals.parseNumericLiteral;
 const decodeStringContent = literals.decodeStringContent;
+// §12.9 / §13.15 constant folding reuses the interpreter's exact
+// arithmetic / comparison routines so a folded constant is byte-
+// identical to evaluating the operator at runtime — see `tryFoldConstant`.
+const arith = @import("../runtime/lantern/arith.zig");
 const normalizeTemplateLineTerminators = literals.normalizeTemplateLineTerminators;
 
 const arguments_scan = @import("arguments_scan.zig");
@@ -5094,6 +5098,162 @@ pub const Compiler = struct {
 
     // ── Unary / Binary / Logical ────────────────────────────────────────
 
+    // ── Constant folding (§12.9 / §13.15) ───────────────────────────────
+    //
+    // `tryFoldConstant` recursively evaluates a subtree of numeric /
+    // string / boolean literals and the operators over them to a single
+    // primitive `Value`, returning null when any leaf or operator isn't
+    // foldable. Correctness rests on REUSE: the folded value is produced
+    // by the very `arith.zig` routines the interpreter's opcode arms call
+    // (`addValues`, `numericBinary`, `bitwiseBinary`, `strictEq`,
+    // `looseEq`, `relational`, `unaryNegate`, …), with the same operand
+    // order (`lhs op rhs`, since `Op reg` is `acc = reg op acc`). So every
+    // IEEE-754 / ToInt32 / surrogate-seam / -0 / NaN edge case is identical
+    // to the runtime by construction — a fold can never observably differ
+    // from evaluating the expression at run time.
+    //
+    // Hard exclusions (return null → normal compile path runs):
+    // • BigInt — `1n + 2n` is BigInt-typed; never enters (a
+    //   `bigint_literal` leaf is non-foldable, so any BigInt-producing
+    //   subtree bails before an op sees it).
+    // • objects, `null`, identifiers, calls — no compile-time value.
+    // • `instanceof` / `in` — need runtime objects.
+    // Folding only ever yields a Number, String, or Boolean primitive.
+
+    /// Guarded entry to `tryFoldConstant`. The fold only feeds primitive
+    /// operands to the reused `arith` routines, so no throw path should
+    /// fire; this defends against a stray `pending_exception` leaking
+    /// into the compile by discarding any the fold attempt set and
+    /// refusing the fold, rather than emitting a wrong constant.
+    fn foldConstant(self: *Compiler, e: ast.Expression) ?Value {
+        const had_exception = self.realm.pending_exception != null;
+        const folded = self.tryFoldConstant(e);
+        if (!had_exception and self.realm.pending_exception != null) {
+            self.realm.pending_exception = null;
+            return null;
+        }
+        return folded;
+    }
+
+    fn tryFoldConstant(self: *Compiler, e: ast.Expression) ?Value {
+        return switch (e) {
+            .parenthesized => |p| self.tryFoldConstant(p.expression.*),
+            .numeric_literal => |lit| blk: {
+                const text = self.source[lit.span.start..lit.span.end];
+                const num = parseNumericLiteral(text) catch break :blk null;
+                // Canonicalise to the SAME Value the LdaSmi / LdaConstant
+                // path loads at runtime, so the reused int32-vs-double
+                // fast-path selection matches and the fold is byte-exact
+                // (e.g. `-1 * 0` stays +0 via the int path, as the engine
+                // computes it — double leaves would synthesize -0).
+                break :blk if (asExactSmi(num)) |i| Value.fromInt32(i) else Value.fromDouble(num);
+            },
+            .string_literal => |lit| blk: {
+                const raw = self.source[lit.span.start..lit.span.end];
+                if (raw.len < 2) break :blk null; // parser guarantees quotes
+                const decoded = decodeStringContent(self.allocator, raw[1 .. raw.len - 1]) catch break :blk null;
+                defer self.allocator.free(decoded);
+                const s = self.realm.heap.allocateString(decoded) catch break :blk null;
+                break :blk Value.fromString(s);
+            },
+            .boolean_literal => |lit| Value.fromBool(lit.value),
+            .unary => |u| self.tryFoldUnary(u),
+            .binary => |b| self.tryFoldBinary(b),
+            // bigint_literal, null_literal, identifiers, calls, members,
+            // objects, … — no foldable compile-time value.
+            else => null,
+        };
+    }
+
+    fn tryFoldUnary(self: *Compiler, u: ast.expression.UnaryExpr) ?Value {
+        const operand = self.tryFoldConstant(u.operand.*) orelse return null;
+        const realm = self.realm;
+        return switch (u.op) {
+            // §13.5.5 / §13.5.4 / §13.5.6 / §13.5.7 — ToNumeric / ToNumber
+            // / ToBoolean over a primitive operand, reused verbatim.
+            .minus => (arith.unaryNegate(realm, operand) catch return null) orelse return null,
+            .plus => (arith.unaryToNumber(realm, operand) catch return null) orelse return null,
+            .tilde => (arith.unaryBitNot(realm, operand) catch return null) orelse return null,
+            .bang => Value.fromBool(!arith.toBoolean(operand)),
+            // typeof / void / delete have reference / side-effect
+            // semantics handled in `compileUnary`.
+            .typeof_, .void_, .delete_ => null,
+        };
+    }
+
+    fn tryFoldBinary(self: *Compiler, b: ast.expression.BinaryExpr) ?Value {
+        const l = self.tryFoldConstant(b.lhs.*) orelse return null;
+        const r = self.tryFoldConstant(b.rhs.*) orelse return null;
+        const realm = self.realm;
+        return switch (b.op) {
+            // §13.15 — `+` is string-concat-or-numeric via `addValues`
+            // (handles two-string cons, number+string coercion, etc.).
+            .plus => (arith.addValues(realm, l, r) catch return null) orelse return null,
+            // §13.6 / §13.7 — numeric operators (ToNumber both sides).
+            .minus => (arith.numericBinary(realm, .sub, l, r) catch return null) orelse return null,
+            .star => (arith.numericBinary(realm, .mul, l, r) catch return null) orelse return null,
+            .slash => (arith.numericBinary(realm, .div, l, r) catch return null) orelse return null,
+            .percent => (arith.numericBinary(realm, .mod, l, r) catch return null) orelse return null,
+            .star_star => (arith.numericBinary(realm, .pow, l, r) catch return null) orelse return null,
+            // §13.12 / §13.10 — bitwise + shifts (ToInt32 / ToUint32).
+            .amp => (arith.bitwiseBinary(realm, .bit_and, l, r) catch return null) orelse return null,
+            .pipe => (arith.bitwiseBinary(realm, .bit_or, l, r) catch return null) orelse return null,
+            .caret => (arith.bitwiseBinary(realm, .bit_xor, l, r) catch return null) orelse return null,
+            .lt_lt => (arith.bitwiseBinary(realm, .shl, l, r) catch return null) orelse return null,
+            .gt_gt => (arith.bitwiseBinary(realm, .shr, l, r) catch return null) orelse return null,
+            .gt_gt_gt => (arith.bitwiseBinary(realm, .shr_u, l, r) catch return null) orelse return null,
+            // §7.2.15 / §7.2.16 — (strict) equality.
+            .eq_eq_eq => Value.fromBool(arith.strictEq(l, r)),
+            .bang_eq_eq => Value.fromBool(!arith.strictEq(l, r)),
+            .eq_eq => Value.fromBool(arith.looseEq(realm.allocator, l, r)),
+            .bang_eq => Value.fromBool(!arith.looseEq(realm.allocator, l, r)),
+            // §13.10 — relational (numeric or UTF-16 code-unit order).
+            .lt => arith.relational(.lt, realm, l, r) catch return null,
+            .gt => arith.relational(.gt, realm, l, r) catch return null,
+            .le => arith.relational(.le, realm, l, r) catch return null,
+            .ge => arith.relational(.ge, realm, l, r) catch return null,
+            // Need runtime objects — never folded.
+            .instanceof_, .in_ => null,
+        };
+    }
+
+    /// Emit bytecode that loads a folded constant `Value`. Mirrors
+    /// `compileNumeric` / `compileString` / boolean-literal emission so
+    /// the loaded value is identical to writing the constant as a literal
+    /// — plus a -0 guard the literal paths don't need (a source literal is
+    /// never -0, but a fold can produce it, and `LdaSmi 0` loads +0).
+    fn emitFoldedConstant(self: *Compiler, v: Value, span: Span) CompileError!void {
+        if (v.isBool()) {
+            try self.builder.emitOp(if (v.asBool()) .lda_true else .lda_false, span);
+            return;
+        }
+        if (v.isString()) {
+            const k = try self.builder.addConstant(v);
+            try self.builder.emitOp(.lda_constant, span);
+            try self.builder.emitU16(k);
+            return;
+        }
+        // Number: Smi fast-path (mirrors `compileNumeric`).
+        if (v.isInt32()) {
+            try self.builder.emitOp(.lda_smi, span);
+            try self.builder.emitI32(v.asInt32());
+            return;
+        }
+        const num = v.asDouble();
+        if (asExactSmi(num)) |i| {
+            // §6.1.6.1 — -0 is observably distinct (`1 / -0 === -∞`,
+            // `Object.is(-0, 0) === false`); never collapse it to `LdaSmi 0`.
+            if (!(i == 0 and std.math.signbit(num))) {
+                try self.builder.emitOp(.lda_smi, span);
+                try self.builder.emitI32(i);
+                return;
+            }
+        }
+        const k = try self.builder.addConstant(Value.fromDouble(num));
+        try self.builder.emitOp(.lda_constant, span);
+        try self.builder.emitU16(k);
+    }
+
     fn compileUnary(self: *Compiler, u: ast.expression.UnaryExpr) CompileError!void {
         // §13.5.2 `void X` evaluates X for side effects and yields
         // `undefined`. We compile the operand (its value lands in
@@ -5210,24 +5370,16 @@ pub const Compiler = struct {
                 }
             }
         }
-        // §12.5.5 — fold `-<numeric literal>` to a single `LdaSmi -n`
-        // when n is a non-zero exact i32. `-0` must stay `LdaSmi 0;
-        // Negate` (negative zero is observably distinct per §6.1.6.1
-        // and LdaSmi can't represent it); a literal too large for i32
-        // keeps the general `<literal>; negate` path. The literal is
-        // always non-negative here — negatives are this very unary.
-        if (u.op == .minus and u.operand.* == .numeric_literal) {
-            const lit = u.operand.numeric_literal;
-            const text = self.source[lit.span.start..lit.span.end];
-            if (parseNumericLiteral(text)) |num| {
-                if (num != 0) {
-                    if (asExactSmi(num)) |i| {
-                        try self.builder.emitOp(.lda_smi, u.span);
-                        try self.builder.emitI32(-i); // i ∈ [1, maxInt] ⇒ -i in range
-                        return;
-                    }
-                }
-            } else |_| {}
+        // §12.9 / §13.5 — fold a unary op over a compile-time literal
+        // (`-2` → `LdaSmi -2`, `~0xff`, `!0`, `+"3"`) to its constant
+        // value. Reuses the interpreter's exact unary routines, so the
+        // folded constant is byte-identical to evaluating the op at
+        // runtime (including -0 / NaN preservation). Supersedes the
+        // former minus-only special case. `typeof` / `void` / `delete`
+        // are handled above and never reach here as foldable ops.
+        if (self.foldConstant(.{ .unary = u })) |folded| {
+            try self.emitFoldedConstant(folded, u.span);
+            return;
         }
         try self.compileExpression(u.operand);
         const op: Op = switch (u.op) {
@@ -5243,6 +5395,16 @@ pub const Compiler = struct {
     }
 
     fn compileBinary(self: *Compiler, b: ast.expression.BinaryExpr) CompileError!void {
+        // §12.9 / §13.15 — when both operands fold to compile-time
+        // literals (`1 + 2*3`, `1 << 31`, `"a" + "b"`, `3 === 3`),
+        // evaluate the whole subtree now via the interpreter's exact
+        // routines and emit the resulting constant. Bails (returns
+        // null) for any non-literal operand, BigInt, `instanceof`, or
+        // `in` — including the `private_identifier in` cover form below.
+        if (self.foldConstant(.{ .binary = b })) |folded| {
+            try self.emitFoldedConstant(folded, b.span);
+            return;
+        }
         // §13.10.2 — `PrivateIdentifier in ShiftExpression` is a
         // cover form, parsed as `binary { op = in_, lhs =
         // private_identifier }`. The class-fields-private-in
@@ -15001,4 +15163,25 @@ test "compiler: epilogue is KEPT when the body can fall off the end" {
     const e = try dumpExpr("(function e(){ })");
     defer testing.allocator.free(e);
     try testing.expect(std.mem.indexOf(u8, t0Of(e), "LdaUndefined") != null);
+}
+
+test "compiler: folds a constant numeric expression to a single LdaSmi" {
+    // §12.9 / §13.15 — `1 + 2*3` has only literal operands, so the
+    // whole subtree evaluates at compile time to the loaded constant
+    // `7` (matching V8's `LdaSmi [7]`). No runtime `Add` / `Mul`
+    // dispatch should survive.
+    const got = try dumpExpr("1 + 2*3;");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "LdaSmi 7") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "Add") == null);
+    try testing.expect(std.mem.indexOf(u8, got, "Mul") == null);
+}
+
+test "compiler: a BigInt expression is never constant-folded" {
+    // §12.9.5 — `1n + 2n` is BigInt-typed; folding it through the
+    // Number routines would change the result's type. The fold must
+    // bail and leave the runtime `Add` in place.
+    const got = try dumpExpr("1n + 2n;");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "Add") != null);
 }
