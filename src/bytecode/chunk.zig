@@ -631,6 +631,16 @@ pub const Builder = struct {
     /// Running count of call-IC cells handed out via `allocCallIC`.
     /// Sizes `Chunk.inline_call_caches` at `finish`.
     inline_call_cache_count: u16 = 0,
+    /// Byte offset of the most recently emitted opcode (set by
+    /// `emitOp`). Lets `accStillHoldsRegister` recognise a just-emitted
+    /// `Star r` so the compiler can drop a redundant following
+    /// `Ldar r` — the accumulator still holds the stored value.
+    last_op_start: ?u32 = null,
+    /// Highest jump target patched so far (every jump — forward and
+    /// backward — resolves through `patchI16`). Used by
+    /// `accStillHoldsRegister`: if no jump targets the current
+    /// position, control can only have fallen through to it.
+    max_jump_target: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{ .allocator = allocator };
@@ -730,7 +740,28 @@ pub const Builder = struct {
             .offset = self.here(),
             .span = span,
         });
+        self.last_op_start = self.here();
         try self.code.append(self.allocator, @intFromEnum(op));
+    }
+
+    /// True when the accumulator provably still holds register `r` at
+    /// the current (tail) position, so a redundant `Ldar r` may be
+    /// dropped. Two conditions:
+    ///   1. the last instruction emitted is exactly `Star r` (acc
+    ///      untouched since) — the `start + 2 == len` guard rejects a
+    ///      stale `last_op_start` (any wider op emitted after the Star);
+    ///   2. no jump targets the current position. Every jump offset is
+    ///      patched through `patchI16`, and backward (loop) targets are
+    ///      always earlier, so `max_jump_target < here()` proves the
+    ///      only edge into here is the Star's fall-through. Without (2)
+    ///      a branch could reach here with a different accumulator (the
+    ///      `if(x){}else{y}` completion-join case).
+    pub fn accStillHoldsRegister(self: *const Builder, r: u8) bool {
+        const start = self.last_op_start orelse return false;
+        if (@as(usize, start) + 2 != self.code.items.len) return false;
+        if (self.code.items[start] != @intFromEnum(Op.star) or
+            self.code.items[start + 1] != r) return false;
+        return self.max_jump_target < self.here();
     }
 
     pub fn emitU8(self: *Builder, x: u8) !void {
@@ -765,6 +796,7 @@ pub const Builder = struct {
         const bytes = std.mem.toBytes(o);
         self.code.items[at] = bytes[0];
         self.code.items[at + 1] = bytes[1];
+        if (target > self.max_jump_target) self.max_jump_target = target;
     }
 
     /// Allocate a fresh inline-cache slot, returning its index. The

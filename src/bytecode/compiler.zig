@@ -3200,8 +3200,24 @@ pub const Compiler = struct {
             },
             .computed => |key_expr| {
                 // §13.3.2 EvaluatePropertyAccessWithExpressionKey.
-                // Receiver into a temp, key into the accumulator,
-                // emit `lda_computed`.
+                // The receiver normally goes into a temp so the key
+                // evaluation can't clobber it before `lda_computed`
+                // reads it. When the receiver is a live register-bound
+                // binding and the key can't write that register, read
+                // the object straight from the source register and skip
+                // the `Ldar; Star` copy. (Optional chaining needs the
+                // receiver in the accumulator for the nullish short-
+                // circuit, so it keeps the copy path.)
+                if (!m.optional) {
+                    if (self.tryRegisterBoundIdent(m.object.*)) |r_src| {
+                        if (!self.exprMayWriteRegister(key_expr)) {
+                            try self.compileExpression(key_expr);
+                            try self.builder.emitOp(.lda_computed, m.span);
+                            try self.builder.emitU8(r_src);
+                            return;
+                        }
+                    }
+                }
                 try self.compileExpression(m.object);
                 if (m.optional) try self.emitOptionalShortCircuit(m.span);
                 const r_obj = try self.reserveTemp();
@@ -3344,11 +3360,32 @@ pub const Compiler = struct {
             return;
         }
 
-        try self.compileExpression(m.object);
-        const r_obj = try self.reserveTemp();
-        defer self.releaseTemp();
-        try self.builder.emitOp(.star, m.span);
-        try self.builder.emitU8(r_obj);
+        // §13.15.2 — the receiver normally goes into a temp so the
+        // computed key / RHS evaluation can't clobber it before the
+        // store. When it's a live register-bound binding that neither
+        // can write, store through the source register directly and
+        // skip the `Ldar; Star` copy. Both the computed key and the
+        // RHS (`a.value`) evaluate after the receiver is fixed, so both
+        // must be unable to write the register (conservative: any
+        // assignment/update anywhere in them).
+        const src_obj: ?u8 = blk: {
+            const r = self.tryRegisterBoundIdent(m.object.*) orelse break :blk null;
+            if (m.property == .computed and self.exprMayWriteRegister(m.property.computed)) break :blk null;
+            if (self.exprMayWriteRegister(a.value)) break :blk null;
+            break :blk r;
+        };
+        var r_obj: u8 = undefined;
+        var obj_is_temp = false;
+        if (src_obj) |r| {
+            r_obj = r;
+        } else {
+            try self.compileExpression(m.object);
+            r_obj = try self.reserveTemp();
+            obj_is_temp = true;
+            try self.builder.emitOp(.star, m.span);
+            try self.builder.emitU8(r_obj);
+        }
+        defer if (obj_is_temp) self.releaseTemp();
 
         // Resolve the property key into either a string-constant
         // index (for ident keys) or a temp register (for computed
@@ -14499,9 +14536,19 @@ fn compileScriptLikeChunk(
     // branch (`pending_global_decl_error`) never sets the register
     // — it already emitted an unconditional throw, so the trailing
     // `return_` there is dead code.
+    //
+    // Skip the reload when the last value-producing ExpressionStatement
+    // already left the value in the accumulator (its `Star r`) and no
+    // branch targets this position — then the `Ldar r` is redundant.
+    // The branch-target guard is load-bearing: for `if(x){}else{y}` the
+    // then-branch jumps to this completion join, so the lexically-last
+    // `Star r` (the else arm) does NOT dominate it and the reload must
+    // stay. `accStillHoldsRegister` checks both.
     if (c.completion_reg) |r| {
-        try c.builder.emitOp(.ldar, end_span);
-        try c.builder.emitU8(r);
+        if (!c.builder.accStillHoldsRegister(r)) {
+            try c.builder.emitOp(.ldar, end_span);
+            try c.builder.emitU8(r);
+        }
     }
     try c.builder.emitOp(.return_, end_span);
 
@@ -14822,4 +14869,63 @@ test "compiler: register-bound leaf receiver emits LdaPropertyReg, drops the red
     defer testing.allocator.free(got);
     try testing.expect(std.mem.indexOf(u8, got, "LdaPropertyReg") != null);
     try testing.expect(std.mem.indexOf(u8, got, "LdaProperty ") == null);
+}
+
+/// Compile `source` as a Script (with the completion-value register
+/// the eval/script epilogue uses) and return the disassembly. Caller
+/// frees. Distinct from `dumpExpr`, which uses the expression-chunk
+/// path that has no completion register.
+fn dumpScript(source: []const u8) ![]u8 {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), source, null);
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    var chunk = try compileScriptAsChunk(testing.allocator, &realm, &program, source, null);
+    defer chunk.deinit(testing.allocator);
+    return disasm.dump(testing.allocator, &chunk);
+}
+
+/// The nested `t0` function-template slice of a dump (the body of the
+/// first declared function), so assertions ignore the wrapper chunk's
+/// own register traffic.
+fn t0Of(dump: []const u8) []const u8 {
+    const i = std.mem.indexOf(u8, dump, "function template t0") orelse return dump;
+    return dump[i..];
+}
+
+test "compiler: computed access a[i] with register-bound receiver reads the source register (no Ldar;Star copy)" {
+    // §13.3.2 — `a[i]`: the receiver `a` is a live register param and
+    // the key `i` cannot write it, so `lda_computed` reads the object
+    // straight from `a`'s register instead of the compiler copying it
+    // into a fresh temp (`Ldar a; Star tmp`) first.
+    const got = try dumpExpr("(function(a,i){ return a[i]; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    // Object operand is the param register r0, not a copied temp.
+    try testing.expect(std.mem.indexOf(u8, t0, "LdaComputed r0") != null);
+    // …and the receiver-copy Star is gone (the body has no other Star).
+    try testing.expect(std.mem.indexOf(u8, t0, "Star ") == null);
+}
+
+test "compiler: member store o.x=v with register-bound receiver stores to the source register (no Ldar;Star copy)" {
+    // §13.15.2 — `o.x = v`: receiver `o` is a live register param and
+    // the RHS `v` cannot write it, so `sta_property` targets `o`'s
+    // register directly rather than a snapshot temp.
+    const got = try dumpExpr("(function(o,v){ o.x = v; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "StaProperty k0 r0") != null);
+    try testing.expect(std.mem.indexOf(u8, t0, "Star ") == null);
+}
+
+test "compiler: trailing expression statement drops the redundant completion reload (Star r;Ldar r)" {
+    // §16.1.6 — the script completion value is already in the
+    // accumulator from the last ExpressionStatement's `Star r`, so the
+    // epilogue's `Ldar r` is redundant. (Only the epilogue reads r0
+    // here, so its absence is unambiguous.)
+    const got = try dumpScript("Math.max(1,2);");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "Star r0") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "Ldar r0") == null);
 }

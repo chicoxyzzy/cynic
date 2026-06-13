@@ -1159,6 +1159,57 @@ test "lda_property_reg: string-primitive receiver via register form" {
     try expectScriptInt("(function(s){ return s.length; })('hello');", 5);
 }
 
+// Redundant-register-move elimination: the access/store reads the
+// receiver straight from its register (no Ldar;Star copy) and the
+// script completion drops the redundant reload. Values must be
+// identical to the copy/reload forms — only the register traffic
+// changes.
+test "reg-move: computed read of a register-bound receiver" {
+    try expectScriptInt("(function(a,i){ return a[i]; })([10,20,30], 1);", 20);
+}
+
+test "reg-move: member store to a register-bound receiver" {
+    try expectScriptInt("(function(o,v){ o.x = v; return o.x; })({}, 7);", 7);
+}
+
+test "reg-move: computed read keeps receiver snapshot when key reassigns it" {
+    // §13.3.2 — the receiver is evaluated BEFORE the key. `a[a = 0]`
+    // must index the ORIGINAL array, not the reassigned `0`. The key
+    // writes the receiver register, so the copy MUST be kept; reading
+    // the source register here would index `(0)[0]` → undefined.
+    try expectScriptInt("(function(a){ return a[a = 0]; })([42]);", 42);
+}
+
+test "reg-move: member store keeps receiver snapshot when RHS reassigns it" {
+    // §13.15.2 — receiver before RHS. `o.x = (o = 5)` stores onto the
+    // ORIGINAL object even though the RHS rebinds `o`. The RHS writes
+    // the receiver register, so the copy MUST be kept.
+    try expectScriptInt("(function(o){ var saved = o; o.x = (o = 5); return saved.x; })({});", 5);
+}
+
+test "reg-move: compound store to a register-bound receiver" {
+    // The compound read+store both use the receiver register directly.
+    try expectScriptInt("(function(o,v){ o.x = 10; o.x += v; return o.x; })({}, 5);", 15);
+}
+
+test "reg-move: script completion value survives the dropped reload" {
+    // §16.1.6 — the trailing expression statement's value is the
+    // completion; dropping the epilogue `Ldar` must not change it.
+    try expectScriptIntWithBuiltins("Math.max(1, 2);", 2);
+    try expectScriptInt("let a = 3; a * 2;", 6);
+}
+
+test "reg-move: completion reload is kept across a branch join" {
+    // §13.2 — the completion epilogue is a jump target here: the
+    // then-branch jumps past the else arm (whose `Star` is lexically
+    // last) to the join. The reload MUST stay or the then-path returns
+    // a stale accumulator. `if (1) {7} else {999}` takes the then arm.
+    try expectScriptInt("if (1) { 7; } else { 999; }", 7);
+    try expectScriptInt("if (0) { 7; } else { 999; }", 999);
+    // (The empty-taken-branch → undefined completion is covered by the
+    // existing eval_test; it's the case the branch-join guard restores.)
+}
+
 test "later: assigning new property" {
     try expectScriptInt("let o = {}; o.x = 99; o.x;", 99);
 }
