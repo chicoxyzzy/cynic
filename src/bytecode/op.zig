@@ -935,6 +935,19 @@ pub const Op = enum(u8) {
     /// (§10.1.8). Throws if the receiver isn't object-typed —
     /// runtime check, like every other dynamic dispatch.
     lda_property,
+    /// `[op] [k:u16] [r_obj:u8] [ic:u16]` — register-receiver form of
+    /// `lda_property`. Load property `k` from the object in register
+    /// `r_obj` (not the accumulator), leaving the result in acc. The
+    /// register is only read, never written, so it survives for a
+    /// following `call_method` to use as `this`. The compiler emits
+    /// this when the receiver already sits in a register (a root/leaf
+    /// access — `o.x`, an `obj.method(…)` receiver — where the acc
+    /// form would otherwise pay a redundant `ldar`); chain
+    /// continuations (`a.b.c`) and computed receivers keep the acc
+    /// form. Identical IC shape, prototype walk, getter / Proxy-trap
+    /// dispatch, and §10.1.8 missing-key `undefined` as `lda_property`
+    /// — only the receiver SOURCE differs.
+    lda_property_reg,
     /// `[op] [k:u16] [r_obj:u8] [ic:u16]` — store acc into property
     /// `k` of the object held in register `r_obj`. The compiler
     /// arranges for `obj.x = v` to leave `obj` in `r_obj` and `v`
@@ -1270,7 +1283,9 @@ pub const Op = enum(u8) {
             .def_template_property => 5, // k:u16 + r_obj:u8 + slot:u16
             .add_smi => 5, // r:u8 + imm:i32
             .to_int32 => 0, // no operand — transforms acc in place
-            .sta_property => 5, // k:u16 + r_obj:u8 + ic:u16 (inline-cache slot)
+            .sta_property,
+            .lda_property_reg,
+            => 5, // k:u16 + r_obj:u8 + ic:u16 (inline-cache slot)
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
             .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
             .lda_computed => 1, // r_obj:u8 (key in acc)
@@ -1409,6 +1424,7 @@ pub const Op = enum(u8) {
             .array_spread => "ArraySpread",
             .object_spread => "ObjectSpread",
             .lda_property => "LdaProperty",
+            .lda_property_reg => "LdaPropertyReg",
             .sta_property => "StaProperty",
             .def_property => "DefProperty",
             .def_template_property => "DefTemplateProperty",
@@ -1475,6 +1491,10 @@ test "Op: operandSize agrees with the documented encoding" {
     // so unit-test failures stay hidden — playground/source-map
     // hover would be the user-visible signal).
     try testing.expectEqual(@as(u8, 4), Op.operandSize(.lda_property));
+    // `lda_property_reg` is the register-receiver counterpart:
+    // `[op] [k:u16] [r_obj:u8] [ic:u16]` — 5 bytes, the same operand
+    // shape as `sta_property`.
+    try testing.expectEqual(@as(u8, 5), Op.operandSize(.lda_property_reg));
     // `lda_global` and `lda_global_or_undef` carry an IC slot
     // alongside the key constant index: `[op] [k:u16] [ic:u16]`,
     // 4 bytes of operand. The IC turns a `decl_env.get` +

@@ -787,6 +787,20 @@ pub const Builder = struct {
         try self.emitU16(try self.allocIC());
     }
 
+    /// Emit `lda_property_reg` plus its key constant index, receiver
+    /// register, and a freshly allocated IC slot. Encoding:
+    /// `[op] [k:u16] [r_obj:u8] [ic:u16]`. The register-receiver
+    /// counterpart to `emitLdaProperty`: the compiler emits this when
+    /// the receiver already sits in a frame register, sparing the
+    /// redundant `ldar` into the accumulator. The IC cell shape is
+    /// identical to `lda_property`'s — only the receiver source moves.
+    pub fn emitLdaPropertyReg(self: *Builder, span: Span, k: u16, r_obj: u8) !void {
+        try self.emitOp(.lda_property_reg, span);
+        try self.emitU16(k);
+        try self.emitU8(r_obj);
+        try self.emitU16(try self.allocIC());
+    }
+
     /// Emit `lda_global` plus its key constant index and a freshly
     /// allocated IC slot. Encoding: `[op] [k:u16] [ic:u16]`. The IC
     /// caches `(globalThis_shape, slot, decl_revision)` so repeated

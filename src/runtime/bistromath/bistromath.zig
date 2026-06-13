@@ -506,7 +506,7 @@ const Compiler = struct {
                 .mov, .add, .sub, .mul, .add_smi, .to_int32,
                 .bit_and, .bit_or, .bit_xor,
                 .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq,
-                .lda_property, .sta_property,
+                .lda_property, .lda_property_reg, .sta_property,
                 .lda_global, .lda_global_or_undef,
                 .lda_this, .call, .call_method, .call_property,
                 .tail_call, .tail_call_method,
@@ -969,6 +969,22 @@ const Compiler = struct {
                     const td = try self.tdFor(bc);
                     const ic_idx = readU16(code, i + 3);
                     try self.emitPropertyIcLoad(acc_reg, acc_reg, ic_idx, td);
+                },
+                .lda_property_reg => {
+                    // Register-receiver form: load the receiver from
+                    // its frame slot (a GC-rooted register — only read
+                    // here, never stored to, so it survives for a
+                    // following call's `this`), then run the same IC
+                    // load into the accumulator. `x9` mirrors the
+                    // `sta_property` pattern: `emitPropertyIcLoad`'s
+                    // first act is `emitPlainObject(src, .x9, …)`,
+                    // which reads `src` before writing `.x9`, so
+                    // sourcing from `.x9` is safe.
+                    const td = try self.tdFor(bc);
+                    const r_obj = code[i + 3];
+                    const ic_idx = readU16(code, i + 4);
+                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_obj)));
+                    try self.emitPropertyIcLoad(.x9, acc_reg, ic_idx, td);
                 },
                 .sta_property => {
                     // Same-shape hit only; the transition mode

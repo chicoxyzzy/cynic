@@ -9071,10 +9071,37 @@ pub fn runFrames(
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
 
-        .lda_property => {
+        .lda_property, .lda_property_reg => {
+            // §10.1.8 OrdinaryGet — hybrid receiver source. The acc
+            // form (`lda_property`) reads the receiver from the
+            // accumulator (chain continuations `a.b.c`, computed
+            // receivers); the register form (`lda_property_reg`) reads
+            // it from a frame register (root/leaf accesses — `o.x`,
+            // an `obj.method(…)` receiver). The two encodings differ
+            // only in operand width and receiver source; the
+            // OrdinaryGet body below is identical for both. The load
+            // never reads the pre-op accumulator, so the register form
+            // seeds `acc` with the register receiver up front — every
+            // receiver read in the body (type dispatch, getter / Proxy
+            // / accessor `this`, namespace receiver) then resolves the
+            // same way, and the first result write overwrites the
+            // seed. The receiver REGISTER is only read, never stored
+            // to, so it survives for a following `call_method` to use
+            // as `this`.
             const k = readU16(code, ip);
-            const ic_idx = readU16(code, ip + 2);
-            ip += 4;
+            const ic_idx = blk: {
+                if (code[ip - 1] == @intFromEnum(Op.lda_property_reg)) {
+                    const r_obj = code[ip + 2];
+                    const ic = readU16(code, ip + 3);
+                    ip += 5;
+                    acc = registers[r_obj];
+                    break :blk ic;
+                } else {
+                    const ic = readU16(code, ip + 2);
+                    ip += 4;
+                    break :blk ic;
+                }
+            };
             if (k >= local_chunk.constants.len) return error.InvalidOpcode;
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
