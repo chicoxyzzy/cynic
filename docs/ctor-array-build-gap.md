@@ -398,13 +398,28 @@ function-wrapped form the JIT actually compiles is covered.
   *general* [[Construct]] every time, whereas the interpreter's
   `new_call` has an inline construct-IC fast path (cached callee +
   `.prototype`, skipping §10.1.14 GetPrototypeFromConstructor and the
-  proxy / has_construct gates). Compiling construct only pays off **with
-  a compiled construct IC** — a `helperConstructDirect` behind a
-  `CallICCell` compare in an `emitConstructDispatch`, reusing the
-  construct cell Lantern already filled during warm-up (so the compiled
-  site only *checks* the cell, never fills it). Until that lands,
-  `new_call` stays dont_compile; the general-helper form is net-negative
-  on construct-heavy code — the same lesson as `sta_this_property`.
+  proxy / has_construct gates). **The construct IC was then built and
+  measured (2026-06-13) — it does NOT recover the regression:** a
+  `helperConstructDirect` behind a `CallICCell` compare in an
+  `emitConstructDispatch`, reusing the construct cell Lantern fills at
+  warm-up, plus a shared `runOrdinaryConstructBody` factored out of
+  `constructValue`. With the IC, construct_loop was *still ~19% slower*
+  (1.19, vs 1.18 for the general helper — the IC made no measurable
+  difference). The §10.1.14 walk the IC skips was never the bottleneck.
+  The real cost is structural: the compiled construct runs the ctor
+  through a **nested `runFrames`** (the helper does its own re-entry),
+  whereas the interpreter's `new_call` pushes the construct frame and
+  **re-enters the same dispatch loop in place** — no nested-run setup.
+  That overhead dominates a construct-heavy loop, and the IC doesn't
+  touch it. The only way to make compiled construct competitive is
+  **in-line frame-reentry** — compiled code that pushes the interpreter
+  `CallFrame` and yields back to the dispatch loop the way the
+  interpreter's fast path does, instead of a nested-run helper. That is a
+  major call/construct-mechanism change (it would also lift compiled
+  *calls*, which pay the same nested-run cost via `helperCallDirect`),
+  not an IC. Until then `new_call` stays dont_compile — the same lesson
+  as `sta_this_property`, now with the IC shortcut measured and ruled
+  out.
 - A segregated `JSArray` heap kind (V8/JSC-style separate type):
   **not recommended** — the unified-JSObject costs this fixture
   still pays (header init breadth, per-corpse deinit walk) are

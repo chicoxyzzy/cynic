@@ -2,18 +2,18 @@
 // arithmetic on the result. The A/B fixture behind the `new_call`
 // codegen experiment (docs/ctor-array-build-gap.md L5).
 //
-// `step` currently does NOT tier up: `new_call` is dont_compile in
-// Bistromath, so any constructing function stays interpreted. A
-// prototype taught Bistromath to compile `new_call` (routing the
-// construct through the shared `constructValue` helper); it was
-// correct (differential + gc-stress clean) but a measured REGRESSION
-// — ~18% slower than interpreted on this fixture — because the
-// compiled path takes the general [[Construct]] every time, while the
-// interpreter's `new_call` has an inline construct-IC fast path
-// (cached callee + prototype, no GetPrototypeFromConstructor walk).
-// Compiling construct only pays off with a compiled construct IC; the
-// general-helper form is net-negative, so it stays dont_compile. This
-// fixture is the A/B for when the IC lands.
+// `step` does NOT tier up: `new_call` is dont_compile in Bistromath, so
+// any constructing function stays interpreted. Two prototypes taught
+// Bistromath to compile `new_call` — a general `constructValue` helper,
+// then a full construct IC (`helperConstructDirect` + cached proto).
+// Both were correct (differential + gc-stress clean) and both were a
+// ~18-19% REGRESSION on this fixture (min-of-41, control-validated).
+// The IC made no difference: the §10.1.14 proto walk it skips was never
+// the cost. The real cost is the compiled construct running the ctor via
+// a nested `runFrames`, while the interpreter's `new_call` pushes the
+// construct frame and re-enters its dispatch loop in place. Closing that
+// needs in-line frame-reentry (a major change), not an IC — see
+// docs/ctor-array-build-gap.md L5. This fixture is the A/B for that work.
 //
 // Iteration count picked so wall time is a couple hundred ms.
 'use strict';
