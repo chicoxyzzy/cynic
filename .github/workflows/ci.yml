@@ -433,13 +433,16 @@ jobs:
     # §10.5): the tier ships on by default, so a pass-set
     # divergence is a build failure, not an annotation.
     runs-on: macos-latest
-    # Two full test262 sweeps on a macOS runner, and the `--jit` pass
-    # force-compiles every eligible chunk (tier-up threshold 1) — that
-    # second sweep dominates and grows as Bistromath's coverage widens,
-    # so the 25-min step budget started timing out. Raised to keep the
-    # gate gating on a *divergence*, not on wall time. The durable fix
-    # (scoping the differential / speeding the force-compile pass) is a
-    # JIT-track concern — see docs/jit.md §10.
+    # Two full test262 sweeps on a macOS runner; the `--jit` pass
+    # force-compiles every eligible chunk (tier-up threshold 1) and so
+    # dominates wall time. It used to wedge past the step budget — not
+    # from slowness but from a handful of fixtures the cooperative
+    # per-fixture watchdog can't abort (a real `Atomics.wait` futex park,
+    # the detached-coercion loops) — so the diff never ran and the gate
+    # went red on wall time instead of on a divergence. The differential
+    # step now `--exclude`s exactly those buckets and writes each sweep's
+    # pass set to an explicit `--pass-list-out` file, so it completes and
+    # actually compares the pass-sets. Budget kept generous as headroom.
     timeout-minutes: 55
     needs: build-and-test
     steps:
@@ -461,11 +464,37 @@ jobs:
       - name: Differential sweep (interpreter vs force-compiled)
         timeout-minutes: 50
         run: |
-          zig build test262 -- --quiet --threads=0
-          cp .test262-pass-cache.txt /tmp/pass-interp.txt
-          zig build test262 -- --quiet --threads=0 --jit
-          diff -u /tmp/pass-interp.txt .test262-pass-cache.txt
-          echo "pass-sets identical: $(wc -l < /tmp/pass-interp.txt) fixtures"
+          set -euo pipefail
+          # The force-compile (`--jit`) sweep must produce the EXACT
+          # pass-set of the interpreter sweep (docs/jit.md §10.2). Two
+          # real fixture classes block in a way the cooperative
+          # per-fixture watchdog can't abort — a genuine `Atomics.wait`
+          # futex park (wait/notify), and the detached-ArrayBuffer
+          # coercion loops under `copyWithin` — so force-compiling the
+          # whole corpus wedged the sweep at the step timeout and the
+          # diff never ran: a wall-time red with no divergence signal.
+          # Drop just those buckets from the DIFFERENTIAL; they still run
+          # and score in the `test262` job, and carry no Bistromath-
+          # specific codegen, so the JIT comparison loses no coverage.
+          #
+          # Each sweep writes its pass set to an explicit file (NOT the
+          # shared `.test262-pass-cache.txt`, which `--only-failing`
+          # depends on and which a non-completing sweep would leave
+          # stale). The file is written only after the sweep returns, so
+          # a hung or killed sweep leaves no file and the `test -s` guard
+          # below fails the step loudly — the diff can never compare a
+          # stale cache against itself and false-pass.
+          # Trailing slash on wait/ + notify/ so `waitAsync` (bounded by
+          # the harness, doesn't block) stays in the comparison.
+          EXCLUDES="--exclude=built-ins/Atomics/wait/ --exclude=built-ins/Atomics/notify/ --exclude=built-ins/TypedArray/prototype/copyWithin/coerced"
+          zig build test262 -- --quiet --threads=0 $EXCLUDES --pass-list-out=/tmp/pass-interp.txt
+          zig build test262 -- --quiet --threads=0 --jit $EXCLUDES --pass-list-out=/tmp/pass-jit.txt
+          # Both files exist and are non-empty only if both sweeps
+          # completed — otherwise fail before the diff.
+          test -s /tmp/pass-interp.txt
+          test -s /tmp/pass-jit.txt
+          diff -u /tmp/pass-interp.txt /tmp/pass-jit.txt
+          echo "pass-sets identical: $(wc -l < /tmp/pass-interp.txt) fixtures (Atomics wait/notify + copyWithin coerced-detached excluded from the differential)"
 
   test262-gc-stress-jit:
     name: test262 GC stress + JIT / ${{ matrix.bucket }} (advisory)

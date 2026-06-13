@@ -19,6 +19,16 @@
 //!                           `vendor/test262/harness`.
 //!   --filter=<substring>    Only attempt fixtures whose relative path contains
 //!                           <substring>. Forwarded to every phase.
+//!   --exclude=<substring>   Drop fixtures whose relative path contains <substring>.
+//!                           Repeatable. Narrows the corpus like `--filter` (so no
+//!                           authoritative pass-cache write, no score row, no
+//!                           `--min-pass-pct` gate). The JIT differential uses it to
+//!                           drop the unpreemptable Atomics-wait / detached-coercion
+//!                           buckets so the force-compile sweep completes.
+//!   --pass-list-out=<path>  Write the main-phase pass set (sorted) to <path>,
+//!                           regardless of "full run" status, without touching the
+//!                           shared `.test262-pass-cache.txt`. The JIT differential
+//!                           writes one file per sweep and diffs the two.
 //!   --no-harness            Skip the sta.js + assert.js preamble. Runtime mode
 //!                           only; measures the no-harness floor.
 //!
@@ -1147,6 +1157,22 @@ var g_jit_force: bool = false;
 const Options = struct {
     corpus: []const u8 = "vendor/test262/test",
     filter: ?[]const u8 = null,
+    /// Repeatable `--exclude=<substr>` — drop any fixture whose path
+    /// contains the substring at corpus-walk time. Treated like
+    /// `--filter` for scoring (narrows the corpus, so no authoritative
+    /// pass-cache write, no score row, no `--min-pass-pct` gate). The
+    /// JIT differential uses it to drop the unpreemptable Atomics-wait /
+    /// detached-coercion buckets the cooperative per-fixture watchdog
+    /// can't abort, so the force-compile sweep completes instead of
+    /// wedging at the step timeout.
+    exclude: []const []const u8 = &.{},
+    /// `--pass-list-out=<path>` — write the main-phase pass set (sorted,
+    /// one path per line) to this explicit path, regardless of whether
+    /// the run is "full". Distinct from the shared
+    /// `.test262-pass-cache.txt` so a narrowed differential sweep can
+    /// capture its pass set without disturbing the `--only-failing`
+    /// cache. Null disables.
+    pass_list_out: ?[]const u8 = null,
     list_failures: u32 = 0,
     quiet: bool = false,
     verbose: bool = false,
@@ -1655,6 +1681,19 @@ fn writePassCache(
     cwd: std.Io.Dir,
     paths: []const []const u8,
 ) !void {
+    try writePassListTo(gpa, io, cwd, pass_cache_path, paths);
+}
+
+/// Write a sorted, newline-delimited pass list to an explicit path.
+/// Backs both `.test262-pass-cache.txt` (via `writePassCache`) and the
+/// `--pass-list-out` differential artifact.
+fn writePassListTo(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    cwd: std.Io.Dir,
+    sub_path: []const u8,
+    paths: []const []const u8,
+) !void {
     const sorted = try gpa.alloc([]const u8, paths.len);
     defer gpa.free(sorted);
     @memcpy(sorted, paths);
@@ -1670,7 +1709,16 @@ fn writePassCache(
         try buf.appendSlice(gpa, p);
         try buf.append(gpa, '\n');
     }
-    try cwd.writeFile(io, .{ .sub_path = pass_cache_path, .data = buf.items });
+    try cwd.writeFile(io, .{ .sub_path = sub_path, .data = buf.items });
+}
+
+/// `--exclude=<substr>` membership: true when any configured exclude
+/// substring occurs in `path`.
+fn excludedByOpts(opts: *const Options, path: []const u8) bool {
+    for (opts.exclude) |ex| {
+        if (std.mem.indexOf(u8, path, ex) != null) return true;
+    }
+    return false;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -1777,7 +1825,7 @@ pub fn main(init: std.process.Init) !void {
                 };
             }
         }
-        const is_full = opts.filter == null and !opts.only_failing;
+        const is_full = opts.filter == null and opts.exclude.len == 0 and !opts.only_failing;
         const now_ts = std.Io.Clock.now(.real, io);
         if (main_result) |*mr| {
             const elapsed_for_row: ?u64 = if (is_full and mr.elapsed_ms > 0) @intCast(mr.elapsed_ms) else null;
@@ -1790,8 +1838,20 @@ pub fn main(init: std.process.Init) !void {
     // re-runs them (they're tiny and their pass set is realm-flag-
     // dependent, so caching across flag configurations would lie).
     if (main_result) |*mr| {
-        const is_full = opts.filter == null and !opts.only_failing;
+        const is_full = opts.filter == null and opts.exclude.len == 0 and !opts.only_failing;
         if (is_full) try writePassCache(gpa, io, cwd, mr.pass_paths.items);
+    }
+
+    // `--pass-list-out` — capture the main-phase pass set at an explicit
+    // path regardless of `is_full`. The JIT differential gate writes one
+    // file per sweep (interpreter / force-compile) and diffs the two, so
+    // a narrowed `--exclude` sweep never disturbs the shared
+    // `.test262-pass-cache.txt` that `--only-failing` depends on. The
+    // file is written only after the sweep returns normally, so a hung
+    // or killed sweep leaves no file and the gate fails loudly (the
+    // diff's input is missing) instead of comparing a stale cache.
+    if (opts.pass_list_out) |path| {
+        if (main_result) |*mr| try writePassListTo(gpa, io, cwd, path, mr.pass_paths.items);
     }
 
     // `--min-pass-pct` — gate the run on the headline pass% floor.
@@ -1799,7 +1859,7 @@ pub fn main(init: std.process.Init) !void {
     // leave the floor wide-open because a `--filter=` narrows the
     // corpus to a sliver whose pass% has no meaningful relation to
     // the published row.
-    if (opts.filter == null and opts.min_pass_pct > 0.0) {
+    if (opts.filter == null and opts.exclude.len == 0 and opts.min_pass_pct > 0.0) {
         if (main_result) |*mr| {
             const attempted = mr.stats.pass() + mr.stats.fail();
             if (attempted > 0) {
@@ -1883,11 +1943,15 @@ fn runSweep(
         try loadPassCache(gpa, io, cwd, &pass_cache);
     }
 
-    // A "full run" is the only time the main phase (re)writes the
-    // cache. Per-feature phases never contribute to the cache so
-    // their `is_full_run` value is moot (their `pass_paths` stays
-    // empty downstream).
-    const is_full_run = opts.filter == null and !opts.only_failing and phase == .main;
+    // Collect `pass_paths` only when the main phase will persist them:
+    // a full run (re)writes `.test262-pass-cache.txt`, and ANY run with
+    // `--pass-list-out` writes the explicit differential artifact — even
+    // when `--filter`/`--exclude` narrow the corpus (the JIT gate relies
+    // on that). Per-feature phases never persist a pass list, so they
+    // skip the collection (their `pass_paths` stays empty downstream).
+    const is_full_run = phase == .main and
+        ((opts.filter == null and opts.exclude.len == 0 and !opts.only_failing) or
+            opts.pass_list_out != null);
 
     const start_ts = std.Io.Clock.now(.awake, io);
 
@@ -1913,6 +1977,7 @@ fn runSweep(
             if (opts.filter) |needle| {
                 if (std.mem.indexOf(u8, entry.path, needle) == null) continue;
             }
+            if (excludedByOpts(opts, entry.path)) continue;
             if (skip_rules.pathIsSkipped(entry.path)) continue;
             // The only walk-time exclusions are `harness/` and
             // `staging/` (handled above) plus pre-Stage-4 proposals
@@ -4307,6 +4372,7 @@ fn parsePctOrExit(arg: []const u8, flag_prefix: []const u8, raw: []const u8) f64
 
 fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
     var opts: Options = .{};
+    var exclude_list: std.ArrayListUnmanaged([]const u8) = .empty;
     var iter = args.iterate();
     _ = iter.next(); // skip binary path
     while (iter.next()) |arg| {
@@ -4326,6 +4392,10 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.corpus = try gpa.dupe(u8, arg["--corpus=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--filter=")) {
             opts.filter = try gpa.dupe(u8, arg["--filter=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--exclude=")) {
+            try exclude_list.append(gpa, try gpa.dupe(u8, arg["--exclude=".len..]));
+        } else if (std.mem.startsWith(u8, arg, "--pass-list-out=")) {
+            opts.pass_list_out = try gpa.dupe(u8, arg["--pass-list-out=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--list-failures=")) {
             opts.list_failures = std.fmt.parseInt(u32, arg["--list-failures=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--threads=")) {
@@ -4374,6 +4444,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
         }
     }
 
+    opts.exclude = try exclude_list.toOwnedSlice(gpa);
+
     // Single-threaded pin for flags that need it. The diagnostic
     // flags below all require single-process state — DebugAllocator
     // isn't thread-safe (`--leak-check`), process RSS is a process-
@@ -4398,4 +4470,7 @@ fn freeArgs(gpa: std.mem.Allocator, opts: *Options) void {
     if (!std.mem.eql(u8, opts.corpus, "vendor/test262/test")) gpa.free(opts.corpus);
     if (!std.mem.eql(u8, opts.harness_dir, "vendor/test262/harness")) gpa.free(opts.harness_dir);
     if (opts.filter) |s| gpa.free(s);
+    for (opts.exclude) |e| gpa.free(e);
+    if (opts.exclude.len > 0) gpa.free(opts.exclude);
+    if (opts.pass_list_out) |s| gpa.free(s);
 }
