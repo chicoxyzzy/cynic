@@ -503,6 +503,9 @@ const Compiler = struct {
                 // zig fmt: off
                 .lda_undefined, .lda_null, .lda_true, .lda_false,
                 .lda_hole, .lda_smi, .lda_constant, .ldar, .star,
+                .lda_zero, .lda_one,
+                .ldar_0, .ldar_1, .ldar_2, .ldar_3,
+                .star_0, .star_1, .star_2, .star_3,
                 .mov, .add, .sub, .mul, .add_smi, .to_int32,
                 .bit_and, .bit_or, .bit_xor,
                 .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq,
@@ -602,6 +605,11 @@ const Compiler = struct {
                 },
                 .ldar => try m.emit(a64.ldrImm(acc_reg, regs_reg, regSlot(code[i + 1]))),
                 .star => try m.emit(a64.strImm(acc_reg, regs_reg, regSlot(code[i + 1]))),
+                // Compact forms — index/constant baked into the opcode.
+                .lda_zero => try m.movImm64(acc_reg, Value.fromInt32(0).bits),
+                .lda_one => try m.movImm64(acc_reg, Value.fromInt32(1).bits),
+                .ldar_0, .ldar_1, .ldar_2, .ldar_3 => try m.emit(a64.ldrImm(acc_reg, regs_reg, regSlot(@intFromEnum(op) - @intFromEnum(Op.ldar_0)))),
+                .star_0, .star_1, .star_2, .star_3 => try m.emit(a64.strImm(acc_reg, regs_reg, regSlot(@intFromEnum(op) - @intFromEnum(Op.star_0)))),
                 .mov => {
                     try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try m.emit(a64.strImm(.x9, regs_reg, regSlot(code[i + 2])));

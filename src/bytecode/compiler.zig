@@ -670,8 +670,7 @@ pub const Compiler = struct {
             // provably initialise before any read); the body-locals
             // promotion seeds the register with Hole and keeps the
             // §13.3.1 check, mirroring the env path below.
-            try self.builder.emitOp(.ldar, span);
-            try self.builder.emitU8(binding.register);
+            try self.builder.emitLoadReg(span, binding.register);
             if (binding.register_tdz and binding.kind != .var_) {
                 try self.builder.emitOp(.throw_if_hole, span);
             }
@@ -756,13 +755,10 @@ pub const Compiler = struct {
             if (binding.register_tdz and !is_init) {
                 const tmp = try self.reserveTemp();
                 defer self.releaseTemp();
-                try self.builder.emitOp(.star, span);
-                try self.builder.emitU8(tmp);
-                try self.builder.emitOp(.ldar, span);
-                try self.builder.emitU8(binding.register);
+                try self.builder.emitStoreReg(span, tmp);
+                try self.builder.emitLoadReg(span, binding.register);
                 try self.builder.emitOp(.throw_if_hole, span);
-                try self.builder.emitOp(.ldar, span);
-                try self.builder.emitU8(tmp);
+                try self.builder.emitLoadReg(span, tmp);
             }
             // §8.1.1.1.4 SetMutableBinding step 4 — a non-init
             // store to a promoted `const` is the runtime TypeError,
@@ -773,8 +769,7 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.throw_assign_const, span);
                 return;
             }
-            try self.builder.emitOp(.star, span);
-            try self.builder.emitU8(binding.register);
+            try self.builder.emitStoreReg(span, binding.register);
             return;
         }
         if (binding.is_fn_expr_name) {
@@ -874,14 +869,12 @@ pub const Compiler = struct {
             if (!is_init and binding.kind != .var_) {
                 const r_save = try self.reserveTemp();
                 defer self.releaseTemp();
-                try self.builder.emitOp(.star, span);
-                try self.builder.emitU8(r_save);
+                try self.builder.emitStoreReg(span, r_save);
                 try self.builder.emitOp(.lda_env, span);
                 try self.builder.emitU8(depth);
                 try self.builder.emitU8(binding.env_slot);
                 try self.builder.emitOp(.throw_if_hole, span);
-                try self.builder.emitOp(.ldar, span);
-                try self.builder.emitU8(r_save);
+                try self.builder.emitLoadReg(span, r_save);
             }
             try self.builder.emitOp(.sta_env, span);
             try self.builder.emitU8(depth);
@@ -1076,8 +1069,7 @@ pub const Compiler = struct {
         try self.compileExpression(ic.source);
         const r_spec = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, ic.source.span());
-        try self.builder.emitU8(r_spec);
+        try self.builder.emitStoreReg(ic.source.span(), r_spec);
         try self.compileExpression(ic.options.?);
         try self.builder.emitOp(.dynamic_import_with_options, ic.span);
         try self.builder.emitU8(r_spec);
@@ -1122,24 +1114,21 @@ pub const Compiler = struct {
         try self.builder.emitLdaGlobal(span, k_regexp);
         const r_ctor = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_ctor);
+        try self.builder.emitStoreReg(span, r_ctor);
 
         const k_pat = try self.builder.addConstant(Value.fromString(self.realm.heap.allocateString(pattern) catch return error.OutOfMemory));
         try self.builder.emitOp(.lda_constant, span);
         try self.builder.emitU16(k_pat);
         const r_pat = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_pat);
+        try self.builder.emitStoreReg(span, r_pat);
 
         const k_flags = try self.builder.addConstant(Value.fromString(self.realm.heap.allocateString(flags) catch return error.OutOfMemory));
         try self.builder.emitOp(.lda_constant, span);
         try self.builder.emitU16(k_flags);
         const r_flags = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_flags);
+        try self.builder.emitStoreReg(span, r_flags);
 
         try self.builder.emitNewCall(span, r_ctor, 2);
     }
@@ -1238,8 +1227,7 @@ pub const Compiler = struct {
         }
         const r_iter = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_iter);
+        try self.builder.emitStoreReg(y.span, r_iter);
         const r_val = try self.reserveTemp();
         defer self.releaseTemp();
 
@@ -1259,8 +1247,7 @@ pub const Compiler = struct {
             const r_received = try self.reserveTemp();
             defer self.releaseTemp();
             try self.builder.emitOp(.lda_undefined, y.span);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_received);
+            try self.builder.emitStoreReg(y.span, r_received);
             const r_result = try self.reserveTemp();
             defer self.releaseTemp();
             const r_recv = try self.reserveTemp();
@@ -1283,26 +1270,18 @@ pub const Compiler = struct {
             // `call_method`, not `iter_step`.
             const r_next = try self.reserveTemp();
             defer self.releaseTemp();
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_iter);
+            try self.builder.emitLoadReg(y.span, r_iter);
             try self.builder.emitLdaProperty(y.span, k_next);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_next);
+            try self.builder.emitStoreReg(y.span, r_next);
 
             // ── Next path ──
             const next_path_start = self.builder.here();
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_iter);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_recv);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_next);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_callee);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_received);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_arg0);
+            try self.builder.emitLoadReg(y.span, r_iter);
+            try self.builder.emitStoreReg(y.span, r_recv);
+            try self.builder.emitLoadReg(y.span, r_next);
+            try self.builder.emitStoreReg(y.span, r_callee);
+            try self.builder.emitLoadReg(y.span, r_received);
+            try self.builder.emitStoreReg(y.span, r_arg0);
             try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
             try self.builder.emitOp(.await_, y.span);
             // §27.6.3.7 step 7.b.iv — after Awaiting the inner step
@@ -1314,10 +1293,8 @@ pub const Compiler = struct {
             try self.builder.emitOp(.throw_if_not_object, y.span);
             // ── Shared body — acc holds the awaited result ──
             const body_after_call = self.builder.here();
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_result);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_result);
+            try self.builder.emitStoreReg(y.span, r_result);
+            try self.builder.emitLoadReg(y.span, r_result);
             try self.builder.emitLdaProperty(y.span, k_done_key);
             try self.builder.emitOp(.jmp_if_true, y.span);
             const exit_patch = self.builder.here();
@@ -1329,18 +1306,14 @@ pub const Compiler = struct {
             // result's `get done` accessor must run exactly once
             // per §27.6.3.7 step 7.c.ix.
             const body_after_done = self.builder.here();
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_result);
+            try self.builder.emitLoadReg(y.span, r_result);
             try self.builder.emitLdaProperty(y.span, k_value);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_val);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_val);
+            try self.builder.emitStoreReg(y.span, r_val);
+            try self.builder.emitLoadReg(y.span, r_val);
             const yield_start_pc = self.builder.here();
             try self.builder.emitOp(.gen_yield, y.span);
             const yield_end_pc = self.builder.here();
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_received);
+            try self.builder.emitStoreReg(y.span, r_received);
             try self.builder.emitOp(.jmp, y.span);
             const back_patch = self.builder.here();
             try self.builder.emitI16(0);
@@ -1348,24 +1321,17 @@ pub const Compiler = struct {
 
             // ── Throw handler ──
             const throw_handler_pc = self.builder.here();
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_received);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_iter);
+            try self.builder.emitStoreReg(y.span, r_received);
+            try self.builder.emitLoadReg(y.span, r_iter);
             try self.builder.emitLdaProperty(y.span, k_throw);
             try self.builder.emitOp(.jmp_if_nullish, y.span);
             const no_throw_patch = self.builder.here();
             try self.builder.emitI16(0);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_callee);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_iter);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_recv);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_received);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_arg0);
+            try self.builder.emitStoreReg(y.span, r_callee);
+            try self.builder.emitLoadReg(y.span, r_iter);
+            try self.builder.emitStoreReg(y.span, r_recv);
+            try self.builder.emitLoadReg(y.span, r_received);
+            try self.builder.emitStoreReg(y.span, r_arg0);
             try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
             try self.builder.emitOp(.await_, y.span);
             try self.builder.emitOp(.jmp, y.span);
@@ -1378,31 +1344,23 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_iter);
             try self.builder.emitU8(0);
             try self.builder.emitLdaGlobal(y.span, k_type_error);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_callee);
+            try self.builder.emitStoreReg(y.span, r_callee);
             try self.builder.emitNewCall(y.span, r_callee, 0);
             try self.builder.emitOp(.throw_, y.span);
 
             // ── Return handler ──
             const return_handler_pc = self.builder.here();
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_received);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_iter);
+            try self.builder.emitStoreReg(y.span, r_received);
+            try self.builder.emitLoadReg(y.span, r_iter);
             try self.builder.emitLdaProperty(y.span, k_return);
             try self.builder.emitOp(.jmp_if_nullish, y.span);
             const no_return_patch = self.builder.here();
             try self.builder.emitI16(0);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_callee);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_iter);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_recv);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_received);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_arg0);
+            try self.builder.emitStoreReg(y.span, r_callee);
+            try self.builder.emitLoadReg(y.span, r_iter);
+            try self.builder.emitStoreReg(y.span, r_recv);
+            try self.builder.emitLoadReg(y.span, r_received);
+            try self.builder.emitStoreReg(y.span, r_arg0);
             try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
             try self.builder.emitOp(.await_, y.span);
             // §27.6.3.7 step 7.c.viii — after Awaiting the inner
@@ -1411,16 +1369,13 @@ pub const Compiler = struct {
             // body_after_call which already has its own check;
             // this branch ends in `return_` so we check here.)
             try self.builder.emitOp(.throw_if_not_object, y.span);
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_result);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_result);
+            try self.builder.emitStoreReg(y.span, r_result);
+            try self.builder.emitLoadReg(y.span, r_result);
             try self.builder.emitLdaProperty(y.span, k_done_key);
             try self.builder.emitOp(.jmp_if_false, y.span);
             const return_not_done_patch = self.builder.here();
             try self.builder.emitI16(0);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_result);
+            try self.builder.emitLoadReg(y.span, r_result);
             try self.builder.emitLdaProperty(y.span, k_value);
             try self.builder.emitOp(.return_, y.span);
             const return_not_done_target = self.builder.here();
@@ -1437,8 +1392,7 @@ pub const Compiler = struct {
             try self.builder.patchI16(return_to_body_patch, body_after_done);
             const no_return_target = self.builder.here();
             try self.builder.patchI16(no_return_patch, no_return_target);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_received);
+            try self.builder.emitLoadReg(y.span, r_received);
             // §27.6.3.7 step 7.c.iii.1 — when the inner iterator has
             // no `return` method and generatorKind is async, the
             // received completion's value is Awaited before being
@@ -1452,8 +1406,7 @@ pub const Compiler = struct {
             // ── Exit ──
             const exit_target = self.builder.here();
             try self.builder.patchI16(exit_patch, exit_target);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_result);
+            try self.builder.emitLoadReg(y.span, r_result);
             try self.builder.emitLdaProperty(y.span, k_value);
 
             try self.builder.addHandler(.{
@@ -1497,8 +1450,7 @@ pub const Compiler = struct {
         const r_received = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.lda_undefined, y.span);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_received);
+        try self.builder.emitStoreReg(y.span, r_received);
         // r_result — latest `{value, done}` object.
         const r_result = try self.reserveTemp();
         defer self.releaseTemp();
@@ -1515,26 +1467,18 @@ pub const Compiler = struct {
         // `yield-star-sync-next.js`'s log-once invariant.
         const r_next = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_iter);
+        try self.builder.emitLoadReg(y.span, r_iter);
         try self.builder.emitLdaProperty(y.span, k_next);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_next);
+        try self.builder.emitStoreReg(y.span, r_next);
 
         // ── Next path entry ──
         const next_path_start = self.builder.here();
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_iter);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_recv);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_next);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_received);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_arg0);
+        try self.builder.emitLoadReg(y.span, r_iter);
+        try self.builder.emitStoreReg(y.span, r_recv);
+        try self.builder.emitLoadReg(y.span, r_next);
+        try self.builder.emitStoreReg(y.span, r_callee);
+        try self.builder.emitLoadReg(y.span, r_received);
+        try self.builder.emitStoreReg(y.span, r_arg0);
         try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
         // ── Shared body — acc holds inner result ──
         const body_after_call = self.builder.here();
@@ -1545,10 +1489,8 @@ pub const Compiler = struct {
         // invocations. (The return handler reads `.done` off
         // `r_result` separately and isn't routed through this label.)
         try self.builder.emitOp(.throw_if_not_object, y.span);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_result);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_result);
+        try self.builder.emitStoreReg(y.span, r_result);
+        try self.builder.emitLoadReg(y.span, r_result);
         try self.builder.emitLdaProperty(y.span, k_done_key);
         try self.builder.emitOp(.jmp_if_true, y.span);
         const exit_patch = self.builder.here();
@@ -1562,15 +1504,13 @@ pub const Compiler = struct {
         // `gen_yield_iter_result` to suppress the outer
         // CreateIterResultObject wrap that `gen_yield` would
         // trigger.
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_result);
+        try self.builder.emitLoadReg(y.span, r_result);
         // Synthetic-handler-covered yield.
         const yield_start_pc = self.builder.here();
         try self.builder.emitOp(.gen_yield_iter_result, y.span);
         const yield_end_pc = self.builder.here();
         // Normal resume — save sent value, loop.
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_received);
+        try self.builder.emitStoreReg(y.span, r_received);
         try self.builder.emitOp(.jmp, y.span);
         const back_patch = self.builder.here();
         try self.builder.emitI16(0);
@@ -1578,26 +1518,19 @@ pub const Compiler = struct {
 
         // ── Throw handler ──
         const throw_handler_pc = self.builder.here();
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_received);
+        try self.builder.emitStoreReg(y.span, r_received);
         // GetMethod(r_iter, "throw").
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_iter);
+        try self.builder.emitLoadReg(y.span, r_iter);
         try self.builder.emitLdaProperty(y.span, k_throw);
         try self.builder.emitOp(.jmp_if_nullish, y.span);
         const no_throw_patch = self.builder.here();
         try self.builder.emitI16(0);
         // Have a throw method — call inner.throw(received).
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_iter);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_recv);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_received);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_arg0);
+        try self.builder.emitStoreReg(y.span, r_callee);
+        try self.builder.emitLoadReg(y.span, r_iter);
+        try self.builder.emitStoreReg(y.span, r_recv);
+        try self.builder.emitLoadReg(y.span, r_received);
+        try self.builder.emitStoreReg(y.span, r_arg0);
         try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
         try self.builder.emitOp(.jmp, y.span);
         const throw_to_body_patch = self.builder.here();
@@ -1611,37 +1544,28 @@ pub const Compiler = struct {
         try self.builder.emitU8(0); // mode = normal
         // `new TypeError()` — lda_global TypeError → r_callee, new_call.
         try self.builder.emitLdaGlobal(y.span, k_type_error);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(y.span, r_callee);
         try self.builder.emitNewCall(y.span, r_callee, 0);
         try self.builder.emitOp(.throw_, y.span);
 
         // ── Return handler ──
         const return_handler_pc = self.builder.here();
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_received);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_iter);
+        try self.builder.emitStoreReg(y.span, r_received);
+        try self.builder.emitLoadReg(y.span, r_iter);
         try self.builder.emitLdaProperty(y.span, k_return);
         try self.builder.emitOp(.jmp_if_nullish, y.span);
         const no_return_patch = self.builder.here();
         try self.builder.emitI16(0);
         // Have a return method — call inner.return(received).
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_callee);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_iter);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_recv);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_received);
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_arg0);
+        try self.builder.emitStoreReg(y.span, r_callee);
+        try self.builder.emitLoadReg(y.span, r_iter);
+        try self.builder.emitStoreReg(y.span, r_recv);
+        try self.builder.emitLoadReg(y.span, r_received);
+        try self.builder.emitStoreReg(y.span, r_arg0);
         try self.builder.emitCallMethod(y.span, r_recv, r_callee, 1);
         // §15.5.5 step 7.c.iii — inner result must be Object.
         // Save the raw call result first so we can check it.
-        try self.builder.emitOp(.star, y.span);
-        try self.builder.emitU8(r_result);
+        try self.builder.emitStoreReg(y.span, r_result);
         // Quick check: if it's nullish, throw TypeError. Otherwise
         // we still need a stricter "is Object" — but `lda_property`
         // on a primitive boxes; the spec wants TypeError on every
@@ -1650,8 +1574,7 @@ pub const Compiler = struct {
         // star-rhs-iter-rtrn-rtrn-call-non-obj 'return 23' shape
         // partially — 23 isn't nullish so we'd miss). Skip the
         // strict check for now; landed as a follow-up.
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_result);
+        try self.builder.emitLoadReg(y.span, r_result);
         try self.builder.emitLdaProperty(y.span, k_done_key);
         try self.builder.emitOp(.jmp_if_false, y.span);
         const return_not_done_patch = self.builder.here();
@@ -1663,24 +1586,20 @@ pub const Compiler = struct {
         // BEFORE settling the outer generator (§14.15) — bare
         // `return_` would pop the frame without that. Stash the
         // value, walk the finally chain, restore, return.
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_result);
+        try self.builder.emitLoadReg(y.span, r_result);
         try self.builder.emitLdaProperty(y.span, k_value);
         if (self.finally_chain != null) {
             const r_save = try self.reserveTemp();
             defer self.releaseTemp();
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_save);
+            try self.builder.emitStoreReg(y.span, r_save);
             try self.emitFinalliesUntil(null, y.span);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_save);
+            try self.builder.emitLoadReg(y.span, r_save);
         }
         try self.builder.emitOp(.return_, y.span);
         // Not done — loop back to body.
         const return_not_done_target = self.builder.here();
         try self.builder.patchI16(return_not_done_patch, return_not_done_target);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_result);
+        try self.builder.emitLoadReg(y.span, r_result);
         try self.builder.emitOp(.jmp, y.span);
         const return_to_body_patch = self.builder.here();
         try self.builder.emitI16(0);
@@ -1690,24 +1609,20 @@ pub const Compiler = struct {
         // finally-walk requirement as the done-branch above.
         const no_return_target = self.builder.here();
         try self.builder.patchI16(no_return_patch, no_return_target);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_received);
+        try self.builder.emitLoadReg(y.span, r_received);
         if (self.finally_chain != null) {
             const r_save = try self.reserveTemp();
             defer self.releaseTemp();
-            try self.builder.emitOp(.star, y.span);
-            try self.builder.emitU8(r_save);
+            try self.builder.emitStoreReg(y.span, r_save);
             try self.emitFinalliesUntil(null, y.span);
-            try self.builder.emitOp(.ldar, y.span);
-            try self.builder.emitU8(r_save);
+            try self.builder.emitLoadReg(y.span, r_save);
         }
         try self.builder.emitOp(.return_, y.span);
 
         // ── Exit — `yield*` evaluates to inner's final value ──
         const exit_target = self.builder.here();
         try self.builder.patchI16(exit_patch, exit_target);
-        try self.builder.emitOp(.ldar, y.span);
-        try self.builder.emitU8(r_result);
+        try self.builder.emitLoadReg(y.span, r_result);
         try self.builder.emitLdaProperty(y.span, k_value);
 
         try self.builder.addHandler(.{
@@ -1818,8 +1733,7 @@ pub const Compiler = struct {
         const need_old = !u.prefix and result_used;
         const r_orig: u8 = if (need_old) blk: {
             const r = try self.reserveTemp();
-            try self.builder.emitOp(.star, span);
-            try self.builder.emitU8(r);
+            try self.builder.emitStoreReg(span, r);
             break :blk r;
         } else 0;
         defer if (need_old) self.releaseTemp();
@@ -1834,8 +1748,7 @@ pub const Compiler = struct {
 
         if (need_old) {
             // Result = original (consumed postfix).
-            try self.builder.emitOp(.ldar, u.span);
-            try self.builder.emitU8(r_orig);
+            try self.builder.emitLoadReg(u.span, r_orig);
         }
         // Otherwise the result is the bumped value, still in acc after
         // the store (sta_env / sta_global leave the accumulator
@@ -1857,8 +1770,7 @@ pub const Compiler = struct {
         try self.compileExpression(m.object);
         const r_obj = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, u.span);
-        try self.builder.emitU8(r_obj);
+        try self.builder.emitStoreReg(u.span, r_obj);
 
         // Resolve the key shape; computed keys evaluate the key
         // expression once into r_key so the get/set pair share
@@ -1905,23 +1817,18 @@ pub const Compiler = struct {
                 // runtime so `null[obj]++` still TypeErrors before
                 // `obj.toString` runs.
                 r_key = try self.reserveTemp();
-                try self.builder.emitOp(.star, u.span);
-                try self.builder.emitU8(r_key);
-                try self.builder.emitOp(.ldar, u.span);
-                try self.builder.emitU8(r_obj);
+                try self.builder.emitStoreReg(u.span, r_key);
+                try self.builder.emitLoadReg(u.span, r_obj);
                 try self.builder.emitOp(.require_object_coercible, u.span);
-                try self.builder.emitOp(.ldar, u.span);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitLoadReg(u.span, r_key);
                 try self.builder.emitOp(.to_property_key, u.span);
-                try self.builder.emitOp(.star, u.span);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitStoreReg(u.span, r_key);
                 mode = .computed;
             },
         }
 
         // Read current value → acc, ToNumeric, save as r_orig.
-        try self.builder.emitOp(.ldar, u.span);
-        try self.builder.emitU8(r_obj);
+        try self.builder.emitLoadReg(u.span, r_obj);
         switch (mode) {
             .ident => {
                 try self.builder.emitLdaProperty(u.span, k_const);
@@ -1931,8 +1838,7 @@ pub const Compiler = struct {
                 try self.builder.emitU16(k_const);
             },
             .computed => {
-                try self.builder.emitOp(.ldar, u.span);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitLoadReg(u.span, r_key);
                 try self.builder.emitOp(.lda_computed, u.span);
                 try self.builder.emitU8(r_obj);
             },
@@ -1940,8 +1846,7 @@ pub const Compiler = struct {
         // §13.4.4.1 step 2.b — ToNumeric (BigInt-tolerant).
         try self.builder.emitOp(.to_numeric, u.span);
         const r_orig = try self.reserveTemp();
-        try self.builder.emitOp(.star, u.span);
-        try self.builder.emitU8(r_orig);
+        try self.builder.emitStoreReg(u.span, r_orig);
 
         // §13.4 bump = oldValue + Type(oldValue)::unit. Inc / Dec
         // dispatch on Number vs BigInt so BigInt members
@@ -1968,8 +1873,7 @@ pub const Compiler = struct {
 
         if (!u.prefix) {
             // Postfix — result is the original.
-            try self.builder.emitOp(.ldar, u.span);
-            try self.builder.emitU8(r_orig);
+            try self.builder.emitLoadReg(u.span, r_orig);
         }
         // Prefix — acc currently has the bumped value, leave it.
 
@@ -2008,8 +1912,7 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.super_check_this, m.span);
                 try self.compileExpression(key_expr);
                 r_key = try self.reserveTemp();
-                try self.builder.emitOp(.star, u.span);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitStoreReg(u.span, r_key);
                 mode = .computed;
             },
         }
@@ -2021,16 +1924,14 @@ pub const Compiler = struct {
                 try self.builder.emitU16(k_const);
             },
             .computed => {
-                try self.builder.emitOp(.ldar, u.span);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitLoadReg(u.span, r_key);
                 try self.builder.emitOp(.super_get_computed, m.span);
             },
         }
         // §13.4.4.1 step 2.b — ToNumeric (BigInt-tolerant).
         try self.builder.emitOp(.to_numeric, u.span);
         const r_orig = try self.reserveTemp();
-        try self.builder.emitOp(.star, u.span);
-        try self.builder.emitU8(r_orig);
+        try self.builder.emitStoreReg(u.span, r_orig);
 
         // §13.4 bump = oldValue + Type(oldValue)::unit. Inc / Dec
         // dispatch on Number vs BigInt so BigInt members
@@ -2040,8 +1941,7 @@ pub const Compiler = struct {
 
         // Store via super.<key> = bumped.
         const r_val = try self.reserveTemp();
-        try self.builder.emitOp(.star, u.span);
-        try self.builder.emitU8(r_val);
+        try self.builder.emitStoreReg(u.span, r_val);
         switch (mode) {
             .ident => {
                 try self.builder.emitOp(.super_set, m.span);
@@ -2057,8 +1957,7 @@ pub const Compiler = struct {
 
         if (!u.prefix) {
             // Postfix — result is the (coerced) original.
-            try self.builder.emitOp(.ldar, u.span);
-            try self.builder.emitU8(r_orig);
+            try self.builder.emitLoadReg(u.span, r_orig);
         }
         // Prefix — acc holds the bumped value (super_set leaves
         // it there).
@@ -2096,8 +1995,7 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.super_check_this, m.span);
                 try self.compileExpression(key_expr);
                 r_key = try self.reserveTemp();
-                try self.builder.emitOp(.star, a.span);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitStoreReg(a.span, r_key);
                 mode = .computed;
             },
         }
@@ -2109,14 +2007,12 @@ pub const Compiler = struct {
                 try self.builder.emitU16(k_const);
             },
             .computed => {
-                try self.builder.emitOp(.ldar, a.span);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitLoadReg(a.span, r_key);
                 try self.builder.emitOp(.super_get_computed, m.span);
             },
         }
         const r_lhs = try self.reserveTemp();
-        try self.builder.emitOp(.star, a.span);
-        try self.builder.emitU8(r_lhs);
+        try self.builder.emitStoreReg(a.span, r_lhs);
 
         // Evaluate RHS → acc, then `acc = r_lhs <op> acc`.
         try self.compileExpression(a.value);
@@ -2125,8 +2021,7 @@ pub const Compiler = struct {
 
         // Store the result via super.
         const r_val = try self.reserveTemp();
-        try self.builder.emitOp(.star, a.span);
-        try self.builder.emitU8(r_val);
+        try self.builder.emitStoreReg(a.span, r_val);
         switch (mode) {
             .ident => {
                 try self.builder.emitOp(.super_set, m.span);
@@ -2164,8 +2059,7 @@ pub const Compiler = struct {
         try self.compileTemplateQuasi(lit.quasis[0].span);
         const r_acc = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, lit.span);
-        try self.builder.emitU8(r_acc);
+        try self.builder.emitStoreReg(lit.span, r_acc);
 
         for (lit.expressions, 0..) |*expr, i| {
             // §13.2.8.6 step 7 — `Let middle be ? ToString(sub)`.
@@ -2184,20 +2078,17 @@ pub const Compiler = struct {
             try self.builder.emitOp(.to_string, lit.span);
             try self.builder.emitOp(.add, lit.span);
             try self.builder.emitU8(r_acc);
-            try self.builder.emitOp(.star, lit.span);
-            try self.builder.emitU8(r_acc);
+            try self.builder.emitStoreReg(lit.span, r_acc);
 
             // Trailing quasi after this substitution — already a
             // String literal, so no coercion needed before Add.
             try self.compileTemplateQuasi(lit.quasis[i + 1].span);
             try self.builder.emitOp(.add, lit.span);
             try self.builder.emitU8(r_acc);
-            try self.builder.emitOp(.star, lit.span);
-            try self.builder.emitU8(r_acc);
+            try self.builder.emitStoreReg(lit.span, r_acc);
         }
 
-        try self.builder.emitOp(.ldar, lit.span);
-        try self.builder.emitU8(r_acc);
+        try self.builder.emitLoadReg(lit.span, r_acc);
     }
 
     /// `tag`a${e1}b${e2}c`` — §13.3.11 TaggedTemplate. Lowers to
@@ -2241,8 +2132,7 @@ pub const Compiler = struct {
             try self.compileExpression(m.object);
             if (m.optional) try self.emitOptionalShortCircuit(m.span);
             const r_recv = try self.reserveTemp();
-            try self.builder.emitOp(.star, tt.span);
-            try self.builder.emitU8(r_recv);
+            try self.builder.emitStoreReg(tt.span, r_recv);
 
             // Property load → r_callee (adjacent to r_recv).
             switch (m.property) {
@@ -2250,8 +2140,7 @@ pub const Compiler = struct {
                     const key_slice = self.source[span.start..span.end];
                     const decoded = try self.decodeIdentifierName(key_slice);
                     const k = try self.internString(decoded);
-                    try self.builder.emitOp(.ldar, tt.span);
-                    try self.builder.emitU8(r_recv);
+                    try self.builder.emitLoadReg(tt.span, r_recv);
                     try self.builder.emitLdaProperty(tt.span, k);
                 },
                 .computed => |key_expr| {
@@ -2261,23 +2150,20 @@ pub const Compiler = struct {
                 },
             }
             const r_callee = try self.reserveTemp();
-            try self.builder.emitOp(.star, tt.span);
-            try self.builder.emitU8(r_callee);
+            try self.builder.emitStoreReg(tt.span, r_callee);
 
             // arg[0] = template strs object.
             const r_strs = try self.reserveTemp();
             try self.builder.emitOp(.lda_constant, tt.span);
             try self.builder.emitU16(k_strs);
-            try self.builder.emitOp(.star, tt.span);
-            try self.builder.emitU8(r_strs);
+            try self.builder.emitStoreReg(tt.span, r_strs);
 
             var reserved: u8 = 1;
             for (lit.expressions) |*e| {
                 try self.compileExpression(e);
                 const r_arg = try self.reserveTemp();
                 reserved += 1;
-                try self.builder.emitOp(.star, tt.span);
-                try self.builder.emitU8(r_arg);
+                try self.builder.emitStoreReg(tt.span, r_arg);
             }
 
             if (emit_tail) {
@@ -2299,15 +2185,13 @@ pub const Compiler = struct {
         // Compile the tag → r_callee.
         try self.compileExpression(tt.tag);
         const r_callee = try self.reserveTemp();
-        try self.builder.emitOp(.star, tt.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(tt.span, r_callee);
 
         // First arg = the cached `strs` object.
         const r_strs = try self.reserveTemp();
         try self.builder.emitOp(.lda_constant, tt.span);
         try self.builder.emitU16(k_strs);
-        try self.builder.emitOp(.star, tt.span);
-        try self.builder.emitU8(r_strs);
+        try self.builder.emitStoreReg(tt.span, r_strs);
 
         // Compile each substitution into consecutive arg slots.
         var reserved: u8 = 1; // r_strs
@@ -2315,8 +2199,7 @@ pub const Compiler = struct {
             try self.compileExpression(e);
             const r_arg = try self.reserveTemp();
             reserved += 1;
-            try self.builder.emitOp(.star, tt.span);
-            try self.builder.emitU8(r_arg);
+            try self.builder.emitStoreReg(tt.span, r_arg);
         }
 
         if (emit_tail) {
@@ -2527,8 +2410,7 @@ pub const Compiler = struct {
                 const r = try self.reserveTemp();
                 if (r_base == null) r_base = r;
                 reserved += 1;
-                try self.builder.emitOp(.star, lit.span);
-                try self.builder.emitU8(r);
+                try self.builder.emitStoreReg(lit.span, r);
             }
             try self.builder.emitOp(.make_array_n, lit.span);
             try self.builder.emitU8(r_base.?);
@@ -2541,8 +2423,7 @@ pub const Compiler = struct {
         try self.builder.emitOp(.make_array, lit.span);
         const r_arr = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, lit.span);
-        try self.builder.emitU8(r_arr);
+        try self.builder.emitStoreReg(lit.span, r_arr);
 
         // Two-pass strategy: when there are no spread elements we
         // can write each slot at a known stringified index and
@@ -2604,8 +2485,7 @@ pub const Compiler = struct {
             if (needs_length_write) {
                 const k_length = try self.internString("length");
                 if (idx <= std.math.maxInt(i32)) {
-                    try self.builder.emitOp(.lda_smi, lit.span);
-                    try self.builder.emitI32(@intCast(idx));
+                    try self.builder.emitLoadSmi(lit.span, @intCast(idx));
                 } else {
                     return error.UnsupportedExpression;
                 }
@@ -2615,8 +2495,7 @@ pub const Compiler = struct {
             // length starts at 0 — array_spread / arrayPush rely
             // on the existing length. Initialise it explicitly.
             const k_length = try self.internString("length");
-            try self.builder.emitOp(.lda_smi, lit.span);
-            try self.builder.emitI32(0);
+            try self.builder.emitLoadSmi(lit.span, 0);
             try self.builder.emitStaProperty(lit.span, k_length, r_arr);
 
             for (lit.elements) |maybe_elem| {
@@ -2638,28 +2517,22 @@ pub const Compiler = struct {
                         // r_arr[r_idx] = acc, length++.
                         try self.compileExpression(&elem);
                         const r_val = try self.reserveTemp();
-                        try self.builder.emitOp(.star, lit.span);
-                        try self.builder.emitU8(r_val);
+                        try self.builder.emitStoreReg(lit.span, r_val);
                         // r_idx = r_arr.length
-                        try self.builder.emitOp(.ldar, lit.span);
-                        try self.builder.emitU8(r_arr);
+                        try self.builder.emitLoadReg(lit.span, r_arr);
                         try self.builder.emitLdaProperty(lit.span, k_length);
                         const r_idx = try self.reserveTemp();
-                        try self.builder.emitOp(.star, lit.span);
-                        try self.builder.emitU8(r_idx);
+                        try self.builder.emitStoreReg(lit.span, r_idx);
                         // r_arr[r_idx] = r_val — §13.2.4.1 element
                         // init is CreateDataPropertyOrThrow (own data
                         // slot), not [[Set]] with proto walk.
-                        try self.builder.emitOp(.ldar, lit.span);
-                        try self.builder.emitU8(r_val);
+                        try self.builder.emitLoadReg(lit.span, r_val);
                         try self.builder.emitOp(.def_computed, lit.span);
                         try self.builder.emitU8(r_arr);
                         try self.builder.emitU8(r_idx);
                         // length += 1
-                        try self.builder.emitOp(.ldar, lit.span);
-                        try self.builder.emitU8(r_idx);
-                        try self.builder.emitOp(.lda_smi, lit.span);
-                        try self.builder.emitI32(1);
+                        try self.builder.emitLoadReg(lit.span, r_idx);
+                        try self.builder.emitLoadSmi(lit.span, 1);
                         try self.builder.emitOp(.add, lit.span);
                         try self.builder.emitU8(r_idx);
                         try self.builder.emitStaProperty(lit.span, k_length, r_arr);
@@ -2669,14 +2542,11 @@ pub const Compiler = struct {
                     }
                 } else {
                     // Elision in spread context — still bumps length.
-                    try self.builder.emitOp(.ldar, lit.span);
-                    try self.builder.emitU8(r_arr);
+                    try self.builder.emitLoadReg(lit.span, r_arr);
                     try self.builder.emitLdaProperty(lit.span, k_length);
                     const r_idx = try self.reserveTemp();
-                    try self.builder.emitOp(.star, lit.span);
-                    try self.builder.emitU8(r_idx);
-                    try self.builder.emitOp(.lda_smi, lit.span);
-                    try self.builder.emitI32(1);
+                    try self.builder.emitStoreReg(lit.span, r_idx);
+                    try self.builder.emitLoadSmi(lit.span, 1);
                     try self.builder.emitOp(.add, lit.span);
                     try self.builder.emitU8(r_idx);
                     try self.builder.emitStaProperty(lit.span, k_length, r_arr);
@@ -2685,8 +2555,7 @@ pub const Compiler = struct {
             }
         }
 
-        try self.builder.emitOp(.ldar, lit.span);
-        try self.builder.emitU8(r_arr);
+        try self.builder.emitLoadReg(lit.span, r_arr);
     }
 
     fn compileObjectLiteral(self: *Compiler, lit: ast.expression.ObjectLit) CompileError!void {
@@ -2765,8 +2634,7 @@ pub const Compiler = struct {
         }
         const r_obj = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, lit.span);
-        try self.builder.emitU8(r_obj);
+        try self.builder.emitStoreReg(lit.span, r_obj);
 
         // When the literal was templatized, every static-key
         // `.property` writes into a known slot (template-build
@@ -2793,8 +2661,7 @@ pub const Compiler = struct {
                     try self.builder.emitOp(.to_property_key, p.span);
                     const r_key = try self.reserveTemp();
                     defer self.releaseTemp();
-                    try self.builder.emitOp(.star, p.span);
-                    try self.builder.emitU8(r_key);
+                    try self.builder.emitStoreReg(p.span, r_key);
                     try self.compileExpression(&p.value);
                     // §15.5.6.4 — anonymous function-likes pick up
                     // a name derived from the computed key. The
@@ -2883,8 +2750,7 @@ pub const Compiler = struct {
                     try self.builder.emitOp(.to_property_key, m.span);
                     const r_key = try self.reserveTemp();
                     defer self.releaseTemp();
-                    try self.builder.emitOp(.star, m.span);
-                    try self.builder.emitU8(r_key);
+                    try self.builder.emitStoreReg(m.span, r_key);
                     // §10.2.5 — propagate is_generator / is_async
                     // so `{ *gen() {} }` / `{ async fn() {} }`
                     // produce the correct JSFunction shape.
@@ -3014,8 +2880,7 @@ pub const Compiler = struct {
         };
 
         // Final result of an object literal is the object itself.
-        try self.builder.emitOp(.ldar, lit.span);
-        try self.builder.emitU8(r_obj);
+        try self.builder.emitLoadReg(lit.span, r_obj);
     }
 
     /// Decode `\uXXXX` / `\u{XXXX}` escapes inside an
@@ -3226,8 +3091,7 @@ pub const Compiler = struct {
                 if (m.optional) try self.emitOptionalShortCircuit(m.span);
                 const r_obj = try self.reserveTemp();
                 defer self.releaseTemp();
-                try self.builder.emitOp(.star, m.span);
-                try self.builder.emitU8(r_obj);
+                try self.builder.emitStoreReg(m.span, r_obj);
 
                 try self.compileExpression(key_expr);
                 try self.builder.emitOp(.lda_computed, m.span);
@@ -3326,8 +3190,7 @@ pub const Compiler = struct {
                     try self.compileExpression(a.value);
                     const r_val = try self.reserveTemp();
                     defer self.releaseTemp();
-                    try self.builder.emitOp(.star, a.span);
-                    try self.builder.emitU8(r_val);
+                    try self.builder.emitStoreReg(a.span, r_val);
                     try self.builder.emitOp(.super_set, m.span);
                     try self.builder.emitU16(k);
                     try self.builder.emitU8(r_val);
@@ -3349,13 +3212,11 @@ pub const Compiler = struct {
                     try self.compileExpression(key_expr);
                     const r_key = try self.reserveTemp();
                     defer self.releaseTemp();
-                    try self.builder.emitOp(.star, a.span);
-                    try self.builder.emitU8(r_key);
+                    try self.builder.emitStoreReg(a.span, r_key);
                     try self.compileExpression(a.value);
                     const r_val = try self.reserveTemp();
                     defer self.releaseTemp();
-                    try self.builder.emitOp(.star, a.span);
-                    try self.builder.emitU8(r_val);
+                    try self.builder.emitStoreReg(a.span, r_val);
                     try self.builder.emitOp(.super_set_computed, m.span);
                     try self.builder.emitU8(r_key);
                     try self.builder.emitU8(r_val);
@@ -3386,8 +3247,7 @@ pub const Compiler = struct {
             try self.compileExpression(m.object);
             r_obj = try self.reserveTemp();
             obj_is_temp = true;
-            try self.builder.emitOp(.star, m.span);
-            try self.builder.emitU8(r_obj);
+            try self.builder.emitStoreReg(m.span, r_obj);
         }
         defer if (obj_is_temp) self.releaseTemp();
 
@@ -3414,8 +3274,7 @@ pub const Compiler = struct {
             .computed => |key_expr| {
                 try self.compileExpression(key_expr);
                 const r_key = try self.reserveTemp();
-                try self.builder.emitOp(.star, a.span);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitStoreReg(a.span, r_key);
                 computed_r = r_key;
                 // §13.15.2 + §13.3.4.1 — for a compound / logical
                 // assignment (`obj[k] op= v`) the spec evaluates
@@ -3438,14 +3297,11 @@ pub const Compiler = struct {
                 // at the store site already matches the visible
                 // side-effect count.
                 if (a.op != .eq) {
-                    try self.builder.emitOp(.ldar, m.span);
-                    try self.builder.emitU8(r_obj);
+                    try self.builder.emitLoadReg(m.span, r_obj);
                     try self.builder.emitOp(.require_object_coercible, m.span);
-                    try self.builder.emitOp(.ldar, key_expr.span());
-                    try self.builder.emitU8(r_key);
+                    try self.builder.emitLoadReg(key_expr.span(), r_key);
                     try self.builder.emitOp(.to_property_key, key_expr.span());
-                    try self.builder.emitOp(.star, key_expr.span());
-                    try self.builder.emitU8(r_key);
+                    try self.builder.emitStoreReg(key_expr.span(), r_key);
                 }
             },
         }
@@ -3457,8 +3313,7 @@ pub const Compiler = struct {
         // opcode based on which slot was filled above.
         const Helper = struct {
             fn emitRead(this_: *Compiler, span_: Span, ro: u8, nk: ?u16, pk: ?u16, ck: ?u8) CompileError!void {
-                try this_.builder.emitOp(.ldar, span_);
-                try this_.builder.emitU8(ro);
+                try this_.builder.emitLoadReg(span_, ro);
                 if (nk) |k| {
                     try this_.builder.emitLdaProperty(span_, k);
                 } else if (pk) |k| {
@@ -3506,8 +3361,7 @@ pub const Compiler = struct {
             // We have receiver in r_obj and key in computed_r. So:
             // ldar computed_r ; key → acc
             // lda_computed r_obj ; obj[acc] → acc
-            try self.builder.emitOp(.ldar, a.span);
-            try self.builder.emitU8(computed_r.?);
+            try self.builder.emitLoadReg(a.span, computed_r.?);
             try self.builder.emitOp(.lda_computed, a.span);
             try self.builder.emitU8(r_obj);
         } else {
@@ -3553,8 +3407,7 @@ pub const Compiler = struct {
         // evaluate rhs, run the op, store back.
         const r_old = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, a.span);
-        try self.builder.emitU8(r_old);
+        try self.builder.emitStoreReg(a.span, r_old);
         try self.compileExpression(a.value);
         const op = compoundOp(a.op) orelse return error.UnsupportedExpression;
         try self.builder.emitOp(op, a.span);
@@ -3765,11 +3618,9 @@ pub const Compiler = struct {
                 const r_args = try self.reserveTemp();
                 defer self.releaseTemp();
                 try self.builder.emitOp(.make_array, c.span);
-                try self.builder.emitOp(.star, c.span);
-                try self.builder.emitU8(r_args);
+                try self.builder.emitStoreReg(c.span, r_args);
                 const k_length = try self.internString("length");
-                try self.builder.emitOp(.lda_smi, c.span);
-                try self.builder.emitI32(0);
+                try self.builder.emitLoadSmi(c.span, 0);
                 try self.builder.emitStaProperty(c.span, k_length, r_args);
                 for (c.arguments) |*arg| {
                     if (arg.* == .spread) {
@@ -3780,23 +3631,18 @@ pub const Compiler = struct {
                         try self.compileExpression(arg);
                         const r_val = try self.reserveTemp();
                         defer self.releaseTemp();
-                        try self.builder.emitOp(.star, c.span);
-                        try self.builder.emitU8(r_val);
-                        try self.builder.emitOp(.ldar, c.span);
-                        try self.builder.emitU8(r_args);
+                        try self.builder.emitStoreReg(c.span, r_val);
+                        try self.builder.emitLoadReg(c.span, r_args);
                         try self.builder.emitLdaProperty(c.span, k_length);
                         const r_idx = try self.reserveTemp();
                         defer self.releaseTemp();
-                        try self.builder.emitOp(.star, c.span);
-                        try self.builder.emitU8(r_idx);
-                        try self.builder.emitOp(.ldar, c.span);
-                        try self.builder.emitU8(r_val);
+                        try self.builder.emitStoreReg(c.span, r_idx);
+                        try self.builder.emitLoadReg(c.span, r_val);
                         try self.builder.emitOp(.sta_computed, c.span);
                         try self.builder.emitU8(r_args);
                         try self.builder.emitU8(r_idx);
                         // length = length + 1
-                        try self.builder.emitOp(.lda_smi, c.span);
-                        try self.builder.emitI32(1);
+                        try self.builder.emitLoadSmi(c.span, 1);
                         try self.builder.emitOp(.add, c.span);
                         try self.builder.emitU8(r_idx);
                         try self.builder.emitStaProperty(c.span, k_length, r_args);
@@ -3812,14 +3658,12 @@ pub const Compiler = struct {
             if (c.arguments.len > 0) {
                 // First arg already reserved as r_first.
                 try self.compileExpression(&c.arguments[0]);
-                try self.builder.emitOp(.star, c.span);
-                try self.builder.emitU8(r_first);
+                try self.builder.emitStoreReg(c.span, r_first);
                 reserved += 1;
                 for (c.arguments[1..]) |*arg| {
                     try self.compileExpression(arg);
                     const r = try self.reserveTemp();
-                    try self.builder.emitOp(.star, c.span);
-                    try self.builder.emitU8(r);
+                    try self.builder.emitStoreReg(c.span, r);
                     reserved += 1;
                 }
             }
@@ -3967,8 +3811,7 @@ pub const Compiler = struct {
         // value just produced.
         if (c.optional) try self.emitOptionalShortCircuit(c.span);
         const r_callee = try self.reserveTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(c.span, r_callee);
 
         // Compile each arg, store in consecutive temps so the
         // interpreter can fetch them by `r_callee + 1.. r_callee + argc`.
@@ -3977,8 +3820,7 @@ pub const Compiler = struct {
             try self.compileExpression(arg);
             const r = try self.reserveTemp();
             reserved += 1;
-            try self.builder.emitOp(.star, c.span);
-            try self.builder.emitU8(r);
+            try self.builder.emitStoreReg(c.span, r);
         }
 
         // §15.10 PTC — when the call is statically known to be in
@@ -4012,15 +3854,13 @@ pub const Compiler = struct {
         // each arg into consecutive temps `r_callee+1 ..`.
         try self.compileExpression(c.callee);
         const r_callee = try self.reserveTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(c.span, r_callee);
         var reserved: u8 = 0;
         for (c.arguments) |*arg| {
             try self.compileExpression(arg);
             const r = try self.reserveTemp();
             reserved += 1;
-            try self.builder.emitOp(.star, c.span);
-            try self.builder.emitU8(r);
+            try self.builder.emitStoreReg(c.span, r);
         }
         try self.builder.emitOp(.direct_eval, c.span);
         try self.builder.emitU16(scope_k);
@@ -4136,20 +3976,17 @@ pub const Compiler = struct {
         try self.compileExpression(c.callee);
         const r_callee = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(c.span, r_callee);
 
         // 2. Build args array — same lowering as compileArrayLiteral
         // in spread mode. We re-use the helper routine.
         const r_args = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.make_array, c.span);
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_args);
+        try self.builder.emitStoreReg(c.span, r_args);
 
         const k_length = try self.internString("length");
-        try self.builder.emitOp(.lda_smi, c.span);
-        try self.builder.emitI32(0);
+        try self.builder.emitLoadSmi(c.span, 0);
         try self.builder.emitStaProperty(c.span, k_length, r_args);
 
         for (c.arguments) |*arg| {
@@ -4160,23 +3997,17 @@ pub const Compiler = struct {
             } else {
                 try self.compileExpression(arg);
                 const r_val = try self.reserveTemp();
-                try self.builder.emitOp(.star, c.span);
-                try self.builder.emitU8(r_val);
-                try self.builder.emitOp(.ldar, c.span);
-                try self.builder.emitU8(r_args);
+                try self.builder.emitStoreReg(c.span, r_val);
+                try self.builder.emitLoadReg(c.span, r_args);
                 try self.builder.emitLdaProperty(c.span, k_length);
                 const r_idx = try self.reserveTemp();
-                try self.builder.emitOp(.star, c.span);
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.ldar, c.span);
-                try self.builder.emitU8(r_val);
+                try self.builder.emitStoreReg(c.span, r_idx);
+                try self.builder.emitLoadReg(c.span, r_val);
                 try self.builder.emitOp(.sta_computed, c.span);
                 try self.builder.emitU8(r_args);
                 try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.ldar, c.span);
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.lda_smi, c.span);
-                try self.builder.emitI32(1);
+                try self.builder.emitLoadReg(c.span, r_idx);
+                try self.builder.emitLoadSmi(c.span, 1);
                 try self.builder.emitOp(.add, c.span);
                 try self.builder.emitU8(r_idx);
                 try self.builder.emitStaProperty(c.span, k_length, r_args);
@@ -4198,25 +4029,20 @@ pub const Compiler = struct {
 
         // 3. Look up `.apply` on the callee → r_apply.
         const k_apply = try self.internString("apply");
-        try self.builder.emitOp(.ldar, c.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitLoadReg(c.span, r_callee);
         try self.builder.emitLdaProperty(c.span, k_apply);
         const r_apply = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_apply);
+        try self.builder.emitStoreReg(c.span, r_apply);
 
         // 4. Stage the call args at r_apply + 1, r_apply + 2:
         // arg[0] = undefined (thisArg), arg[1] = args array.
         const r_this = try self.reserveTemp();
         try self.builder.emitOp(.lda_undefined, c.span);
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_this);
+        try self.builder.emitStoreReg(c.span, r_this);
         const r_args_pos = try self.reserveTemp();
-        try self.builder.emitOp(.ldar, c.span);
-        try self.builder.emitU8(r_args);
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_args_pos);
+        try self.builder.emitLoadReg(c.span, r_args);
+        try self.builder.emitStoreReg(c.span, r_args_pos);
 
         // 5. call_method: r_callee is the receiver (`f`), r_apply
         // is the function, two args.
@@ -4282,16 +4108,14 @@ pub const Compiler = struct {
             // register.
             try self.compileExpression(m.object);
             const r_recv = try self.reserveTemp();
-            try self.builder.emitOp(.star, c.span);
-            try self.builder.emitU8(r_recv);
+            try self.builder.emitStoreReg(c.span, r_recv);
 
             var reserved: u8 = 0;
             for (c.arguments) |*arg| {
                 try self.compileExpression(arg);
                 const r = try self.reserveTemp();
                 reserved += 1;
-                try self.builder.emitOp(.star, c.span);
-                try self.builder.emitU8(r);
+                try self.builder.emitStoreReg(c.span, r);
             }
 
             try self.builder.emitCallProperty(c.span, k, r_recv, @intCast(c.arguments.len));
@@ -4307,8 +4131,7 @@ pub const Compiler = struct {
         try self.compileExpression(m.object);
         if (m.optional) try self.emitOptionalShortCircuit(m.span);
         const r_recv = try self.reserveTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_recv);
+        try self.builder.emitStoreReg(c.span, r_recv);
 
         // Property load → acc, save in r_callee adjacent to r_recv.
         switch (m.property) {
@@ -4320,8 +4143,7 @@ pub const Compiler = struct {
                     const decoded = try self.decodeIdentifierName(key_slice[1..]);
                     const mangled = try self.manglePrivateRef(decoded);
                     const k = try self.internString(mangled);
-                    try self.builder.emitOp(.ldar, c.span);
-                    try self.builder.emitU8(r_recv);
+                    try self.builder.emitLoadReg(c.span, r_recv);
                     try self.builder.emitOp(.lda_private, c.span);
                     try self.builder.emitU16(k);
                 } else {
@@ -4330,8 +4152,7 @@ pub const Compiler = struct {
                     // is `obj.o()`.
                     const decoded = try self.decodeIdentifierName(key_slice);
                     const k = try self.internString(decoded);
-                    try self.builder.emitOp(.ldar, c.span);
-                    try self.builder.emitU8(r_recv);
+                    try self.builder.emitLoadReg(c.span, r_recv);
                     try self.builder.emitLdaProperty(c.span, k);
                 }
             },
@@ -4342,8 +4163,7 @@ pub const Compiler = struct {
             },
         }
         const r_callee = try self.reserveTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(c.span, r_callee);
 
         // §13.5.5 — `obj.method?.()` short-circuits when the
         // method itself is nullish. The check runs after loading
@@ -4356,8 +4176,7 @@ pub const Compiler = struct {
             try self.compileExpression(arg);
             const r = try self.reserveTemp();
             reserved += 1;
-            try self.builder.emitOp(.star, c.span);
-            try self.builder.emitU8(r);
+            try self.builder.emitStoreReg(c.span, r);
         }
 
         if (emit_tail) {
@@ -4396,8 +4215,7 @@ pub const Compiler = struct {
         try self.compileExpression(m.object);
         const r_recv = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_recv);
+        try self.builder.emitStoreReg(c.span, r_recv);
 
         // 2. Look up the method on `obj` → r_callee.
         switch (m.property) {
@@ -4409,16 +4227,14 @@ pub const Compiler = struct {
                     const decoded = try self.decodeIdentifierName(key_slice[1..]);
                     const mangled = try self.manglePrivateRef(decoded);
                     const k = try self.internString(mangled);
-                    try self.builder.emitOp(.ldar, c.span);
-                    try self.builder.emitU8(r_recv);
+                    try self.builder.emitLoadReg(c.span, r_recv);
                     try self.builder.emitOp(.lda_private, c.span);
                     try self.builder.emitU16(k);
                 } else {
                     // §12.7.1 — decode `\uXXXX` in IdentifierName.
                     const decoded = try self.decodeIdentifierName(key_slice);
                     const k = try self.internString(decoded);
-                    try self.builder.emitOp(.ldar, c.span);
-                    try self.builder.emitU8(r_recv);
+                    try self.builder.emitLoadReg(c.span, r_recv);
                     try self.builder.emitLdaProperty(c.span, k);
                 }
             },
@@ -4430,19 +4246,16 @@ pub const Compiler = struct {
         }
         const r_callee = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(c.span, r_callee);
 
         // 3. Build args array using the same shape as
         //    compileSpreadCall.
         const r_args = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.make_array, c.span);
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_args);
+        try self.builder.emitStoreReg(c.span, r_args);
         const k_length = try self.internString("length");
-        try self.builder.emitOp(.lda_smi, c.span);
-        try self.builder.emitI32(0);
+        try self.builder.emitLoadSmi(c.span, 0);
         try self.builder.emitStaProperty(c.span, k_length, r_args);
 
         for (c.arguments) |*arg| {
@@ -4453,23 +4266,17 @@ pub const Compiler = struct {
             } else {
                 try self.compileExpression(arg);
                 const r_val = try self.reserveTemp();
-                try self.builder.emitOp(.star, c.span);
-                try self.builder.emitU8(r_val);
-                try self.builder.emitOp(.ldar, c.span);
-                try self.builder.emitU8(r_args);
+                try self.builder.emitStoreReg(c.span, r_val);
+                try self.builder.emitLoadReg(c.span, r_args);
                 try self.builder.emitLdaProperty(c.span, k_length);
                 const r_idx = try self.reserveTemp();
-                try self.builder.emitOp(.star, c.span);
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.ldar, c.span);
-                try self.builder.emitU8(r_val);
+                try self.builder.emitStoreReg(c.span, r_idx);
+                try self.builder.emitLoadReg(c.span, r_val);
                 try self.builder.emitOp(.sta_computed, c.span);
                 try self.builder.emitU8(r_args);
                 try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.ldar, c.span);
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.lda_smi, c.span);
-                try self.builder.emitI32(1);
+                try self.builder.emitLoadReg(c.span, r_idx);
+                try self.builder.emitLoadSmi(c.span, 1);
                 try self.builder.emitOp(.add, c.span);
                 try self.builder.emitU8(r_idx);
                 try self.builder.emitStaProperty(c.span, k_length, r_args);
@@ -4481,27 +4288,21 @@ pub const Compiler = struct {
         // 4. Look up `.apply` on the callee → r_apply, then call
         //    apply with `(r_recv, r_args)`.
         const k_apply = try self.internString("apply");
-        try self.builder.emitOp(.ldar, c.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitLoadReg(c.span, r_callee);
         try self.builder.emitLdaProperty(c.span, k_apply);
         const r_apply = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_apply);
+        try self.builder.emitStoreReg(c.span, r_apply);
 
         // 5. Stage args at r_apply + 1, r_apply + 2.
         const r_this = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.ldar, c.span);
-        try self.builder.emitU8(r_recv);
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_this);
+        try self.builder.emitLoadReg(c.span, r_recv);
+        try self.builder.emitStoreReg(c.span, r_this);
         const r_args_pos = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.ldar, c.span);
-        try self.builder.emitU8(r_args);
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_args_pos);
+        try self.builder.emitLoadReg(c.span, r_args);
+        try self.builder.emitStoreReg(c.span, r_args_pos);
 
         try self.builder.emitCallMethod(c.span, r_callee, r_apply, 2);
     }
@@ -4539,8 +4340,7 @@ pub const Compiler = struct {
             },
         }
         const r_callee = try self.reserveTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(c.span, r_callee);
 
         // Args at r_callee + 1...
         var reserved: u8 = 0;
@@ -4548,16 +4348,14 @@ pub const Compiler = struct {
             try self.compileExpression(arg);
             const r = try self.reserveTemp();
             reserved += 1;
-            try self.builder.emitOp(.star, c.span);
-            try self.builder.emitU8(r);
+            try self.builder.emitStoreReg(c.span, r);
         }
 
         // Read `this` into a temp acting as the receiver, then
         // emit call_method with that temp.
         const r_recv = try self.reserveTemp();
         try self.builder.emitOp(.lda_this, c.span);
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_recv);
+        try self.builder.emitStoreReg(c.span, r_recv);
 
         try self.builder.emitCallMethod(c.span, r_recv, r_callee, @intCast(c.arguments.len));
 
@@ -4596,18 +4394,15 @@ pub const Compiler = struct {
         }
         const r_callee = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(c.span, r_callee);
 
         // 2. Build the args array (same shape as compileSpreadCall).
         const r_args = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.make_array, c.span);
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_args);
+        try self.builder.emitStoreReg(c.span, r_args);
         const k_length = try self.internString("length");
-        try self.builder.emitOp(.lda_smi, c.span);
-        try self.builder.emitI32(0);
+        try self.builder.emitLoadSmi(c.span, 0);
         try self.builder.emitStaProperty(c.span, k_length, r_args);
 
         for (c.arguments) |*arg| {
@@ -4618,23 +4413,17 @@ pub const Compiler = struct {
             } else {
                 try self.compileExpression(arg);
                 const r_val = try self.reserveTemp();
-                try self.builder.emitOp(.star, c.span);
-                try self.builder.emitU8(r_val);
-                try self.builder.emitOp(.ldar, c.span);
-                try self.builder.emitU8(r_args);
+                try self.builder.emitStoreReg(c.span, r_val);
+                try self.builder.emitLoadReg(c.span, r_args);
                 try self.builder.emitLdaProperty(c.span, k_length);
                 const r_idx = try self.reserveTemp();
-                try self.builder.emitOp(.star, c.span);
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.ldar, c.span);
-                try self.builder.emitU8(r_val);
+                try self.builder.emitStoreReg(c.span, r_idx);
+                try self.builder.emitLoadReg(c.span, r_val);
                 try self.builder.emitOp(.sta_computed, c.span);
                 try self.builder.emitU8(r_args);
                 try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.ldar, c.span);
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.lda_smi, c.span);
-                try self.builder.emitI32(1);
+                try self.builder.emitLoadReg(c.span, r_idx);
+                try self.builder.emitLoadSmi(c.span, 1);
                 try self.builder.emitOp(.add, c.span);
                 try self.builder.emitU8(r_idx);
                 try self.builder.emitStaProperty(c.span, k_length, r_args);
@@ -4645,26 +4434,21 @@ pub const Compiler = struct {
 
         // 3. Look up `.apply` on the method → r_apply.
         const k_apply = try self.internString("apply");
-        try self.builder.emitOp(.ldar, c.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitLoadReg(c.span, r_callee);
         try self.builder.emitLdaProperty(c.span, k_apply);
         const r_apply = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_apply);
+        try self.builder.emitStoreReg(c.span, r_apply);
 
         // 4. Stage `this = current this` and `args` at r_apply + 1, +2.
         const r_this = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.lda_this, c.span);
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_this);
+        try self.builder.emitStoreReg(c.span, r_this);
         const r_args_pos = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.ldar, c.span);
-        try self.builder.emitU8(r_args);
-        try self.builder.emitOp(.star, c.span);
-        try self.builder.emitU8(r_args_pos);
+        try self.builder.emitLoadReg(c.span, r_args);
+        try self.builder.emitStoreReg(c.span, r_args_pos);
 
         try self.builder.emitCallMethod(c.span, r_callee, r_apply, 2);
     }
@@ -4686,16 +4470,14 @@ pub const Compiler = struct {
         }
         try self.compileExpression(n.callee);
         const r_callee = try self.reserveTemp();
-        try self.builder.emitOp(.star, n.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(n.span, r_callee);
 
         var reserved: u8 = 0;
         for (n.arguments) |*arg| {
             try self.compileExpression(arg);
             const r = try self.reserveTemp();
             reserved += 1;
-            try self.builder.emitOp(.star, n.span);
-            try self.builder.emitU8(r);
+            try self.builder.emitStoreReg(n.span, r);
         }
 
         try self.builder.emitNewCall(n.span, r_callee, @intCast(n.arguments.len));
@@ -4713,18 +4495,15 @@ pub const Compiler = struct {
         try self.compileExpression(n.callee);
         const r_callee = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, n.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(n.span, r_callee);
 
         // Build the flat-args array.
         const r_args = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitOp(.make_array, n.span);
-        try self.builder.emitOp(.star, n.span);
-        try self.builder.emitU8(r_args);
+        try self.builder.emitStoreReg(n.span, r_args);
         const k_length = try self.internString("length");
-        try self.builder.emitOp(.lda_smi, n.span);
-        try self.builder.emitI32(0);
+        try self.builder.emitLoadSmi(n.span, 0);
         try self.builder.emitStaProperty(n.span, k_length, r_args);
         for (n.arguments) |*arg| {
             if (arg.* == .spread) {
@@ -4734,23 +4513,17 @@ pub const Compiler = struct {
             } else {
                 try self.compileExpression(arg);
                 const r_val = try self.reserveTemp();
-                try self.builder.emitOp(.star, n.span);
-                try self.builder.emitU8(r_val);
-                try self.builder.emitOp(.ldar, n.span);
-                try self.builder.emitU8(r_args);
+                try self.builder.emitStoreReg(n.span, r_val);
+                try self.builder.emitLoadReg(n.span, r_args);
                 try self.builder.emitLdaProperty(n.span, k_length);
                 const r_idx = try self.reserveTemp();
-                try self.builder.emitOp(.star, n.span);
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.ldar, n.span);
-                try self.builder.emitU8(r_val);
+                try self.builder.emitStoreReg(n.span, r_idx);
+                try self.builder.emitLoadReg(n.span, r_val);
                 try self.builder.emitOp(.sta_computed, n.span);
                 try self.builder.emitU8(r_args);
                 try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.ldar, n.span);
-                try self.builder.emitU8(r_idx);
-                try self.builder.emitOp(.lda_smi, n.span);
-                try self.builder.emitI32(1);
+                try self.builder.emitLoadReg(n.span, r_idx);
+                try self.builder.emitLoadSmi(n.span, 1);
                 try self.builder.emitOp(.add, n.span);
                 try self.builder.emitU8(r_idx);
                 try self.builder.emitStaProperty(n.span, k_length, r_args);
@@ -4766,21 +4539,16 @@ pub const Compiler = struct {
         try self.builder.emitLdaProperty(n.span, k_construct);
         const r_construct = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, n.span);
-        try self.builder.emitU8(r_construct);
+        try self.builder.emitStoreReg(n.span, r_construct);
         // Position args adjacent to r_construct: r_construct+1=callee, r_construct+2=args.
-        try self.builder.emitOp(.ldar, n.span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitLoadReg(n.span, r_callee);
         const r_a1 = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, n.span);
-        try self.builder.emitU8(r_a1);
-        try self.builder.emitOp(.ldar, n.span);
-        try self.builder.emitU8(r_args);
+        try self.builder.emitStoreReg(n.span, r_a1);
+        try self.builder.emitLoadReg(n.span, r_args);
         const r_a2 = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, n.span);
-        try self.builder.emitU8(r_a2);
+        try self.builder.emitStoreReg(n.span, r_a2);
         try self.builder.emitCall(n.span, r_construct, 2);
     }
 
@@ -5023,8 +4791,7 @@ pub const Compiler = struct {
             const t = try self.reserveTemp();
             defer self.releaseTemp();
             try self.emitLoadBinding(binding, a.target.span());
-            try self.builder.emitOp(.star, a.target.span());
-            try self.builder.emitU8(t);
+            try self.builder.emitStoreReg(a.target.span(), t);
             try self.compileExpression(a.value);
             try self.builder.emitOp(op, a.span);
             try self.builder.emitU8(t);
@@ -5052,8 +4819,7 @@ pub const Compiler = struct {
         // numbers go through unary `negate` in the AST, so the
         // literal itself is always non-negative here.
         if (asExactSmi(num)) |i| {
-            try self.builder.emitOp(.lda_smi, span);
-            try self.builder.emitI32(i);
+            try self.builder.emitLoadSmi(span, i);
         } else {
             const k = try self.builder.addConstant(Value.fromDouble(num));
             try self.builder.emitOp(.lda_constant, span);
@@ -5235,8 +5001,7 @@ pub const Compiler = struct {
         }
         // Number: Smi fast-path (mirrors `compileNumeric`).
         if (v.isInt32()) {
-            try self.builder.emitOp(.lda_smi, span);
-            try self.builder.emitI32(v.asInt32());
+            try self.builder.emitLoadSmi(span, v.asInt32());
             return;
         }
         const num = v.asDouble();
@@ -5244,8 +5009,7 @@ pub const Compiler = struct {
             // §6.1.6.1 — -0 is observably distinct (`1 / -0 === -∞`,
             // `Object.is(-0, 0) === false`); never collapse it to `LdaSmi 0`.
             if (!(i == 0 and std.math.signbit(num))) {
-                try self.builder.emitOp(.lda_smi, span);
-                try self.builder.emitI32(i);
+                try self.builder.emitLoadSmi(span, i);
                 return;
             }
         }
@@ -5289,8 +5053,7 @@ pub const Compiler = struct {
                     const r_callee = try self.reserveTemp();
                     defer self.releaseTemp();
                     try self.builder.emitLdaGlobal(u.span, k_ref_error);
-                    try self.builder.emitOp(.star, u.span);
-                    try self.builder.emitU8(r_callee);
+                    try self.builder.emitStoreReg(u.span, r_callee);
                     try self.builder.emitNewCall(u.span, r_callee, 0);
                     try self.builder.emitOp(.throw_, u.span);
                     return;
@@ -5309,8 +5072,7 @@ pub const Compiler = struct {
                         try self.compileExpression(m.object);
                         const r_obj = try self.reserveTemp();
                         defer self.releaseTemp();
-                        try self.builder.emitOp(.star, u.span);
-                        try self.builder.emitU8(r_obj);
+                        try self.builder.emitStoreReg(u.span, r_obj);
                         try self.builder.emitOp(.del_named_property, u.span);
                         try self.builder.emitU16(k);
                         try self.builder.emitU8(r_obj);
@@ -5319,14 +5081,12 @@ pub const Compiler = struct {
                         try self.compileExpression(m.object);
                         const r_obj = try self.reserveTemp();
                         defer self.releaseTemp();
-                        try self.builder.emitOp(.star, u.span);
-                        try self.builder.emitU8(r_obj);
+                        try self.builder.emitStoreReg(u.span, r_obj);
 
                         try self.compileExpression(key_expr);
                         const r_key = try self.reserveTemp();
                         defer self.releaseTemp();
-                        try self.builder.emitOp(.star, u.span);
-                        try self.builder.emitU8(r_key);
+                        try self.builder.emitStoreReg(u.span, r_key);
 
                         try self.builder.emitOp(.del_computed_property, u.span);
                         try self.builder.emitU8(r_obj);
@@ -5528,8 +5288,7 @@ pub const Compiler = struct {
         try self.compileExpression(b.lhs);
         const r = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, b.lhs.span());
-        try self.builder.emitU8(r);
+        try self.builder.emitStoreReg(b.lhs.span(), r);
         try self.compileExpression(b.rhs);
         try self.builder.emitOp(op, b.span);
         try self.builder.emitU8(r);
@@ -5838,8 +5597,7 @@ pub const Compiler = struct {
                     // they return `undefined` (or an explicit
                     // `return`), not a completion value.
                     if (self.completion_reg) |r| {
-                        try self.builder.emitOp(.star, es.span);
-                        try self.builder.emitU8(r);
+                        try self.builder.emitStoreReg(es.span, r);
                     }
                 }
             },
@@ -6668,8 +6426,7 @@ pub const Compiler = struct {
         try self.builder.emitOp(open_op, s.span);
         const r_iter = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, s.span);
-        try self.builder.emitU8(r_iter);
+        try self.builder.emitStoreReg(s.span, r_iter);
 
         const k_next = try self.internString("next");
         const k_value = try self.internString("value");
@@ -6689,11 +6446,9 @@ pub const Compiler = struct {
         // semantically a no-op there but still safe.
         const r_next_fn = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.ldar, s.span);
-        try self.builder.emitU8(r_iter);
+        try self.builder.emitLoadReg(s.span, r_iter);
         try self.builder.emitLdaProperty(s.span, k_next);
-        try self.builder.emitOp(.star, s.span);
-        try self.builder.emitU8(r_next_fn);
+        try self.builder.emitStoreReg(s.span, r_next_fn);
 
         // Plain sync `for-of` folds the step into `for_of_next`,
         // which writes the boolean `done` into its own register.
@@ -6737,11 +6492,9 @@ pub const Compiler = struct {
             try self.builder.emitU8(r_next_fn);
             try self.builder.emitU8(r_done);
             // r_result holds the stepped value across the body.
-            try self.builder.emitOp(.star, s.span);
-            try self.builder.emitU8(r_result);
+            try self.builder.emitStoreReg(s.span, r_result);
             // acc = done, for the loop-exit test below.
-            try self.builder.emitOp(.ldar, s.span);
-            try self.builder.emitU8(r_done);
+            try self.builder.emitLoadReg(s.span, r_done);
         } else {
             // r_result = r_iter.next() — uses the cached `next`
             // from r_next_fn (read once above).
@@ -6753,21 +6506,18 @@ pub const Compiler = struct {
             // value as-is, so the sync fallback in
             // `async_iter_open` composes.
             if (s.is_await) try self.builder.emitOp(.await_, s.span);
-            try self.builder.emitOp(.star, s.span);
-            try self.builder.emitU8(r_result);
+            try self.builder.emitStoreReg(s.span, r_result);
 
             // §7.4.2 IteratorNext step 4 — `If Type(result) is
             // not Object, throw a TypeError`. `for-in` is driven
             // by the harness iterator (always Object); skip it.
             if (s.kind != .in_) {
-                try self.builder.emitOp(.ldar, s.span);
-                try self.builder.emitU8(r_result);
+                try self.builder.emitLoadReg(s.span, r_result);
                 try self.builder.emitOp(.throw_if_not_object, s.span);
             }
 
             // acc = r_result.done, for the loop-exit test below.
-            try self.builder.emitOp(.ldar, s.span);
-            try self.builder.emitU8(r_result);
+            try self.builder.emitLoadReg(s.span, r_result);
             try self.builder.emitLdaProperty(s.span, k_done);
         }
         // if (done) jmp exit
@@ -6830,8 +6580,7 @@ pub const Compiler = struct {
         // value → bind. Fast `for-of` already holds the stepped
         // value in r_result; the slow / for-in path holds the
         // iterator result object there and must read `.value`.
-        try self.builder.emitOp(.ldar, s.span);
-        try self.builder.emitU8(r_result);
+        try self.builder.emitLoadReg(s.span, r_result);
         if (!fast_for_of) {
             try self.builder.emitLdaProperty(s.span, k_value);
         }
@@ -6893,8 +6642,7 @@ pub const Compiler = struct {
             const r_val = try self.reserveTemp();
             const binding = self.scope.?.resolve(bind_name) orelse return error.UnresolvedReference;
             try self.emitLoadBinding(binding, bind_span);
-            try self.builder.emitOp(.star, bind_span);
-            try self.builder.emitU8(r_val);
+            try self.builder.emitStoreReg(bind_span, r_val);
             try self.builder.emitOp(.register_using, bind_span);
             try self.builder.emitU8(r_dispose_stack);
             try self.builder.emitU8(r_val);
@@ -6981,8 +6729,7 @@ pub const Compiler = struct {
             // op's contract), then rethrow.
             const r_caught = try self.reserveTemp();
             defer self.releaseTemp();
-            try self.builder.emitOp(.star, s.span);
-            try self.builder.emitU8(r_caught);
+            try self.builder.emitStoreReg(s.span, r_caught);
             // §13.2.4.6 — dispose any per-iter `using` resources
             // BEFORE iter_close so SuppressedError-wrapping fires
             // on the in-flight throw. `dispose_stack` in throw-mode
@@ -6990,8 +6737,7 @@ pub const Compiler = struct {
             // and writes the outgoing (possibly SuppressedError-
             // wrapped) throw back to acc.
             if (pushed_dispose_finally) {
-                try self.builder.emitOp(.ldar, s.span);
-                try self.builder.emitU8(r_caught);
+                try self.builder.emitLoadReg(s.span, r_caught);
                 const throw_dispose_op: Op = if (is_await_using) .dispose_stack_async else .dispose_stack;
                 try self.builder.emitOp(throw_dispose_op, s.span);
                 try self.builder.emitU8(r_dispose_stack);
@@ -7005,13 +6751,11 @@ pub const Compiler = struct {
                     // here). Either way, after this point acc
                     // holds either undefined (restore) or the
                     // wrapped throw (already in flight).
-                    try self.builder.emitOp(.ldar, s.span);
-                    try self.builder.emitU8(r_caught);
+                    try self.builder.emitLoadReg(s.span, r_caught);
                 } else {
                     // Sync dispose returns the (possibly wrapped)
                     // throw in acc; save back to r_caught.
-                    try self.builder.emitOp(.star, s.span);
-                    try self.builder.emitU8(r_caught);
+                    try self.builder.emitStoreReg(s.span, r_caught);
                 }
             }
             try self.builder.emitOp(.iter_close, s.span);
@@ -7019,8 +6763,7 @@ pub const Compiler = struct {
             // §7.4.6 step 7 — original throw wins; swallow any inner
             // throw from `return()` and skip the non-Object check.
             try self.builder.emitU8(1);
-            try self.builder.emitOp(.ldar, s.span);
-            try self.builder.emitU8(r_caught);
+            try self.builder.emitLoadReg(s.span, r_caught);
             try self.builder.emitOp(.throw_, s.span);
             const after_handler_pc = self.builder.here();
             try self.builder.patchI16(skip_handler_patch, after_handler_pc);
@@ -7091,14 +6834,12 @@ pub const Compiler = struct {
     fn compileForOfMemberAssign(self: *Compiler, m: ast.expression.MemberExpr, span: Span) CompileError!void {
         const r_value = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_value);
+        try self.builder.emitStoreReg(span, r_value);
 
         try self.compileExpression(m.object);
         const r_obj = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_obj);
+        try self.builder.emitStoreReg(span, r_obj);
 
         switch (m.property) {
             .ident => |kspan| {
@@ -7115,8 +6856,7 @@ pub const Compiler = struct {
                     const decoded = try self.decodeIdentifierName(raw[1..]);
                     const mangled = try self.manglePrivateRef(decoded);
                     const k = try self.internString(mangled);
-                    try self.builder.emitOp(.ldar, span);
-                    try self.builder.emitU8(r_value);
+                    try self.builder.emitLoadReg(span, r_value);
                     try self.builder.emitOp(.sta_private, span);
                     try self.builder.emitU16(k);
                     try self.builder.emitU8(r_obj);
@@ -7124,18 +6864,15 @@ pub const Compiler = struct {
                 }
                 const key = try self.decodeIdentifierName(raw);
                 const k = try self.internString(key);
-                try self.builder.emitOp(.ldar, span);
-                try self.builder.emitU8(r_value);
+                try self.builder.emitLoadReg(span, r_value);
                 try self.builder.emitStaProperty(span, k, r_obj);
             },
             .computed => |key_expr| {
                 try self.compileExpression(key_expr);
                 const r_key = try self.reserveTemp();
                 defer self.releaseTemp();
-                try self.builder.emitOp(.star, span);
-                try self.builder.emitU8(r_key);
-                try self.builder.emitOp(.ldar, span);
-                try self.builder.emitU8(r_value);
+                try self.builder.emitStoreReg(span, r_key);
+                try self.builder.emitLoadReg(span, r_value);
                 try self.builder.emitOp(.sta_computed, span);
                 try self.builder.emitU8(r_obj);
                 try self.builder.emitU8(r_key);
@@ -7173,8 +6910,7 @@ pub const Compiler = struct {
         try self.compileExpression(&s.discriminant);
         const r_disc = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, s.span);
-        try self.builder.emitU8(r_disc);
+        try self.builder.emitStoreReg(s.span, r_disc);
 
         // §13.12.9 CaseBlockEvaluation step 1 — "Let V be undefined."
         // The switch accumulates its completion value starting from
@@ -7193,8 +6929,7 @@ pub const Compiler = struct {
         // the completion register.
         if (self.completion_reg) |r| {
             try self.builder.emitOp(.lda_undefined, s.span);
-            try self.builder.emitOp(.star, s.span);
-            try self.builder.emitU8(r);
+            try self.builder.emitStoreReg(s.span, r);
         }
 
         // §14.12.3 — the CaseBlock gets a fresh DeclarativeEnvironment
@@ -7415,11 +7150,9 @@ pub const Compiler = struct {
             const inline_start = self.builder.here();
             const r_save = try self.reserveTemp();
             defer self.releaseTemp();
-            try self.builder.emitOp(.star, s.span);
-            try self.builder.emitU8(r_save);
+            try self.builder.emitStoreReg(s.span, r_save);
             try self.emitFinalliesUntil(null, s.span);
-            try self.builder.emitOp(.ldar, s.span);
-            try self.builder.emitU8(r_save);
+            try self.builder.emitLoadReg(s.span, r_save);
             const inline_end = self.builder.here();
             try self.recordInlineFinallyRange(null, inline_start, inline_end);
         }
@@ -7574,8 +7307,7 @@ pub const Compiler = struct {
             const r = try self.reserveTemp();
             reserved_count += 1;
             r_heritage = r;
-            try self.builder.emitOp(.star, span);
-            try self.builder.emitU8(r);
+            try self.builder.emitStoreReg(span, r);
         }
 
         // Reserve a contiguous run of temps for the key block.
@@ -7597,15 +7329,13 @@ pub const Compiler = struct {
             .method => |m| if (m.key == .computed) {
                 try self.compileExpression(m.key.computed);
                 try self.builder.emitOp(.to_property_key, m.span);
-                try self.builder.emitOp(.star, m.span);
-                try self.builder.emitU8(@intCast(r_keys_base + next_idx));
+                try self.builder.emitStoreReg(m.span, @intCast(r_keys_base + next_idx));
                 next_idx += 1;
             },
             .field => |fd| if (fd.key == .computed) {
                 try self.compileExpression(fd.key.computed);
                 try self.builder.emitOp(.to_property_key, fd.span);
-                try self.builder.emitOp(.star, fd.span);
-                try self.builder.emitU8(@intCast(r_keys_base + next_idx));
+                try self.builder.emitStoreReg(fd.span, @intCast(r_keys_base + next_idx));
                 next_idx += 1;
             },
             .static_block => {},
@@ -7613,8 +7343,7 @@ pub const Compiler = struct {
         std.debug.assert(next_idx == key_count);
 
         if (r_heritage) |rh| {
-            try self.builder.emitOp(.ldar, span);
-            try self.builder.emitU8(rh);
+            try self.builder.emitLoadReg(span, rh);
         }
         try self.builder.emitOp(.make_class, span);
         try self.builder.emitU16(template_idx);
@@ -9210,10 +8939,8 @@ pub const Compiler = struct {
         const handler_pc = self.builder.here();
         const r_caught = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_caught);
-        try self.builder.emitOp(.ldar, span);
-        try self.builder.emitU8(r_caught);
+        try self.builder.emitStoreReg(span, r_caught);
+        try self.builder.emitLoadReg(span, r_caught);
         try self.builder.emitOp(dispose_op, span);
         try self.builder.emitU8(r_stack);
         try self.builder.emitU8(1); // mode 1 — throw completion
@@ -9229,8 +8956,7 @@ pub const Compiler = struct {
             // r_caught so `throw_` re-emits the original. A
             // disposer-thrown SuppressedError surfaced via
             // await's reject path → already lives in `acc`.
-            try self.builder.emitOp(.ldar, span);
-            try self.builder.emitU8(r_caught);
+            try self.builder.emitLoadReg(span, r_caught);
         }
         try self.builder.emitOp(.throw_, span);
 
@@ -9360,8 +9086,7 @@ pub const Compiler = struct {
         });
         // §13.3.1 — seed the TDZ sentinel.
         try self.builder.emitOp(.lda_hole, span);
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(reg);
+        try self.builder.emitStoreReg(span, reg);
     }
 
     /// §14.3.2 — `var` register promotion: function-scoped, no TDZ
@@ -9383,8 +9108,7 @@ pub const Compiler = struct {
             .register_tdz = false,
         });
         try self.builder.emitOp(.lda_undefined, span);
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(reg);
+        try self.builder.emitStoreReg(span, reg);
     }
 
     /// Close a register-promoted binding's §13.3.1 TDZ window once
@@ -9775,8 +9499,7 @@ pub const Compiler = struct {
         try self.builder.emitLdaGlobal(span, k_type_error);
         const r_callee = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_callee);
+        try self.builder.emitStoreReg(span, r_callee);
 
         // Build "Cannot redeclare non-configurable global '<name>'".
         // The phrasing pairs `Cannot redeclare` (V8 / SpiderMonkey
@@ -9793,8 +9516,7 @@ pub const Compiler = struct {
         try self.builder.emitU16(k_msg);
         const r_msg = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_msg);
+        try self.builder.emitStoreReg(span, r_msg);
 
         try self.builder.emitNewCall(span, r_callee, 1);
         try self.builder.emitOp(.throw_, span);
@@ -10181,8 +9903,7 @@ pub const Compiler = struct {
                         const r_value = try self.reserveTemp();
                         defer self.releaseTemp();
                         try self.emitLoadBinding(binding, d.span);
-                        try self.builder.emitOp(.star, d.span);
-                        try self.builder.emitU8(r_value);
+                        try self.builder.emitStoreReg(d.span, r_value);
                         try self.builder.emitOp(.register_using, d.span);
                         try self.builder.emitU8(r_stack);
                         try self.builder.emitU8(r_value);
@@ -10235,8 +9956,7 @@ pub const Compiler = struct {
     fn compileDestructure(self: *Compiler, target: ast.statement.BindingTarget, is_init: bool) CompileError!void {
         const r_src = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, target.span());
-        try self.builder.emitU8(r_src);
+        try self.builder.emitStoreReg(target.span(), r_src);
 
         switch (target) {
             .identifier => |id| {
@@ -10244,8 +9964,7 @@ pub const Compiler = struct {
                 // a plain ident name have already taken the direct
                 // sta_env path above. §12.7 — bind by StringValue.
                 const name = try self.bindingName(id.span);
-                try self.builder.emitOp(.ldar, id.span);
-                try self.builder.emitU8(r_src);
+                try self.builder.emitLoadReg(id.span, r_src);
                 try self.assignToBinding(name, id.span, is_init);
             },
             .array => |arr_pat| {
@@ -10255,13 +9974,11 @@ pub const Compiler = struct {
                 // result, or `undefined` on done), collect any rest
                 // through repeated `iter_step`, and close the iter
                 // afterwards if it didn't fully drain (§7.4.10).
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_src);
+                try self.builder.emitLoadReg(target.span(), r_src);
                 try self.builder.emitOp(.iter_open, target.span());
                 const r_iter = try self.reserveTemp();
                 defer self.releaseTemp();
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_iter);
+                try self.builder.emitStoreReg(target.span(), r_iter);
                 const r_done = try self.reserveTemp();
                 defer self.releaseTemp();
 
@@ -10291,12 +10008,9 @@ pub const Compiler = struct {
                     const r_idx = try self.reserveTemp();
                     defer self.releaseTemp();
                     try self.builder.emitOp(.make_array, target.span());
-                    try self.builder.emitOp(.star, target.span());
-                    try self.builder.emitU8(r_rest);
-                    try self.builder.emitOp(.lda_smi, target.span());
-                    try self.builder.emitI32(0);
-                    try self.builder.emitOp(.star, target.span());
-                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitStoreReg(target.span(), r_rest);
+                    try self.builder.emitLoadSmi(target.span(), 0);
+                    try self.builder.emitStoreReg(target.span(), r_idx);
 
                     const r_val = try self.reserveTemp();
                     defer self.releaseTemp();
@@ -10306,27 +10020,22 @@ pub const Compiler = struct {
                     try self.builder.emitU8(r_done);
                     // Snapshot the stepped value — the `ldar r_done`
                     // below clobbers `acc`.
-                    try self.builder.emitOp(.star, target.span());
-                    try self.builder.emitU8(r_val);
+                    try self.builder.emitStoreReg(target.span(), r_val);
                     // if (r_done) jmp loop_end
-                    try self.builder.emitOp(.ldar, target.span());
-                    try self.builder.emitU8(r_done);
+                    try self.builder.emitLoadReg(target.span(), r_done);
                     try self.builder.emitOp(.jmp_if_true, target.span());
                     const exit_patch = self.builder.here();
                     try self.builder.emitI16(0);
                     // rest[idx] = value
-                    try self.builder.emitOp(.ldar, target.span());
-                    try self.builder.emitU8(r_val);
+                    try self.builder.emitLoadReg(target.span(), r_val);
                     try self.builder.emitOp(.sta_computed, target.span());
                     try self.builder.emitU8(r_rest);
                     try self.builder.emitU8(r_idx);
                     // idx += 1 — `add r` is `acc = registers[r] + acc`.
-                    try self.builder.emitOp(.lda_smi, target.span());
-                    try self.builder.emitI32(1);
+                    try self.builder.emitLoadSmi(target.span(), 1);
                     try self.builder.emitOp(.add, target.span());
                     try self.builder.emitU8(r_idx);
-                    try self.builder.emitOp(.star, target.span());
-                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitStoreReg(target.span(), r_idx);
                     try self.builder.emitOp(.jmp, target.span());
                     const back_patch = self.builder.here();
                     try self.builder.emitI16(0);
@@ -10335,8 +10044,7 @@ pub const Compiler = struct {
                     try self.builder.patchI16(exit_patch, exit_target);
 
                     // rest array → leaf
-                    try self.builder.emitOp(.ldar, target.span());
-                    try self.builder.emitU8(r_rest);
+                    try self.builder.emitLoadReg(target.span(), r_rest);
                     try self.assignPatternLeaf(rest_target.*, is_init);
                 } else {
                     // §7.4.10 IteratorClose — if the iter is not yet
@@ -10354,8 +10062,7 @@ pub const Compiler = struct {
                 // pattern starts with RequireObjectCoercible on the
                 // source. `const {} = null` must throw TypeError before
                 // any (zero) property reads happen.
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_src);
+                try self.builder.emitLoadReg(target.span(), r_src);
                 try self.builder.emitOp(.require_object_coercible, target.span());
 
                 // §14.3.3.4 RestBindingInitialization — when the
@@ -10371,11 +10078,9 @@ pub const Compiler = struct {
                 defer if (r_excl_opt != null) self.releaseTemp();
                 if (r_excl_opt) |r_excl| {
                     try self.builder.emitOp(.make_array, target.span());
-                    try self.builder.emitOp(.star, target.span());
-                    try self.builder.emitU8(r_excl);
+                    try self.builder.emitStoreReg(target.span(), r_excl);
                     const k_length = try self.internString("length");
-                    try self.builder.emitOp(.lda_smi, target.span());
-                    try self.builder.emitI32(@intCast(obj_pat.properties.len));
+                    try self.builder.emitLoadSmi(target.span(), @intCast(obj_pat.properties.len));
                     try self.builder.emitStaProperty(target.span(), k_length, r_excl);
                 }
 
@@ -10393,24 +10098,21 @@ pub const Compiler = struct {
                         try self.compileExpression(prop.key.computed);
                         try self.builder.emitOp(.to_property_key, prop.span);
                         const kr = try self.reserveTemp();
-                        try self.builder.emitOp(.star, prop.span);
-                        try self.builder.emitU8(kr);
+                        try self.builder.emitStoreReg(prop.span, kr);
                         // Pin the post-ToPropertyKey value into the rest
                         // exclusion list. `object_rest_from` honours
                         // string entries; a symbol key is harmless (a
                         // symbol-keyed property is excluded by it and
                         // matches by the symbol's `prop_key`).
                         if (r_excl_opt) |r_excl| {
-                            try self.builder.emitOp(.ldar, prop.span);
-                            try self.builder.emitU8(kr);
+                            try self.builder.emitLoadReg(prop.span, kr);
                             var ibuf: [16]u8 = undefined;
                             const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
                             const ik = try self.internString(islice);
                             try self.builder.emitStaProperty(prop.span, ik, r_excl);
                             excl_idx += 1;
                         }
-                        try self.builder.emitOp(.ldar, prop.span);
-                        try self.builder.emitU8(kr);
+                        try self.builder.emitLoadReg(prop.span, kr);
                         try self.builder.emitOp(.lda_computed, prop.span);
                         try self.builder.emitU8(r_src);
                         self.releaseTemp(); // kr
@@ -10457,8 +10159,7 @@ pub const Compiler = struct {
                         try self.builder.emitStaProperty(prop.span, ik, r_excl);
                         excl_idx += 1;
                     }
-                    try self.builder.emitOp(.ldar, prop.span);
-                    try self.builder.emitU8(r_src);
+                    try self.builder.emitLoadReg(prop.span, r_src);
                     try self.builder.emitLdaProperty(prop.span, k);
                     try self.applyDefaultIfNeeded(prop.value);
                     try self.assignPatternLeaf(prop.value.target, is_init);
@@ -10486,8 +10187,7 @@ pub const Compiler = struct {
     fn compileAssignmentPattern(self: *Compiler, target: ast.expression.Expression) CompileError!void {
         const r_src = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, target.span());
-        try self.builder.emitU8(r_src);
+        try self.builder.emitStoreReg(target.span(), r_src);
 
         switch (target) {
             .array_literal => |al| {
@@ -10507,13 +10207,11 @@ pub const Compiler = struct {
                     }
                 }
 
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_src);
+                try self.builder.emitLoadReg(target.span(), r_src);
                 try self.builder.emitOp(.iter_open, target.span());
                 const r_iter = try self.reserveTemp();
                 defer self.releaseTemp();
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_iter);
+                try self.builder.emitStoreReg(target.span(), r_iter);
                 const r_done = try self.reserveTemp();
                 defer self.releaseTemp();
 
@@ -10578,35 +10276,27 @@ pub const Compiler = struct {
                     const r_val = try self.reserveTemp();
                     defer self.releaseTemp();
                     try self.builder.emitOp(.make_array, target.span());
-                    try self.builder.emitOp(.star, target.span());
-                    try self.builder.emitU8(r_rest);
-                    try self.builder.emitOp(.lda_smi, target.span());
-                    try self.builder.emitI32(0);
-                    try self.builder.emitOp(.star, target.span());
-                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitStoreReg(target.span(), r_rest);
+                    try self.builder.emitLoadSmi(target.span(), 0);
+                    try self.builder.emitStoreReg(target.span(), r_idx);
 
                     const loop_start = self.builder.here();
                     try self.builder.emitOp(.iter_step, target.span());
                     try self.builder.emitU8(r_iter);
                     try self.builder.emitU8(r_done);
-                    try self.builder.emitOp(.star, target.span());
-                    try self.builder.emitU8(r_val);
-                    try self.builder.emitOp(.ldar, target.span());
-                    try self.builder.emitU8(r_done);
+                    try self.builder.emitStoreReg(target.span(), r_val);
+                    try self.builder.emitLoadReg(target.span(), r_done);
                     try self.builder.emitOp(.jmp_if_true, target.span());
                     const exit_patch = self.builder.here();
                     try self.builder.emitI16(0);
-                    try self.builder.emitOp(.ldar, target.span());
-                    try self.builder.emitU8(r_val);
+                    try self.builder.emitLoadReg(target.span(), r_val);
                     try self.builder.emitOp(.sta_computed, target.span());
                     try self.builder.emitU8(r_rest);
                     try self.builder.emitU8(r_idx);
-                    try self.builder.emitOp(.lda_smi, target.span());
-                    try self.builder.emitI32(1);
+                    try self.builder.emitLoadSmi(target.span(), 1);
                     try self.builder.emitOp(.add, target.span());
                     try self.builder.emitU8(r_idx);
-                    try self.builder.emitOp(.star, target.span());
-                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitStoreReg(target.span(), r_idx);
                     try self.builder.emitOp(.jmp, target.span());
                     const back_patch = self.builder.here();
                     try self.builder.emitI16(0);
@@ -10614,8 +10304,7 @@ pub const Compiler = struct {
                     const exit_target = self.builder.here();
                     try self.builder.patchI16(exit_patch, exit_target);
 
-                    try self.builder.emitOp(.ldar, target.span());
-                    try self.builder.emitU8(r_rest);
+                    try self.builder.emitLoadReg(target.span(), r_rest);
                     if (rest_is_pattern) {
                         try self.assignAssignmentPatternLeaf(arg.*);
                     } else {
@@ -10665,25 +10354,21 @@ pub const Compiler = struct {
 
                 const throw_handler_pc = self.builder.here();
                 const r_caught_throw = try self.reserveTemp();
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_caught_throw);
+                try self.builder.emitStoreReg(target.span(), r_caught_throw);
                 try self.builder.emitOp(.iter_close, target.span());
                 try self.builder.emitU8(r_iter);
                 try self.builder.emitU8(1);
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_caught_throw);
+                try self.builder.emitLoadReg(target.span(), r_caught_throw);
                 try self.builder.emitOp(.throw_, target.span());
                 self.releaseTemp();
 
                 const return_handler_pc = self.builder.here();
                 const r_caught_ret = try self.reserveTemp();
-                try self.builder.emitOp(.star, target.span());
-                try self.builder.emitU8(r_caught_ret);
+                try self.builder.emitStoreReg(target.span(), r_caught_ret);
                 try self.builder.emitOp(.iter_close, target.span());
                 try self.builder.emitU8(r_iter);
                 try self.builder.emitU8(0);
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_caught_ret);
+                try self.builder.emitLoadReg(target.span(), r_caught_ret);
                 try self.builder.emitOp(.throw_, target.span());
                 self.releaseTemp();
 
@@ -10708,8 +10393,7 @@ pub const Compiler = struct {
                 // requires the source be ToObject-coercible. `({} = null)`
                 // throws TypeError; emit the guard before any property
                 // reads (and before the empty-pattern early exit).
-                try self.builder.emitOp(.ldar, target.span());
-                try self.builder.emitU8(r_src);
+                try self.builder.emitLoadReg(target.span(), r_src);
                 try self.builder.emitOp(.require_object_coercible, target.span());
 
                 // Pre-allocate the rest exclusion array when the pattern
@@ -10735,11 +10419,9 @@ pub const Compiler = struct {
                 defer if (r_excl_opt != null) self.releaseTemp();
                 if (r_excl_opt) |r_excl| {
                     try self.builder.emitOp(.make_array, rest_span);
-                    try self.builder.emitOp(.star, rest_span);
-                    try self.builder.emitU8(r_excl);
+                    try self.builder.emitStoreReg(rest_span, r_excl);
                     const k_length = try self.internString("length");
-                    try self.builder.emitOp(.lda_smi, rest_span);
-                    try self.builder.emitI32(bound_count);
+                    try self.builder.emitLoadSmi(rest_span, bound_count);
                     try self.builder.emitStaProperty(rest_span, k_length, r_excl);
                 }
 
@@ -10763,8 +10445,7 @@ pub const Compiler = struct {
                             try self.compileExpression(op.key.computed);
                             try self.builder.emitOp(.to_property_key, op.span);
                             const r = try self.reserveTemp();
-                            try self.builder.emitOp(.star, op.span);
-                            try self.builder.emitU8(r);
+                            try self.builder.emitStoreReg(op.span, r);
                             src_key_r = r;
                             // Pin the computed key (its post-ToPropertyKey
                             // value) into the rest exclusion list. The
@@ -10774,8 +10455,7 @@ pub const Compiler = struct {
                             // harmless (the matching property won't be
                             // copied either).
                             if (r_excl_opt) |r_excl| {
-                                try self.builder.emitOp(.ldar, op.span);
-                                try self.builder.emitU8(r);
+                                try self.builder.emitLoadReg(op.span, r);
                                 var ibuf: [16]u8 = undefined;
                                 const islice = std.fmt.bufPrint(&ibuf, "{d}", .{excl_idx}) catch unreachable;
                                 const ik = try self.internString(islice);
@@ -10810,8 +10490,7 @@ pub const Compiler = struct {
                         const prepared = try self.prepareAssignmentLeaf(leaf_target);
                         if (src_key_r) |kr| {
                             // step 2 — GetV(value, propertyName).
-                            try self.builder.emitOp(.ldar, op.span);
-                            try self.builder.emitU8(kr);
+                            try self.builder.emitLoadReg(op.span, kr);
                             try self.builder.emitOp(.lda_computed, op.span);
                             try self.builder.emitU8(r_src);
                             try self.assignAssignmentPatternElemPrepared(op.value, prepared);
@@ -10821,8 +10500,7 @@ pub const Compiler = struct {
                         }
                         const key_slice = try self.assignmentPatternKey(op.key);
                         const k = try self.internString(key_slice);
-                        try self.builder.emitOp(.ldar, op.span);
-                        try self.builder.emitU8(r_src);
+                        try self.builder.emitLoadReg(op.span, r_src);
                         try self.builder.emitLdaProperty(op.span, k);
                         // Shorthand `{a}` is target `a` (assign back to a).
                         // `{a = 1}` is shorthand with default — the parser
@@ -10854,8 +10532,7 @@ pub const Compiler = struct {
         // (expression context) reads `acc` for the assignment-expression
         // result, so restore it here. Statement / for-of callers
         // overwrite `acc` immediately and don't care.
-        try self.builder.emitOp(.ldar, target.span());
-        try self.builder.emitU8(r_src);
+        try self.builder.emitLoadReg(target.span(), r_src);
     }
 
     /// Assignment-pattern element handling. The element AST is
@@ -10931,8 +10608,7 @@ pub const Compiler = struct {
                 // the receiver before anything else.
                 try self.compileExpression(m.object);
                 const r_obj = try self.reserveTemp();
-                try self.builder.emitOp(.star, m.span);
-                try self.builder.emitU8(r_obj);
+                try self.builder.emitStoreReg(m.span, r_obj);
                 switch (m.property) {
                     .ident => |kspan| {
                         const raw = self.source[kspan.start..kspan.end];
@@ -10958,8 +10634,7 @@ pub const Compiler = struct {
                         // as part of step 1. Stash before source read.
                         try self.compileExpression(key_expr);
                         const r_key = try self.reserveTemp();
-                        try self.builder.emitOp(.star, m.span);
-                        try self.builder.emitU8(r_key);
+                        try self.builder.emitStoreReg(m.span, r_key);
                         return .{ .member = .{ .span = m.span, .r_obj = r_obj, .r_key = r_key, .key = .computed } };
                     },
                 }
@@ -10980,10 +10655,8 @@ pub const Compiler = struct {
                 // value in `acc`).
                 const r_value = try self.reserveTemp();
                 defer self.releaseTemp();
-                try self.builder.emitOp(.star, pm.span);
-                try self.builder.emitU8(r_value);
-                try self.builder.emitOp(.ldar, pm.span);
-                try self.builder.emitU8(r_value);
+                try self.builder.emitStoreReg(pm.span, r_value);
+                try self.builder.emitLoadReg(pm.span, r_value);
                 switch (pm.key) {
                     .name => |k| {
                         try self.builder.emitStaProperty(pm.span, k, pm.r_obj);
@@ -11094,14 +10767,12 @@ pub const Compiler = struct {
     fn assignToMember(self: *Compiler, m: ast.expression.MemberExpr, span: Span) CompileError!void {
         const r_value = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_value);
+        try self.builder.emitStoreReg(span, r_value);
 
         try self.compileExpression(m.object);
         const r_obj = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_obj);
+        try self.builder.emitStoreReg(span, r_obj);
 
         switch (m.property) {
             .ident => |kspan| {
@@ -11117,8 +10788,7 @@ pub const Compiler = struct {
                     const decoded = try self.decodeIdentifierName(raw[1..]);
                     const mangled = try self.manglePrivateRef(decoded);
                     const k = try self.internString(mangled);
-                    try self.builder.emitOp(.ldar, span);
-                    try self.builder.emitU8(r_value);
+                    try self.builder.emitLoadReg(span, r_value);
                     try self.builder.emitOp(.sta_private, span);
                     try self.builder.emitU16(k);
                     try self.builder.emitU8(r_obj);
@@ -11126,18 +10796,15 @@ pub const Compiler = struct {
                 }
                 const key = try self.decodeIdentifierName(raw);
                 const k = try self.internString(key);
-                try self.builder.emitOp(.ldar, span);
-                try self.builder.emitU8(r_value);
+                try self.builder.emitLoadReg(span, r_value);
                 try self.builder.emitStaProperty(span, k, r_obj);
             },
             .computed => |key_expr| {
                 try self.compileExpression(key_expr);
                 const r_key = try self.reserveTemp();
                 defer self.releaseTemp();
-                try self.builder.emitOp(.star, span);
-                try self.builder.emitU8(r_key);
-                try self.builder.emitOp(.ldar, span);
-                try self.builder.emitU8(r_value);
+                try self.builder.emitStoreReg(span, r_key);
+                try self.builder.emitLoadReg(span, r_value);
                 try self.builder.emitOp(.sta_computed, span);
                 try self.builder.emitU8(r_obj);
                 try self.builder.emitU8(r_key);
@@ -11165,8 +10832,7 @@ pub const Compiler = struct {
     fn applyDefaultExprNamed(self: *Compiler, default_expr: *const ast.expression.Expression, span: Span, binding_name: ?[]const u8) CompileError!void {
         const r_val = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(r_val);
+        try self.builder.emitStoreReg(span, r_val);
 
         try self.builder.emitOp(.lda_undefined, span);
         try self.builder.emitOp(.strict_neq, span);
@@ -11186,8 +10852,7 @@ pub const Compiler = struct {
 
         const keep_target = self.builder.here();
         try self.builder.patchI16(keep_patch, keep_target);
-        try self.builder.emitOp(.ldar, span);
-        try self.builder.emitU8(r_val);
+        try self.builder.emitLoadReg(span, r_val);
 
         const end_target = self.builder.here();
         try self.builder.patchI16(end_patch, end_target);
@@ -11258,8 +10923,7 @@ pub const Compiler = struct {
                 return;
             }
             // Load the caller-supplied register into acc.
-            try self.builder.emitOp(.ldar, sp.span);
-            try self.builder.emitU8(i);
+            try self.builder.emitLoadReg(sp.span, i);
             // §15.2.4 step 8 — `function f(x = expr)`: when the
             // argument is `undefined`, evaluate `expr` (with the
             // already-bound earlier params visible) and use its
@@ -11275,8 +10939,7 @@ pub const Compiler = struct {
             // §15.2 Destructuring parameter — declare each leaf
             // binding, then walk the pattern over the arg in `acc`.
             try self.declarePatternBindings(sp.target, .let_);
-            try self.builder.emitOp(.ldar, sp.span);
-            try self.builder.emitU8(i);
+            try self.builder.emitLoadReg(sp.span, i);
             if (sp.default) |*default_expr| {
                 try self.applyDefaultExprNamed(default_expr, sp.span, null);
             }
@@ -11387,8 +11050,7 @@ pub const Compiler = struct {
         // eval statement list); null inside function bodies.
         if (self.completion_reg) |r| {
             try self.builder.emitOp(.lda_undefined, s.span);
-            try self.builder.emitOp(.star, s.span);
-            try self.builder.emitU8(r);
+            try self.builder.emitStoreReg(s.span, r);
         }
 
         try self.compileExpression(&s.test_);
@@ -11565,8 +11227,7 @@ pub const Compiler = struct {
     fn emitCompletionUndefined(self: *Compiler, span: Span) CompileError!void {
         const reg = self.completion_reg orelse return;
         try self.builder.emitOp(.lda_undefined, span);
-        try self.builder.emitOp(.star, span);
-        try self.builder.emitU8(reg);
+        try self.builder.emitStoreReg(span, reg);
     }
 
     fn compileWhile(self: *Compiler, s: ast.statement.WhileStmt) CompileError!void {
@@ -12471,17 +12132,13 @@ pub const Compiler = struct {
         errdefer if (bound_is_temp) self.releaseTemp();
 
         const init_span = init_expr.numeric_literal.span;
-        try self.builder.emitOp(.lda_smi, init_span);
-        try self.builder.emitI32(init_val);
-        try self.builder.emitOp(.star, init_span);
-        try self.builder.emitU8(r_counter);
+        try self.builder.emitLoadSmi(init_span, init_val);
+        try self.builder.emitStoreReg(init_span, r_counter);
 
         if (bound_is_temp) {
             const bound_span = bin.rhs.numeric_literal.span;
-            try self.builder.emitOp(.lda_smi, bound_span);
-            try self.builder.emitI32(bound_lit);
-            try self.builder.emitOp(.star, bound_span);
-            try self.builder.emitU8(r_bound);
+            try self.builder.emitLoadSmi(bound_span, bound_lit);
+            try self.builder.emitStoreReg(bound_span, r_bound);
         }
 
         // Open the loop's lexical scope and register `i` as a
@@ -12513,8 +12170,7 @@ pub const Compiler = struct {
         // reg < acc`, so we load `bound` into acc and pass
         // `r_counter` as the operand to get the spec-direction
         // comparison.
-        try self.builder.emitOp(.ldar, s.span);
-        try self.builder.emitU8(r_bound);
+        try self.builder.emitLoadReg(s.span, r_bound);
         try self.builder.emitOp(.lt, s.span);
         try self.builder.emitU8(r_counter);
         try self.builder.emitOp(.jmp_if_false, s.span);
@@ -12897,17 +12553,14 @@ pub const Compiler = struct {
         const handler_pc = self.builder.here();
         const r_caught = try self.reserveTemp();
         defer self.releaseTemp();
-        try self.builder.emitOp(.star, s.span);
-        try self.builder.emitU8(r_caught);
-        try self.builder.emitOp(.ldar, s.span);
-        try self.builder.emitU8(r_caught);
+        try self.builder.emitStoreReg(s.span, r_caught);
+        try self.builder.emitLoadReg(s.span, r_caught);
         try self.builder.emitOp(dispose_op, s.span);
         try self.builder.emitU8(r_stack);
         try self.builder.emitU8(1); // mode 1 — throw completion
         if (has_await) {
             try self.builder.emitOp(.await_, s.span);
-            try self.builder.emitOp(.ldar, s.span);
-            try self.builder.emitU8(r_caught);
+            try self.builder.emitLoadReg(s.span, r_caught);
         }
         try self.builder.emitOp(.throw_, s.span);
 
@@ -13179,16 +12832,14 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.lda_env, s.span);
                 try self.builder.emitU8(0);
                 try self.builder.emitU8(@intCast(i));
-                try self.builder.emitOp(.star, s.span);
-                try self.builder.emitU8(r);
+                try self.builder.emitStoreReg(s.span, r);
             }
             try self.builder.emitOp(.pop_env, s.span);
             try self.builder.emitOp(.make_environment, s.span);
             per_iter_size_patch_pre = self.builder.code.items.len;
             try self.builder.emitU8(0); // placeholder; patched below
             for (carry_regs.items, 0..) |r, i| {
-                try self.builder.emitOp(.ldar, s.span);
-                try self.builder.emitU8(r);
+                try self.builder.emitLoadReg(s.span, r);
                 try self.builder.emitOp(.sta_env, s.span);
                 try self.builder.emitU8(0);
                 try self.builder.emitU8(@intCast(i));
@@ -13235,8 +12886,7 @@ pub const Compiler = struct {
                 try self.builder.emitOp(.lda_env, s.span);
                 try self.builder.emitU8(0);
                 try self.builder.emitU8(@intCast(i));
-                try self.builder.emitOp(.star, s.span);
-                try self.builder.emitU8(r);
+                try self.builder.emitStoreReg(s.span, r);
             }
             // Pop current env and push a fresh one with the
             // carried-over values.
@@ -13245,8 +12895,7 @@ pub const Compiler = struct {
             per_iter_size_patch_2 = self.builder.code.items.len;
             try self.builder.emitU8(0); // placeholder; patched below
             for (carry_regs.items, 0..) |r, i| {
-                try self.builder.emitOp(.ldar, s.span);
-                try self.builder.emitU8(r);
+                try self.builder.emitLoadReg(s.span, r);
                 try self.builder.emitOp(.sta_env, s.span);
                 try self.builder.emitU8(0);
                 try self.builder.emitU8(@intCast(i));
@@ -13691,8 +13340,7 @@ pub const Compiler = struct {
         // script / eval statement list); null inside function bodies.
         if (self.completion_reg) |r| {
             try self.builder.emitOp(.lda_undefined, s.span);
-            try self.builder.emitOp(.star, s.span);
-            try self.builder.emitU8(r);
+            try self.builder.emitStoreReg(s.span, r);
         }
 
         const start_pc = self.builder.here();
@@ -13827,19 +13475,14 @@ pub const Compiler = struct {
             if (self.completion_reg) |cr| {
                 const r_block = try self.reserveTemp();
                 defer self.releaseTemp();
-                try self.builder.emitOp(.ldar, fb.span);
-                try self.builder.emitU8(cr);
-                try self.builder.emitOp(.star, fb.span);
-                try self.builder.emitU8(r_block);
+                try self.builder.emitLoadReg(fb.span, cr);
+                try self.builder.emitStoreReg(fb.span, r_block);
                 try self.builder.emitOp(.lda_undefined, fb.span);
-                try self.builder.emitOp(.star, fb.span);
-                try self.builder.emitU8(cr);
+                try self.builder.emitStoreReg(fb.span, cr);
                 try self.compileBlock(fb.body, fb.span);
                 // Normal fall-through: restore B (discard F's value).
-                try self.builder.emitOp(.ldar, fb.span);
-                try self.builder.emitU8(r_block);
-                try self.builder.emitOp(.star, fb.span);
-                try self.builder.emitU8(cr);
+                try self.builder.emitLoadReg(fb.span, r_block);
+                try self.builder.emitStoreReg(fb.span, cr);
             } else {
                 try self.compileBlock(fb.body, fb.span);
             }
@@ -14684,8 +14327,7 @@ fn compileScriptLikeChunk(
         // expression temps allocate above it.
         c.completion_reg = try c.reserveTemp();
         try c.builder.emitOp(.lda_undefined, start_span);
-        try c.builder.emitOp(.star, start_span);
-        try c.builder.emitU8(c.completion_reg.?);
+        try c.builder.emitStoreReg(start_span, c.completion_reg.?);
         // L4 Stage 2 — record the script top-level body so loop-body
         // block consts promote to registers (per-binding capture
         // check in compileBlock), the `ctor_array_build` script shape.
@@ -14728,8 +14370,7 @@ fn compileScriptLikeChunk(
     // stay. `accStillHoldsRegister` checks both.
     if (c.completion_reg) |r| {
         if (!c.builder.accStillHoldsRegister(r)) {
-            try c.builder.emitOp(.ldar, end_span);
-            try c.builder.emitU8(r);
+            try c.builder.emitLoadReg(end_span, r);
         }
     }
     try c.builder.emitOp(.return_, end_span);
@@ -15103,12 +14744,14 @@ test "compiler: member store o.x=v with register-bound receiver stores to the so
 
 test "compiler: trailing expression statement drops the redundant completion reload (Star r;Ldar r)" {
     // §16.1.6 — the script completion value is already in the
-    // accumulator from the last ExpressionStatement's `Star r`, so the
-    // epilogue's `Ldar r` is redundant. (Only the epilogue reads r0
-    // here, so its absence is unambiguous.)
+    // accumulator from the last ExpressionStatement's store to the
+    // completion register (r0, now the compact `Star0`), so the
+    // epilogue's reload is redundant. (Only the epilogue reads r0 here,
+    // so its absence is unambiguous.)
     const got = try dumpScript("Math.max(1,2);");
     defer testing.allocator.free(got);
-    try testing.expect(std.mem.indexOf(u8, got, "Star r0") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "Star0") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "Ldar0") == null);
     try testing.expect(std.mem.indexOf(u8, got, "Ldar r0") == null);
 }
 
@@ -15184,4 +14827,45 @@ test "compiler: a BigInt expression is never constant-folded" {
     const got = try dumpExpr("1n + 2n;");
     defer testing.allocator.free(got);
     try testing.expect(std.mem.indexOf(u8, got, "Add") != null);
+}
+
+test "compiler: low register indices use the compact operand-free Ldar0..3" {
+    // Register access — params land in r0..r3 and read via the
+    // operand-free `Ldar0..3` ops, not the 2-byte `Ldar rN` form.
+    const d = try dumpExpr("(function(a,b,c,d){ return d; })");
+    defer testing.allocator.free(d);
+    try testing.expect(std.mem.indexOf(u8, t0Of(d), "Ldar3") != null);
+    // The 2-byte general form (`Ldar r…`) must be gone for this low reg.
+    try testing.expect(std.mem.indexOf(u8, t0Of(d), "Ldar r") == null);
+
+    const a = try dumpExpr("(function(a){ return a; })");
+    defer testing.allocator.free(a);
+    try testing.expect(std.mem.indexOf(u8, t0Of(a), "Ldar0") != null);
+}
+
+test "compiler: storing to a low register uses the compact Star0..3" {
+    // A temp spill into a low slot uses the operand-free `Star0..3`.
+    const got = try dumpExpr("(function(a,b){ return (a-b) + (b-a); })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    const has_compact_star =
+        std.mem.indexOf(u8, t0, "Star0") != null or
+        std.mem.indexOf(u8, t0, "Star1") != null or
+        std.mem.indexOf(u8, t0, "Star2") != null or
+        std.mem.indexOf(u8, t0, "Star3") != null;
+    try testing.expect(has_compact_star);
+}
+
+test "compiler: the constants 0 and 1 use LdaZero / LdaOne" {
+    // V8 `LdaZero` / Hermes `LoadConstZero` — the two most common
+    // integer constants get operand-free loads (5 bytes → 1).
+    const z = try dumpExpr("0;");
+    defer testing.allocator.free(z);
+    try testing.expect(std.mem.indexOf(u8, z, "LdaZero") != null);
+    try testing.expect(std.mem.indexOf(u8, z, "LdaSmi") == null);
+
+    const o = try dumpExpr("1;");
+    defer testing.allocator.free(o);
+    try testing.expect(std.mem.indexOf(u8, o, "LdaOne") != null);
+    try testing.expect(std.mem.indexOf(u8, o, "LdaSmi") == null);
 }

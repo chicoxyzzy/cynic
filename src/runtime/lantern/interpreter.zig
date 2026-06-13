@@ -1217,6 +1217,26 @@ pub fn runFrames(
             acc = Value.hole_;
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
+        // Compact operand-free loads — the constant / register index is
+        // baked into the opcode. Semantics identical to the general form;
+        // the merged register arms recover the index as `tag - *_0` so the
+        // hot `.ldar` / `.star` / `.lda_smi` arms above stay untouched.
+        .lda_zero => {
+            acc = Value.fromInt32(0);
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
+        .lda_one => {
+            acc = Value.fromInt32(1);
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
+        .ldar_0, .ldar_1, .ldar_2, .ldar_3 => |t| {
+            acc = registers[@intFromEnum(t) - @intFromEnum(Op.ldar_0)];
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
+        .star_0, .star_1, .star_2, .star_3 => |t| {
+            registers[@intFromEnum(t) - @intFromEnum(Op.star_0)] = acc;
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
 
         // ── Peephole padding ────────────────────────────────────────
         // ── Arithmetic — `acc = reg <op> acc` ───────────────────────

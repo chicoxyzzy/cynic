@@ -758,9 +758,19 @@ pub const Builder = struct {
     ///      `if(x){}else{y}` completion-join case).
     pub fn accStillHoldsRegister(self: *const Builder, r: u8) bool {
         const start = self.last_op_start orelse return false;
-        if (@as(usize, start) + 2 != self.code.items.len) return false;
-        if (self.code.items[start] != @intFromEnum(Op.star) or
-            self.code.items[start + 1] != r) return false;
+        const items = self.code.items;
+        // The last instruction must be exactly the store of `r`, in
+        // either encoding: compact `Star0..3` (1 byte, register baked
+        // in) or the general 2-byte `Star r`. The `start + N == len`
+        // guard rejects a stale `last_op_start` (any wider op after).
+        const is_store_of_r = blk: {
+            if (r <= 3 and @as(usize, start) + 1 == items.len and
+                items[start] == @intFromEnum(Op.star_0) + r) break :blk true;
+            if (@as(usize, start) + 2 == items.len and
+                items[start] == @intFromEnum(Op.star) and items[start + 1] == r) break :blk true;
+            break :blk false;
+        };
+        if (!is_store_of_r) return false;
         return self.max_jump_target < self.here();
     }
 
@@ -808,6 +818,44 @@ pub const Builder = struct {
 
     pub fn emitU32(self: *Builder, x: u32) !void {
         try self.code.appendSlice(self.allocator, &std.mem.toBytes(x));
+    }
+
+    /// Emit a register load into the accumulator, choosing the compact
+    /// operand-free `Ldar0..3` form for the hot low slots (1 byte) and
+    /// falling back to the 2-byte `Ldar rN` otherwise. Semantics are
+    /// identical; the single choke point lets the compact encodings be
+    /// toggled in one place.
+    pub fn emitLoadReg(self: *Builder, span: Span, r: u8) !void {
+        if (r <= 3) {
+            try self.emitOp(@enumFromInt(@intFromEnum(Op.ldar_0) + r), span);
+        } else {
+            try self.emitOp(.ldar, span);
+            try self.emitU8(r);
+        }
+    }
+
+    /// Emit a store of the accumulator into a register, choosing the
+    /// compact `Star0..3` form for the hot low slots, else `Star rN`.
+    pub fn emitStoreReg(self: *Builder, span: Span, r: u8) !void {
+        if (r <= 3) {
+            try self.emitOp(@enumFromInt(@intFromEnum(Op.star_0) + r), span);
+        } else {
+            try self.emitOp(.star, span);
+            try self.emitU8(r);
+        }
+    }
+
+    /// Emit a Smi load, choosing the operand-free `LdaZero` / `LdaOne`
+    /// for the two most common constants (1 byte vs 5), else `LdaSmi`.
+    pub fn emitLoadSmi(self: *Builder, span: Span, v: i32) !void {
+        switch (v) {
+            0 => try self.emitOp(.lda_zero, span),
+            1 => try self.emitOp(.lda_one, span),
+            else => {
+                try self.emitOp(.lda_smi, span);
+                try self.emitI32(v);
+            },
+        }
     }
 
     /// Patch a previously-emitted i16 placeholder at `at` with the

@@ -52,6 +52,27 @@ pub const Op = enum(u8) {
     /// Load the TDZ Hole sentinel into acc. Block-entry init for
     /// every `let`/`const` binding (§13.3.1).
     lda_hole,
+    /// `[op]` — load the Smi `0` into acc (operand-free). The two most
+    /// frequent integer constants get a 1-byte load instead of the
+    /// 5-byte `lda_smi` (cf. V8 `LdaZero`, Hermes `LoadConstZero`).
+    lda_zero,
+    /// `[op]` — load the Smi `1` into acc (operand-free).
+    lda_one,
+    /// `[op]` — copy register N into acc, with the register index
+    /// (0..3) baked into the opcode (operand-free). Compact form of
+    /// `ldar rN` for the hottest low slots — params and the first
+    /// locals. MUST stay contiguous: the index is `op - ldar_0`.
+    ldar_0,
+    ldar_1,
+    ldar_2,
+    ldar_3,
+    /// `[op]` — copy acc into register N (0..3), index baked into the
+    /// opcode (operand-free). Compact form of `star rN`. MUST stay
+    /// contiguous: the index is `op - star_0`.
+    star_0,
+    star_1,
+    star_2,
+    star_3,
 
     // ── Arithmetic (acc = reg OP acc) ────────────────────────────────────
     /// `[op] [r:u8]` — acc = reg + acc. §13.7.3.
@@ -1195,6 +1216,17 @@ pub const Op = enum(u8) {
             .import_meta,
             .module_link_complete,
             .module_reexport_star,
+            // Compact operand-free loads/stores (index/constant in opcode).
+            .lda_zero,
+            .lda_one,
+            .ldar_0,
+            .ldar_1,
+            .ldar_2,
+            .ldar_3,
+            .star_0,
+            .star_1,
+            .star_2,
+            .star_3,
             => 0,
             .alloc_dispose_stack,
             => 1, // r_dst
@@ -1334,8 +1366,18 @@ pub const Op = enum(u8) {
             .lda_smi => "LdaSmi",
             .lda_constant => "LdaConstant",
             .lda_hole => "LdaHole",
+            .lda_zero => "LdaZero",
+            .lda_one => "LdaOne",
             .ldar => "Ldar",
+            .ldar_0 => "Ldar0",
+            .ldar_1 => "Ldar1",
+            .ldar_2 => "Ldar2",
+            .ldar_3 => "Ldar3",
             .star => "Star",
+            .star_0 => "Star0",
+            .star_1 => "Star1",
+            .star_2 => "Star2",
+            .star_3 => "Star3",
             .mov => "Mov",
             .add => "Add",
             .sub => "Sub",
