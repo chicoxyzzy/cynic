@@ -14,6 +14,8 @@ pub const disasm = @import("bytecode/disasm.zig");
 
 pub const liveness = @import("bytecode/liveness.zig");
 
+pub const regalloc = @import("bytecode/regalloc.zig");
+
 pub const scope = @import("bytecode/scope.zig");
 
 pub const compiler = @import("bytecode/compiler.zig");

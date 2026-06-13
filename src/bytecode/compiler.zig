@@ -67,6 +67,8 @@ const decodeStringContent = literals.decodeStringContent;
 // arithmetic / comparison routines so a folded constant is byte-
 // identical to evaluating the operator at runtime — see `tryFoldConstant`.
 const arith = @import("../runtime/lantern/arith.zig");
+// P1 — liveness-driven re-emitting passes run on the finalized chunk.
+const regalloc = @import("regalloc.zig");
 const normalizeTemplateLineTerminators = literals.normalizeTemplateLineTerminators;
 
 const arguments_scan = @import("arguments_scan.zig");
@@ -14381,6 +14383,7 @@ fn compileScriptLikeChunk(
     // nested function / class templates). Chunks are realm-
     // lifetime; pinning lets the GC skip walking the chunk
     // tree on every collect. See `Heap.pinChunk`.
+    _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
 }
@@ -14580,6 +14583,7 @@ pub fn compileModuleAsChunk(
     c.builder.is_async_module = c.module_has_top_level_await;
     var chunk = try c.finish();
     chunk.base_url = base_url;
+    _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
 }
@@ -14610,6 +14614,7 @@ pub fn compileExpressionAsChunk(
     try c.compileExpression(expr);
     try c.builder.emitOp(.return_, expr.span());
     var chunk = try c.finish();
+    _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
 }
@@ -14742,15 +14747,15 @@ test "compiler: member store o.x=v with register-bound receiver stores to the so
     try testing.expect(std.mem.indexOf(u8, t0, "Star ") == null);
 }
 
-test "compiler: trailing expression statement drops the redundant completion reload (Star r;Ldar r)" {
-    // §16.1.6 — the script completion value is already in the
-    // accumulator from the last ExpressionStatement's store to the
-    // completion register (r0, now the compact `Star0`), so the
-    // epilogue's reload is redundant. (Only the epilogue reads r0 here,
-    // so its absence is unambiguous.)
+test "compiler: a trailing statement's completion register traffic is eliminated" {
+    // §16.1.6 — the completion value is already in the accumulator after
+    // the call (Return yields acc), so the reload peephole drops the
+    // epilogue's `Ldar0`, and the liveness-driven dead-store pass (P1)
+    // then removes the now-dead `Star0`: no completion-register traffic
+    // survives — the body is just `…CallProperty; Return`.
     const got = try dumpScript("Math.max(1,2);");
     defer testing.allocator.free(got);
-    try testing.expect(std.mem.indexOf(u8, got, "Star0") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "Star0") == null);
     try testing.expect(std.mem.indexOf(u8, got, "Ldar0") == null);
     try testing.expect(std.mem.indexOf(u8, got, "Ldar r0") == null);
 }
@@ -14868,4 +14873,16 @@ test "compiler: the constants 0 and 1 use LdaZero / LdaOne" {
     defer testing.allocator.free(o);
     try testing.expect(std.mem.indexOf(u8, o, "LdaOne") != null);
     try testing.expect(std.mem.indexOf(u8, o, "LdaSmi") == null);
+}
+
+test "compiler: dead completion stores are eliminated end-to-end (P1)" {
+    // §16.1.6 — each statement stores its completion to r0, but Return
+    // yields the accumulator and the reload peephole drops the r0 reloads,
+    // so every `Star0` here is a dead store. The liveness-driven pass
+    // (wired into the compile pipeline) removes them; on the loop body
+    // that's one fewer dispatch per iteration. (No function/object ops in
+    // this script, so it is `fully_understood` and the pass runs.)
+    const got = try dumpScript("let s=0; for (let i=0;i<3;i++){ s=s+i; } s;");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "Star0") == null);
 }

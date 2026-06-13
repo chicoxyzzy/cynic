@@ -198,6 +198,49 @@ pub const Analysis = struct {
         return lo;
     }
 
+    /// Registers live at the program point immediately AFTER the
+    /// instruction at `off` (i.e. live-in of the next instruction).
+    /// Caller owns the returned set. Used to detect dead stores
+    /// (`Star rX` is dead iff `rX` ∉ liveAfter(off)) and interference.
+    pub fn liveAfter(self: *const Analysis, code: []const u8, off: u32) !std.DynamicBitSet {
+        const blk = self.blockOf(off);
+        var live = try std.DynamicBitSet.initEmpty(self.allocator, self.register_count);
+        live.setUnion(self.live_out[blk]);
+        const end: u32 = if (blk + 1 < self.leaders.len) self.leaders[blk + 1] else @intCast(code.len);
+        // Collect instruction offsets strictly after `off`, then apply the
+        // reverse transfer in reverse program order: starting from the
+        // block's live_out, `live = (live − writes) ∪ reads` per insn
+        // yields the live set just after `off`.
+        var insn: std.ArrayListUnmanaged(u32) = .empty;
+        defer insn.deinit(self.allocator);
+        var p: u32 = self.leaders[blk];
+        while (p < end) {
+            if (p > off) try insn.append(self.allocator, p);
+            const op: Op = @enumFromInt(code[p]);
+            p += 1 + Op.operandSize(op);
+        }
+        var idx: usize = insn.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            const at = insn.items[idx];
+            const op: Op = @enumFromInt(code[at]);
+            const e = effectOf(op, code, at);
+            if (e.write) |w| {
+                if (w < self.register_count) live.unset(w);
+            }
+            var ri: u8 = 0;
+            while (ri < e.n_reads) : (ri += 1) {
+                if (e.reads[ri] < self.register_count) live.set(e.reads[ri]);
+            }
+            if (e.win_len > 0) {
+                var w: u32 = e.win_base;
+                const wend = @as(u32, e.win_base) + e.win_len;
+                while (w < wend) : (w += 1) if (w < self.register_count) live.set(@intCast(w));
+            }
+        }
+        return live;
+    }
+
     pub fn deinit(self: *Analysis) void {
         self.allocator.free(self.leaders);
         self.reachable.deinit();
