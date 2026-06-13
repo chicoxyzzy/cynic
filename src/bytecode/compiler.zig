@@ -8201,8 +8201,13 @@ pub const Compiler = struct {
         try self.emitVarInits(span);
         for (body) |*s| if (s.* == .function_decl) try self.compileStatement(s);
         try self.compileFunctionBodyTail(body, span);
-        try self.builder.emitOp(.lda_undefined, span);
-        try self.builder.emitOp(.return_, span);
+        // §10.2.1.4 — append the implicit `return undefined` ONLY when
+        // the body can fall off the end. If it ends in return/throw/
+        // unconditional tail-call on every path, the slot is dead.
+        if (!self.builder.tailIsUnreachable()) {
+            try self.builder.emitOp(.lda_undefined, span);
+            try self.builder.emitOp(.return_, span);
+        }
 
         if (slot_count_patch) |p| {
             self.builder.code.items[p] = self.env_slot_count;
@@ -8448,8 +8453,16 @@ pub const Compiler = struct {
         self.body_register_safe = saved_body_register_safe;
         self.current_fn_body = saved_ctor_fn_body;
         self.current_fn_has_eval = saved_ctor_fn_has_eval;
-        try self.builder.emitOp(.lda_undefined, span);
-        try self.builder.emitOp(.return_, span);
+        // §10.2.1.4 / §10.2.2 — the implicit trailing return (a
+        // construct frame turns its undefined into `this`) is only
+        // reachable when the body can fall off the end; skip it when
+        // every path already returns/throws. A derived ctor that CAN
+        // fall through keeps it, so the synthetic return still runs the
+        // super-called `this` check.
+        if (!self.builder.tailIsUnreachable()) {
+            try self.builder.emitOp(.lda_undefined, span);
+            try self.builder.emitOp(.return_, span);
+        }
 
         if (slot_count_patch) |p| {
             self.builder.code.items[p] = self.env_slot_count;
@@ -8702,8 +8715,11 @@ pub const Compiler = struct {
         try self.emitVarInits(span);
         for (body_stmts) |*s| if (s.* == .function_decl) try self.compileStatement(s);
         try self.compileFunctionBodyTail(body_stmts, span);
-        try self.builder.emitOp(.lda_undefined, span);
-        try self.builder.emitOp(.return_, span);
+        // §10.2.1.4 — implicit `return undefined` only when reachable.
+        if (!self.builder.tailIsUnreachable()) {
+            try self.builder.emitOp(.lda_undefined, span);
+            try self.builder.emitOp(.return_, span);
+        }
 
         if (slot_count_patch) |p| {
             self.builder.code.items[p] = self.env_slot_count;
@@ -14222,8 +14238,12 @@ fn compileFunctionTemplateExtNamed(
             // try/finally so a `return` inside dispose-time fires
             // disposers on the way out.
             try self.compileFunctionBodyTail(stmts, span);
-            try self.builder.emitOp(.lda_undefined, span);
-            try self.builder.emitOp(.return_, span);
+            // §10.2.1.4 — implicit `return undefined` only when the
+            // block body can fall off the end.
+            if (!self.builder.tailIsUnreachable()) {
+                try self.builder.emitOp(.lda_undefined, span);
+                try self.builder.emitOp(.return_, span);
+            }
         },
         .expression => |e| {
             // §15.10.1 — ArrowFunction ConciseBody is in tail
@@ -14948,4 +14968,37 @@ test "compiler: ≤3-arg free calls fold argc into the opcode (CallN), >3 stay g
     defer testing.allocator.free(g4);
     try testing.expect(std.mem.indexOf(u8, g4, "Call ") != null); // generic for >3
     try testing.expect(std.mem.indexOf(u8, g4, "Call4") == null);
+}
+
+test "compiler: no dead LdaUndefined epilogue when the body can't fall through" {
+    // §10.2.1.4 — a body that ends in return/throw on every path leaves
+    // the trailing slot unreachable, so the synthetic `return undefined`
+    // is dead. `t0Of` scopes to the function template (the wrapper chunk
+    // legitimately seeds `undefined`). The function body itself contains
+    // no `LdaUndefined`, so its absence proves the epilogue was dropped.
+    const add = try dumpExpr("(function add(a,b){ return a+b; })");
+    defer testing.allocator.free(add);
+    try testing.expect(std.mem.indexOf(u8, t0Of(add), "LdaUndefined") == null);
+
+    const k = try dumpExpr("(function k(){ throw 1; })");
+    defer testing.allocator.free(k);
+    try testing.expect(std.mem.indexOf(u8, t0Of(k), "LdaUndefined") == null);
+
+    // All paths return (trailing unconditional return).
+    const n = try dumpExpr("(function n(x){ if (x) return 1; return 2; })");
+    defer testing.allocator.free(n);
+    try testing.expect(std.mem.indexOf(u8, t0Of(n), "LdaUndefined") == null);
+}
+
+test "compiler: epilogue is KEPT when the body can fall off the end" {
+    // §10.2.1.4 — the trailing position is reachable (the `if` with no
+    // else falls through), so the `LdaUndefined; Return` must stay.
+    const g = try dumpExpr("(function g(x){ if (x) return 1; })");
+    defer testing.allocator.free(g);
+    try testing.expect(std.mem.indexOf(u8, t0Of(g), "LdaUndefined") != null);
+
+    // Empty body falls through.
+    const e = try dumpExpr("(function e(){ })");
+    defer testing.allocator.free(e);
+    try testing.expect(std.mem.indexOf(u8, t0Of(e), "LdaUndefined") != null);
 }

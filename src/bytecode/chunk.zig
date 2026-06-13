@@ -764,6 +764,32 @@ pub const Builder = struct {
         return self.max_jump_target < self.here();
     }
 
+    /// True when the position after the last emitted instruction is
+    /// provably unreachable — control can't fall off the end. Two
+    /// conditions, both required:
+    ///   1. the last instruction is an UNCONDITIONAL control transfer
+    ///      (`return_` / `throw_` / `jmp` / a tail call), so control
+    ///      doesn't fall through into the next slot; and
+    ///   2. no jump targets that slot (`max_jump_target < here()`;
+    ///      every jump resolves through `patchI16`, backward/loop
+    ///      targets are always earlier), so nothing branches there.
+    /// Lets the compiler drop the synthetic `LdaUndefined; Return`
+    /// epilogue a function would otherwise always append. Conservative
+    /// by construction: a conditional terminator (`jmp_if_*`), a
+    /// non-terminator tail, OR any jump landing here all yield `false`,
+    /// so a function that CAN fall through keeps its epilogue (and
+    /// still returns undefined). An empty body (`last_op_start == null`)
+    /// is reachable → `false`.
+    pub fn tailIsUnreachable(self: *const Builder) bool {
+        const start = self.last_op_start orelse return false;
+        const op: Op = @enumFromInt(self.code.items[start]);
+        switch (op) {
+            .return_, .throw_, .jmp, .tail_call, .tail_call_method => {},
+            else => return false,
+        }
+        return self.max_jump_target < self.here();
+    }
+
     pub fn emitU8(self: *Builder, x: u8) !void {
         try self.code.append(self.allocator, x);
     }

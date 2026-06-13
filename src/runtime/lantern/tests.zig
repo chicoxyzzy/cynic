@@ -1239,6 +1239,39 @@ test "argc-calls: tail-call forms are untouched" {
     try expectScriptInt("'use strict'; function f(n,acc){ if(n===0) return acc; return f(n-1, acc+1); } f(100000, 0);", 100000);
 }
 
+// §10.2.1.4 — dropping the dead `return undefined` epilogue must never
+// change observable behaviour: a body that CAN fall off the end still
+// returns undefined; one that can't returns its value.
+test "epilogue: fall-through paths return undefined" {
+    try expectScriptString("typeof (function(){})();", "undefined"); // empty body
+    try expectScriptString("typeof (function(x){ if (x) return 1; })(0);", "undefined"); // if no else, false
+    try expectScriptInt("(function(x){ if (x) return 1; })(1);", 1); // taken path
+    try expectScriptString("typeof (function(){ for (let i=0;i<0;i++) return 1; })();", "undefined"); // loop body never runs
+    try expectScriptString("typeof (function(){ L: { break L; } })();", "undefined"); // labeled break to end
+}
+
+test "epilogue: terminated bodies still return their value" {
+    try expectScriptInt("(function(x){ if (x) return 1; else return 2; })(0);", 2); // all paths return
+    try expectScriptInt("(function(){ return 7; })();", 7);
+    try expectScriptInt("(function(){ try { throw 5; } catch (e) { return e; } })();", 5);
+}
+
+test "epilogue: switch without default can fall through (keeps undefined)" {
+    // No default → an unmatched discriminant falls off the end.
+    try expectScriptString("typeof (function(x){ switch (x) { case 1: return 1; } })(2);", "undefined");
+    // default present, all clauses return → terminated, returns the value.
+    try expectScriptInt("(function(x){ switch (x) { case 1: return 1; default: return 9; } })(2);", 9);
+}
+
+test "epilogue: finally can redirect a return (must not be dropped wrong)" {
+    // finally's completion overrides the try's — `return 2` wins.
+    try expectScriptInt("(function(){ try { return 1; } finally { return 2; } })();", 2);
+    // finally is normal → the try's `return 1` stands.
+    try expectScriptInt("(function(){ try { return 1; } finally { } })();", 1);
+    // try falls through, finally falls through → function falls off the end.
+    try expectScriptString("typeof (function(){ try { } finally { } })();", "undefined");
+}
+
 test "later: assigning new property" {
     try expectScriptInt("let o = {}; o.x = 99; o.x;", 99);
 }
