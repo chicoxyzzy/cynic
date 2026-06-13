@@ -3179,6 +3179,20 @@ pub const Compiler = struct {
                 } else {
                     const key_slice = try self.decodeIdentifierName(raw_slice);
                     const k = try self.internString(key_slice);
+                    // §13.3.2 — a root/leaf receiver already bound to a
+                    // register (a bare local / param / promoted var,
+                    // resolved without emitting any code) reads in
+                    // place via the register form, sparing the
+                    // redundant `Ldar` the accumulator form would emit.
+                    // Optional chaining needs the receiver in the
+                    // accumulator for the nullish short-circuit, so it
+                    // keeps the accumulator form.
+                    if (!m.optional) {
+                        if (self.tryRegisterBoundIdent(m.object.*)) |r_obj| {
+                            try self.builder.emitLdaPropertyReg(m.span, k, r_obj);
+                            return;
+                        }
+                    }
                     try self.compileExpression(m.object);
                     if (m.optional) try self.emitOptionalShortCircuit(m.span);
                     try self.builder.emitLdaProperty(m.span, k);
@@ -14780,4 +14794,32 @@ test "compiler: smoke — chunk has the leading MakeEnvironment" {
     try testing.expect(chunk.code.len >= 2);
     try testing.expectEqual(@intFromEnum(@import("op.zig").Op.make_environment), chunk.code[0]);
     try testing.expectEqual(@intFromEnum(@import("op.zig").Op.return_), chunk.code[chunk.code.len - 1]);
+}
+
+/// Compile `source` (one expression statement) and return its full
+/// recursive disassembly — nested function templates included, so a
+/// member access inside a function body is visible. Caller frees.
+fn dumpExpr(source: []const u8) ![]u8 {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), source, null);
+    const expr = program.body[0].expression.expression;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    var chunk = try compileExpressionAsChunk(testing.allocator, &realm, &expr, source);
+    defer chunk.deinit(testing.allocator);
+    return disasm.dump(testing.allocator, &chunk);
+}
+
+test "compiler: register-bound leaf receiver emits LdaPropertyReg, drops the redundant Ldar" {
+    // §13.3.2 — `o.x` where `o` is a bare register-bound binding
+    // (here the param) should use the register-receiver form, so the
+    // `Ldar o` the accumulator form emits before `LdaProperty`
+    // disappears. The lone access means the accumulator-form mnemonic
+    // ("LdaProperty " — the trailing space can't match
+    // "LdaPropertyReg") must be entirely absent afterward.
+    const got = try dumpExpr("(function(o){ return o.x; })");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "LdaPropertyReg") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "LdaProperty ") == null);
 }

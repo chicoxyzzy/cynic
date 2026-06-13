@@ -1104,6 +1104,61 @@ test "later: chained property reads" {
     try expectScriptInt("let o = {inner: {value: 7}}; o.inner.value;", 7);
 }
 
+// §10.1.8 OrdinaryGet — `lda_property_reg` register-receiver form.
+// These wrap the access in a function so the receiver is a
+// register-bound param (a top-level binding is a global slot, which
+// keeps the accumulator form); the value must be identical to the
+// accumulator form, only the receiver SOURCE differs.
+test "lda_property_reg: leaf read of a register-bound receiver" {
+    try expectScriptInt("(function(o){ return o.x; })({x: 42});", 42);
+}
+
+test "lda_property_reg: getter fires with `this` = the register receiver" {
+    // The getter reads `this.v`; `this` must be the param value, not
+    // the (seeded-then-overwritten) accumulator.
+    try expectScriptIntWithBuiltins(
+        "(function(rec){ return rec.x; })({ v: 9, get x(){ return this.v; } });",
+        9,
+    );
+}
+
+test "lda_property_reg: getter invocation order/count is unchanged" {
+    // Two reg-form reads → getter fires exactly twice, left to right.
+    try expectScriptStringWithBuiltins(
+        \\let n = 0;
+        \\let o = { get x(){ n = n + 1; return "" + n; } };
+        \\let r = (function(rec){ return rec.x + rec.x; })(o);
+        \\r + "/" + n;
+    , "12/2");
+}
+
+test "lda_property_reg: Proxy get trap fires once with the right receiver" {
+    try expectScriptStringWithBuiltins(
+        \\let calls = 0;
+        \\let p = new Proxy({ v: 3 }, {
+        \\  get(t, k, recv) { if (k === "x") { calls = calls + 1; return t.v + 1; } return t[k]; }
+        \\});
+        \\let res = (function(rec){ return rec.x; })(p);
+        \\"" + res + "/" + calls;
+    , "4/1");
+}
+
+test "lda_property_reg: chain o.a.b.c — only the first link is register-bound" {
+    // `o.a` uses the register form; `.b` / `.c` are chain
+    // continuations on the accumulator. Value unchanged.
+    try expectScriptInt("(function(o){ return o.a.b.c; })({a:{b:{c:11}}});", 11);
+}
+
+test "lda_property_reg: computed receiver foo().x stays on the accumulator form" {
+    try expectScriptInt("(function(){ return (function(){ return {x:8}; })().x; })();", 8);
+}
+
+test "lda_property_reg: string-primitive receiver via register form" {
+    // Exercises the `recv.isString()` arm reached through the seeded
+    // accumulator — `s.length` is §22.1.5.1 code-unit count.
+    try expectScriptInt("(function(s){ return s.length; })('hello');", 5);
+}
+
 test "later: assigning new property" {
     try expectScriptInt("let o = {}; o.x = 99; o.x;", 99);
 }
