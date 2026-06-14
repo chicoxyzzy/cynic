@@ -3306,11 +3306,35 @@ pub const Compiler = struct {
                 }
             },
             .computed => |key_expr| {
-                try self.compileExpression(key_expr);
-                const r_key = try self.reserveTemp();
-                try self.builder.emitStoreReg(a.span, r_key);
-                computed_r = r_key;
-                // §13.15.2 + §13.3.4.1 — for a compound / logical
+                // §13.3.2 — a constant string key that is not a
+                // canonical numeric index is a plain named store: route
+                // it to `name_k` so the dispatch below emits the IC'd
+                // `sta_property` instead of the un-cached `sta_computed`
+                // (mirrors the read-side lowering in compileMember).
+                // Numeric-index strings stay computed — `arr["0"] = v`
+                // must reach the array's element storage.
+                if (key_expr.* == .string_literal) {
+                    const raw = self.source[key_expr.string_literal.span.start..key_expr.string_literal.span.end];
+                    if (raw.len >= 2) {
+                        const inner = raw[1 .. raw.len - 1];
+                        const decoded = decodeStringContent(self.allocator, inner) catch return error.UnsupportedExpression;
+                        defer self.allocator.free(decoded);
+                        const obj_mod = @import("../runtime/object.zig");
+                        if (obj_mod.JSObject.canonicalIntegerIndex(decoded) == null) {
+                            name_k = try self.internString(decoded);
+                        }
+                    }
+                }
+                if (name_k != null) {
+                    // Lowered to a named store; no key register / no
+                    // per-op ToPropertyKey needed (the read + write
+                    // helpers below dispatch on `name_k`).
+                } else {
+                    try self.compileExpression(key_expr);
+                    const r_key = try self.reserveTemp();
+                    try self.builder.emitStoreReg(a.span, r_key);
+                    computed_r = r_key;
+                    // §13.15.2 + §13.3.4.1 — for a compound / logical
                 // assignment (`obj[k] op= v`) the spec evaluates
                 // the LHS reference (RequireObjectCoercible(base)
                 // at step 5, ToPropertyKey(key) at step 6) BEFORE
@@ -3336,6 +3360,7 @@ pub const Compiler = struct {
                     try self.builder.emitLoadReg(key_expr.span(), r_key);
                     try self.builder.emitOp(.to_property_key, key_expr.span());
                     try self.builder.emitStoreReg(key_expr.span(), r_key);
+                    }
                 }
             },
         }
