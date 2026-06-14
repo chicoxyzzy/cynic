@@ -1243,15 +1243,21 @@ fn iteratorToArray(realm: *Realm, this_value: Value, args: []const Value) Native
     // §27.1.4.1.1.5 step 1 — GetIteratorDirect snapshots `next` once.
     _ = this_obj;
     const next_fn = try snapshotNext(realm, this_value);
+    // `next` may be a `get next()` accessor that returns a FRESH
+    // function closure the iterator never stores as an own property
+    // (toArray/this-plain-iterator.js). The snapshot is then
+    // reachable only through this Zig local, which the precise GC
+    // does not scan. Root it BEFORE the first allocation below — and
+    // `out` alongside — so neither the snapshotted `next` nor the
+    // half-built array is swept mid-step. The loop body calls into
+    // user JS (`next`, accessor getters) and allocates an index
+    // JSString per step.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(out, realm.intrinsics.array_prototype);
     out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-    // The loop body calls into user JS (`next`, accessor getters)
-    // and allocates an index JSString per step. `out` is only
-    // alive through this local variable — pin it so the GC can't
-    // reclaim it mid-step.
-    const scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer scope.close();
     scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
     var idx: i32 = 0;
     var ibuf: [24]u8 = undefined;
@@ -1283,6 +1289,16 @@ fn iteratorForEach(realm: *Realm, this_value: Value, args: []const Value) Native
     // §27.1.4.1.1.6 step 2 — GetIteratorDirect snapshots `next`.
     _ = this_obj;
     const next_fn = try snapshotNext(realm, this_value);
+    // §7.4.2 — `next` may be a `get next()` accessor returning a
+    // FRESH function closure the iterator never stores as an own
+    // property (forEach/this-plain-iterator.js). That snapshot is
+    // reachable only through this Zig local, which the precise GC
+    // does not scan; the per-step callback + result-object
+    // allocations re-enter JS and can sweep it, leaving `next_fn`
+    // dangling for the next step. Root it for the loop's lifetime.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
     var idx: i32 = 0;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
@@ -1316,6 +1332,13 @@ fn iteratorFind(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     };
     _ = this_obj;
     const next_fn = try snapshotNext(realm, this_value);
+    // §7.4.2 — root the snapshotted `next` (a `get next()` accessor
+    // may hand back a fresh closure stored nowhere reachable; the
+    // precise GC can't see this Zig local, and the per-step
+    // predicate call would otherwise sweep it). See forEach.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
     var idx: i32 = 0;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
@@ -1356,6 +1379,13 @@ fn iteratorSome(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     };
     _ = this_obj;
     const next_fn = try snapshotNext(realm, this_value);
+    // §7.4.2 — root the snapshotted `next` (a `get next()` accessor
+    // may hand back a fresh closure stored nowhere reachable; the
+    // precise GC can't see this Zig local, and the per-step
+    // predicate call would otherwise sweep it). See forEach.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
     var idx: i32 = 0;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
@@ -1396,6 +1426,13 @@ fn iteratorEvery(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     };
     _ = this_obj;
     const next_fn = try snapshotNext(realm, this_value);
+    // §7.4.2 — root the snapshotted `next` (a `get next()` accessor
+    // may hand back a fresh closure stored nowhere reachable; the
+    // precise GC can't see this Zig local, and the per-step
+    // predicate call would otherwise sweep it). See forEach.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
     var idx: i32 = 0;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
@@ -1438,6 +1475,17 @@ fn iteratorReduce(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const next_fn = try snapshotNext(realm, this_value);
     var has_acc: bool = args.len >= 2;
     var acc: Value = if (has_acc) args[1] else Value.undefined_;
+    // §7.4.2 — root the snapshotted `next` (a `get next()` accessor
+    // can hand back a fresh closure stored nowhere reachable). The
+    // accumulator also outlives each `next()` re-entry: once it is a
+    // reducer RESULT it is reachable only through this Zig local, so
+    // a `next()`-triggered GC would sweep it before the next reducer
+    // call. Root both; keep the accumulator slot updated in place.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
+    scope.push(acc) catch return error.OutOfMemory;
+    const acc_slot = scope.handles.items.len - 1;
     var idx: i32 = 0;
     const max_iter: usize = 1 << 24;
     var step: usize = 0;
@@ -1452,6 +1500,7 @@ fn iteratorReduce(realm: *Realm, this_value: Value, args: []const Value) NativeE
         if (!has_acc) {
             acc = value;
             has_acc = true;
+            scope.handles.items[acc_slot] = acc;
             idx += 1;
             continue;
         }
@@ -1464,6 +1513,7 @@ fn iteratorReduce(realm: *Realm, this_value: Value, args: []const Value) NativeE
             .value, .yielded => |x| x,
             .thrown => |ex| return callbackThrew(realm, this_value, ex),
         };
+        scope.handles.items[acc_slot] = acc;
         idx += 1;
     }
     if (!has_acc) return throwTypeError(realm, "Iterator.prototype.reduce on empty iterator with no initial value");

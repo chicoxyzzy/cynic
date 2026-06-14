@@ -7183,6 +7183,60 @@ test "GC: Iterator.concat survives gc_threshold=1" {
     , 15);
 }
 
+test "GC: eager Iterator helper snapshotted `next` survives gc_threshold=1" {
+    // §27.1.4 eager helpers (`forEach` / `reduce` / `toArray` /
+    // `find` / `some` / `every`) snapshot the source's `next` once
+    // (§7.4.2 GetIteratorDirect) and drive the loop from that
+    // function. When `next` is a `get next()` ACCESSOR that hands
+    // back a FRESH closure the iterator never stores as an own
+    // property (test262 `forEach/this-plain-iterator.js`,
+    // `forEach/get-next-method-only-once.js`), the snapshot is
+    // reachable only through the native's Zig local — which the
+    // precise GC does not scan. The per-step callback + result-
+    // object allocations re-enter JS; under setGcThreshold(1) a
+    // sweep fires and reclaims the unrooted closure, so the next
+    // step would call into freed-then-poisoned memory (observed as
+    // a SIGSEGV under ReleaseSafe). Rooting the snapshot for the
+    // loop's lifetime fixes it; this guards every eager helper.
+    //
+    // The callback allocates per step to keep heap churn high so a
+    // major cycle (every 8 minor) lands mid-iteration.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\function makeIter() {
+        \\  return {
+        \\    get next() {
+        \\      let count = 6;
+        \\      return function () {
+        \\        --count;
+        \\        return count >= 0
+        \\          ? { done: false, value: count }
+        \\          : { done: true, value: undefined };
+        \\      };
+        \\    },
+        \\  };
+        \\}
+        \\let total = 0;
+        \\// forEach — snapshot held across each callback re-entry.
+        \\Iterator.prototype.forEach.call(makeIter(), function (v) {
+        \\  let box = { v };
+        \\  total += box.v;
+        \\});
+        \\// reduce — also exercises the accumulator-rooting path; the
+        \\// acc outlives every `next()` re-entry, not just the reducer.
+        \\total += Iterator.prototype.reduce.call(makeIter(), function (a, b) {
+        \\  let box = { a, b };
+        \\  return box.a + box.b;
+        \\}, 0);
+        \\// toArray — snapshot held across each index-string alloc.
+        \\total += Iterator.prototype.toArray.call(makeIter()).length;
+        \\// some — predicate never passes, so it drains the iterator.
+        \\if (Iterator.prototype.some.call(makeIter(), () => false)) total += 100;
+        \\// every — predicate always passes, so it drains the iterator.
+        \\if (Iterator.prototype.every.call(makeIter(), () => true)) total += 1;
+        \\total;
+    , 37); // forEach 15 + reduce 15 + toArray 6 + every 1
+}
+
 test "GC: Iterator.zip survives gc_threshold=1" {
     // zip collects per-input {iter, next, active, pad} records into
     // the typed `iter_helper.zip_inputs` slot; collectZipIters and
