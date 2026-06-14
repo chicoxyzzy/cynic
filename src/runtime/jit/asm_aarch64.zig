@@ -281,6 +281,19 @@ pub fn ldrbImm(rt: Reg, rn: Reg, imm12: u12) u32 {
     return 0x39400000 | (@as(u32, imm12) << 10) | (r(rn) << 5) | r(rt);
 }
 
+/// LDR Wt, [Xn, Xm] — 32-bit load from base Xn + register offset Xm
+/// (no scaling, LSL #0), zero-extended into Wt. The wasm memory load:
+/// Xn is the memory base, Xm the bounds-checked effective address.
+pub fn ldrRegW(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0xB8606800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+/// STR Wt, [Xn, Xm] — store Wt's low 4 bytes at base Xn + register
+/// offset Xm (no scaling). The wasm memory store.
+pub fn strRegW(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0xB8206800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
 /// STP Xt, Xt2, [SP, #simm7×8]! — pre-indexed pair push through SP.
 pub fn stpPreIdxSp(rt: Reg, rt2: Reg, byte_off: i10) u32 {
     std.debug.assert(@rem(byte_off, 8) == 0);

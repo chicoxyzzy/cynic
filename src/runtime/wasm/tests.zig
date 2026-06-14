@@ -469,6 +469,111 @@ test "wasm spasm: i32.div_s INT_MIN / -1 raises a catchable integer-overflow tra
     try testing.expectError(error.IntegerOverflow, runSpasmDiv(arena.allocator(), 0x8000_0000, 0xFFFF_FFFF));
 }
 
+// A module with one page of memory exporting `load`/`store`:
+//   (func (param i32) (result i32) local.get 0  i32.load  align=2 off=0)
+//   (func (param i32 i32)          local.get 0  local.get 1  i32.store)
+const mem_module_body = [_]u8{
+    // type section (payload 11): type 0 = (i32)->i32, type 1 = (i32,i32)->()
+    0x01, 0x0b, 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x00,
+    // func section: func 0 : type 0, func 1 : type 1
+    0x03, 0x03, 0x02, 0x00, 0x01,
+    // memory section: one page, no max
+    0x05, 0x03, 0x01, 0x00, 0x01,
+    // export section (payload 16): "load" -> 0, "store" -> 1
+    0x07, 0x10, 0x02, 0x04, 0x6c, 0x6f, 0x61, 0x64, 0x00, 0x00, 0x05, 0x73, 0x74, 0x6f, 0x72, 0x65, 0x00, 0x01,
+    // code section (payload 19)
+    0x0a, 0x13, 0x02,
+    0x07, 0x00, 0x20, 0x00, 0x28, 0x02, 0x00, 0x0b, // load (body 7): local.get 0; i32.load a=2 o=0; end
+    0x09, 0x00, 0x20, 0x00, 0x20, 0x01, 0x36, 0x02, 0x00, 0x0b, // store (body 9): local.get 0; local.get 1; i32.store a=2 o=0; end
+};
+
+test "wasm spasm: i32.load compiles and reads linear memory" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + mem_module_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &mem_module_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    // Seed four bytes at offset 8, then load them back through Spasm.
+    std.mem.writeInt(u32, instance.memories[0].data[8..][0..4], 0xCAFE_BABE, .little);
+    const fidx = funcExport(mp, "load") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 8);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    try testing.expectEqual(@as(u32, 0xCAFE_BABE), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+/// Decode + instantiate `mem_module_body` (caller owns `bytes`, which the
+/// decoded module borrows), forcing Spasm on. Returns the module handle.
+fn setupMemModule(instance: *interp.Instance, a: std.mem.Allocator, bytes: []const u8) !*wasm.Module {
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+    try interp.instantiate(instance, a, testing.allocator, mp, .{});
+    instance.spasm_enabled = true;
+    return mp;
+}
+
+test "wasm spasm: i32.store compiles and writes linear memory" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + mem_module_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &mem_module_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    const fidx = funcExport(mp, "store") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = @as(u128, 16); // address
+    cells[1] = @as(u128, 0xDEAD_BEEF); // value
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // The Spasm-compiled store landed the bytes at offset 16.
+    try testing.expectEqual(@as(u32, 0xDEAD_BEEF), std.mem.readInt(u32, instance.memories[0].data[16..][0..4], .little));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: an out-of-bounds load raises a catchable trap" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + mem_module_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &mem_module_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    const fidx = funcExport(mp, "load") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    // One page is 65536 bytes; a 4-byte load at 65536 runs off the end and
+    // the compiled bounds check routes it through the trap channel.
+    cells[0] = @as(u128, 65536);
+
+    try testing.expectError(error.OutOfBoundsMemoryAccess, interp.invoke(&instance, testing.allocator, fidx, cells));
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {

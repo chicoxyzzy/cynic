@@ -973,7 +973,9 @@ useful:
    class (now: the complete straight-line i32 tier — const,
    `local.get`/`set`/`tee`, the i32 ALU including the four trapping
    `div`/`rem` ops, the ten comparisons +
-   `eqz`, branchless `select`, `nop`/`drop` — on the
+   `eqz`, branchless `select`, `nop`/`drop`, and bounds-checked
+   `i32.load`/`i32.store` (the boundary passes the live memory base in x2
+   and length in x3) — on the
    depth→register operand-stack machine, plus structured control
    flow: `block`/`end` + forward conditional `br_if`, `loop` +
    backward `br_if` (do-while), and unconditional `br` with a
@@ -998,8 +1000,13 @@ useful:
    (÷0 yields 0, INT_MIN/-1 yields INT_MIN), so the spec's two `div`
    traps (divide-by-zero, signed overflow) are explicit pre-checks that
    branch to shared out-of-line exits; `rem_s(INT_MIN,-1) = 0` falls out
-   of sdiv+msub on its own. This channel is the mechanism the next
-   trapping rung — memory bounds checks — reuses. The
+   of sdiv+msub on its own. `i32.load`/`i32.store` reuse this channel:
+   each computes `ea = addr + offset`, bounds-checks `ea + n > mem_len`
+   (x3) — AArch64's unsigned `hi`, with the zero-extended address making
+   `ea` non-wrapping — and routes a failure to a shared
+   `OutOfBoundsMemoryAccess` exit, so a stray access traps catchably
+   instead of faulting the host; the access itself is a register-offset
+   `ldr`/`str` off the base (x2). The
    **wasm-testsuite differential gate** now holds: a force-`spasm_enabled`
    run over the full spec testsuite (58779/58779 commands across 222
    `.wast` files, 1232 skip) produces the interpreter's exact pass-set —

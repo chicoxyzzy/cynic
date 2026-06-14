@@ -1267,14 +1267,25 @@ fn spasmRun(
 
     const results = try allocator.alloc(spasm.Cell, @max(ftype.results.len, 1));
     defer allocator.free(results);
+
+    // The active linear memory (memory 0) — its base + length are passed
+    // so compiled memory ops can bounds-check and address off it. A
+    // memory-free module has no compilable memory op (validation forbids
+    // them), so the dummy base is never dereferenced; len 0 makes any
+    // stray access trap rather than read out of bounds.
+    const has_mem = instance.memories.len > 0;
+    const mem_base: [*]u8 = if (has_mem) instance.memories[0].data.ptr else @ptrCast(locals.ptr);
+    const mem_len: u64 = if (has_mem) instance.memories[0].data.len else 0;
+
     // The trap channel (spasm.EntryFn): a non-zero status means the body
     // trapped before writing results. Map it to the matching TrapError so
     // a Spasm trap surfaces exactly like the interpreter's — the JS
     // boundary turns either into a WebAssembly.RuntimeError the same way.
-    switch (entry(locals.ptr, results.ptr)) {
+    switch (entry(locals.ptr, results.ptr, mem_base, mem_len)) {
         spasm.trap_ok => {},
         spasm.trap_divide_by_zero => return error.IntegerDivideByZero,
         spasm.trap_int_overflow => return error.IntegerOverflow,
+        spasm.trap_out_of_bounds => return error.OutOfBoundsMemoryAccess,
         else => return null, // unknown status — degrade defensively
     }
 
