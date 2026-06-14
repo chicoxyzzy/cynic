@@ -567,24 +567,41 @@ pub fn build(b: *std.Build) void {
     // wasm-opt rejects the bulk-memory ops the engine relies on. When
     // wasm-opt is absent (most dev machines), fall back to the raw
     // ReleaseSmall binary so `zig build wasm` still works offline. CI
-    // installs Binaryen, so the published artifact is always optimized
+    // installs Binaryen, so the published artifact is normally optimized
     // (~13% smaller than ReleaseSmall alone).
+    //
+    // `-Dno-wasm-opt` forces the raw module even when wasm-opt is present.
+    // The playground deploy uses it as a fallback: `wasm-opt -Oz` has
+    // SIGSEGV'd on the constrained CI runner while optimizing the engine's
+    // ~1 MB interpreter-dispatch function (it succeeds on a dev box), and
+    // a crashing optimizer must not block the deploy — a valid unoptimized
+    // module beats none. See .github/workflows/playground.yml.
+    const skip_wasm_opt = b.option(
+        bool,
+        "no-wasm-opt",
+        "Skip the wasm-opt -Oz post-pass; ship the raw ReleaseSmall playground module",
+    ) orelse false;
+
     const raw_wasm = wasm_exe.getEmittedBin();
-    const wasm_bin: std.Build.LazyPath = if (b.findProgram(.{ .names = &.{"wasm-opt"} })) |wasm_opt_path| blk: {
-        const opt = b.addSystemCommand(&.{
-            wasm_opt_path,
-            "-Oz",
-            "--enable-bulk-memory",
-            "--enable-bulk-memory-opt",
-            "--enable-sign-ext",
-            "--enable-nontrapping-float-to-int",
-            "--enable-mutable-globals",
-            "--enable-multivalue",
-        });
-        opt.addFileArg(raw_wasm);
-        opt.addArg("-o");
-        break :blk opt.addOutputFileArg("cynic.wasm");
-    } else raw_wasm;
+    const wasm_bin: std.Build.LazyPath = blk: {
+        if (skip_wasm_opt) break :blk raw_wasm;
+        if (b.findProgram(.{ .names = &.{"wasm-opt"} })) |wasm_opt_path| {
+            const opt = b.addSystemCommand(&.{
+                wasm_opt_path,
+                "-Oz",
+                "--enable-bulk-memory",
+                "--enable-bulk-memory-opt",
+                "--enable-sign-ext",
+                "--enable-nontrapping-float-to-int",
+                "--enable-mutable-globals",
+                "--enable-multivalue",
+            });
+            opt.addFileArg(raw_wasm);
+            opt.addArg("-o");
+            break :blk opt.addOutputFileArg("cynic.wasm");
+        }
+        break :blk raw_wasm;
+    };
 
     const install_wasm = b.addInstallFileWithDir(
         wasm_bin,
