@@ -552,6 +552,11 @@ const Compiler = struct {
                     _ = try self.labelFor(targetOf(after, off));
                     if (off < 0) try self.osr_headers.put(self.m.gpa, targetOf(after, off), {});
                 },
+                .jmp_if_strict_eq, .jmp_if_strict_neq => {
+                    // `[op][r:u8][off:i16]` — forward-only by construction.
+                    const off = readI16(code, i + 2);
+                    _ = try self.labelFor(targetOf(after, off));
+                },
                 else => return error.UnsupportedOp,
             }
             i = after;
@@ -1103,6 +1108,26 @@ const Compiler = struct {
                     defer skip.fixups.deinit(m.gpa);
                     try m.jumpCond(.ge, &skip);
                     if (off < 0) try self.backEdgeSafePoint(target);
+                    try m.jump(try self.labelForExisting(target));
+                    m.bind(&skip);
+                },
+                .jmp_if_strict_eq, .jmp_if_strict_neq => {
+                    // Fused strict-equality compare-and-branch — the int32
+                    // fast path of `strict_eq` + a forward branch (cf.
+                    // loop_inc_lt). Non-int32 operands tier down, exactly as
+                    // standalone `strict_eq` does, so Lantern runs the full
+                    // `strictEq`. Forward-only ⇒ no back-edge safepoint.
+                    const td = try self.tdFor(bc);
+                    const off = readI16(code, i + 2);
+                    const target = targetOf(after, off);
+                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try self.checkInt32(.x9, td);
+                    try self.checkInt32(acc_reg, td);
+                    try m.emit(a64.cmpRegW(.x9, acc_reg));
+                    var skip = Masm.Label{};
+                    defer skip.fixups.deinit(m.gpa);
+                    // Take the branch when the condition holds; skip otherwise.
+                    try m.jumpCond(if (op == .jmp_if_strict_eq) .ne else .eq, &skip);
                     try m.jump(try self.labelForExisting(target));
                     m.bind(&skip);
                 },

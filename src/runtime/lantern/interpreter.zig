@@ -1975,6 +1975,25 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
+        .jmp_if_strict_eq, .jmp_if_strict_neq => |t| {
+            // Fused strict-equality compare-and-branch: `registers[r] === acc`.
+            // Byte-identical to `strict_eq r; jmp_if_{true,false}` — reuses
+            // `strictEq` exactly. Emitted only as forward branches, so the
+            // OSR back-edge machinery is unneeded; a backward offset
+            // (defensive) still takes a GC safepoint.
+            const r = code[ip];
+            const off = readI16(code, ip + 1);
+            ip += 3;
+            const equal = strictEq(registers[r], acc);
+            const take = if (t == .jmp_if_strict_eq) equal else !equal;
+            if (take) {
+                ip = applyOffset(ip, off);
+                if (off < 0) {
+                    if (try loopSafePoint(realm, f, ip, acc)) |res| return res;
+                }
+            }
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
         .jmp_if_nullish => {
             const off = readI16(code, ip);
             ip += 2;

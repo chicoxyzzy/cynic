@@ -11032,6 +11032,48 @@ pub const Compiler = struct {
         };
     }
 
+    /// §13.6 — when `cond` is a strict-equality comparison (`a === b` /
+    /// `a !== b`), emit a single fused compare-and-branch (`JmpIfStrict*`)
+    /// and return the i16 patch slot; otherwise return null so the caller
+    /// compiles the condition + a plain `jmp_if_{false,true}`. The fused
+    /// branch is taken (forward) when the *condition* is false
+    /// (`jump_when_false`) or true. Folds the `strict_eq r; jmp_if_*` pair
+    /// into one op — one fewer dispatch per conditional. strictEq is pure
+    /// (no coercion / re-entry), so the fusion is byte-identical; only the
+    /// forward-branch sites (if / while / for tests) use it, so there is
+    /// no loop back-edge to handle.
+    fn tryFuseStrictEqBranch(
+        self: *Compiler,
+        cond: *const ast.expression.Expression,
+        span: Span,
+        jump_when_false: bool,
+    ) CompileError!?u32 {
+        var e = cond;
+        while (e.* == .parenthesized) e = e.parenthesized.expression;
+        if (e.* != .binary) return null;
+        const b = e.binary;
+        const is_strict_eq = switch (b.op) {
+            .eq_eq_eq => true,
+            .bang_eq_eq => false,
+            else => return null,
+        };
+        // Take the branch when `registers[r] === acc` (JmpIfStrictEq) or
+        // `!==` (JmpIfStrictNeq). `a===b` branch-when-false ⇒ branch on
+        // `!==`; `a!==b` branch-when-false ⇒ branch on `===`.
+        const take_on_equal = if (jump_when_false) !is_strict_eq else is_strict_eq;
+        const fused: Op = if (take_on_equal) .jmp_if_strict_eq else .jmp_if_strict_neq;
+        try self.compileExpression(b.lhs);
+        const r = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitStoreReg(span, r);
+        try self.compileExpression(b.rhs);
+        try self.builder.emitOp(fused, span);
+        try self.builder.emitU8(r);
+        const slot = self.builder.here();
+        try self.builder.emitI16(0);
+        return slot;
+    }
+
     fn compileIf(self: *Compiler, s: ast.statement.IfStmt) CompileError!void {
         // §14.6.2 IfStatement — the completion is UpdateEmpty(<taken
         // branch>, undefined). Seed the shared completion register with
@@ -11055,10 +11097,13 @@ pub const Compiler = struct {
             try self.builder.emitStoreReg(s.span, r);
         }
 
-        try self.compileExpression(&s.test_);
-        try self.builder.emitOp(.jmp_if_false, s.span);
-        const else_patch = self.builder.here();
-        try self.builder.emitI16(0);
+        const else_patch = (try self.tryFuseStrictEqBranch(&s.test_, s.span, true)) orelse blk: {
+            try self.compileExpression(&s.test_);
+            try self.builder.emitOp(.jmp_if_false, s.span);
+            const slot = self.builder.here();
+            try self.builder.emitI16(0);
+            break :blk slot;
+        };
 
         try self.compileStatement(s.consequent);
 
@@ -14885,4 +14930,24 @@ test "compiler: dead completion stores are eliminated end-to-end (P1)" {
     const got = try dumpScript("let s=0; for (let i=0;i<3;i++){ s=s+i; } s;");
     defer testing.allocator.free(got);
     try testing.expect(std.mem.indexOf(u8, got, "Star0") == null);
+}
+
+test "compiler: a strict-equality condition fuses into a compare-and-branch" {
+    // §13.6 — `if (a === b)` should compile to a single fused
+    // `JmpIfStrictNeq` (jump to the else/exit when a !== b), not the
+    // two-op `StrictEq r; JmpIfFalse` pair.
+    const got = try dumpExpr("(function(a,b){ if (a===b) return 1; return 2; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "JmpIfStrictNeq") != null);
+    try testing.expect(std.mem.indexOf(u8, t0, "StrictEq ") == null);
+}
+
+test "compiler: a strict-inequality condition fuses to JmpIfStrictEq" {
+    // `if (a !== b)` jumps to else when a === b → fused `JmpIfStrictEq`.
+    const got = try dumpExpr("(function(a,b){ if (a!==b) return 1; return 2; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "JmpIfStrictEq") != null);
+    try testing.expect(std.mem.indexOf(u8, t0, "StrictNeq ") == null);
 }

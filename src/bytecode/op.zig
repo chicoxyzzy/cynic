@@ -195,6 +195,14 @@ pub const Op = enum(u8) {
     /// §13.5.5 OptionalChain short-circuit: when `?.` LHS evaluates
     /// to nullish, the entire chain returns undefined.
     jmp_if_nullish,
+    /// `[op] [r:u8] [o:i16]` — fused strict-equality compare-and-branch:
+    /// jump (forward) when `registers[r] === acc`. Collapses the two-op
+    /// `strict_eq r; jmp_if_true` pair a comparison condition emits. The
+    /// compiler only emits these for forward branches (`if` / `while` /
+    /// `for` tests), so there is no loop back-edge / OSR path here.
+    jmp_if_strict_eq,
+    /// `[op] [r:u8] [o:i16]` — jump (forward) when `registers[r] !== acc`.
+    jmp_if_strict_neq,
     /// `[op] [r_counter:u8] [r_bound:u8] [o:i16]` — fused
     /// counter-loop bottom: `r_counter += 1`, then branch back to
     /// the body when `r_counter < r_bound`. Fuses the seven-opcode
@@ -1321,6 +1329,7 @@ pub const Op = enum(u8) {
             => 2, // u8 + u8
             .call => 4, // r_callee:u8 + argc:u8 + ic:u16
             .call0, .call1, .call2, .call3 => 3, // r_callee:u8 + ic:u16 (argc in opcode)
+            .jmp_if_strict_eq, .jmp_if_strict_neq => 3, // r:u8 + off:i16
             .new_call => 4, // r_callee:u8 + argc:u8 + ic:u16
             .tail_call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
             .direct_eval => 4, // scope:u16 + r_callee:u8 + argc:u8
@@ -1414,6 +1423,8 @@ pub const Op = enum(u8) {
             .jmp_if_false => "JmpIfFalse",
             .jmp_if_true => "JmpIfTrue",
             .jmp_if_nullish => "JmpIfNullish",
+            .jmp_if_strict_eq => "JmpIfStrictEq",
+            .jmp_if_strict_neq => "JmpIfStrictNeq",
             .loop_inc_lt => "LoopIncLt",
             .make_function => "MakeFunction",
             .make_named_function_expr => "MakeNamedFunctionExpr",
