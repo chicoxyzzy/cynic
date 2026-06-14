@@ -3070,7 +3070,39 @@ pub const Compiler = struct {
                 }
             },
             .computed => |key_expr| {
-                // §13.3.2 EvaluatePropertyAccessWithExpressionKey.
+                // §13.3.2 — a CONSTANT string key that is not a
+                // canonical numeric index is a plain named property:
+                // route it into the IC'd named-load path (`lda_property`
+                // [`_reg`]) instead of the un-cached `lda_computed` slow
+                // path (which stringifies the key, walks the proto chain
+                // uncached, and re-parses). `ToPropertyKey` of a string
+                // literal is side-effect-free and yields the string
+                // itself (§7.1.19), so this is observably identical.
+                // Numeric-index strings (`arr["0"]`) must stay on the
+                // computed path — the named load doesn't reach an
+                // array's indexed storage.
+                if (key_expr.* == .string_literal) {
+                    const raw = self.source[key_expr.string_literal.span.start..key_expr.string_literal.span.end];
+                    if (raw.len >= 2) {
+                        const inner = raw[1 .. raw.len - 1];
+                        const decoded = decodeStringContent(self.allocator, inner) catch return error.UnsupportedExpression;
+                        defer self.allocator.free(decoded);
+                        const obj_mod = @import("../runtime/object.zig");
+                        if (obj_mod.JSObject.canonicalIntegerIndex(decoded) == null) {
+                            const k = try self.internString(decoded);
+                            if (!m.optional) {
+                                if (self.tryRegisterBoundIdent(m.object.*)) |r_obj| {
+                                    try self.builder.emitLdaPropertyReg(m.span, k, r_obj);
+                                    return;
+                                }
+                            }
+                            try self.compileExpression(m.object);
+                            if (m.optional) try self.emitOptionalShortCircuit(m.span);
+                            try self.builder.emitLdaProperty(m.span, k);
+                            return;
+                        }
+                    }
+                }
                 // The receiver normally goes into a temp so the key
                 // evaluation can't clobber it before `lda_computed`
                 // reads it. When the receiver is a live register-bound

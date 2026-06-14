@@ -2885,6 +2885,39 @@ test "RegExp @@split roots splitter across an allocating flags getter" {
     , "a|bb|ccc|dddd#4");
 }
 
+// §13.3.2 — a constant-string bracket access `obj["x"]` is a plain
+// named property; the compiler routes it into the IC'd named-load path
+// (lda_property), NOT the un-cached lda_computed. Numeric-index strings
+// (`arr["0"]`) must stay on the computed/indexed path. These pin that
+// the routing preserves semantics across both key classes.
+
+test "const-str member: bracket access reads like dot access" {
+    try expectScriptIntWithBuiltins("const o = { x: 42, y: 1 }; o[\"x\"] + o.y", 43);
+    try expectScriptIntWithBuiltins("function f(o){ return o[\"a\"]; } f({ a: 7 })", 7);
+}
+
+test "const-str member: bracket write is the same property as dot" {
+    try expectScriptIntWithBuiltins("const o = {}; o[\"x\"] = 9; o.x", 9);
+    try expectScriptIntWithBuiltins("const o = { x: 1 }; o[\"x\"] = 5; o.x + o[\"x\"]", 10);
+}
+
+test "const-str member: numeric-index string stays indexed (arrays)" {
+    // The named load can't reach an array's element storage — `arr["0"]`
+    // must keep the computed/indexed path.
+    try expectScriptIntWithBuiltins("const a = [10, 20, 30]; a[\"0\"] + a[\"2\"]", 40);
+    try expectScriptIntWithBuiltins("const a = [1, 2]; a[\"0\"] = 9; a[0]", 9);
+}
+
+test "const-str member: non-identifier and escaped keys" {
+    try expectScriptIntWithBuiltins("const o = {}; o[\"a-b\"] = 3; o[\"a-b\"]", 3);
+    // \x78 == "x"
+    try expectScriptIntWithBuiltins("const o = { x: 8 }; o[\"\\x78\"]", 8);
+}
+
+test "const-str member: getter fires through bracket access" {
+    try expectScriptIntWithBuiltins("let n = 0; const o = { get x(){ n++; return 5; } }; const v = o[\"x\"]; v + n", 6);
+}
+
 test "computed int read: dense in-bounds hits own elements" {
     try expectScriptInt("var a=[10,20,30]; a[0]+a[1]+a[2]", 60);
     try expectScriptInt("var a=[10,20,30]; var i=2; a[i]", 30);
