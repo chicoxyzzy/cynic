@@ -574,6 +574,103 @@ test "wasm spasm: an out-of-bounds load raises a catchable trap" {
     try testing.expectError(error.OutOfBoundsMemoryAccess, interp.invoke(&instance, testing.allocator, fidx, cells));
 }
 
+// A one-page-memory module exporting the sub-width accessors:
+//   "lu" (i32)->i32     : local.get 0  i32.load8_u
+//   "ls" (i32)->i32     : local.get 0  i32.load8_s
+//   "s8" (i32,i32)->()  : local.get 0  local.get 1  i32.store8
+const subwidth_module_body = [_]u8{
+    // type (payload 11): type0=(i32)->i32, type1=(i32,i32)->()
+    0x01, 0x0b, 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x00,
+    // func: 3 funcs (types 0,0,1)
+    0x03, 0x04, 0x03, 0x00, 0x00, 0x01,
+    // memory: one page
+    0x05, 0x03, 0x01, 0x00, 0x01,
+    // export (payload 16): "lu"->0, "ls"->1, "s8"->2
+    0x07, 0x10, 0x03, 0x02, 0x6c, 0x75, 0x00, 0x00, 0x02, 0x6c, 0x73, 0x00, 0x01, 0x02, 0x73, 0x38, 0x00, 0x02,
+    // code (payload 27)
+    0x0a, 0x1b, 0x03,
+    0x07, 0x00, 0x20, 0x00, 0x2d, 0x00, 0x00, 0x0b, // lu: local.get 0; i32.load8_u; end
+    0x07, 0x00, 0x20, 0x00, 0x2c, 0x00, 0x00, 0x0b, // ls: local.get 0; i32.load8_s; end
+    0x09, 0x00, 0x20, 0x00, 0x20, 0x01, 0x3a, 0x00, 0x00, 0x0b, // s8: local.get 0; local.get 1; i32.store8; end
+};
+
+test "wasm spasm: i32.load8_u compiles and zero-extends a byte" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + subwidth_module_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &subwidth_module_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    instance.memories[0].data[5] = 0xFF;
+    const fidx = funcExport(mp, "lu") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 5);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // 0xFF zero-extended is 255, computed by Spasm-compiled native code.
+    try testing.expectEqual(@as(u32, 0xFF), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: i32.load8_s sign-extends a byte" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + subwidth_module_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &subwidth_module_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    instance.memories[0].data[5] = 0xFF;
+    const fidx = funcExport(mp, "ls") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 5);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // 0xFF sign-extended is -1; the LDRSB result fills the i32.
+    try testing.expectEqual(@as(i32, -1), @as(i32, @bitCast(@as(u32, @truncate(res[0])))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: i32.store8 writes only the low byte" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + subwidth_module_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &subwidth_module_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    // A sentinel above the target byte must survive the byte-width store.
+    instance.memories[0].data[10] = 0xAA;
+    const fidx = funcExport(mp, "s8") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = @as(u128, 9); // address
+    cells[1] = @as(u128, 0x1234); // value — only 0x34 should land
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    try testing.expectEqual(@as(u8, 0x34), instance.memories[0].data[9]);
+    try testing.expectEqual(@as(u8, 0xAA), instance.memories[0].data[10]); // untouched
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {

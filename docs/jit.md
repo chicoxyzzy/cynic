@@ -973,9 +973,11 @@ useful:
    class (now: the complete straight-line i32 tier — const,
    `local.get`/`set`/`tee`, the i32 ALU including the four trapping
    `div`/`rem` ops, the ten comparisons +
-   `eqz`, branchless `select`, `nop`/`drop`, and bounds-checked
-   `i32.load`/`i32.store` (the boundary passes the live memory base in x2
-   and length in x3) — on the
+   `eqz`, branchless `select`, `nop`/`drop`, and the bounds-checked i32
+   memory accesses — full-width `load`/`store` plus the sign/zero-extending
+   sub-width `load8_s`/`load8_u`/`load16_s`/`load16_u` and the narrowing
+   `store8`/`store16` (the boundary passes the live memory base in x2 and
+   length in x3) — on the
    depth→register operand-stack machine, plus structured control
    flow: `block`/`end` + forward conditional `br_if`, `loop` +
    backward `br_if` (do-while), and unconditional `br` with a

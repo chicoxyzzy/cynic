@@ -294,6 +294,38 @@ pub fn strRegW(rt: Reg, rn: Reg, rm: Reg) u32 {
     return 0xB8206800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
 }
 
+/// LDRB Wt, [Xn, Xm] — load one byte, zero-extended into Wt (i32.load8_u).
+pub fn ldrbRegW(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x38606800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+/// LDRSB Wt, [Xn, Xm] — load one byte, sign-extended into the 32-bit Wt
+/// (i32.load8_s). The W form clears bits 32..63 of the cell.
+pub fn ldrsbRegW(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x38E06800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+/// LDRH Wt, [Xn, Xm] — load a halfword, zero-extended into Wt (i32.load16_u).
+pub fn ldrhRegW(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x78606800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+/// LDRSH Wt, [Xn, Xm] — load a halfword, sign-extended into the 32-bit Wt
+/// (i32.load16_s).
+pub fn ldrshRegW(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x78E06800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+/// STRB Wt, [Xn, Xm] — store Wt's low byte (i32.store8).
+pub fn strbRegW(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x38206800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+/// STRH Wt, [Xn, Xm] — store Wt's low halfword (i32.store16).
+pub fn strhRegW(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x78206800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
 /// STP Xt, Xt2, [SP, #simm7×8]! — pre-indexed pair push through SP.
 pub fn stpPreIdxSp(rt: Reg, rt2: Reg, byte_off: i10) u32 {
     std.debug.assert(@rem(byte_off, 8) == 0);

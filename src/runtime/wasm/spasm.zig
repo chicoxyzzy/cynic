@@ -116,7 +116,13 @@ const op_i32_div_u: u8 = 0x6e;
 const op_i32_rem_s: u8 = 0x6f;
 const op_i32_rem_u: u8 = 0x70;
 const op_i32_load: u8 = 0x28;
+const op_i32_load8_s: u8 = 0x2c;
+const op_i32_load8_u: u8 = 0x2d;
+const op_i32_load16_s: u8 = 0x2e;
+const op_i32_load16_u: u8 = 0x2f;
 const op_i32_store: u8 = 0x36;
+const op_i32_store8: u8 = 0x3a;
+const op_i32_store16: u8 = 0x3b;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -478,30 +484,53 @@ pub fn compile(
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
-            op_i32_load => {
-                // §4.4.7 i32.load — pop the address, bounds-check the
-                // effective address, then load 4 bytes from mem_base + ea
-                // into the address's slot (consumes addr, produces value).
+            op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u => {
+                // §4.4.7 i32 loads — pop the address, bounds-check the
+                // effective address for the access width, then load from
+                // mem_base + ea into the address's slot (consumes addr,
+                // produces the value). The narrow forms zero- or
+                // sign-extend into the i32 (LDRB/LDRSB, LDRH/LDRSH); the W
+                // destination clears the cell's high word either way.
                 const offset = readMemArg(body, &i) orelse return null;
                 if (sp < 1) return null;
                 const ra = try materialize(&m, stack[sp - 1], sp - 1);
-                try emitMemBounds(&m, ra, offset, 4, &trap_oob);
+                const n: u32 = switch (op) {
+                    op_i32_load8_s, op_i32_load8_u => 1,
+                    op_i32_load16_s, op_i32_load16_u => 2,
+                    else => 4,
+                };
+                try emitMemBounds(&m, ra, offset, n, &trap_oob);
                 trap_oob_used = true;
-                try m.emit(a64.ldrRegW(ra, .x2, .x16)); // ra = mem_base[ea]
+                switch (op) {
+                    op_i32_load => try m.emit(a64.ldrRegW(ra, .x2, .x16)),
+                    op_i32_load8_u => try m.emit(a64.ldrbRegW(ra, .x2, .x16)),
+                    op_i32_load8_s => try m.emit(a64.ldrsbRegW(ra, .x2, .x16)),
+                    op_i32_load16_u => try m.emit(a64.ldrhRegW(ra, .x2, .x16)),
+                    else => try m.emit(a64.ldrshRegW(ra, .x2, .x16)), // load16_s
+                }
                 stack[sp - 1] = .{ .reg = ra };
             },
-            op_i32_store => {
-                // §4.4.7 i32.store — operands [addr, value]; bounds-check
-                // ea, then store value's 4 bytes at mem_base + ea. Pops both
-                // and pushes nothing.
+            op_i32_store, op_i32_store8, op_i32_store16 => {
+                // §4.4.7 i32 stores — operands [addr, value]; bounds-check
+                // ea for the access width, then store value's low bytes at
+                // mem_base + ea (STR/STRB/STRH). Pops both, pushes nothing.
                 const offset = readMemArg(body, &i) orelse return null;
                 if (sp < 2) return null;
                 const ra = try materialize(&m, stack[sp - 2], sp - 2); // addr
                 const rv = try materialize(&m, stack[sp - 1], sp - 1); // value
                 sp -= 2;
-                try emitMemBounds(&m, ra, offset, 4, &trap_oob);
+                const n: u32 = switch (op) {
+                    op_i32_store8 => 1,
+                    op_i32_store16 => 2,
+                    else => 4,
+                };
+                try emitMemBounds(&m, ra, offset, n, &trap_oob);
                 trap_oob_used = true;
-                try m.emit(a64.strRegW(rv, .x2, .x16)); // mem_base[ea] = value
+                switch (op) {
+                    op_i32_store => try m.emit(a64.strRegW(rv, .x2, .x16)),
+                    op_i32_store8 => try m.emit(a64.strbRegW(rv, .x2, .x16)),
+                    else => try m.emit(a64.strhRegW(rv, .x2, .x16)), // store16
+                }
             },
             op_block => {
                 // §3.3.5 — push a control frame. The block's result
@@ -840,7 +869,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
             op_i32_const => {
                 _ = readSleb32(body, i) orelse return null;
             },
-            op_i32_load, op_i32_store => {
+            op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u, op_i32_store, op_i32_store8, op_i32_store16 => {
                 const flags = readUleb32(body, i) orelse return null;
                 if (flags & 0x40 != 0) return null; // multi-memory — degrade
                 _ = readUleb32(body, i) orelse return null; // offset
