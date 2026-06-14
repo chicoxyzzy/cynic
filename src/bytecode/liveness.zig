@@ -84,6 +84,12 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         .eq, .strict_eq, .neq, .strict_neq, .lt, .gt, .le, .ge,
         .instanceof_, .in_op, .array_spread,
         => Effect.read1(code[i + 1]),
+        // Fused compare-and-branch `[op][r:u8][off:i16]` — reads the
+        // register operand (the compared lhs); the branch edge is handled
+        // by the leader/CFG scan via `branchTarget` / `isBranch`.
+        .jmp_if_strict_eq, .jmp_if_strict_neq,
+        .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge,
+        => Effect.read1(code[i + 1]),
         .add_smi => Effect.read1(code[i + 1]),
         .lda_computed => Effect.read1(code[i + 1]),
         // `[op][k:u16][r_obj:u8]…` — receiver register at i+3.
@@ -150,6 +156,14 @@ pub fn branchTarget(op: Op, code: []const u8, i: usize) ?u32 {
             const after: i64 = @intCast(i + 1 + 4);
             break :blk @intCast(after + readI16(code, i + 3));
         },
+        // Fused compare-and-branch `[op][r:u8][off:i16]` — i16 at i+2,
+        // relative to the byte after the operand (i + 1 + 3).
+        .jmp_if_strict_eq, .jmp_if_strict_neq,
+        .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge,
+        => blk: {
+            const after: i64 = @intCast(i + 1 + 3);
+            break :blk @intCast(after + readI16(code, i + 2));
+        },
         else => null,
     };
 }
@@ -163,7 +177,10 @@ fn isUnconditionalTransfer(op: Op) bool {
 
 fn isBranch(op: Op) bool {
     return switch (op) {
-        .jmp, .jmp_if_true, .jmp_if_false, .jmp_if_nullish, .loop_inc_lt => true,
+        .jmp, .jmp_if_true, .jmp_if_false, .jmp_if_nullish, .loop_inc_lt,
+        .jmp_if_strict_eq, .jmp_if_strict_neq,
+        .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge,
+        => true,
         else => false,
     };
 }
@@ -172,6 +189,11 @@ pub const Analysis = struct {
     allocator: std.mem.Allocator,
     /// Sorted block-leader offsets; block `b` spans `[leaders[b], leaders[b+1])`.
     leaders: []u32,
+    /// Per-block forward control-flow successors (block indices; up to two —
+    /// branch target + fall-through). `null` slots are unused. Handler edges
+    /// are NOT included here (consumers that care bail on handlers). Exposed
+    /// for forward dataflow passes (e.g. TDZ-check elimination).
+    succs: [][2]?usize,
     /// `reachable.isSet(b)` — block `b` is reachable from entry.
     reachable: std.DynamicBitSet,
     /// Per-block register live-in / live-out sets (size `register_count`).
@@ -243,6 +265,7 @@ pub const Analysis = struct {
 
     pub fn deinit(self: *Analysis) void {
         self.allocator.free(self.leaders);
+        self.allocator.free(self.succs);
         self.reachable.deinit();
         for (self.live_in) |*s| s.deinit();
         for (self.live_out) |*s| s.deinit();
@@ -306,7 +329,7 @@ pub fn analyze(
 
     // ── Successors + per-block use/def ──
     var succs = try allocator.alloc([2]?usize, nblocks);
-    defer allocator.free(succs);
+    errdefer allocator.free(succs);
     var use = try allocator.alloc(std.DynamicBitSet, nblocks);
     var def = try allocator.alloc(std.DynamicBitSet, nblocks);
     defer {
@@ -467,6 +490,7 @@ pub fn analyze(
     return .{
         .allocator = allocator,
         .leaders = leaders,
+        .succs = succs,
         .reachable = reachable,
         .live_in = live_in,
         .live_out = live_out,
@@ -594,6 +618,24 @@ test "liveness: a backward loop keeps the counter live across the back-edge" {
     // r0 is read in the loop body and the back-edge re-enters, so r0 is
     // live at the loop header (live_in of block 0).
     try testing.expect(a.live_in[0].isSet(0));
+}
+
+test "liveness: a fused compare-and-branch is modelled (register read + branch edge)" {
+    // jmp_if_not_lt r1 +2 -> 6 ; ldar r0 ; return — `[op][r:u8][off:i16]`.
+    // Must be recognized as a branch (so blocks/successors are correct) and
+    // as reading r1 (so a re-emit re-patches its i16 — the corruption this
+    // guards against), and must NOT mark the function opaque.
+    var code = [_]u8{
+        byteOf(.jmp_if_not_lt), 1, 2, 0, // 0: r1, off=2, after=4 -> 6
+        byteOf(.ldar),          0, // 4
+        byteOf(.return_), // 6
+    };
+    var a = try analyze(testing.allocator, &code, 4, &.{});
+    defer a.deinit();
+    try testing.expect(a.fully_understood);
+    try testing.expectEqual(@as(?u32, 6), branchTarget(.jmp_if_not_lt, &code, 0));
+    try testing.expectEqual(@as(usize, 3), a.blockCount()); // leaders 0,4,6
+    try testing.expect(a.live_in[0].isSet(1)); // r1 is read by the fused op
 }
 
 test "liveness: an opaque opcode marks the function not-fully-understood" {

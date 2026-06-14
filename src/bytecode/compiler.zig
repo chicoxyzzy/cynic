@@ -14448,6 +14448,7 @@ fn compileScriptLikeChunk(
     // nested function / class templates). Chunks are realm-
     // lifetime; pinning lets the GC skip walking the chunk
     // tree on every collect. See `Heap.pinChunk`.
+    _ = try regalloc.eliminateRedundantTdzChecks(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
@@ -14648,6 +14649,7 @@ pub fn compileModuleAsChunk(
     c.builder.is_async_module = c.module_has_top_level_await;
     var chunk = try c.finish();
     chunk.base_url = base_url;
+    _ = try regalloc.eliminateRedundantTdzChecks(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
@@ -14679,6 +14681,7 @@ pub fn compileExpressionAsChunk(
     try c.compileExpression(expr);
     try c.builder.emitOp(.return_, expr.span());
     var chunk = try c.finish();
+    _ = try regalloc.eliminateRedundantTdzChecks(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
@@ -14992,4 +14995,15 @@ test "compiler: a while-loop relational test fuses" {
     const got = try dumpExpr("(function(n){ let i=0; while (i<n) i=i+1; return i; })");
     defer testing.allocator.free(got);
     try testing.expect(std.mem.indexOf(u8, t0Of(got), "JmpIfNotLt") != null);
+}
+
+test "compiler: redundant TDZ checks on initialized global lexicals are eliminated" {
+    // §9.1.1.4 — `const o` (and `let s`, `let i`) are initialized before the
+    // loop, so every read of them inside the body is provably past the TDZ.
+    // The per-read `ThrowIfHole` guards (one per property read pre-pass)
+    // collapse to none, while the loads themselves remain.
+    const got = try dumpScript("const o = { x: 1 }; let s = 0; for (let i = 0; i < 3; i++) s = s + o.x; s;");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "LdaGlobalSlot") != null); // o is still loaded
+    try testing.expect(std.mem.indexOf(u8, got, "ThrowIfHole") == null); // but no TDZ guard survives
 }

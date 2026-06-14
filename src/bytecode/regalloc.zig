@@ -95,9 +95,22 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
         }
     }
     if (dead.items.len == 0) return 0;
+    try reEmitDropping(allocator, chunk, dead.items);
+    return dead.items.len;
+}
+
+/// Rebuild `chunk.code` / `source_positions` / `handlers` with the
+/// instructions at the given `dead` offsets removed (sorted ascending, each
+/// an instruction start), re-patching i16-relative jumps, remapping source
+/// positions, and fixing handler pc ranges. The old buffers are freed.
+/// Shared re-emit foundation for the dead-store and TDZ-check passes — a
+/// removed instruction's offset maps to the next surviving instruction, so a
+/// jump that targeted it still resolves.
+fn reEmitDropping(allocator: std.mem.Allocator, chunk: *Chunk, dead: []const u32) !void {
+    const code = chunk.code;
 
     // ── old offset → new offset map (every instruction start + a code.len
-    // sentinel). A removed store maps to the next surviving instruction. ──
+    // sentinel). A removed instruction maps to the next surviving one. ──
     const new_off = try allocator.alloc(u32, code.len + 1);
     defer allocator.free(new_off);
     {
@@ -108,7 +121,7 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
             new_off[old] = new;
             const op: Op = @enumFromInt(code[old]);
             const sz: u32 = 1 + Op.operandSize(op);
-            if (di < dead.items.len and dead.items[di] == old) {
+            if (di < dead.len and dead[di] == old) {
                 di += 1; // removed: don't advance `new`
             } else {
                 new += sz;
@@ -118,7 +131,7 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
         new_off[code.len] = new;
     }
 
-    // ── Pass 2: re-emit surviving instructions, re-patching i16 jumps ──
+    // ── Re-emit surviving instructions, re-patching i16 jumps ──
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
     var new_sp: std.ArrayListUnmanaged(SourcePos) = .empty;
@@ -130,7 +143,7 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
         while (old < code.len) {
             const op: Op = @enumFromInt(code[old]);
             const sz: u32 = 1 + Op.operandSize(op);
-            const is_dead = di < dead.items.len and dead.items[di] == old;
+            const is_dead = di < dead.len and dead[di] == old;
             if (is_dead) {
                 di += 1;
                 // skip this instruction's source position(s)
@@ -149,6 +162,7 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
                 try out.appendSlice(allocator, code[old .. old + sz]);
                 const i16_pos: u32 = switch (op) {
                     .loop_inc_lt => new_self + 3, // [op][rc][rb][off]
+                    .jmp_if_strict_eq, .jmp_if_strict_neq, .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => new_self + 2, // [op][r][off]
                     else => new_self + 1, // [op][off]
                 };
                 const new_after: i64 = @as(i64, i16_pos) + 2;
@@ -185,6 +199,205 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
     chunk.code = owned_code;
     chunk.source_positions = owned_sp;
     chunk.handlers = new_handlers;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Redundant TDZ-check elimination
+// ─────────────────────────────────────────────────────────────────────
+
+/// The global lexical slot index of a global-slot op, else null. Each is
+/// `[op][slot:u32-le]`.
+fn globalSlotOf(op: Op, code: []const u8, i: u32) ?u32 {
+    return switch (op) {
+        .lda_global_slot, .sta_global_slot, .sta_global_slot_init => std.mem.readInt(u32, code[i + 1 ..][0..4], .little),
+        else => null,
+    };
+}
+
+fn writesGlobalSlot(op: Op) bool {
+    return op == .sta_global_slot or op == .sta_global_slot_init;
+}
+
+fn isLeaderOff(leaders: []const u32, off: u32) bool {
+    var lo: usize = 0;
+    var hi: usize = leaders.len;
+    while (lo < hi) {
+        const mid = (lo + hi) / 2;
+        if (leaders[mid] == off) return true;
+        if (leaders[mid] < off) lo = mid + 1 else hi = mid;
+    }
+    return false;
+}
+
+fn bitsetEqlN(a: std.DynamicBitSet, b: std.DynamicBitSet, n: u32) bool {
+    var i: u32 = 0;
+    while (i < n) : (i += 1) if (a.isSet(i) != b.isSet(i)) return false;
+    return true;
+}
+
+/// Drop provably-redundant TDZ checks. A `let` / `const` global lexical
+/// binding, once initialized, can never return to the TDZ hole sentinel
+/// (§9.1.1.4 — InitializeBinding runs once and is irreversible), so a
+/// `throw_if_hole` that guards a `lda_global_slot sN` for a slot already
+/// initialized on every path to that read always passes — dead. A forward
+/// must-dataflow ("definitely-initialized slots", meet = intersection)
+/// finds them; each such check is removed via the shared re-emit. Recurses
+/// into nested function / class templates. Returns the count removed.
+///
+/// Sound across opaque ops and calls: global lexical slots are written only
+/// by `sta_global_slot{,_init}`, and nothing can un-initialize one, so an
+/// unmodelled op can only fail to *add* init-ness (kept check, conservative)
+/// — never wrongly assert it. Restricted to the exact adjacent
+/// `lda_global_slot; throw_if_hole` pair (so the accumulator definitely
+/// holds the slot) with the check not itself a jump target.
+pub fn eliminateRedundantTdzChecks(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
+    var removed = try eliminateRedundantTdzChecksOne(allocator, chunk);
+    for (chunk.function_templates) |*t| removed += try eliminateRedundantTdzChecks(allocator, &t.chunk);
+    return removed;
+}
+
+fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
+    const code = chunk.code;
+    if (code.len == 0) return 0;
+
+    // The CFG model omits try/catch/finally edges, so a throw could pre-empt
+    // an init the must-analysis assumes ran. Bail on handlers (the global
+    // reads we target live in handler-free top-level / loop code), matching
+    // the dead-store pass.
+    if (chunk.handlers.len > 0) return 0;
+
+    // Slot universe = highest referenced global slot + 1.
+    var nslots: u32 = 0;
+    {
+        var i: u32 = 0;
+        while (i < code.len) {
+            const op: Op = @enumFromInt(code[i]);
+            if (globalSlotOf(op, code, i)) |s| nslots = @max(nslots, s + 1);
+            i += 1 + Op.operandSize(op);
+        }
+    }
+    if (nslots == 0) return 0; // no global-slot traffic
+
+    var a = try liveness.analyze(allocator, code, chunk.register_count, chunk.handlers);
+    defer a.deinit();
+    const nblocks = a.blockCount();
+
+    // gen[b] = slots written (→ definitely initialized) within block b.
+    var gen = try allocator.alloc(std.DynamicBitSet, nblocks);
+    defer {
+        for (gen) |*g| g.deinit();
+        allocator.free(gen);
+    }
+    for (0..nblocks) |b| {
+        gen[b] = try std.DynamicBitSet.initEmpty(allocator, nslots);
+        const start = a.leaders[b];
+        const end: u32 = if (b + 1 < nblocks) a.leaders[b + 1] else @intCast(code.len);
+        var p: u32 = start;
+        while (p < end) {
+            const op: Op = @enumFromInt(code[p]);
+            if (writesGlobalSlot(op)) {
+                if (globalSlotOf(op, code, p)) |s| gen[b].set(s);
+            }
+            p += 1 + Op.operandSize(op);
+        }
+    }
+
+    // Predecessor lists (reachable blocks only; no handler edges — bailed).
+    var preds = try allocator.alloc(std.ArrayListUnmanaged(usize), nblocks);
+    defer {
+        for (preds) |*pl| pl.deinit(allocator);
+        allocator.free(preds);
+    }
+    for (0..nblocks) |b| preds[b] = .empty;
+    for (0..nblocks) |b| {
+        if (!a.reachable.isSet(b)) continue;
+        for (a.succs[b]) |maybe| if (maybe) |s| try preds[s].append(allocator, b);
+    }
+
+    // Forward must-dataflow:
+    //   in[entry] = ∅ ; in[b] = ⋂ out[pred] ; out[b] = in[b] ∪ gen[b]
+    // Non-entry blocks start at ⊤ (all slots) so the meet narrows down.
+    // Entry is pinned (in=∅, out=gen[0]) — correct even when a back-edge
+    // re-enters block 0, since the program-start path contributes ∅.
+    var in_set = try allocator.alloc(std.DynamicBitSet, nblocks);
+    var out_set = try allocator.alloc(std.DynamicBitSet, nblocks);
+    defer {
+        for (in_set) |*s| s.deinit();
+        for (out_set) |*s| s.deinit();
+        allocator.free(in_set);
+        allocator.free(out_set);
+    }
+    for (0..nblocks) |b| {
+        in_set[b] = try std.DynamicBitSet.initEmpty(allocator, nslots);
+        out_set[b] = try std.DynamicBitSet.initEmpty(allocator, nslots);
+        if (b == 0) {
+            out_set[0].setUnion(gen[0]);
+        } else {
+            out_set[b].setRangeValue(.{ .start = 0, .end = nslots }, true);
+        }
+    }
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (1..nblocks) |b| {
+            if (!a.reachable.isSet(b)) continue;
+            var new_in = try std.DynamicBitSet.initEmpty(allocator, nslots);
+            defer new_in.deinit();
+            var first = true;
+            for (preds[b].items) |p| {
+                if (first) {
+                    new_in.setUnion(out_set[p]);
+                    first = false;
+                } else {
+                    new_in.setIntersection(out_set[p]);
+                }
+            }
+            var new_out = try new_in.clone(allocator);
+            defer new_out.deinit();
+            new_out.setUnion(gen[b]);
+            if (!bitsetEqlN(new_out, out_set[b], nslots)) {
+                changed = true;
+                out_set[b].setRangeValue(.{ .start = 0, .end = nslots }, false);
+                out_set[b].setUnion(new_out);
+            }
+            in_set[b].setRangeValue(.{ .start = 0, .end = nslots }, false);
+            in_set[b].setUnion(new_in);
+        }
+    }
+
+    // Replay the transfer per reachable block, marking every
+    // `lda_global_slot sN; throw_if_hole` with sN already initialized — and
+    // the check not itself a jump target — for removal.
+    var dead: std.ArrayListUnmanaged(u32) = .empty;
+    defer dead.deinit(allocator);
+    for (0..nblocks) |b| {
+        if (!a.reachable.isSet(b)) continue;
+        var cur = try in_set[b].clone(allocator);
+        defer cur.deinit();
+        const start = a.leaders[b];
+        const end: u32 = if (b + 1 < nblocks) a.leaders[b + 1] else @intCast(code.len);
+        var p: u32 = start;
+        while (p < end) {
+            const op: Op = @enumFromInt(code[p]);
+            const sz: u32 = 1 + Op.operandSize(op);
+            if (op == .lda_global_slot) {
+                const slot = globalSlotOf(op, code, p).?;
+                const next = p + sz;
+                if (next < end and @as(Op, @enumFromInt(code[next])) == .throw_if_hole and
+                    cur.isSet(slot) and !isLeaderOff(a.leaders, next))
+                {
+                    try dead.append(allocator, next);
+                }
+            }
+            if (writesGlobalSlot(op)) {
+                if (globalSlotOf(op, code, p)) |s| cur.set(s);
+            }
+            p += sz;
+        }
+    }
+    if (dead.items.len == 0) return 0;
+    std.mem.sort(u32, dead.items, {}, std.sort.asc(u32));
+    try reEmitDropping(allocator, chunk, dead.items);
     return dead.items.len;
 }
 
@@ -282,4 +495,89 @@ test "regalloc: a jump offset is recomputed when a store between it and its targ
         i += 1 + Op.operandSize(op);
     }
     try testing.expect(checked);
+}
+
+fn mkChunk(code: []const u8) !Chunk {
+    return .{
+        .code = try testing.allocator.dupe(u8, code),
+        .constants = &.{},
+        .source_positions = &.{},
+        .handlers = &.{},
+        .function_templates = &.{},
+        .class_templates = &.{},
+        .register_count = 4,
+    };
+}
+
+// `sta_global_slot_init s0` / `lda_global_slot s0` are `[op][slot:u32-le]`.
+const gs_init_s0 = [_]u8{ @intFromEnum(Op.sta_global_slot_init), 0, 0, 0, 0 };
+const gl_s0 = [_]u8{ @intFromEnum(Op.lda_global_slot), 0, 0, 0, 0 };
+
+test "regalloc(tdz): a check dominated by the slot's init is dropped" {
+    // lda_zero; sta_global_slot_init s0; lda_global_slot s0; throw_if_hole; return
+    var code = [_]u8{@intFromEnum(Op.lda_zero)} ++ gs_init_s0 ++ gl_s0 ++
+        [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+    const removed = try eliminateRedundantTdzChecksOne(testing.allocator, &chunk);
+    try testing.expectEqual(@as(usize, 1), removed);
+    try testing.expectEqual(@as(usize, code.len - 1), chunk.code.len); // throw_if_hole (1 byte) gone
+    // No throw_if_hole survives.
+    var i: u32 = 0;
+    while (i < chunk.code.len) : (i += 1 + Op.operandSize(@enumFromInt(chunk.code[i]))) {
+        try testing.expect(@as(Op, @enumFromInt(chunk.code[i])) != .throw_if_hole);
+    }
+}
+
+test "regalloc(tdz): a check before the slot's init is kept" {
+    // lda_global_slot s0; throw_if_hole; lda_zero; sta_global_slot_init s0; return
+    var code = gl_s0 ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.lda_zero) } ++
+        gs_init_s0 ++ [_]u8{@intFromEnum(Op.return_)};
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+    try testing.expectEqual(@as(usize, 0), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
+    try testing.expectEqual(@as(usize, code.len), chunk.code.len);
+}
+
+test "regalloc(tdz): a check after a one-armed init is kept (must, not may)" {
+    // lda_zero; jmp_if_false +6 -> join; lda_zero; sta_global_slot_init s0;
+    // join: lda_global_slot s0; throw_if_hole; return
+    // The init runs only on the fall-through arm, so at the join s0 is not
+    // initialized on ALL paths — the check must stay.
+    var code = [_]u8{
+        @intFromEnum(Op.lda_zero), // 0
+        @intFromEnum(Op.jmp_if_false), 6, 0, // 1: after=4, +6 -> 10 (join)
+        @intFromEnum(Op.lda_zero), // 4
+    } ++ gs_init_s0 // 5: sta_global_slot_init s0 -> 10
+    ++ gl_s0 // 10: lda_global_slot s0 -> 15
+    ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) }; // 15, 16
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+    try testing.expectEqual(@as(usize, 0), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
+}
+
+test "regalloc(tdz): a check on a branch dominated by an earlier init is dropped" {
+    // lda_zero; sta_global_slot_init s0; jmp_if_false +6 -> end;
+    // lda_global_slot s0; throw_if_hole; end: return
+    // The init precedes (dominates) the branch, so the in-branch read is
+    // provably initialized.
+    var code = [_]u8{@intFromEnum(Op.lda_zero)} // 0
+    ++ gs_init_s0 // 1: init -> 6
+    ++ [_]u8{ @intFromEnum(Op.jmp_if_false), 6, 0 } // 6: after=9, +6 -> 15 (end)
+    ++ gl_s0 // 9: lda_global_slot s0 -> 14
+    ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) }; // 14, 15
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+    try testing.expectEqual(@as(usize, 1), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
+}
+
+test "regalloc(tdz): a function with an exception handler is left untouched" {
+    var code = [_]u8{@intFromEnum(Op.lda_zero)} ++ gs_init_s0 ++ gl_s0 ++
+        [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) };
+    var handlers = [_]Handler{.{ .start_pc = 0, .end_pc = 6, .handler_pc = 6, .catch_register = 1 }};
+    var chunk = try mkChunk(&code);
+    chunk.handlers = &handlers;
+    defer testing.allocator.free(chunk.code);
+    try testing.expectEqual(@as(usize, 0), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
+    try testing.expectEqual(@as(usize, code.len), chunk.code.len);
 }
