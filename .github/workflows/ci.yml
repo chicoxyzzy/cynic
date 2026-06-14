@@ -486,9 +486,9 @@ jobs:
           # stale cache against itself and false-pass.
           # Trailing slash on wait/ + notify/ so `waitAsync` (bounded by
           # the harness, doesn't block) stays in the comparison.
-          EXCLUDES="--exclude=built-ins/Atomics/wait/ --exclude=built-ins/Atomics/notify/ --exclude=built-ins/TypedArray/prototype/copyWithin/coerced"
-          zig build test262 -- --quiet --threads=0 $EXCLUDES --pass-list-out=/tmp/pass-interp.txt
-          zig build test262 -- --quiet --threads=0 --jit $EXCLUDES --pass-list-out=/tmp/pass-jit.txt
+          EXCLUDES=(--exclude=built-ins/Atomics/wait/ --exclude=built-ins/Atomics/notify/ --exclude=built-ins/TypedArray/prototype/copyWithin/coerced)
+          zig build test262 -- --quiet --threads=0 "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-interp.txt
+          zig build test262 -- --quiet --threads=0 --jit "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-jit.txt
           # Both files exist and are non-empty only if both sweeps
           # completed — otherwise fail before the diff.
           test -s /tmp/pass-interp.txt
