@@ -15007,3 +15007,16 @@ test "compiler: redundant TDZ checks on initialized global lexicals are eliminat
     try testing.expect(std.mem.indexOf(u8, got, "LdaGlobalSlot") != null); // o is still loaded
     try testing.expect(std.mem.indexOf(u8, got, "ThrowIfHole") == null); // but no TDZ guard survives
 }
+
+test "compiler: a TDZ check inside a try body is eliminated when the global is init before the try" {
+    // §9.1.1.4 — even though the chunk has an exception handler, the read of
+    // `o` inside the try body is dominated by its pre-try init, so its guard
+    // is dropped. The whole chunk used to be skipped because it has a handler.
+    // (A read in the catch, or after the try, keeps its guard: the pass pins
+    // the catch entry to ∅, conservatively forgetting pre-try inits on the
+    // throw path — sound, and the cold case. Here the only read is in-try.)
+    const got = try dumpScript("const o = { x: 1 }; try { o.x; } catch (e) {}");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "LdaGlobalSlot") != null); // o still loaded in the try
+    try testing.expect(std.mem.indexOf(u8, got, "ThrowIfHole") == null); // its TDZ guard is gone
+}

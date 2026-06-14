@@ -260,11 +260,16 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
     const code = chunk.code;
     if (code.len == 0) return 0;
 
-    // The CFG model omits try/catch/finally edges, so a throw could pre-empt
-    // an init the must-analysis assumes ran. Bail on handlers (the global
-    // reads we target live in handler-free top-level / loop code), matching
-    // the dead-store pass.
-    if (chunk.handlers.len > 0) return 0;
+    // Handlers ARE supported here (unlike the dead-store pass): Cynic inlines
+    // every `finally` body at each break/continue/return exit, so all
+    // completion control flow is via static jumps already in `succs`. The
+    // only non-static edge is `throw → handler_pc`, and a throw can occur at
+    // any protected instruction — including before any in-try init. So a
+    // handler-entry block's must-init set is pinned to ∅ below (never trusted
+    // from its normal predecessors), which makes the forward must-analysis
+    // sound across try/catch/finally. (Backward dead-store liveness needs
+    // instruction-granular throw edges for a mid-block throw, which we don't
+    // model — hence it still bails on handlers; this forward pass doesn't.)
 
     // Slot universe = highest referenced global slot + 1.
     var nslots: u32 = 0;
@@ -281,6 +286,16 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
     var a = try liveness.analyze(allocator, code, chunk.register_count, chunk.handlers);
     defer a.deinit();
     const nblocks = a.blockCount();
+
+    // Blocks pinned to must-in = ∅: the entry block (program start), and every
+    // handler entry (reachable via a throw at any protected point, so nothing
+    // can be assumed initialized there). These never take the meet over their
+    // normal predecessors — that is what keeps the analysis sound across
+    // exception edges the `succs` CFG does not carry.
+    var is_pinned = try allocator.alloc(bool, nblocks);
+    defer allocator.free(is_pinned);
+    for (0..nblocks) |b| is_pinned[b] = (b == 0);
+    for (chunk.handlers) |h| is_pinned[a.blockOf(h.handler_pc)] = true;
 
     // gen[b] = slots written (→ definitely initialized) within block b.
     var gen = try allocator.alloc(std.DynamicBitSet, nblocks);
@@ -302,7 +317,9 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
         }
     }
 
-    // Predecessor lists (reachable blocks only; no handler edges — bailed).
+    // Predecessor lists from normal (succs) edges only — reachable blocks.
+    // Throw→handler edges are deliberately excluded; handler entries are
+    // pinned to ∅ instead (see `is_pinned`), which is the conservative truth.
     var preds = try allocator.alloc(std.ArrayListUnmanaged(usize), nblocks);
     defer {
         for (preds) |*pl| pl.deinit(allocator);
@@ -315,10 +332,11 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
     }
 
     // Forward must-dataflow:
-    //   in[entry] = ∅ ; in[b] = ⋂ out[pred] ; out[b] = in[b] ∪ gen[b]
-    // Non-entry blocks start at ⊤ (all slots) so the meet narrows down.
-    // Entry is pinned (in=∅, out=gen[0]) — correct even when a back-edge
-    // re-enters block 0, since the program-start path contributes ∅.
+    //   in[pinned] = ∅ ; in[b] = ⋂ out[pred] ; out[b] = in[b] ∪ gen[b]
+    // Pinned blocks (entry + handler entries) start at in=∅, out=gen and are
+    // never recomputed — correct even when a back-edge re-enters them, since
+    // the program-start / throw path contributes ∅. Other blocks start at ⊤
+    // (all slots) so the meet narrows down monotonically.
     var in_set = try allocator.alloc(std.DynamicBitSet, nblocks);
     var out_set = try allocator.alloc(std.DynamicBitSet, nblocks);
     defer {
@@ -330,8 +348,8 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
     for (0..nblocks) |b| {
         in_set[b] = try std.DynamicBitSet.initEmpty(allocator, nslots);
         out_set[b] = try std.DynamicBitSet.initEmpty(allocator, nslots);
-        if (b == 0) {
-            out_set[0].setUnion(gen[0]);
+        if (is_pinned[b]) {
+            out_set[b].setUnion(gen[b]); // in=∅ → out=gen
         } else {
             out_set[b].setRangeValue(.{ .start = 0, .end = nslots }, true);
         }
@@ -339,8 +357,8 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
     var changed = true;
     while (changed) {
         changed = false;
-        for (1..nblocks) |b| {
-            if (!a.reachable.isSet(b)) continue;
+        for (0..nblocks) |b| {
+            if (is_pinned[b] or !a.reachable.isSet(b)) continue;
             var new_in = try std.DynamicBitSet.initEmpty(allocator, nslots);
             defer new_in.deinit();
             var first = true;
@@ -571,7 +589,11 @@ test "regalloc(tdz): a check on a branch dominated by an earlier init is dropped
     try testing.expectEqual(@as(usize, 1), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
 }
 
-test "regalloc(tdz): a function with an exception handler is left untouched" {
+test "regalloc(tdz): a check in a handler (catch) body is kept — handler entry pinned to ∅" {
+    // The `lda_global_slot s0; throw_if_hole` sits in the catch body
+    // (handler_pc = 6). A throw can reach the catch before the init runs, so
+    // the handler-entry block's must-init is ∅ and the check must stay — even
+    // though a normal fall-through from the init block exists in the bytecode.
     var code = [_]u8{@intFromEnum(Op.lda_zero)} ++ gs_init_s0 ++ gl_s0 ++
         [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) };
     var handlers = [_]Handler{.{ .start_pc = 0, .end_pc = 6, .handler_pc = 6, .catch_register = 1 }};
@@ -580,4 +602,27 @@ test "regalloc(tdz): a function with an exception handler is left untouched" {
     defer testing.allocator.free(chunk.code);
     try testing.expectEqual(@as(usize, 0), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
     try testing.expectEqual(@as(usize, code.len), chunk.code.len);
+}
+
+test "regalloc(tdz): a check inside a try body dominated by a pre-try init is dropped" {
+    // init s0 before the try; the read is inside the protected range and the
+    // try normally jumps past the catch. The check is removable despite the
+    // handler — the pass no longer bails on handler-bearing chunks.
+    // @0 lda_zero; @1 sta_global_slot_init s0; [try @6) @6 lda_global_slot s0;
+    // @11 throw_if_hole; @12 jmp +1 -> @16; [catch @15] @15 lda_undefined;
+    // @16 return.  handler: try [6,12), catch @15.
+    var code = [_]u8{@intFromEnum(Op.lda_zero)} // 0
+    ++ gs_init_s0 // 1: init -> 6
+    ++ gl_s0 // 6: read -> 11
+    ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.jmp), 1, 0, @intFromEnum(Op.lda_undefined), @intFromEnum(Op.return_) };
+    // 11: throw_if_hole; 12: jmp after=15 +1 -> 16; 15: lda_undefined; 16: return
+    var chunk = try mkChunk(&code);
+    // Owned handlers slice — the re-emit frees and rebuilds it (a removal
+    // happens here, so it runs), so it must not be a stack array.
+    const handlers = try testing.allocator.alloc(Handler, 1);
+    handlers[0] = .{ .start_pc = 6, .end_pc = 12, .handler_pc = 15, .catch_register = 1 };
+    chunk.handlers = handlers;
+    defer testing.allocator.free(chunk.code);
+    defer testing.allocator.free(chunk.handlers); // the rebuilt slice
+    try testing.expectEqual(@as(usize, 1), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
 }
