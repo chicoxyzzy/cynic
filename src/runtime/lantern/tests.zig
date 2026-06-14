@@ -6514,6 +6514,21 @@ test "shape: lazy own_key_order survives a redefine transition without duplicati
         \\harden(o);
         \\Object.values(o).join(",");
     , "10,20");
+    // GetOwnPropertyNames and JSON.stringify route through the same
+    // §10.1.11 ordered own-key iterator — a redefine-duplicated key
+    // would surface as `["a","b","b","a"]` / `{"a":1,"b":2,"b":2,...}`.
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, b: 2 };
+        \\harden(o);
+        \\Object.getOwnPropertyNames(o).join(",");
+    , "a,b");
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, b: 2 };
+        \\harden(o);
+        \\JSON.stringify(o);
+    ,
+        \\{"a":1,"b":2}
+    );
 }
 
 test "GC: closures keep captured envs alive under gc_threshold=1" {
