@@ -218,6 +218,30 @@ pub const Memory = struct {
 /// An instantiated module: its validated functions plus runtime state.
 /// Linear memory and tables join in later steps; the integer+control
 /// subset needs only globals and the function bodies.
+/// Per-function Spasm code cache (docs/jit.md §6). Compiles each
+/// emittable function once and reuses the native `EntryFn` across
+/// invocations (the v1 path compiled fresh per call). Owns the
+/// `CodeAllocator` whose executable pages the cached `EntryFn`s point
+/// into, so it must outlive every Spasm-run call — it is freed only in
+/// `Instance.deinit`.
+const SpasmCache = struct {
+    /// Per-defined-function compilation state. `failed` records that the
+    /// body is outside Spasm's emittable class, so a function that can't
+    /// compile isn't re-attempted (and re-failed) on every call.
+    const Slot = union(enum) {
+        untried,
+        failed,
+        compiled: spasm.EntryFn,
+    };
+    ca: code_alloc.CodeAllocator,
+    slots: []Slot,
+
+    fn deinit(self: *SpasmCache, gpa: std.mem.Allocator) void {
+        self.ca.deinit();
+        gpa.free(self.slots);
+    }
+};
+
 pub const Instance = struct {
     module: *const Module,
     funcs: []const CompiledFunc,
@@ -291,6 +315,15 @@ pub const Instance = struct {
     /// differential/unit test prove the compiled path was taken (the
     /// result alone is identical to the interpreter's, by design).
     spasm_runs: u32 = 0,
+    /// Functions actually handed to `spasm.compile` — distinct from
+    /// `spasm_runs` so a test can prove the per-function code cache
+    /// reuses an `EntryFn` instead of recompiling every call (N runs,
+    /// 1 compile). docs/jit.md §6.
+    spasm_compiles: u32 = 0,
+    /// Per-function Spasm code cache, lazily created on the first
+    /// Spasm-enabled invoke. Owns the executable memory the compiled
+    /// `EntryFn`s point into, so it lives for the instance's lifetime.
+    spasm_cache: ?SpasmCache = null,
 
     /// Allocate an `ExnRecord` in this instance's pool — used by the JS
     /// boundary to reify a thrown JS value for a `try_table` to catch.
@@ -326,6 +359,50 @@ pub const Instance = struct {
         self.exn_pool.deinit(self.gpa);
         self.gpa.free(self.tag_identities);
         self.gpa.free(self.owned_tag_types);
+        if (self.spasm_cache) |*c| c.deinit(self.gpa);
+    }
+
+    /// Return the cached Spasm `EntryFn` for `func`, compiling and
+    /// caching it on first use and reusing it on every later call.
+    /// Returns null when the body is outside Spasm's emittable class
+    /// (recorded as `failed` so it isn't re-attempted — and re-failed —
+    /// every call). `func` must point into `self.funcs`, which holds for
+    /// any target reached through `resolveFunc`'s `.wasm` arm. docs/jit.md §6.
+    fn spasmEntryFor(self: *Instance, func: *const CompiledFunc) ?spasm.EntryFn {
+        if (comptime !spasm.supported) return null;
+        // Lazily create the cache on the first Spasm-enabled invoke, so an
+        // instance that never tiers up pays no executable-memory cost.
+        if (self.spasm_cache == null) {
+            var ca = code_alloc.CodeAllocator.init(self.gpa, 64 * 1024) catch return null;
+            const slots = self.gpa.alloc(SpasmCache.Slot, self.funcs.len) catch {
+                ca.deinit();
+                return null;
+            };
+            @memset(slots, .untried);
+            self.spasm_cache = .{ .ca = ca, .slots = slots };
+        }
+        const cache = &self.spasm_cache.?;
+
+        // Recover the defined-function index from `func`'s position in
+        // `self.funcs` — robust across a cross-module re-export, where an
+        // index relative to the *calling* instance would be wrong.
+        const idx = (@intFromPtr(func) - @intFromPtr(self.funcs.ptr)) / @sizeOf(CompiledFunc);
+        if (idx >= cache.slots.len) return null;
+
+        switch (cache.slots[idx]) {
+            .compiled => |e| return e,
+            .failed => return null,
+            .untried => {
+                const ftype = &self.module.types[func.type_index];
+                if (spasm.compile(self.gpa, &cache.ca, func, ftype) catch null) |e| {
+                    cache.slots[idx] = .{ .compiled = e };
+                    self.spasm_compiles += 1;
+                    return e;
+                }
+                cache.slots[idx] = .failed;
+                return null;
+            },
+        }
     }
 
     /// Read a global's raw cell by its index in the global index space
@@ -1169,8 +1246,9 @@ pub fn invoke(
 /// boundary marshals params + locals into one `Cell` array (params
 /// seeded from `args`, declared locals zeroed) and reads one result
 /// `Cell` per result — exactly the representation `spasm.EntryFn`
-/// expects. v1 compiles fresh per call (no code cache); caching the
-/// `EntryFn` per function is the recorded perf follow-up.
+/// expects. The `EntryFn` itself comes from the per-function code cache
+/// (`spasmEntryFor`): each emittable function is compiled once and reused
+/// across calls; only the per-call marshalling buffers below are transient.
 fn spasmRun(
     allocator: std.mem.Allocator,
     instance: *Instance,
@@ -1180,9 +1258,7 @@ fn spasmRun(
     if (comptime !spasm.supported) return null;
     const ftype = &instance.module.types[func.type_index];
     if (args.len != ftype.params.len) return null;
-    var ca = code_alloc.CodeAllocator.init(allocator, 64 * 1024) catch return null;
-    defer ca.deinit();
-    const entry = (spasm.compile(allocator, &ca, func, ftype) catch return null) orelse return null;
+    const entry = instance.spasmEntryFor(func) orelse return null;
 
     const locals = try allocator.alloc(spasm.Cell, @max(func.local_types.len, 1));
     defer allocator.free(locals);

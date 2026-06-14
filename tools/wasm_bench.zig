@@ -81,6 +81,25 @@ const Bench = struct {
     reps: u32,
 };
 
+const Timing = struct { us: i64, checksum: u64, spasm_runs: u32 };
+
+/// Warm up once (under Spasm this compiles + caches the function), then
+/// time `reps` invocations. The warmup invoke is excluded, so a Spasm
+/// run measures cached native execution — no per-rep compile.
+fn timeReps(inst: *wasm.Instance, a: std.mem.Allocator, io: std.Io, args: []const u128, reps: u32) !Timing {
+    _ = try wasm.invoke(inst, a, 0, args);
+    const runs_before = inst.spasm_runs;
+    var checksum: u64 = 0;
+    const t0 = std.Io.Clock.now(.awake, io);
+    var k: u32 = 0;
+    while (k < reps) : (k += 1) {
+        const res = try wasm.invoke(inst, a, 0, args);
+        checksum +%= @truncate(res[0]);
+    }
+    const us = t0.untilNow(io, .awake).toMicroseconds();
+    return .{ .us = us, .checksum = checksum, .spasm_runs = inst.spasm_runs - runs_before };
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var arena = std.heap.ArenaAllocator.init(init.gpa);
@@ -97,29 +116,37 @@ pub fn main(init: std.process.Init) !void {
         const m = try wasm.decode(a, bytes);
         const mp = try a.create(wasm.Module);
         mp.* = m;
-        const inst = try a.create(wasm.Instance);
-        try wasm.instantiate(inst, a, a, mp, .{});
-
         const args = [_]u128{@as(u32, @bitCast(bench.arg))};
-        // Warm up (and validate the workload actually runs).
-        _ = try wasm.invoke(inst, a, 0, &args);
 
-        var checksum: u64 = 0;
-        const t0 = std.Io.Clock.now(.awake, io);
-        var k: u32 = 0;
-        while (k < bench.reps) : (k += 1) {
-            const res = try wasm.invoke(inst, a, 0, &args);
-            checksum +%= @truncate(res[0]);
-        }
-        const us = t0.untilNow(io, .awake).toMicroseconds();
-        const per_rep = @divTrunc(us, @as(i64, bench.reps));
+        // Interpreter baseline.
+        const inst_i = try a.create(wasm.Instance);
+        try wasm.instantiate(inst_i, a, a, mp, .{});
+        const ti = try timeReps(inst_i, a, io, &args, bench.reps);
 
-        var line: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&line, "{s:<32}  {d:>9.2} ms total  {d:>8.3} ms/rep  (checksum {x})\n", .{
+        // Spasm (baseline tier forced on). The function compiles once at
+        // warmup and the cached EntryFn runs every timed rep.
+        const inst_s = try a.create(wasm.Instance);
+        try wasm.instantiate(inst_s, a, a, mp, .{});
+        inst_s.spasm_enabled = true;
+        const ts = try timeReps(inst_s, a, io, &args, bench.reps);
+
+        const interp_per = @as(f64, @floatFromInt(ti.us)) / @as(f64, @floatFromInt(bench.reps));
+        const spasm_per = @as(f64, @floatFromInt(ts.us)) / @as(f64, @floatFromInt(bench.reps));
+        const speedup = if (spasm_per > 0.0) interp_per / spasm_per else 0.0;
+        // The same answer interpreted vs compiled is the inline correctness
+        // check; `native` confirms Spasm engaged (vs degrading to interp,
+        // e.g. `call`-using bodies it can't emit yet).
+        const tag = if (ts.spasm_runs > 0) "native" else "degraded";
+
+        var line: [320]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&line, "{s:<30}  interp {d:>8.3}  spasm {d:>8.3} ms/rep  {d:>5.2}x  {s:<8} (chk {x}=={x})\n", .{
             bench.name,
-            @as(f64, @floatFromInt(us)) / 1_000.0,
-            @as(f64, @floatFromInt(per_rep)) / 1_000.0,
-            checksum,
+            interp_per / 1_000.0,
+            spasm_per / 1_000.0,
+            speedup,
+            tag,
+            ti.checksum,
+            ts.checksum,
         });
         try std.Io.File.stdout().writeStreamingAll(io, msg);
     }

@@ -357,6 +357,42 @@ test "wasm spasm: a compilable function runs Spasm-compiled with an identical re
     try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
 }
 
+test "wasm spasm: the per-function code cache compiles once across repeated invokes" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + adder_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &adder_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const fidx = funcExport(mp, "add") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = @as(u128, 7);
+    cells[1] = @as(u128, 35);
+
+    // Repeated invokes of the same function each run native code, but the
+    // function is compiled exactly once and its EntryFn reused — the
+    // whole point of the per-function code cache.
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+        defer testing.allocator.free(res);
+        try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(res[0])));
+    }
+
+    try testing.expectEqual(@as(u32, 3), instance.spasm_runs);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {

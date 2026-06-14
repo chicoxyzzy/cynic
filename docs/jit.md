@@ -995,9 +995,18 @@ useful:
    the §10-analog authoritative correctness gate, reproduced with
    `zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite --
    --quiet [--spasm]` (the harness `--spasm` flag forces the per-instance
-   gate on for every loaded module). Still to come: the per-function code
-   cache, the side-table-as-control-oracle wiring (§6) that makes
-   valcnt/popcnt and multi-target branches cheap, then i64.
+   gate on for every loaded module). The **per-function code cache**
+   now ships (`spasmEntryFor`): each emittable function compiles once on
+   its first Spasm-enabled invoke and the cached `EntryFn` runs every
+   later call (the instance owns the executable pages for its lifetime;
+   a body Spasm can't emit is recorded `failed` so it isn't re-attempted).
+   A counter-proven unit test (1 compile across N runs) and the
+   `zig build wasm-bench` interp-vs-Spasm A/B back it — the fully
+   compilable `sum(i*i)` loop runs ~10× faster as cached native code on
+   that workload, results byte-identical, while `call`-using `fib`
+   degrades to the interpreter at parity. Still to come: the
+   side-table-as-control-oracle wiring (§6) that makes valcnt/popcnt and
+   multi-target branches cheap, then i64.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.
