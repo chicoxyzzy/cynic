@@ -429,9 +429,9 @@ test "regalloc: a dead store is dropped and the value is unchanged" {
     // Build: lda_one; star r0; lda_zero; star r0; ldar r0; return
     // The first `star r0` is dead (r0 overwritten before any read).
     var code = [_]u8{
-        @intFromEnum(Op.lda_one),  @intFromEnum(Op.star),    0, // dead store
-        @intFromEnum(Op.lda_zero), @intFromEnum(Op.star),    0,
-        @intFromEnum(Op.ldar),     0, @intFromEnum(Op.return_),
+        @intFromEnum(Op.lda_one),  @intFromEnum(Op.star), 0, // dead store
+        @intFromEnum(Op.lda_zero), @intFromEnum(Op.star), 0,
+        @intFromEnum(Op.ldar),     0,                     @intFromEnum(Op.return_),
     };
     var chunk: Chunk = .{
         .code = try testing.allocator.dupe(u8, &code),
@@ -454,9 +454,9 @@ test "regalloc: a function with an exception handler is left untouched" {
     // Same dead-store shape as above, but with a handler present — the
     // unmodelled try/catch/finally control flow means we must not rewrite.
     var code = [_]u8{
-        @intFromEnum(Op.lda_one),  @intFromEnum(Op.star),    0, // dead store
-        @intFromEnum(Op.lda_zero), @intFromEnum(Op.star),    0,
-        @intFromEnum(Op.ldar),     0, @intFromEnum(Op.return_),
+        @intFromEnum(Op.lda_one),  @intFromEnum(Op.star), 0, // dead store
+        @intFromEnum(Op.lda_zero), @intFromEnum(Op.star), 0,
+        @intFromEnum(Op.ldar),     0,                     @intFromEnum(Op.return_),
     };
     var handlers = [_]Handler{.{ .start_pc = 0, .end_pc = 3, .handler_pc = 3, .catch_register = 1 }};
     var chunk: Chunk = .{
@@ -481,10 +481,10 @@ test "regalloc: a jump offset is recomputed when a store between it and its targ
     var code = [_]u8{
         @intFromEnum(Op.lda_zero), // 0
         @intFromEnum(Op.jmp_if_false), 2, 0, // 1: -> (1+3)+2 = 6
-        @intFromEnum(Op.star),         1, // 4: dead, between branch and target
+        @intFromEnum(Op.star), 1, // 4: dead, between branch and target
         @intFromEnum(Op.lda_one), // 6: target
-        @intFromEnum(Op.star),         0, // 7
-        @intFromEnum(Op.ldar),         0, // 9
+        @intFromEnum(Op.star), 0, // 7
+        @intFromEnum(Op.ldar), 0, // 9
         @intFromEnum(Op.return_), // 11
     };
     var chunk: Chunk = .{
@@ -580,10 +580,10 @@ test "regalloc(tdz): a check on a branch dominated by an earlier init is dropped
     // The init precedes (dominates) the branch, so the in-branch read is
     // provably initialized.
     var code = [_]u8{@intFromEnum(Op.lda_zero)} // 0
-    ++ gs_init_s0 // 1: init -> 6
-    ++ [_]u8{ @intFromEnum(Op.jmp_if_false), 6, 0 } // 6: after=9, +6 -> 15 (end)
-    ++ gl_s0 // 9: lda_global_slot s0 -> 14
-    ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) }; // 14, 15
+        ++ gs_init_s0 // 1: init -> 6
+        ++ [_]u8{ @intFromEnum(Op.jmp_if_false), 6, 0 } // 6: after=9, +6 -> 15 (end)
+        ++ gl_s0 // 9: lda_global_slot s0 -> 14
+        ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) }; // 14, 15
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
     try testing.expectEqual(@as(usize, 1), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
@@ -612,9 +612,9 @@ test "regalloc(tdz): a check inside a try body dominated by a pre-try init is dr
     // @11 throw_if_hole; @12 jmp +1 -> @16; [catch @15] @15 lda_undefined;
     // @16 return.  handler: try [6,12), catch @15.
     var code = [_]u8{@intFromEnum(Op.lda_zero)} // 0
-    ++ gs_init_s0 // 1: init -> 6
-    ++ gl_s0 // 6: read -> 11
-    ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.jmp), 1, 0, @intFromEnum(Op.lda_undefined), @intFromEnum(Op.return_) };
+        ++ gs_init_s0 // 1: init -> 6
+        ++ gl_s0 // 6: read -> 11
+        ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.jmp), 1, 0, @intFromEnum(Op.lda_undefined), @intFromEnum(Op.return_) };
     // 11: throw_if_hole; 12: jmp after=15 +1 -> 16; 15: lda_undefined; 16: return
     var chunk = try mkChunk(&code);
     // Owned handlers slice — the re-emit frees and rebuilds it (a removal

@@ -64,31 +64,85 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         // ── Pure accumulator / immediate / constant / env / global —
         // no register operands. Listed explicitly so a function built
         // only from these stays `fully_understood`.
-        .lda_undefined, .lda_null, .lda_true, .lda_false, .lda_hole,
-        .lda_zero, .lda_one, .lda_smi, .lda_constant,
-        .lda_this, .lda_new_target, .lda_arguments, .import_meta,
-        .lda_property, .lda_global, .lda_global_or_undef,
-        .lda_global_slot, .sta_global_slot, .sta_global_slot_init,
-        .lda_env, .sta_env, .make_environment, .pop_env,
-        .negate, .bit_not, .logical_not, .to_number, .to_numeric,
-        .to_string, .to_int32, .inc, .dec, .typeof_, .to_property_key,
-        .throw_, .throw_if_hole, .throw_assign_const, .throw_if_not_object,
-        .require_object_coercible, .return_,
-        .make_object, .make_array,
+        .lda_undefined,
+        .lda_null,
+        .lda_true,
+        .lda_false,
+        .lda_hole,
+        .lda_zero,
+        .lda_one,
+        .lda_smi,
+        .lda_constant,
+        .lda_this,
+        .lda_new_target,
+        .lda_arguments,
+        .import_meta,
+        .lda_property,
+        .lda_global,
+        .lda_global_or_undef,
+        .lda_global_slot,
+        .sta_global_slot,
+        .sta_global_slot_init,
+        .lda_env,
+        .sta_env,
+        .make_environment,
+        .pop_env,
+        .negate,
+        .bit_not,
+        .logical_not,
+        .to_number,
+        .to_numeric,
+        .to_string,
+        .to_int32,
+        .inc,
+        .dec,
+        .typeof_,
+        .to_property_key,
+        .throw_,
+        .throw_if_hole,
+        .throw_assign_const,
+        .throw_if_not_object,
+        .require_object_coercible,
+        .return_,
+        .make_object,
+        .make_array,
         => .{},
 
         // ── Register reads (one source register; acc is implicit) ──
         .ldar => Effect.read1(code[i + 1]),
-        .add, .sub, .mul, .div, .mod, .pow,
-        .bit_and, .bit_or, .bit_xor, .shl, .shr, .shr_u,
-        .eq, .strict_eq, .neq, .strict_neq, .lt, .gt, .le, .ge,
-        .instanceof_, .in_op, .array_spread,
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        .pow,
+        .bit_and,
+        .bit_or,
+        .bit_xor,
+        .shl,
+        .shr,
+        .shr_u,
+        .eq,
+        .strict_eq,
+        .neq,
+        .strict_neq,
+        .lt,
+        .gt,
+        .le,
+        .ge,
+        .instanceof_,
+        .in_op,
+        .array_spread,
         => Effect.read1(code[i + 1]),
         // Fused compare-and-branch `[op][r:u8][off:i16]` — reads the
         // register operand (the compared lhs); the branch edge is handled
         // by the leader/CFG scan via `branchTarget` / `isBranch`.
-        .jmp_if_strict_eq, .jmp_if_strict_neq,
-        .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge,
+        .jmp_if_strict_eq,
+        .jmp_if_strict_neq,
+        .jmp_if_not_lt,
+        .jmp_if_not_le,
+        .jmp_if_not_gt,
+        .jmp_if_not_ge,
         => Effect.read1(code[i + 1]),
         .add_smi => Effect.read1(code[i + 1]),
         .lda_computed => Effect.read1(code[i + 1]),
@@ -158,8 +212,12 @@ pub fn branchTarget(op: Op, code: []const u8, i: usize) ?u32 {
         },
         // Fused compare-and-branch `[op][r:u8][off:i16]` — i16 at i+2,
         // relative to the byte after the operand (i + 1 + 3).
-        .jmp_if_strict_eq, .jmp_if_strict_neq,
-        .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge,
+        .jmp_if_strict_eq,
+        .jmp_if_strict_neq,
+        .jmp_if_not_lt,
+        .jmp_if_not_le,
+        .jmp_if_not_gt,
+        .jmp_if_not_ge,
         => blk: {
             const after: i64 = @intCast(i + 1 + 3);
             break :blk @intCast(after + readI16(code, i + 2));
@@ -177,9 +235,17 @@ fn isUnconditionalTransfer(op: Op) bool {
 
 fn isBranch(op: Op) bool {
     return switch (op) {
-        .jmp, .jmp_if_true, .jmp_if_false, .jmp_if_nullish, .loop_inc_lt,
-        .jmp_if_strict_eq, .jmp_if_strict_neq,
-        .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge,
+        .jmp,
+        .jmp_if_true,
+        .jmp_if_false,
+        .jmp_if_nullish,
+        .loop_inc_lt,
+        .jmp_if_strict_eq,
+        .jmp_if_strict_neq,
+        .jmp_if_not_lt,
+        .jmp_if_not_le,
+        .jmp_if_not_gt,
+        .jmp_if_not_ge,
         => true,
         else => false,
     };
@@ -580,10 +646,10 @@ test "liveness: straight-line block, def-then-use register is not live-in" {
 test "liveness: a register defined before a branch is live across both arms" {
     // star r0; jmp_if_false +2 -> 7; ldar r0; ldar r0; return
     var code = [_]u8{
-        byteOf(.star),         0, // 0: def r0
+        byteOf(.star), 0, // 0: def r0
         byteOf(.jmp_if_false), 2, 0, // 2: -> (2+3)+2 = 7
-        byteOf(.ldar),         0, // 5: then reads r0
-        byteOf(.ldar),         0, // 7: join reads r0
+        byteOf(.ldar), 0, // 5: then reads r0
+        byteOf(.ldar), 0, // 7: join reads r0
         byteOf(.return_), // 9
     };
     var a = try analyze(testing.allocator, &code, 4, &.{});
@@ -607,9 +673,9 @@ test "liveness: code after an unconditional return is unreachable" {
 
 test "liveness: a backward loop keeps the counter live across the back-edge" {
     var code = [_]u8{
-        byteOf(.jmp_if_false), 5,    0, // 0: exit -> (0+3)+5 = 8
-        byteOf(.ldar),         0, // 3: read r0 (loop body)
-        byteOf(.jmp),          0xf8, 0xff, // 5: back-edge -8 -> (5+3)-8 = 0
+        byteOf(.jmp_if_false), 5, 0, // 0: exit -> (0+3)+5 = 8
+        byteOf(.ldar), 0, // 3: read r0 (loop body)
+        byteOf(.jmp), 0xf8, 0xff, // 5: back-edge -8 -> (5+3)-8 = 0
         byteOf(.return_), // 8: exit
     };
     var a = try analyze(testing.allocator, &code, 4, &.{});
@@ -627,7 +693,7 @@ test "liveness: a fused compare-and-branch is modelled (register read + branch e
     // guards against), and must NOT mark the function opaque.
     var code = [_]u8{
         byteOf(.jmp_if_not_lt), 1, 2, 0, // 0: r1, off=2, after=4 -> 6
-        byteOf(.ldar),          0, // 4
+        byteOf(.ldar), 0, // 4
         byteOf(.return_), // 6
     };
     var a = try analyze(testing.allocator, &code, 4, &.{});
