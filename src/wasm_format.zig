@@ -21,6 +21,7 @@ const heap = @import("runtime/heap.zig");
 const JSString = @import("runtime/string.zig").JSString;
 const JSObject = @import("runtime/object.zig").JSObject;
 const bigint = @import("runtime/bigint.zig");
+const date = @import("runtime/builtins/date.zig");
 
 /// Cap on nested-array recursion. Past this we print `Array(N)`
 /// instead of descending. The completion-value hint is one line in
@@ -107,6 +108,9 @@ fn appendValueAt(
     } else if (heap.valueAsPlainObject(v)) |obj| {
         if (obj.is_array_exotic) {
             try appendArray(allocator, buf, obj, depth);
+        } else if (try appendExoticObject(allocator, buf, obj, depth)) {
+            // Rendered as a typed-slot builtin (Map / Set / Date /
+            // RegExp / Promise / boxed primitive); nothing more to do.
         } else {
             try appendObject(allocator, buf, obj, depth);
         }
@@ -228,6 +232,190 @@ fn appendObject(
 fn objKeyEligible(obj: *const JSObject, key: []const u8) bool {
     if (std.mem.startsWith(u8, key, "__cynic_")) return false;
     return obj.flagsFor(key).enumerable;
+}
+
+/// Render the typed-slot builtins whose state lives in dedicated
+/// `JSObject` slots — not the enumerable property bag — so the
+/// generic `appendObject` dump would show them as a misleading `{}`.
+/// Returns `true` if `obj` was one of them (and already written),
+/// `false` to fall through to the plain-object path.
+///
+/// Order matters only for objects that could plausibly carry two
+/// slots at once; in practice each builtin owns exactly one, so the
+/// checks are mutually exclusive.
+fn appendExoticObject(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    obj: *JSObject,
+    depth: u8,
+) FormatError!bool {
+    // RegExp — `/source/flags`, read straight off the original-source
+    // / original-flags slots (§22.2.4).
+    if (obj.regexp_source) |src| {
+        try buf.append(allocator, '/');
+        try buf.appendSlice(allocator, src.flatBytes());
+        try buf.append(allocator, '/');
+        if (obj.regexp_flags) |fl| try buf.appendSlice(allocator, fl.flatBytes());
+        return true;
+    }
+
+    // Map / WeakMap — §24.1 [[MapData]]. A WeakMap's entries can't be
+    // enumerated (weak keys), so it shows just the tag.
+    if (obj.getMapData()) |m| {
+        if (m.is_weak) {
+            try buf.appendSlice(allocator, "WeakMap {…}");
+            return true;
+        }
+        try appendMap(allocator, buf, m, depth);
+        return true;
+    }
+
+    // Set / WeakSet — §24.2 [[SetData]].
+    if (obj.getSetData()) |s| {
+        if (s.is_weak) {
+            try buf.appendSlice(allocator, "WeakSet {…}");
+            return true;
+        }
+        try appendSet(allocator, buf, s, depth);
+        return true;
+    }
+
+    // Promise — §27.2. State only; the settled value isn't surfaced
+    // here (reading it can race the reaction queue and isn't a
+    // property anyway).
+    if (obj.promise_state != .none) {
+        try buf.appendSlice(allocator, switch (obj.promise_state) {
+            .pending => "Promise {<pending>}",
+            .fulfilled => "Promise {<fulfilled>}",
+            .rejected => "Promise {<rejected>}",
+            .none => unreachable,
+        });
+        return true;
+    }
+
+    // Date — the ISO string, reusing the builtin's pure civil-date
+    // math (§21.4.4.36). Out-of-range / NaN shows `Invalid Date`.
+    if (obj.getDateMs()) |ms| {
+        try appendDate(allocator, buf, ms);
+        return true;
+    }
+
+    // Boxed primitive — `new Number(5)` / `new String("x")` /
+    // `new Boolean(true)`. Show the wrapped value with a tag.
+    if (obj.getBoxedPrimitive()) |prim| {
+        const tag = if (prim.isString()) "String" else if (prim.isBool()) "Boolean" else "Number";
+        try buf.append(allocator, '[');
+        try buf.appendSlice(allocator, tag);
+        try buf.appendSlice(allocator, ": ");
+        try appendValueAt(allocator, buf, prim, depth + 1);
+        try buf.append(allocator, ']');
+        return true;
+    }
+
+    return false;
+}
+
+/// `Map(N) {k0 => v0, k1 => v1, …}` — non-deleted entries in
+/// insertion order, clamped by `max_array_show` / `max_depth`.
+fn appendMap(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    m: *const @import("runtime/object.zig").MapData,
+    depth: u8,
+) FormatError!void {
+    var live: usize = 0;
+    for (m.entries.items) |e| {
+        if (!e.deleted) live += 1;
+    }
+    var scratch: [32]u8 = undefined;
+    try buf.appendSlice(allocator, try std.fmt.bufPrint(&scratch, "Map({d})", .{live}));
+    if (depth >= max_depth) {
+        try buf.appendSlice(allocator, " {…}");
+        return;
+    }
+    try buf.appendSlice(allocator, " {");
+    const show_n = @min(live, max_array_show);
+    var shown: usize = 0;
+    for (m.entries.items) |e| {
+        if (e.deleted) continue;
+        if (shown >= show_n) break;
+        if (shown > 0) try buf.appendSlice(allocator, ", ");
+        try appendValueAt(allocator, buf, e.key, depth + 1);
+        try buf.appendSlice(allocator, " => ");
+        try appendValueAt(allocator, buf, e.value, depth + 1);
+        shown += 1;
+    }
+    if (live > show_n) {
+        try buf.appendSlice(allocator, try std.fmt.bufPrint(&scratch, ", … ({d} more)", .{live - show_n}));
+    }
+    try buf.append(allocator, '}');
+}
+
+/// `Set(N) {v0, v1, …}` — non-deleted members in insertion order.
+fn appendSet(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    s: *const @import("runtime/object.zig").SetData,
+    depth: u8,
+) FormatError!void {
+    var live: usize = 0;
+    for (s.entries.items) |e| {
+        if (!e.deleted) live += 1;
+    }
+    var scratch: [32]u8 = undefined;
+    try buf.appendSlice(allocator, try std.fmt.bufPrint(&scratch, "Set({d})", .{live}));
+    if (depth >= max_depth) {
+        try buf.appendSlice(allocator, " {…}");
+        return;
+    }
+    try buf.appendSlice(allocator, " {");
+    const show_n = @min(live, max_array_show);
+    var shown: usize = 0;
+    for (s.entries.items) |e| {
+        if (e.deleted) continue;
+        if (shown >= show_n) break;
+        if (shown > 0) try buf.appendSlice(allocator, ", ");
+        try appendValueAt(allocator, buf, e.value, depth + 1);
+        shown += 1;
+    }
+    if (live > show_n) {
+        try buf.appendSlice(allocator, try std.fmt.bufPrint(&scratch, ", … ({d} more)", .{live - show_n}));
+    }
+    try buf.append(allocator, '}');
+}
+
+/// A Date's `toISOString` form (§21.4.4.36), or `Invalid Date` for a
+/// NaN / out-of-TimeClip-range value. Reuses `date.dateParts` so the
+/// civil-calendar math has a single source of truth.
+fn appendDate(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    ms: f64,
+) FormatError!void {
+    if (!std.math.isFinite(ms) or @abs(ms) > 8.64e15) {
+        try buf.appendSlice(allocator, "Invalid Date");
+        return;
+    }
+    const p = date.dateParts(ms);
+    const u = struct {
+        fn cast(x: i64) u64 {
+            return @intCast(x);
+        }
+    }.cast;
+    var scratch: [40]u8 = undefined;
+    const text = if (p.year >= 0 and p.year <= 9999)
+        try std.fmt.bufPrint(&scratch, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+            u(p.year), u(p.month + 1), u(p.day), u(p.hours), u(p.minutes), u(p.seconds), u(p.ms),
+        })
+    else if (p.year < 0)
+        try std.fmt.bufPrint(&scratch, "-{d:0>6}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+            u(-p.year), u(p.month + 1), u(p.day), u(p.hours), u(p.minutes), u(p.seconds), u(p.ms),
+        })
+    else
+        try std.fmt.bufPrint(&scratch, "+{d:0>6}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+            u(p.year), u(p.month + 1), u(p.day), u(p.hours), u(p.minutes), u(p.seconds), u(p.ms),
+        });
+    try buf.appendSlice(allocator, text);
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +601,66 @@ test "wasm_format: object nested past depth cap collapses" {
     try expectFormat(
         "({a: {b: {c: {d: {e: 1}}}}});",
         "{a: {b: {c: {d: {…}}}}}",
+    );
+}
+
+test "wasm_format: Map renders entries" {
+    try expectFormat(
+        "new Map([[\"a\", 1], [\"b\", 2]]);",
+        "Map(2) {\"a\" => 1, \"b\" => 2}",
+    );
+}
+
+test "wasm_format: empty Map" {
+    try expectFormat("new Map();", "Map(0) {}");
+}
+
+test "wasm_format: Set renders members" {
+    try expectFormat("new Set([1, 2, 3]);", "Set(3) {1, 2, 3}");
+}
+
+test "wasm_format: WeakMap shows tag, not entries" {
+    try expectFormat(
+        "const k = {}; new WeakMap([[k, 1]]);",
+        "WeakMap {…}",
+    );
+}
+
+test "wasm_format: RegExp renders source and flags" {
+    try expectFormat("/ab+c/gi;", "/ab+c/gi");
+}
+
+test "wasm_format: RegExp no flags" {
+    try expectFormat("/x/;", "/x/");
+}
+
+test "wasm_format: resolved Promise shows state" {
+    try expectFormat("Promise.resolve(1);", "Promise {<fulfilled>}");
+}
+
+test "wasm_format: Date renders ISO string" {
+    try expectFormat(
+        "new Date(0);",
+        "1970-01-01T00:00:00.000Z",
+    );
+}
+
+test "wasm_format: invalid Date" {
+    try expectFormat("new Date(NaN);", "Invalid Date");
+}
+
+test "wasm_format: boxed Number" {
+    try expectFormat("new Number(42);", "[Number: 42]");
+}
+
+test "wasm_format: boxed String" {
+    try expectFormat("new String(\"hi\");", "[String: \"hi\"]");
+}
+
+test "wasm_format: Map nested in array" {
+    try expectFormat(
+        "[new Set([1, 2])];",
+        "[Set(2) {1, 2}]",
     );
 }
 

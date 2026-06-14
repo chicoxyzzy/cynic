@@ -908,9 +908,14 @@ fn daysFromEpoch(year: i64, month: i64, day: i64) i64 {
     return era * 146097 + doe - 719468;
 }
 
-const DateParts = struct { year: i64, month: i64, day: i64, weekday: i64, hours: i64, minutes: i64, seconds: i64, ms: i64 };
+/// Broken-down civil-calendar fields for an epoch-ms value. `pub` so
+/// the playground's value-hint formatter (`src/wasm_format.zig`) can
+/// render a Date's ISO string from the same pure math the
+/// `toISOString` builtin uses, instead of duplicating the
+/// days-to-y/m/d algorithm.
+pub const DateParts = struct { year: i64, month: i64, day: i64, weekday: i64, hours: i64, minutes: i64, seconds: i64, ms: i64 };
 
-fn dateParts(ms_v: f64) DateParts {
+pub fn dateParts(ms_v: f64) DateParts {
     if (std.math.isNan(ms_v) or std.math.isInf(ms_v)) {
         return .{ .year = 0, .month = 0, .day = 0, .weekday = 0, .hours = 0, .minutes = 0, .seconds = 0, .ms = 0 };
     }
