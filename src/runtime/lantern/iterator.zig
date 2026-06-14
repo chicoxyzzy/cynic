@@ -513,7 +513,8 @@ pub fn openForInIterator(
             defer shadow_only.deinit(realm.allocator);
             var emitted_str: std.StringHashMapUnmanaged(void) = .empty;
             defer emitted_str.deinit(realm.allocator);
-            for (cur.own_key_order.items) |key| {
+            var key_iter = cur.ownKeyOrderIterator();
+            while (key_iter.next()) |key| {
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
                 // §14.7.5.9 — String keys only; skip flattened Symbols.
                 if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) continue;

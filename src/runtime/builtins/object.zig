@@ -213,10 +213,7 @@ fn canonicalIntegerIndex(s: []const u8) ?u32 {
 /// would win only on pathologically large objects, and Cynic
 /// doesn't currently profile any.
 fn orderListContains(obj: *const JSObject, key: []const u8) bool {
-    for (obj.own_key_order.items) |k| {
-        if (std.mem.eql(u8, k, key)) return true;
-    }
-    return false;
+    return obj.ownKeyOrderContains(key);
 }
 
 /// §10.1.11 OrdinaryOwnPropertyKeys ordering. Returns own
@@ -328,7 +325,8 @@ pub fn ownPropertyKeysOrdered(
     if (obj.is_array_exotic) {
         string_keys.append(realm.allocator, "length") catch return error.OutOfMemory;
     }
-    for (obj.own_key_order.items) |k| {
+    var key_iter = obj.ownKeyOrderIterator();
+    while (key_iter.next()) |k| {
         if (std.mem.startsWith(u8, k, "__cynic_")) continue;
         // The order list refuses integer-index keys at recordKey
         // time, so they never appear here. The guards stay
@@ -1818,7 +1816,10 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // it. Symbol keys (null anchor) are stable on their own.
             // Anchored even on a redefine: a data→accessor conversion
             // stores a freshly stringified key slice.
-            if (dk.anchor) |ks| target.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+            if (dk.anchor) |ks| {
+                target.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+                target.markNonPristine();
+            }
             return target_v;
         }
 
@@ -1833,7 +1834,10 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // named-property bag (an array-exotic integer index goes
             // to `elements` and needs no anchor).
             if (target.ownDataContains(key)) {
-                if (dk.anchor) |ks| target.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+                if (dk.anchor) |ks| {
+                    target.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+                    target.markNonPristine();
+                }
             }
             // §10.4.2.4 ArraySetLength step 16-17 — when the
             // receiver is an Array and the key is "length", a
@@ -2422,6 +2426,7 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
             fout.set(realm.allocator, k_str.flatBytes(), desc) catch return error.OutOfMemory;
             if (fout.ownDataContains(k_str.flatBytes())) {
                 fout.key_anchors.append(realm.allocator, k_str) catch return error.OutOfMemory;
+                fout.markNonPristine();
             }
         }
         return heap_mod.taggedObject(fout);
@@ -2472,6 +2477,7 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
         // the heap string so a later sweep can't free it.
         if (out.ownDataContains(k_str.flatBytes())) {
             out.key_anchors.append(realm.allocator, k_str) catch return error.OutOfMemory;
+            out.markNonPristine();
         }
     }
     return heap_mod.taggedObject(out);
@@ -3187,6 +3193,7 @@ fn lowerArrayIndexedFlags(realm: *Realm, obj: *JSObject, sealed_only: bool) Nati
         // anchor the heap key string so a GC sweep can't dangle it.
         if (obj.ownDataContains(ks_owned.flatBytes())) {
             obj.key_anchors.append(realm.allocator, ks_owned) catch return error.OutOfMemory;
+            obj.markNonPristine();
         }
     }
 }
@@ -3627,6 +3634,7 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
         if (key_slot.anchor) |ks| {
             if (out.ownDataContains(key_slot.key)) {
                 out.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+                out.markNonPristine();
             }
         }
         // `v` is now reachable via `out`; drop the per-iteration
@@ -3935,6 +3943,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             out.set(realm.allocator, key_str, heap_mod.taggedObject(bucket)) catch return error.OutOfMemory;
             // `out` borrows the key slice; anchor the heap string.
             out.key_anchors.append(realm.allocator, key_js) catch return error.OutOfMemory;
+            out.markNonPristine();
         }
         const cur_len = bucket.get("length");
         const len_i: i32 = if (cur_len.isInt32()) cur_len.asInt32() else 0;

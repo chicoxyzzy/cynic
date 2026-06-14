@@ -8757,20 +8757,17 @@ pub fn runFrames(
                 var us_i: usize = 0;
                 while (us_i < obj.slotCount()) : (us_i += 1) obj.slotPtr(us_i).* = Value.undefined_;
             }
-            // Pre-fill `own_key_order` from the template's keys.
-            // The downstream `def_template_property` op skips
-            // `recordKey` entirely, so this is the one chance to
-            // populate the §10.1.11 OrdinaryOwnPropertyKeys order
-            // list. Chunk constants are pinned for the chunk's
-            // lifetime, so the borrowed slices outlive any
-            // reachable instance.
-            obj.own_key_order.ensureTotalCapacityPrecise(allocator, tmpl.keys.len) catch return error.OutOfMemory;
-            for (tmpl.keys) |key_idx| {
-                const key_v = local_chunk.constants[key_idx];
-                const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-                obj.own_key_order.appendAssumeCapacity(key_s.flatBytes());
-            }
-            if (tmpl.keys.len > 0) obj.markNonPristine();
+            // §10.1.11 OrdinaryOwnPropertyKeys insertion order is
+            // implicit in the cached shape's transition chain
+            // (root→leaf = insertion order); the read paths
+            // (Object.keys / Reflect.ownKeys / for-in) walk the
+            // shape chain when `own_key_order` is empty. Skipping
+            // the eager materialization here keeps the literal
+            // instance `is_pristine` so its death takes the
+            // `deinitFields` fast-return — the architectural win
+            // the `bench/micros/object_alloc.js` /
+            // `ctor_array_build.js` foundation could not yet close.
+            _ = tmpl.keys;
             acc = heap_mod.taggedObject(obj);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },

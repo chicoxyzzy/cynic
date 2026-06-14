@@ -6406,15 +6406,16 @@ test "GC: pristine empty-object death takes the deinitFields fast path" {
     //
     // `JSObject.deinit_slowpath_count` is a debug counter incremented
     // exactly when `deinitFields` runs the slow path. Allocating 200
-    // pristine `{}` objects under gc_threshold=1 forces each one
-    // through `deinitFields` immediately after it dies; if the fast
-    // path is wired, the counter delta over that span is bounded by
-    // the few non-pristine objects the realm-internal machinery
-    // (scope frames, completion records, etc.) allocates.
+    // pristine `{}` objects under setGcThreshold(1) forces a minor
+    // cycle on every allocation, sweeping each dead intermediate
+    // immediately; if the fast path is wired, the counter delta over
+    // that span is bounded by the few non-pristine objects the
+    // realm-internal machinery (scope frames, completion records, etc.)
+    // allocates.
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
     try installBuiltinsAllFeatures(&realm);
-    realm.heap.gc_threshold = 1;
+    realm.heap.setGcThreshold(1);
 
     const before = realm.heap.deinit_slowpath_count;
 
@@ -6435,6 +6436,84 @@ test "GC: pristine empty-object death takes the deinitFields fast path" {
     // path. A no-fast-path implementation runs the slow path ≥ 200
     // times here; the fast-path implementation runs it ≤ ~50.
     try testing.expect(delta < 100);
+}
+
+test "GC: pristine two-property shape-mode object death takes the deinitFields fast path" {
+    // Locks the architectural follow-up: a `{a:i, b:i+1}` object
+    // literal is shape-absorbed by `shadowSet` — both values land
+    // in `inline_slots`, the bag stays empty, and the only attached
+    // storage WAS the `own_key_order` ArrayList that `recordKey`
+    // populated for §10.1.11 OrdinaryOwnPropertyKeys iteration.
+    // Once `recordKey` is shape-aware (the shape chain already
+    // preserves insertion order leaf→root, so the redundant list
+    // stays empty in lazy mode), these objects qualify as pristine
+    // and the deinit fast-path fires.
+    //
+    // Same shape as the `{}` test above: 200 deaths under
+    // `gc_threshold=1` must produce well under 200 slowpath calls.
+    // The bench fixtures `object_alloc` (`{a:i, b:i+1}`) and
+    // `ctor_array_build` (`new Point(x, y)`) share this shape and
+    // are the actual target of the ~9-10 % `deinitFields` cost the
+    // foundation could not yet close.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    realm.heap.setGcThreshold(1);
+
+    const before = realm.heap.deinit_slowpath_count;
+
+    _ = switch (try evaluateScriptResult(&realm,
+        \\let last = null;
+        \\for (let i = 0; i < 200; i++) { last = { a: i, b: i + 1 }; }
+        \\last.a + last.b;
+    )) {
+        .value, .yielded => {},
+        .thrown => return error.UncaughtException,
+    };
+
+    const delta = realm.heap.deinit_slowpath_count - before;
+
+    // Loose budget: 200 dead shape-mode `{a:i, b:i+1}` instances must
+    // NOT each take the slowpath. Pre-laziness this delta was ~190+
+    // (every dead instance hit the slow path because the literal
+    // template eagerly populated `own_key_order`, flipping
+    // `is_pristine = false`). Post-laziness the shape chain
+    // authoritatively records insertion order and these instances
+    // qualify as pristine.
+    try testing.expect(delta < 100);
+}
+
+test "shape: lazy own_key_order survives a redefine transition without duplicating keys" {
+    // §10.1.11 OrdinaryOwnPropertyKeys via the lazy shape-chain
+    // iterator. `harden(o)` flips each own data property to frozen
+    // in-place through `ShapeTree.redefineTransition`, which appends
+    // a SECOND chain node for an existing key at the SAME slot
+    // (property_count unchanged). A naive depth-counting chain walk
+    // over-counts data nodes and emits each redefined key twice; the
+    // iterator must iterate by distinct slot (0..property_count),
+    // taking the leaf-most data node per slot, so a redefine is
+    // dedup-free by construction. Invisible to the `--unhardened`
+    // test262 scored posture — `harden` is the trigger.
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, b: 2 };
+        \\harden(o);
+        \\Object.keys(o).join(",");
+    , "a,b");
+    // The same object built via constant-string bracket writes —
+    // routed into the named-property IC (8ac6fcc), one of the paths
+    // into the shape-mode-with-empty-own_key_order state.
+    try expectScriptStringWithBuiltins(
+        \\const o = {};
+        \\o["a"] = 1; o["b"] = 2; o["c"] = 3;
+        \\harden(o);
+        \\Reflect.ownKeys(o).join(",");
+    , "a,b,c");
+    // Values / entries read through the same iterator.
+    try expectScriptStringWithBuiltins(
+        \\const o = { x: 10, y: 20 };
+        \\harden(o);
+        \\Object.values(o).join(",");
+    , "10,20");
 }
 
 test "GC: closures keep captured envs alive under gc_threshold=1" {

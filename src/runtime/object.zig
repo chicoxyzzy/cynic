@@ -2103,12 +2103,104 @@ pub const JSObject = struct {
     ) !bool {
         if (std.mem.startsWith(u8, key, "__cynic_")) return false;
         if (canonicalIntegerIndex(key) != null) return false;
+        // Lazy shape-mode: the shape chain authoritatively records
+        // §10.1.11 OrdinaryOwnPropertyKeys insertion order (leaf-to-
+        // root walk = reverse insertion order). Materializing
+        // `own_key_order` here would just duplicate that — and force
+        // the object out of `is_pristine`, paying the slow deinit
+        // path on death. Defer materialization to `demoteFromShape`
+        // (the only path that breaks the shape's authority) so
+        // typical `{a, b}` / `new Point(x, y)` literals stay pristine.
+        if (self.shape != null and self.own_key_order.items.len == 0) {
+            return false;
+        }
         for (self.own_key_order.items) |existing| {
             if (std.mem.eql(u8, existing, key)) return false;
         }
         try self.own_key_order.append(allocator, key);
         self.markNonPristine();
         return true;
+    }
+
+    /// True iff `key` appears in this object's §10.1.11 own-key
+    /// insertion order, either via the materialized `own_key_order`
+    /// list or implicitly via the shape chain (lazy mode).
+    pub fn ownKeyOrderContains(self: *const JSObject, key: []const u8) bool {
+        if (self.own_key_order.items.len > 0) {
+            for (self.own_key_order.items) |k| {
+                if (std.mem.eql(u8, k, key)) return true;
+            }
+            return false;
+        }
+        if (self.shape) |sh| {
+            var node: ?*const @import("shape.zig").Shape = sh;
+            while (node) |n| : (node = n.parent) {
+                if (n.parent == null) break;
+                if (n.kind != .data) continue;
+                if (std.mem.eql(u8, n.key, key)) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Iterate own keys in §10.1.11 insertion order — either from
+    /// the materialized `own_key_order` list or by walking the shape
+    /// chain in lazy mode. The shape-chain walk is O(N²) but bounded
+    /// by the typical object size (rarely > 10 properties in shape
+    /// mode); the constant factor wins vs eagerly materializing the
+    /// list every time a shape-mode object is created.
+    ///
+    /// The shape-mode walk iterates by DISTINCT SLOT (`0
+    /// ..property_count`), not by counting data nodes — a
+    /// `ShapeTree.redefineTransition` (the in-shape `harden()` /
+    /// frozen-realm freeze path) appends a second data node for an
+    /// existing key at the SAME slot, leaving `property_count`
+    /// unchanged. Counting nodes over-counts and emits the redefined
+    /// key twice; iterating slots emits each key exactly once.
+    /// Slot N belongs to the Nth-inserted key (append-only +
+    /// same-slot redefine), so slot order IS insertion order.
+    /// Mirrors the proven `OwnNamedIterator.shape` walker above.
+    pub const OwnKeyOrderIterator = struct {
+        obj: *const JSObject,
+        list_idx: usize = 0,
+        next_slot: u32 = 0,
+
+        pub fn next(self: *OwnKeyOrderIterator) ?[]const u8 {
+            const items = self.obj.own_key_order.items;
+            if (items.len > 0) {
+                if (self.list_idx >= items.len) return null;
+                const k = items[self.list_idx];
+                self.list_idx += 1;
+                return k;
+            }
+            const sh = self.obj.shape orelse return null;
+            const property_count = sh.property_count;
+            while (self.next_slot < property_count) {
+                const want_slot = self.next_slot;
+                self.next_slot += 1;
+                // Leaf→root: the FIRST data node carrying `want_slot`
+                // is the leaf-most (current) descriptor for that
+                // slot — a redefine node shadows the original append
+                // node at the same slot, and both share the key, so
+                // taking either yields the right key string. Emitting
+                // exactly one per slot is what dedups the redefine.
+                var node: ?*const @import("shape.zig").Shape = sh;
+                while (node) |n| : (node = n.parent) {
+                    if (n.parent == null) break;
+                    if (n.kind == .data and n.slot == want_slot) {
+                        return n.key;
+                    }
+                }
+                // No data node for this slot (defensive — an
+                // append-only chain always has one). Skip and
+                // continue to the next slot.
+            }
+            return null;
+        }
+    };
+
+    pub fn ownKeyOrderIterator(self: *const JSObject) OwnKeyOrderIterator {
+        return .{ .obj = self };
     }
 
     /// §10.1.11 OrdinaryOwnPropertyKeys — drop `key` from the
@@ -2520,6 +2612,37 @@ pub const JSObject = struct {
             const is_default = n.attrs.writable and n.attrs.enumerable and n.attrs.configurable;
             if (!is_default) {
                 try self.property_flags.put(allocator, n.key, n.attrs);
+            }
+        }
+        // Materialize `own_key_order` from the shape chain BEFORE
+        // dropping `self.shape`. After demote the chain is no longer
+        // the source of truth for §10.1.11 insertion order, so the
+        // list must take over. Walk leaf→root, append each data key,
+        // then reverse to get root→leaf (the actual insertion order).
+        // Idempotent when the list is already populated (a partial
+        // demote that already materialized).
+        if (self.own_key_order.items.len == 0) {
+            var n2: ?*const @import("shape.zig").Shape = shape;
+            const before_len = self.own_key_order.items.len;
+            while (n2) |n| : (n2 = n.parent) {
+                if (n.parent == null) break;
+                if (n.kind != .data) continue;
+                // Skip duplicates from a redefinition transition —
+                // the leaf-most occurrence wins, same as the bag
+                // backfill above.
+                var dup = false;
+                for (self.own_key_order.items[before_len..]) |k| {
+                    if (std.mem.eql(u8, k, n.key)) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) continue;
+                try self.own_key_order.append(allocator, n.key);
+            }
+            if (self.own_key_order.items.len > before_len) {
+                std.mem.reverse([]const u8, self.own_key_order.items[before_len..]);
+                self.markNonPristine();
             }
         }
         self.shape = null;
