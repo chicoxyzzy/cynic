@@ -67,3 +67,20 @@ member is pinned to a deliberate, documented posture (strict-only
 dynamic code; no Annex B). Further headline movement comes from the
 big policy buckets — ECMA-402 (`intl402/`, ~3.2k) being the only
 whole-point lever — not from chasing the gap tail.
+
+## Update 2026-06-14 — error-stack-accessor (a real gap, now closed)
+
+A test262 submodule bump after the 2026-06-11 audit added the
+`built-ins/Error/prototype/stack` family (34 fixtures, feature
+`error-stack-accessor`). Unlike the tail above, these were a **real**
+engine gap, not a by-design posture: the `proposal-error-stacks`
+accessor pair on `%Error.prototype%` was simply unimplemented. Closed
+this session — the getter/setter (§6.1.7 receiver typing; the stack
+string is the §20.5.3.4 toString header; the proxy- / accessor-aware
+§SetterThatIgnoresPrototypeProperties now lives in `builtins/object.zig`
+and is shared with `Iterator.prototype.constructor`) brings
+`built-ins/Error` to 93/0. Headline: +34 (test262 → 45333).
+
+A fresh triage of the rest of the current gap list re-confirmed every
+by-design family above (sloppy-via-dynamic-code, Annex-B-in-body) — no
+new real engine gaps surfaced; the verdict stands.
