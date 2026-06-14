@@ -6575,6 +6575,38 @@ test "shape: lazy own_key_order survives a redefine transition without duplicati
     );
 }
 
+test "GC: defineProperty([], \"length\", 2^32-1) survives gc_threshold=1" {
+    // §10.4.2.4 ArraySetLength via §10.4.2.1 [[DefineOwnProperty]] —
+    // redefining the Array exotic's virtual `length` slot to the
+    // §10.4.2.4 step 3.c boundary value 2^32-1. The length write
+    // routes straight to the virtual-length slot (no shape node, no
+    // bag entry, no `recordKey`), so the array can stay `is_pristine`
+    // through the whole define. The defineProperty builtin still
+    // anchors the `"length"` key JSString on the array via
+    // `key_anchors.append` (the key slice is borrowed; the GC must
+    // keep it alive) — and that append MUST be paired with
+    // `markNonPristine`. Without the pairing the array is pristine yet
+    // holds one anchor, which trips `assertPristineFieldsClean` (a
+    // pristine object's deinit fast-path asserts zero anchors) and
+    // aborts the host under allocation-pressure GC. No test262 fixture
+    // catches this class — the verifier fires only under
+    // gc_threshold + runtime-safety, invisible to a normal sweep
+    // (the live reproducer was built-ins/Object/defineProperty/
+    // 15.2.3.6-4-155, green at HEAD since 927c18f). 50 arrays die
+    // mid-loop under threshold=1, each deinit'd on the next allocation;
+    // the count comes out 50 only if every `length` read also survived
+    // (the anchor kept the boundary value addressable).
+    try expectScriptIntUnderGcPressure(
+        \\let r = 0;
+        \\for (let i = 0; i < 50; i++) {
+        \\  let a = [];
+        \\  Object.defineProperty(a, "length", { value: 4294967295 });
+        \\  if (a.length === 4294967295) r += 1;
+        \\}
+        \\r;
+    , 50);
+}
+
 test "GC: closures keep captured envs alive under gc_threshold=1" {
     // The arrow returned from `makeCounter` captures `n`; that
     // env is reachable only through the closure's `captured_env`
