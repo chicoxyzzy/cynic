@@ -257,12 +257,34 @@ that's a mechanical addition but requires the JIT track's sign-off.
 
 ### L3 — dead-object economics (three independent steps + one research track)
 
-- **L3a: "plain object" deinit fast bit.** A header flag set false
+- **L3a: "plain object" deinit fast bit. SHIPPED (`6ab8ac3` +
+  `927c18f`).** `JSObject.is_pristine` starts true and is cleared
   the first time any out-of-line field is created (bag entry,
-  accessors, elements, extension, …). `deinitFields` on a
-  still-plain object becomes a no-op; Point instances qualify
-  (inline slots only), literal arrays don't (elements). Estimate
-  −5 to −8 ns/iter. Low risk, small surface.
+  accessors, elements, overflow slots, extension, `own_key_order`,
+  `key_anchors`, the iter-state / promise-store pointers, …) via
+  `markNonPristine`; `deinitFields` early-returns on a still-
+  pristine object, and a `runtime_safety`-gated
+  `assertPristineFieldsClean` polices the clearing contract.
+  The foundation alone did NOT cover Point / `{a, b}` literals —
+  every shape-absorbed write called `recordKey`, which eagerly
+  appended to `own_key_order` and flipped the bit. The follow-up
+  (`927c18f`) made `own_key_order` **lazy in shape mode** (the
+  shape chain already encodes §10.1.11 insertion order; the
+  redundant list materialises only on `demoteFromShape`), so the
+  bench-target shapes now qualify. Measured: `deinitFields` on
+  `ctor_array_build` dropped 9.9 % → 8.4 % of wall time (profile,
+  `--no-jit`); the pristine two-property death rate went from
+  192/200 slow-path to < 100/200 (the `deinit_slowpath_count`
+  counter / regression test). The **residual** `deinitFields`
+  cost on *this* fixture is the elements-pooled `[p.x, p.y, …]`
+  array (it has out-of-line elements, so it can never be pristine —
+  that is L3b's territory, not L3a's), and the fixture's dominant
+  cost remains `runFrames` (44.5 %, construct/dispatch — the
+  JIT-bound `new_call` residual below), so L3a's wall-time effect
+  on the headline number is small-but-real and the alloc-fixture
+  *medal* gap here is structurally not a GC problem. Also helps
+  `object_alloc` / `class_instantiate` / `promise_chain`, where
+  the dead object is the dominant allocation.
 - **L3b: pool small element buffers.** Replace libc malloc/free for
   ≤8-slot element vectors with a per-heap size-class slab (same
   free-list shape as `object_pool`). Kills the malloc (element-
@@ -462,8 +484,9 @@ ctor row waits on construct support.
    `sta_computed`'s mirror while in there). Gates: unit tests
    red-first, `built-ins/Array` + `language/expressions` test262
    buckets, `/gc-stress` on the bucket, full-sweep safety net.
-2. **L3a** plain-bit deinit skip (small, independent, also helps
-   `object_alloc` / `class_instantiate` / `promise_chain`).
+2. **L3a** plain-bit deinit skip — **SHIPPED** (`6ab8ac3` +
+   the lazy-`own_key_order` follow-up `927c18f`); also helps
+   `object_alloc` / `class_instantiate` / `promise_chain`.
 3. **L2** fused `make_array_n` (coordinate the new opcode with the
    JIT track before landing).
 4. **L3b** pooled small element buffers (after L2, sizes are exact).
