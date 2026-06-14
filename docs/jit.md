@@ -988,12 +988,16 @@ useful:
    register-resident at the canonical depth registers via a
    native-label control stack; the compilable block types carry no
    loop params, so a back-edge carries nothing and loop-carried state
-   lives in locals, keeping the header merge spill-free. Still to
-   come: the **wasm-testsuite differential gate** (a force-`spasm_enabled`
-   run must produce the interpreter's exact pass-set — the §10-analog
-   authoritative correctness gate, run on a clean machine), the
-   per-function code cache, the side-table-as-control-oracle wiring (§6)
-   that makes valcnt/popcnt and multi-target branches cheap, then i64).
+   lives in locals, keeping the header merge spill-free. The
+   **wasm-testsuite differential gate** now holds: a force-`spasm_enabled`
+   run over the full spec testsuite (58779/58779 commands across 222
+   `.wast` files, 1232 skip) produces the interpreter's exact pass-set —
+   the §10-analog authoritative correctness gate, reproduced with
+   `zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite --
+   --quiet [--spasm]` (the harness `--spasm` flag forces the per-instance
+   gate on for every loaded module). Still to come: the per-function code
+   cache, the side-table-as-control-oracle wiring (§6) that makes
+   valcnt/popcnt and multi-target branches cheap, then i64.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.
