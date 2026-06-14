@@ -1841,8 +1841,7 @@ pub const Compiler = struct {
             },
             .computed => {
                 try self.builder.emitLoadReg(u.span, r_key);
-                try self.builder.emitOp(.lda_computed, u.span);
-                try self.builder.emitU8(r_obj);
+                try self.builder.emitLdaComputed(u.span, r_obj);
             },
         }
         // §13.4.4.1 step 2.b — ToNumeric (BigInt-tolerant).
@@ -2147,8 +2146,7 @@ pub const Compiler = struct {
                 },
                 .computed => |key_expr| {
                     try self.compileExpression(key_expr);
-                    try self.builder.emitOp(.lda_computed, tt.span);
-                    try self.builder.emitU8(r_recv);
+                    try self.builder.emitLdaComputed(tt.span, r_recv);
                 },
             }
             const r_callee = try self.reserveTemp();
@@ -3115,8 +3113,7 @@ pub const Compiler = struct {
                     if (self.tryRegisterBoundIdent(m.object.*)) |r_src| {
                         if (!self.exprMayWriteRegister(key_expr)) {
                             try self.compileExpression(key_expr);
-                            try self.builder.emitOp(.lda_computed, m.span);
-                            try self.builder.emitU8(r_src);
+                            try self.builder.emitLdaComputed(m.span, r_src);
                             return;
                         }
                     }
@@ -3128,8 +3125,7 @@ pub const Compiler = struct {
                 try self.builder.emitStoreReg(m.span, r_obj);
 
                 try self.compileExpression(key_expr);
-                try self.builder.emitOp(.lda_computed, m.span);
-                try self.builder.emitU8(r_obj);
+                try self.builder.emitLdaComputed(m.span, r_obj);
             },
         }
     }
@@ -3379,8 +3375,7 @@ pub const Compiler = struct {
                     try this_.builder.emitOp(.lda_private, span_);
                     try this_.builder.emitU16(k);
                 } else if (ck) |k| {
-                    try this_.builder.emitOp(.lda_computed, span_);
-                    try this_.builder.emitU8(ro);
+                    try this_.builder.emitLdaComputed(span_, ro);
                     _ = k;
                 } else unreachable;
             }
@@ -3421,8 +3416,7 @@ pub const Compiler = struct {
             // ldar computed_r ; key → acc
             // lda_computed r_obj ; obj[acc] → acc
             try self.builder.emitLoadReg(a.span, computed_r.?);
-            try self.builder.emitOp(.lda_computed, a.span);
-            try self.builder.emitU8(r_obj);
+            try self.builder.emitLdaComputed(a.span, r_obj);
         } else {
             try Helper.emitRead(self, a.span, r_obj, name_k, private_k, null);
         }
@@ -4217,8 +4211,7 @@ pub const Compiler = struct {
             },
             .computed => |key_expr| {
                 try self.compileExpression(key_expr);
-                try self.builder.emitOp(.lda_computed, c.span);
-                try self.builder.emitU8(r_recv);
+                try self.builder.emitLdaComputed(c.span, r_recv);
             },
         }
         const r_callee = try self.reserveTemp();
@@ -4299,8 +4292,7 @@ pub const Compiler = struct {
             },
             .computed => |key_expr| {
                 try self.compileExpression(key_expr);
-                try self.builder.emitOp(.lda_computed, c.span);
-                try self.builder.emitU8(r_recv);
+                try self.builder.emitLdaComputed(c.span, r_recv);
             },
         }
         const r_callee = try self.reserveTemp();
@@ -10172,8 +10164,7 @@ pub const Compiler = struct {
                             excl_idx += 1;
                         }
                         try self.builder.emitLoadReg(prop.span, kr);
-                        try self.builder.emitOp(.lda_computed, prop.span);
-                        try self.builder.emitU8(r_src);
+                        try self.builder.emitLdaComputed(prop.span, r_src);
                         self.releaseTemp(); // kr
                         try self.applyDefaultIfNeeded(prop.value);
                         try self.assignPatternLeaf(prop.value.target, is_init);
@@ -10550,8 +10541,7 @@ pub const Compiler = struct {
                         if (src_key_r) |kr| {
                             // step 2 — GetV(value, propertyName).
                             try self.builder.emitLoadReg(op.span, kr);
-                            try self.builder.emitOp(.lda_computed, op.span);
-                            try self.builder.emitU8(r_src);
+                            try self.builder.emitLdaComputed(op.span, r_src);
                             try self.assignAssignmentPatternElemPrepared(op.value, prepared);
                             self.releasePreparedLeaf(prepared);
                             self.releaseTemp(); // src_key_r

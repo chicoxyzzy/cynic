@@ -2936,6 +2936,92 @@ test "const-str member: getter fires through bracket access" {
     try expectScriptIntWithBuiltins("let n = 0; const o = { get x(){ n++; return 5; } }; const v = o[\"x\"]; v + n", 6);
 }
 
+// ── computed-key IC (`obj[k]`, dynamic string key) — regression guards.
+// A *variable* key routes through `lda_computed` (a string *literal*
+// goes through the named-property IC). These pin the monomorphic IC's
+// invariants: a hit serves the right slot; a key / shape / proto /
+// accessor change never serves a stale slot; and a rotating-key site
+// that parks megamorphic still resolves the live key. (The IC is
+// behavior-transparent, so these guard correctness, not firing — the
+// fast path's effect is measured by the cross-bench A/B, not here.)
+
+test "computed-key IC: dynamic string key serves the right slot in a hot loop" {
+    try expectScriptIntWithBuiltins(
+        \\const o = { a: 3, b: 4 };
+        \\const k = "a";
+        \\let s = 0;
+        \\for (let i = 0; i < 100; i++) s += o[k];
+        \\s
+    , 300);
+}
+
+test "computed-key IC: a key that varies at one callsite refills, never stale" {
+    try expectScriptIntWithBuiltins(
+        \\const o = { a: 1, b: 10, c: 100 };
+        \\const keys = ["a", "b", "c"];
+        \\let s = 0;
+        \\for (let i = 0; i < 9; i++) s += o[keys[i % 3]];
+        \\s
+    , 333);
+}
+
+test "computed-key IC: polymorphic shapes at one callsite stay correct" {
+    // `v` lands at a different slot in each shape — the cell must
+    // re-resolve per receiver shape, not serve a cached slot blindly.
+    try expectScriptIntWithBuiltins(
+        \\const k = "v";
+        \\const objs = [{ v: 1 }, { a: 0, v: 2 }, { v: 3, b: 0 }];
+        \\let s = 0;
+        \\for (let i = 0; i < 9; i++) s += objs[i % 3][k];
+        \\s
+    , 18);
+}
+
+test "computed-key IC: inherited key via prototype reads correctly" {
+    try expectScriptIntWithBuiltins(
+        \\const proto = { p: 5 };
+        \\const o = Object.create(proto);
+        \\const k = "p";
+        \\let s = 0;
+        \\for (let i = 0; i < 10; i++) s += o[k];
+        \\s
+    , 50);
+}
+
+test "computed-key IC: a getter reached by dynamic key fires every read" {
+    try expectScriptIntWithBuiltins(
+        \\let n = 0;
+        \\const o = { get g() { n++; return 2; } };
+        \\const k = "g";
+        \\let s = 0;
+        \\for (let i = 0; i < 10; i++) s += o[k];
+        \\s + n
+    , 30);
+}
+
+test "computed-key IC: numeric dynamic key on an array stays on the element path" {
+    try expectScriptIntWithBuiltins(
+        \\const a = [10, 20, 30];
+        \\let s = 0;
+        \\for (let i = 0; i < 3; i++) s += a[i];
+        \\s
+    , 60);
+}
+
+test "computed-key IC: a rotating-key callsite stays correct after going megamorphic" {
+    // A 4-way rotating key blows past `computed_key_megamorphic_after`,
+    // parking the cell on the slow path. Every read must still resolve
+    // the live key — never a frozen slot. (40 iters >> the park
+    // threshold, so the bulk of reads run post-park.)
+    try expectScriptIntWithBuiltins(
+        \\const o = { a: 1, b: 2, c: 3, d: 4 };
+        \\const keys = ["a", "b", "c", "d"];
+        \\let s = 0;
+        \\for (let i = 0; i < 40; i++) s += o[keys[i % 4]];
+        \\s
+    , 100);
+}
+
 test "computed int read: dense in-bounds hits own elements" {
     try expectScriptInt("var a=[10,20,30]; a[0]+a[1]+a[2]", 60);
     try expectScriptInt("var a=[10,20,30]; var i=2; a[i]", 30);

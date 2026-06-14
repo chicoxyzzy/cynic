@@ -9980,7 +9980,8 @@ pub fn runFrames(
         },
         .lda_computed => {
             const r_obj = code[ip];
-            ip += 1;
+            const ic_idx = readU16(code, ip + 1);
+            ip += 3;
             const recv = registers[r_obj];
             // §13.3.4.1 EvaluatePropertyAccessWithExpressionKey
             // step 5 — RequireObjectCoercible(baseValue) BEFORE
@@ -9996,6 +9997,35 @@ pub fn runFrames(
                     return .{ .thrown = ex };
                 }
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+            // Computed-key IC fast path — a hot monomorphic `obj[k]`
+            // with a flat string key whose own shape data slot was
+            // cached. A *shaped* receiver is a plain ordinary object
+            // (`shadowSet` demotes proxy / namespace / typed-view /
+            // array exotics out of shape mode before stamping a shape),
+            // so a shape pointer + key-bytes match means a plain own-
+            // data read with no accessor / proxy / TypedArray in play —
+            // observably identical to the slow path below. Length and
+            // flatness are O(1) stored fields; ropes (rare for keys)
+            // and any miss fall through to the full lookup, which refills.
+            ic_hit: {
+                const cell = &local_chunk.inline_caches[ic_idx];
+                // `cached_key_len == 0` is cold; `> computed_key_cap`
+                // is the megamorphic park sentinel — either way the
+                // cell can't serve, and the upper bound also keeps the
+                // `cached_key_buf[0..len]` slice in range.
+                if (cell.cached_key_len == 0 or cell.cached_key_len > chunk_mod.computed_key_cap or cell.shape == null) break :ic_hit;
+                if (!acc.isString()) break :ic_hit;
+                const ks: *JSString = @ptrCast(@alignCast(acc.asString()));
+                if (ks.byte_len != cell.cached_key_len) break :ic_hit;
+                const kb = ks.flatBytesIfFlat() orelse break :ic_hit;
+                const obj_in = heap_mod.valueAsPlainObject(recv) orelse break :ic_hit;
+                if (obj_in.shape == cell.shape and
+                    std.mem.eql(u8, kb, cell.cached_key_buf[0..cell.cached_key_len]))
+                {
+                    acc = obj_in.slotAt(cell.slot);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
             }
             // §10.1.8.1 OrdinaryGet step 1 — an int32 non-negative
             // key on a non-proxy dense Array exotic resolves to the
@@ -10131,6 +10161,43 @@ pub fn runFrames(
                         acc = Value.undefined_;
                     }
                     continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+                // Computed-key IC fill — cache an own shape data slot on
+                // a plain (non-proxy-fallthrough) receiver with a non-
+                // numeric, cacheable-length key. `obj == obj_in` rules
+                // out a Proxy fallthrough (the cell keys on the
+                // *receiver*'s shape); a numeric key lives in element
+                // storage, not the shape, so it's excluded.
+                if (obj == obj_in and obj.shape != null and
+                    key_slice.len >= 1 and key_slice.len <= chunk_mod.computed_key_cap and
+                    JSObject.canonicalIntegerIndex(key_slice) == null)
+                {
+                    const cell = &local_chunk.inline_caches[ic_idx];
+                    // `cached_key_len > computed_key_cap` is the
+                    // megamorphic park (a rotating-key site that already
+                    // gave up) — leave it on the slow path.
+                    if (cell.cached_key_len <= chunk_mod.computed_key_cap) {
+                        if (obj.shape.?.lookup(key_slice)) |entry| {
+                            if (entry.kind == .data) {
+                                // Reaching the fill with a key already
+                                // cached means the fast path missed — a
+                                // polymorphic key. Count it and park the
+                                // cell once a handful pile up, so a
+                                // `obj[keys[i]]` site stops thrashing.
+                                if (cell.cached_key_len != 0) cell.cached_key_miss +%= 1;
+                                if (cell.cached_key_miss >= chunk_mod.computed_key_megamorphic_after) {
+                                    cell.cached_key_len = chunk_mod.computed_key_megamorphic;
+                                } else {
+                                    cell.shape = obj.shape;
+                                    cell.slot = entry.slot;
+                                    cell.proto = null;
+                                    cell.proto_shape = null;
+                                    cell.cached_key_len = @intCast(key_slice.len);
+                                    @memcpy(cell.cached_key_buf[0..key_slice.len], key_slice);
+                                }
+                            }
+                        }
+                    }
                 }
                 acc = obj.get(key_slice);
             } else if (heap_mod.valueAsFunction(recv)) |fn_obj| {

@@ -1036,10 +1036,13 @@ pub const Op = enum(u8) {
     /// survive an unexpected demote. `k` is retained for the
     /// fallback's key resolution and for disassembler readability.
     def_template_property,
-    /// `[op] [r_obj:u8]` — `acc = obj[acc]` (computed property
-    /// read). Coerces the key to a string at runtime; non-string
-    /// keys go through ToPropertyKey (§7.1.19). Walks the
-    /// prototype chain like `lda_property`.
+    /// `[op] [r_obj:u8] [ic:u16]` — `acc = obj[acc]` (computed
+    /// property read). Coerces the key to a string at runtime;
+    /// non-string keys go through ToPropertyKey (§7.1.19). Walks the
+    /// prototype chain like `lda_property`. The `ic` operand indexes
+    /// `Chunk.inline_caches`; the cell caches `(shape, slot)` keyed by
+    /// the dynamic string key (captured inline in the cell) so a hot
+    /// monomorphic `obj[k]` collapses to a shape + key-bytes compare.
     lda_computed,
     /// `[op] [r_obj:u8] [r_key:u8]` — `obj[key] = acc` (computed
     /// property write). Stores acc; the result of the expression
@@ -1356,7 +1359,7 @@ pub const Op = enum(u8) {
             => 5, // k:u16 + r_obj:u8 + ic:u16 (inline-cache slot)
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
             .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
-            .lda_computed => 1, // r_obj:u8 (key in acc)
+            .lda_computed => 3, // r_obj:u8 + ic:u16 (key in acc)
             .sta_computed, .super_set_computed, .def_computed => 2, // r_obj:u8 + r_key:u8
             .del_named_property => 3, // k:u16 + r_obj:u8
             .del_computed_property => 2, // r_obj:u8 + r_key:u8

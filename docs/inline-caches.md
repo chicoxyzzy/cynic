@@ -308,10 +308,28 @@ pool by design.
 
 ### Tier 2 — medium
 
-**Computed-property IC** (`obj[k]` where `k` is a hot constant
-string). Cache `(shape, key_intern, slot)`. Requires string
-interning first; unlocked once *the flip* (below) makes
-shape-mode reads independent of `properties`.
+**Computed-property read IC** (`obj[k]`, dynamic string key) —
+**shipped**. `lda_computed` gained an `ic:u16` operand; the cell
+caches `(shape, slot)` guarded by the runtime key. The original
+plan ("cache `(shape, key_intern, slot)`; requires string interning
+first") was sidestepped: rather than build an interning subsystem,
+the cell stores the key **bytes inline** (`cached_key_buf`, capped
+at `computed_key_cap = 23`; longer keys aren't cached). That keeps
+the cell allocation-free and GC-anchor-free — no JSString pointer to
+root — at the cost of a byte-compare guard instead of a pointer
+compare. The flip's Phase 3 already made shape reads authoritative,
+so the other prerequisite was met. A monomorphic site fills on the
+cold miss, then serves `recv.slotAt(slot)` after a shape + key-bytes
+match (own-data only; accessors / proxies / inherited keys fall to
+the slow path, which refills). A **megamorphic guard**
+(`computed_key_megamorphic_after = 4`) parks a rotating-key
+(`obj[keys[i]]`) site on the slow path so it stops thrashing.
+Bistromath needed no codegen change — its loop advances via
+`Op.operandSize`, so the wider opcode is skipped automatically and
+the `--jit` differential stays byte-identical. A/B: monomorphic
+`obj[k]` −57% interp; a rotating-key site returns to baseline (no
+regression). The **write** counterpart (`sta_computed`) is the next
+increment.
 
 ### Tier 3 — niche
 

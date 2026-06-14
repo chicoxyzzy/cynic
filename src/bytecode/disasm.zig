@@ -191,7 +191,8 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
             },
             .lda_computed => {
                 const r = chunk.code[i + 1];
-                try buf.print(allocator, " r{d}", .{r});
+                const slot = readU16(chunk.code, i + 2);
+                try buf.print(allocator, " r{d} ic{d}", .{ r, slot });
             },
             .sta_computed, .def_computed => {
                 const r_obj = chunk.code[i + 1];

@@ -105,9 +105,41 @@ pub const ICCell = struct {
     /// via the shape pointer compare), so the cached index stays
     /// valid as long as the cell matches.
     bag_index: u32 = bag_index_uncached,
+    /// `lda_computed` computed-key IC — the dynamic string key
+    /// captured at fill, stored inline (no allocation, no GC anchor:
+    /// the bytes are copied, not a JSString pointer). A hit guards on
+    /// `shape` AND a byte-equality of the runtime key against
+    /// `cached_key_buf[0..cached_key_len]`. `cached_key_len == 0` is
+    /// "no computed key cached" (the cell belongs to a non-computed op,
+    /// or the key was empty / longer than `computed_key_cap` and so was
+    /// never cached — those fall to the slow path, correctness intact).
+    cached_key_len: u8 = 0,
+    cached_key_buf: [computed_key_cap]u8 = undefined,
+    /// `lda_computed` polymorphism counter — bumped on each refill (a
+    /// fast-path miss that re-points the cell at a new key). Once it
+    /// reaches `computed_key_megamorphic_after`, the cell parks at
+    /// `cached_key_len = computed_key_megamorphic` and both the fast
+    /// path and the fill go quiet, so a rotating-key (`obj[keys[i]]`)
+    /// site pays the plain slow path instead of thrashing the cache.
+    cached_key_miss: u8 = 0,
 };
 
 pub const bag_index_uncached: u32 = std.math.maxInt(u32);
+
+/// Inline byte budget for a `lda_computed` IC's cached key. Covers the
+/// overwhelming majority of property identifiers (`constructor` is 11);
+/// a longer key simply isn't cached. Keeps the cell allocation-free.
+pub const computed_key_cap: usize = 23;
+
+/// `cached_key_len` sentinel: the computed-key cell has gone
+/// megamorphic and is permanently disabled. Any value `> computed_key_cap`
+/// reads as "skip"; `0xFF` is the canonical park value.
+pub const computed_key_megamorphic: u8 = 0xFF;
+
+/// Distinct-key refills tolerated before a computed-key cell parks
+/// itself megamorphic. Small: a monomorphic site never misses, so it
+/// never counts; a 2+-way rotating site converges to the slow path fast.
+pub const computed_key_megamorphic_after: u8 = 4;
 
 /// Inline-cache cell for `call_method` / `call` / `new_call`.
 /// Caches the last callee observed at the call site so subsequent
@@ -903,6 +935,17 @@ pub const Builder = struct {
     pub fn emitLdaPropertyReg(self: *Builder, span: Span, k: u16, r_obj: u8) !void {
         try self.emitOp(.lda_property_reg, span);
         try self.emitU16(k);
+        try self.emitU8(r_obj);
+        try self.emitU16(try self.allocIC());
+    }
+
+    /// Emit `lda_computed` plus its receiver register and a freshly
+    /// allocated IC slot. Encoding: `[op] [r_obj:u8] [ic:u16]` — the
+    /// key stays in the accumulator. The IC caches `(shape, slot)` keyed
+    /// by the runtime string key (captured inline in the cell) so a hot
+    /// monomorphic `obj[k]` skips ToPropertyKey + the shape hash.
+    pub fn emitLdaComputed(self: *Builder, span: Span, r_obj: u8) !void {
+        try self.emitOp(.lda_computed, span);
         try self.emitU8(r_obj);
         try self.emitU16(try self.allocIC());
     }
