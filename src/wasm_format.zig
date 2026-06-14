@@ -108,7 +108,7 @@ fn appendValueAt(
         if (obj.is_array_exotic) {
             try appendArray(allocator, buf, obj, depth);
         } else {
-            try buf.appendSlice(allocator, "[object Object]");
+            try appendObject(allocator, buf, obj, depth);
         }
     } else {
         try buf.appendSlice(allocator, "[unknown]");
@@ -166,6 +166,68 @@ fn appendArray(
         );
     }
     try buf.append(allocator, ']');
+}
+
+/// Render a plain (non-array) object as `{k0: v0, k1: v1, …}`,
+/// clamped by `max_array_show` and `max_depth`. Walks own enumerable
+/// string-keyed DATA properties in insertion / shape order — the same
+/// set `Object.keys` yields — so a null-prototype object (e.g. an
+/// `Object.groupBy` result) renders its buckets instead of the old
+/// coarse `[object Object]` tag. Skips internal `__cynic_*` slots;
+/// accessor-only keys never reach `iterOwnNamedKeys` (it walks data
+/// storage), and getters are deliberately NOT invoked — this is a
+/// display hint, not a spec `[[Get]]`.
+fn appendObject(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    obj: *JSObject,
+    depth: u8,
+) FormatError!void {
+    if (depth >= max_depth) {
+        try buf.appendSlice(allocator, "{…}");
+        return;
+    }
+
+    // Count eligible keys first so the "(N more)" tail is exact and
+    // matches the array path's truncation shape.
+    var total: usize = 0;
+    {
+        var it = obj.iterOwnNamedKeys();
+        while (it.next()) |e| {
+            if (objKeyEligible(obj, e.key_ptr.*)) total += 1;
+        }
+    }
+
+    try buf.append(allocator, '{');
+    const show_n = @min(total, max_array_show);
+    var shown: usize = 0;
+    var it = obj.iterOwnNamedKeys();
+    while (it.next()) |e| {
+        const key = e.key_ptr.*;
+        if (!objKeyEligible(obj, key)) continue;
+        if (shown >= show_n) break;
+        if (shown > 0) try buf.appendSlice(allocator, ", ");
+        try buf.appendSlice(allocator, key);
+        try buf.appendSlice(allocator, ": ");
+        try appendValueAt(allocator, buf, e.value_ptr.*, depth + 1);
+        shown += 1;
+    }
+    if (total > show_n) {
+        var scratch: [48]u8 = undefined;
+        try buf.appendSlice(
+            allocator,
+            try std.fmt.bufPrint(&scratch, ", … ({d} more)", .{total - show_n}),
+        );
+    }
+    try buf.append(allocator, '}');
+}
+
+/// An own named key counts toward the object dump iff it is a
+/// user-visible enumerable property: not an internal `__cynic_*`
+/// slot, and `[[Enumerable]]` (the set `Object.keys` would return).
+fn objKeyEligible(obj: *const JSObject, key: []const u8) bool {
+    if (std.mem.startsWith(u8, key, "__cynic_")) return false;
+    return obj.flagsFor(key).enumerable;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +364,56 @@ test "wasm_format: function" {
 }
 
 test "wasm_format: plain object" {
-    try expectFormat("({x: 1, y: 2});", "[object Object]");
+    try expectFormat("({x: 1, y: 2});", "{x: 1, y: 2}");
+}
+
+test "wasm_format: empty object" {
+    try expectFormat("({});", "{}");
+}
+
+test "wasm_format: object with string + nested values" {
+    try expectFormat(
+        "({name: \"x\", n: 1, ok: true, list: [1, 2]});",
+        "{name: \"x\", n: 1, ok: true, list: [1, 2]}",
+    );
+}
+
+test "wasm_format: null-prototype object renders its keys" {
+    // Object.create(null) has no toString in its (absent) chain; the
+    // formatter must still dump own enumerable data props rather than
+    // fall back to a coarse tag.
+    try expectFormat(
+        "Object.assign(Object.create(null), {a: 1, b: 2});",
+        "{a: 1, b: 2}",
+    );
+}
+
+test "wasm_format: Object.groupBy result" {
+    // The reported case — a null-proto bucket object. Keys in
+    // first-encounter order, values are the grouped arrays.
+    try expectFormat(
+        "Object.groupBy([1, 2, 3, 4], (n) => (n % 2 ? \"odd\" : \"even\"));",
+        "{odd: [1, 3], even: [2, 4]}",
+    );
+}
+
+test "wasm_format: non-enumerable own prop is hidden" {
+    try expectFormat(
+        \\const o = {a: 1};
+        \\Object.defineProperty(o, "hidden", { value: 9, enumerable: false });
+        \\o;
+    ,
+        "{a: 1}",
+    );
+}
+
+test "wasm_format: object nested past depth cap collapses" {
+    // {a:{b:{c:{d:{...}}}}} — the object at depth == max_depth prints
+    // `{…}` instead of descending.
+    try expectFormat(
+        "({a: {b: {c: {d: {e: 1}}}}});",
+        "{a: {b: {c: {d: {…}}}}}",
+    );
 }
 
 test "wasm_format: empty array" {
@@ -330,7 +441,7 @@ test "wasm_format: array of functions" {
 }
 
 test "wasm_format: array containing plain object" {
-    try expectFormat("[{x: 1}];", "[[object Object]]");
+    try expectFormat("[{x: 1}];", "[{x: 1}]");
 }
 
 test "wasm_format: array containing symbol" {
