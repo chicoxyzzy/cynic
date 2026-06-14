@@ -755,6 +755,19 @@ test "Error.prototype.stack: accessor-pair contract (proposal-error-stacks)" {
         \\ok = ok && od.value === 'custom-trace' && od.writable && od.enumerable && od.configurable;
         \\// after the own data prop exists, plain access reads it back
         \\ok = ok && e.stack === 'custom-trace';
+        \\// the setter works on any object kind — a function receiver
+        \\// takes an own data property (SetterThatIgnoresPrototypeProperties
+        \\// routes CreateDataPropertyOrThrow through [[DefineOwnProperty]])
+        \\function fnRecv() {}
+        \\d.set.call(fnRecv, 'fn-trace');
+        \\ok = ok && fnRecv.stack === 'fn-trace';
+        \\// when an own accessor already exists, step 5 Set(O,p,v,true)
+        \\// invokes ITS setter, not the inherited Error.prototype one
+        \\const e2 = new TypeError('x');
+        \\let observed;
+        \\Object.defineProperty(e2, 'stack', { get() { return observed; }, set(val) { observed = val; }, configurable: true });
+        \\d.set.call(e2, 'via-own-setter');
+        \\ok = ok && observed === 'via-own-setter';
         \\ok ? 1 : 0
     ;
     const v = switch (try lantern.evaluateScript(testing.allocator, &realm, src)) {

@@ -37,7 +37,7 @@ const installNativeMethod = intrinsics.installNativeMethod;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const argOr = intrinsics.argOr;
 const throwTypeError = intrinsics.throwTypeError;
-const setterThatIgnoresPrototypeProperties = intrinsics.setterThatIgnoresPrototypeProperties;
+const setterThatIgnoresPrototypeProperties = @import("object.zig").setterThatIgnoresPrototypeProperties;
 const throwRangeError = intrinsics.throwRangeError;
 
 pub fn install(realm: *Realm) !void {

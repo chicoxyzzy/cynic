@@ -1409,6 +1409,71 @@ fn isCompatibleRedefine(
     return true;
 }
 
+/// SetterThatIgnoresPrototypeProperties(O, home, p, v) — the shared
+/// abstract operation behind accessor setters that must write an OWN
+/// property and never consult the inherited accessor on `home` (which
+/// would recurse). Backs `Iterator.prototype.constructor` /
+/// `[Symbol.toStringTag]` and `Error.prototype.stack`.
+///   1. If O is not an Object → TypeError.
+///   2. If SameValue(O, home) → TypeError (emulates assigning to a
+///      non-writable data property on `home`).
+///   3. Let desc be ? O.[[GetOwnProperty]](p).
+///   4. If desc is undefined → ? CreateDataPropertyOrThrow(O, p, v).
+///   5. Else → ? Set(O, p, v, true).
+///
+/// Steps 3 / 4 route through the proxy-aware `objectGetOwnPropertyDescriptor`
+/// / `objectDefineProperty`, so Proxy `getOwnPropertyDescriptor` /
+/// `defineProperty` traps fire and any object kind (function, array,
+/// ordinary) takes an own data property. Step 5 handles the own-DATA
+/// case; an own-accessor [[Set]] (which must invoke the accessor's
+/// setter) and cross-realm `home` resolution remain tracked residuals.
+pub fn setterThatIgnoresPrototypeProperties(realm: *Realm, this_value: Value, home: *JSObject, key: []const u8, v: Value) NativeError!void {
+    // step 1 — §6.1.7 Type(O) is Object (excludes Symbol / BigInt).
+    if (!heap_mod.isJSObject(this_value)) {
+        return throwTypeError(realm, "SetterThatIgnoresPrototypeProperties: receiver is not an object");
+    }
+    // step 2 — SameValue(O, home).
+    if (heap_mod.valueAsPlainObject(this_value)) |po| {
+        if (po == home) return throwTypeError(realm, "Cannot assign to a non-writable accessor property on its home prototype");
+    }
+    const key_str = realm.heap.allocateString(key) catch return error.OutOfMemory;
+    const key_v = Value.fromString(key_str);
+    // Pin everything held across the proxy-trap re-entries below.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(this_value) catch return error.OutOfMemory;
+    scope.push(key_v) catch return error.OutOfMemory;
+    scope.push(v) catch return error.OutOfMemory;
+    // step 3 — [[GetOwnProperty]] (fires the Proxy gOPD trap).
+    const own_desc = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &.{ this_value, key_v });
+    if (own_desc.isUndefined()) {
+        // step 4 — CreateDataPropertyOrThrow via [[DefineOwnProperty]]
+        // (fires the Proxy defineProperty trap; a false return / non-
+        // extensible target surfaces as a TypeError, which is exactly
+        // what Object.defineProperty raises and we propagate).
+        const desc_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+        if (realm.intrinsics.object_prototype) |op| realm.heap.setObjectPrototype(desc_obj, op);
+        scope.push(heap_mod.taggedObject(desc_obj)) catch return error.OutOfMemory;
+        const data_flags: ObjMod.PropertyFlags = .{ .writable = true, .enumerable = true, .configurable = true };
+        desc_obj.setWithFlags(realm.allocator, "value", v, data_flags) catch return error.OutOfMemory;
+        desc_obj.setWithFlags(realm.allocator, "writable", Value.fromBool(true), data_flags) catch return error.OutOfMemory;
+        desc_obj.setWithFlags(realm.allocator, "enumerable", Value.fromBool(true), data_flags) catch return error.OutOfMemory;
+        desc_obj.setWithFlags(realm.allocator, "configurable", Value.fromBool(true), data_flags) catch return error.OutOfMemory;
+        _ = try objectDefineProperty(realm, Value.undefined_, &.{ this_value, key_v, heap_mod.taggedObject(desc_obj) });
+        return;
+    }
+    // step 5 — ? Set(O, p, v, true). Routes through §7.3.4 Set, which
+    // fires the Proxy `set` trap (throwing on a falsy return), invokes
+    // an own accessor's setter, and throws on a writability / getter-
+    // only violation.
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse {
+        // A function receiver with a pre-existing own property is not
+        // reached by any current fixture.
+        return throwTypeError(realm, "SetterThatIgnoresPrototypeProperties: own-property update unsupported on this receiver");
+    };
+    try @import("array.zig").setOrThrow(realm, obj, key, key_str, v);
+}
+
 pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const target_v = argOr(args, 0, Value.undefined_);

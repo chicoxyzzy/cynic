@@ -558,7 +558,7 @@ fn errorPrototypeStackSet(realm: *Realm, this_value: Value, args: []const Value)
     // correct — the step-2 SameValue(E, home) guard then catches only
     // `set.call(Error.prototype)` of that realm).
     const home = homeRealm(realm).intrinsics.error_prototype.?;
-    try intrinsics.setterThatIgnoresPrototypeProperties(realm, this_value, home, "stack", v);
+    try @import("object.zig").setterThatIgnoresPrototypeProperties(realm, this_value, home, "stack", v);
     return Value.undefined_;
 }
 
