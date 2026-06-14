@@ -306,6 +306,13 @@ export fn cynic_eval(src: [*]const u8, len: u32, hardened: u32) [*]u8 {
     // Set the SES posture before `installBuiltins` — the freeze pass
     // runs at the end of install and only fires when `hardened`.
     realm.hardened = hardened != 0;
+    // The playground is a demo sandbox (it also installs the debug test
+    // globals below), so open the `--allow=wasm` gate: snippets can
+    // `WebAssembly.compile` / `instantiate` and run modules through the
+    // Sarcasm engine, which is already linked into this build. Frozen-
+    // primordial (hardened) instantiation is covered by `wasm_js_test.zig`
+    // ("…hardened realm (playground posture)").
+    realm.allow_wasm = true;
     realm.installBuiltins() catch {
         return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
     };

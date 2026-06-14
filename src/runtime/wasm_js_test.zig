@@ -77,6 +77,25 @@ fn expectIntWasmAsync(setup: []const u8, want: i32) !void {
     try testing.expectEqual(want, v.asInt32());
 }
 
+/// Mirror the browser playground's posture: primordials frozen
+/// (`hardened`), the wasm gate open, and the test globals installed —
+/// exactly the realm `playground/wasm.zig`'s `cynic_eval` builds. Wasm
+/// must instantiate and run with the `WebAssembly.*` prototypes frozen.
+fn evalWasmHardened(source: []const u8) !Value {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm = true;
+    realm.jit_enabled = true; // production posture — Spasm-by-default (see evalWasm)
+    realm.hardened = true;
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, source);
+    return switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => error.WasmThrewUnexpectedly,
+    };
+}
+
 // An `(i32,i32)->i32` adder exported as "add".
 const adder_bytes =
     "new Uint8Array([0,97,115,109,1,0,0,0, 1,7,1,96,2,127,127,1,127, 3,2,1,0, 7,7,1,3,97,100,100,0,0, 10,9,1,7,0,32,0,32,1,106,11])";
@@ -99,6 +118,19 @@ test "new WebAssembly.Module + Instance exposes callable i32 exports" {
         "const inst = new WebAssembly.Instance(m);" ++
         "inst.exports.add(2, 3)";
     try expectIntWasm(src, 5);
+}
+
+test "WebAssembly instantiates and runs in a hardened realm (playground posture)" {
+    // The browser playground freezes primordials by default; compiling a
+    // module, constructing an instance, and calling an export must all
+    // still work with the `WebAssembly.*` prototypes frozen. Guards the
+    // `realm.allow_wasm = true` enablement in playground/wasm.zig.
+    const src =
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ adder_bytes ++ "));" ++
+        "inst.exports.add(2, 3)";
+    const v = try evalWasmHardened(src);
+    try testing.expect(v.isInt32());
+    try testing.expectEqual(@as(i32, 5), v.asInt32());
 }
 
 test "exported i32 function handles negative results" {
