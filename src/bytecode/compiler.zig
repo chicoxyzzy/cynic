@@ -12322,6 +12322,167 @@ pub const Compiler = struct {
         return true;
     }
 
+    /// Register-promote a non-captured C-style for-`let` counter whose
+    /// shape the fused `LoopIncLt` path rejected — descending (`i--`),
+    /// `<=` / `>` / `>=`, an expression bound (`i < a.length`), or a
+    /// non-literal init (`let i = start`). §14.7.4: with no closure
+    /// capturing the counter (and no direct eval), the per-iteration
+    /// declarative environment is unobservable, so the counter lives in
+    /// a register and the body reads it without an `LdaEnv` /
+    /// `ThrowIfHole`. Unlike the fused path this re-evaluates the test
+    /// and runs the update each iteration with ordinary opcodes (no
+    /// fusion), so it accepts any relational test and `++`/`--` update.
+    /// Returns `false` (to the general env path) on any shape it can't
+    /// prove safe.
+    fn tryCompileRegisterCounterLoop(self: *Compiler, s: ast.statement.ForStmt) CompileError!bool {
+        // 1. Single-identifier `let` counter. `const` can't be an
+        // `++`/`--` target; `var` is already function-scope-promoted, so
+        // it doesn't need this.
+        const head = s.init orelse return false;
+        const lex = switch (head) {
+            .lexical => |ld| ld,
+            .expression => return false,
+        };
+        if (lex.kind != .let_) return false;
+        if (lex.declarators.len != 1) return false;
+        const decl = lex.declarators[0];
+        const counter_ident = switch (decl.name) {
+            .identifier => |id| id,
+            else => return false,
+        };
+        const counter_name = try self.bindingName(counter_ident.span);
+        const init_ptr = if (decl.init) |*e| e else return false;
+
+        // Init: int literal, or a register-bound identifier (not the
+        // counter — it isn't in scope yet, so a self-reference would
+        // resolve to an outer same-named binding).
+        const InitSrc = union(enum) { literal: i32, register: u8 };
+        const init_src: InitSrc = blk: {
+            if (self.intLiteralValue(init_ptr)) |v| break :blk InitSrc{ .literal = v };
+            if (init_ptr.* == .identifier_reference) {
+                const iname = try self.bindingName(init_ptr.identifier_reference.span);
+                if (!std.mem.eql(u8, iname, counter_name)) {
+                    if (self.scope) |sc| {
+                        if (sc.resolve(iname)) |bnd| {
+                            if (bnd.is_register and !bnd.register_tdz) break :blk InitSrc{ .register = bnd.register };
+                        }
+                    }
+                }
+            }
+            return false;
+        };
+
+        // 2. Test: `counter <relational> bound`, counter on the left.
+        const t_ptr = if (s.test_) |*t| t else return false;
+        const bin = switch (t_ptr.*) {
+            .binary => |b| b,
+            else => return false,
+        };
+        switch (bin.op) {
+            .lt, .le, .gt, .ge => {},
+            else => return false,
+        }
+        if (bin.lhs.* != .identifier_reference) return false;
+        if (!std.mem.eql(u8, try self.bindingName(bin.lhs.identifier_reference.span), counter_name)) return false;
+        // The bound is re-evaluated each iteration, so it may be any
+        // expression — but a closure inside it capturing the counter, or
+        // a direct eval, would make the per-iteration env observable.
+        const counter_names = [_][]const u8{counter_name};
+        if (try self.exprMentionsNamesInNestedFn(bin.rhs, &counter_names)) return false;
+        {
+            const prs = @import("param_register_scan.zig");
+            if (prs.expressionHasDirectEvalCall(self.source, bin.rhs)) return false;
+        }
+
+        // 3. Update: `counter++` / `counter--` (prefix or postfix).
+        const u_ptr = if (s.update) |*u| u else return false;
+        const upd = switch (u_ptr.*) {
+            .update => |u| u,
+            else => return false,
+        };
+        if (upd.op != .increment and upd.op != .decrement) return false;
+        if (upd.operand.* != .identifier_reference) return false;
+        if (!std.mem.eql(u8, try self.bindingName(upd.operand.identifier_reference.span), counter_name)) return false;
+
+        // 4. Body safety — no closure (a per-iteration env would be
+        // observable), no direct eval, no in-body reassignment of the
+        // counter. Same predicate the fused path uses.
+        if (try self.bodyCounterHazard(s.body, counter_name)) return false;
+
+        // 5. Emit. `compileFor` already seeded the completion value.
+        const labels = try self.drainPendingLabels();
+        var labels_owned = labels;
+        errdefer if (labels_owned.len > 0) self.allocator.free(labels_owned);
+
+        const r_counter = try self.reserveTemp();
+        errdefer self.releaseTemp();
+
+        // init → r_counter
+        switch (init_src) {
+            .literal => |v| try self.builder.emitLoadSmi(counter_ident.span, v),
+            .register => |reg| try self.builder.emitLoadReg(counter_ident.span, reg),
+        }
+        try self.builder.emitStoreReg(counter_ident.span, r_counter);
+
+        // Register the counter so body / test / update reads route to
+        // `ldar r_counter` — no env slot, no TDZ (initialised above).
+        var for_scope: Scope = .{ .parent = self.scope, .kind = .block, .has_own_env = false };
+        defer for_scope.deinit(self.allocator);
+        try for_scope.bindings.append(self.allocator, .{
+            .name = counter_name,
+            .env_slot = 0,
+            .env_depth = self.env_depth,
+            .kind = .let_,
+            .span = counter_ident.span,
+            .is_register = true,
+            .register = r_counter,
+        });
+        const saved_scope = self.scope;
+        self.scope = &for_scope;
+        defer self.scope = saved_scope;
+
+        // Re-evaluate the test, run the body, run the update, jump back.
+        // Mirrors the general for scaffold (the `jmp` back-edge carries
+        // the loop safepoint), minus the per-iteration env machinery.
+        const loop_start = self.builder.here();
+        try self.compileExpression(t_ptr);
+        try self.builder.emitOp(.jmp_if_false, s.span);
+        const exit_patch = self.builder.here();
+        try self.builder.emitI16(0);
+
+        var ctx: LoopContext = .{
+            .continue_target = 0,
+            .parent = self.current_loop,
+            .entry_finally_chain = self.finally_chain,
+            .labels = labels_owned,
+        };
+        defer ctx.deinit(self.allocator);
+        labels_owned = &.{};
+        const saved_loop = self.current_loop;
+        self.current_loop = &ctx;
+        defer self.current_loop = saved_loop;
+
+        try self.compileStatement(s.body);
+
+        const update_pc = self.builder.here();
+        ctx.continue_target = update_pc;
+        // For-update value is discarded — skip the dead old-value save.
+        try self.compileUpdate(upd, false);
+
+        try self.builder.emitOp(.jmp, s.span);
+        const back_patch = self.builder.here();
+        try self.builder.emitI16(0);
+        try self.builder.patchI16(back_patch, loop_start);
+
+        const exit_pc = self.builder.here();
+        try self.builder.patchI16(exit_patch, exit_pc);
+        for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_pc);
+        for (ctx.continue_patches.items) |p| try self.builder.patchI16(p, update_pc);
+
+        self.releaseTemp(); // r_counter
+        return true;
+    }
+
     /// Decode a numeric-literal expression to its i32 value when
     /// the source text parses cleanly and fits exactly in i32.
     /// Returns `null` for any other expression shape, non-integer
@@ -12709,6 +12870,11 @@ pub const Compiler = struct {
         // Fast path — fused counter loop. Falls through to the
         // general path on any pattern mismatch.
         if (try self.tryCompileFusedCounterLoop(s)) return;
+        // Broader fast path — register-promote a non-captured counter
+        // whose shape LoopIncLt can't fuse (descending, `<=`/`>`/`>=`,
+        // expression bound, non-literal init). Still bails to the
+        // general env path on capture / eval / unrecognised shape.
+        if (try self.tryCompileRegisterCounterLoop(s)) return;
         // §14.7.4 ForStatement (C-style — for-in / for-of compile
         // separately). For `let`/`const` head bindings,
         // §14.7.4.1 ForBodyEvaluation step 2 + CreatePerIterationEnvironment

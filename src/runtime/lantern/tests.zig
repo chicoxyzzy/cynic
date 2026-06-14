@@ -3408,6 +3408,50 @@ test "for: closure capture with a variable bound keeps per-iteration values" {
     , "0,1,2");
 }
 
+test "for: register-promoted counters across non-fusable shapes" {
+    // §14.7.4 — a non-captured for-`let` counter is register-promoted
+    // even when the shape can't use LoopIncLt: descending `i--`, `<=`,
+    // an expression bound (`i < a.length`), `>=`, and a non-literal
+    // init. All must compute correctly with the counter in a register.
+    try expectScriptStringWithBuiltins(
+        \\function desc(n){ let s=0; for (let i=n; i>0; i--) s+=i; return s; }       // 5+4+3+2+1
+        \\function le(n){ let s=0; for (let i=0; i<=n; i++) s+=i; return s; }         // 0..5
+        \\function eb(a){ let s=0; for (let i=0; i<a.length; i++) s+=a[i]; return s; }
+        \\function ge(n){ let s=0; for (let i=n; i>=0; i--) s+=i; return s; }         // 5..0
+        \\function ni(start,n){ let s=0; for (let i=start; i<n; i++) s+=i; return s; }// 2+3+4
+        \\[desc(5), le(5), eb([1,2,3,4]), ge(5), ni(2,5)].join(",");
+    , "15,15,10,15,9");
+}
+
+test "for: expression bound is re-evaluated each iteration (non-fusable)" {
+    // §14.7.4.1 step 3.a — `i < a.length` re-reads `a.length` every
+    // iteration, so shrinking it mid-loop exits early. A cached bound
+    // would run the full original length.
+    try expectScriptStringWithBuiltins(
+        \\function f(){ var a=[1,1,1,1,1], s=0;
+        \\  for (let i=0; i<a.length; i++) { s++; if (i===1) a.length=2; }
+        \\  return s; }
+        \\"" + f();
+    , "2");
+}
+
+test "for: descending counter with closure capture keeps per-iteration values" {
+    // The register fast path must still bail to the per-iteration env
+    // when a body closure captures a descending counter.
+    try expectScriptStringWithBuiltins(
+        \\const fns = [];
+        \\for (let i = 3; i > 0; i--) fns.push(() => i);
+        \\fns.map(f => f()).join(",");
+    , "3,2,1");
+}
+
+test "for: break and continue in a register-promoted descending loop" {
+    try expectScriptStringWithBuiltins(
+        \\function f(){ let out=""; for (let i=5; i>0; i--){ if (i===2) continue; if (i===1) break; out+=i; } return out; }
+        \\f();
+    , "543");
+}
+
 test "later: new Number(5) wraps a primitive that ToNumber unwraps" {
     try expectScriptIntWithBuiltins(
         \\const n = new Number(5);
