@@ -152,6 +152,23 @@ console.log("plus 1mo: " + d.add({ months: 1 }).toString());
 const dur = Temporal.Duration.from({ hours: 2, minutes: 30 });
 "duration: " + dur.toString();`,
 
+  'WebAssembly — run a module': `// WebAssembly runs on Cynic's own from-scratch engine (Sarcasm),
+// not the host's. These bytes are a hand-assembled module exporting
+// add(i32, i32) -> i32; compile, instantiate, and call straight into
+// the interpreter — the same path the WebAssembly.* API drives.
+"use strict";
+const bytes = new Uint8Array([
+  0,97,115,109, 1,0,0,0,           // wasm header (magic + version 1)
+  1,7,1, 96,2,127,127,1,127,       // type: (i32, i32) -> i32
+  3,2,1,0,                         // function 0: type 0
+  7,7,1, 3,97,100,100, 0,0,        // export "add" -> function 0
+  10,9,1, 7,0, 32,0,32,1,106, 11,  // body: local.get 0; local.get 1; i32.add
+]);
+const { exports } = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+console.log("add(2, 3) =", exports.add(2, 3));
+console.log("add(40, 2) =", exports.add(40, 2));
+exports.add(2, 3);`,
+
   'Iterator helpers': `// Iterator.prototype.{map,filter,take,toArray} — the
 // pre-Stage-4 iterator-helper proposal, lazy by construction.
 function* nats() { let n = 1; while (true) yield n++; }
