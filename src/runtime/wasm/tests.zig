@@ -326,6 +326,37 @@ test "wasm decoder: decodes a full adder module" {
     try testing.expectEqualSlices(u8, &.{ 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b }, m.code[0].bytes);
 }
 
+test "wasm spasm: a compilable function runs Spasm-compiled with an identical result" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + adder_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &adder_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const fidx = funcExport(mp, "add") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = @as(u128, 7);
+    cells[1] = @as(u128, 35);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // Same answer as the interpreter (the baseline's whole contract)...
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(res[0])));
+    // ...and the compiled path was actually taken, not the interpreter.
+    try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {

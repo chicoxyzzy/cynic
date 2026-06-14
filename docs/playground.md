@@ -108,15 +108,16 @@ byte offsets into the module's linear memory.
 |---|---|---|
 | `cynic_alloc` | `(len: u32) -> ptr` | allocate a guest buffer; JS writes UTF-8 source here |
 | `cynic_free` | `(ptr, len: u32) -> void` | release a guest buffer |
-| `cynic_eval` | `(ptr, len: u32) -> ptr` | parse + run source; returns a result frame |
-| `cynic_parse` | `(ptr, len: u32) -> ptr` | parse + compile; returns a bytecode disassembly in the frame |
+| `cynic_eval` | `(ptr, len: u32, hardened: u32) -> ptr` | parse + run source; returns a result frame. `hardened` mirrors the SES posture — non-zero freezes the primordials at realm init, `0` is the `--unhardened` opt-out |
+| `cynic_parse` | `(ptr, len: u32) -> ptr` | parse + compile; returns a bytecode disassembly in the frame's `value` |
+| `cynic_parse_ast` | `(ptr, len: u32) -> ptr` | parse only; returns the S-expression AST dump in the frame's `value` |
 | `cynic_result_ptr` | `() -> ptr` | address of the last result frame |
 | `cynic_result_len` | `() -> u32` | length of the last result frame |
 | `cynic_version_ptr` / `cynic_version_len` | `() -> ptr / u32` | the engine version string |
 
-`cynic_eval` and `cynic_parse` both return a **result frame** — a
-self-describing buffer so the JS side needs no struct-layout
-knowledge beyond the section-length encoding:
+`cynic_eval`, `cynic_parse`, and `cynic_parse_ast` all return a
+**result frame** — a self-describing buffer so the JS side needs no
+struct-layout knowledge beyond the section-length encoding:
 
 ```
 [u8  status]      0 = ok, 1 = uncaught throw, 2 = parse/compile error
@@ -126,10 +127,28 @@ knowledge beyond the section-length encoding:
 [u8  value_len bytes]       completion value, string form
 [u32 error_len]   big-endian
 [u8  error_len bytes]       error text (empty unless status != 0)
+[u32 error_span_start]      big-endian, byte offset into source
+[u32 error_span_end]        big-endian, byte offset into source
+[u32 stats_len]   big-endian
+[u8  stats_len bytes]       runtime-stats footer (eval only; see below)
 ```
 
+`error_span_start == error_span_end` means "no source range" — the
+UI falls back to a panel-level error. Today the span is populated
+for parse-error diagnostics (the first error-severity diagnostic's
+span); compile-time and runtime errors carry an empty span.
+
+`stats` is populated only by `cynic_eval` on a successful run or an
+uncaught throw — a short `chunk: … / GC: …` summary the playground
+shows under the output. Empty on parse/compile failure, on
+`cynic_parse`, and on `cynic_parse_ast`. Both the `error_span` pair
+and the `stats` section ride at the end of the frame, length-
+prefixed, so an older JS client that stops after `error_len` keeps
+parsing cleanly.
+
 For `cynic_parse` the `value` section carries the bytecode
-disassembly text and `stdout` is empty.
+disassembly text; for `cynic_parse_ast` it carries the S-expression
+AST dump. `stdout` is empty for both.
 
 The frame is owned by the module and replaced on the next call;
 the JS side reads it immediately via `cynic_result_ptr` /

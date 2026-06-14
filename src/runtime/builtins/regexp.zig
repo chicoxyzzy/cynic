@@ -1372,6 +1372,7 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
         .done = false,
     };
     iter.regexp_string_iter = ri_state;
+    iter.markNonPristine();
     return heap_mod.taggedObject(iter);
 }
 
@@ -1587,6 +1588,7 @@ fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
             };
             boxed.* = program;
             regex_obj.regex_perlex = boxed;
+            regex_obj.markNonPristine();
             return true;
         },
         .syntax_error => {

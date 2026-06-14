@@ -659,6 +659,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     if (key_anchor) |ks| {
         if (o.ownDataContains(key)) {
             o.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+            o.markNonPristine();
         }
     }
 }
@@ -2547,6 +2548,7 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
     // `elements` vector), anchor the string so GC keeps the key alive.
     if (cur.ownDataContains(key)) {
         cur.key_anchors.append(realm.allocator, key_str) catch return error.OutOfMemory;
+        cur.markNonPristine();
     }
 }
 
@@ -4193,6 +4195,7 @@ fn createDataPropertyOrThrow(
     // named-property bag — see `createDataPropertyOrThrowGeneric`.
     if (cur.ownDataContains(key)) {
         cur.key_anchors.append(realm.allocator, key_str) catch return error.OutOfMemory;
+        cur.markNonPristine();
     }
 }
 

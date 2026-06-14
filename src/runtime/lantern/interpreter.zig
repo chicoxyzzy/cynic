@@ -6886,6 +6886,7 @@ pub fn runFrames(
                 const r = realm.allocator.create(@import("../object.zig").IterRecord) catch return error.OutOfMemory;
                 r.* = .{};
                 iter_obj.iter_record = r;
+                iter_obj.markNonPristine();
                 break :blk r;
             };
             // Once the iter has surfaced `done: true` we stop
@@ -7859,6 +7860,7 @@ pub fn runFrames(
                 // its key; anchor the heap JSString so a GC sweep
                 // can't dangle a computed accessor key.
                 obj.key_anchors.append(allocator, owned) catch return error.OutOfMemory;
+                obj.markNonPristine();
             }
             if (is_setter) {
                 realm.heap.setAccessorSetter(.{ .object = obj }, entry.value_ptr, fn_obj);
@@ -8820,19 +8822,17 @@ pub fn runFrames(
                 var us_i: usize = 0;
                 while (us_i < obj.slotCount()) : (us_i += 1) obj.slotPtr(us_i).* = Value.undefined_;
             }
-            // Pre-fill `own_key_order` from the template's keys.
-            // The downstream `def_template_property` op skips
-            // `recordKey` entirely, so this is the one chance to
-            // populate the §10.1.11 OrdinaryOwnPropertyKeys order
-            // list. Chunk constants are pinned for the chunk's
-            // lifetime, so the borrowed slices outlive any
-            // reachable instance.
-            obj.own_key_order.ensureTotalCapacityPrecise(allocator, tmpl.keys.len) catch return error.OutOfMemory;
-            for (tmpl.keys) |key_idx| {
-                const key_v = local_chunk.constants[key_idx];
-                const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-                obj.own_key_order.appendAssumeCapacity(key_s.flatBytes());
-            }
+            // §10.1.11 OrdinaryOwnPropertyKeys insertion order is
+            // implicit in the cached shape's transition chain
+            // (root→leaf = insertion order); the read paths
+            // (Object.keys / Reflect.ownKeys / for-in) walk the
+            // shape chain when `own_key_order` is empty. Skipping
+            // the eager materialization here keeps the literal
+            // instance `is_pristine` so its death takes the
+            // `deinitFields` fast-return — the architectural win
+            // the `bench/micros/object_alloc.js` /
+            // `ctor_array_build.js` foundation could not yet close.
+            _ = tmpl.keys;
             acc = heap_mod.taggedObject(obj);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -10422,6 +10422,7 @@ pub fn runFrames(
             }
             realm.heap.storePropertyWithFlags(obj, allocator, key_slice, acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
             obj.key_anchors.append(allocator, key_js) catch return error.OutOfMemory;
+            obj.markNonPristine();
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .del_named_property => {

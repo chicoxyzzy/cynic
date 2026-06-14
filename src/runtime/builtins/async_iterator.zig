@@ -94,6 +94,7 @@ fn afsiNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         const r = realm.allocator.create(@import("../object.zig").IterRecord) catch return error.OutOfMemory;
         r.* = .{};
         sync_iter_obj.iter_record = r;
+        sync_iter_obj.markNonPristine();
         break :blk r;
     };
     const next_v = if (rec.next_cached) rec.next else nv: {

@@ -2903,6 +2903,39 @@ test "RegExp @@split roots splitter across an allocating flags getter" {
     , "a|bb|ccc|dddd#4");
 }
 
+// §13.3.2 — a constant-string bracket access `obj["x"]` is a plain
+// named property; the compiler routes it into the IC'd named-load path
+// (lda_property), NOT the un-cached lda_computed. Numeric-index strings
+// (`arr["0"]`) must stay on the computed/indexed path. These pin that
+// the routing preserves semantics across both key classes.
+
+test "const-str member: bracket access reads like dot access" {
+    try expectScriptIntWithBuiltins("const o = { x: 42, y: 1 }; o[\"x\"] + o.y", 43);
+    try expectScriptIntWithBuiltins("function f(o){ return o[\"a\"]; } f({ a: 7 })", 7);
+}
+
+test "const-str member: bracket write is the same property as dot" {
+    try expectScriptIntWithBuiltins("const o = {}; o[\"x\"] = 9; o.x", 9);
+    try expectScriptIntWithBuiltins("const o = { x: 1 }; o[\"x\"] = 5; o.x + o[\"x\"]", 10);
+}
+
+test "const-str member: numeric-index string stays indexed (arrays)" {
+    // The named load can't reach an array's element storage — `arr["0"]`
+    // must keep the computed/indexed path.
+    try expectScriptIntWithBuiltins("const a = [10, 20, 30]; a[\"0\"] + a[\"2\"]", 40);
+    try expectScriptIntWithBuiltins("const a = [1, 2]; a[\"0\"] = 9; a[0]", 9);
+}
+
+test "const-str member: non-identifier and escaped keys" {
+    try expectScriptIntWithBuiltins("const o = {}; o[\"a-b\"] = 3; o[\"a-b\"]", 3);
+    // \x78 == "x"
+    try expectScriptIntWithBuiltins("const o = { x: 8 }; o[\"\\x78\"]", 8);
+}
+
+test "const-str member: getter fires through bracket access" {
+    try expectScriptIntWithBuiltins("let n = 0; const o = { get x(){ n++; return 5; } }; const v = o[\"x\"]; v + n", 6);
+}
+
 test "computed int read: dense in-bounds hits own elements" {
     try expectScriptInt("var a=[10,20,30]; a[0]+a[1]+a[2]", 60);
     try expectScriptInt("var a=[10,20,30]; var i=2; a[i]", 30);
@@ -3391,6 +3424,50 @@ test "for: closure capture with a variable bound keeps per-iteration values" {
         \\for (let i = 0; i < n; i++) fns.push(() => i);
         \\fns.map(f => f()).join(",");
     , "0,1,2");
+}
+
+test "for: register-promoted counters across non-fusable shapes" {
+    // §14.7.4 — a non-captured for-`let` counter is register-promoted
+    // even when the shape can't use LoopIncLt: descending `i--`, `<=`,
+    // an expression bound (`i < a.length`), `>=`, and a non-literal
+    // init. All must compute correctly with the counter in a register.
+    try expectScriptStringWithBuiltins(
+        \\function desc(n){ let s=0; for (let i=n; i>0; i--) s+=i; return s; }       // 5+4+3+2+1
+        \\function le(n){ let s=0; for (let i=0; i<=n; i++) s+=i; return s; }         // 0..5
+        \\function eb(a){ let s=0; for (let i=0; i<a.length; i++) s+=a[i]; return s; }
+        \\function ge(n){ let s=0; for (let i=n; i>=0; i--) s+=i; return s; }         // 5..0
+        \\function ni(start,n){ let s=0; for (let i=start; i<n; i++) s+=i; return s; }// 2+3+4
+        \\[desc(5), le(5), eb([1,2,3,4]), ge(5), ni(2,5)].join(",");
+    , "15,15,10,15,9");
+}
+
+test "for: expression bound is re-evaluated each iteration (non-fusable)" {
+    // §14.7.4.1 step 3.a — `i < a.length` re-reads `a.length` every
+    // iteration, so shrinking it mid-loop exits early. A cached bound
+    // would run the full original length.
+    try expectScriptStringWithBuiltins(
+        \\function f(){ var a=[1,1,1,1,1], s=0;
+        \\  for (let i=0; i<a.length; i++) { s++; if (i===1) a.length=2; }
+        \\  return s; }
+        \\"" + f();
+    , "2");
+}
+
+test "for: descending counter with closure capture keeps per-iteration values" {
+    // The register fast path must still bail to the per-iteration env
+    // when a body closure captures a descending counter.
+    try expectScriptStringWithBuiltins(
+        \\const fns = [];
+        \\for (let i = 3; i > 0; i--) fns.push(() => i);
+        \\fns.map(f => f()).join(",");
+    , "3,2,1");
+}
+
+test "for: break and continue in a register-promoted descending loop" {
+    try expectScriptStringWithBuiltins(
+        \\function f(){ let out=""; for (let i=5; i>0; i--){ if (i===2) continue; if (i===1) break; out+=i; } return out; }
+        \\f();
+    , "543");
 }
 
 test "later: new Number(5) wraps a primitive that ToNumber unwraps" {
@@ -6377,6 +6454,175 @@ test "GC: object-allocating loop survives gc_threshold=1" {
         \\}
         \\r;
     , 2500);
+}
+
+test "GC: pristine empty-object death takes the deinitFields fast path" {
+    // Foundation for the deinitFields lifecycle cost reduction:
+    // an object that accumulates no attached heap state (`{}` only,
+    // no property writes, no element store, no descriptor changes,
+    // no extension materialisation) MUST exit `deinitFields` via the
+    // early-return — the 13-call sequence of `.deinit` / null-checks
+    // for storage that was never allocated is the largest per-dead-
+    // object cost in the profile (object_alloc / ctor_array_build
+    // bench fixtures, ~9-10% each).
+    //
+    // `JSObject.deinit_slowpath_count` is a debug counter incremented
+    // exactly when `deinitFields` runs the slow path. Allocating 200
+    // pristine `{}` objects under setGcThreshold(1) forces a minor
+    // cycle on every allocation, sweeping each dead intermediate
+    // immediately; if the fast path is wired, the counter delta over
+    // that span is bounded by the few non-pristine objects the
+    // realm-internal machinery (scope frames, completion records, etc.)
+    // allocates.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    realm.heap.setGcThreshold(1);
+
+    const before = realm.heap.deinit_slowpath_count;
+
+    _ = switch (try evaluateScriptResult(&realm,
+        \\let last = null;
+        \\for (let i = 0; i < 200; i++) { last = {}; }
+        \\last;
+    )) {
+        .value, .yielded => {},
+        .thrown => return error.UncaughtException,
+    };
+
+    const delta = realm.heap.deinit_slowpath_count - before;
+
+    // Loose budget — realm bookkeeping (scope objects, completion
+    // records, IC scratchpads, etc.) churns some non-pristine state.
+    // The 200 pristine `{}` allocations must NOT each pay the slow
+    // path. A no-fast-path implementation runs the slow path ≥ 200
+    // times here; the fast-path implementation runs it ≤ ~50.
+    try testing.expect(delta < 100);
+}
+
+test "GC: pristine two-property shape-mode object death takes the deinitFields fast path" {
+    // Locks the architectural follow-up: a `{a:i, b:i+1}` object
+    // literal is shape-absorbed by `shadowSet` — both values land
+    // in `inline_slots`, the bag stays empty, and the only attached
+    // storage WAS the `own_key_order` ArrayList that `recordKey`
+    // populated for §10.1.11 OrdinaryOwnPropertyKeys iteration.
+    // Once `recordKey` is shape-aware (the shape chain already
+    // preserves insertion order leaf→root, so the redundant list
+    // stays empty in lazy mode), these objects qualify as pristine
+    // and the deinit fast-path fires.
+    //
+    // Same shape as the `{}` test above: 200 deaths under
+    // `gc_threshold=1` must produce well under 200 slowpath calls.
+    // The bench fixtures `object_alloc` (`{a:i, b:i+1}`) and
+    // `ctor_array_build` (`new Point(x, y)`) share this shape and
+    // are the actual target of the ~9-10 % `deinitFields` cost the
+    // foundation could not yet close.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    realm.heap.setGcThreshold(1);
+
+    const before = realm.heap.deinit_slowpath_count;
+
+    _ = switch (try evaluateScriptResult(&realm,
+        \\let last = null;
+        \\for (let i = 0; i < 200; i++) { last = { a: i, b: i + 1 }; }
+        \\last.a + last.b;
+    )) {
+        .value, .yielded => {},
+        .thrown => return error.UncaughtException,
+    };
+
+    const delta = realm.heap.deinit_slowpath_count - before;
+
+    // Loose budget: 200 dead shape-mode `{a:i, b:i+1}` instances must
+    // NOT each take the slowpath. Pre-laziness this delta was ~190+
+    // (every dead instance hit the slow path because the literal
+    // template eagerly populated `own_key_order`, flipping
+    // `is_pristine = false`). Post-laziness the shape chain
+    // authoritatively records insertion order and these instances
+    // qualify as pristine.
+    try testing.expect(delta < 100);
+}
+
+test "shape: lazy own_key_order survives a redefine transition without duplicating keys" {
+    // §10.1.11 OrdinaryOwnPropertyKeys via the lazy shape-chain
+    // iterator. `harden(o)` flips each own data property to frozen
+    // in-place through `ShapeTree.redefineTransition`, which appends
+    // a SECOND chain node for an existing key at the SAME slot
+    // (property_count unchanged). A naive depth-counting chain walk
+    // over-counts data nodes and emits each redefined key twice; the
+    // iterator must iterate by distinct slot (0..property_count),
+    // taking the leaf-most data node per slot, so a redefine is
+    // dedup-free by construction. Invisible to the `--unhardened`
+    // test262 scored posture — `harden` is the trigger.
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, b: 2 };
+        \\harden(o);
+        \\Object.keys(o).join(",");
+    , "a,b");
+    // The same object built via constant-string bracket writes —
+    // routed into the named-property IC (8ac6fcc), one of the paths
+    // into the shape-mode-with-empty-own_key_order state.
+    try expectScriptStringWithBuiltins(
+        \\const o = {};
+        \\o["a"] = 1; o["b"] = 2; o["c"] = 3;
+        \\harden(o);
+        \\Reflect.ownKeys(o).join(",");
+    , "a,b,c");
+    // Values / entries read through the same iterator.
+    try expectScriptStringWithBuiltins(
+        \\const o = { x: 10, y: 20 };
+        \\harden(o);
+        \\Object.values(o).join(",");
+    , "10,20");
+    // GetOwnPropertyNames and JSON.stringify route through the same
+    // §10.1.11 ordered own-key iterator — a redefine-duplicated key
+    // would surface as `["a","b","b","a"]` / `{"a":1,"b":2,"b":2,...}`.
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, b: 2 };
+        \\harden(o);
+        \\Object.getOwnPropertyNames(o).join(",");
+    , "a,b");
+    try expectScriptStringWithBuiltins(
+        \\const o = { a: 1, b: 2 };
+        \\harden(o);
+        \\JSON.stringify(o);
+    ,
+        \\{"a":1,"b":2}
+    );
+}
+
+test "GC: defineProperty([], \"length\", 2^32-1) survives gc_threshold=1" {
+    // §10.4.2.4 ArraySetLength via §10.4.2.1 [[DefineOwnProperty]] —
+    // redefining the Array exotic's virtual `length` slot to the
+    // §10.4.2.4 step 3.c boundary value 2^32-1. The length write
+    // routes straight to the virtual-length slot (no shape node, no
+    // bag entry, no `recordKey`), so the array can stay `is_pristine`
+    // through the whole define. The defineProperty builtin still
+    // anchors the `"length"` key JSString on the array via
+    // `key_anchors.append` (the key slice is borrowed; the GC must
+    // keep it alive) — and that append MUST be paired with
+    // `markNonPristine`. Without the pairing the array is pristine yet
+    // holds one anchor, which trips `assertPristineFieldsClean` (a
+    // pristine object's deinit fast-path asserts zero anchors) and
+    // aborts the host under allocation-pressure GC. No test262 fixture
+    // catches this class — the verifier fires only under
+    // gc_threshold + runtime-safety, invisible to a normal sweep
+    // (the live reproducer was built-ins/Object/defineProperty/
+    // 15.2.3.6-4-155, green at HEAD since 927c18f). 50 arrays die
+    // mid-loop under threshold=1, each deinit'd on the next allocation;
+    // the count comes out 50 only if every `length` read also survived
+    // (the anchor kept the boundary value addressable).
+    try expectScriptIntUnderGcPressure(
+        \\let r = 0;
+        \\for (let i = 0; i < 50; i++) {
+        \\  let a = [];
+        \\  Object.defineProperty(a, "length", { value: 4294967295 });
+        \\  if (a.length === 4294967295) r += 1;
+        \\}
+        \\r;
+    , 50);
 }
 
 test "GC: closures keep captured envs alive under gc_threshold=1" {

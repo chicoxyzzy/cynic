@@ -261,6 +261,7 @@ pub fn openIteratorOpts(
     const state = realm.allocator.create(object_mod.ArrayLikeIterState) catch return error.OutOfMemory;
     state.* = .{ .target = iterable };
     iter.array_like_iter = state;
+    iter.markNonPristine();
     const next_fn = realm.heap.allocateFunctionNative(realm, arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
     next_fn.proto = realm.intrinsics.function_prototype;
     iter.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
@@ -512,7 +513,8 @@ pub fn openForInIterator(
             defer shadow_only.deinit(realm.allocator);
             var emitted_str: std.StringHashMapUnmanaged(void) = .empty;
             defer emitted_str.deinit(realm.allocator);
-            for (cur.own_key_order.items) |key| {
+            var key_iter = cur.ownKeyOrderIterator();
+            while (key_iter.next()) |key| {
                 if (std.mem.startsWith(u8, key, "__cynic_")) continue;
                 // §14.7.5.9 — String keys only; skip flattened Symbols.
                 if (std.mem.startsWith(u8, key, "@@") or std.mem.startsWith(u8, key, "<sym:")) continue;
@@ -619,6 +621,7 @@ pub fn openForInIterator(
     const state = realm.allocator.create(@import("../object.zig").ArrayLikeIterState) catch return error.OutOfMemory;
     state.* = .{ .target = heap_mod.taggedObject(arr), .idx = 0, .done = false, .for_in_source = obj_v };
     iter.array_like_iter = state;
+    iter.markNonPristine();
     const next_fn = realm.heap.allocateFunctionNative(realm, arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
     next_fn.proto = realm.intrinsics.function_prototype;
     iter.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;

@@ -41,6 +41,12 @@ const Options = struct {
     filter: ?[]const u8 = null,
     quiet: bool = false,
     write_results: bool = false,
+    /// Force the Spasm baseline JIT on for every instantiated module
+    /// (docs/jit.md §6/§12 step 4 — the wasm analog of test262's
+    /// `--jit`). A `--spasm` run must produce the same pass-set as the
+    /// default interpreter run: that diff is the goes-live correctness
+    /// gate (compilable functions run native, everything else degrades).
+    spasm: bool = false,
     /// Headline floor. Exit 2 if `pass%` falls below it (0 = no gate).
     /// Mirrors the test262 harness so CI can gate the Sarcasm engine.
     min_pass_pct: f64 = 0.0,
@@ -63,6 +69,8 @@ pub fn main(init: std.process.Init) !void {
                 opts.quiet = true;
             } else if (std.mem.eql(u8, a, "--write-results")) {
                 opts.write_results = true;
+            } else if (std.mem.eql(u8, a, "--spasm")) {
+                opts.spasm = true;
             } else if (std.mem.startsWith(u8, a, "--min-pass-pct=")) {
                 opts.min_pass_pct = std.fmt.parseFloat(f64, a["--min-pass-pct=".len..]) catch 0.0;
             } else if (std.mem.eql(u8, a, "--debug-loads")) {
@@ -94,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
 
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
-        const c = runManifest(arena.allocator(), io, dir, entry.path) catch |err| {
+        const c = runManifest(arena.allocator(), io, dir, entry.path, opts.spasm) catch |err| {
             if (!opts.quiet) {
                 var line: [512]u8 = undefined;
                 const msg = try std.fmt.bufPrint(&line, "  {s}: harness error {t}\n", .{ entry.path, err });
@@ -134,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
 
 // ── per-manifest execution ──────────────────────────────────────────
 
-fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path: []const u8) !Counts {
+fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path: []const u8, spasm_enabled: bool) !Counts {
     const bytes = try dir.readFileAlloc(io, json_path, arena, .limited(64 * 1024 * 1024));
     const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
     const commands = (root.object.get("commands") orelse return error.BadManifest).array.items;
@@ -164,6 +172,10 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
             const res = loadModule(arena, io, dir, cmd, &registry) catch null;
             if (res) |loaded| {
                 current = loaded.instance;
+                // Force the baseline tier on this instance so every
+                // subsequent action/assert runs the compilable functions
+                // as native code — the differential gate's whole point.
+                if (spasm_enabled) loaded.instance.spasm_enabled = true;
                 // A named module ((module $M …)) is addressable by later
                 // actions and registers via its internal name.
                 if (cmd.get("name")) |n| registry.put(arena, n.string, loaded.instance) catch {};

@@ -367,6 +367,7 @@ fn wrapIterator(realm: *Realm, source: Value) NativeError!Value {
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{ .source = source, .next_fn = cached_next_v };
     wrap.iter_helper = state;
+    wrap.markNonPristine();
     return heap_mod.taggedObject(wrap);
 }
 
@@ -732,6 +733,7 @@ fn iteratorFlatMap(realm: *Realm, this_value: Value, args: []const Value) Native
         .kind = .flat_map,
     };
     wrap.iter_helper = state;
+    wrap.markNonPristine();
     return heap_mod.taggedObject(wrap);
 }
 
@@ -953,6 +955,7 @@ fn buildLazy(realm: *Realm, source: Value, payload: Value, kind: IteratorHelperS
         .kind = kind,
     };
     wrap.iter_helper = state;
+    wrap.markNonPristine();
     return heap_mod.taggedObject(wrap);
 }
 
@@ -1598,6 +1601,7 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{ .count = @intCast(args.len), .kind = .concat };
     wrap.iter_helper = state;
+    wrap.markNonPristine();
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
@@ -1929,6 +1933,7 @@ fn buildZipWrapper(
         .kind = .zip,
     };
     wrap.iter_helper = state;
+    wrap.markNonPristine();
     scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
 
     // Per-input state — the sub-iterator, its §7.4.2
