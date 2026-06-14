@@ -705,3 +705,61 @@ test "cross-realm: calling a class constructor without new throws the class's re
     const ps: *@import("string.zig").JSString = @ptrCast(@alignCast(probe.asString()));
     try testing.expectEqualStrings("child", ps.flatBytes());
 }
+
+// ── error-stack-accessor proposal — Error.prototype.stack ───────────
+//
+// TC39 Stage 1 `proposal-error-stacks`: an accessor pair lives on
+// %Error.prototype% (not on instances, not on NativeError prototypes).
+//   get: this not Object → TypeError; no [[ErrorData]] → undefined;
+//        else an implementation-defined string.
+//   set(v): this not Object → TypeError; v not a String → TypeError;
+//        else SetterThatIgnoresPrototypeProperties creates / updates an
+//        own data property { writable, enumerable, configurable: true }.
+
+test "Error.prototype.stack: accessor-pair contract (proposal-error-stacks)" {
+    var realm = try freshRealm(false); // unhardened — the scored posture
+    defer realm.deinit();
+    // Every assertion is folded into one boolean so a single completion
+    // value reports pass/fail; each `try/catch` pins a throwing clause.
+    const src =
+        \\let ok = true;
+        \\const d = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
+        \\// accessor pair, { enumerable: false, configurable: true }
+        \\ok = ok && typeof d.get === 'function' && typeof d.set === 'function';
+        \\ok = ok && d.enumerable === false && d.configurable === true;
+        \\ok = ok && d.get.name === 'get stack' && d.get.length === 0;
+        \\ok = ok && d.set.name === 'set stack' && d.set.length === 1;
+        \\// a fresh instance has NO own stack; the accessor is inherited
+        \\const e = new TypeError('boom');
+        \\ok = ok && !Object.prototype.hasOwnProperty.call(e, 'stack');
+        \\ok = ok && typeof e.stack === 'string';
+        \\// the accessor lives only on Error.prototype, not TypeError.prototype
+        \\ok = ok && Object.getOwnPropertyDescriptor(TypeError.prototype, 'stack') === undefined;
+        \\// getter on the prototype itself ([[ErrorData]] absent) → undefined
+        \\ok = ok && Error.prototype.stack === undefined;
+        \\// getter on a non-Error object → undefined (not a throw)
+        \\ok = ok && d.get.call({}) === undefined;
+        \\ok = ok && d.get.call(function () {}) === undefined;
+        \\// getter on a non-object → TypeError (incl. Symbol / BigInt,
+        \\// which are primitives despite a heap-tagged representation)
+        \\try { d.get.call(undefined); ok = false; } catch (x) { ok = ok && (x instanceof TypeError); }
+        \\try { d.get.call(Symbol('s')); ok = false; } catch (x) { ok = ok && (x instanceof TypeError); }
+        \\try { d.get.call(10n); ok = false; } catch (x) { ok = ok && (x instanceof TypeError); }
+        \\// setter with a non-string value → TypeError
+        \\try { d.set.call(e, 123); ok = false; } catch (x) { ok = ok && (x instanceof TypeError); }
+        \\// setter on a non-object → TypeError
+        \\try { d.set.call(undefined, ''); ok = false; } catch (x) { ok = ok && (x instanceof TypeError); }
+        \\// setter creates an own writable/enumerable/configurable data prop
+        \\e.stack = 'custom-trace';
+        \\const od = Object.getOwnPropertyDescriptor(e, 'stack');
+        \\ok = ok && od.value === 'custom-trace' && od.writable && od.enumerable && od.configurable;
+        \\// after the own data prop exists, plain access reads it back
+        \\ok = ok && e.stack === 'custom-trace';
+        \\ok ? 1 : 0
+    ;
+    const v = switch (try lantern.evaluateScript(testing.allocator, &realm, src)) {
+        .value, .yielded => |val| val,
+        .thrown => return error.ScriptThrewUnexpectedly,
+    };
+    try testing.expect(v.isInt32() and v.asInt32() == 1);
+}

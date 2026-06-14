@@ -87,6 +87,10 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
     // §20.5.3.4 Error.prototype.toString — installed only on the
     // Error prototype; NativeError instances inherit it.
     try intrinsics.installNativeMethodOnProto(realm, error_proto, "toString", errorPrototypeToString, 0);
+    // `proposal-error-stacks` — Error.prototype.stack accessor pair.
+    // Installed only on %Error.prototype%; NativeError instances and
+    // prototypes inherit it.
+    try installErrorPrototypeStack(realm, error_proto);
     // §20.5.2.1 Error.isError(arg) — ES2025. Returns true iff
     // arg is an Object with an `[[ErrorData]]` internal slot.
     // Cynic's brand check is structural: any object whose
@@ -505,6 +509,74 @@ fn errorPrototypeToString(realm: *Realm, this_value: Value, args: []const Value)
     defer realm.allocator.free(joined);
     const out = realm.heap.allocateString(joined) catch return error.OutOfMemory;
     return Value.fromString(out);
+}
+
+// ── `proposal-error-stacks` — Error.prototype.stack ─────────────────
+//
+// TC39 Stage 1 accessor pair on %Error.prototype%. The `[[ErrorData]]`
+// brand (`JSObject.has_error_data`) is the discriminator: only objects
+// created by an Error / NativeError / AggregateError / SuppressedError
+// constructor carry it, so the getter returns a string for those and
+// `undefined` for everything else. The stack content is
+// implementation-defined; Cynic returns the §20.5.3.4 toString header
+// ("Name: message") — a faithful, GC-safe first line. (Frame rendering
+// is a follow-up; the contract the proposal pins is the accessor shape.)
+
+/// get Error.prototype.stack:
+///   1. Let E be the this value.
+///   2. If E is not an Object, throw a TypeError.
+///   3. If E does not have an [[ErrorData]] slot, return undefined.
+///   4. Return an implementation-defined stack-trace string.
+fn errorPrototypeStackGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    // §6.1.7 Type(E) is Object — `isJSObject` excludes Symbol / BigInt,
+    // which share the tagged-pointer encoding but are primitives.
+    if (!heap_mod.isJSObject(this_value)) {
+        return intrinsics.throwTypeError(realm, "Error.prototype.stack getter called on a non-object");
+    }
+    // [[ErrorData]] lives on plain JSObjects; a function / proxy / other
+    // exotic receiver is an Object (step 2 passed) but has no brand.
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
+    if (!obj.has_error_data) return Value.undefined_;
+    return errorPrototypeToString(realm, this_value, &.{});
+}
+
+/// set Error.prototype.stack(v):
+///   1. Let E be the this value.
+///   2. If E is not an Object, throw a TypeError.
+///   3. If v is not a String, throw a TypeError.
+///   4. SetterThatIgnoresPrototypeProperties(E, %Error.prototype%, "stack", v).
+fn errorPrototypeStackSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const v = argOr(args, 0, Value.undefined_);
+    if (!heap_mod.isJSObject(this_value)) {
+        return intrinsics.throwTypeError(realm, "Error.prototype.stack setter called on a non-object");
+    }
+    if (!v.isString()) {
+        return intrinsics.throwTypeError(realm, "Error.prototype.stack setter requires a string value");
+    }
+    // `home` is %Error.prototype% of the setter's own realm (cross-realm
+    // correct — the step-2 SameValue(E, home) guard then catches only
+    // `set.call(Error.prototype)` of that realm).
+    const home = homeRealm(realm).intrinsics.error_prototype.?;
+    try intrinsics.setterThatIgnoresPrototypeProperties(realm, this_value, home, "stack", v);
+    return Value.undefined_;
+}
+
+/// Install the `stack` accessor pair on %Error.prototype% with the
+/// §17 / proposal descriptor { enumerable: false, configurable: true }.
+/// No shape demotion: `stack` has no pre-existing data slot, so the
+/// accessor-map lookup (consulted independently of shape mode) wins —
+/// matches `Iterator.prototype[@@toStringTag]`.
+fn installErrorPrototypeStack(realm: *Realm, error_proto: *JSObject) !void {
+    const getter = try intrinsics.makeNativeFunction(realm, errorPrototypeStackGet, 0, "get stack");
+    const setter = try intrinsics.makeNativeFunction(realm, errorPrototypeStackSet, 1, "set stack");
+    const entry = try error_proto.getOrPutAccessor(realm.allocator, "stack");
+    entry.value_ptr.* = .{ .getter = getter, .setter = setter };
+    try error_proto.property_flags.put(realm.allocator, "stack", .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
+    });
 }
 
 pub fn constructErrorInstance(realm: *Realm, this_value: Value, proto: *JSObject, args: []const Value) NativeError!Value {

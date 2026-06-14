@@ -961,6 +961,45 @@ pub fn makeNativeFunction(realm: *Realm, native: NativeFn, params: u8, name: []c
     return fn_obj;
 }
 
+/// SetterThatIgnoresPrototypeProperties(O, home, p, v) — the shared
+/// abstract operation behind accessor setters that must write an OWN
+/// property and never consult the inherited accessor on `home` (which
+/// would recurse). Used by `Iterator.prototype.constructor`/
+/// `[Symbol.toStringTag]` and `Error.prototype.stack`.
+///   1. If O is not an Object → TypeError.
+///   2. If SameValue(O, home) → TypeError (emulates assigning to a
+///      non-writable data property on `home`).
+///   3. Let desc be ? O.[[GetOwnProperty]](p).
+///   4. If desc is undefined → CreateDataPropertyOrThrow(O, p, v).
+///   5. Else → Set(O, p, v, true).
+pub fn setterThatIgnoresPrototypeProperties(realm: *Realm, this_value: Value, home: *JSObject, key: []const u8, v: Value) NativeError!void {
+    const obj = heap_mod.valueAsPlainObject(this_value) orelse {
+        return throwTypeError(realm, "SetterThatIgnoresPrototypeProperties: receiver is not an object");
+    };
+    if (obj == home) {
+        return throwTypeError(realm, "Cannot assign to a non-writable accessor property on its home prototype");
+    }
+    if (obj.hasOwn(key)) {
+        // ? Set(O, p, v, true) — an own property already exists, so
+        // [[Set]] resolves on it (honouring writability) without
+        // climbing to the inherited accessor.
+        const ok = obj.setIfWritable(realm.allocator, key, v) catch return error.OutOfMemory;
+        if (!ok) {
+            return throwTypeError(realm, "Cannot assign to read-only property");
+        }
+        return;
+    }
+    // CreateDataPropertyOrThrow — must throw if not extensible.
+    if (!obj.extensible) {
+        return throwTypeError(realm, "Cannot define property on non-extensible object");
+    }
+    obj.setWithFlags(realm.allocator, key, v, .{
+        .writable = true,
+        .enumerable = true,
+        .configurable = true,
+    }) catch return error.OutOfMemory;
+}
+
 pub fn installNativeMethod(realm: *Realm, target: *JSFunction, name: []const u8, native: NativeFn, params: u8) !void {
     const fn_obj = try makeNativeFunction(realm, native, params, name);
     // §17 — built-in own data property descriptors are non-

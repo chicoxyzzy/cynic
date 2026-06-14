@@ -37,6 +37,7 @@ const installNativeMethod = intrinsics.installNativeMethod;
 const installNativeMethodOnProto = intrinsics.installNativeMethodOnProto;
 const argOr = intrinsics.argOr;
 const throwTypeError = intrinsics.throwTypeError;
+const setterThatIgnoresPrototypeProperties = intrinsics.setterThatIgnoresPrototypeProperties;
 const throwRangeError = intrinsics.throwRangeError;
 
 pub fn install(realm: *Realm) !void {
@@ -231,40 +232,6 @@ fn iteratorPrototypeToStringTagSet(realm: *Realm, this_value: Value, args: []con
     const home = ctor.prototype orelse return throwTypeError(realm, "Iterator.prototype missing");
     try setterThatIgnoresPrototypeProperties(realm, this_value, home, "@@toStringTag", v);
     return Value.undefined_;
-}
-
-/// §27.1.4.x SetterThatIgnoresPrototypeProperties(O, home, p, v):
-///   1. If O is not Object → TypeError.
-///   2. If SameValue(O, home) → TypeError (emulates assigning a
-///      non-writable data property on `home`).
-///   3. Let desc be ? O.[[GetOwnProperty]](p).
-///   4. If desc is undefined → CreateDataPropertyOrThrow(O, p, v).
-///   5. Else → Set(O, p, v, true).
-fn setterThatIgnoresPrototypeProperties(realm: *Realm, this_value: Value, home: *JSObject, key: []const u8, v: Value) NativeError!void {
-    const obj = heap_mod.valueAsPlainObject(this_value) orelse {
-        return throwTypeError(realm, "SetterThatIgnoresPrototypeProperties: receiver is not an object");
-    };
-    if (obj == home) {
-        return throwTypeError(realm, "Cannot assign to non-writable property on Iterator.prototype");
-    }
-    if (obj.hasOwn(key)) {
-        // OrdinarySet honouring writability — bypass accessor
-        // setters: the spec uses ? Set(O, p, v, true).
-        const ok = obj.setIfWritable(realm.allocator, key, v) catch return error.OutOfMemory;
-        if (!ok) {
-            return throwTypeError(realm, "Cannot assign to read-only property");
-        }
-        return;
-    }
-    // CreateDataPropertyOrThrow — must throw if not extensible.
-    if (!obj.extensible) {
-        return throwTypeError(realm, "Cannot define property on non-extensible object");
-    }
-    obj.setWithFlags(realm.allocator, key, v, .{
-        .writable = true,
-        .enumerable = true,
-        .configurable = true,
-    }) catch return error.OutOfMemory;
 }
 
 fn iteratorConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
