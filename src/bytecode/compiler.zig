@@ -11032,17 +11032,24 @@ pub const Compiler = struct {
         };
     }
 
-    /// §13.6 — when `cond` is a strict-equality comparison (`a === b` /
-    /// `a !== b`), emit a single fused compare-and-branch (`JmpIfStrict*`)
-    /// and return the i16 patch slot; otherwise return null so the caller
-    /// compiles the condition + a plain `jmp_if_{false,true}`. The fused
-    /// branch is taken (forward) when the *condition* is false
-    /// (`jump_when_false`) or true. Folds the `strict_eq r; jmp_if_*` pair
-    /// into one op — one fewer dispatch per conditional. strictEq is pure
-    /// (no coercion / re-entry), so the fusion is byte-identical; only the
-    /// forward-branch sites (if / while / for tests) use it, so there is
-    /// no loop back-edge to handle.
-    fn tryFuseStrictEqBranch(
+    /// §13.6 / §13.10 — when `cond` is a strict-equality (`===` / `!==`)
+    /// or relational (`<` `<=` `>` `>=`) comparison, emit a single fused
+    /// compare-and-branch (`JmpIfStrict*` / `JmpIfNot{Lt,Le,Gt,Ge}`) and
+    /// return the i16 patch slot; else return null so the caller compiles
+    /// the condition + a plain `jmp_if_{false,true}`. Folds the `<cmp> r;
+    /// jmp_if_*` pair into one op — one fewer dispatch per conditional.
+    /// Strict-(in)equality is boolean-negatable, so it fuses in both senses
+    /// (jump-when-false → the negated operator, `JmpIfStrictNeq`). Relational
+    /// comparisons are not (a NaN makes both `a<b` and `a>=b` false), so they
+    /// fuse only in the jump-when-false sense via the dedicated `JmpIfNot*`
+    /// ops that test the comparison and branch on its falsity (`if (a<b)` →
+    /// `JmpIfNotLt`); a jump-when-true relational test is left unfused. The
+    /// fused arms reuse the exact `strictEq` / `relational` routines (incl.
+    /// coercion / re-entry), so the fusion is byte-identical; only
+    /// forward-branch sites (if / while / for tests) use it, so there is no
+    /// loop back-edge to handle. Loose `==` / `!=` are not fused (they need
+    /// `coerceForCompareEq`).
+    fn tryFuseComparisonBranch(
         self: *Compiler,
         cond: *const ast.expression.Expression,
         span: Span,
@@ -11052,16 +11059,23 @@ pub const Compiler = struct {
         while (e.* == .parenthesized) e = e.parenthesized.expression;
         if (e.* != .binary) return null;
         const b = e.binary;
-        const is_strict_eq = switch (b.op) {
-            .eq_eq_eq => true,
-            .bang_eq_eq => false,
+        // Strict-(in)equality is boolean-negatable, so both branch senses
+        // fuse — the jump-when-false form uses the negated operator
+        // (eq↔neq). Relational comparisons are NOT boolean-negatable: a NaN
+        // operand makes both `a<b` and `a>=b` false, so `!(a<b)` is not
+        // `a>=b`. Their fused op therefore exists only in the jump-when-false
+        // sense (`jmp_if_not_*` jumps when the comparison is false), which is
+        // what every `if` / `while` / `for` head-test needs; a jump-when-true
+        // relational test is left unfused.
+        const fused: Op = switch (b.op) {
+            .eq_eq_eq => if (jump_when_false) .jmp_if_strict_neq else .jmp_if_strict_eq,
+            .bang_eq_eq => if (jump_when_false) .jmp_if_strict_eq else .jmp_if_strict_neq,
+            .lt => if (jump_when_false) .jmp_if_not_lt else return null,
+            .le => if (jump_when_false) .jmp_if_not_le else return null,
+            .gt => if (jump_when_false) .jmp_if_not_gt else return null,
+            .ge => if (jump_when_false) .jmp_if_not_ge else return null,
             else => return null,
         };
-        // Take the branch when `registers[r] === acc` (JmpIfStrictEq) or
-        // `!==` (JmpIfStrictNeq). `a===b` branch-when-false ⇒ branch on
-        // `!==`; `a!==b` branch-when-false ⇒ branch on `===`.
-        const take_on_equal = if (jump_when_false) !is_strict_eq else is_strict_eq;
-        const fused: Op = if (take_on_equal) .jmp_if_strict_eq else .jmp_if_strict_neq;
         try self.compileExpression(b.lhs);
         const r = try self.reserveTemp();
         defer self.releaseTemp();
@@ -11097,7 +11111,7 @@ pub const Compiler = struct {
             try self.builder.emitStoreReg(s.span, r);
         }
 
-        const else_patch = (try self.tryFuseStrictEqBranch(&s.test_, s.span, true)) orelse blk: {
+        const else_patch = (try self.tryFuseComparisonBranch(&s.test_, s.span, true)) orelse blk: {
             try self.compileExpression(&s.test_);
             try self.builder.emitOp(.jmp_if_false, s.span);
             const slot = self.builder.here();
@@ -11284,10 +11298,13 @@ pub const Compiler = struct {
         const labels = try self.drainPendingLabels();
         try self.emitCompletionUndefined(s.span);
         const loop_start = self.builder.here();
-        try self.compileExpression(&s.test_);
-        try self.builder.emitOp(.jmp_if_false, s.span);
-        const exit_patch = self.builder.here();
-        try self.builder.emitI16(0);
+        const exit_patch = (try self.tryFuseComparisonBranch(&s.test_, s.span, true)) orelse blk: {
+            try self.compileExpression(&s.test_);
+            try self.builder.emitOp(.jmp_if_false, s.span);
+            const slot = self.builder.here();
+            try self.builder.emitI16(0);
+            break :blk slot;
+        };
 
         var ctx: LoopContext = .{
             .continue_target = loop_start,
@@ -12897,10 +12914,13 @@ pub const Compiler = struct {
 
         var exit_patch: ?u32 = null;
         if (s.test_) |*t| {
-            try self.compileExpression(t);
-            try self.builder.emitOp(.jmp_if_false, s.span);
-            exit_patch = self.builder.here();
-            try self.builder.emitI16(0);
+            exit_patch = (try self.tryFuseComparisonBranch(t, s.span, true)) orelse blk: {
+                try self.compileExpression(t);
+                try self.builder.emitOp(.jmp_if_false, s.span);
+                const slot = self.builder.here();
+                try self.builder.emitI16(0);
+                break :blk slot;
+            };
         }
 
         var ctx: LoopContext = .{
@@ -14950,4 +14970,26 @@ test "compiler: a strict-inequality condition fuses to JmpIfStrictEq" {
     const t0 = t0Of(got);
     try testing.expect(std.mem.indexOf(u8, t0, "JmpIfStrictEq") != null);
     try testing.expect(std.mem.indexOf(u8, t0, "StrictNeq ") == null);
+}
+
+test "compiler: a relational condition fuses into a compare-and-branch" {
+    // §13.10 — `if (a < b)` jumps to the else when !(a < b). That is NOT
+    // `a >= b` (a NaN operand makes both false), so it fuses to the
+    // jump-on-false op `JmpIfNotLt`, not a negated `JmpIfGe` and not
+    // `Lt r; JmpIfFalse`.
+    const got = try dumpExpr("(function(a,b){ if (a<b) return 1; return 2; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "JmpIfNotLt") != null);
+    // The fusion collapsed the standalone `Lt r; JmpIfFalse` pair — no
+    // separate boolean branch remains. (Can't assert "Lt r" absent: it is a
+    // substring of the fused "JmpIfNotLt r".)
+    try testing.expect(std.mem.indexOf(u8, t0, "JmpIfFalse") == null);
+}
+
+test "compiler: a while-loop relational test fuses" {
+    // `while (i < n)` top-test → jump-to-exit when !(i < n) → JmpIfNotLt.
+    const got = try dumpExpr("(function(n){ let i=0; while (i<n) i=i+1; return i; })");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, t0Of(got), "JmpIfNotLt") != null);
 }

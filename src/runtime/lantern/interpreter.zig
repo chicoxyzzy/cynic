@@ -1994,6 +1994,71 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
+        .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => |t| {
+            // Fused relational compare-and-branch, jump-when-false sense —
+            // byte-identical to `lt|le|gt|ge r; jmp_if_false`: the §13.10
+            // comparison (int32 fast path, else ToPrimitive/ToNumber
+            // coercion with the same throw/handler unwind), then jump when
+            // the comparison is FALSE. The negation is on the boolean
+            // result (`!(a<b)`), NOT the operator (`a>=b`) — those differ
+            // when a NaN is involved (both `<` and `>=` are false), so this
+            // op must test the comparison and branch on its falsity, not
+            // emit the negated comparison. Mirrors the standalone `.lt` arm;
+            // two small `switch (t)` selects keep the comptime comparison op
+            // without duplicating the body. Forward-only by emit; a
+            // defensive backward offset still takes a GC safepoint.
+            const r = code[ip];
+            const off = readI16(code, ip + 1);
+            ip += 3;
+            var take: bool = undefined;
+            const fast: ?Value = switch (t) {
+                .jmp_if_not_lt => intCompare(.lt, registers[r], acc),
+                .jmp_if_not_le => intCompare(.le, registers[r], acc),
+                .jmp_if_not_gt => intCompare(.gt, registers[r], acc),
+                else => intCompare(.ge, registers[r], acc),
+            };
+            if (fast) |res| {
+                take = !res.asBool();
+            } else {
+                const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
+                if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
+                if (lhs == .handled) {
+                    committed = true;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                }
+                const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
+                if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
+                if (rhs == .handled) {
+                    committed = true;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                }
+                const res = (switch (t) {
+                    .jmp_if_not_lt => relational(.lt, realm, lhs.ok, rhs.ok),
+                    .jmp_if_not_le => relational(.le, realm, lhs.ok, rhs.ok),
+                    .jmp_if_not_gt => relational(.gt, realm, lhs.ok, rhs.ok),
+                    else => relational(.ge, realm, lhs.ok, rhs.ok),
+                }) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NativeThrew => {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "comparison threw");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = lhs.ok;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        committed = true;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                };
+                take = !res.asBool();
+            }
+            if (take) {
+                ip = applyOffset(ip, off);
+                if (off < 0) {
+                    if (try loopSafePoint(realm, f, ip, acc)) |sp| return sp;
+                }
+            }
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
         .jmp_if_nullish => {
             const off = readI16(code, ip);
             ip += 2;

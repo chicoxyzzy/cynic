@@ -93,7 +93,7 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                     @as(u64, @intCast(target)),
                 });
             },
-            .jmp_if_strict_eq, .jmp_if_strict_neq => {
+            .jmp_if_strict_eq, .jmp_if_strict_neq, .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => {
                 const r = chunk.code[i + 1];
                 const o = readI16(chunk.code, i + 2);
                 const target: i64 = @as(i64, @intCast(i + 1 + 3)) + o;

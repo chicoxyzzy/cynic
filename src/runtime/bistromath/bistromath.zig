@@ -552,7 +552,7 @@ const Compiler = struct {
                     _ = try self.labelFor(targetOf(after, off));
                     if (off < 0) try self.osr_headers.put(self.m.gpa, targetOf(after, off), {});
                 },
-                .jmp_if_strict_eq, .jmp_if_strict_neq => {
+                .jmp_if_strict_eq, .jmp_if_strict_neq, .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => {
                     // `[op][r:u8][off:i16]` — forward-only by construction.
                     const off = readI16(code, i + 2);
                     _ = try self.labelFor(targetOf(after, off));
@@ -1111,12 +1111,15 @@ const Compiler = struct {
                     try m.jump(try self.labelForExisting(target));
                     m.bind(&skip);
                 },
-                .jmp_if_strict_eq, .jmp_if_strict_neq => {
-                    // Fused strict-equality compare-and-branch — the int32
-                    // fast path of `strict_eq` + a forward branch (cf.
-                    // loop_inc_lt). Non-int32 operands tier down, exactly as
-                    // standalone `strict_eq` does, so Lantern runs the full
-                    // `strictEq`. Forward-only ⇒ no back-edge safepoint.
+                .jmp_if_strict_eq, .jmp_if_strict_neq, .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => {
+                    // Fused compare-and-branch — the int32 fast path of the
+                    // comparison (cf. the `.lt`…`.strict_eq` codegen) + a
+                    // forward branch (cf. loop_inc_lt). Non-int32 operands
+                    // tier down, exactly as the standalone compares do, so
+                    // Lantern runs the full §13.10 / strictEq semantics
+                    // (incl. the NaN cases that make the `jmp_if_not_*` ops
+                    // jump-on-false rather than negated comparisons).
+                    // Forward-only ⇒ no back-edge safepoint.
                     const td = try self.tdFor(bc);
                     const off = readI16(code, i + 2);
                     const target = targetOf(after, off);
@@ -1126,8 +1129,20 @@ const Compiler = struct {
                     try m.emit(a64.cmpRegW(.x9, acc_reg));
                     var skip = Masm.Label{};
                     defer skip.fixups.deinit(m.gpa);
-                    // Take the branch when the condition holds; skip otherwise.
-                    try m.jumpCond(if (op == .jmp_if_strict_eq) .ne else .eq, &skip);
+                    // Skip the branch when it should NOT be taken. For the
+                    // strict-eq pair that is "comparison fails"; for the
+                    // `jmp_if_not_*` (jump-on-false) ops it is "comparison
+                    // holds" — int32 has no NaN, so the signed condition is
+                    // exact here.
+                    const skip_cond: a64.Cond = switch (op) {
+                        .jmp_if_strict_eq => .ne,
+                        .jmp_if_strict_neq => .eq,
+                        .jmp_if_not_lt => .lt,
+                        .jmp_if_not_le => .le,
+                        .jmp_if_not_gt => .gt,
+                        else => .ge, // jmp_if_not_ge
+                    };
+                    try m.jumpCond(skip_cond, &skip);
                     try m.jump(try self.labelForExisting(target));
                     m.bind(&skip);
                 },

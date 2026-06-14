@@ -385,6 +385,24 @@ test "interpreter: NaN comparisons are false" {
     try expectBool("(0/0) === (0/0);", false);
 }
 
+test "interpreter: fused relational branch is jump-on-false, not negated (NaN)" {
+    // §13.10 — a NaN operand makes BOTH `a<b` and `a>=b` false, so a fused
+    // `if (a<b)` head-test must jump to the else on `!(a<b)` (taken for
+    // NaN), never on the negated operator `a>=b` (which a NaN leaves false,
+    // so it would fall into the then-branch). This is exactly the bug the
+    // `jmp_if_not_*` jump-on-false ops exist to avoid; params keep the
+    // comparison out of the constant folder so the fused arm runs.
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(0/0, 1);", 2);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(0/0, 1);", 2);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(0/0, 1);", 2);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(0/0, 1);", 2);
+    // Finite operands keep the ordinary result (then-branch when true).
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1, 2);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(2, 1);", 2);
+    // A loop guard with a NaN bound must not enter the body.
+    try expectInt("(function(n){ let i=0; while (i<n) i=i+1; return i; })(0/0);", 0);
+}
+
 test "interpreter: logical not" {
     try expectBool("!true;", false);
     try expectBool("!0;", true);
