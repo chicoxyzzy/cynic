@@ -1004,7 +1004,18 @@ useful:
    `zig build wasm-bench` interp-vs-Spasm A/B back it — the fully
    compilable `sum(i*i)` loop runs ~10× faster as cached native code on
    that workload, results byte-identical, while `call`-using `fib`
-   degrades to the interpreter at parity. Still to come: the
+   degrades to the interpreter at parity. **Spasm is now the default
+   production wasm tier**: the JS `WebAssembly` API turns it on for every
+   instance when the JIT is on (`spasm_enabled = realm.jit_enabled`, set
+   in `populateInstance`), so a JS-instantiated module's emittable
+   functions baseline-compile through Spasm and `--no-jit` keeps the pure
+   interpreter — the posture every shipping engine takes (V8 Liftoff,
+   SpiderMonkey baseline, JSC BBQ all baseline-compile wasm rather than
+   interpret it). A red-first `wasm_js_test` (a JS export runs
+   Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
+   suite run under the jit-on posture gate it; non-emittable bodies
+   (div/rem, memory, calls, i64/f64) degrade, so the suite still covers
+   the interpreter through that fallback. Still to come: the
    side-table-as-control-oracle wiring (§6) that makes valcnt/popcnt and
    multi-target branches cheap, then i64.
 5. **Ohaimark ADR** — written against measured Bistromath data

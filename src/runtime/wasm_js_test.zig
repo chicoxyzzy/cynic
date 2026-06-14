@@ -19,6 +19,11 @@ fn evalWasm(source: []const u8) !Value {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
     realm.allow_wasm = true;
+    // The production posture: the JIT is on by default, so instance
+    // exports baseline-compile through Spasm (degrading to the
+    // interpreter for anything outside its class). Exercising the JS-wasm
+    // surface here doubles as a Spasm-by-default differential.
+    realm.jit_enabled = true;
     try realm.installBuiltins();
     const outcome = try lantern.evaluateScript(testing.allocator, &realm, source);
     return switch (outcome) {
@@ -58,6 +63,7 @@ fn expectIntWasmAsync(setup: []const u8, want: i32) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
     realm.allow_wasm = true;
+    realm.jit_enabled = true; // production posture — Spasm-by-default (see evalWasm)
     realm.hardened = false; // the .then callback writes globalThis.__r
     try realm.installBuiltins();
     _ = try lantern.evaluateScript(testing.allocator, &realm, setup);

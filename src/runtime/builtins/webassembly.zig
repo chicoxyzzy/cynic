@@ -319,6 +319,16 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
     ip.host_exn_ctx = realm;
     ip.host_exn_hook = convertHostException;
 
+    // Baseline-compile this instance's functions through Spasm when the
+    // JIT is on (docs/jit.md §6) — the production wasm posture every
+    // shipping engine takes (V8 Liftoff, SpiderMonkey baseline, JSC BBQ
+    // all baseline-compile wasm rather than interpret it). Each emittable
+    // function compiles on its first invoke and the cached EntryFn runs
+    // thereafter; anything outside the class degrades to the interpreter.
+    // `--no-jit` (jit_enabled = false) keeps the pure interpreter for both
+    // the JS and wasm tiers.
+    ip.spasm_enabled = realm.jit_enabled;
+
     // Register the instance's externref tables / globals as GC roots, so a
     // JS value a wasm body stores into one survives past the call that put
     // it there (its transient pin is dropped at the outermost return).
@@ -1479,4 +1489,56 @@ fn bufferSourceBytes(args: []const Value) ?[]const u8 {
     }
     if (obj.getArrayBuffer()) |ab| return ab;
     return null;
+}
+
+// ── tests ───────────────────────────────────────────────────────────
+
+test "WebAssembly JS API: a jit-enabled realm runs instance exports through Spasm" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    const spasm = @import("../wasm/spasm.zig");
+    if (comptime !spasm.supported) return error.SkipZigTest;
+
+    // A self-contained `(i32,i32)->i32` adder module — fully within
+    // Spasm's emittable class (local.get/local.get/i32.add).
+    const mod_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // preamble
+        0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type (i32,i32)->i32
+        0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+        0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00, // export "add" -> 0
+        0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b, // code
+    };
+
+    // Embed the module bytes as a Uint8Array literal and drive the real
+    // JS API: `new WebAssembly.Instance(new WebAssembly.Module(bytes))`,
+    // call the export, then yield the export function so the test can
+    // reach the backing wasm Instance through its ExportRecord.
+    var src: std.ArrayListUnmanaged(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    try src.appendSlice(testing.allocator, "const i=new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([");
+    for (mod_bytes, 0..) |b, idx| {
+        if (idx != 0) try src.append(testing.allocator, ',');
+        var tmp: [3]u8 = undefined;
+        try src.appendSlice(testing.allocator, std.fmt.bufPrint(&tmp, "{d}", .{b}) catch unreachable);
+    }
+    try src.appendSlice(testing.allocator, "])));i.exports.add(7,35);i.exports.add;");
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm = true;
+    realm.jit_enabled = true; // the production default; Spasm should engage
+    try realm.installBuiltins();
+
+    const fn_result = try lantern.evaluateScript(testing.allocator, &realm, src.items);
+    const fn_val = switch (fn_result) {
+        .value => |v| v,
+        else => return error.TestUnexpectedResult,
+    };
+    const fn_obj = heap_mod.valueAsFunction(fn_val) orelse return error.TestUnexpectedResult;
+    const rec: *ExportRecord = @ptrCast(@alignCast(fn_obj.wasm_export orelse return error.TestUnexpectedResult));
+
+    // The JIT flag propagated to the instance, and calling the export
+    // actually ran Spasm-compiled native code (not the interpreter).
+    try testing.expect(rec.instance.spasm_enabled);
+    try testing.expect(rec.instance.spasm_runs >= 1);
 }
