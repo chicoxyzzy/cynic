@@ -1866,9 +1866,7 @@ pub const Compiler = struct {
                 try self.builder.emitU8(r_obj);
             },
             .computed => {
-                try self.builder.emitOp(.sta_computed, u.span);
-                try self.builder.emitU8(r_obj);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitStaComputed(u.span, r_obj, r_key);
             },
         }
 
@@ -3387,9 +3385,7 @@ pub const Compiler = struct {
                     try this_.builder.emitU16(k);
                     try this_.builder.emitU8(ro);
                 } else if (ck) |rk| {
-                    try this_.builder.emitOp(.sta_computed, span_);
-                    try this_.builder.emitU8(ro);
-                    try this_.builder.emitU8(rk);
+                    try this_.builder.emitStaComputed(span_, ro, rk);
                 } else unreachable;
             }
         };
@@ -3691,9 +3687,7 @@ pub const Compiler = struct {
                         defer self.releaseTemp();
                         try self.builder.emitStoreReg(c.span, r_idx);
                         try self.builder.emitLoadReg(c.span, r_val);
-                        try self.builder.emitOp(.sta_computed, c.span);
-                        try self.builder.emitU8(r_args);
-                        try self.builder.emitU8(r_idx);
+                        try self.builder.emitStaComputed(c.span, r_args, r_idx);
                         // length = length + 1
                         try self.builder.emitLoadSmi(c.span, 1);
                         try self.builder.emitOp(.add, c.span);
@@ -4056,9 +4050,7 @@ pub const Compiler = struct {
                 const r_idx = try self.reserveTemp();
                 try self.builder.emitStoreReg(c.span, r_idx);
                 try self.builder.emitLoadReg(c.span, r_val);
-                try self.builder.emitOp(.sta_computed, c.span);
-                try self.builder.emitU8(r_args);
-                try self.builder.emitU8(r_idx);
+                try self.builder.emitStaComputed(c.span, r_args, r_idx);
                 try self.builder.emitLoadReg(c.span, r_idx);
                 try self.builder.emitLoadSmi(c.span, 1);
                 try self.builder.emitOp(.add, c.span);
@@ -4323,9 +4315,7 @@ pub const Compiler = struct {
                 const r_idx = try self.reserveTemp();
                 try self.builder.emitStoreReg(c.span, r_idx);
                 try self.builder.emitLoadReg(c.span, r_val);
-                try self.builder.emitOp(.sta_computed, c.span);
-                try self.builder.emitU8(r_args);
-                try self.builder.emitU8(r_idx);
+                try self.builder.emitStaComputed(c.span, r_args, r_idx);
                 try self.builder.emitLoadReg(c.span, r_idx);
                 try self.builder.emitLoadSmi(c.span, 1);
                 try self.builder.emitOp(.add, c.span);
@@ -4470,9 +4460,7 @@ pub const Compiler = struct {
                 const r_idx = try self.reserveTemp();
                 try self.builder.emitStoreReg(c.span, r_idx);
                 try self.builder.emitLoadReg(c.span, r_val);
-                try self.builder.emitOp(.sta_computed, c.span);
-                try self.builder.emitU8(r_args);
-                try self.builder.emitU8(r_idx);
+                try self.builder.emitStaComputed(c.span, r_args, r_idx);
                 try self.builder.emitLoadReg(c.span, r_idx);
                 try self.builder.emitLoadSmi(c.span, 1);
                 try self.builder.emitOp(.add, c.span);
@@ -4570,9 +4558,7 @@ pub const Compiler = struct {
                 const r_idx = try self.reserveTemp();
                 try self.builder.emitStoreReg(n.span, r_idx);
                 try self.builder.emitLoadReg(n.span, r_val);
-                try self.builder.emitOp(.sta_computed, n.span);
-                try self.builder.emitU8(r_args);
-                try self.builder.emitU8(r_idx);
+                try self.builder.emitStaComputed(n.span, r_args, r_idx);
                 try self.builder.emitLoadReg(n.span, r_idx);
                 try self.builder.emitLoadSmi(n.span, 1);
                 try self.builder.emitOp(.add, n.span);
@@ -6924,9 +6910,7 @@ pub const Compiler = struct {
                 defer self.releaseTemp();
                 try self.builder.emitStoreReg(span, r_key);
                 try self.builder.emitLoadReg(span, r_value);
-                try self.builder.emitOp(.sta_computed, span);
-                try self.builder.emitU8(r_obj);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitStaComputed(span, r_obj, r_key);
             },
         }
     }
@@ -10079,9 +10063,7 @@ pub const Compiler = struct {
                     try self.builder.emitI16(0);
                     // rest[idx] = value
                     try self.builder.emitLoadReg(target.span(), r_val);
-                    try self.builder.emitOp(.sta_computed, target.span());
-                    try self.builder.emitU8(r_rest);
-                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitStaComputed(target.span(), r_rest, r_idx);
                     // idx += 1 — `add r` is `acc = registers[r] + acc`.
                     try self.builder.emitLoadSmi(target.span(), 1);
                     try self.builder.emitOp(.add, target.span());
@@ -10340,9 +10322,7 @@ pub const Compiler = struct {
                     const exit_patch = self.builder.here();
                     try self.builder.emitI16(0);
                     try self.builder.emitLoadReg(target.span(), r_val);
-                    try self.builder.emitOp(.sta_computed, target.span());
-                    try self.builder.emitU8(r_rest);
-                    try self.builder.emitU8(r_idx);
+                    try self.builder.emitStaComputed(target.span(), r_rest, r_idx);
                     try self.builder.emitLoadSmi(target.span(), 1);
                     try self.builder.emitOp(.add, target.span());
                     try self.builder.emitU8(r_idx);
@@ -10716,9 +10696,7 @@ pub const Compiler = struct {
                         try self.builder.emitU8(pm.r_obj);
                     },
                     .computed => {
-                        try self.builder.emitOp(.sta_computed, pm.span);
-                        try self.builder.emitU8(pm.r_obj);
-                        try self.builder.emitU8(pm.r_key.?);
+                        try self.builder.emitStaComputed(pm.span, pm.r_obj, pm.r_key.?);
                     },
                 }
             },
@@ -10854,9 +10832,7 @@ pub const Compiler = struct {
                 defer self.releaseTemp();
                 try self.builder.emitStoreReg(span, r_key);
                 try self.builder.emitLoadReg(span, r_value);
-                try self.builder.emitOp(.sta_computed, span);
-                try self.builder.emitU8(r_obj);
-                try self.builder.emitU8(r_key);
+                try self.builder.emitStaComputed(span, r_obj, r_key);
             },
         }
     }

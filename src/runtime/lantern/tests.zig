@@ -3022,6 +3022,98 @@ test "computed-key IC: a rotating-key callsite stays correct after going megamor
     , 100);
 }
 
+// ── computed-key WRITE IC (`obj[k] = v`, dynamic string key) — guards.
+// Mirrors the read-IC guards for `sta_computed`: a same-shape rewrite
+// of a writable own-data slot is the fast case; a key / shape change,
+// a setter, a transition (new key), a non-writable slot, and numeric
+// keys must each route correctly and never store to a stale slot.
+
+test "computed-key write IC: same-shape rewrite reads back correctly in a hot loop" {
+    try expectScriptIntWithBuiltins(
+        \\const o = { x: 0, y: 9 };
+        \\const k = "x";
+        \\for (let i = 0; i < 100; i++) o[k] = i;
+        \\o[k] + o.y
+    , 108);
+}
+
+test "computed-key write IC: polymorphic shapes at one callsite write the right slot" {
+    // `v` is at slot 0 / 1 / 0 across the three shapes — a hit must
+    // store to the per-shape slot, never a frozen one.
+    try expectScriptIntWithBuiltins(
+        \\const k = "v";
+        \\const objs = [{ v: 0 }, { a: 1, v: 0 }, { v: 0, b: 2 }];
+        \\for (let i = 0; i < 9; i++) objs[i % 3][k] = i;
+        \\objs[0].v + objs[1].v + objs[2].v
+    , 21);
+}
+
+test "computed-key write IC: rotating keys stay correct after going megamorphic" {
+    try expectScriptIntWithBuiltins(
+        \\const o = { a: 0, b: 0, c: 0, d: 0 };
+        \\const keys = ["a", "b", "c", "d"];
+        \\for (let i = 0; i < 40; i++) o[keys[i % 4]] = i;
+        \\o.a + o.b + o.c + o.d
+    , 150);
+}
+
+test "computed-key write IC: adding a new key (transition) stays on the slow path" {
+    try expectScriptIntWithBuiltins(
+        \\let s = 0;
+        \\for (let i = 0; i < 5; i++) { const o = {}; const k = "n"; o[k] = i; s += o[k]; }
+        \\s
+    , 10);
+}
+
+test "computed-key write IC: a setter reached by dynamic key fires every write" {
+    try expectScriptIntWithBuiltins(
+        \\let sum = 0;
+        \\const o = { set s(v) { sum += v; } };
+        \\const k = "s";
+        \\for (let i = 1; i <= 5; i++) o[k] = i;
+        \\sum
+    , 15);
+}
+
+test "computed-key write IC: numeric dynamic key on an array stays on the element path" {
+    try expectScriptIntWithBuiltins(
+        \\const a = [0, 0, 0];
+        \\for (let i = 0; i < 3; i++) a[i] = (i + 1) * 10;
+        \\a[0] + a[1] + a[2]
+    , 60);
+}
+
+test "computed-key write IC: a non-writable own slot is not silently overwritten" {
+    // Object.freeze makes `x` non-writable; a strict `obj[k] = v` write
+    // throws. The IC must not blind-store to the slot (writability is
+    // part of the shape, so the cell never caches a frozen slot).
+    try expectScriptIntWithBuiltins(
+        \\const o = { x: 7 };
+        \\Object.freeze(o);
+        \\const k = "x";
+        \\let threw = 0;
+        \\for (let i = 0; i < 5; i++) { try { o[k] = i; } catch (e) { threw++; } }
+        \\(o.x === 7 ? 1000 : 0) + threw
+    , 1005);
+}
+
+test "computed-key write IC: freezing after a cached write invalidates the cell" {
+    // The dangerous case: the cell caches `x` as a writable slot, then
+    // a freeze makes it non-writable. Writability is part of the shape,
+    // so the freeze changes the receiver's shape and the cached cell
+    // misses — the later writes throw instead of blind-storing.
+    try expectScriptIntWithBuiltins(
+        \\const o = { x: 0 };
+        \\const k = "x";
+        \\let threw = 0;
+        \\for (let i = 0; i < 5; i++) {
+        \\  if (i === 3) Object.freeze(o);
+        \\  try { o[k] = i; } catch (e) { threw++; }
+        \\}
+        \\(o.x === 2 ? 100 : 0) + threw
+    , 102);
+}
+
 test "computed int read: dense in-bounds hits own elements" {
     try expectScriptInt("var a=[10,20,30]; a[0]+a[1]+a[2]", 60);
     try expectScriptInt("var a=[10,20,30]; var i=2; a[i]", 30);

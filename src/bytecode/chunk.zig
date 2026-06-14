@@ -950,6 +950,19 @@ pub const Builder = struct {
         try self.emitU16(try self.allocIC());
     }
 
+    /// Emit `sta_computed` plus its receiver / key registers and a
+    /// freshly allocated IC slot. Encoding:
+    /// `[op] [r_obj:u8] [r_key:u8] [ic:u16]` — value stays in the
+    /// accumulator. The IC caches `(shape, slot)` keyed by the runtime
+    /// key so a hot same-shape `obj[k] = v` rewrite skips ToPropertyKey
+    /// + the shape hash + the `[[Set]]` walk.
+    pub fn emitStaComputed(self: *Builder, span: Span, r_obj: u8, r_key: u8) !void {
+        try self.emitOp(.sta_computed, span);
+        try self.emitU8(r_obj);
+        try self.emitU8(r_key);
+        try self.emitU16(try self.allocIC());
+    }
+
     /// Emit `lda_global` plus its key constant index and a freshly
     /// allocated IC slot. Encoding: `[op] [k:u16] [ic:u16]`. The IC
     /// caches `(globalThis_shape, slot, decl_revision)` so repeated

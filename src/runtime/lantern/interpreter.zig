@@ -10329,8 +10329,34 @@ pub fn runFrames(
         .sta_computed => {
             const r_obj = code[ip];
             const r_key = code[ip + 1];
-            ip += 2;
+            const ic_idx = readU16(code, ip + 2);
+            ip += 4;
             const recv = registers[r_obj];
+            // Computed-key write IC fast path — a hot same-shape
+            // `obj[k] = v` rewrite of an existing writable own-data
+            // slot. A shaped receiver is a plain ordinary object
+            // (`shadowSet` demotes exotics before stamping), and the
+            // cell is only filled for writable own-data entries whose
+            // writability is part of the matched shape — so a shape +
+            // key-bytes match is a direct slot store with no accessor /
+            // proxy / TypedArray / writability concern.
+            sta_ic_hit: {
+                const cell = &local_chunk.inline_caches[ic_idx];
+                if (cell.cached_key_len == 0 or cell.cached_key_len > chunk_mod.computed_key_cap or cell.shape == null) break :sta_ic_hit;
+                const kv = registers[r_key];
+                if (!kv.isString()) break :sta_ic_hit;
+                const ks: *JSString = @ptrCast(@alignCast(kv.asString()));
+                if (ks.byte_len != cell.cached_key_len) break :sta_ic_hit;
+                const kb = ks.flatBytesIfFlat() orelse break :sta_ic_hit;
+                const obj_in = heap_mod.valueAsPlainObject(recv) orelse break :sta_ic_hit;
+                if (obj_in.shape == cell.shape and
+                    std.mem.eql(u8, kb, cell.cached_key_buf[0..cell.cached_key_len]))
+                {
+                    obj_in.setSlot(cell.slot, acc);
+                    realm.heap.storeInternalSlot(.{ .object = obj_in }, acc);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+            }
             // §7.1.19 ToPropertyKey — object keys go through
             // ToPrimitive(string) before stringification.
             const key_v = switch (try coerceToPropertyKey(allocator, realm, frames, f, ip, registers[r_key])) {
@@ -10434,6 +10460,10 @@ pub fn runFrames(
                 if (heap_mod.valueAsPlainObject(recv)) |o| o.is_array_exotic else false;
             const owned: ?*JSString =
                 if (skip_key_anchor) null else (realm.heap.allocateString(key_slice) catch return error.OutOfMemory);
+            // Pre-write shape so the fill can tell a same-shape rewrite
+            // (cacheable) from a transition (left to the slow path).
+            const sta_pre_shape: ?*@import("../shape.zig").Shape =
+                if (heap_mod.valueAsPlainObject(recv)) |o| o.shape else null;
             {
                 const key_arg: []const u8 = if (owned) |o| o.flatBytes() else key_slice;
                 const set_outcome = try strictSetPropertyAnchored(allocator, realm, frames, f, ip, recv, key_arg, owned, acc);
@@ -10444,6 +10474,38 @@ pub fn runFrames(
                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     },
                     .uncaught => |ex| return .{ .thrown = ex },
+                }
+            }
+            // Computed-key write IC fill — a same-shape rewrite of an
+            // existing writable own-data slot (the hot case). A numeric
+            // key (element storage) and a transition (adding a key) stay
+            // on the slow path. Megamorphic guard parks a rotating-key
+            // site after a few refills.
+            if (heap_mod.valueAsPlainObject(recv)) |obj_after| {
+                if (obj_after.shape) |sh| {
+                    if (sta_pre_shape == sh and
+                        key_slice.len >= 1 and key_slice.len <= chunk_mod.computed_key_cap and
+                        JSObject.canonicalIntegerIndex(key_slice) == null)
+                    {
+                        const cell = &local_chunk.inline_caches[ic_idx];
+                        if (cell.cached_key_len <= chunk_mod.computed_key_cap) {
+                            if (sh.lookup(key_slice)) |entry| {
+                                if (entry.kind == .data and entry.attrs.writable) {
+                                    if (cell.cached_key_len != 0) cell.cached_key_miss +%= 1;
+                                    if (cell.cached_key_miss >= chunk_mod.computed_key_megamorphic_after) {
+                                        cell.cached_key_len = chunk_mod.computed_key_megamorphic;
+                                    } else {
+                                        cell.shape = sh;
+                                        cell.slot = entry.slot;
+                                        cell.proto = null;
+                                        cell.proto_shape = null;
+                                        cell.cached_key_len = @intCast(key_slice.len);
+                                        @memcpy(cell.cached_key_buf[0..key_slice.len], key_slice);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);

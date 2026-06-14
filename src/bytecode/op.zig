@@ -1044,9 +1044,14 @@ pub const Op = enum(u8) {
     /// the dynamic string key (captured inline in the cell) so a hot
     /// monomorphic `obj[k]` collapses to a shape + key-bytes compare.
     lda_computed,
-    /// `[op] [r_obj:u8] [r_key:u8]` — `obj[key] = acc` (computed
-    /// property write). Stores acc; the result of the expression
-    /// is the assigned value (still in acc).
+    /// `[op] [r_obj:u8] [r_key:u8] [ic:u16]` — `obj[key] = acc`
+    /// (computed property write). Stores acc; the result of the
+    /// expression is the assigned value (still in acc). The `ic`
+    /// operand indexes `Chunk.inline_caches`; the cell caches
+    /// `(shape, slot)` keyed by the dynamic key so a hot
+    /// same-shape `obj[k] = v` rewrite of an existing writable
+    /// own-data slot skips ToPropertyKey + the shape hash + the
+    /// `[[Set]]` accessor / proto walk.
     sta_computed,
     /// `[op] [r_obj:u8] [r_key:u8]` — §7.3.7 CreateDataPropertyOrThrow
     /// with a computed key. The key is in `r_key` (already
@@ -1360,7 +1365,8 @@ pub const Op = enum(u8) {
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
             .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
             .lda_computed => 3, // r_obj:u8 + ic:u16 (key in acc)
-            .sta_computed, .super_set_computed, .def_computed => 2, // r_obj:u8 + r_key:u8
+            .sta_computed => 4, // r_obj:u8 + r_key:u8 + ic:u16
+            .super_set_computed, .def_computed => 2, // r_obj:u8 + r_key:u8
             .del_named_property => 3, // k:u16 + r_obj:u8
             .del_computed_property => 2, // r_obj:u8 + r_key:u8
             .call_method => 5, // r_recv:u8 + r_callee:u8 + argc:u8 + ic:u16
