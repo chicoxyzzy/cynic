@@ -19,6 +19,8 @@ const code_mod = @import("code.zig");
 const opcodes = @import("opcodes.zig");
 const validator = @import("validator.zig");
 const reader_mod = @import("reader.zig");
+const spasm = @import("spasm.zig");
+const code_alloc = @import("../jit/code_alloc.zig");
 
 const ValType = types.ValType;
 const Module = module_mod.Module;
@@ -279,6 +281,16 @@ pub const Instance = struct {
     /// `WebAssembly.Exception` keeps its tag identity.
     host_exn_ctx: ?*anyopaque = null,
     host_exn_hook: ?*const fn (*anyopaque, *Instance) ?*ExnRecord = null,
+
+    /// Spasm baseline-JIT opt-in (docs/jit.md §6). Off by default; the
+    /// wasm-testsuite differential forces it on. When set, `invoke`
+    /// tries to compile the entry function and run native code,
+    /// degrading to the interpreter for anything Spasm can't emit.
+    spasm_enabled: bool = false,
+    /// Invocations that actually ran Spasm-compiled code — lets a
+    /// differential/unit test prove the compiled path was taken (the
+    /// result alone is identical to the interpreter's, by design).
+    spasm_runs: u32 = 0,
 
     /// Allocate an `ExnRecord` in this instance's pool — used by the JS
     /// boundary to reify a thrown JS value for a `try_table` to catch.
@@ -1109,6 +1121,18 @@ pub fn invoke(
         .host => return error.UnsupportedImportCall,
     };
 
+    // Spasm baseline-JIT fast path (docs/jit.md §6): if the tier is on,
+    // compile the entry function and run native code for the class
+    // Spasm can emit (straight-line i32 + structured control flow);
+    // anything it can't emit returns null and falls through to the
+    // interpreter below.
+    if (target.instance.spasm_enabled) {
+        if (try spasmRun(allocator, target.instance, target.func, args)) |out| {
+            target.instance.spasm_runs += 1;
+            return out;
+        }
+    }
+
     const stack = try allocator.alloc(Cell, STACK_CELLS);
     defer allocator.free(stack);
     const frames = try allocator.alloc(Frame, MAX_FRAMES);
@@ -1136,6 +1160,41 @@ pub fn invoke(
     const nres = ip.sp;
     const out = try allocator.alloc(u128, nres);
     @memcpy(out, ip.stack[0..nres]);
+    return out;
+}
+
+/// Try to run `func` via Spasm-compiled native code (docs/jit.md §6),
+/// returning the result cells on success or null when the body is
+/// outside Spasm's emittable class (the caller then interprets). The v1
+/// boundary marshals params + locals into one `Cell` array (params
+/// seeded from `args`, declared locals zeroed) and reads one result
+/// `Cell` per result — exactly the representation `spasm.EntryFn`
+/// expects. v1 compiles fresh per call (no code cache); caching the
+/// `EntryFn` per function is the recorded perf follow-up.
+fn spasmRun(
+    allocator: std.mem.Allocator,
+    instance: *Instance,
+    func: *const CompiledFunc,
+    args: []const u128,
+) Error!?[]u128 {
+    if (comptime !spasm.supported) return null;
+    const ftype = &instance.module.types[func.type_index];
+    if (args.len != ftype.params.len) return null;
+    var ca = code_alloc.CodeAllocator.init(allocator, 64 * 1024) catch return null;
+    defer ca.deinit();
+    const entry = (spasm.compile(allocator, &ca, func, ftype) catch return null) orelse return null;
+
+    const locals = try allocator.alloc(spasm.Cell, @max(func.local_types.len, 1));
+    defer allocator.free(locals);
+    @memset(locals, 0);
+    for (args, 0..) |x, i| locals[i] = x;
+
+    const results = try allocator.alloc(spasm.Cell, @max(ftype.results.len, 1));
+    defer allocator.free(results);
+    entry(locals.ptr, results.ptr);
+
+    const out = try allocator.alloc(u128, ftype.results.len);
+    for (0..ftype.results.len) |i| out[i] = results[i];
     return out;
 }
 

@@ -960,8 +960,16 @@ useful:
    shared substrate, with the v1 boundary ABI (params/results as
    the interpreter's `Cell` arrays, the §7.1 native-register
    thunks deferred) and the degrade-to-interpreter contract
-   (`compile → ?EntryFn`, null = stay interpreted). Not yet wired
-   into `interpreter.invoke` — the next increments grow the
+   (`compile → ?EntryFn`, null = stay interpreted). **Now wired into
+   `interpreter.invoke`** behind the off-by-default per-instance
+   `spasm_enabled` gate (the wasm-testsuite differential forces it on):
+   a compilable entry function compiles and runs as native code through
+   the v1 `Cell`-array boundary (params + locals in, results out),
+   degrading to the interpreter for anything outside the emittable
+   class. A counter-proven unit test (`spasm_runs`) confirms the
+   compiled path is actually taken — the result alone is identical to
+   the interpreter by design. v1 compiles fresh per call; a per-function
+   code cache is a recorded perf follow-up. The compilable
    class (now: the complete straight-line i32 tier — const,
    `local.get`/`set`/`tee`, the i32 ALU, the ten comparisons +
    `eqz`, branchless `select`, `nop`/`drop` — on the
@@ -981,9 +989,11 @@ useful:
    native-label control stack; the compilable block types carry no
    loop params, so a back-edge carries nothing and loop-carried state
    lives in locals, keeping the header merge spill-free. Still to
-   come: the side-table-as-control-oracle
-   wiring (§6) that makes valcnt/popcnt and multi-target branches
-   cheap, then i64) before the interpreter hands hot functions over.
+   come: the **wasm-testsuite differential gate** (a force-`spasm_enabled`
+   run must produce the interpreter's exact pass-set — the §10-analog
+   authoritative correctness gate, run on a clean machine), the
+   per-function code cache, the side-table-as-control-oracle wiring (§6)
+   that makes valcnt/popcnt and multi-target branches cheap, then i64).
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.
