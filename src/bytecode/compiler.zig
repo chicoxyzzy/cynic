@@ -1672,13 +1672,12 @@ pub const Compiler = struct {
         var operand: *const ast.expression.Expression = u.operand;
         while (operand.* == .parenthesized) operand = operand.parenthesized.expression;
         if (operand.* == .member) {
-            // The member path (`obj.x++`) keeps materializing the old
-            // value regardless of `result_used` — the result-discard
-            // elision is wired only for the identifier (loop-counter)
-            // path for now.
+            // The member path (`obj.x++`) honors `result_used` too: a
+            // discarded postfix (or any prefix) skips materializing the old
+            // value (see `compileUpdateMember`).
             var unwrapped = u;
             unwrapped.operand = @constCast(operand);
-            return self.compileUpdateMember(unwrapped);
+            return self.compileUpdateMember(unwrapped, result_used);
         }
         if (operand.* != .identifier_reference) {
             return error.UnsupportedExpression;
@@ -1761,7 +1760,7 @@ pub const Compiler = struct {
     /// once, the property read coerced via ToNumeric, the bump
     /// stored back through the same access path, and the result
     /// (old vs new) chosen by `u.prefix`.
-    fn compileUpdateMember(self: *Compiler, u: ast.expression.UpdateExpr) CompileError!void {
+    fn compileUpdateMember(self: *Compiler, u: ast.expression.UpdateExpr, result_used: bool) CompileError!void {
         const m = u.operand.member;
         if (m.optional) return error.UnsupportedExpression;
         if (m.object.* == .super_) {
@@ -1846,8 +1845,18 @@ pub const Compiler = struct {
         }
         // §13.4.4.1 step 2.b — ToNumeric (BigInt-tolerant).
         try self.builder.emitOp(.to_numeric, u.span);
-        const r_orig = try self.reserveTemp();
-        try self.builder.emitStoreReg(u.span, r_orig);
+        // The original value is observable only for a postfix update whose
+        // result is used (`a = o.p++`). A discarded statement (`o.p++;`) or
+        // any prefix form leaves it dead, so skip the save + reload — mirrors
+        // the identifier path's `need_old` in `compileUpdate`. A post-emit
+        // pass can't remove these (the save is read by the reload), so the
+        // elision happens here.
+        const need_old = !u.prefix and result_used;
+        var r_orig: u8 = 0;
+        if (need_old) {
+            r_orig = try self.reserveTemp();
+            try self.builder.emitStoreReg(u.span, r_orig);
+        }
 
         // §13.4 bump = oldValue + Type(oldValue)::unit. Inc / Dec
         // dispatch on Number vs BigInt so BigInt members
@@ -1870,13 +1879,13 @@ pub const Compiler = struct {
             },
         }
 
-        if (!u.prefix) {
-            // Postfix — result is the original.
+        if (need_old) {
+            // Postfix, result used — reload the saved original as the result.
             try self.builder.emitLoadReg(u.span, r_orig);
+            self.releaseTemp(); // r_orig (reserved last → released first)
         }
-        // Prefix — acc currently has the bumped value, leave it.
-
-        self.releaseTemp(); // r_orig
+        // Otherwise acc already holds the bumped value: the prefix result, or
+        // (for a discarded postfix) a value the caller ignores.
         if (mode == .computed) self.releaseTemp(); // r_key
     }
 
@@ -15208,4 +15217,28 @@ test "compiler: a TDZ check inside a try body is eliminated when the global is i
     defer testing.allocator.free(got);
     try testing.expect(std.mem.indexOf(u8, got, "LdaGlobalSlot") != null); // o still loaded in the try
     try testing.expect(std.mem.indexOf(u8, got, "ThrowIfHole") == null); // its TDZ guard is gone
+}
+
+test "compiler: a discarded member post-increment elides the old-value save" {
+    // §13.4 — `o.x++` as a statement discards the postfix (old) value, so
+    // the save-and-reload that only exists to produce it is dead. Mirrors the
+    // identifier-path `need_old` elision in `compileUpdate`. The receiver
+    // save (Star1 = r_obj) stays; the old-value save (Star2 = r_orig) and its
+    // postfix reload (Ldar2) are gone, while the write-back remains.
+    const got = try dumpExpr("(function(o){ o.x++; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "StaProperty") != null); // still writes back
+    try testing.expect(std.mem.indexOf(u8, t0, "Star2") == null); // no old-value save
+    try testing.expect(std.mem.indexOf(u8, t0, "Ldar2") == null); // no postfix reload
+}
+
+test "compiler: a used member post-increment keeps the old value" {
+    // `return o.x++` needs the original as the result, so the save (Star2) +
+    // reload (Ldar2) must remain — guards against over-elision.
+    const got = try dumpExpr("(function(o){ return o.x++; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "Star2") != null);
+    try testing.expect(std.mem.indexOf(u8, t0, "Ldar2") != null);
 }

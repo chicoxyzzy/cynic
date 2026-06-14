@@ -410,6 +410,20 @@ test "interpreter: logical not" {
     try expectBool("!'x';", false);
 }
 
+test "interpreter: member update (o.x++/--) — discard-elision preserves results" {
+    // §13.4 — eliding the old-value materialization when the postfix result
+    // is discarded must not change any observable result: postfix yields the
+    // OLD value, prefix the NEW, and a discarded update still mutates. Covers
+    // ident, computed, and decrement paths.
+    try expectInt("(function(o){ o.x++; return o.x; })({x:5});", 6); // discarded inc mutates
+    try expectInt("(function(o){ o.x--; return o.x; })({x:5});", 4); // discarded dec mutates
+    try expectInt("(function(o){ return o.x++; })({x:5});", 5); // postfix returns old
+    try expectInt("(function(o){ return o.x--; })({x:5});", 5); // postfix dec returns old
+    try expectInt("(function(o){ return ++o.x; })({x:5});", 6); // prefix returns new
+    try expectInt("(function(o,k){ o[k]++; return o[k]; })({x:5},'x');", 6); // computed discarded
+    try expectInt("(function(o){ var a = o.x++; return a + o.x; })({x:5});", 11); // used in a larger expr
+}
+
 test "interpreter: conditional ?:" {
     try expectInt("1 < 2 ? 10 : 20;", 10);
     try expectInt("1 > 2 ? 10 : 20;", 20);
