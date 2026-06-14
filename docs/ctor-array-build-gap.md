@@ -301,6 +301,36 @@ that's a mechanical addition but requires the JIT track's sign-off.
   Estimate −3 to −5 ns/iter here (grows with realm size). Higher
   risk: GC completeness invariant — needs the gc-stress gate at
   `--gc-threshold=1`, multi-threaded too.
+
+  **Naive scan-drop ATTEMPTED and REVERTED (2026-06).** Dropping the
+  object/function/environment scan passes (keeping generators) was
+  probed empirically: a filtered `--gc-threshold=1` ReleaseSafe sweep
+  across `built-ins/{Object,Map,Set,Promise,WeakRef,FinalizationRegistry}`
+  stayed crash-free at baseline, and a hand-built adversarial CLI case
+  (mature `Map` holding a freshly-young value reachable only through
+  its unbarriered `entries`, forced GC) survived — because under
+  promote-on-first a minor cycle re-marks the full graph from roots
+  (`beginMinorCycle` flips `live_color`; `markValue` recurses with no
+  generation guard), so a *root-reachable* mature container's young
+  referents are found without the scan. **But `zig build test-fast`
+  caught two cases the filtered probe missed:** `Heap: collectYoung
+  keeps a young object reachable from a mature typed slot` (a mature
+  object whose `prototype` slot holds a young object via a RAW write,
+  collected with an EMPTY root set) failed, and `Heap: minor cycle
+  roots disposable-stack resource records on a mature stack` crashed
+  (swept-then-read). The scan's guarantee is **complete-by-construction
+  for raw typed-slot writes and for mature containers not in the root
+  set** — neither of which the root re-mark or the dirty-list barrier
+  covers. So L3c is NOT a simple delete: it requires first making the
+  dirty-list authoritative for *every* typed-slot/collection write
+  (the "bucket 2" complete-coverage work — barrier every collection
+  mutation, or maintain an always-remembered subset of
+  collection-bearing mature containers), which is the same
+  per-edge-class completeness wall the two reverted aging attempts hit
+  (see gc-generational-aging.md). Reverted per the "revert on any
+  gc-stress crash" discipline; the −3 to −5 ns does not justify the
+  bucket-2 effort while the headline gap is JIT-bound (`runFrames`
+  44.5%).
 - **L3d (research, parked): block-structured bump'n'pop young
   space.** JSC-shape 16 KB per-type blocks, bump-while-empty,
   block-granularity sweep, wholesale empty-block reset — all
@@ -492,7 +522,9 @@ ctor row waits on construct support.
 4. **L3b** pooled small element buffers (after L2, sizes are exact).
 5. **L4** register-allocated block consts (compiler track, parallel-
    izable with 3/4).
-6. **L3c** dirty-only minor marking; then reassess whether **L3d**
+6. **L3c** dirty-only minor marking — **naive scan-drop reverted**
+   (see L3c above); blocked on bucket-2 complete-coverage, deferred
+   while the headline gap is JIT-bound. Then reassess whether **L3d**
    is still worth a Metla redesign.
 
 Back-of-envelope end state if 1-5 land near their estimates:
