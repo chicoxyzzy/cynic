@@ -519,6 +519,16 @@ pub const Heap = struct {
     /// gc_cycles_total`.
     gc_time_ns_total: u64 = 0,
 
+    /// Count of `JSObject.deinitFields` calls that ran the slow
+    /// path (object had accumulated heap-attached state).
+    /// Pristine deaths take the fast-return at the top of the
+    /// function and are NOT counted. Diagnostic only — drives the
+    /// `bench/micros/object_alloc.js` /
+    /// `bench/micros/ctor_array_build.js` regression tests that
+    /// verify the architectural invariant: a typical object-literal
+    /// death pays no per-field deinit cost.
+    deinit_slowpath_count: u64 = 0,
+
     /// Weak-aware marking mode. `collectFull` sets this `true` for
     /// the duration of its mark phase; `collectYoung` leaves it
     /// `false`. When `true`, `markValue` does NOT strong-mark the
@@ -932,6 +942,7 @@ pub const Heap = struct {
         obj.elements = .{ .items = buf[0..0], .capacity = element_buf_cap };
         obj.elements_pooled = true;
         obj.elements.appendSliceAssumeCapacity(elems);
+        obj.markNonPristine();
         return obj;
     }
 

@@ -6821,6 +6821,7 @@ pub fn runFrames(
                 const r = realm.allocator.create(@import("../object.zig").IterRecord) catch return error.OutOfMemory;
                 r.* = .{};
                 iter_obj.iter_record = r;
+                iter_obj.markNonPristine();
                 break :blk r;
             };
             // Once the iter has surfaced `done: true` we stop
@@ -7794,6 +7795,7 @@ pub fn runFrames(
                 // its key; anchor the heap JSString so a GC sweep
                 // can't dangle a computed accessor key.
                 obj.key_anchors.append(allocator, owned) catch return error.OutOfMemory;
+                obj.markNonPristine();
             }
             if (is_setter) {
                 realm.heap.setAccessorSetter(.{ .object = obj }, entry.value_ptr, fn_obj);
@@ -8768,6 +8770,7 @@ pub fn runFrames(
                 const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
                 obj.own_key_order.appendAssumeCapacity(key_s.flatBytes());
             }
+            if (tmpl.keys.len > 0) obj.markNonPristine();
             acc = heap_mod.taggedObject(obj);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -10357,6 +10360,7 @@ pub fn runFrames(
             }
             realm.heap.storePropertyWithFlags(obj, allocator, key_slice, acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
             obj.key_anchors.append(allocator, key_js) catch return error.OutOfMemory;
+            obj.markNonPristine();
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .del_named_property => {

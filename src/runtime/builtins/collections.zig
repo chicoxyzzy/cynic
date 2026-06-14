@@ -154,6 +154,7 @@ fn makeMapIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind)
     const st = try realm.allocator.create(ObjMod.MapSetIterState);
     st.* = .{ .brand = .map, .source = src, .kind = kind };
     it.map_set_iter = st;
+    it.markNonPristine();
     return heap_mod.taggedObject(it);
 }
 
@@ -342,6 +343,7 @@ fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, 
         },
     };
     it.array_like_iter = state;
+    it.markNonPristine();
     // `next` lives on the prototype (see ensureArrayIteratorPrototype);
     // `@@iterator` similarly inherits from %IteratorPrototype% so
     // no own slots need to be wired here.
@@ -1586,6 +1588,7 @@ fn makeSetIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind)
     const st = try realm.allocator.create(ObjMod.MapSetIterState);
     st.* = .{ .brand = .set, .source = src, .kind = kind };
     it.map_set_iter = st;
+    it.markNonPristine();
     return heap_mod.taggedObject(it);
 }
 

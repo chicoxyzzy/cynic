@@ -6361,6 +6361,49 @@ test "GC: object-allocating loop survives gc_threshold=1" {
     , 2500);
 }
 
+test "GC: pristine empty-object death takes the deinitFields fast path" {
+    // Foundation for the deinitFields lifecycle cost reduction:
+    // an object that accumulates no attached heap state (`{}` only,
+    // no property writes, no element store, no descriptor changes,
+    // no extension materialisation) MUST exit `deinitFields` via the
+    // early-return — the 13-call sequence of `.deinit` / null-checks
+    // for storage that was never allocated is the largest per-dead-
+    // object cost in the profile (object_alloc / ctor_array_build
+    // bench fixtures, ~9-10% each).
+    //
+    // `JSObject.deinit_slowpath_count` is a debug counter incremented
+    // exactly when `deinitFields` runs the slow path. Allocating 200
+    // pristine `{}` objects under gc_threshold=1 forces each one
+    // through `deinitFields` immediately after it dies; if the fast
+    // path is wired, the counter delta over that span is bounded by
+    // the few non-pristine objects the realm-internal machinery
+    // (scope frames, completion records, etc.) allocates.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    realm.heap.gc_threshold = 1;
+
+    const before = realm.heap.deinit_slowpath_count;
+
+    _ = switch (try evaluateScriptResult(&realm,
+        \\let last = null;
+        \\for (let i = 0; i < 200; i++) { last = {}; }
+        \\last;
+    )) {
+        .value, .yielded => {},
+        .thrown => return error.UncaughtException,
+    };
+
+    const delta = realm.heap.deinit_slowpath_count - before;
+
+    // Loose budget — realm bookkeeping (scope objects, completion
+    // records, IC scratchpads, etc.) churns some non-pristine state.
+    // The 200 pristine `{}` allocations must NOT each pay the slow
+    // path. A no-fast-path implementation runs the slow path ≥ 200
+    // times here; the fast-path implementation runs it ≤ ~50.
+    try testing.expect(delta < 100);
+}
+
 test "GC: closures keep captured envs alive under gc_threshold=1" {
     // The arrow returned from `makeCounter` captures `n`; that
     // env is reachable only through the closure's `captured_env`

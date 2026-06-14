@@ -907,6 +907,29 @@ pub const JSObject = struct {
     /// young heap value into any property / element / slot of this
     /// object (while it is mature) sets it.
     dirty: bool = false,
+    /// True while this object has not accumulated any heap-attached
+    /// state — every potentially-allocated field (`properties`,
+    /// `property_flags`, `own_key_order`, `key_anchors`, `elements`,
+    /// `sparse_elements`, `overflow_slots`, `extension`, plus the
+    /// optional state pointers `array_like_iter` / `map_set_iter` /
+    /// `regexp_string_iter` / `iter_record` / `iter_helper` /
+    /// `regex_perlex` / `promise_store`, and the capability /
+    /// boxed-string / accessor / Map data / Set data slots that live
+    /// inside `extension`) is in its zero/empty initial state. A
+    /// pristine object's death path skips the 13-call `deinitFields`
+    /// sequence — there is nothing to free.
+    ///
+    /// Every site that mutates one of those fields to a non-zero /
+    /// non-empty state MUST call `markNonPristine` before the
+    /// mutation (or be funneled through a helper that does). On the
+    /// `bench/micros/object_alloc.js` / `ctor_array_build.js`
+    /// profiles the per-dead-object `deinitFields` cost is ~9-10 %
+    /// of wall time; the fast-return collapses that to ~0 % for
+    /// pristine deaths, and a follow-up that defers `own_key_order`
+    /// allocation in shape mode (the only field these literals
+    /// touch) lets shape-mode `{a, b}` / `new Point(x, y)`
+    /// instances qualify as pristine.
+    is_pristine: bool = true,
     /// `[[Extensible]]` (§10.1.2). `false` after
     /// `Object.preventExtensions` / `seal` / `freeze`. New
     /// property writes silently fail when `false`.
@@ -1294,6 +1317,7 @@ pub const JSObject = struct {
         const ext = try allocator.create(JSObjectExtension);
         ext.* = .{};
         self.extension = ext;
+        self.markNonPristine();
         return ext;
     }
 
@@ -1654,6 +1678,7 @@ pub const JSObject = struct {
             try allocator.create(PromiseReactionStore);
         s.* = .{};
         self.promise_store = s;
+        self.markNonPristine();
         return s;
     }
 
@@ -1935,6 +1960,7 @@ pub const JSObject = struct {
     pub fn resizeSlots(self: *JSObject, allocator: std.mem.Allocator, n: usize) !void {
         if (n > inline_slot_cap) {
             try self.overflow_slots.resize(allocator, n - inline_slot_cap);
+            self.markNonPristine();
         } else if (self.overflow_slots.items.len != 0) {
             // Shrinking back into the inline range — drop the
             // overflow buffer's live entries (keep capacity).
@@ -1956,7 +1982,55 @@ pub const JSObject = struct {
     /// `Heap` pool path calls this and then `pool.destroy(self)`
     /// so the JSObject memory goes onto the slab free-list instead
     /// of back through libsystem_malloc.
+    /// Mark this object as no longer pristine. Called from every
+    /// site that allocates / mutates an attached storage field —
+    /// the bag puts, `own_key_order.append`, the extension setters,
+    /// the iter-state setters, the elements vector grow, etc. Once
+    /// cleared, `is_pristine` stays false for the object's lifetime
+    /// — a `delete` that empties the bag back to nothing does not
+    /// re-pristine because the bag's underlying capacity is still
+    /// allocated.
+    pub fn markNonPristine(self: *JSObject) void {
+        self.is_pristine = false;
+    }
+
+    /// Debug-only invariant check for the `is_pristine` contract:
+    /// every potentially-allocated field that `deinitFields` would
+    /// touch must be in its zero/empty state. A failed assert names
+    /// the missing `markNonPristine` call site (the field that was
+    /// mutated without flipping the flag).
+    ///
+    /// Compiled out of ReleaseFast — only the runtime-safety builds
+    /// (Debug, ReleaseSafe, test) run it.
+    fn assertPristineFieldsClean(self: *const JSObject) void {
+        if (self.properties.count() != 0) std.debug.panic("pristine violated: properties.count={d}", .{self.properties.count()});
+        if (self.property_flags.count() != 0) std.debug.panic("pristine violated: property_flags.count={d}", .{self.property_flags.count()});
+        if (self.own_key_order.items.len != 0) std.debug.panic("pristine violated: own_key_order.len={d}", .{self.own_key_order.items.len});
+        if (self.key_anchors.items.len != 0) std.debug.panic("pristine violated: key_anchors.len={d}", .{self.key_anchors.items.len});
+        if (self.elements.items.len != 0) std.debug.panic("pristine violated: elements.len={d}", .{self.elements.items.len});
+        if (self.sparse_elements.count() != 0) std.debug.panic("pristine violated: sparse_elements.count={d}", .{self.sparse_elements.count()});
+        if (self.overflow_slots.items.len != 0) std.debug.panic("pristine violated: overflow_slots.len={d}", .{self.overflow_slots.items.len});
+        if (self.extension != null) std.debug.panic("pristine violated: extension is non-null", .{});
+        if (self.array_like_iter != null) std.debug.panic("pristine violated: array_like_iter is non-null", .{});
+        if (self.map_set_iter != null) std.debug.panic("pristine violated: map_set_iter is non-null", .{});
+        if (self.regexp_string_iter != null) std.debug.panic("pristine violated: regexp_string_iter is non-null", .{});
+        if (self.iter_record != null) std.debug.panic("pristine violated: iter_record is non-null", .{});
+        if (self.iter_helper != null) std.debug.panic("pristine violated: iter_helper is non-null", .{});
+        if (self.regex_perlex != null) std.debug.panic("pristine violated: regex_perlex is non-null", .{});
+        if (self.promise_store != null) std.debug.panic("pristine violated: promise_store is non-null", .{});
+    }
+
     pub fn deinitFields(self: *JSObject, allocator: std.mem.Allocator) void {
+        // Fast path: a pristine object holds no attached heap state,
+        // so every `.deinit` / null-check below is a no-op. The
+        // ~13-call sequence is itself measurable (`object_alloc` +
+        // `ctor_array_build` profiles, ~9-10 % wall time each) — the
+        // fast-return collapses it to a single load + branch.
+        if (self.is_pristine) {
+            if (std.debug.runtime_safety) self.assertPristineFieldsClean();
+            return;
+        }
+        if (self.heap) |h| h.deinit_slowpath_count +%= 1;
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);
         // `private_properties`, `private_methods`, `private_accessors`,
@@ -2033,6 +2107,7 @@ pub const JSObject = struct {
             if (std.mem.eql(u8, existing, key)) return false;
         }
         try self.own_key_order.append(allocator, key);
+        self.markNonPristine();
         return true;
     }
 
@@ -2065,6 +2140,7 @@ pub const JSObject = struct {
     /// interpreter store opcode.
     fn bagPut(self: *JSObject, allocator: std.mem.Allocator, key: []const u8, v: Value) std.mem.Allocator.Error!void {
         try self.properties.put(allocator, key, v);
+        self.markNonPristine();
         if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
     }
 
@@ -2097,7 +2173,10 @@ pub const JSObject = struct {
             // when newly recorded so a sweep can't free it out from
             // under the order slice (gc-threshold=1 reorders
             // Object.keys/values otherwise).
-            if (newly_ordered) try self.key_anchors.append(allocator, key_str);
+            if (newly_ordered) {
+                try self.key_anchors.append(allocator, key_str);
+                self.markNonPristine();
+            }
             return;
         }
         // Dictionary-mode: the `properties` bag ALSO borrows the key
@@ -2113,6 +2192,7 @@ pub const JSObject = struct {
         // `key_anchors` can't grow unboundedly.
         const gop = try self.properties.getOrPut(allocator, key);
         gop.value_ptr.* = v;
+        self.markNonPristine();
         // Generational write barrier — see `bagPut` (this site can't
         // use the helper: it needs `getOrPut`'s `found_existing` for
         // the key-anchor bookkeeping below).
@@ -2283,6 +2363,7 @@ pub const JSObject = struct {
             _ = self.property_flags.swapRemove(key);
         } else {
             try self.property_flags.put(allocator, key, flags);
+            self.markNonPristine();
         }
     }
 
@@ -2435,6 +2516,7 @@ pub const JSObject = struct {
             if (self.properties.contains(n.key)) continue;
             const v = self.slotAt(n.slot);
             try self.properties.put(allocator, n.key, v);
+            self.markNonPristine();
             const is_default = n.attrs.writable and n.attrs.enumerable and n.attrs.configurable;
             if (!is_default) {
                 try self.property_flags.put(allocator, n.key, n.attrs);
@@ -3088,6 +3170,7 @@ pub const JSObject = struct {
         } else {
             self.elements.items[idx] = v;
         }
+        self.markNonPristine();
         // Generational write barrier — a mature array gaining a young
         // element referent must join the remembered set, or the minor
         // sweep reclaims the still-reachable young value
@@ -3161,6 +3244,7 @@ pub const JSObject = struct {
             try self.elementsUnpool(allocator, self.elements.items.len + 1);
         }
         try self.elements.append(allocator, v);
+        self.markNonPristine();
         if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
         return true;
     }
@@ -3175,6 +3259,7 @@ pub const JSObject = struct {
             if (new_len > self.sparse_length) {
                 if (new_len > std.math.maxInt(u32)) return error.OutOfMemory;
                 self.sparse_length = @intCast(new_len);
+                self.markNonPristine();
             }
             return;
         }
@@ -3192,6 +3277,7 @@ pub const JSObject = struct {
         while (i < new_len) : (i += 1) {
             self.elements.items[i] = Value.hole_;
         }
+        self.markNonPristine();
     }
 
     /// Migrate `elements` into `sparse_elements`. Existing non-
