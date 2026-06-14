@@ -306,11 +306,12 @@ Top-level `runFrames` entries (the one-shot allocations at realm
 boot) and the tail-call register-file reallocations stay on the
 pool by design.
 
-### Tier 2 — medium
+### Tier 2 — drained
 
-**Computed-property read IC** (`obj[k]`, dynamic string key) —
-**shipped**. `lda_computed` gained an `ic:u16` operand; the cell
-caches `(shape, slot)` guarded by the runtime key. The original
+**Computed-property read + write IC** (`obj[k]` / `obj[k] = v`,
+dynamic string key) — **shipped** (read `lda_computed`, write
+`sta_computed`). The cell caches `(shape, slot)` guarded by the
+runtime key. The original
 plan ("cache `(shape, key_intern, slot)`; requires string interning
 first") was sidestepped: rather than build an interning subsystem,
 the cell stores the key **bytes inline** (`cached_key_buf`, capped
@@ -326,10 +327,16 @@ the slow path, which refills). A **megamorphic guard**
 (`obj[keys[i]]`) site on the slow path so it stops thrashing.
 Bistromath needed no codegen change — its loop advances via
 `Op.operandSize`, so the wider opcode is skipped automatically and
-the `--jit` differential stays byte-identical. A/B: monomorphic
-`obj[k]` −57% interp; a rotating-key site returns to baseline (no
-regression). The **write** counterpart (`sta_computed`) is the next
-increment.
+the `--jit` differential stays byte-identical; `sta_computed` isn't
+Bistromath-compiled at all, so the write IC is differential-neutral by
+construction. The write fast path does `setSlot` + write barrier on an
+existing **writable** own-data slot (writability is part of the matched
+shape, so a frozen / non-writable slot never hits it); transitions
+(new key), setters, proxies, and numeric keys take the slow path. A/B
+(interp): monomorphic `obj[k]` −57% read, `obj[k] = v` −90% write (the
+write slow path allocates a key-anchor JSString per store that the IC
+skips); rotating-key sites return to baseline (megamorphic guard, no
+regression).
 
 ### Tier 3 — niche
 
