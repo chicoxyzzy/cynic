@@ -393,6 +393,82 @@ test "wasm spasm: the per-function code cache compiles once across repeated invo
     try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
 }
 
+// An `(i32,i32)->i32` signed-divide module exported as "div" — the body
+// is `local.get 0; local.get 1; i32.div_s; end`.
+const div_s_body = [_]u8{
+    0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type (i32,i32)->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x07, 0x01, 0x03, 0x64, 0x69, 0x76, 0x00, 0x00, // export "div" -> 0
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6d, 0x0b, // local.get 0; local.get 1; i32.div_s; end
+};
+
+test "wasm spasm: i32.div_s compiles and runs Spasm-compiled" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + div_s_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &div_s_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "div") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = @as(u128, 20);
+    cells[1] = @as(u128, 4);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // 20 / 4 == 5, computed by Spasm-compiled native code (not degraded).
+    try testing.expectEqual(@as(u32, 5), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+/// Run the Spasm-compiled "div" export of `div_s_body` with `(a, b)` and
+/// return whatever `invoke` returns — a result slice or a trap error.
+fn runSpasmDiv(a_alloc: std.mem.Allocator, arg_a: u32, arg_b: u32) ![]u128 {
+    var buf: [8 + div_s_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &div_s_body);
+    const m = try wasm.decode(a_alloc, bytes);
+    const mp = try a_alloc.create(wasm.Module);
+    mp.* = m;
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a_alloc, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    const fidx = funcExport(mp, "div") orelse return error.NoSuchExport;
+    const cells = try a_alloc.alloc(u128, 2);
+    cells[0] = @as(u128, arg_a);
+    cells[1] = @as(u128, arg_b);
+    return interp.invoke(&instance, testing.allocator, fidx, cells);
+}
+
+test "wasm spasm: i32.div_s by zero raises a catchable divide-by-zero trap" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // The Spasm-compiled body's explicit b==0 check (AArch64 sdiv would
+    // otherwise return 0) routes through the trap channel to this error.
+    try testing.expectError(error.IntegerDivideByZero, runSpasmDiv(arena.allocator(), 1, 0));
+}
+
+test "wasm spasm: i32.div_s INT_MIN / -1 raises a catchable integer-overflow trap" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // INT_MIN / -1 overflows i32; AArch64 sdiv returns INT_MIN, so the
+    // explicit overflow check is what produces the spec-mandated trap.
+    try testing.expectError(error.IntegerOverflow, runSpasmDiv(arena.allocator(), 0x8000_0000, 0xFFFF_FFFF));
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {

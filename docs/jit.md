@@ -971,7 +971,8 @@ useful:
    the interpreter by design. v1 compiles fresh per call; a per-function
    code cache is a recorded perf follow-up. The compilable
    class (now: the complete straight-line i32 tier — const,
-   `local.get`/`set`/`tee`, the i32 ALU, the ten comparisons +
+   `local.get`/`set`/`tee`, the i32 ALU including the four trapping
+   `div`/`rem` ops, the ten comparisons +
    `eqz`, branchless `select`, `nop`/`drop` — on the
    depth→register operand-stack machine, plus structured control
    flow: `block`/`end` + forward conditional `br_if`, `loop` +
@@ -988,7 +989,17 @@ useful:
    register-resident at the canonical depth registers via a
    native-label control stack; the compilable block types carry no
    loop params, so a back-edge carries nothing and loop-carried state
-   lives in locals, keeping the header merge spill-free. The
+   lives in locals, keeping the header merge spill-free. `div`/`rem`
+   introduce the **trap channel**: `EntryFn` now returns a `u32` status
+   (0 = ok, non-zero = a `TrapCode`), so a body that traps returns the
+   code instead of writing results and `spasmRun` maps it to the matching
+   `TrapError` — a Spasm trap is then indistinguishable from an
+   interpreter trap at the JS boundary. AArch64 division never faults
+   (÷0 yields 0, INT_MIN/-1 yields INT_MIN), so the spec's two `div`
+   traps (divide-by-zero, signed overflow) are explicit pre-checks that
+   branch to shared out-of-line exits; `rem_s(INT_MIN,-1) = 0` falls out
+   of sdiv+msub on its own. This channel is the mechanism the next
+   trapping rung — memory bounds checks — reuses. The
    **wasm-testsuite differential gate** now holds: a force-`spasm_enabled`
    run over the full spec testsuite (58779/58779 commands across 222
    `.wast` files, 1232 skip) produces the interpreter's exact pass-set —

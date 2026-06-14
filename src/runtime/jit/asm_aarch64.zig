@@ -204,6 +204,26 @@ pub fn asrvW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x1AC02800 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
 }
 
+/// UDIV Wd, Wn, Wm — unsigned divide. AArch64 division never faults:
+/// Wm == 0 yields 0 (so wasm's divide-by-zero trap must be an explicit
+/// check before this), and there is no unsigned overflow case.
+pub fn udivW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x1AC00800 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// SDIV Wd, Wn, Wm — signed divide. Also non-faulting: Wm == 0 yields 0
+/// and INT_MIN / -1 yields INT_MIN, so both of wasm's i32.div_s traps
+/// (divide-by-zero, overflow) must be explicit checks before this.
+pub fn sdivW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x1AC00C00 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// MSUB Wd, Wn, Wm, Wa — Wd = Wa - Wn*Wm. Pairs with a divide to form a
+/// remainder (`rem = a - (a/b)*b`).
+pub fn msubW(rd: Reg, rn: Reg, rm: Reg, ra: Reg) u32 {
+    return 0x1B008000 | (r(rm) << 16) | (r(ra) << 10) | (r(rn) << 5) | r(rd);
+}
+
 /// CSEL Wd, Wn, Wm, cond — Wd = cond ? Wn : Wm. Branchless select,
 /// wasm `select` (cond on top picks the deeper-but-one operand).
 pub fn cselW(rd: Reg, rn: Reg, rm: Reg, cond: Cond) u32 {

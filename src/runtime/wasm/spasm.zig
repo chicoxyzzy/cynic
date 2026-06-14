@@ -50,7 +50,20 @@ pub const Cell = u128;
 /// (x1) is where the compiled body writes its result cells. The
 /// optimized native-register boundary (the per-signature §7.1 thunks)
 /// is a later increment; correctness first.
-pub const EntryFn = *const fn (locals: [*]Cell, results: [*]Cell) callconv(.c) void;
+///
+/// The `u32` return (w0) is the trap channel: `trap_ok` (0) means the
+/// body completed and `results` is valid; a non-zero `TrapCode` means
+/// the body trapped before writing results, and the caller maps it to
+/// the matching `TrapError` (so a Spasm trap is indistinguishable from
+/// an interpreter trap at the boundary). This is the mechanism every
+/// trapping op reuses — divide-by-zero today, memory bounds next.
+pub const EntryFn = *const fn (locals: [*]Cell, results: [*]Cell) callconv(.c) u32;
+
+/// Trap status codes returned in w0 (see `EntryFn`). Kept in lockstep
+/// with the `w0` immediates the epilogue's trap exits emit.
+pub const trap_ok: u32 = 0;
+pub const trap_divide_by_zero: u32 = 1;
+pub const trap_int_overflow: u32 = 2;
 
 pub const CompileError = error{ OutOfMemory, UnsupportedOp };
 
@@ -91,6 +104,10 @@ const op_i32_xor: u8 = 0x73;
 const op_i32_shl: u8 = 0x74;
 const op_i32_shr_s: u8 = 0x75;
 const op_i32_shr_u: u8 = 0x76;
+const op_i32_div_s: u8 = 0x6d;
+const op_i32_div_u: u8 = 0x6e;
+const op_i32_rem_s: u8 = 0x6f;
+const op_i32_rem_u: u8 = 0x70;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -184,6 +201,19 @@ pub fn compile(
         c.label.deinit(gpa);
         c.else_label.deinit(gpa); // `.empty` for non-`if` frames — safe
     };
+
+    // Shared out-of-line trap exits (the §trap-channel mechanism). A
+    // trapping op forward-branches to one of these; each is bound and
+    // emitted after the epilogue, but only if some op actually used it
+    // (an unused label is never bound, so no dead exit is emitted). The
+    // exit loads w0 with the `TrapCode` and returns, skipping the result
+    // writes — the caller reads w0 and raises the matching `TrapError`.
+    var trap_div0: masm_mod.Masm.Label = .{};
+    var trap_overflow: masm_mod.Masm.Label = .{};
+    defer trap_div0.deinit(gpa);
+    defer trap_overflow.deinit(gpa);
+    var trap_div0_used = false;
+    var trap_overflow_used = false;
 
     const body = func.body;
     var i: usize = 0;
@@ -383,6 +413,55 @@ pub fn compile(
                         // W-move truncates + zero-extends for the cell.
                         try m.emit(a64.smull(ra, ra, rb));
                         try m.emit(a64.movRegW(ra, ra));
+                    },
+                }
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u => {
+                // §4.3.10 i32 div/rem. AArch64 division never faults, so
+                // wasm's traps are explicit checks before the divide: a
+                // zero divisor traps for all four ops, and INT_MIN / -1
+                // overflows only div_s (rem_s of that pair is 0, which
+                // sdiv+msub produce on their own). Both operands are
+                // always materialized — a constant divide is rare, and
+                // folding it would have to replicate this trap predicate.
+                if (sp < 2) return null;
+                const a = stack[sp - 2]; // dividend
+                const b = stack[sp - 1]; // divisor
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+
+                // Divide-by-zero trap (all four ops).
+                try m.jumpCbz(rb, &trap_div0);
+                trap_div0_used = true;
+
+                if (op == op_i32_div_s) {
+                    // INT_MIN / -1 overflow trap (div_s only): skip it
+                    // unless the divisor is exactly -1.
+                    var skip: masm_mod.Masm.Label = .{};
+                    defer skip.deinit(gpa);
+                    try m.movImm64(.x16, 0xFFFF_FFFF); // -1 in the low word
+                    try m.emit(a64.cmpRegW(rb, .x16));
+                    try m.jumpCond(.ne, &skip);
+                    try m.movImm64(.x16, 0x8000_0000); // INT_MIN
+                    try m.emit(a64.cmpRegW(ra, .x16));
+                    try m.jumpCond(.eq, &trap_overflow);
+                    trap_overflow_used = true;
+                    m.bind(&skip);
+                }
+
+                switch (op) {
+                    op_i32_div_s => try m.emit(a64.sdivW(ra, ra, rb)),
+                    op_i32_div_u => try m.emit(a64.udivW(ra, ra, rb)),
+                    op_i32_rem_s => {
+                        // rem = a - (a/b)*b; the quotient lands in scratch.
+                        try m.emit(a64.sdivW(.x16, ra, rb));
+                        try m.emit(a64.msubW(ra, .x16, rb, ra));
+                    },
+                    else => { // rem_u
+                        try m.emit(a64.udivW(.x16, ra, rb));
+                        try m.emit(a64.msubW(ra, .x16, rb, ra));
                     },
                 }
                 stack[sp - 1] = .{ .reg = ra };
@@ -624,7 +703,24 @@ pub fn compile(
         }
         try m.emit(a64.strImm(.x17, .x1, cell_off + 8));
     }
+    // Normal return: w0 = trap_ok; results are already written to x1.
+    // x0 (the now-dead locals pointer) carries the status back.
+    try m.movImm64(.x0, trap_ok);
     try m.emit(a64.ret());
+
+    // Out-of-line trap exits, bound only if a div/rem op forward-branched
+    // to them: load the TrapCode into w0 and return without writing any
+    // result (the caller raises the matching TrapError and ignores x1).
+    if (trap_div0_used) {
+        m.bind(&trap_div0);
+        try m.movImm64(.x0, trap_divide_by_zero);
+        try m.emit(a64.ret());
+    }
+    if (trap_overflow_used) {
+        m.bind(&trap_overflow);
+        try m.movImm64(.x0, trap_int_overflow);
+        try m.emit(a64.ret());
+    }
 
     const installed = m.install(ca) catch return null;
     return code_alloc.asFn(EntryFn, installed);
@@ -682,7 +778,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readSleb32(body, i) orelse return null;
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u => {},
             else => return null, // unknown immediate width — degrade
         }
     }
@@ -782,7 +878,7 @@ test "spasm: a const-return function compiles and returns its constant" {
 
     var results: [1]Cell = .{0};
     var locals: [1]Cell = .{0};
-    entry(&locals, &results);
+    _ = entry(&locals, &results);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -807,7 +903,7 @@ test "spasm: a negative constant sign-extends through the LEB path" {
         return error.SpasmRefusedTrivialFunction;
     var results: [1]Cell = .{0};
     var locals: [1]Cell = .{0};
-    entry(&locals, &results);
+    _ = entry(&locals, &results);
     try testing.expectEqual(@as(i32, -7), @as(i32, @bitCast(@as(u32, @truncate(results[0])))));
 }
 
@@ -822,7 +918,7 @@ test "spasm: i32 add of two params compiles and computes" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [2]Cell = .{ 7, 35 };
     var results: [1]Cell = .{0};
-    entry(&locals, &results);
+    _ = entry(&locals, &results);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -838,7 +934,7 @@ test "spasm: i32 sub and mul of params compute" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 50, 8 };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
     }
     // mul: 6 * 7 = 42 (and the low-32 truncation is clean)
@@ -848,7 +944,7 @@ test "spasm: i32 sub and mul of params compute" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 6, 7 };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
     }
 }
@@ -864,7 +960,7 @@ test "spasm: i32 arithmetic folds two constants at compile time" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    entry(&locals, &results);
+    _ = entry(&locals, &results);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -880,7 +976,7 @@ test "spasm: i32 bitwise and/or/xor compute and fold" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 0b1110, 0b1011 };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, 0b1010), @as(u32, @truncate(results[0])));
     }
     // or | xor folded: (5 | 2) ^ 3 = 7 ^ 3 = 4, all constant
@@ -891,7 +987,7 @@ test "spasm: i32 bitwise and/or/xor compute and fold" {
         const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
         var locals: [1]Cell = .{0};
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, 4), @as(u32, @truncate(results[0])));
     }
 }
@@ -907,7 +1003,7 @@ test "spasm: local.set writes a local that local.get reads back" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{99}; // overwritten by local.set
     var results: [1]Cell = .{0};
-    entry(&locals, &results);
+    _ = entry(&locals, &results);
     try testing.expectEqual(@as(u32, 5), @as(u32, @truncate(results[0])));
 }
 
@@ -922,7 +1018,7 @@ test "spasm: local.tee stores and leaves the value on the stack" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{99};
     var results: [1]Cell = .{0};
-    entry(&locals, &results);
+    _ = entry(&locals, &results);
     try testing.expectEqual(@as(u32, 14), @as(u32, @truncate(results[0])));
 }
 
@@ -947,7 +1043,7 @@ test "spasm: i32 comparisons distinguish signed from unsigned" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ @as(u32, @bitCast(c.a)), @as(u32, @bitCast(c.b)) };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(c.want, @as(u32, @truncate(results[0])));
     }
 }
@@ -963,7 +1059,7 @@ test "spasm: i32.eqz computes and folds" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
     // folded: i32.const 0; i32.eqz -> 1
@@ -973,7 +1069,7 @@ test "spasm: i32.eqz computes and folds" {
     const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    entry(&locals, &results);
+    _ = entry(&locals, &results);
     try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(results[0])));
 }
 
@@ -995,7 +1091,7 @@ test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ @as(u32, @bitCast(c.a)), @as(u32, @bitCast(c.b)) };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(c.want, @as(u32, @truncate(results[0])));
     }
     // folded: i32.const 3; i32.const 2; i32.shl -> 12
@@ -1005,7 +1101,7 @@ test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
     const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    entry(&locals, &results);
+    _ = entry(&locals, &results);
     try testing.expectEqual(@as(u32, 12), @as(u32, @truncate(results[0])));
 }
 
@@ -1024,7 +1120,7 @@ test "spasm: select picks an operand by the condition (branchless)" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [3]Cell = .{ 10, 20, pair[0] };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -1042,7 +1138,7 @@ test "spasm: drop pops a value; nop is a no-op" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [2]Cell = .{ 42, 99 };
     var results: [1]Cell = .{0};
-    entry(&locals, &results);
+    _ = entry(&locals, &results);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -1076,7 +1172,7 @@ test "spasm: block with br_if picks a result by condition (forward branch)" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -1109,7 +1205,7 @@ test "spasm: empty block with br_if as an early break (arity 0)" {
     inline for (.{ .{ 1, 42 }, .{ 0, 99 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -1145,7 +1241,7 @@ test "spasm: nested block, br_if 1 exits two levels carrying a result" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -1178,7 +1274,7 @@ test "spasm: loop with backward br_if accumulates (do-while)" {
     inline for (.{ .{ 1, 1 }, .{ 3, 6 }, .{ 5, 15 }, .{ 10, 55 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -1211,7 +1307,7 @@ test "spasm: loop (result i32) iterates then yields its result" {
     inline for (.{ .{ 4, 10 }, .{ 6, 21 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -1250,7 +1346,7 @@ test "spasm: while loop — br as continue, br_if as break" {
     inline for (.{ .{ 0, 0 }, .{ 1, 1 }, .{ 5, 15 }, .{ 6, 21 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -1281,7 +1377,7 @@ test "spasm: br exits a block forward; dead code (nested block) is skipped" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    entry(&locals, &results);
+    _ = entry(&locals, &results);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -1312,7 +1408,7 @@ test "spasm: if/else picks a result arm by the condition" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -1343,7 +1439,7 @@ test "spasm: if without else conditionally overwrites a local" {
     inline for (.{ .{ 1, 9 }, .{ 0, 5 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -1382,7 +1478,7 @@ test "spasm: br_table dispatches by index to distinct block ends" {
     inline for (.{ .{ 0, 10 }, .{ 1, 7 }, .{ 3, 7 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        entry(&locals, &results);
+        _ = entry(&locals, &results);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }

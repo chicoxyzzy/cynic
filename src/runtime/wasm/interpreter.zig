@@ -1267,7 +1267,16 @@ fn spasmRun(
 
     const results = try allocator.alloc(spasm.Cell, @max(ftype.results.len, 1));
     defer allocator.free(results);
-    entry(locals.ptr, results.ptr);
+    // The trap channel (spasm.EntryFn): a non-zero status means the body
+    // trapped before writing results. Map it to the matching TrapError so
+    // a Spasm trap surfaces exactly like the interpreter's — the JS
+    // boundary turns either into a WebAssembly.RuntimeError the same way.
+    switch (entry(locals.ptr, results.ptr)) {
+        spasm.trap_ok => {},
+        spasm.trap_divide_by_zero => return error.IntegerDivideByZero,
+        spasm.trap_int_overflow => return error.IntegerOverflow,
+        else => return null, // unknown status — degrade defensively
+    }
 
     const out = try allocator.alloc(u128, ftype.results.len);
     for (0..ftype.results.len) |i| out[i] = results[i];
