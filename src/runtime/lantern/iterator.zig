@@ -307,11 +307,8 @@ pub fn openForInIterator(
             if (!fn_obj.flagsForOwn(key).enumerable) continue;
             const gop = seen.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
             if (gop.found_existing) continue;
-            var ibuf: [16]u8 = undefined;
-            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
-            const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
             const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-            arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(key_owned)) catch return error.OutOfMemory;
+            realm.heap.storeElement(arr, realm.allocator, @intCast(len), Value.fromString(key_owned)) catch return error.OutOfMemory;
             len += 1;
         }
         // §14.7.5.6 EnumerateObjectProperties step 5 — climb the
@@ -334,11 +331,8 @@ pub fn openForInIterator(
                 const gop = seen.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
                 if (gop.found_existing) continue;
                 if (!cur.flagsFor(key).enumerable) continue;
-                var ibuf: [16]u8 = undefined;
-                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
-                const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                 const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
+                realm.heap.storeElement(arr, realm.allocator, @intCast(len), Value.fromString(k_owned)) catch return error.OutOfMemory;
                 len += 1;
             }
             // §14.7.5.6 also surfaces accessor properties; mark them
@@ -353,11 +347,8 @@ pub fn openForInIterator(
                     const gop = seen.getOrPut(realm.allocator, key) catch return error.OutOfMemory;
                     if (gop.found_existing) continue;
                     if (!cur.flagsFor(key).enumerable) continue;
-                    var ibuf: [16]u8 = undefined;
-                    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
-                    const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                     const k_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                    arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
+                    realm.heap.storeElement(arr, realm.allocator, @intCast(len), Value.fromString(k_owned)) catch return error.OutOfMemory;
                     len += 1;
                 }
             }
@@ -405,11 +396,8 @@ pub fn openForInIterator(
                             const gop = seen.getOrPut(realm.allocator, k) catch return error.OutOfMemory;
                             if (gop.found_existing) continue;
                             if (!enum_ok) continue;
-                            var ibuf: [16]u8 = undefined;
-                            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
-                            const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                             const k_owned = realm.heap.allocateString(k) catch return error.OutOfMemory;
-                            arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(k_owned)) catch return error.OutOfMemory;
+                            realm.heap.storeElement(arr, realm.allocator, @intCast(len), Value.fromString(k_owned)) catch return error.OutOfMemory;
                             len += 1;
                         }
                     }
@@ -582,21 +570,15 @@ pub fn openForInIterator(
             for (int_keys.items) |e| {
                 if (seen.contains(e.key)) continue;
                 seen.put(realm.allocator, e.key, {}) catch return error.OutOfMemory;
-                var ibuf: [16]u8 = undefined;
-                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
-                const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                 const key_owned = realm.heap.allocateString(e.key) catch return error.OutOfMemory;
-                arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(key_owned)) catch return error.OutOfMemory;
+                realm.heap.storeElement(arr, realm.allocator, @intCast(len), Value.fromString(key_owned)) catch return error.OutOfMemory;
                 len += 1;
             }
             for (str_keys.items) |key| {
                 if (seen.contains(key)) continue;
                 seen.put(realm.allocator, key, {}) catch return error.OutOfMemory;
-                var ibuf: [16]u8 = undefined;
-                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
-                const idx_owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
                 const key_owned = realm.heap.allocateString(key) catch return error.OutOfMemory;
-                arr.set(realm.allocator, idx_owned.flatBytes(), Value.fromString(key_owned)) catch return error.OutOfMemory;
+                realm.heap.storeElement(arr, realm.allocator, @intCast(len), Value.fromString(key_owned)) catch return error.OutOfMemory;
                 len += 1;
             }
             // §14.7.5.6 — own-but-non-enumerable names shadow

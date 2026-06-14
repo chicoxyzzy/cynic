@@ -3128,6 +3128,33 @@ test "computed-key write IC: freezing after a cached write invalidates the cell"
     , 102);
 }
 
+// ── for-in key collection — guards the openForInIterator element-store
+// path (keys land in the snapshot array's element vector directly,
+// skipping a per-key index-string allocation). Behavior-transparent:
+// same keys, same §10.1.11 order (int indices ascending, then string
+// keys in insertion order, then inherited enumerables).
+
+test "for-in: own insertion order then inherited enumerable key" {
+    try expectScriptStringWithBuiltins(
+        \\const proto = { p: 0 };
+        \\const o = Object.create(proto);
+        \\o.b = 1; o.a = 2; o.c = 3;
+        \\let r = "";
+        \\for (const k in o) r += k;
+        \\r
+    , "bacp");
+}
+
+test "for-in: array integer indices ascending, then named keys" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [10, 20, 30];
+        \\a.foo = "x";
+        \\let r = "";
+        \\for (const k in a) r += k + ",";
+        \\r
+    , "0,1,2,foo,");
+}
+
 test "computed int read: dense in-bounds hits own elements" {
     try expectScriptInt("var a=[10,20,30]; a[0]+a[1]+a[2]", 60);
     try expectScriptInt("var a=[10,20,30]; var i=2; a[i]", 30);
