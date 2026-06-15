@@ -531,6 +531,19 @@ fn mkChunk(code: []const u8) !Chunk {
 const gs_init_s0 = [_]u8{ @intFromEnum(Op.sta_global_slot_init), 0, 0, 0, 0 };
 const gl_s0 = [_]u8{ @intFromEnum(Op.lda_global_slot), 0, 0, 0, 0 };
 
+test "regalloc: dead-store runs on a chunk that declares a closure (make_function modelled)" {
+    // make_function k0; lda_one; star r0 (dead); lda_zero; star r0; ldar r0; return
+    // `make_function` has no register effect, so the chunk stays
+    // fully-understood and the dead store is removed — previously the opaque
+    // make_function bailed the whole pass (the common closure + loop shape).
+    var code = [_]u8{ @intFromEnum(Op.make_function), 0, 0 } // make_function k0
+        ++ [_]u8{ @intFromEnum(Op.lda_one), @intFromEnum(Op.star), 0 } // dead store r0
+        ++ [_]u8{ @intFromEnum(Op.lda_zero), @intFromEnum(Op.star), 0, @intFromEnum(Op.ldar), 0, @intFromEnum(Op.return_) };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+    try testing.expectEqual(@as(usize, 1), try eliminateDeadStoresOne(testing.allocator, &chunk));
+}
+
 test "regalloc(tdz): a check dominated by the slot's init is dropped" {
     // lda_zero; sta_global_slot_init s0; lda_global_slot s0; throw_if_hole; return
     var code = [_]u8{@intFromEnum(Op.lda_zero)} ++ gs_init_s0 ++ gl_s0 ++

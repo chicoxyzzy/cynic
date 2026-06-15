@@ -106,6 +106,13 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         .return_,
         .make_object,
         .make_array,
+        // `make_function` is `[op][k:u16]` — builds a closure from a template
+        // + the current environment, reading no register (captured variables
+        // live in the environment, not registers; capture forces env
+        // promotion, so a register-resident local is never captured). Modelled
+        // as no-effect so a chunk that merely declares a closure stays
+        // fully-understood and the register passes still fire on it.
+        .make_function,
         => .{},
 
         // ── Register reads (one source register; acc is implicit) ──
@@ -702,6 +709,18 @@ test "liveness: a fused compare-and-branch is modelled (register read + branch e
     try testing.expectEqual(@as(?u32, 6), branchTarget(.jmp_if_not_lt, &code, 0));
     try testing.expectEqual(@as(usize, 3), a.blockCount()); // leaders 0,4,6
     try testing.expect(a.live_in[0].isSet(1)); // r1 is read by the fused op
+}
+
+test "liveness: make_function is modelled (no register operand → no effect)" {
+    // `make_function k0` is `[op][k:u16]` — it builds a closure from a
+    // template + the current env, reading no register (captures live in the
+    // environment, not registers). Modelling it as no-effect lets a chunk
+    // that merely declares a closure stay fully-understood, so the register
+    // passes still fire on the common "closure + loop" shape.
+    var code = [_]u8{ byteOf(.make_function), 0, 0, byteOf(.return_) };
+    var a = try analyze(testing.allocator, &code, 4, &.{});
+    defer a.deinit();
+    try testing.expect(a.fully_understood);
 }
 
 test "liveness: an opaque opcode marks the function not-fully-understood" {
