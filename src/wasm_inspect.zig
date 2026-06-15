@@ -503,11 +503,11 @@ test "toWat: an (i32,i32)->i32 adder" {
     //   (func (type 0) local.get 0; local.get 1; i32.add)
     //   (export "add" (func 0)))
     const bytes = [_]u8{
-        0,   97,  115, 109, 1,  0,   0,   0, // \0asm v1
-        1,   7,   1,   0x60, 2,  0x7f, 0x7f, 1, 0x7f, // type: (i32,i32)->i32
-        3,   2,   1,   0, // func 0 : type 0
-        7,   7,   1,   3, 'a', 'd', 'd', 0, 0, // export "add" func 0
-        10,  9,   1,   7, 0, 0x20, 0, 0x20, 1, 0x6a, 0x0b, // code: local.get 0/1; i32.add; end
+        0, 97, 115, 109, 1, 0, 0, 0, // \0asm v1
+        1, 7, 1, 0x60, 2, 0x7f, 0x7f, 1, 0x7f, // type: (i32,i32)->i32
+        3, 2, 1, 0, // func 0 : type 0
+        7, 7, 1, 3, 'a', 'd', 'd', 0, 0, // export "add" func 0
+        10, 9, 1, 7, 0, 0x20, 0, 0x20, 1, 0x6a, 0x0b, // code: local.get 0/1; i32.add; end
     };
     const wat = try watOf(&bytes);
     defer testing.allocator.free(wat);
@@ -529,11 +529,11 @@ test "toWat: an (i32,i32)->i32 adder" {
 test "toWat: i32.const immediate and a result-only type" {
     // (module (type (func (result i32))) (func (type 0) i32.const 7) (export "f" (func 0)))
     const bytes = [_]u8{
-        0,  97, 115, 109, 1, 0, 0, 0,
-        1,  5,  1,   0x60, 0, 1, 0x7f, // type: () -> i32
-        3,  2,  1,   0,
-        7,  5,  1,   1, 'f', 0, 0,
-        10, 6,  1,   4, 0, 0x41, 7, 0x0b, // i32.const 7; end
+        0, 97, 115, 109, 1, 0, 0, 0,
+        1, 5,   1, 0x60, 0, 1, 0x7f, // type: () -> i32
+        3, 2,   1, 0,    7, 5, 1,
+        1, 'f', 0, 0,
+        10, 6, 1, 4, 0, 0x41, 7, 0x0b, // i32.const 7; end
     };
     const wat = try watOf(&bytes);
     defer testing.allocator.free(wat);
