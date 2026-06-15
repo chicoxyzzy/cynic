@@ -287,6 +287,7 @@ const els = {
   version: document.getElementById('version'),
   unhardened: document.getElementById('unhardened'),
   modeTabs: Array.from(document.querySelectorAll('.mode-tab')),
+  tabWasm: document.getElementById('tab-wasm'),
 };
 
 let view = null;   // the CodeMirror EditorView
@@ -454,7 +455,10 @@ function createEditor(initialDoc) {
         // Mirror every document edit to localStorage (debounced) so a
         // reload restores the draft. See scheduleSave / loadSaved.
         EditorView.updateListener.of((update) => {
-          if (update.docChanged) scheduleSave();
+          if (update.docChanged) {
+            scheduleSave();
+            updateWasmTabVisibility();
+          }
         }),
       ],
     }),
@@ -988,6 +992,18 @@ const WAT_TYPE_RE = /^(i32|i64|f32|f64|v128|funcref|externref|exnref)$/;
 const WAT_TOKEN_RE = /(?<comment>\(;[\s\S]*?;\))|(?<string>"(?:[^"\\]|\\.)*")|(?<paren>[()])|(?<word>[A-Za-z_][A-Za-z0-9_.]*)|(?<num>[-+]?\d[\w.]*)/g;
 
 function appendWatTokens(parent, line) {
+  // Mute the leading raw-byte gutter (e.g. "    20 00  local.get 0") so
+  // the instruction encoding reads as a gutter, not as WAT operands.
+  const gutter = line.match(/^(\s*)((?:[0-9a-f]{2} )*[0-9a-f]{2})(  )/);
+  if (gutter) {
+    parent.appendChild(document.createTextNode(gutter[1]));
+    const bytes = document.createElement('span');
+    bytes.className = 'wat-tok-bytes';
+    bytes.textContent = gutter[2];
+    parent.appendChild(bytes);
+    parent.appendChild(document.createTextNode(gutter[3]));
+    line = line.slice(gutter[0].length);
+  }
   let last = 0;
   for (const m of line.matchAll(WAT_TOKEN_RE)) {
     if (m.index > last) parent.appendChild(document.createTextNode(line.slice(last, m.index)));
@@ -1215,6 +1231,15 @@ function wireSnippets() {
 // Init
 // --------------------------------------------------------------------------
 
+// Show the wasm tab only when the source references WebAssembly — it is
+// the one mode that needs a module to inspect. If the wasm code is
+// deleted while that tab is active, fall back to eval.
+function updateWasmTabVisibility() {
+  const uses = /WebAssembly/.test(getSource());
+  if (els.tabWasm) els.tabWasm.hidden = !uses;
+  if (!uses && currentMode === 'wasm') setMode('eval');
+}
+
 function init() {
   els.run.disabled = true;
   // Load precedence: an explicit shared link wins, then the locally
@@ -1223,6 +1248,7 @@ function init() {
   createEditor(seedFromHash() || loadSaved() || DEFAULT_SNIPPET);
   wireSnippets();
   wireModeTabs();
+  updateWasmTabVisibility();
   wireInspectorHover();
   wireSourceToSpanHover();
   els.run.addEventListener('click', run);

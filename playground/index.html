@@ -370,6 +370,7 @@
   .ast-tok-num    { color: #b5500f; }
   .ast-tok-ident  { color: #0d7a8a; }
   .wat-tok-comment { color: var(--ink-soft); font-style: italic; }
+  .wat-tok-bytes   { color: var(--ink-soft); }
 
   /* Right-panel tab row. Replaces the toolbar mode <select>; clicking
      a tab switches the inspector view and re-runs the source. */
@@ -390,6 +391,7 @@
     padding: 4px 12px;
     cursor: pointer;
   }
+  .mode-tab[hidden] { display: none; }
   .mode-tab[aria-selected="true"] {
     background: #fff;
     box-shadow: 2px 2px 0 var(--ink);
