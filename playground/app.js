@@ -49,6 +49,7 @@ import {
   evalSource,
   parseSource,
   parseAst,
+  inspectWasm,
 } from './cynic-engine.js';
 
 // ES modules are strict by definition — no `'use strict'` directive
@@ -289,7 +290,7 @@ const els = {
 };
 
 let view = null;   // the CodeMirror EditorView
-let currentMode = 'eval'; // 'eval' | 'bytecode' | 'ast' — driven by the right-panel tabs
+let currentMode = 'eval'; // 'eval' | 'bytecode' | 'ast' | 'wasm' — driven by the right-panel tabs
 let engineReady = false;  // set once cynic-engine.js's loadEngine() resolves
 
 // --------------------------------------------------------------------------
@@ -978,6 +979,35 @@ function renderAstResult(frame) {
   }
 }
 
+// The "wasm" inspector: WAT for the module the snippet builds. Unlike the
+// bytecode / AST views this *runs* the snippet — the module lives in the
+// bytes it passes to WebAssembly.Module / instantiate, and the engine
+// captures it for disassembly. WAT carries no source mapping, so there
+// are no hoverable source spans here.
+function renderWasmResult(frame) {
+  clearOutput();
+  setEditorHotRange(null);
+  setEditorErrorRange(null);
+  lastSpanLines = [];
+  if (frame.status !== 0) {
+    appendLine(frame.error || 'WebAssembly inspection failed', 'out-error');
+    return;
+  }
+  // Any console.log the snippet emitted while building the module.
+  if (frame.stdout) {
+    for (const line of frame.stdout.replace(/\n+$/, '').split('\n')) {
+      if (line.length) appendLine(line, 'out-stdout');
+    }
+  }
+  // The WAT text (or a one-line hint when the snippet built no module).
+  for (const line of frame.value.split('\n')) {
+    const el = document.createElement('span');
+    el.className = 'bc-line out-stdout';
+    el.textContent = line;
+    els.output.appendChild(el);
+  }
+}
+
 // --------------------------------------------------------------------------
 // Actions
 // --------------------------------------------------------------------------
@@ -997,6 +1027,9 @@ function run() {
         break;
       case 'ast':
         renderAstResult(parseAst(source));
+        break;
+      case 'wasm':
+        renderWasmResult(inspectWasm(source));
         break;
       case 'eval':
       default:
