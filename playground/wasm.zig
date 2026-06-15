@@ -509,6 +509,113 @@ export fn cynic_parse_ast(src: [*]const u8, len: u32) [*]u8 {
 }
 
 // ---------------------------------------------------------------------------
+// cynic_wasm_inspect — WAT view of the module a snippet builds
+// ---------------------------------------------------------------------------
+
+/// Run `src[0..len]`, then disassemble the WebAssembly module it built
+/// into WAT text in the frame's `value` section — the playground's "wasm"
+/// inspector tab (the structure + disassembly analog of `cynic_parse` /
+/// `cynic_parse_ast`). Unlike those JS-only views this one *executes* the
+/// snippet: the module to inspect lives in the bytes the snippet passes to
+/// `new WebAssembly.Module(...)` / `WebAssembly.instantiate(...)`, so the
+/// engine captures it at construction time (`realm.last_wasm_module`) and
+/// this dumps the most recent one. Parse / compile errors surface exactly
+/// like `cynic_eval`'s; if the snippet compiled no module, the `value`
+/// section carries a short hint (or the snippet's uncaught throw).
+export fn cynic_wasm_inspect(src: [*]const u8, len: u32) [*]u8 {
+    const source = src[0..len];
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var diags: cynic.diagnostic.Diagnostics = .empty;
+
+    const program = cynic.parser.parseScript(arena.allocator(), source, &diags) catch {
+        var msg: std.ArrayListUnmanaged(u8) = .empty;
+        defer msg.deinit(gpa);
+        const span = formatDiagnostics(&msg, &diags, "SyntaxError: failed to parse");
+        return buildFrame(.parse_error, "", "", msg.items, span);
+    };
+    if (firstError(&diags)) |d| {
+        var msg: std.ArrayListUnmanaged(u8) = .empty;
+        defer msg.deinit(gpa);
+        appendDiagnostics(&msg, &diags) catch {};
+        return buildFrame(.parse_error, "", "", msg.items, d.span);
+    }
+
+    var realm = Realm.init(gpa);
+    defer realm.deinit();
+    // Open the wasm gate so `new WebAssembly.Module(...)` runs (and is
+    // captured); install the debug globals as `cynic_eval` does.
+    realm.allow_wasm = true;
+    realm.installBuiltins() catch {
+        return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
+    };
+    realm.installTestGlobals() catch {
+        return buildFrame(.parse_error, "", "", "internal error: test globals install failed", empty_span);
+    };
+
+    const chunk_ptr = realm.allocator.create(cynic.bytecode.Chunk) catch {
+        return buildFrame(.parse_error, "", "", "internal error: chunk alloc failed", empty_span);
+    };
+    chunk_ptr.* = cynic.bytecode.compiler.compileScriptAsChunk(
+        realm.allocator,
+        &realm,
+        &program,
+        source,
+        &diags,
+    ) catch {
+        realm.allocator.destroy(chunk_ptr);
+        var msg: std.ArrayListUnmanaged(u8) = .empty;
+        defer msg.deinit(gpa);
+        const span = formatDiagnostics(
+            &msg,
+            &diags,
+            "SyntaxError: failed to compile (engine did not record a diagnostic)",
+        );
+        return buildFrame(.parse_error, "", "", msg.items, span);
+    };
+    realm.script_chunks.append(realm.allocator, chunk_ptr) catch {
+        return buildFrame(.parse_error, "", "", "internal error: chunk pin failed", empty_span);
+    };
+
+    // Execute to trigger module construction (the capture hook). A throw
+    // is not fatal here — a module built before it is still inspectable.
+    const outcome = cynic.runtime.lantern.run(gpa, &realm, chunk_ptr) catch |err| {
+        const msg = switch (err) {
+            error.OutOfMemory => "RangeError: out of memory",
+            error.InvalidOpcode => "InternalError: invalid opcode",
+        };
+        return buildFrame(.parse_error, realm.output.items, "", msg, empty_span);
+    };
+    cynic.runtime.lantern.drainMicrotasks(gpa, &realm) catch {};
+
+    if (realm.last_wasm_module) |module_ptr| {
+        const wat = cynic.wasm_inspect.toWatOpaque(gpa, module_ptr) catch {
+            return buildFrame(.parse_error, realm.output.items, "", "internal error: WAT render failed", empty_span);
+        };
+        defer gpa.free(wat);
+        return buildFrame(.ok, realm.output.items, wat, "", empty_span);
+    }
+
+    switch (outcome) {
+        .thrown => |v| {
+            var error_buf: std.ArrayListUnmanaged(u8) = .empty;
+            defer error_buf.deinit(gpa);
+            appendThrownText(&error_buf, v) catch {};
+            return buildFrame(.threw, realm.output.items, "", error_buf.items, empty_span);
+        },
+        else => return buildFrame(
+            .ok,
+            realm.output.items,
+            "(this snippet compiled no WebAssembly.Module — build one with " ++
+                "new WebAssembly.Module(bytes) or WebAssembly.instantiate(bytes) to inspect it)",
+            "",
+            empty_span,
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Version string
 // ---------------------------------------------------------------------------
 

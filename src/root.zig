@@ -49,6 +49,13 @@ pub const wasm_format = @import("wasm_format.zig");
 /// is wasm32-only).
 pub const wasm_diag = @import("wasm_diag.zig");
 
+/// WebAssembly module → WAT text, for the playground's "wasm" inspector
+/// tab (the structure + disassembly analog of the JS AST / bytecode
+/// views). Library-boundary like `wasm_format` so `zig build test` can
+/// exercise the printer; the playground entry that drives it is
+/// wasm32-only.
+pub const wasm_inspect = @import("wasm_inspect.zig");
+
 /// WebAssembly execution engine — decoder, validator, interpreter.
 /// Implements §1-§5 of the WebAssembly Core specification natively;
 /// the JS API surface (`WebAssembly.Module/Instance/Memory/...`)
@@ -131,6 +138,7 @@ test {
     _ = @import("bytecode/arguments_scan.zig");
     _ = @import("wasm_format.zig");
     _ = @import("wasm_diag.zig");
+    _ = @import("wasm_inspect.zig");
     _ = wasm;
     _ = @import("runtime/wasm/wasm.zig");
     _ = @import("runtime/wasm/reader.zig");

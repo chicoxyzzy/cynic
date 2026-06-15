@@ -1325,3 +1325,19 @@ test "a shared WebAssembly.Memory exposes a SharedArrayBuffer" {
             "true",
     );
 }
+
+test "captured module disassembles to WAT (playground inspector hook)" {
+    // Constructing a WebAssembly.Module records it on the realm; the
+    // playground's `cynic_wasm_inspect` reads that pointer and renders
+    // the module as WAT (the structure + disassembly inspector view).
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm = true;
+    try realm.installBuiltins();
+    _ = try lantern.evaluateScript(testing.allocator, &realm, "new WebAssembly.Module(" ++ adder_bytes ++ "); 0");
+    const ptr = realm.last_wasm_module orelse return error.NoModuleCaptured;
+    const wat = try @import("../wasm_inspect.zig").toWatOpaque(testing.allocator, ptr);
+    defer testing.allocator.free(wat);
+    try testing.expect(std.mem.indexOf(u8, wat, "i32.add") != null);
+    try testing.expect(std.mem.indexOf(u8, wat, "(export \"add\" (func 0))") != null);
+}

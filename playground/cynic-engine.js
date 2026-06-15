@@ -19,6 +19,7 @@
 //   evalSource(src, { hardened? }) — run a Script; default hardened (SES).
 //   parseSource(src)               — compile to bytecode (inspector view).
 //   parseAst(src)                  — parse to an S-expression AST.
+//   inspectWasm(src)               — run, then disassemble the built wasm module to WAT.
 //
 // Every `*Source` / `parse*` call returns a frame:
 //   { status, stdout, value, error, errorSpan, stats }
@@ -119,6 +120,15 @@ export function parseSource(src) {
 // Parse `src` to an S-expression AST.
 export function parseAst(src) {
   return callEngine('cynic_parse_ast', src);
+}
+
+// Run `src` and disassemble the WebAssembly module it builds to WAT (the
+// "wasm" inspector view). The module is captured at construction time, so
+// the snippet must call `new WebAssembly.Module(bytes)` /
+// `WebAssembly.instantiate(bytes)`; the returned frame's `value` carries
+// the WAT text (or a short hint when the snippet built no module).
+export function inspectWasm(src) {
+  return callEngine('cynic_wasm_inspect', src);
 }
 
 // Decode the framed result buffer the engine left behind.

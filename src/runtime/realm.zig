@@ -1089,6 +1089,12 @@ pub const Realm = struct {
     /// wholesale at realm teardown, so wasm objects need no per-object
     /// cleanup. The realm-owned store of docs/wasm-engine.md §7.
     wasm_arena: ?std.heap.ArenaAllocator = null,
+    /// The most recently decoded `WebAssembly.Module` in this realm — a
+    /// non-owning pointer into `wasm_arena`, so it needs no teardown. The
+    /// playground's `cynic_wasm_inspect` reads it to disassemble (to WAT)
+    /// the module a snippet built; ordinary eval ignores it. Typed opaque
+    /// to keep the module layout out of the realm's interface.
+    last_wasm_module: ?*const anyopaque = null,
     /// `WebAssembly.Global.prototype`, cached at install so an instance's
     /// global exports can be wrapped as `Global` objects.
     wasm_global_prototype: ?*@import("object.zig").JSObject = null,

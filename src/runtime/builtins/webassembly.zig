@@ -272,6 +272,10 @@ fn decodeModuleInto(realm: *Realm, self: *JSObject, bytes: []const u8) NativeErr
     const mp = a.create(wasm.Module) catch return error.OutOfMemory;
     mp.* = wasm.decode(a, owned) catch
         return throwCompileError(realm, "WebAssembly.Module: invalid module");
+    // Record the decoded module so the playground's WAT inspector can
+    // disassemble what a snippet built (non-owning — it lives in the wasm
+    // arena). Harmless for ordinary callers: a single pointer store.
+    realm.last_wasm_module = @ptrCast(mp);
     _ = wasm.validateModule(a, mp) catch
         return throwCompileError(realm, "WebAssembly.Module: invalid module");
     const state = a.create(ModuleState) catch return error.OutOfMemory;
