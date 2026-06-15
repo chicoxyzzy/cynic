@@ -988,7 +988,9 @@ useful:
    the narrowing `store`/`store8`/`store16`/`store32`, sharing the
    overflow-safe bounds check; the zero-extending narrow loads reuse the
    W-form loads, whose cleared high word is the i64 zero-extension) — the
-   X-form mirror of the i32 ops — on the
+   X-form mirror of the i32 ops — and the integer-width conversions
+   `i64.extend_i32_s` (sxtw), `i64.extend_i32_u`, and `i32.wrap_i64` (both
+   a W-form mov), completing the i64 integer tier — on the
    depth→register operand-stack machine, plus structured control
    flow: `block`/`end` + forward conditional `br_if`, `loop` +
    backward `br_if` (do-while), and unconditional `br` with a

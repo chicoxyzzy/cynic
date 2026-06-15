@@ -159,6 +159,9 @@ const op_i64_store: u8 = 0x37;
 const op_i64_store8: u8 = 0x3c;
 const op_i64_store16: u8 = 0x3d;
 const op_i64_store32: u8 = 0x3e;
+const op_i32_wrap_i64: u8 = 0xa7;
+const op_i64_extend_i32_s: u8 = 0xac;
+const op_i64_extend_i32_u: u8 = 0xad;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -757,6 +760,24 @@ pub fn compile(
                     else => try m.emit(a64.strRegW(rv, .x2, .x16)), // store32 (low 4)
                 }
             },
+            op_i64_extend_i32_s => {
+                // §4.3.7 i64.extend_i32_s — sign-extend the i32 operand to
+                // i64; `sxtw` widens the low 32 bits across the register.
+                if (sp < 1) return null;
+                const ra = try materialize(&m, stack[sp - 1], sp - 1);
+                try m.emit(a64.sxtw(ra, ra));
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_i64_extend_i32_u, op_i32_wrap_i64 => {
+                // §4.3.7 i64.extend_i32_u and §4.3.8 i32.wrap_i64 both keep
+                // the low 32 bits zero-extended — extend_i32_u widens an i32
+                // (already zero-extended), wrap_i64 truncates an i64 — so a
+                // W-form mov (takes the low word, clears bits 32..63) does both.
+                if (sp < 1) return null;
+                const ra = try materialize(&m, stack[sp - 1], sp - 1);
+                try m.emit(a64.movRegW(ra, ra));
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_block => {
                 // §3.3.5 — push a control frame. The block's result
                 // arity comes from its block type; a `block` consumes no
@@ -1110,7 +1131,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u => {},
             else => return null, // unknown immediate width — degrade
         }
     }

@@ -863,6 +863,43 @@ test "wasm spasm: i64.load compiles and reads eight bytes" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// An `(i32)->i64` exported as "ext": local.get 0; i64.extend_i32_s; end.
+const i64_extend_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7e, // type (i32)->i64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x07, 0x01, 0x03, 0x65, 0x78, 0x74, 0x00, 0x00, // export "ext" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0xac, 0x0b, // local.get 0; i64.extend_i32_s; end
+};
+
+test "wasm spasm: i64.extend_i32_s sign-extends a negative i32" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i64_extend_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i64_extend_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "ext") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 0xFFFF_FFFF); // the i32 -1
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // -1 (i32) sign-extends to -1 (i64); a zero-extend would give 0xFFFFFFFF.
+    try testing.expectEqual(@as(u64, 0xFFFF_FFFF_FFFF_FFFF), @as(u64, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {
