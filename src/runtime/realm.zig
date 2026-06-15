@@ -982,18 +982,37 @@ pub const Realm = struct {
     step_budget: u64 = std.math.maxInt(u64),
     /// Externally-flippable interrupt flag. Any thread (including
     /// a SIGALRM-style watchdog or a host UI thread) can call
-    /// `requestInterrupt`. The interpreter dispatch loop polls
-    /// this between opcodes and throws an uncatchable
-    /// `RangeError("execution interrupted")` when set, mirroring
-    /// V8's `Isolate::TerminateExecution` and JSC's
-    /// `Watchdog::fire`.
+    /// `requestInterrupt`. The interpreter dispatch loop polls this
+    /// between opcodes (the loop back-edge safe point) and throws
+    /// `RangeError("execution interrupted")` when set.
+    ///
+    /// NOTE: unlike V8's `Isolate::TerminateExecution` / JSC's
+    /// `Watchdog::fire`, this exception is currently **catchable** —
+    /// the thrown `RangeError` is an ordinary value that a user
+    /// `try`/`catch` (or `assert.throws`) can swallow, after which
+    /// execution resumes. A true watchdog abort needs uncatchable
+    /// termination (a "terminating" mode that `unwindThrow` honours
+    /// by skipping every handler, à la the existing
+    /// `gen_return_completion` step-past-catch path); that isn't
+    /// implemented yet, so a wedged fixture inside a `try` block
+    /// can't be force-unwound.
     interrupt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    /// Optional host-supplied interrupt flag, polled alongside
-    /// `interrupt`. Unlike `interrupt` (a per-realm field), this
-    /// points at storage the host keeps alive longer than the realm
-    /// — so a watchdog thread can flip it without racing the realm's
-    /// teardown. The test262 harness aims it at a stable per-worker
-    /// flag; null for ordinary embeddings.
+    /// Optional host-supplied interrupt flag. Unlike `interrupt` (a
+    /// per-realm field), this points at storage the host keeps alive
+    /// longer than the realm — so a watchdog thread can flip it
+    /// without racing the realm's teardown. The test262 harness aims
+    /// it at a stable per-worker abort flag; null for ordinary
+    /// embeddings.
+    ///
+    /// NOTE: this flag is currently **not polled** anywhere in the
+    /// engine — only `interrupt` is checked at the safe points. Wiring
+    /// it in (the safe points should poll `interrupt OR (host_interrupt
+    /// and *host_interrupt)`) is a prerequisite for the test262
+    /// watchdog to abort a wedged worker, but is insufficient on its
+    /// own without the uncatchable-termination work noted on
+    /// `interrupt` above. Until both land, the harness relies on
+    /// `--exclude`ing the handful of fixtures that wedge under
+    /// `--gc-threshold=1` (see the gc-stress CI job).
     host_interrupt: ?*std.atomic.Value(bool) = null,
     /// Stack of every live `runFrames` call's frame list. Each
     /// entry is the `*ArrayListUnmanaged(CallFrame)` that a
