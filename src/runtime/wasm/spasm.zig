@@ -148,6 +148,17 @@ const op_i64_div_s: u8 = 0x7f;
 const op_i64_div_u: u8 = 0x80;
 const op_i64_rem_s: u8 = 0x81;
 const op_i64_rem_u: u8 = 0x82;
+const op_i64_load: u8 = 0x29;
+const op_i64_load8_s: u8 = 0x30;
+const op_i64_load8_u: u8 = 0x31;
+const op_i64_load16_s: u8 = 0x32;
+const op_i64_load16_u: u8 = 0x33;
+const op_i64_load32_s: u8 = 0x34;
+const op_i64_load32_u: u8 = 0x35;
+const op_i64_store: u8 = 0x37;
+const op_i64_store8: u8 = 0x3c;
+const op_i64_store16: u8 = 0x3d;
+const op_i64_store32: u8 = 0x3e;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -695,6 +706,57 @@ pub fn compile(
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
+            op_i64_load, op_i64_load8_s, op_i64_load8_u, op_i64_load16_s, op_i64_load16_u, op_i64_load32_s, op_i64_load32_u => {
+                // §4.4.7 i64 loads — bounds-check the access width, then load
+                // from mem_base + ea into the address's slot. The zero-
+                // extending forms reuse the W-form ldrb/ldrh/ldr (the W
+                // destination clears bits 32..63, i.e. the i64 zero-extend);
+                // the signed forms sign-extend to the full 64.
+                const offset = readMemArg(body, &i) orelse return null;
+                if (sp < 1) return null;
+                const ra = try materialize(&m, stack[sp - 1], sp - 1);
+                const n: u32 = switch (op) {
+                    op_i64_load8_s, op_i64_load8_u => 1,
+                    op_i64_load16_s, op_i64_load16_u => 2,
+                    op_i64_load32_s, op_i64_load32_u => 4,
+                    else => 8, // i64.load
+                };
+                try emitMemBounds(&m, ra, offset, n, &trap_oob);
+                trap_oob_used = true;
+                switch (op) {
+                    op_i64_load => try m.emit(a64.ldrReg(ra, .x2, .x16)),
+                    op_i64_load8_u => try m.emit(a64.ldrbRegW(ra, .x2, .x16)),
+                    op_i64_load8_s => try m.emit(a64.ldrsbReg(ra, .x2, .x16)),
+                    op_i64_load16_u => try m.emit(a64.ldrhRegW(ra, .x2, .x16)),
+                    op_i64_load16_s => try m.emit(a64.ldrshReg(ra, .x2, .x16)),
+                    op_i64_load32_u => try m.emit(a64.ldrRegW(ra, .x2, .x16)),
+                    else => try m.emit(a64.ldrswReg(ra, .x2, .x16)), // load32_s
+                }
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_i64_store, op_i64_store8, op_i64_store16, op_i64_store32 => {
+                // §4.4.7 i64 stores — operands [addr, value]; bounds-check ea,
+                // then store the value's low bytes at mem_base + ea.
+                const offset = readMemArg(body, &i) orelse return null;
+                if (sp < 2) return null;
+                const ra = try materialize(&m, stack[sp - 2], sp - 2); // addr
+                const rv = try materialize(&m, stack[sp - 1], sp - 1); // value
+                sp -= 2;
+                const n: u32 = switch (op) {
+                    op_i64_store8 => 1,
+                    op_i64_store16 => 2,
+                    op_i64_store32 => 4,
+                    else => 8, // i64.store
+                };
+                try emitMemBounds(&m, ra, offset, n, &trap_oob);
+                trap_oob_used = true;
+                switch (op) {
+                    op_i64_store => try m.emit(a64.strReg(rv, .x2, .x16)),
+                    op_i64_store8 => try m.emit(a64.strbRegW(rv, .x2, .x16)),
+                    op_i64_store16 => try m.emit(a64.strhRegW(rv, .x2, .x16)),
+                    else => try m.emit(a64.strRegW(rv, .x2, .x16)), // store32 (low 4)
+                }
+            },
             op_block => {
                 // §3.3.5 — push a control frame. The block's result
                 // arity comes from its block type; a `block` consumes no
@@ -1042,7 +1104,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
             op_i64_const => {
                 _ = readSleb64(body, i) orelse return null;
             },
-            op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u, op_i32_store, op_i32_store8, op_i32_store16 => {
+            op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u, op_i32_store, op_i32_store8, op_i32_store16, op_i64_load, op_i64_load8_s, op_i64_load8_u, op_i64_load16_s, op_i64_load16_u, op_i64_load32_s, op_i64_load32_u, op_i64_store, op_i64_store8, op_i64_store16, op_i64_store32 => {
                 const flags = readUleb32(body, i) orelse return null;
                 if (flags & 0x40 != 0) return null; // multi-memory — degrade
                 _ = readUleb32(body, i) orelse return null; // offset

@@ -983,8 +983,12 @@ useful:
    (`i64.const`, i64 `local.get`/`set`/`tee`, the i64 ALU
    add/sub/mul/and/or/xor/shl/shr_s/shr_u, `eqz` + the ten i64
    comparisons — a full 64-bit X-form `cmp` producing the i32 0/1 result —
-   and the four `div`/`rem` ops reusing the trap channel (the X-form
-   mirror of the i32 ops) — on the
+   the four `div`/`rem` ops reusing the trap channel, and the i64 memory
+   family (`load` + the sign/zero-extending `load8`/`load16`/`load32` and
+   the narrowing `store`/`store8`/`store16`/`store32`, sharing the
+   overflow-safe bounds check; the zero-extending narrow loads reuse the
+   W-form loads, whose cleared high word is the i64 zero-extension) — the
+   X-form mirror of the i32 ops — on the
    depth→register operand-stack machine, plus structured control
    flow: `block`/`end` + forward conditional `br_if`, `loop` +
    backward `br_if` (do-while), and unconditional `br` with a

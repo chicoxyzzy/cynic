@@ -815,6 +815,54 @@ test "wasm spasm: i64.div_s by zero raises a catchable trap" {
     try testing.expectError(error.IntegerDivideByZero, runSpasmI64Div(arena.allocator(), 5, 0));
 }
 
+// A one-page-memory module exporting i64 memory accessors:
+//   "ld" (i32)->i64     : local.get 0  i64.load     align=3 off=0
+//   "st" (i32,i64)->()  : local.get 0  local.get 1  i64.store align=3 off=0
+const i64_mem_module_body = [_]u8{
+    // type (payload 11): type0=(i32)->i64, type1=(i32,i64)->()
+    0x01, 0x0b, 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7e, 0x60, 0x02, 0x7f, 0x7e, 0x00,
+    // func: 2 funcs (types 0,1)
+    0x03, 0x03, 0x02, 0x00, 0x01,
+    // memory: one page
+    0x05, 0x03, 0x01, 0x00, 0x01,
+    // export (payload 11): "ld"->0, "st"->1
+    0x07, 0x0b, 0x02, 0x02, 0x6c, 0x64, 0x00, 0x00, 0x02, 0x73, 0x74, 0x00, 0x01,
+    // code (payload 19)
+    0x0a, 0x13, 0x02,
+    0x07, 0x00, 0x20, 0x00, 0x29, 0x03, 0x00, 0x0b, // ld: local.get 0; i64.load a=3 o=0; end
+    0x09, 0x00, 0x20, 0x00, 0x20, 0x01, 0x37, 0x03, 0x00, 0x0b, // st: local.get 0; local.get 1; i64.store a=3 o=0; end
+};
+
+test "wasm spasm: i64.load compiles and reads eight bytes" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i64_mem_module_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i64_mem_module_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    // A full 64-bit value at offset 8; a 4-byte load would drop the high word.
+    std.mem.writeInt(u64, instance.memories[0].data[8..][0..8], 0xCAFE_BABE_DEAD_BEEF, .little);
+    const fidx = funcExport(mp, "ld") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 8);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    try testing.expectEqual(@as(u64, 0xCAFE_BABE_DEAD_BEEF), @as(u64, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {

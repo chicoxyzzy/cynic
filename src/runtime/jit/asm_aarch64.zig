@@ -365,6 +365,34 @@ pub fn strhRegW(rt: Reg, rn: Reg, rm: Reg) u32 {
     return 0x78206800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
 }
 
+/// LDR Xt, [Xn, Xm] — 64-bit load (i64.load). The zero-extending narrow
+/// i64 loads reuse the W-form ldrb/ldrh/ldr (the W destination clears bits
+/// 32..63, which is the i64 zero-extension); only the sign-extending forms
+/// need a distinct 64-bit-destination encoding below.
+pub fn ldrReg(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0xF8606800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+/// STR Xt, [Xn, Xm] — 64-bit store (i64.store).
+pub fn strReg(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0xF8206800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+/// LDRSB Xt, [Xn, Xm] — load a byte, sign-extended to 64 bits (i64.load8_s).
+pub fn ldrsbReg(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x38A06800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+/// LDRSH Xt, [Xn, Xm] — load a halfword, sign-extended to 64 (i64.load16_s).
+pub fn ldrshReg(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x78A06800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+/// LDRSW Xt, [Xn, Xm] — load a word, sign-extended to 64 (i64.load32_s).
+pub fn ldrswReg(rt: Reg, rn: Reg, rm: Reg) u32 {
+    return 0xB8A06800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
 /// STP Xt, Xt2, [SP, #simm7×8]! — pre-indexed pair push through SP.
 pub fn stpPreIdxSp(rt: Reg, rt2: Reg, byte_off: i10) u32 {
     std.debug.assert(@rem(byte_off, 8) == 0);
