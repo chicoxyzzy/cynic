@@ -990,7 +990,14 @@ useful:
    W-form loads, whose cleared high word is the i64 zero-extension) — the
    X-form mirror of the i32 ops — and the integer-width conversions
    `i64.extend_i32_s` (sxtw), `i64.extend_i32_u`, and `i32.wrap_i64` (both
-   a W-form mov), completing the i64 integer tier — on the
+   a W-form mov), completing the i64 integer tier; and the start of the
+   float tier (`f64.const`, f64 `local.get`/`set`/`tee`, and f64
+   add/sub/mul/div). A float keeps living in its slot's GP register as raw
+   bits — an FP op bridges those bits into a v-register (`fmov` to v16/v17,
+   a distinct register file from the GP x16/x17 scratch), computes in the
+   FP unit, and bridges back — so the operand-stack model is unchanged and
+   float loads/stores/const reuse the integer machinery. (`select` moved to
+   the X-form `csel` so an i64/f64 select keeps all 64 bits.) — on the
    depth→register operand-stack machine, plus structured control
    flow: `block`/`end` + forward conditional `br_if`, `loop` +
    backward `br_if` (do-while), and unconditional `br` with a

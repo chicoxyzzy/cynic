@@ -905,6 +905,45 @@ test "wasm spasm: i64.extend_i32_s sign-extends a negative i32" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// An `(f64,f64)->f64` adder exported as "add": local.get 0; local.get 1;
+// f64.add; end. (0x7c is the f64 value type, 0xa0 is f64.add.)
+const f64_add_body = [_]u8{
+    0x01, 0x07, 0x01, 0x60, 0x02, 0x7c, 0x7c, 0x01, 0x7c, // type (f64,f64)->f64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00, // export "add" -> 0
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0xa0, 0x0b, // local.get 0; local.get 1; f64.add; end
+};
+
+test "wasm spasm: f64.add compiles and runs Spasm-compiled" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + f64_add_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &f64_add_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "add") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, 1.5))));
+    cells[1] = @as(u128, @as(u64, @bitCast(@as(f64, 2.25))));
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // 1.5 + 2.25 == 3.75, computed in the FP unit via the fmov bridge.
+    try testing.expectEqual(@as(f64, 3.75), @as(f64, @bitCast(@as(u64, @truncate(res[0])))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {

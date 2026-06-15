@@ -162,6 +162,11 @@ const op_i64_store32: u8 = 0x3e;
 const op_i32_wrap_i64: u8 = 0xa7;
 const op_i64_extend_i32_s: u8 = 0xac;
 const op_i64_extend_i32_u: u8 = 0xad;
+const op_f64_const: u8 = 0x44;
+const op_f64_add: u8 = 0xa0;
+const op_f64_sub: u8 = 0xa1;
+const op_f64_mul: u8 = 0xa2;
+const op_f64_div: u8 = 0xa3;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -308,8 +313,9 @@ pub fn compile(
                 const rc = try materialize(&m, c, sp + 1);
                 try m.movImm64(.x16, 0);
                 try m.emit(a64.cmpRegW(rc, .x16));
-                // r1 = (c != 0) ? v1 : v2.
-                try m.emit(a64.cselW(r1, r1, r2, .ne));
+                // r1 = (c != 0) ? v1 : v2. X-form keeps all 64 bits so an
+                // i64/f64 select doesn't truncate (i32 stays zero-extended).
+                try m.emit(a64.csel(r1, r1, r2, .ne));
                 stack[sp - 1] = .{ .reg = r1 };
             },
             op_local_get => {
@@ -323,12 +329,13 @@ pub fn compile(
                         if (cell_off > 16380 or cell_off % 4 != 0) return null; // ldrImmW ceiling
                         try m.emit(a64.ldrImmW(regForDepth(sp), .x0, @intCast(cell_off)));
                     },
-                    // 64-bit load reads the whole i64 from the cell's low 8 bytes.
-                    .i64 => {
+                    // 64-bit load reads the whole i64/f64 from the cell's low
+                    // 8 bytes (an f64 is its raw bit pattern in the GP slot).
+                    .i64, .f64 => {
                         if (cell_off > 32760 or cell_off % 8 != 0) return null; // ldrImm ceiling
                         try m.emit(a64.ldrImm(regForDepth(sp), .x0, @intCast(cell_off)));
                     },
-                    else => return null, // f32/f64/v128/ref locals — degrade
+                    else => return null, // f32/v128/ref locals — degrade
                 }
                 stack[sp] = .{ .reg = regForDepth(sp) };
                 sp += 1;
@@ -338,7 +345,7 @@ pub fn compile(
                 if (sp < 1) return null;
                 if (idx >= func.local_types.len) return null;
                 const lt = func.local_types[idx];
-                if (lt != .i32 and lt != .i64) return null; // i32/i64 locals
+                if (lt != .i32 and lt != .i64 and lt != .f64) return null; // i32/i64/f64 locals
                 const cell_off = @as(u64, idx) * @sizeOf(Cell);
                 if (cell_off > 32760) return null; // strImm scaled-imm ceiling
                 // Materialize the top value (its slot register, or a
@@ -778,6 +785,38 @@ pub fn compile(
                 try m.emit(a64.movRegW(ra, ra));
                 stack[sp - 1] = .{ .reg = ra };
             },
+            op_f64_const => {
+                // §4.4.1 f64.const — an 8-byte little-endian IEEE-754 bit
+                // pattern, materialized as raw bits into the slot's GP
+                // register (a float lives as bits in a GP reg; FP ops bridge).
+                const bits = readF64Bits(body, &i) orelse return null;
+                if (sp >= operand_reg_count) return null;
+                try m.movImm64(regForDepth(sp), bits);
+                stack[sp] = .{ .reg = regForDepth(sp) };
+                sp += 1;
+            },
+            op_f64_add, op_f64_sub, op_f64_mul, op_f64_div => {
+                // §4.3 f64 ALU — bridge the GP-resident bit patterns into the
+                // FP unit (fmov to v16/v17, distinct from GP x16/x17), compute
+                // in double precision, and bridge the result back to the GP
+                // slot. The operand stack stays GP-resident throughout.
+                if (sp < 2) return null;
+                const a = stack[sp - 2];
+                const b = stack[sp - 1];
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                try m.emit(a64.fmovXtoD(.x16, ra));
+                try m.emit(a64.fmovXtoD(.x17, rb));
+                switch (op) {
+                    op_f64_add => try m.emit(a64.faddD(.x16, .x16, .x17)),
+                    op_f64_sub => try m.emit(a64.fsubD(.x16, .x16, .x17)),
+                    op_f64_mul => try m.emit(a64.fmulD(.x16, .x16, .x17)),
+                    else => try m.emit(a64.fdivD(.x16, .x16, .x17)), // f64.div
+                }
+                try m.emit(a64.fmovDtoX(ra, .x16));
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_block => {
                 // §3.3.5 — push a control frame. The block's result
                 // arity comes from its block type; a `block` consumes no
@@ -1000,7 +1039,7 @@ pub fn compile(
     if (sp != results.len) return null;
     // i32 and i64 results both store from the slot register's low bytes
     // (an i32 is zero-extended in its register), high cell word cleared.
-    for (results) |rt| if (rt != .i32 and rt != .i64) return null;
+    for (results) |rt| if (rt != .i32 and rt != .i64 and rt != .f64) return null;
 
     // Materialize the residual stack into result cells. Wasm results
     // map bottom-of-stack → results[0]; an i32 cell is the value
@@ -1125,13 +1164,16 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
             op_i64_const => {
                 _ = readSleb64(body, i) orelse return null;
             },
+            op_f64_const => {
+                _ = readF64Bits(body, i) orelse return null; // 8 raw bytes
+            },
             op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u, op_i32_store, op_i32_store8, op_i32_store16, op_i64_load, op_i64_load8_s, op_i64_load8_u, op_i64_load16_s, op_i64_load16_u, op_i64_load32_s, op_i64_load32_u, op_i64_store, op_i64_store8, op_i64_store16, op_i64_store32 => {
                 const flags = readUleb32(body, i) orelse return null;
                 if (flags & 0x40 != 0) return null; // multi-memory — degrade
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div => {},
             else => return null, // unknown immediate width — degrade
         }
     }
@@ -1236,6 +1278,21 @@ fn readSleb64(body: []const u8, i: *usize) ?i64 {
         if (shift >= 70) return null; // i64 LEB is at most 10 bytes
     }
     return null;
+}
+
+/// Read an `f64.const`'s 8-byte little-endian IEEE-754 bit pattern (§5.4.1
+/// — floats are NOT LEB-encoded, they are the raw little-endian value),
+/// advancing `i` past it. Null on a short read (a validated body always
+/// has the eight bytes; Spasm never aborts on a surprising one).
+fn readF64Bits(body: []const u8, i: *usize) ?u64 {
+    if (i.* + 8 > body.len) return null;
+    var bits: u64 = 0;
+    var k: usize = 0;
+    while (k < 8) : (k += 1) {
+        bits |= @as(u64, body[i.* + k]) << @intCast(k * 8);
+    }
+    i.* += 8;
+    return bits;
 }
 
 // ── tests ───────────────────────────────────────────────────────────

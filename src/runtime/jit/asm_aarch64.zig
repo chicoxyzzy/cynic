@@ -247,6 +247,14 @@ pub fn cselW(rd: Reg, rn: Reg, rm: Reg, cond: Cond) u32 {
     return 0x1A800000 | (r(rm) << 16) | (@as(u32, @intFromEnum(cond)) << 12) | (r(rn) << 5) | r(rd);
 }
 
+/// CSEL Xd, Xn, Xm, cond — the 64-bit select. wasm `select` on an i64 or
+/// f64 (or an f32 reinterpreted in a GP register) must preserve all 64
+/// bits; the W-form would truncate. Correct for i32 too — its operands are
+/// zero-extended, so the full-width select keeps the high word clear.
+pub fn csel(rd: Reg, rn: Reg, rm: Reg, cond: Cond) u32 {
+    return 0x9A800000 | (r(rm) << 16) | (@as(u32, @intFromEnum(cond)) << 12) | (r(rn) << 5) | r(rd);
+}
+
 /// ORR Xd, Xn, Xm
 pub fn orrReg(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0xAA000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
@@ -391,6 +399,43 @@ pub fn ldrshReg(rt: Reg, rn: Reg, rm: Reg) u32 {
 /// LDRSW Xt, [Xn, Xm] — load a word, sign-extended to 64 (i64.load32_s).
 pub fn ldrswReg(rt: Reg, rn: Reg, rm: Reg) u32 {
     return 0xB8A06800 | (r(rm) << 16) | (r(rn) << 5) | r(rt);
+}
+
+// ── floating-point (the GP↔FP bridge for the wasm float tier) ────────
+// Spasm keeps the operand stack in GP registers, so a float value lives
+// as raw bits in its slot's GP register; an FP op bridges those bits into
+// a v-register, computes, and bridges back. The `Reg` argument's *number*
+// (0..31) selects the v-register — passing `.x16`/`.x17` means v16/v17
+// (caller-saved FP scratch, a different register file from GP x16/x17).
+
+/// FMOV Dd, Xn — move a GP register's 64 bits into an FP double register.
+pub fn fmovXtoD(fd: Reg, xn: Reg) u32 {
+    return 0x9E670000 | (r(xn) << 5) | r(fd);
+}
+
+/// FMOV Xd, Dn — move an FP double register's 64 bits into a GP register.
+pub fn fmovDtoX(xd: Reg, dn: Reg) u32 {
+    return 0x9E660000 | (r(dn) << 5) | r(xd);
+}
+
+/// FADD Dd, Dn, Dm — double-precision add.
+pub fn faddD(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E602800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
+/// FSUB Dd, Dn, Dm — double-precision subtract.
+pub fn fsubD(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E603800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
+/// FMUL Dd, Dn, Dm — double-precision multiply.
+pub fn fmulD(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E600800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
+/// FDIV Dd, Dn, Dm — double-precision divide.
+pub fn fdivD(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E601800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
 }
 
 /// STP Xt, Xt2, [SP, #simm7×8]! — pre-indexed pair push through SP.
