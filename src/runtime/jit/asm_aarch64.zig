@@ -224,6 +224,23 @@ pub fn msubW(rd: Reg, rn: Reg, rm: Reg, ra: Reg) u32 {
     return 0x1B008000 | (r(rm) << 16) | (r(ra) << 10) | (r(rn) << 5) | r(rd);
 }
 
+/// UDIV Xd, Xn, Xm — 64-bit unsigned divide (non-faulting; wasm i64.div_u
+/// needs an explicit divide-by-zero check before it).
+pub fn udiv(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x9AC00800 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// SDIV Xd, Xn, Xm — 64-bit signed divide (non-faulting; wasm i64.div_s
+/// needs explicit divide-by-zero and INT64_MIN / -1 overflow checks).
+pub fn sdiv(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x9AC00C00 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// MSUB Xd, Xn, Xm, Xa — Xd = Xa - Xn*Xm, for the 64-bit remainder.
+pub fn msub(rd: Reg, rn: Reg, rm: Reg, ra: Reg) u32 {
+    return 0x9B008000 | (r(rm) << 16) | (r(ra) << 10) | (r(rn) << 5) | r(rd);
+}
+
 /// CSEL Wd, Wn, Wm, cond — Wd = cond ? Wn : Wm. Branchless select,
 /// wasm `select` (cond on top picks the deeper-but-one operand).
 pub fn cselW(rd: Reg, rn: Reg, rm: Reg, cond: Cond) u32 {

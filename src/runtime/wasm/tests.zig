@@ -750,6 +750,71 @@ test "wasm spasm: i64.lt_s compiles and compares the full 64 bits" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// An `(i64,i64)->i64` signed divide exported as "div": local.get 0;
+// local.get 1; i64.div_s; end.
+const i64_div_s_body = [_]u8{
+    0x01, 0x07, 0x01, 0x60, 0x02, 0x7e, 0x7e, 0x01, 0x7e, // type (i64,i64)->i64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x07, 0x01, 0x03, 0x64, 0x69, 0x76, 0x00, 0x00, // export "div" -> 0
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x7f, 0x0b, // local.get 0; local.get 1; i64.div_s; end
+};
+
+/// Build + instantiate the i64 divide module (Spasm forced on) and invoke
+/// "div" with `(a, b)`, returning the result slice or a trap error.
+fn runSpasmI64Div(a_alloc: std.mem.Allocator, arg_a: u64, arg_b: u64) ![]u128 {
+    var buf: [8 + i64_div_s_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i64_div_s_body);
+    const m = try wasm.decode(a_alloc, bytes);
+    const mp = try a_alloc.create(wasm.Module);
+    mp.* = m;
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a_alloc, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    const fidx = funcExport(mp, "div") orelse return error.NoSuchExport;
+    const cells = try a_alloc.alloc(u128, 2);
+    cells[0] = @as(u128, arg_a);
+    cells[1] = @as(u128, arg_b);
+    return interp.invoke(&instance, testing.allocator, fidx, cells);
+}
+
+test "wasm spasm: i64.div_s compiles and divides the full 64 bits" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i64_div_s_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i64_div_s_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "div") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    // (6 * 2^32) / 2 == 3 * 2^32; a truncated 32-bit divide would see 0 / 2.
+    cells[0] = @as(u128, 0x6_0000_0000);
+    cells[1] = @as(u128, 2);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    try testing.expectEqual(@as(u64, 0x3_0000_0000), @as(u64, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: i64.div_s by zero raises a catchable trap" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(error.IntegerDivideByZero, runSpasmI64Div(arena.allocator(), 5, 0));
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {
