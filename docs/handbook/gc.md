@@ -514,13 +514,37 @@ vector regardless of how many iterations the source produced.
   CLI doesn't yet thread it through. (`--gc-threshold=<n>` is
   now wired — `cynic --gc-threshold=1 run foo.js` collects on
   every allocation for stress testing.)
-- **Known latent rooting bugs (gc-stress only).** Two pre-existing
-  failure clusters surface only under `--gc-threshold=1`
-  ReleaseSafe: `built-ins/Array/fromAsync/*` (~67 fixtures —
-  async-pumped driver state isn't rooted across the suspended
-  await), and `language/expressions/generators/dstr/
-  {,dflt-}obj-ptrn-rest-getter.js` (rest-pattern destructure with
-  an accessor side effect). Both pass at the default GC threshold.
+- **Latent rooting bugs (gc-stress only).** The historically
+  documented clusters here — `built-ins/Array/fromAsync/*` and the
+  `language/expressions/generators/dstr/{,dflt-}obj-ptrn-rest-getter.js`
+  rest-pattern getters — are now clean at `--gc-threshold=1`
+  ReleaseSafe. Most recently fixed: the §27.6.1.6
+  AsyncFromSyncIteratorContinuation path
+  (`built-ins/AsyncFromSyncIteratorPrototype/*`), which held the
+  inner rejection reason / iterator-result value in bare Zig frames
+  across the `iterator.return()` and `value.constructor` JS
+  re-entries it performs. A minor cycle during a re-entry freed the
+  value and left the resulting Promise's `promise_value` dangling —
+  a use-after-free that crashed on the next mark, visible only under
+  `--gc-threshold=1` (it passes at the default threshold). Closed by
+  wrapping each re-entry in `builtins/async_iterator.zig` in a
+  `HandleScope` (`closeAndReject`, `processIterResult`, the
+  pending-Promise branch of `wrapAsyncGenResultWithClose`,
+  `closeIteratorOnReject`).
+- **Open gc-stress crashes (cons-string segments).** A broad
+  `--gc-threshold=1` ReleaseSafe sweep across the callback-heavy
+  buckets surfaced two *still-open* clusters distinct from the
+  promise-rooting class above: `built-ins/RegExp` (×2) and
+  `built-ins/JSON` (×1) abort with an out-of-bounds read of a
+  `0xaa…`-poisoned length inside `string.zig` `copyConsBytes` /
+  `flatBytes` — i.e. a cons-rope (`JSString` cons) segment freed
+  while a builtin still holds it across a re-entry, then flattened.
+  Both pass at the default threshold. These are a *string-segment*
+  rooting gap, not a promise gap; tracked for a follow-up pass.
+  (`built-ins/TypedArray` at `--gc-threshold=1` is merely slow — it
+  times out a 400 s budget, no crash.) A full-corpus
+  `--gc-threshold=1` sweep remains the way to surface any *new*
+  native missing a `HandleScope`.
 
 ## Prior art
 

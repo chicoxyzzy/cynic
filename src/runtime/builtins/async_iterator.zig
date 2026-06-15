@@ -252,6 +252,17 @@ fn processIterResult(
             (intrinsics_mod.newTypeError(realm, "iterator result .value read failed") catch return error.OutOfMemory);
         return rejectedPromise(realm, ex);
     };
+    // The `constructor` species probe and the close/wrap paths below
+    // all re-enter JS (and so can GC). `value_v` came from a
+    // `getPropertyChain` read and is held only in this Zig frame;
+    // root it (and the iterator) so a re-entry GC can't free the
+    // value out from under the Promise built downstream. Stays open
+    // across the nested `wrapAsyncGenResultWithClose` call.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(value_v) catch return error.OutOfMemory;
+    scope.push(sync_iter_v) catch return error.OutOfMemory;
+
     // §27.6.1.6 step 5 — PromiseResolve(%Promise%, value). In Cynic
     // this is the `value.constructor` read (used by `Promise.resolve`
     // species lookup when value is a thenable). If reading
@@ -300,11 +311,20 @@ fn wrapAsyncGenResultWithClose(
             // Register on-fulfilled + on-rejected reactions. The
             // rejection reaction calls IteratorClose before
             // rejecting the outer Promise (§27.6.1.6 step 13).
+            // Each allocation below can trigger a minor GC; root the
+            // results already created so a later allocation's cycle
+            // can't free a still-Zig-local `outer` / reaction closure
+            // before it lands in `p`'s reaction list.
+            const scope = realm.heap.openScope() catch return error.OutOfMemory;
+            defer scope.close();
             const outer = intrinsics_mod.allocatePromiseFor(realm, null, .pending, Value.undefined_) catch return error.OutOfMemory;
+            scope.push(outer) catch return error.OutOfMemory;
             const fulfill_fn = realm.heap.allocateFunctionNative(realm, if (done) iterResultDoneTrue else iterResultDoneFalse, 1, "asyncGenYield") catch return error.OutOfMemory;
             fulfill_fn.has_construct = false;
+            scope.push(heap_mod.taggedFunction(fulfill_fn)) catch return error.OutOfMemory;
             const reject_fn = realm.heap.allocateFunctionNative(realm, closeIteratorOnReject, 1, "closeIterator") catch return error.OutOfMemory;
             reject_fn.has_construct = false;
+            scope.push(heap_mod.taggedFunction(reject_fn)) catch return error.OutOfMemory;
             reject_fn.properties.put(realm.allocator, "__cynic_sync_iter__", sync_iter_v) catch return error.OutOfMemory;
             const p_reactions = p.promiseReactionsPtr(realm.allocator) catch return error.OutOfMemory;
             p_reactions.append(realm.allocator, .{
@@ -329,6 +349,18 @@ fn closeAndReject(
     sync_iter_v: Value,
     reject_value: Value,
 ) NativeError!Value {
+    // §7.4.7 IteratorClose runs the user `return()` method below, a
+    // JS re-entry that can trigger a minor GC. Root the rejection
+    // reason (and the iterator) across it: `reject_value` is only
+    // held in this Zig frame, so an unrooted mid-`return()` cycle
+    // would free it and leave the rejected Promise built at the tail
+    // pointing at a freed object — a use-after-free surfacing on the
+    // next mark of `promise_value` (host-safety invariant).
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(reject_value) catch return error.OutOfMemory;
+    scope.push(sync_iter_v) catch return error.OutOfMemory;
+
     const ret_v = intrinsics_mod.getPropertyChain(realm, sync_iter_obj, "return") catch {
         _ = lantern.consumePendingException(realm);
         return rejectedPromise(realm, reject_value);
@@ -357,6 +389,12 @@ fn iterResultDoneTrue(realm: *Realm, this_value: Value, args: []const Value) Nat
 
 fn closeIteratorOnReject(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ex = if (args.len > 0) args[0] else Value.undefined_;
+    // `ex` is re-thrown (as `pending_exception`) after the
+    // IteratorClose `return()` re-entry below, which can GC. Root it
+    // so a mid-close minor cycle can't free the rejection reason.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(ex) catch return error.OutOfMemory;
     // Recover the sync iter from the function's stash. The
     // closure was tagged with `__cynic_sync_iter__` at creation.
     if (heap_mod.valueAsFunction(this_value)) |fn_obj| {
