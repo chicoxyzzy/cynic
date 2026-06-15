@@ -350,6 +350,31 @@ care about.
 **`hasOwn` / `in` ICs.** Cache shape-presence for
 `Object.hasOwn(obj, "x")` and `"x" in obj`. Niche.
 
+**for-in enumeration cache** — cache the key snapshot
+`EnumerateObjectProperties` (§14.7.5.6) builds at `for_in_open`, so a
+hot `for (k in o)` loop over a stable-shape object skips the array
+alloc + own/inherited key walk + per-key string copies on re-entry,
+serving the cached snapshot after a guard match. **Attempted and
+reverted** — measured a net regression in the default posture, so it
+is not on `main`. The trap: the conservative scope guarded on the
+receiver's [[Prototype]] being the realm's *shape-mode* `%Object.
+prototype%` (`proto.shape != null`), but Cynic is SES-by-default and
+the realm-init freeze demotes the primordial prototypes to
+**dictionary mode** (`shape == null`). So under the shipping posture
+the fill-gate is never satisfied — the cache never fills, the fast-path
++ fill guards run on every open as pure overhead, and a 5-key
+`for-in` micro regressed ~8 %. A working version must invalidate
+against a **dictionary-mode** proto, i.e. a `proto_struct_epoch`-style
+guard (the same machinery the `sta_property` transition IC already
+uses for non-immediate / dictionary protos) rather than a proto-shape
+pointer — plus the dedicated weak `ForInICCell` table (mirroring
+`CallICCell`, weak-cleared post-mark) the snapshot pointer needs. The
+key-snapshot **allocation reduction** that does *not* need a cache —
+`storeElement` straight into the result array instead of
+index-string + `arr.set` per key, in `openForInIterator` — landed
+separately (`33f974a`, ~6-8 %) and stands. A cache on top is only
+worth revisiting with the dictionary-proto epoch guard in hand.
+
 ## The flip — retire `properties` for shaped objects
 
 Today's design keeps `properties` populated as a mirror even when
