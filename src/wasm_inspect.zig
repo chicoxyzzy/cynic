@@ -185,51 +185,76 @@ fn readLocals(a: std.mem.Allocator, buf: *Buf, r: *Reader) !void {
     try buf.append(a, ')');
 }
 
-/// Disassemble the instruction stream up to the body-terminating `end`.
+/// Disassemble the instruction stream up to the body-terminating `end`,
+/// each instruction rendered as `<raw bytes>  <mnemonic> <operands>`.
 /// `block` / `loop` / `if` raise indentation; their `end` lowers it and
 /// prints `end`. The outermost `end` closes the function (rendered by
 /// the caller's `)`), so it is consumed silently. Any decode failure or
 /// unsupported opcode appends a note and stops.
 fn disasmBody(a: std.mem.Allocator, buf: *Buf, r: *Reader) error{OutOfMemory}!void {
     var depth: u32 = 0; // structured-control nesting within the body
+    var line: Buf = .empty; // scratch for the current mnemonic + operands
+    defer line.deinit(a);
     while (true) {
+        const start = r.pos; // first byte of this instruction
         const opbyte = r.byte() catch return; // ran out — done
         const op = std.enums.fromInt(Op, opbyte) orelse {
-            try indent(a, buf, depth);
-            try print(a, buf, "(; unknown opcode 0x{x:0>2} — disassembly stopped ;)\n", .{opbyte});
+            line.clearRetainingCapacity();
+            try print(a, &line, "(; unknown opcode 0x{x:0>2} — disassembly stopped ;)", .{opbyte});
+            try emitInstr(a, buf, r.bytes[start..r.pos], depth, line.items);
             return;
         };
 
         if (op == .end) {
             if (depth == 0) return; // function terminator
             depth -= 1;
-            try indent(a, buf, depth);
-            try buf.appendSlice(a, "end\n");
+            try emitInstr(a, buf, r.bytes[start..r.pos], depth, "end");
             continue;
         }
         if (op == .@"else") {
             // Sits between the if's arms: render at the if's level, body
             // depth unchanged.
-            try indent(a, buf, if (depth == 0) 0 else depth - 1);
-            try buf.appendSlice(a, "else\n");
+            try emitInstr(a, buf, r.bytes[start..r.pos], if (depth == 0) 0 else depth - 1, "else");
             continue;
         }
 
-        try indent(a, buf, depth);
-        try appendMnemonic(a, buf, op);
-        appendImmediates(a, buf, r, op, opbyte) catch |e| switch (e) {
+        line.clearRetainingCapacity();
+        try appendMnemonic(a, &line, op);
+        appendImmediates(a, &line, r, op, opbyte) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
-                try buf.appendSlice(a, " (; truncated — disassembly stopped ;)\n");
+                try line.appendSlice(a, " (; truncated — disassembly stopped ;)");
+                try emitInstr(a, buf, r.bytes[start..r.pos], depth, line.items);
                 return;
             },
         };
-        try buf.append(a, '\n');
+        try emitInstr(a, buf, r.bytes[start..r.pos], depth, line.items);
 
         switch (op) {
             .block, .loop, .@"if", .try_table => depth += 1,
             else => {},
         }
+    }
+}
+
+/// Emit one disassembled instruction: indentation, the raw byte encoding
+/// (space-separated two-digit hex), two spaces, then `text` (the mnemonic
+/// and its operands).
+fn emitInstr(a: std.mem.Allocator, buf: *Buf, bytes: []const u8, depth: u32, text: []const u8) error{OutOfMemory}!void {
+    try indent(a, buf, depth);
+    try appendHex(a, buf, bytes);
+    try buf.appendSlice(a, "  ");
+    try buf.appendSlice(a, text);
+    try buf.append(a, '\n');
+}
+
+/// Space-separated two-digit hex for `bytes` (no per-byte allocation).
+fn appendHex(a: std.mem.Allocator, buf: *Buf, bytes: []const u8) error{OutOfMemory}!void {
+    const digits = "0123456789abcdef";
+    for (bytes, 0..) |b, i| {
+        if (i != 0) try buf.append(a, ' ');
+        try buf.append(a, digits[b >> 4]);
+        try buf.append(a, digits[b & 0x0f]);
     }
 }
 
@@ -490,9 +515,9 @@ test "toWat: an (i32,i32)->i32 adder" {
         \\(module
         \\  (type (;0;) (func (param i32 i32) (result i32)))
         \\  (func (;0;) (type 0)
-        \\    local.get 0
-        \\    local.get 1
-        \\    i32.add
+        \\    20 00  local.get 0
+        \\    20 01  local.get 1
+        \\    6a  i32.add
         \\  )
         \\  (export "add" (func 0))
         \\)
@@ -516,7 +541,7 @@ test "toWat: i32.const immediate and a result-only type" {
         \\(module
         \\  (type (;0;) (func (result i32)))
         \\  (func (;0;) (type 0)
-        \\    i32.const 7
+        \\    41 07  i32.const 7
         \\  )
         \\  (export "f" (func 0))
         \\)
