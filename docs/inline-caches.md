@@ -274,8 +274,9 @@ Tier 1 is empty as of `90b6f5b` — the proto-load read IC,
 own/write IC, `call_method` IC, fused `call_property`, global IC,
 free-function `call` IC, and `new_call` IC are all on `main`. The
 hot interpreter dispatch paths are IC-covered; future wins shift to
-Tier 2 / 3 below or to non-IC axes (leaf-call register-file
-inlining, threaded dispatch).
+Tier 2 / 3 below or to non-IC axes (cheaper call frames —
+see the leaf-call note at the end of this Tier — and threaded
+dispatch).
 
 The first non-IC axis landed across two commits — `realm.value_stack`,
 a bump-allocated register-file stack that frame-push sites try
@@ -305,6 +306,36 @@ LIFO discipline.
 Top-level `runFrames` entries (the one-shot allocations at realm
 boot) and the tail-call register-file reallocations stay on the
 pool by design.
+
+**Leaf-call note — the next call-path win is a smaller `CallFrame`,
+not arg-copy elision.** With `value_stack` landed, register *storage*
+is already inlined (a bump, not a malloc), so the classic
+"register-file inlining" via overlapping/coalesced register windows
+would only shave the per-argument cost. A measurement says that's the
+wrong target: a 0-arg leaf call in a 30M-iteration loop costs
+~13.7 ns of pure call overhead per call (810 ms vs 400 ms for the
+same loop inlined, no-jit ReleaseFast), and growing the call to
+8 arguments adds only ~1 ns/arg (810 → 1030 ms). The **fixed**
+per-call cost dominates — ~40-60 % of call-heavy code — and the
+per-arg cost (the arg-copy loop + register `@memset`) is already
+cheap. `reEnterDispatch` is an inline 6-field copy, also cheap. What
+remains is the `CallFrame` struct itself: ≈30 fields / ~176 bytes
+constructed and `append`ed on every call, plus the field loads off
+`callee_fn` and the return teardown — a 176-byte struct copy is ~6 ns
+on its own. The lever is therefore **shrinking `CallFrame`**: a
+hot/cold split that moves the ~10 rarely-read fields (`home_object`,
+`home_function`, `new_target`, `super_called_cell`,
+`is_derived_ctor`, `super_called`, `wrap_return_in_promise`,
+`generator`, `owning_module`, `running_realm`) behind a
+`cold: ?*ColdFrame` that is `null` for a plain call — roughly halving
+the per-call struct cost, an estimated ~10-20 % on call-heavy code.
+It is invasive (every cold-field read site — `super` call,
+return-from-derived-ctor, `import.meta`, generator yield, async
+return — must be provably reached only when `cold` is non-null), so
+it is deferred to a focused session rather than bolted on. The risk
+is bounded: test262's super / ctor / generator / async / module
+fixtures crash loudly on any `cold`-is-`null` violation, so a
+mistake is caught, not silent.
 
 ### Tier 2 — drained
 
