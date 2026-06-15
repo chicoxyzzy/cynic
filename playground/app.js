@@ -979,6 +979,34 @@ function renderAstResult(frame) {
   }
 }
 
+// WAT token highlighting — reuses the AST/bytecode palette: types ->
+// attr (blue), section heads + instruction mnemonics -> head (magenta),
+// strings -> green, numbers -> orange, comments -> muted italic, parens
+// -> muted. WAT carries no $-identifiers here (the disassembler emits
+// numeric indices).
+const WAT_TYPE_RE = /^(i32|i64|f32|f64|v128|funcref|externref|exnref)$/;
+const WAT_TOKEN_RE = /(?<comment>\(;[\s\S]*?;\))|(?<string>"(?:[^"\\]|\\.)*")|(?<paren>[()])|(?<word>[A-Za-z_][A-Za-z0-9_.]*)|(?<num>[-+]?\d[\w.]*)/g;
+
+function appendWatTokens(parent, line) {
+  let last = 0;
+  for (const m of line.matchAll(WAT_TOKEN_RE)) {
+    if (m.index > last) parent.appendChild(document.createTextNode(line.slice(last, m.index)));
+    const tok = m[0];
+    const span = document.createElement('span');
+    const cls =
+      m.groups.comment ? 'wat-tok-comment' :
+      m.groups.string  ? 'ast-tok-string' :
+      m.groups.paren   ? 'ast-tok-paren' :
+      m.groups.num     ? 'ast-tok-num' :
+      m.groups.word    ? (WAT_TYPE_RE.test(tok) ? 'ast-tok-attr' : 'ast-tok-head') : '';
+    if (cls) span.className = cls;
+    span.textContent = tok;
+    parent.appendChild(span);
+    last = m.index + tok.length;
+  }
+  if (last < line.length) parent.appendChild(document.createTextNode(line.slice(last)));
+}
+
 // The "wasm" inspector: WAT for the module the snippet builds. Unlike the
 // bytecode / AST views this *runs* the snippet — the module lives in the
 // bytes it passes to WebAssembly.Module / instantiate, and the engine
@@ -1003,7 +1031,7 @@ function renderWasmResult(frame) {
   for (const line of frame.value.split('\n')) {
     const el = document.createElement('span');
     el.className = 'bc-line out-stdout';
-    el.textContent = line;
+    appendWatTokens(el, line);
     els.output.appendChild(el);
   }
 }
