@@ -641,5 +641,21 @@ jobs:
       - name: GC stress sweep (ReleaseSafe, --gc-threshold=1)
         timeout-minutes: 20
         run: |
+          # The three `copyWithin/coerced-values-*-detached*` SECURITY
+          # fixtures each build a 10000-element array per TypedArray
+          # constructor (~11×) to make a use-after-free more likely if the
+          # detached buffer is touched. Under `--gc-threshold=1` every one
+          # of those ~100k allocations triggers a full young GC +
+          # `verifyRememberedSet` walk — quadratic, ~25s each at the
+          # default threshold but well past the 20-minute budget at
+          # threshold 1, which wedged the whole TypedArray bucket (the GC
+          # is mid-fixture, so the per-fixture watchdog can't preempt it).
+          # The detach-during-coercion path they exercise is independent of
+          # GC frequency, so excluding them from the threshold-1 sweep loses
+          # no rooting coverage. They still run in the conformance sweep
+          # (which already `--exclude`s the broader `copyWithin/coerced`).
+          # No-op for non-TypedArray buckets (no matching paths).
           zig build test262 -Doptimize=ReleaseSafe -- \
-            --gc-threshold=1 --threads=4 --filter=${{ matrix.bucket }}
+            --gc-threshold=1 --threads=4 --filter=${{ matrix.bucket }} \
+            --exclude=copyWithin/coerced-values-end-detached \
+            --exclude=copyWithin/coerced-values-start-detached
