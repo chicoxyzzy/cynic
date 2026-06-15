@@ -980,9 +980,10 @@ useful:
    length in x3, and the bounds check is overflow-safe — it traps on
    `ea > len` via a subtract's borrow rather than an `ea + n` that a near-
    2^64 memory64 address could wrap past), and the start of the i64 tier
-   (`i64.const`, i64 `local.get`/`set`/`tee`, and the i64 ALU
-   add/sub/mul/and/or/xor/shl/shr_s/shr_u as the X-form mirror of the i32
-   ops) — on the
+   (`i64.const`, i64 `local.get`/`set`/`tee`, the i64 ALU
+   add/sub/mul/and/or/xor/shl/shr_s/shr_u, and `eqz` + the ten i64
+   comparisons — a full 64-bit X-form `cmp` producing the i32 0/1 result —
+   all the X-form mirror of the i32 ops) — on the
    depth→register operand-stack machine, plus structured control
    flow: `block`/`end` + forward conditional `br_if`, `loop` +
    backward `br_if` (do-while), and unconditional `br` with a

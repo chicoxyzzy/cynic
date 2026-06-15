@@ -133,6 +133,17 @@ const op_i64_xor: u8 = 0x85;
 const op_i64_shl: u8 = 0x86;
 const op_i64_shr_s: u8 = 0x87;
 const op_i64_shr_u: u8 = 0x88;
+const op_i64_eqz: u8 = 0x50;
+const op_i64_eq: u8 = 0x51;
+const op_i64_ne: u8 = 0x52;
+const op_i64_lt_s: u8 = 0x53;
+const op_i64_lt_u: u8 = 0x54;
+const op_i64_gt_s: u8 = 0x55;
+const op_i64_gt_u: u8 = 0x56;
+const op_i64_le_s: u8 = 0x57;
+const op_i64_le_u: u8 = 0x58;
+const op_i64_ge_s: u8 = 0x59;
+const op_i64_ge_u: u8 = 0x5a;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -597,6 +608,43 @@ pub fn compile(
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
+            op_i64_eqz => {
+                // §4.3.10 i64.eqz — unary; 1 if the 64-bit operand is zero.
+                // The i32 result lands zero-extended in the slot register.
+                if (sp < 1) return null;
+                const ra = try materialize(&m, stack[sp - 1], sp - 1);
+                try m.movImm64(.x16, 0);
+                try m.emit(a64.cmpReg(ra, .x16));
+                try m.emit(a64.csetW(ra, .eq));
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u => {
+                // §4.3.10 i64 relops — a full 64-bit compare producing the
+                // i32 0/1 result (csetW zero-extends into the slot). The
+                // signed forms use the AArch64 signed conditions, the
+                // unsigned forms the carry-based ones, exactly as i32.
+                if (sp < 2) return null;
+                const b = stack[sp - 1];
+                const a = stack[sp - 2];
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                try m.emit(a64.cmpReg(ra, rb));
+                const cond: a64.Cond = switch (op) {
+                    op_i64_eq => .eq,
+                    op_i64_ne => .ne,
+                    op_i64_lt_s => .lt,
+                    op_i64_lt_u => .cc,
+                    op_i64_gt_s => .gt,
+                    op_i64_gt_u => .hi,
+                    op_i64_le_s => .le,
+                    op_i64_le_u => .ls,
+                    op_i64_ge_s => .ge,
+                    else => .cs, // ge_u
+                };
+                try m.emit(a64.csetW(ra, cond));
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_block => {
                 // §3.3.5 — push a control frame. The block's result
                 // arity comes from its block type; a `block` consumes no
@@ -950,7 +998,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u => {},
             else => return null, // unknown immediate width — degrade
         }
     }

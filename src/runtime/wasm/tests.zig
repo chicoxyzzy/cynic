@@ -710,6 +710,46 @@ test "wasm spasm: i64.add compiles and runs Spasm-compiled (full 64-bit)" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// An `(i64,i64)->i32` signed less-than exported as "lt": local.get 0;
+// local.get 1; i64.lt_s; end. The result type is i32 (a comparison).
+const i64_lt_s_body = [_]u8{
+    0x01, 0x07, 0x01, 0x60, 0x02, 0x7e, 0x7e, 0x01, 0x7f, // type (i64,i64)->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x6c, 0x74, 0x00, 0x00, // export "lt" -> 0
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x53, 0x0b, // local.get 0; local.get 1; i64.lt_s; end
+};
+
+test "wasm spasm: i64.lt_s compiles and compares the full 64 bits" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i64_lt_s_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i64_lt_s_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "lt") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    // 2^32 vs 1: a truncated 32-bit compare would see 0 < 1 and answer 1;
+    // the real 64-bit signed compare answers 0 (2^32 is not < 1).
+    cells[0] = @as(u128, 0x1_0000_0000);
+    cells[1] = @as(u128, 1);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {
