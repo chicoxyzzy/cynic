@@ -977,7 +977,12 @@ useful:
    memory accesses — full-width `load`/`store` plus the sign/zero-extending
    sub-width `load8_s`/`load8_u`/`load16_s`/`load16_u` and the narrowing
    `store8`/`store16` (the boundary passes the live memory base in x2 and
-   length in x3) — on the
+   length in x3, and the bounds check is overflow-safe — it traps on
+   `ea > len` via a subtract's borrow rather than an `ea + n` that a near-
+   2^64 memory64 address could wrap past), and the start of the i64 tier
+   (`i64.const`, i64 `local.get`/`set`/`tee`, and the i64 ALU
+   add/sub/mul/and/or/xor/shl/shr_s/shr_u as the X-form mirror of the i32
+   ops) — on the
    depth→register operand-stack machine, plus structured control
    flow: `block`/`end` + forward conditional `br_if`, `loop` +
    backward `br_if` (do-while), and unconditional `br` with a

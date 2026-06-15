@@ -123,6 +123,16 @@ const op_i32_load16_u: u8 = 0x2f;
 const op_i32_store: u8 = 0x36;
 const op_i32_store8: u8 = 0x3a;
 const op_i32_store16: u8 = 0x3b;
+const op_i64_const: u8 = 0x42;
+const op_i64_add: u8 = 0x7c;
+const op_i64_sub: u8 = 0x7d;
+const op_i64_mul: u8 = 0x7e;
+const op_i64_and: u8 = 0x83;
+const op_i64_or: u8 = 0x84;
+const op_i64_xor: u8 = 0x85;
+const op_i64_shl: u8 = 0x86;
+const op_i64_shr_s: u8 = 0x87;
+const op_i64_shr_u: u8 = 0x88;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -277,12 +287,20 @@ pub fn compile(
                 const idx = readUleb32(body, &i) orelse return null;
                 if (sp >= operand_reg_count) return null;
                 if (idx >= func.local_types.len) return null;
-                if (func.local_types[idx] != .i32) return null; // i32 locals only this increment
                 const cell_off = @as(u64, idx) * @sizeOf(Cell);
-                if (cell_off > 16380 or cell_off % 4 != 0) return null; // ldrImmW scaled-imm ceiling
-                // 32-bit load zero-extends the i32 from the cell's low
-                // word into the slot's register.
-                try m.emit(a64.ldrImmW(regForDepth(sp), .x0, @intCast(cell_off)));
+                switch (func.local_types[idx]) {
+                    // 32-bit load zero-extends the i32 from the cell's low word.
+                    .i32 => {
+                        if (cell_off > 16380 or cell_off % 4 != 0) return null; // ldrImmW ceiling
+                        try m.emit(a64.ldrImmW(regForDepth(sp), .x0, @intCast(cell_off)));
+                    },
+                    // 64-bit load reads the whole i64 from the cell's low 8 bytes.
+                    .i64 => {
+                        if (cell_off > 32760 or cell_off % 8 != 0) return null; // ldrImm ceiling
+                        try m.emit(a64.ldrImm(regForDepth(sp), .x0, @intCast(cell_off)));
+                    },
+                    else => return null, // f32/f64/v128/ref locals — degrade
+                }
                 stack[sp] = .{ .reg = regForDepth(sp) };
                 sp += 1;
             },
@@ -290,7 +308,8 @@ pub fn compile(
                 const idx = readUleb32(body, &i) orelse return null;
                 if (sp < 1) return null;
                 if (idx >= func.local_types.len) return null;
-                if (func.local_types[idx] != .i32) return null;
+                const lt = func.local_types[idx];
+                if (lt != .i32 and lt != .i64) return null; // i32/i64 locals
                 const cell_off = @as(u64, idx) * @sizeOf(Cell);
                 if (cell_off > 32760) return null; // strImm scaled-imm ceiling
                 // Materialize the top value (its slot register, or a
@@ -532,6 +551,52 @@ pub fn compile(
                     else => try m.emit(a64.strhRegW(rv, .x2, .x16)), // store16
                 }
             },
+            op_i64_const => {
+                // §4.4.1 i64.const — the Loc model only folds i32 consts,
+                // so materialize the 64-bit immediate straight into the
+                // slot's register.
+                const v = readSleb64(body, &i) orelse return null;
+                if (sp >= operand_reg_count) return null;
+                try m.movImm64(regForDepth(sp), @bitCast(v));
+                stack[sp] = .{ .reg = regForDepth(sp) };
+                sp += 1;
+            },
+            op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor => {
+                // §4.3 i64 ALU — the X-form mirror of the i32 ops. i64
+                // operands are always register-resident (no i64 const
+                // folding), so there is no compile-time fold path.
+                if (sp < 2) return null;
+                const a = stack[sp - 2];
+                const b = stack[sp - 1];
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                switch (op) {
+                    op_i64_add => try m.emit(a64.addReg(ra, ra, rb)),
+                    op_i64_sub => try m.emit(a64.subsReg(ra, ra, rb)), // SUBS; flags unused
+                    op_i64_and => try m.emit(a64.andReg(ra, ra, rb)),
+                    op_i64_or => try m.emit(a64.orrReg(ra, ra, rb)),
+                    op_i64_xor => try m.emit(a64.eorReg(ra, ra, rb)),
+                    else => try m.emit(a64.mul(ra, ra, rb)), // i64.mul — low 64 bits
+                }
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_i64_shl, op_i64_shr_s, op_i64_shr_u => {
+                // §4.3.10 i64 shifts — the count masks to 6 bits (mod 64),
+                // which the AArch64 variable-shift X-forms do for free.
+                if (sp < 2) return null;
+                const b = stack[sp - 1]; // count
+                const a = stack[sp - 2]; // value
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                switch (op) {
+                    op_i64_shl => try m.emit(a64.lslv(ra, ra, rb)),
+                    op_i64_shr_u => try m.emit(a64.lsrv(ra, ra, rb)),
+                    else => try m.emit(a64.asrv(ra, ra, rb)), // shr_s
+                }
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_block => {
                 // §3.3.5 — push a control frame. The block's result
                 // arity comes from its block type; a `block` consumes no
@@ -752,7 +817,9 @@ pub fn compile(
 
     const results = ftype.results;
     if (sp != results.len) return null;
-    for (results) |rt| if (rt != .i32) return null;
+    // i32 and i64 results both store from the slot register's low bytes
+    // (an i32 is zero-extended in its register), high cell word cleared.
+    for (results) |rt| if (rt != .i32 and rt != .i64) return null;
 
     // Materialize the residual stack into result cells. Wasm results
     // map bottom-of-stack → results[0]; an i32 cell is the value
@@ -813,14 +880,17 @@ fn materialize(m: *masm_mod.Masm, loc: Loc, depth: usize) CompileError!a64.Reg {
 }
 
 /// Emit a memory access's effective-address computation and bounds check
-/// (§4.4.7): `x16 = addr_reg + offset`, then trap to `oob` when
-/// `ea + n > mem_len` (x3). `addr_reg` holds a zero-extended i32 (≤ 2^32-1)
-/// and `offset` ≤ 2^32-1, so `ea` and `ea + n` (n ≤ 8) never wrap 64 bits;
-/// AArch64's unsigned `hi` is then exactly the spec's `ea + n > len`. The
-/// boundary keeps the live memory base in x2 and length in x3, untouched
-/// by codegen, so they stay valid for every access in the body. x16 holds
-/// the effective address on return — the load/store then addresses
-/// `[x2, x16]`.
+/// (§4.4.7): `x16 = addr_reg + offset`, then trap to `oob` when the
+/// `n`-byte access runs past `mem_len` (x3). The check is overflow-safe —
+/// `addr_reg` is an i32 address on a 32-bit memory but a full i64 on a
+/// memory64 module, so `ea` can be near 2^64. An `ea + n > len` form would
+/// let `ea + n` wrap a huge address back under the bound and then load off
+/// `[x2, ea]` out of bounds; instead this mirrors `rangeInBounds`: `subs`
+/// computes `mem_len - ea`, whose unsigned borrow (carry clear) catches
+/// `ea > mem_len` directly, then a second compare rejects `mem_len - ea <
+/// n`. The boundary keeps the memory base in x2 and length in x3, untouched
+/// by codegen; x4 is a free scratch. x16 holds the effective address on
+/// return — the load/store then addresses `[x2, x16]`.
 fn emitMemBounds(m: *masm_mod.Masm, addr_reg: a64.Reg, offset: u32, n: u32, oob: *masm_mod.Masm.Label) CompileError!void {
     if (offset <= 4095) {
         try m.emit(a64.addImm(.x16, addr_reg, @intCast(offset), false));
@@ -828,9 +898,11 @@ fn emitMemBounds(m: *masm_mod.Masm, addr_reg: a64.Reg, offset: u32, n: u32, oob:
         try m.movImm64(.x16, offset);
         try m.emit(a64.addReg(.x16, addr_reg, .x16));
     }
-    try m.emit(a64.addImm(.x17, .x16, @intCast(n), false)); // x17 = ea + n
-    try m.emit(a64.cmpReg(.x17, .x3)); // compare with mem_len
-    try m.jumpCond(.hi, oob); // ea + n > len -> out of bounds
+    try m.emit(a64.subsReg(.x17, .x3, .x16)); // x17 = mem_len - ea; carry clear iff ea > len
+    try m.jumpCond(.cc, oob); // ea > mem_len -> out of bounds
+    try m.movImm64(.x4, n);
+    try m.emit(a64.cmpReg(.x17, .x4));
+    try m.jumpCond(.cc, oob); // (mem_len - ea) < n -> out of bounds
 }
 
 /// Skip the unreachable code following an unconditional `br` (or
@@ -869,13 +941,16 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
             op_i32_const => {
                 _ = readSleb32(body, i) orelse return null;
             },
+            op_i64_const => {
+                _ = readSleb64(body, i) orelse return null;
+            },
             op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u, op_i32_store, op_i32_store8, op_i32_store16 => {
                 const flags = readUleb32(body, i) orelse return null;
                 if (flags & 0x40 != 0) return null; // multi-memory — degrade
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u => {},
             else => return null, // unknown immediate width — degrade
         }
     }
@@ -955,6 +1030,29 @@ fn readSleb32(body: []const u8, i: *usize) ?i32 {
         }
         shift += 7;
         if (shift >= 35) return null; // i32 LEB is at most 5 bytes
+    }
+    return null;
+}
+
+/// Signed LEB128 decoding an i64 (§5.2.2) — `i64.const`'s immediate.
+/// Null on a malformed / over-long sequence; the shift always stays ≤ 63
+/// at the point it is applied (the over-long guard fires first), so the
+/// casts never trap on a surprising byte (AGENTS.md robustness contract).
+fn readSleb64(body: []const u8, i: *usize) ?i64 {
+    var result: i64 = 0;
+    var shift: u7 = 0;
+    while (i.* < body.len) {
+        const byte = body[i.*];
+        i.* += 1;
+        result |= @as(i64, byte & 0x7f) << @as(u6, @intCast(shift));
+        if (byte & 0x80 == 0) {
+            if (shift < 63 and (byte & 0x40) != 0) {
+                result |= @as(i64, -1) << @as(u6, @intCast(shift + 7));
+            }
+            return result;
+        }
+        shift += 7;
+        if (shift >= 70) return null; // i64 LEB is at most 10 bytes
     }
     return null;
 }

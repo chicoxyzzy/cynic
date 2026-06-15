@@ -240,6 +240,28 @@ pub fn eorReg(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0xCA000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
 }
 
+/// MUL Xd, Xn, Xm — alias of MADD Xd, Xn, Xm, XZR. The low 64 bits of the
+/// product, which is exactly wasm i64.mul (mod 2^64).
+pub fn mul(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x9B007C00 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// LSLV Xd, Xn, Xm — shift left by the low 6 bits of Xm (count mod 64),
+/// exactly wasm i64.shl's masking.
+pub fn lslv(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x9AC02000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// LSRV Xd, Xn, Xm — logical (zero-fill) shift right; wasm i64.shr_u.
+pub fn lsrv(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x9AC02400 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// ASRV Xd, Xn, Xm — arithmetic (sign-fill) shift right; wasm i64.shr_s.
+pub fn asrv(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x9AC02800 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
 /// LSL Xd, Xn, #shift — alias of UBFM Xd, Xn, #(-shift MOD 64), #(63-shift).
 pub fn lslImm(rd: Reg, rn: Reg, shift: u6) u32 {
     const immr: u32 = @as(u32, 64 - @as(u32, shift)) & 0x3F;
