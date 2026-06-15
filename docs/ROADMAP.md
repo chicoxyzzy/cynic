@@ -1247,7 +1247,11 @@ and the per-builtin checklist; this section tracks status.
   Modeled on JSC DFG / V8 TurboFan or Maglev.
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,
-  Liftoff / Wizard-SPC shape; buries *asm* like its parent.
+  Liftoff / Wizard-SPC shape; buries *asm* like its parent. The
+  complete i32 + i64 integer ISA (ALU, comparisons, div/rem with
+  catchable traps, the memory family, width conversions) plus
+  structured control flow ships and is default-on for wasm; the float
+  tier (f32/f64) is next.
 
   The architecture for all three tiers — the shared codegen
   substrate and the JS↔wasm call-boundary fast path included — is

@@ -599,9 +599,12 @@ reviewed in PRs against `test262-results.md`.
                           re-exports the public API (`decode`,
                           `validateModule`, `instantiate`, `invoke`);
                           `interpreter.zig` holds the dispatch loop +
-                          runtime structs. Spasm, the planned baseline
-                          JIT tier, will live here as `spasm.zig`
-                          (docs/jit.md §6). Passes 100% of the
+                          runtime structs. Spasm, the baseline JIT tier
+                          (T1), lives in `spasm.zig` (docs/jit.md §6) —
+                          default-on for wasm, compiling the i32 + i64
+                          integer ISA and structured control flow, and
+                          degrading to the interpreter for the rest.
+                          Passes 100% of the
                           spec-testsuite commands it scores
                           (wasm-results.md — the scored set excludes
                           tests for unimplemented proposals). See

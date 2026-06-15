@@ -477,14 +477,18 @@ the measured design space:
   and the memory `is_64` flag** out of the per-access path into the
   side-table; **stack caching** (top-of-stack in a register, like
   Lantern); **superinstructions** for common opcode pairs; a guard-page
-  value stack. The real throughput jump comes from a **baseline JIT
-  tier** later (the ~10×→~2–3× step), which would consume the validated
+  value stack. The real throughput jump comes from the **baseline JIT
+  tier**, **Spasm** (the ~10×→~2–3× step), which consumes the validated
   module + side-table — exactly where V8/JSC/SM add Liftoff/BBQ over
-  their interpreters. That tier is **Spasm** — it buries *asm* the
-  way its parent does — single-pass, side-table-driven, on the
-  codegen substrate shared with the JS tiers; pinned in
-  [jit.md](jit.md) §6, with the JS↔wasm call-boundary fast path
-  (per-signature thunks, IC-integrated dispatch) in jit.md §7.1.
+  their interpreters. It now ships and is default-on for wasm — a
+  single-pass, side-table-driven compiler that buries *asm* the way its
+  parent does, on the codegen substrate shared with the JS tiers — and
+  covers the complete i32 + i64 integer ISA (ALU, comparisons, div/rem
+  with catchable traps, the memory family, conversions) plus structured
+  control flow, degrading to the interpreter for the float tier (next)
+  and everything else. Pinned in [jit.md](jit.md) §6, with the JS↔wasm
+  call-boundary fast path (per-signature thunks, IC-integrated dispatch)
+  in jit.md §7.1 (still deferred).
 - **Narrowing the operand cell was measured and declined** (2026-06).
   Splitting the 128-bit `Cell` into parallel 64-bit lanes (scalars in
   the low lane only) was prototyped and benchmarked on Apple Silicon:
