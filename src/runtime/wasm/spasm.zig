@@ -63,7 +63,7 @@ pub const Cell = u128;
 /// the matching `TrapError` (so a Spasm trap is indistinguishable from
 /// an interpreter trap at the boundary). This is the mechanism every
 /// trapping op reuses — divide-by-zero and memory bounds today.
-pub const EntryFn = *const fn (locals: [*]Cell, results: [*]Cell, mem_base: [*]u8, mem_len: u64) callconv(.c) u32;
+pub const EntryFn = *const fn (locals: [*]Cell, results: [*]Cell, mem_base: [*]u8, mem_len: u64, globals: [*]const *anyopaque) callconv(.c) u32;
 
 /// Trap status codes returned in w0 (see `EntryFn`). Kept in lockstep
 /// with the `w0` immediates the epilogue's trap exits emit.
@@ -92,6 +92,8 @@ const op_local_get: u8 = 0x20;
 const op_i32_const: u8 = 0x41;
 const op_local_set: u8 = 0x21;
 const op_local_tee: u8 = 0x22;
+const op_global_get: u8 = 0x23;
+const op_global_set: u8 = 0x24;
 const op_i32_clz: u8 = 0x67;
 const op_i32_ctz: u8 = 0x68;
 const op_i32_popcnt: u8 = 0x69;
@@ -324,8 +326,10 @@ pub fn compile(
     defer m.deinit();
 
     // The abstract operand stack (§6) — Locs are emitted into their
-    // depth's register on demand. x0 = locals (param+local cells),
-    // x1 = results (the boundary ABI).
+    // depth's register on demand. The boundary args: x0 = locals
+    // (param+local cells), x1 = results, x2 = mem_base, x3 = mem_len,
+    // x4 = globals base (an array of *Global). All five stay live across
+    // the body; codegen scratch is x5/x16/x17.
     var stack: [operand_reg_count]Loc = undefined;
     var sp: usize = 0;
 
@@ -443,6 +447,44 @@ pub fn compile(
                 };
                 try m.emit(a64.strImm(reg, .x0, @intCast(cell_off)));
                 if (op == op_local_set) sp -= 1;
+            },
+            op_global_get => {
+                // §4.4.5 global.get — x4 holds the instance globals base, an
+                // array of `*Global` pointers. Load the global's pointer
+                // (`[x4 + idx*8]`), then its value's low 64 bits (.value is at
+                // offset 0); a scalar global's high word is canonically zero,
+                // so the 64-bit read zero-extends an i32/f32. A v128 global
+                // would truncate, but it has no emittable consumer, so the
+                // function degrades at the op that would use it (or its result
+                // type at the epilogue).
+                const idx = readUleb32(body, &i) orelse return null;
+                if (@as(u64, idx) * 8 > 32760) return null; // ldrImm scaled-imm ceiling
+                if (sp >= operand_reg_count) return null;
+                const ra = regForDepth(sp);
+                try m.emit(a64.ldrImm(.x16, .x4, @intCast(idx * 8))); // *Global
+                try m.emit(a64.ldrImm(ra, .x16, 0)); // .value low 64
+                stack[sp] = .{ .reg = ra };
+                sp += 1;
+            },
+            op_global_set => {
+                // §4.4.6 global.set — store the top value's low 64 bits into
+                // the global's value slot, then pop. Validation guarantees the
+                // global is mutable, so no runtime check. x16 holds the
+                // `*Global`; a folded constant materializes into x17 first so
+                // the pointer load doesn't clobber it.
+                const idx = readUleb32(body, &i) orelse return null;
+                if (@as(u64, idx) * 8 > 32760) return null;
+                if (sp < 1) return null;
+                const reg = switch (stack[sp - 1]) {
+                    .reg => |r| r,
+                    .const_i32 => |v| blk: {
+                        try m.movImm64(.x17, @as(u32, @bitCast(v)));
+                        break :blk .x17;
+                    },
+                };
+                try m.emit(a64.ldrImm(.x16, .x4, @intCast(idx * 8))); // *Global
+                try m.emit(a64.strImm(reg, .x16, 0)); // store .value
+                sp -= 1;
             },
             op_i32_eqz => {
                 // §4.3.10 i32.eqz — unary: 1 if the operand is zero.
@@ -1551,7 +1593,8 @@ fn materialize(m: *masm_mod.Masm, loc: Loc, depth: usize) CompileError!a64.Reg {
 /// computes `mem_len - ea`, whose unsigned borrow (carry clear) catches
 /// `ea > mem_len` directly, then a second compare rejects `mem_len - ea <
 /// n`. The boundary keeps the memory base in x2 and length in x3, untouched
-/// by codegen; x4 is a free scratch. x16 holds the effective address on
+/// by codegen (x4 now carries the globals base); x5 is a free scratch.
+/// x16 holds the effective address on
 /// return — the load/store then addresses `[x2, x16]`.
 fn emitMemBounds(m: *masm_mod.Masm, addr_reg: a64.Reg, offset: u32, n: u32, oob: *masm_mod.Masm.Label) CompileError!void {
     if (offset <= 4095) {
@@ -1562,8 +1605,8 @@ fn emitMemBounds(m: *masm_mod.Masm, addr_reg: a64.Reg, offset: u32, n: u32, oob:
     }
     try m.emit(a64.subsReg(.x17, .x3, .x16)); // x17 = mem_len - ea; carry clear iff ea > len
     try m.jumpCond(.cc, oob); // ea > mem_len -> out of bounds
-    try m.movImm64(.x4, n);
-    try m.emit(a64.cmpReg(.x17, .x4));
+    try m.movImm64(.x5, n); // x5 scratch: x4 now carries the globals base
+    try m.emit(a64.cmpReg(.x17, .x5));
     try m.jumpCond(.cc, oob); // (mem_len - ea) < n -> out of bounds
 }
 
@@ -1649,7 +1692,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 depth -= 1;
             },
             op_else => {}, // stays within the enclosing `if`'s nesting
-            op_br, op_br_if, op_local_get, op_local_set, op_local_tee => {
+            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set => {
                 _ = readUleb32(body, i) orelse return null;
             },
             op_br_table => {
@@ -1845,7 +1888,7 @@ test "spasm: a const-return function compiles and returns its constant" {
 
     var results: [1]Cell = .{0};
     var locals: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0);
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -1870,7 +1913,7 @@ test "spasm: a negative constant sign-extends through the LEB path" {
         return error.SpasmRefusedTrivialFunction;
     var results: [1]Cell = .{0};
     var locals: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0);
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
     try testing.expectEqual(@as(i32, -7), @as(i32, @bitCast(@as(u32, @truncate(results[0])))));
 }
 
@@ -1885,7 +1928,7 @@ test "spasm: i32 add of two params compiles and computes" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [2]Cell = .{ 7, 35 };
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0);
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -1901,7 +1944,7 @@ test "spasm: i32 sub and mul of params compute" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 50, 8 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
     }
     // mul: 6 * 7 = 42 (and the low-32 truncation is clean)
@@ -1911,7 +1954,7 @@ test "spasm: i32 sub and mul of params compute" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 6, 7 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
     }
 }
@@ -1927,7 +1970,7 @@ test "spasm: i32 arithmetic folds two constants at compile time" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0);
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -1943,7 +1986,7 @@ test "spasm: i32 bitwise and/or/xor compute and fold" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 0b1110, 0b1011 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, 0b1010), @as(u32, @truncate(results[0])));
     }
     // or | xor folded: (5 | 2) ^ 3 = 7 ^ 3 = 4, all constant
@@ -1954,7 +1997,7 @@ test "spasm: i32 bitwise and/or/xor compute and fold" {
         const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
         var locals: [1]Cell = .{0};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, 4), @as(u32, @truncate(results[0])));
     }
 }
@@ -1970,7 +2013,7 @@ test "spasm: local.set writes a local that local.get reads back" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{99}; // overwritten by local.set
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0);
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 5), @as(u32, @truncate(results[0])));
 }
 
@@ -1985,7 +2028,7 @@ test "spasm: local.tee stores and leaves the value on the stack" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{99};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0);
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 14), @as(u32, @truncate(results[0])));
 }
 
@@ -2010,7 +2053,7 @@ test "spasm: i32 comparisons distinguish signed from unsigned" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ @as(u32, @bitCast(c.a)), @as(u32, @bitCast(c.b)) };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(c.want, @as(u32, @truncate(results[0])));
     }
 }
@@ -2026,7 +2069,7 @@ test "spasm: i32.eqz computes and folds" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
     // folded: i32.const 0; i32.eqz -> 1
@@ -2036,7 +2079,7 @@ test "spasm: i32.eqz computes and folds" {
     const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0);
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(results[0])));
 }
 
@@ -2058,7 +2101,7 @@ test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
         const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ @as(u32, @bitCast(c.a)), @as(u32, @bitCast(c.b)) };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(c.want, @as(u32, @truncate(results[0])));
     }
     // folded: i32.const 3; i32.const 2; i32.shl -> 12
@@ -2068,7 +2111,7 @@ test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
     const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0);
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 12), @as(u32, @truncate(results[0])));
 }
 
@@ -2087,7 +2130,7 @@ test "spasm: select picks an operand by the condition (branchless)" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [3]Cell = .{ 10, 20, pair[0] };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2105,7 +2148,7 @@ test "spasm: drop pops a value; nop is a no-op" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [2]Cell = .{ 42, 99 };
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0);
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -2139,7 +2182,7 @@ test "spasm: block with br_if picks a result by condition (forward branch)" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2172,7 +2215,7 @@ test "spasm: empty block with br_if as an early break (arity 0)" {
     inline for (.{ .{ 1, 42 }, .{ 0, 99 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2208,7 +2251,7 @@ test "spasm: nested block, br_if 1 exits two levels carrying a result" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2241,7 +2284,7 @@ test "spasm: loop with backward br_if accumulates (do-while)" {
     inline for (.{ .{ 1, 1 }, .{ 3, 6 }, .{ 5, 15 }, .{ 10, 55 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2274,7 +2317,7 @@ test "spasm: loop (result i32) iterates then yields its result" {
     inline for (.{ .{ 4, 10 }, .{ 6, 21 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2313,7 +2356,7 @@ test "spasm: while loop — br as continue, br_if as break" {
     inline for (.{ .{ 0, 0 }, .{ 1, 1 }, .{ 5, 15 }, .{ 6, 21 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2344,7 +2387,7 @@ test "spasm: br exits a block forward; dead code (nested block) is skipped" {
     const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0);
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -2375,7 +2418,7 @@ test "spasm: if/else picks a result arm by the condition" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2406,7 +2449,7 @@ test "spasm: if without else conditionally overwrites a local" {
     inline for (.{ .{ 1, 9 }, .{ 0, 5 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2445,7 +2488,7 @@ test "spasm: br_table dispatches by index to distinct block ends" {
     inline for (.{ .{ 0, 10 }, .{ 1, 7 }, .{ 3, 7 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0);
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }

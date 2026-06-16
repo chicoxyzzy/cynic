@@ -1699,6 +1699,83 @@ test "wasm spasm: i64.popcnt counts set bits via CNT+ADDV (X-form)" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// A `()->i32` reading a mutable i32 global initialized to 42: a global
+// section (id 6) declares one mutable i32 (init `i32.const 42`), and the
+// body is `global.get 0; end`. (0x23 = global.get.)
+const global_get_body = [_]u8{
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type ()->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x2a, 0x0b, // global: mutable i32 = 42
+    0x07, 0x05, 0x01, 0x01, 0x67, 0x00, 0x00, // export "g" -> 0
+    0x0a, 0x06, 0x01, 0x04, 0x00, 0x23, 0x00, 0x0b, // global.get 0; end
+};
+
+test "wasm spasm: global.get reads the instance global" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + global_get_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &global_get_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "g") orelse return error.NoSuchExport;
+    const res = try interp.invoke(&instance, testing.allocator, fidx, &.{});
+    defer testing.allocator.free(res);
+
+    // global.get 0 reads the init value, 42.
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+// An `(i32)->i32` round-trip through a mutable i32 global (init 0): the
+// body is `local.get 0; global.set 0; global.get 0; end`, so it stores the
+// argument and reads it back. (0x24 = global.set, 0x23 = global.get.)
+const global_set_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, // type (i32)->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x00, 0x0b, // global: mutable i32 = 0
+    0x07, 0x05, 0x01, 0x01, 0x67, 0x00, 0x00, // export "g" -> 0
+    0x0a, 0x0a, 0x01, 0x08, 0x00, 0x20, 0x00, 0x24, 0x00, 0x23, 0x00, 0x0b, // local.get 0; global.set 0; global.get 0; end
+};
+
+test "wasm spasm: global.set then global.get round-trips" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + global_set_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &global_set_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "g") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u32, 99));
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // The global was set to 99, then read back.
+    try testing.expectEqual(@as(u32, 99), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // An `(f64,f64)->i32` ordered less-than exported as "lt": local.get 0;
 // local.get 1; f64.lt; end. (0x63 is f64.lt; the result is an i32.)
 const f64_lt_body = [_]u8{

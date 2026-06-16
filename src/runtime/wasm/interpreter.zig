@@ -1279,6 +1279,15 @@ fn spasmRun(
     const mem_base: [*]u8 = if (has_mem) instance.memories[0].data.ptr else @ptrCast(locals.ptr);
     const mem_len: u64 = if (has_mem) instance.memories[0].data.len else 0;
 
+    // The instance globals — an array of `*Global` pointers (compiled
+    // global.get/set double-indirect through it: base + idx*8 -> *Global
+    // -> .value). A globals-free module never emits a global op, so the
+    // dummy base is never dereferenced.
+    const globals_base: [*]const *anyopaque = if (instance.globals.len > 0)
+        @ptrCast(instance.globals.ptr)
+    else
+        @ptrCast(locals.ptr);
+
     // The trap channel (spasm.EntryFn): a non-zero status means the body
     // trapped before writing results. Map it to the matching TrapError so
     // a Spasm trap surfaces exactly like the interpreter's — the JS
@@ -1288,7 +1297,7 @@ fn spasmRun(
     // proving a trap came from compiled code reads `spasm_runs`). A status
     // the switch can't map degrades, so the increment is rolled back there.
     instance.spasm_runs += 1;
-    switch (entry(locals.ptr, results.ptr, mem_base, mem_len)) {
+    switch (entry(locals.ptr, results.ptr, mem_base, mem_len, globals_base)) {
         spasm.trap_ok => {},
         spasm.trap_divide_by_zero => return error.IntegerDivideByZero,
         spasm.trap_int_overflow => return error.IntegerOverflow,

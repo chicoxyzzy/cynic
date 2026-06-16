@@ -1087,15 +1087,17 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (calls, globals, tables, bulk memory, SIMD) degrade, so the suite still
+   (calls, tables, bulk memory, SIMD) degrade, so the suite still
    covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
    set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
    and sign-extends, and every float↔int
-   conversion (trapping and saturating) — the whole scalar wasm ALU;
-   calls, globals, and the reference/SIMD families are the remaining
-   frontier, along with the side-table-as-control-oracle wiring (§6) that
-   would make multi-target `br_table` cheap.
+   conversion (trapping and saturating) — the whole scalar wasm ALU — plus
+   `global.get`/`global.set` (a fifth boundary register, x4, carries the
+   instance globals base; the ops double-indirect through it to the
+   global's value cell); calls and the reference/SIMD families are the
+   remaining frontier, along with the side-table-as-control-oracle wiring
+   (§6) that would make multi-target `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.
