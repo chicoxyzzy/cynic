@@ -3,8 +3,11 @@
 [![CI](https://github.com/chicoxyzzy/cynic/actions/workflows/ci.yml/badge.svg)](https://github.com/chicoxyzzy/cynic/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/chicoxyzzy/cynic/actions/workflows/codeql.yml/badge.svg)](https://github.com/chicoxyzzy/cynic/actions/workflows/codeql.yml)
 [![Playground](https://github.com/chicoxyzzy/cynic/actions/workflows/playground.yml/badge.svg)](https://github.com/chicoxyzzy/cynic/actions/workflows/playground.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A strict-only ECMAScript engine, written from scratch in Zig.
+
+**[Try it in your browser →](https://chicoxyzzy.github.io/cynic/playground/)** — run JavaScript in Cynic, no install.
 
 Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
 — and omits the web-compatibility surfaces by design:
