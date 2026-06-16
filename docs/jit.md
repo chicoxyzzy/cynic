@@ -1010,7 +1010,9 @@ useful:
    of the representation conversions — the four reinterprets (free: a
    reinterpret only relabels the type, and the bits already sit in the GP
    slot) plus `f32.demote_f64` / `f64.promote_f32` (the cross-precision
-   `FCVT`s)). A float keeps living in its slot's GP register as raw
+   `FCVT`s) and the int→float conversions (`SCVTF` / `UCVTF`, which read
+   the integer straight from the GP slot — signed and unsigned, i32 and
+   i64 sources, both result precisions)). A float keeps living in its slot's GP register as raw
    bits — an FP op bridges those bits into a v-register (`fmov` to v16/v17,
    a distinct register file from the GP x16/x17 scratch), computes in the
    FP unit, and bridges back — so the operand-stack model is unchanged and

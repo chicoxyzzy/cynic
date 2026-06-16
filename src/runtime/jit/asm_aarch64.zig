@@ -568,6 +568,52 @@ pub fn fcvtStoD(fd: Reg, sn: Reg) u32 {
     return 0x1E22C000 | (r(sn) << 5) | r(fd);
 }
 
+// Integer→float conversions (SCVTF/UCVTF). These read the integer
+// straight from a GP register (Rn) and write the FP register (Rd) — no
+// input bridge — so the wasm `convert` ops only `fmov` the result back.
+// `sf` (the 0x80000000 bit) selects a 64-bit (X) vs 32-bit (W) source;
+// `type` (the 0x400000 bit) selects a double (D) vs single (S) result.
+
+/// SCVTF Sd, Wn — signed i32 → f32.
+pub fn scvtfSfromW(fd: Reg, wn: Reg) u32 {
+    return 0x1E220000 | (r(wn) << 5) | r(fd);
+}
+
+/// SCVTF Sd, Xn — signed i64 → f32.
+pub fn scvtfSfromX(fd: Reg, xn: Reg) u32 {
+    return 0x9E220000 | (r(xn) << 5) | r(fd);
+}
+
+/// SCVTF Dd, Wn — signed i32 → f64.
+pub fn scvtfDfromW(fd: Reg, wn: Reg) u32 {
+    return 0x1E620000 | (r(wn) << 5) | r(fd);
+}
+
+/// SCVTF Dd, Xn — signed i64 → f64.
+pub fn scvtfDfromX(fd: Reg, xn: Reg) u32 {
+    return 0x9E620000 | (r(xn) << 5) | r(fd);
+}
+
+/// UCVTF Sd, Wn — unsigned i32 → f32.
+pub fn ucvtfSfromW(fd: Reg, wn: Reg) u32 {
+    return 0x1E230000 | (r(wn) << 5) | r(fd);
+}
+
+/// UCVTF Sd, Xn — unsigned i64 → f32.
+pub fn ucvtfSfromX(fd: Reg, xn: Reg) u32 {
+    return 0x9E230000 | (r(xn) << 5) | r(fd);
+}
+
+/// UCVTF Dd, Wn — unsigned i32 → f64.
+pub fn ucvtfDfromW(fd: Reg, wn: Reg) u32 {
+    return 0x1E630000 | (r(wn) << 5) | r(fd);
+}
+
+/// UCVTF Dd, Xn — unsigned i64 → f64.
+pub fn ucvtfDfromX(fd: Reg, xn: Reg) u32 {
+    return 0x9E630000 | (r(xn) << 5) | r(fd);
+}
+
 /// FCMP Sn, Sm — single-precision compare (same condition mapping as fcmpD).
 pub fn fcmpS(sn: Reg, sm: Reg) u32 {
     return 0x1E202000 | (r(sm) << 16) | (r(sn) << 5);
