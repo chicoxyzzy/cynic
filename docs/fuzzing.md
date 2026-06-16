@@ -291,6 +291,28 @@ Anything else is ignored — extending the op set requires both an
 engine change in `src/runtime/builtins/fuzzilli.zig` and matching
 profile changes in `CynicProfile.swift`.
 
+## Differential fuzzing (finding miscompiles)
+
+The base `cynic` profile finds crashes. To find **silent
+miscompiles** — a wrong value with no crash — `cynic-fuzz` also
+supports an interpreter-vs-JIT differential via three argv flags:
+
+- `--jit` — run with Bistromath on, tier-up threshold forced to 1.
+- `--diff` — after each sample, write a canonical completion-value
+  digest to fd 103 so Fuzzilli's fuzzout oracle can compare two runs.
+- `--diff-self-test` — perturb that digest (harness validation only).
+
+The matching Fuzzilli side — a fuzzout-comparison oracle and a
+separate `cynicDiff` profile (target `--jit --diff` vs reference
+`--diff`) — ships as [`docs/fuzzilli/CynicDiffProfile.swift`](fuzzilli/CynicDiffProfile.swift)
+plus [`docs/fuzzilli/cynic-diff-oracle.patch`](fuzzilli/cynic-diff-oracle.patch),
+applied to a local Fuzzilli clone the same way the base profile is.
+Because both halves are the same engine at the same posture, the
+carve-outs below never fire as false positives. See
+[docs/fuzz-differential.md](fuzz-differential.md) for the full design,
+why a cross-engine (interpreter-conformance) differential is deferred,
+and the trigger condition to revisit it.
+
 ## The coverage protocol
 
 `cynic-fuzz` builds with `-fsanitize-coverage=trace-pc-guard` so

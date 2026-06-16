@@ -51,7 +51,30 @@ pub fn main(init: std.process.Init) !void {
         const raw = init.minimal.environ.getPosix("FUZZ_GC_THRESHOLD") orelse break :blk null;
         break :blk std.fmt.parseInt(u32, raw, 10) catch null;
     };
-    fuzz_reprl.run(init.gpa, gc_threshold, coverage.reset) catch |err| switch (err) {
+
+    // Differential-mode flags (docs/fuzz-differential.md). These come
+    // from argv rather than the environment because Fuzzilli shares
+    // one `processEnv` across both halves of a differential pair —
+    // only `processArgs` vs `processArgsReference` can differ, so the
+    // interpreter and JIT runners are distinguished by these flags.
+    // Unknown args are ignored: a fuzz host must not abort on a flag
+    // it doesn't recognize (Fuzzilli may inject its own).
+    var options = fuzz_reprl.Options{ .gc_threshold = gc_threshold };
+    var arg_it = std.process.Args.Iterator.init(init.minimal.args);
+    _ = arg_it.skip(); // argv[0]
+    while (arg_it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--jit")) {
+            options.jit = true;
+        } else if (std.mem.eql(u8, arg, "--diff")) {
+            options.emit_digest = true;
+        } else if (std.mem.eql(u8, arg, "--diff-self-test")) {
+            // A digest to perturb is a prerequisite for the self-test.
+            options.emit_digest = true;
+            options.self_test = true;
+        }
+    }
+
+    fuzz_reprl.run(init.gpa, options, coverage.reset) catch |err| switch (err) {
         error.UnsupportedPlatform => {
             try std.Io.File.stderr().writeStreamingAll(init.io, "error: `cynic-fuzz` is not supported on this platform (Fuzzilli is POSIX-only)\n");
             std.process.exit(2);

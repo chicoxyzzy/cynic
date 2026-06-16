@@ -10,11 +10,18 @@
 //! — the runner surfaces that as a focused error rather than
 //! crashing.
 //!
-//! Posture is fixed: `--unhardened` + `--allow=eval` +
+//! Base posture is fixed: `--unhardened` + `--allow=eval` +
 //! `installTestGlobals` (so the `fuzzilli(op, arg)` host hook is
 //! reachable). Hardened fuzzing — frozen primordials confining
 //! mutation — can get its own host entry later if it's worth the
 //! reduced reachable behavior.
+//!
+//! Three argv flags layer on top for native differential fuzzing
+//! (docs/fuzz-differential.md), parsed in `fuzz_main`: `--jit` tiers
+//! the run up to Bistromath, `--diff` writes a completion-value
+//! digest to fd 103 after each sample, and `--diff-self-test`
+//! perturbs that digest to validate the parent's oracle. The plain
+//! crash-finding profile passes none of them and is unaffected.
 //!
 //! Protocol summary (V8 / JSC / SpiderMonkey converge on this):
 //!   - fd 100 (CRFD): engine reads control commands from Fuzzilli
@@ -35,6 +42,41 @@ const builtin = @import("builtin");
 const cynic = @import("cynic");
 
 const Realm = cynic.runtime.Realm;
+const Value = cynic.runtime.Value;
+const JSString = cynic.runtime.JSString;
+const RunResult = cynic.runtime.lantern.RunResult;
+
+/// Per-run knobs parsed from `cynic-fuzz`'s argv (see `fuzz_main`).
+/// `processEnv` is shared between Fuzzilli's target and reference
+/// runners, so the only way to give the two halves of a differential
+/// pair different postures is via `processArgs` vs
+/// `processArgsReference` — i.e. these come from the command line,
+/// not the environment.
+pub const Options = struct {
+    /// Per-fixture allocation-pressure GC threshold (the
+    /// `FUZZ_GC_THRESHOLD` env-var knob; see `fuzz_main`). `null`
+    /// leaves the engine default.
+    gc_threshold: ?u32 = null,
+    /// `--jit`: tier hot chunks up to Bistromath and force-compile
+    /// every eligible chunk on its first call (`jit_threshold_override
+    /// = 1`). The differential target sets this; the reference runs
+    /// the interpreter, so the pair is an interpreter-vs-JIT
+    /// correctness diff (docs/fuzz-differential.md). A comptime no-op
+    /// on hosts without codegen support (docs/jit.md §8).
+    jit: bool = false,
+    /// `--diff`: after each sample, write a canonical digest of the
+    /// completion outcome to fd 103 (Fuzzilli's differential sink) so
+    /// the parent's fuzzout oracle can compare the two runs. Off for
+    /// the plain crash-finding profile, on for both halves of a
+    /// differential pair.
+    emit_digest: bool = false,
+    /// `--diff-self-test`: perturb the emitted digest with a sentinel
+    /// so the two halves of a differential pair disagree on every
+    /// sample. Pure harness validation — it proves the oracle fires
+    /// end-to-end without needing a real JIT miscompile. Never set in
+    /// a real fuzzing run.
+    self_test: bool = false,
+};
 
 /// Control / data file descriptor numbers Fuzzilli pre-opens
 /// before exec'ing the engine. Hard-coded constants on both sides
@@ -182,7 +224,7 @@ fn readIteration(allocator: std.mem.Allocator) !?[]u8 {
 /// while the engine's snapshot / fast-reset machinery is still in
 /// design. Iteration rate optimization lands with the coverage
 /// commit when there's actual perf signal to chase.
-fn executeOne(allocator: std.mem.Allocator, source: []const u8, gc_threshold: ?u32) u8 {
+fn executeOne(allocator: std.mem.Allocator, source: []const u8, options: Options) u8 {
     var realm = Realm.init(allocator);
     defer realm.deinit();
     // Fuzzilli mutates prototypes and constructs runtime code; the
@@ -192,7 +234,15 @@ fn executeOne(allocator: std.mem.Allocator, source: []const u8, gc_threshold: ?u
     // every `Function(string)` / direct `eval(...)` Fuzzilli emits.
     realm.hardened = false;
     realm.allow_eval = true;
-    if (gc_threshold) |n| realm.heap.setGcThreshold(n);
+    if (options.jit) {
+        // docs/fuzz-differential.md — the differential target tiers up
+        // to Bistromath and force-compiles every eligible chunk on its
+        // first call so even a sample that runs each function once
+        // exercises the JIT path. The reference half leaves this off.
+        realm.jit_enabled = true;
+        realm.jit_threshold_override = 1;
+    }
+    if (options.gc_threshold) |n| realm.heap.setGcThreshold(n);
     realm.installBuiltins() catch return 1;
     // `fuzzilli(op, arg)` lives here — same install path as the
     // other host-only debug hooks. See `installTestGlobals`.
@@ -204,7 +254,127 @@ fn executeOne(allocator: std.mem.Allocator, source: []const u8, gc_threshold: ?u
     // at the top level still reaches the crash on the iteration
     // that scheduled it.
     cynic.runtime.lantern.drainMicrotasks(allocator, &realm) catch {};
+    // Differential sink: emit the completion-value digest before the
+    // `defer realm.deinit()` runs, while the heap that backs the
+    // `Value` is still alive. Computed without re-entering JS — no
+    // user `toString`, so it can't perturb GC state or leak the
+    // non-determinism a user callback would.
+    if (options.emit_digest) emitDigest(outcome, options.self_test);
     return outcomeToExitCode(outcome);
+}
+
+/// Tiny fixed-capacity formatter. The digest is short and bounded
+/// (a tag byte + at most a u64 in hex + a length), so a stack buffer
+/// with manual length tracking avoids any allocation and any reliance
+/// on the churning 0.17-dev stream/writer surface — it builds on the
+/// one formatting primitive the rest of this host already uses
+/// (`std.fmt.bufPrint`). An overrun silently truncates: a digest can
+/// only collide *more* on truncation, never produce a false
+/// divergence between two identical-content runs (both truncate the
+/// same way).
+const DigestBuf = struct {
+    bytes: [96]u8 = undefined,
+    len: usize = 0,
+
+    fn append(self: *DigestBuf, comptime fmt: []const u8, args: anytype) void {
+        const slice = std.fmt.bufPrint(self.bytes[self.len..], fmt, args) catch return;
+        self.len += slice.len;
+    }
+
+    fn written(self: *const DigestBuf) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+/// Write a one-line canonical digest of the sample's completion
+/// outcome to fd 103 (Fuzzilli's `FUZZILLI_PRINT` / fuzzout channel).
+/// Fuzzilli's fuzzout differential oracle (docs/fuzz-differential.md)
+/// compares this line across the JIT and interpreter runs of the same
+/// sample; a mismatch is a candidate miscompile.
+///
+/// Silent no-op when fd 103 isn't open (running outside REPRL) — the
+/// same contract as the `fuzzilli('FUZZILLI_PRINT', …)` host hook.
+fn emitDigest(outcome: anyerror!RunResult, self_test: bool) void {
+    var buf = DigestBuf{};
+    if (outcome) |r| {
+        switch (r) {
+            // Tag byte distinguishes returned / thrown / yielded so a
+            // thrown `5` can't read identical to a returned `5`.
+            .value => |v| {
+                buf.append("V", .{});
+                appendValueDigest(&buf, v);
+            },
+            .thrown => |v| {
+                buf.append("T", .{});
+                appendValueDigest(&buf, v);
+            },
+            // A top-level script can't end mid-yield, but tag it rather
+            // than assert — a fuzz host never trusts its own invariants.
+            .yielded => |v| {
+                buf.append("Y", .{});
+                appendValueDigest(&buf, v);
+            },
+        }
+    } else |_| {
+        // A host-side parse / compile failure — no Value to digest.
+        buf.append("E", .{});
+    }
+    // `--diff-self-test`: append a sentinel so the perturbed half of a
+    // differential pair disagrees with the unperturbed half on every
+    // sample, proving the oracle fires without a real miscompile.
+    if (self_test) buf.append("#ST", .{});
+    buf.append("\n", .{});
+    writeAll(DWFD, buf.written()) catch {};
+}
+
+/// FNV-1a over a byte slice. A digest hash — collision-resistant
+/// enough that two different strings of equal length are
+/// overwhelmingly likely to differ, and stable across runs so the
+/// JIT and interpreter halves agree on identical content.
+fn fnv1a(bytes: []const u8) u64 {
+    var h: u64 = 0xcbf2_9ce4_8422_2325;
+    for (bytes) |b| {
+        h ^= b;
+        h *%= 0x0000_0100_0000_01b3;
+    }
+    return h;
+}
+
+/// Append a canonical, allocation-free, no-re-entry digest of `v`.
+/// Primitives serialize exactly (the high-value case: a JIT
+/// arithmetic / comparison / string-length miscompile surfaces as a
+/// differing primitive digest). Heap objects collapse to a type tag
+/// — their identity is a non-deterministic heap address, and deep
+/// structural compare is out of scope for this differential.
+fn appendValueDigest(buf: *DigestBuf, v: Value) void {
+    if (v.isUndefined()) {
+        buf.append("u", .{});
+    } else if (v.isNull()) {
+        buf.append("n", .{});
+    } else if (v.isBool()) {
+        buf.append("b{d}", .{@intFromBool(v.asBool())});
+    } else if (v.isInt32()) {
+        buf.append("i{d}", .{v.asInt32()});
+    } else if (v.isDouble()) {
+        // Raw IEEE-754 bits: exact, deterministic, and distinguishes
+        // +0 from -0. NaN is already canonical (`Value.fromDouble`),
+        // so every NaN hashes identically across the two runs.
+        const bits: u64 = @bitCast(v.asDouble());
+        buf.append("d{x}", .{bits});
+    } else if (v.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(v.asString()));
+        if (s.flatBytesIfFlat()) |bytes| {
+            buf.append("s{d}:{x}", .{ bytes.len, fnv1a(bytes) });
+        } else {
+            // Rope — skip the flatten allocation (a fuzz host must not
+            // add an OOM path here); the code-unit length is enough
+            // signal for a digest.
+            buf.append("s{d}~", .{s.length_cu});
+        }
+    } else {
+        // Object / function / symbol / bigint — all heap-tagged.
+        buf.append("o", .{});
+    }
 }
 
 /// Entry point: handshake, then loop until EOF on the control
@@ -217,7 +387,7 @@ fn executeOne(allocator: std.mem.Allocator, source: []const u8, gc_threshold: ?u
 /// uninstrumented host (e.g. a protocol smoke test) passes null.
 pub fn run(
     allocator: std.mem.Allocator,
-    gc_threshold: ?u32,
+    options: Options,
     on_iteration_start: ?*const fn () void,
 ) RunError!void {
     if (comptime builtin.os.tag == .windows) {
@@ -227,7 +397,7 @@ pub fn run(
     while (try readIteration(allocator)) |source| {
         defer allocator.free(source);
         if (on_iteration_start) |cb| cb();
-        const exit_code = executeOne(allocator, source, gc_threshold);
+        const exit_code = executeOne(allocator, source, options);
         const status = encodeStatus(exit_code);
         try writeAll(CWFD, &status);
     }
@@ -246,6 +416,90 @@ const testing = std.testing;
 test "fuzz_reprl: decodeScriptSize parses little-endian u64" {
     const bytes: [8]u8 = .{ 0x37, 0x13, 0, 0, 0, 0, 0, 0 };
     try testing.expectEqual(@as(u64, 0x1337), decodeScriptSize(bytes));
+}
+
+/// Digest `v` into a caller-owned `DigestBuf`. The buffer must
+/// outlive the returned slice — each assertion below uses its own so
+/// two digests can be compared without aliasing a shared buffer.
+fn digestInto(out: *DigestBuf, v: Value) []const u8 {
+    out.* = DigestBuf{};
+    appendValueDigest(out, v);
+    return out.written();
+}
+
+test "fuzz_reprl: appendValueDigest serializes primitives canonically" {
+    var b: DigestBuf = undefined;
+    try testing.expectEqualStrings("u", digestInto(&b, Value.undefined_));
+    try testing.expectEqualStrings("n", digestInto(&b, Value.null_));
+    try testing.expectEqualStrings("b1", digestInto(&b, Value.true_));
+    try testing.expectEqualStrings("b0", digestInto(&b, Value.false_));
+    try testing.expectEqualStrings("i42", digestInto(&b, Value.fromInt32(42)));
+    try testing.expectEqualStrings("i-7", digestInto(&b, Value.fromInt32(-7)));
+    // Object-tagged values collapse to a single type tag.
+    try testing.expectEqualStrings("o", digestInto(&b, Value.fromObject(@ptrFromInt(0x1000))));
+}
+
+test "fuzz_reprl: appendValueDigest distinguishes +0, -0, and NaN doubles" {
+    // The int32 fast-path owns small integers, so use non-fast-path
+    // doubles for the value tests. ±0 must differ (observable via
+    // `Object.is`); NaN must be stable (canonicalized in Value).
+    // Each digest gets its own buffer so the slices don't alias.
+    var z0: DigestBuf = undefined;
+    var z1: DigestBuf = undefined;
+    try testing.expect(!std.mem.eql(
+        u8,
+        digestInto(&z0, Value.fromDouble(0.0)),
+        digestInto(&z1, Value.fromDouble(-0.0)),
+    ));
+
+    var na: DigestBuf = undefined;
+    var nb: DigestBuf = undefined;
+    try testing.expectEqualStrings(
+        digestInto(&na, Value.fromDouble(std.math.nan(f64))),
+        digestInto(&nb, Value.fromDouble(-std.math.nan(f64))),
+    );
+
+    // A genuine double value is exact and reproducible across calls,
+    // and two distinct values produce distinct digests.
+    var da: DigestBuf = undefined;
+    var db: DigestBuf = undefined;
+    try testing.expectEqualStrings(
+        digestInto(&da, Value.fromDouble(1.5)),
+        digestInto(&db, Value.fromDouble(1.5)),
+    );
+    try testing.expect(!std.mem.eql(
+        u8,
+        digestInto(&da, Value.fromDouble(1.5)),
+        digestInto(&db, Value.fromDouble(2.5)),
+    ));
+}
+
+test "fuzz_reprl: executeOne agrees under JIT and interpreter on benign scripts" {
+    // The differential PoC's premise: for a correct engine the JIT and
+    // interpreter halves return the same per-sample exit code. Exercise
+    // the exact fuzz JIT posture (`jit_enabled` + `jit_threshold_override
+    // = 1`) on a handful of benign samples and confirm neither hangs nor
+    // diverges from the interpreter.
+    const cases = [_][]const u8{
+        "1 + 1;",
+        "var x = 0; for (var i = 0; i < 64; i++) { x += i; } x;",
+        "function f(n) { return n * 2; } var s = 0; for (var i = 0; i < 64; i++) s += f(i); s;",
+        "'a' + 'b' + 'c';",
+        "throw new Error('boom');",
+    };
+    for (cases) |src| {
+        const interp = executeOne(testing.allocator, src, .{});
+        const jit = executeOne(testing.allocator, src, .{ .jit = true });
+        try testing.expectEqual(interp, jit);
+    }
+}
+
+test "fuzz_reprl: fnv1a is stable and content-sensitive" {
+    try testing.expectEqual(fnv1a("hello"), fnv1a("hello"));
+    try testing.expect(fnv1a("hello") != fnv1a("hellp"));
+    // The published FNV-1a 64-bit seed digests the empty string to
+    // the offset basis unchanged.
+    try testing.expectEqual(@as(u64, 0xcbf2_9ce4_8422_2325), fnv1a(""));
 }
 
 test "fuzz_reprl: decodeScriptSize handles a full 64-bit value" {

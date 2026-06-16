@@ -1,0 +1,173 @@
+Sources/Fuzzilli/Configuration.swift       |  9 +++++-
+ Sources/Fuzzilli/Execution/Execution.swift | 26 ++++++++++++++++
+ Sources/Fuzzilli/Fuzzer.swift              | 49 ++++++++++++++++++++++++++++++
+ Sources/Fuzzilli/Profiles/Profile.swift    | 18 +++++++++++
+ Sources/FuzzilliCli/main.swift             |  6 ++--
+ 5 files changed, 105 insertions(+), 3 deletions(-)
+
+--- Changes ---
+
+Sources/Fuzzilli/Configuration.swift
+  @@ -109,6 +109,11 @@ public struct Configuration {
+  +    // When true, differential runs compare the fd-103 fuzzout output of
+  +    // the two runs (Profile.differentialMode == .fuzzout) instead of the
+  +    // on-disk V8 frame dumps. Set by the cynicDiff profile.
+  +    public let differentialCompareFuzzout: Bool
+  +
+       // The subdirectory in {config.storagePath} at which all programs are stored which could not
+       // be imported due to disabled wasm capabilities in the fuzzer.
+       public static let excludedWasmDirectory = "excluded_wasm_programs"
+  @@ -136,7 +141,8 @@ public struct Configuration {
+  -        dumplingEnabled: Bool = false
+  +        dumplingEnabled: Bool = false,
+  +        differentialCompareFuzzout: Bool = false
+       ) {
+           self.arguments = arguments
+           self.timeout = timeout
+  @@ -155,6 +161,7 @@ public struct Configuration {
+  +        self.differentialCompareFuzzout = differentialCompareFuzzout
+           self.diffConfig =
+               dumplingEnabled
+               ? DifferentialConfig.create(for: instanceId, storagePath: storagePath!) : nil
+  +8 -1
+
+Sources/Fuzzilli/Execution/Execution.swift
+  @@ -100,6 +100,32 @@ struct DiffExecution: Execution {
+  +    /// Build a `.differential` execution from a fuzzout-output
+  +    /// divergence (the engine-agnostic oracle; see
+  +    /// Fuzzer.executeFuzzoutDifferential). Both runs are known to have
+  +    /// succeeded; only their fd-103 output differs.
+  +    static func fuzzoutDivergence(target: Execution, reference: Execution) -> Execution {
+  +        func formatDiff(label: String, targetData: String, referenceData: String) -> String {
+  +            return """
+  +                === TARGET \(label) ===
+  +                \(targetData)
+  +
+  +                === REFERENCE \(label) ===
+  +                \(referenceData)
+  +                """
+  +        }
+  +        return DiffExecution(
+  +            outcome: .differential,
+  +            execTime: target.execTime,
+  +            stdout: formatDiff(
+  +                label: "STDOUT", targetData: target.stdout, referenceData: reference.stdout),
+  +            stderr: formatDiff(
+  +                label: "STDERR", targetData: target.stderr, referenceData: reference.stderr),
+  +            fuzzout: formatDiff(
+  +                label: "FUZZOUT", targetData: target.fuzzout, referenceData: reference.fuzzout)
+  +        )
+  +    }
+  +
+       static func diff(
+           optExec: Execution, unoptExec: Execution,
+           optDumpOut: String, unoptDumpOut: String
+  +26 -0
+
+Sources/Fuzzilli/Fuzzer.swift
+  @@ -778,6 +778,10 @@ public class Fuzzer {
+  +            if config.differentialCompareFuzzout {
+  +                return executeFuzzoutDifferential(
+  +                    execution, program, script, withTimeout: timeout ?? config.timeout)
+  +            }
+               return executeDifferentialIfNeeded(
+                   execution, program, script, withTimeout: timeout ?? config.timeout)
+           }
+  @@ -1306,6 +1310,51 @@ public class Fuzzer {
+  +    /// Engine-agnostic differential: re-run the (already-succeeded)
+  +    /// target sample on the reference runner and compare the fd-103
+  +    /// fuzzout output of the two runs. A mismatch yields `.differential`,
+  +    /// which is treated like a crash (kept + minimized). Used by the
+  +    /// cynicDiff profile, where the two runs are the same cynic-fuzz
+  +    /// binary at JIT vs interpreter and `--diff` makes each emit a
+  +    /// completion-value digest. See docs/fuzz-differential.md.
+  +    ///
+  +    /// Conservative on the reference outcome: if the reference doesn't
+  +    /// also succeed, we return the target execution unflagged rather
+  +    /// than reporting a divergence — a reference crash/timeout is its
+  +    /// own (separately-surfaced) signal and shouldn't masquerade as an
+  +    /// output divergence. This keeps the lane low-noise.
+  +    private func executeFuzzoutDifferential(
+  +        _ execution: Execution, _ program: Program, _ script: String, withTimeout timeout: UInt32
+  +    ) -> Execution {
+  +        let referenceExecution = referenceRunner!.run(script, withTimeout: timeout)
+  +        guard referenceExecution.outcome == .succeeded else {
+  +            return execution
+  +        }
+  +
+  +        let targetOut = execution.fuzzout.trimmingCharacters(in: .whitespacesAndNewlines)
+  +        let referenceOut = referenceExecution.fuzzout.trimmingCharacters(
+  +            in: .whitespacesAndNewlines)
+  +
+  +        if targetOut == referenceOut {
+  +            return execution
+  +        }
+  +
+  +        logger.error(
+  +            """
+  +            ================================================================
+  +            [CYNIC-DIFF]  OUTPUT DIVERGENCE
+  +            === TARGET fuzzout ===
+  +            \(targetOut)
+  +            === REFERENCE fuzzout ===
+  +            \(referenceOut)
+  +            === SCRIPT ===
+  +            \(script)
+  +            ================================================================
+  +            """)
+  +
+  +        return DiffExecution.fuzzoutDivergence(target: execution, reference: referenceExecution)
+  +    }
+  +
+       private func executeDifferentialIfNeeded(
+           _ execution: Execution, _ program: Program, _ script: String, withTimeout timeout: UInt32
+       ) -> Execution {
+  +49 -0
+
+Sources/Fuzzilli/Profiles/Profile.swift
+  @@ -12,10 +12,27 @@
+  +// Selects how a differential profile's two runs are compared.
+  +public enum DifferentialMode {
+  +    // V8 "Dumpling" oracle: compare the interpreter/JIT frame dumps
+  +    // V8 writes to disk (the --*-dumping flags). V8-specific; the
+  +    // default so existing differential profiles are unchanged.
+  +    case dumplingFrames
+  +    // Compare the fd-103 FUZZILLI_PRINT (fuzzout) output of the two
+  +    // runs. Engine-agnostic; used by the cynicDiff profile, where
+  +    // cynic-fuzz --diff emits a completion-value digest per sample.
+  +    case fuzzout
+  +}
+  +
+   public struct Profile {
+       public let processArgs: (_ randomize: Bool) -> [String]
+       // if not nil, then this is profile for differential fuzzing
+       public let processArgsReference: [String]?
+  +    // How a differential run compares the target and reference. A
+  +    // `var` with a default keeps the synthesized memberwise init
+  +    // backwards-compatible: existing profiles that don't set it get
+  +    // .dumplingFrames.
+  +    public var differentialMode: DifferentialMode = .dumplingFrames
+       public let processEnv: [String: String]
+       public let maxExecsBeforeRespawn: Int
+       // Timeout either by value or interval in milliseconds.
+  @@ -61,4 +78,5 @@ public let profiles = [
+  +    "cynicDiff": cynicDiffProfile,
+   ]
+  +18 -0
+
+Sources/FuzzilliCli/main.swift
+  @@ -648,7 +648,8 @@ let mainConfig = Configuration(
+  -    dumplingEnabled: profile.isDifferential)
+  +    dumplingEnabled: profile.isDifferential && profile.differentialMode == .dumplingFrames,
+  +    differentialCompareFuzzout: profile.isDifferential && profile.differentialMode == .fuzzout)
+   
+   let fuzzer = makeFuzzer(with: mainConfig)
+   
+  @@ -829,7 +830,8 @@ for i in 1..<numJobs {
+  -        dumplingEnabled: profile.isDifferential)
+  +        dumplingEnabled: profile.isDifferential && profile.differentialMode == .dumplingFrames,
+  +        differentialCompareFuzzout: profile.isDifferential && profile.differentialMode == .fuzzout)
+   
+       let worker = makeFuzzer(with: workerConfig)
+       worker.async {
+  +4 -2
