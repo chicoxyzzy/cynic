@@ -991,9 +991,10 @@ useful:
    X-form mirror of the i32 ops — and the integer-width conversions
    `i64.extend_i32_s` (sxtw), `i64.extend_i32_u`, and `i32.wrap_i64` (both
    a W-form mov), completing the i64 integer tier; the bit-count unary
-   ops `i32`/`i64.clz` and `ctz` (the native `CLZ`, with a `RBIT`+`CLZ`
-   pair for trailing zeros, both yielding the bit width for a zero input)
-   and the sign-extension ops `i32.extend8`/`16_s` and
+   ops `i32`/`i64.clz`, `ctz` (the native `CLZ`, with a `RBIT`+`CLZ`
+   pair for trailing zeros, both yielding the bit width for a zero input),
+   and `popcnt` (no scalar GP form, so a NEON `CNT`+`ADDV` over the
+   vector unit) and the sign-extension ops `i32.extend8`/`16_s` and
    `i64.extend8`/`16`/`32_s` (`SXTB`/`SXTH`/`SXTW`); and the start of the
    float tier (`f64.const`, f64 `local.get`/`set`/`tee`, f64
    add/sub/mul/div, the six f64 comparisons — `fcmp` then `cset` with
@@ -1089,12 +1090,12 @@ useful:
    (calls, globals, tables, bulk memory, SIMD) degrade, so the suite still
    covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
-   set (incl. min/max/copysign), the integer bit-counts (clz/ctz) and
-   sign-extends, and every float↔int
-   conversion (trapping and saturating); integer popcnt, calls, globals,
-   and the reference/SIMD families are the remaining frontier, along with
-   the side-table-as-control-oracle wiring (§6) that would make
-   multi-target `br_table` cheap.
+   set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
+   and sign-extends, and every float↔int
+   conversion (trapping and saturating) — the whole scalar wasm ALU;
+   calls, globals, and the reference/SIMD families are the remaining
+   frontier, along with the side-table-as-control-oracle wiring (§6) that
+   would make multi-target `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.

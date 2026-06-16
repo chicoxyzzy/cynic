@@ -1625,6 +1625,80 @@ test "wasm spasm: i64.extend32_s sign-extends the low word via SXTW" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// An `(i32)->i32` population-count exported as "op" (0x69 = i32.popcnt).
+const i32_popcnt_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, // type (i32)->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x6f, 0x70, 0x00, 0x00, // export "op" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0x69, 0x0b, // local.get 0; i32.popcnt; end
+};
+
+test "wasm spasm: i32.popcnt counts set bits via CNT+ADDV" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i32_popcnt_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i32_popcnt_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "op") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u32, 0xffffffff)); // all 32 bits set
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // popcnt(0xffffffff) == 32 — the cross-byte sum of four 0xff bytes.
+    try testing.expectEqual(@as(u32, 32), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+// An `(i64)->i64` population-count exported as "op" (0x7b = i64.popcnt).
+const i64_popcnt_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7e, 0x01, 0x7e, // type (i64)->i64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x6f, 0x70, 0x00, 0x00, // export "op" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0x7b, 0x0b, // local.get 0; i64.popcnt; end
+};
+
+test "wasm spasm: i64.popcnt counts set bits via CNT+ADDV (X-form)" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i64_popcnt_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i64_popcnt_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "op") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u64, 0xffffffffffffffff)); // all 64 bits set
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // popcnt(~0) == 64 — the cross-byte sum of eight 0xff bytes.
+    try testing.expectEqual(@as(u64, 64), @as(u64, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // An `(f64,f64)->i32` ordered less-than exported as "lt": local.get 0;
 // local.get 1; f64.lt; end. (0x63 is f64.lt; the result is an i32.)
 const f64_lt_body = [_]u8{

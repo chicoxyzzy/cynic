@@ -236,6 +236,22 @@ pub fn sxtwX(rd: Reg, rn: Reg) u32 {
     return 0x93407C00 | (r(rn) << 5) | r(rd);
 }
 
+// NEON vector ops used to synthesize `popcnt` — there is no scalar GP
+// population count on AArch64. The operands are v-registers (the `Reg`
+// number selects v0..v31, as with the FP ops); the value bridges in via
+// `fmov` from a GP register. The `.8B` arrangement covers the low 64 bits.
+
+/// CNT Vd.8B, Vn.8B — per-byte population count of the low eight bytes.
+pub fn cnt8b(vd: Reg, vn: Reg) u32 {
+    return 0x0E205800 | (r(vn) << 5) | r(vd);
+}
+
+/// ADDV Bd, Vn.8B — horizontal add of the eight byte lanes into byte 0
+/// (zeroing the rest), summing the per-byte counts into the total.
+pub fn addvB(vd: Reg, vn: Reg) u32 {
+    return 0x0E31B800 | (r(vn) << 5) | r(vd);
+}
+
 /// ORR Wd, Wn, Wm
 pub fn orrRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x2A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
