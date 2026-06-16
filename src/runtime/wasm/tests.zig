@@ -982,6 +982,45 @@ test "wasm spasm: f64.lt compiles and compares in the FP unit" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// A one-page-memory module: `(i32)->f64` exported as "ld" — local.get 0;
+// f64.load align=3 off=0; end.
+const f64_load_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7c, // type (i32)->f64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x05, 0x03, 0x01, 0x00, 0x01, // memory: one page
+    0x07, 0x06, 0x01, 0x02, 0x6c, 0x64, 0x00, 0x00, // export "ld" -> 0
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x2b, 0x03, 0x00, 0x0b, // local.get 0; f64.load a=3 o=0; end
+};
+
+test "wasm spasm: f64.load reads an eight-byte double" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + f64_load_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &f64_load_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    std.mem.writeInt(u64, instance.memories[0].data[8..][0..8], @as(u64, @bitCast(@as(f64, 3.14159))), .little);
+    const fidx = funcExport(mp, "ld") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 8);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    try testing.expectEqual(@as(f64, 3.14159), @as(f64, @bitCast(@as(u64, @truncate(res[0])))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // ── imports, memories, tables, globals ──────────────────────────────
 
 test "wasm decoder: decodes an import section" {

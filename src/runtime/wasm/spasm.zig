@@ -173,6 +173,10 @@ const op_f64_lt: u8 = 0x63;
 const op_f64_gt: u8 = 0x64;
 const op_f64_le: u8 = 0x65;
 const op_f64_ge: u8 = 0x66;
+const op_f32_load: u8 = 0x2a;
+const op_f64_load: u8 = 0x2b;
+const op_f32_store: u8 = 0x38;
+const op_f64_store: u8 = 0x39;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -330,8 +334,9 @@ pub fn compile(
                 if (idx >= func.local_types.len) return null;
                 const cell_off = @as(u64, idx) * @sizeOf(Cell);
                 switch (func.local_types[idx]) {
-                    // 32-bit load zero-extends the i32 from the cell's low word.
-                    .i32 => {
+                    // 32-bit load zero-extends the i32 (or f32 bit pattern)
+                    // from the cell's low word into the slot register.
+                    .i32, .f32 => {
                         if (cell_off > 16380 or cell_off % 4 != 0) return null; // ldrImmW ceiling
                         try m.emit(a64.ldrImmW(regForDepth(sp), .x0, @intCast(cell_off)));
                     },
@@ -351,7 +356,7 @@ pub fn compile(
                 if (sp < 1) return null;
                 if (idx >= func.local_types.len) return null;
                 const lt = func.local_types[idx];
-                if (lt != .i32 and lt != .i64 and lt != .f64) return null; // i32/i64/f64 locals
+                if (lt != .i32 and lt != .i64 and lt != .f64 and lt != .f32) return null; // i32/i64/f32/f64 locals
                 const cell_off = @as(u64, idx) * @sizeOf(Cell);
                 if (cell_off > 32760) return null; // strImm scaled-imm ceiling
                 // Materialize the top value (its slot register, or a
@@ -545,7 +550,7 @@ pub fn compile(
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
-            op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u => {
+            op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u, op_f32_load => {
                 // §4.4.7 i32 loads — pop the address, bounds-check the
                 // effective address for the access width, then load from
                 // mem_base + ea into the address's slot (consumes addr,
@@ -563,7 +568,7 @@ pub fn compile(
                 try emitMemBounds(&m, ra, offset, n, &trap_oob);
                 trap_oob_used = true;
                 switch (op) {
-                    op_i32_load => try m.emit(a64.ldrRegW(ra, .x2, .x16)),
+                    op_i32_load, op_f32_load => try m.emit(a64.ldrRegW(ra, .x2, .x16)),
                     op_i32_load8_u => try m.emit(a64.ldrbRegW(ra, .x2, .x16)),
                     op_i32_load8_s => try m.emit(a64.ldrsbRegW(ra, .x2, .x16)),
                     op_i32_load16_u => try m.emit(a64.ldrhRegW(ra, .x2, .x16)),
@@ -571,7 +576,7 @@ pub fn compile(
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
-            op_i32_store, op_i32_store8, op_i32_store16 => {
+            op_i32_store, op_i32_store8, op_i32_store16, op_f32_store => {
                 // §4.4.7 i32 stores — operands [addr, value]; bounds-check
                 // ea for the access width, then store value's low bytes at
                 // mem_base + ea (STR/STRB/STRH). Pops both, pushes nothing.
@@ -588,7 +593,7 @@ pub fn compile(
                 try emitMemBounds(&m, ra, offset, n, &trap_oob);
                 trap_oob_used = true;
                 switch (op) {
-                    op_i32_store => try m.emit(a64.strRegW(rv, .x2, .x16)),
+                    op_i32_store, op_f32_store => try m.emit(a64.strRegW(rv, .x2, .x16)),
                     op_i32_store8 => try m.emit(a64.strbRegW(rv, .x2, .x16)),
                     else => try m.emit(a64.strhRegW(rv, .x2, .x16)), // store16
                 }
@@ -722,7 +727,7 @@ pub fn compile(
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
-            op_i64_load, op_i64_load8_s, op_i64_load8_u, op_i64_load16_s, op_i64_load16_u, op_i64_load32_s, op_i64_load32_u => {
+            op_i64_load, op_i64_load8_s, op_i64_load8_u, op_i64_load16_s, op_i64_load16_u, op_i64_load32_s, op_i64_load32_u, op_f64_load => {
                 // §4.4.7 i64 loads — bounds-check the access width, then load
                 // from mem_base + ea into the address's slot. The zero-
                 // extending forms reuse the W-form ldrb/ldrh/ldr (the W
@@ -740,7 +745,7 @@ pub fn compile(
                 try emitMemBounds(&m, ra, offset, n, &trap_oob);
                 trap_oob_used = true;
                 switch (op) {
-                    op_i64_load => try m.emit(a64.ldrReg(ra, .x2, .x16)),
+                    op_i64_load, op_f64_load => try m.emit(a64.ldrReg(ra, .x2, .x16)),
                     op_i64_load8_u => try m.emit(a64.ldrbRegW(ra, .x2, .x16)),
                     op_i64_load8_s => try m.emit(a64.ldrsbReg(ra, .x2, .x16)),
                     op_i64_load16_u => try m.emit(a64.ldrhRegW(ra, .x2, .x16)),
@@ -750,7 +755,7 @@ pub fn compile(
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
-            op_i64_store, op_i64_store8, op_i64_store16, op_i64_store32 => {
+            op_i64_store, op_i64_store8, op_i64_store16, op_i64_store32, op_f64_store => {
                 // §4.4.7 i64 stores — operands [addr, value]; bounds-check ea,
                 // then store the value's low bytes at mem_base + ea.
                 const offset = readMemArg(body, &i) orelse return null;
@@ -767,7 +772,7 @@ pub fn compile(
                 try emitMemBounds(&m, ra, offset, n, &trap_oob);
                 trap_oob_used = true;
                 switch (op) {
-                    op_i64_store => try m.emit(a64.strReg(rv, .x2, .x16)),
+                    op_i64_store, op_f64_store => try m.emit(a64.strReg(rv, .x2, .x16)),
                     op_i64_store8 => try m.emit(a64.strbRegW(rv, .x2, .x16)),
                     op_i64_store16 => try m.emit(a64.strhRegW(rv, .x2, .x16)),
                     else => try m.emit(a64.strRegW(rv, .x2, .x16)), // store32 (low 4)
@@ -1070,7 +1075,7 @@ pub fn compile(
     if (sp != results.len) return null;
     // i32 and i64 results both store from the slot register's low bytes
     // (an i32 is zero-extended in its register), high cell word cleared.
-    for (results) |rt| if (rt != .i32 and rt != .i64 and rt != .f64) return null;
+    for (results) |rt| if (rt != .i32 and rt != .i64 and rt != .f64 and rt != .f32) return null;
 
     // Materialize the residual stack into result cells. Wasm results
     // map bottom-of-stack → results[0]; an i32 cell is the value
@@ -1198,7 +1203,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
             op_f64_const => {
                 _ = readF64Bits(body, i) orelse return null; // 8 raw bytes
             },
-            op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u, op_i32_store, op_i32_store8, op_i32_store16, op_i64_load, op_i64_load8_s, op_i64_load8_u, op_i64_load16_s, op_i64_load16_u, op_i64_load32_s, op_i64_load32_u, op_i64_store, op_i64_store8, op_i64_store16, op_i64_store32 => {
+            op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u, op_i32_store, op_i32_store8, op_i32_store16, op_i64_load, op_i64_load8_s, op_i64_load8_u, op_i64_load16_s, op_i64_load16_u, op_i64_load32_s, op_i64_load32_u, op_i64_store, op_i64_store8, op_i64_store16, op_i64_store32, op_f32_load, op_f64_load, op_f32_store, op_f64_store => {
                 const flags = readUleb32(body, i) orelse return null;
                 if (flags & 0x40 != 0) return null; // multi-memory — degrade
                 _ = readUleb32(body, i) orelse return null; // offset

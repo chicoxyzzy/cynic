@@ -992,9 +992,11 @@ useful:
    `i64.extend_i32_s` (sxtw), `i64.extend_i32_u`, and `i32.wrap_i64` (both
    a W-form mov), completing the i64 integer tier; and the start of the
    float tier (`f64.const`, f64 `local.get`/`set`/`tee`, f64
-   add/sub/mul/div, and the six f64 comparisons — `fcmp` then `cset` with
+   add/sub/mul/div, the six f64 comparisons — `fcmp` then `cset` with
    the FP condition codes, so a NaN operand makes the ordered relops false
-   and `ne` true per spec). A float keeps living in its slot's GP register as raw
+   and `ne` true per spec — and the `f32`/`f64` loads/stores, which are
+   bit-identical to the same-width integer load/store and so reuse those
+   encoders directly). A float keeps living in its slot's GP register as raw
    bits — an FP op bridges those bits into a v-register (`fmov` to v16/v17,
    a distinct register file from the GP x16/x17 scratch), computes in the
    FP unit, and bridges back — so the operand-stack model is unchanged and
