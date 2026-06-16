@@ -32,6 +32,14 @@ node_modules/
 .claude/*
 !.claude/commands/
 
+# Local fuzz scratch — the nightly gate writes new-crash reproducers
+# to `fuzz-artifacts/` and resumes Fuzzilli from `fuzz-storage/`
+# (corpus / crashes / stats). Both are the gate's defaults when run
+# locally; per-machine and never tracked. The committed knobs live in
+# tools/fuzz/ (crash-baseline.txt, the scripts) and the workflow.
+fuzz-artifacts/
+fuzz-storage/
+
 # `--only-failing` cache for the test262 harness — written by
 # every full run, consumed by `--only-failing`.
 .test262-pass-cache.txt

@@ -15,10 +15,14 @@
 #   tools/fuzz/triage-crashes.sh [crashes-dir]
 #
 # Env:
-#   CYNIC      path to the cynic binary (default ./zig-out/bin/cynic)
-#   TIMEOUT_S  per-repro seconds (default 3)
-#   JOBS       parallel cynic invocations (default 8)
-#   LIMIT      cap reproducers processed (for smoke tests)
+#   CYNIC       path to the cynic binary (default ./zig-out/bin/cynic)
+#   TIMEOUT_S   per-repro seconds (default 3)
+#   JOBS        parallel cynic invocations (default 8)
+#   LIMIT       cap reproducers processed (for smoke tests)
+#   TRIAGE_TSV  if set, also write machine-readable bucket rows
+#               ("<count>\t<anchor>\t<example-path>", one per line, sorted
+#               by count descending) to this path. The human stderr
+#               report is unchanged. Used by tools/fuzz/fuzz-ci-gate.sh.
 #
 # Defaults assume the post-8h run at /tmp/fuzzilli-cynic/crashes.
 
@@ -96,7 +100,9 @@ sort < "$raw" | awk -F'\t' '
     END {
         if (prev != "") printf "%d\t%s\t%s\n", count, prev, example
     }
-' | sort -t$'\t' -k1,1rn | awk -F'\t' '{
+' | sort -t$'\t' -k1,1rn \
+  | tee "${TRIAGE_TSV:-/dev/null}" \
+  | awk -F'\t' '{
     printf "  %4d  %s\n        example: %s\n\n", $1, $2, $3
 }'
 

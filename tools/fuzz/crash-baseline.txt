@@ -1,0 +1,53 @@
+# tools/fuzz/crash-baseline.txt — known-open fuzz crash buckets.
+#
+# The nightly Fuzzilli gate (.github/workflows/fuzz-nightly.yml) buckets
+# every crash reproducer by its Zig panic anchor (file.zig:line, via
+# tools/fuzz/triage-crashes.sh) and FAILS only on a bucket that is NOT
+# listed here. A bucket listed here is a *known-open* host-safety bug:
+# real, tracked, but not yet fixed — so it must not turn the nightly red
+# every single night. New, unlisted panic anchors are the signal the
+# gate exists to catch.
+#
+# This is an allowlist, not a bug tracker. Every entry is a debt: the
+# goal is an empty file. See docs/fuzzing.md → "Continuous fuzzing" for
+# the full workflow, including how to update this file.
+#
+# FORMAT — one entry per line. Blank lines and `#` comments ignored.
+#   src/runtime/object.zig:209     exact anchor (file + line)
+#   src/runtime/object.zig:*       whole-file wildcard (any line in the
+#                                  file). Use ONLY for a bucket whose
+#                                  line keeps drifting across unrelated
+#                                  refactors and that you've decided to
+#                                  tolerate file-wide. It is coarse — it
+#                                  masks *every* panic in that file,
+#                                  including a genuinely new one — so
+#                                  prefer the exact form and tighten back
+#                                  to it once the line stabilises.
+#
+# WHY ANCHORS DRIFT. The anchor is a source location in the engine being
+# fuzzed (HEAD). Editing a file above the panic site shifts its line, so
+# the same bug reports a new anchor. Because this file is committed
+# alongside the source, the fix is to update the entry in the SAME commit
+# that moved the code. A drifted-but-not-updated entry surfaces as a
+# nightly failure naming the new anchor — annoying but self-correcting
+# and never a per-PR blocker (the gate is nightly-only).
+#
+# TO ADD a bucket (accepting a newly-found crash as known-open):
+#   add its anchor here with a one-line `#` note — what it is, and a
+#   link to the tracking issue/finding. Prefer fixing it.
+# TO REMOVE a bucket (a bug got fixed):
+#   delete its line. The next nightly then re-fails if it somehow still
+#   reproduces — which is the regression signal you want.
+#
+# -----------------------------------------------------------------------
+
+# object.zig — host-safety panic reachable from fuzzer-generated JS,
+# documented open at the time this gate was introduced. NOTE: the line
+# below is the anchor as last reported; recent host-safety / GC work may
+# have already fixed it, and unrelated edits to object.zig drift the
+# line. The FIRST nightly run after this gate lands recalibrates this
+# entry — see docs/fuzzing.md "Bootstrapping the baseline":
+#   * if triage reports this bug at a different object.zig line, update
+#     the number here;
+#   * if it no longer reproduces (fixed), delete this entry.
+src/runtime/object.zig:209

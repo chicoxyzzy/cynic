@@ -1,0 +1,270 @@
+name: Nightly fuzz
+
+# A bounded Fuzzilli campaign against HEAD, every night, as a host-safety
+# regression gate. NOT a per-PR check: fuzzing is slow and nondeterministic
+# — which generated samples run varies run to run — so gating merges on it
+# would be flaky and would block the constant direct pushes to `main`. The
+# nightly cadence catches a host-safety regression (a Zig panic / segfault
+# on untrusted JS — AGENTS.md "never abort the host on untrusted input")
+# within a day of it landing, without ever blocking a merge.
+#
+# The gate fails ONLY on a NEW crash bucket — a panic anchor (file.zig:line)
+# not in tools/fuzz/crash-baseline.txt. A run that finds nothing, or only
+# known-open / non-reproducing buckets, is a PASS. Because a known-open
+# bucket is allowlisted whether or not tonight's corpus happens to surface
+# it, sample-set churn can never flip the verdict. See docs/fuzzing.md
+# "Continuous fuzzing".
+
+on:
+  schedule:
+    # 06:00 UTC daily (~23:00 PT / 22:00 PST). Off-peak for the
+    # GitHub-hosted pool; one run per day.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    # Manual trigger for on-demand campaigns (longer budget, GC-stress
+    # posture) and for validating the workflow itself.
+    inputs:
+      duration_seconds:
+        description: 'Wall-clock fuzz budget (seconds)'
+        default: '1500'
+      jobs:
+        description: 'Fuzzilli parallel jobs'
+        default: '3'
+      gc_threshold:
+        description: 'FUZZ_GC_THRESHOLD (empty = engine default; 1 = collect every alloc, max UAF detection, slow)'
+        default: ''
+
+permissions:
+  contents: read
+
+# Never let two fuzz runs overlap (they'd contend for the corpus cache and
+# the runner). Never cancel one in flight — a partial campaign that has
+# already written corpus + crashes to disk is worth finishing the triage on.
+concurrency:
+  group: fuzz-nightly
+  cancel-in-progress: false
+
+# The pinned Fuzzilli revision. The corpus cache stores Fuzzilli's
+# version-specific `.fzil` protobuf programs, so a cache written by one
+# Fuzzilli build must never be fed to another — the cache key below embeds
+# this SHA, so bumping it transparently invalidates the old corpus (one
+# cold start, then warm again). When bumping: pick a new upstream commit,
+# update this SHA, and re-confirm docs/fuzzilli/CynicProfile.swift still
+# compiles against it. See docs/fuzzing.md "Corpus cache + the Fuzzilli pin".
+env:
+  FUZZILLI_REV: e1776516c3ceb3b17ec63df6395ffe0c8dd5efc5
+
+jobs:
+  fuzz:
+    name: Fuzzilli nightly (linux)
+    runs-on: ubuntu-latest
+    # Cold caches: zig build (~5 min) + swift build of Fuzzilli (~5 min) +
+    # the fuzz budget (default 25 min) + triage (~2 min). 75 leaves headroom;
+    # the fuzz step itself is hard-bounded by guarded-run.sh regardless.
+    timeout-minutes: 75
+    # Linux, not the macOS/aarch64 dev box: cheaper minutes, and a different
+    # stack-size / allocator / libc surface than where cynic-fuzz is normally
+    # run — so it can surface host-safety bugs the dev box can't. Swift +
+    # Fuzzilli need a toolchain the bare runner doesn't ship, so we run inside
+    # the official Swift image (Docker Official Image, maintained upstream),
+    # digest-pinned for reproducibility. Refresh the digest when bumping the
+    # tag: the `6.0` tag floats across patch releases.
+    #   docker buildx imagetools inspect swift:6.0   # → current digest
+    container:
+      image: swift:6.0@sha256:1dd31e9a7d28a04704d1c28aaf6d658bb9685fc8875b2b4aa416ee9ba285fac4
+    # NOTE: step-security/harden-runner (on every job in ci.yml) is omitted
+    # here — it instruments the runner *host* and is a documented no-op /
+    # failure inside container jobs. The egress it would audit is a git clone
+    # of pinned-SHA Fuzzilli + the pinned actions; acceptable for a nightly,
+    # non-merge-gating job.
+    steps:
+      - name: Install host tools (procps for the process-tree guard)
+        # guarded-run.sh walks the process tree with ps/pgrep to enforce the
+        # wall-time + RSS bounds and to SIGKILL every descendant on exit. The
+        # Swift image doesn't ship procps. ca-certificates/git are already in
+        # the image, but assert them so a base-image change fails loudly here
+        # rather than mid-clone.
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends procps ca-certificates git
+          ps --version; pgrep --version | head -1
+
+      - name: Checkout
+        # No submodules: cynic-fuzz never reads the test262 corpus.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          submodules: false
+
+      - name: Set up Zig
+        uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
+        with:
+          cache-key: fuzz
+
+      - name: Build cynic-fuzz + a ReleaseSafe cynic
+        # cynic-fuzz: the Fuzzilli REPRL target (always ReleaseSafe + sancov,
+        # per build.zig). The plain `cynic` is built ReleaseSafe too — the
+        # triage step replays each crash reproducer through it, and a Debug
+        # binary's ~1000× DebugAllocator slowdown would make repros time out
+        # and mis-report as "(no-panic)". ReleaseSafe also matches cynic-fuzz's
+        # posture, so a crash reproduces at the same panic anchor.
+        run: |
+          set -eux
+          zig build -Doptimize=ReleaseSafe   # → zig-out/bin/cynic (triage replay)
+          zig build fuzz                     # → zig-out/bin/cynic-fuzz (Fuzzilli target)
+          test -x zig-out/bin/cynic
+          test -x zig-out/bin/cynic-fuzz
+          # Smoke-test the REPRL host: run bare, it must print the documented
+          # FD error — not panic/segfault (docs/fuzzing.md "Pre-Fuzzilli sanity").
+          out=$(./zig-out/bin/cynic-fuzz 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q 'expects FDs 100/101/102/103' \
+            || { echo "::error::cynic-fuzz REPRL smoke test failed — engine regression"; exit 1; }
+
+      - name: Clone + register Fuzzilli (pinned)
+        run: |
+          set -eux
+          # Shallow-fetch exactly the pinned commit.
+          rm -rf fuzzilli && mkdir fuzzilli && cd fuzzilli
+          git init -q
+          git remote add origin https://github.com/googleprojectzero/fuzzilli.git
+          git fetch -q --depth 1 origin "$FUZZILLI_REV"
+          git checkout -q FETCH_HEAD
+          # Drop in Cynic's profile and register it (docs/fuzzing.md "Setup").
+          cp "$GITHUB_WORKSPACE/docs/fuzzilli/CynicProfile.swift" \
+             Sources/Fuzzilli/Profiles/CynicProfile.swift
+          PF=Sources/Fuzzilli/Profiles/Profile.swift
+          if ! grep -q '"cynic": cynicProfile' "$PF"; then
+            # Insert before the closing `]` of the `profiles` dict — robust to
+            # which engines are present (no dependence on the last entry's name).
+            awk '
+              /^public let profiles = \[/ { inblock = 1 }
+              inblock && /^\]/ { print "    \"cynic\": cynicProfile,"; inblock = 0 }
+              { print }
+            ' "$PF" > "$PF.tmp" && mv "$PF.tmp" "$PF"
+          fi
+          grep -q '"cynic": cynicProfile' "$PF" \
+            || { echo "::error::failed to register cynic profile in $PF (did the dict shape change in $FUZZILLI_REV?)"; exit 1; }
+
+      - name: Cache Fuzzilli build
+        # Deterministic for a given (rev, profile) pair, so a stable key: first
+        # run misses and saves; later runs hit and `swift build` is a near-noop.
+        # A profile edit changes the hash → fresh build of the changed file.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: fuzzilli/.build
+          key: fuzzilli-build-${{ env.FUZZILLI_REV }}-${{ hashFiles('docs/fuzzilli/CynicProfile.swift') }}-${{ runner.os }}
+
+      - name: Build Fuzzilli
+        working-directory: fuzzilli
+        run: swift build -c release
+
+      - name: Restore corpus (warm start)
+        id: corpus
+        # Key embeds the Fuzzilli rev (format pin) and is unique per run so a
+        # fresh, grown corpus is saved every night; restore-keys falls back to
+        # the most recent prior night with the SAME rev. A rev bump ⇒ key
+        # miss ⇒ one cold start, then warm again under the new rev.
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: fuzz-storage
+          key: fuzz-corpus-${{ env.FUZZILLI_REV }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            fuzz-corpus-${{ env.FUZZILLI_REV }}-
+
+      - name: Run bounded fuzz session
+        env:
+          DURATION: ${{ github.event.inputs.duration_seconds || '1500' }}
+          JOBS: ${{ github.event.inputs.jobs || '3' }}
+          FUZZ_GC_THRESHOLD: ${{ github.event.inputs.gc_threshold || '' }}
+        run: |
+          set -uo pipefail
+          STORAGE="$GITHUB_WORKSPACE/fuzz-storage"
+          # Carry corpus/settings/stats across nights, but NEVER stale crashes
+          # — triage must see only THIS run's findings.
+          mkdir -p "$STORAGE"
+          rm -rf "$STORAGE/crashes" "$STORAGE/differentials"
+          RESUME_ARGS=()
+          if find "$STORAGE/corpus" -name '*.fzil' -type f 2>/dev/null | head -1 | grep -q .; then
+            echo "warm start: $(find "$STORAGE/corpus" -name '*.fzil' | wc -l) cached corpus programs"
+            RESUME_ARGS=(--resume)
+          else
+            echo "cold start: no cached corpus for rev $FUZZILLI_REV"
+            rm -rf "$STORAGE"   # guarantee a clean storage dir Fuzzilli creates fresh
+          fi
+          # FUZZ_GC_THRESHOLD is read by cynic-fuzz (tools/fuzz/fuzz_main.zig)
+          # and inherited by the children Fuzzilli spawns. Empty ⇒ unset.
+          [ -n "$FUZZ_GC_THRESHOLD" ] && export FUZZ_GC_THRESHOLD
+
+          # guarded-run.sh bounds wall-time AND total tree RSS, and SIGKILLs
+          # the whole process tree on exit — so a hung or OOMing Fuzzilli (or
+          # a runaway cynic-fuzz child) can't wedge or balloon the runner.
+          # --maxRuntimeInHours is an Int (min 1h), too coarse for a ~25-min
+          # budget, so the wall-clock bound lives in the wrapper. Corpus +
+          # crashes are written to disk incrementally, so a hard kill loses
+          # nothing the triage needs.
+          set +e
+          tools/guarded-run.sh --timeout="$DURATION" --rss=12000 -- \
+            fuzzilli/.build/release/FuzzilliCli \
+              --profile=cynic \
+              --storagePath="$STORAGE" \
+              "${RESUME_ARGS[@]}" \
+              --jobs="$JOBS" \
+              --timeout=500 \
+              --exportStatistics \
+              "$GITHUB_WORKSPACE/zig-out/bin/cynic-fuzz"
+          rc=$?
+          set -e
+          # 124 = wall-time budget reached (the expected end of a timed
+          # campaign). 137 = RSS cap (OOM guard fired) — still proceed, the
+          # crashes-so-far are valid. Anything else = Fuzzilli failed to start
+          # / a startup test failed / a profile-engine mismatch → fail loudly.
+          case "$rc" in
+            0)   echo "Fuzzilli exited cleanly (rc=0)";;
+            124) echo "fuzz budget elapsed (rc=124, expected)";;
+            137) echo "::warning::RSS cap hit (rc=137) — proceeding to triage with crashes found so far";;
+            *)   echo "::error::Fuzzilli exited abnormally (rc=$rc) — likely a profile/engine misconfiguration, not a fuzz finding"; exit "$rc";;
+          esac
+          echo "crashes this run: $(find "$STORAGE/crashes" -maxdepth 1 -name '*.js' 2>/dev/null | wc -l)"
+
+      - name: Save corpus (always, even on a gate failure)
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: fuzz-storage
+          key: fuzz-corpus-${{ env.FUZZILLI_REV }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Triage + regression gate
+        env:
+          ARTIFACT_DIR: ${{ github.workspace }}/fuzz-artifacts
+        run: |
+          set -uo pipefail
+          mkdir -p "$ARTIFACT_DIR"
+          # Snapshot Fuzzilli's stats into the artifact bundle for the dashboard.
+          cp -r fuzz-storage/stats "$ARTIFACT_DIR/stats" 2>/dev/null || true
+          # The gate: dedup by panic anchor, drop non-reproducing samples,
+          # compare to the committed baseline, fail only on a NEW bucket. Its
+          # report goes to stderr; tee the combined stream into the artifact
+          # bundle as gate.log while keeping it in the CI log, and propagate the
+          # gate's real exit code (PIPESTATUS[0]) as the step result.
+          set +e
+          CYNIC="$GITHUB_WORKSPACE/zig-out/bin/cynic" \
+          BASELINE="$GITHUB_WORKSPACE/tools/fuzz/crash-baseline.txt" \
+          ARTIFACT_DIR="$ARTIFACT_DIR" \
+          JOBS=4 TIMEOUT_S=5 \
+            tools/fuzz/fuzz-ci-gate.sh "$GITHUB_WORKSPACE/fuzz-storage/crashes" 2>&1 \
+            | tee "$ARTIFACT_DIR/gate.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          exit "$rc"
+
+      - name: Upload fuzz artifacts (stats + any new-crash reproducers)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: fuzz-nightly-${{ github.run_id }}
+          path: |
+            fuzz-artifacts/
+            fuzz-storage/crashes/
+          if-no-files-found: ignore
+          retention-days: 30
