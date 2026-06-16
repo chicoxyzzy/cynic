@@ -183,6 +183,30 @@ pub fn bicRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x0A200000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
 }
 
+// Data-processing (1 source) bit-count ops. `clz` counts leading zeros;
+// `ctz` has no direct instruction — it's `rbit` (bit reverse) then `clz`.
+// Both yield the bit width for a zero input, matching wasm's clz/ctz.
+
+/// CLZ Wd, Wn — count leading zeros (32-bit).
+pub fn clzW(rd: Reg, rn: Reg) u32 {
+    return 0x5AC01000 | (r(rn) << 5) | r(rd);
+}
+
+/// CLZ Xd, Xn — count leading zeros (64-bit).
+pub fn clzX(rd: Reg, rn: Reg) u32 {
+    return 0xDAC01000 | (r(rn) << 5) | r(rd);
+}
+
+/// RBIT Wd, Wn — reverse the bit order (32-bit); paired with `clzW` for ctz.
+pub fn rbitW(rd: Reg, rn: Reg) u32 {
+    return 0x5AC00000 | (r(rn) << 5) | r(rd);
+}
+
+/// RBIT Xd, Xn — reverse the bit order (64-bit); paired with `clzX` for ctz.
+pub fn rbitX(rd: Reg, rn: Reg) u32 {
+    return 0xDAC00000 | (r(rn) << 5) | r(rd);
+}
+
 /// ORR Wd, Wn, Wm
 pub fn orrRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x2A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);

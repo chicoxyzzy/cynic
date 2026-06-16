@@ -990,7 +990,10 @@ useful:
    W-form loads, whose cleared high word is the i64 zero-extension) — the
    X-form mirror of the i32 ops — and the integer-width conversions
    `i64.extend_i32_s` (sxtw), `i64.extend_i32_u`, and `i32.wrap_i64` (both
-   a W-form mov), completing the i64 integer tier; and the start of the
+   a W-form mov), completing the i64 integer tier; the bit-count unary
+   ops `i32`/`i64.clz` and `ctz` (the native `CLZ`, with a `RBIT`+`CLZ`
+   pair for trailing zeros, both yielding the bit width for a zero input);
+   and the start of the
    float tier (`f64.const`, f64 `local.get`/`set`/`tee`, f64
    add/sub/mul/div, the six f64 comparisons — `fcmp` then `cset` with
    the FP condition codes, so a NaN operand makes the ordered relops false
@@ -1082,8 +1085,13 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (div/rem, memory, calls, i64/f64) degrade, so the suite still covers
-   the interpreter through that fallback. Still to come: the
+   (calls, globals, tables, bulk memory, SIMD) degrade, so the suite still
+   covers the interpreter through that fallback. The scalar ALU now spans
+   the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
+   set (incl. min/max/copysign), the integer bit-counts (clz/ctz), and
+   every float↔int conversion (trapping and saturating); integer
+   popcnt/sign-extends, calls, globals, and the reference/SIMD families are
+   the remaining frontier. Still to come: the
    side-table-as-control-oracle wiring (§6) that makes valcnt/popcnt and
    multi-target branches cheap, then i64.
 5. **Ohaimark ADR** — written against measured Bistromath data
