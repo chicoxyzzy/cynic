@@ -62,6 +62,13 @@ jobs:
     # the fuzz budget (default 25 min) + triage (~2 min). 75 leaves headroom;
     # the fuzz step itself is hard-bounded by guarded-run.sh regardless.
     timeout-minutes: 75
+    # Container jobs default the `run:` shell to `sh` (dash), not bash — so
+    # the bash-isms in the steps below (set -o pipefail, arrays, PIPESTATUS)
+    # would die with "Illegal option -o pipefail". Force bash everywhere;
+    # swift:6.1 ships /bin/bash.
+    defaults:
+      run:
+        shell: bash
     # Linux, not the macOS/aarch64 dev box: cheaper minutes, and a different
     # stack-size / allocator / libc surface than where cynic-fuzz is normally
     # run — so it can surface host-safety bugs the dev box can't. Swift +
@@ -202,7 +209,7 @@ jobs:
           fi
           # FUZZ_GC_THRESHOLD is read by cynic-fuzz (tools/fuzz/fuzz_main.zig)
           # and inherited by the children Fuzzilli spawns. Empty ⇒ unset.
-          [ -n "$FUZZ_GC_THRESHOLD" ] && export FUZZ_GC_THRESHOLD
+          if [ -n "$FUZZ_GC_THRESHOLD" ]; then export FUZZ_GC_THRESHOLD; fi
 
           # guarded-run.sh bounds wall-time AND total tree RSS, and SIGKILLs
           # the whole process tree on exit — so a hung or OOMing Fuzzilli (or
