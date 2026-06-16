@@ -174,6 +174,9 @@ const op_f64_add: u8 = 0xa0;
 const op_f64_sub: u8 = 0xa1;
 const op_f64_mul: u8 = 0xa2;
 const op_f64_div: u8 = 0xa3;
+const op_f64_min: u8 = 0xa4;
+const op_f64_max: u8 = 0xa5;
+const op_f64_copysign: u8 = 0xa6;
 const op_f64_eq: u8 = 0x61;
 const op_f64_ne: u8 = 0x62;
 const op_f64_lt: u8 = 0x63;
@@ -202,6 +205,9 @@ const op_f32_add: u8 = 0x92;
 const op_f32_sub: u8 = 0x93;
 const op_f32_mul: u8 = 0x94;
 const op_f32_div: u8 = 0x95;
+const op_f32_min: u8 = 0x96;
+const op_f32_max: u8 = 0x97;
+const op_f32_copysign: u8 = 0x98;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -874,6 +880,42 @@ pub fn compile(
                 try m.emit(a64.fmovDtoX(ra, .x16));
                 stack[sp - 1] = .{ .reg = ra };
             },
+            op_f64_min, op_f64_max => {
+                // §4.3.3 f64.min/max — the FP unit's FMIN/FMAX (the plain
+                // NaN-propagating ones, not FMINNM/FMAXNM): min(-0, +0) = -0
+                // and max(-0, +0) = +0, matching the spec's signed-zero rule.
+                if (sp < 2) return null;
+                const a = stack[sp - 2];
+                const b = stack[sp - 1];
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                try m.emit(a64.fmovXtoD(.x16, ra));
+                try m.emit(a64.fmovXtoD(.x17, rb));
+                if (op == op_f64_min)
+                    try m.emit(a64.fminD(.x16, .x16, .x17))
+                else
+                    try m.emit(a64.fmaxD(.x16, .x16, .x17));
+                try m.emit(a64.fmovDtoX(ra, .x16));
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_f64_copysign => {
+                // §4.3.3 f64.copysign — magnitude of a with the sign of b, a
+                // pure bit op on the GP-resident patterns (no FP unit): clear
+                // a's sign (`bic` against the sign mask), extract b's sign
+                // (`and`), combine (`orr`).
+                if (sp < 2) return null;
+                const a = stack[sp - 2];
+                const b = stack[sp - 1];
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                try m.movImm64(.x16, 0x8000000000000000);
+                try m.emit(a64.bicReg(ra, ra, .x16)); // |a|
+                try m.emit(a64.andReg(.x17, rb, .x16)); // sign(b)
+                try m.emit(a64.orrReg(ra, ra, .x17));
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge => {
                 // §4.3.4 f64 relops — bridge both operands into the FP unit,
                 // `fcmp`, then `cset` the i32 0/1 result. The ordered
@@ -948,6 +990,40 @@ pub fn compile(
                     else => try m.emit(a64.fsqrtS(.x16, .x16)), // f32.sqrt
                 }
                 try m.emit(a64.fmovStoW(ra, .x16));
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_f32_min, op_f32_max => {
+                // §4.3.3 f32.min/max — the S-form FMIN/FMAX, same NaN-
+                // propagating, signed-zero semantics as the f64 pair.
+                if (sp < 2) return null;
+                const a = stack[sp - 2];
+                const b = stack[sp - 1];
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                try m.emit(a64.fmovWtoS(.x16, ra));
+                try m.emit(a64.fmovWtoS(.x17, rb));
+                if (op == op_f32_min)
+                    try m.emit(a64.fminS(.x16, .x16, .x17))
+                else
+                    try m.emit(a64.fmaxS(.x16, .x16, .x17));
+                try m.emit(a64.fmovStoW(ra, .x16));
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_f32_copysign => {
+                // §4.3.3 f32.copysign — the W-form bit op: |a| (bic) | sign(b)
+                // (and), combined with orr. The W-form ops zero the high word,
+                // leaving the canonical 32-bit f32 pattern.
+                if (sp < 2) return null;
+                const a = stack[sp - 2];
+                const b = stack[sp - 1];
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                try m.movImm64(.x16, 0x80000000);
+                try m.emit(a64.bicRegW(ra, ra, .x16)); // |a|
+                try m.emit(a64.andRegW(.x17, rb, .x16)); // sign(b)
+                try m.emit(a64.orrRegW(ra, ra, .x17));
                 stack[sp - 1] = .{ .reg = ra };
             },
             op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge => {
@@ -1332,7 +1408,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_min, op_f64_max, op_f64_copysign, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_min, op_f32_max, op_f32_copysign, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge => {},
             else => return null, // unknown immediate width — degrade
         }
     }

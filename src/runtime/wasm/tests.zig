@@ -982,6 +982,82 @@ test "wasm spasm: f64.sqrt compiles and runs in the FP unit" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// An `(f64,f64)->f64` minimum exported as "min" (0xa4 = f64.min).
+const f64_min_body = [_]u8{
+    0x01, 0x07, 0x01, 0x60, 0x02, 0x7c, 0x7c, 0x01, 0x7c, // type (f64,f64)->f64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x07, 0x01, 0x03, 0x6d, 0x69, 0x6e, 0x00, 0x00, // export "min" -> 0
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0xa4, 0x0b, // local.get 0; local.get 1; f64.min; end
+};
+
+test "wasm spasm: f64.min compiles and runs in the FP unit" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + f64_min_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &f64_min_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "min") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, 3.0))));
+    cells[1] = @as(u128, @as(u64, @bitCast(@as(f64, 5.0))));
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // min(3.0, 5.0) == 3.0, via FMIN.
+    try testing.expectEqual(@as(f64, 3.0), @as(f64, @bitCast(@as(u64, @truncate(res[0])))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+// An `(f64,f64)->f64` copysign exported as "cs" (0xa6 = f64.copysign).
+const f64_copysign_body = [_]u8{
+    0x01, 0x07, 0x01, 0x60, 0x02, 0x7c, 0x7c, 0x01, 0x7c, // type (f64,f64)->f64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x63, 0x73, 0x00, 0x00, // export "cs" -> 0
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0xa6, 0x0b, // local.get 0; local.get 1; f64.copysign; end
+};
+
+test "wasm spasm: f64.copysign combines magnitude and sign by bit ops" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + f64_copysign_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &f64_copysign_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "cs") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, 3.0))));
+    cells[1] = @as(u128, @as(u64, @bitCast(@as(f64, -5.0))));
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // copysign(3.0, -5.0) == -3.0 — magnitude of a, sign of b.
+    try testing.expectEqual(@as(f64, -3.0), @as(f64, @bitCast(@as(u64, @truncate(res[0])))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // An `(f64,f64)->i32` ordered less-than exported as "lt": local.get 0;
 // local.get 1; f64.lt; end. (0x63 is f64.lt; the result is an i32.)
 const f64_lt_body = [_]u8{

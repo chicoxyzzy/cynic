@@ -172,6 +172,17 @@ pub fn andRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x0A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
 }
 
+/// BIC Xd, Xn, Xm — Xn AND NOT Xm (AND with the N bit set). Used by
+/// `copysign` to clear the sign bit (`bic` against the sign mask).
+pub fn bicReg(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x8A200000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// BIC Wd, Wn, Wm — the W-form of `bicReg` (f32 copysign).
+pub fn bicRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x0A200000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
 /// ORR Wd, Wn, Wm
 pub fn orrRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x2A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
@@ -438,6 +449,18 @@ pub fn fdivD(fd: Reg, fn_: Reg, fm: Reg) u32 {
     return 0x1E601800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
 }
 
+/// FMIN Dd, Dn, Dm — double-precision minimum (NaN-propagating, and
+/// `min(-0, +0) = -0` — the plain FMIN, not the IEEE-numeric FMINNM,
+/// so it matches §4.3.3 f64.min).
+pub fn fminD(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E605800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
+/// FMAX Dd, Dn, Dm — double-precision maximum (`max(-0, +0) = +0`).
+pub fn fmaxD(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E604800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
 /// FCMP Dn, Dm — double-precision compare, setting NZCV. A wasm relop then
 /// `cset`s the result: ordered `<` is `mi`, `>` is `gt`, `<=` is `ls`,
 /// `>=` is `ge`, `==` is `eq`, and `!=` is `ne` (NaN leaves Z clear, so
@@ -518,6 +541,16 @@ pub fn fmulS(fd: Reg, fn_: Reg, fm: Reg) u32 {
 /// FDIV Sd, Sn, Sm — single-precision divide.
 pub fn fdivS(fd: Reg, fn_: Reg, fm: Reg) u32 {
     return 0x1E201800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
+/// FMIN Sd, Sn, Sm — single-precision minimum (the S-form of fminD).
+pub fn fminS(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E205800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
+/// FMAX Sd, Sn, Sm — single-precision maximum (the S-form of fmaxD).
+pub fn fmaxS(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E204800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
 }
 
 /// FCMP Sn, Sm — single-precision compare (same condition mapping as fcmpD).
