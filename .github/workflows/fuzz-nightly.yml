@@ -218,6 +218,15 @@ jobs:
           # budget, so the wall-clock bound lives in the wrapper. Corpus +
           # crashes are written to disk incrementally, so a hard kill loses
           # nothing the triage needs.
+          #
+          # --timeout=3000 overrides the profile's 500ms per-sample budget,
+          # which is tuned for the macOS dev box. On a Linux ReleaseSafe +
+          # sancov runner the panic-abort path (stack-trace symbolization over
+          # a large instrumented binary) is slow enough that a crash —
+          # including Fuzzilli's FUZZILLI_CRASH startup probe — lands as a
+          # .timedOut instead of .crashed at 500ms, so crash detection (and
+          # thus the whole gate) wouldn't work. 3s gives the abort headroom;
+          # the cost is a slower infinite-loop tail, acceptable for a nightly.
           set +e
           tools/guarded-run.sh --timeout="$DURATION" --rss=12000 -- \
             fuzzilli/.build/release/FuzzilliCli \
@@ -225,7 +234,7 @@ jobs:
               --storagePath="$STORAGE" \
               "${RESUME_ARGS[@]}" \
               --jobs="$JOBS" \
-              --timeout=500 \
+              --timeout=3000 \
               --exportStatistics \
               "$GITHUB_WORKSPACE/zig-out/bin/cynic-fuzz"
           rc=$?
