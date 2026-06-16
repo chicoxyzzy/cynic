@@ -1551,6 +1551,80 @@ test "wasm spasm: i64.clz counts leading zeros via CLZ (X-form)" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// An `(i32)->i32` sign-extend-byte exported as "op" (0xc0 = i32.extend8_s).
+const i32_extend8_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, // type (i32)->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x6f, 0x70, 0x00, 0x00, // export "op" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0xc0, 0x0b, // local.get 0; i32.extend8_s; end
+};
+
+test "wasm spasm: i32.extend8_s sign-extends the low byte via SXTB" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i32_extend8_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i32_extend8_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "op") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u32, 0xff)); // low byte 0xFF = -1 as i8
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // extend8_s(0xff) sign-extends to 0xffffffff (-1).
+    try testing.expectEqual(@as(u32, 0xffffffff), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+// An `(i64)->i64` sign-extend-word exported as "op" (0xc4 = i64.extend32_s).
+const i64_extend32_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7e, 0x01, 0x7e, // type (i64)->i64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x6f, 0x70, 0x00, 0x00, // export "op" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0xc4, 0x0b, // local.get 0; i64.extend32_s; end
+};
+
+test "wasm spasm: i64.extend32_s sign-extends the low word via SXTW" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i64_extend32_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i64_extend32_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "op") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u64, 0x80000000)); // low word's sign bit set
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // extend32_s(0x80000000) sign-extends to 0xffffffff80000000 (-2^31).
+    try testing.expectEqual(@as(u64, 0xffffffff80000000), @as(u64, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // An `(f64,f64)->i32` ordered less-than exported as "lt": local.get 0;
 // local.get 1; f64.lt; end. (0x63 is f64.lt; the result is an i32.)
 const f64_lt_body = [_]u8{

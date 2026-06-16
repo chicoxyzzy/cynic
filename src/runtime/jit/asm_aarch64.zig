@@ -207,6 +207,35 @@ pub fn rbitX(rd: Reg, rn: Reg) u32 {
     return 0xDAC00000 | (r(rn) << 5) | r(rd);
 }
 
+// Sign-extension ops (SBFM aliases) for the wasm `extend{8,16,32}_s`
+// family: take the low byte/half/word of the source and replicate its
+// sign bit through the rest of the W- or X-form result.
+
+/// SXTB Wd, Wn — sign-extend the low byte to 32 bits.
+pub fn sxtbW(rd: Reg, rn: Reg) u32 {
+    return 0x13001C00 | (r(rn) << 5) | r(rd);
+}
+
+/// SXTH Wd, Wn — sign-extend the low halfword to 32 bits.
+pub fn sxthW(rd: Reg, rn: Reg) u32 {
+    return 0x13003C00 | (r(rn) << 5) | r(rd);
+}
+
+/// SXTB Xd, Wn — sign-extend the low byte to 64 bits.
+pub fn sxtbX(rd: Reg, rn: Reg) u32 {
+    return 0x93401C00 | (r(rn) << 5) | r(rd);
+}
+
+/// SXTH Xd, Wn — sign-extend the low halfword to 64 bits.
+pub fn sxthX(rd: Reg, rn: Reg) u32 {
+    return 0x93403C00 | (r(rn) << 5) | r(rd);
+}
+
+/// SXTW Xd, Wn — sign-extend the low word to 64 bits.
+pub fn sxtwX(rd: Reg, rn: Reg) u32 {
+    return 0x93407C00 | (r(rn) << 5) | r(rd);
+}
+
 /// ORR Wd, Wn, Wm
 pub fn orrRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x2A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
