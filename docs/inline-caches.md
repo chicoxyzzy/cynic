@@ -378,8 +378,26 @@ intended consumer (docs/jit.md §5). Marginal below that tier
 unless profiling shows polymorphic sites dominating a workload we
 care about.
 
-**`hasOwn` / `in` ICs.** Cache shape-presence for
-`Object.hasOwn(obj, "x")` and `"x" in obj`. Niche.
+**`in` IC — shipped (own-positive).** `"x" in obj` carries an IC
+(`in_op` → `[op] [r:u8] [ic:u16]`) that caches the **own-positive**
+result — `x` is an own property of `obj`'s shape — guarded by the
+receiver shape + the runtime key bytes captured inline. Own presence
+⟺ the shape contains the key, so a shape guard alone is sound; the
+cold fill confirms the key is shape-tracked (`shape.lookup`), gated on
+a `found_on_receiver` flag so the negative / proto-positive paths skip
+that probe. The negative, proto-positive, function, and proxy cases
+never fill — a plain `Proto.x = 1` on a shape-mode proto bumps neither
+`proto_revision_counter` nor `proto_struct_epoch`, so a cached negative
+would go stale. `in_op` isn't Bistromath-compiled (it walks the proto
+chain / dispatches the `has` trap), so the wider opcode is differential-
+neutral via `Op.operandSize`. A/B (interp): own-positive `"x" in o`
+−37% in a hot loop; negative ~neutral. test262 transparent.
+
+**`Object.hasOwn` / `hasOwnProperty`.** Not IC'd — they are native
+calls (`objectHasOwn` etc.), outside the bytecode-opcode IC model. The
+`call_property` / `call` ICs already cache the *callee*; a shape→
+presence cache inside the native would need a per-realm `(shape, key)`
+table rather than a per-callsite cell. Niche; deferred.
 
 **for-in enumeration cache** — cache the key snapshot
 `EnumerateObjectProperties` (§14.7.5.6) builds at `for_in_open`, so a
@@ -406,20 +424,32 @@ index-string + `arr.set` per key, in `openForInIterator` — landed
 separately (`33f974a`, ~6-8 %) and stands. A cache on top is only
 worth revisiting with the dictionary-proto epoch guard in hand.
 
-## The flip — retire `properties` for shaped objects
+## The flip — retire `properties` for shaped objects (effectively done)
 
-Today's design keeps `properties` populated as a mirror even when
-`shape` is authoritative. The *flip* drops that mirror:
+The flip dropped the bag mirror for shape-mode objects. Phases 1-3
+shipped (`cbf1402`, `6e07ab7`, `8b8c605`): `get` / `hasOwn` /
+`lookupOwn` / `iterOwnNamedKeys` are shape-first, shape-mode writes
+skip the bag, and the **GC marker walks `slots[0..property_count]`**
+for shape-mode objects (the Phase 4 marker work was absorbed into
+Phase 3 — splitting would have left an inconsistent transient). The
+`properties` field stays `.empty`-defaulted rather than `?…` optional;
+an empty `StringArrayHashMapUnmanaged` allocates nothing (capacity 0),
+so a shape-mode object pays **no bag allocation** — the same memory
+outcome as the optional design, minus the compile-time "bag null ⟹
+shape mode" guarantee (a runtime convention every write upholds via
+`setWithFlags`).
 
-- `JSObject.get` / `.hasOwn` already shape-first
-  (`4133c7f`, `4b06eb4`).
-- Direct `obj.properties.get(key)` call sites (~27 across
-  builtins — Reflect, JSON, Proxy traps, `Object.defineProperty`)
-  need auditing.
-- Write path stops mirroring once the audit closes.
-
-Memory win, not perf — but unlocks computed-property IC and
-makes the JIT-tier work tractable. Phased plan + invariants in
+What remains (lazy-property-bag.md Phases 4-5) is **not worth doing**:
+the only Phase-4 residual is skipping the no-op `properties.deinit()`
+on the `.empty` bag in `deinitFields` (the doc's own "~free but not
+zero"), a GC-delicate change for a negligible win, and its abort
+criterion (`object_alloc` must move ≥15 %) is unmeetable — Phase 3
+measured the alloc path flat (the `sta_property` IC already bypasses
+the bag). Phase 5 is a `properties.put` / `.get` survivor audit;
+mixed-mode is tolerated by design, so it's low-value housekeeping. The
+bag retirement's substance is complete; the `?…` flip is left as an
+optional type-system tightening if a coherence regression ever traces
+here. Phased plan + invariants in
 [docs/lazy-property-bag.md](lazy-property-bag.md).
 
 ## Conformance risks (where IC changes can break test262)
