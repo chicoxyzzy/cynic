@@ -322,20 +322,35 @@ cheap. `reEnterDispatch` is an inline 6-field copy, also cheap. What
 remains is the `CallFrame` struct itself: ≈30 fields / ~176 bytes
 constructed and `append`ed on every call, plus the field loads off
 `callee_fn` and the return teardown — a 176-byte struct copy is ~6 ns
-on its own. The lever is therefore **shrinking `CallFrame`**: a
-hot/cold split that moves the ~10 rarely-read fields (`home_object`,
-`home_function`, `new_target`, `super_called_cell`,
-`is_derived_ctor`, `super_called`, `wrap_return_in_promise`,
-`generator`, `owning_module`, `running_realm`) behind a
-`cold: ?*ColdFrame` that is `null` for a plain call — roughly halving
-the per-call struct cost, an estimated ~10-20 % on call-heavy code.
-It is invasive (every cold-field read site — `super` call,
-return-from-derived-ctor, `import.meta`, generator yield, async
-return — must be provably reached only when `cold` is non-null), so
-it is deferred to a focused session rather than bolted on. The risk
-is bounded: test262's super / ctor / generator / async / module
-fixtures crash loudly on any `cold`-is-`null` violation, so a
-mistake is caught, not silent.
+on its own. Shrinking `CallFrame` (a hot/cold split moving rarely-read
+fields behind a `cold: ?*ColdFrame` pointer) was the candidate lever —
+**investigated and not pursued**, for two reasons found on inspection:
+
+1. **The payoff is small.** A direct test — add 64 B of dead padding to
+   `CallFrame`, rebuild ReleaseFast, measure — moved the leaf-call micro
+   only +4 % and the 0-arg micro +5.6 % (~1.5 ns per 64 B). The frame
+   *size* is a real but shallow cost. A clean cold-split can't halve the
+   frame anyway (see below), so the recoverable slice is ~30-50 B →
+   **~3-5 % on call-heavy code**, not the half-the-struct figure a naive
+   reading suggests.
+2. **A clean split moves far less than ~176 B.** `home_object`,
+   `running_realm`, and `owning_module` are written on common / every-
+   call paths, so making them cold would force a per-method-call
+   allocation — a regression, not a win. `generator` and the async /
+   `super` state entangle with generator/async **suspension
+   persistence**: a cold struct on a suspending frame must outlive the
+   call, breaking the LIFO bump discipline `value_stack` relies on. The
+   genuinely-safe-to-move set is just the construct/super-rare fields
+   (`new_target`, `is_construct`, `is_derived_ctor`, `super_called`,
+   `super_called_cell`, `home_function`) — ~30-50 B.
+
+So a ~3-5 % win on call-heavy code, gated behind an invasive, GC-
+critical refactor (every cold-field read site + root-marking the cold
+struct in the GC mark walk, with suspension-persistence corner cases) is
+a poor trade. Left as documented; revisit only if a profile shows
+call-frame construction dominating a workload we care about, or if the
+GC mark walk is reworked for other reasons and the cold struct falls out
+cheaply.
 
 ### Tier 2 — drained
 
