@@ -395,10 +395,14 @@ pub const Op = enum(u8) {
     /// callable; if it isn't, throws TypeError. Walks the LHS's
     /// prototype chain looking for `rhs.prototype`.
     instanceof_,
-    /// `[op] [r:u8]` — acc = (ToPropertyKey(reg) in acc).
+    /// `[op] [r:u8] [ic:u16]` — acc = (ToPropertyKey(reg) in acc).
     /// §13.10.1 RelationalExpression `in`. Right-hand side must be
     /// an object; if not, throws TypeError. Walks the prototype
-    /// chain. On a proxy receiver, dispatches the `has` trap.
+    /// chain. On a proxy receiver, dispatches the `has` trap. The IC
+    /// caches only the *own-positive* result (`key` is an own property
+    /// of the object's shape), guarded by shape + the runtime key —
+    /// sound because own presence ⟺ the shape contains the key. The
+    /// negative / proto-positive / function / proxy cases never fill.
     in_op,
     /// `[op] [r:u8]` — §7.4.6 IteratorClose for the iterator in
     /// register `r`. Looks up `iter.return`; if callable, invokes
@@ -1286,7 +1290,6 @@ pub const Op = enum(u8) {
             .le,
             .ge,
             .instanceof_,
-            .in_op,
             .super_call_spread,
             .array_spread,
             .object_spread,
@@ -1365,6 +1368,7 @@ pub const Op = enum(u8) {
             .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
             .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
             .lda_computed => 3, // r_obj:u8 + ic:u16 (key in acc)
+            .in_op => 3, // r_key:u8 + ic:u16 (object in acc)
             .sta_computed => 4, // r_obj:u8 + r_key:u8 + ic:u16
             .super_set_computed, .def_computed => 2, // r_obj:u8 + r_key:u8
             .del_named_property => 3, // k:u16 + r_obj:u8

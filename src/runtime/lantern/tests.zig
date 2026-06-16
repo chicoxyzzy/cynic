@@ -3128,6 +3128,90 @@ test "computed-key write IC: freezing after a cached write invalidates the cell"
     , 102);
 }
 
+// ── `in` operator IC (`key in obj`) — own-positive cache regression
+// guards. The cell caches only the *own-positive* result (`key` is an
+// own property of `obj`'s shape), which a shape guard alone makes
+// sound — own presence ⟺ the shape contains the key. The negative
+// case (`key in obj === false`) and the proto-positive case are NOT
+// cached: a plain `Proto.x = 1` on a shape-mode prototype changes only
+// the proto's shape (it bumps neither `proto_revision_counter` nor
+// `proto_struct_epoch`), so a cached negative would go stale. These
+// pin that contract — especially the last test, which goes red if a
+// negative is ever wrongly cached. (Behavior-transparent like the
+// other ICs; firing is measured by the A/B, not here.)
+
+test "in IC: own-positive key in a hot loop stays true" {
+    try expectScriptIntWithBuiltins(
+        \\const o = { a: 1, b: 2 };
+        \\let n = 0;
+        \\for (let i = 0; i < 100; i++) if ("a" in o) n++;
+        \\n
+    , 100);
+}
+
+test "in IC: deleting the own key invalidates the cell" {
+    // `delete` demotes the receiver's shape, so the cached cell misses
+    // and the re-walk reports absence.
+    try expectScriptIntWithBuiltins(
+        \\const o = { a: 1 };
+        \\let n = 0;
+        \\for (let i = 0; i < 10; i++) {
+        \\  if (i === 5) delete o.a;
+        \\  if ("a" in o) n++;
+        \\}
+        \\n
+    , 5);
+}
+
+test "in IC: polymorphic shapes — own-present and own-absent each correct" {
+    // objs[1] lacks `a`; the cell must re-resolve per shape, never
+    // serve a cached presence blindly. i%3 visits each shape 3×.
+    try expectScriptIntWithBuiltins(
+        \\const objs = [{ a: 1 }, { b: 2 }, { a: 3 }];
+        \\let n = 0;
+        \\for (let i = 0; i < 9; i++) if ("a" in objs[i % 3]) n++;
+        \\n
+    , 6);
+}
+
+test "in IC: a genuinely absent key stays false (never cached)" {
+    try expectScriptIntWithBuiltins(
+        \\const o = { a: 1 };
+        \\let n = 0;
+        \\for (let i = 0; i < 10; i++) if ("z" in o) n++;
+        \\n
+    , 0);
+}
+
+test "in IC: an inherited (proto) key reads true via the slow path" {
+    try expectScriptIntWithBuiltins(
+        \\const proto = { p: 1 };
+        \\const o = Object.create(proto);
+        \\o.a = 2;
+        \\let n = 0;
+        \\for (let i = 0; i < 10; i++) if ("p" in o) n++;
+        \\n
+    , 10);
+}
+
+test "in IC: a proto gaining the key flips a negative result (no stale negative)" {
+    // THE soundness pin. If the IC wrongly cached `"x" in o === false`
+    // during i<5, the later `proto.x = 1` (a shape-mode proto add that
+    // bumps neither realm counter nor proto epoch) would leave the
+    // cache stale and `post` would be 0. `post === 5` proves the
+    // negative was never cached — own-positive only.
+    try expectScriptIntWithBuiltins(
+        \\const proto = {};
+        \\const o = Object.create(proto);
+        \\let pre = 0, post = 0;
+        \\for (let i = 0; i < 10; i++) {
+        \\  if (i < 5) { if ("x" in o) pre++; }
+        \\  else { if (i === 5) proto.x = 1; if ("x" in o) post++; }
+        \\}
+        \\pre * 100 + post
+    , 5);
+}
+
 // ── for-in key collection — guards the openForInIterator element-store
 // path (keys land in the snapshot array's element vector directly,
 // skipping a per-key index-string allocation). Behavior-transparent:

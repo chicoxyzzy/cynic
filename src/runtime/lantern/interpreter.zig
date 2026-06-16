@@ -5374,8 +5374,35 @@ pub fn runFrames(
 
         .in_op => {
             const r = code[ip];
-            ip += 1;
+            const ic_idx = readU16(code, ip + 1);
+            ip += 3;
             const obj_v = acc;
+            // `in` IC fast path — own-positive cache. A filled cell
+            // (shape + inline key bytes) means the cached shape carries
+            // the key as an own property; own presence ⟺ the shape
+            // contains the key, so a shape + key-bytes match returns
+            // `true` with no ToPropertyKey (the key is already a flat
+            // string, where §7.1.19 is identity) and no prototype walk.
+            // A shaped receiver is a plain ordinary object (proxy /
+            // array / typed-view exotics are demoted out of shape mode
+            // before a shape is stamped), so the result is identical to
+            // the slow path below. Any miss falls through and refills.
+            ic_hit: {
+                const cell = &local_chunk.inline_caches[ic_idx];
+                if (cell.shape == null or cell.cached_key_len == 0 or cell.cached_key_len > chunk_mod.computed_key_cap) break :ic_hit;
+                const key_v = registers[r];
+                if (!key_v.isString()) break :ic_hit;
+                const ks: *JSString = @ptrCast(@alignCast(key_v.asString()));
+                if (ks.byte_len != cell.cached_key_len) break :ic_hit;
+                const kb = ks.flatBytesIfFlat() orelse break :ic_hit;
+                const obj_in = heap_mod.valueAsPlainObject(obj_v) orelse break :ic_hit;
+                if (obj_in.shape == cell.shape and
+                    std.mem.eql(u8, kb, cell.cached_key_buf[0..cell.cached_key_len]))
+                {
+                    acc = Value.fromBool(true);
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
+            }
             // §13.10.1 — RHS must be an object; otherwise TypeError.
             // §10.1.7 HasProperty / §7.3.12 — applies to any
             // Object, including callable Functions. Function
@@ -5439,6 +5466,7 @@ pub fn runFrames(
             // trap is absent.
             var cursor: ?*JSObject = obj_in;
             var found = false;
+            var found_on_receiver = false;
             var handled_via_proxy = false;
             walk: while (cursor) |c| {
                 if (c.proxy_target != null or c.proxy_revoked) {
@@ -5475,12 +5503,39 @@ pub fn runFrames(
                 // the `properties` / `accessors` maps.
                 if (c.hasOwn(key_slice)) {
                     found = true;
+                    // Own-positive iff found on the receiver itself, not
+                    // an inherited prototype — the only result the IC
+                    // fill below can guard with a shape pointer alone.
+                    if (c == obj_in) found_on_receiver = true;
                     break :walk;
                 }
                 cursor = c.prototype;
             }
             if (handled_via_proxy)
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            // `in` IC fill — own-positive only. `found_on_receiver`
+            // leads the gate (and short-circuits it) so the negative and
+            // proto-positive paths skip the `shape.lookup` below — that
+            // hash probe is the cost the own-positive case pays once on
+            // the cold fill, then never again (the fast path serves it).
+            // The lookup confirms the key is genuinely shape-tracked
+            // (not, e.g., array element storage) before caching, so the
+            // shape guard alone is sound: own presence ⟺ shape contains
+            // the key. Found-via-proto is excluded because
+            // `obj_in.shape == cell.shape` could not guard it — a plain
+            // `Proto.x = 1` on a shape-mode proto changes only the
+            // proto's shape, bumping neither the realm's
+            // proto_revision_counter nor proto_struct_epoch.
+            if (found_on_receiver and obj_in.shape != null and obj_in.proxy_target == null and
+                key_slice.len >= 1 and key_slice.len <= chunk_mod.computed_key_cap and
+                JSObject.canonicalIntegerIndex(key_slice) == null and
+                obj_in.shape.?.lookup(key_slice) != null)
+            {
+                const cell = &local_chunk.inline_caches[ic_idx];
+                cell.shape = obj_in.shape;
+                cell.cached_key_len = @intCast(key_slice.len);
+                @memcpy(cell.cached_key_buf[0..key_slice.len], key_slice);
+            }
             acc = Value.fromBool(found);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },

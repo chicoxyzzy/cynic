@@ -963,6 +963,18 @@ pub const Builder = struct {
         try self.emitU16(try self.allocIC());
     }
 
+    /// Emit `in_op` plus its key register and a freshly allocated IC
+    /// slot. Encoding: `[op] [r_key:u8] [ic:u16]` — the object stays in
+    /// the accumulator. The IC caches the own-positive result keyed by
+    /// the runtime string key (captured inline in the cell), guarded by
+    /// the object's shape so a hot `key in obj` over a stable own
+    /// property skips ToPropertyKey + the prototype walk.
+    pub fn emitInOp(self: *Builder, span: Span, r_key: u8) !void {
+        try self.emitOp(.in_op, span);
+        try self.emitU8(r_key);
+        try self.emitU16(try self.allocIC());
+    }
+
     /// Emit `lda_global` plus its key constant index and a freshly
     /// allocated IC slot. Encoding: `[op] [k:u16] [ic:u16]`. The IC
     /// caches `(globalThis_shape, slot, decl_revision)` so repeated

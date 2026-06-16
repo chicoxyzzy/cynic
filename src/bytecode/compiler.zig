@@ -5240,6 +5240,22 @@ pub const Compiler = struct {
             return;
         }
 
+        // §13.10.1 `in` — fused with an own-positive IC. Mirrors the
+        // generic binary emit (key → temp reg, object → acc) but emits
+        // `[in_op] [r_key:u8] [ic:u16]` via `emitInOp`. Special-cased
+        // here (like `private_in` above) so the IC slot is allocated;
+        // the `.in_ => .in_op` arm in the switch below is then dead but
+        // kept for exhaustiveness.
+        if (b.op == .in_) {
+            try self.compileExpression(b.lhs);
+            const r = try self.reserveTemp();
+            defer self.releaseTemp();
+            try self.builder.emitStoreReg(b.lhs.span(), r);
+            try self.compileExpression(b.rhs);
+            try self.builder.emitInOp(b.span, r);
+            return;
+        }
+
         const op: Op = switch (b.op) {
             .plus => .add,
             .minus => .sub,
