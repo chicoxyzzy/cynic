@@ -185,6 +185,13 @@ const op_f64_load: u8 = 0x2b;
 const op_f32_store: u8 = 0x38;
 const op_f64_store: u8 = 0x39;
 const op_f32_const: u8 = 0x43;
+const op_f32_abs: u8 = 0x8b;
+const op_f32_neg: u8 = 0x8c;
+const op_f32_ceil: u8 = 0x8d;
+const op_f32_floor: u8 = 0x8e;
+const op_f32_trunc: u8 = 0x8f;
+const op_f32_nearest: u8 = 0x90;
+const op_f32_sqrt: u8 = 0x91;
 const op_f32_eq: u8 = 0x5b;
 const op_f32_ne: u8 = 0x5c;
 const op_f32_lt: u8 = 0x5d;
@@ -922,6 +929,27 @@ pub fn compile(
                 try m.emit(a64.fmovStoW(ra, .x16));
                 stack[sp - 1] = .{ .reg = ra };
             },
+            op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt => {
+                // §4.3.3 f32 unary — the S-form mirror of the f64 unary ops:
+                // the f32 bits bridge W→S into the FP unit, the one-source op
+                // applies, and the result bridges S→W back. abs/neg are the
+                // sign-bit FABS/FNEG; ceil/floor/trunc/nearest the FRINT modes
+                // (nearest = ties-to-even); sqrt is FSQRT.
+                if (sp < 1) return null;
+                const ra = try materialize(&m, stack[sp - 1], sp - 1);
+                try m.emit(a64.fmovWtoS(.x16, ra));
+                switch (op) {
+                    op_f32_abs => try m.emit(a64.fabsS(.x16, .x16)),
+                    op_f32_neg => try m.emit(a64.fnegS(.x16, .x16)),
+                    op_f32_ceil => try m.emit(a64.frintpS(.x16, .x16)),
+                    op_f32_floor => try m.emit(a64.frintmS(.x16, .x16)),
+                    op_f32_trunc => try m.emit(a64.frintzS(.x16, .x16)),
+                    op_f32_nearest => try m.emit(a64.frintnS(.x16, .x16)),
+                    else => try m.emit(a64.fsqrtS(.x16, .x16)), // f32.sqrt
+                }
+                try m.emit(a64.fmovStoW(ra, .x16));
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge => {
                 // §4.3.4 f32 relops — the S-form mirror of the f64 compares,
                 // same FP condition mapping (NaN makes ordered relops false).
@@ -1304,7 +1332,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge => {},
             else => return null, // unknown immediate width — degrade
         }
     }

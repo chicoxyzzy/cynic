@@ -525,6 +525,44 @@ pub fn fcmpS(sn: Reg, sm: Reg) u32 {
     return 0x1E202000 | (r(sm) << 16) | (r(sn) << 5);
 }
 
+// Single-precision one-source ops — the S-form mirror of the f64 unary
+// group above (FABS/FNEG sign-bit, FRINTP/M/Z/N rounding, FSQRT).
+
+/// FABS Sd, Sn — single-precision absolute value (sign-bit clear).
+pub fn fabsS(fs: Reg, sn: Reg) u32 {
+    return 0x1E20C000 | (r(sn) << 5) | r(fs);
+}
+
+/// FNEG Sd, Sn — single-precision negate (sign-bit flip).
+pub fn fnegS(fs: Reg, sn: Reg) u32 {
+    return 0x1E214000 | (r(sn) << 5) | r(fs);
+}
+
+/// FSQRT Sd, Sn — single-precision square root.
+pub fn fsqrtS(fs: Reg, sn: Reg) u32 {
+    return 0x1E21C000 | (r(sn) << 5) | r(fs);
+}
+
+/// FRINTP Sd, Sn — round to integral toward +inf (f32.ceil).
+pub fn frintpS(fs: Reg, sn: Reg) u32 {
+    return 0x1E24C000 | (r(sn) << 5) | r(fs);
+}
+
+/// FRINTM Sd, Sn — round to integral toward -inf (f32.floor).
+pub fn frintmS(fs: Reg, sn: Reg) u32 {
+    return 0x1E254000 | (r(sn) << 5) | r(fs);
+}
+
+/// FRINTZ Sd, Sn — round to integral toward zero (f32.trunc).
+pub fn frintzS(fs: Reg, sn: Reg) u32 {
+    return 0x1E25C000 | (r(sn) << 5) | r(fs);
+}
+
+/// FRINTN Sd, Sn — round to nearest integral, ties to even (f32.nearest).
+pub fn frintnS(fs: Reg, sn: Reg) u32 {
+    return 0x1E244000 | (r(sn) << 5) | r(fs);
+}
+
 /// STP Xt, Xt2, [SP, #simm7×8]! — pre-indexed pair push through SP.
 pub fn stpPreIdxSp(rt: Reg, rt2: Reg, byte_off: i10) u32 {
     std.debug.assert(@rem(byte_off, 8) == 0);

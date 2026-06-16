@@ -1001,7 +1001,8 @@ useful:
    `fmov`s; and the f64 unary ops — `abs`/`neg` as the non-arithmetic
    sign-bit `FABS`/`FNEG` (NaN payloads preserved), `ceil`/`floor`/`trunc`/
    `nearest` as the `FRINTP`/`FRINTM`/`FRINTZ`/`FRINTN` directed-rounding
-   modes (nearest = ties-to-even), and `sqrt` as `FSQRT`). A float keeps living in its slot's GP register as raw
+   modes (nearest = ties-to-even), and `sqrt` as `FSQRT`; and the f32
+   unary ops, the S-form mirror of the same seven). A float keeps living in its slot's GP register as raw
    bits — an FP op bridges those bits into a v-register (`fmov` to v16/v17,
    a distinct register file from the GP x16/x17 scratch), computes in the
    FP unit, and bridges back — so the operand-stack model is unchanged and
