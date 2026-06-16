@@ -222,6 +222,9 @@ const op_i32_reinterpret_f32: u8 = 0xbc;
 const op_i64_reinterpret_f64: u8 = 0xbd;
 const op_f32_reinterpret_i32: u8 = 0xbe;
 const op_f64_reinterpret_i64: u8 = 0xbf;
+// §5.4.6 — the 0xFC prefix introduces a second opcode byte (a varuint32).
+// The baseline handles only the saturating truncations (sub-opcodes 0..7).
+const op_misc_prefix: u8 = 0xfc;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -1099,6 +1102,34 @@ pub fn compile(
                 // are read costs no instructions; leave the location as-is.
                 if (sp < 1) return null;
             },
+            op_misc_prefix => {
+                // §4.3.3 saturating truncations (the 0xFC prefix, sub-opcodes
+                // 0..7). FCVTZS/FCVTZU round toward zero and, on NaN or
+                // out-of-range, yield 0 / saturate to the integer min/max —
+                // exactly trunc_sat, so no trap path is needed. Any other
+                // 0xFC op (bulk memory, tables) degrades.
+                const sub = readUleb32(body, &i) orelse return null;
+                if (sub > 7) return null;
+                if (sp < 1) return null;
+                const ra = try materialize(&m, stack[sp - 1], sp - 1);
+                // Bridge the float in by its source width: f32 (sub 0/1/4/5)
+                // through the low word, f64 (2/3/6/7) through the full slot.
+                if ((sub & 0x2) == 0)
+                    try m.emit(a64.fmovWtoS(.x16, ra))
+                else
+                    try m.emit(a64.fmovXtoD(.x16, ra));
+                switch (sub) {
+                    0 => try m.emit(a64.fcvtzsWfromS(ra, .x16)), // i32.trunc_sat_f32_s
+                    1 => try m.emit(a64.fcvtzuWfromS(ra, .x16)), // i32.trunc_sat_f32_u
+                    2 => try m.emit(a64.fcvtzsWfromD(ra, .x16)), // i32.trunc_sat_f64_s
+                    3 => try m.emit(a64.fcvtzuWfromD(ra, .x16)), // i32.trunc_sat_f64_u
+                    4 => try m.emit(a64.fcvtzsXfromS(ra, .x16)), // i64.trunc_sat_f32_s
+                    5 => try m.emit(a64.fcvtzuXfromS(ra, .x16)), // i64.trunc_sat_f32_u
+                    6 => try m.emit(a64.fcvtzsXfromD(ra, .x16)), // i64.trunc_sat_f64_s
+                    else => try m.emit(a64.fcvtzuXfromD(ra, .x16)), // i64.trunc_sat_f64_u
+                }
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_f32_demote_f64 => {
                 // §4.3.5 f32.demote_f64 — narrow the double to single via FCVT,
                 // bridging the f64 bits into the FP unit and the f32 result back.
@@ -1464,6 +1495,12 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
             },
             op_i64_const => {
                 _ = readSleb64(body, i) orelse return null;
+            },
+            op_misc_prefix => {
+                // Only the saturating truncations (sub 0..7, no further
+                // immediate) are skippable; any other 0xFC op degrades.
+                const sub = readUleb32(body, i) orelse return null;
+                if (sub > 7) return null;
             },
             op_f64_const => {
                 _ = readF64Bits(body, i) orelse return null; // 8 raw bytes

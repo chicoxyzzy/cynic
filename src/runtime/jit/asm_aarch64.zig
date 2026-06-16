@@ -614,6 +614,52 @@ pub fn ucvtfDfromX(fd: Reg, xn: Reg) u32 {
     return 0x9E630000 | (r(xn) << 5) | r(fd);
 }
 
+// Float→integer truncations (FCVTZS/FCVTZU, round toward zero). These
+// read the FP register (Rn) and write a GP register (Rd); on NaN they
+// yield 0 and on out-of-range they saturate to the integer min/max —
+// exactly the wasm `trunc_sat` semantics. `sf` selects an i64 (X) vs i32
+// (W) result; `type` selects a double (D) vs single (S) source.
+
+/// FCVTZS Wd, Sn — f32 → i32, signed, toward zero (saturating).
+pub fn fcvtzsWfromS(wd: Reg, sn: Reg) u32 {
+    return 0x1E380000 | (r(sn) << 5) | r(wd);
+}
+
+/// FCVTZU Wd, Sn — f32 → i32, unsigned, toward zero (saturating).
+pub fn fcvtzuWfromS(wd: Reg, sn: Reg) u32 {
+    return 0x1E390000 | (r(sn) << 5) | r(wd);
+}
+
+/// FCVTZS Wd, Dn — f64 → i32, signed, toward zero (saturating).
+pub fn fcvtzsWfromD(wd: Reg, dn: Reg) u32 {
+    return 0x1E780000 | (r(dn) << 5) | r(wd);
+}
+
+/// FCVTZU Wd, Dn — f64 → i32, unsigned, toward zero (saturating).
+pub fn fcvtzuWfromD(wd: Reg, dn: Reg) u32 {
+    return 0x1E790000 | (r(dn) << 5) | r(wd);
+}
+
+/// FCVTZS Xd, Sn — f32 → i64, signed, toward zero (saturating).
+pub fn fcvtzsXfromS(xd: Reg, sn: Reg) u32 {
+    return 0x9E380000 | (r(sn) << 5) | r(xd);
+}
+
+/// FCVTZU Xd, Sn — f32 → i64, unsigned, toward zero (saturating).
+pub fn fcvtzuXfromS(xd: Reg, sn: Reg) u32 {
+    return 0x9E390000 | (r(sn) << 5) | r(xd);
+}
+
+/// FCVTZS Xd, Dn — f64 → i64, signed, toward zero (saturating).
+pub fn fcvtzsXfromD(xd: Reg, dn: Reg) u32 {
+    return 0x9E780000 | (r(dn) << 5) | r(xd);
+}
+
+/// FCVTZU Xd, Dn — f64 → i64, unsigned, toward zero (saturating).
+pub fn fcvtzuXfromD(xd: Reg, dn: Reg) u32 {
+    return 0x9E790000 | (r(dn) << 5) | r(xd);
+}
+
 /// FCMP Sn, Sm — single-precision compare (same condition mapping as fcmpD).
 pub fn fcmpS(sn: Reg, sm: Reg) u32 {
     return 0x1E202000 | (r(sm) << 16) | (r(sn) << 5);
