@@ -250,9 +250,11 @@ plus a hash of the profile.
 `FUZZILLI_REV`, and re-confirm `CynicProfile.swift` still compiles
 against it (the `profiles`-dict registration in the workflow is robust
 to entry renames but the `Profile(...)` field set can change between
-revisions). The container `swift:6.0` tag floats across patch
-releases; refresh its digest pin with
-`docker buildx imagetools inspect swift:6.0` when bumping.
+revisions — including the Swift floor: a recent Fuzzilli needs Swift
+6.1 for SE-0439 trailing commas, so the container is `swift:6.1`, not
+6.0). The `swift:6.1` tag floats across patch releases; refresh its
+digest pin with `docker buildx imagetools inspect swift:6.1` when
+bumping.
 
 ### Manual / on-demand runs
 

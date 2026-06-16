@@ -67,11 +67,16 @@ jobs:
     # run — so it can surface host-safety bugs the dev box can't. Swift +
     # Fuzzilli need a toolchain the bare runner doesn't ship, so we run inside
     # the official Swift image (Docker Official Image, maintained upstream),
-    # digest-pinned for reproducibility. Refresh the digest when bumping the
-    # tag: the `6.0` tag floats across patch releases.
-    #   docker buildx imagetools inspect swift:6.0   # → current digest
+    # digest-pinned for reproducibility.
+    #
+    # Swift 6.1, not 6.0: the pinned Fuzzilli revision's own sources use
+    # trailing commas in argument lists (SE-0439, Swift 6.1) — 6.0 rejects
+    # them with "unexpected ',' separator". Bump the floor in step with the
+    # FUZZILLI_REV pin if upstream adopts newer syntax. Refresh the digest
+    # when bumping the tag (the `6.1` tag floats across patch releases):
+    #   docker buildx imagetools inspect swift:6.1   # → current digest
     container:
-      image: swift:6.0@sha256:1dd31e9a7d28a04704d1c28aaf6d658bb9685fc8875b2b4aa416ee9ba285fac4
+      image: swift:6.1@sha256:4c6af6663ed2316002a3b38ff5505a1fc1f2749ec31e84936c32dd336713c569
     # NOTE: step-security/harden-runner (on every job in ci.yml) is omitted
     # here — it instruments the runner *host* and is a documented no-op /
     # failure inside container jobs. The egress it would audit is a git clone
