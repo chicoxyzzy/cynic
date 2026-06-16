@@ -944,6 +944,44 @@ test "wasm spasm: f64.add compiles and runs Spasm-compiled" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// An `(f64)->f64` unary exported as "op": local.get 0; f64.sqrt; end.
+// (0x7c = f64 value type, 0x9f = f64.sqrt.)
+const f64_sqrt_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7c, 0x01, 0x7c, // type (f64)->f64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x6f, 0x70, 0x00, 0x00, // export "op" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0x9f, 0x0b, // local.get 0; f64.sqrt; end
+};
+
+test "wasm spasm: f64.sqrt compiles and runs in the FP unit" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + f64_sqrt_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &f64_sqrt_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "op") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, 16.0))));
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // sqrt(16.0) == 4.0, via FSQRT through the fmov bridge.
+    try testing.expectEqual(@as(f64, 4.0), @as(f64, @bitCast(@as(u64, @truncate(res[0])))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // An `(f64,f64)->i32` ordered less-than exported as "lt": local.get 0;
 // local.get 1; f64.lt; end. (0x63 is f64.lt; the result is an i32.)
 const f64_lt_body = [_]u8{

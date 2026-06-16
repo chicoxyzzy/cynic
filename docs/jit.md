@@ -996,9 +996,12 @@ useful:
    the FP condition codes, so a NaN operand makes the ordered relops false
    and `ne` true per spec; the `f32`/`f64` loads/stores, which are
    bit-identical to the same-width integer load/store and so reuse those
-   encoders directly; and the f32 arithmetic and comparisons — the S-form
+   encoders directly; the f32 arithmetic and comparisons — the S-form
    mirror of the f64 ops, bridging through the low word with the W↔S
-   `fmov`s). A float keeps living in its slot's GP register as raw
+   `fmov`s; and the f64 unary ops — `abs`/`neg` as the non-arithmetic
+   sign-bit `FABS`/`FNEG` (NaN payloads preserved), `ceil`/`floor`/`trunc`/
+   `nearest` as the `FRINTP`/`FRINTM`/`FRINTZ`/`FRINTN` directed-rounding
+   modes (nearest = ties-to-even), and `sqrt` as `FSQRT`). A float keeps living in its slot's GP register as raw
    bits — an FP op bridges those bits into a v-register (`fmov` to v16/v17,
    a distinct register file from the GP x16/x17 scratch), computes in the
    FP unit, and bridges back — so the operand-stack model is unchanged and

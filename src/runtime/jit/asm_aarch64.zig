@@ -446,6 +446,46 @@ pub fn fcmpD(dn: Reg, dm: Reg) u32 {
     return 0x1E602000 | (r(dm) << 16) | (r(dn) << 5);
 }
 
+// Double-precision one-source ops (§4.3.3 f64 unary). FABS/FNEG are
+// non-arithmetic sign-bit ops that preserve NaN payloads; FRINTP/M/Z/N
+// are the directed rounding modes (toward +inf / -inf / zero / nearest-
+// ties-to-even); FSQRT is the IEEE square root.
+
+/// FABS Dd, Dn — double-precision absolute value (sign-bit clear).
+pub fn fabsD(fd: Reg, dn: Reg) u32 {
+    return 0x1E60C000 | (r(dn) << 5) | r(fd);
+}
+
+/// FNEG Dd, Dn — double-precision negate (sign-bit flip).
+pub fn fnegD(fd: Reg, dn: Reg) u32 {
+    return 0x1E614000 | (r(dn) << 5) | r(fd);
+}
+
+/// FSQRT Dd, Dn — double-precision square root.
+pub fn fsqrtD(fd: Reg, dn: Reg) u32 {
+    return 0x1E61C000 | (r(dn) << 5) | r(fd);
+}
+
+/// FRINTP Dd, Dn — round to integral toward +inf (f64.ceil).
+pub fn frintpD(fd: Reg, dn: Reg) u32 {
+    return 0x1E64C000 | (r(dn) << 5) | r(fd);
+}
+
+/// FRINTM Dd, Dn — round to integral toward -inf (f64.floor).
+pub fn frintmD(fd: Reg, dn: Reg) u32 {
+    return 0x1E654000 | (r(dn) << 5) | r(fd);
+}
+
+/// FRINTZ Dd, Dn — round to integral toward zero (f64.trunc).
+pub fn frintzD(fd: Reg, dn: Reg) u32 {
+    return 0x1E65C000 | (r(dn) << 5) | r(fd);
+}
+
+/// FRINTN Dd, Dn — round to nearest integral, ties to even (f64.nearest).
+pub fn frintnD(fd: Reg, dn: Reg) u32 {
+    return 0x1E644000 | (r(dn) << 5) | r(fd);
+}
+
 // Single-precision (f32) — the S-form mirror of the D-form ops above. An
 // f32 lives in the low 32 bits of its GP slot register; the bridge uses
 // the W↔S moves, and arithmetic/compare operate on s16/s17.
