@@ -3239,6 +3239,102 @@ test "for-in: array integer indices ascending, then named keys" {
     , "0,1,2,foo,");
 }
 
+// ── for-in enumeration cache — caches the §14.7.5.6 key snapshot at
+// `for_in_open`, keyed by (receiver shape, frozen-proto identity,
+// proto-struct epoch), so a hot `for (k in o)` loop over a stable
+// object served by a frozen prototype skips the array alloc + key
+// walk + per-key string copies on re-entry. Behavior-transparent:
+// these pin keys + §14.7.5.6 order + every invalidation path; the
+// win is measured by the A/B, not here.
+
+test "for-in cache: same-shape hot loop keeps key order across iterations" {
+    // Frozen %Object.prototype% (hardened default) over a stable
+    // 3-key object — the fill-eligible shape. The cache must serve the
+    // identical §14.7.5.6 order ("bac", insertion order, no inherited
+    // enumerable) on every one of the 50 re-entries.
+    try expectScriptStringWithBuiltins(
+        \\const o = { b: 1, a: 2, c: 3 };
+        \\let last = "";
+        \\for (let i = 0; i < 50; i++) {
+        \\  let r = "";
+        \\  for (const k in o) r += k;
+        \\  last = r;
+        \\}
+        \\last
+    , "bac");
+}
+
+test "for-in cache: receiver shape change mid-loop reflects the new shape" {
+    // Adding `d` transitions the receiver's shape; the recv_shape
+    // guard must miss and re-snapshot so the new key is enumerated.
+    // The total counts keys across all 10 passes: 5 passes of 3 keys
+    // (b,a,c) then 5 passes of 4 keys (b,a,c,d) = 15 + 20 = 35.
+    try expectScriptIntWithBuiltins(
+        \\const o = { b: 1, a: 2, c: 3 };
+        \\let n = 0;
+        \\for (let i = 0; i < 10; i++) {
+        \\  if (i === 5) o.d = 4;
+        \\  for (const k in o) n++;
+        \\}
+        \\n
+    , 35);
+}
+
+test "for-in cache: polymorphic shapes at one site each enumerate correctly" {
+    // objs cycle three distinct shapes at one for_in_open site; each
+    // pass must enumerate its own keys, never a cached foreign snapshot.
+    // {a} → "a", {b,c} → "bc", {d,e,f} → "def"; i%3 over 9 → 3 each.
+    try expectScriptStringWithBuiltins(
+        \\const objs = [{ a: 1 }, { b: 1, c: 2 }, { d: 1, e: 2, f: 3 }];
+        \\let r = "";
+        \\for (let i = 0; i < 9; i++) {
+        \\  for (const k in objs[i % 3]) r += k;
+        \\}
+        \\r
+    , "abcdefabcdefabcdef");
+}
+
+test "for-in cache: non-frozen proto whose keys change is never stale" {
+    // THE soundness pin. `proto` is a plain (non-frozen) user object,
+    // so the frozen-proto gate must refuse to fill — every open
+    // re-walks. After `proto.x = 1` at i===5, the inherited enumerable
+    // `x` MUST appear. If the cache wrongly filled over the unfrozen
+    // proto, the post-5 passes would miss `x` and `n` would be too low.
+    // Pre: 5 passes see own `own` only (5). Post: 5 passes see `own`
+    // + inherited `x` (10). Total 15.
+    try expectScriptIntWithBuiltins(
+        \\const proto = {};
+        \\const o = Object.create(proto);
+        \\o.own = 0;
+        \\let n = 0;
+        \\for (let i = 0; i < 10; i++) {
+        \\  if (i === 5) proto.x = 1;
+        \\  for (const k in o) n++;
+        \\}
+        \\n
+    , 15);
+}
+
+test "for-in cache: inherited enumerable from a frozen proto merges with own keys" {
+    // A user-built proto carrying an enumerable `p`, then frozen, then
+    // an own object layered on top. The §14.7.5.6 merge must surface
+    // own keys (insertion order) then the inherited enumerable `p`,
+    // deduplicated, identically across all 30 hot re-entries.
+    try expectScriptStringWithBuiltins(
+        \\const proto = { p: 0 };
+        \\Object.freeze(proto);
+        \\const o = Object.create(proto);
+        \\o.b = 1; o.a = 2;
+        \\let last = "";
+        \\for (let i = 0; i < 30; i++) {
+        \\  let r = "";
+        \\  for (const k in o) r += k;
+        \\  last = r;
+        \\}
+        \\last
+    , "bap");
+}
+
 test "computed int read: dense in-bounds hits own elements" {
     try expectScriptInt("var a=[10,20,30]; a[0]+a[1]+a[2]", 60);
     try expectScriptInt("var a=[10,20,30]; var i=2; a[i]", 30);

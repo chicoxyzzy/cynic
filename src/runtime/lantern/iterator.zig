@@ -281,10 +281,29 @@ pub fn openIteratorOpts(
 /// etc. Cynic-internal sentinel properties (those whose name
 /// starts with `__cynic_`) are also skipped.
 pub fn openForInIterator(
-    _: std.mem.Allocator,
+    allocator: std.mem.Allocator,
     realm: *Realm,
     obj_v: Value,
 ) RunError!Value {
+    const arr = try buildForInSnapshot(allocator, realm, obj_v);
+    return wrapForInSnapshot(realm, arr, obj_v);
+}
+
+/// Build the §14.7.5.6 key-snapshot array for `obj_v` WITHOUT wrapping
+/// it in an iterator. `openForInIterator` is `wrapForInSnapshot` over
+/// this; the `for_in_open` enumeration cache caches the returned
+/// `*JSObject` so a re-entry over a stable object serves a fresh
+/// iterator without re-walking the keys.
+///
+/// The cache only fills from this with a fill-eligible receiver (plain
+/// shape-mode object, frozen one-level proto, no integer elements), but
+/// the walk itself is the general §14.7.5.6 one — the array is correct
+/// for any receiver; the gate is purely a soundness-of-reuse filter.
+pub fn buildForInSnapshot(
+    _: std.mem.Allocator,
+    realm: *Realm,
+    obj_v: Value,
+) RunError!*JSObject {
     const arr = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(arr, realm.intrinsics.array_prototype);
     arr.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
@@ -592,16 +611,30 @@ pub fn openForInIterator(
     }
     arr.set(realm.allocator, "length", Value.fromInt32(len)) catch return error.OutOfMemory;
 
+    return arr;
+}
+
+/// Wrap an already-built §14.7.5.6 key-snapshot array in a fresh
+/// for-in iterator. Used by both the cold build (`openForInIterator`)
+/// and the `for_in_open` enumeration-cache hit. `source_v` is the
+/// original for-in target, stashed on the iterator state so
+/// `arrayLikeIterNext` can run §14.7.5.6's live-deletion check
+/// ("a property deleted before it is visited is not visited"). The
+/// array itself is never mutated, so a cached array is safe to wrap
+/// repeatedly.
+pub fn wrapForInSnapshot(
+    realm: *Realm,
+    arr: *JSObject,
+    source_v: Value,
+) RunError!Value {
     // Build a direct array-like iterator over the snapshot
     // rather than going through %Array.prototype%[@@iterator],
     // because we need to stash the original source on the
     // iterator state for §14.7.5.6's live-deletion check.
-    // ("If a property that has not yet been visited during
-    // enumeration is deleted, then it will not be visited.")
     const iter = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(iter, realm.intrinsics.object_prototype);
     const state = realm.allocator.create(@import("../object.zig").ArrayLikeIterState) catch return error.OutOfMemory;
-    state.* = .{ .target = heap_mod.taggedObject(arr), .idx = 0, .done = false, .for_in_source = obj_v };
+    state.* = .{ .target = heap_mod.taggedObject(arr), .idx = 0, .done = false, .for_in_source = source_v };
     iter.array_like_iter = state;
     iter.markNonPristine();
     const next_fn = realm.heap.allocateFunctionNative(realm, arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;

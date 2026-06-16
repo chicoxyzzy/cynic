@@ -6492,13 +6492,15 @@ pub const Compiler = struct {
             self.env_depth = saved_env_depth;
             self.env_slot_count = saved_head_slot_count;
         }
-        const open_op: Op = if (s.kind == .in_)
-            .for_in_open
-        else if (s.is_await)
-            .async_iter_open
-        else
-            .iter_open;
-        try self.builder.emitOp(open_op, s.span);
+        // §14.7.5.6 — for-in routes through `emitForInOpen` to carry
+        // the enumeration-cache IC slot (`[op] [ic:u16]`); for-of /
+        // for-await have no such cache and emit the bare opcode.
+        if (s.kind == .in_) {
+            try self.builder.emitForInOpen(s.span);
+        } else {
+            const open_op: Op = if (s.is_await) .async_iter_open else .iter_open;
+            try self.builder.emitOp(open_op, s.span);
+        }
         const r_iter = try self.reserveTemp();
         defer self.releaseTemp();
         try self.builder.emitStoreReg(s.span, r_iter);

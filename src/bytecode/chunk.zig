@@ -172,6 +172,51 @@ pub const CallICCell = struct {
     proto: ?*@import("../runtime/object.zig").JSObject = null,
 };
 
+/// Inline-cache cell for `for_in_open` — caches the §14.7.5.6
+/// EnumerateObjectProperties key snapshot at one for-in callsite so a
+/// hot `for (k in o)` loop over a stable object skips the array alloc
+/// + own/inherited key walk + per-key string copies on re-entry.
+///
+/// Soundness rests on the receiver's `[[Prototype]]` being a **frozen**
+/// object with a `null` `[[Prototype]]` (a one-level frozen chain, e.g.
+/// `obj` → frozen `%Object.prototype%` → null). A frozen proto's
+/// enumerable contribution to for-in is immutable, so the snapshot stays
+/// valid as long as the receiver's own shape is unchanged. This is the
+/// corrected gate: the earlier reverted attempt guarded on the proto
+/// being *shape-mode*, which never held under SES-default frozen
+/// (dictionary-mode, `shape == null`) primordials.
+///
+/// A filled cell holds `(recv_shape, proto, snapshot, guard_epoch)`:
+///   • `recv_shape` — the receiver's shape at fill (own named-key
+///     structure). A shape change (add / delete key) misses.
+///   • `proto` — the receiver's `[[Prototype]]` identity at fill.
+///     A `setPrototypeOf` to a different proto misses.
+///   • `snapshot` — the key-array `JSObject` the cold fill built via
+///     `buildForInSnapshot`. On a hit the cell serves a FRESH iterator
+///     over this same array (the array itself is never mutated).
+///   • `guard_epoch` — `heap.proto_struct_epoch` at fill. A structural
+///     mutation anywhere bumps it; the hot path re-checks so a frozen
+///     proto thawed-then-mutated (it can't be, but defensively) or any
+///     structural funnel forces a refill.
+///
+/// `proto` and `snapshot` are GC-heap pointers held WEAKLY — the heap's
+/// mark walk weak-clears the whole cell if either referent is swept, so
+/// the cell never roots a dead snapshot and never dangles. `recv_shape`
+/// is arena-stable (shapes are never collected individually) but it's
+/// cleared alongside the others so a swept-and-reused proto / snapshot
+/// address cannot reawaken a stale cell.
+///
+/// `snapshot == null` is the cold / un-cacheable state (the last open
+/// hit a non-fill-eligible receiver — proxy, array-exotic, owns
+/// integer-indexed elements, unfrozen or deeper proto chain — or simply
+/// hasn't run yet). Initialised that way at chunk finalisation.
+pub const ForInICCell = struct {
+    recv_shape: ?*Shape = null,
+    proto: ?*@import("../runtime/object.zig").JSObject = null,
+    snapshot: ?*@import("../runtime/object.zig").JSObject = null,
+    guard_epoch: u64 = 0,
+};
+
 /// Compile-time blueprint for an object-literal's shape — the V8 /
 /// JSC "literal boilerplate" pattern. When an object literal like
 /// `{a: e1, b: e2}` uses only static identifier keys, no spreads,
@@ -553,6 +598,11 @@ pub const Chunk = struct {
     /// the heap mark walks every reachable chunk's cells and
     /// weak-clears stale callee pointers post-mark.
     inline_call_caches: []CallICCell = &.{},
+    /// Sister table for `for_in_open` callsite caching. Cell at
+    /// index `i` is the IC cell for the i-th for_in_open emit;
+    /// the heap mark weak-clears any cell whose cached proto /
+    /// snapshot heap pointer was swept (see `ForInICCell`).
+    inline_forin_caches: []ForInICCell = &.{},
     /// Object-literal shape templates. `make_object_shape <k>`
     /// indexes this table; the runtime stamps the cached
     /// `Shape*` onto the freshly-allocated object so the
@@ -620,6 +670,7 @@ pub const Chunk = struct {
         allocator.free(self.direct_eval_scopes);
         allocator.free(self.inline_caches);
         allocator.free(self.inline_call_caches);
+        allocator.free(self.inline_forin_caches);
         for (self.literal_shape_templates) |*t| allocator.free(t.keys);
         allocator.free(self.literal_shape_templates);
         if (self.jit_state) |js| allocator.destroy(js);
@@ -663,6 +714,9 @@ pub const Builder = struct {
     /// Running count of call-IC cells handed out via `allocCallIC`.
     /// Sizes `Chunk.inline_call_caches` at `finish`.
     inline_call_cache_count: u16 = 0,
+    /// Running count of for-in-IC cells handed out via `allocForInIC`.
+    /// Sizes `Chunk.inline_forin_caches` at `finish`.
+    inline_forin_cache_count: u16 = 0,
     /// Byte offset of the most recently emitted opcode (set by
     /// `emitOp`). Lets `accStillHoldsRegister` recognise a just-emitted
     /// `Star r` so the compiler can drop a redundant following
@@ -1016,6 +1070,26 @@ pub const Builder = struct {
         return k;
     }
 
+    /// Allocate a fresh for-in-IC slot for a `for_in_open` site.
+    pub fn allocForInIC(self: *Builder) !u16 {
+        if (self.inline_forin_cache_count == std.math.maxInt(u16)) {
+            return error.TooManyInlineCaches;
+        }
+        const k = self.inline_forin_cache_count;
+        self.inline_forin_cache_count += 1;
+        return k;
+    }
+
+    /// Emit `for_in_open` plus a freshly allocated for-in-IC slot.
+    /// Encoding: `[op] [ic:u16]` — the object stays in the
+    /// accumulator. The IC caches the §14.7.5.6 key snapshot keyed by
+    /// the receiver shape + a frozen one-level prototype, so a hot
+    /// `for (k in o)` loop over a stable object skips the re-walk.
+    pub fn emitForInOpen(self: *Builder, span: Span) !void {
+        try self.emitOp(.for_in_open, span);
+        try self.emitU16(try self.allocForInIC());
+    }
+
     /// Emit `call_method` plus its receiver / callee / argc operands
     /// and a freshly allocated call-IC slot. Encoding:
     /// `[op] [r_recv:u8] [r_callee:u8] [argc:u8] [ic:u16]`.
@@ -1232,6 +1306,8 @@ pub const Builder = struct {
         for (ics) |*c| c.* = .{};
         const call_ics = try self.allocator.alloc(CallICCell, self.inline_call_cache_count);
         for (call_ics) |*c| c.* = .{};
+        const forin_ics = try self.allocator.alloc(ForInICCell, self.inline_forin_cache_count);
+        for (forin_ics) |*c| c.* = .{};
         const jit_state = try self.allocator.create(Chunk.JitState);
         jit_state.* = .{};
         return .{
@@ -1249,6 +1325,7 @@ pub const Builder = struct {
             .global_lexical_base = self.global_lexical_base,
             .inline_caches = ics,
             .inline_call_caches = call_ics,
+            .inline_forin_caches = forin_ics,
             .jit_state = jit_state,
         };
     }

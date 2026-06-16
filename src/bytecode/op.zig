@@ -669,13 +669,16 @@ pub const Op = enum(u8) {
     /// sync `for-of`; `for-await-of` and `for-in` keep the
     /// open-coded `call_method` + `lda_property` sequence.
     for_of_next,
-    /// `[op]` — §14.7.5.6 EnumerateObjectProperties. Reads the
-    /// object from acc, walks its own + inherited string-keyed
+    /// `[op] [ic:u16]` — §14.7.5.6 EnumerateObjectProperties. Reads
+    /// the object from acc, walks its own + inherited string-keyed
     /// properties (deduplicated), and produces an iterator that
     /// yields each name. `null` / `undefined` produce an empty
     /// iterator (per §14.7.5.6 ForIn/OfHeadEvaluation step 7).
     /// Symbol-keyed properties are excluded (§14.7.5.6 step 4).
-    /// Used by `for-in`.
+    /// Used by `for-in`. The `ic` operand indexes
+    /// `Chunk.inline_forin_caches`: the cell caches the key snapshot
+    /// keyed by the receiver shape + a frozen one-level prototype so
+    /// a hot loop over a stable object skips the re-walk.
     for_in_open,
     /// `[op]` — discard the current frame's innermost
     /// environment, restoring its parent. Used by closure-per-
@@ -1225,7 +1228,6 @@ pub const Op = enum(u8) {
             .await_,
             .iter_open,
             .async_iter_open,
-            .for_in_open,
             .pop_env,
             .negate,
             .bit_not,
@@ -1322,6 +1324,11 @@ pub const Op = enum(u8) {
             .sta_global_init,
             .sta_global_fn_decl,
             .module_export,
+            // §14.7.5.6 — `for_in_open [ic:u16]` carries the for-in
+            // enumeration-cache slot (object is in `acc`). The cell
+            // caches the key snapshot keyed by receiver shape + a
+            // frozen one-level prototype.
+            .for_in_open,
             // §13.3.10 — `dynamic_import` carries the
             // `with { type: "..." }` attribute as a u16 constant
             // index (or `0xFFFF` for no attribute) so the deferred

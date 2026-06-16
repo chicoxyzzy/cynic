@@ -151,6 +151,8 @@ pub const openIteratorAllowArrayLike = iter_mod.openIteratorAllowArrayLike;
 pub const openIteratorOpts = iter_mod.openIteratorOpts;
 pub const openAsyncIterator = iter_mod.openAsyncIterator;
 pub const openForInIterator = iter_mod.openForInIterator;
+pub const buildForInSnapshot = iter_mod.buildForInSnapshot;
+pub const wrapForInSnapshot = iter_mod.wrapForInSnapshot;
 
 // Module loading lives in `module.zig`. Re-export the public
 // surface; the dispatch loop's `module_load` / `dynamic_import`
@@ -7195,6 +7197,8 @@ pub fn runFrames(
             // §14.7.5.6 — snapshot the object's own + inherited
             // string keys into a fresh array iterator. `null` /
             // `undefined` produce an empty iterator.
+            const forin_ic_idx = readU16(code, ip);
+            ip += 2;
             if (acc.isNull() or acc.isUndefined()) {
                 const empty = realm.heap.allocateObject() catch return error.OutOfMemory;
                 realm.heap.setObjectPrototype(empty, realm.intrinsics.array_prototype);
@@ -7202,6 +7206,38 @@ pub fn runFrames(
                 realm.heap.storeProperty(empty, allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
                 acc = openIterator(allocator, realm, heap_mod.taggedObject(empty)) catch return error.OutOfMemory;
             } else {
+                // §14.7.5.6 for-in enumeration cache — fast path.
+                // A filled cell holds the key snapshot keyed by the
+                // receiver shape + a frozen one-level prototype +
+                // `heap.proto_struct_epoch`. The guard re-verifies all
+                // of: receiver shape, proto identity, proto still
+                // frozen (`!extensible`), epoch unchanged, receiver
+                // has no integer-indexed elements (which the shape
+                // doesn't capture). A match serves a FRESH iterator
+                // over the cached array — no re-walk, no per-key string
+                // copy, no `seen` set. Soundness: a frozen proto's
+                // enumerable contribution is immutable, and the shape
+                // pins the receiver's own keys + §10.1.11 order. Any
+                // miss falls through to the cold build + refill.
+                forin_hit: {
+                    const cell = &local_chunk.inline_forin_caches[forin_ic_idx];
+                    const snap = cell.snapshot orelse break :forin_hit;
+                    const recv = heap_mod.valueAsPlainObject(acc) orelse break :forin_hit;
+                    if (recv.shape == null or recv.shape != cell.recv_shape) break :forin_hit;
+                    if (recv.prototype != cell.proto) break :forin_hit;
+                    const proto = cell.proto orelse break :forin_hit;
+                    if (proto.extensible) break :forin_hit;
+                    if (realm.heap.proto_struct_epoch != cell.guard_epoch) break :forin_hit;
+                    // Integer-indexed elements are own enumerable keys
+                    // (§10.4.2 / §10.1.11) the shape doesn't track; a
+                    // post-fill `o[0] = …` wouldn't bump the shape, so
+                    // re-check liveness here. Plain shape-mode objects
+                    // never carry these, so this is ~free in the common
+                    // case.
+                    if (recv.elements.items.len != 0 or recv.is_sparse or recv.sparse_elements.count() != 0) break :forin_hit;
+                    acc = wrapForInSnapshot(realm, snap, acc) catch return error.OutOfMemory;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
                 // §9.4.6.4 Module Namespace [[GetOwnProperty]]
                 // — EnumerateObjectProperties (§14.7.5.6) reads
                 // each own descriptor, materialising
@@ -7233,7 +7269,48 @@ pub fn runFrames(
                         }
                     }
                 }
-                acc = openForInIterator(allocator, realm, acc) catch return error.OutOfMemory;
+                // Cold / miss path — build the §14.7.5.6 snapshot
+                // once, then (when the receiver is fill-eligible) cache
+                // the array so the next open over the same stable
+                // object takes the fast path above.
+                const recv_v = acc;
+                const snap_arr = buildForInSnapshot(allocator, realm, recv_v) catch return error.OutOfMemory;
+                // Fill gate (all must hold): receiver is a plain
+                // shape-mode object — not a proxy, not array-exotic, no
+                // typed view, no module namespace, no integer-indexed
+                // elements — whose `[[Prototype]]` is a FROZEN object
+                // (`!extensible`) with a `null` `[[Prototype]]` (a
+                // one-level frozen chain, e.g. `obj` → frozen
+                // `%Object.prototype%` → null). Conservative by design:
+                // a deeper or unfrozen chain refuses, so an unfrozen
+                // proto whose enumerable keys later change never serves
+                // a stale snapshot.
+                fill: {
+                    const recv = heap_mod.valueAsPlainObject(recv_v) orelse break :fill;
+                    if (recv.shape == null) break :fill;
+                    if (recv.proxy_target != null or recv.proxy_target_fn != null or recv.proxy_revoked) break :fill;
+                    if (recv.is_array_exotic or recv.is_module_namespace or recv.getTypedView() != null) break :fill;
+                    if (recv.elements.items.len != 0 or recv.is_sparse or recv.sparse_elements.count() != 0) break :fill;
+                    const proto = recv.prototype orelse break :fill;
+                    if (proto.extensible) break :fill; // not frozen / sealed
+                    if (proto.prototype != null) break :fill; // not a one-level chain
+                    // The proto must itself be a fully integrity-locked
+                    // object: non-extensible alone (preventExtensions)
+                    // leaves existing keys configurable, so a
+                    // `defineProperty` could flip an enumerable flag.
+                    // The `guard_epoch` snapshot catches that (the
+                    // structural funnels in object.zig bump it), but
+                    // require the proto have no own integer elements
+                    // it could re-enumerate, and no live proxy.
+                    if (proto.proxy_target != null or proto.proxy_revoked) break :fill;
+                    if (proto.elements.items.len != 0 or proto.is_sparse or proto.sparse_elements.count() != 0) break :fill;
+                    const cell = &local_chunk.inline_forin_caches[forin_ic_idx];
+                    cell.recv_shape = recv.shape;
+                    cell.proto = proto;
+                    cell.snapshot = snap_arr;
+                    cell.guard_epoch = realm.heap.proto_struct_epoch;
+                }
+                acc = wrapForInSnapshot(realm, snap_arr, recv_v) catch return error.OutOfMemory;
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },

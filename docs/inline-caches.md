@@ -399,30 +399,48 @@ calls (`objectHasOwn` etc.), outside the bytecode-opcode IC model. The
 presence cache inside the native would need a per-realm `(shape, key)`
 table rather than a per-callsite cell. Niche; deferred.
 
-**for-in enumeration cache** — cache the key snapshot
-`EnumerateObjectProperties` (§14.7.5.6) builds at `for_in_open`, so a
-hot `for (k in o)` loop over a stable-shape object skips the array
-alloc + own/inherited key walk + per-key string copies on re-entry,
-serving the cached snapshot after a guard match. **Attempted and
-reverted** — measured a net regression in the default posture, so it
-is not on `main`. The trap: the conservative scope guarded on the
-receiver's [[Prototype]] being the realm's *shape-mode* `%Object.
-prototype%` (`proto.shape != null`), but Cynic is SES-by-default and
-the realm-init freeze demotes the primordial prototypes to
-**dictionary mode** (`shape == null`). So under the shipping posture
-the fill-gate is never satisfied — the cache never fills, the fast-path
-+ fill guards run on every open as pure overhead, and a 5-key
-`for-in` micro regressed ~8 %. A working version must invalidate
-against a **dictionary-mode** proto, i.e. a `proto_struct_epoch`-style
-guard (the same machinery the `sta_property` transition IC already
-uses for non-immediate / dictionary protos) rather than a proto-shape
-pointer — plus the dedicated weak `ForInICCell` table (mirroring
-`CallICCell`, weak-cleared post-mark) the snapshot pointer needs. The
-key-snapshot **allocation reduction** that does *not* need a cache —
-`storeElement` straight into the result array instead of
-index-string + `arr.set` per key, in `openForInIterator` — landed
-separately (`33f974a`, ~6-8 %) and stands. A cache on top is only
-worth revisiting with the dictionary-proto epoch guard in hand.
+**for-in enumeration cache — shipped (frozen-proto guard).**
+`for_in_open` carries an IC (`[op] [ic:u16]` → `Chunk.inline_forin_caches`,
+a weak `ForInICCell` table mirroring `CallICCell`) that caches the
+§14.7.5.6 EnumerateObjectProperties key snapshot, so a hot `for (k in o)`
+loop over a stable object served by a frozen prototype skips the array
+alloc + own/inherited key walk + per-key string copies on re-entry —
+serving a *fresh* iterator over the cached key-array after a guard match
+(the array is never mutated). The cell holds
+`(recv_shape, proto, snapshot, guard_epoch)`.
+
+This is the corrected design after the earlier revert. The reverted
+attempt guarded on the receiver's [[Prototype]] being the realm's
+*shape-mode* `%Object.prototype%` (`proto.shape != null`), but Cynic is
+SES-by-default and the realm-init freeze demotes the primordial
+prototypes to **dictionary mode** (`shape == null`) — so the fill-gate
+never held and it ran as pure overhead (a 5-key micro regressed ~8 %).
+The corrected gate keys on the proto being **frozen** (`!extensible`)
+with a `null` [[Prototype]] — a one-level frozen chain, e.g. `obj` →
+frozen `%Object.prototype%` → null. A frozen proto's enumerable
+contribution is immutable, so the snapshot stays valid while the
+receiver's own shape is unchanged. Fill conditions (all must hold):
+receiver is a plain shape-mode object (`shape != null`), not a proxy /
+array-exotic / typed-view / module-namespace, with no integer-indexed
+elements (for-in includes own indices ascending from `elements`, which
+the shape doesn't capture); its [[Prototype]] is a frozen one-level
+chain. Guard on hit re-verifies receiver shape == cell.recv_shape,
+proto identity, proto still `!extensible`, `heap.proto_struct_epoch`
+unchanged (catches any enumerable-flag flip / delete / accessor install
+on the proto via the same structural funnels the `sta_property`
+transition IC uses), and no integer elements on the receiver. The
+`proto` + `snapshot` pointers are GC-heap and held **weakly** —
+`weakClearChunkICs` (heap.zig) nulls the whole cell if either is swept,
+so the cache never roots a dead snapshot and never dangles. `for_in_open`
+isn't Bistromath-compiled (it walks the proto chain / allocates), so the
+wider opcode is differential-neutral via `Op.operandSize`. A/B (interp,
+min-of-7, --no-jit): count-only `for (k in o)` over `{a,b,c}` −58 %,
+with-keys (`s += k.length; s += o[k]`) −55 %, both vs the alloc-reduction
+baseline. test262 transparent (45335, byte-identical pass-set; --jit
+matches). The key-snapshot **allocation reduction** that does *not* need
+a cache — `storeElement` straight into the result array, in
+`buildForInSnapshot` — landed separately (`33f974a`, ~6-8 %) and is the
+baseline the A/B beats.
 
 ## The flip — retire `properties` for shaped objects (effectively done)
 

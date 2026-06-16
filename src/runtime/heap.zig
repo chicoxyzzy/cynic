@@ -2190,6 +2190,22 @@ pub const Heap = struct {
                 if (proto.mark_color != live_color) cell.proto = null;
             }
         }
+        // §14.7.5.6 for-in enumeration cache — the cell holds two
+        // GC-heap pointers held weakly: the frozen prototype and the
+        // key-snapshot array. If EITHER is swept, clear the whole
+        // cell so (a) the cache never roots a dead snapshot and
+        // (b) a swept-and-reused proto / snapshot address cannot
+        // reawaken a stale cell. `recv_shape` is arena-stable but is
+        // nulled alongside for the same reuse-safety reason.
+        for (chunk.inline_forin_caches) |*cell| {
+            const proto_dead = if (cell.proto) |p| p.mark_color != live_color else false;
+            const snap_dead = if (cell.snapshot) |s| s.mark_color != live_color else false;
+            if (proto_dead or snap_dead) {
+                cell.recv_shape = null;
+                cell.proto = null;
+                cell.snapshot = null;
+            }
+        }
         for (chunk.function_templates) |*ft| weakClearChunkICs(&ft.chunk, live_color);
         for (chunk.class_templates) |*ct| {
             weakClearChunkICs(&ct.constructor_chunk, live_color);
