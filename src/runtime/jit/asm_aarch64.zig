@@ -446,6 +446,45 @@ pub fn fcmpD(dn: Reg, dm: Reg) u32 {
     return 0x1E602000 | (r(dm) << 16) | (r(dn) << 5);
 }
 
+// Single-precision (f32) — the S-form mirror of the D-form ops above. An
+// f32 lives in the low 32 bits of its GP slot register; the bridge uses
+// the W↔S moves, and arithmetic/compare operate on s16/s17.
+
+/// FMOV Sd, Wn — move a GP register's low 32 bits into an FP single.
+pub fn fmovWtoS(fs: Reg, wn: Reg) u32 {
+    return 0x1E270000 | (r(wn) << 5) | r(fs);
+}
+
+/// FMOV Wd, Sn — move an FP single's bits into a GP register's low 32.
+pub fn fmovStoW(wd: Reg, fs: Reg) u32 {
+    return 0x1E260000 | (r(fs) << 5) | r(wd);
+}
+
+/// FADD Sd, Sn, Sm — single-precision add.
+pub fn faddS(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E202800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
+/// FSUB Sd, Sn, Sm — single-precision subtract.
+pub fn fsubS(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E203800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
+/// FMUL Sd, Sn, Sm — single-precision multiply.
+pub fn fmulS(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E200800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
+/// FDIV Sd, Sn, Sm — single-precision divide.
+pub fn fdivS(fd: Reg, fn_: Reg, fm: Reg) u32 {
+    return 0x1E201800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
+}
+
+/// FCMP Sn, Sm — single-precision compare (same condition mapping as fcmpD).
+pub fn fcmpS(sn: Reg, sm: Reg) u32 {
+    return 0x1E202000 | (r(sm) << 16) | (r(sn) << 5);
+}
+
 /// STP Xt, Xt2, [SP, #simm7×8]! — pre-indexed pair push through SP.
 pub fn stpPreIdxSp(rt: Reg, rt2: Reg, byte_off: i10) u32 {
     std.debug.assert(@rem(byte_off, 8) == 0);

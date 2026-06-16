@@ -177,6 +177,17 @@ const op_f32_load: u8 = 0x2a;
 const op_f64_load: u8 = 0x2b;
 const op_f32_store: u8 = 0x38;
 const op_f64_store: u8 = 0x39;
+const op_f32_const: u8 = 0x43;
+const op_f32_eq: u8 = 0x5b;
+const op_f32_ne: u8 = 0x5c;
+const op_f32_lt: u8 = 0x5d;
+const op_f32_gt: u8 = 0x5e;
+const op_f32_le: u8 = 0x5f;
+const op_f32_ge: u8 = 0x60;
+const op_f32_add: u8 = 0x92;
+const op_f32_sub: u8 = 0x93;
+const op_f32_mul: u8 = 0x94;
+const op_f32_div: u8 = 0x95;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -853,6 +864,59 @@ pub fn compile(
                 try m.emit(a64.csetW(ra, cond));
                 stack[sp - 1] = .{ .reg = ra };
             },
+            op_f32_const => {
+                // §4.4.1 f32.const — a 4-byte little-endian pattern, the f32
+                // bits materialized into the low word of the slot register.
+                const bits = readF32Bits(body, &i) orelse return null;
+                if (sp >= operand_reg_count) return null;
+                try m.movImm64(regForDepth(sp), bits);
+                stack[sp] = .{ .reg = regForDepth(sp) };
+                sp += 1;
+            },
+            op_f32_add, op_f32_sub, op_f32_mul, op_f32_div => {
+                // §4.3 f32 ALU — the S-form bridge: the f32 bits live in the
+                // low word of the GP slot register, so `fmov` W→S into the
+                // FP unit, compute, and `fmov` S→W back.
+                if (sp < 2) return null;
+                const a = stack[sp - 2];
+                const b = stack[sp - 1];
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                try m.emit(a64.fmovWtoS(.x16, ra));
+                try m.emit(a64.fmovWtoS(.x17, rb));
+                switch (op) {
+                    op_f32_add => try m.emit(a64.faddS(.x16, .x16, .x17)),
+                    op_f32_sub => try m.emit(a64.fsubS(.x16, .x16, .x17)),
+                    op_f32_mul => try m.emit(a64.fmulS(.x16, .x16, .x17)),
+                    else => try m.emit(a64.fdivS(.x16, .x16, .x17)), // f32.div
+                }
+                try m.emit(a64.fmovStoW(ra, .x16));
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge => {
+                // §4.3.4 f32 relops — the S-form mirror of the f64 compares,
+                // same FP condition mapping (NaN makes ordered relops false).
+                if (sp < 2) return null;
+                const a = stack[sp - 2];
+                const b = stack[sp - 1];
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                try m.emit(a64.fmovWtoS(.x16, ra));
+                try m.emit(a64.fmovWtoS(.x17, rb));
+                try m.emit(a64.fcmpS(.x16, .x17));
+                const cond: a64.Cond = switch (op) {
+                    op_f32_eq => .eq,
+                    op_f32_ne => .ne,
+                    op_f32_lt => .mi,
+                    op_f32_gt => .gt,
+                    op_f32_le => .ls,
+                    else => .ge, // f32.ge
+                };
+                try m.emit(a64.csetW(ra, cond));
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_block => {
                 // §3.3.5 — push a control frame. The block's result
                 // arity comes from its block type; a `block` consumes no
@@ -1203,13 +1267,16 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
             op_f64_const => {
                 _ = readF64Bits(body, i) orelse return null; // 8 raw bytes
             },
+            op_f32_const => {
+                _ = readF32Bits(body, i) orelse return null; // 4 raw bytes
+            },
             op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u, op_i32_store, op_i32_store8, op_i32_store16, op_i64_load, op_i64_load8_s, op_i64_load8_u, op_i64_load16_s, op_i64_load16_u, op_i64_load32_s, op_i64_load32_u, op_i64_store, op_i64_store8, op_i64_store16, op_i64_store32, op_f32_load, op_f64_load, op_f32_store, op_f64_store => {
                 const flags = readUleb32(body, i) orelse return null;
                 if (flags & 0x40 != 0) return null; // multi-memory — degrade
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge => {},
             else => return null, // unknown immediate width — degrade
         }
     }
@@ -1328,6 +1395,19 @@ fn readF64Bits(body: []const u8, i: *usize) ?u64 {
         bits |= @as(u64, body[i.* + k]) << @intCast(k * 8);
     }
     i.* += 8;
+    return bits;
+}
+
+/// Read an `f32.const`'s 4-byte little-endian IEEE-754 bit pattern (§5.4.1),
+/// returning it zero-extended into a u64 for `movImm64`. Null on a short read.
+fn readF32Bits(body: []const u8, i: *usize) ?u64 {
+    if (i.* + 4 > body.len) return null;
+    var bits: u64 = 0;
+    var k: usize = 0;
+    while (k < 4) : (k += 1) {
+        bits |= @as(u64, body[i.* + k]) << @intCast(k * 8);
+    }
+    i.* += 4;
     return bits;
 }
 
