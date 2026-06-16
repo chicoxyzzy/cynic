@@ -86,6 +86,98 @@ throughput. Unset is the engine default (fastest). Worth a
 dedicated campaign separate from the headline coverage run,
 the same way `/gc-stress` complements a normal test262 sweep.
 
+### Guard-page byte-payload campaign
+
+`FUZZ_GC_THRESHOLD` targets the *GC-managed* use-after-free class.
+A separate, complementary class is **non-GC byte payloads**: the
+raw heap allocations the engine indexes with hand-computed offsets
+rather than slices —
+
+- `JSString.bytes` (WTF-8 storage; offset arithmetic in
+  `src/runtime/utf16.zig` / `src/runtime/string.zig`), and
+- ArrayBuffer / TypedArray backing stores (byte-offset math in
+  `src/runtime/builtins/typed_array.zig`).
+
+Both flow through the allocator the fuzz host hands to
+`Realm.init`, which backs *both* `realm.allocator` (the buffer
+stores) and `heap.bytes_allocator` (the WTF-8 bytes). ReleaseSafe's
+bounds checks protect *slice* indexing, but a `bytes.ptr[offset]`
+read/write with a mis-computed offset is unchecked.
+
+The opt-in build flag wraps that one allocator in
+`std.heap.DebugAllocator(.{})`, whose large-allocation path mmaps
+each payload on its own pages and munmaps them on free:
+
+    zig build fuzz -Dfuzz-debug-alloc=true     # → zig-out/bin/cynic-fuzz
+
+Default is off, so the headline (upstream-PR'd) binary keeps its
+ReleaseSafe posture unchanged. Run this variant as its own
+campaign, like the `FUZZ_GC_THRESHOLD` one.
+
+**What it catches — and the honest caveat.** The default ReleaseSafe
+binary's `init.gpa` already resolves (via Zig's `start.zig`) to
+`std.heap.SafeAllocator`, which is stronger than "bounds-checked
+slices" suggests: it trails every allocation with a checksummed
+footer and never reuses addresses. So the two allocators are
+**complementary, not strictly ordered**. Measured on this host
+(aarch64-macos, ReleaseSafe, raw `ptr[offset]` access; the
+DebugAllocator small/large boundary sits at 32 KiB with the default
+128 KiB `page_size`):
+
+| payload / bug                       | DebugAllocator (variant) | SafeAllocator (default) |
+|-------------------------------------|--------------------------|-------------------------|
+| large (>32 KiB) overflow past end   | crash, **at the access** | crash, deferred to free |
+| large use-after-free                | crash, **at the access** | crash                   |
+| small (≤32 KiB) overflow past end   | not caught (no redzone)  | crash (footer checksum) |
+| small immediate use-after-free      | crash (eager page reclaim) | not caught (immediate read) |
+
+The variant's real marginal value is **exact-access
+localization**. Where SafeAllocator flags an overrun only when the
+allocation is freed — for the engine, at realm teardown, so the
+backtrace names `realm.deinit`, not the writer — DebugAllocator
+SIGSEGVs on the offending store, with the full JS→native stack
+naming the `*.zig:line` that did it. A verified injected 1-byte
+overrun past a 256 KiB ArrayBuffer backing store reproduces exactly
+this split: the default reports `free of invalid memory` from
+`heap.deinit`; the variant faults in `arrayBufferConstructor` at the
+write. For triage from a crashing input, that difference is the
+whole point.
+
+**What it does NOT catch.** Small-payload *overflow* (no per-slot
+redzone — SafeAllocator is the better lens there, so keep running
+the default too), and **GC-managed objects**. Cynic slab-pools its
+`JSObject` / `JSString` / environment headers through free-lists
+(`src/runtime/heap.zig`), so a swept header is never handed back to
+the backing allocator — a guard-page allocator can't see those
+frees. That class stays the job of `FUZZ_GC_THRESHOLD` + the 0xaa
+free-poison (above). This flag is strictly about the raw
+byte-payload class.
+
+**Perf.** Modest, because the baseline is already a page-backed
+safe allocator, not a fast pooling one. An isolated byte-payload
+alloc/free microbench (mixed sizes) runs ~1.4× slower under
+DebugAllocator than under SafeAllocator; at the `cynic-fuzz` level
+the fresh-realm-per-sample cost dominates, so end-to-end campaign
+throughput slows only ~1.1–1.3× and sits inside the harness's
+run-to-run variance. This is *not* an ASan-scale slowdown — it is
+cheap enough to leave running for a whole campaign.
+
+**A note on the GC class (not built).** The ASan analog for the
+slab-pooled GC objects DebugAllocator can't reach would be a
+*sweep-quarantine*: hold each swept header poisoned on a
+fixed-length FIFO for N collection cycles before its free-list slot
+is eligible for reuse, so a stale read after a sweep keeps hitting
+`0xaa` longer (the spatial analog of `FUZZ_GC_THRESHOLD`'s temporal
+widening). It would live in the per-kind sweep paths in
+`heap.zig` and is a real, bounded change. It is not built here
+because `FUZZ_GC_THRESHOLD=1` already maximizes the poisoned window
+by collecting on every allocation, and the historically documented
+GC-UAF clusters (`docs/handbook/gc.md`) are reproducible under it;
+quarantine would mainly help *shrink* a repro (raise detection odds
+at a higher threshold, for throughput) rather than find a class the
+threshold knob misses. Worth revisiting if a future GC-UAF proves
+to need a wider window than `=1` provides.
+
 ## Triage
 
 Two steps: dedupe crashes by panic anchor, then check each

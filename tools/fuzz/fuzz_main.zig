@@ -13,6 +13,7 @@
 //!         for protocol smoke tests.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const coverage = @import("fuzz_coverage.zig");
 const fuzz_reprl = @import("fuzz_reprl.zig");
 
@@ -74,7 +75,31 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    fuzz_reprl.run(init.gpa, options, coverage.reset) catch |err| switch (err) {
+    // Engine allocator selection. Default ⇒ the host GPA the runtime
+    // handed us (the upstream-PR'd ReleaseSafe posture). With the
+    // opt-in `-Dfuzz-debug-alloc` build flag ⇒ `DebugAllocator(.{})`,
+    // whose large-allocation path mmaps each payload on its own pages
+    // and munmaps them on free. The fuzz host builds every realm via
+    // `Realm.init(allocator)`, which backs BOTH the struct allocator
+    // (`realm.allocator`, used for ArrayBuffer / TypedArray backing
+    // stores) and the heap byte allocator (`heap.bytes_allocator`,
+    // used for `JSString.bytes` WTF-8 storage) with this one
+    // allocator — so wrapping it here guards both non-GC byte-payload
+    // classes. An overrun or use-after-free on one of those payloads
+    // then SIGSEGVs at the exact access rather than corrupting the
+    // heap silently. GC-managed slab headers are free-list-pooled and
+    // stay invisible to this (see docs/fuzzing.md "Guard-page
+    // byte-payload campaign") — that class is `FUZZ_GC_THRESHOLD`'s
+    // job. `fuzz_debug_alloc` is comptime, so the default binary
+    // compiles the DebugAllocator out entirely and pays nothing.
+    var debug_alloc: std.heap.DebugAllocator(.{}) =
+        if (build_options.fuzz_debug_alloc) .init else undefined;
+    defer if (build_options.fuzz_debug_alloc) {
+        _ = debug_alloc.deinit();
+    };
+    const gpa = if (build_options.fuzz_debug_alloc) debug_alloc.allocator() else init.gpa;
+
+    fuzz_reprl.run(gpa, options, coverage.reset) catch |err| switch (err) {
         error.UnsupportedPlatform => {
             try std.Io.File.stderr().writeStreamingAll(init.io, "error: `cynic-fuzz` is not supported on this platform (Fuzzilli is POSIX-only)\n");
             std.process.exit(2);

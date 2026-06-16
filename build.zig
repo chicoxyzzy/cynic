@@ -69,6 +69,27 @@ pub fn build(b: *std.Build) void {
     // free-poison stay armed via `runtime_safety`, so a fuzz-found
     // use-after-free panics on the poisoned read instead of returning
     // garbage. Same reason `/gc-stress` reaches for the safe binary.
+    //
+    // `-Dfuzz-debug-alloc=true` is an opt-in posture knob (default
+    // off, so the upstream-PR'd ReleaseSafe binary is unchanged): it
+    // wraps the engine allocator in `std.heap.DebugAllocator(.{})`,
+    // whose large-allocation path mmaps each payload on its own pages
+    // and munmaps on free. That turns an overrun or use-after-free on
+    // a non-GC byte payload — `JSString.bytes` (WTF-8) and ArrayBuffer
+    // / TypedArray backing stores, both routed through the realm
+    // allocator the fuzz host passes in — into a SIGSEGV at the exact
+    // access, which ReleaseSafe's slice bounds checks don't cover for
+    // raw computed-offset reads/writes. See docs/fuzzing.md
+    // "Guard-page byte-payload campaign". GC-managed slab headers are
+    // free-list-pooled (heap.zig) and stay invisible to this — that
+    // class is the `FUZZ_GC_THRESHOLD` knob's job.
+    const fuzz_debug_alloc = b.option(
+        bool,
+        "fuzz-debug-alloc",
+        "Wrap the cynic-fuzz engine allocator in DebugAllocator for guard-page byte-payload detection (opt-in; default false).",
+    ) orelse false;
+    const fuzz_build_options = b.addOptions();
+    fuzz_build_options.addOption(bool, "fuzz_debug_alloc", fuzz_debug_alloc);
     const cynic_fuzz_mod = b.createModule(.{
         .root_source_file = b.path("tools/fuzz/fuzz_main.zig"),
         .target = target,
@@ -88,6 +109,10 @@ pub fn build(b: *std.Build) void {
     });
     lib_mod_fuzz.addOptions("build_options", lib_build_options);
     cynic_fuzz_mod.addImport("cynic", lib_mod_fuzz);
+    // The fuzz host reads its own `build_options` (the `fuzz_debug_alloc`
+    // flag) — kept separate from the lib's options so the engine never
+    // sees a fuzz-only knob.
+    cynic_fuzz_mod.addOptions("build_options", fuzz_build_options);
     const cynic_fuzz = b.addExecutable(.{
         .name = "cynic-fuzz",
         .root_module = cynic_fuzz_mod,
