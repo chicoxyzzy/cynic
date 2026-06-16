@@ -14969,6 +14969,23 @@ test "scope flattening: a promoted body-top const rejects reassignment (TypeErro
     );
 }
 
+test "scope flattening: per-binding — an uncaptured local promotes beside a captured one" {
+    // §13.3.1 — `cap` is captured by `add` (stays env); `acc` (re-assigned)
+    // and `add` (called directly) are uncaptured and live in registers. The
+    // mixed scope must compute correctly: ((0+7)+7)+7 = 21. A miscompiled
+    // promotion of `acc` would read a stale register across iterations.
+    try expectScriptIntWithBuiltins(
+        \\function f(){
+        \\  const cap = 7;
+        \\  let acc = 0;
+        \\  const add = function(x){ return x + cap; };
+        \\  for (let i = 0; i < 3; i++) acc = add(acc);
+        \\  return acc;
+        \\}
+        \\f();
+    , 21);
+}
+
 test "scope flattening: promoting a body-top const does not disturb per-iteration block capture" {
     // §14.7.4.4 CreatePerIterationEnvironment — `fns` (body-top const) is
     // uncaptured and promotes, but the loop-body `const j` IS captured by each

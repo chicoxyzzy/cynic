@@ -245,6 +245,19 @@ pub const Compiler = struct {
     /// restore at every function entry point.
     current_fn_body: ?[]const ast.statement.Statement = null,
     current_fn_has_eval: bool = false,
+    /// §13.3.1 — set ONLY around a function / method / constructor
+    /// body-top `hoistLetConst` call when that body is stage-2
+    /// eligible (the coarse register-safe gate failed only because of
+    /// a nested function / class). When non-null, `hoistLetConst`
+    /// promotes each body-top simple-ident lexical to a register
+    /// per-binding — iff THAT name is not captured by a nested closure
+    /// in this body — instead of the coarse all-or-nothing path (which
+    /// promotes every body-top lexical because no closure exists to
+    /// capture any). Always null for blocks / switch cases / script /
+    /// module hoists, so their behaviour is unchanged; reset to null
+    /// immediately after the body-top hoist so nested `compileBlock`
+    /// hoists never see it.
+    body_top_capture_body: ?[]const ast.statement.Statement = null,
     /// §14.3.2 `var` register promotion — set only while
     /// `hoistVarAndFunctions` runs for a register-safe body whose
     /// every `var` declarator is a simple identifier: the hoist
@@ -8391,7 +8404,12 @@ pub const Compiler = struct {
         const saved_ctor_fn_has_eval = self.current_fn_has_eval;
         self.current_fn_body = body_stmts;
         self.current_fn_has_eval = fnBodyHasEval(self.source, body_stmts);
-        try self.hoistLetConst(body_stmts, try self.bodyTopPromoteTopLex(body_stmts, locals_register_only));
+        const promote_body_top = self.bodyTopPromoteEligible(body_stmts, locals_register_only);
+        // Per-binding filter is active only on the stage-2 path (coarse
+        // failed); coarse promotes all (no closure to capture any).
+        self.body_top_capture_body = if (promote_body_top and !locals_register_only) body_stmts else null;
+        try self.hoistLetConst(body_stmts, promote_body_top);
+        self.body_top_capture_body = null;
         self.current_promote_vars = vars_register_only;
         try self.hoistVarAndFunctions(body_stmts);
         self.current_promote_vars = false;
@@ -8659,7 +8677,12 @@ pub const Compiler = struct {
         }
 
         // Body.
-        try self.hoistLetConst(body_stmts, try self.bodyTopPromoteTopLex(body_stmts, locals_register_only));
+        const promote_body_top = self.bodyTopPromoteEligible(body_stmts, locals_register_only);
+        // Per-binding filter is active only on the stage-2 path (coarse
+        // failed); coarse promotes all (no closure to capture any).
+        self.body_top_capture_body = if (promote_body_top and !locals_register_only) body_stmts else null;
+        try self.hoistLetConst(body_stmts, promote_body_top);
+        self.body_top_capture_body = null;
         self.current_promote_vars = vars_register_only;
         try self.hoistVarAndFunctions(body_stmts);
         self.current_promote_vars = false;
@@ -9098,10 +9121,24 @@ pub const Compiler = struct {
                 // Register-promoted body locals: the register is
                 // claimed permanently below the temp stack and the
                 // Hole seed + `throw_if_hole` on reads keep §13.3.1
-                // TDZ observably identical to the env path.
+                // TDZ observably identical to the env path. When
+                // `body_top_capture_body` is set (the stage-2 function
+                // path), the choice is per-binding: a name captured by
+                // a nested closure stays env-resident while its
+                // uncaptured siblings still promote. On every other
+                // promoting caller (coarse register-safe body — no
+                // closure exists) the filter is null and all promote.
                 for (ld.declarators) |d| {
                     const name = try self.bindingName(d.name.identifier.span);
-                    try self.declareRegisterLocal(name, kind, d.name.identifier.span);
+                    const promote_this = if (self.body_top_capture_body) |cb|
+                        !(try self.nameCapturedInBody(name, cb))
+                    else
+                        true;
+                    if (promote_this) {
+                        try self.declareRegisterLocal(name, kind, d.name.identifier.span);
+                    } else {
+                        try self.declarePatternBindings(d.name, kind);
+                    }
                 }
                 continue;
             }
@@ -11451,31 +11488,31 @@ pub const Compiler = struct {
         return false;
     }
 
-    /// §13.3.1 — the effective `promote_top_lex` for a
-    /// function / method / constructor body hoist, generalizing the
-    /// coarse `bodyIsRegisterSafe` gate with a per-binding capture
-    /// analysis (the body-top analogue of `compileBlock`'s block-
-    /// scoped Stage 2). Returns `coarse` unchanged when the coarse
-    /// gate already passed; otherwise promotes the body-top simple-
-    /// ident `let` / `const` to registers iff none of them is captured
-    /// by a nested closure. A register binding cannot be captured
-    /// (closures capture env slots), so any nested-closure reference
-    /// keeps the whole body-top scope on the env path (all-or-nothing,
-    /// matching the block-scoped fallback). Preconditions, all
-    /// required for soundness:
+    /// §13.3.1 — is a function / method / constructor body eligible
+    /// for body-top lexical register promotion, generalizing the
+    /// coarse `bodyIsRegisterSafe` gate? Returns `coarse` unchanged
+    /// when the coarse gate already passed (every body-top lexical
+    /// promotes — no closure exists to capture any). Otherwise the
+    /// body is eligible for the per-binding path (`hoistLetConst`
+    /// promotes each uncaptured body-top simple-ident lexical, keeping
+    /// captured ones on the env path) when, all required for soundness:
     ///   • not a generator / async body — those reify the env across a
     ///     suspension point, signalled by `current_fn_body == null`;
     ///   • no direct `eval(...)` in scope (§19.2.1.3) — eval resolves
-    ///     any in-scope name through the environment, not a register.
-    /// The function-entry env is NOT elided here (the caller's
-    /// `needs_entry_env` stays on the coarse flag), so promotion only
-    /// moves bindings out of an env that already exists for the
-    /// nested function / class that defeated the coarse gate.
-    fn bodyTopPromoteTopLex(
+    ///     any in-scope name through the environment, not a register;
+    ///   • at least one promotable body-top lexical, within budget.
+    /// The per-binding capture decision itself lives in `hoistLetConst`
+    /// (gated by `body_top_capture_body`), so this only screens the
+    /// whole-body preconditions. The function-entry env is NOT elided
+    /// here (the caller's `needs_entry_env` stays on the coarse flag),
+    /// so promotion only moves bindings out of an env that already
+    /// exists for the nested function / class that defeated the coarse
+    /// gate.
+    fn bodyTopPromoteEligible(
         self: *Compiler,
         body_stmts: []const ast.statement.Statement,
         coarse: bool,
-    ) CompileError!bool {
+    ) bool {
         if (coarse) return true;
         // Generators / async reify the env across yield / await.
         if (self.current_fn_body == null) return false;
@@ -11488,14 +11525,13 @@ pub const Compiler = struct {
         // Nothing to promote, or beyond the register budget (params
         // live in env on this path, so the promoted locals start at
         // r0; the 192 ceiling leaves headroom for body temps and the
-        // block-scoped Stage 2 reservations layered on top).
-        if (promotable == 0 or promotable > 192) return false;
-        if (try self.bodyTopLexCaptured(body_stmts)) return false;
-        return true;
+        // block-scoped Stage 2 reservations layered on top). The
+        // per-binding filter promotes a subset, so this over-counts
+        // safely.
+        return promotable > 0 and promotable <= 192;
     }
 
-    /// §13.3.1 — true iff any of the body-top simple-ident lexical
-    /// names declared in `body` is referenced inside a nested closure
+    /// §13.3.1 — true iff `name` is referenced inside a nested closure
     /// anywhere in `body`. Unlike `blockLexCapturedInFn` (which reuses
     /// the fused-counter `stmtCounterHazard` and so also flags direct
     /// writes), this is capture-ONLY: a body-top `let` re-assigned in
@@ -11504,15 +11540,13 @@ pub const Compiler = struct {
     /// Delegates to the proven, conservative (shadowing-unaware, so
     /// over-rejecting) `exprMentionsNamesInNestedFn` /
     /// `fnBodyMentionsNames` / `classBodyMentionsNames` primitives.
-    fn bodyTopLexCaptured(self: *Compiler, body: []const ast.statement.Statement) CompileError!bool {
+    fn nameCapturedInBody(
+        self: *Compiler,
+        name: []const u8,
+        body: []const ast.statement.Statement,
+    ) CompileError!bool {
         for (body) |*s| {
-            if (!topLevelLexIsPromotable(s)) continue;
-            for (s.lexical.declarators) |d| {
-                const name = self.bindingName(d.name.identifier.span) catch return true;
-                for (body) |*outer| {
-                    if (try self.stmtCapturesName(outer, name)) return true;
-                }
-            }
+            if (try self.stmtCapturesName(s, name)) return true;
         }
         return false;
     }
@@ -14471,7 +14505,12 @@ fn compileFunctionTemplateExtNamed(
     // Compile body.
     switch (body) {
         .block => |stmts| {
-            try self.hoistLetConst(stmts, try self.bodyTopPromoteTopLex(stmts, locals_register_only));
+            const promote_body_top = self.bodyTopPromoteEligible(stmts, locals_register_only);
+            // Per-binding filter is active only on the stage-2 path
+            // (coarse failed); coarse promotes all (no closure exists).
+            self.body_top_capture_body = if (promote_body_top and !locals_register_only) stmts else null;
+            try self.hoistLetConst(stmts, promote_body_top);
+            self.body_top_capture_body = null;
             self.current_promote_vars = vars_register_only;
             try self.hoistVarAndFunctions(stmts);
             self.current_promote_vars = false;
@@ -15476,4 +15515,16 @@ test "compiler: a generator body-top const is NOT promoted (the env is reified a
     const got = try dumpExpr("(function*(){ const x = side(); g(function(){ return 1; }); yield x; })");
     defer testing.allocator.free(got);
     try testing.expect(std.mem.indexOf(u8, got, "StaEnv") != null);
+}
+
+test "compiler: an uncaptured body-top const promotes even beside a captured sibling (per-binding)" {
+    // §13.3.1 — `cap` is captured by the nested closure and must stay in the
+    // env; `free` is uncaptured. Promotion is per-binding, not all-or-nothing:
+    // `free` lives in a register while `cap` keeps its slot, so exactly one
+    // env slot survives (`cap`). A whole-scope bail would leave both in a
+    // 2-slot env.
+    const got = try dumpExpr("(function(){ const cap = side(); const free = other(); g(function(){ return cap; }); return free; })");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "MakeEnvironment 1 slots") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "MakeEnvironment 2 slots") == null);
 }
