@@ -557,6 +557,13 @@ fn atomicsWait(realm: *Realm, _: Value, args: []const Value) NativeError!Value {
     // §25.4.11 step 6 — coerce `value`; step 7 — coerce `timeout`.
     const value_bits = try coerceRawBits(realm, kind, argOr(args, 2, Value.undefined_));
     const timeout_ns = try coerceTimeoutNs(realm, argOr(args, 3, Value.undefined_));
+    // §25.4.3.14 step 8-9 — AgentCanSuspend(): a non-blocking agent
+    // must throw TypeError here, after the argument coercions (whose
+    // side effects are observable) and before entering the critical
+    // section / parking. `waitAsync` has no such check — it is meant
+    // to run on a non-blocking agent. See `Realm.agent_can_block`.
+    if (!realm.agent_can_block)
+        return throwTypeError(realm, "Atomics.wait: agent cannot be suspended (CanBlock is false)");
     const block = tv.viewed.getSharedBlock().?;
     const byte_pos = tv.byte_offset + idx * size;
     const mask: u64 = if (size == 8) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(size * 8)) - 1;

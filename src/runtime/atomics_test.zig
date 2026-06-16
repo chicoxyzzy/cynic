@@ -235,6 +235,48 @@ test "Atomics.wait returns 'timed-out' on a zero timeout with matching value" {
     );
 }
 
+// ── AgentCanSuspend / CanBlock (§25.4.3.14 step 8-9) ────────────────
+
+/// Run `source` in a realm whose agent cannot block
+/// (`agent_can_block = false`), returning the completion value.
+fn runCannotBlock(source: []const u8) !Value {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    realm.agent_can_block = false;
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, source);
+    return switch (outcome) {
+        .value, .yielded => |v| v,
+        .thrown => error.ScriptThrewUnexpectedly,
+    };
+}
+
+test "Atomics.wait throws TypeError when the agent cannot block (§25.4.3.14)" {
+    // CanBlock is false → AgentCanSuspend() is false → step 9 throws
+    // TypeError before parking, even with a zero timeout that would
+    // otherwise return 'timed-out'.
+    const v = try runCannotBlock(
+        \\var ta = new Int32Array(new SharedArrayBuffer(8));
+        \\var threw = false;
+        \\try { Atomics.wait(ta, 0, 0, 0); }
+        \\catch (e) { threw = e instanceof TypeError; }
+        \\threw ? 1 : 0;
+    );
+    try testing.expect(v.isInt32() and v.asInt32() == 1);
+}
+
+test "Atomics.waitAsync is unaffected by a non-blocking agent (§25.4.3.14)" {
+    // waitAsync is designed to run on a non-blocking agent — it must
+    // NOT throw when agent_can_block is false; a zero timeout resolves
+    // synchronously to 'timed-out'.
+    const v = try runCannotBlock(
+        \\var ta = new Int32Array(new SharedArrayBuffer(8));
+        \\var r = Atomics.waitAsync(ta, 0, 0, 0);
+        \\r.async === false && r.value === 'timed-out' ? 1 : 0;
+    );
+    try testing.expect(v.isInt32() and v.asInt32() == 1);
+}
+
 // ── waitAsync ───────────────────────────────────────────────────────
 
 test "Atomics.waitAsync is a function with name/length" {

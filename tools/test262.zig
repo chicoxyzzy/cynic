@@ -2855,6 +2855,11 @@ fn classifyAndRunInner(
     // §20.2.1.1.1) is opened so eval-dependent fixtures run for real.
     realm.hardened = false;
     realm.allow_eval = true;
+    // `flags: [CanBlockIsFalse]` — run the fixture in a non-blocking
+    // agent so §25.4.3.14 Atomics.wait throws TypeError (step 9). The
+    // default agent can block (Cynic's edge/server target); only these
+    // fixtures opt out.
+    if (fm.flags.can_block_is_false) realm.agent_can_block = false;
     if (g_jit_force) {
         // `--jit` — the docs/jit.md §10 differential gate: Bistromath
         // on, every eligible chunk force-compiled on first call.

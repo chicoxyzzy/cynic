@@ -1084,6 +1084,17 @@ pub const Realm = struct {
     /// eval-on — they're orthogonal capabilities. See
     /// docs/ses-alignment.md.
     allow_eval: bool = false,
+    /// §25.4.3.14 AgentCanSuspend — whether the surrounding agent may
+    /// block on `Atomics.wait`. `true` by default: Cynic targets edge
+    /// / Worker / server hosts whose main agent can suspend, so a
+    /// blocking wait is allowed. A host that runs Cynic in a context
+    /// that must never block (an HTML-main-thread-style agent, or a
+    /// runtime that forbids synchronous suspension) sets this `false`,
+    /// and `Atomics.wait` then throws TypeError per step 9 instead of
+    /// parking. `Atomics.waitAsync` is unaffected — it is designed to
+    /// run on a non-blocking agent. The test262 harness flips this off
+    /// for `flags: [CanBlockIsFalse]` fixtures.
+    agent_can_block: bool = true,
     /// `--allow=wasm` posture toggle. When `false` (the default) the
     /// WebAssembly code-construction surface (`compile` / `instantiate`
     /// / `new Module` / `new Instance`) throws by policy
