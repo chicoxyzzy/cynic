@@ -314,6 +314,9 @@ pub const Instance = struct {
     /// Invocations that actually ran Spasm-compiled code — lets a
     /// differential/unit test prove the compiled path was taken (the
     /// result alone is identical to the interpreter's, by design).
+    /// Counts entries into the compiled body whether it returns normally
+    /// or traps: a trapping op (e.g. a trapping truncation) executes
+    /// native code too, so a test can prove the trap came from Spasm.
     spasm_runs: u32 = 0,
     /// Functions actually handed to `spasm.compile` — distinct from
     /// `spasm_runs` so a test can prove the per-function code cache
@@ -1205,7 +1208,6 @@ pub fn invoke(
     // interpreter below.
     if (target.instance.spasm_enabled) {
         if (try spasmRun(allocator, target.instance, target.func, args)) |out| {
-            target.instance.spasm_runs += 1;
             return out;
         }
     }
@@ -1281,12 +1283,21 @@ fn spasmRun(
     // trapped before writing results. Map it to the matching TrapError so
     // a Spasm trap surfaces exactly like the interpreter's — the JS
     // boundary turns either into a WebAssembly.RuntimeError the same way.
+    // The compiled body runs here. Count the entry whether it returns
+    // normally or traps — a trap is still a Spasm execution (and a test
+    // proving a trap came from compiled code reads `spasm_runs`). A status
+    // the switch can't map degrades, so the increment is rolled back there.
+    instance.spasm_runs += 1;
     switch (entry(locals.ptr, results.ptr, mem_base, mem_len)) {
         spasm.trap_ok => {},
         spasm.trap_divide_by_zero => return error.IntegerDivideByZero,
         spasm.trap_int_overflow => return error.IntegerOverflow,
         spasm.trap_out_of_bounds => return error.OutOfBoundsMemoryAccess,
-        else => return null, // unknown status — degrade defensively
+        spasm.trap_invalid_conversion => return error.InvalidConversionToInteger,
+        else => {
+            instance.spasm_runs -= 1; // unrecognized status — degrade, uncount
+            return null;
+        },
     }
 
     const out = try allocator.alloc(u128, ftype.results.len);

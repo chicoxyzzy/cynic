@@ -71,6 +71,7 @@ pub const trap_ok: u32 = 0;
 pub const trap_divide_by_zero: u32 = 1;
 pub const trap_int_overflow: u32 = 2;
 pub const trap_out_of_bounds: u32 = 3;
+pub const trap_invalid_conversion: u32 = 4;
 
 pub const CompileError = error{ OutOfMemory, UnsupportedOp };
 
@@ -225,6 +226,14 @@ const op_f64_reinterpret_i64: u8 = 0xbf;
 // §5.4.6 — the 0xFC prefix introduces a second opcode byte (a varuint32).
 // The baseline handles only the saturating truncations (sub-opcodes 0..7).
 const op_misc_prefix: u8 = 0xfc;
+const op_i32_trunc_f32_s: u8 = 0xa8;
+const op_i32_trunc_f32_u: u8 = 0xa9;
+const op_i32_trunc_f64_s: u8 = 0xaa;
+const op_i32_trunc_f64_u: u8 = 0xab;
+const op_i64_trunc_f32_s: u8 = 0xae;
+const op_i64_trunc_f32_u: u8 = 0xaf;
+const op_i64_trunc_f64_s: u8 = 0xb0;
+const op_i64_trunc_f64_u: u8 = 0xb1;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -328,12 +337,15 @@ pub fn compile(
     var trap_div0: masm_mod.Masm.Label = .{};
     var trap_overflow: masm_mod.Masm.Label = .{};
     var trap_oob: masm_mod.Masm.Label = .{};
+    var trap_invalid: masm_mod.Masm.Label = .{};
     defer trap_div0.deinit(gpa);
     defer trap_overflow.deinit(gpa);
     defer trap_oob.deinit(gpa);
+    defer trap_invalid.deinit(gpa);
     var trap_div0_used = false;
     var trap_overflow_used = false;
     var trap_oob_used = false;
+    var trap_invalid_used = false;
 
     const body = func.body;
     var i: usize = 0;
@@ -1102,6 +1114,29 @@ pub fn compile(
                 // are read costs no instructions; leave the location as-is.
                 if (sp < 1) return null;
             },
+            op_i32_trunc_f32_s, op_i32_trunc_f32_u, op_i32_trunc_f64_s, op_i32_trunc_f64_u, op_i64_trunc_f32_s, op_i64_trunc_f32_u, op_i64_trunc_f64_s, op_i64_trunc_f64_u => {
+                // §4.3.3 trapping float→int truncation. FCVTZS/FCVTZU alone
+                // would saturate / map NaN to 0, but these ops must trap, so
+                // an explicit NaN test (→ invalid-conversion) and range test
+                // (→ overflow) precede the convert. The [lo, hi) bounds are
+                // the interpreter's exact representable limits per (Int, Float)
+                // pair (see truncTrap), so the in-range FCVTZ never saturates.
+                if (sp < 1) return null;
+                const ra = try materialize(&m, stack[sp - 1], sp - 1);
+                trap_invalid_used = true;
+                trap_overflow_used = true;
+                switch (op) {
+                    op_i32_trunc_f32_s => try emitTruncTrap(&m, ra, true, false, true, -2147483648.0, true, 2147483648.0, &trap_invalid, &trap_overflow),
+                    op_i32_trunc_f32_u => try emitTruncTrap(&m, ra, true, false, false, -1.0, false, 4294967296.0, &trap_invalid, &trap_overflow),
+                    op_i32_trunc_f64_s => try emitTruncTrap(&m, ra, false, false, true, -2147483649.0, false, 2147483648.0, &trap_invalid, &trap_overflow),
+                    op_i32_trunc_f64_u => try emitTruncTrap(&m, ra, false, false, false, -1.0, false, 4294967296.0, &trap_invalid, &trap_overflow),
+                    op_i64_trunc_f32_s => try emitTruncTrap(&m, ra, true, true, true, -9223372036854775808.0, true, 9223372036854775808.0, &trap_invalid, &trap_overflow),
+                    op_i64_trunc_f32_u => try emitTruncTrap(&m, ra, true, true, false, -1.0, false, 18446744073709551616.0, &trap_invalid, &trap_overflow),
+                    op_i64_trunc_f64_s => try emitTruncTrap(&m, ra, false, true, true, -9223372036854775808.0, true, 9223372036854775808.0, &trap_invalid, &trap_overflow),
+                    else => try emitTruncTrap(&m, ra, false, true, false, -1.0, false, 18446744073709551616.0, &trap_invalid, &trap_overflow), // i64.trunc_f64_u
+                }
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_misc_prefix => {
                 // §4.3.3 saturating truncations (the 0xFC prefix, sub-opcodes
                 // 0..7). FCVTZS/FCVTZU round toward zero and, on NaN or
@@ -1411,6 +1446,11 @@ pub fn compile(
         try m.movImm64(.x0, trap_out_of_bounds);
         try m.emit(a64.ret());
     }
+    if (trap_invalid_used) {
+        m.bind(&trap_invalid);
+        try m.movImm64(.x0, trap_invalid_conversion);
+        try m.emit(a64.ret());
+    }
 
     const installed = m.install(ca) catch return null;
     return code_alloc.asFn(EntryFn, installed);
@@ -1455,6 +1495,65 @@ fn emitMemBounds(m: *masm_mod.Masm, addr_reg: a64.Reg, offset: u32, n: u32, oob:
     try m.movImm64(.x4, n);
     try m.emit(a64.cmpReg(.x17, .x4));
     try m.jumpCond(.cc, oob); // (mem_len - ea) < n -> out of bounds
+}
+
+/// Emit a §4.3.3 trapping float→int truncation. The float operand is in
+/// `ra`'s slot; bridge it into FP scratch v16, trap to `invalid` on NaN
+/// and to `overflow` outside `[lo, hi)` (lo half-open per `lo_inclusive`),
+/// then `FCVTZS`/`FCVTZU` the in-range value back into `ra`. GP x16 is
+/// reused to materialize each bound's bit pattern (a different register
+/// file from FP v16, so the operand survives), bridged into FP v17 for the
+/// compare. The bounds are passed as comptime literals matching the
+/// interpreter's `truncTrap` call sites exactly.
+fn emitTruncTrap(
+    m: *masm_mod.Masm,
+    ra: a64.Reg,
+    comptime src_f32: bool,
+    comptime to_i64: bool,
+    comptime signed: bool,
+    comptime lo: f64,
+    comptime lo_inclusive: bool,
+    comptime hi: f64,
+    invalid: *masm_mod.Masm.Label,
+    overflow: *masm_mod.Masm.Label,
+) CompileError!void {
+    const lo_bits: u64 = if (src_f32) @as(u32, @bitCast(@as(f32, @floatCast(lo)))) else @as(u64, @bitCast(lo));
+    const hi_bits: u64 = if (src_f32) @as(u32, @bitCast(@as(f32, @floatCast(hi)))) else @as(u64, @bitCast(hi));
+
+    // Bridge the operand f into FP scratch v16.
+    if (src_f32) try m.emit(a64.fmovWtoS(.x16, ra)) else try m.emit(a64.fmovXtoD(.x16, ra));
+
+    // NaN → invalid conversion. `fcmp f, f` leaves V set iff unordered.
+    if (src_f32) try m.emit(a64.fcmpS(.x16, .x16)) else try m.emit(a64.fcmpD(.x16, .x16));
+    try m.jumpCond(.vs, invalid);
+
+    // lo bound: overflow if f < lo (inclusive) or f <= lo (exclusive).
+    try m.movImm64(.x16, lo_bits);
+    if (src_f32) try m.emit(a64.fmovWtoS(.x17, .x16)) else try m.emit(a64.fmovXtoD(.x17, .x16));
+    if (src_f32) try m.emit(a64.fcmpS(.x16, .x17)) else try m.emit(a64.fcmpD(.x16, .x17));
+    try m.jumpCond(if (lo_inclusive) .mi else .ls, overflow);
+
+    // hi bound: overflow if f >= hi.
+    try m.movImm64(.x16, hi_bits);
+    if (src_f32) try m.emit(a64.fmovWtoS(.x17, .x16)) else try m.emit(a64.fmovXtoD(.x17, .x16));
+    if (src_f32) try m.emit(a64.fcmpS(.x16, .x17)) else try m.emit(a64.fcmpD(.x16, .x17));
+    try m.jumpCond(.ge, overflow);
+
+    // In range: round toward zero. The result width (W/X) and signedness
+    // pick the FCVTZ variant; the W-form zero-extends an i32 result.
+    if (to_i64) {
+        if (src_f32) {
+            try m.emit(if (signed) a64.fcvtzsXfromS(ra, .x16) else a64.fcvtzuXfromS(ra, .x16));
+        } else {
+            try m.emit(if (signed) a64.fcvtzsXfromD(ra, .x16) else a64.fcvtzuXfromD(ra, .x16));
+        }
+    } else {
+        if (src_f32) {
+            try m.emit(if (signed) a64.fcvtzsWfromS(ra, .x16) else a64.fcvtzuWfromS(ra, .x16));
+        } else {
+            try m.emit(if (signed) a64.fcvtzsWfromD(ra, .x16) else a64.fcvtzuWfromD(ra, .x16));
+        }
+    }
 }
 
 /// Skip the unreachable code following an unconditional `br` (or
@@ -1514,7 +1613,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_f32_convert_i32_s, op_f32_convert_i32_u, op_f32_convert_i64_s, op_f32_convert_i64_u, op_f32_demote_f64, op_f64_convert_i32_s, op_f64_convert_i32_u, op_f64_convert_i64_s, op_f64_convert_i64_u, op_f64_promote_f32, op_i32_reinterpret_f32, op_i64_reinterpret_f64, op_f32_reinterpret_i32, op_f64_reinterpret_i64, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_min, op_f64_max, op_f64_copysign, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_min, op_f32_max, op_f32_copysign, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_i32_trunc_f32_s, op_i32_trunc_f32_u, op_i32_trunc_f64_s, op_i32_trunc_f64_u, op_i64_trunc_f32_s, op_i64_trunc_f32_u, op_i64_trunc_f64_s, op_i64_trunc_f64_u, op_f32_convert_i32_s, op_f32_convert_i32_u, op_f32_convert_i64_s, op_f32_convert_i64_u, op_f32_demote_f64, op_f64_convert_i32_s, op_f64_convert_i32_u, op_f64_convert_i64_s, op_f64_convert_i64_u, op_f64_promote_f32, op_i32_reinterpret_f32, op_i64_reinterpret_f64, op_f32_reinterpret_i32, op_f64_reinterpret_i64, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_min, op_f64_max, op_f64_copysign, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_min, op_f32_max, op_f32_copysign, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge => {},
             else => return null, // unknown immediate width — degrade
         }
     }

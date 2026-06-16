@@ -1012,10 +1012,15 @@ useful:
    slot) plus `f32.demote_f64` / `f64.promote_f32` (the cross-precision
    `FCVT`s), the int→float conversions (`SCVTF` / `UCVTF`, which read
    the integer straight from the GP slot — signed and unsigned, i32 and
-   i64 sources, both result precisions), and the saturating truncations
+   i64 sources, both result precisions), the saturating truncations
    (the `0xFC`-prefixed `i32`/`i64.trunc_sat_f32`/`f64_s`/`u` — `FCVTZS` /
    `FCVTZU`, whose round-toward-zero with NaN→0 and saturate-on-overflow
-   is exactly the spec's, so no trap path is needed)). A float keeps living in its slot's GP register as raw
+   is exactly the spec's, so no trap path is needed), and the trapping
+   truncations (the single-byte `i32`/`i64.trunc_f32`/`f64_s`/`u`, which
+   must trap rather than saturate: an explicit `fcmp f, f`/`b.vs` traps
+   NaN to a new invalid-conversion channel and a `[lo, hi)` range test —
+   the interpreter's exact per-pair bounds — traps to the overflow
+   channel, then the in-range `FCVTZS`/`FCVTZU` converts)). A float keeps living in its slot's GP register as raw
    bits — an FP op bridges those bits into a v-register (`fmov` to v16/v17,
    a distinct register file from the GP x16/x17 scratch), computes in the
    FP unit, and bridges back — so the operand-stack model is unchanged and
