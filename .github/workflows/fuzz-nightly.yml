@@ -78,17 +78,20 @@ jobs:
     # of pinned-SHA Fuzzilli + the pinned actions; acceptable for a nightly,
     # non-merge-gating job.
     steps:
-      - name: Install host tools (procps for the process-tree guard)
-        # guarded-run.sh walks the process tree with ps/pgrep to enforce the
-        # wall-time + RSS bounds and to SIGKILL every descendant on exit. The
-        # Swift image doesn't ship procps. ca-certificates/git are already in
-        # the image, but assert them so a base-image change fails loudly here
-        # rather than mid-clone.
+      - name: Install host tools
+        # - procps: guarded-run.sh walks the process tree with ps/pgrep to
+        #   enforce the wall-time + RSS bounds and SIGKILL every descendant.
+        # - xz-utils: the Swift image ships no `xz`, but setup-zig fetches Zig
+        #   as a `.tar.xz` and extracts with `tar xJ` — without xz that step
+        #   dies "xz: Cannot exec". (This is the in-container gap a local
+        #   build can't surface; the first dispatch run caught it.)
+        # ca-certificates/git are already in the image, but assert them so a
+        # base-image change fails loudly here rather than mid-clone.
         run: |
           set -eux
           apt-get update
-          apt-get install -y --no-install-recommends procps ca-certificates git
-          ps --version; pgrep --version | head -1
+          apt-get install -y --no-install-recommends procps xz-utils ca-certificates git
+          ps --version; pgrep --version | head -1; xz --version
 
       - name: Checkout
         # No submodules: cynic-fuzz never reads the test262 corpus.
@@ -228,7 +231,11 @@ jobs:
           echo "crashes this run: $(find "$STORAGE/crashes" -maxdepth 1 -name '*.js' 2>/dev/null | wc -l)"
 
       - name: Save corpus (always, even on a gate failure)
-        if: always()
+        # always() so a *gate* failure still persists the grown corpus — but
+        # only when there's a corpus to save. Guarding on corpus/** keeps an
+        # early-exit run (build failed, fuzz step skipped) from tar-failing on
+        # a non-existent fuzz-storage.
+        if: always() && hashFiles('fuzz-storage/corpus/**') != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: fuzz-storage
