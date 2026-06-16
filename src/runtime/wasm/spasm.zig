@@ -167,6 +167,12 @@ const op_f64_add: u8 = 0xa0;
 const op_f64_sub: u8 = 0xa1;
 const op_f64_mul: u8 = 0xa2;
 const op_f64_div: u8 = 0xa3;
+const op_f64_eq: u8 = 0x61;
+const op_f64_ne: u8 = 0x62;
+const op_f64_lt: u8 = 0x63;
+const op_f64_gt: u8 = 0x64;
+const op_f64_le: u8 = 0x65;
+const op_f64_ge: u8 = 0x66;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -817,6 +823,31 @@ pub fn compile(
                 try m.emit(a64.fmovDtoX(ra, .x16));
                 stack[sp - 1] = .{ .reg = ra };
             },
+            op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge => {
+                // §4.3.4 f64 relops — bridge both operands into the FP unit,
+                // `fcmp`, then `cset` the i32 0/1 result. The ordered
+                // conditions are the FP mapping (lt→mi, gt→gt, le→ls, ge→ge);
+                // ne→ne is true for unordered (NaN), matching the spec.
+                if (sp < 2) return null;
+                const a = stack[sp - 2];
+                const b = stack[sp - 1];
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                try m.emit(a64.fmovXtoD(.x16, ra));
+                try m.emit(a64.fmovXtoD(.x17, rb));
+                try m.emit(a64.fcmpD(.x16, .x17));
+                const cond: a64.Cond = switch (op) {
+                    op_f64_eq => .eq,
+                    op_f64_ne => .ne,
+                    op_f64_lt => .mi,
+                    op_f64_gt => .gt,
+                    op_f64_le => .ls,
+                    else => .ge, // f64.ge
+                };
+                try m.emit(a64.csetW(ra, cond));
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_block => {
                 // §3.3.5 — push a control frame. The block's result
                 // arity comes from its block type; a `block` consumes no
@@ -1173,7 +1204,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge => {},
             else => return null, // unknown immediate width — degrade
         }
     }

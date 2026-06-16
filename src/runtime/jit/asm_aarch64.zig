@@ -438,6 +438,14 @@ pub fn fdivD(fd: Reg, fn_: Reg, fm: Reg) u32 {
     return 0x1E601800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
 }
 
+/// FCMP Dn, Dm — double-precision compare, setting NZCV. A wasm relop then
+/// `cset`s the result: ordered `<` is `mi`, `>` is `gt`, `<=` is `ls`,
+/// `>=` is `ge`, `==` is `eq`, and `!=` is `ne` (NaN leaves Z clear, so
+/// `ne` is true and the ordered conditions are false — exactly the spec).
+pub fn fcmpD(dn: Reg, dm: Reg) u32 {
+    return 0x1E602000 | (r(dm) << 16) | (r(dn) << 5);
+}
+
 /// STP Xt, Xt2, [SP, #simm7×8]! — pre-indexed pair push through SP.
 pub fn stpPreIdxSp(rt: Reg, rt2: Reg, byte_off: i10) u32 {
     std.debug.assert(@rem(byte_off, 8) == 0);
