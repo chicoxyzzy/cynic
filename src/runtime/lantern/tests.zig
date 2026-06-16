@@ -14921,3 +14921,66 @@ test "Object.getOwnPropertyDescriptors accepts a function target" {
         \\"" + d.length.value + "," + d.name.value + "," + d.length.configurable;
     , "2,pick,true");
 }
+
+test "scope flattening: body-top const + let promote beside a nested function decl" {
+    // §13.3.1 — `base` (const) and `acc` (let, re-assigned) are body-top
+    // lexicals that the nested `step` does not capture, so both promote to
+    // registers even though the body's nested function makes the coarse
+    // register-safe gate fail. Exercises the register read/write path under
+    // a live loop: step doubles each index, acc accumulates, +base at the end.
+    try expectScriptIntWithBuiltins(
+        \\function f(n){
+        \\  const base = 100;
+        \\  let acc = 0;
+        \\  function step(x){ return x * 2; }
+        \\  for (let i = 0; i < n; i++) acc = acc + step(i);
+        \\  return acc + base;
+        \\}
+        \\f(4);
+    , 112);
+}
+
+test "scope flattening: a captured body-top const still reads correctly through the closure" {
+    // §13.3.1 — `x` IS referenced by the returned closure, so it must stay
+    // env-resident; the closure reads the live binding. A miscompiled promotion
+    // would have the closure read a stale / absent register.
+    try expectScriptIntWithBuiltins(
+        \\function make(){ const x = 42; return function(){ return x; }; }
+        \\make()();
+    , 42);
+}
+
+test "scope flattening: a promoted body-top const keeps §13.3.1 TDZ (read-before-init throws)" {
+    // §13.3.1 — a register-promoted `const` still seeds the TDZ Hole and
+    // guards reads with `throw_if_hole`; reading `x` before its initializer
+    // (here through a hoisted `var`) throws ReferenceError, not undefined.
+    try expectScriptThrowsWithBuiltins(
+        \\function f(){ function g(){ return 1; } var y = x; const x = 1; return y; }
+        \\f();
+    );
+}
+
+test "scope flattening: a promoted body-top const rejects reassignment (TypeError)" {
+    // §8.1.1.1.4 — assigning a register-promoted `const` still throws
+    // TypeError, exactly as on the env path.
+    try expectScriptThrowsWithBuiltins(
+        \\function f(){ function g(){ return 1; } const x = 1; x = 2; return x; }
+        \\f();
+    );
+}
+
+test "scope flattening: promoting a body-top const does not disturb per-iteration block capture" {
+    // §14.7.4.4 CreatePerIterationEnvironment — `fns` (body-top const) is
+    // uncaptured and promotes, but the loop-body `const j` IS captured by each
+    // pushed closure and must keep its per-iteration env slot. Each closure
+    // must see its own `j` (0, 1, 2), summing to 3 — not 6 (a shared slot).
+    try expectScriptIntWithBuiltins(
+        \\function f(){
+        \\  class C {}
+        \\  const fns = [];
+        \\  for (let i = 0; i < 3; i++) { const j = i; fns.push(function(){ return j; }); }
+        \\  return fns[0]() + fns[1]() + fns[2]();
+        \\}
+        \\f();
+    , 3);
+}

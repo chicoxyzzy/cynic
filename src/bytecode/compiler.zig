@@ -8391,7 +8391,7 @@ pub const Compiler = struct {
         const saved_ctor_fn_has_eval = self.current_fn_has_eval;
         self.current_fn_body = body_stmts;
         self.current_fn_has_eval = fnBodyHasEval(self.source, body_stmts);
-        try self.hoistLetConst(body_stmts, locals_register_only);
+        try self.hoistLetConst(body_stmts, try self.bodyTopPromoteTopLex(body_stmts, locals_register_only));
         self.current_promote_vars = vars_register_only;
         try self.hoistVarAndFunctions(body_stmts);
         self.current_promote_vars = false;
@@ -8659,7 +8659,7 @@ pub const Compiler = struct {
         }
 
         // Body.
-        try self.hoistLetConst(body_stmts, locals_register_only);
+        try self.hoistLetConst(body_stmts, try self.bodyTopPromoteTopLex(body_stmts, locals_register_only));
         self.current_promote_vars = vars_register_only;
         try self.hoistVarAndFunctions(body_stmts);
         self.current_promote_vars = false;
@@ -11449,6 +11449,166 @@ pub const Compiler = struct {
             }
         }
         return false;
+    }
+
+    /// §13.3.1 — the effective `promote_top_lex` for a
+    /// function / method / constructor body hoist, generalizing the
+    /// coarse `bodyIsRegisterSafe` gate with a per-binding capture
+    /// analysis (the body-top analogue of `compileBlock`'s block-
+    /// scoped Stage 2). Returns `coarse` unchanged when the coarse
+    /// gate already passed; otherwise promotes the body-top simple-
+    /// ident `let` / `const` to registers iff none of them is captured
+    /// by a nested closure. A register binding cannot be captured
+    /// (closures capture env slots), so any nested-closure reference
+    /// keeps the whole body-top scope on the env path (all-or-nothing,
+    /// matching the block-scoped fallback). Preconditions, all
+    /// required for soundness:
+    ///   • not a generator / async body — those reify the env across a
+    ///     suspension point, signalled by `current_fn_body == null`;
+    ///   • no direct `eval(...)` in scope (§19.2.1.3) — eval resolves
+    ///     any in-scope name through the environment, not a register.
+    /// The function-entry env is NOT elided here (the caller's
+    /// `needs_entry_env` stays on the coarse flag), so promotion only
+    /// moves bindings out of an env that already exists for the
+    /// nested function / class that defeated the coarse gate.
+    fn bodyTopPromoteTopLex(
+        self: *Compiler,
+        body_stmts: []const ast.statement.Statement,
+        coarse: bool,
+    ) CompileError!bool {
+        if (coarse) return true;
+        // Generators / async reify the env across yield / await.
+        if (self.current_fn_body == null) return false;
+        // §19.2.1.3 — a direct eval can name any in-scope local.
+        if (self.current_fn_has_eval) return false;
+        var promotable: usize = 0;
+        for (body_stmts) |*s| {
+            if (topLevelLexIsPromotable(s)) promotable += s.lexical.declarators.len;
+        }
+        // Nothing to promote, or beyond the register budget (params
+        // live in env on this path, so the promoted locals start at
+        // r0; the 192 ceiling leaves headroom for body temps and the
+        // block-scoped Stage 2 reservations layered on top).
+        if (promotable == 0 or promotable > 192) return false;
+        if (try self.bodyTopLexCaptured(body_stmts)) return false;
+        return true;
+    }
+
+    /// §13.3.1 — true iff any of the body-top simple-ident lexical
+    /// names declared in `body` is referenced inside a nested closure
+    /// anywhere in `body`. Unlike `blockLexCapturedInFn` (which reuses
+    /// the fused-counter `stmtCounterHazard` and so also flags direct
+    /// writes), this is capture-ONLY: a body-top `let` re-assigned in
+    /// its own scope is still register-promotable (the write lowers to
+    /// `Star`), so only a nested-closure reference is disqualifying.
+    /// Delegates to the proven, conservative (shadowing-unaware, so
+    /// over-rejecting) `exprMentionsNamesInNestedFn` /
+    /// `fnBodyMentionsNames` / `classBodyMentionsNames` primitives.
+    fn bodyTopLexCaptured(self: *Compiler, body: []const ast.statement.Statement) CompileError!bool {
+        for (body) |*s| {
+            if (!topLevelLexIsPromotable(s)) continue;
+            for (s.lexical.declarators) |d| {
+                const name = self.bindingName(d.name.identifier.span) catch return true;
+                for (body) |*outer| {
+                    if (try self.stmtCapturesName(outer, name)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// §13.3.1 — capture-only statement walker: true iff `name` is
+    /// referenced inside a nested function / arrow / class / method
+    /// reachable from `stmt`. A direct (non-nested) reference is NOT a
+    /// capture — it reads the register fine. Mirrors
+    /// `stmtCounterHazard`'s exhaustive shape (so a new AST node is a
+    /// compile error here, not a silent miss) but routes every
+    /// expression through `exprMentionsNamesInNestedFn`, which returns
+    /// false for a bare identifier and only descends into closures.
+    fn stmtCapturesName(
+        self: *Compiler,
+        stmt: *const ast.statement.Statement,
+        name: []const u8,
+    ) CompileError!bool {
+        const names = [_][]const u8{name};
+        return switch (stmt.*) {
+            .empty, .debugger_, .break_, .continue_, .import_decl => false,
+            .export_decl => |ed| switch (ed.body) {
+                .declaration => |inner| self.stmtCapturesName(inner, name),
+                else => false,
+            },
+            .function_decl => |fd| self.fnBodyMentionsNames(fd.params, fd.body.body, names[0..]),
+            .class_decl => |cd| self.classBodyMentionsNames(cd.superclass, cd.body, names[0..]),
+            .expression => |es| self.exprMentionsNamesInNestedFn(&es.expression, names[0..]),
+            .block => |bs| {
+                for (bs.body) |*sub| if (try self.stmtCapturesName(sub, name)) return true;
+                return false;
+            },
+            .lexical => |ld| {
+                for (ld.declarators) |d| {
+                    if (d.init) |*e| if (try self.exprMentionsNamesInNestedFn(e, names[0..])) return true;
+                }
+                return false;
+            },
+            .if_ => |ifs| {
+                if (try self.exprMentionsNamesInNestedFn(&ifs.test_, names[0..])) return true;
+                if (try self.stmtCapturesName(ifs.consequent, name)) return true;
+                if (ifs.alternate) |alt| return self.stmtCapturesName(alt, name);
+                return false;
+            },
+            .while_ => |ws| {
+                if (try self.exprMentionsNamesInNestedFn(&ws.test_, names[0..])) return true;
+                return self.stmtCapturesName(ws.body, name);
+            },
+            .do_while => |dw| {
+                if (try self.stmtCapturesName(dw.body, name)) return true;
+                return self.exprMentionsNamesInNestedFn(&dw.test_, names[0..]);
+            },
+            .return_ => |rs| {
+                if (rs.argument) |*e| return self.exprMentionsNamesInNestedFn(e, names[0..]);
+                return false;
+            },
+            .throw_ => |ts| self.exprMentionsNamesInNestedFn(&ts.argument, names[0..]),
+            .for_ => |fs| {
+                if (fs.init) |head| switch (head) {
+                    .lexical => |ld| for (ld.declarators) |d| {
+                        if (d.init) |*e| if (try self.exprMentionsNamesInNestedFn(e, names[0..])) return true;
+                    },
+                    .expression => |e| if (try self.exprMentionsNamesInNestedFn(&e, names[0..])) return true,
+                };
+                if (fs.test_) |*t| if (try self.exprMentionsNamesInNestedFn(t, names[0..])) return true;
+                if (fs.update) |*u| if (try self.exprMentionsNamesInNestedFn(u, names[0..])) return true;
+                return self.stmtCapturesName(fs.body, name);
+            },
+            .for_in_of => |fio| {
+                if (fio.left == .expression) {
+                    if (try self.exprMentionsNamesInNestedFn(&fio.left.expression, names[0..])) return true;
+                } else for (fio.left.lexical.declarators) |d| {
+                    if (d.init) |*e| if (try self.exprMentionsNamesInNestedFn(e, names[0..])) return true;
+                }
+                if (try self.exprMentionsNamesInNestedFn(&fio.right, names[0..])) return true;
+                return self.stmtCapturesName(fio.body, name);
+            },
+            .try_ => |ts| {
+                for (ts.block.body) |*sub| if (try self.stmtCapturesName(sub, name)) return true;
+                if (ts.handler) |h| {
+                    for (h.body.body) |*sub| if (try self.stmtCapturesName(sub, name)) return true;
+                }
+                if (ts.finalizer) |f| {
+                    for (f.body) |*sub| if (try self.stmtCapturesName(sub, name)) return true;
+                }
+                return false;
+            },
+            .switch_ => |sw| {
+                if (try self.exprMentionsNamesInNestedFn(&sw.discriminant, names[0..])) return true;
+                for (sw.cases) |c| {
+                    if (c.test_) |*t| if (try self.exprMentionsNamesInNestedFn(t, names[0..])) return true;
+                    for (c.body) |*sub| if (try self.stmtCapturesName(sub, name)) return true;
+                }
+                return false;
+            },
+            .labeled => |ls| self.stmtCapturesName(ls.body, name),
+        };
     }
 
     fn bodyHasClosure(self: *Compiler, stmt: *const ast.statement.Statement) bool {
@@ -14311,7 +14471,7 @@ fn compileFunctionTemplateExtNamed(
     // Compile body.
     switch (body) {
         .block => |stmts| {
-            try self.hoistLetConst(stmts, locals_register_only);
+            try self.hoistLetConst(stmts, try self.bodyTopPromoteTopLex(stmts, locals_register_only));
             self.current_promote_vars = vars_register_only;
             try self.hoistVarAndFunctions(stmts);
             self.current_promote_vars = false;
@@ -15257,4 +15417,63 @@ test "compiler: a used member post-increment keeps the old value" {
     const t0 = t0Of(got);
     try testing.expect(std.mem.indexOf(u8, t0, "Star2") != null);
     try testing.expect(std.mem.indexOf(u8, t0, "Ldar2") != null);
+}
+
+test "compiler: an uncaptured body-top const promotes to a register beside a nested closure" {
+    // §13.3.1 — `x` is a function-body-top `const` whose only sibling closure
+    // (`function(){ return 1; }`) does not reference it, so no closure can
+    // capture it. The coarse register-safe gate fails (the body contains a
+    // nested function), but the per-binding capture analysis still promotes
+    // `x` to a frame register: its store becomes `Star` and its read `Ldar`,
+    // so no env-slot load (`LdaEnv`) survives in the body. The nested
+    // closure forces the entry env to exist, but `x` no longer lives in it.
+    const got = try dumpExpr("(function(){ const x = side(); g(function(){ return 1; }); return x; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "LdaEnv") == null);
+}
+
+test "compiler: an uncaptured body-top let accumulator promotes (reads and writes hit a register)" {
+    // §13.3.1 — `s` is a body-top `let` that is read and re-assigned, with a
+    // sibling closure that does not reference it. It promotes to a register:
+    // every access is `Ldar` / `Star`, with neither `LdaEnv` nor `StaEnv`
+    // for `s`. (The for-counter promotion already covers loop variables; this
+    // covers the plain body-top accumulator a hot loop mutates.)
+    const got = try dumpExpr("(function(){ let s = 0; g(function(){ return 1; }); s = s + 1; return s; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "LdaEnv") == null);
+    try testing.expect(std.mem.indexOf(u8, t0, "StaEnv") == null);
+}
+
+test "compiler: a captured body-top const stays in the environment (no over-promotion)" {
+    // §13.3.1 — here the nested closure DOES reference `x` (`return x`), so a
+    // register copy would leave the closure reading a stale / absent slot.
+    // The capture analysis must keep `x` env-resident: its init stores via
+    // `StaEnv` and the closure reads it via `LdaEnv`. Guards the conservatism
+    // contract — a missed capture here is a silent miscompile.
+    const got = try dumpExpr("(function(){ const x = side(); g(function(){ return x; }); return 1; })");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "StaEnv") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "LdaEnv") != null);
+}
+
+test "compiler: a body-top const is NOT promoted when a direct eval is in scope" {
+    // §19.2.1.3 — a direct `eval(...)` can reference any in-scope local by
+    // name and resolves it through the environment, not a register. With eval
+    // in the body, `x` must stay env-resident even though no lexical closure
+    // captures it. (The test262 main phase runs `--allow=eval`.)
+    const got = try dumpExpr("(function(){ const x = side(); g(function(){ return 1; }); eval('x'); return x; })");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "StaEnv") != null);
+}
+
+test "compiler: a generator body-top const is NOT promoted (the env is reified across yield)" {
+    // §27.5 — a generator suspends at `yield`, reifying its environment into
+    // the JSGenerator state; a transient register would not survive the
+    // suspension. Body-top lexicals in a generator stay env-resident even
+    // without a capturing closure.
+    const got = try dumpExpr("(function*(){ const x = side(); g(function(){ return 1; }); yield x; })");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "StaEnv") != null);
 }
