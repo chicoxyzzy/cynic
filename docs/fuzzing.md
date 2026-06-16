@@ -162,21 +162,46 @@ throughput slows only ~1.1–1.3× and sits inside the harness's
 run-to-run variance. This is *not* an ASan-scale slowdown — it is
 cheap enough to leave running for a whole campaign.
 
-**A note on the GC class (not built).** The ASan analog for the
-slab-pooled GC objects DebugAllocator can't reach would be a
-*sweep-quarantine*: hold each swept header poisoned on a
-fixed-length FIFO for N collection cycles before its free-list slot
-is eligible for reuse, so a stale read after a sweep keeps hitting
-`0xaa` longer (the spatial analog of `FUZZ_GC_THRESHOLD`'s temporal
-widening). It would live in the per-kind sweep paths in
-`heap.zig` and is a real, bounded change. It is not built here
-because `FUZZ_GC_THRESHOLD=1` already maximizes the poisoned window
-by collecting on every allocation, and the historically documented
-GC-UAF clusters (`docs/handbook/gc.md`) are reproducible under it;
-quarantine would mainly help *shrink* a repro (raise detection odds
-at a higher threshold, for throughput) rather than find a class the
-threshold knob misses. Worth revisiting if a future GC-UAF proves
-to need a wider window than `=1` provides.
+**The GC class is a separate knob.** The slab-pooled GC objects
+DebugAllocator can't reach have their own ASan-quarantine analog —
+`FUZZ_GC_QUARANTINE`, the next section.
+
+### Sweep-quarantine campaign
+
+The guard-page variant deliberately can't see GC-managed headers
+(`JSObject` / `JSString` / `Environment`), which are slab-pooled
+through `std.heap.MemoryPool` free-lists, not the backing allocator.
+`FUZZ_GC_THRESHOLD` widens the GC-UAF detection window *temporally*
+(collect more often, so a swept header is poisoned sooner);
+`FUZZ_GC_QUARANTINE` widens it *spatially*:
+
+    FUZZ_GC_QUARANTINE=8 FUZZ_GC_THRESHOLD=1 \
+      .build/release/FuzzilliCli --profile=cynic \
+        --storagePath=/tmp/fuzzilli-cynic-quar \
+        /path/to/cynic/zig-out/bin/cynic-fuzz
+
+`MemoryPool.destroy` poisons a swept header (`ptr.* = undefined` ⇒
+`0xaa` under ReleaseSafe) and pushes its slot onto a LIFO free-list —
+so the *next* same-kind allocation reuses it, and a stale pointer to
+that header then reads a freshly-constructed live object instead of
+poison. `FUZZ_GC_QUARANTINE=N` interposes a quarantine: a swept
+header is held poisoned and **out of the free-list for N collection
+cycles** before its slot can be reused (`QuarantinedPool` in
+`heap.zig`, a drop-in `MemoryPool` wrapper; a ring of N intrusive
+cohorts rotated once per cycle). The dangling read keeps hitting
+`0xaa` across that window instead of a live object, so the
+use-after-free faults. Unset / `0` ⇒ disabled (the production
+default — pools behave as bare `MemoryPool`s, zero overhead).
+
+Pair it with `FUZZ_GC_THRESHOLD=1`: collect-on-every-allocation
+maximizes how *soon* the poison appears, quarantine maximizes how
+*long* it survives. `=1` alone already catches the documented
+cons-string GC-UAF clusters (`docs/handbook/gc.md`); quarantine
+mainly helps where the stale read lands several allocations after
+the sweep — far enough that even threshold-`1` reuse would have
+overwritten the poison — and lets a repro survive at a higher (and
+much faster) threshold than `=1`. Like the other two campaigns, run
+it on its own.
 
 ## Triage
 

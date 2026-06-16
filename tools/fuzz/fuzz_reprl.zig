@@ -57,6 +57,12 @@ pub const Options = struct {
     /// `FUZZ_GC_THRESHOLD` env-var knob; see `fuzz_main`). `null`
     /// leaves the engine default.
     gc_threshold: ?u32 = null,
+    /// Sweep-quarantine depth in GC cycles (the `FUZZ_GC_QUARANTINE`
+    /// env-var knob; see `fuzz_main`). Holds each swept slab header
+    /// poisoned out of its pool for N collection cycles before reuse,
+    /// widening the window in which a use-after-free on a GC-managed
+    /// header faults. `null` / `0` disables. Complements `gc_threshold`.
+    gc_quarantine: ?u32 = null,
     /// `--jit`: tier hot chunks up to Bistromath and force-compile
     /// every eligible chunk on its first call (`jit_threshold_override
     /// = 1`). The differential target sets this; the reference runs
@@ -243,6 +249,12 @@ fn executeOne(allocator: std.mem.Allocator, source: []const u8, options: Options
         realm.jit_threshold_override = 1;
     }
     if (options.gc_threshold) |n| realm.heap.setGcThreshold(n);
+    // Sweep-quarantine: hold each swept slab header poisoned out of its
+    // pool for N collection cycles before reuse, widening the window in
+    // which a use-after-free on a GC-managed header faults. Complements
+    // `gc_threshold` (which collects more often); set both for the
+    // deepest GC-UAF campaign. See docs/fuzzing.md.
+    if (options.gc_quarantine) |n| realm.heap.setGcQuarantine(n);
     realm.installBuiltins() catch return 1;
     // `fuzzilli(op, arg)` lives here — same install path as the
     // other host-only debug hooks. See `installTestGlobals`.

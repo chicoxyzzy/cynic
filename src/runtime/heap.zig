@@ -203,6 +203,104 @@ pub fn isJSObject(v: Value) bool {
     return k == kind_object or k == kind_function;
 }
 
+/// Drop-in wrapper over `std.heap.MemoryPool(Item)` that can hold a
+/// freed slab slot poisoned for N collection cycles before it becomes
+/// eligible for reuse — a sweep-quarantine, the GC-aware analog of an
+/// allocator quarantine. `MemoryPool.destroy` returns a slot to a LIFO
+/// free-list, so the very next same-kind `create` reuses it; a stale
+/// pointer to a swept header then reads a *live* object instead of
+/// poison, and the use-after-free goes undetected. Holding the slot
+/// out of circulation for N cycles keeps it `0xaa`-poisoned across
+/// that window, so the dangling read faults — the spatial complement
+/// to `setGcThreshold(1)`'s temporal widening. Off by default
+/// (`quarantine_cycles == 0`): `create`/`destroy`/`deinit` then match
+/// the bare pool one-for-one, so the production engine is unaffected.
+///
+/// Each cohort is an intrusive `SinglyLinkedList` threaded through the
+/// dead slots themselves (slots are `>= @sizeOf(Node)`), so quarantine
+/// needs no side allocation and `destroy` can never fail. A ring of N
+/// cohorts is rotated once per GC cycle by `rotate`: the cohort about
+/// to be reused for this cycle is exactly the one filled N cycles ago,
+/// so it is flushed back to the pool before new slots land in it.
+fn QuarantinedPool(comptime Item: type) type {
+    return struct {
+        const Self = @This();
+        const Inner = std.heap.MemoryPool(Item);
+        const Node = std.SinglyLinkedList.Node;
+        /// Mirrors the (private) `MemoryPool.ItemPtr` exactly — the
+        /// pool over-aligns slots to fit its intrusive free-list node,
+        /// and callers pass the same naturally-aligned pointers they do
+        /// today, so this is a drop-in alias.
+        pub const ItemPtr = *align(Inner.item_alignment.toByteUnits()) Item;
+
+        /// Largest quarantine depth the ring supports; `setQuarantine`
+        /// clamps to it. 32 cohorts is 3 × 32 list heads across the
+        /// pooled kinds — negligible, and far past any useful depth.
+        pub const max_cycles: u32 = 32;
+
+        inner: Inner = .empty,
+        cohorts: [max_cycles]std.SinglyLinkedList = @splat(.{}),
+        /// Active quarantine depth in GC cycles; 0 disables (bare-pool
+        /// behaviour).
+        quarantine_cycles: u32 = 0,
+        /// Ring cursor — the cohort this cycle's `destroy`s land in.
+        head: u32 = 0,
+
+        pub const empty: Self = .{};
+
+        pub fn create(self: *Self, allocator: std.mem.Allocator) std.mem.Allocator.Error!ItemPtr {
+            return self.inner.create(allocator);
+        }
+
+        pub fn destroy(self: *Self, ptr: ItemPtr) void {
+            if (self.quarantine_cycles == 0) {
+                self.inner.destroy(ptr);
+                return;
+            }
+            // Poison the whole header so a dangling read during the
+            // quarantine window faults (`MemoryPool.destroy` does this
+            // via `ptr.* = undefined`; we're deferring that call, so do
+            // it here). The intrusive `prepend` below overwrites the
+            // leading `Node`-sized bytes with the cohort link — fine,
+            // those are re-poisoned when the slot is finally flushed.
+            if (std.debug.runtime_safety) @memset(std.mem.asBytes(ptr), 0xaa);
+            self.cohorts[self.head].prepend(@ptrCast(@alignCast(ptr)));
+        }
+
+        /// Advance the ring one step and flush the cohort that has now
+        /// waited `quarantine_cycles` cycles. Called once per GC cycle,
+        /// before the sweep that fills the new head cohort.
+        pub fn rotate(self: *Self) void {
+            if (self.quarantine_cycles == 0) return;
+            self.head = (self.head + 1) % self.quarantine_cycles;
+            self.flushCohort(self.head);
+        }
+
+        fn flushCohort(self: *Self, idx: u32) void {
+            while (self.cohorts[idx].popFirst()) |node| {
+                self.inner.destroy(@ptrCast(@alignCast(node)));
+            }
+        }
+
+        /// Set the quarantine depth. Draining everything currently held
+        /// keeps the ring coherent if the depth changes mid-run; hosts
+        /// set it once at realm init, before any allocation.
+        pub fn setQuarantine(self: *Self, cycles: u32) void {
+            for (0..max_cycles) |i| self.flushCohort(@intCast(i));
+            self.head = 0;
+            self.quarantine_cycles = @min(cycles, max_cycles);
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            // The quarantined headers live in the pool's own arena, so
+            // `inner.deinit` reclaims their slabs wholesale; the cohort
+            // lists are intrusive (no side storage to free).
+            self.inner.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+}
+
 pub const Heap = struct {
     /// Upper bound (exclusive) of the small-integer toString cache
     /// (`small_int_strings` / `smallIntString`). 256 covers byte
@@ -457,6 +555,13 @@ pub const Heap = struct {
     /// of MB of dead intermediates before the count-based trigger
     /// fires).
     gc_byte_threshold: usize = 16 * 1024 * 1024,
+    /// Sweep-quarantine depth in GC cycles (`setGcQuarantine`). 0 = off
+    /// (production default — slab pools behave as bare `MemoryPool`s).
+    /// When > 0, a swept pooled header is held poisoned out of the pool
+    /// free-list for this many collection cycles before its slot is
+    /// reusable; `rotateQuarantine` advances the ring each cycle. A
+    /// fuzzing-only knob — see `QuarantinedPool`.
+    gc_quarantine_cycles: u32 = 0,
     /// Sum of bytes charged across `allocateX` callers. Coarse
     /// — counts the dominant payload (string bytes, ArrayBuffer
     /// bytes, register files); approximate for the small headers.
@@ -598,7 +703,7 @@ pub const Heap = struct {
     /// arena reclaims everything in one `deinit`; per-object
     /// sub-field cleanup goes through `JSObject.deinitFields`
     /// before the header returns to the pool.
-    object_pool: std.heap.MemoryPool(JSObject) = .empty,
+    object_pool: QuarantinedPool(JSObject) = .empty,
     /// Slab pool for `Environment` headers. Every JS function call
     /// that needs a binding env (params, locals) used to malloc a
     /// fresh Environment struct from the general allocator. On a
@@ -613,7 +718,7 @@ pub const Heap = struct {
     /// function and a single-size pool won't cover the spread;
     /// that's the next layer of cleanup if profiling shows it
     /// still dominates after this lands.
-    env_pool: std.heap.MemoryPool(Environment) = .empty,
+    env_pool: QuarantinedPool(Environment) = .empty,
     /// Slab pool for `JSString` headers. A tight string-concat loop
     /// (`s = s + "x"` × 300k, or any JSON.stringify hot path) used
     /// to reach `allocator.create(JSString)` through the GP
@@ -626,7 +731,7 @@ pub const Heap = struct {
     /// to cover them. The byte buffer is freed before the header
     /// returns to the pool — see the `JSString` branches in
     /// `sweepList` and `promoteYoungList`.
-    string_pool: std.heap.MemoryPool(JSString) = .empty,
+    string_pool: QuarantinedPool(JSString) = .empty,
 
     /// Slab pool for `PromiseReactionStore` nodes — every pending
     /// promise that gains a reaction or waiter allocates one; a
@@ -692,6 +797,33 @@ pub const Heap = struct {
     pub fn setGcThreshold(self: *Heap, n: u32) void {
         self.gc_young_threshold = n;
         self.gc_threshold = n *| self.full_every_n_minor;
+    }
+
+    /// Set the sweep-quarantine depth (`FUZZ_GC_QUARANTINE=<n>`) on
+    /// every slab-pooled kind. A swept `JSObject` / `JSString` /
+    /// `Environment` header then stays poisoned and out of the pool
+    /// free-list for `n` collection cycles before its slot can be
+    /// reused — widening the window in which a dangling pointer to a
+    /// swept header faults instead of reading a freshly-reused live
+    /// object. `0` disables (the production default; pools behave as
+    /// bare `MemoryPool`s). A fuzzing knob, complementary to
+    /// `setGcThreshold` — see `QuarantinedPool` and docs/fuzzing.md.
+    pub fn setGcQuarantine(self: *Heap, n: u32) void {
+        self.gc_quarantine_cycles = @min(n, QuarantinedPool(JSObject).max_cycles);
+        self.object_pool.setQuarantine(n);
+        self.string_pool.setQuarantine(n);
+        self.env_pool.setQuarantine(n);
+    }
+
+    /// Advance every pooled kind's quarantine ring one step, flushing
+    /// the cohort that has now waited `gc_quarantine_cycles` cycles.
+    /// Called once at the top of each collection's sweep phase; a
+    /// no-op when quarantine is disabled.
+    pub fn rotateQuarantine(self: *Heap) void {
+        if (self.gc_quarantine_cycles == 0) return;
+        self.object_pool.rotate();
+        self.string_pool.rotate();
+        self.env_pool.rotate();
     }
 
     /// Charge `n` bytes against the heap ceiling. Returns
@@ -2453,6 +2585,12 @@ pub const Heap = struct {
         const pre_syms = self.symbolCount();
         const pre_bigs = self.bigintCount();
 
+        // Advance the sweep-quarantine ring before this cycle's frees
+        // land, so the cohort about to be refilled (the one from N
+        // cycles ago) is flushed back to its pool first. No-op unless
+        // `gc_quarantine_cycles > 0`.
+        self.rotateQuarantine();
+
         // Sweep phase. The mature lists are swept in place; the
         // young lists are swept-AND-promoted — every young survivor
         // is relinked into its mature list. After this, the young
@@ -2673,6 +2811,11 @@ pub const Heap = struct {
         // loop body cleared `marked = false` on every mature object,
         // defeating part of the generational promise: a "cheap"
         // minor cycle still cost O(mature_set) per cycle.)
+        //
+        // Advance the sweep-quarantine ring first (no-op when
+        // disabled) so this cycle's frees land in a freshly-flushed
+        // cohort — see `collectFull`.
+        self.rotateQuarantine();
         const lc = self.live_color;
         promoteYoungList(*JSString, &self.strings_young, &self.strings_mature, lc, self.allocator, .{ self.allocator, self.bytes_allocator, &self.string_pool });
         promoteYoungList(*JSFunction, &self.functions_young, &self.functions_mature, lc, self.allocator, .{self.allocator});
@@ -4785,4 +4928,34 @@ test "tagging: object and function have distinct kind bits" {
     try std.testing.expect(!isPlainObject(fv));
     try std.testing.expect(!isFunction(ov));
     try std.testing.expect(isPlainObject(ov));
+}
+
+test "QuarantinedPool: holds a freed slot for N cycles before reuse" {
+    const a = std.testing.allocator;
+    var pool: QuarantinedPool(u64) = .empty;
+    defer pool.deinit(a);
+
+    // Disabled (depth 0) ⇒ bare-pool behaviour: a freed slot is reused
+    // by the very next create (LIFO free-list).
+    {
+        const p1 = try pool.create(a);
+        pool.destroy(p1);
+        const p2 = try pool.create(a);
+        try std.testing.expectEqual(p1, p2);
+        pool.destroy(p2);
+    }
+
+    // Depth 2 ⇒ a freed slot is held out of circulation until two
+    // rotate() cycles have elapsed.
+    pool.setQuarantine(2);
+    const q1 = try pool.create(a);
+    pool.destroy(q1); // quarantined — NOT returned to the free-list
+    const q2 = try pool.create(a);
+    try std.testing.expect(q1 != q2); // slot still held ⇒ fresh address
+    pool.rotate(); // cycle 1: q1's cohort not yet due
+    pool.rotate(); // cycle 2: q1's cohort flushed back to the pool
+    const q3 = try pool.create(a);
+    try std.testing.expectEqual(q1, q3); // slot reusable again
+    pool.destroy(q2);
+    pool.destroy(q3);
 }

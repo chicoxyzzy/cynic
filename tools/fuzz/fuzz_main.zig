@@ -53,6 +53,20 @@ pub fn main(init: std.process.Init) !void {
         break :blk std.fmt.parseInt(u32, raw, 10) catch null;
     };
 
+    // `FUZZ_GC_QUARANTINE` surfaces the engine's sweep-quarantine depth
+    // to Fuzzilli (same env-var channel as the GC threshold). It holds
+    // each swept slab header (`JSObject` / `JSString` / `Environment`)
+    // poisoned and out of its pool free-list for N collection cycles
+    // before the slot is reusable, so a use-after-free on a GC-managed
+    // header keeps hitting `0xaa` longer instead of reading a freshly-
+    // reused live object — the spatial complement to `FUZZ_GC_THRESHOLD`
+    // collecting more often. Pair the two for the deepest GC-UAF
+    // campaign. Unset ⇒ disabled (no quarantine). See docs/fuzzing.md.
+    const gc_quarantine: ?u32 = blk: {
+        const raw = init.minimal.environ.getPosix("FUZZ_GC_QUARANTINE") orelse break :blk null;
+        break :blk std.fmt.parseInt(u32, raw, 10) catch null;
+    };
+
     // Differential-mode flags (docs/fuzz-differential.md). These come
     // from argv rather than the environment because Fuzzilli shares
     // one `processEnv` across both halves of a differential pair —
@@ -60,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
     // interpreter and JIT runners are distinguished by these flags.
     // Unknown args are ignored: a fuzz host must not abort on a flag
     // it doesn't recognize (Fuzzilli may inject its own).
-    var options = fuzz_reprl.Options{ .gc_threshold = gc_threshold };
+    var options = fuzz_reprl.Options{ .gc_threshold = gc_threshold, .gc_quarantine = gc_quarantine };
     var arg_it = std.process.Args.Iterator.init(init.minimal.args);
     _ = arg_it.skip(); // argv[0]
     while (arg_it.next()) |arg| {
