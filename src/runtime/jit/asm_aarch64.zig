@@ -553,6 +553,21 @@ pub fn fmaxS(fd: Reg, fn_: Reg, fm: Reg) u32 {
     return 0x1E204800 | (r(fm) << 16) | (r(fn_) << 5) | r(fd);
 }
 
+// Cross-precision float conversions (the FCVT 1-source forms): narrow a
+// double to single (f32.demote_f64) or widen a single to double
+// (f64.promote_f32). The source's ptype picks the input precision; the
+// opcode's low bits pick the output.
+
+/// FCVT Sd, Dn — narrow a double to single (f32.demote_f64).
+pub fn fcvtDtoS(fs: Reg, dn: Reg) u32 {
+    return 0x1E624000 | (r(dn) << 5) | r(fs);
+}
+
+/// FCVT Dd, Sn — widen a single to double (f64.promote_f32).
+pub fn fcvtStoD(fd: Reg, sn: Reg) u32 {
+    return 0x1E22C000 | (r(sn) << 5) | r(fd);
+}
+
 /// FCMP Sn, Sm — single-precision compare (same condition mapping as fcmpD).
 pub fn fcmpS(sn: Reg, sm: Reg) u32 {
     return 0x1E202000 | (r(sm) << 16) | (r(sn) << 5);

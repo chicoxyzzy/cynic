@@ -1058,6 +1058,118 @@ test "wasm spasm: f64.copysign combines magnitude and sign by bit ops" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// An `(f32)->i32` reinterpret exported as "ri" (0xbc = i32.reinterpret_f32);
+// the bits pass through unchanged.
+const reinterpret_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7d, 0x01, 0x7f, // type (f32)->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x72, 0x69, 0x00, 0x00, // export "ri" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0xbc, 0x0b, // local.get 0; i32.reinterpret_f32; end
+};
+
+test "wasm spasm: i32.reinterpret_f32 passes the bits through" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + reinterpret_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &reinterpret_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "ri") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u32, @bitCast(@as(f32, 1.0))));
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // reinterpret(1.0f) == 0x3f80_0000 — the f32 bit pattern of 1.0, as i32.
+    try testing.expectEqual(@as(u32, 0x3f800000), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+// An `(f32)->f64` promote exported as "pr" (0xbb = f64.promote_f32).
+const promote_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7d, 0x01, 0x7c, // type (f32)->f64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x70, 0x72, 0x00, 0x00, // export "pr" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0xbb, 0x0b, // local.get 0; f64.promote_f32; end
+};
+
+test "wasm spasm: f64.promote_f32 widens via FCVT" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + promote_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &promote_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "pr") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u32, @bitCast(@as(f32, 1.5))));
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // promote(1.5f) == 1.5 in double precision.
+    try testing.expectEqual(@as(f64, 1.5), @as(f64, @bitCast(@as(u64, @truncate(res[0])))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+// An `(f64)->f32` demote exported as "dm" (0xb6 = f32.demote_f64).
+const demote_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7c, 0x01, 0x7d, // type (f64)->f32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x64, 0x6d, 0x00, 0x00, // export "dm" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0xb6, 0x0b, // local.get 0; f32.demote_f64; end
+};
+
+test "wasm spasm: f32.demote_f64 narrows via FCVT" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + demote_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &demote_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "dm") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, 1.5))));
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // demote(1.5) == 1.5f in single precision.
+    try testing.expectEqual(@as(f32, 1.5), @as(f32, @bitCast(@as(u32, @truncate(res[0])))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // An `(f64,f64)->i32` ordered less-than exported as "lt": local.get 0;
 // local.get 1; f64.lt; end. (0x63 is f64.lt; the result is an i32.)
 const f64_lt_body = [_]u8{
