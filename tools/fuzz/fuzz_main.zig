@@ -34,12 +34,24 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stderr().writeStreamingAll(init.io, msg);
     };
 
-    // The regular CLI's `--gc-threshold` knob isn't surfaced yet —
-    // Fuzzilli has no syntax for engine-specific args. Default
-    // GC posture is fine for the first fuzzing pass; a future
-    // commit can add a `FUZZ_GC_THRESHOLD` env-var if pairing
-    // Fuzzilli with `--gc-threshold=1` stress mode pays off.
-    fuzz_reprl.run(init.gpa, null, coverage.reset) catch |err| switch (err) {
+    // `FUZZ_GC_THRESHOLD` env-var surfaces the CLI's `--gc-threshold`
+    // knob to Fuzzilli (which has no syntax for engine-specific
+    // args). Cynic slab-pools its GC objects, so a swept header
+    // returns to a free-list rather than to the OS — meaning a
+    // use-after-free on a borrowed slice (a dangling property key,
+    // an unanchored cons-string leaf) is caught by the 0xaa free-
+    // poison ONLY if the stale read beats the slab's reallocation.
+    // Lowering the allocation-pressure GC threshold collects more
+    // often, so swept memory spends more wall-clock poisoned and
+    // the race tips toward detection. `FUZZ_GC_THRESHOLD=1`
+    // collects on every allocation (maximal detection, slowest);
+    // a mid value (e.g. 256) trades some sensitivity for exec-rate.
+    // Unset ⇒ engine default, the fastest posture.
+    const gc_threshold: ?u32 = blk: {
+        const raw = init.minimal.environ.getPosix("FUZZ_GC_THRESHOLD") orelse break :blk null;
+        break :blk std.fmt.parseInt(u32, raw, 10) catch null;
+    };
+    fuzz_reprl.run(init.gpa, gc_threshold, coverage.reset) catch |err| switch (err) {
         error.UnsupportedPlatform => {
             try std.Io.File.stderr().writeStreamingAll(init.io, "error: `cynic-fuzz` is not supported on this platform (Fuzzilli is POSIX-only)\n");
             std.process.exit(2);

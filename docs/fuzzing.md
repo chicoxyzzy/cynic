@@ -65,6 +65,27 @@ counts dropped dramatically as the GC-marker, host-safety, and
 stack-guard fixes landed — fresh forks may see a higher initial
 crash rate if they introduce regressions.
 
+### Stressing the GC for use-after-free detection
+
+Cynic slab-pools its GC objects, so a swept header returns to a
+free-list rather than to the OS. A use-after-free on a borrowed
+slice (a dangling property key, an unanchored cons-string leaf)
+is caught by the 0xaa free-poison only if the stale read beats
+the slab's reuse. The `FUZZ_GC_THRESHOLD` env var lowers the
+allocation-pressure GC threshold so swept memory spends more
+wall-clock poisoned and the race tips toward detection:
+
+    FUZZ_GC_THRESHOLD=1 \
+      .build/release/FuzzilliCli --profile=cynic \
+        --storagePath=/tmp/fuzzilli-cynic-gc \
+        /path/to/cynic/zig-out/bin/cynic-fuzz
+
+`=1` collects on every allocation — maximal detection, slowest
+exec rate. A mid value (e.g. `256`) trades some sensitivity for
+throughput. Unset is the engine default (fastest). Worth a
+dedicated campaign separate from the headline coverage run,
+the same way `/gc-stress` complements a normal test262 sweep.
+
 ## Triage
 
 Two steps: dedupe crashes by panic anchor, then check each
