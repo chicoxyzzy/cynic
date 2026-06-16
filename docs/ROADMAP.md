@@ -912,17 +912,18 @@ sampling by `/profile`.
   per-fixture wall time + RSS against the prior `bench-results.md`
   baseline. Phase 1 of [docs/benchmarking.md](benchmarking.md).
 
-**Planned — the path to interpreter-tier parity.**
+**Interpreter-tier parity with QuickJS-NG — reached.**
 
-The cross-engine harness (interpreter tier, JITs off) puts Cynic
-level with or ahead of QuickJS-NG on `array_iter`, `promise_chain`
-and `string_concat`, and within ~10 % on `arith_loop` and
-`object_alloc`. One gap is large — `prop_access` runs ~3× slower
-than QuickJS-NG. Closing that, then trimming the two mid-pack
-benches, is the work below, ordered largest-win-first. The goal
-is honest parity with QuickJS-NG — the fairest non-JIT peer;
+The cross-engine harness (interpreter tier, JITs off) now puts
+Cynic at or ahead of QuickJS-NG across the micro suite — including
+`prop_access` (13 vs 16 ms), once the largest gap at ~3× slower,
+closed by the inline property-shape caches below. (Live numbers in
+[`bench-cross-results.md`](../bench-cross-results.md); that file and
+`bench-results.md` are the source of truth — this narrative records
+how the wins landed.) QuickJS-NG is the fairest non-JIT peer;
 matching the JIT engines at full speed is a separate track (see
-*Proper Tail Calls* and the baseline-JIT note).
+*Proper Tail Calls* and the JIT tiers). The shipped work that got
+here, largest-win-first:
 
 1. **Inline property-shape caches** — the single biggest win.
    **Monomorphic shipped** — `lda_property`, `sta_property`, and
