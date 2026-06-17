@@ -602,9 +602,12 @@ reviewed in PRs against `test262-results.md`.
                           `interpreter.zig` holds the dispatch loop +
                           runtime structs. Spasm, the baseline JIT tier
                           (T1), lives in `spasm.zig` (docs/jit.md §6) —
-                          default-on for wasm, compiling the i32 + i64
-                          integer ISA and structured control flow, and
-                          degrading to the interpreter for the rest.
+                          default-on for wasm, compiling the full scalar
+                          numeric ISA (i32/i64/f32/f64 arithmetic,
+                          comparison, and every conversion), globals,
+                          bulk-memory fill/copy/size, and structured
+                          control flow, and degrading to the interpreter
+                          for calls, tables, and SIMD.
                           Passes 100% of the
                           spec-testsuite commands it scores
                           (wasm-results.md — the scored set excludes

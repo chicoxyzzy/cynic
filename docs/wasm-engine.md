@@ -483,10 +483,11 @@ the measured design space:
   their interpreters. It now ships and is default-on for wasm — a
   single-pass, side-table-driven compiler that buries *asm* the way its
   parent does, on the codegen substrate shared with the JS tiers — and
-  covers the complete i32 + i64 integer ISA (ALU, comparisons, div/rem
-  with catchable traps, the memory family, conversions) plus structured
-  control flow, degrading to the interpreter for the float tier (next)
-  and everything else. Pinned in [jit.md](jit.md) §6, with the JS↔wasm
+  covers the complete scalar numeric ISA — i32/i64 and f32/f64 ALU,
+  comparisons, div/rem with catchable traps, the memory family (incl.
+  bulk-memory fill/copy/size), and every int↔float conversion (trapping
+  and saturating) — plus globals and structured control flow, degrading
+  to the interpreter for calls, tables, and SIMD. Pinned in [jit.md](jit.md) §6, with the JS↔wasm
   call-boundary fast path (per-signature thunks, IC-integrated dispatch)
   in jit.md §7.1 (still deferred).
 - **Narrowing the operand cell was measured and declined** (2026-06).

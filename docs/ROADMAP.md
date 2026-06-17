@@ -1249,10 +1249,11 @@ and the per-builtin checklist; this section tracks status.
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,
   Liftoff / Wizard-SPC shape; buries *asm* like its parent. The
-  complete i32 + i64 integer ISA (ALU, comparisons, div/rem with
-  catchable traps, the memory family, width conversions) plus
-  structured control flow ships and is default-on for wasm; the float
-  tier (f32/f64) is next.
+  complete scalar numeric ISA — i32/i64 and f32/f64 ALU, comparisons,
+  div/rem with catchable traps, the memory family (incl. bulk-memory
+  fill/copy/size), and every int↔float conversion (trapping and
+  saturating) — plus globals and structured control flow ships and is
+  default-on for wasm; calls, tables, and SIMD are next.
 
   The architecture for all three tiers — the shared codegen
   substrate and the JS↔wasm call-boundary fast path included — is
