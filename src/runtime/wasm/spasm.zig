@@ -122,6 +122,10 @@ const op_i32_ge_u: u8 = 0x4f;
 const op_i32_and: u8 = 0x71;
 const op_i32_or: u8 = 0x72;
 const op_i32_xor: u8 = 0x73;
+const op_i32_rotl: u8 = 0x77;
+const op_i32_rotr: u8 = 0x78;
+const op_i64_rotl: u8 = 0x89;
+const op_i64_rotr: u8 = 0x8a;
 const op_i32_shl: u8 = 0x74;
 const op_i32_shr_s: u8 = 0x75;
 const op_i32_shr_u: u8 = 0x76;
@@ -633,6 +637,26 @@ pub fn compile(
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
+            op_i32_rotl, op_i32_rotr => {
+                // §4.3.10 i32 rotates. RORV rotates right (count masked to 5
+                // bits, matching `& 31`); AArch64 has no rotate-left, so rotl
+                // is RORV by (32 - count) — RORV's mod-32 masking turns that
+                // into a left rotate. Operands: [value, count].
+                if (sp < 2) return null;
+                const b = stack[sp - 1]; // count
+                const a = stack[sp - 2]; // value
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                if (op == op_i32_rotr) {
+                    try m.emit(a64.rorvW(ra, ra, rb));
+                } else { // rotl = ror by (32 - count)
+                    try m.movImm64(.x16, 32);
+                    try m.emit(a64.subsReg(.x16, .x16, rb));
+                    try m.emit(a64.rorvW(ra, ra, .x16));
+                }
+                stack[sp - 1] = .{ .reg = ra };
+            },
             op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor => {
                 if (sp < 2) return null;
                 const b = stack[sp - 1];
@@ -814,6 +838,24 @@ pub fn compile(
                     op_i64_shl => try m.emit(a64.lslv(ra, ra, rb)),
                     op_i64_shr_u => try m.emit(a64.lsrv(ra, ra, rb)),
                     else => try m.emit(a64.asrv(ra, ra, rb)), // shr_s
+                }
+                stack[sp - 1] = .{ .reg = ra };
+            },
+            op_i64_rotl, op_i64_rotr => {
+                // §4.3.10 i64 rotates — the X-form RORV (count masked to 6
+                // bits); rotl is RORV by (64 - count).
+                if (sp < 2) return null;
+                const b = stack[sp - 1]; // count
+                const a = stack[sp - 2]; // value
+                sp -= 1;
+                const ra = try materialize(&m, a, sp - 1);
+                const rb = try materialize(&m, b, sp);
+                if (op == op_i64_rotr) {
+                    try m.emit(a64.rorv(ra, ra, rb));
+                } else { // rotl = ror by (64 - count)
+                    try m.movImm64(.x16, 64);
+                    try m.emit(a64.subsReg(.x16, .x16, rb));
+                    try m.emit(a64.rorv(ra, ra, .x16));
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
@@ -1836,7 +1878,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_clz, op_i32_ctz, op_i64_clz, op_i64_ctz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_i32_trunc_f32_s, op_i32_trunc_f32_u, op_i32_trunc_f64_s, op_i32_trunc_f64_u, op_i64_trunc_f32_s, op_i64_trunc_f32_u, op_i64_trunc_f64_s, op_i64_trunc_f64_u, op_f32_convert_i32_s, op_f32_convert_i32_u, op_f32_convert_i64_s, op_f32_convert_i64_u, op_f32_demote_f64, op_f64_convert_i32_s, op_f64_convert_i32_u, op_f64_convert_i64_s, op_f64_convert_i64_u, op_f64_promote_f32, op_i32_reinterpret_f32, op_i64_reinterpret_f64, op_f32_reinterpret_i32, op_f64_reinterpret_i64, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_min, op_f64_max, op_f64_copysign, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_min, op_f32_max, op_f32_copysign, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge, op_i32_extend8_s, op_i32_extend16_s, op_i64_extend8_s, op_i64_extend16_s, op_i64_extend32_s, op_i32_popcnt, op_i64_popcnt => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_clz, op_i32_ctz, op_i64_clz, op_i64_ctz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_rotl, op_i32_rotr, op_i64_rotl, op_i64_rotr, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_i32_trunc_f32_s, op_i32_trunc_f32_u, op_i32_trunc_f64_s, op_i32_trunc_f64_u, op_i64_trunc_f32_s, op_i64_trunc_f32_u, op_i64_trunc_f64_s, op_i64_trunc_f64_u, op_f32_convert_i32_s, op_f32_convert_i32_u, op_f32_convert_i64_s, op_f32_convert_i64_u, op_f32_demote_f64, op_f64_convert_i32_s, op_f64_convert_i32_u, op_f64_convert_i64_s, op_f64_convert_i64_u, op_f64_promote_f32, op_i32_reinterpret_f32, op_i64_reinterpret_f64, op_f32_reinterpret_i32, op_f64_reinterpret_i64, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_min, op_f64_max, op_f64_copysign, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_min, op_f32_max, op_f32_copysign, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge, op_i32_extend8_s, op_i32_extend16_s, op_i64_extend8_s, op_i64_extend16_s, op_i64_extend32_s, op_i32_popcnt, op_i64_popcnt => {},
             else => return null, // unknown immediate width — degrade
         }
     }

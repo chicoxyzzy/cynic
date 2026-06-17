@@ -284,6 +284,17 @@ pub fn asrvW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x1AC02800 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
 }
 
+/// RORV Wd, Wn, Wm — rotate right by Wm (mod 32); wasm i32.rotr, and
+/// i32.rotl via a (32 - count) rotate. AArch64 has no rotate-left.
+pub fn rorvW(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x1AC02C00 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
+/// RORV Xd, Xn, Xm — rotate right by Xm (mod 64); wasm i64.rotr/rotl.
+pub fn rorv(rd: Reg, rn: Reg, rm: Reg) u32 {
+    return 0x9AC02C00 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
+}
+
 /// UDIV Wd, Wn, Wm — unsigned divide. AArch64 division never faults:
 /// Wm == 0 yields 0 (so wasm's divide-by-zero trap must be an explicit
 /// check before this), and there is no unsigned overflow case.

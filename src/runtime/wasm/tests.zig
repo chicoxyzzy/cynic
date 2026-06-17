@@ -746,6 +746,80 @@ test "wasm spasm: memory.size returns the page count" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// `(i32,i32)->i32` adders for the rotates: "rl" = i32.rotl (0x77),
+// "rr" = i32.rotr (0x78).
+const i32_rotl_body = [_]u8{
+    0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type (i32,i32)->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x72, 0x6c, 0x00, 0x00, // export "rl" -> 0
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x77, 0x0b, // local.get 0; local.get 1; i32.rotl; end
+};
+
+test "wasm spasm: i32.rotl rotates left via RORV by (32 - count)" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i32_rotl_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i32_rotl_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "rl") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = @as(u128, @as(u32, 0x12345678));
+    cells[1] = @as(u128, 8);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // rotl(0x12345678, 8) == 0x34567812.
+    try testing.expectEqual(@as(u32, 0x34567812), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+const i32_rotr_body = [_]u8{
+    0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type (i32,i32)->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x06, 0x01, 0x02, 0x72, 0x72, 0x00, 0x00, // export "rr" -> 0
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x78, 0x0b, // local.get 0; local.get 1; i32.rotr; end
+};
+
+test "wasm spasm: i32.rotr rotates right via RORV" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i32_rotr_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i32_rotr_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "rr") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = @as(u128, @as(u32, 0x12345678));
+    cells[1] = @as(u128, 8);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // rotr(0x12345678, 8) == 0x78123456.
+    try testing.expectEqual(@as(u32, 0x78123456), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 test "wasm spasm: i32.load8_s sign-extends a byte" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + subwidth_module_body.len]u8 = undefined;
