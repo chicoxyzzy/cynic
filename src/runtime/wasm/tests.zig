@@ -715,6 +715,37 @@ test "wasm spasm: memory.copy moves a byte range" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// A one-page-memory module whose `()->i32` export "sz" returns the current
+// memory size in pages (memory.size, 0x3f) — the byte length >> 16.
+const memsize_body = [_]u8{
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type ()->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1 page
+    0x07, 0x06, 0x01, 0x02, 0x73, 0x7a, 0x00, 0x00, // export "sz" -> 0
+    0x0a, 0x06, 0x01, 0x04, 0x00, 0x3f, 0x00, 0x0b, // memory.size; end
+};
+
+test "wasm spasm: memory.size returns the page count" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + memsize_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &memsize_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    const fidx = funcExport(mp, "sz") orelse return error.NoSuchExport;
+    const res = try interp.invoke(&instance, testing.allocator, fidx, &.{});
+    defer testing.allocator.free(res);
+
+    // One page of linear memory, so memory.size == 1.
+    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 test "wasm spasm: i32.load8_s sign-extends a byte" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + subwidth_module_body.len]u8 = undefined;

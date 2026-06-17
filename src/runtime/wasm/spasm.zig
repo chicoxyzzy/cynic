@@ -239,6 +239,7 @@ const op_f64_reinterpret_i64: u8 = 0xbf;
 // §5.4.6 — the 0xFC prefix introduces a second opcode byte (a varuint32).
 // The baseline handles only the saturating truncations (sub-opcodes 0..7).
 const op_misc_prefix: u8 = 0xfc;
+const op_memory_size: u8 = 0x3f;
 const op_i32_trunc_f32_s: u8 = 0xa8;
 const op_i32_trunc_f32_u: u8 = 0xa9;
 const op_i32_trunc_f64_s: u8 = 0xaa;
@@ -1249,10 +1250,23 @@ pub fn compile(
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
+            op_memory_size => {
+                // §4.4.9 memory.size — the current size in 64 KiB pages, i.e.
+                // mem_len >> 16 (x3 carries the byte length). The result type
+                // (i32 for a 32-bit memory, i64 for memory64) is validation's
+                // concern; the page count is the same shift either way.
+                const mem_idx = readUleb32(body, &i) orelse return null;
+                if (mem_idx != 0) return null; // single memory only
+                if (sp >= operand_reg_count) return null;
+                const ra = regForDepth(sp);
+                try m.emit(a64.lsrImm(ra, .x3, 16));
+                stack[sp] = .{ .reg = ra };
+                sp += 1;
+            },
             op_misc_prefix => {
                 // The 0xFC prefix. Sub-opcodes 0..7 are the saturating
-                // truncations; 11 is memory.fill. Anything else (bulk memory,
-                // tables) degrades.
+                // truncations; 10/11 are memory.copy/memory.fill. Anything
+                // else (the rest of bulk memory, tables) degrades.
                 const sub = readUleb32(body, &i) orelse return null;
                 if (sub <= 7) {
                     // §4.3.3 saturating truncations. FCVTZS/FCVTZU round toward
@@ -1780,7 +1794,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 depth -= 1;
             },
             op_else => {}, // stays within the enclosing `if`'s nesting
-            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set => {
+            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size => {
                 _ = readUleb32(body, i) orelse return null;
             },
             op_br_table => {
