@@ -1095,10 +1095,11 @@ useful:
    conversion (trapping and saturating) — the whole scalar wasm ALU — plus
    `global.get`/`global.set` (a fifth boundary register, x4, carries the
    instance globals base; the ops double-indirect through it to the
-   global's value cell) and `memory.fill` (the first bulk-memory op — an
-   inline byte loop after an up-front overflow-safe bounds check, leaf, no
-   helper); calls, the rest of bulk memory, tables, and the reference/SIMD
-   families are the remaining frontier, along with the
+   global's value cell) and the first bulk-memory ops `memory.fill` and
+   `memory.copy` (inline byte loops after up-front overflow-safe bounds
+   checks — leaf, no helper; copy picks the overlap-safe direction from
+   `dst <= src`); calls, the rest of bulk memory, tables, and the
+   reference/SIMD families are the remaining frontier, along with the
    side-table-as-control-oracle wiring (§6) that would make multi-target
    `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data

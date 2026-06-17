@@ -1308,6 +1308,61 @@ pub fn compile(
                     try m.jump(&fill_loop);
                     m.bind(&fill_done);
                     sp -= 3;
+                } else if (sub == 10) {
+                    // §4.4.7 memory.copy — move n bytes from src to dst
+                    // (memmove). Operands [dst, src, n]; the encoding carries
+                    // two memory indices (dst, src), only single-memory
+                    // compiles. Bounds-check both ranges up front, then copy in
+                    // the overlap-safe direction: forward (low→high) when
+                    // dst <= src, else backward (high→low) so an overlapping
+                    // copy never reads a byte it already overwrote. Inline
+                    // loops keep it leaf.
+                    const dst_mi = readUleb32(body, &i) orelse return null;
+                    const src_mi = readUleb32(body, &i) orelse return null;
+                    if (dst_mi != 0 or src_mi != 0) return null;
+                    if (sp < 3) return null;
+                    const r_n = try materialize(&m, stack[sp - 1], sp - 1);
+                    const r_src = try materialize(&m, stack[sp - 2], sp - 2);
+                    const r_dst = try materialize(&m, stack[sp - 3], sp - 3);
+                    // Both [src, src+n) and [dst, dst+n) must lie in [0, len).
+                    try m.emit(a64.subsReg(.x17, .x3, r_src));
+                    try m.jumpCond(.cc, &trap_oob);
+                    try m.emit(a64.cmpReg(.x17, r_n));
+                    try m.jumpCond(.cc, &trap_oob);
+                    try m.emit(a64.subsReg(.x17, .x3, r_dst));
+                    try m.jumpCond(.cc, &trap_oob);
+                    try m.emit(a64.cmpReg(.x17, r_n));
+                    try m.jumpCond(.cc, &trap_oob);
+                    trap_oob_used = true;
+                    var fwd_loop: masm_mod.Masm.Label = .{};
+                    var bwd_loop: masm_mod.Masm.Label = .{};
+                    var copy_done: masm_mod.Masm.Label = .{};
+                    defer fwd_loop.deinit(gpa);
+                    defer bwd_loop.deinit(gpa);
+                    defer copy_done.deinit(gpa);
+                    try m.emit(a64.cmpReg(r_dst, r_src));
+                    try m.jumpCond(.ls, &fwd_loop); // dst <= src -> forward
+                    // backward: start past the end and walk down.
+                    try m.emit(a64.addReg(r_dst, r_dst, r_n));
+                    try m.emit(a64.addReg(r_src, r_src, r_n));
+                    m.bind(&bwd_loop);
+                    try m.jumpCbz(r_n, &copy_done);
+                    try m.emit(a64.subImm(r_dst, r_dst, 1, false));
+                    try m.emit(a64.subImm(r_src, r_src, 1, false));
+                    try m.emit(a64.ldrbRegW(.x16, .x2, r_src));
+                    try m.emit(a64.strbRegW(.x16, .x2, r_dst));
+                    try m.emit(a64.subImm(r_n, r_n, 1, false));
+                    try m.jump(&bwd_loop);
+                    m.bind(&fwd_loop);
+                    try m.jumpCbz(r_n, &copy_done);
+                    try m.emit(a64.ldrbRegW(.x16, .x2, r_src));
+                    try m.emit(a64.strbRegW(.x16, .x2, r_dst));
+                    try m.emit(a64.addImm(r_src, r_src, 1, false));
+                    try m.emit(a64.addImm(r_dst, r_dst, 1, false));
+                    try m.emit(a64.subImm(r_n, r_n, 1, false));
+                    try m.jump(&fwd_loop);
+                    m.bind(&copy_done);
+                    sp -= 3;
                 } else return null;
             },
             op_f32_demote_f64 => {
@@ -1750,6 +1805,9 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                     // no further immediate
                 } else if (sub == 11) {
                     _ = readUleb32(body, i) orelse return null; // memory index
+                } else if (sub == 10) {
+                    _ = readUleb32(body, i) orelse return null; // dst memory index
+                    _ = readUleb32(body, i) orelse return null; // src memory index
                 } else return null;
             },
             op_f64_const => {

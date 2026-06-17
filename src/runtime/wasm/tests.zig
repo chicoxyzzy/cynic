@@ -666,6 +666,55 @@ test "wasm spasm: memory.fill writes the byte range, then loads it back" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// A one-page-memory module whose `(i32)->i32` export "cp" copies 4 bytes
+// from src=0 to dst=8 (the 0xFC-prefixed memory.copy, sub-opcode 10) then
+// loads the byte at the argument offset back.
+const memcopy_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, // type (i32)->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1 page
+    0x07, 0x06, 0x01, 0x02, 0x63, 0x70, 0x00, 0x00, // export "cp" -> 0
+    0x0a, 0x13, 0x01, 0x11, // code: 1 func, body size 17
+    0x00, // 0 locals
+    0x41, 0x08, // i32.const 8 (dst)
+    0x41, 0x00, // i32.const 0 (src)
+    0x41, 0x04, // i32.const 4 (n)
+    0xfc, 0x0a, 0x00, 0x00, // memory.copy (dst memory 0, src memory 0)
+    0x20, 0x00, // local.get 0
+    0x2d, 0x00, 0x00, // i32.load8_u align=0 offset=0
+    0x0b, // end
+};
+
+test "wasm spasm: memory.copy moves a byte range" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + memcopy_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &memcopy_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    // Source bytes the copy will move from [0,4) to [8,12).
+    instance.memories[0].data[0] = 0x11;
+    instance.memories[0].data[1] = 0x22;
+    instance.memories[0].data[2] = 0x33;
+    instance.memories[0].data[3] = 0x44;
+
+    const fidx = funcExport(mp, "cp") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 9); // read dst+1 == byte copied from src+1 (0x22)
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // dst byte 9 holds what was at src byte 1, 0x22.
+    try testing.expectEqual(@as(u32, 0x22), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 test "wasm spasm: i32.load8_s sign-extends a byte" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + subwidth_module_body.len]u8 = undefined;
