@@ -684,6 +684,11 @@ pub const Heap = struct {
     /// that 10k-deep closure scopes would otherwise blow the stack
     /// through.
     mark_env_worklist: std.ArrayListUnmanaged(*Environment) = .empty,
+    /// Worklist for `pinString`'s cons-rope descent — the right child
+    /// of each cons reached while pinning a chunk-constant rope. Used
+    /// only at `pinChunk` time (compile / realm init), never inside a
+    /// GC cycle, so it shares no state with the mark worklists.
+    pin_worklist: std.ArrayListUnmanaged(*JSString) = .empty,
     /// §26.2 FinalizationRegistry cleanup-job scheduler context —
     /// the `*Realm`, type-erased (the heap can't import realm.zig
     /// without a cycle). `null` on a bare `Heap` (unit tests that
@@ -933,6 +938,7 @@ pub const Heap = struct {
         self.finalization_registries_seen.deinit(self.allocator);
         self.mark_worklist.deinit(self.allocator);
         self.mark_env_worklist.deinit(self.allocator);
+        self.pin_worklist.deinit(self.allocator);
     }
 
     pub fn allocateBigInt(self: *Heap, value: i128) !*JSBigInt {
@@ -2217,8 +2223,65 @@ pub const Heap = struct {
         }
     }
 
+    /// Pin a `JSString` permanently live, descending a cons rope so
+    /// the whole subtree survives.
+    ///
+    /// A pinned string is exempt from marking — the sweep keeps it on
+    /// the `pinned` bit alone (`promoteYoungList` / `sweepList`), and
+    /// nothing ever calls `markString` on it (a chunk constant is not
+    /// a GC root, and `pinValue` doesn't trace). For a flat string
+    /// that is complete. But a chunk constant can be a **cons rope**:
+    /// the compiler constant-folds `'…' + '…' + …` (§12.9 / §13.15) by
+    /// reusing `arith.addValues`, which builds a real lazy cons via
+    /// `allocateConsString` once the total clears `min_cons_byte_len`.
+    /// Pinning only the rope's root leaves its intermediate cons
+    /// nodes (born transiently by the fold, never themselves chunk
+    /// constants) unpinned AND unmarked, so the first `collectYoung`
+    /// frees them — and a later `flatBytes()` on the pinned root
+    /// descends `copyConsBytes` into freed memory (a use-after-free,
+    /// the never-abort-the-host contract breach this guards against).
+    /// So pinning recursively pins the children too: the left/right
+    /// of every cons reached. Depth is capped at `max_rope_depth`, so
+    /// the explicit worklist is bounded; idempotent via the `pinned`
+    /// short-circuit.
+    fn pinString(self: *Heap, root: *JSString) void {
+        var cursor: *JSString = root;
+        while (true) {
+            if (cursor.pinned) {
+                // Already pinned — its whole subtree is too (this
+                // routine pins top-down). Pop the worklist or stop.
+                if (self.pin_worklist.items.len == 0) break;
+                cursor = self.pin_worklist.pop().?;
+                continue;
+            }
+            cursor.pinned = true;
+            // A pinned chunk-constant string is permanently live;
+            // mark it `.mature` so a young collection treats it as an
+            // old object. It may still physically sit in
+            // `strings_young` (allocated there during compile, before
+            // `pinChunk` ran) — `collectYoung` relinks any such pinned
+            // straggler into `strings_mature` when it sweeps.
+            cursor.generation = .mature;
+            switch (cursor.payload) {
+                .flat => {
+                    if (self.pin_worklist.items.len == 0) break;
+                    cursor = self.pin_worklist.pop().?;
+                },
+                .cons => |c| {
+                    // Defer the right child; descend left. On OOM,
+                    // fall back to pinning the right child's flat
+                    // bytes via direct recursion — a missed pin is a
+                    // use-after-free, far worse than a deep frame.
+                    self.pin_worklist.append(self.allocator, c.right) catch self.pinString(c.right);
+                    cursor = c.left;
+                },
+            }
+        }
+    }
+
     /// Keep the heap-allocated payload of `v` permanently live.
-    /// Strings carry a `pinned` flag the sweep honours directly.
+    /// Strings carry a `pinned` flag the sweep honours directly (and,
+    /// for a cons rope, the whole child subtree — see `pinString`).
     /// Objects (the per-call-site tagged-template `strs` / `raw`
     /// arrays) and `BigInt` literal values can't — pinning one slot
     /// of an object without pinning its whole transitive graph would
@@ -2230,15 +2293,7 @@ pub const Heap = struct {
     fn pinValue(self: *Heap, v: Value) !void {
         if (v.isString()) {
             const s: *JSString = @ptrCast(@alignCast(v.asString()));
-            s.pinned = true;
-            // A pinned chunk-constant string is permanently live;
-            // mark it `.mature` so a young collection treats it as
-            // an old object. The string may still physically sit in
-            // `strings_young` (it was allocated there during
-            // compile, before `pinChunk` ran) — `collectYoung`
-            // relinks any such pinned straggler into
-            // `strings_mature` when it sweeps.
-            s.generation = .mature;
+            self.pinString(s);
             return;
         }
         // Objects (template arrays) and BigInt literals — re-marked

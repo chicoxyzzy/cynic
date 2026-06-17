@@ -531,20 +531,30 @@ vector regardless of how many iterations the source produced.
   `HandleScope` (`closeAndReject`, `processIterResult`, the
   pending-Promise branch of `wrapAsyncGenResultWithClose`,
   `closeIteratorOnReject`).
-- **Open gc-stress crashes (cons-string segments).** A broad
-  `--gc-threshold=1` ReleaseSafe sweep across the callback-heavy
-  buckets surfaced two *still-open* clusters distinct from the
-  promise-rooting class above: `built-ins/RegExp` (×2) and
-  `built-ins/JSON` (×1) abort with an out-of-bounds read of a
-  `0xaa…`-poisoned length inside `string.zig` `copyConsBytes` /
-  `flatBytes` — i.e. a cons-rope (`JSString` cons) segment freed
-  while a builtin still holds it across a re-entry, then flattened.
-  Both pass at the default threshold. These are a *string-segment*
-  rooting gap, not a promise gap; tracked for a follow-up pass.
-  (`built-ins/TypedArray` at `--gc-threshold=1` is merely slow — it
-  times out a 400 s budget, no crash.) A full-corpus
-  `--gc-threshold=1` sweep remains the way to surface any *new*
-  native missing a `HandleScope`.
+- **Constant-folded cons-rope pinning (fixed).** A broad
+  `--gc-threshold=1` ReleaseSafe sweep surfaced `built-ins/RegExp`
+  (×2) and `built-ins/JSON` (×1) aborting with an out-of-bounds read
+  of a `0xaa…`-poisoned length inside `string.zig` `copyConsBytes` /
+  `flatBytes`. Root cause was NOT a builtin holding a string across a
+  re-entry (the first hypothesis) — it was the **compiler constant-
+  folding `'…' + '…' + …` (§12.9 / §13.15)**: the fold reuses
+  `arith.addValues`, which builds a real lazy cons rope once the total
+  clears `min_cons_byte_len`, and stores it as a chunk constant.
+  `pinChunk` → `pinValue` pinned only the rope's ROOT; its
+  intermediate cons nodes (born transiently by the fold, never
+  themselves chunk constants) were left unpinned AND unmarked, so the
+  first `collectYoung` freed them — and a later `flatBytes()` on the
+  pinned root descended `copyConsBytes` into freed memory. Fixed by
+  `Heap.pinString`: pinning a cons rope now recursively pins the whole
+  child subtree (bounded by `max_rope_depth`, idempotent, pin-time
+  only — zero GC-cycle cost). `built-ins/JSON` + `built-ins/RegExp`
+  are crash-free at `--gc-threshold=1`; score unchanged. The gate is
+  the in-corpus fixture (`built-ins/JSON/parse/15.12.1.1-0-9` at
+  `--gc-threshold=1`) — a minimal unit test can't faithfully hit the
+  pinned-but-not-`const_roots` window. (`built-ins/TypedArray` at
+  `--gc-threshold=1` is merely slow — it times out a 400 s budget,
+  no crash.) A full-corpus `--gc-threshold=1` sweep remains the way
+  to surface any *new* native missing a `HandleScope`.
 
 ## Prior art
 
