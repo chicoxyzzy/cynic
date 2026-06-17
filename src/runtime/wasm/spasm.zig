@@ -1250,32 +1250,65 @@ pub fn compile(
                 stack[sp - 1] = .{ .reg = ra };
             },
             op_misc_prefix => {
-                // §4.3.3 saturating truncations (the 0xFC prefix, sub-opcodes
-                // 0..7). FCVTZS/FCVTZU round toward zero and, on NaN or
-                // out-of-range, yield 0 / saturate to the integer min/max —
-                // exactly trunc_sat, so no trap path is needed. Any other
-                // 0xFC op (bulk memory, tables) degrades.
+                // The 0xFC prefix. Sub-opcodes 0..7 are the saturating
+                // truncations; 11 is memory.fill. Anything else (bulk memory,
+                // tables) degrades.
                 const sub = readUleb32(body, &i) orelse return null;
-                if (sub > 7) return null;
-                if (sp < 1) return null;
-                const ra = try materialize(&m, stack[sp - 1], sp - 1);
-                // Bridge the float in by its source width: f32 (sub 0/1/4/5)
-                // through the low word, f64 (2/3/6/7) through the full slot.
-                if ((sub & 0x2) == 0)
-                    try m.emit(a64.fmovWtoS(.x16, ra))
-                else
-                    try m.emit(a64.fmovXtoD(.x16, ra));
-                switch (sub) {
-                    0 => try m.emit(a64.fcvtzsWfromS(ra, .x16)), // i32.trunc_sat_f32_s
-                    1 => try m.emit(a64.fcvtzuWfromS(ra, .x16)), // i32.trunc_sat_f32_u
-                    2 => try m.emit(a64.fcvtzsWfromD(ra, .x16)), // i32.trunc_sat_f64_s
-                    3 => try m.emit(a64.fcvtzuWfromD(ra, .x16)), // i32.trunc_sat_f64_u
-                    4 => try m.emit(a64.fcvtzsXfromS(ra, .x16)), // i64.trunc_sat_f32_s
-                    5 => try m.emit(a64.fcvtzuXfromS(ra, .x16)), // i64.trunc_sat_f32_u
-                    6 => try m.emit(a64.fcvtzsXfromD(ra, .x16)), // i64.trunc_sat_f64_s
-                    else => try m.emit(a64.fcvtzuXfromD(ra, .x16)), // i64.trunc_sat_f64_u
-                }
-                stack[sp - 1] = .{ .reg = ra };
+                if (sub <= 7) {
+                    // §4.3.3 saturating truncations. FCVTZS/FCVTZU round toward
+                    // zero and, on NaN or out-of-range, yield 0 / saturate to
+                    // the integer min/max — exactly trunc_sat, no trap needed.
+                    if (sp < 1) return null;
+                    const ra = try materialize(&m, stack[sp - 1], sp - 1);
+                    // Bridge the float in by its source width: f32 (sub
+                    // 0/1/4/5) through the low word, f64 (2/3/6/7) full slot.
+                    if ((sub & 0x2) == 0)
+                        try m.emit(a64.fmovWtoS(.x16, ra))
+                    else
+                        try m.emit(a64.fmovXtoD(.x16, ra));
+                    switch (sub) {
+                        0 => try m.emit(a64.fcvtzsWfromS(ra, .x16)), // i32.trunc_sat_f32_s
+                        1 => try m.emit(a64.fcvtzuWfromS(ra, .x16)), // i32.trunc_sat_f32_u
+                        2 => try m.emit(a64.fcvtzsWfromD(ra, .x16)), // i32.trunc_sat_f64_s
+                        3 => try m.emit(a64.fcvtzuWfromD(ra, .x16)), // i32.trunc_sat_f64_u
+                        4 => try m.emit(a64.fcvtzsXfromS(ra, .x16)), // i64.trunc_sat_f32_s
+                        5 => try m.emit(a64.fcvtzuXfromS(ra, .x16)), // i64.trunc_sat_f32_u
+                        6 => try m.emit(a64.fcvtzsXfromD(ra, .x16)), // i64.trunc_sat_f64_s
+                        else => try m.emit(a64.fcvtzuXfromD(ra, .x16)), // i64.trunc_sat_f64_u
+                    }
+                    stack[sp - 1] = .{ .reg = ra };
+                } else if (sub == 11) {
+                    // §4.4.8 memory.fill — set n bytes at dst to the low byte
+                    // of val. The operands are [dst, val, n] (n on top). The
+                    // bounds check is up-front and overflow-safe (the spec's
+                    // rangeInBounds: dst > len or n > len - dst traps before any
+                    // write), then an inline byte loop keeps the op leaf — no
+                    // helper, no frame.
+                    const mem_idx = readUleb32(body, &i) orelse return null;
+                    if (mem_idx != 0) return null; // single memory only
+                    if (sp < 3) return null;
+                    const r_n = try materialize(&m, stack[sp - 1], sp - 1);
+                    const r_val = try materialize(&m, stack[sp - 2], sp - 2);
+                    const r_dst = try materialize(&m, stack[sp - 3], sp - 3);
+                    try m.emit(a64.subsReg(.x17, .x3, r_dst)); // x17 = mem_len - dst
+                    try m.jumpCond(.cc, &trap_oob); // dst > mem_len
+                    try m.emit(a64.cmpReg(.x17, r_n));
+                    try m.jumpCond(.cc, &trap_oob); // (mem_len - dst) < n
+                    trap_oob_used = true;
+                    // while (n != 0) { mem_base[dst] = val; dst += 1; n -= 1; }
+                    var fill_loop: masm_mod.Masm.Label = .{};
+                    var fill_done: masm_mod.Masm.Label = .{};
+                    defer fill_loop.deinit(gpa);
+                    defer fill_done.deinit(gpa);
+                    m.bind(&fill_loop);
+                    try m.jumpCbz(r_n, &fill_done);
+                    try m.emit(a64.strbRegW(r_val, .x2, r_dst));
+                    try m.emit(a64.addImm(r_dst, r_dst, 1, false));
+                    try m.emit(a64.subImm(r_n, r_n, 1, false));
+                    try m.jump(&fill_loop);
+                    m.bind(&fill_done);
+                    sp -= 3;
+                } else return null;
             },
             op_f32_demote_f64 => {
                 // §4.3.5 f32.demote_f64 — narrow the double to single via FCVT,
@@ -1709,10 +1742,15 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readSleb64(body, i) orelse return null;
             },
             op_misc_prefix => {
-                // Only the saturating truncations (sub 0..7, no further
-                // immediate) are skippable; any other 0xFC op degrades.
+                // Saturating truncations (sub 0..7) take no further immediate;
+                // memory.fill (sub 11) takes a memory index. Any other 0xFC op
+                // degrades.
                 const sub = readUleb32(body, i) orelse return null;
-                if (sub > 7) return null;
+                if (sub <= 7) {
+                    // no further immediate
+                } else if (sub == 11) {
+                    _ = readUleb32(body, i) orelse return null; // memory index
+                } else return null;
             },
             op_f64_const => {
                 _ = readF64Bits(body, i) orelse return null; // 8 raw bytes
