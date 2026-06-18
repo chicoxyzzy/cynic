@@ -868,19 +868,19 @@
         <div class="compare-row">
           <div>
             <div class="feature-name"><code>SharedArrayBuffer</code> · <code>Atomics</code></div>
-            <div class="compare-note">shared-memory primitives; needs a multi-agent story that keeps the SES isolation boundary intact</div>
+            <div class="compare-note">shared-memory primitives — <code>Atomics.wait</code> / <code>notify</code> / <code>waitAsync</code>, cross-agent notify, a multi-agent realm pool; the SES isolation boundary stays intact</div>
           </div>
-          <div class="cross">Future Cynic's problem.</div>
-          <div>Was out by policy. Now it's a design problem on the list, not a closed door.</div>
+          <div class="check">Works.</div>
+          <div>Was out by policy, then a design problem. Now it just works — wait, notify, waitAsync, across agents.</div>
         </div>
 
         <div class="compare-row">
           <div>
             <div class="feature-name">JIT tiers</div>
-            <div class="compare-note">bytecode interpreter by default; Bistromath — a baseline JIT — runs behind <code>--jit</code> while its coverage lands; the optimising tier is still future</div>
+            <div class="compare-note">Bistromath — a baseline JIT — on by default; <code>--no-jit</code> opts out. The optimising tier (Ohaimark) is still future.</div>
           </div>
           <div class="check">In progress.</div>
-          <div>There's a JIT now. It's shy — hides behind <code>--jit</code>.</div>
+          <div>There's a JIT now, and it's done hiding — on by default. The optimising tier is future Cynic's problem.</div>
         </div>
       </div>
 
