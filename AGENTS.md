@@ -1,6 +1,8 @@
 # Working on Cynic
 
-Cynic is a strict-only ECMAScript engine in Zig, built from scratch.
+Cynic is a strict-only ECMAScript and WebAssembly engine in Zig,
+built from scratch — security-hardened by default, declining
+JavaScript's legacy web-compatibility surfaces on purpose.
 This document is the entry point for any contributor — human or AI
 agent (Claude Code, Codex, Cursor, Aider, …). Tools that don't read
 this file by name can be pointed at it (`aider --read AGENTS.md`,
@@ -67,8 +69,11 @@ These are project rules — they apply to everyone.
   introduce new code paths that settle a Promise synchronously
   in user-observable order — Workers, Deno, and SES all rely on
   the spec ordering.
-- **Strict-only, non-browser-host target.** Cynic targets edge
-  runtimes (Workers / Deno / server JS) — not browsers. So:
+- **Strict-only by conviction.** Cynic declines JavaScript's legacy
+  web-compatibility surfaces on purpose — not because of where it
+  runs, but because they're mistakes a hardened engine shouldn't
+  carry. (It deploys naturally server-side / embedded; the browser
+  playground is a demo, not a target.) So:
   - **Annex B in its entirety** — out. The lone regex-grammar
     residual (§B.1.4) is narrowed by Perlex — see below. No sloppy
     mode, no labelled function declarations (B.3.1), no
@@ -103,8 +108,8 @@ These are project rules — they apply to everyone.
     has been retired) — raises `SyntaxError`, so every pattern is
     held to the strict grammar with no fallback to leak the Annex B
     leniency. (Every shipping browser engine — V8 / JSC /
-    SpiderMonkey — accepts the Annex B forms; Cynic's non-browser
-    target is why it doesn't.) See
+    SpiderMonkey — accepts the Annex B forms; Cynic declines them by
+    conviction.) See
     [docs/ROADMAP.md](docs/ROADMAP.md) under "Regex".
   - **`eval` and runtime code construction** — off by
     default, opt in with `--allow=eval`. `eval()` itself,
@@ -135,7 +140,7 @@ These are project rules — they apply to everyone.
     property). Full SES Compartment confinement is deferred. See
     [docs/ses-alignment.md](docs/ses-alignment.md) "The eval engine".
 - **SES-aligned by default; `--unhardened` opts out.** Cynic
-  isn't just "SES-friendly" (every modern edge runtime is that);
+  isn't just "SES-friendly" (every modern JS runtime is that);
   Cynic ships **hardened by default**:
   - **Primordials frozen at realm init** — every intrinsic
     object + prototype + method gets `[[Extensible]] = false`

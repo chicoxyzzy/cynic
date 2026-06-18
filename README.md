@@ -5,12 +5,14 @@
 [![Playground](https://github.com/chicoxyzzy/cynic/actions/workflows/playground.yml/badge.svg)](https://github.com/chicoxyzzy/cynic/actions/workflows/playground.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A strict-only ECMAScript engine, written from scratch in Zig.
+A strict-only ECMAScript and WebAssembly engine, written from scratch
+in Zig.
 
 **[Try it in your browser →](https://chicoxyzzy.github.io/cynic/playground/)** — run JavaScript in Cynic, no install.
 
-Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
-— and omits the web-compatibility surfaces by design:
+Security-hardened by default, it declines JavaScript's legacy
+web-compatibility surfaces on purpose — strict-only and SES-by-default
+as a thesis, not a deployment side effect:
 
 - **No sloppy mode.** Every source is parsed as strict. The strict
   reserved-word set, restricted assignment to `eval` / `arguments`, and
@@ -26,7 +28,7 @@ Cynic targets non-browser hosts — edge runtimes, Workers, server-side JS
 - **No runtime code construction.** `eval`, `new Function(string)`,
   `new GeneratorFunction(string)`, `new AsyncFunction(string)`. Aligns
   with [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses).
-- **SES-hardened by default.** Every modern edge runtime is
+- **SES-hardened by default.** Every modern JS runtime is
   "SES-friendly" — meaning user code can call `lockdown()` to harden
   primordials. Cynic skips the call. Realms boot with every intrinsic
   frozen (`[[Extensible]] = false`, non-writable / non-configurable
