@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Cynic — A JavaScript engine that's heard enough</title>
-<meta name="description" content="Cynic is a strict-only ECMAScript engine, written from scratch in Zig. It targets non-browser hosts and refuses what JavaScript has been trying to forget." />
+<meta name="description" content="Cynic is a strict-only ECMAScript and WebAssembly engine, written from scratch in Zig. Hardened by default, it refuses what JavaScript has been trying to forget." />
 <link rel="icon" type="image/svg+xml" href="favicon.svg" />
 <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
 <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png" />
@@ -12,13 +12,13 @@
 <link rel="manifest" href="site.webmanifest" />
 <meta name="theme-color" content="#70c0e8" />
 <meta property="og:title" content="Cynic — A JavaScript engine that's heard enough" />
-<meta property="og:description" content="Strict-only ECMAScript engine in Zig. No sloppy mode. No web-compat baggage." />
+<meta property="og:description" content="Strict-only ECMAScript + WebAssembly engine in Zig. No sloppy mode. No web-compat baggage." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://chicoxyzzy.github.io/cynic/" />
 <meta property="og:image" content="https://chicoxyzzy.github.io/cynic/icons/favicon-512.png" />
 <meta name="twitter:card" content="summary" />
 <meta name="twitter:title" content="Cynic — A JavaScript engine that's heard enough" />
-<meta name="twitter:description" content="Strict-only ECMAScript engine in Zig. No sloppy mode. No web-compat baggage." />
+<meta name="twitter:description" content="Strict-only ECMAScript + WebAssembly engine in Zig. No sloppy mode. No web-compat baggage." />
 <meta name="twitter:image" content="https://chicoxyzzy.github.io/cynic/icons/favicon-512.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -519,7 +519,7 @@
         <h1 class="title">Cynic.</h1>
         <p class="tagline">A JavaScript engine that has <em>heard enough</em>.</p>
         <p class="lede">
-          Strict-only, and hardened from the first line — the primordials freeze before your code runs, so a dependency can't redefine <code>Array.prototype</code> out from under you. It already parses, compiles, and runs real JavaScript: async, generators, a module graph, proper tail calls. And WebAssembly, through a second engine built from scratch — called Sarcasm, because of course. Everything the language spent twenty years trying to forget, it forgets on purpose: no <code>with</code>, no sloppy mode, <code>eval</code> off unless you ask. Aimed at edge runtimes, Workers, and servers. Eventually.
+          Strict-only, and hardened from the first line — the primordials freeze before your code runs, so a dependency can't redefine <code>Array.prototype</code> out from under you. It already parses, compiles, and runs real JavaScript: async, generators, a module graph, proper tail calls. And WebAssembly, through a second engine built from scratch — called Sarcasm, because of course. Everything the language spent twenty years trying to forget, it forgets on purpose: no <code>with</code>, no sloppy mode, <code>eval</code> off unless you ask. Ready for production? Eventually.
         </p>
       </div>
 
@@ -548,7 +548,7 @@
       <div class="section-num">§01 · REFUSALS</div>
       <h2 class="section-title">Things Cynic <span class="accent">won't</span> do for you.</h2>
       <p class="section-sub">
-        Every feature an engine ships is surface it can never take back. Cynic carries less of it by design — the legacy syntax, the sloppy-mode quirks, the deprecated globals, and the sharper tools a hardened server-side runtime is better off without.
+        Every feature an engine ships is surface it can never take back. Cynic carries less of it by design — the legacy syntax, the sloppy-mode quirks, the deprecated globals, and the sharper tools a hardened runtime is better off without.
       </p>
 
       <div class="refuse-grid">
