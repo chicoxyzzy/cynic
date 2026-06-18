@@ -1756,6 +1756,13 @@ pub const Realm = struct {
         // `cycle_started` and skips its own arm-cycle.
         self.heap.beginMinorCycle();
         self.markAllSharingRealmRoots();
+        // Arm the conservative native-stack rooting backstop only when a
+        // native builtin is executing — the sole window an unrooted young
+        // heap pointer can sit in a native local across a re-entry. Pure-JS
+        // young pointers are already rooted via the frame stack, so this
+        // keeps the backstop's scan + young-set build off the hot alloc
+        // loop. See `Heap.scan_native_stack`.
+        self.heap.scan_native_stack = self.active_native_fn != null;
         self.heap.collectYoung(&.{});
         self.drainRealmTeardown();
     }

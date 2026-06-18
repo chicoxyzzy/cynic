@@ -21,6 +21,7 @@
 //! `Local<T>` ergonomics, single-threaded.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const value_mod = @import("value.zig");
 const Value = value_mod.Value;
@@ -38,6 +39,15 @@ const JSGenerator = @import("generator.zig").JSGenerator;
 const jit_code_alloc = @import("jit/code_alloc.zig");
 const JSSymbol = @import("symbol.zig").JSSymbol;
 const JSBigInt = @import("bigint.zig").JSBigInt;
+
+/// macOS-only: the highest address of `thread`'s stack (the base —
+/// the stack grows toward lower addresses). Used by the conservative
+/// native-stack rooting backstop (`Heap.scanNativeStackForRoots`) to
+/// bound the live native-stack region at GC time. Not exposed by
+/// `std.c`, so declared here; referenced only under a comptime
+/// `builtin.os.tag == .macos` guard, so non-Darwin targets never link
+/// against it.
+extern "c" fn pthread_get_stackaddr_np(thread: std.c.pthread_t) ?*anyopaque;
 
 /// Monotonic nanosecond timestamp via libc `clock_gettime`.
 /// Used by `Heap.collect`'s diagnostic pause-time field; the
@@ -101,6 +111,22 @@ pub const FinalizationEnqueueFn = *const fn (
 /// Two-bit enum so it packs into the existing flag-byte padding
 /// next to each header's `marked` bit.
 pub const Generation = enum(u2) { young, mature };
+
+/// Heap-kind tag for the conservative native-stack rooting backstop's
+/// young-pointer membership map (`Heap.young_ptr_set`). Records which
+/// per-kind marker a matched stack word should be routed through — the
+/// raw pointer alone doesn't carry its kind, and the NaN-box tag is
+/// only present when the stack word is a `Value` rather than a bare
+/// Zig pointer.
+pub const ScanKind = enum(u3) {
+    object,
+    function,
+    environment,
+    generator,
+    string,
+    symbol,
+    bigint,
+};
 
 pub fn taggedFunction(ptr: *JSFunction) Value {
     const p: u64 = @intFromPtr(ptr);
@@ -483,6 +509,49 @@ pub const Heap = struct {
     /// retention + promotion-time rebuild; the generic marking here is
     /// already complete-by-construction for that.)
     dirty_list: std.ArrayListUnmanaged(Container) = .empty,
+
+    /// Conservative native-stack rooting backstop — an exact
+    /// membership map of every live young heap pointer to its kind,
+    /// rebuilt at the start of each minor cycle's mark phase
+    /// (`scanNativeStackForRoots`). The minor cycle scans aligned
+    /// `usize` words of the current thread's native call stack and,
+    /// for any word that is an exact key in this map, marks the
+    /// referent through the kind-correct marker. This layers UNDER
+    /// the precise `HandleScope`s as a completeness backstop: a
+    /// native that forgot to root a young heap pointer it holds
+    /// across a JS re-entry then costs a retained-too-long object,
+    /// never a use-after-free (the rooting analogue of the dirty-list
+    /// barrier — see docs/gc-generational-aging.md "Post-barrier
+    /// finding (2026-06-08): the rooting blocker is divergent").
+    ///
+    /// EXACT pointers only: a key is `@intFromPtr` of a real,
+    /// currently-live young allocation, so a stack word matches ONLY
+    /// a genuine young object — marking it can never trace garbage. A
+    /// coincidental stack integer equal to a live young pointer just
+    /// retains that (real, already-reachable-or-not) object, which is
+    /// safe by construction (it only ADDS roots → can only retain,
+    /// never free more). Persistent (`clearRetainingCapacity` each
+    /// cycle) so the per-cycle rebuild is allocation-free in steady
+    /// state. Empty when no young objects exist, in which case the
+    /// stack scan is skipped entirely (the common minor-cycle fast
+    /// path).
+    young_ptr_set: std.AutoHashMapUnmanaged(usize, ScanKind) = .empty,
+
+    /// Gate for the conservative native-stack scan (root source 3 in
+    /// `collectYoung`). The backstop only earns its cost when a native
+    /// builtin is on the stack — that is the only time an unrooted young
+    /// heap pointer can live in a native local across a GC-triggering
+    /// re-entry. In pure-JS execution every young pointer is reachable
+    /// through the interpreter frame stack (a precise root), so both the
+    /// scan AND its per-cycle `buildYoungPtrSet` would be wasted work — a
+    /// ~20-30% regression on alloc-heavy loops (`object_alloc`,
+    /// `ctor_array_build`, `class_instantiate`). `Realm.collectGarbageYoung`
+    /// sets this from `active_native_fn != null` before each minor cycle;
+    /// direct callers (unit tests) leave it false. Purely additive either
+    /// way — gating only narrows WHICH cases the backstop helps, it never
+    /// makes the heap less safe than no backstop at all (the precise
+    /// `HandleScope`s remain the primary rooting mechanism).
+    scan_native_stack: bool = false,
 
     /// Allocations (across every kind) since the last `collect`
     /// call. Bumped by each `allocateX`; the interpreter dispatch
@@ -930,6 +999,7 @@ pub const Heap = struct {
         self.bigints_young.deinit(self.allocator);
         self.bigints_mature.deinit(self.allocator);
         self.dirty_list.deinit(self.allocator);
+        self.young_ptr_set.deinit(self.allocator);
         self.const_roots.deinit(self.allocator);
         self.native_ctor_roots.deinit(self.allocator);
         self.handle_scopes.deinit(self.allocator);
@@ -2568,6 +2638,156 @@ pub const Heap = struct {
         }
     }
 
+    /// Rebuild the conservative-scan young-pointer membership map
+    /// (`young_ptr_set`) from the per-kind young lists. Each entry
+    /// maps `@intFromPtr(obj)` → its `ScanKind`. Cleared-and-rebuilt
+    /// (capacity retained) so a steady-state minor cycle does no
+    /// per-cycle allocation. Returns the number of live young
+    /// pointers — `0` lets `collectYoung` skip the stack scan
+    /// entirely (no young object can be matched, so the scan is pure
+    /// cost). See `young_ptr_set`.
+    fn buildYoungPtrSet(self: *Heap) usize {
+        self.young_ptr_set.clearRetainingCapacity();
+        const total =
+            self.objects_young.items.len +
+            self.functions_young.items.len +
+            self.environments_young.items.len +
+            self.generators_young.items.len +
+            self.strings_young.items.len +
+            self.symbols_young.items.len +
+            self.bigints_young.items.len;
+        if (total == 0) return 0;
+        // Pre-size once so the per-entry puts don't re-hash mid-build.
+        // On OOM, fall back to an unsized map (still correct — put
+        // may then grow); a failed grow inside the loop drops that
+        // one entry, which only weakens the backstop (loses a root
+        // candidate), never corrupts it.
+        self.young_ptr_set.ensureTotalCapacity(self.allocator, @intCast(total)) catch {};
+        for (self.objects_young.items) |o|
+            self.young_ptr_set.put(self.allocator, @intFromPtr(o), .object) catch {};
+        for (self.functions_young.items) |f|
+            self.young_ptr_set.put(self.allocator, @intFromPtr(f), .function) catch {};
+        for (self.environments_young.items) |e|
+            self.young_ptr_set.put(self.allocator, @intFromPtr(e), .environment) catch {};
+        for (self.generators_young.items) |g|
+            self.young_ptr_set.put(self.allocator, @intFromPtr(g), .generator) catch {};
+        for (self.strings_young.items) |s|
+            self.young_ptr_set.put(self.allocator, @intFromPtr(s), .string) catch {};
+        for (self.symbols_young.items) |s|
+            self.young_ptr_set.put(self.allocator, @intFromPtr(s), .symbol) catch {};
+        for (self.bigints_young.items) |b|
+            self.young_ptr_set.put(self.allocator, @intFromPtr(b), .bigint) catch {};
+        return total;
+    }
+
+    /// Mark a single conservative-scan hit through its kind-correct
+    /// marker. `ptr` is an exact key from `young_ptr_set`, so the
+    /// cast back to the concrete header type is sound. Idempotent —
+    /// the underlying markers short-circuit on `mark_color`.
+    fn markScanHit(self: *Heap, ptr: usize, kind: ScanKind) void {
+        switch (kind) {
+            .object => self.markValue(taggedObject(@ptrFromInt(ptr))),
+            .function => self.markValue(taggedFunction(@ptrFromInt(ptr))),
+            .environment => self.markEnvironment(@ptrFromInt(ptr)),
+            .generator => self.markGenerator(@ptrFromInt(ptr)),
+            .string => self.markString(@ptrFromInt(ptr)),
+            .symbol => self.markValue(taggedSymbol(@ptrFromInt(ptr))),
+            .bigint => self.markValue(taggedBigInt(@ptrFromInt(ptr))),
+        }
+    }
+
+    /// Current thread's native-stack extent `[low, high)`, or `null`
+    /// when the base address is unknown / unsupported (then the
+    /// caller skips the scan rather than guess). `low` is the GC-time
+    /// frame address (the stack grows DOWN, so the live region is
+    /// everything from here up to the base); `high` is the thread's
+    /// stack base. Queried per-call, not captured at init: the
+    /// multi-threaded test262 harness runs each fixture — and its GCs
+    /// — on a worker thread, so the base must come from
+    /// `pthread_self()` at GC time. macOS exposes the base directly
+    /// via `pthread_get_stackaddr_np`; other hosts fall through to
+    /// `null` (the backstop is macOS-only for now — the precise
+    /// `HandleScope`s remain the portable rooting mechanism).
+    fn nativeStackExtent(low: usize) ?struct { low: usize, high: usize } {
+        if (comptime builtin.os.tag != .macos) return null;
+        // `pthread_get_stackaddr_np` returns the highest address of
+        // the stack (the base); the stack grows toward lower
+        // addresses. Not in `std.c`, so declared locally.
+        const base = @intFromPtr(pthread_get_stackaddr_np(std.c.pthread_self()));
+        if (base == 0) return null; // unknown base — skip the scan
+        if (base <= low) return null; // inverted / degenerate — skip
+        return .{ .low = low, .high = base };
+    }
+
+    /// Conservative native-stack rooting backstop. Scans aligned
+    /// `usize` words of the current thread's native call stack and,
+    /// for each word that exactly matches a live young heap pointer
+    /// (`young_ptr_set`), marks the referent. A stack word can hold
+    /// either a bare Zig pointer (`*JSObject`, written by native code
+    /// holding a header) — matched directly — or a NaN-boxed `Value`
+    /// (the pointer ORed with the object tag + kind bits) — matched
+    /// by masking the pointer back out. Either way the lookup keys on
+    /// the raw `@intFromPtr`, so only a genuine young allocation is
+    /// ever marked; a coincidental integer that doesn't hit the map
+    /// is ignored.
+    ///
+    /// Safe by construction: the backstop only ADDS roots, so it can
+    /// only retain a live object, never free one — a missing precise
+    /// `HandleScope` degrades from a use-after-free to a
+    /// retained-too-long object. See `young_ptr_set` and
+    /// docs/gc-generational-aging.md.
+    ///
+    /// Called via `@call(.never_inline, …)` so the scanned frame
+    /// range reliably includes the live native locals of the GC's
+    /// callers: the `low` bound is this function's own frame address,
+    /// and keeping it a distinct (non-inlined) frame guarantees the
+    /// caller frames holding the at-risk pointers sit ABOVE `low` in
+    /// the scanned region. The backstop relies on at-risk pointers
+    /// being stack-resident at GC time — which they are by
+    /// construction here: every such pointer is live ACROSS the
+    /// allocation call that triggers GC (and across the deep
+    /// interpreter dispatch + collect call chain below it), so the
+    /// ABI spills it to the stack or to a callee-saved register that
+    /// an intervening frame spills. Values live only in an
+    /// unspilled callee-saved register of the immediate caller are
+    /// the one residual gap; the precise `HandleScope`s remain the
+    /// primary, register-exact rooting mechanism this layers under.
+    fn scanNativeStackForRoots(self: *Heap) void {
+        if (self.young_ptr_set.count() == 0) return;
+        const low = @frameAddress();
+        const extent = nativeStackExtent(low) orelse return;
+        // Walk word-aligned slots from `low` (current frame) up to the
+        // stack base. `@frameAddress` is pointer-aligned, so stepping
+        // by `@sizeOf(usize)` covers every aligned candidate; a heap
+        // pointer is 8-byte aligned and so always lands on one of
+        // these boundaries.
+        var addr = std.mem.alignForward(usize, extent.low, @sizeOf(usize));
+        while (addr + @sizeOf(usize) <= extent.high) : (addr += @sizeOf(usize)) {
+            const word = @as(*const usize, @ptrFromInt(addr)).*;
+            // (1) Bare Zig pointer on the stack.
+            if (self.young_ptr_set.get(word)) |kind| {
+                self.markScanHit(word, kind);
+                continue;
+            }
+            // (2) NaN-boxed Value — only the object-tag encoding
+            // carries a heap pointer (string Values use a separate
+            // tag; both are handled by extracting the low pointer
+            // bits and re-checking membership). Cheap pre-filter on
+            // the high tag bits keeps the common non-pointer word a
+            // single compare.
+            const top_tag: u16 = @truncate(word >> 48);
+            if (top_tag == Value.tag_object) {
+                // Strip the NaN-box tag and the low kind bits to
+                // recover the raw header pointer.
+                const cand = (word & Value.pointer_mask) & ~kind_mask;
+                if (self.young_ptr_set.get(cand)) |kind| self.markScanHit(cand, kind);
+            } else if (top_tag == Value.tag_string) {
+                const cand = word & Value.pointer_mask;
+                if (self.young_ptr_set.get(cand)) |kind| self.markScanHit(cand, kind);
+            }
+        }
+    }
+
     /// Run a full mark-sweep cycle across BOTH generations. `roots`
     /// is every live value the caller wants to keep. Anything
     /// reachable only through values outside `roots` (and outside
@@ -2852,6 +3072,34 @@ pub const Heap = struct {
             for (e.slots) |s| self.markValue(s);
         }
         for (self.generators_mature.items) |g| self.markGeneratorInternalSlots(g);
+
+        // Root source 3 — conservative native-stack scan (rooting
+        // backstop). Build the exact young-pointer membership map from
+        // the young lists, then scan the current thread's native call
+        // stack: any aligned word that exactly matches a live young
+        // pointer is marked as a root. This is the rooting analogue of
+        // the dirty-list barrier above — complete-by-construction over
+        // the native frames, so a young heap pointer held in a native
+        // local across a JS re-entry (a Promise reaction handler, a
+        // capability promise, a value thunk) survives even if its
+        // precise `HandleScope` is missing. Exact-pointer matching
+        // means it can only ever ADD a root (retain a real object),
+        // never trace garbage — so it cannot introduce a
+        // use-after-free; a missing scope degrades to retained-too-
+        // long. See docs/gc-generational-aging.md "Post-barrier
+        // finding (2026-06-08): the rooting blocker is divergent" and
+        // `young_ptr_set`. Skipped when no young objects exist (the
+        // map is empty → nothing to match → pure cost avoided) and on
+        // hosts without a known stack base.
+        // Only when a native builtin is on the stack (set by
+        // `Realm.collectGarbageYoung`): pure-JS young pointers are
+        // already rooted via the interpreter frame stack, so the scan
+        // + per-cycle `buildYoungPtrSet` would be pure cost. See
+        // `scan_native_stack`.
+        if (self.scan_native_stack) {
+            _ = self.buildYoungPtrSet();
+            @call(.never_inline, scanNativeStackForRoots, .{self});
+        }
 
         // Weak-clear the `call_method` IC — see `collectFull` for
         // the rationale. Young collection nulls cells whose callee
@@ -4273,6 +4521,32 @@ test "Heap: collectFull clears the remembered set and the bits" {
     try testing.expectEqual(@as(usize, 1), heap.dirty_list.items.len);
 }
 
+// Allocate a young object and discard it, in a frame that is popped
+// before the caller collects. Keeping it `noinline` means the
+// allocation result lives only in this frame's slots, not the
+// caller's — so once it returns and the caller clobbers the freed
+// frame region, no stale copy of the garbage pointer remains on the
+// scanned stack. Used by the sweep test below to write an unrooted
+// young object the conservative scan won't falsely retain.
+noinline fn allocYoungGarbage(heap: *Heap) !void {
+    _ = try heap.allocateObject();
+}
+
+// Overwrite a span of this thread's stack just below the current
+// frame with a non-pointer pattern, scrubbing any stale spilled
+// pointer a just-returned helper left behind. `noinline` + `volatile`
+// so the writes aren't elided. Lets a "this gets collected" test hold
+// under the conservative native-stack scan, which would otherwise
+// conservatively root a leftover pointer word.
+noinline fn scrubStackBelow() void {
+    var scratch: [64]usize = undefined;
+    for (&scratch) |*w| {
+        const p: *volatile usize = w;
+        p.* = 0xdeadbeef;
+    }
+    std.mem.doNotOptimizeAway(&scratch);
+}
+
 test "Heap: collectYoung sweeps young garbage, leaves mature untouched" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
@@ -4282,7 +4556,12 @@ test "Heap: collectYoung sweeps young garbage, leaves mature untouched" {
     _ = heap.objects_young.pop();
     try heap.objects_mature.append(heap.allocator, mature);
     mature.generation = .mature;
-    _ = try heap.allocateObject(); // young garbage, unrooted
+    // Young garbage, unrooted — allocated in a popped helper frame so
+    // its pointer doesn't linger in this frame's slots, then the stack
+    // below is scrubbed so the conservative native-stack scan (root
+    // source 3 in `collectYoung`) finds no stale word pointing at it.
+    try allocYoungGarbage(&heap);
+    scrubStackBelow();
 
     try testing.expectEqual(@as(usize, 1), heap.objects_young.items.len);
     try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
@@ -5029,4 +5308,77 @@ test "QuarantinedPool: holds a freed slot for N cycles before reuse" {
     try std.testing.expectEqual(q1, q3); // slot reusable again
     pool.destroy(q2);
     pool.destroy(q3);
+}
+
+// ── Conservative native-stack rooting backstop ─────────────────────
+// `collectYoung` builds an exact young-pointer membership map and
+// scans the native stack: any aligned word matching a live young
+// pointer is rooted. The backstop layers UNDER the precise
+// HandleScopes — a young heap pointer held in a native local across a
+// re-entry survives even without an explicit scope. The test below
+// proves the mechanism directly: a young object whose pointer lives
+// ONLY in a stack slot (not in `roots`, not on a handle scope, not
+// reachable from any other root) survives a minor cycle. On a host
+// without a known stack base (`nativeStackExtent` returns null) the
+// scan is skipped and the object would be swept — so the assertion is
+// gated to macOS, the platform the backstop targets.
+
+test "Heap: conservative stack scan roots a young object held only on the native stack" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const o = try heap.allocateObject();
+    try testing.expectEqual(@as(usize, 1), heap.objects_young.items.len);
+
+    // Park the raw pointer in an address-taken stack slot so the
+    // compiler must keep it stack-resident across the collect (a plain
+    // `const` could be hoisted into a register the scan never sees).
+    // `buf` sits in this test frame, ABOVE `scanNativeStackForRoots`'s
+    // frame, so it falls inside the scanned `[low, high)` window.
+    var buf: [1]usize = .{@intFromPtr(o)};
+    const slot: *volatile usize = &buf[0];
+
+    // Collect with NO roots and NO open handle scope: the only thing
+    // keeping `o` reachable is its pointer sitting in `buf`. If the
+    // conservative scan finds it, `o` tenures; otherwise it is swept.
+    // Arm the scan as `Realm.collectGarbageYoung` does when a native is
+    // on the stack (it is gated off for pure-JS minor cycles).
+    heap.scan_native_stack = true;
+    heap.collectYoung(&.{});
+
+    // Survived ⇒ promoted to the mature list, young list now empty.
+    try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
+    try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
+    try testing.expectEqual(Generation.mature, o.generation);
+
+    // Read the slot back after the collect so the optimizer cannot
+    // prove `buf` dead before the scan ran.
+    try testing.expectEqual(@intFromPtr(o), slot.*);
+}
+
+test "Heap: conservative stack scan leaves the young set cleared between cycles" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // First cycle with a live young object populates the membership
+    // map; the second, with no young objects, must clear it and skip
+    // the scan (empty-set fast path) without retaining anything.
+    const o = try heap.allocateObject();
+    var buf: [1]usize = .{@intFromPtr(o)};
+    const slot: *volatile usize = &buf[0];
+    // Arm the scan (gated off for pure-JS cycles) so both cycles build
+    // the membership map — the second must rebuild it empty.
+    heap.scan_native_stack = true;
+    heap.collectYoung(&.{});
+    try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
+    _ = slot.*;
+
+    // No young allocations before this cycle: the set rebuilds empty
+    // and the scan is skipped.
+    heap.collectYoung(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.young_ptr_set.count());
 }

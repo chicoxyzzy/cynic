@@ -119,6 +119,25 @@ the real prerequisite for aging + the alloc-churn medals.
 This note's lower half remains the card-marking diagnosis (now shipped)
 so the next effort starts from the root cause, not from scratch.
 
+### Update — conservative native-stack scan shipped
+
+The completeness backstop above is now implemented (`collectYoung`
+"root source 3" in `src/runtime/heap.zig`): each minor cycle builds an
+exact young-pointer membership map (`young_ptr_set`) from the per-kind
+young lists, then scans the current thread's native call stack
+(`@frameAddress()` → `pthread_get_stackaddr_np`), marking any aligned
+word — bare `*T` or NaN-boxed `Value` — that exactly matches a live
+young pointer. Exact-pointer matching means it can only ADD a root
+(retain a real object), never trace garbage, so it cannot introduce a
+use-after-free; a missing precise `HandleScope` degrades to
+retained-too-long. It is gated on `Heap.scan_native_stack`, which
+`Realm.collectGarbageYoung` sets from `active_native_fn != null` — the
+only window an unrooted young pointer can sit in a native local — so
+pure-JS minor cycles (every young pointer reachable via the frame
+stack) pay nothing. macOS today; other hosts fall through (the precise
+scopes remain primary). With this backstop in place the **aging recipe
+below is now safe to attempt** — it's the next step, separately gated.
+
 ## The problem this targets
 
 Cynic's interpreter-tier cross-engine compass
