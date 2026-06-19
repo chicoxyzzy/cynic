@@ -1690,6 +1690,15 @@ pub const Realm = struct {
         // and skips its own arm-cycle.
         self.heap.beginMajorCycle();
         self.markAllSharingRealmRoots();
+        // Arm the conservative native-stack rooting backstop when a
+        // native builtin is on the stack — the full collector tenures
+        // (and so can free) the young generation just like the minor
+        // one, so a young heap pointer held only in a native local
+        // across a JS re-entry needs the same backstop. Critically, at
+        // `--gc-threshold=1` EVERY cycle is a full cycle, so without
+        // this the backstop never runs under gc-stress. See
+        // `Heap.scan_native_stack` and `Realm.collectGarbageYoung`.
+        self.heap.scan_native_stack = self.active_native_fn != null;
         // Hand off to `heap.collectFull` for the handle-scope walk
         // and the actual sweep. The empty roots slice is fine —
         // every root above is already marked.
