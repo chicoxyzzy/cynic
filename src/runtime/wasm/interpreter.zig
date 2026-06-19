@@ -1595,6 +1595,103 @@ fn spasmTableGet(
     return spasm.trap_ok;
 }
 
+/// The native helper a Spasm-compiled `table.set` (§4.4.x, opcode 0x26)
+/// branches to. Mirrors the interpreter's `.table_set` arm: bounds-check
+/// `index` against table `table_idx` and, in range, write the 128-bit
+/// reference read from `ref_slot[0]` (a cell in the over-allocated locals
+/// buffer keyed by the ref operand's depth, or a temporary the codegen
+/// staged a compile-time `ref.func`/`ref.null` into) over
+/// `tables[table_idx].elems[index]`. The reference travels through that cell
+/// rather than a GP register. On an out-of-range index (or an out-of-range
+/// table, which validation forbids but is read defensively) it stashes
+/// `OutOfBoundsTableAccess` and returns `spasm.trap_pending`; otherwise
+/// `spasm.trap_ok`.
+fn spasmTableSet(
+    instance_opaque: *anyopaque,
+    table_idx: u32,
+    index: u32,
+    ref_slot: [*]const u128,
+) callconv(.c) u32 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (table_idx >= inst.tables.len) {
+        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+        return spasm.trap_pending;
+    }
+    const table = inst.tables[table_idx];
+    if (index >= table.elems.len) {
+        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+        return spasm.trap_pending;
+    }
+    table.elems[index] = ref_slot[0];
+    return spasm.trap_ok;
+}
+
+/// The native helper a Spasm-compiled `table.grow` (§4.4.x, 0xFC sub 15)
+/// branches to. Mirrors `tableGrow` + `growTable`: grow table `table_idx` by
+/// `delta` elements, filling the new slots with the 128-bit reference read
+/// from `init_slot[0]` (a cell in the over-allocated locals buffer, or a
+/// temporary the codegen staged a compile-time `ref.func`/`ref.null` into).
+/// Returns the PREVIOUS element count as an i64, or -1 on failure (an
+/// implementation limit or the table's max — growth never traps). Only the
+/// init reference travels through the cell; the i32 delta and the i32/i64
+/// result cross the operand stack directly.
+fn spasmTableGrow(
+    instance_opaque: *anyopaque,
+    table_idx: u32,
+    init_slot: [*]const u128,
+    delta: u32,
+) callconv(.c) i64 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (table_idx >= inst.tables.len) return -1;
+    const table = inst.tables[table_idx];
+    const old: u64 = table.elems.len;
+    const new_len: u64 = old + delta;
+    // §4.5.4 permits growth to fail for any implementation limit; cap well
+    // below the point where a huge request would lazily "succeed" and fault
+    // on first touch (mirrors `growTable`).
+    if (new_len > MAX_TABLE_ELEMS) return -1;
+    if (table.max) |mx| {
+        if (new_len > mx) return -1;
+    }
+    const grown = inst.gpa.realloc(table.elems, @intCast(new_len)) catch return -1;
+    for (grown[@intCast(old)..]) |*e| e.* = init_slot[0];
+    table.elems = grown;
+    return @intCast(old);
+}
+
+/// The native helper a Spasm-compiled `table.fill` (§4.4.x, 0xFC sub 17)
+/// branches to. Mirrors `tableFill`: fill `count` entries of table
+/// `table_idx` from `index` with the 128-bit reference read from
+/// `val_slot[0]` (a cell in the over-allocated locals buffer, or a temporary
+/// the codegen staged a compile-time `ref.func`/`ref.null` into), after an
+/// overflow-safe bounds check. Only the fill reference travels through the
+/// cell; the i32 index and count cross the operand stack directly. On an
+/// out-of-bounds range it stashes `OutOfBoundsTableAccess` and returns
+/// `spasm.trap_pending`; otherwise `spasm.trap_ok`.
+fn spasmTableFill(
+    instance_opaque: *anyopaque,
+    table_idx: u32,
+    index: u32,
+    val_slot: [*]const u128,
+    count: u32,
+) callconv(.c) u32 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (table_idx >= inst.tables.len) {
+        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+        return spasm.trap_pending;
+    }
+    const table = inst.tables[table_idx];
+    if (!rangeInBounds(table.elems.len, index, count)) {
+        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+        return spasm.trap_pending;
+    }
+    const base: usize = @intCast(index);
+    const val = val_slot[0];
+    var k: u32 = 0;
+    while (k < count) : (k += 1) table.elems[base + k] = val;
+    return spasm.trap_ok;
+}
+
 /// Try to run `func` via Spasm-compiled native code (docs/jit.md §6),
 /// returning the result cells on success or null when the body is
 /// outside Spasm's emittable class (the caller then interprets). The v1
@@ -1632,6 +1729,9 @@ fn spasmRun(
     if (comptime spasm.supported) spasm.table_init_helper = spasmTableInit;
     if (comptime spasm.supported) spasm.elem_drop_helper = spasmElemDrop;
     if (comptime spasm.supported) spasm.table_get_helper = spasmTableGet;
+    if (comptime spasm.supported) spasm.table_set_helper = spasmTableSet;
+    if (comptime spasm.supported) spasm.table_grow_helper = spasmTableGrow;
+    if (comptime spasm.supported) spasm.table_fill_helper = spasmTableFill;
 
     const entry = instance.spasmEntryFor(func) orelse return null;
 

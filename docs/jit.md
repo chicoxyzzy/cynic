@@ -1126,11 +1126,13 @@ useful:
    locals buffer (`spasmRun` over-allocates by the bank depth; a ref is exactly
    one `Cell`), addressed off x0 — so a runtime ref survives calls and SP moves
    for free (the data is in the heap buffer, x0 is a spilled boundary register)
-   and never touches the register bank. On that representation `table.get`
-   compiles (a helper does the bounds-checked read into the cell) and
-   `ref.is_null` tests the full 128-bit slot against `REF_NULL`. The remaining
-   frontier — the ref-*writing* ops (`table.set` / `grow` / `fill`), ref locals,
-   and `select` of a ref (all now unblocked by the runtime ref representation),
+   and never touches the register bank. On that representation the whole
+   `table.*` family compiles: `table.get` reads a ref into a cell, `table.set`
+   / `table.grow` / `table.fill` write one back (a shared helper normalizes a
+   `.ref_func` / `.ref_null` operand into the cell first so the runtime helper
+   always reads one uniform slot pointer), and `ref.is_null` tests the full
+   128-bit slot against `REF_NULL`. The remaining frontier — ref locals and
+   `select` of a ref (the last consumers of the runtime ref representation),
    plus the SIMD family — along with the side-table-as-control-oracle wiring
    (§6) that would make multi-target `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data

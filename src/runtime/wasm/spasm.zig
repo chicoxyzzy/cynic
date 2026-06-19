@@ -187,6 +187,45 @@ pub var elem_drop_helper: ?ElemDropHelperFn = null;
 pub const TableGetHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u32, out_cell: [*]u128) callconv(.c) u32;
 pub var table_get_helper: ?TableGetHelperFn = null;
 
+/// The native helper a Spasm-compiled `table.set` (§4.4.x, opcode 0x26)
+/// branches to: `(instance, table_index, index, ref_slot) -> status`. It
+/// bounds-checks `index` against the table and, in range, writes the 128-bit
+/// reference at `ref_slot[0]` over `tables[table_index].elems[index]`; out of
+/// range it stashes `OutOfBoundsTableAccess` and returns `spasm.trap_pending`.
+/// The reference travels through `ref_slot` (a cell in the over-allocated
+/// locals buffer, keyed by the ref operand's depth — or a temporary the
+/// codegen staged a compile-time `ref.func`/`ref.null` into) rather than a GP
+/// register, just like `table.get`'s `out_cell`. Injected at startup
+/// (one-directional import).
+pub const TableSetHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u32, ref_slot: [*]const u128) callconv(.c) u32;
+pub var table_set_helper: ?TableSetHelperFn = null;
+
+/// The native helper a Spasm-compiled `table.grow` (§4.4.x, 0xFC sub 15)
+/// branches to: `(instance, table_index, init_slot, delta) -> old_size`. It
+/// grows the table by `delta` elements, filling the new slots with the 128-bit
+/// reference at `init_slot[0]`, and returns the previous element count, or -1
+/// on failure (an implementation limit or the table's max — grow never traps).
+/// A table realloc does NOT invalidate any cached register (table access always
+/// goes through the instance), so unlike `memory.grow` the compiled body needs
+/// no base/len reload — only the i64 result is captured. The init reference
+/// travels through `init_slot` (a depth-keyed cell, or a staged temporary for a
+/// compile-time `ref.func`/`ref.null`). Injected at startup (one-directional
+/// import).
+pub const TableGrowHelperFn = *const fn (instance: *anyopaque, table_index: u32, init_slot: [*]const u128, delta: u32) callconv(.c) i64;
+pub var table_grow_helper: ?TableGrowHelperFn = null;
+
+/// The native helper a Spasm-compiled `table.fill` (§4.4.x, 0xFC sub 17)
+/// branches to: `(instance, table_index, index, val_slot, count) -> status`. It
+/// fills `count` entries of the table from `index` with the 128-bit reference
+/// at `val_slot[0]`, after an overflow-safe bounds check; out of range it
+/// stashes `OutOfBoundsTableAccess` and returns `spasm.trap_pending`. Only the
+/// fill reference travels through `val_slot` (a depth-keyed cell, or a staged
+/// temporary for a compile-time `ref.func`/`ref.null`); the i32 index and count
+/// cross the operand stack directly. Injected at startup (one-directional
+/// import).
+pub const TableFillHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u32, val_slot: [*]const u128, count: u32) callconv(.c) u32;
+pub var table_fill_helper: ?TableFillHelperFn = null;
+
 // ── wasm opcodes this increment understands ─────────────────────────
 const op_end: u8 = 0x0b;
 const op_nop: u8 = 0x01;
@@ -378,6 +417,10 @@ const op_ref_func: u8 = 0xd2;
 // pushes the 128-bit reference at `tables[idx][index]` (trapping OOB). The
 // first op whose result is a runtime reference on Spasm's operand stack.
 const op_table_get: u8 = 0x25;
+// §4.4.x table.set — one ULEB table index. Pops [index(i32), ref] (the ref on
+// top) and writes `tables[idx][index] = ref` (trapping OOB). The first op that
+// MOVES a reference off the operand stack into a table.
+const op_table_set: u8 = 0x26;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -788,6 +831,123 @@ pub fn compile(
                 // pop the i32 index, push the ref at the same depth.
                 stack[below] = .ref;
                 sp = below + 1;
+            },
+            op_table_set => {
+                // §4.4.x table.set — pop [index(i32), ref] (the ref on top) and
+                // write `tables[table_idx][index] = ref`, trapping OOB. The
+                // first op that MOVES a reference off the operand stack into a
+                // table. The ref operand at depth sp-1 carries its value either
+                // in its depth-keyed heap cell (a runtime `.ref`) or as a
+                // compile-time constant (`.ref_func`/`.ref_null`); either way it
+                // is normalized into the cell at `refSlotOff(num_locals, sp-1)`
+                // (a no-op for `.ref`) so the helper reads one uniform slot
+                // pointer. A native helper bounds-checks + writes; its trap
+                // status flows through the shared epilogue.
+                //
+                // Operands consumed: the ref (depth sp-1) and the index (depth
+                // sp-2); nothing pushed. `below = sp-2` survivors beneath. The
+                // frame shuffle mirrors the other helper-call arms: a
+                // callconv(.c) helper clobbers x0..x18 + x6, so spill the
+                // boundary registers + the live register below-operands, call,
+                // then reload.
+                if (table_set_helper == null) return null; // helper not wired
+                const table_idx = readUleb32(body, &i) orelse return null;
+                if (sp < 2) return null;
+                const below = sp - 2; // operands beneath the index
+                if (below > operand_reg_count) return null;
+
+                // Materialize the index into its home register (regForDepth(
+                // sp-2), an x9.. reg the x0..x4 helper-arg setup never
+                // clobbers). The ref operand at sp-1 is NOT materialized — a
+                // `.ref` has no register, and a `.ref_func`/`.ref_null` is a
+                // compile-time constant; both are handled by the slot write.
+                const idx_reg = try materialize(&m, stack[sp - 2], sp - 2);
+
+                // Normalize the ref operand (depth sp-1) into its depth-keyed
+                // cell BEFORE x0 is clobbered: a `.ref` is already there, a
+                // `.ref_func`/`.ref_null` is stored in now (x0 still the locals
+                // base; uses x16 + the body-constant x19).
+                try emitRefIntoSlot(&m, stack[sp - 1], sp - 1, num_locals);
+
+                // Frame: spill slots for the five boundary regs x0..x4 at +0,
+                // then one 8-byte slot per `.reg` below-operand. Round up to a
+                // 16-byte multiple (AAPCS64 SP alignment).
+                const spill_off: u15 = 0; // x0..x4 at +0/+8/+16/+24/+32
+                const op_spill_off: u15 = spill_off + 40;
+                const raw_frame = @as(usize, op_spill_off) + below * 8;
+                const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+                try m.emit(a64.subSpImm(framebytes));
+                try m.emit(a64.addRegSp(.x6, 0));
+
+                // Spill the five caller-saved boundary registers x0..x4.
+                try m.emit(a64.strImm(.x0, .x6, spill_off));
+                try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+                try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+                try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+
+                // Spill the register below-operands; a `.const_i32` below-
+                // operand is left untouched (its Loc must look identical to both
+                // arms of an enclosing `if` — see `op_call`). A `.ref` below-
+                // operand is skipped too: its data is in the heap buffer
+                // (addressed off the reloaded x0), not a register.
+                {
+                    var d: usize = 0;
+                    while (d < below) : (d += 1) {
+                        if (stack[d] != .reg) continue;
+                        const off: u15 = @intCast(op_spill_off + d * 8);
+                        try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                    }
+                }
+
+                // Helper ABI: x0 = instance (callee-saved x19), x1 = table
+                // index, x2 = element index, x3 = ref-slot pointer. Compute x3
+                // = x0 + refSlotOff(num_locals, sp-1) FIRST, while x0 still
+                // holds the locals base. Then stage x2 from the index register
+                // (x9.., not yet clobbered), then x0/x1.
+                const ref_off = refSlotOff(num_locals, sp - 1);
+                if (ref_off <= 4095) {
+                    try m.emit(a64.addImm(.x3, .x0, @intCast(ref_off), false));
+                } else {
+                    try m.movImm64(.x16, ref_off);
+                    try m.emit(a64.addReg(.x3, .x0, .x16));
+                }
+                try m.emit(a64.movReg(.x2, idx_reg));
+                try m.emit(a64.movReg(.x0, .x19));
+                try m.movImm64(.x1, table_idx);
+                try m.callAbs(.x16, @intFromPtr(table_set_helper.?));
+
+                // Trap status in w0; an OOB releases the frame and falls into
+                // the shared epilogue (which pops the prologue frame and
+                // returns w0 unchanged).
+                var set_ok: masm_mod.Masm.Label = .{};
+                defer set_ok.deinit(gpa);
+                try m.jumpCbz(.x0, &set_ok);
+                try m.emit(a64.addSpImm(framebytes));
+                try m.jump(&epilogue);
+                m.bind(&set_ok);
+
+                // Success: recompute x6 from SP (AAPCS64 callee-restores SP;
+                // nothing moved it since the reserve), reload the boundary
+                // registers and the register below-operands, release the frame.
+                try m.emit(a64.addRegSp(.x6, 0));
+                try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+                try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+                try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                {
+                    var d: usize = 0;
+                    while (d < below) : (d += 1) {
+                        if (stack[d] != .reg) continue;
+                        const off: u15 = @intCast(op_spill_off + d * 8);
+                        try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                    }
+                }
+                try m.emit(a64.addSpImm(framebytes));
+                // 2 consumed (index + ref), 0 pushed.
+                sp = below;
             },
             op_local_get => {
                 const idx = readUleb32(body, &i) orelse return null;
@@ -1796,8 +1956,10 @@ pub fn compile(
             },
             op_misc_prefix => {
                 // The 0xFC prefix. Sub-opcodes 0..7 are the saturating
-                // truncations; 10/11 are memory.copy/memory.fill. Anything
-                // else (the rest of bulk memory, tables) degrades.
+                // truncations; 8/9 memory.init/data.drop; 10/11 memory.copy/
+                // memory.fill; 12/13/14 table.init/elem.drop/table.copy; 15
+                // table.grow; 16 table.size; 17 table.fill. Anything else (SIMD,
+                // GC) degrades.
                 const sub = readUleb32(body, &i) orelse return null;
                 if (sub <= 7) {
                     // §4.3.3 saturating truncations. FCVTZS/FCVTZU round toward
@@ -2357,6 +2519,204 @@ pub fn compile(
                     }
                     try m.emit(a64.addSpImm(framebytes));
                     // sp unchanged (no stack effect).
+                } else if (sub == 15) {
+                    // §4.4.x table.grow — pop [init(ref), delta(i32)] (delta on
+                    // top), grow table `table_idx` by `delta` filling new slots
+                    // with `init`, push the PREVIOUS element count (i32) or -1
+                    // on failure (it never traps). The init ref carries its
+                    // value in its depth-keyed cell (a runtime `.ref`) or as a
+                    // compile-time constant (`.ref_func`/`.ref_null`); it is
+                    // normalized into the cell at `refSlotOff(num_locals, sp-2)`
+                    // so the helper reads one uniform slot pointer. Unlike
+                    // `memory.grow`, a table realloc never invalidates a cached
+                    // register (table access always goes through the instance),
+                    // so NO mem_base/mem_len reload is needed — only the i32
+                    // result is captured. The frame shuffle otherwise mirrors
+                    // `memory.grow`'s result-capture form: a callconv(.c) helper
+                    // clobbers x0..x18 + x6, so spill the boundary registers +
+                    // the live register below-operands, call, capture w0, reload.
+                    if (table_grow_helper == null) return null; // helper not wired
+                    const table_idx = readUleb32(body, &i) orelse return null;
+                    // A table64's result is i64, not i32 (a different width than
+                    // this arm produces) — degrade rather than special-case it,
+                    // exactly as `memory.grow` does for memory64.
+                    if (table_idx >= module.tables.len) return null;
+                    if (module.tables[table_idx].limits.is_64) return null;
+                    if (sp < 2) return null;
+                    const below = sp - 2; // operands beneath init+delta
+                    // Post-op stack = survivors + 1 result; it must fit the bank.
+                    if (below + 1 > operand_reg_count) return null;
+
+                    // Materialize the delta into its home register (regForDepth(
+                    // sp-1), an x9.. reg the x0..x4 helper-arg setup never
+                    // clobbers). The init ref at sp-2 is normalized via the slot
+                    // write, not materialized.
+                    const delta_reg = try materialize(&m, stack[sp - 1], sp - 1);
+
+                    // Normalize the init ref (depth sp-2) into its depth-keyed
+                    // cell BEFORE x0 is clobbered (a `.ref` is already there).
+                    try emitRefIntoSlot(&m, stack[sp - 2], sp - 2, num_locals);
+
+                    const spill_off: u15 = 0; // x0..x4 at +0/+8/+16/+24/+32
+                    const op_spill_off: u15 = spill_off + 40;
+                    const raw_frame = @as(usize, op_spill_off) + below * 8;
+                    const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+                    try m.emit(a64.subSpImm(framebytes));
+                    try m.emit(a64.addRegSp(.x6, 0));
+
+                    try m.emit(a64.strImm(.x0, .x6, spill_off));
+                    try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                        }
+                    }
+
+                    // Helper ABI: x0 = instance (x19), x1 = table index, x2 =
+                    // init-slot pointer, x3 = delta. Compute x2 = x0 +
+                    // refSlotOff(num_locals, sp-2) FIRST (x0 still the locals
+                    // base), then stage x3 from the delta register (x9.., not
+                    // yet clobbered), then x0/x1.
+                    const init_off = refSlotOff(num_locals, sp - 2);
+                    if (init_off <= 4095) {
+                        try m.emit(a64.addImm(.x2, .x0, @intCast(init_off), false));
+                    } else {
+                        try m.movImm64(.x16, init_off);
+                        try m.emit(a64.addReg(.x2, .x0, .x16));
+                    }
+                    try m.emit(a64.movReg(.x3, delta_reg));
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, table_idx);
+                    try m.callAbs(.x16, @intFromPtr(table_grow_helper.?));
+
+                    // x0 holds old_size (i64), or -1 (0xFFFF_FFFF_FFFF_FFFF) on
+                    // failure; x6 is clobbered. Capture the result FIRST: a
+                    // 32-bit move zero-extends the i32 old size (or the low
+                    // 0xFFFFFFFF of -1) into the result slot register. Then
+                    // recompute x6 from SP and reload the boundary registers +
+                    // register below-operands. No mem_base/mem_len reload —
+                    // a table grow leaves the cached memory registers valid.
+                    try m.emit(a64.movRegW(regForDepth(below), .x0));
+                    try m.emit(a64.addRegSp(.x6, 0));
+                    try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                    try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                        }
+                    }
+                    try m.emit(a64.addSpImm(framebytes));
+                    stack[below] = .{ .reg = regForDepth(below) };
+                    sp = below + 1; // 2 consumed (init + delta), 1 pushed
+                } else if (sub == 17) {
+                    // §4.4.x table.fill — pop [index(i32), val(ref), count(i32)]
+                    // (count on top, val in the middle, index at the bottom),
+                    // fill `count` entries of table `table_idx` from `index`
+                    // with `val`, trapping OOB. The val ref carries its value in
+                    // its depth-keyed cell (a runtime `.ref`) or as a compile-
+                    // time constant (`.ref_func`/`.ref_null`); it is normalized
+                    // into the cell at `refSlotOff(num_locals, sp-2)` so the
+                    // helper reads one uniform slot pointer. A native helper
+                    // bounds-checks + fills; its trap status flows through the
+                    // shared epilogue. The frame shuffle mirrors `memory.init`:
+                    // a callconv(.c) helper clobbers x0..x18 + x6, so spill the
+                    // boundary registers + the live register below-operands,
+                    // call, reload. table.fill never resizes memory.
+                    if (table_fill_helper == null) return null; // helper not wired
+                    const table_idx = readUleb32(body, &i) orelse return null;
+                    if (sp < 3) return null;
+                    const below = sp - 3; // operands beneath index/val/count
+                    if (below > operand_reg_count) return null;
+
+                    // Materialize the index (depth sp-3) and count (depth sp-1)
+                    // into their home registers (x9.., never clobbered by the
+                    // x0..x4 helper-arg setup). The val ref at sp-2 is normalized
+                    // via the slot write, not materialized.
+                    const idx_reg = try materialize(&m, stack[sp - 3], sp - 3);
+                    const cnt_reg = try materialize(&m, stack[sp - 1], sp - 1);
+
+                    // Normalize the val ref (depth sp-2) into its depth-keyed
+                    // cell BEFORE x0 is clobbered (a `.ref` is already there).
+                    try emitRefIntoSlot(&m, stack[sp - 2], sp - 2, num_locals);
+
+                    const spill_off: u15 = 0; // x0..x4 at +0/+8/+16/+24/+32
+                    const op_spill_off: u15 = spill_off + 40;
+                    const raw_frame = @as(usize, op_spill_off) + below * 8;
+                    const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+                    try m.emit(a64.subSpImm(framebytes));
+                    try m.emit(a64.addRegSp(.x6, 0));
+
+                    try m.emit(a64.strImm(.x0, .x6, spill_off));
+                    try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                        }
+                    }
+
+                    // Helper ABI: x0 = instance (x19), x1 = table index, x2 =
+                    // index, x3 = val-slot pointer, x4 = count. Compute x3 = x0
+                    // + refSlotOff(num_locals, sp-2) FIRST (x0 still the locals
+                    // base), then stage x2/x4 from their operand registers
+                    // (x9.., not yet clobbered), then x0/x1.
+                    const val_off = refSlotOff(num_locals, sp - 2);
+                    if (val_off <= 4095) {
+                        try m.emit(a64.addImm(.x3, .x0, @intCast(val_off), false));
+                    } else {
+                        try m.movImm64(.x16, val_off);
+                        try m.emit(a64.addReg(.x3, .x0, .x16));
+                    }
+                    try m.emit(a64.movReg(.x2, idx_reg));
+                    try m.emit(a64.movReg(.x4, cnt_reg));
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, table_idx);
+                    try m.callAbs(.x16, @intFromPtr(table_fill_helper.?));
+
+                    // Trap status in w0; an OOB releases the frame and falls into
+                    // the shared epilogue.
+                    var fill_ok: masm_mod.Masm.Label = .{};
+                    defer fill_ok.deinit(gpa);
+                    try m.jumpCbz(.x0, &fill_ok);
+                    try m.emit(a64.addSpImm(framebytes));
+                    try m.jump(&epilogue);
+                    m.bind(&fill_ok);
+
+                    try m.emit(a64.addRegSp(.x6, 0));
+                    try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                    try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                        }
+                    }
+                    try m.emit(a64.addSpImm(framebytes));
+                    sp = below; // 3 consumed (index + val + count), 0 pushed
                 } else return null;
             },
             op_f32_demote_f64 => {
@@ -2985,6 +3345,43 @@ fn materialize(m: *masm_mod.Masm, loc: Loc, depth: usize) CompileError!a64.Reg {
     }
 }
 
+/// Ensure the depth-keyed reference cell at `refSlotOff(num_locals, depth)`
+/// off x0 holds the 128-bit value of the reference operand `loc`, so the
+/// ref-writing table ops (`table.set`/`table.grow`/`table.fill`) can hand the
+/// helper one uniform slot pointer regardless of how the reference reached the
+/// op (§5.4.2). A runtime `.ref` already lives in that slot — nothing to emit.
+/// A compile-time `.ref_func f` / `.ref_null` is materialized into it: the
+/// funcref encoding is `(instance << 64) | f` (low 64 = the function index, an
+/// emitted immediate; high 64 = the body-constant instance in x19), and
+/// `ref.null` is `interpreter.REF_NULL` (all-ones in both halves). Must run
+/// BEFORE x0 is clobbered. A `.reg`/`.const_i32` operand would be a validation
+/// violation (a non-reference reaching a ref slot); degrade defensively.
+/// Scratch: x16 (the masm immediate scratch). The slot's two 8-byte halves sit
+/// at `off` and `off + 8`, mirroring `op_table_get` / `ref.is_null`.
+fn emitRefIntoSlot(m: *masm_mod.Masm, loc: Loc, depth: usize, num_locals: usize) CompileError!void {
+    const off = refSlotOff(num_locals, depth);
+    switch (loc) {
+        // Already in its home slot (a `table.get` result, etc.).
+        .ref => {},
+        // §5.4.2 — funcref bits: low 64 = the function index, high 64 = the
+        // defining instance (the callee-saved body constant x19).
+        .ref_func => |f| {
+            try m.movImm64(.x16, f);
+            try m.emit(a64.strImm(.x16, .x0, off));
+            try m.emit(a64.strImm(.x19, .x0, off + 8));
+        },
+        // §5.4.2 — `ref.null` is `interpreter.REF_NULL` = all-ones in both
+        // 64-bit halves.
+        .ref_null => {
+            try m.movImm64(.x16, 0xFFFF_FFFF_FFFF_FFFF);
+            try m.emit(a64.strImm(.x16, .x0, off));
+            try m.emit(a64.strImm(.x16, .x0, off + 8));
+        },
+        // A scalar reaching a reference slot is impossible in validated code.
+        .reg, .const_i32 => return error.UnsupportedOp,
+    }
+}
+
 /// Emit a memory access's effective-address computation and bounds check
 /// (§4.4.7): `x16 = addr_reg + offset`, then trap to `oob` when the
 /// `n`-byte access runs past `mem_len` (x3). The check is overflow-safe —
@@ -3094,7 +3491,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 depth -= 1;
             },
             op_else => {}, // stays within the enclosing `if`'s nesting
-            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_memory_grow, op_call, op_ref_func, op_table_get => {
+            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_memory_grow, op_call, op_ref_func, op_table_get, op_table_set => {
                 _ = readUleb32(body, i) orelse return null;
             },
             op_call_indirect => { // type index + table index
@@ -3124,8 +3521,9 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 // two memory indices; memory.fill (sub 11) one; table.init
                 // (sub 12) an element index + table index; elem.drop (sub 13)
                 // an element index; table.copy (sub 14) two table indices;
-                // table.size (sub 16) one table index. Any other 0xFC op
-                // degrades.
+                // table.grow (sub 15) one table index; table.size (sub 16) one
+                // table index; table.fill (sub 17) one table index. Any other
+                // 0xFC op degrades.
                 const sub = readUleb32(body, i) orelse return null;
                 if (sub <= 7) {
                     // no further immediate
@@ -3147,7 +3545,11 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 } else if (sub == 14) {
                     _ = readUleb32(body, i) orelse return null; // dst table index
                     _ = readUleb32(body, i) orelse return null; // src table index
+                } else if (sub == 15) {
+                    _ = readUleb32(body, i) orelse return null; // table index
                 } else if (sub == 16) {
+                    _ = readUleb32(body, i) orelse return null; // table index
+                } else if (sub == 17) {
                     _ = readUleb32(body, i) orelse return null; // table index
                 } else return null;
             },

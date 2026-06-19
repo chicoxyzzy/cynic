@@ -1399,6 +1399,267 @@ test "wasm spasm: table.get reads a runtime funcref, ref.is_null inspects it" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: table.set writes a funcref, then call_indirect dispatches through it" {
+    // §4.4.x table.set (0x26) — the first ref-WRITING table op on Spasm's
+    // operand stack. Stack order is [index(i32), ref] with the ref on top.
+    // Two ways the ref-to-write reaches the op are covered:
+    //   "setcall"(): writes a COMPILE-TIME ref (`ref.func add10`, a .ref_func
+    //       Loc) into table[1], then `call_indirect`s through table[1] with
+    //       arg 5 → add10(5) == 15, proving the slot now holds a callable ref.
+    //   "setrt"():  populates table[0] from a passive elem (table.init), reads
+    //       it back with `table.get` (a RUNTIME .ref operand), writes THAT into
+    //       table[1] with table.set, then call_indirect table[1](5) == 15 —
+    //       proving the runtime-.ref write path too.
+    // Both must run Spasm-compiled (spasm_runs counts each compiled entry).
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->i32 (add10 + the call_indirect signature);
+    // type 1: ()->i32    (setcall/setrt).
+    const tbody = [_]u8{ 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f };
+    // func section: func0 add10 type0, func1 setcall type1, func2 setrt type1.
+    const fbody = [_]u8{ 0x03, 0x00, 0x01, 0x01 };
+    // table section: 1 table, funcref (0x70), limits min-only (0x00) min 4.
+    const tablebody = [_]u8{ 0x01, 0x70, 0x00, 0x04 };
+    // export "setcall" -> func1, "setrt" -> func2.
+    const xbody = [_]u8{
+        0x02,
+        0x07, 's', 'e', 't', 'c', 'a', 'l', 'l', 0x00, 0x01,
+        0x05, 's', 'e', 't', 'r', 't', 0x00, 0x02,
+    };
+    // element section: 1 *passive* segment (flag 0x01), elemkind 0x00
+    // (funcref), funcs [0 (add10)].
+    const ebody = [_]u8{ 0x01, 0x01, 0x00, 0x01, 0x00 };
+    // code section: three bodies.
+    //   func0 (add10): local.get 0; i32.const 10; i32.add; end
+    //   func1 (setcall):
+    //     i32.const 1; ref.func 0; table.set 0;          (table[1] = add10)
+    //     i32.const 5; i32.const 1; call_indirect 0 0; end
+    //   func2 (setrt):
+    //     i32.const 0; i32.const 0; i32.const 1; table.init 0 0; (table[0]=add10)
+    //     i32.const 1; i32.const 0; table.get 0; table.set 0;    (table[1]=table[0])
+    //     i32.const 5; i32.const 1; call_indirect 0 0; end
+    const cbody = [_]u8{
+        0x03, // three code entries
+        0x07, 0x00, 0x20, 0x00, 0x41, 0x0a, 0x6a, 0x0b, // add10: 7 bytes
+        0x0f, 0x00, // setcall: 15 bytes, 0 locals
+        0x41, 0x01, 0xd2, 0x00, 0x26, 0x00, // i32.const 1; ref.func 0; table.set 0
+        0x41, 0x05, 0x41, 0x01, 0x11, 0x00, 0x00, 0x0b, // i32.const 5; i32.const 1; call_indirect 0 0; end
+        0x1b, 0x00, // setrt: 27 bytes, 0 locals
+        0x41, 0x00, 0x41, 0x00, 0x41, 0x01, 0xfc, 0x0c, 0x00, 0x00, // table.init 0 0
+        0x41, 0x01, 0x41, 0x00, 0x25, 0x00, 0x26, 0x00, // i32.const 1; i32.const 0; table.get 0; table.set 0
+        0x41, 0x05, 0x41, 0x01, 0x11, 0x00, 0x00, 0x0b, // i32.const 5; i32.const 1; call_indirect 0 0; end
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tablebody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    // setcall: a compile-time `ref.func` written by table.set, then dispatched
+    // through. add10(5) == 15, the same the interpreter gives.
+    const setcall_idx = funcExport(mp, "setcall") orelse return error.NoSuchExport;
+    const r_setcall = try interp.invoke(&instance, testing.allocator, setcall_idx, &.{});
+    defer testing.allocator.free(r_setcall);
+    try testing.expectEqual(@as(u32, 15), @as(u32, @truncate(r_setcall[0])));
+
+    // setrt: a runtime `.ref` (read via table.get) written by table.set, then
+    // dispatched through. Same answer, proving the runtime-ref write path.
+    const setrt_idx = funcExport(mp, "setrt") orelse return error.NoSuchExport;
+    const r_setrt = try interp.invoke(&instance, testing.allocator, setrt_idx, &.{});
+    defer testing.allocator.free(r_setrt);
+    try testing.expectEqual(@as(u32, 15), @as(u32, @truncate(r_setrt[0])));
+
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: table.set out of bounds raises a catchable trap" {
+    // §4.4.x table.set traps OutOfBoundsTableAccess when the index is past the
+    // table — the same the interpreter gives. "oob"() writes ref.func 0 at
+    // index 9 of a min-2 table.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const tbody = [_]u8{ 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x02, 0x00, 0x01 };
+    const tablebody = [_]u8{ 0x01, 0x70, 0x00, 0x02 };
+    const xbody = [_]u8{ 0x01, 0x03, 'o', 'o', 'b', 0x00, 0x01 };
+    // declarative element segment so `ref.func 0` validates (§3.3.2.4 — the
+    // index must be in C.refs); it does not initialize the table.
+    const ebody = [_]u8{ 0x01, 0x03, 0x00, 0x01, 0x00 };
+    // func0 (dummy add10), func1 (oob): i32.const 9; ref.func 0; table.set 0; i32.const 0; end
+    const cbody = [_]u8{
+        0x02,
+        0x07, 0x00, 0x20, 0x00, 0x41, 0x0a, 0x6a, 0x0b, // add10
+        0x0a, 0x00, // oob: 10 bytes, 0 locals
+        0x41, 0x09, 0xd2, 0x00, 0x26, 0x00, 0x41, 0x00, 0x0b, // i32.const 9; ref.func 0; table.set 0; i32.const 0; end
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tablebody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "oob") orelse return error.NoSuchExport;
+    try testing.expectError(error.OutOfBoundsTableAccess, interp.invoke(&instance, testing.allocator, fidx, &.{}));
+}
+
+test "wasm spasm: table.grow grows the table and returns the previous size" {
+    // §4.4.x table.grow (0xFC sub 15) — pops [init(ref), delta(i32)] (delta on
+    // top), grows the table by `delta` filling new slots with `init`, pushes
+    // the PREVIOUS element count (or -1 on failure; it never traps). The init
+    // ref here is a COMPILE-TIME `ref.func add10` (.ref_func Loc).
+    //   "grow"(): ref.func 0; i32.const 1; table.grow 0; end — the table starts
+    //       at 4 elements, so the old size is 4 and the table grows to 5.
+    // The only exported/invoked function is "grow" itself, and it is otherwise
+    // leaf (no call), so `spasm_runs >= 1` is a true signal that `table.grow`
+    // compiled — not an unrelated function inflating the counter. The grown
+    // slot's content (the `init` funcref) is checked directly from Zig.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->i32 (add10, the ref.func target); type 1: ()->i32 (grow).
+    const tbody = [_]u8{ 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x02, 0x00, 0x01 };
+    const tablebody = [_]u8{ 0x01, 0x70, 0x00, 0x04 };
+    const xbody = [_]u8{ 0x01, 0x04, 'g', 'r', 'o', 'w', 0x00, 0x01 };
+    // declarative element segment so `ref.func 0` validates (§3.3.2.4); it
+    // does not initialize the table.
+    const ebody = [_]u8{ 0x01, 0x03, 0x00, 0x01, 0x00 };
+    // code: func0 add10 (only ref'd, never called); func1 grow.
+    //   grow: ref.func 0; i32.const 1; table.grow 0; end
+    const cbody = [_]u8{
+        0x02,
+        0x07, 0x00, 0x20, 0x00, 0x41, 0x0a, 0x6a, 0x0b, // add10
+        0x09, 0x00, // grow: 9 bytes, 0 locals
+        0xd2, 0x00, 0x41, 0x01, 0xfc, 0x0f, 0x00, 0x0b, // ref.func 0; i32.const 1; table.grow 0; end
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tablebody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    // grow returns the previous size (4) and grows the table to 5 — the same
+    // the interpreter gives.
+    const grow_idx = funcExport(mp, "grow") orelse return error.NoSuchExport;
+    const r_grow = try interp.invoke(&instance, testing.allocator, grow_idx, &.{});
+    defer testing.allocator.free(r_grow);
+    try testing.expectEqual(@as(u32, 4), @as(u32, @truncate(r_grow[0])));
+    try testing.expectEqual(@as(usize, 5), instance.tables[0].elems.len);
+
+    // The grown slot (index 4) holds the `init` ref — `ref.func 0`, i.e.
+    // makeFuncRef(defining-instance, 0), which is non-null. Checking the cell
+    // directly (rather than dispatching through it) keeps the only invoked
+    // function "grow" itself, so the spasm_runs assertion stays load-bearing.
+    try testing.expectEqual(interp.makeFuncRef(&instance, 0), instance.tables[0].elems[4]);
+
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: table.fill fills a range, observed via call_indirect" {
+    // §4.4.x table.fill (0xFC sub 17) — pops [index(i32), val(ref), count(i32)]
+    // (count on top, val in the middle, index at the bottom), filling `count`
+    // entries from `index` with `val`, trapping OOB. The fill value here is a
+    // COMPILE-TIME `ref.func add10` (.ref_func Loc).
+    //   "fill"(): i32.const 1; ref.func 0; i32.const 2; table.fill 0 — fills
+    //       table[1] and table[2] with add10; then call_indirect through
+    //       table[2] with arg 5 → add10(5) == 15, observing the fill landed.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const tbody = [_]u8{ 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x02, 0x00, 0x01 };
+    const tablebody = [_]u8{ 0x01, 0x70, 0x00, 0x04 };
+    const xbody = [_]u8{ 0x01, 0x04, 'f', 'i', 'l', 'l', 0x00, 0x01 };
+    // declarative element segment so `ref.func 0` validates (§3.3.2.4); it
+    // does not initialize the table.
+    const ebody = [_]u8{ 0x01, 0x03, 0x00, 0x01, 0x00 };
+    // code: func0 add10; func1 fill.
+    //   fill: i32.const 1; ref.func 0; i32.const 2; table.fill 0;
+    //         i32.const 5; i32.const 2; call_indirect 0 0; end
+    const cbody = [_]u8{
+        0x02,
+        0x07, 0x00, 0x20, 0x00, 0x41, 0x0a, 0x6a, 0x0b, // add10
+        0x12, 0x00, // fill: 18 bytes, 0 locals
+        0x41, 0x01, 0xd2, 0x00, 0x41, 0x02, 0xfc, 0x11, 0x00, // i32.const 1; ref.func 0; i32.const 2; table.fill 0
+        0x41, 0x05, 0x41, 0x02, 0x11, 0x00, 0x00, 0x0b, // i32.const 5; i32.const 2; call_indirect 0 0; end
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tablebody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    // table.fill places add10 at table[1..3]; dispatching through table[2]
+    // gives add10(5) == 15, the same the interpreter gives.
+    const fidx = funcExport(mp, "fill") orelse return error.NoSuchExport;
+    const res = try interp.invoke(&instance, testing.allocator, fidx, &.{});
+    defer testing.allocator.free(res);
+    try testing.expectEqual(@as(u32, 15), @as(u32, @truncate(res[0])));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // A one-page-memory module whose `()->i32` export "sz" returns the current
 // memory size in pages (memory.size, 0x3f) — the byte length >> 16.
 const memsize_body = [_]u8{
