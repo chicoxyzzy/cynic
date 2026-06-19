@@ -1388,6 +1388,38 @@ fn spasmCallIndirect(
     return status;
 }
 
+/// The native helper a Spasm-compiled `memory.grow` (§4.4.7) branches to.
+/// Grows memory `mem_idx` by `delta` pages, reusing `growMem`'s logic, and
+/// returns the previous page count (>= 0) or -1 if growth fails (it never
+/// traps). The grow reallocates the backing buffer, so the compiled body's
+/// cached `mem_base`/`mem_len` are now stale; the new `data.ptr` and
+/// `data.len` are written to `out_baselen[0]`/`out_baselen[1]` for the body
+/// to reload. They are written even on failure — there they are just the
+/// unchanged current values, which is exactly what the body should reload.
+fn spasmMemoryGrow(instance_opaque: *anyopaque, mem_idx: u32, delta: u64, out_baselen: [*]u64) callconv(.c) i64 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    const mem = inst.memories[mem_idx];
+    const old = mem.pages();
+    const new_pages: u64 = old + delta;
+    var result: i64 = -1;
+    grow: {
+        if (new_pages > 65536) break :grow; // hard cap (4 GiB) bounds allocation
+        if (mem.max_pages) |mx| {
+            if (new_pages > mx) break :grow;
+        }
+        const old_len = mem.data.len;
+        const grown = inst.gpa.realloc(mem.data, @as(usize, @intCast(new_pages)) * PAGE_SIZE) catch break :grow;
+        @memset(grown[old_len..], 0);
+        mem.data = grown;
+        result = @bitCast(old);
+    }
+    // Hand the body the *current* base/len — grown on success, unchanged on
+    // failure — so its reload always sees the live memory.
+    out_baselen[0] = @intFromPtr(mem.data.ptr);
+    out_baselen[1] = mem.data.len;
+    return result;
+}
+
 /// Try to run `func` via Spasm-compiled native code (docs/jit.md §6),
 /// returning the result cells on success or null when the body is
 /// outside Spasm's emittable class (the caller then interprets). The v1
@@ -1417,6 +1449,7 @@ fn spasmRun(
     // interpreter's `spasmCall` — is why this isn't a comptime `const`.
     if (comptime spasm.supported) spasm.call_helper = spasmCall;
     if (comptime spasm.supported) spasm.call_indirect_helper = spasmCallIndirect;
+    if (comptime spasm.supported) spasm.mem_grow_helper = spasmMemoryGrow;
 
     const entry = instance.spasmEntryFor(func) orelse return null;
 

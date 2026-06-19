@@ -1098,7 +1098,10 @@ useful:
    global's value cell), the first bulk-memory ops `memory.fill` and
    `memory.copy` (inline byte loops after up-front overflow-safe bounds
    checks — leaf, no helper; copy picks the overlap-safe direction from
-   `dst <= src`), `memory.size` (`mem_len >> 16`), and both `call` and
+   `dst <= src`), `memory.size` (`mem_len >> 16`), `memory.grow` (a helper
+   does the realloc and writes the fresh base/len into a frame out-region the
+   body reloads x2/x3 from — growth invalidates the cached pointers; the i32
+   result is the previous page count or -1), and both `call` and
    `call_indirect` (a non-leaf prologue parks the `*Instance` in callee-saved
    x19; the args marshal through a per-frame cell buffer to a native helper
    that re-enters `invoke`; operands live below the args are spilled across
@@ -1106,9 +1109,9 @@ useful:
    re-materialized on each control-flow arm; `call_indirect` resolves and
    type-checks the table element in its helper, trapping on a bad index,
    null element, or signature mismatch; a thread-local depth guard turns
-   runaway native recursion into a catchable `CallStackExhausted`); the rest
-   of bulk memory, tables, and the reference/SIMD families are the remaining
-   frontier, along with the side-table-as-control-oracle wiring (§6) that
+   runaway native recursion into a catchable `CallStackExhausted`);
+   `memory.init` / `data.drop`, tables, and the reference/SIMD families are
+   the remaining frontier, along with the side-table-as-control-oracle wiring (§6) that
    would make multi-target `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does

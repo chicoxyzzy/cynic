@@ -1062,6 +1062,40 @@ test "wasm spasm: memory.size returns the page count" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// `()->i32` that grows the (min-1-page) memory by one page and returns
+// the previous page count: `i32.const 1; memory.grow 0; end` (§4.4.7).
+const memgrow_body = [_]u8{
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type ()->i32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1 page
+    0x07, 0x06, 0x01, 0x02, 0x67, 0x72, 0x00, 0x00, // export "gr" -> 0
+    0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x01, 0x40, 0x00, 0x0b, // i32.const 1; memory.grow 0; end
+};
+
+test "wasm spasm: memory.grow grows the memory and returns the previous page count" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + memgrow_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &memgrow_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    const fidx = funcExport(mp, "gr") orelse return error.NoSuchExport;
+    const res = try interp.invoke(&instance, testing.allocator, fidx, &.{});
+    defer testing.allocator.free(res);
+
+    // memory.grow returns the previous size (1 page) and the memory now
+    // holds two pages — proving the realloc happened and Spasm reloaded
+    // the stale mem_base/mem_len after the helper.
+    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(res[0])));
+    try testing.expectEqual(@as(u64, 2 * interp.PAGE_SIZE), @as(u64, instance.memories[0].data.len));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // `(i32,i32)->i32` adders for the rotates: "rl" = i32.rotl (0x77),
 // "rr" = i32.rotr (0x78).
 const i32_rotl_body = [_]u8{

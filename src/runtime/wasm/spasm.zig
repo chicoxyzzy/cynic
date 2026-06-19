@@ -104,6 +104,19 @@ pub var call_helper: ?CallHelperFn = null;
 pub const CallIndirectHelperFn = *const fn (instance: *anyopaque, type_index: u32, table_index: u32, elem_index: u32, buf: [*]Cell) callconv(.c) u32;
 pub var call_indirect_helper: ?CallIndirectHelperFn = null;
 
+/// The native helper a Spasm-compiled `memory.grow` (§4.4.7) branches to:
+/// `(instance, mem_index, delta_pages, out_baselen) -> old_pages`. It grows
+/// the memory and returns the previous page count, or -1 on failure (grow
+/// never traps). Growth reallocates the backing buffer, so the helper writes
+/// the new base pointer to `out_baselen[0]` and the new byte length to
+/// `out_baselen[1]`; the compiled body reloads its stale `mem_base`/`mem_len`
+/// from there. The interpreter owns the grow (it reuses `growMem`); spasm.zig
+/// only emits the `blr`, so the address is injected at startup to keep the
+/// module dependency one-directional (interpreter imports spasm, never the
+/// reverse).
+pub const MemGrowHelperFn = *const fn (instance: *anyopaque, mem_index: u32, delta_pages: u64, out_baselen: [*]u64) callconv(.c) i64;
+pub var mem_grow_helper: ?MemGrowHelperFn = null;
+
 // ── wasm opcodes this increment understands ─────────────────────────
 const op_end: u8 = 0x0b;
 const op_nop: u8 = 0x01;
@@ -275,6 +288,7 @@ const op_f64_reinterpret_i64: u8 = 0xbf;
 // The baseline handles only the saturating truncations (sub-opcodes 0..7).
 const op_misc_prefix: u8 = 0xfc;
 const op_memory_size: u8 = 0x3f;
+const op_memory_grow: u8 = 0x40;
 const op_i32_trunc_f32_s: u8 = 0xa8;
 const op_i32_trunc_f32_u: u8 = 0xa9;
 const op_i32_trunc_f64_s: u8 = 0xaa;
@@ -1356,6 +1370,104 @@ pub fn compile(
                 stack[sp] = .{ .reg = ra };
                 sp += 1;
             },
+            op_memory_grow => {
+                // §4.4.7 memory.grow — pop `delta` (pages), grow linear
+                // memory, push the previous page count (i32) or -1 on
+                // failure (it never traps). Growth reallocates the backing
+                // buffer, so the cached mem_base (x2) / mem_len (x3) go stale
+                // and must be reloaded after. A native helper does the grow
+                // (it reuses the interpreter's `growMem`), writing the fresh
+                // base/len into an out-region of the frame; the body reloads
+                // x2/x3 from there. The frame shuffle mirrors `op_call`: a
+                // callconv(.c) helper clobbers x0..x18 + x6, so spill the
+                // boundary registers that must survive and reload them after.
+                const mem_idx = readUleb32(body, &i) orelse return null;
+                if (mem_idx != 0) return null; // single memory only
+                // memory64's result is i64, not i32 (a different width than
+                // this arm produces) — degrade rather than special-case it.
+                if (mem_idx >= module.mems.len) return null;
+                if (module.mems[mem_idx].limits.is_64) return null;
+                if (mem_grow_helper == null) return null; // helper not wired
+                if (sp < 1) return null; // need the delta operand
+                // `delta` is the top (and only) arg; operands beneath survive.
+                const below = sp - 1;
+                // Post-op stack = survivors + 1 result; it must fit the bank.
+                if (below + 1 > operand_reg_count) return null;
+
+                // Frame: a 16-byte out-region ([new_base, new_len]) at 0; then
+                // spill slots for the boundary regs that must SURVIVE the call
+                // — x0, x1, x4 (x2/x3 are reloaded from the out-region, not
+                // spilled); then one 8-byte slot per `.reg` below-operand.
+                // Round up to a 16-byte multiple (AAPCS64 SP alignment).
+                const out_off: u15 = 0;
+                const spill_off: u15 = 16; // x0, x1, x4 at +16/+24/+32
+                const op_spill_off: u15 = spill_off + 24;
+                const raw_frame = @as(usize, op_spill_off) + below * 8;
+                const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+                // Materialize the delta into its home register (regForDepth(
+                // sp-1), an x9.. reg the x0..x4 helper-arg setup never
+                // clobbers) before the SP move shuffles anything.
+                const delta_reg = try materialize(&m, stack[sp - 1], sp - 1);
+
+                // Reserve the frame; take its base in x6 (a free scratch, not
+                // an operand register). The delta in x9.. is untouched.
+                try m.emit(a64.subSpImm(framebytes));
+                try m.emit(a64.addRegSp(.x6, 0));
+
+                // Spill the boundary registers that must survive: x0 locals,
+                // x1 results, x4 globals. (mem_base/mem_len are reloaded fresh
+                // from the out-region after the grow.)
+                try m.emit(a64.strImm(.x0, .x6, spill_off));
+                try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                try m.emit(a64.strImm(.x4, .x6, spill_off + 16));
+
+                // Spill the live register below-operands. A `.const_i32`
+                // below-operand is left entirely untouched (its Loc must look
+                // identical to both arms of an enclosing `if` — see `op_call`).
+                {
+                    var d: usize = 0;
+                    while (d < below) : (d += 1) {
+                        if (stack[d] != .reg) continue;
+                        const off: u15 = @intCast(op_spill_off + d * 8);
+                        try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                    }
+                }
+
+                // Helper ABI: x0 = instance (callee-saved x19), x1 = memory
+                // index, x2 = delta, x3 = out-region pointer (the frame base).
+                try m.emit(a64.movReg(.x0, .x19));
+                try m.movImm64(.x1, mem_idx);
+                try m.emit(a64.movReg(.x2, delta_reg));
+                try m.emit(a64.addRegSp(.x3, out_off)); // x3 = SP + 0
+                try m.callAbs(.x16, @intFromPtr(mem_grow_helper.?));
+
+                // x0 now holds old_pages (i64), x6 is clobbered. Capture the
+                // result FIRST: a 32-bit move zero-extends the i32 (or the
+                // 0xFFFFFFFF of -1) into the result slot register.
+                try m.emit(a64.movRegW(regForDepth(below), .x0));
+                // Recompute x6 from SP (AAPCS64 callee-restores SP; nothing
+                // moved it since the reserve), then reload the live state:
+                // x2/x3 from the out-region (the grown base/len), the spilled
+                // boundary registers, and the register below-operands.
+                try m.emit(a64.addRegSp(.x6, 0));
+                try m.emit(a64.ldrImm(.x2, .x6, out_off)); // fresh mem_base
+                try m.emit(a64.ldrImm(.x3, .x6, out_off + 8)); // fresh mem_len
+                try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                try m.emit(a64.ldrImm(.x4, .x6, spill_off + 16));
+                {
+                    var d: usize = 0;
+                    while (d < below) : (d += 1) {
+                        if (stack[d] != .reg) continue; // const: nothing spilled
+                        const off: u15 = @intCast(op_spill_off + d * 8);
+                        try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                    }
+                }
+                try m.emit(a64.addSpImm(framebytes));
+                stack[below] = .{ .reg = regForDepth(below) };
+                sp = below + 1;
+            },
             op_misc_prefix => {
                 // The 0xFC prefix. Sub-opcodes 0..7 are the saturating
                 // truncations; 10/11 are memory.copy/memory.fill. Anything
@@ -2188,7 +2300,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 depth -= 1;
             },
             op_else => {}, // stays within the enclosing `if`'s nesting
-            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_call => {
+            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_memory_grow, op_call => {
                 _ = readUleb32(body, i) orelse return null;
             },
             op_call_indirect => { // type index + table index
