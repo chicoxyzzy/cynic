@@ -1131,10 +1131,13 @@ useful:
    / `table.grow` / `table.fill` write one back (a shared helper normalizes a
    `.ref_func` / `.ref_null` operand into the cell first so the runtime helper
    always reads one uniform slot pointer), and `ref.is_null` tests the full
-   128-bit slot against `REF_NULL`. The remaining frontier — ref locals and
-   `select` of a ref (the last consumers of the runtime ref representation),
-   plus the SIMD family — along with the side-table-as-control-oracle wiring
-   (§6) that would make multi-target `br_table` cheap.
+   128-bit slot against `REF_NULL`. Reference locals (`local.get` / `set` /
+   `tee` of a ref type — `spasmRun` re-seeds a declared ref local to `REF_NULL`
+   per §4.4.10, since `@memset(0)` is wrong for a reference) and `select t` of
+   a ref close out the reference family. **That leaves SIMD (`v128`) as the
+   one remaining frontier** — the whole scalar/control/calls/memory/table/ref
+   surface now baseline-compiles — along with the side-table-as-control-oracle
+   wiring (§6) that would make multi-target `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.

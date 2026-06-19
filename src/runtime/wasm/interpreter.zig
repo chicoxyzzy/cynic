@@ -1747,6 +1747,18 @@ fn spasmRun(
     defer allocator.free(locals);
     @memset(locals, 0);
     for (args, 0..) |x, i| locals[i] = x;
+    // §4.4.10 — a declared (non-parameter) reference local defaults to
+    // ref.null, NOT zero. The @memset zeroed the buffer, which is correct for
+    // every numeric default but wrong for a reference (REF_NULL is all-ones);
+    // re-seed each declared reference local so the compiled body reads the same
+    // initial value the interpreter's pushFrame installs (isRef -> REF_NULL).
+    // Parameters were just seeded from the incoming args and stay as-is.
+    {
+        var li: usize = args.len;
+        while (li < func.local_types.len) : (li += 1) {
+            if (func.local_types[li].isRef()) locals[li] = REF_NULL;
+        }
+    }
 
     const results = try allocator.alloc(spasm.Cell, @max(ftype.results.len, 1));
     defer allocator.free(results);

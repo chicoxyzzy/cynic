@@ -241,6 +241,10 @@ const op_call: u8 = 0x10;
 const op_call_indirect: u8 = 0x11;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
+// §5.4.2 — typed select carries a result-type vector immediate (a
+// count-prefixed list of value types); the numeric/reference distinction
+// the untyped `select` (0x1b) leaves implicit is explicit here.
+const op_select_t: u8 = 0x1c;
 const op_local_get: u8 = 0x20;
 const op_i32_const: u8 = 0x41;
 const op_local_set: u8 = 0x21;
@@ -634,12 +638,61 @@ pub fn compile(
                 if (sp < 1) return null;
                 sp -= 1;
             },
-            op_select => {
-                // wasm `select`: [v1, v2, c] -> c != 0 ? v1 : v2.
+            op_select, op_select_t => {
+                // §4.2.4 select / typed select: [v1, v2, c] -> c != 0 ? v1 : v2.
+                // The typed form (0x1c) carries a result-type vector immediate;
+                // consume it. Spasm emits only the single-result shape (the one
+                // form valid wasm produces); a longer vector degrades.
+                if (op == op_select_t) {
+                    const n = readUleb32(body, &i) orelse return null;
+                    if (n != 1) return null;
+                    skipValType(body, &i) orelse return null;
+                }
                 if (sp < 3) return null;
                 const c = stack[sp - 1];
                 const v2 = stack[sp - 2];
                 const v1 = stack[sp - 3];
+
+                // §5.4.2 reference select: if either value is a reference (a
+                // runtime `.ref` slot or a compile-time `.ref_null`/`.ref_func`),
+                // the 128-bit width can't ride the GP operand bank. Normalize
+                // both values into their depth-keyed ref cells, then write the
+                // result cell (v1's, at depth sp-3) half-by-half: each 64-bit
+                // half is `(c != 0) ? v1 : v2` via CSEL. A constant condition is
+                // NOT folded here (v1/v2 are never i32 constants, so the scalar
+                // fold below never fires for refs) — the CSEL is always emitted,
+                // which is correct.
+                if (v1 == .ref or v1 == .ref_null or v1 == .ref_func or
+                    v2 == .ref or v2 == .ref_null or v2 == .ref_func)
+                {
+                    const d1 = sp - 3; // v1's home depth (= the result's depth)
+                    const d2 = sp - 2; // v2's home depth
+                    // Normalize both operands into their slots (a runtime `.ref`
+                    // is already there; a constant ref is materialized in). Uses
+                    // x16 + the body-constant x19; must precede the slot reads.
+                    try emitRefIntoSlot(&m, v1, d1, num_locals);
+                    try emitRefIntoSlot(&m, v2, d2, num_locals);
+                    const off1 = refSlotOff(num_locals, d1);
+                    const off2 = refSlotOff(num_locals, d2);
+                    // Materialize the condition into its home register (an x9..
+                    // reg the x16/x17 scratch below never touches), then test it.
+                    const rc = try materialize(&m, c, sp - 1);
+                    try m.emit(a64.cmpImm(rc, 0, false)); // sets Z iff c == 0
+                    // Low 64: v1 -> x16, v2 -> x17, pick v1 when c != 0 (.ne).
+                    try m.emit(a64.ldrImm(.x16, .x0, off1));
+                    try m.emit(a64.ldrImm(.x17, .x0, off2));
+                    try m.emit(a64.csel(.x16, .x16, .x17, .ne));
+                    try m.emit(a64.strImm(.x16, .x0, off1));
+                    // High 64: same selection over the upper halves.
+                    try m.emit(a64.ldrImm(.x16, .x0, off1 + 8));
+                    try m.emit(a64.ldrImm(.x17, .x0, off2 + 8));
+                    try m.emit(a64.csel(.x16, .x16, .x17, .ne));
+                    try m.emit(a64.strImm(.x16, .x0, off1 + 8));
+                    sp -= 2; // pop 3, push 1; the ref result lives in v1's slot
+                    stack[sp - 1] = .ref;
+                    continue;
+                }
+
                 sp -= 2; // pop 3, push 1; result slot is now sp-1
                 if (c == .const_i32 and v1 == .const_i32 and v2 == .const_i32) {
                     stack[sp - 1] = .{ .const_i32 = if (c.const_i32 != 0) v1.const_i32 else v2.const_i32 };
@@ -954,6 +1007,23 @@ pub fn compile(
                 if (sp >= operand_reg_count) return null;
                 if (idx >= func.local_types.len) return null;
                 const cell_off = @as(u64, idx) * @sizeOf(Cell);
+                if (func.local_types[idx].isRef()) {
+                    // §5.4.2 reference local. Its 128-bit value lives in its own
+                    // local cell off x0 (like a scalar local). Copy the whole cell
+                    // into the operand's depth-keyed ref slot and push a runtime
+                    // `.ref`. Both halves of the local cell must be in the scaled
+                    // ldrImm/strImm reach; the destination slot is covered by the
+                    // compile-time `refSlotOff` reach guard above.
+                    if (cell_off + 8 > 32760) return null; // both halves in reach
+                    const dst = refSlotOff(num_locals, sp);
+                    try m.emit(a64.ldrImm(.x16, .x0, @intCast(cell_off)));
+                    try m.emit(a64.strImm(.x16, .x0, dst));
+                    try m.emit(a64.ldrImm(.x16, .x0, @intCast(cell_off + 8)));
+                    try m.emit(a64.strImm(.x16, .x0, dst + 8));
+                    stack[sp] = .ref;
+                    sp += 1;
+                    continue;
+                }
                 switch (func.local_types[idx]) {
                     // 32-bit load zero-extends the i32 (or f32 bit pattern)
                     // from the cell's low word into the slot register.
@@ -967,7 +1037,7 @@ pub fn compile(
                         if (cell_off > 32760 or cell_off % 8 != 0) return null; // ldrImm ceiling
                         try m.emit(a64.ldrImm(regForDepth(sp), .x0, @intCast(cell_off)));
                     },
-                    else => return null, // f32/v128/ref locals — degrade
+                    else => return null, // v128 locals — degrade
                 }
                 stack[sp] = .{ .reg = regForDepth(sp) };
                 sp += 1;
@@ -977,8 +1047,20 @@ pub fn compile(
                 if (sp < 1) return null;
                 if (idx >= func.local_types.len) return null;
                 const lt = func.local_types[idx];
-                if (lt != .i32 and lt != .i64 and lt != .f64 and lt != .f32) return null; // i32/i64/f32/f64 locals
                 const cell_off = @as(u64, idx) * @sizeOf(Cell);
+                if (lt.isRef()) {
+                    // §5.4.2 reference local. Write the 128-bit ref operand at
+                    // depth sp-1 into the local's own cell: a runtime `.ref` is
+                    // copied from its depth slot; a compile-time `.ref_null` /
+                    // `.ref_func` is materialized directly. `tee` leaves the
+                    // operand (and, for a runtime `.ref`, its slot) untouched;
+                    // `set` pops it.
+                    if (cell_off + 8 > 32760) return null; // both halves in reach
+                    try emitRefIntoLocalCell(&m, stack[sp - 1], @intCast(cell_off), sp - 1, num_locals);
+                    if (op == op_local_set) sp -= 1;
+                    continue;
+                }
+                if (lt != .i32 and lt != .i64 and lt != .f64 and lt != .f32) return null; // i32/i64/f32/f64 locals
                 if (cell_off > 32760) return null; // strImm scaled-imm ceiling
                 // Materialize the top value (its slot register, or a
                 // scratch for a folded constant) and store its low 64
@@ -990,10 +1072,8 @@ pub fn compile(
                         try m.movImm64(.x16, @as(u32, @bitCast(v)));
                         break :blk .x16;
                     },
-                    // §5.4.2 — the scalar-local guard above rejects a ref
-                    // local, so a ref operand can't reach a scalar cell;
-                    // degrade rather than store a truncated reference (a
-                    // runtime `.ref`, or a static `.ref_null`/`.ref_func`).
+                    // A reference operand is handled by the isRef path above; a
+                    // ref reaching a scalar cell would be a validation violation.
                     .ref_null, .ref_func, .ref => return null,
                 };
                 try m.emit(a64.strImm(reg, .x0, @intCast(cell_off)));
@@ -3382,6 +3462,40 @@ fn emitRefIntoSlot(m: *masm_mod.Masm, loc: Loc, depth: usize, num_locals: usize)
     }
 }
 
+/// Write the 128-bit value of the reference operand `loc` (at stack depth
+/// `depth`) into a reference-typed LOCAL's own cell at byte offset `dst_off`
+/// off x0 (§5.4.2; local.set / local.tee). Distinct from `emitRefIntoSlot`,
+/// whose `.ref` case is a no-op because the destination IS the operand's home
+/// slot; here the destination is a different cell, so a runtime `.ref` is
+/// COPIED slot→cell (two 64-bit halves via x16). A compile-time `.ref_func f`
+/// / `.ref_null` is materialized directly (the same bit patterns as
+/// `emitRefIntoSlot`: funcref = function index in the low half, the
+/// body-constant instance x19 in the high half; `ref.null` = all-ones). Must
+/// run before x0 is clobbered (x0 is the locals base). Scratch: x16. A scalar
+/// Loc would be a validation violation; degrade defensively.
+fn emitRefIntoLocalCell(m: *masm_mod.Masm, loc: Loc, dst_off: u15, depth: usize, num_locals: usize) CompileError!void {
+    switch (loc) {
+        .ref => {
+            const src = refSlotOff(num_locals, depth);
+            try m.emit(a64.ldrImm(.x16, .x0, src));
+            try m.emit(a64.strImm(.x16, .x0, dst_off));
+            try m.emit(a64.ldrImm(.x16, .x0, src + 8));
+            try m.emit(a64.strImm(.x16, .x0, dst_off + 8));
+        },
+        .ref_func => |f| {
+            try m.movImm64(.x16, f);
+            try m.emit(a64.strImm(.x16, .x0, dst_off));
+            try m.emit(a64.strImm(.x19, .x0, dst_off + 8));
+        },
+        .ref_null => {
+            try m.movImm64(.x16, 0xFFFF_FFFF_FFFF_FFFF);
+            try m.emit(a64.strImm(.x16, .x0, dst_off));
+            try m.emit(a64.strImm(.x16, .x0, dst_off + 8));
+        },
+        .reg, .const_i32 => return error.UnsupportedOp,
+    }
+}
+
 /// Emit a memory access's effective-address computation and bounds check
 /// (§4.4.7): `x16 = addr_reg + offset`, then trap to `oob` when the
 /// `n`-byte access runs past `mem_len` (x3). The check is overflow-safe —
@@ -3491,6 +3605,11 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 depth -= 1;
             },
             op_else => {}, // stays within the enclosing `if`'s nesting
+            op_select_t => { // typed select: a result-type vector immediate
+                const n = readUleb32(body, i) orelse return null;
+                var k: u32 = 0;
+                while (k < n) : (k += 1) skipValType(body, i) orelse return null;
+            },
             op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_memory_grow, op_call, op_ref_func, op_table_get, op_table_set => {
                 _ = readUleb32(body, i) orelse return null;
             },
@@ -3608,6 +3727,20 @@ fn readMemArg(body: []const u8, i: *usize) ?u32 {
 
 /// Unsigned LEB128 (§5.2.2) — `local.get`'s index. Null on a malformed
 /// / over-long sequence (never aborts; AGENTS.md robustness contract).
+/// Skip a value type encoding (§5.3.1) in an instruction immediate (the
+/// typed-select result vector). A single byte for a scalar / vector /
+/// abstract-heap shorthand; the `(ref [null] ht)` long forms (0x63 / 0x64)
+/// are followed by an s33 heap type. Returns null on truncation so the
+/// function degrades rather than misread the next byte as an opcode.
+fn skipValType(body: []const u8, i: *usize) ?void {
+    if (i.* >= body.len) return null;
+    const b = body[i.*];
+    i.* += 1;
+    if (b == 0x63 or b == 0x64) {
+        _ = readSleb64(body, i) orelse return null; // heap type (s33)
+    }
+}
+
 fn readUleb32(body: []const u8, i: *usize) ?u32 {
     var result: u64 = 0;
     var shift: u6 = 0;

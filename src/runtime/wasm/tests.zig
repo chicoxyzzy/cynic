@@ -1559,6 +1559,291 @@ test "wasm spasm: table.set writes a funcref, then call_indirect dispatches thro
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: reference locals round-trip through local.get/set/tee, declared ref local defaults to null" {
+    // §5.4.2 — local.get / local.set / local.tee of a REFERENCE-typed local,
+    // and §4.4.10 the default value of a declared (non-parameter) reference
+    // local. A reference local lives in its own scalar-local cell (128 bits
+    // wide, the over-allocated locals buffer), addressed off x0 exactly like
+    // a numeric local; the ops copy the whole 128-bit value to/from the
+    // operand's depth-keyed cell. Functions exercised (one funcref table,
+    // table[0] = ref.func dummy via an active element segment so table.get
+    // yields a genuine RUNTIME funcref; the funcs are exported so ref.func
+    // validates per §3.4.1.3):
+    //   roundtrip(r): local.set the funcref param into a declared funcref
+    //       local, local.get it back, ref.is_null — so roundtrip(null) == 1
+    //       and roundtrip(non-null) == 0, the local faithfully carrying the
+    //       reference across set/get.
+    //   teetest(r):  local.tee the param into the declared local and drop the
+    //       left-on-stack copy, then local.get the local and ref.is_null —
+    //       proving tee WROTE the local (and left a value), so teetest(non-
+    //       null) == 0.
+    //   uninit():    a declared funcref local with no initializer, never
+    //       written, fed to ref.is_null — its default is ref.null (§4.4.10),
+    //       so uninit() == 1. This pins the declared-ref-local zero-vs-null
+    //       initialization: a zeroed (not all-ones) cell would wrongly read
+    //       as non-null and return 0.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (funcref)->(i32); type 1: ()->(i32); type 2: (i32)->(i32).
+    const tbody = [_]u8{
+        0x03,
+        0x60, 0x01, 0x70, 0x01, 0x7f, // (funcref)->(i32)
+        0x60, 0x00, 0x01, 0x7f, // ()->(i32)
+        0x60, 0x01, 0x7f, 0x01, 0x7f, // (i32)->(i32)
+    };
+    // func section: func0 dummy:t2, func1 roundtrip:t0, func2 teetest:t0,
+    // func3 uninit:t1.
+    const fbody = [_]u8{ 0x04, 0x02, 0x00, 0x00, 0x01 };
+    // table section: 1 table, funcref (0x70), min-only (0x00) min 2.
+    const tablebody = [_]u8{ 0x01, 0x70, 0x00, 0x02 };
+    // export dummy(0), roundtrip(1), teetest(2), uninit(3) — exporting puts
+    // dummy's index in the §3.4.1.3 reference set so ref.func 0 validates.
+    const xbody = [_]u8{
+        0x04,
+        0x05,
+        'd',
+        'u',
+        'm',
+        'm',
+        'y',
+        0x00,
+        0x00,
+        0x09,
+        'r',
+        'o',
+        'u',
+        'n',
+        'd',
+        't',
+        'r',
+        'i',
+        'p',
+        0x00,
+        0x01,
+        0x07,
+        't',
+        'e',
+        'e',
+        't',
+        'e',
+        's',
+        't',
+        0x00,
+        0x02,
+        0x06,
+        'u',
+        'n',
+        'i',
+        'n',
+        'i',
+        't',
+        0x00,
+        0x03,
+    };
+    // element section: 1 active segment, table 0, offset i32.const 0, funcs
+    // [0 (dummy)] — fills table[0], leaves table[1] null.
+    const ebody = [_]u8{ 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00 };
+    // code section: four bodies.
+    //   func0 dummy:     local.get 0; end                            (0 locals)
+    //   func1 roundtrip: local.get 0; local.set 1; local.get 1; ref.is_null; end
+    //   func2 teetest:   local.get 0; local.tee 1; drop; local.get 1; ref.is_null; end
+    //   func3 uninit:    local.get 0; ref.is_null; end               (1 funcref local)
+    const cbody = [_]u8{
+        0x04, // four code entries
+        0x04, 0x00, 0x20, 0x00, 0x0b, // dummy: 4 bytes, 0 locals
+        0x0b, 0x01, 0x01, 0x70, 0x20, 0x00, 0x21, 0x01, 0x20, 0x01, 0xd1, 0x0b, // roundtrip: 1 funcref local
+        0x0c, 0x01, 0x01, 0x70, 0x20, 0x00, 0x22, 0x01, 0x1a, 0x20, 0x01, 0xd1, 0x0b, // teetest: 1 funcref local
+        0x07, 0x01, 0x01, 0x70, 0x20, 0x00, 0xd1, 0x0b, // uninit: 1 funcref local
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tablebody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const REF_NULL: u128 = std.math.maxInt(u128);
+
+    // roundtrip: a null funcref arg round-trips to null (is_null 1); a
+    // non-null funcref arg (any value that is not REF_NULL) round-trips to
+    // non-null (is_null 0).
+    const rt_idx = funcExport(mp, "roundtrip") orelse return error.NoSuchExport;
+    {
+        const args = try a.alloc(u128, 1);
+        args[0] = REF_NULL;
+        const r = try interp.invoke(&instance, testing.allocator, rt_idx, args);
+        defer testing.allocator.free(r);
+        try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(r[0])));
+    }
+    {
+        const args = try a.alloc(u128, 1);
+        args[0] = 0; // a non-null reference value
+        const r = try interp.invoke(&instance, testing.allocator, rt_idx, args);
+        defer testing.allocator.free(r);
+        try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(r[0])));
+    }
+
+    // teetest: tee writes the local AND leaves a copy on the stack; reading
+    // the local back proves the write. A non-null arg yields is_null 0.
+    const tee_idx = funcExport(mp, "teetest") orelse return error.NoSuchExport;
+    {
+        const args = try a.alloc(u128, 1);
+        args[0] = 0; // non-null
+        const r = try interp.invoke(&instance, testing.allocator, tee_idx, args);
+        defer testing.allocator.free(r);
+        try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(r[0])));
+    }
+    {
+        const args = try a.alloc(u128, 1);
+        args[0] = REF_NULL; // null
+        const r = try interp.invoke(&instance, testing.allocator, tee_idx, args);
+        defer testing.allocator.free(r);
+        try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(r[0])));
+    }
+
+    // uninit: a declared funcref local with no initializer defaults to
+    // ref.null (§4.4.10), so ref.is_null == 1. A zeroed cell would read as a
+    // non-null reference and return 0 — this is the differential-visible
+    // initialization bug guard.
+    const uninit_idx = funcExport(mp, "uninit") orelse return error.NoSuchExport;
+    {
+        const r = try interp.invoke(&instance, testing.allocator, uninit_idx, &.{});
+        defer testing.allocator.free(r);
+        try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(r[0])));
+    }
+
+    // All four bodies ran Spasm-compiled (the ref-local ops emitted native
+    // code), not degraded to the interpreter.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: typed select picks a reference operand by the condition" {
+    // §4.2.4 typed select (`select t`, 0x1c) on REFERENCE operands. The
+    // untyped `select` (0x1b) is invalid for references in core wasm
+    // (§3.3.4 restricts it to numeric / vector operands), so only the typed
+    // form is exercised. Stack is [val1, val2, cond(i32)]; the result is val1
+    // when cond != 0 else val2, landing as a reference whose 128-bit value is
+    // chosen half-by-half. Both operand shapes Spasm must handle are covered
+    // (one funcref table, table[0] = ref.func dummy via an active element
+    // segment; the funcs are exported so ref.func validates per §3.4.1.3):
+    //   selt(cond):   constant ref operands — `ref.func dummy` (non-null) vs
+    //       `ref.null func`. cond != 0 -> is_null 0; cond == 0 -> is_null 1.
+    //   seltrt(cond): a RUNTIME `.ref` first operand (read with table.get) vs
+    //       `ref.null func`, proving the slot-copy path. cond != 0 ->
+    //       is_null(table[0]) 0; cond == 0 -> is_null(null) 1.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->(i32) — dummy + both selt funcs take the condition.
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    // func section: func0 dummy:t0, func1 selt:t0, func2 seltrt:t0.
+    const fbody = [_]u8{ 0x03, 0x00, 0x00, 0x00 };
+    // table section: 1 table, funcref (0x70), min-only (0x00) min 2.
+    const tablebody = [_]u8{ 0x01, 0x70, 0x00, 0x02 };
+    // export dummy(0) (so ref.func 0 validates), selt(1), seltrt(2).
+    const xbody = [_]u8{
+        0x03,
+        0x05,
+        'd',
+        'u',
+        'm',
+        'm',
+        'y',
+        0x00,
+        0x00,
+        0x04,
+        's',
+        'e',
+        'l',
+        't',
+        0x00,
+        0x01,
+        0x06,
+        's',
+        'e',
+        'l',
+        't',
+        'r',
+        't',
+        0x00,
+        0x02,
+    };
+    // element section: 1 active segment, table 0, offset i32.const 0, funcs
+    // [0 (dummy)] — fills table[0], leaves table[1] null.
+    const ebody = [_]u8{ 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00 };
+    // code section: three bodies.
+    //   func0 dummy:  local.get 0; end
+    //   func1 selt:   ref.func 0; ref.null func; local.get 0;
+    //                 select (result funcref); ref.is_null; end
+    //   func2 seltrt: i32.const 0; table.get 0; ref.null func; local.get 0;
+    //                 select (result funcref); ref.is_null; end
+    const cbody = [_]u8{
+        0x03, // three code entries
+        0x04, 0x00, 0x20, 0x00, 0x0b, // dummy: 4 bytes
+        0x0c, 0x00, 0xd2, 0x00, 0xd0, 0x70, 0x20, 0x00, 0x1c, 0x01, 0x70, 0xd1, 0x0b, // selt
+        0x0e, 0x00, 0x41, 0x00, 0x25, 0x00, 0xd0, 0x70, 0x20, 0x00, 0x1c, 0x01, 0x70, 0xd1, 0x0b, // seltrt
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tablebody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    inline for (.{ "selt", "seltrt" }) |name| {
+        const idx = funcExport(mp, name) orelse return error.NoSuchExport;
+        // cond != 0 -> the non-null reference -> is_null 0.
+        {
+            const args = try a.alloc(u128, 1);
+            args[0] = 1;
+            const r = try interp.invoke(&instance, testing.allocator, idx, args);
+            defer testing.allocator.free(r);
+            try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(r[0])));
+        }
+        // cond == 0 -> ref.null func (null) -> is_null 1.
+        {
+            const args = try a.alloc(u128, 1);
+            args[0] = 0;
+            const r = try interp.invoke(&instance, testing.allocator, idx, args);
+            defer testing.allocator.free(r);
+            try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(r[0])));
+        }
+    }
+
+    // selt/seltrt ran Spasm-compiled (the typed-select ref path emitted native
+    // code), not degraded to the interpreter.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 test "wasm spasm: table.set out of bounds raises a catchable trap" {
     // §4.4.x table.set traps OutOfBoundsTableAccess when the index is past the
     // table — the same the interpreter gives. "oob"() writes ref.func 0 at
