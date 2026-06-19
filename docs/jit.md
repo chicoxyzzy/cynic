@@ -1111,8 +1111,17 @@ useful:
    null element, or signature mismatch; a thread-local depth guard turns
    runaway native recursion into a catchable `CallStackExhausted`); and
    `memory.init` / `data.drop` (the passive-segment ops, via the same
-   helper-call shape) — so the whole bulk-memory family now compiles. Tables
-   and the reference/SIMD families are the remaining frontier, along with the
+   helper-call shape) — so the whole bulk-memory family now compiles. The
+   reference types open with `ref.null` / `ref.func` / `ref.is_null`: both ref
+   sources are compile-time-known (a `ref.null` is always `REF_NULL`; a
+   `ref.func`'s funcref is `makeFuncRef(x19, f)`, fixed by the immediate since
+   the instance is the body-constant x19), so two compile-time-constant `Loc`
+   variants carry them — like `.const_i32`, never spilled or mutated — and
+   `ref.is_null` folds to a constant `i32`; no 128-bit runtime operand
+   representation is needed yet (anything that would put a ref in a runtime
+   register — a ref result/param, a ref local, `table.get`, `select` of a ref —
+   degrades). The runtime ref representation (register pair or spill slot) plus
+   `table.*` and the SIMD family are the remaining frontier, along with the
    side-table-as-control-oracle wiring (§6) that would make multi-target
    `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data

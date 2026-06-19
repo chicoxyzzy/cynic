@@ -318,6 +318,13 @@ const op_i64_trunc_f32_s: u8 = 0xae;
 const op_i64_trunc_f32_u: u8 = 0xaf;
 const op_i64_trunc_f64_s: u8 = 0xb0;
 const op_i64_trunc_f64_u: u8 = 0xb1;
+// §5.4.2 reference instructions. `ref.null t` takes a heap type (an s33);
+// `ref.func f` takes a function index (a uleb32); `ref.is_null` takes no
+// immediate. The baseline compiles only the statically-foldable subset —
+// see the arms in `compile`.
+const op_ref_null: u8 = 0xd0;
+const op_ref_is_null: u8 = 0xd1;
+const op_ref_func: u8 = 0xd2;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -327,6 +334,19 @@ const op_i64_trunc_f64_u: u8 = 0xb1;
 const Loc = union(enum) {
     const_i32: i32,
     reg: a64.Reg,
+    /// §5.4.2 — a statically-known null reference (`ref.null t`), always
+    /// `interpreter.REF_NULL`. Like `const_i32`, it is recomputable and so
+    /// never spilled or mutated; it survives calls and control flow. The
+    /// only consumer this slice emits is `ref.is_null` (which folds it to
+    /// the constant 1); any op that would need the 128-bit value in a
+    /// runtime location degrades via `materialize`.
+    ref_null,
+    /// §5.4.2 — a statically-known function reference (`ref.func f`),
+    /// `makeFuncRef(instance, f)`. The instance is the body-constant x19,
+    /// so the funcref is fully determined by the immediate `f`, and it is
+    /// always non-null. Carries the function index. `ref.is_null` folds it
+    /// to the constant 0; any runtime-location consumer degrades.
+    ref_func: u32,
 };
 
 /// The native register caching the value at operand-stack depth `d`.
@@ -494,6 +514,47 @@ pub fn compile(
                 try m.emit(a64.csel(r1, r1, r2, .ne));
                 stack[sp - 1] = .{ .reg = r1 };
             },
+            op_ref_null => {
+                // §5.4.2 ref.null t — push the statically-known null
+                // reference. The heap-type immediate (an s33) selects the
+                // reference type but not the value: every `ref.null` is the
+                // same null. Consume it (degrade on a malformed LEB rather
+                // than misread the next byte as an opcode) and record a
+                // compile-time `.ref_null` Loc — no code is emitted until a
+                // consumer forces it (`ref.is_null` folds; everything else
+                // degrades).
+                _ = readSleb64(body, &i) orelse return null; // heap type (s33)
+                if (sp >= operand_reg_count) return null;
+                stack[sp] = .ref_null;
+                sp += 1;
+            },
+            op_ref_func => {
+                // §5.4.2 ref.func f — push a reference to the defined
+                // function `f`. The defining instance is the body-constant
+                // x19, so the funcref `makeFuncRef(instance, f)` is fully
+                // determined by `f` and is always non-null. Record a
+                // compile-time `.ref_func` Loc carrying the index; no code
+                // is emitted until a consumer forces it.
+                const fidx = readUleb32(body, &i) orelse return null;
+                if (sp >= operand_reg_count) return null;
+                stack[sp] = .{ .ref_func = fidx };
+                sp += 1;
+            },
+            op_ref_is_null => {
+                // §5.4.2 ref.is_null — 1 if the reference operand is null,
+                // else 0. Validation guarantees the operand is a reference
+                // type, and the only reference producers this slice tracks
+                // (`ref.null`, `ref.func`) carry their nullity statically,
+                // so this folds at compile time to an i32 constant with no
+                // runtime value. A non-reference Loc would be a validation
+                // violation; degrade defensively.
+                if (sp < 1) return null;
+                switch (stack[sp - 1]) {
+                    .ref_null => stack[sp - 1] = .{ .const_i32 = 1 },
+                    .ref_func => stack[sp - 1] = .{ .const_i32 = 0 },
+                    .reg, .const_i32 => return null,
+                }
+            },
             op_local_get => {
                 const idx = readUleb32(body, &i) orelse return null;
                 if (sp >= operand_reg_count) return null;
@@ -535,6 +596,10 @@ pub fn compile(
                         try m.movImm64(.x16, @as(u32, @bitCast(v)));
                         break :blk .x16;
                     },
+                    // §5.4.2 — the scalar-local guard above rejects a ref
+                    // local, so a ref operand can't reach a scalar cell;
+                    // degrade rather than store a truncated reference.
+                    .ref_null, .ref_func => return null,
                 };
                 try m.emit(a64.strImm(reg, .x0, @intCast(cell_off)));
                 if (op == op_local_set) sp -= 1;
@@ -572,6 +637,10 @@ pub fn compile(
                         try m.movImm64(.x17, @as(u32, @bitCast(v)));
                         break :blk .x17;
                     },
+                    // §5.4.2 — a ref-typed global has no emittable consumer
+                    // here; the scalar value path can't carry 128 bits, so
+                    // degrade rather than truncate a reference.
+                    .ref_null, .ref_func => return null,
                 };
                 try m.emit(a64.ldrImm(.x16, .x4, @intCast(idx * 8))); // *Global
                 try m.emit(a64.strImm(reg, .x16, 0)); // store .value
@@ -2283,6 +2352,11 @@ pub fn compile(
                 try m.emit(a64.strImm(.x16, .x1, cell_off));
             },
             .reg => |r| try m.emit(a64.strImm(r, .x1, cell_off)),
+            // §5.4.2 — a reference result would need its full 128 bits in
+            // the result cell. The result-type guard above already rejects
+            // a non-scalar result type, so a ref Loc cannot reach a scalar
+            // result slot; degrade defensively rather than truncate.
+            .ref_null, .ref_func => return null,
         }
         try m.emit(a64.strImm(.x17, .x1, cell_off + 8));
     }
@@ -2365,6 +2439,16 @@ fn materialize(m: *masm_mod.Masm, loc: Loc, depth: usize) CompileError!a64.Reg {
             try m.movImm64(reg, @as(u32, @bitCast(v)));
             return reg;
         },
+        // §5.4.2 — a reference is 128-bit; the 64-bit operand bank can't
+        // hold it. The general runtime reference representation is a later
+        // slice; until then, any op that reaches a reference operand into a
+        // runtime register (a ref result, a ref call param, a ref-typed
+        // block merge, `select`/`local`/`table` on a ref) degrades the whole
+        // function to the interpreter, which is always correct (the host is
+        // never aborted on a surprising shape — AGENTS.md robustness
+        // contract). `ref.is_null` folds these statically and never calls
+        // here.
+        .ref_null, .ref_func => return error.UnsupportedOp,
     }
 }
 
@@ -2477,7 +2561,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 depth -= 1;
             },
             op_else => {}, // stays within the enclosing `if`'s nesting
-            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_memory_grow, op_call => {
+            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_memory_grow, op_call, op_ref_func => {
                 _ = readUleb32(body, i) orelse return null;
             },
             op_call_indirect => { // type index + table index
@@ -2495,6 +2579,9 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readSleb32(body, i) orelse return null;
             },
             op_i64_const => {
+                _ = readSleb64(body, i) orelse return null;
+            },
+            op_ref_null => { // §5.4.2 — heap type, an s33
                 _ = readSleb64(body, i) orelse return null;
             },
             op_misc_prefix => {
@@ -2530,7 +2617,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 _ = readUleb32(body, i) orelse return null; // offset
             },
             // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_clz, op_i32_ctz, op_i64_clz, op_i64_ctz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_rotl, op_i32_rotr, op_i64_rotl, op_i64_rotr, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_i32_trunc_f32_s, op_i32_trunc_f32_u, op_i32_trunc_f64_s, op_i32_trunc_f64_u, op_i64_trunc_f32_s, op_i64_trunc_f32_u, op_i64_trunc_f64_s, op_i64_trunc_f64_u, op_f32_convert_i32_s, op_f32_convert_i32_u, op_f32_convert_i64_s, op_f32_convert_i64_u, op_f32_demote_f64, op_f64_convert_i32_s, op_f64_convert_i32_u, op_f64_convert_i64_s, op_f64_convert_i64_u, op_f64_promote_f32, op_i32_reinterpret_f32, op_i64_reinterpret_f64, op_f32_reinterpret_i32, op_f64_reinterpret_i64, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_min, op_f64_max, op_f64_copysign, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_min, op_f32_max, op_f32_copysign, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge, op_i32_extend8_s, op_i32_extend16_s, op_i64_extend8_s, op_i64_extend16_s, op_i64_extend32_s, op_i32_popcnt, op_i64_popcnt => {},
+            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_clz, op_i32_ctz, op_i64_clz, op_i64_ctz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_rotl, op_i32_rotr, op_i64_rotl, op_i64_rotr, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_i32_trunc_f32_s, op_i32_trunc_f32_u, op_i32_trunc_f64_s, op_i32_trunc_f64_u, op_i64_trunc_f32_s, op_i64_trunc_f32_u, op_i64_trunc_f64_s, op_i64_trunc_f64_u, op_f32_convert_i32_s, op_f32_convert_i32_u, op_f32_convert_i64_s, op_f32_convert_i64_u, op_f32_demote_f64, op_f64_convert_i32_s, op_f64_convert_i32_u, op_f64_convert_i64_s, op_f64_convert_i64_u, op_f64_promote_f32, op_i32_reinterpret_f32, op_i64_reinterpret_f64, op_f32_reinterpret_i32, op_f64_reinterpret_i64, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_min, op_f64_max, op_f64_copysign, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_min, op_f32_max, op_f32_copysign, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge, op_i32_extend8_s, op_i32_extend16_s, op_i64_extend8_s, op_i64_extend16_s, op_i64_extend32_s, op_i32_popcnt, op_i64_popcnt, op_ref_is_null => {},
             else => return null, // unknown immediate width — degrade
         }
     }

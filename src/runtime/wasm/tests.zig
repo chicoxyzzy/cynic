@@ -670,6 +670,72 @@ test "wasm spasm: call_indirect dispatches through a table, runs Spasm-compiled"
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: ref.is_null folds ref.null to 1 and ref.func to 0, runs Spasm-compiled" {
+    // §4.2.4 / §5.4.2 — the reference-type producers `ref.null t` and
+    // `ref.func f` are both compile-time-known: `ref.null` is always the
+    // null reference, and `ref.func f` names a defined function, so it is
+    // always non-null. `ref.is_null` (§4.2.4) therefore folds at compile
+    // time — its operand's nullity is statically known — to the i32 result
+    // 1 (for `ref.null`) or 0 (for `ref.func`), with no runtime 128-bit
+    // reference value materialized. Both functions return i32, so the body
+    // never has to place a reference into a runtime location; the slice
+    // stays inside the scalar operand bank.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: ()->(i32)
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    // func section: two funcs, both type 0
+    const fbody = [_]u8{ 0x02, 0x00, 0x00 };
+    // export both funcs — an export puts the index in §3.4.1.3's reference
+    // set, so `ref.func 0` below validates as a declared reference.
+    const xbody = [_]u8{
+        0x02,
+        0x0c, 'i', 's', '_', 'n', 'u', 'l', 'l', '_', 'n', 'u', 'l', 'l', 0x00, 0x00,
+        0x0c, 'i', 's', '_', 'n', 'u', 'l', 'l', '_', 'f', 'u', 'n', 'c', 0x00, 0x01,
+    };
+    // code section: two bodies.
+    //   func 0 (is_null_of_null): ref.null func; ref.is_null; end
+    //   func 1 (is_null_of_func): ref.func 0;     ref.is_null; end
+    const cbody = [_]u8{
+        0x02, // two code entries
+        0x05, 0x00, 0xd0, 0x70, 0xd1, 0x0b, // is_null_of_null: 5 bytes
+        0x05, 0x00, 0xd2, 0x00, 0xd1, 0x0b, // is_null_of_func: 5 bytes
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const null_idx = funcExport(mp, "is_null_null") orelse return error.NoSuchExport;
+    const func_idx = funcExport(mp, "is_null_func") orelse return error.NoSuchExport;
+
+    const r_null = try interp.invoke(&instance, testing.allocator, null_idx, &.{});
+    defer testing.allocator.free(r_null);
+    const r_func = try interp.invoke(&instance, testing.allocator, func_idx, &.{});
+    defer testing.allocator.free(r_func);
+
+    // ref.is_null(ref.null func) == 1; ref.is_null(ref.func $f) == 0.
+    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(r_null[0])));
+    try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(r_func[0])));
+    // Both ran Spasm-compiled (the fold emitted real native code), not degraded.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 test "wasm spasm: a self-recursive call traps CallStackExhausted, never crashes" {
     // Host-safety (AGENTS.md never-abort-the-host): a Spasm-compiled body
     // that recurses unboundedly nests `invoke` on the *native* stack via
