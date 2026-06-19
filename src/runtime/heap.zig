@@ -2867,6 +2867,27 @@ pub const Heap = struct {
         // on the next call site execution.
         self.weakClearCallICs();
 
+        // Conservative native-stack rooting backstop (Root source 3),
+        // run AFTER the precise weak pass above so it never perturbs
+        // WeakRef / WeakMap / WeakSet / FinalizationRegistry clearing
+        // (those read the precise `mark_color`; a conservatively-retained
+        // referent stays weak-cleared and merely survives one extra
+        // cycle). It must run BEFORE the young sweep below, which tenures
+        // — and frees every unmarked — young object, so a young heap
+        // pointer held only in a native local across a JS re-entry (a
+        // Promise capability / value-thunk in the §27.2.5.3 finally
+        // chain) survives. At `--gc-threshold=1` EVERY cycle is a full
+        // cycle, so this is the only backstop that runs under gc-stress;
+        // the minor cycle (`collectYoung`) carries an identical scan.
+        // Exact-pointer membership means it can only ADD a root, never
+        // trace garbage. Gated on `scan_native_stack`; `drainMarkWorklist`
+        // flushes any deferred marks the scan's `markValue` produced.
+        if (self.scan_native_stack) {
+            _ = self.buildYoungPtrSet();
+            @call(.never_inline, scanNativeStackForRoots, .{self});
+            self.drainMarkWorklist();
+        }
+
         // Snapshot pre-sweep counts for the diagnostic report.
         const pre_objs = self.objectCount();
         const pre_strs = self.stringCount();
