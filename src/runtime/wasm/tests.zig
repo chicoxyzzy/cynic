@@ -432,6 +432,141 @@ test "wasm spasm: i32.div_s compiles and runs Spasm-compiled" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: a direct call to a leaf function runs Spasm-compiled" {
+    // §4.4.1 / §5.4.1 — `call fidx` (the first non-leaf Spasm op). Two
+    // `(i32)->i32` functions: func 0 "main" calls func 1 (a leaf that
+    // squares its argument). Before the call arm shipped, "main" was
+    // non-emittable and degraded — the interpreter ran it and interpreted
+    // the callee inline, so `spasm_runs` stayed 0. With the call arm,
+    // "main" runs via Spasm and its helper re-enters `invoke`, which runs
+    // the leaf via Spasm too.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->(i32)
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    // func section: two funcs, both type 0
+    const fbody = [_]u8{ 0x02, 0x00, 0x00 };
+    // export "main" -> func 0
+    const xbody = [_]u8{ 0x01, 0x04, 'm', 'a', 'i', 'n', 0x00, 0x00 };
+    // code section: two bodies.
+    //   func 0 (main):   locals(0) local.get 0; call 1; end
+    //   func 1 (square): locals(0) local.get 0; local.get 0; i32.mul; end
+    const cbody = [_]u8{
+        0x02, // two code entries
+        0x06, 0x00, 0x20, 0x00, 0x10, 0x01, 0x0b, // main: 6 bytes
+        0x07, 0x00, 0x20, 0x00, 0x20, 0x00, 0x6c, 0x0b, // square: 7 bytes
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const fidx = funcExport(mp, "main") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 5);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // square(5) == 25, the same answer the interpreter gives...
+    try testing.expectEqual(@as(u32, 25), @as(u32, @truncate(res[0])));
+    // ...and "main" (which has a `call`) ran Spasm-compiled, not degraded.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: a self-recursive call traps CallStackExhausted, never crashes" {
+    // Host-safety (AGENTS.md never-abort-the-host): a Spasm-compiled body
+    // that recurses unboundedly nests `invoke` on the *native* stack via
+    // the call helper. Without the depth guard that is a SIGSEGV; the
+    // guard must turn pathological depth into a catchable trap instead.
+    // The function `f(n)` returns 0 at n==0 and otherwise calls f(n-1):
+    //   block (result i32)
+    //     local.get 0; i32.eqz; br_if 0 (drop-through pushes 0? no —)
+    //   ...
+    // Simpler shape: `local.get 0; if (result i32) ... else 0 end`. We
+    // hand-assemble: if n==0 return 0, else return f(n-1).
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->(i32)
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 }; // one func, type 0
+    const xbody = [_]u8{ 0x01, 0x03, 'r', 'e', 'c', 0x00, 0x00 }; // export "rec" -> 0
+    // f(n): if (n == 0) 0 else f(n - 1)
+    //   local.get 0            20 00
+    //   i32.eqz                45
+    //   if (result i32)        04 7f
+    //     i32.const 0          41 00
+    //   else                   05
+    //     local.get 0          20 00
+    //     i32.const 1          41 01
+    //     i32.sub              6b
+    //     call 0               10 00
+    //   end                    0b
+    //   end                    0b   (function body end)
+    const expr = [_]u8{
+        0x20, 0x00, 0x45, 0x04, 0x7f, 0x41, 0x00, 0x05,
+        0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x00, 0x0b,
+        0x0b,
+    };
+    var cb: List = .empty;
+    try cb.append(a, 0x01); // one code entry
+    try uleb(a, &cb, expr.len + 1); // body size: locals header (1) + expr
+    try cb.append(a, 0x00); // locals(0)
+    try cb.appendSlice(a, &expr);
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = cb.items },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "rec") orelse return error.NoSuchExport;
+
+    // Safe depth returns normally (the recursion bottoms out at n==0).
+    {
+        const cells = try a.alloc(u128, 1);
+        cells[0] = @as(u128, 8);
+        const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+        defer testing.allocator.free(res);
+        try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(res[0])));
+    }
+
+    // Pathological depth traps (a catchable error), it does not SIGSEGV.
+    {
+        const cells = try a.alloc(u128, 1);
+        cells[0] = @as(u128, 1_000_000); // far past the native-stack guard
+        try testing.expectError(error.CallStackExhausted, interp.invoke(&instance, testing.allocator, fidx, cells));
+    }
+}
+
 /// Run the Spasm-compiled "div" export of `div_s_body` with `(a, b)` and
 /// return whatever `invoke` returns — a result slice or a trap error.
 fn runSpasmDiv(a_alloc: std.mem.Allocator, arg_a: u32, arg_b: u32) ![]u128 {

@@ -32,6 +32,7 @@ const a64 = @import("../jit/asm_aarch64.zig");
 const CompiledFunc = @import("code.zig").CompiledFunc;
 const FuncType = @import("types.zig").FuncType;
 const ValType = @import("types.zig").ValType;
+const Module = @import("module.zig").Module;
 
 /// Whether this target can host Spasm. Bistromath's gate, verbatim:
 /// the substrate emits aarch64 today (docs/jit.md §8/§14 keep x86_64
@@ -63,7 +64,12 @@ pub const Cell = u128;
 /// the matching `TrapError` (so a Spasm trap is indistinguishable from
 /// an interpreter trap at the boundary). This is the mechanism every
 /// trapping op reuses — divide-by-zero and memory bounds today.
-pub const EntryFn = *const fn (locals: [*]Cell, results: [*]Cell, mem_base: [*]u8, mem_len: u64, globals: [*]const *anyopaque) callconv(.c) u32;
+///
+/// `instance` (x5 on entry) is the opaque `*Instance` the compiled body
+/// passes to the call helper when it emits a `call` (§5.4.1); a leaf body
+/// never touches it. It is the 6th argument so the boundary stays
+/// append-only across increments.
+pub const EntryFn = *const fn (locals: [*]Cell, results: [*]Cell, mem_base: [*]u8, mem_len: u64, globals: [*]const *anyopaque, instance: *anyopaque) callconv(.c) u32;
 
 /// Trap status codes returned in w0 (see `EntryFn`). Kept in lockstep
 /// with the `w0` immediates the epilogue's trap exits emit.
@@ -72,8 +78,24 @@ pub const trap_divide_by_zero: u32 = 1;
 pub const trap_int_overflow: u32 = 2;
 pub const trap_out_of_bounds: u32 = 3;
 pub const trap_invalid_conversion: u32 = 4;
+/// A nested `call` (§5.4.1) trapped: the call helper stored the concrete
+/// `Error` (any of the 17 `TrapError` variants, or `OutOfMemory`) on the
+/// instance and returned this status so `spasmRun` re-raises it without
+/// the channel having to enumerate each variant.
+pub const trap_pending: u32 = 5;
 
 pub const CompileError = error{ OutOfMemory, UnsupportedOp };
+
+/// The native call helper a compiled `call` (§5.4.1) branches to:
+/// `(instance, func_index, buf) -> status`. It marshals the args staged
+/// in `buf` into a nested `invoke` and writes the results back over
+/// `buf`, returning `trap_ok` or `trap_pending` (the concrete error is
+/// stashed on the instance — see `EntryFn`). The interpreter owns the
+/// body (it re-enters `invoke`); spasm.zig only emits the `blr` to it, so
+/// the address is injected here at startup to keep the module dependency
+/// one-directional (interpreter imports spasm, never the reverse).
+pub const CallHelperFn = *const fn (instance: *anyopaque, func_index: u32, buf: [*]Cell) callconv(.c) u32;
+pub var call_helper: ?CallHelperFn = null;
 
 // ── wasm opcodes this increment understands ─────────────────────────
 const op_end: u8 = 0x0b;
@@ -86,6 +108,7 @@ const op_br: u8 = 0x0c;
 const op_br_if: u8 = 0x0d;
 const op_br_table: u8 = 0x0e;
 const op_return: u8 = 0x0f;
+const op_call: u8 = 0x10;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
 const op_local_get: u8 = 0x20;
@@ -320,15 +343,28 @@ pub fn compile(
     ca: *code_alloc.CodeAllocator,
     func: *const CompiledFunc,
     ftype: *const FuncType,
+    module: *const Module,
 ) CompileError!?EntryFn {
     if (comptime !supported) return null;
     // The operand-stack bank is fixed (regForDepth); a deeper body
-    // tiers down. Leaf arithmetic functions touch only caller-saved
-    // scratch, so no prologue/epilogue is needed.
+    // tiers down.
     if (func.max_stack > operand_reg_count) return null;
 
     var m = masm_mod.Masm.init(gpa);
     defer m.deinit();
+
+    // Non-leaf prologue (§5.4.1 — Spasm now emits `call`). A compiled body
+    // may `blr` the call helper, which clobbers the link register x30, so
+    // save it; and x5 carries the `*Instance` argument the helper needs,
+    // which a `blr` also clobbers, so move it into the callee-saved x19
+    // and keep it live for the body's duration. The pair push keeps SP
+    // 16-byte aligned (AAPCS64). Every return path — the normal epilogue
+    // and each trap exit — pops this frame before `ret`. Gating the
+    // prologue on whether the body actually contains a `call` is a
+    // follow-up optimization; emitting it always is correct (a leaf body
+    // just pushes/pops a pair it never reads).
+    try m.emit(a64.stpPreIdxSp(.x19, .lr, -16));
+    try m.emit(a64.movReg(.x19, .x5));
 
     // The abstract operand stack (§6) — Locs are emitted into their
     // depth's register on demand. The boundary args: x0 = locals
@@ -358,10 +394,17 @@ pub fn compile(
     var trap_overflow: masm_mod.Masm.Label = .{};
     var trap_oob: masm_mod.Masm.Label = .{};
     var trap_invalid: masm_mod.Masm.Label = .{};
+    // §5.4.1 — the shared epilogue every return path jumps to. It pops
+    // the non-leaf frame (the prologue's `stp`) and `ret`s, returning w0
+    // unchanged. A trapping `call` lands here too — after the call arm
+    // has released its own buffer reservation — with w0 holding the
+    // helper's status.
+    var epilogue: masm_mod.Masm.Label = .{};
     defer trap_div0.deinit(gpa);
     defer trap_overflow.deinit(gpa);
     defer trap_oob.deinit(gpa);
     defer trap_invalid.deinit(gpa);
+    defer epilogue.deinit(gpa);
     var trap_div0_used = false;
     var trap_overflow_used = false;
     var trap_oob_used = false;
@@ -1618,6 +1661,122 @@ pub fn compile(
                 }
                 ctrl_len -= 1;
             },
+            op_call => {
+                // §5.4.1 call — the first non-leaf Spasm op. Read the
+                // callee index and its signature, marshal the top
+                // `nparams` operand-stack values into a per-frame buffer,
+                // `blr` the native call helper (which re-enters `invoke`),
+                // then load the `nresults` result cells back onto the
+                // operand stack. A non-zero status from the helper (a
+                // nested trap) is propagated through the shared epilogue.
+                if (call_helper == null) return null; // helper not wired
+                const fidx = readUleb32(body, &i) orelse return null;
+                const callee = calleeFuncType(module, fidx) orelse return null;
+                const nparams: usize = callee.params.len;
+                const nresults: usize = callee.results.len;
+                // Increment 1: only scalar params/results travel through
+                // the cell buffer (the low 64 bits carry the value; an i32
+                // is zero-extended). A v128/ref operand degrades.
+                for (callee.params) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
+                for (callee.results) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
+                // The args must be the only live operand values: the
+                // helper's callconv(.c) clobbers the whole operand bank
+                // (x9..x15) and the boundary scratch, so nothing below the
+                // args can survive the call (it would have to be spilled).
+                // `sp == nparams` is exactly "args occupy the whole stack".
+                // A deeper stack (a call whose result feeds a pending
+                // operand) degrades to the interpreter for now.
+                if (sp != nparams) return null;
+                if (nresults > operand_reg_count) return null;
+
+                // Per-frame buffer: `bufcells` 16-byte cells for the
+                // args-in / results-out region, then a 40-byte spill for
+                // the five caller-saved boundary registers x0..x4 (locals,
+                // results, mem_base, mem_len, globals) — the helper's
+                // callconv(.c) body would otherwise destroy them. Round the
+                // whole reservation up to a 16-byte multiple (AAPCS64 SP
+                // alignment): `bufcells*16` is already aligned, so the
+                // 40-byte spill rounds to 48.
+                const bufcells = @max(nparams, nresults);
+                const spill_off: u15 = @intCast(bufcells * @sizeOf(Cell));
+                const framebytes: u12 = @intCast(bufcells * @sizeOf(Cell) + 48);
+
+                // Materialize the args into their slot registers first
+                // (while x16/x17 are free), before any boundary-register
+                // shuffle below clobbers the scratch.
+                var ai: usize = 0;
+                while (ai < nparams) : (ai += 1) {
+                    _ = try materialize(&m, stack[ai], ai);
+                }
+
+                // Reserve the frame and take its base in x6 (a free
+                // scratch, not an operand register). The args in x9.. are
+                // untouched by the SP move.
+                try m.emit(a64.subSpImm(framebytes));
+                try m.emit(a64.addRegSp(.x6, 0));
+
+                // Spill every caller-saved boundary register the helper's
+                // callconv(.c) body may clobber: x0 locals, x1 results,
+                // x2 mem_base, x3 mem_len, x4 globals. (x5/x6 scratch and
+                // the operand bank x9.. are already dead here — sp==nparams
+                // means the args were the whole stack, now staged as cells.)
+                try m.emit(a64.strImm(.x0, .x6, spill_off));
+                try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+                try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+                try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+
+                // Stage each arg as a full cell: low 64 = the value
+                // (an i32 is zero-extended in its register), high 64 = 0.
+                var k: usize = 0;
+                while (k < nparams) : (k += 1) {
+                    const cell_off: u15 = @intCast(k * @sizeOf(Cell));
+                    try m.emit(a64.strImm(regForDepth(k), .x6, cell_off));
+                    try m.emit(a64.strZeroImm(.x6, cell_off + 8));
+                }
+
+                // Helper ABI: x0 = instance (callee-saved x19), x1 = func
+                // index, x2 = buffer pointer. Setting x2 destroys mem_base,
+                // but it is already spilled (and reloaded after the call).
+                try m.emit(a64.movReg(.x0, .x19));
+                try m.movImm64(.x1, fidx);
+                try m.emit(a64.movReg(.x2, .x6));
+                try m.callAbs(.x16, @intFromPtr(call_helper.?));
+
+                // The helper returns the trap status in w0. On a nested
+                // trap, release this frame's reservation and fall into the
+                // shared epilogue (which pops the prologue frame and
+                // returns w0 unchanged).
+                var call_ok: masm_mod.Masm.Label = .{};
+                defer call_ok.deinit(gpa);
+                try m.jumpCbz(.x0, &call_ok); // status == 0 -> success
+                try m.emit(a64.addSpImm(framebytes)); // release buffer
+                try m.jump(&epilogue); // propagate w0 (the status)
+                m.bind(&call_ok);
+
+                // Success. x6 is caller-saved, so the helper may have
+                // clobbered it — but AAPCS64 guarantees SP is callee-
+                // restored, and nothing moved SP between reserving the
+                // frame and the `blr`, so SP again equals the buffer base.
+                // Recompute x6 from SP before any reload.
+                try m.emit(a64.addRegSp(.x6, 0));
+                // Reload the results into the operand bank (low 64 bits per
+                // cell), then restore the spilled boundary registers, then
+                // release the frame.
+                var r: usize = 0;
+                while (r < nresults) : (r += 1) {
+                    const cell_off: u15 = @intCast(r * @sizeOf(Cell));
+                    try m.emit(a64.ldrImm(regForDepth(r), .x6, cell_off));
+                    stack[r] = .{ .reg = regForDepth(r) };
+                }
+                try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+                try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+                try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                try m.emit(a64.addSpImm(framebytes));
+                sp = nresults;
+            },
             op_end => {
                 // An `end` with no open frame terminates the function
                 // body; otherwise it closes the innermost block.
@@ -1680,36 +1839,70 @@ pub fn compile(
         try m.emit(a64.strImm(.x17, .x1, cell_off + 8));
     }
     // Normal return: w0 = trap_ok; results are already written to x1.
-    // x0 (the now-dead locals pointer) carries the status back.
+    // x0 (the now-dead locals pointer) carries the status back. Fall
+    // through into the shared epilogue, which restores the frame and
+    // returns.
     try m.movImm64(.x0, trap_ok);
+
+    // The shared epilogue: every return path lands here with w0 set, so
+    // the frame teardown (the non-leaf prologue's pop) is emitted once.
+    // The normal return falls in; each trap exit jumps in after loading
+    // its status. Pop x19 + the link register, then `ret`.
+    m.bind(&epilogue);
+    try m.emit(a64.ldpPostIdxSp(.x19, .lr, 16));
     try m.emit(a64.ret());
 
-    // Out-of-line trap exits, bound only if a div/rem op forward-branched
-    // to them: load the TrapCode into w0 and return without writing any
-    // result (the caller raises the matching TrapError and ignores x1).
+    // Out-of-line trap exits, bound only if some op forward-branched to
+    // them: load the TrapCode into w0 and jump to the shared epilogue
+    // (which restores the frame), writing no result (the caller raises
+    // the matching TrapError and ignores x1).
     if (trap_div0_used) {
         m.bind(&trap_div0);
         try m.movImm64(.x0, trap_divide_by_zero);
-        try m.emit(a64.ret());
+        try m.jump(&epilogue);
     }
     if (trap_overflow_used) {
         m.bind(&trap_overflow);
         try m.movImm64(.x0, trap_int_overflow);
-        try m.emit(a64.ret());
+        try m.jump(&epilogue);
     }
     if (trap_oob_used) {
         m.bind(&trap_oob);
         try m.movImm64(.x0, trap_out_of_bounds);
-        try m.emit(a64.ret());
+        try m.jump(&epilogue);
     }
     if (trap_invalid_used) {
         m.bind(&trap_invalid);
         try m.movImm64(.x0, trap_invalid_conversion);
-        try m.emit(a64.ret());
+        try m.jump(&epilogue);
     }
 
     const installed = m.install(ca) catch return null;
     return code_alloc.asFn(EntryFn, installed);
+}
+
+/// Resolve `call fidx` (§5.4.1) to the callee's `FuncType` by walking the
+/// function index space: imported functions first (their type index is
+/// the import's `desc.func`), then the module's own defined functions
+/// (`module.funcs[local]` is the type index). Returns null on an
+/// out-of-range index — the function then degrades to the interpreter
+/// rather than misread, which is always correct.
+fn calleeFuncType(module: *const Module, fidx: u32) ?*const FuncType {
+    var seen: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc != .func) continue;
+        if (seen == fidx) {
+            const ti = imp.desc.func;
+            if (ti >= module.types.len) return null;
+            return &module.types[ti];
+        }
+        seen += 1;
+    }
+    const local = fidx - seen;
+    if (local >= module.funcs.len) return null;
+    const ti = module.funcs[local];
+    if (ti >= module.types.len) return null;
+    return &module.types[ti];
 }
 
 /// Place `loc`'s value into the register for stack `depth`, emitting a
@@ -1836,7 +2029,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 depth -= 1;
             },
             op_else => {}, // stays within the enclosing `if`'s nesting
-            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size => {
+            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_call => {
                 _ = readUleb32(body, i) orelse return null;
             },
             op_br_table => {
@@ -2017,6 +2210,22 @@ fn readF32Bits(body: []const u8, i: *usize) ?u64 {
 
 const testing = std.testing;
 
+/// Compile `func` against a throwaway single-type module — the unit tests
+/// here build a `CompiledFunc`/`FuncType` directly and never emit a
+/// `call`, so `compile` only dereferences the module inside the (unused)
+/// call arm; a one-type module satisfies its pointer parameter. The
+/// module borrows `ftype`, so the caller must keep it alive across the
+/// call (every site does — it is a local that outlives `compile`).
+fn compileT(
+    ca: *code_alloc.CodeAllocator,
+    func: *const CompiledFunc,
+    ftype: *const FuncType,
+) CompileError!?EntryFn {
+    const types_arr = [_]FuncType{ftype.*};
+    const module: Module = .{ .types = &types_arr, .funcs = &.{0} };
+    return compile(testing.allocator, ca, func, ftype, &module);
+}
+
 test "spasm: a const-return function compiles and returns its constant" {
     if (comptime !supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
@@ -2035,12 +2244,12 @@ test "spasm: a const-return function compiles and returns its constant" {
     };
     const ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
 
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse
+    const entry = (try compileT(&ca, &func, &ftype)) orelse
         return error.SpasmRefusedTrivialFunction;
 
     var results: [1]Cell = .{0};
     var locals: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -2061,11 +2270,11 @@ test "spasm: a negative constant sign-extends through the LEB path" {
     };
     const ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
 
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse
+    const entry = (try compileT(&ca, &func, &ftype)) orelse
         return error.SpasmRefusedTrivialFunction;
     var results: [1]Cell = .{0};
     var locals: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
     try testing.expectEqual(@as(i32, -7), @as(i32, @bitCast(@as(u32, @truncate(results[0])))));
 }
 
@@ -2077,10 +2286,10 @@ test "spasm: i32 add of two params compiles and computes" {
     const body = [_]u8{ 0x20, 0x00, 0x20, 0x01, 0x6a, op_end };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = &.{}, .max_stack = 2 };
     const ftype: FuncType = .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [2]Cell = .{ 7, 35 };
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -2093,20 +2302,20 @@ test "spasm: i32 sub and mul of params compute" {
     {
         const body = [_]u8{ 0x20, 0x00, 0x20, 0x01, 0x6b, op_end };
         const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = &.{}, .max_stack = 2 };
-        const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+        const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 50, 8 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
     }
     // mul: 6 * 7 = 42 (and the low-32 truncation is clean)
     {
         const body = [_]u8{ 0x20, 0x00, 0x20, 0x01, 0x6c, op_end };
         const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = &.{}, .max_stack = 2 };
-        const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+        const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 6, 7 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
     }
 }
@@ -2119,10 +2328,10 @@ test "spasm: i32 arithmetic folds two constants at compile time" {
     const body = [_]u8{ op_i32_const, 40, op_i32_const, 2, 0x6a, op_end };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{}, .body = &body, .side_table = &.{}, .max_stack = 2 };
     const ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -2135,10 +2344,10 @@ test "spasm: i32 bitwise and/or/xor compute and fold" {
     {
         const body = [_]u8{ 0x20, 0x00, 0x20, 0x01, 0x71, op_end };
         const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = &.{}, .max_stack = 2 };
-        const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+        const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 0b1110, 0b1011 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, 0b1010), @as(u32, @truncate(results[0])));
     }
     // or | xor folded: (5 | 2) ^ 3 = 7 ^ 3 = 4, all constant
@@ -2146,10 +2355,10 @@ test "spasm: i32 bitwise and/or/xor compute and fold" {
         const body = [_]u8{ op_i32_const, 5, op_i32_const, 2, 0x72, op_i32_const, 3, 0x73, op_end };
         const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{}, .body = &body, .side_table = &.{}, .max_stack = 2 };
         const fty: FuncType = .{ .params = &.{}, .results = &.{.i32} };
-        const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
+        const entry = (try compileT(&ca, &func, &fty)) orelse return error.SpasmRefused;
         var locals: [1]Cell = .{0};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, 4), @as(u32, @truncate(results[0])));
     }
 }
@@ -2162,10 +2371,10 @@ test "spasm: local.set writes a local that local.get reads back" {
     const body = [_]u8{ op_i32_const, 5, 0x21, 0x00, 0x20, 0x00, op_end };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = &.{}, .max_stack = 1 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{99}; // overwritten by local.set
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 5), @as(u32, @truncate(results[0])));
 }
 
@@ -2177,10 +2386,10 @@ test "spasm: local.tee stores and leaves the value on the stack" {
     const body = [_]u8{ op_i32_const, 7, 0x22, 0x00, 0x20, 0x00, 0x6a, op_end };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = &.{}, .max_stack = 2 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{99};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 14), @as(u32, @truncate(results[0])));
 }
 
@@ -2202,10 +2411,10 @@ test "spasm: i32 comparisons distinguish signed from unsigned" {
     for (cases) |c| {
         const body = [_]u8{ 0x20, 0x00, 0x20, 0x01, c.op, op_end };
         const func: CompiledFunc = .{ .type_index = 0, .local_types = local2, .body = &body, .side_table = &.{}, .max_stack = 2 };
-        const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+        const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ @as(u32, @bitCast(c.a)), @as(u32, @bitCast(c.b)) };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(c.want, @as(u32, @truncate(results[0])));
     }
 }
@@ -2218,20 +2427,20 @@ test "spasm: i32.eqz computes and folds" {
     inline for (.{ .{ 0, 1 }, .{ 5, 0 } }) |pair| {
         const body = [_]u8{ 0x20, 0x00, 0x45, op_end };
         const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = &.{}, .max_stack = 1 };
-        const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+        const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
     // folded: i32.const 0; i32.eqz -> 1
     const body = [_]u8{ op_i32_const, 0, 0x45, op_end };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{}, .body = &body, .side_table = &.{}, .max_stack = 1 };
     const fty: FuncType = .{ .params = &.{}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &fty)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(results[0])));
 }
 
@@ -2250,20 +2459,20 @@ test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
     for (cases) |c| {
         const body = [_]u8{ 0x20, 0x00, 0x20, 0x01, c.op, op_end };
         const func: CompiledFunc = .{ .type_index = 0, .local_types = local2, .body = &body, .side_table = &.{}, .max_stack = 2 };
-        const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+        const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ @as(u32, @bitCast(c.a)), @as(u32, @bitCast(c.b)) };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(c.want, @as(u32, @truncate(results[0])));
     }
     // folded: i32.const 3; i32.const 2; i32.shl -> 12
     const body = [_]u8{ op_i32_const, 3, op_i32_const, 2, 0x74, op_end };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{}, .body = &body, .side_table = &.{}, .max_stack = 2 };
     const fty: FuncType = .{ .params = &.{}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &fty)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &fty)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 12), @as(u32, @truncate(results[0])));
 }
 
@@ -2278,11 +2487,11 @@ test "spasm: select picks an operand by the condition (branchless)" {
     const local3: []const ValType = &.{ .i32, .i32, .i32 };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = local3, .body = &body, .side_table = &.{}, .max_stack = 3 };
     const ftype: FuncType = .{ .params = local3, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [3]Cell = .{ 10, 20, pair[0] };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2297,10 +2506,10 @@ test "spasm: drop pops a value; nop is a no-op" {
     const local2: []const ValType = &.{ .i32, .i32 };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = local2, .body = &body, .side_table = &.{}, .max_stack = 2 };
     const ftype: FuncType = .{ .params = local2, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [2]Cell = .{ 42, 99 };
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -2330,11 +2539,11 @@ test "spasm: block with br_if picks a result by condition (forward branch)" {
     };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = side, .max_stack = 2 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2363,11 +2572,11 @@ test "spasm: empty block with br_if as an early break (arity 0)" {
     };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 1 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 1, 42 }, .{ 0, 99 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2399,11 +2608,11 @@ test "spasm: nested block, br_if 1 exits two levels carrying a result" {
     };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = side, .max_stack = 2 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2432,11 +2641,11 @@ test "spasm: loop with backward br_if accumulates (do-while)" {
     };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 2 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 1, 1 }, .{ 3, 6 }, .{ 5, 15 }, .{ 10, 55 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2465,11 +2674,11 @@ test "spasm: loop (result i32) iterates then yields its result" {
     };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 2 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 4, 10 }, .{ 6, 21 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2504,11 +2713,11 @@ test "spasm: while loop — br as continue, br_if as break" {
     };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 2 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 0, 0 }, .{ 1, 1 }, .{ 5, 15 }, .{ 6, 21 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2536,10 +2745,10 @@ test "spasm: br exits a block forward; dead code (nested block) is skipped" {
     };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{}, .body = &body, .side_table = side, .max_stack = 1 };
     const ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -2566,11 +2775,11 @@ test "spasm: if/else picks a result arm by the condition" {
     };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{.i32}, .body = &body, .side_table = side, .max_stack = 1 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2597,11 +2806,11 @@ test "spasm: if without else conditionally overwrites a local" {
     };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 1 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 1, 9 }, .{ 0, 5 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2636,11 +2845,11 @@ test "spasm: br_table dispatches by index to distinct block ends" {
     };
     const func: CompiledFunc = .{ .type_index = 0, .local_types = &.{ .i32, .i32 }, .body = &body, .side_table = side, .max_stack = 1 };
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
-    const entry = (try compile(testing.allocator, &ca, &func, &ftype)) orelse return error.SpasmRefused;
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     inline for (.{ .{ 0, 10 }, .{ 1, 7 }, .{ 3, 7 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -2650,10 +2859,11 @@ test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
 
-    // `call` (0x10) is far outside the baseline's current set —
+    // `memory.grow` (0x40) is outside the baseline's current set —
     // Spasm must refuse the whole function, not abort. The
-    // interpreter runs it.
-    const body = [_]u8{ 0x10, 0x00, op_end };
+    // interpreter runs it. (`call` is now emittable, so this guard
+    // uses an op that still degrades.)
+    const body = [_]u8{ 0x40, 0x00, op_end };
     const func: CompiledFunc = .{
         .type_index = 0,
         .local_types = &.{},
@@ -2662,5 +2872,5 @@ test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
         .max_stack = 1,
     };
     const ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
-    try testing.expectEqual(@as(?EntryFn, null), try compile(testing.allocator, &ca, &func, &ftype));
+    try testing.expectEqual(@as(?EntryFn, null), try compileT(&ca, &func, &ftype));
 }

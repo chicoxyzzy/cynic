@@ -327,6 +327,13 @@ pub const Instance = struct {
     /// Spasm-enabled invoke. Owns the executable memory the compiled
     /// `EntryFn`s point into, so it lives for the instance's lifetime.
     spasm_cache: ?SpasmCache = null,
+    /// The concrete error a nested `call` from Spasm-compiled code raised
+    /// (§5.4.1). The call helper stashes it here and returns
+    /// `spasm.trap_pending`; `spasmRun` re-raises it. This carries any of
+    /// the 17 `TrapError` variants (or `OutOfMemory`) across the C-ABI
+    /// trap channel without the channel enumerating each one. Only valid
+    /// immediately after a `trap_pending` status; never read otherwise.
+    spasm_call_trap: ?Error = null,
 
     /// Allocate an `ExnRecord` in this instance's pool — used by the JS
     /// boundary to reify a thrown JS value for a `try_table` to catch.
@@ -397,7 +404,7 @@ pub const Instance = struct {
             .failed => return null,
             .untried => {
                 const ftype = &self.module.types[func.type_index];
-                if (spasm.compile(self.gpa, &cache.ca, func, ftype) catch null) |e| {
+                if (spasm.compile(self.gpa, &cache.ca, func, ftype, self.module) catch null) |e| {
                     cache.slots[idx] = .{ .compiled = e };
                     self.spasm_compiles += 1;
                     return e;
@@ -1242,6 +1249,83 @@ pub fn invoke(
     return out;
 }
 
+/// Native-stack recursion depth of Spasm-compiled `call`s (§5.4.1). Each
+/// `spasmCall` re-enters `invoke`, which for a Spasm-compiled callee adds
+/// a native frame (the compiled body + this helper) — so an unbounded
+/// self-recursive wasm function would otherwise overflow the *native*
+/// stack and SIGSEGV. The guard turns pathological depth into a catchable
+/// `CallStackExhausted` trap (AGENTS.md never-abort-the-host). The cap is
+/// well under the native stack budget for the helper+body frames; the
+/// interpreter has its own deeper `MAX_FRAMES` cap, but a Spasm callee
+/// nests real C frames, which are far costlier. Thread-local so concurrent
+/// instances on different threads don't share a counter.
+threadlocal var spasm_call_depth: u32 = 0;
+const spasm_call_depth_cap: u32 = 512;
+
+/// The native call helper a Spasm-compiled `call` (§5.4.1) branches to.
+/// `buf` holds the marshalled argument cells on entry (the compiled body
+/// staged the top `nparams` operand-stack values there); on success the
+/// `nresults` result cells are written back over `buf`. Returns
+/// `spasm.trap_ok` on success or `spasm.trap_pending` on any trap — the
+/// concrete error is stashed on the instance, which `spasmRun` re-raises.
+/// Never returns a Zig error (it is `callconv(.c)`): every failure path
+/// becomes a stashed error + `trap_pending`.
+fn spasmCall(instance_opaque: *anyopaque, func_index: u32, buf: [*]u128) callconv(.c) u32 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+
+    // Native-stack recursion guard (host-safety): refuse before the
+    // nested `invoke` can overflow the C stack.
+    if (spasm_call_depth >= spasm_call_depth_cap) {
+        inst.spasm_call_trap = error.CallStackExhausted;
+        return spasm.trap_pending;
+    }
+    spasm_call_depth += 1;
+    defer spasm_call_depth -= 1;
+
+    const ref = inst.resolveFunc(func_index) orelse {
+        inst.spasm_call_trap = error.UnsupportedImportCall;
+        return spasm.trap_pending;
+    };
+    switch (ref) {
+        .wasm => |w| {
+            // The callee's arity comes from its *defining* instance's
+            // module (a cross-module re-export defines the type there).
+            const cftype = &w.instance.module.types[w.func.type_index];
+            const nparams = cftype.params.len;
+            const nresults = cftype.results.len;
+            // Run the callee to completion (Spasm-compiled if emittable,
+            // interpreted otherwise — `invoke` decides). It returns a
+            // freshly-allocated results slice owned by us.
+            const out = invoke(inst, inst.gpa, func_index, buf[0..nparams]) catch |e| {
+                inst.spasm_call_trap = e;
+                return spasm.trap_pending;
+            };
+            defer inst.gpa.free(out);
+            // Write results back over the buffer (args are dead now).
+            var k: usize = 0;
+            while (k < nresults) : (k += 1) buf[k] = out[k];
+            return spasm.trap_ok;
+        },
+        .host => |h| {
+            // A host import: call it directly. Args and results must not
+            // overlap (the interpreter's `callHost` keeps them separate),
+            // so the results land in a local buffer first, then copy back.
+            var resbuf: [16]u128 = undefined;
+            if (h.params > 16 or h.results > 16) {
+                inst.spasm_call_trap = error.UnsupportedImportCall;
+                return spasm.trap_pending;
+            }
+            h.fn_ptr(h.ctx, buf[0..h.params], resbuf[0..h.results]) catch |e| {
+                inst.spasm_call_trap = e;
+                return spasm.trap_pending;
+            };
+            var k: usize = 0;
+            while (k < h.results) : (k += 1) buf[k] = resbuf[k];
+            return spasm.trap_ok;
+        },
+    }
+}
+
 /// Try to run `func` via Spasm-compiled native code (docs/jit.md §6),
 /// returning the result cells on success or null when the body is
 /// outside Spasm's emittable class (the caller then interprets). The v1
@@ -1260,6 +1344,17 @@ fn spasmRun(
     if (comptime !spasm.supported) return null;
     const ftype = &instance.module.types[func.type_index];
     if (args.len != ftype.params.len) return null;
+
+    // §5.4.1 — wire the native `call` helper BEFORE compiling. `compile`
+    // reads `spasm.call_helper` to decide whether a `call` op is emittable;
+    // a null helper degrades the whole body. `spasmEntryFor` compiles on
+    // first touch and caches the outcome, so wiring after it would cache a
+    // spurious degrade that never retries. The address is constant and the
+    // store idempotent (every instance shares the one helper); the import
+    // cycle that forces a runtime wire — spasm.zig can't reference the
+    // interpreter's `spasmCall` — is why this isn't a comptime `const`.
+    if (comptime spasm.supported) spasm.call_helper = spasmCall;
+
     const entry = instance.spasmEntryFor(func) orelse return null;
 
     const locals = try allocator.alloc(spasm.Cell, @max(func.local_types.len, 1));
@@ -1297,12 +1392,16 @@ fn spasmRun(
     // proving a trap came from compiled code reads `spasm_runs`). A status
     // the switch can't map degrades, so the increment is rolled back there.
     instance.spasm_runs += 1;
-    switch (entry(locals.ptr, results.ptr, mem_base, mem_len, globals_base)) {
+    switch (entry(locals.ptr, results.ptr, mem_base, mem_len, globals_base, @ptrCast(instance))) {
         spasm.trap_ok => {},
         spasm.trap_divide_by_zero => return error.IntegerDivideByZero,
         spasm.trap_int_overflow => return error.IntegerOverflow,
         spasm.trap_out_of_bounds => return error.OutOfBoundsMemoryAccess,
         spasm.trap_invalid_conversion => return error.InvalidConversionToInteger,
+        // A nested `call` trapped: re-raise the concrete error the helper
+        // stashed (covers all TrapError variants + OutOfMemory without
+        // enumerating them here).
+        spasm.trap_pending => return instance.spasm_call_trap.?,
         else => {
             instance.spasm_runs -= 1; // unrecognized status — degrade, uncount
             return null;

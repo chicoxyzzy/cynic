@@ -799,6 +799,34 @@ pub fn ldpPostIdxSp(rt: Reg, rt2: Reg, byte_off: i10) u32 {
     return 0xA8C00000 | (imm7 << 15) | (r(rt2) << 10) | (sp << 5) | r(rt);
 }
 
+/// SUB SP, SP, #imm12 — reserve stack (Rd = Rn = SP). Keep `imm12` a
+/// multiple of 16 to preserve AAPCS64 16-byte SP alignment.
+pub fn subSpImm(imm12: u12) u32 {
+    const sp: u32 = 31;
+    return 0xD1000000 | (@as(u32, imm12) << 10) | (sp << 5) | sp;
+}
+
+/// ADD SP, SP, #imm12 — release stack (Rd = Rn = SP). Same alignment rule.
+pub fn addSpImm(imm12: u12) u32 {
+    const sp: u32 = 31;
+    return 0x91000000 | (@as(u32, imm12) << 10) | (sp << 5) | sp;
+}
+
+/// ADD Xd, SP, #imm12 — materialize an SP-relative address in a GP
+/// register (Rn = SP). The cheap "where is my stack slot" address-of.
+pub fn addRegSp(rd: Reg, imm12: u12) u32 {
+    const sp: u32 = 31;
+    return 0x91000000 | (@as(u32, imm12) << 10) | (sp << 5) | r(rd);
+}
+
+/// STR XZR, [Xn, #byte_off] — store the zero register (used to clear a
+/// memory cell's high 64 bits). The Rt = 31 here means XZR, not SP, in a
+/// load/store's transfer field.
+pub fn strZeroImm(rn: Reg, byte_off: u15) u32 {
+    std.debug.assert(byte_off % 8 == 0);
+    return 0xF9000000 | (@as(u32, byte_off / 8) << 10) | (r(rn) << 5) | xzr;
+}
+
 /// STR Xt, [SP, #simm9]! — pre-indexed push through SP. Keep SP
 /// 16-byte aligned per AAPCS64 (use multiples of -16).
 pub fn strPreIdxSp(rt: Reg, simm9: i9) u32 {
@@ -910,6 +938,14 @@ test "jit asm_aarch64: golden encodings" {
     try expectEqual(@as(u32, 0xF84107FE), ldrPostIdxSp(.lr, 16)); // ldr x30, [sp], #16
     try expectEqual(@as(u32, 0xA9BF7BFD), stpPreIdxSp(.fp, .lr, -16)); // stp x29, x30, [sp, #-16]!
     try expectEqual(@as(u32, 0xA8C17BFD), ldpPostIdxSp(.fp, .lr, 16)); // ldp x29, x30, [sp], #16
+    try expectEqual(@as(u32, 0xA9BF7BF3), stpPreIdxSp(.x19, .lr, -16)); // stp x19, x30, [sp, #-16]!
+    try expectEqual(@as(u32, 0xA8C17BF3), ldpPostIdxSp(.x19, .lr, 16)); // ldp x19, x30, [sp], #16
+    try expectEqual(@as(u32, 0xD101C3FF), subSpImm(112)); // sub sp, sp, #112
+    try expectEqual(@as(u32, 0x9101C3FF), addSpImm(112)); // add sp, sp, #112
+    try expectEqual(@as(u32, 0x910003E6), addRegSp(.x6, 0)); // add x6, sp, #0
+    try expectEqual(@as(u32, 0x910043E6), addRegSp(.x6, 16)); // add x6, sp, #16
+    try expectEqual(@as(u32, 0xF90004DF), strZeroImm(.x6, 8)); // str xzr, [x6, #8]
+    try expectEqual(@as(u32, 0xAA0503F3), movReg(.x19, .x5)); // mov x19, x5
     try expectEqual(@as(u32, 0x2B010002), addsRegW(.x2, .x0, .x1)); // adds w2, w0, w1
     try expectEqual(@as(u32, 0x6B02003F), cmpRegW(.x1, .x2)); // cmp w1, w2
     try expectEqual(@as(u32, 0x31000420), addsImmW(.x0, .x1, 1)); // adds w0, w1, #1
