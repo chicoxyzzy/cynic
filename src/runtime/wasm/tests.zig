@@ -1322,6 +1322,83 @@ test "wasm spasm: table.init then table.copy populate the table, then elem.drop 
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: table.get reads a runtime funcref, ref.is_null inspects it" {
+    // §4.4.x table.get (0x25) + §4.2.4 ref.is_null on a RUNTIME reference —
+    // the first ops to put a 128-bit reference value onto Spasm's operand
+    // stack. `table.get` pops an i32 index and pushes the reference at
+    // `tables[0][index]` (trapping OOB); `ref.is_null` then folds it to 1 if
+    // null, else 0. The reference lives in a depth-keyed cell appended to the
+    // heap locals buffer, never a register, so it survives no calls here but
+    // proves the runtime-ref representation end to end.
+    //   main(x): local.get 0; table.get 0; ref.is_null; end
+    // The module's funcref table (min 2) gets an active element segment
+    // filling table[0] with `ref.func 0` (the defined function `dummy`),
+    // leaving table[1] null. So main(0) == 0 (populated, non-null) and
+    // main(1) == 1 (null) — the same the interpreter gives.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->(i32)  (dummy's signature and main's signature)
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    // func section: func0 "dummy" type0, func1 "main" type0
+    const fbody = [_]u8{ 0x02, 0x00, 0x00 };
+    // table section: 1 table, funcref (0x70), limits min-only (0x00) min 2
+    const tablebody = [_]u8{ 0x01, 0x70, 0x00, 0x02 };
+    // export "main" -> func 1
+    const xbody = [_]u8{ 0x01, 0x04, 'm', 'a', 'i', 'n', 0x00, 0x01 };
+    // element section: 1 active segment, table 0, offset (i32.const 0),
+    // funcs [0 (dummy)] — fills table[0], leaves table[1] null.
+    const ebody = [_]u8{ 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00 };
+    // code section: two bodies.
+    //   func 0 (dummy): local.get 0; end  (never called; only ref'd)
+    //   func 1 (main):  local.get 0; table.get 0; ref.is_null; end
+    const cbody = [_]u8{
+        0x02, // two code entries
+        0x04, 0x00, 0x20, 0x00, 0x0b, // dummy: 4 bytes, 0 locals
+        0x07, 0x00, 0x20, 0x00, 0x25, 0x00, 0xd1, 0x0b, // main: 7 bytes, 0 locals
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tablebody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const fidx = funcExport(mp, "main") orelse return error.NoSuchExport;
+
+    // table[0] is populated (ref.func dummy), so ref.is_null is 0.
+    const populated = try a.alloc(u128, 1);
+    populated[0] = @as(u128, 0);
+    const r_pop = try interp.invoke(&instance, testing.allocator, fidx, populated);
+    defer testing.allocator.free(r_pop);
+    try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(r_pop[0])));
+
+    // table[1] is null (no segment filled it), so ref.is_null is 1.
+    const empty = try a.alloc(u128, 1);
+    empty[0] = @as(u128, 1);
+    const r_null = try interp.invoke(&instance, testing.allocator, fidx, empty);
+    defer testing.allocator.free(r_null);
+    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(r_null[0])));
+
+    // "main" (a `table.get` feeding `ref.is_null`) ran Spasm-compiled, not
+    // degraded — the runtime reference crossed the operand stack natively.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // A one-page-memory module whose `()->i32` export "sz" returns the current
 // memory size in pages (memory.size, 0x3f) — the byte length >> 16.
 const memsize_body = [_]u8{

@@ -1565,6 +1565,36 @@ fn spasmElemDrop(instance_opaque: *anyopaque, elem_idx: u32) callconv(.c) void {
     }
 }
 
+/// The native helper a Spasm-compiled `table.get` (§4.4.x, opcode 0x25)
+/// branches to. Mirrors the interpreter's `.table_get` arm: bounds-check
+/// `index` against table `table_idx` and, in range, write the 128-bit
+/// reference `tables[table_idx].elems[index]` through `out_cell` (a cell in
+/// the over-allocated locals buffer, keyed by the result operand's depth).
+/// The reference travels through that cell rather than a GP register — it is
+/// the first value Spasm moves across the operand stack at runtime. On an
+/// out-of-range index (or an out-of-range table, which validation forbids but
+/// is read defensively) it stashes `OutOfBoundsTableAccess` and returns
+/// `spasm.trap_pending`; otherwise `spasm.trap_ok`.
+fn spasmTableGet(
+    instance_opaque: *anyopaque,
+    table_idx: u32,
+    index: u32,
+    out_cell: [*]u128,
+) callconv(.c) u32 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (table_idx >= inst.tables.len) {
+        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+        return spasm.trap_pending;
+    }
+    const table = inst.tables[table_idx];
+    if (index >= table.elems.len) {
+        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+        return spasm.trap_pending;
+    }
+    out_cell[0] = table.elems[index];
+    return spasm.trap_ok;
+}
+
 /// Try to run `func` via Spasm-compiled native code (docs/jit.md §6),
 /// returning the result cells on success or null when the body is
 /// outside Spasm's emittable class (the caller then interprets). The v1
@@ -1601,10 +1631,19 @@ fn spasmRun(
     if (comptime spasm.supported) spasm.table_copy_helper = spasmTableCopy;
     if (comptime spasm.supported) spasm.table_init_helper = spasmTableInit;
     if (comptime spasm.supported) spasm.elem_drop_helper = spasmElemDrop;
+    if (comptime spasm.supported) spasm.table_get_helper = spasmTableGet;
 
     const entry = instance.spasmEntryFor(func) orelse return null;
 
-    const locals = try allocator.alloc(spasm.Cell, @max(func.local_types.len, 1));
+    // The compiled body keeps runtime 128-bit references (e.g. a `table.get`
+    // result) in extra cells appended after the scalar locals, keyed by the
+    // operand's stack depth (spasm.zig — the `.ref` Loc + `refSlotOff`). The
+    // operand stack is at most `spasm.operand_reg_count` deep, so over-
+    // allocating by exactly that many cells guarantees every possible ref
+    // operand has a home slot. A body with no reference op never touches the
+    // trailing cells; the over-allocation only adds them, leaving every scalar
+    // local's offset (params + declared locals, keyed by index) unchanged.
+    const locals = try allocator.alloc(spasm.Cell, func.local_types.len + spasm.operand_reg_count);
     defer allocator.free(locals);
     @memset(locals, 0);
     for (args, 0..) |x, i| locals[i] = x;

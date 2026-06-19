@@ -175,6 +175,18 @@ pub var table_init_helper: ?TableInitHelperFn = null;
 pub const ElemDropHelperFn = *const fn (instance: *anyopaque, elem_index: u32) callconv(.c) void;
 pub var elem_drop_helper: ?ElemDropHelperFn = null;
 
+/// The native helper a Spasm-compiled `table.get` (§4.4.x, opcode 0x25)
+/// branches to: `(instance, table_index, index, out_cell) -> status`. It
+/// bounds-checks `index` against the table and, in range, writes the 128-bit
+/// reference `tables[table_index].elems[index]` to `out_cell[0]` (a cell in
+/// the over-allocated locals buffer keyed by the result operand's depth);
+/// out of range it stashes `OutOfBoundsTableAccess` and returns
+/// `spasm.trap_pending`. The reference is the first value Spasm moves across
+/// the operand stack at runtime, so it travels through `out_cell` rather than
+/// a GP register. Injected at startup (one-directional import).
+pub const TableGetHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u32, out_cell: [*]u128) callconv(.c) u32;
+pub var table_get_helper: ?TableGetHelperFn = null;
+
 // ── wasm opcodes this increment understands ─────────────────────────
 const op_end: u8 = 0x0b;
 const op_nop: u8 = 0x01;
@@ -362,6 +374,10 @@ const op_i64_trunc_f64_u: u8 = 0xb1;
 const op_ref_null: u8 = 0xd0;
 const op_ref_is_null: u8 = 0xd1;
 const op_ref_func: u8 = 0xd2;
+// §4.4.x table.get — one ULEB table index. Pops an i32 element index and
+// pushes the 128-bit reference at `tables[idx][index]` (trapping OOB). The
+// first op whose result is a runtime reference on Spasm's operand stack.
+const op_table_get: u8 = 0x25;
 
 /// An operand-stack location in the abstract state (§6 constant
 /// tracking). A `const_i32` carries a folded immediate that has not
@@ -384,15 +400,48 @@ const Loc = union(enum) {
     /// always non-null. Carries the function index. `ref.is_null` folds it
     /// to the constant 0; any runtime-location consumer degrades.
     ref_func: u32,
+    /// §5.4.2 — a 128-bit runtime reference (e.g. a `table.get` result)
+    /// whose value is not statically known. It does NOT live in a register
+    /// (the operand bank is 64-bit); it lives in a depth-keyed cell appended
+    /// to the heap locals buffer — the cell at byte offset
+    /// `(num_locals + depth) * @sizeOf(Cell)` off x0 (see `refSlotOff`). A
+    /// stack-machine operand never changes depth once pushed, so the home
+    /// slot is fully determined by the operand's depth and needs no payload.
+    /// Because the data is in the heap buffer (not a register), a `.ref`
+    /// operand survives calls and SP moves for free, and the spill guards
+    /// (`if (stack[d] != .reg) continue;`) correctly skip it (nothing to
+    /// spill). `materialize` on a `.ref` degrades — the 128-bit value can't
+    /// fit a single GP register; only the consumers that read the slot
+    /// directly (`ref.is_null`) handle it, everything else returns null.
+    ref,
 };
 
 /// The native register caching the value at operand-stack depth `d`.
 /// x9..x15 (7 slots) are the wasm operand-stack registers; x16/x17 are
 /// the masm/materialization scratch, x0/x1 the boundary args. A body
 /// whose stack runs deeper than the bank tiers down (returns null).
-const operand_reg_count = 7;
+/// The depth of the operand-register bank — also the number of extra cells
+/// `spasmRun` appends to the locals buffer for depth-keyed runtime references
+/// (§5.4.2 — the `.ref` Loc; see `refSlotOff`). The operand stack is at most
+/// this deep, so at most this many references are simultaneously live.
+pub const operand_reg_count = 7;
 fn regForDepth(d: usize) a64.Reg {
     return @enumFromInt(@as(u5, @intCast(9 + d)));
+}
+
+/// Byte offset (off x0, the locals base) of the depth-keyed cell that holds
+/// a 128-bit runtime reference operand at stack depth `d` (§5.4.2 — the
+/// `.ref` Loc). `spasmRun` over-allocates the locals buffer by
+/// `operand_reg_count` trailing cells exactly so each possible ref operand
+/// has one: the operand stack is at most `operand_reg_count` deep, so at
+/// most that many simultaneous ref operands exist, and a stack-machine
+/// operand never changes depth once pushed. The scalar locals occupy
+/// `num_locals` cells first; the ref slots follow at `num_locals + d`. The
+/// ceiling — `(num_locals + operand_reg_count - 1) * 16` — must stay within
+/// the scaled `ldrImm`/`strImm` reach (≤ 32760), which the `compile`-time
+/// guard `refSlotInReach` enforces.
+fn refSlotOff(num_locals: usize, d: usize) u15 {
+    return @intCast((num_locals + d) * @sizeOf(Cell));
 }
 
 /// One open structured-control frame (§6 — the operand-stack machine's
@@ -449,6 +498,18 @@ pub fn compile(
     // The operand-stack bank is fixed (regForDepth); a deeper body
     // tiers down.
     if (func.max_stack > operand_reg_count) return null;
+
+    // §5.4.2 — runtime references live in depth-keyed cells appended after
+    // the scalar locals (see `refSlotOff`). `num_locals` is the count the
+    // local ops already key off x0 (params + declared locals); the highest
+    // ref slot sits at `num_locals + operand_reg_count - 1`. Its byte offset
+    // must stay within the scaled `ldrImm`/`strImm` reach (≤ 32760). A body
+    // with so many locals that the top ref slot overflows that window
+    // degrades to the interpreter (a `.ref`-producing op would otherwise
+    // emit an out-of-range load); a body with no ref op never touches these
+    // slots, but the guard is cheap and uniform.
+    const num_locals = func.local_types.len;
+    if ((num_locals + operand_reg_count - 1) * @sizeOf(Cell) > 32760) return null;
 
     var m = masm_mod.Masm.init(gpa);
     defer m.deinit();
@@ -579,18 +640,154 @@ pub fn compile(
             },
             op_ref_is_null => {
                 // §5.4.2 ref.is_null — 1 if the reference operand is null,
-                // else 0. Validation guarantees the operand is a reference
-                // type, and the only reference producers this slice tracks
-                // (`ref.null`, `ref.func`) carry their nullity statically,
-                // so this folds at compile time to an i32 constant with no
-                // runtime value. A non-reference Loc would be a validation
+                // else 0. The statically-known producers (`ref.null`,
+                // `ref.func`) carry their nullity at compile time, so this
+                // folds to an i32 constant with no runtime value. A runtime
+                // `.ref` (e.g. a `table.get` result) lives in its depth-keyed
+                // heap cell: load both 64-bit halves and test whether the
+                // whole 128-bit value is all-ones (`interpreter.REF_NULL`).
+                // A FULL-width test is required — an externref's low 64 can be
+                // all-ones while the high 64 is not, so the low half alone
+                // would mis-report a non-null reference as null. ANDing the
+                // two halves makes the result all-ones iff BOTH halves are,
+                // i.e. iff the reference is exactly REF_NULL; comparing that
+                // against -1 and `csetW .eq` yields the i32 1/0. A
+                // non-reference Loc (`.reg`/`.const_i32`) would be a validation
                 // violation; degrade defensively.
                 if (sp < 1) return null;
                 switch (stack[sp - 1]) {
                     .ref_null => stack[sp - 1] = .{ .const_i32 = 1 },
                     .ref_func => stack[sp - 1] = .{ .const_i32 = 0 },
+                    .ref => {
+                        const d = sp - 1;
+                        const off = refSlotOff(num_locals, d);
+                        const ra = regForDepth(d); // the result lands here
+                        // Low 64 -> ra, high 64 -> x16; AND, compare to -1.
+                        try m.emit(a64.ldrImm(ra, .x0, off));
+                        try m.emit(a64.ldrImm(.x16, .x0, off + 8));
+                        try m.emit(a64.andReg(ra, ra, .x16)); // all-ones iff both halves are
+                        try m.movImm64(.x16, 0xFFFF_FFFF_FFFF_FFFF); // REF_NULL's per-half pattern
+                        try m.emit(a64.cmpReg(ra, .x16));
+                        try m.emit(a64.csetW(ra, .eq)); // 1 iff ref == REF_NULL
+                        stack[d] = .{ .reg = ra };
+                    },
                     .reg, .const_i32 => return null,
                 }
+            },
+            op_table_get => {
+                // §4.4.x table.get — pop an i32 element index, push the
+                // 128-bit reference at `tables[table_idx][index]` (trapping
+                // OOB). The result is the first runtime reference Spasm puts
+                // on the operand stack: it does NOT land in a register but in
+                // the depth-keyed cell at `refSlotOff(num_locals, sp-1)` off
+                // x0 (the over-allocated locals buffer). A native helper does
+                // the bounds-check + read, writing the ref through that cell
+                // pointer; its trap status flows through the shared epilogue.
+                //
+                // The index is the top operand (depth sp-1, consumed); the
+                // result ref lands at the SAME depth sp-1, so net depth is
+                // unchanged (`below = sp-1` survivors beneath, then one ref).
+                // The frame shuffle mirrors the other helper-call arms: a
+                // callconv(.c) helper clobbers x0..x18 + x6, so spill the
+                // boundary registers + the live register below-operands, call,
+                // then reload. The out-cell pointer must be computed from x0
+                // (the live locals base) BEFORE x0 is overwritten with the
+                // instance, so it is materialized into x3 just before the call.
+                if (table_get_helper == null) return null; // helper not wired
+                const table_idx = readUleb32(body, &i) orelse return null;
+                if (sp < 1) return null;
+                const below = sp - 1; // operands beneath the index
+                if (below > operand_reg_count) return null;
+
+                // Materialize the index into its home register (regForDepth(
+                // below) = regForDepth(sp-1), an x9.. reg the x0..x4 helper-arg
+                // setup never clobbers) before the SP move shuffles anything.
+                const idx_reg = try materialize(&m, stack[below], below);
+
+                // Frame: spill slots for the five boundary regs x0..x4 at +0,
+                // then one 8-byte slot per `.reg` below-operand. Round up to a
+                // 16-byte multiple (AAPCS64 SP alignment).
+                const spill_off: u15 = 0; // x0..x4 at +0/+8/+16/+24/+32
+                const op_spill_off: u15 = spill_off + 40;
+                const raw_frame = @as(usize, op_spill_off) + below * 8;
+                const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+                try m.emit(a64.subSpImm(framebytes));
+                try m.emit(a64.addRegSp(.x6, 0));
+
+                // Spill the five caller-saved boundary registers x0..x4.
+                try m.emit(a64.strImm(.x0, .x6, spill_off));
+                try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+                try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+                try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+
+                // Spill the register below-operands; a `.const_i32` below-
+                // operand is left untouched (its Loc must look identical to
+                // both arms of an enclosing `if` — see `op_call`). A `.ref`
+                // below-operand is skipped too: its data is in the heap buffer
+                // (addressed off the reloaded x0), not a register, so the
+                // `!= .reg` guard correctly leaves it to survive for free.
+                {
+                    var d: usize = 0;
+                    while (d < below) : (d += 1) {
+                        if (stack[d] != .reg) continue;
+                        const off: u15 = @intCast(op_spill_off + d * 8);
+                        try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                    }
+                }
+
+                // Helper ABI: x0 = instance (callee-saved x19), x1 = table
+                // index, x2 = element index, x3 = out-cell pointer. Compute x3
+                // = x0 + refSlotOff(num_locals, sp-1) FIRST, while x0 still
+                // holds the locals base (it is about to be overwritten with the
+                // instance). Then stage x2 from the index register (x9.., not
+                // yet clobbered), then x0/x1.
+                const out_off = refSlotOff(num_locals, below);
+                if (out_off <= 4095) {
+                    try m.emit(a64.addImm(.x3, .x0, @intCast(out_off), false));
+                } else {
+                    try m.movImm64(.x16, out_off);
+                    try m.emit(a64.addReg(.x3, .x0, .x16));
+                }
+                try m.emit(a64.movReg(.x2, idx_reg));
+                try m.emit(a64.movReg(.x0, .x19));
+                try m.movImm64(.x1, table_idx);
+                try m.callAbs(.x16, @intFromPtr(table_get_helper.?));
+
+                // Trap status in w0; an OOB releases the frame and falls into
+                // the shared epilogue (which pops the prologue frame and
+                // returns w0 unchanged).
+                var get_ok: masm_mod.Masm.Label = .{};
+                defer get_ok.deinit(gpa);
+                try m.jumpCbz(.x0, &get_ok);
+                try m.emit(a64.addSpImm(framebytes));
+                try m.jump(&epilogue);
+                m.bind(&get_ok);
+
+                // Success: the helper has written the ref into its depth-keyed
+                // cell. Recompute x6 from SP (AAPCS64 callee-restores SP;
+                // nothing moved it since the reserve), reload the boundary
+                // registers and the register below-operands, release the frame.
+                try m.emit(a64.addRegSp(.x6, 0));
+                try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+                try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+                try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                {
+                    var d: usize = 0;
+                    while (d < below) : (d += 1) {
+                        if (stack[d] != .reg) continue;
+                        const off: u15 = @intCast(op_spill_off + d * 8);
+                        try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                    }
+                }
+                try m.emit(a64.addSpImm(framebytes));
+                // The result is a runtime reference in its depth-keyed slot:
+                // pop the i32 index, push the ref at the same depth.
+                stack[below] = .ref;
+                sp = below + 1;
             },
             op_local_get => {
                 const idx = readUleb32(body, &i) orelse return null;
@@ -635,8 +832,9 @@ pub fn compile(
                     },
                     // §5.4.2 — the scalar-local guard above rejects a ref
                     // local, so a ref operand can't reach a scalar cell;
-                    // degrade rather than store a truncated reference.
-                    .ref_null, .ref_func => return null,
+                    // degrade rather than store a truncated reference (a
+                    // runtime `.ref`, or a static `.ref_null`/`.ref_func`).
+                    .ref_null, .ref_func, .ref => return null,
                 };
                 try m.emit(a64.strImm(reg, .x0, @intCast(cell_off)));
                 if (op == op_local_set) sp -= 1;
@@ -676,8 +874,9 @@ pub fn compile(
                     },
                     // §5.4.2 — a ref-typed global has no emittable consumer
                     // here; the scalar value path can't carry 128 bits, so
-                    // degrade rather than truncate a reference.
-                    .ref_null, .ref_func => return null,
+                    // degrade rather than truncate a reference (runtime
+                    // `.ref` or static `.ref_null`/`.ref_func`).
+                    .ref_null, .ref_func, .ref => return null,
                 };
                 try m.emit(a64.ldrImm(.x16, .x4, @intCast(idx * 8))); // *Global
                 try m.emit(a64.strImm(reg, .x16, 0)); // store .value
@@ -2684,9 +2883,10 @@ pub fn compile(
             .reg => |r| try m.emit(a64.strImm(r, .x1, cell_off)),
             // §5.4.2 — a reference result would need its full 128 bits in
             // the result cell. The result-type guard above already rejects
-            // a non-scalar result type, so a ref Loc cannot reach a scalar
-            // result slot; degrade defensively rather than truncate.
-            .ref_null, .ref_func => return null,
+            // a non-scalar result type, so a reference Loc cannot reach a
+            // scalar result slot; degrade defensively rather than truncate
+            // (a runtime `.ref`, or a static `.ref_null`/`.ref_func`).
+            .ref_null, .ref_func, .ref => return null,
         }
         try m.emit(a64.strImm(.x17, .x1, cell_off + 8));
     }
@@ -2770,15 +2970,18 @@ fn materialize(m: *masm_mod.Masm, loc: Loc, depth: usize) CompileError!a64.Reg {
             return reg;
         },
         // §5.4.2 — a reference is 128-bit; the 64-bit operand bank can't
-        // hold it. The general runtime reference representation is a later
-        // slice; until then, any op that reaches a reference operand into a
-        // runtime register (a ref result, a ref call param, a ref-typed
-        // block merge, `select`/`local`/`table` on a ref) degrades the whole
-        // function to the interpreter, which is always correct (the host is
-        // never aborted on a surprising shape — AGENTS.md robustness
-        // contract). `ref.is_null` folds these statically and never calls
-        // here.
-        .ref_null, .ref_func => return error.UnsupportedOp,
+        // hold it. A `.ref_null` / `.ref_func` is statically known but still
+        // 128-bit; a `.ref` is a runtime reference living in its depth-keyed
+        // heap cell, not a register. None can be coerced into one GP slot
+        // register, so any op that would force a reference into a runtime
+        // register (a ref result, a ref call param, a ref-typed block merge,
+        // `select`/`local`/`table.set` on a ref) degrades the whole function
+        // to the interpreter via this error, which is always correct (the
+        // host is never aborted on a surprising shape — AGENTS.md robustness
+        // contract). The consumers that read a reference *without* needing it
+        // in a single register (`ref.is_null` folds `.ref_null`/`.ref_func`
+        // statically and reads a `.ref` slot directly) never call here.
+        .ref_null, .ref_func, .ref => return error.UnsupportedOp,
     }
 }
 
@@ -2891,7 +3094,7 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 depth -= 1;
             },
             op_else => {}, // stays within the enclosing `if`'s nesting
-            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_memory_grow, op_call, op_ref_func => {
+            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_memory_grow, op_call, op_ref_func, op_table_get => {
                 _ = readUleb32(body, i) orelse return null;
             },
             op_call_indirect => { // type index + table index

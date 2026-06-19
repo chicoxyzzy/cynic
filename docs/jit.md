@@ -1117,18 +1117,22 @@ useful:
    `ref.func`'s funcref is `makeFuncRef(x19, f)`, fixed by the immediate since
    the instance is the body-constant x19), so two compile-time-constant `Loc`
    variants carry them — like `.const_i32`, never spilled or mutated — and
-   `ref.is_null` folds to a constant `i32`; no 128-bit runtime operand
-   representation is needed yet (anything that would put a ref in a runtime
-   register — a ref result/param, a ref local, `table.get`, `select` of a ref —
-   degrades). The scalar-operand table ops (`table.size`, `table.copy`,
-   `table.init`, `elem.drop` — no reference crosses the operand stack, only
-   i32 indices) compile through the same helper-call shape as the bulk-memory
-   ops. The runtime ref representation (register pair or spill slot) — which
-   unlocks the ref-carrying table ops (`table.get` / `set` / `grow` / `fill`),
-   ref locals, and `select` of a ref — plus the SIMD family are the remaining
-   frontier, along with the
-   side-table-as-control-oracle wiring (§6) that would make multi-target
-   `br_table` cheap.
+   `ref.is_null` folds those to a constant `i32`. The scalar-operand table ops
+   (`table.size`, `table.copy`, `table.init`, `elem.drop` — no reference
+   crosses the operand stack, only i32 indices) compile through the same
+   helper-call shape as the bulk-memory ops. A *runtime* reference (a
+   `table.get` result) needs a 128-bit home: rather than register pairs or a
+   native-stack frame, Spasm puts it in a depth-keyed cell appended to the heap
+   locals buffer (`spasmRun` over-allocates by the bank depth; a ref is exactly
+   one `Cell`), addressed off x0 — so a runtime ref survives calls and SP moves
+   for free (the data is in the heap buffer, x0 is a spilled boundary register)
+   and never touches the register bank. On that representation `table.get`
+   compiles (a helper does the bounds-checked read into the cell) and
+   `ref.is_null` tests the full 128-bit slot against `REF_NULL`. The remaining
+   frontier — the ref-*writing* ops (`table.set` / `grow` / `fill`), ref locals,
+   and `select` of a ref (all now unblocked by the runtime ref representation),
+   plus the SIMD family — along with the side-table-as-control-oracle wiring
+   (§6) that would make multi-target `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.
