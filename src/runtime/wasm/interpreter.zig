@@ -1420,6 +1420,52 @@ fn spasmMemoryGrow(instance_opaque: *anyopaque, mem_idx: u32, delta: u64, out_ba
     return result;
 }
 
+/// The native helper a Spasm-compiled `memory.init` (§4.4.7) branches to.
+/// Mirrors the interpreter's `memInit`: copy `len` bytes from data segment
+/// `data_idx` (offset `src`) into memory `mem_idx` (offset `dst`), after the
+/// overflow-safe bounds check on both the segment and the memory. A dropped
+/// segment has empty `bytes`, so a non-zero `len` against it fails the check
+/// and traps. The op reads the segment + memory through the instance (not the
+/// compiled body's cached `mem_base`/`mem_len`), so it never resizes memory —
+/// the body's x2/x3 stay valid across the call. On any out-of-bounds it stashes
+/// `OutOfBoundsMemoryAccess` and returns `spasm.trap_pending`; otherwise
+/// `spasm.trap_ok`.
+fn spasmMemoryInit(
+    instance_opaque: *anyopaque,
+    data_idx: u32,
+    mem_idx: u32,
+    dst: u32,
+    src: u32,
+    len: u32,
+) callconv(.c) u32 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (data_idx >= inst.data_segments.len or mem_idx >= inst.memories.len) {
+        inst.spasm_call_trap = error.OutOfBoundsMemoryAccess;
+        return spasm.trap_pending;
+    }
+    const seg = inst.data_segments[data_idx].bytes;
+    const mem = inst.memories[mem_idx];
+    if (!rangeInBounds(seg.len, src, len) or !rangeInBounds(mem.data.len, dst, len)) {
+        inst.spasm_call_trap = error.OutOfBoundsMemoryAccess;
+        return spasm.trap_pending;
+    }
+    const base: usize = @intCast(dst);
+    var k: u32 = 0;
+    while (k < len) : (k += 1) mem.data[base + k] = seg[src + k];
+    return spasm.trap_ok;
+}
+
+/// The native helper a Spasm-compiled `data.drop` (§4.4.7) branches to.
+/// Mirrors the interpreter's sub-9 arm: mark data segment `data_idx`
+/// dropped and clear its bytes (guarded by the segment count). Cannot trap.
+fn spasmDataDrop(instance_opaque: *anyopaque, data_idx: u32) callconv(.c) void {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (data_idx < inst.data_segments.len) {
+        inst.data_segments[data_idx].dropped = true;
+        inst.data_segments[data_idx].bytes = &.{};
+    }
+}
+
 /// Try to run `func` via Spasm-compiled native code (docs/jit.md §6),
 /// returning the result cells on success or null when the body is
 /// outside Spasm's emittable class (the caller then interprets). The v1
@@ -1450,6 +1496,8 @@ fn spasmRun(
     if (comptime spasm.supported) spasm.call_helper = spasmCall;
     if (comptime spasm.supported) spasm.call_indirect_helper = spasmCallIndirect;
     if (comptime spasm.supported) spasm.mem_grow_helper = spasmMemoryGrow;
+    if (comptime spasm.supported) spasm.mem_init_helper = spasmMemoryInit;
+    if (comptime spasm.supported) spasm.data_drop_helper = spasmDataDrop;
 
     const entry = instance.spasmEntryFor(func) orelse return null;
 

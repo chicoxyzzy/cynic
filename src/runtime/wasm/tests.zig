@@ -1031,6 +1031,82 @@ test "wasm spasm: memory.copy moves a byte range" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: memory.init copies from a passive data segment, then data.drop empties it" {
+    // §4.4.7 memory.init (0xFC sub 8) + §4.4.7 data.drop (0xFC sub 9). The
+    // module carries a passive data segment [0x11,0x22,0x33,0x44] and a
+    // data-count section (id 12, required for the two ops to validate).
+    //   "mi"(x): memory.init copies the 4 segment bytes from src=0 to dst=8,
+    //            then loads the byte at offset x — proving the copy landed.
+    //   "dr"():  data.drop 0, then returns 42 — proving the op compiled.
+    // Both must run Spasm-compiled (spasm_runs counts each compiled entry).
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->i32  (mi);  type 1: ()->i32  (dr)
+    const tbody = [_]u8{ 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f };
+    // func section: func0 type0, func1 type1
+    const fbody = [_]u8{ 0x02, 0x00, 0x01 };
+    // memory section: 1 memory, min-only, min 1 page
+    const membody = [_]u8{ 0x01, 0x00, 0x01 };
+    // export "mi" -> func0, "dr" -> func1
+    const xbody = [_]u8{ 0x02, 0x02, 'm', 'i', 0x00, 0x00, 0x02, 'd', 'r', 0x00, 0x01 };
+    // data-count section (id 12): one data segment
+    const dcbody = [_]u8{0x01};
+    // code section: two bodies.
+    //   func0 (mi): i32.const 8; i32.const 0; i32.const 4; memory.init 0 0;
+    //               local.get 0; i32.load8_u align=0 offset=0; end
+    //   func1 (dr): data.drop 0; i32.const 42; end
+    const cbody = [_]u8{
+        0x02, // two code entries
+        0x11, 0x00, // mi: 17 bytes, 0 locals
+        0x41, 0x08, 0x41, 0x00, 0x41, 0x04, 0xfc, 0x08, 0x00, 0x00,
+        0x20, 0x00, 0x2d, 0x00, 0x00, 0x0b,
+        0x07, 0x00, // dr: 7 bytes, 0 locals
+        0xfc, 0x09, 0x00, 0x41, 0x2a, 0x0b,
+    };
+    // data section (id 11): 1 passive segment, 4 bytes [0x11,0x22,0x33,0x44]
+    const dbody = [_]u8{ 0x01, 0x01, 0x04, 0x11, 0x22, 0x33, 0x44 };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &membody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 12, .body = &dcbody },
+        .{ .id = 10, .body = &cbody },
+        .{ .id = 11, .body = &dbody },
+    });
+
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    // memory.init copied [0x11,0x22,0x33,0x44] to [8,12); read back byte 9.
+    const mi_idx = funcExport(mp, "mi") orelse return error.NoSuchExport;
+    const mi_cells = try a.alloc(u128, 1);
+    mi_cells[0] = @as(u128, 9); // dst+1 == segment byte 1 == 0x22
+    const mi_res = try interp.invoke(&instance, testing.allocator, mi_idx, mi_cells);
+    defer testing.allocator.free(mi_res);
+    try testing.expectEqual(@as(u32, 0x22), @as(u32, @truncate(mi_res[0])));
+
+    // data.drop returns the trailing constant and runs Spasm-compiled.
+    const dr_idx = funcExport(mp, "dr") orelse return error.NoSuchExport;
+    const dr_res = try interp.invoke(&instance, testing.allocator, dr_idx, &.{});
+    defer testing.allocator.free(dr_res);
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(dr_res[0])));
+
+    // After data.drop the passive segment is empty (§4.4.7), so a fresh
+    // non-zero-length memory.init now traps OutOfBoundsMemoryAccess — the
+    // same outcome the interpreter gives. This proves the drop took effect
+    // through the compiled `dr`.
+    try testing.expectError(error.OutOfBoundsMemoryAccess, interp.invoke(&instance, testing.allocator, mi_idx, mi_cells));
+
+    // Every compiled entry (mi twice + dr) ran Spasm-compiled, not degraded.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // A one-page-memory module whose `()->i32` export "sz" returns the current
 // memory size in pages (memory.size, 0x3f) — the byte length >> 16.
 const memsize_body = [_]u8{

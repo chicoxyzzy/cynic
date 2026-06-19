@@ -1109,10 +1109,12 @@ useful:
    re-materialized on each control-flow arm; `call_indirect` resolves and
    type-checks the table element in its helper, trapping on a bad index,
    null element, or signature mismatch; a thread-local depth guard turns
-   runaway native recursion into a catchable `CallStackExhausted`);
-   `memory.init` / `data.drop`, tables, and the reference/SIMD families are
-   the remaining frontier, along with the side-table-as-control-oracle wiring (§6) that
-   would make multi-target `br_table` cheap.
+   runaway native recursion into a catchable `CallStackExhausted`); and
+   `memory.init` / `data.drop` (the passive-segment ops, via the same
+   helper-call shape) — so the whole bulk-memory family now compiles. Tables
+   and the reference/SIMD families are the remaining frontier, along with the
+   side-table-as-control-oracle wiring (§6) that would make multi-target
+   `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.
