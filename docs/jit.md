@@ -1120,8 +1120,13 @@ useful:
    `ref.is_null` folds to a constant `i32`; no 128-bit runtime operand
    representation is needed yet (anything that would put a ref in a runtime
    register — a ref result/param, a ref local, `table.get`, `select` of a ref —
-   degrades). The runtime ref representation (register pair or spill slot) plus
-   `table.*` and the SIMD family are the remaining frontier, along with the
+   degrades). The scalar-operand table ops (`table.size`, `table.copy`,
+   `table.init`, `elem.drop` — no reference crosses the operand stack, only
+   i32 indices) compile through the same helper-call shape as the bulk-memory
+   ops. The runtime ref representation (register pair or spill slot) — which
+   unlocks the ref-carrying table ops (`table.get` / `set` / `grow` / `fill`),
+   ref locals, and `select` of a ref — plus the SIMD family are the remaining
+   frontier, along with the
    side-table-as-control-oracle wiring (§6) that would make multi-target
    `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data

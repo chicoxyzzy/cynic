@@ -1173,6 +1173,155 @@ test "wasm spasm: memory.init copies from a passive data segment, then data.drop
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: table.size returns the table length" {
+    // §4.4.x table.size (0xFC sub 16) — push the current element count of
+    // table 0 as i32. The module declares a funcref table with min 3 and
+    // no element segment, so the size is exactly 3. "sz"() must run
+    // Spasm-compiled (spasm_runs counts each compiled entry).
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: ()->i32
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    // func section: func0 type0
+    const fbody = [_]u8{ 0x01, 0x00 };
+    // table section: 1 table, funcref (0x70), limits min-only (0x00) min 3
+    const tablebody = [_]u8{ 0x01, 0x70, 0x00, 0x03 };
+    // export "sz" -> func0
+    const xbody = [_]u8{ 0x01, 0x02, 's', 'z', 0x00, 0x00 };
+    // code section: one body.
+    //   func0 (sz): table.size 0; end
+    const cbody = [_]u8{
+        0x01, // one code entry
+        0x05, 0x00, // sz: 5 bytes, 0 locals
+        0xfc, 0x10, 0x00, 0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tablebody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const fidx = funcExport(mp, "sz") orelse return error.NoSuchExport;
+    const res = try interp.invoke(&instance, testing.allocator, fidx, &.{});
+    defer testing.allocator.free(res);
+
+    // The table was declared with min 3 elements...
+    try testing.expectEqual(@as(u32, 3), @as(u32, @truncate(res[0])));
+    // ...and "sz" (a `table.size`) ran Spasm-compiled, not degraded.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: table.init then table.copy populate the table, then elem.drop empties the segment" {
+    // §4.4.x table.init (0xFC sub 12), table.copy (0xFC sub 14), and
+    // elem.drop (0xFC sub 13) — all scalar-operand bulk-table ops (only i32
+    // indices cross the operand stack; the references stay table-internal).
+    // The module declares a funcref table (min 4, no active segment, so
+    // every slot starts null) and a *passive* element segment [add10, add20].
+    //   "go"(): table.init copies elem[0..2] -> table[0..2]; table.copy
+    //           copies table[0] -> table[2]; elem.drop 0; then dispatches
+    //           call_indirect through table[2] (now add10) with arg 5 — so
+    //           go() == add10(5) == 15, observing every op landed.
+    //   "again"(): a fresh table.init of length 2 — after "go" dropped the
+    //           segment it now traps OutOfBoundsTableAccess, proving the drop.
+    // Both must run Spasm-compiled (spasm_runs counts each compiled entry).
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->i32  (add10/add20 + the call_indirect signature);
+    // type 1: ()->i32     (go/again).
+    const tbody = [_]u8{ 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f };
+    // func section: func0 add10 type0, func1 add20 type0, func2 go type1,
+    // func3 again type1.
+    const fbody = [_]u8{ 0x04, 0x00, 0x00, 0x01, 0x01 };
+    // table section: 1 table, funcref (0x70), limits min-only (0x00) min 4
+    const tablebody = [_]u8{ 0x01, 0x70, 0x00, 0x04 };
+    // export "go" -> func2, "again" -> func3
+    const xbody = [_]u8{
+        0x02,
+        0x02, 'g', 'o', 0x00, 0x02,
+        0x05, 'a', 'g', 'a', 'i', 'n', 0x00, 0x03,
+    };
+    // element section: 1 *passive* segment (flag 0x01, index form), elemkind
+    // 0x00 (funcref), funcs [0 (add10), 1 (add20)].
+    const ebody = [_]u8{ 0x01, 0x01, 0x00, 0x02, 0x00, 0x01 };
+    // code section: four bodies.
+    //   func0 (add10): local.get 0; i32.const 10; i32.add; end
+    //   func1 (add20): local.get 0; i32.const 20; i32.add; end
+    //   func2 (go):
+    //     i32.const 0; i32.const 0; i32.const 2; table.init 0 0; (table[0..2])
+    //     i32.const 2; i32.const 0; i32.const 1; table.copy 0 0; (table[2]=table[0])
+    //     elem.drop 0;
+    //     i32.const 5; i32.const 2; call_indirect (type 0) (table 0); end
+    //   func3 (again): i32.const 0; i32.const 0; i32.const 2; table.init 0 0;
+    //     i32.const 0; end
+    const cbody = [_]u8{
+        0x04, // four code entries
+        0x07, 0x00, 0x20, 0x00, 0x41, 0x0a, 0x6a, 0x0b, // add10: 7 bytes
+        0x07, 0x00, 0x20, 0x00, 0x41, 0x14, 0x6a, 0x0b, // add20: 7 bytes
+        0x20, 0x00, // go: 32 bytes, 0 locals
+        0x41, 0x00, 0x41, 0x00, 0x41, 0x02, 0xfc, 0x0c, 0x00, 0x00, // table.init 0 0
+        0x41, 0x02, 0x41, 0x00, 0x41, 0x01, 0xfc, 0x0e, 0x00, 0x00, // table.copy 0 0
+        0xfc, 0x0d, 0x00, // elem.drop 0
+        0x41, 0x05, 0x41, 0x02, 0x11, 0x00, 0x00, 0x0b, // i32.const 5; i32.const 2; call_indirect 0 0; end
+        0x0e, 0x00, // again: 14 bytes, 0 locals
+        0x41, 0x00, 0x41, 0x00, 0x41, 0x02, 0xfc, 0x0c, 0x00, 0x00, // table.init 0 0
+        0x41, 0x00, 0x0b, // i32.const 0; end
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tablebody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    // go(): table.init + table.copy place add10 at table[2]; the trailing
+    // call_indirect dispatches through it. add10(5) == 15, the same the
+    // interpreter gives.
+    const go_idx = funcExport(mp, "go") orelse return error.NoSuchExport;
+    const go_res = try interp.invoke(&instance, testing.allocator, go_idx, &.{});
+    defer testing.allocator.free(go_res);
+    try testing.expectEqual(@as(u32, 15), @as(u32, @truncate(go_res[0])));
+
+    // After elem.drop the passive segment is empty (§4.4.x), so "again"'s
+    // fresh non-zero-length table.init now traps OutOfBoundsTableAccess —
+    // the same outcome the interpreter gives. This proves the drop took
+    // effect through the compiled "go".
+    const again_idx = funcExport(mp, "again") orelse return error.NoSuchExport;
+    try testing.expectError(error.OutOfBoundsTableAccess, interp.invoke(&instance, testing.allocator, again_idx, &.{}));
+
+    // Every compiled entry (go + again) ran Spasm-compiled, not degraded.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // A one-page-memory module whose `()->i32` export "sz" returns the current
 // memory size in pages (memory.size, 0x3f) — the byte length >> 16.
 const memsize_body = [_]u8{

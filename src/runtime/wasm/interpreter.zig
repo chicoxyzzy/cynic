@@ -1466,6 +1466,105 @@ fn spasmDataDrop(instance_opaque: *anyopaque, data_idx: u32) callconv(.c) void {
     }
 }
 
+/// The native helper a Spasm-compiled `table.size` (§4.4.x) branches to.
+/// Returns the current element count of table `table_idx` (the i32 result
+/// the op pushes). No reference crosses the operand stack — only the size.
+/// Cannot trap; an out-of-range index (which validation forbids) is read
+/// defensively and reported as 0.
+fn spasmTableSize(instance_opaque: *anyopaque, table_idx: u32) callconv(.c) u32 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (table_idx >= inst.tables.len) return 0;
+    return @intCast(inst.tables[table_idx].elems.len);
+}
+
+/// The native helper a Spasm-compiled `table.copy` (§4.4.x) branches to.
+/// Mirrors `tableCopy`: move `len` elements from table `src_t` (offset
+/// `src`) to table `dst_t` (offset `dst`), overlap-safe (forward when
+/// dst <= src, else backward), after an overflow-safe bounds check on both
+/// ranges. The references stay table-internal — only the i32 indices crossed
+/// the operand stack. On any out-of-bounds it stashes `OutOfBoundsTableAccess`
+/// and returns `spasm.trap_pending`; otherwise `spasm.trap_ok`.
+fn spasmTableCopy(
+    instance_opaque: *anyopaque,
+    dst_t: u32,
+    src_t: u32,
+    dst: u32,
+    src: u32,
+    len: u32,
+) callconv(.c) u32 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (dst_t >= inst.tables.len or src_t >= inst.tables.len) {
+        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+        return spasm.trap_pending;
+    }
+    const dtable = inst.tables[dst_t];
+    const stable = inst.tables[src_t];
+    if (!rangeInBounds(stable.elems.len, src, len) or !rangeInBounds(dtable.elems.len, dst, len)) {
+        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+        return spasm.trap_pending;
+    }
+    if (len == 0) return spasm.trap_ok;
+    const d: usize = @intCast(dst);
+    const s: usize = @intCast(src);
+    const cnt: usize = @intCast(len);
+    if (dst <= src) {
+        var k: usize = 0;
+        while (k < cnt) : (k += 1) dtable.elems[d + k] = stable.elems[s + k];
+    } else {
+        var k: usize = cnt;
+        while (k > 0) {
+            k -= 1;
+            dtable.elems[d + k] = stable.elems[s + k];
+        }
+    }
+    return spasm.trap_ok;
+}
+
+/// The native helper a Spasm-compiled `table.init` (§4.4.x) branches to.
+/// Mirrors `tableInit`: copy `len` references from passive element segment
+/// `elem_idx` (offset `src`) into table `table_idx` (offset `dst`), after an
+/// overflow-safe bounds check on both the segment and the table. A dropped
+/// segment has empty `values`, so a non-zero `len` against it fails the check
+/// and traps. The references stay table-internal — only the i32 indices
+/// crossed the operand stack. On any out-of-bounds it stashes
+/// `OutOfBoundsTableAccess` and returns `spasm.trap_pending`; otherwise
+/// `spasm.trap_ok`.
+fn spasmTableInit(
+    instance_opaque: *anyopaque,
+    elem_idx: u32,
+    table_idx: u32,
+    dst: u32,
+    src: u32,
+    len: u32,
+) callconv(.c) u32 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (table_idx >= inst.tables.len or elem_idx >= inst.elem_segments.len) {
+        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+        return spasm.trap_pending;
+    }
+    const table = inst.tables[table_idx];
+    const vals = inst.elem_segments[elem_idx].values;
+    if (!rangeInBounds(vals.len, src, len) or !rangeInBounds(table.elems.len, dst, len)) {
+        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+        return spasm.trap_pending;
+    }
+    const base: usize = @intCast(dst);
+    var k: u32 = 0;
+    while (k < len) : (k += 1) table.elems[base + k] = vals[src + k];
+    return spasm.trap_ok;
+}
+
+/// The native helper a Spasm-compiled `elem.drop` (§4.4.x) branches to.
+/// Mirrors the interpreter's sub-13 arm: mark element segment `elem_idx`
+/// dropped and clear its values (guarded by the segment count). Cannot trap.
+fn spasmElemDrop(instance_opaque: *anyopaque, elem_idx: u32) callconv(.c) void {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (elem_idx < inst.elem_segments.len) {
+        inst.elem_segments[elem_idx].dropped = true;
+        inst.elem_segments[elem_idx].values = &.{};
+    }
+}
+
 /// Try to run `func` via Spasm-compiled native code (docs/jit.md §6),
 /// returning the result cells on success or null when the body is
 /// outside Spasm's emittable class (the caller then interprets). The v1
@@ -1498,6 +1597,10 @@ fn spasmRun(
     if (comptime spasm.supported) spasm.mem_grow_helper = spasmMemoryGrow;
     if (comptime spasm.supported) spasm.mem_init_helper = spasmMemoryInit;
     if (comptime spasm.supported) spasm.data_drop_helper = spasmDataDrop;
+    if (comptime spasm.supported) spasm.table_size_helper = spasmTableSize;
+    if (comptime spasm.supported) spasm.table_copy_helper = spasmTableCopy;
+    if (comptime spasm.supported) spasm.table_init_helper = spasmTableInit;
+    if (comptime spasm.supported) spasm.elem_drop_helper = spasmElemDrop;
 
     const entry = instance.spasmEntryFor(func) orelse return null;
 

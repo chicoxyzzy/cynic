@@ -138,6 +138,43 @@ pub var mem_init_helper: ?MemInitHelperFn = null;
 pub const DataDropHelperFn = *const fn (instance: *anyopaque, data_index: u32) callconv(.c) void;
 pub var data_drop_helper: ?DataDropHelperFn = null;
 
+/// The native helper a Spasm-compiled `table.size` (§4.4.x) branches to:
+/// `(instance, table_index) -> elem_count`. It returns the current element
+/// count of the table — the i32 the op pushes; no reference crosses the
+/// operand stack. It cannot trap. Injected at startup like the other helpers.
+pub const TableSizeHelperFn = *const fn (instance: *anyopaque, table_index: u32) callconv(.c) u32;
+pub var table_size_helper: ?TableSizeHelperFn = null;
+
+/// The native helper a Spasm-compiled `table.copy` (§4.4.x) branches to:
+/// `(instance, dst_table, src_table, dst, src, len) -> status`. It copies
+/// `len` references from the source table (offset `src`) into the destination
+/// table (offset `dst`), overlap-safe, after a bounds check, reusing the
+/// interpreter's overlap-safe copy. Only the i32 indices crossed the operand
+/// stack — the references stay table-internal, so it neither resizes nor
+/// touches linear memory. Returns `trap_ok`, or `trap_pending` on an
+/// out-of-bounds access (the concrete `OutOfBoundsTableAccess` is stashed on
+/// the instance — see `EntryFn`). Injected at startup (one-directional import).
+pub const TableCopyHelperFn = *const fn (instance: *anyopaque, dst_table: u32, src_table: u32, dst: u32, src: u32, len: u32) callconv(.c) u32;
+pub var table_copy_helper: ?TableCopyHelperFn = null;
+
+/// The native helper a Spasm-compiled `table.init` (§4.4.x) branches to:
+/// `(instance, elem_index, table_index, dst, src, len) -> status`. It copies
+/// `len` references from the passive element segment (offset `src`) into the
+/// table (offset `dst`) after a bounds check, reusing the interpreter's
+/// `tableInit` logic. Only the i32 indices crossed the operand stack. Returns
+/// `trap_ok`, or `trap_pending` on an out-of-bounds access (the concrete
+/// `OutOfBoundsTableAccess` is stashed on the instance — see `EntryFn`).
+/// Injected at startup (one-directional import).
+pub const TableInitHelperFn = *const fn (instance: *anyopaque, elem_index: u32, table_index: u32, dst: u32, src: u32, len: u32) callconv(.c) u32;
+pub var table_init_helper: ?TableInitHelperFn = null;
+
+/// The native helper a Spasm-compiled `elem.drop` (§4.4.x) branches to:
+/// `(instance, elem_index) -> void`. It marks the passive element segment
+/// dropped and clears its values, mirroring the interpreter's sub-13 arm. It
+/// cannot trap. Injected at startup like the other helpers.
+pub const ElemDropHelperFn = *const fn (instance: *anyopaque, elem_index: u32) callconv(.c) void;
+pub var elem_drop_helper: ?ElemDropHelperFn = null;
+
 // ── wasm opcodes this increment understands ─────────────────────────
 const op_end: u8 = 0x0b;
 const op_nop: u8 = 0x01;
@@ -1828,6 +1865,299 @@ pub fn compile(
                     }
                     try m.emit(a64.addSpImm(framebytes));
                     // sp unchanged (no stack effect).
+                } else if (sub == 16) {
+                    // §4.4.x table.size — push the current element count of
+                    // table `table_idx` as i32. A native helper reads
+                    // `tables[table_idx].elems.len`; no reference crosses the
+                    // operand stack, only the size. It cannot trap. The frame
+                    // shuffle mirrors `op_memory_grow`'s result capture: a
+                    // callconv(.c) helper clobbers x0..x18 + x6, so spill the
+                    // boundary registers + the live register below-operands,
+                    // call, capture w0 into the result slot, then reload.
+                    if (table_size_helper == null) return null; // helper not wired
+                    const table_idx = readUleb32(body, &i) orelse return null;
+                    // Pushes a result, consumes nothing.
+                    const below = sp;
+                    if (below + 1 > operand_reg_count) return null;
+
+                    // Frame: spill slots for the five boundary regs x0..x4 at
+                    // +0, then one 8-byte slot per `.reg` below-operand. Round
+                    // up to a 16-byte multiple (AAPCS64 SP alignment).
+                    const spill_off: u15 = 0; // x0..x4 at +0/+8/+16/+24/+32
+                    const op_spill_off: u15 = spill_off + 40;
+                    const raw_frame = @as(usize, op_spill_off) + below * 8;
+                    const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+                    try m.emit(a64.subSpImm(framebytes));
+                    try m.emit(a64.addRegSp(.x6, 0));
+
+                    // Spill the five caller-saved boundary registers x0..x4.
+                    try m.emit(a64.strImm(.x0, .x6, spill_off));
+                    try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+
+                    // Spill the register below-operands; a `.const_i32`
+                    // below-operand is left untouched (its Loc must look
+                    // identical to both arms of an enclosing `if`).
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                        }
+                    }
+
+                    // Helper ABI: x0 = instance (x19), x1 = table index.
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, table_idx);
+                    try m.callAbs(.x16, @intFromPtr(table_size_helper.?));
+
+                    // x0 holds the element count (u32), x6 is clobbered.
+                    // Capture the result FIRST: a 32-bit move zero-extends the
+                    // i32 into the result slot register. Then recompute x6 from
+                    // SP and reload the boundary regs + register below-operands.
+                    try m.emit(a64.movRegW(regForDepth(below), .x0));
+                    try m.emit(a64.addRegSp(.x6, 0));
+                    try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                    try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                        }
+                    }
+                    try m.emit(a64.addSpImm(framebytes));
+                    stack[below] = .{ .reg = regForDepth(below) };
+                    sp = below + 1;
+                } else if (sub == 14) {
+                    // §4.4.x table.copy — move `len` elements from table
+                    // `src_t` (offset src) to table `dst_t` (offset dst).
+                    // Operands [dst, src, len] (len on top); the encoding
+                    // carries two table indices (dst, src). A native helper
+                    // reuses the interpreter's overlap-safe bounds-checked copy
+                    // and traps OOB through the shared channel. No reference
+                    // crosses the operand stack. The frame shuffle mirrors
+                    // `memory.init`: a callconv(.c) helper clobbers x0..x18 +
+                    // x6, so spill the boundary registers + the live register
+                    // below-operands, call, then reload. table.copy never
+                    // resizes memory, so the reloaded x2/x3 are unchanged.
+                    if (table_copy_helper == null) return null; // helper not wired
+                    const dst_t = readUleb32(body, &i) orelse return null;
+                    const src_t = readUleb32(body, &i) orelse return null;
+                    if (sp < 3) return null;
+                    const below = sp - 3;
+                    if (below + 0 > operand_reg_count) return null;
+
+                    // Materialize the three args into their home registers
+                    // (regForDepth(below+0/1/2), all x9.., which the x0..x5
+                    // helper-arg setup never clobbers) before the SP move.
+                    const r_dst = try materialize(&m, stack[below + 0], below + 0);
+                    const r_src = try materialize(&m, stack[below + 1], below + 1);
+                    const r_len = try materialize(&m, stack[below + 2], below + 2);
+
+                    const spill_off: u15 = 0; // x0..x4 at +0/+8/+16/+24/+32
+                    const op_spill_off: u15 = spill_off + 40;
+                    const raw_frame = @as(usize, op_spill_off) + below * 8;
+                    const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+                    try m.emit(a64.subSpImm(framebytes));
+                    try m.emit(a64.addRegSp(.x6, 0));
+
+                    try m.emit(a64.strImm(.x0, .x6, spill_off));
+                    try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                        }
+                    }
+
+                    // Helper ABI: x0 = instance (x19), x1 = dst table index,
+                    // x2 = src table index, x3 = dst, x4 = src, x5 = len. Load
+                    // dst/src/len from their operand registers FIRST (they are
+                    // x9.., never clobbered by the x0..x2 immediates), then
+                    // overwrite x0..x2.
+                    try m.emit(a64.movReg(.x3, r_dst));
+                    try m.emit(a64.movReg(.x4, r_src));
+                    try m.emit(a64.movReg(.x5, r_len));
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, dst_t);
+                    try m.movImm64(.x2, src_t);
+                    try m.callAbs(.x16, @intFromPtr(table_copy_helper.?));
+
+                    // Trap status in w0; an OOB releases the frame and falls
+                    // into the shared epilogue (which pops the prologue frame
+                    // and returns w0 unchanged).
+                    var copy_ok: masm_mod.Masm.Label = .{};
+                    defer copy_ok.deinit(gpa);
+                    try m.jumpCbz(.x0, &copy_ok);
+                    try m.emit(a64.addSpImm(framebytes));
+                    try m.jump(&epilogue);
+                    m.bind(&copy_ok);
+
+                    try m.emit(a64.addRegSp(.x6, 0));
+                    try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                    try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                        }
+                    }
+                    try m.emit(a64.addSpImm(framebytes));
+                    sp = below; // 3 consumed, 0 produced
+                } else if (sub == 12) {
+                    // §4.4.x table.init — copy `len` references from passive
+                    // element segment `elem_idx` (offset src) into table
+                    // `table_idx` (offset dst). Operands [dst, src, len] (len
+                    // on top). A native helper reuses the interpreter's
+                    // `tableInit` bounds-check + copy and traps OOB through the
+                    // shared channel. No reference crosses the operand stack.
+                    // The frame shuffle mirrors `memory.init` exactly.
+                    if (table_init_helper == null) return null; // helper not wired
+                    const elem_idx = readUleb32(body, &i) orelse return null;
+                    const table_idx = readUleb32(body, &i) orelse return null;
+                    if (sp < 3) return null;
+                    const below = sp - 3;
+                    if (below + 0 > operand_reg_count) return null;
+
+                    const r_dst = try materialize(&m, stack[below + 0], below + 0);
+                    const r_src = try materialize(&m, stack[below + 1], below + 1);
+                    const r_len = try materialize(&m, stack[below + 2], below + 2);
+
+                    const spill_off: u15 = 0; // x0..x4 at +0/+8/+16/+24/+32
+                    const op_spill_off: u15 = spill_off + 40;
+                    const raw_frame = @as(usize, op_spill_off) + below * 8;
+                    const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+                    try m.emit(a64.subSpImm(framebytes));
+                    try m.emit(a64.addRegSp(.x6, 0));
+
+                    try m.emit(a64.strImm(.x0, .x6, spill_off));
+                    try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                        }
+                    }
+
+                    // Helper ABI: x0 = instance (x19), x1 = element segment
+                    // index, x2 = table index, x3 = dst, x4 = src, x5 = len.
+                    // Load dst/src/len from their operand registers FIRST (they
+                    // are x9.., never clobbered by the x0..x2 immediates), then
+                    // overwrite x0..x2.
+                    try m.emit(a64.movReg(.x3, r_dst));
+                    try m.emit(a64.movReg(.x4, r_src));
+                    try m.emit(a64.movReg(.x5, r_len));
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, elem_idx);
+                    try m.movImm64(.x2, table_idx);
+                    try m.callAbs(.x16, @intFromPtr(table_init_helper.?));
+
+                    var init_ok: masm_mod.Masm.Label = .{};
+                    defer init_ok.deinit(gpa);
+                    try m.jumpCbz(.x0, &init_ok);
+                    try m.emit(a64.addSpImm(framebytes));
+                    try m.jump(&epilogue);
+                    m.bind(&init_ok);
+
+                    try m.emit(a64.addRegSp(.x6, 0));
+                    try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                    try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                        }
+                    }
+                    try m.emit(a64.addSpImm(framebytes));
+                    sp = below; // 3 consumed, 0 produced
+                } else if (sub == 13) {
+                    // §4.4.x elem.drop — mark passive element segment `elem_idx`
+                    // dropped (sets values to empty). No stack effect. A native
+                    // helper mirrors the interpreter's sub-13 arm; it cannot
+                    // trap. Every live operand (depths 0..sp) must survive the
+                    // callconv(.c) helper, so below == sp: spill the register
+                    // ones plus the boundary regs x0..x4, call, reload.
+                    if (elem_drop_helper == null) return null; // helper not wired
+                    const elem_idx = readUleb32(body, &i) orelse return null;
+                    const below = sp;
+                    if (below > operand_reg_count) return null;
+
+                    const spill_off: u15 = 0; // x0..x4 at +0/+8/+16/+24/+32
+                    const op_spill_off: u15 = spill_off + 40;
+                    const raw_frame = @as(usize, op_spill_off) + below * 8;
+                    const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+                    try m.emit(a64.subSpImm(framebytes));
+                    try m.emit(a64.addRegSp(.x6, 0));
+
+                    try m.emit(a64.strImm(.x0, .x6, spill_off));
+                    try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                        }
+                    }
+
+                    // Helper ABI: x0 = instance (x19), x1 = element segment
+                    // index. The helper returns void and cannot trap, so no
+                    // status check.
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, elem_idx);
+                    try m.callAbs(.x16, @intFromPtr(elem_drop_helper.?));
+
+                    try m.emit(a64.addRegSp(.x6, 0));
+                    try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                    try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                    try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+                    try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+                    try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                    {
+                        var d: usize = 0;
+                        while (d < below) : (d += 1) {
+                            if (stack[d] != .reg) continue;
+                            const off: u15 = @intCast(op_spill_off + d * 8);
+                            try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                        }
+                    }
+                    try m.emit(a64.addSpImm(framebytes));
+                    // sp unchanged (no stack effect).
                 } else return null;
             },
             op_f32_demote_f64 => {
@@ -2588,8 +2918,11 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 // Saturating truncations (sub 0..7) take no further immediate;
                 // memory.init (sub 8) takes a data index + memory index;
                 // data.drop (sub 9) takes a data index; memory.copy (sub 10)
-                // two memory indices; memory.fill (sub 11) one. Any other 0xFC
-                // op degrades.
+                // two memory indices; memory.fill (sub 11) one; table.init
+                // (sub 12) an element index + table index; elem.drop (sub 13)
+                // an element index; table.copy (sub 14) two table indices;
+                // table.size (sub 16) one table index. Any other 0xFC op
+                // degrades.
                 const sub = readUleb32(body, i) orelse return null;
                 if (sub <= 7) {
                     // no further immediate
@@ -2603,6 +2936,16 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                 } else if (sub == 10) {
                     _ = readUleb32(body, i) orelse return null; // dst memory index
                     _ = readUleb32(body, i) orelse return null; // src memory index
+                } else if (sub == 12) {
+                    _ = readUleb32(body, i) orelse return null; // element index
+                    _ = readUleb32(body, i) orelse return null; // table index
+                } else if (sub == 13) {
+                    _ = readUleb32(body, i) orelse return null; // element index
+                } else if (sub == 14) {
+                    _ = readUleb32(body, i) orelse return null; // dst table index
+                    _ = readUleb32(body, i) orelse return null; // src table index
+                } else if (sub == 16) {
+                    _ = readUleb32(body, i) orelse return null; // table index
                 } else return null;
             },
             op_f64_const => {
