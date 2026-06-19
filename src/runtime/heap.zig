@@ -2774,16 +2774,24 @@ pub const Heap = struct {
             // tag; both are handled by extracting the low pointer
             // bits and re-checking membership). Cheap pre-filter on
             // the high tag bits keeps the common non-pointer word a
-            // single compare.
-            const top_tag: u16 = @truncate(word >> 48);
-            if (top_tag == Value.tag_object) {
-                // Strip the NaN-box tag and the low kind bits to
-                // recover the raw header pointer.
-                const cand = (word & Value.pointer_mask) & ~kind_mask;
-                if (self.young_ptr_set.get(cand)) |kind| self.markScanHit(cand, kind);
-            } else if (top_tag == Value.tag_string) {
-                const cand = word & Value.pointer_mask;
-                if (self.young_ptr_set.get(cand)) |kind| self.markScanHit(cand, kind);
+            // single compare. The tag occupies the high 16 bits of a
+            // 64-bit Value, so this only applies where a `usize` stack
+            // word is wide enough to hold one. On a 32-bit target
+            // (`wasm32`) `usize` is narrower than a NaN-boxed Value and
+            // `word >> 48` would be an invalid shift, so the whole check
+            // is comptime-elided there (a 32-bit word can only ever be
+            // the bare pointer handled in (1) above).
+            if (comptime @bitSizeOf(usize) >= 64) {
+                const top_tag: u16 = @truncate(word >> 48);
+                if (top_tag == Value.tag_object) {
+                    // Strip the NaN-box tag and the low kind bits to
+                    // recover the raw header pointer.
+                    const cand = (word & Value.pointer_mask) & ~kind_mask;
+                    if (self.young_ptr_set.get(cand)) |kind| self.markScanHit(cand, kind);
+                } else if (top_tag == Value.tag_string) {
+                    const cand = word & Value.pointer_mask;
+                    if (self.young_ptr_set.get(cand)) |kind| self.markScanHit(cand, kind);
+                }
             }
         }
     }
