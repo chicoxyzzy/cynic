@@ -701,8 +701,36 @@ test "wasm spasm: ref.is_null folds ref.null to 1 and ref.func to 0, runs Spasm-
     // set, so `ref.func 0` below validates as a declared reference.
     const xbody = [_]u8{
         0x02,
-        0x0c, 'i', 's', '_', 'n', 'u', 'l', 'l', '_', 'n', 'u', 'l', 'l', 0x00, 0x00,
-        0x0c, 'i', 's', '_', 'n', 'u', 'l', 'l', '_', 'f', 'u', 'n', 'c', 0x00, 0x01,
+        0x0c,
+        'i',
+        's',
+        '_',
+        'n',
+        'u',
+        'l',
+        'l',
+        '_',
+        'n',
+        'u',
+        'l',
+        'l',
+        0x00,
+        0x00,
+        0x0c,
+        'i',
+        's',
+        '_',
+        'n',
+        'u',
+        'l',
+        'l',
+        '_',
+        'f',
+        'u',
+        'n',
+        'c',
+        0x00,
+        0x01,
     };
     // code section: two bodies.
     //   func 0 (is_null_of_null): ref.null func; ref.is_null; end
@@ -1212,7 +1240,8 @@ test "wasm spasm: table.size returns the table length" {
     const cbody = [_]u8{
         0x01, // one code entry
         0x05, 0x00, // sz: 5 bytes, 0 locals
-        0xfc, 0x10, 0x00, 0x0b,
+        0xfc, 0x10,
+        0x00, 0x0b,
     };
     const bytes = try assemble(a, &.{
         .{ .id = 1, .body = &tbody },
@@ -1271,8 +1300,19 @@ test "wasm spasm: table.init then table.copy populate the table, then elem.drop 
     // export "go" -> func2, "again" -> func3
     const xbody = [_]u8{
         0x02,
-        0x02, 'g', 'o', 0x00, 0x02,
-        0x05, 'a', 'g', 'a', 'i', 'n', 0x00, 0x03,
+        0x02,
+        'g',
+        'o',
+        0x00,
+        0x02,
+        0x05,
+        'a',
+        'g',
+        'a',
+        'i',
+        'n',
+        0x00,
+        0x03,
     };
     // element section: 1 *passive* segment (flag 0x01, index form), elemkind
     // 0x00 (funcref), funcs [0 (add10), 1 (add20)].
@@ -1442,8 +1482,24 @@ test "wasm spasm: table.set writes a funcref, then call_indirect dispatches thro
     // export "setcall" -> func1, "setrt" -> func2.
     const xbody = [_]u8{
         0x02,
-        0x07, 's', 'e', 't', 'c', 'a', 'l', 'l', 0x00, 0x01,
-        0x05, 's', 'e', 't', 'r', 't', 0x00, 0x02,
+        0x07,
+        's',
+        'e',
+        't',
+        'c',
+        'a',
+        'l',
+        'l',
+        0x00,
+        0x01,
+        0x05,
+        's',
+        'e',
+        't',
+        'r',
+        't',
+        0x00,
+        0x02,
     };
     // element section: 1 *passive* segment (flag 0x01), elemkind 0x00
     // (funcref), funcs [0 (add10)].
