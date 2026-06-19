@@ -1326,6 +1326,68 @@ fn spasmCall(instance_opaque: *anyopaque, func_index: u32, buf: [*]u128) callcon
     }
 }
 
+/// The native helper a Spasm-compiled `call_indirect` (§5.4.1) branches
+/// to. Mirrors the interpreter's `.call_indirect` arm: bounds-check the
+/// table and element index, reject a null element, resolve the funcref to
+/// its defining instance, and type-check it against the declared type —
+/// stashing the matching trap and returning `spasm.trap_pending` on any
+/// failure. On success it delegates the invoke + result marshalling (and
+/// the native-recursion depth guard) to `spasmCall`, on the *defining*
+/// instance so a cross-module table entry runs where it was defined.
+fn spasmCallIndirect(
+    instance_opaque: *anyopaque,
+    type_index: u32,
+    table_index: u32,
+    elem_index: u32,
+    buf: [*]u128,
+) callconv(.c) u32 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (table_index >= inst.tables.len) {
+        inst.spasm_call_trap = error.UnsupportedImportCall;
+        return spasm.trap_pending;
+    }
+    const table = inst.tables[table_index];
+    if (elem_index >= table.elems.len) {
+        inst.spasm_call_trap = error.UndefinedElement;
+        return spasm.trap_pending;
+    }
+    const ref = table.elems[@as(usize, elem_index)];
+    if (ref == REF_NULL) {
+        inst.spasm_call_trap = error.UninitializedElement;
+        return spasm.trap_pending;
+    }
+    // The funcref's defining instance is in its high bits; a bare index
+    // (high bits zero) defaults to the calling instance.
+    const fidx = funcRefIndex(ref);
+    const def_inst = if (ref >> 64 == 0) inst else funcRefInstance(ref);
+    const target = def_inst.resolveFunc(fidx) orelse {
+        inst.spasm_call_trap = error.UnsupportedImportCall;
+        return spasm.trap_pending;
+    };
+    const expected = inst.module.types[type_index];
+    switch (target) {
+        .host => |h| if (expected.params.len != h.params or expected.results.len != h.results) {
+            inst.spasm_call_trap = error.IndirectCallTypeMismatch;
+            return spasm.trap_pending;
+        },
+        .wasm => |w| {
+            const actual = w.instance.module.types[w.func.type_index];
+            if (!funcTypesEqual(expected, actual)) {
+                inst.spasm_call_trap = error.IndirectCallTypeMismatch;
+                return spasm.trap_pending;
+            }
+        },
+    }
+    // Type-checked: run it via the direct-call helper on the defining
+    // instance. A nested trap is stashed on `def_inst`; surface it on the
+    // calling instance (the one `spasmRun` reads) when they differ.
+    const status = spasmCall(@ptrCast(def_inst), fidx, buf);
+    if (status == spasm.trap_pending and def_inst != inst) {
+        inst.spasm_call_trap = def_inst.spasm_call_trap;
+    }
+    return status;
+}
+
 /// Try to run `func` via Spasm-compiled native code (docs/jit.md §6),
 /// returning the result cells on success or null when the body is
 /// outside Spasm's emittable class (the caller then interprets). The v1
@@ -1354,6 +1416,7 @@ fn spasmRun(
     // cycle that forces a runtime wire — spasm.zig can't reference the
     // interpreter's `spasmCall` — is why this isn't a comptime `const`.
     if (comptime spasm.supported) spasm.call_helper = spasmCall;
+    if (comptime spasm.supported) spasm.call_indirect_helper = spasmCallIndirect;
 
     const entry = instance.spasmEntryFor(func) orelse return null;
 

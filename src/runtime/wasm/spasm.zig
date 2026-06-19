@@ -97,6 +97,13 @@ pub const CompileError = error{ OutOfMemory, UnsupportedOp };
 pub const CallHelperFn = *const fn (instance: *anyopaque, func_index: u32, buf: [*]Cell) callconv(.c) u32;
 pub var call_helper: ?CallHelperFn = null;
 
+/// The native helper a Spasm-compiled `call_indirect` branches to. Takes
+/// the declared type index, the table index, and the runtime element index
+/// (popped from the operand stack); resolves + type-checks the element,
+/// then dispatches like a direct call. Same trap channel as `CallHelperFn`.
+pub const CallIndirectHelperFn = *const fn (instance: *anyopaque, type_index: u32, table_index: u32, elem_index: u32, buf: [*]Cell) callconv(.c) u32;
+pub var call_indirect_helper: ?CallIndirectHelperFn = null;
+
 // ── wasm opcodes this increment understands ─────────────────────────
 const op_end: u8 = 0x0b;
 const op_nop: u8 = 0x01;
@@ -109,6 +116,7 @@ const op_br_if: u8 = 0x0d;
 const op_br_table: u8 = 0x0e;
 const op_return: u8 = 0x0f;
 const op_call: u8 = 0x10;
+const op_call_indirect: u8 = 0x11;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
 const op_local_get: u8 = 0x20;
@@ -1812,6 +1820,122 @@ pub fn compile(
                 try m.emit(a64.addSpImm(framebytes));
                 sp = below + nresults;
             },
+            op_call_indirect => {
+                // §5.4.1 call_indirect — the declared type and table indices
+                // are immediates; the runtime element index is the top
+                // operand (consumed). The args sit just below it, anything
+                // beneath them survives the call. A native helper resolves +
+                // type-checks the table element and dispatches like a direct
+                // call; its trap status flows through the shared epilogue.
+                if (call_indirect_helper == null) return null; // helper not wired
+                const type_idx = readUleb32(body, &i) orelse return null;
+                const table_idx = readUleb32(body, &i) orelse return null;
+                if (type_idx >= module.types.len) return null;
+                const callee = &module.types[type_idx];
+                const nparams: usize = callee.params.len;
+                const nresults: usize = callee.results.len;
+                for (callee.params) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
+                for (callee.results) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
+                // Stack at entry: [below..., args..., index]. Validation
+                // guarantees sp >= 1 + nparams (index + args). The index is
+                // depth sp-1; the args are the next `nparams` down.
+                if (sp < 1 + nparams) return null;
+                const idx_depth = sp - 1;
+                const below = sp - 1 - nparams;
+                if (below + nresults > operand_reg_count) return null;
+
+                // Same per-frame buffer as `call`: cells, the five boundary
+                // registers, and one 8-byte slot per register below-operand.
+                const bufcells = @max(nparams, nresults);
+                const spill_off: u15 = @intCast(bufcells * @sizeOf(Cell));
+                const op_spill_off: u15 = spill_off + 40;
+                const raw_frame = @as(usize, bufcells) * @sizeOf(Cell) + 40 + below * 8;
+                const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+                // Materialize the index (top) and the args into their home
+                // registers. `idx_reg` is regForDepth(idx_depth) (x9..x15),
+                // never a boundary register, so the helper-arg setup below
+                // does not clobber it.
+                const idx_reg = try materialize(&m, stack[idx_depth], idx_depth);
+                {
+                    var k: usize = 0;
+                    while (k < nparams) : (k += 1) _ = try materialize(&m, stack[below + k], below + k);
+                }
+
+                try m.emit(a64.subSpImm(framebytes));
+                try m.emit(a64.addRegSp(.x6, 0));
+
+                // Spill the five caller-saved boundary registers x0..x4.
+                try m.emit(a64.strImm(.x0, .x6, spill_off));
+                try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+                try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+                try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+                try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+
+                // Spill the register below-operands; a const stays a const
+                // (the if/else-arm consistency rule, see `call`).
+                {
+                    var d: usize = 0;
+                    while (d < below) : (d += 1) {
+                        if (stack[d] != .reg) continue;
+                        const off: u15 = @intCast(op_spill_off + d * 8);
+                        try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                    }
+                }
+
+                // Stage each arg as a full cell (arg k at depth below+k).
+                var k: usize = 0;
+                while (k < nparams) : (k += 1) {
+                    const cell_off: u15 = @intCast(k * @sizeOf(Cell));
+                    try m.emit(a64.strImm(regForDepth(below + k), .x6, cell_off));
+                    try m.emit(a64.strZeroImm(.x6, cell_off + 8));
+                }
+
+                // Helper ABI: x0 = instance (x19), x1 = type index, x2 =
+                // table index, x3 = element index (the popped top operand),
+                // x4 = buffer pointer.
+                try m.emit(a64.movReg(.x0, .x19));
+                try m.movImm64(.x1, type_idx);
+                try m.movImm64(.x2, table_idx);
+                try m.emit(a64.movReg(.x3, idx_reg));
+                try m.emit(a64.movReg(.x4, .x6));
+                try m.callAbs(.x16, @intFromPtr(call_indirect_helper.?));
+
+                // Trap status in w0; a nested trap (or a resolve/type-check
+                // failure) releases the frame and falls into the epilogue.
+                var call_ok: masm_mod.Masm.Label = .{};
+                defer call_ok.deinit(gpa);
+                try m.jumpCbz(.x0, &call_ok);
+                try m.emit(a64.addSpImm(framebytes));
+                try m.jump(&epilogue);
+                m.bind(&call_ok);
+
+                // Success: recompute x6 from SP, reload results above the
+                // survivors, restore the boundary registers and survivors,
+                // release the frame.
+                try m.emit(a64.addRegSp(.x6, 0));
+                var r: usize = 0;
+                while (r < nresults) : (r += 1) {
+                    const cell_off: u15 = @intCast(r * @sizeOf(Cell));
+                    try m.emit(a64.ldrImm(regForDepth(below + r), .x6, cell_off));
+                    stack[below + r] = .{ .reg = regForDepth(below + r) };
+                }
+                try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+                try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+                try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+                try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                {
+                    var d: usize = 0;
+                    while (d < below) : (d += 1) {
+                        if (stack[d] != .reg) continue;
+                        const off: u15 = @intCast(op_spill_off + d * 8);
+                        try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                    }
+                }
+                try m.emit(a64.addSpImm(framebytes));
+                sp = below + nresults;
+            },
             op_end => {
                 // An `end` with no open frame terminates the function
                 // body; otherwise it closes the innermost block.
@@ -2065,6 +2189,10 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
             },
             op_else => {}, // stays within the enclosing `if`'s nesting
             op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_call => {
+                _ = readUleb32(body, i) orelse return null;
+            },
+            op_call_indirect => { // type index + table index
+                _ = readUleb32(body, i) orelse return null;
                 _ = readUleb32(body, i) orelse return null;
             },
             op_br_table => {

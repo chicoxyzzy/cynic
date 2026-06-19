@@ -608,6 +608,68 @@ test "wasm spasm: a constant under an if/else with calls in both arms is not cor
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: call_indirect dispatches through a table, runs Spasm-compiled" {
+    // §5.4.1 — `call_indirect` reads a function reference from a table at a
+    // runtime index, type-checks it, and calls it. main(x) loads x, pushes
+    // the table index 0, and `call_indirect (type 0)`s — table[0] is
+    // `add10`, so main(x) == x + 10. The index is the top operand (consumed);
+    // the arg sits under it. A Spasm `call_indirect` resolves the element +
+    // type via a native helper, then dispatches like a direct call.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->(i32)
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    // func section: func0 "add10" type0, func1 "main" type0
+    const fbody = [_]u8{ 0x02, 0x00, 0x00 };
+    // table section: 1 table, funcref (0x70), limits min-only (0x00) min 1
+    const tablebody = [_]u8{ 0x01, 0x70, 0x00, 0x01 };
+    // export "main" -> func 1
+    const xbody = [_]u8{ 0x01, 0x04, 'm', 'a', 'i', 'n', 0x00, 0x01 };
+    // element section: 1 active segment, table 0, offset (i32.const 0),
+    // funcs [0 (add10)]
+    const ebody = [_]u8{ 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00 };
+    // code section: two bodies.
+    //   func 0 (add10): local.get 0; i32.const 10; i32.add; end
+    //   func 1 (main):  local.get 0; i32.const 0; call_indirect 0 0; end
+    const cbody = [_]u8{
+        0x02, // two code entries
+        0x07, 0x00, 0x20, 0x00, 0x41, 0x0a, 0x6a, 0x0b, // add10: 7 bytes
+        0x09, 0x00, 0x20, 0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b, // main: 9 bytes
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tablebody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 9, .body = &ebody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const fidx = funcExport(mp, "main") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 5);
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // table[0] == add10, add10(5) == 15, the same the interpreter gives...
+    try testing.expectEqual(@as(u32, 15), @as(u32, @truncate(res[0])));
+    // ...and "main" (a `call_indirect`) ran Spasm-compiled, not degraded.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 test "wasm spasm: a self-recursive call traps CallStackExhausted, never crashes" {
     // Host-safety (AGENTS.md never-abort-the-host): a Spasm-compiled body
     // that recurses unboundedly nests `invoke` on the *native* stack via
