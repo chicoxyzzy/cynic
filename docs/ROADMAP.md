@@ -129,20 +129,29 @@ code construction (aligns with SES).
   `collectYoung` with promotion-by-relink — has shipped (see the
   Performance section); incremental marking of the mature set is
   the remaining GC step.
-- **GC trigger at every safe-point, not only JS loop back-edges.**
+- **GC trigger at every safe-point — the pure-native residual.**
   The allocation-pressure check (`gc_threshold` / `gc_byte_threshold`)
-  runs at bytecode loop back-edges, so a microtask-driven or
-  pure-native allocation storm — e.g. a promise chain that re-defers
-  itself and never returns to a JS loop — crosses no back-edge and
-  never triggers GC. V8 / SpiderMonkey / JSC scavenge when the nursery
-  fills regardless of context; checking allocation pressure on the
-  microtask-drain boundary (and other native re-entry points) would
-  self-throttle such storms instead of relying on a later loop. A
-  companion harness fix: a real timer queue in `tools/test262.zig` so
-  the test262 `setTimeout` polyfill resolves a delay by wall-clock
-  instead of busy-spinning (what `d8` / `jsc` / Node give the runner).
-  Both were surfaced landing the `$262.agent` cross-agent `waitAsync`
-  fixtures, whose parent busy-loops on exactly this pattern.
+  fires at every interpreter safe-point: each bytecode loop back-edge
+  AND the first opcode of every `runFrames` entry (interpreter.zig
+  `runSafePoint`). So a microtask-driven JS storm — e.g. a self-deferring
+  `.then` chain that re-defers and never returns to a JS loop — already
+  self-throttles: each reaction is a fresh `runFrames` entry that crosses
+  the entry safe-point (verified — a 400-step self-deferring storm runs
+  ~25 minor cycles mid-drain, heap bounded; `realm_test.zig`). The
+  residual is a *pure-native* allocation storm that never re-enters the
+  interpreter — a native builtin looping over user-sized input, or a
+  reaction with no JS handler — which crosses no safe-point; those are
+  bounded per-builtin by the host-safety checklist rather than a global
+  trigger, so a drain-boundary check is belt-and-suspenders rather than a
+  correctness gap. V8 / SpiderMonkey / JSC scavenge when the nursery fills
+  regardless of context; a microtask-drain-boundary check (and other
+  native re-entry points) would close the residual uniformly if a native
+  path is ever found to grow unbounded. A companion harness fix: a real
+  timer queue in `tools/test262.zig` so the test262 `setTimeout` polyfill
+  resolves a delay by wall-clock instead of busy-spinning (what `d8` /
+  `jsc` / Node give the runner). Both were surfaced landing the
+  `$262.agent` cross-agent `waitAsync` fixtures, whose parent busy-loops
+  on exactly this pattern.
 
 **Recently landed (was in progress; now done).**
 

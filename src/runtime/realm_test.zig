@@ -776,3 +776,36 @@ test "Error.prototype.stack: accessor-pair contract (proposal-error-stacks)" {
     };
     try testing.expect(v.isInt32() and v.asInt32() == 1);
 }
+
+// ── Host-safety: a self-deferring microtask storm is GC-throttled ────
+
+test "GC: a self-deferring microtask allocation storm is throttled mid-drain" {
+    // Host-safety invariant (AGENTS.md never-abort-the-host: "no unbounded
+    // resource growth"): a promise reaction that allocates and re-defers
+    // itself — a loopless chain that crosses no JS loop back-edge — must
+    // still self-throttle. It does, because each reaction runs as a fresh
+    // `runFrames` entry and the interpreter crosses a safe-point on the
+    // first opcode of every entry (interpreter.zig — `runSafePoint`), not
+    // only at loop back-edges. So allocation pressure built up across a
+    // microtask-drain storm is collected during the drain rather than
+    // growing unbounded until control happens back to a JS loop. Regression
+    // guard for that safe-point; if it ever moves to back-edges only, the
+    // drain would stop collecting and this goes red.
+    var ra = try freshRealm(false);
+    defer ra.deinit();
+    // Low young threshold so the storm crosses it during the drain.
+    ra.heap.gc_young_threshold = 64;
+    _ = try lantern.evaluateScript(testing.allocator, &ra,
+        \\var n = 0;
+        \\function step() { var junk = { a: 1, b: 2 }; if (n++ < 400) Promise.resolve().then(step); }
+        \\Promise.resolve().then(step);
+    );
+    // `evaluateScript` doesn't drain; the loopless setup is well under the
+    // threshold, so no cycle has run yet.
+    const before = ra.heap.gc_cycles_total;
+    try lantern.drainMicrotasks(testing.allocator, &ra);
+    // The drain self-throttled: collections fired while processing the storm
+    // (≈ one per `gc_young_threshold` allocations), so the heap stayed
+    // bounded instead of accreting all 400 steps' garbage.
+    try testing.expect(ra.heap.gc_cycles_total > before);
+}
