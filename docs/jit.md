@@ -1134,10 +1134,18 @@ useful:
    128-bit slot against `REF_NULL`. Reference locals (`local.get` / `set` /
    `tee` of a ref type — `spasmRun` re-seeds a declared ref local to `REF_NULL`
    per §4.4.10, since `@memset(0)` is wrong for a reference) and `select t` of
-   a ref close out the reference family. **That leaves SIMD (`v128`) as the
-   one remaining frontier** — the whole scalar/control/calls/memory/table/ref
-   surface now baseline-compiles — along with the side-table-as-control-oracle
-   wiring (§6) that would make multi-target `br_table` cheap.
+   a ref close out the reference family. The whole
+   scalar/control/calls/memory/table/ref surface baseline-compiles. **SIMD
+   (`v128`) is now under way**: a `v128` is one `Cell`, so it reuses the same
+   depth-keyed heap-cell storage as references (a `.v128` Loc; default all-zero,
+   not `REF_NULL`), giving the data path — `v128.const`, `v128.load` / `store`,
+   v128 locals / params / results — for free as 128-bit cell moves; the first
+   lane-compute op `i32x4.add` establishes the NEON substrate (the `ldr`/`str`
+   Q-reg + `add Vd.4S` encoders in `asm_aarch64.zig`: load both operand cells
+   into v0/v1, `add.4s`, store the result cell). The rest of the v128 lane-op
+   surface (the other arithmetic/compare/convert/shuffle/lane families) is the
+   remaining frontier, along with the side-table-as-control-oracle wiring (§6)
+   that would make multi-target `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data
    (where does T1 plateau, which sites are polymorphic, what does
    deopt need) — then M6 implementation.

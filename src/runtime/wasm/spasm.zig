@@ -400,6 +400,16 @@ const op_f64_reinterpret_i64: u8 = 0xbf;
 // §5.4.6 — the 0xFC prefix introduces a second opcode byte (a varuint32).
 // The baseline handles only the saturating truncations (sub-opcodes 0..7).
 const op_misc_prefix: u8 = 0xfc;
+// §4.4 SIMD — the 0xFD prefix introduces a second opcode byte (a varuint32),
+// distinct from the 0xFC misc prefix. The baseline compiles the v128 data
+// path (const / load / store) and the first NEON compute op (i32x4.add);
+// every other sub-opcode degrades to the interpreter.
+const op_simd_prefix: u8 = 0xfd;
+// §4.4 SIMD sub-opcodes (after the 0xFD prefix, varuint32-encoded).
+const simd_v128_load: u32 = 0;
+const simd_v128_store: u32 = 11;
+const simd_v128_const: u32 = 12;
+const simd_i32x4_add: u32 = 174;
 const op_memory_size: u8 = 0x3f;
 const op_memory_grow: u8 = 0x40;
 const op_i32_trunc_f32_s: u8 = 0xa8;
@@ -461,6 +471,21 @@ const Loc = union(enum) {
     /// fit a single GP register; only the consumers that read the slot
     /// directly (`ref.is_null`) handle it, everything else returns null.
     ref,
+    /// §4.4 SIMD — a 128-bit `v128` operand. Like `.ref`, it is too wide
+    /// for the 64-bit operand bank, so it lives in the depth-keyed cell at
+    /// `refSlotOff(num_locals, depth)` off x0 (the same over-allocated
+    /// locals buffer the runtime references use — a v128 is exactly one
+    /// `Cell`). The home slot is fully determined by the operand's depth, so
+    /// this variant carries no payload. Because the data is in the heap
+    /// buffer (not a register), a `.v128` operand survives calls and SP
+    /// moves for free, and the spill guards (`if (stack[d] != .reg)
+    /// continue;`) correctly skip it (nothing to spill). It differs from
+    /// `.ref` in one way only: a v128 local/operand default is all-ZERO, not
+    /// `REF_NULL`, so `spasmRun`'s `@memset(0)` already seeds it and no
+    /// re-seed is emitted. `materialize` degrades (the value can't fit one
+    /// GP register); the SIMD ops that consume a `.v128` read its slot
+    /// directly (`i32x4.add`) or copy it whole (`v128.store`, `local.set`).
+    v128,
 };
 
 /// The native register caching the value at operand-stack depth `d`.
@@ -653,23 +678,25 @@ pub fn compile(
                 const v2 = stack[sp - 2];
                 const v1 = stack[sp - 3];
 
-                // §5.4.2 reference select: if either value is a reference (a
-                // runtime `.ref` slot or a compile-time `.ref_null`/`.ref_func`),
-                // the 128-bit width can't ride the GP operand bank. Normalize
-                // both values into their depth-keyed ref cells, then write the
-                // result cell (v1's, at depth sp-3) half-by-half: each 64-bit
-                // half is `(c != 0) ? v1 : v2` via CSEL. A constant condition is
-                // NOT folded here (v1/v2 are never i32 constants, so the scalar
-                // fold below never fires for refs) — the CSEL is always emitted,
-                // which is correct.
-                if (v1 == .ref or v1 == .ref_null or v1 == .ref_func or
-                    v2 == .ref or v2 == .ref_null or v2 == .ref_func)
-                {
+                // §5.4.2 / §4.4 — 128-bit select: if either value is a
+                // reference (a runtime `.ref` slot or a compile-time
+                // `.ref_null`/`.ref_func`) or a `.v128`, the 128-bit width
+                // can't ride the GP operand bank. Normalize both values into
+                // their depth-keyed cells, then write the result cell (v1's,
+                // at depth sp-3) half-by-half: each 64-bit half is
+                // `(c != 0) ? v1 : v2` via CSEL. A constant condition is NOT
+                // folded here (v1/v2 are never i32 constants, so the scalar
+                // fold below never fires for these) — the CSEL is always
+                // emitted, which is correct.
+                const v1_wide = v1 == .ref or v1 == .ref_null or v1 == .ref_func or v1 == .v128;
+                const v2_wide = v2 == .ref or v2 == .ref_null or v2 == .ref_func or v2 == .v128;
+                if (v1_wide or v2_wide) {
                     const d1 = sp - 3; // v1's home depth (= the result's depth)
                     const d2 = sp - 2; // v2's home depth
-                    // Normalize both operands into their slots (a runtime `.ref`
-                    // is already there; a constant ref is materialized in). Uses
-                    // x16 + the body-constant x19; must precede the slot reads.
+                    // Normalize both operands into their slots (a runtime
+                    // `.ref`/`.v128` is already there; a constant ref is
+                    // materialized in). Uses x16 + the body-constant x19; must
+                    // precede the slot reads.
                     try emitRefIntoSlot(&m, v1, d1, num_locals);
                     try emitRefIntoSlot(&m, v2, d2, num_locals);
                     const off1 = refSlotOff(num_locals, d1);
@@ -688,8 +715,10 @@ pub fn compile(
                     try m.emit(a64.ldrImm(.x17, .x0, off2 + 8));
                     try m.emit(a64.csel(.x16, .x16, .x17, .ne));
                     try m.emit(a64.strImm(.x16, .x0, off1 + 8));
-                    sp -= 2; // pop 3, push 1; the ref result lives in v1's slot
-                    stack[sp - 1] = .ref;
+                    sp -= 2; // pop 3, push 1; the result lives in v1's slot
+                    // The result type matches the operands (validation ensures
+                    // both the same): a `.v128` if either is v128, else `.ref`.
+                    stack[sp - 1] = if (v1 == .v128 or v2 == .v128) .v128 else .ref;
                     continue;
                 }
 
@@ -767,7 +796,9 @@ pub fn compile(
                         try m.emit(a64.csetW(ra, .eq)); // 1 iff ref == REF_NULL
                         stack[d] = .{ .reg = ra };
                     },
-                    .reg, .const_i32 => return null,
+                    // A non-reference operand (`.reg`/`.const_i32`/`.v128`)
+                    // would be a validation violation; degrade defensively.
+                    .reg, .const_i32, .v128 => return null,
                 }
             },
             op_table_get => {
@@ -1024,6 +1055,25 @@ pub fn compile(
                     sp += 1;
                     continue;
                 }
+                if (func.local_types[idx] == .v128) {
+                    // §4.4 SIMD v128 local. Its 128-bit value lives in its own
+                    // local cell off x0 (like a scalar local). Copy the whole
+                    // cell into the operand's depth-keyed slot and push a
+                    // `.v128`. Identical movement to the reference-local path,
+                    // but with no REF_NULL concern — a v128 default is all-zero,
+                    // which `spasmRun`'s `@memset(0)` already installs. Both
+                    // cell halves must be in the scaled ldrImm/strImm reach; the
+                    // destination slot is covered by the `refSlotOff` guard.
+                    if (cell_off + 8 > 32760) return null; // both halves in reach
+                    const dst = refSlotOff(num_locals, sp);
+                    try m.emit(a64.ldrImm(.x16, .x0, @intCast(cell_off)));
+                    try m.emit(a64.strImm(.x16, .x0, dst));
+                    try m.emit(a64.ldrImm(.x16, .x0, @intCast(cell_off + 8)));
+                    try m.emit(a64.strImm(.x16, .x0, dst + 8));
+                    stack[sp] = .v128;
+                    sp += 1;
+                    continue;
+                }
                 switch (func.local_types[idx]) {
                     // 32-bit load zero-extends the i32 (or f32 bit pattern)
                     // from the cell's low word into the slot register.
@@ -1037,7 +1087,7 @@ pub fn compile(
                         if (cell_off > 32760 or cell_off % 8 != 0) return null; // ldrImm ceiling
                         try m.emit(a64.ldrImm(regForDepth(sp), .x0, @intCast(cell_off)));
                     },
-                    else => return null, // v128 locals — degrade
+                    else => return null, // an unexpected local type — degrade
                 }
                 stack[sp] = .{ .reg = regForDepth(sp) };
                 sp += 1;
@@ -1060,6 +1110,24 @@ pub fn compile(
                     if (op == op_local_set) sp -= 1;
                     continue;
                 }
+                if (lt == .v128) {
+                    // §4.4 SIMD v128 local. Copy the 128-bit operand at depth
+                    // sp-1 (always a `.v128` in its depth-keyed slot — validation
+                    // guarantees the operand type matches the local) into the
+                    // local's own cell, both halves via x16. `tee` leaves the
+                    // operand and its slot untouched; `set` pops it (its slot is
+                    // simply abandoned). A non-v128 operand here would be a
+                    // validation violation; degrade defensively.
+                    if (stack[sp - 1] != .v128) return null;
+                    if (cell_off + 8 > 32760) return null; // both halves in reach
+                    const src = refSlotOff(num_locals, sp - 1);
+                    try m.emit(a64.ldrImm(.x16, .x0, src));
+                    try m.emit(a64.strImm(.x16, .x0, @intCast(cell_off)));
+                    try m.emit(a64.ldrImm(.x16, .x0, src + 8));
+                    try m.emit(a64.strImm(.x16, .x0, @intCast(cell_off + 8)));
+                    if (op == op_local_set) sp -= 1;
+                    continue;
+                }
                 if (lt != .i32 and lt != .i64 and lt != .f64 and lt != .f32) return null; // i32/i64/f32/f64 locals
                 if (cell_off > 32760) return null; // strImm scaled-imm ceiling
                 // Materialize the top value (its slot register, or a
@@ -1072,9 +1140,10 @@ pub fn compile(
                         try m.movImm64(.x16, @as(u32, @bitCast(v)));
                         break :blk .x16;
                     },
-                    // A reference operand is handled by the isRef path above; a
-                    // ref reaching a scalar cell would be a validation violation.
-                    .ref_null, .ref_func, .ref => return null,
+                    // A reference operand is handled by the isRef path above,
+                    // a v128 operand by the v128 path above; either reaching a
+                    // scalar cell would be a validation violation.
+                    .ref_null, .ref_func, .ref, .v128 => return null,
                 };
                 try m.emit(a64.strImm(reg, .x0, @intCast(cell_off)));
                 if (op == op_local_set) sp -= 1;
@@ -1084,11 +1153,16 @@ pub fn compile(
                 // array of `*Global` pointers. Load the global's pointer
                 // (`[x4 + idx*8]`), then its value's low 64 bits (.value is at
                 // offset 0); a scalar global's high word is canonically zero,
-                // so the 64-bit read zero-extends an i32/f32. A v128 global
-                // would truncate, but it has no emittable consumer, so the
-                // function degrades at the op that would use it (or its result
-                // type at the epilogue).
+                // so the 64-bit read zero-extends an i32/f32.
                 const idx = readUleb32(body, &i) orelse return null;
+                // §4.4 — a v128 global holds 128 bits; the scalar load below
+                // would truncate it to the low 64. Now that v128 results /
+                // operands are compilable, the truncated value could reach a
+                // result or a SIMD op, so degrade a v128 global to the
+                // interpreter rather than load a partial value. (A ref-typed
+                // global likewise has no scalar consumer; it degrades at the op
+                // that would use it.)
+                if (globalValType(module, idx) == .v128) return null;
                 if (@as(u64, idx) * 8 > 32760) return null; // ldrImm scaled-imm ceiling
                 if (sp >= operand_reg_count) return null;
                 const ra = regForDepth(sp);
@@ -1112,11 +1186,11 @@ pub fn compile(
                         try m.movImm64(.x17, @as(u32, @bitCast(v)));
                         break :blk .x17;
                     },
-                    // §5.4.2 — a ref-typed global has no emittable consumer
-                    // here; the scalar value path can't carry 128 bits, so
-                    // degrade rather than truncate a reference (runtime
-                    // `.ref` or static `.ref_null`/`.ref_func`).
-                    .ref_null, .ref_func, .ref => return null,
+                    // §5.4.2 / §4.4 — a ref- or v128-typed global has no
+                    // emittable consumer here; the scalar value path can't
+                    // carry 128 bits, so degrade rather than truncate a
+                    // reference (`.ref`/`.ref_null`/`.ref_func`) or a `.v128`.
+                    .ref_null, .ref_func, .ref, .v128 => return null,
                 };
                 try m.emit(a64.ldrImm(.x16, .x4, @intCast(idx * 8))); // *Global
                 try m.emit(a64.strImm(reg, .x16, 0)); // store .value
@@ -2799,6 +2873,91 @@ pub fn compile(
                     sp = below; // 3 consumed (index + val + count), 0 pushed
                 } else return null;
             },
+            op_simd_prefix => {
+                // §4.4 SIMD — the 0xFD prefix. The baseline compiles the v128
+                // data path (const / load / store) and the first NEON compute
+                // op (i32x4.add); every other sub-opcode degrades. A v128 is
+                // exactly one `Cell`, so it reuses the depth-keyed cell storage
+                // the runtime references use (the `.v128` Loc + `refSlotOff`):
+                // const/load/store/add move the 128-bit cell with GP halves or
+                // a NEON quad, never the GP operand bank.
+                const sub = readUleb32(body, &i) orelse return null;
+                if (sub == simd_v128_const) {
+                    // §4.4 v128.const — 16 immediate bytes (NOT LEB; raw little-
+                    // endian). Write the two 64-bit halves into the depth's cell
+                    // and push a `.v128`. x16 is the immediate scratch.
+                    const v = readV128Bytes(body, &i) orelse return null;
+                    if (sp >= operand_reg_count) return null;
+                    const dst = refSlotOff(num_locals, sp);
+                    try m.movImm64(.x16, v.lo);
+                    try m.emit(a64.strImm(.x16, .x0, dst));
+                    try m.movImm64(.x16, v.hi);
+                    try m.emit(a64.strImm(.x16, .x0, dst + 8));
+                    stack[sp] = .v128;
+                    sp += 1;
+                } else if (sub == simd_v128_load) {
+                    // §4.4.7 v128.load — pop the i32 address, bounds-check the
+                    // 16-byte access, then copy 16 bytes mem→cell as two 64-bit
+                    // GP halves (no NEON needed for the move). The result lands
+                    // in the address operand's depth-keyed slot (its depth = the
+                    // result's depth). `emitMemBounds` leaves the effective
+                    // address in x16 (and clobbers x17); the high half reads
+                    // [x2, ea+8], still inside the checked [ea, ea+16) range.
+                    const offset = readMemArg(body, &i) orelse return null;
+                    if (sp < 1) return null;
+                    const ra = try materialize(&m, stack[sp - 1], sp - 1);
+                    try emitMemBounds(&m, ra, offset, 16, &trap_oob);
+                    trap_oob_used = true;
+                    const dst = refSlotOff(num_locals, sp - 1);
+                    // low 64: [x2, ea] -> cell
+                    try m.emit(a64.ldrReg(.x17, .x2, .x16));
+                    try m.emit(a64.strImm(.x17, .x0, dst));
+                    // high 64: ea += 8, [x2, ea] -> cell + 8
+                    try m.emit(a64.addImm(.x16, .x16, 8, false));
+                    try m.emit(a64.ldrReg(.x17, .x2, .x16));
+                    try m.emit(a64.strImm(.x17, .x0, dst + 8));
+                    stack[sp - 1] = .v128;
+                } else if (sub == simd_v128_store) {
+                    // §4.4.7 v128.store — operands [addr, v128] (v128 on top);
+                    // bounds-check the 16-byte access, then copy the v128 cell
+                    // → mem as two 64-bit GP halves. The v128 operand at sp-1 is
+                    // a `.v128` in its depth-keyed slot (validated). Pops both,
+                    // pushes nothing.
+                    const offset = readMemArg(body, &i) orelse return null;
+                    if (sp < 2) return null;
+                    if (stack[sp - 1] != .v128) return null; // value must be a v128
+                    const ra = try materialize(&m, stack[sp - 2], sp - 2); // addr
+                    const src = refSlotOff(num_locals, sp - 1);
+                    try emitMemBounds(&m, ra, offset, 16, &trap_oob);
+                    trap_oob_used = true;
+                    // low 64: cell -> [x2, ea]
+                    try m.emit(a64.ldrImm(.x17, .x0, src));
+                    try m.emit(a64.strReg(.x17, .x2, .x16));
+                    // high 64: ea += 8, cell + 8 -> [x2, ea]
+                    try m.emit(a64.addImm(.x16, .x16, 8, false));
+                    try m.emit(a64.ldrImm(.x17, .x0, src + 8));
+                    try m.emit(a64.strReg(.x17, .x2, .x16));
+                    sp -= 2;
+                } else if (sub == simd_i32x4_add) {
+                    // §4.4 i32x4.add — pop two v128 operands (cells at depths
+                    // sp-1, sp-2), lane-wise add four i32 lanes, push the v128
+                    // result into v1's slot (depth sp-2). Both operands are
+                    // `.v128` in their depth-keyed cells. Load each cell into a
+                    // NEON quad (q0/q1 — the SIMD register file, disjoint from
+                    // the GP operand bank Spasm keeps everything else in), `ADD
+                    // Vd.4S`, store the result quad back to the lower cell.
+                    if (sp < 2) return null;
+                    if (stack[sp - 1] != .v128 or stack[sp - 2] != .v128) return null;
+                    const off_a = refSlotOff(num_locals, sp - 2);
+                    const off_b = refSlotOff(num_locals, sp - 1);
+                    try m.emit(a64.ldrQImm(.x0, .x0, off_a)); // q0 = a (Rn=x0 = locals base)
+                    try m.emit(a64.ldrQImm(.x1, .x0, off_b)); // q1 = b
+                    try m.emit(a64.addV4s(.x0, .x0, .x1)); // q0 = a + b (4×i32)
+                    try m.emit(a64.strQImm(.x0, .x0, off_a)); // result -> a's cell
+                    sp -= 1; // pop 2, push 1; the v128 result lives in a's slot
+                    stack[sp - 1] = .v128;
+                } else return null; // other SIMD ops — stay interpreted
+            },
             op_f32_demote_f64 => {
                 // §4.3.5 f32.demote_f64 — narrow the double to single via FCVT,
                 // bridging the f64 bits into the FP unit and the f32 result back.
@@ -3305,30 +3464,47 @@ pub fn compile(
 
     const results = ftype.results;
     if (sp != results.len) return null;
-    // i32 and i64 results both store from the slot register's low bytes
-    // (an i32 is zero-extended in its register), high cell word cleared.
-    for (results) |rt| if (rt != .i32 and rt != .i64 and rt != .f64 and rt != .f32) return null;
+    // A scalar result stores from the slot register's low bytes (an i32 is
+    // zero-extended in its register), high cell word cleared. §4.4 SIMD — a
+    // v128 result is the full 128-bit cell (both halves real), copied from
+    // the operand's depth-keyed slot. A reference result still degrades (no
+    // emittable producer puts a reference at a result slot today).
+    for (results) |rt| if (rt != .i32 and rt != .i64 and rt != .f64 and rt != .f32 and rt != .v128) return null;
 
     // Materialize the residual stack into result cells. Wasm results
     // map bottom-of-stack → results[0]; an i32 cell is the value
     // zero-extended into the low 64 bits with the high 64 cleared.
-    try m.movImm64(.x17, 0); // reused zero for every cell's high half
+    try m.movImm64(.x17, 0); // reused zero for every scalar cell's high half
     for (results, 0..) |_, ri| {
         const cell_off: u15 = @intCast(ri * @sizeOf(Cell));
         switch (stack[ri]) {
             .const_i32 => |v| {
                 try m.movImm64(.x16, @as(u32, @bitCast(v)));
                 try m.emit(a64.strImm(.x16, .x1, cell_off));
+                try m.emit(a64.strImm(.x17, .x1, cell_off + 8)); // clear high half
             },
-            .reg => |r| try m.emit(a64.strImm(r, .x1, cell_off)),
+            .reg => |r| {
+                try m.emit(a64.strImm(r, .x1, cell_off));
+                try m.emit(a64.strImm(.x17, .x1, cell_off + 8)); // clear high half
+            },
+            // §4.4 SIMD — a v128 result lives in its depth-keyed cell (depth
+            // ri, since result ri maps to stack depth ri). Copy BOTH 64-bit
+            // halves slot→results — the high half is real here, NOT zero, so
+            // it is written from the slot, not from x17. x16 is the scratch.
+            .v128 => {
+                const src = refSlotOff(num_locals, ri);
+                try m.emit(a64.ldrImm(.x16, .x0, src));
+                try m.emit(a64.strImm(.x16, .x1, cell_off));
+                try m.emit(a64.ldrImm(.x16, .x0, src + 8));
+                try m.emit(a64.strImm(.x16, .x1, cell_off + 8));
+            },
             // §5.4.2 — a reference result would need its full 128 bits in
-            // the result cell. The result-type guard above already rejects
-            // a non-scalar result type, so a reference Loc cannot reach a
-            // scalar result slot; degrade defensively rather than truncate
+            // the result cell. The result-type guard above rejects a
+            // reference result type, so a reference Loc cannot reach a
+            // result slot; degrade defensively rather than truncate
             // (a runtime `.ref`, or a static `.ref_null`/`.ref_func`).
             .ref_null, .ref_func, .ref => return null,
         }
-        try m.emit(a64.strImm(.x17, .x1, cell_off + 8));
     }
     // Normal return: w0 = trap_ok; results are already written to x1.
     // x0 (the now-dead locals pointer) carries the status back. Fall
@@ -3397,6 +3573,24 @@ fn calleeFuncType(module: *const Module, fidx: u32) ?*const FuncType {
     return &module.types[ti];
 }
 
+/// Resolve a global's value type (§4.4.5/§4.4.6) by walking the global
+/// index space: imported globals first (`imp.desc.global.val`), then the
+/// module's own defined globals (`module.globals[local].type.val`).
+/// Returns null on an out-of-range index — the function then degrades.
+/// Used to keep a v128-typed global off the scalar `global.get`/`global.set`
+/// fast path (those carry only 64 bits, so a v128 must stay interpreted).
+fn globalValType(module: *const Module, idx: u32) ?ValType {
+    var seen: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc != .global) continue;
+        if (seen == idx) return imp.desc.global.val;
+        seen += 1;
+    }
+    const local = idx - seen;
+    if (local >= module.globals.len) return null;
+    return module.globals[local].type.val;
+}
+
 /// Place `loc`'s value into the register for stack `depth`, emitting a
 /// `movz`/`movk` sequence for a folded constant (a `reg` value is
 /// already in its slot register by the depth invariant). Returns the
@@ -3421,7 +3615,13 @@ fn materialize(m: *masm_mod.Masm, loc: Loc, depth: usize) CompileError!a64.Reg {
         // contract). The consumers that read a reference *without* needing it
         // in a single register (`ref.is_null` folds `.ref_null`/`.ref_func`
         // statically and reads a `.ref` slot directly) never call here.
-        .ref_null, .ref_func, .ref => return error.UnsupportedOp,
+        //
+        // §4.4 SIMD — a `.v128` is 128-bit too; it lives in its depth-keyed
+        // cell, not a register, and can't be coerced into one GP slot. Any
+        // op that would force a v128 into a runtime register degrades here;
+        // the SIMD consumers that read the slot directly (`i32x4.add`, the
+        // store, a local copy) never call `materialize` on a `.v128`.
+        .ref_null, .ref_func, .ref, .v128 => return error.UnsupportedOp,
     }
 }
 
@@ -3441,8 +3641,13 @@ fn materialize(m: *masm_mod.Masm, loc: Loc, depth: usize) CompileError!a64.Reg {
 fn emitRefIntoSlot(m: *masm_mod.Masm, loc: Loc, depth: usize, num_locals: usize) CompileError!void {
     const off = refSlotOff(num_locals, depth);
     switch (loc) {
-        // Already in its home slot (a `table.get` result, etc.).
-        .ref => {},
+        // Already in its home slot (a `table.get` result, etc.). §4.4 SIMD —
+        // a `.v128` is likewise always in its depth-keyed slot (there is no
+        // compile-time-constant v128 Loc; `v128.const` writes the slot), so
+        // ensuring its 128 bits are in place is a no-op, exactly like `.ref`.
+        // This lets the shared 128-bit cell paths (the reference/v128 select)
+        // call one normalizer regardless of operand kind.
+        .ref, .v128 => {},
         // §5.4.2 — funcref bits: low 64 = the function index, high 64 = the
         // defining instance (the callee-saved body constant x19).
         .ref_func => |f| {
@@ -3457,7 +3662,8 @@ fn emitRefIntoSlot(m: *masm_mod.Masm, loc: Loc, depth: usize, num_locals: usize)
             try m.emit(a64.strImm(.x16, .x0, off));
             try m.emit(a64.strImm(.x16, .x0, off + 8));
         },
-        // A scalar reaching a reference slot is impossible in validated code.
+        // A scalar reaching a reference / v128 slot is impossible in
+        // validated code; degrade defensively.
         .reg, .const_i32 => return error.UnsupportedOp,
     }
 }
@@ -3492,7 +3698,7 @@ fn emitRefIntoLocalCell(m: *masm_mod.Masm, loc: Loc, dst_off: u15, depth: usize,
             try m.emit(a64.strImm(.x16, .x0, dst_off));
             try m.emit(a64.strImm(.x16, .x0, dst_off + 8));
         },
-        .reg, .const_i32 => return error.UnsupportedOp,
+        .reg, .const_i32, .v128 => return error.UnsupportedOp,
     }
 }
 
@@ -3672,6 +3878,26 @@ fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
                     _ = readUleb32(body, i) orelse return null; // table index
                 } else return null;
             },
+            op_simd_prefix => {
+                // §4.4 SIMD — v128.const (sub 12) carries 16 raw immediate
+                // bytes; v128.load (sub 0) / v128.store (sub 11) carry a memarg
+                // (align + offset ULEBs); i32x4.add (sub 174) takes no further
+                // immediate. Every other SIMD sub-op (lane immediates,
+                // load/store_lane, shuffle, …) has an immediate width this
+                // baseline doesn't model, so degrade rather than risk misreading
+                // a following byte as an opcode.
+                const sub = readUleb32(body, i) orelse return null;
+                if (sub == simd_i32x4_add) {
+                    // no further immediate
+                } else if (sub == simd_v128_const) {
+                    if (i.* + 16 > body.len) return null;
+                    i.* += 16; // 16 raw immediate bytes
+                } else if (sub == simd_v128_load or sub == simd_v128_store) {
+                    const flags = readUleb32(body, i) orelse return null;
+                    if (flags & 0x40 != 0) return null; // multi-memory — degrade
+                    _ = readUleb32(body, i) orelse return null; // offset
+                } else return null;
+            },
             op_f64_const => {
                 _ = readF64Bits(body, i) orelse return null; // 8 raw bytes
             },
@@ -3831,6 +4057,24 @@ fn readF32Bits(body: []const u8, i: *usize) ?u64 {
     }
     i.* += 4;
     return bits;
+}
+
+/// Read a `v128.const`'s 16 raw little-endian immediate bytes (§4.4 — a
+/// v128 immediate is NOT LEB-encoded), returning the two 64-bit halves
+/// (`lo` = bytes 0..8, `hi` = bytes 8..16) for two `movImm64`s into the
+/// operand's cell. Null on a short read (a validated body always has the
+/// sixteen bytes; Spasm never aborts on a surprising one).
+fn readV128Bytes(body: []const u8, i: *usize) ?struct { lo: u64, hi: u64 } {
+    if (i.* + 16 > body.len) return null;
+    var lo: u64 = 0;
+    var hi: u64 = 0;
+    var k: usize = 0;
+    while (k < 8) : (k += 1) {
+        lo |= @as(u64, body[i.* + k]) << @intCast(k * 8);
+        hi |= @as(u64, body[i.* + 8 + k]) << @intCast(k * 8);
+    }
+    i.* += 16;
+    return .{ .lo = lo, .hi = hi };
 }
 
 // ── tests ───────────────────────────────────────────────────────────

@@ -252,6 +252,14 @@ pub fn addvB(vd: Reg, vn: Reg) u32 {
     return 0x0E31B800 | (r(vn) << 5) | r(vd);
 }
 
+/// ADD Vd.4S, Vn.4S, Vm.4S — lane-wise (mod 2^32) add of four 32-bit
+/// integer lanes (the §4.4 SIMD `i32x4.add`). Advanced-SIMD three-same
+/// form, Q=1 (full 128 bits) / U=0 / size=10 / opcode=ADD; the `r()`
+/// field selects v0..v31, as with the other vector ops.
+pub fn addV4s(vd: Reg, vn: Reg, vm: Reg) u32 {
+    return 0x4EA08400 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
 /// ORR Wd, Wn, Wm
 pub fn orrRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x2A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
@@ -403,6 +411,21 @@ pub fn ldrImm(rt: Reg, rn: Reg, byte_off: u15) u32 {
 pub fn strImm(rt: Reg, rn: Reg, byte_off: u15) u32 {
     std.debug.assert(byte_off % 8 == 0);
     return 0xF9000000 | (@as(u32, byte_off / 8) << 10) | (r(rn) << 5) | r(rt);
+}
+
+/// LDR Qt, [Xn, #byte_off] — 128-bit SIMD&FP load, unsigned scaled
+/// offset; `byte_off` must be 16-byte aligned and ≤ 65520 (imm12 × 16).
+/// The `r()` field selects v0..v31. Moves a whole `v128` cell in one
+/// instruction (the §4.4 SIMD data path).
+pub fn ldrQImm(qt: Reg, rn: Reg, byte_off: u17) u32 {
+    std.debug.assert(byte_off % 16 == 0);
+    return 0x3DC00000 | (@as(u32, byte_off / 16) << 10) | (r(rn) << 5) | r(qt);
+}
+
+/// STR Qt, [Xn, #byte_off] — 128-bit SIMD&FP store, same limits.
+pub fn strQImm(qt: Reg, rn: Reg, byte_off: u17) u32 {
+    std.debug.assert(byte_off % 16 == 0);
+    return 0x3D800000 | (@as(u32, byte_off / 16) << 10) | (r(rn) << 5) | r(qt);
 }
 
 /// LDR Wt, [Xn, #byte_off] — 32-bit load, unsigned scaled offset;

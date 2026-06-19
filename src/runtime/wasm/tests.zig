@@ -6042,3 +6042,138 @@ test "wasm locals: a reference-typed local defaults to null" {
     });
     try testing.expectEqual(@as(i32, 1), try runI32(bytes, "f", &.{}));
 }
+
+test "wasm spasm: i32x4.add of two v128.const vectors, stored and lane-read, runs Spasm-compiled" {
+    // §4.4 SIMD — the v128 data path plus the first NEON compute op. "f"
+    // builds two i32x4 vectors with `v128.const`, lane-wise adds them with
+    // `i32x4.add` (the NEON `ADD Vd.4S`), stores the 128-bit result to
+    // linear memory with `v128.store`, then reads lane 1 back out with
+    // `i32.load` and returns it. `i32x4.extract_lane` is out of scope, so
+    // the store+scalar-load round-trip is how the test observes one lane.
+    // [1,2,3,4] + [10,20,30,40] = [11,22,33,44]; lane 1 = 2+20 = 22.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: () -> (i32)
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    // func section: func 0 : type 0
+    const fbody = [_]u8{ 0x01, 0x00 };
+    // memory section: one page, min only
+    const mbody = [_]u8{ 0x01, 0x00, 0x01 };
+    // export "f" -> func 0
+    const xbody = [_]u8{ 0x01, 0x01, 'f', 0x00, 0x00 };
+    // code: func 0, 0 locals:
+    //   i32.const 0                      ;; store address
+    //   v128.const i32x4 1 2 3 4
+    //   v128.const i32x4 10 20 30 40
+    //   i32x4.add                        ;; 0xFD 0xAE 0x01
+    //   v128.store align=4 offset=0      ;; 0xFD 0x0B 0x04 0x00
+    //   i32.const 0                      ;; load address
+    //   i32.load align=2 offset=4        ;; lane 1
+    //   end
+    const cbody = [_]u8{
+        0x01, // one code entry
+        0x34, // body length (52 bytes)
+        0x00, // 0 local groups
+        0x41, 0x00, // i32.const 0
+        0xfd, 0x0c, // v128.const
+        0x01, 0x00,
+        0x00, 0x00,
+        0x02, 0x00,
+        0x00, 0x00,
+        0x03, 0x00,
+        0x00, 0x00,
+        0x04, 0x00,
+        0x00, 0x00,
+        0xfd, 0x0c, // v128.const
+        0x0a, 0x00,
+        0x00, 0x00,
+        0x14, 0x00,
+        0x00, 0x00,
+        0x1e, 0x00,
+        0x00, 0x00,
+        0x28, 0x00,
+        0x00, 0x00,
+        0xfd, 0xae, 0x01, // i32x4.add
+        0xfd, 0x0b, 0x04, 0x00, // v128.store a=4 o=0
+        0x41, 0x00, // i32.const 0
+        0x28, 0x02, 0x04, // i32.load a=2 o=4
+        0x0b, // end
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const fidx = funcExport(mp, "f") orelse return error.NoSuchExport;
+    const res = try interp.invoke(&instance, testing.allocator, fidx, &.{});
+    defer testing.allocator.free(res);
+
+    try testing.expectEqual(@as(u32, 22), @as(u32, @truncate(res[0])));
+    // The whole body — v128.const/add/store + i32.load — ran Spasm-compiled.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: a v128 param flows through a local and out as the result, Spasm-compiled" {
+    // §4.4 SIMD — exercises a v128 parameter, a 128-bit operand on the
+    // stack, and a v128 result, all of which reuse the depth-keyed cell
+    // machinery. "id" is `(param v128) (result v128) local.get 0` — the
+    // whole 128-bit value must round-trip unchanged. A v128 param seeds its
+    // cell from the args buffer; `local.get` copies cell→operand-slot; the
+    // epilogue copies the result operand's cell back to the results buffer.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (v128) -> (v128)
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7b, 0x01, 0x7b };
+    // func section: func 0 : type 0
+    const fbody = [_]u8{ 0x01, 0x00 };
+    // export "id" -> func 0
+    const xbody = [_]u8{ 0x01, 0x02, 'i', 'd', 0x00, 0x00 };
+    // code: func 0, 0 locals: local.get 0; end
+    const cbody = [_]u8{ 0x01, 0x04, 0x00, 0x20, 0x00, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const fidx = funcExport(mp, "id") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    // A value whose two 64-bit halves differ, so a half-only copy would show.
+    const want: u128 = 0x0123_4567_89AB_CDEF_FEDC_BA98_7654_3210;
+    cells[0] = want;
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    try testing.expectEqual(want, res[0]);
+    try testing.expect(instance.spasm_runs >= 1);
+}
