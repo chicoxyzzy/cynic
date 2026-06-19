@@ -1679,34 +1679,43 @@ pub fn compile(
                 // is zero-extended). A v128/ref operand degrades.
                 for (callee.params) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
                 for (callee.results) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
-                // The args must be the only live operand values: the
-                // helper's callconv(.c) clobbers the whole operand bank
-                // (x9..x15) and the boundary scratch, so nothing below the
-                // args can survive the call (it would have to be spilled).
-                // `sp == nparams` is exactly "args occupy the whole stack".
-                // A deeper stack (a call whose result feeds a pending
-                // operand) degrades to the interpreter for now.
-                if (sp != nparams) return null;
-                if (nresults > operand_reg_count) return null;
+                // Operands live *below* the args (a call whose result feeds
+                // a pending operand) must survive the helper call: its
+                // callconv(.c) clobbers the whole operand bank (x9..x15) and
+                // the caller-saved boundary scratch. `below` is how many,
+                // spilled into the frame alongside the boundary registers and
+                // reloaded after. Validation guarantees sp >= nparams; every
+                // live operand is a scalar (a v128/ref producer degraded
+                // upstream), so each fits one 8-byte slot.
+                if (sp < nparams) return null;
+                const below = sp - nparams;
+                // The post-call stack is the survivors plus the results; it
+                // must fit the operand bank.
+                if (below + nresults > operand_reg_count) return null;
 
-                // Per-frame buffer: `bufcells` 16-byte cells for the
-                // args-in / results-out region, then a 40-byte spill for
-                // the five caller-saved boundary registers x0..x4 (locals,
-                // results, mem_base, mem_len, globals) — the helper's
-                // callconv(.c) body would otherwise destroy them. Round the
-                // whole reservation up to a 16-byte multiple (AAPCS64 SP
-                // alignment): `bufcells*16` is already aligned, so the
-                // 40-byte spill rounds to 48.
+                // Per-frame buffer, three regions:
+                //   [0 .. bufcells*16)         args-in / results-out cells
+                //   [spill_off .. +40)         the five caller-saved boundary
+                //                              registers x0..x4
+                //   [op_spill_off .. +below*8) the live operands below the
+                //                              args, one 8-byte slot each
+                // Round the whole reservation up to a 16-byte multiple
+                // (AAPCS64 SP alignment).
                 const bufcells = @max(nparams, nresults);
                 const spill_off: u15 = @intCast(bufcells * @sizeOf(Cell));
-                const framebytes: u12 = @intCast(bufcells * @sizeOf(Cell) + 48);
+                const op_spill_off: u15 = spill_off + 40;
+                const raw_frame = @as(usize, bufcells) * @sizeOf(Cell) + 40 + below * 8;
+                const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
 
-                // Materialize the args into their slot registers first
-                // (while x16/x17 are free), before any boundary-register
-                // shuffle below clobbers the scratch.
-                var ai: usize = 0;
-                while (ai < nparams) : (ai += 1) {
-                    _ = try materialize(&m, stack[ai], ai);
+                // Materialize the args into their slot registers (a
+                // `.const_i32` arg becomes regForDepth(below+k); a `.reg` arg
+                // already is) before any boundary shuffle clobbers the
+                // scratch. Args are the top `nparams`: depth below..sp-1.
+                // Below-operands are handled separately — a constant one is
+                // never put in a register (see the spill below).
+                {
+                    var k: usize = 0;
+                    while (k < nparams) : (k += 1) _ = try materialize(&m, stack[below + k], below + k);
                 }
 
                 // Reserve the frame and take its base in x6 (a free
@@ -1717,21 +1726,37 @@ pub fn compile(
 
                 // Spill every caller-saved boundary register the helper's
                 // callconv(.c) body may clobber: x0 locals, x1 results,
-                // x2 mem_base, x3 mem_len, x4 globals. (x5/x6 scratch and
-                // the operand bank x9.. are already dead here — sp==nparams
-                // means the args were the whole stack, now staged as cells.)
+                // x2 mem_base, x3 mem_len, x4 globals.
                 try m.emit(a64.strImm(.x0, .x6, spill_off));
                 try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
                 try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
                 try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
                 try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
 
+                // Spill the live operands below the args. Only those already
+                // in a register (regForDepth(d)) need saving across the call;
+                // a `.const_i32` below-operand is re-materialized when later
+                // consumed, so it is left entirely untouched. Crucially its
+                // Loc is NOT mutated to `.reg`: doing so would leak a
+                // then-arm-only materialization into a sibling else-arm that
+                // never ran the `mov` (an operand below an `if` must look
+                // identical to both arms — they compile from one entry state).
+                {
+                    var d: usize = 0;
+                    while (d < below) : (d += 1) {
+                        if (stack[d] != .reg) continue;
+                        const off: u15 = @intCast(op_spill_off + d * 8);
+                        try m.emit(a64.strImm(regForDepth(d), .x6, off));
+                    }
+                }
+
                 // Stage each arg as a full cell: low 64 = the value
                 // (an i32 is zero-extended in its register), high 64 = 0.
+                // Arg k is the operand at depth below+k (the top `nparams`).
                 var k: usize = 0;
                 while (k < nparams) : (k += 1) {
                     const cell_off: u15 = @intCast(k * @sizeOf(Cell));
-                    try m.emit(a64.strImm(regForDepth(k), .x6, cell_off));
+                    try m.emit(a64.strImm(regForDepth(below + k), .x6, cell_off));
                     try m.emit(a64.strZeroImm(.x6, cell_off + 8));
                 }
 
@@ -1760,22 +1785,32 @@ pub fn compile(
                 // frame and the `blr`, so SP again equals the buffer base.
                 // Recompute x6 from SP before any reload.
                 try m.emit(a64.addRegSp(.x6, 0));
-                // Reload the results into the operand bank (low 64 bits per
-                // cell), then restore the spilled boundary registers, then
-                // release the frame.
+                // Reload the results onto the operand bank *above* the
+                // survivors (low 64 bits per cell): result r lands at depth
+                // below+r. Then restore the spilled boundary registers, the
+                // survivors (regForDepth(0..below)), and release the frame.
                 var r: usize = 0;
                 while (r < nresults) : (r += 1) {
                     const cell_off: u15 = @intCast(r * @sizeOf(Cell));
-                    try m.emit(a64.ldrImm(regForDepth(r), .x6, cell_off));
-                    stack[r] = .{ .reg = regForDepth(r) };
+                    try m.emit(a64.ldrImm(regForDepth(below + r), .x6, cell_off));
+                    stack[below + r] = .{ .reg = regForDepth(below + r) };
                 }
                 try m.emit(a64.ldrImm(.x0, .x6, spill_off));
                 try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
                 try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
                 try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
                 try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+                {
+                    var d: usize = 0;
+                    while (d < below) : (d += 1) {
+                        if (stack[d] != .reg) continue; // const: nothing was spilled
+                        const off: u15 = @intCast(op_spill_off + d * 8);
+                        try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+                        // Loc stays `.reg regForDepth(d)` — unchanged.
+                    }
+                }
                 try m.emit(a64.addSpImm(framebytes));
-                sp = nresults;
+                sp = below + nresults;
             },
             op_end => {
                 // An `end` with no open frame terminates the function

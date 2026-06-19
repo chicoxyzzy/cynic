@@ -489,6 +489,125 @@ test "wasm spasm: a direct call to a leaf function runs Spasm-compiled" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: a call with a live operand under the args runs Spasm-compiled" {
+    // §5.4.1 — a `call` whose result feeds a pending operand. "main"
+    // computes x + square(x): it keeps a copy of x on the operand stack
+    // *under* the call's argument, so at the call site the stack is deeper
+    // than the callee's arity (sp=2, nparams=1). The call arm must spill the
+    // live operand below the args across the helper call and reload it
+    // after, then `i32.add` it to the result. Before this, a deeper-than-
+    // arity stack at a call degraded to the interpreter.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->(i32)
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    // func section: two funcs, both type 0
+    const fbody = [_]u8{ 0x02, 0x00, 0x00 };
+    // export "main" -> func 0
+    const xbody = [_]u8{ 0x01, 0x04, 'm', 'a', 'i', 'n', 0x00, 0x00 };
+    // code section: two bodies.
+    //   func 0 (main):   local.get 0; local.get 0; call 1; i32.add; end
+    //   func 1 (square): local.get 0; local.get 0; i32.mul; end
+    const cbody = [_]u8{
+        0x02, // two code entries
+        0x09, 0x00, 0x20, 0x00, 0x20, 0x00, 0x10, 0x01, 0x6a, 0x0b, // main: 9 bytes
+        0x07, 0x00, 0x20, 0x00, 0x20, 0x00, 0x6c, 0x0b, // square: 7 bytes
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const fidx = funcExport(mp, "main") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 5);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    // 5 + square(5) == 5 + 25 == 30, the same answer the interpreter gives...
+    try testing.expectEqual(@as(u32, 30), @as(u32, @truncate(res[0])));
+    // ...and "main" (deeper-than-arity stack at the call) ran Spasm-compiled.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: a constant under an if/else with calls in both arms is not corrupted" {
+    // §5.4.1 regression (the if.json `as-select-mid`/`as-store-last` class).
+    // main(x) = 7 + (if x then { dummy(); 1 } else { dummy(); 0 }). The
+    // constant 7 sits *below* the if-block; both arms contain a `call`, so
+    // the call's below-operand handling runs on each arm. A constant
+    // below-operand must NOT be materialized-and-pinned by the call: doing
+    // so on the then-arm (compiled first) would leak a `.reg` Loc into the
+    // else-arm, whose path never ran the `mov`, so main(0) would read a
+    // garbage "7". The const must stay a const, re-materialized after the
+    // call on whichever arm runs. main(0) == 7 (else), main(1) == 8 (then).
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->(i32); type 1: ()->()
+    const tbody = [_]u8{ 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x00 };
+    // func section: func0 "main" type0, func1 "dummy" type1
+    const fbody = [_]u8{ 0x02, 0x00, 0x01 };
+    // export "main" -> func 0
+    const xbody = [_]u8{ 0x01, 0x04, 'm', 'a', 'i', 'n', 0x00, 0x00 };
+    // code section: two bodies.
+    //   func 0 (main): i32.const 7; local.get 0; if (result i32);
+    //     then: call 1; i32.const 1; else: call 1; i32.const 0; end;
+    //     i32.add; end
+    //   func 1 (dummy): end
+    const cbody = [_]u8{
+        0x02, // two code entries
+        0x13, 0x00, // main: 19 bytes, 0 locals
+        0x41, 0x07, 0x20, 0x00, 0x04, 0x7f, 0x10, 0x01, 0x41, 0x01,
+        0x05, 0x10, 0x01, 0x41, 0x00, 0x0b, 0x6a, 0x0b,
+        0x02, 0x00, 0x0b, // dummy: 2 bytes, 0 locals, end
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true; // force the baseline tier
+
+    const fidx = funcExport(mp, "main") orelse return error.NoSuchExport;
+    inline for (.{ .{ 0, 7 }, .{ 1, 8 } }) |case| {
+        const cells = try a.alloc(u128, 1);
+        cells[0] = @as(u128, case[0]);
+        const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+        defer testing.allocator.free(res);
+        try testing.expectEqual(@as(u32, case[1]), @as(u32, @truncate(res[0])));
+    }
+    // "main" (a `call` under an `if`) ran Spasm-compiled, not degraded.
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 test "wasm spasm: a self-recursive call traps CallStackExhausted, never crashes" {
     // Host-safety (AGENTS.md never-abort-the-host): a Spasm-compiled body
     // that recurses unboundedly nests `invoke` on the *native* stack via

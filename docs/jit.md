@@ -1087,7 +1087,7 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (`call_indirect`, deeper-stack calls, tables, most of bulk memory, SIMD)
+   (`call_indirect`, tables, most of bulk memory, SIMD)
    degrade, so the suite still covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
    set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
@@ -1098,14 +1098,15 @@ useful:
    global's value cell), the first bulk-memory ops `memory.fill` and
    `memory.copy` (inline byte loops after up-front overflow-safe bounds
    checks — leaf, no helper; copy picks the overlap-safe direction from
-   `dst <= src`), `memory.size` (`mem_len >> 16`), and direct `call` whose
-   arguments occupy the whole operand stack (a non-leaf prologue parks the
-   `*Instance` in callee-saved x19; the args marshal through a per-frame
-   cell buffer to a native helper that re-enters `invoke`; a thread-local
-   depth guard turns runaway native recursion into a catchable
-   `CallStackExhausted`); `call_indirect`, calls whose result feeds a
-   pending operand, the rest of bulk memory, tables, and the reference/SIMD
-   families are the remaining frontier, along with the
+   `dst <= src`), `memory.size` (`mem_len >> 16`), and direct `call` (a
+   non-leaf prologue parks the `*Instance` in callee-saved x19; the args
+   marshal through a per-frame cell buffer to a native helper that re-enters
+   `invoke`; operands live below the args are spilled across the helper call
+   and reloaded after — a constant one stays a constant, re-materialized on
+   each control-flow arm; a thread-local depth guard turns runaway native
+   recursion into a catchable `CallStackExhausted`); `call_indirect`, the
+   rest of bulk memory, tables, and the reference/SIMD families are the
+   remaining frontier, along with the
    side-table-as-control-oracle wiring (§6) that would make multi-target
    `br_table` cheap.
 5. **Ohaimark ADR** — written against measured Bistromath data
