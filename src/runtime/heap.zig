@@ -2454,11 +2454,39 @@ pub const Heap = struct {
     /// so `markValue`'s object arm strong-marks weak slots exactly
     /// like the old `markObjectInternalSlots` path did.
     fn markAllPointerFields(self: *Heap, container: Container) void {
+        // This is the remembered-set scan: `container` is a mature
+        // object the write barrier flagged as (possibly) holding a young
+        // referent, and the minor cycle must walk its outgoing edges to
+        // root that referent. Once minor cycles stop flipping `live_color`
+        // (sticky mark bits), a mature container is already `live_color`,
+        // so a plain `markValue(container)` would short-circuit on the
+        // colour check and skip the walk — the dirty list would go inert.
+        // Clear the container's mark first so the FULL per-type walk runs
+        // (it reuses every edge `markValue`/`markEnvironment`/
+        // `markGenerator` already enumerate — no per-edge-class list to
+        // keep in lockstep, so no dropped edge); the walk re-marks the
+        // container. The container is mature, so its colour is otherwise
+        // irrelevant to the minor sweep. Under the current flip scheme
+        // the container is already unmarked, so the pre-clear is a no-op
+        // and this is behaviour-preserving.
+        const unmarked = ~self.live_color;
         switch (container) {
-            .object => |o| self.markValue(taggedObject(o)),
-            .function => |f| self.markValue(taggedFunction(f)),
-            .environment => |e| self.markEnvironment(e),
-            .generator => |g| self.markGenerator(g),
+            .object => |o| {
+                o.mark_color = unmarked;
+                self.markValue(taggedObject(o));
+            },
+            .function => |f| {
+                f.mark_color = unmarked;
+                self.markValue(taggedFunction(f));
+            },
+            .environment => |e| {
+                e.mark_color = unmarked;
+                self.markEnvironment(e);
+            },
+            .generator => |g| {
+                g.mark_color = unmarked;
+                self.markGenerator(g);
+            },
         }
     }
 
