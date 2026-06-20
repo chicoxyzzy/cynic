@@ -4210,7 +4210,8 @@ pub const Compiler = struct {
                     const decoded = try self.decodeIdentifierName(key_slice[1..]);
                     const mangled = try self.manglePrivateRef(decoded);
                     const k = try self.internString(mangled);
-                    try self.builder.emitLoadReg(c.span, r_recv);
+                    // Receiver still in acc (see the ident branch) — the acc-form
+                    // `lda_private` reads it directly; no redundant `Ldar r_recv`.
                     try self.builder.emitOp(.lda_private, c.span);
                     try self.builder.emitU16(k);
                 } else {
@@ -4219,7 +4220,11 @@ pub const Compiler = struct {
                     // is `obj.o()`.
                     const decoded = try self.decodeIdentifierName(key_slice);
                     const k = try self.internString(decoded);
-                    try self.builder.emitLoadReg(c.span, r_recv);
+                    // §13.3.6 — the receiver is still in the accumulator: it was
+                    // just `Star`-ed to r_recv (which preserves acc) with nothing
+                    // emitted in between, so the acc-form `LdaProperty` callee
+                    // load reads it directly. r_recv still holds the receiver for
+                    // the call's `this`. The old `Ldar r_recv` reload was dead.
                     try self.builder.emitLdaProperty(c.span, k);
                 }
             },
@@ -4293,14 +4298,19 @@ pub const Compiler = struct {
                     const decoded = try self.decodeIdentifierName(key_slice[1..]);
                     const mangled = try self.manglePrivateRef(decoded);
                     const k = try self.internString(mangled);
-                    try self.builder.emitLoadReg(c.span, r_recv);
+                    // Receiver still in acc (see the ident branch) — the acc-form
+                    // `lda_private` reads it directly; no redundant `Ldar r_recv`.
                     try self.builder.emitOp(.lda_private, c.span);
                     try self.builder.emitU16(k);
                 } else {
                     // §12.7.1 — decode `\uXXXX` in IdentifierName.
                     const decoded = try self.decodeIdentifierName(key_slice);
                     const k = try self.internString(decoded);
-                    try self.builder.emitLoadReg(c.span, r_recv);
+                    // §13.3.6 — the receiver is still in the accumulator: it was
+                    // just `Star`-ed to r_recv (which preserves acc) with nothing
+                    // emitted in between, so the acc-form `LdaProperty` callee
+                    // load reads it directly. r_recv still holds the receiver for
+                    // the call's `this`. The old `Ldar r_recv` reload was dead.
                     try self.builder.emitLdaProperty(c.span, k);
                 }
             },
@@ -15554,6 +15564,19 @@ test "compiler: a used member post-increment keeps the old value" {
     const t0 = t0Of(got);
     try testing.expect(std.mem.indexOf(u8, t0, "Star2") != null);
     try testing.expect(std.mem.indexOf(u8, t0, "Ldar2") != null);
+}
+
+test "compiler: a method call loads the callee from the accumulator, not a redundant reload" {
+    // §13.3.6 — after the receiver is evaluated and stored to r_recv it is
+    // still in the accumulator (Star preserves acc; nothing emits between),
+    // so the acc-form `LdaProperty` callee load reads it directly. The
+    // `Ldar r_recv` reload before it is dead. (`o.run(1)` drops it: 9→8 ops.)
+    const got = try dumpExpr("(function(o){ return o.run(1); })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "LdaProperty") != null); // still loads o.run
+    try testing.expect(std.mem.indexOf(u8, t0, "Star1") != null); // receiver still saved for `this`
+    try testing.expect(std.mem.indexOf(u8, t0, "Ldar1") == null); // redundant reload gone
 }
 
 test "compiler: an uncaptured body-top const promotes to a register beside a nested closure" {

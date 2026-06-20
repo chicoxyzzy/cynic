@@ -424,6 +424,18 @@ test "interpreter: member update (o.x++/--) — discard-elision preserves result
     try expectInt("(function(o){ var a = o.x++; return a + o.x; })({x:5});", 11); // used in a larger expr
 }
 
+test "interpreter: method call callee-from-acc load preserves this-binding + value" {
+    // §13.3.6 — dropping the redundant `Ldar r_recv` before the callee load
+    // must not change the call: the receiver stays in r_recv for `this`, and
+    // the callee is read from the accumulator (which still holds the receiver).
+    try expectInt("(function(o){ return o.run(1); })({run(x){return x*10;}});", 10); // tail method call
+    try expectInt("(function(o){ o.run(1); return o.run(2); })({run(x){return x;}});", 2); // non-tail + tail
+    try expectInt("(function(o){ return o.getThis(); })({v:42, getThis(){return this.v;}});", 42); // this = receiver
+    try expectInt("(function(a,b){ return ({m(x){return x+1;}}).m(a+b); })(2,3);", 6); // receiver is an expr
+    // private method (`o.#m()`) takes the same callee-load path (lda_private).
+    try expectInt("(function(){ class C { #m(x){return x*3;} run(x){return this.#m(x);} } return new C().run(4); })();", 12);
+}
+
 test "interpreter: conditional ?:" {
     try expectInt("1 < 2 ? 10 : 20;", 10);
     try expectInt("1 > 2 ? 10 : 20;", 20);
