@@ -352,6 +352,48 @@ call-frame construction dominating a workload we care about, or if the
 GC mark walk is reworked for other reasons and the cold struct falls out
 cheaply.
 
+**Call-callee load: redundant-`ldar` drop shipped; a dedicated
+register-receiver dispatch arm was built, measured, and NOT shipped.**
+The legacy member-call path (`o.run(x)` / `Math.max(x)` — a non-literal
+arg, where `call_property` fusion is inadmissible per §13.3.6.1) used to
+load the callee with `ldar r_recv; lda_property k` — a redundant
+receiver reload plus the acc-receiver IC. Two independent fixes were
+explored; **only the cheap one shipped:**
+
+1. **Shipped** — a compiler peephole keeps the acc-form `lda_property`
+   and just deletes the dead `ldar`: `Star r_recv` already preserves the
+   accumulator, so the receiver is still in acc at the load. One op
+   dropped, **no new opcode, no dispatch-table growth.**
+2. **Built and dropped** — a dedicated `lda_property_reg_call` opcode
+   (byte-identical to `lda_property_reg`; slow path shared with
+   `call_property` via `slowLookupForCallProperty`; Bistromath compiles
+   it identically) with its OWN interpreter dispatch arm. The motivation
+   is the documented mispredict that keeps resurfacing: routing the
+   callee load through the *shared* `lda_property` / `lda_property_reg`
+   arm mispredicts on the reg/acc alternation that mixed leaf-read +
+   method-call code creates — a prior method-callee conversion regressed
+   on exactly this, and "dedicated arms" was the proposed remedy. It was
+   correct (test262 transparent, `--jit` byte-identical, full unit pins)
+   but, on top of fix (1), its only delta is the arm isolation — a
+   permanent extra opcode. **Verdict: flat on a uniform call-heavy micro**
+   (the callee load is a small fraction of per-call cost; the isolation
+   benefit needs reg/acc *alternation*, which a uniform loop can't
+   exercise). The deciding test — an **alternation micro**
+   `for(...){ x = o.a; y = o.run(z); }`, dedicated-arm vs plain main,
+   with the `arith_loop` dispatch-bloat canary — **could not be run**: a
+   quiet machine never materialised (sustained multi-agent load all
+   session; A/A noise floor ~33 % ≫ the ~10 % signal needed). Dropped
+   rather than ship a permanent opcode on an unmeasured benefit.
+
+   **To settle it for good** (don't rebuild from scratch): rebase the
+   dedicated arm onto main (fix (1) already did the op-drop, so the arm
+   is the *only* delta), and on a genuinely idle machine run the
+   alternation micro vs plain main. **Ship bar (both required):**
+   alternation ≥ ~10 % faster, repeatable, well outside noise, AND
+   `arith_loop` flat (no global dispatch tax). Flat or marginal, or any
+   `arith_loop` regression → the dedicated arm is dead; keep fix (1) and
+   close this for good.
+
 ### Tier 2 — drained
 
 **Computed-property read + write IC** (`obj[k]` / `obj[k] = v`,
