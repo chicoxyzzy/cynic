@@ -55,3 +55,7 @@ profile.syms.json
 tools/bench/node_modules/
 tools/bench/.remote.env
 .remote.env
+
+# Raw per-run output from tools/bench/remote-bench.sh (head/base/cross
+# dirs + the rendered A/B report). Regenerated every run; never tracked.
+bench-results-remote/

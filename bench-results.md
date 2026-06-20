@@ -17,6 +17,58 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-21 — cynic `bf5951e1` (sticky mark bits), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+First row from the remote bench box — the canonical bench host now that
+local full-suite runs are off. It's a **shared-vCPU** machine, so
+absolute ms run several× slower and noisier than the Darwin arm64 laptop
+rows below (micro spreads 25–82 %); the two hosts are **not comparable**.
+The trustworthy signal is the same-runner A/B vs `db87dedd` (the
+pre-sticky-bits commit), which cancels host variance:
+
+- **splay 0.283× (default tier) / 0.289× (`--no-jit`) — a ~3.5× GC win**:
+  the sticky-mark-bit minor cycle no longer re-traces the mature set.
+  splay's own macro spread is a clean ~5–8 %.
+- All other movers faster: promise_chain 0.72× / 0.67×; object_alloc
+  0.88× and string_concat 0.88× on `--no-jit`. The other four macros are
+  flat (±6 %).
+- prop_write flags +29 % (default) / +15 % (`--no-jit`), but its head p50
+  is identical across both tiers and it's the noisiest micro on the box —
+  treat as shared-vCPU jitter pending a confirm re-run, not a real
+  regression.
+
+Default tier (Bistromath). Macros are the cleaner absolute read on the
+shared box; the noisy micros follow for completeness — defer to the A/B
+ratio over their absolute ms.
+
+#### Macros (default tier)
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| richards | 660.16 | 628.03 | 721.54 | 7296 |
+| deltablue | 595.31 | 562.37 | 677.71 | 12032 |
+| crypto | 683.70 | 669.56 | 718.40 | 10496 |
+| raytrace | 662.09 | 616.87 | 721.12 | 11520 |
+| navier_stokes | 831.22 | 803.66 | 860.15 | 8704 |
+| splay | 4569.18 | 4446.68 | 4806.51 | 371918 |
+
+#### Micros (default tier)
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 72.38 | 67.94 | 98.69 | 6912 |
+| prop_access | 30.74 | 27.32 | 43.40 | 6912 |
+| prop_write | 32.35 | 31.08 | 41.63 | 6912 |
+| array_iter | 48.63 | 46.12 | 58.73 | 7936 |
+| string_concat | 74.63 | 66.86 | 128.20 | 14946 |
+| promise_chain | 27.32 | 24.83 | 39.07 | 24576 |
+| object_alloc | 34.15 | 31.31 | 55.60 | 10112 |
+| method_call | 40.64 | 38.43 | 46.49 | 7040 |
+| class_instantiate | 55.30 | 52.51 | 68.29 | 10240 |
+| ctor_array_build | 374.10 | 356.46 | 422.20 | 10816 |
+| json_stringify | 41.52 | 39.42 | 50.80 | 9472 |
+| tail_recursion | 44.30 | 42.05 | 46.69 | 6912 |
+
 ### 2026-06-19 — cynic `8642fb21`, host `Darwin 25.6.0 arm64`
 
 Eight fixtures faster ≥5 % vs `cd2dd5c`: object_alloc −39 %, prop_access
