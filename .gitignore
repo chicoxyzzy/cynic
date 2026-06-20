@@ -50,3 +50,8 @@ fuzz-storage/
 profile.json
 profile.json.gz
 profile.syms.json
+
+# Bench TS tooling deps (tsgo + @types/node)
+tools/bench/node_modules/
+tools/bench/.remote.env
+.remote.env

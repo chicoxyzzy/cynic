@@ -1,0 +1,15 @@
+{
+  "name": "cynic-bench-tools",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cynic bench report tooling (TypeScript, type-checked with tsgo)",
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "report": "node ab-report.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@typescript/native-preview": "7.0.0-dev.20260620.1"
+  }
+}
