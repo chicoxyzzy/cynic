@@ -674,13 +674,15 @@ pub const Heap = struct {
     /// this cycle" iff `obj.mark_color == heap.live_color`. The mark
     /// phase sets `obj.mark_color = live_color` on every reachable
     /// object; the sweep keeps `mark_color == live_color` and frees
-    /// everything else. Flipped exactly once per cycle (in
-    /// `beginMajorCycle` / `beginMinorCycle`), so survivors of the
-    /// previous cycle automatically look "unmarked" until the trace
-    /// re-marks them — replacing the per-cycle linear walk that
-    /// used to clear `marked = false` on every mature object. Fresh
-    /// allocations seed `mark_color` from `live_color` so they look
-    /// "alive" until the next flip.
+    /// everything else. Flipped once per *major* cycle (in
+    /// `beginMajorCycle`), which ages every mature mark to "unmarked"
+    /// in O(1) so the major trace re-marks the live ones. A *minor*
+    /// cycle keeps `live_color` stable (sticky mark bits — mature marks
+    /// persist so the nursery cycle never re-traces the mature set) and
+    /// instead clears the young generation in `beginMinorCycle`. Fresh
+    /// allocations seed `mark_color` from `live_color`; a minor's young
+    /// clear then unmarks them so the minor mark can distinguish live
+    /// from dead.
     live_color: u1 = 0,
     /// Set by `beginMajorCycle` / `beginMinorCycle`; cleared at the
     /// end of `collectFull` / `collectYoung`. Lets the realm-driven
@@ -2611,9 +2613,10 @@ pub const Heap = struct {
     /// realm.
     ///
     /// The pre-mark clear walks every mature list once per *major*
-    /// cycle. Minor cycles still skip the walk (`full_every_n_minor`
-    /// is 8 by default, so the per-cycle savings of the colour-flip
-    /// are preserved).
+    /// cycle. Minor cycles never touch the mature lists (sticky mark
+    /// bits) — they clear only the young generation, so keeping the
+    /// mature set alive across nursery cycles costs O(1) on the mature
+    /// side.
     pub fn beginMajorCycle(self: *Heap) void {
         self.live_color = ~self.live_color;
         const unmarked: u1 = ~self.live_color;
@@ -2631,15 +2634,37 @@ pub const Heap = struct {
         self.finalization_registries_seen.clearRetainingCapacity();
     }
 
-    /// Arm a minor (young-only) GC cycle. Flips `live_color`; does
-    /// NOT arm weak-aware marking — a minor cycle strong-marks weak
-    /// slots (a young weak target tenures and is processed weakly at
-    /// the next major cycle; §26.1 GC timing is implementation-
-    /// defined, so this is conformant). Same caller protocol as
-    /// `beginMajorCycle` — realm calls before `markRoots`,
-    /// `collectYoung` covers the test path.
+    /// Arm a minor (young-only) GC cycle. Sticky mark bits: a minor
+    /// cycle does NOT flip `live_color`. The mature generation keeps its
+    /// marks across minors, so `markValue` short-circuits a mature object
+    /// on the `mark_color == live_color` check instead of re-tracing the
+    /// whole retained graph from roots every nursery cycle (the dominant
+    /// GC cost on a large stable heap — JSC-Riptide's Eden collection
+    /// does the same). Only the young generation needs resetting: clear
+    /// every young object's mark to "unmarked" so the minor mark can
+    /// distinguish a live young object (re-marked to `live_color`) from a
+    /// dead one. This walk is O(young) — bounded by the allocation churn
+    /// since the last GC, not the live set. Mature→young edges are rooted
+    /// by the dirty list + the typed-slot scan + the native-stack
+    /// backstop, exactly as before.
+    ///
+    /// Does NOT arm weak-aware marking — a minor strong-marks weak slots
+    /// (a young weak target tenures and is processed weakly at the next
+    /// major; §26.1 GC timing is implementation-defined, so conformant).
+    /// A major cycle (`beginMajorCycle`) still flips + clears the mature
+    /// lists; young there is seeded `live_color`, so the major's flip
+    /// unmarks it uniformly with no separate young clear. Same caller
+    /// protocol — realm calls before `markRoots`, `collectYoung` covers
+    /// the test path.
     pub fn beginMinorCycle(self: *Heap) void {
-        self.live_color = ~self.live_color;
+        const unmarked: u1 = ~self.live_color;
+        for (self.objects_young.items) |o| o.mark_color = unmarked;
+        for (self.functions_young.items) |f| f.mark_color = unmarked;
+        for (self.environments_young.items) |e| e.mark_color = unmarked;
+        for (self.generators_young.items) |g| g.mark_color = unmarked;
+        for (self.strings_young.items) |s| s.mark_color = unmarked;
+        for (self.symbols_young.items) |s| s.mark_color = unmarked;
+        for (self.bigints_young.items) |b| b.mark_color = unmarked;
         self.cycle_started = true;
     }
 
@@ -4884,11 +4909,11 @@ test "Heap: collectYoung clears stale mark bits on mature objects" {
 // ── Mark-colour flip tests ─────────────────────────────────────────
 // The mark-bit scheme: every heap kind carries a `mark_color: u1`;
 // an object is "live this cycle" iff `obj.mark_color ==
-// heap.live_color`. Each cycle flips `live_color` once at the top,
-// so survivors of the previous cycle automatically look "unmarked"
-// without a per-object clear loop. The tests below characterise the
-// flip protocol — they belong to the colour-flip refactor itself
-// rather than to any single allocator helper.
+// heap.live_color`. A *major* cycle flips `live_color` once at the top
+// (+ clears the mature lists), so the mature set looks "unmarked"
+// without a per-object clear loop. A *minor* cycle keeps `live_color`
+// stable (sticky mark bits) and clears only the young generation. The
+// tests below characterise both protocols.
 
 test "Heap: live_color flips on each major cycle" {
     var heap = Heap.init(testing.allocator);
@@ -4906,13 +4931,36 @@ test "Heap: live_color flips on each major cycle" {
     try testing.expectEqual(c0, c2);
 }
 
-test "Heap: live_color flips on each minor cycle" {
+test "Heap: live_color is sticky across a minor cycle (no flip)" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
 
+    // Sticky mark bits: a minor cycle must NOT flip `live_color`, so the
+    // mature generation keeps its marks and is never re-traced.
     const c0 = heap.live_color;
     heap.collectYoung(&.{});
-    try testing.expect(c0 != heap.live_color);
+    try testing.expectEqual(c0, heap.live_color);
+}
+
+test "Heap: a minor cycle leaves a mature object's mark sticky" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // A mature object marked in a prior cycle keeps `mark_color ==
+    // live_color` across a minor cycle (sticky) — the minor neither
+    // re-marks nor sweeps the mature generation, so it survives without
+    // being a root. Under the old per-minor flip this assertion failed
+    // (the flip rotated `live_color` out from under the stale mark).
+    const mature = try heap.allocateObject();
+    _ = heap.objects_young.pop();
+    try heap.objects_mature.append(heap.allocator, mature);
+    mature.generation = .mature;
+    mature.mark_color = heap.live_color; // as a promoted survivor would be
+
+    heap.collectYoung(&.{}); // empty roots — mature must be untouched
+
+    try testing.expectEqual(heap.live_color, mature.mark_color);
+    try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
 }
 
 test "Heap: a freshly-allocated object's mark_color matches live_color" {
@@ -4967,16 +5015,18 @@ test "Heap: beginMajorCycle arms the cycle and flips live_color exactly once" {
     try testing.expect(!heap.cycle_started);
 }
 
-test "Heap: beginMinorCycle arms the cycle and flips live_color exactly once" {
+test "Heap: beginMinorCycle arms the cycle without flipping live_color" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
 
+    // Sticky mark bits: arming a minor cycle leaves `live_color`
+    // unchanged (mature marks stay valid); only the young generation is
+    // cleared.
     const c0 = heap.live_color;
     heap.beginMinorCycle();
     try testing.expect(heap.cycle_started);
-    try testing.expectEqual(@as(u1, ~c0), heap.live_color);
+    try testing.expectEqual(c0, heap.live_color);
 
-    // collectYoung called after explicit arming must NOT re-flip.
     const c_armed = heap.live_color;
     heap.collectYoung(&.{});
     try testing.expectEqual(c_armed, heap.live_color);
