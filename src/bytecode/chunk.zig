@@ -685,6 +685,24 @@ pub const Chunk = struct {
         osr_strikes: u8 = 0,
 
         pub const OsrEntry = extern struct { bc: u32, code_off: u32 };
+
+        /// Bistromath in-line frame-reentry (docs/jit.md §4.5): the
+        /// code offset to re-enter this compiled chunk at after a
+        /// callee pushed by an in-line `call`/`new_call` returns —
+        /// keyed by the resume bytecode offset (the op after the
+        /// call) the compiler stamped into the same `osr_ptr` table
+        /// as the loop-header OSR entries. Disjoint bc keys (a
+        /// post-call ip is never a back-edge target), so the table
+        /// is shared. Returns null when `bc` isn't a recorded
+        /// resume point.
+        pub fn resumeCodeOffset(self: *const JitState, bc: u32) ?u32 {
+            const ptr = self.osr_ptr orelse return null;
+            for (ptr[0..self.osr_len]) |e| {
+                if (e.bc == bc) return e.code_off;
+            }
+            return null;
+        }
+
         pub const Tier = enum(u8) { cold, compiled, dont_compile };
         /// JSC weights +15 per entry / +1 per back-edge; 16 keeps
         /// the entry bump a shift (docs/jit.md §4.7).

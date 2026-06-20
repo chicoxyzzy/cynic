@@ -1025,6 +1025,15 @@ pub const Realm = struct {
     /// allocation inside a child `runFrames` collects values that
     /// the parent's for-of's `r_iter` register still points at.
     frame_stacks: std.ArrayListUnmanaged(*std.ArrayListUnmanaged(@import("lantern/interpreter.zig").CallFrame)) = .empty,
+    /// Bistromath in-line frame-reentry (docs/jit.md §4.5): the
+    /// `frames` list the active `driveTop` is driving. A compiled
+    /// in-line `call`/`new_call` shim appends the callee here — this
+    /// is the authoritative active list, NOT `frame_stacks`'s top,
+    /// because `callJSFunction` enters compiled code (via `tryEnterTop`)
+    /// BEFORE its `runFrames` registers the list on `frame_stacks`.
+    /// `driveTop` save/restores it around each activation (it nests
+    /// when a compiled callee makes an exotic call that re-enters JS).
+    jit_active_frames: ?*std.ArrayListUnmanaged(@import("lantern/interpreter.zig").CallFrame) = null,
     /// Pre-Stage-4 / experimental TC39 proposals enabled for this
     /// realm. See `runtime/features.zig`. Default is empty —
     /// embedders and the `cynic` CLI opt in via `--enable=<name>`

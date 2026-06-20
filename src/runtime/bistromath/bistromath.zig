@@ -68,6 +68,19 @@ pub const EntryResult = enum(u32) {
     /// `error.OutOfMemory` (never re-executed: the callee may have
     /// had side effects).
     host_oom = 3,
+    /// In-line frame re-entry (docs/jit.md §4.2/§4.5, the §4.5(b)
+    /// PTC-trampoline generalised to every call/construct): the
+    /// compiled call/construct site pushed the callee `CallFrame`
+    /// onto the caller's own `frames` list (the very list the
+    /// driver is iterating) and yielded back — `frame.ip` already
+    /// holds the resume bytecode offset (the op after the call), so
+    /// the driver drives the callee in place and, on its return,
+    /// re-enters this caller's compiled code at the resume code
+    /// offset (`JitState.resumeCodeOffset`) with the call result in
+    /// `frame.accumulator`. This is what replaces the nested
+    /// `runFrames` setup the prior `new_call` attempts paid — see
+    /// docs/ctor-array-build-gap.md L5.
+    frame_pushed = 4,
 };
 
 /// What the dispatcher hook tells its caller.
@@ -107,14 +120,64 @@ pub fn tierUpThreshold(code_len: usize) u32 {
     return tier_up_base +| (8 *| len);
 }
 
+/// Whether compiled code may resume/enter `fr` as a *construct*
+/// frame. The in-line frame-reentry driver (docs/jit.md §4.5) drives
+/// construct callees too — but only the ordinary [[Construct]] body;
+/// generator/async ctor frames and the Promise-wrapping path stay
+/// Lantern's business.
+inline fn frameKindCompilable(fr: *const CallFrame) bool {
+    return fr.generator == null and !fr.wrap_return_in_promise;
+}
+
+/// Gate + compile-if-warm for a fresh top-frame entry (ip 0). Returns
+/// the entry point, or null to interpret. Construct frames are now
+/// eligible (the driver applies §10.2.2 ConstructResult), so the only
+/// refusals are non-JIT realms, generator/async frames, and chunks
+/// that aren't (and can't become) compiled.
+fn entryForFresh(realm: *Realm, fr: *CallFrame) ?EntryFn {
+    if (comptime !supported) return null;
+    if (!realm.jit_enabled) return null;
+    if (!frameKindCompilable(fr)) return null;
+    const js = fr.chunk.jit_state orelse return null;
+    if (js.entry == null) {
+        if (js.tier != .cold) return null;
+        const threshold = realm.jit_threshold_override orelse
+            tierUpThreshold(fr.chunk.code.len);
+        if (js.warmth < threshold) return null;
+        compile(realm, fr.chunk, js);
+        if (js.entry == null) return null;
+    }
+    return @ptrCast(@alignCast(js.entry.?));
+}
+
 /// The dispatcher hook: called right after a frame push, before
-/// dispatch enters it. Self-gating — returns null (and the caller
-/// proceeds into Lantern as if no JIT existed) unless the realm
-/// has the tier enabled, the frame is a plain call, and the chunk
-/// is (or just became) compiled. On `.done` the callee frame is
-/// popped here and the return value handed back; on tier-down the
-/// frame stays pushed mid-chunk and `reEnterDispatch` picks it up.
+/// dispatch enters it. Self-gating — returns `.not_entered` (and the
+/// caller proceeds into Lantern as if no JIT existed) unless the
+/// realm has the tier enabled and the chunk is (or just became)
+/// compiled. A compiled frame runs to `.completed` here — including,
+/// via in-line frame-reentry (docs/jit.md §4.5), every compiled
+/// call/construct it makes, driven in place on this same `frames`
+/// list with no nested `runFrames`. A tier-down leaves the frame
+/// parked mid-chunk for `reEnterDispatch`; a cold callee pushed by a
+/// compiled caller also returns `.not_entered` so Lantern drives it
+/// (and the `.return_` hook re-enters the parked compiled caller).
 pub fn tryEnterTop(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+) RunError!EnterOutcome {
+    const fr = &frames.items[frames.items.len - 1];
+    const entry = entryForFresh(realm, fr) orelse return .not_entered;
+    return driveTop(allocator, realm, frames, entry);
+}
+
+/// Re-enter a parked compiled caller after an in-line callee popped.
+/// The caller is the current top frame; `frame.ip` holds the resume
+/// bytecode offset (the op after the call) and `frame.accumulator`
+/// holds the call result. Returns `.not_entered` if the caller isn't
+/// compiled at a recorded resume point (it tiered down before the
+/// call, or the chunk lost its entry) — Lantern resumes it instead.
+pub fn tryResumeTop(
     allocator: std.mem.Allocator,
     realm: *Realm,
     frames: *std.ArrayListUnmanaged(CallFrame),
@@ -122,34 +185,114 @@ pub fn tryEnterTop(
     if (comptime !supported) return .not_entered;
     if (!realm.jit_enabled) return .not_entered;
     const fr = &frames.items[frames.items.len - 1];
-    // Plain calls only: constructor return verdicts (§10.2.2 steps
-    // 7-11), generator resumes, and async Promise wrapping all stay
-    // Lantern's business (docs/jit.md §4.5).
-    if (fr.is_construct or fr.generator != null or fr.wrap_return_in_promise) return .not_entered;
     const js = fr.chunk.jit_state orelse return .not_entered;
-    if (js.entry == null) {
-        if (js.tier != .cold) return .not_entered;
-        const threshold = realm.jit_threshold_override orelse
-            tierUpThreshold(fr.chunk.code.len);
-        if (js.warmth < threshold) return .not_entered;
-        compile(realm, fr.chunk, js);
-        if (js.entry == null) return .not_entered;
-    }
-    const entry: EntryFn = @ptrCast(@alignCast(js.entry.?));
-    switch (@as(EntryResult, @enumFromInt(entry(realm, fr, fr.registers.ptr)))) {
-        .done => {
-            const ret = fr.accumulator;
-            fr.releaseRegisters(realm, allocator);
-            _ = frames.pop();
-            return .{ .completed = ret };
-        },
-        .resume_interp => return .not_entered,
-        .threw => {
-            const ex = realm.pending_exception orelse Value.undefined_;
-            realm.pending_exception = null;
-            return .{ .threw = ex };
-        },
-        .host_oom => return error.OutOfMemory,
+    if (js.entry == null) return .not_entered;
+    const code_off = js.resumeCodeOffset(@intCast(fr.ip)) orelse return .not_entered;
+    const base: [*]const u8 = @ptrCast(js.entry.?);
+    const stub: EntryFn = @ptrCast(@alignCast(base + code_off));
+    return driveTop(allocator, realm, frames, stub);
+}
+
+/// The in-line frame-reentry driver (docs/jit.md §4.2/§4.5). Enters
+/// `entry` for the current top frame, then loops on its verdict —
+/// the generalisation of the §4.5(b) PTC trampoline to every
+/// compiled call/construct. The frame this is called for sits at
+/// `frames.items.len - 1`; `base` is the count of frames BELOW it,
+/// the depth the driver unwinds back to before handing `.completed`
+/// to its caller. Every frame at depth ≥ `base` is the driver's to
+/// drive and pop; nothing below is touched.
+///
+/// - `.done`: the top frame finished. If it is a construct frame,
+///   apply §10.2.2 ConstructResult (the shared `constructReturnVerdict`)
+///   — a non-`.normal` verdict pops the frame and throws against the
+///   caller. Otherwise pop and, if we are back at `base`, return
+///   `.completed`; else the caller (new top) is itself a parked
+///   compiled frame — re-enter it at its resume offset and loop.
+/// - `.frame_pushed`: the compiled site pushed a callee at the new
+///   top. If it is compiled, enter it (fresh ip 0) and loop; if cold,
+///   return `.not_entered` so Lantern drives it (and the `.return_`
+///   hook re-enters this parked caller).
+/// - `.resume_interp`: the frame tiered down mid-body — return
+///   `.not_entered` so Lantern interprets it at `frame.ip`.
+/// - `.threw` / `.host_oom`: propagate.
+fn driveTop(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    entry: EntryFn,
+) RunError!EnterOutcome {
+    const base = frames.items.len - 1;
+    // The in-line push shims append to `realm.jit_active_frames` — set
+    // it to THIS activation's list (not `frame_stacks`'s top, which may
+    // be stale: `callJSFunction` enters here before its `runFrames`
+    // registers the list). Restore on exit; the save handles nesting
+    // (a compiled callee's exotic call re-enters JS on a fresh list).
+    const prev_active = realm.jit_active_frames;
+    realm.jit_active_frames = frames;
+    defer realm.jit_active_frames = prev_active;
+    var stub = entry;
+    while (true) {
+        const fr = &frames.items[frames.items.len - 1];
+        switch (@as(EntryResult, @enumFromInt(stub(realm, fr, fr.registers.ptr)))) {
+            .done => {
+                // §10.2.2 ConstructResult for construct frames.
+                var ret = fr.accumulator;
+                if (fr.is_construct) {
+                    const verdict = interpreter.constructReturnVerdict(fr, fr.accumulator, &ret);
+                    if (verdict != .normal) {
+                        fr.releaseRegisters(realm, allocator);
+                        _ = frames.pop();
+                        const ex = try interpreter.constructVerdictError(realm, verdict);
+                        // The frame is popped; the throw is the caller's
+                        // (the spec runs steps 7c/11 after the context is
+                        // gone, so the ctor body's own handlers don't see
+                        // it). If we have unwound back to `base`, hand the
+                        // throw to our caller; otherwise resume unwinding
+                        // through the parked stack.
+                        return .{ .threw = ex };
+                    }
+                }
+                fr.releaseRegisters(realm, allocator);
+                _ = frames.pop();
+                if (frames.items.len == base) return .{ .completed = ret };
+                // Resume the caller (the new top): it pushed this callee
+                // in-line, so its `frame.ip` holds the resume bytecode
+                // offset and the call result belongs in its accumulator.
+                const caller = &frames.items[frames.items.len - 1];
+                caller.accumulator = ret;
+                // If the caller can be re-entered in compiled code at its
+                // resume offset, do so and keep driving in place. Otherwise
+                // it must be interpreted from `frame.ip` — return
+                // `.not_entered` so the dispatch loop resumes it (the
+                // result is already in its accumulator). Returning
+                // `.completed` here would be a frame LEAK: the caller is
+                // still on the stack (frames.len > base), but `.completed`
+                // tells the dispatch loop the whole activation finished, so
+                // nothing would ever pop the caller's subtree — the stack
+                // grows unboundedly to the `max_call_frames` RangeError.
+                const cjs = caller.chunk.jit_state orelse return .not_entered;
+                if (cjs.entry == null) return .not_entered;
+                const code_off = cjs.resumeCodeOffset(@intCast(caller.ip)) orelse return .not_entered;
+                const cbase: [*]const u8 = @ptrCast(cjs.entry.?);
+                stub = @ptrCast(@alignCast(cbase + code_off));
+            },
+            .frame_pushed => {
+                // A compiled call/construct site pushed the callee at the
+                // top and yielded. Drive it: compiled → enter fresh; cold
+                // → let Lantern drive it (the caller stays parked, its
+                // `.return_` resume re-enters via `tryResumeTop`).
+                const callee = &frames.items[frames.items.len - 1];
+                const centry = entryForFresh(realm, callee) orelse return .not_entered;
+                stub = centry;
+            },
+            .resume_interp => return .not_entered,
+            .threw => {
+                const ex = realm.pending_exception orelse Value.undefined_;
+                realm.pending_exception = null;
+                return .{ .threw = ex };
+            },
+            .host_oom => return error.OutOfMemory,
+        }
     }
 }
 
@@ -206,31 +349,18 @@ pub fn tryOsrEnterTop(
         if (js.entry == null) return .not_entered;
     }
     if (js.osr_strikes >= osr_strike_limit) return .not_entered;
-    const tbl = js.osr_ptr orelse return .not_entered;
-    const target: u32 = @intCast(fr.ip);
-    const code_off: u32 = blk: {
-        for (tbl[0..js.osr_len]) |e| {
-            if (e.bc == target) break :blk e.code_off;
-        }
-        return .not_entered;
-    };
+    const code_off = js.resumeCodeOffset(@intCast(fr.ip)) orelse return .not_entered;
     const base: [*]const u8 = @ptrCast(js.entry.?);
     const stub: EntryFn = @ptrCast(@alignCast(base + code_off));
-    switch (@as(EntryResult, @enumFromInt(stub(realm, fr, fr.registers.ptr)))) {
-        .done => {
-            const ret = fr.accumulator;
-            fr.releaseRegisters(realm, allocator);
-            _ = frames.pop();
-            return .{ .completed = ret };
-        },
-        .resume_interp => return .resumed,
-        .threw => {
-            const ex = realm.pending_exception orelse Value.undefined_;
-            realm.pending_exception = null;
-            return .{ .threw = ex };
-        },
-        .host_oom => return error.OutOfMemory,
-    }
+    // Drive the OSR'd activation — including any in-line call/construct
+    // it makes (docs/jit.md §4.5) — in place. A mid-loop tier-down comes
+    // back as `.not_entered`, which for an OSR entry means "Lantern
+    // resumes the frame" (`.resumed`).
+    return switch (try driveTop(allocator, realm, frames, stub)) {
+        .not_entered => .resumed,
+        .completed => |v| .{ .completed = v },
+        .threw => |ex| .{ .threw = ex },
+    };
 }
 
 const CompileError = error{ OutOfMemory, UnsupportedOp };
@@ -309,6 +439,166 @@ fn envStoreBarrier(r: *Realm, env: *Environment, slot: u64, bits: u64) callconv(
 
 /// What `helperCall` reports back to the emitted call sequence.
 const HelperCallStatus = enum(u32) { value = 0, threw = 1, host_oom = 2 };
+
+/// What a push shim reports back to a compiled in-line call/construct
+/// site (docs/jit.md §4.5). `pushed` means the callee frame is on the
+/// caller's `frames` list at ip 0 and the site must return
+/// `EntryResult.frame_pushed`; `tier_down` means the fast-path
+/// precondition didn't hold (stack-depth ceiling — Lantern re-runs the
+/// op and raises the RangeError, or other rare guard) and the site
+/// tiers down to re-run the whole op in Lantern; `host_oom` propagates.
+const PushStatus = enum(u32) { pushed = 0, tier_down = 1, host_oom = 2 };
+
+/// The `frames` list the active `driveTop` is driving (docs/jit.md
+/// §4.5) — set by `driveTop`, NOT `frame_stacks`'s top: a compiled
+/// callee can be entered (via `tryEnterTop` in `callJSFunction`)
+/// before that list is registered on `frame_stacks`, so the top would
+/// be the stale OUTER list and the shim would push the callee onto the
+/// wrong stack. A compiled in-line push appends the callee here (frame
+/// identity, docs/jit.md §4.2): the same list, the same pooled
+/// register files. The append may realloc the backing array and so
+/// invalidate any held `*CallFrame` — the compiled site must have
+/// already flushed `ip` / `accumulator` to its frame and must not
+/// touch its frame pointer again before returning `frame_pushed`
+/// (the driver re-derives the caller by index on resume).
+inline fn activeFrames(realm: *Realm) *std.ArrayListUnmanaged(CallFrame) {
+    return realm.jit_active_frames.?;
+}
+
+/// docs/jit.md §4.5 in-line plain call: push a vetted plain JSFunction
+/// callee's frame onto the caller's `frames` list, exactly as the
+/// interpreter's `.call` / `.call_method` fast path does — reg-file
+/// acquire, arg copy, frame append at ip 0 — without running it. The
+/// driver drives it next. `callee_fn` is the cell-vetted function (the
+/// site checked the function kind + `CallICCell.callee` match); `this`
+/// is the receiver (method form) or undefined (plain). Arrows take
+/// their captured `this` / `new.target` (§13.3.12). Mirrors
+/// interpreter.zig's `.call_method` JS-callee push.
+fn pushCallFrameShim(
+    realm: *Realm,
+    callee_fn: *JSFunction,
+    this_bits: u64,
+    args_ptr: [*]const Value,
+    argc: u64,
+) callconv(.c) u32 {
+    const allocator = realm.heap.allocator;
+    const frames = activeFrames(realm);    if (frames.items.len >= interpreter.max_call_frames) {
+        return @intFromEnum(PushStatus.tier_down);
+    }
+    const callee_chunk = callee_fn.chunk orelse return @intFromEnum(PushStatus.tier_down);
+    const ac: usize = @intCast(argc);
+    const reg_count = @max(@as(usize, callee_chunk.register_count), ac);
+    var is_stack_alloc = true;
+    const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
+        is_stack_alloc = false;
+        break :blk realm.frame_pool.acquire(allocator, reg_count) catch
+            return @intFromEnum(PushStatus.host_oom);
+    };
+    @memset(callee_regs, Value.undefined_);
+    var ai: usize = 0;
+    while (ai < ac and ai < callee_regs.len) : (ai += 1) {
+        callee_regs[ai] = args_ptr[ai];
+    }
+    const callee_this: Value = if (callee_fn.is_arrow) callee_fn.captured_this else .{ .bits = this_bits };
+    const callee_new_target: Value = if (callee_fn.is_arrow) callee_fn.captured_new_target else Value.undefined_;
+    frames.append(allocator, .{
+        .chunk = callee_chunk,
+        .ip = 0,
+        .accumulator = Value.undefined_,
+        .registers = callee_regs,
+        .env = callee_fn.captured_env,
+        .this_value = callee_this,
+        .new_target = callee_new_target,
+        .home_object = callee_fn.home_object,
+        .home_function = callee_fn.home_function,
+        .super_called_cell = callee_fn.super_called_cell,
+        .argc = @intCast(@min(ac, std.math.maxInt(u32))),
+        .wrap_return_in_promise = false,
+        .owning_module = callee_fn.owning_module,
+        .running_realm = callee_fn.realm,
+        .is_stack_alloc = is_stack_alloc,
+    }) catch {
+        if (is_stack_alloc) realm.freeStackRegisters(callee_regs) else realm.frame_pool.release(allocator, callee_regs);
+        return @intFromEnum(PushStatus.host_oom);
+    };
+    return @intFromEnum(PushStatus.pushed);
+}
+
+/// docs/jit.md §4.5 in-line construct: push a vetted plain JSFunction
+/// constructor's frame, exactly as the interpreter's `new_call` IC-hit
+/// fast path does (interpreter.zig `.new_call`) — allocate the
+/// instance with the cell's cached prototype, pre-size its slot vector
+/// from the cell's `initial_shape` (§10.1.13 "initial map"), acquire
+/// the reg file, copy args, append the construct frame at ip 0. The
+/// site has already checked the function kind, `cell.callee` ==
+/// callee_fn, and `callee_fn.prototype` == `cell.proto`; the shim
+/// reads `cell.proto` / `cell.initial_shape` for the instance shape.
+/// The driver applies §10.2.2 ConstructResult on the callee's return.
+fn pushConstructFrameShim(
+    realm: *Realm,
+    cell: *const chunk_mod.CallICCell,
+    callee_fn: *JSFunction,
+    args_ptr: [*]const Value,
+    argc: u64,
+) callconv(.c) u32 {
+    const allocator = realm.heap.allocator;
+    const frames = activeFrames(realm);    if (frames.items.len >= interpreter.max_call_frames) {
+        return @intFromEnum(PushStatus.tier_down);
+    }
+    const callee_chunk = callee_fn.chunk orelse return @intFromEnum(PushStatus.tier_down);
+    const ac: usize = @intCast(argc);
+    const reg_count = @max(@as(usize, callee_chunk.register_count), ac);
+    var is_stack_alloc = true;
+    const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
+        is_stack_alloc = false;
+        break :blk realm.frame_pool.acquire(allocator, reg_count) catch
+            return @intFromEnum(PushStatus.host_oom);
+    };
+    @memset(callee_regs, Value.undefined_);
+    var ai: usize = 0;
+    while (ai < ac and ai < callee_regs.len) : (ai += 1) {
+        callee_regs[ai] = args_ptr[ai];
+    }
+    const instance = realm.heap.allocateObject() catch {
+        if (is_stack_alloc) realm.freeStackRegisters(callee_regs) else realm.frame_pool.release(allocator, callee_regs);
+        return @intFromEnum(PushStatus.host_oom);
+    };
+    realm.heap.setObjectPrototype(instance, cell.proto);
+    // §10.1.13 instance "initial map" — pre-size the slot vector to the
+    // ctor's inferred field count so the body's `this.<field> =` writes
+    // land in provisioned slots. Pure optimization: on OOM skip it and
+    // let the per-field `sta_property` path size/throw. The SHAPE stays
+    // at root (§10.1.11 own-key order grows field-by-field).
+    if (cell.initial_shape) |ishape| presize: {
+        const n = ishape.property_count;
+        if (n == 0 or instance.slotCount() >= n) break :presize;
+        instance.resizeSlots(allocator, n) catch break :presize;
+        var si: usize = 0;
+        while (si < n) : (si += 1) instance.slotPtr(si).* = Value.undefined_;
+    }
+    const this_value = heap_mod.taggedObject(instance);
+    frames.append(allocator, .{
+        .chunk = callee_chunk,
+        .ip = 0,
+        .accumulator = Value.undefined_,
+        .registers = callee_regs,
+        .env = callee_fn.captured_env,
+        .this_value = this_value,
+        .is_construct = true,
+        .is_derived_ctor = callee_fn.constructor_kind == .derived,
+        .new_target = heap_mod.taggedFunction(callee_fn),
+        .home_object = callee_fn.home_object,
+        .home_function = callee_fn.home_function,
+        .owning_module = callee_fn.owning_module,
+        .running_realm = callee_fn.realm,
+        .argc = @intCast(@min(ac, std.math.maxInt(u32))),
+        .is_stack_alloc = is_stack_alloc,
+    }) catch {
+        if (is_stack_alloc) realm.freeStackRegisters(callee_regs) else realm.frame_pool.release(allocator, callee_regs);
+        return @intFromEnum(PushStatus.host_oom);
+    };
+    return @intFromEnum(PushStatus.pushed);
+}
 
 /// The docs/jit.md §4.5 helper-mediated call: compiled code syncs
 /// its accumulator (the callee may allocate and GC; the frame is
@@ -415,13 +705,22 @@ const Compiler = struct {
     /// entry stub; insertion-ordered for a deterministic table.
     osr_headers: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
     osr_entries: std.ArrayListUnmanaged(Chunk.JitState.OsrEntry) = .empty,
+    /// In-line frame-reentry resume points (docs/jit.md §4.5): one per
+    /// in-line `call`/`new_call` site, mapping the resume bytecode
+    /// offset (the op after the call) to a label bound at that op's
+    /// code. `tail()` emits a prologue stub per point and appends its
+    /// (bc → stub code_off) to `osr_entries` so `JitState.resumeCodeOffset`
+    /// finds it. The driver re-enters here after the callee returns.
+    resume_points: std.ArrayListUnmanaged(Resume) = .empty,
     body_start: Masm.Label = .{},
     done_label: Masm.Label = .{},
+    frame_pushed_label: Masm.Label = .{},
     tier_down_label: Masm.Label = .{},
     threw_label: Masm.Label = .{},
     oom_label: Masm.Label = .{},
 
     const Td = struct { label: Masm.Label, resume_off: u32 };
+    const Resume = struct { bc: u32, label: Masm.Label };
 
     fn init(gpa: std.mem.Allocator, chunk: *const Chunk) Compiler {
         return .{ .m = Masm.init(gpa), .chunk = chunk };
@@ -439,8 +738,11 @@ const Compiler = struct {
         self.threws.deinit(gpa);
         self.osr_headers.deinit(gpa);
         self.osr_entries.deinit(gpa);
+        for (self.resume_points.items) |*r| r.label.fixups.deinit(gpa);
+        self.resume_points.deinit(gpa);
         self.body_start.fixups.deinit(gpa);
         self.done_label.fixups.deinit(gpa);
+        self.frame_pushed_label.fixups.deinit(gpa);
         self.tier_down_label.fixups.deinit(gpa);
         self.threw_label.fixups.deinit(gpa);
         self.oom_label.fixups.deinit(gpa);
@@ -512,7 +814,7 @@ const Compiler = struct {
                 .lda_property, .lda_property_reg, .sta_property,
                 .lda_global, .lda_global_or_undef,
                 .lda_this, .call, .call0, .call1, .call2, .call3,
-                .call_method, .call_property,
+                .call_method, .call_property, .new_call,
                 .tail_call, .tail_call_method,
                 .lda_global_slot, .sta_global_slot, .sta_global_slot_init,
                 .negate, .bit_not, .logical_not,
@@ -698,13 +1000,10 @@ const Compiler = struct {
                     // from this chunk; elided.
                 },
                 .call, .call0, .call1, .call2, .call3 => {
-                    // docs/jit.md §4.5 — helper-mediated: the helper
-                    // runs the whole §7.3 call dance (every exotic
-                    // callee kind included) through callValue, so
-                    // this site only marshals the args window from
-                    // the register file. The CallICCell inline
-                    // compare is the recorded follow-up
-                    // optimization.
+                    // docs/jit.md §4.5 — the cell-hit case takes in-line
+                    // frame-reentry (push the callee, drive in place);
+                    // the miss/exotic case takes the generic nested
+                    // `helperCall`. This site marshals the args window.
                     const r_callee = code[i + 1];
                     // `call0..3` fold argc into the opcode (ic at i+2);
                     // generic `call` reads argc:u8 then ic at i+3.
@@ -712,12 +1011,14 @@ const Compiler = struct {
                     const is_generic = op_byte == @intFromEnum(Op.call);
                     const argc: u8 = if (is_generic) code[i + 2] else op_byte - @intFromEnum(Op.call0);
                     const ic_call = if (is_generic) readU16(code, i + 3) else readU16(code, i + 2);
+                    const td = try self.tdFor(bc);
                     const threw = try self.threwFor(bc);
                     // Root the live accumulator through the frame —
                     // the callee may allocate and GC (§4.2).
                     try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
                     try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_callee)));
-                    try self.emitCallDispatch(.x9, null, r_callee + 1, argc, ic_call, threw);
+                    try self.emitCallDispatch(.x9, null, r_callee + 1, argc, ic_call, @intCast(after), td, threw);
+                    try self.bindResume(@intCast(after));
                 },
                 .call_method => {
                     // §13.3.6 — like `call` with `this` bound to the
@@ -728,10 +1029,12 @@ const Compiler = struct {
                     const r_callee = code[i + 2];
                     const argc = code[i + 3];
                     const ic_call = readU16(code, i + 4);
+                    const td = try self.tdFor(bc);
                     const threw = try self.threwFor(bc);
                     try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
                     try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_callee)));
-                    try self.emitCallDispatch(.x9, r_recv, r_callee + 1, argc, ic_call, threw);
+                    try self.emitCallDispatch(.x9, r_recv, r_callee + 1, argc, ic_call, @intCast(after), td, threw);
+                    try self.bindResume(@intCast(after));
                 },
                 .call_property => {
                     // The fused load+call (`obj.method(args)`): the
@@ -753,7 +1056,20 @@ const Compiler = struct {
                     try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
                     try m.emit(a64.ldrImm(.x14, regs_reg, regSlot(r_recv)));
                     try self.emitPropertyIcLoad(.x14, .x14, ic_load, td);
-                    try self.emitCallDispatch(.x14, r_recv, r_recv + 1, argc, ic_call, threw);
+                    try self.emitCallDispatch(.x14, r_recv, r_recv + 1, argc, ic_call, @intCast(after), td, threw);
+                    try self.bindResume(@intCast(after));
+                },
+                .new_call => {
+                    // docs/jit.md §4.5 in-line construct — lifted from
+                    // dont_compile (the prior nested-`runFrames` attempts
+                    // regressed; see docs/ctor-array-build-gap.md L5).
+                    // Cell-hit ctor → push the construct frame and drive
+                    // in place; any miss tiers down to re-run `new_call`.
+                    const r_callee = code[i + 1];
+                    const argc = code[i + 2];
+                    const ic_call = readU16(code, i + 3);
+                    try self.emitConstructDispatch(r_callee, argc, ic_call, bc, @intCast(after));
+                    try self.bindResume(@intCast(after));
                 },
                 .tail_call => {
                     // §15.10 jump-to-entry for the self-recursive
@@ -1240,6 +1556,12 @@ const Compiler = struct {
         m.bind(&self.oom_label);
         try m.emit(a64.movz(.x0, 3, 0)); // EntryResult.host_oom
         try m.jump(&epilogue);
+        // In-line frame-reentry (docs/jit.md §4.5): the call/construct
+        // site already stamped the resume ip and flushed acc to the
+        // frame, and pushed the callee — just report `frame_pushed`.
+        m.bind(&self.frame_pushed_label);
+        try m.emit(a64.movz(.x0, @intFromEnum(EntryResult.frame_pushed), 0));
+        try m.jump(&epilogue);
         // x9 = bytecode offset to resume at.
         m.bind(&self.tier_down_label);
         try m.emit(a64.strImm(.x9, frame_reg, ip_off));
@@ -1264,6 +1586,23 @@ const Compiler = struct {
             try self.prologue();
             const idx = self.target_labels.get(hdr).?;
             try m.jump(&self.labels.items[idx]);
+        }
+        // In-line frame-reentry resume stubs (docs/jit.md §4.5): one per
+        // in-line call/construct site. The driver re-enters here after
+        // the callee returns — same prologue (which reloads `acc_reg`
+        // from `frame.accumulator`, i.e. the call result the driver
+        // wrote there), then a jump to the post-call continuation (the
+        // resume label `bindResume` bound in the body). Shares the
+        // `osr_entries` bc→code_off table with the loop-header entries
+        // (disjoint bc keys — a post-call ip is never a back-edge
+        // target), looked up by `JitState.resumeCodeOffset`.
+        for (self.resume_points.items) |*r| {
+            try self.osr_entries.append(m.gpa, .{
+                .bc = r.bc,
+                .code_off = @intCast(m.code.items.len),
+            });
+            try self.prologue();
+            try m.jump(&r.label);
         }
     }
 
@@ -1503,13 +1842,19 @@ const Compiler = struct {
         try self.m.movImm64(dst, addr);
     }
 
-    /// The shared compiled-call tail (docs/jit.md §4.5 + the
-    /// CallICCell fast path): callee Value in `callee_val`, `this`
-    /// from a register or undefined, args window at
-    /// `args_base..+argc`. A cell hit (vetted plain JSFunction,
-    /// pointer match) dispatches through helperCallDirect; any
-    /// miss — cold cell, different callee, non-function — takes
-    /// the generic helperCall, which handles every callee kind.
+    /// The shared compiled-call tail (docs/jit.md §4.5). callee Value
+    /// in `callee_val`, `this` from a register or undefined, args
+    /// window at `args_base..+argc`. A cell hit (vetted plain
+    /// JSFunction, pointer match) takes **in-line frame-reentry**: it
+    /// stamps the resume ip (`after_bc`) on the frame, pushes the
+    /// callee frame onto the caller's list (`pushCallFrameShim`), and
+    /// returns `EntryResult.frame_pushed` so the driver runs the
+    /// callee in place — no nested `runFrames` (the fix for
+    /// docs/ctor-array-build-gap.md L5). Any miss — cold cell,
+    /// different callee, non-function, exotic — takes the generic
+    /// `helperCall` (the nested path; it handles every callee kind)
+    /// and falls through to the next op with the result in acc. The
+    /// caller binds the resume label at the next op via `bindResume`.
     /// Clobbers x9-x13 and the argument registers.
     fn emitCallDispatch(
         self: *Compiler,
@@ -1518,13 +1863,13 @@ const Compiler = struct {
         args_base: u8,
         argc: u8,
         ic_call: u16,
+        after_bc: u32,
+        td: *Masm.Label,
         threw: *Masm.Label,
     ) CompileError!void {
         const m = &self.m;
         var generic = Masm.Label{};
         defer generic.fixups.deinit(m.gpa);
-        var joined = Masm.Label{};
-        defer joined.fixups.deinit(m.gpa);
         // Function-kind heap pointer? (kind bits 0) — else generic.
         try m.movImm64(.x13, layout.value_bits.tag_object_shifted);
         try m.emit(a64.eorReg(.x13, callee_val, .x13));
@@ -1541,21 +1886,34 @@ const Compiler = struct {
         try m.jumpCbz(.x12, &generic);
         try m.emit(a64.cmpReg(.x10, .x12));
         try m.jumpCond(.ne, &generic);
-        // Hit: the vetted-function direct path.
-        try m.emit(a64.movReg(.x2, .x10));
+        // Hit: in-line push. Stamp the resume ip (the op after the
+        // call) so the driver's `resumeCodeOffset(frame.ip)` finds the
+        // resume stub on the callee's return; acc was already flushed
+        // to the frame by the caller (the callee may GC — §4.2). The
+        // frame pointer may dangle after the shim's `frames.append`
+        // realloc, so we must not touch `frame_reg` after the call.
+        try m.movImm64(.x9, after_bc);
+        try m.emit(a64.strImm(.x9, frame_reg, ip_off));
         try m.emit(a64.movReg(.x0, realm_reg));
-        try m.emit(a64.movReg(.x1, frame_reg));
+        try m.emit(a64.movReg(.x1, .x10)); // callee fn ptr
         if (this_from) |r_this| {
-            try m.emit(a64.ldrImm(.x3, regs_reg, regSlot(r_this)));
+            try m.emit(a64.ldrImm(.x2, regs_reg, regSlot(r_this)));
         } else {
-            try m.movImm64(.x3, Value.undefined_.bits);
+            try m.movImm64(.x2, Value.undefined_.bits);
         }
-        try m.emit(a64.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(args_base))), false));
-        try m.movImm64(.x5, argc);
-        try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
-        try m.callAbs(.x16, @intFromPtr(&helperCallDirect));
-        try m.jump(&joined);
-        // Miss: generic dispatch on the raw Value.
+        try m.emit(a64.addImm(.x3, regs_reg, @intCast(@as(u32, regSlot(args_base))), false));
+        try m.movImm64(.x4, argc);
+        try m.callAbs(.x16, @intFromPtr(&pushCallFrameShim));
+        // PushStatus: 0 pushed → frame_pushed; 1 tier_down → re-run the
+        // op in Lantern; 2 host_oom.
+        try m.emit(a64.movRegW(.x0, .x0));
+        try m.jumpCbz(.x0, &self.frame_pushed_label);
+        try m.emit(a64.cmpImm(.x0, @intFromEnum(PushStatus.tier_down), false));
+        try m.jumpCond(.eq, td);
+        try m.jump(&self.oom_label);
+        // Miss: generic dispatch on the raw Value (nested path; handles
+        // every exotic callee kind). Falls through to the resume label
+        // (next op) with the result in acc.
         m.bind(&generic);
         try m.emit(a64.movReg(.x2, callee_val));
         try m.emit(a64.movReg(.x0, realm_reg));
@@ -1569,8 +1927,79 @@ const Compiler = struct {
         try m.movImm64(.x5, argc);
         try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
         try m.callAbs(.x16, @intFromPtr(&helperCall));
-        m.bind(&joined);
         try self.emitCallStatus(threw);
+    }
+
+    /// In-line `new_call` (docs/jit.md §4.5). callee Value in
+    /// `callee_val`; args window at `r_callee+1 .. +argc`. The cell-hit
+    /// guard mirrors the interpreter's `new_call` IC fast path: a plain
+    /// JSFunction whose `CallICCell.callee` matches AND whose live
+    /// `.prototype` still equals the cell's cached `proto` (catches a
+    /// `C.prototype = …` reassignment). On a hit, push the construct
+    /// frame (`pushConstructFrameShim`, which allocates the instance
+    /// with the cached proto + pre-sizes from `initial_shape`) and
+    /// return `frame_pushed` — the driver applies §10.2.2 ConstructResult
+    /// on the callee's return. Any miss tiers down to re-run the whole
+    /// `new_call` in Lantern (the proxy / bound / native / non-ctor
+    /// cases, byte-identical). Clobbers x9-x13 and arg registers.
+    fn emitConstructDispatch(
+        self: *Compiler,
+        r_callee: u8,
+        argc: u8,
+        ic_call: u16,
+        bc: u32,
+        after_bc: u32,
+    ) CompileError!void {
+        const m = &self.m;
+        const td = try self.tdFor(bc);
+        try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_callee)));
+        // Function-kind heap pointer? (kind bits 0) — else tier down.
+        try m.movImm64(.x13, layout.value_bits.tag_object_shifted);
+        try m.emit(a64.eorReg(.x13, .x9, .x13));
+        try m.emit(a64.lsrImm(.x12, .x13, 48));
+        try m.jumpCbnz(.x12, td);
+        try m.emit(a64.lslImm(.x12, .x13, 62));
+        try m.emit(a64.lsrImm(.x12, .x12, 62));
+        try m.jumpCbnz(.x12, td);
+        try m.emit(a64.lsrImm(.x10, .x13, 2));
+        try m.emit(a64.lslImm(.x10, .x10, 2)); // x10 = callee fn ptr
+        // Cell compare: callee match.
+        try self.emitCallCellAddr(.x11, ic_call);
+        try m.emit(a64.ldrImm(.x12, .x11, layout.call_ic_cell.callee));
+        try m.jumpCbz(.x12, td);
+        try m.emit(a64.cmpReg(.x10, .x12));
+        try m.jumpCond(.ne, td);
+        // §10.1.14 guard: `callee_fn.prototype` == `cell.proto`.
+        try m.emit(a64.ldrImm(.x12, .x10, layout.function.prototype));
+        try m.emit(a64.ldrImm(.x13, .x11, layout.call_ic_cell.proto));
+        try m.emit(a64.cmpReg(.x12, .x13));
+        try m.jumpCond(.ne, td);
+        // Hit: stamp resume ip, flush acc (the shim allocates/GCs —
+        // §4.2), and push the construct frame. `frame_reg` may dangle
+        // after the append realloc, so touch it only before the call.
+        try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
+        try m.movImm64(.x9, after_bc);
+        try m.emit(a64.strImm(.x9, frame_reg, ip_off));
+        try m.emit(a64.movReg(.x0, realm_reg));
+        try m.emit(a64.movReg(.x1, .x11)); // cell ptr
+        try m.emit(a64.movReg(.x2, .x10)); // callee fn ptr
+        try m.emit(a64.addImm(.x3, regs_reg, @intCast(@as(u32, regSlot(r_callee + 1))), false));
+        try m.movImm64(.x4, argc);
+        try m.callAbs(.x16, @intFromPtr(&pushConstructFrameShim));
+        try m.emit(a64.movRegW(.x0, .x0));
+        try m.jumpCbz(.x0, &self.frame_pushed_label);
+        try m.emit(a64.cmpImm(.x0, @intFromEnum(PushStatus.tier_down), false));
+        try m.jumpCond(.eq, td);
+        try m.jump(&self.oom_label);
+    }
+
+    /// Record a resume point for the op at `after_bc` and bind its
+    /// label at the current code offset (the next op's first
+    /// instruction — reached only via the resume stub for the in-line
+    /// push path, or by fall-through on the generic-call miss path).
+    fn bindResume(self: *Compiler, after_bc: u32) CompileError!void {
+        try self.resume_points.append(self.m.gpa, .{ .bc = after_bc, .label = .{} });
+        self.m.bind(&self.resume_points.items[self.resume_points.items.len - 1].label);
     }
 };
 
@@ -2803,5 +3232,128 @@ test "jit bistromath: methods reading `this` compile" {
     try testing.expectEqual(
         Chunk.JitState.Tier.compiled,
         chunk.function_templates[0].chunk.jit_state.?.tier,
+    );
+}
+
+test "jit bistromath: a `new`-using function compiles (in-line construct)" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+
+    // docs/jit.md §4.5 in-line frame-reentry: `step` contains a
+    // `new_call`, which used to force `dont_compile`. Both `step` and
+    // the `Point` ctor heat up; `step` pushes the `Point` frame in
+    // place and the driver runs it without a nested `runFrames`. The
+    // result must equal the interpreter's, and `step` must reach
+    // `.compiled` (the lifted dont_compile refusal).
+    const src =
+        \\function Point(x, y) { this.x = x; this.y = y; }
+        \\function step(i) { var p = new Point(i, i + 1); return (p.x + p.y) | 0; }
+        \\let acc = 0;
+        \\let i = 0;
+        \\while (i < 400) { acc = (acc + step(i)) | 0; i = i + 1; }
+        \\acc;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    // sum_{i<400} (i + (i+1)) = sum (2i+1) = 2*(399*400/2)+400 = 159600+400.
+    try testing.expectEqual(@as(i32, 160000), v.asInt32());
+    // `step` (the `new_call`-bearing chunk) is now compiled.
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "step").jit_state.?.tier,
+    );
+    // and `Point` (the construct callee) too.
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "Point").jit_state.?.tier,
+    );
+}
+
+test "jit bistromath: compiled→compiled call returns the right value (in-line call)" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+
+    // Both `inner` and `outer` heat up; the compiled `outer` calls the
+    // compiled `inner` via the in-line push path (no nested runFrames),
+    // resumes at the post-call op with the result in its accumulator.
+    const src =
+        \\function inner(a, b) { return (a * b + 1) | 0; }
+        \\function outer(i) { var x = inner(i, 2); return (x + inner(i, 3)) | 0; }
+        \\let acc = 0;
+        \\let i = 0;
+        \\while (i < 400) { acc = (acc + outer(i)) | 0; i = i + 1; }
+        \\acc;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    // outer(i) = (2i+1) + (3i+1) = 5i+2; sum_{i<400} = 5*(399*400/2)+2*400
+    //          = 399000 + 800 = 399800.
+    try testing.expectEqual(@as(i32, 399800), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "outer").jit_state.?.tier,
+    );
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "inner").jit_state.?.tier,
+    );
+}
+
+test "jit bistromath: in-line construct returns the constructed object (§10.2.2 7b)" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+
+    // A base ctor that returns a primitive (`return 5`) — §10.2.2 step
+    // 7b — must yield the freshly-allocated `this`, not the primitive.
+    // The driver applies the ConstructResult verdict on the callee's
+    // compiled `done`, exactly as Lantern's `.return_` does.
+    const src =
+        \\function Box(v) { this.v = v; return 5; }
+        \\function step(i) { var b = new Box(i); return b.v | 0; }
+        \\let acc = 0;
+        \\let i = 0;
+        \\while (i < 400) { acc = (acc + step(i)) | 0; i = i + 1; }
+        \\acc;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    // b is the instance (not 5); b.v == i; sum_{i<400} i = 79800.
+    try testing.expectEqual(@as(i32, 79800), v.asInt32());
+    try testing.expectEqual(
+        Chunk.JitState.Tier.compiled,
+        templateNamed(&chunk, "step").jit_state.?.tier,
     );
 }

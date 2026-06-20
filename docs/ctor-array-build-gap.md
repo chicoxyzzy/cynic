@@ -469,9 +469,21 @@ function-wrapped form the JIT actually compiles is covered.
   interpreter's fast path does, instead of a nested-run helper. That is a
   major call/construct-mechanism change (it would also lift compiled
   *calls*, which pay the same nested-run cost via `helperCallDirect`),
-  not an IC. Until then `new_call` stays dont_compile — the same lesson
-  as `sta_this_property`, now with the IC shortcut measured and ruled
-  out.
+  not an IC. **Resolved — in-line frame-reentry.** Bistromath now compiles
+  `new_call`, and routes compiled `call` the same way. A compiled
+  call/construct site pushes the callee `CallFrame` and returns
+  `EntryResult.frame_pushed` to the `runFrames` driver, which drives the
+  callee in either tier (the §4.2 frame-identity rule makes the frames
+  interchangeable) and resumes the caller's compiled code on return — no
+  nested `runFrames`. `construct_loop` is now **~11% faster under `--jit`**
+  than interpreted (interleaved min-of-21 ratio 0.893; `arith_loop` control
+  0.506), versus the ~1.18-1.19 *regression* of the two nested-run attempts
+  above. The full `--jit` test262 pass-set is identical to the interpreter's
+  (45335 passing; failing-paths byte-identical) and gc-stress
+  (`--gc-threshold=1 --jit`, both threadings) is clean. The third attempt
+  cleared the wall the first two hit: the cost was the nested-run setup, and
+  removing it — not the proto walk, not an IC — is what made compiled
+  construct competitive.
 - A segregated `JSArray` heap kind (V8/JSC-style separate type):
   **not recommended** — the unified-JSObject costs this fixture
   still pays (header init breadth, per-corpse deinit walk) are

@@ -190,7 +190,7 @@ const RelOp = arith.RelOp;
 /// number is comfortably below where Zig's own stack would also
 /// blow up — we keep dispatch on the host stack but bound the
 /// per-call allocation work.
-const max_call_frames: usize = 1024;
+pub const max_call_frames: usize = 1024;
 
 // ── Native re-entry stack guard ─────────────────────────────────────
 //
@@ -4433,6 +4433,25 @@ pub fn runFrames(
                             }
                             return error.OutOfMemory;
                         };
+                        // Bistromath (docs/jit.md §4.5): a hot compiled
+                        // constructor runs to completion here via in-line
+                        // frame-reentry — the driver applies §10.2.2
+                        // ConstructResult on its return, so `.completed`
+                        // is already the constructed value. A tier-down
+                        // leaves the frame mid-chunk for `reEnterDispatch`;
+                        // a throw (incl. the derived-ctor verdict error)
+                        // unwinds against the caller stack.
+                        switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+                            .not_entered => {},
+                            .completed => |jit_ret| {
+                                frames.items[frames.items.len - 1].accumulator = jit_ret;
+                            },
+                            .threw => |ex| {
+                                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                                    return .{ .thrown = ex };
+                                }
+                            },
+                        }
                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                     }
                 }
@@ -11265,43 +11284,17 @@ pub fn runFrames(
             //   .ref_error:  derived ctor returned undefined
             //                without calling super (step 11 →
             //                §9.1.1.3.4 GetThisBinding).
-            const Verdict = enum { normal, type_error, ref_error };
-            var verdict: Verdict = .normal;
+            // §10.2.2 ConstructResult — shared with Bistromath's
+            // in-line frame-reentry driver (docs/jit.md §4.5). The
+            // `super_called_cell` merge handles a cross-`runFrames`
+            // super-call flip (e.g. an arrow performed `super(...)`
+            // from inside iterator close `return()` during a for-of
+            // unwind — that call ran in a separate `runFrames`
+            // invocation so the direct frame walk in `.super_call`
+            // couldn't see us).
+            var verdict: ConstructVerdict = .normal;
             if (f.is_construct) {
-                const returned_object =
-                    heap_mod.valueAsPlainObject(acc) != null or
-                    heap_mod.valueAsFunction(acc) != null;
-                // Merge any cross-`runFrames` super-call flip
-                // tracked through `super_called_cell` (e.g. an
-                // arrow performed `super(...)` from inside
-                // iterator close `return()` during the for-of
-                // unwind — that call ran in a separate
-                // `runFrames` invocation so the direct frame
-                // walk in `.super_call` couldn't see us).
-                if (f.super_called_cell) |cell| {
-                    if (cell.*) f.super_called = true;
-                }
-                if (!returned_object) {
-                    if (f.is_derived_ctor and !acc.isUndefined()) {
-                        // §10.2.2 step 7c — derived ctors must
-                        // return either an Object or undefined.
-                        // null / number / string / bool /
-                        // symbol / bigint all trip the gate.
-                        verdict = .type_error;
-                    } else if (f.is_derived_ctor and !f.super_called) {
-                        // §10.2.2 step 11 → §9.1.1.3.4
-                        // GetThisBinding — `this` is still
-                        // uninitialized because `super(...)`
-                        // never executed.
-                        verdict = .ref_error;
-                    } else {
-                        // §10.2.2 step 7b — base ctor (or
-                        // derived ctor after super) returning
-                        // a non-Object falls back to the
-                        // initialized `this`.
-                        ret = f.this_value;
-                    }
-                }
+                verdict = constructReturnVerdict(f, acc, &ret);
             }
             // §27.7 AsyncFunctionStart — an async function's
             // normal completion fulfils the Promise it
@@ -11346,6 +11339,25 @@ pub fn runFrames(
                 return .{ .value = ret };
             }
             frames.items[frames.items.len - 1].accumulator = ret;
+            // Bistromath in-line frame-reentry (docs/jit.md §4.5): the
+            // caller we just popped back to may be a compiled frame
+            // parked at a resume offset (it pushed this callee in-line).
+            // Re-enter its compiled code with the result already in its
+            // accumulator; `.completed` cascades the same way a callee
+            // return does, a tier-down / cold-resume falls through to
+            // Lantern.
+            switch (try bistromath.tryResumeTop(allocator, realm, frames)) {
+                .not_entered => {},
+                .completed => |jit_ret| {
+                    if (frames.items.len == 0) return .{ .value = jit_ret };
+                    frames.items[frames.items.len - 1].accumulator = jit_ret;
+                },
+                .threw => |ex| {
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .thrown = ex };
+                    }
+                },
+            }
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
     }
@@ -11404,6 +11416,61 @@ fn lookupGlobalAccessor(
         cur = o.prototype;
     }
     return .none;
+}
+
+/// §10.2.2 [[Construct]] steps 7-11 ConstructResult — given the
+/// value a constructor body left in the accumulator at `return`,
+/// decide the value the `new` expression yields. Shared by the
+/// interpreter's `.return_` arm and Bistromath's in-line
+/// frame-reentry driver (docs/jit.md §4.5) so both apply the
+/// identical verdict; the caller pops the frame and, on a
+/// non-`.normal` verdict, raises the named error against the
+/// *caller* (after the pop — the synthetic TypeError /
+/// ReferenceError is not catchable inside the ctor body).
+pub const ConstructVerdict = enum { normal, type_error, ref_error };
+
+/// Compute §10.2.2's verdict for a finished construct frame.
+/// `returned` is the body's `return` value (the live accumulator);
+/// on a `.normal` verdict `out_value` receives the value the `new`
+/// yields (the returned object, or the initialized `this`). The
+/// `super_called_cell` merge mirrors the `.return_` arm so an
+/// arrow that ran `super(...)` from a separate dispatch is seen.
+pub fn constructReturnVerdict(f: *CallFrame, returned: Value, out_value: *Value) ConstructVerdict {
+    std.debug.assert(f.is_construct);
+    const returned_object =
+        heap_mod.valueAsPlainObject(returned) != null or
+        heap_mod.valueAsFunction(returned) != null;
+    if (f.super_called_cell) |cell| {
+        if (cell.*) f.super_called = true;
+    }
+    if (returned_object) {
+        out_value.* = returned;
+        return .normal;
+    }
+    if (f.is_derived_ctor and !returned.isUndefined()) {
+        // §10.2.2 step 7c — derived ctor must return Object or undefined.
+        return .type_error;
+    }
+    if (f.is_derived_ctor and !f.super_called) {
+        // §10.2.2 step 11 → §9.1.1.3.4 GetThisBinding — `this`
+        // still uninitialized because `super(...)` never ran.
+        return .ref_error;
+    }
+    // §10.2.2 step 7b — base ctor (or derived after super) returning
+    // a non-Object falls back to the initialized `this`.
+    out_value.* = f.this_value;
+    return .normal;
+}
+
+/// The §10.2.2 step 7c / 11 error value for a non-`.normal` verdict
+/// (raised against the *caller* after the construct frame is
+/// popped). Shared with Bistromath's driver.
+pub fn constructVerdictError(realm: *Realm, verdict: ConstructVerdict) RunError!Value {
+    return switch (verdict) {
+        .type_error => makeTypeError(realm, "Derived constructors may only return object or undefined"),
+        .ref_error => makeReferenceError(realm, "Must call super constructor in derived class before returning from derived constructor"),
+        .normal => unreachable,
+    };
 }
 
 pub fn unwindThrow(

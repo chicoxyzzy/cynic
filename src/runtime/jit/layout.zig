@@ -55,6 +55,10 @@ pub const function = struct {
     pub const owning_module: u15 = @offsetOf(JSFunction, "owning_module");
     pub const realm: u15 = @offsetOf(JSFunction, "realm");
     pub const is_arrow: u15 = @offsetOf(JSFunction, "is_arrow");
+    /// `[[Construct]]`'s instance prototype — the in-line `new_call`
+    /// IC-hit guard (docs/jit.md §4.5) compares this against
+    /// `CallICCell.proto` to catch a `C.prototype = …` reassignment.
+    pub const prototype: u15 = @offsetOf(JSFunction, "prototype");
 };
 
 /// `Environment` — the lda_env / sta_env fixed-depth walks
@@ -119,6 +123,9 @@ pub const ic_cell = struct {
 /// (docs/jit.md §12 step 3e).
 pub const call_ic_cell = struct {
     pub const callee: u15 = @offsetOf(CallICCell, "callee");
+    /// The resolved instance prototype cached for a `new_call` site
+    /// (docs/jit.md §4.5) — the in-line construct guard.
+    pub const proto: u15 = @offsetOf(CallICCell, "proto");
 };
 
 /// NaN-box bit facts compiled tag checks bake as immediates —
