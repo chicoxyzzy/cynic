@@ -15,7 +15,11 @@
 #
 # With no remote configured the runners tell you to set one or run locally.
 
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR)
+# ServerAlive* turns a genuinely dead connection into a clean error after
+# ~60s of silence instead of an indefinite hang — so "alive but quiet" (a
+# long bench) and "stuck/dead" become distinguishable. Keepalives are
+# protocol-level, so a slow-but-healthy run is never falsely dropped.
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR)
 
 # Directory of the checkout on the remote (provisioned by provision-remote.sh).
 CYNIC_REMOTE_DIR="${CYNIC_REMOTE_DIR:-/opt/cynic}"

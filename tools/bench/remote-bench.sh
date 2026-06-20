@@ -67,8 +67,14 @@ bash /tmp/run-suite.sh /tmp/base "$RUNS" "$SUITE"
 
 if [ "$CROSS" = "1" ]; then
   git checkout --detach --quiet "$REF"
-  tools/bench-cross.sh --runs "$RUNS" > /tmp/cross-micros.md 2>/dev/null || echo "_(cross micros failed)_" > /tmp/cross-micros.md
-  tools/bench-cross.sh --macros --runs "$RUNS" > /tmp/cross-macros.md 2>/dev/null || echo "_(cross macros failed)_" > /tmp/cross-macros.md
+  # stderr is intentionally NOT suppressed: bench-cross.sh prints a
+  # per-fixture "running <engine> / <fixture>" heartbeat there, which
+  # streams back over ssh so the long cross pass is visibly alive. Only
+  # stdout (the markdown table) goes to the file.
+  echo ">> cross-engine micros (all peers x both tiers — the slow part)" >&2
+  tools/bench-cross.sh --runs "$RUNS" > /tmp/cross-micros.md || echo "_(cross micros failed)_" > /tmp/cross-micros.md
+  echo ">> cross-engine macros" >&2
+  tools/bench-cross.sh --macros --runs "$RUNS" > /tmp/cross-macros.md || echo "_(cross macros failed)_" > /tmp/cross-macros.md
 fi
 echo "remote run complete" >&2
 REMOTE
