@@ -482,7 +482,8 @@ fn pushCallFrameShim(
     argc: u64,
 ) callconv(.c) u32 {
     const allocator = realm.heap.allocator;
-    const frames = activeFrames(realm);    if (frames.items.len >= interpreter.max_call_frames) {
+    const frames = activeFrames(realm);
+    if (frames.items.len >= interpreter.max_call_frames) {
         return @intFromEnum(PushStatus.tier_down);
     }
     const callee_chunk = callee_fn.chunk orelse return @intFromEnum(PushStatus.tier_down);
@@ -542,7 +543,8 @@ fn pushConstructFrameShim(
     argc: u64,
 ) callconv(.c) u32 {
     const allocator = realm.heap.allocator;
-    const frames = activeFrames(realm);    if (frames.items.len >= interpreter.max_call_frames) {
+    const frames = activeFrames(realm);
+    if (frames.items.len >= interpreter.max_call_frames) {
         return @intFromEnum(PushStatus.tier_down);
     }
     const callee_chunk = callee_fn.chunk orelse return @intFromEnum(PushStatus.tier_down);
