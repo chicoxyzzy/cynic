@@ -10,11 +10,21 @@ and root walker live in
 [`src/runtime/lantern/interpreter.zig`](../../src/runtime/lantern/interpreter.zig).
 
 A **minor cycle** (`Heap.collectYoung`) marks reachable young
-objects, promotes them, and frees the rest. A **major cycle**
+objects, promotes them, and frees the rest. **Sticky mark bits:** a
+minor cycle does *not* flip the mark colour, so the mature generation
+keeps its marks and `markValue` short-circuits a mature object on the
+`mark_color == live_color` check instead of re-tracing the whole
+retained graph from roots every nursery cycle. (Re-tracing the mature
+set on every minor — the old behaviour — was O(live heap) and the
+dominant GC cost on a large stable retained set; this is the
+generational invariant JSC-Riptide's Eden collection / SpiderMonkey's
+nursery also rely on.) A minor instead clears only the young
+generation in `beginMinorCycle` (`O(young)`, bounded by churn) so the
+mark can tell a live young object from a dead one. A **major cycle**
 (`Heap.collectFull`) marks across both halves, sweeps everything
-unreachable, and flips the mark colour at the top of the next cycle
-so the previously-marked bit ages back to "unmarked" without a linear
-walk over the mature set. The dirty-container list
+unreachable, and flips the mark colour + clears the mature lists so
+the previously-marked bit ages back to "unmarked" — the `O(1)`-on-the-
+mature-side reset that the minor's stickiness depends on. The dirty-container list
 (`Heap.dirty_list: ArrayListUnmanaged(Container)`) — the pooled-heap
 adaptation of a card-marking remembered set — tracks mature→young
 edges recorded by the generational write barrier
@@ -132,8 +142,11 @@ and *appends* the marked survivors onto the mature half. A minor
 cycle never touches the mature lists; a major cycle sweeps both
 halves and (still) routes survivors through the same per-kind list.
 Marked entries don't get their bit cleared on a per-entry basis —
-the mark-colour flip at the top of the next major cycle ages the
-whole mature set back to "unmarked" in `O(1)`.
+the mark-colour flip at the top of the next *major* cycle ages the
+whole mature set back to "unmarked" in `O(1)`. A *minor* cycle keeps
+the colour stable (sticky mark bits) and never touches the mature
+lists, so a large stable retained set is not re-traced on every
+nursery cycle; only the young generation is cleared and marked.
 
 ## Natives and `HandleScope`
 

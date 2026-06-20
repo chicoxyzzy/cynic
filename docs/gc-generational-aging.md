@@ -1,5 +1,21 @@
 # Generational aging via card marking — design note
 
+> ## SUPERSEDED for the Splay/alloc gap (sticky mark bits shipped)
+>
+> This note is about *aging* (keep survivors young for N cycles). The
+> cost it set out to attack — the alloc/Splay gap — turned out to be a
+> *different* mechanism: the minor cycle re-traced the **entire mature
+> set every nursery cycle**, because `beginMinorCycle` flipped
+> `live_color` and made every mature object look unmarked. That was
+> fixed by **sticky mark bits** — a minor cycle no longer flips; the
+> mature generation keeps its marks and is never re-traced; the minor
+> clears only the young generation. See `docs/handbook/gc.md`. Result:
+> Octane Splay 5631 → 1417 ms (~4×), the macro alloc cluster trended
+> down with it, conformance byte-identical, gc-stress clean
+> (single + multi-threaded). The aging analysis below still stands
+> (aging gives ~0% on this non-moving collector); the win came from the
+> minor-mark fix, not aging or card marking.
+
 > ## DECISIVE (2026-06-08): aging gives ~0% win on this GC — the premise is refuted
 >
 > The rooting blocker (below) was *solved* — a conservative native-stack
