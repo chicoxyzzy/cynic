@@ -8205,6 +8205,82 @@ pub const Compiler = struct {
         return inner_chunk;
     }
 
+    /// Infer the constructor instance "initial shape" (§10.1.13
+    /// OrdinaryCreateFromConstructor + the V8 "initial map" idea) and
+    /// record it on the *current* builder (must be the constructor's own
+    /// builder, so the interned field-key strings land in the
+    /// constructor chunk's constant pool that `new_call` reads).
+    ///
+    /// Walks the body's LEADING run of `this.<IdentifierName> = <expr>`
+    /// expression statements (§13.3.6 PutValue on a non-optional member
+    /// whose base is `this`), collecting the distinct field keys in
+    /// first-write order. The run stops at the first statement that
+    /// isn't such a write — the recorded count is therefore a LOWER
+    /// bound on the instance's final own-property count, which is all
+    /// the runtime needs: `new_call` pre-sizes the fresh instance's slot
+    /// vector to it, and any field written *after* the leading run grows
+    /// the slots the ordinary way. The shape is never stamped on the
+    /// instance, so §10.1.11 own-key order still grows field-by-field as
+    /// the stores run (an early `'y' in this` reads false until `this.y`).
+    ///
+    /// Conservative by design — anything that would make a leading
+    /// "write" not a plain own-data field store ends the run rather than
+    /// risk a wrong count: a computed `this[k] =`, an `Object.is`-style
+    /// `this.x op= …` compound assignment, a `this.x.y =` (base is a
+    /// member, not `this`), an optional `this?.x`, or a non-`this` base.
+    /// Duplicate keys collapse to one slot (matching the shape the
+    /// stores build). Derived constructors are excluded by the caller
+    /// (their `this` is produced by `super()`, not by `new_call`).
+    fn recordCtorFieldShape(self: *Compiler, body_stmts: []const ast.statement.Statement) CompileError!void {
+        var keys: std.ArrayListUnmanaged(u16) = .empty;
+        defer keys.deinit(self.allocator);
+        outer: for (body_stmts) |*st| {
+            const es = switch (st.*) {
+                .expression => |e| e,
+                else => break :outer, // run ends at any non-expr stmt
+            };
+            const assign = switch (es.expression) {
+                .assignment => |a| a,
+                else => break :outer,
+            };
+            // Only `=` (plain assignment). A compound `this.x += …`
+            // reads the slot first, so it isn't a pure field-create.
+            if (assign.op != .eq) break :outer;
+            const member = switch (assign.target.*) {
+                .member => |m| m,
+                else => break :outer,
+            };
+            // Base must be exactly `this`, non-optional, static-ident key.
+            if (member.optional) break :outer;
+            switch (member.object.*) {
+                .this_expr => {},
+                else => break :outer,
+            }
+            const key_span = switch (member.property) {
+                .ident => |s| s,
+                .computed => break :outer,
+            };
+            const raw = self.source[key_span.start..key_span.end];
+            const decoded = self.decodeIdentifierName(raw) catch break :outer;
+            const k = self.internString(decoded) catch break :outer;
+            // Dedup: a repeated field is one slot (the shape the stores
+            // build has one entry for it). Compare by interned bytes.
+            var dup = false;
+            for (keys.items) |existing| {
+                const ev = self.builder.constants.items[existing];
+                const es_str: *@import("../runtime/string.zig").JSString = @ptrCast(@alignCast(ev.asString()));
+                if (std.mem.eql(u8, es_str.flatBytes(), decoded)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) keys.append(self.allocator, k) catch break :outer;
+        }
+        if (keys.items.len == 0) return; // nothing to pre-size
+        const owned = keys.toOwnedSlice(self.allocator) catch return;
+        self.builder.setCtorFieldShape(owned);
+    }
+
     /// Like compileMethodBody but with prologue tweaks for class
     /// constructors: base classes get `init_instance_fields` at the
     /// start of the user body; derived classes leave it to the
@@ -8443,6 +8519,15 @@ pub const Compiler = struct {
             // means the predicate and emit disagree.
             std.debug.assert(self.env_slot_count == 0);
         }
+        // §10.1.13 instance "initial map" — record the leading static
+        // `this.<field> =` run so `new_call` pre-sizes the instance
+        // slots. Base ctors only: a derived ctor's `this` is created by
+        // `super()`, not by the `new_call` that pre-sizes, so its field
+        // run would size the wrong object. (`has_fields` is fine — class
+        // field initializers run before the body and grow the shape
+        // first; the body's run is still a valid lower bound on the
+        // final slot count, and over-/under-sizing slots is harmless.)
+        if (!is_derived) try self.recordCtorFieldShape(body_stmts);
         const inner_chunk = try self.builder.finish();
         inner_finished = true;
         fn_scope.deinit(self.allocator);
@@ -14530,6 +14615,17 @@ fn compileFunctionTemplateExtNamed(
             if (!self.builder.tailIsUnreachable()) {
                 try self.builder.emitOp(.lda_undefined, span);
                 try self.builder.emitOp(.return_, span);
+            }
+            // §10.1.13 instance "initial map" — an ordinary function
+            // used with `new` constructs a plain object whose body's
+            // leading `this.<field> =` run shapes it. Record the field
+            // run so `new_call` pre-sizes the instance slots. Excludes
+            // arrows / generators / async, which are not constructors
+            // (`new` throws / the `new_call` ctor fast path never runs
+            // for them); a non-constructor function simply never reads
+            // the recorded list.
+            if (!is_arrow and !is_generator and !is_async) {
+                try self.recordCtorFieldShape(stmts);
             }
         },
         .expression => |e| {

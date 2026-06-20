@@ -170,6 +170,24 @@ pub const computed_key_megamorphic_after: u8 = 4;
 pub const CallICCell = struct {
     callee: ?*@import("../runtime/function.zig").JSFunction = null,
     proto: ?*@import("../runtime/object.zig").JSObject = null,
+    /// `new_call` only — the resolved instance "initial shape" for a
+    /// constructor whose body declares a static field run (the chunk's
+    /// `ctor_field_shape`). Its `property_count` is the slot count the
+    /// instance will reach, so `new_call` pre-sizes the fresh instance's
+    /// slot vector to it — the body's `this.<field> =` writes then never
+    /// reallocate slots (§10.1.13 OrdinaryCreateFromConstructor + the V8
+    /// "initial map" idea). The shape itself is NOT stamped on the
+    /// instance: §10.1.11 own-key order must still grow field-by-field as
+    /// the stores execute (an early `'y' in this` reads false until
+    /// `this.y` runs), so only the slot *capacity* is pre-provisioned.
+    ///
+    /// Per-realm by construction: this cell only serves when
+    /// `callee == cached`, and a `JSFunction` belongs to one realm, so a
+    /// shape from realm A's `ShapeTree` is never consulted under realm B's
+    /// constructor (a different `JSFunction` pointer misses the guard).
+    /// Shapes are arena-stable, so the pointer never dangles; it is
+    /// nulled alongside `callee` on sweep purely for reuse-safety.
+    initial_shape: ?*@import("../runtime/shape.zig").Shape = null,
 };
 
 /// Inline-cache cell for `for_in_open` — caches the §14.7.5.6
@@ -609,6 +627,25 @@ pub const Chunk = struct {
     /// per-key `def_property`s downstream skip the per-key
     /// `ShapeTree.transition` lookup.
     literal_shape_templates: []LiteralShapeTemplate = &.{},
+    /// Constructor instance-shape blueprint — the V8 "initial map" /
+    /// JSC `inlineCapacity` analog (§10.1.13 OrdinaryCreateFromConstructor
+    /// + §15.7.10). When this chunk is a constructor body whose leading
+    /// statements are a simple run of `this.<ident> = <expr>` writes
+    /// (§13.3.6 PutValue on a member-this), the compiler records the
+    /// distinct field keys here, in first-write order, as constant-pool
+    /// indices (each a `Value.fromString` interned key). `new_call`
+    /// resolves these into a per-realm `Shape*` (cached in the call IC
+    /// cell, NOT here — shapes belong to a realm's ShapeTree and the
+    /// same chunk can run in several realms) and allocates the instance
+    /// directly into that shape, so the body's field writes land in
+    /// pre-sized slots with no per-field shape transition.
+    ///
+    /// `null` when the constructor isn't eligible (derived, computed /
+    /// conditional / dynamic `this[k]=`, an early `return <object>`, a
+    /// `delete this.x`, `this` escaping before init, or simply not a
+    /// constructor body). Set only by `Builder.setCtorFieldShape`; a
+    /// non-empty slice is the only state the runtime acts on.
+    ctor_field_shape: ?[]const u16 = null,
     /// JIT tier state — mutable side-state on the otherwise-
     /// immutable chunk, following the `inline_caches` pattern
     /// (docs/jit.md §4.1). Allocated unconditionally at `finish`
@@ -673,6 +710,7 @@ pub const Chunk = struct {
         allocator.free(self.inline_forin_caches);
         for (self.literal_shape_templates) |*t| allocator.free(t.keys);
         allocator.free(self.literal_shape_templates);
+        if (self.ctor_field_shape) |keys| allocator.free(keys);
         if (self.jit_state) |js| allocator.destroy(js);
     }
 };
@@ -689,6 +727,11 @@ pub const Builder = struct {
     function_templates: std.ArrayListUnmanaged(FunctionTemplate) = .empty,
     class_templates: std.ArrayListUnmanaged(ClassTemplate) = .empty,
     literal_shape_templates: std.ArrayListUnmanaged(LiteralShapeTemplate) = .empty,
+    /// Constructor instance-shape field-key list, surfaced on the
+    /// finished `Chunk` as `.ctor_field_shape`. Owned heap slice (or
+    /// `null`); set once via `setCtorFieldShape` by the constructor /
+    /// constructor-shaped-function compile path. See the chunk field.
+    ctor_field_shape: ?[]const u16 = null,
     /// §19.2.1 direct-eval scope snapshots, surfaced on the finished
     /// `Chunk` as `.direct_eval_scopes`. See `DirectEvalScope`.
     direct_eval_scopes: std.ArrayListUnmanaged(DirectEvalScope) = .empty,
@@ -747,8 +790,18 @@ pub const Builder = struct {
         self.class_templates.deinit(self.allocator);
         for (self.literal_shape_templates.items) |*t| self.allocator.free(t.keys);
         self.literal_shape_templates.deinit(self.allocator);
+        if (self.ctor_field_shape) |keys| self.allocator.free(keys);
         for (self.direct_eval_scopes.items) |s| self.allocator.free(s.bindings);
         self.direct_eval_scopes.deinit(self.allocator);
+    }
+
+    /// Record the constructor instance-shape field-key list (constant-
+    /// pool indices, first-write order). Takes ownership of `keys`.
+    /// Idempotent-safe: a prior list is freed first. See
+    /// `Chunk.ctor_field_shape`.
+    pub fn setCtorFieldShape(self: *Builder, keys: []const u16) void {
+        if (self.ctor_field_shape) |old| self.allocator.free(old);
+        self.ctor_field_shape = keys;
     }
 
     pub fn addHandler(self: *Builder, h: Handler) !void {
@@ -1310,6 +1363,11 @@ pub const Builder = struct {
         for (forin_ics) |*c| c.* = .{};
         const jit_state = try self.allocator.create(Chunk.JitState);
         jit_state.* = .{};
+        // Hand the ctor field-shape slice to the chunk and detach it
+        // from the builder so the post-`finish` no-op `deinit` can't
+        // double-free it.
+        const ctor_shape = self.ctor_field_shape;
+        self.ctor_field_shape = null;
         return .{
             .code = try self.code.toOwnedSlice(self.allocator),
             .constants = try self.constants.toOwnedSlice(self.allocator),
@@ -1318,6 +1376,7 @@ pub const Builder = struct {
             .function_templates = try self.function_templates.toOwnedSlice(self.allocator),
             .class_templates = try self.class_templates.toOwnedSlice(self.allocator),
             .literal_shape_templates = try self.literal_shape_templates.toOwnedSlice(self.allocator),
+            .ctor_field_shape = ctor_shape,
             .direct_eval_scopes = try self.direct_eval_scopes.toOwnedSlice(self.allocator),
             .register_count = self.register_count,
             .is_async_module = self.is_async_module,

@@ -877,6 +877,34 @@ pub fn run(allocator: std.mem.Allocator, realm: *Realm, chunk: *const Chunk) Run
 /// byte. The threaded-dispatch tail for every arm that completes
 /// without changing the active frame. `committed` is reset so the
 /// arm-local write-back flag never carries state across an opcode
+/// §10.1.13 instance "initial map" — resolve a constructor chunk's
+/// inferred field-key list into a `Shape*` in `realm`'s ShapeTree.
+/// Returns `null` when the chunk declares no field run (not a
+/// shape-eligible constructor) or on any build failure (the caller
+/// treats `null` as "don't pre-size" — purely an optimization gate,
+/// never a correctness path). The built shape is the SAME one the
+/// constructor body's `this.<field> =` stores transition into, so its
+/// `property_count` is the exact slot count those stores reach; the
+/// `new_call` fast path reads only that count, never stamps the shape.
+fn resolveCtorInitialShape(realm: *Realm, chunk: *const Chunk) ?*@import("../shape.zig").Shape {
+    const keys = chunk.ctor_field_shape orelse return null;
+    if (keys.len == 0) return null;
+    var cur = realm.heap.shapes.root;
+    for (keys) |key_idx| {
+        if (key_idx >= chunk.constants.len) return null;
+        const key_v = chunk.constants[key_idx];
+        if (!key_v.isString()) return null;
+        const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
+        cur = realm.heap.shapes.transition(
+            cur,
+            key_s.flatBytes(),
+            object_mod.PropertyFlags.default,
+            .data,
+        ) catch return null;
+    }
+    return cur;
+}
+
 /// boundary.
 ///
 /// The byte → `Op` conversion is an unchecked `@enumFromInt`: the
@@ -4350,6 +4378,31 @@ pub fn runFrames(
                             return error.OutOfMemory;
                         };
                         realm.heap.setObjectPrototype(instance, call_cell.proto);
+                        // §10.1.13 instance "initial map" — pre-size the
+                        // slot vector to the constructor's inferred field
+                        // count so the body's `this.<field> =` writes land
+                        // in already-provisioned slots (the `sta_property`
+                        // transition arm's `resizeSlots` guard then never
+                        // reallocates). The SHAPE stays at root: §10.1.11
+                        // own-key order grows field-by-field as the stores
+                        // run, so this only provisions slot capacity, not
+                        // observable properties. The pre-sized tail slots
+                        // hold `undefined` — a GC-safe Value the mark/sweep
+                        // can scan if a field initializer throws mid-body.
+                        if (call_cell.initial_shape) |ishape| presize: {
+                            const n = ishape.property_count;
+                            if (n == 0 or instance.slotCount() >= n) break :presize;
+                            // For n ≤ inline_slot_cap this never allocates
+                            // (just sets slot_count); the overflow case (a
+                            // >inline-cap field run) is the only fallible
+                            // path — and pre-sizing is a pure optimization,
+                            // so on OOM there just skip it and let the
+                            // per-field `sta_property` path size/throw
+                            // exactly as without the hint. No reg unwind.
+                            instance.resizeSlots(allocator, n) catch break :presize;
+                            var si: usize = 0;
+                            while (si < n) : (si += 1) instance.slotPtr(si).* = Value.undefined_;
+                        }
                         const this_value = heap_mod.taggedObject(instance);
 
                         f.ip = ip;
@@ -4711,6 +4764,16 @@ pub fn runFrames(
             // skip everything above.
             call_cell.callee = callee_fn;
             call_cell.proto = resolved_proto_main;
+            // §10.1.13 instance "initial map" — resolve the constructor's
+            // inferred field-key list (a chunk-side, realm-independent
+            // list of interned-key constant indices) into a per-realm
+            // `Shape*`, cached on the IC cell so the fast path can pre-
+            // size the instance slots. Building it here (cold, once per
+            // callee identity in this realm) keeps the chunk free of any
+            // realm-specific shape pointer. Only base/plain constructors
+            // carry a non-empty list (derived ctors are excluded at
+            // compile time — their `this` comes from `super()`).
+            call_cell.initial_shape = resolveCtorInitialShape(realm, callee_chunk);
 
             frames.append(allocator, .{
                 .chunk = callee_chunk,

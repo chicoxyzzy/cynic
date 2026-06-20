@@ -2254,6 +2254,11 @@ pub const Heap = struct {
                     // matching `callee` would short-circuit
                     // unreachably.
                     cell.proto = null;
+                    // The cached instance initial shape is realm-arena
+                    // stable (never individually swept), but it is keyed
+                    // to this callee — drop it so a swept-and-reused
+                    // callee address can't reawaken a stale shape.
+                    cell.initial_shape = null;
                 }
             }
             // The `new_call` proto can also outlive its callee in

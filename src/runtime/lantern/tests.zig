@@ -15097,3 +15097,193 @@ test "scope flattening: promoting a body-top const does not disturb per-iteratio
         \\f();
     , 3);
 }
+
+// ── Constructor initial shape (V8 "initial map" analog) ──────────
+//
+// §10.1.13 OrdinaryCreateFromConstructor allocates the instance,
+// then the §15.7.10 [[Construct]] runs the body whose
+// `this.<field> = …` writes (§13.3.6 PutValue on a member-this)
+// build the instance shape. When the body is a simple leading run
+// of such writes, the engine infers the `{x, y, …}` instance shape
+// at compile time and allocates `new C()` directly into it, so the
+// body writes land in existing slots. These tests pin the
+// observable semantics that inference MUST preserve across the
+// fast path and its bail conditions — they pass on the generic
+// per-field path too (the optimization is semantics-preserving),
+// so they are the regression net for the shaped path.
+
+test "ctor initial shape: simple {x,y} reads both fields back" {
+    // Last iteration is i = 49, so last = Point(49, 50): 49 + 50.
+    try expectScriptIntWithBuiltins(
+        \\class Point { constructor(x, y) { this.x = x; this.y = y; } }
+        \\let last = null;
+        \\for (let i = 0; i < 50; i++) last = new Point(i, i + 1);
+        \\last.x + last.y;
+    , 99);
+}
+
+test "ctor initial shape: plain function constructor reads fields back" {
+    // §13.3.5.1 — a plain `function` used with `new` constructs an
+    // ordinary object; its body's `this.x = …` writes shape it the
+    // same way a class constructor's do. Last iteration i = 49.
+    try expectScriptIntWithBuiltins(
+        \\function Point(x, y) { this.x = x; this.y = y; }
+        \\let last = null;
+        \\for (let i = 0; i < 50; i++) last = new Point(i, i + 1);
+        \\last.x + last.y;
+    , 99);
+}
+
+test "ctor initial shape: own keys in source-write order" {
+    // §10.1.11 OrdinaryOwnPropertyKeys — insertion order is the
+    // order of the `this.<field> =` writes, regardless of the
+    // inferred-shape pre-stamp.
+    try expectScriptStringWithBuiltins(
+        \\class R { constructor() { this.first = 1; this.second = 2; this.third = 3; } }
+        \\Object.keys(new R()).join(",");
+    , "first,second,third");
+}
+
+test "ctor initial shape: field values from arguments preserved" {
+    try expectScriptStringWithBuiltins(
+        \\class Box { constructor(a, b, c) { this.a = a; this.b = b; this.c = c; } }
+        \\const o = new Box("p", "q", "r");
+        \\o.a + o.b + o.c;
+    , "pqr");
+}
+
+test "ctor initial shape: partial init on throw leaves earlier fields, no later" {
+    // §15.7.10 — if a later field initializer throws, the partially
+    // initialized instance is discarded but must be GC-safe and
+    // observably consistent up to the throw point. Here we capture
+    // `this` via a side table before the throw to inspect it.
+    try expectScriptStringWithBuiltins(
+        \\let captured = null;
+        \\class C {
+        \\  constructor() {
+        \\    this.x = 1;
+        \\    captured = this;
+        \\    this.y = (function(){ throw new Error("boom"); })();
+        \\    this.z = 3;
+        \\  }
+        \\}
+        \\let msg = "";
+        \\try { new C(); } catch (e) { msg = e.message; }
+        \\// x was written; y/z were not.
+        \\msg + ":" + captured.x + ":" + (captured.y === undefined) + ":" + ("z" in captured);
+    , "boom:1:true:false");
+}
+
+test "ctor initial shape: return object replaces instance (bail)" {
+    // §15.7.10 / §13.3.5.1 ConstructResult — a constructor that
+    // returns an object replaces the freshly allocated `this`. The
+    // returned object must NOT carry the ctor's inferred field
+    // shape.
+    try expectScriptStringWithBuiltins(
+        \\class C {
+        \\  constructor() { this.x = 1; this.y = 2; return { other: 9 }; }
+        \\}
+        \\const o = new C();
+        \\("x" in o) + ":" + ("other" in o) + ":" + o.other;
+    , "false:true:9");
+}
+
+test "ctor initial shape: conditional this-write is not pre-shaped wrongly" {
+    // A constructor whose field set depends on a branch must NOT be
+    // forced into a fixed inferred shape — the instance only has
+    // the keys actually written.
+    try expectScriptStringWithBuiltins(
+        \\class C {
+        \\  constructor(flag) { this.a = 1; if (flag) this.b = 2; }
+        \\}
+        \\const yes = new C(true);
+        \\const no = new C(false);
+        \\("b" in yes) + ":" + ("b" in no) + ":" + Object.keys(no).join(",");
+    , "true:false:a");
+}
+
+test "ctor initial shape: duplicate this-write keeps one slot, last value" {
+    // §10.1.11 — writing the same key twice keeps a single own
+    // property; the final write wins, insertion order is first-write.
+    try expectScriptStringWithBuiltins(
+        \\class C { constructor() { this.x = 1; this.y = 2; this.x = 3; } }
+        \\const o = new C();
+        \\Object.keys(o).join(",") + ":" + o.x + ":" + o.y;
+    , "x,y:3:2");
+}
+
+test "ctor initial shape: instances are independent" {
+    try expectScriptStringWithBuiltins(
+        \\class P { constructor(v) { this.v = v; } }
+        \\const a = new P(10);
+        \\const b = new P(20);
+        \\a.v = 11;
+        \\a.v + ":" + b.v;
+    , "11:20");
+}
+
+test "ctor initial shape: defineProperty after shape demotes cleanly" {
+    // A user `Object.defineProperty` with non-default attrs on a
+    // shaped instance must demote correctly — the descriptor wins.
+    try expectScriptStringWithBuiltins(
+        \\class C { constructor() { this.x = 1; this.y = 2; } }
+        \\const o = new C();
+        \\Object.defineProperty(o, "z", { value: 9, enumerable: false, writable: false, configurable: false });
+        \\const d = Object.getOwnPropertyDescriptor(o, "z");
+        \\o.z + ":" + d.enumerable + ":" + d.writable + ":" + Object.keys(o).join(",");
+    , "9:false:false:x,y");
+}
+
+test "ctor initial shape: derived class with super still constructs" {
+    // §15.7.10 derived — `this` is created by the base via
+    // `super()`, so the derived ctor's own field writes happen on a
+    // base-allocated `this`. Inference must bail on derived ctors;
+    // the instance must still carry both base and derived fields.
+    try expectScriptStringWithBuiltins(
+        \\class Base { constructor() { this.b = 1; } }
+        \\class Derived extends Base { constructor() { super(); this.d = 2; } }
+        \\const o = new Derived();
+        \\o.b + ":" + o.d + ":" + Object.keys(o).join(",");
+    , "1:2:b,d");
+}
+
+test "ctor initial shape: hot loop fresh instance per iteration sums" {
+    // The fast path's per-iteration allocate-into-shape must produce
+    // a fresh independent instance every time, not alias slots.
+    try expectScriptIntWithBuiltins(
+        \\class P { constructor(x) { this.x = x; } }
+        \\let sum = 0;
+        \\for (let i = 0; i < 100; i++) { const p = new P(i); sum += p.x; }
+        \\sum;
+    , 4950);
+}
+
+test "ctor initial shape: class field declarations plus ctor writes" {
+    // §15.7.10 — class instance fields (`x = …`) run before the
+    // constructor body's statements (init_instance_fields). A ctor
+    // with both must keep all keys, fields first.
+    try expectScriptStringWithBuiltins(
+        \\class C { p = 1; constructor() { this.q = 2; } }
+        \\const o = new C();
+        \\Object.keys(o).join(",") + ":" + o.p + ":" + o.q;
+    , "p,q:1:2");
+}
+
+test "ctor initial shape: JSON.stringify roundtrips shaped instance" {
+    try expectScriptStringWithBuiltins(
+        \\class C { constructor(x, y) { this.x = x; this.y = y; } }
+        \\JSON.stringify(new C(1, 2));
+    , "{\"x\":1,\"y\":2}");
+}
+
+test "ctor initial shape: computed this-write before plain bails safely" {
+    // A computed `this[k] = …` mid-body means the static-prefix
+    // inference must stop; the instance still gets every key.
+    try expectScriptStringWithBuiltins(
+        \\class C {
+        \\  constructor(k) { this.a = 1; this[k] = 2; this.c = 3; }
+        \\}
+        \\const o = new C("b");
+        \\Object.keys(o).join(",") + ":" + o.a + ":" + o.b + ":" + o.c;
+    , "a,b,c:1:2:3");
+}
