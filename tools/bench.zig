@@ -35,6 +35,9 @@
 //!   zig build bench -- --no-jit     # Lantern-only baseline column
 //!   zig build bench -- --runs=40    # wider budget; lights up p95
 //!   zig build bench -- --runs=200   # lights up p95 + p99
+//!   zig build bench -- --macros     # Octane macro set (bench/macros/),
+//!                                   # run --unhardened; Splay is heavy,
+//!                                   # so --runs=3 for a quick pass
 //!
 //! Bench host expectations (see the "Stability hardening" section of
 //! docs/benchmarking.md):
@@ -95,6 +98,21 @@ const BENCHES = [_]Bench{
     .{ .name = "tail_recursion", .path = "bench/micros/tail_recursion.js" },
 };
 
+// Macro benchmarks — the compute core of the retired V8 Octane 2.0
+// suite (bench/macros/, vendored verbatim; see its README). Selected
+// with `--macros`; run under `--unhardened` because the ES5-era
+// bodies monkey-patch primordials. Heavier than the micros — Splay
+// alone allocates ~250k objects — so they are a separate set, not
+// folded into the default fast micro inner-loop.
+const MACROS = [_]Bench{
+    .{ .name = "richards", .path = "bench/macros/richards.js" },
+    .{ .name = "deltablue", .path = "bench/macros/deltablue.js" },
+    .{ .name = "crypto", .path = "bench/macros/crypto.js" },
+    .{ .name = "raytrace", .path = "bench/macros/raytrace.js" },
+    .{ .name = "navier_stokes", .path = "bench/macros/navier-stokes.js" },
+    .{ .name = "splay", .path = "bench/macros/splay.js" },
+};
+
 const Sample = struct {
     wall_us: i64,
     rss_bytes: usize,
@@ -128,6 +146,7 @@ fn runOnce(
     fixture: []const u8,
     jit: bool,
     no_jit: bool,
+    unhardened: bool,
 ) !Sample {
     const t0 = std.Io.Clock.now(.awake, io);
     // `--enable-experimental` flips every tracked pre-Stage-4
@@ -137,12 +156,32 @@ fn runOnce(
     // don't touch any gated surface. `--jit` (opt-in, mirroring the
     // engine default) measures the Bistromath posture with its
     // natural tier-up thresholds — what a user gets, not a forced
-    // compile.
-    const argv_jit: []const []const u8 = &.{ cynic_bin, "--enable-experimental", "--jit", "run", fixture };
-    const argv_no_jit: []const []const u8 = &.{ cynic_bin, "--enable-experimental", "--no-jit", "run", fixture };
-    const argv_default: []const []const u8 = &.{ cynic_bin, "--enable-experimental", "run", fixture };
+    // compile. `--unhardened` is the macro-suite posture: the Octane
+    // workloads monkey-patch primordial prototypes, which the default
+    // frozen-primordials (SES) posture rejects.
+    var argv_buf: [6][]const u8 = undefined;
+    var argc: usize = 0;
+    argv_buf[argc] = cynic_bin;
+    argc += 1;
+    argv_buf[argc] = "--enable-experimental";
+    argc += 1;
+    if (unhardened) {
+        argv_buf[argc] = "--unhardened";
+        argc += 1;
+    }
+    if (jit) {
+        argv_buf[argc] = "--jit";
+        argc += 1;
+    } else if (no_jit) {
+        argv_buf[argc] = "--no-jit";
+        argc += 1;
+    }
+    argv_buf[argc] = "run";
+    argc += 1;
+    argv_buf[argc] = fixture;
+    argc += 1;
     var child = try std.process.spawn(io, .{
-        .argv = if (jit) argv_jit else if (no_jit) argv_no_jit else argv_default,
+        .argv = argv_buf[0..argc],
         // Suppress the fixture's print() output — the bench harness
         // doesn't care, and dumping it would scramble the report.
         .stdout = .ignore,
@@ -244,6 +283,7 @@ pub fn main(init: std.process.Init) !void {
     var runs: usize = DEFAULT_RUNS;
     var jit = false;
     var no_jit = false;
+    var macros = false;
     {
         var args_iter = init.minimal.args.iterate();
         _ = args_iter.next(); // skip the binary path
@@ -260,9 +300,17 @@ pub fn main(init: std.process.Init) !void {
                 // Interpreter-only baseline column
                 // (docs/jit.md §12 step 3b).
                 no_jit = true;
+            } else if (std.mem.eql(u8, a, "--macros")) {
+                // Run the Octane macro set (bench/macros/) instead of
+                // the default micros, under `--unhardened`.
+                macros = true;
             }
         }
     }
+    // The macro workloads monkey-patch primordials; run them
+    // unhardened so the frozen-primordials posture doesn't reject them.
+    const fixtures: []const Bench = if (macros) &MACROS else &BENCHES;
+    const unhardened = macros;
     const show_p95 = runs >= P95_MIN_SAMPLES;
     const show_p99 = runs >= P99_MIN_SAMPLES;
 
@@ -299,12 +347,12 @@ pub fn main(init: std.process.Init) !void {
 
     var samples_buf: [MAX_RUNS]Sample = undefined;
 
-    for (BENCHES) |b| {
+    for (fixtures) |b| {
         // Warmup — discarded so cold-start cache effects don't skew
         // the first recorded sample.
         var w: usize = 0;
         while (w < WARMUP_RUNS) : (w += 1) {
-            _ = runOnce(io, cynic_bin, b.path, jit, no_jit) catch |err| {
+            _ = runOnce(io, cynic_bin, b.path, jit, no_jit, unhardened) catch |err| {
                 const fail = try std.fmt.bufPrint(&buf, "{s:<16}  warmup failed: {s}\n", .{ b.name, @errorName(err) });
                 try std.Io.File.stderr().writeStreamingAll(io, fail);
             };
@@ -314,7 +362,7 @@ pub fn main(init: std.process.Init) !void {
         var any_failed = false;
         var i: usize = 0;
         while (i < runs) : (i += 1) {
-            samples[i] = runOnce(io, cynic_bin, b.path, jit, no_jit) catch |err| {
+            samples[i] = runOnce(io, cynic_bin, b.path, jit, no_jit, unhardened) catch |err| {
                 const fail = try std.fmt.bufPrint(&buf, "{s:<16}  run {d} failed: {s}\n", .{ b.name, i, @errorName(err) });
                 try std.Io.File.stderr().writeStreamingAll(io, fail);
                 any_failed = true;

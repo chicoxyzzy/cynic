@@ -64,8 +64,16 @@ bench/micros/                    Cynic-specific microbenchmarks
 | Suite | What it measures | Why we run it |
 |---|---|---|
 | **JetStream 2** | Mixed throughput + latency + startup across 64 subtests | Industry-standard; every major engine team publishes JS2 numbers |
-| **Octane** | 15 throughput microbenches (Crypto, Splay, Mandreel, …) | Older but stable; trivially comparable across engines |
+| **Octane** | 15 throughput microbenches (Crypto, Splay, Mandreel, …) | Older but stable; trivially comparable across engines. The pure-compute **six** (Richards, DeltaBlue, Crypto, RayTrace, NavierStokes, Splay) are vendored in `bench/macros/` — see below. |
 | **Custom micros** | Cynic-specific hot paths | Catches regressions in opcodes we own |
+
+Octane is *retired* by its own authors (engines over-tuned to it), so
+the macro suite is for **relative tracking** and **cross-engine
+interpreter-tier comparison**, never a headline score. The eval-heavy
+and generated-blob Octane members (RegExp, EarleyBoyer, pdf.js,
+TypeScript, zlib, Box2D, …) are skipped — high effort, low marginal
+signal for a strict-only engine. JetStream 2's pure-JS core overlaps
+the compute-six; its full harness (WASM + browser bits) is deferred.
 
 Web Tooling Benchmark is **deferred** — it needs Node-style module
 resolution, which we don't ship until the module loader lands.
@@ -98,6 +106,35 @@ Adding a fixture: drop a `.js` file in `bench/micros/`, append the
 fixture name to the `BENCHES` array in `tools/bench.zig`, then
 document it in the table above. Cross-engine picks it up
 automatically (`tools/bench-cross.sh` globs `bench/micros/*.js`).
+
+### Macro fixtures (Octane compute-six)
+
+The vendored Octane workloads live in `bench/macros/*.js` —
+whole-program throughput, complementary to the single-mechanism
+micros. Each is **self-contained**: a small prelude stands in for
+Octane's `base.js` registry, the body is byte-for-byte upstream
+(BSD headers retained), and a tail runs a fixed `CYNIC_ITERS` count.
+Sized to ~200 ms of work on Cynic's interpreter, except `splay`
+(setup-dominated; a GC/allocation macro at the canonical 8000-node
+tree). Full provenance, licence, and the per-fixture rationale are in
+[`bench/macros/README.md`](../bench/macros/README.md).
+
+They are a **separate set**, not folded into the default micro loop
+(Splay alone is seconds, not milliseconds, on the interpreter), and
+they run under `--unhardened` (the ES5-era bodies monkey-patch
+primordials). Select them with a flag on either harness — both
+postures, same as the micros (interpreter-only Lantern + JIT-enabled
+Bistromath):
+
+    zig build bench -- --macros              # single-engine, JIT (default)
+    zig build bench -- --macros --no-jit     # single-engine, interpreter-only
+    tools/bench-cross.sh --macros            # cross-engine, BOTH tiers
+                                             # (interp jitless + full-speed)
+
+Adding one: vendor the body into `bench/macros/`, wrap it the same
+way (see the README), and append to the `MACROS` array in
+`tools/bench.zig`. Cross-engine globs `bench/macros/*.js`
+automatically under `--macros`.
 
 ## Measurement protocol
 

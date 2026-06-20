@@ -42,6 +42,9 @@
 #                                        # tables, never one merged table.
 #   tools/bench-cross.sh -o results.md   # also write table(s) to a file
 #   tools/bench-cross.sh --runs 5        # override timed-run count
+#   tools/bench-cross.sh --macros        # Octane macro set (bench/macros/)
+#                                        # instead of the micros; Cynic
+#                                        # pinned --unhardened
 #
 # Does NOT touch bench-results.md (that file is the single-engine
 # `zig build bench` artifact). Output goes to stdout / the -o file.
@@ -66,18 +69,35 @@ WARMUP=1
 SPREAD_LIMIT=10   # percent
 OUT_FILE=""
 TIER="both"
+MACROS=0          # --macros: run bench/macros/ (Octane) instead of micros
 
 while [ $# -gt 0 ]; do
   case "$1" in
     -o|--out)   OUT_FILE="$2"; shift 2 ;;
     --runs)     RUNS="$2"; shift 2 ;;
     --tier)     TIER="$2"; shift 2 ;;
+    --macros)   MACROS=1; shift ;;
     -h|--help)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "bench-cross: unknown argument '$1'" >&2; exit 1 ;;
   esac
 done
+
+# Macro mode runs the Octane workloads in bench/macros/ instead of the
+# micros, and pins Cynic with `--unhardened` — those ES5-era bodies
+# monkey-patch primordials, which the default frozen-primordials (SES)
+# posture rejects. Peers are unhardened by nature, so the comparison
+# stays apples-to-apples; only Cynic needs the flag.
+if [ "$MACROS" = "1" ]; then
+  BENCH_DIR="$REPO_ROOT/bench/macros"
+  CYNIC_EXTRA="--unhardened"
+  MACRO_FWD="--macros"
+else
+  BENCH_DIR="$MICROS_DIR"
+  CYNIC_EXTRA=""
+  MACRO_FWD=""
+fi
 
 # ---------------------------------------------------------------------
 # Build Cynic ReleaseFast. A Debug `cynic` runs 5-18x slower — it would
@@ -120,8 +140,8 @@ register() {
 if [ "$TIER" = "both" ]; then
   tmp_i="$(mktemp)" tmp_j="$(mktemp)"
   trap 'rm -f "$tmp_i" "$tmp_j"' EXIT
-  "$0" --tier interp --runs "$RUNS" > "$tmp_i"
-  "$0" --tier jit --runs "$RUNS" > "$tmp_j"
+  "$0" --tier interp --runs "$RUNS" $MACRO_FWD > "$tmp_i"
+  "$0" --tier jit --runs "$RUNS" $MACRO_FWD > "$tmp_j"
   if [ -n "$OUT_FILE" ]; then
     { cat "$tmp_i"; echo; cat "$tmp_j"; } > "$OUT_FILE"
     echo "wrote $OUT_FILE" >&2
@@ -141,7 +161,7 @@ if [ "$TIER" = "jit" ]; then
   # natively interpreter-only engines (qjs, hermes, xst) carry no
   # JIT to enable and already appear in the interpreter table, so
   # they are omitted here.
-  register cynic - "$CYNIC_BIN" run
+  register cynic - "$CYNIC_BIN" $CYNIC_EXTRA run
   register v8 - "$JSVU_BIN/v8"
   register sm - "$JSVU_BIN/sm"
 else
@@ -149,7 +169,7 @@ else
   # (Bistromath is the engine default), every JIT peer pinned with
   # its no-JIT flags, so the comparison stays interpreter-tier vs
   # interpreter-tier.
-  register cynic - "$CYNIC_BIN" --no-jit run
+  register cynic - "$CYNIC_BIN" --no-jit $CYNIC_EXTRA run
 
   # QuickJS-NG — headline non-JIT peer, no flag needed.
   register qjs - "$JSVU_BIN/qjs"
@@ -224,12 +244,12 @@ echo >&2
 # Fixture discovery.
 # ---------------------------------------------------------------------
 FIXTURES=()
-for f in "$MICROS_DIR"/*.js; do
+for f in "$BENCH_DIR"/*.js; do
   [ -e "$f" ] || continue
   FIXTURES+=("$f")
 done
 if [ "${#FIXTURES[@]}" -eq 0 ]; then
-  echo "bench-cross: no fixtures in $MICROS_DIR" >&2
+  echo "bench-cross: no fixtures in $BENCH_DIR" >&2
   exit 1
 fi
 
@@ -391,10 +411,12 @@ engine_version() {
 emit() {
   local host_os
   host_os="$(uname -srm 2>/dev/null || echo unknown)"
+  local kind="micro"
+  [ "$MACROS" = "1" ] && kind="macro"
   if [ "$TIER" = "jit" ]; then
-    echo "## Full-speed-tier cross-engine micro-bench"
+    echo "## Full-speed-tier cross-engine ${kind}-bench"
   else
-    echo "## Interpreter-tier cross-engine micro-bench"
+    echo "## Interpreter-tier cross-engine ${kind}-bench"
   fi
   echo
   echo "Subprocess wall-clock; times in **ms**, **median of N=$RUNS timed"
