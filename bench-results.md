@@ -17,6 +17,30 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-19 — cynic `8642fb21`, host `Darwin 25.6.0 arm64`
+
+Eight fixtures faster ≥5 % vs `cd2dd5c`: object_alloc −39 %, prop_access
+−13 %, prop_write −12 %, arith_loop −9 %, class_instantiate −9 %,
+ctor_array_build −8 %, json_stringify −7 %, array_iter −6 % — from the
+spasm / JIT / bytecode work landed since. Default tier (Bistromath).
+Idle machine (load ~2.7); `arith_loop` spread 17.4 % (desktop-UI jitter),
+so its median is approximate.
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 13.82 | 13.17 | 15.57 | 5696 |
+| prop_access | 11.81 | 11.49 | 12.07 | 5632 |
+| prop_write | 11.20 | 10.98 | 11.48 | 5664 |
+| array_iter | 19.09 | 18.61 | 19.47 | 6768 |
+| string_concat | 24.82 | 24.70 | 25.32 | 15720 |
+| promise_chain | 10.57 | 10.38 | 11.07 | 24024 |
+| object_alloc | 14.90 | 14.69 | 15.07 | 9152 |
+| method_call | 13.74 | 13.47 | 14.31 | 5928 |
+| class_instantiate | 24.74 | 24.09 | 25.87 | 9328 |
+| ctor_array_build | 162.74 | 159.48 | 164.61 | 9944 |
+| json_stringify | 21.98 | 21.22 | 23.75 | 8528 |
+| tail_recursion | 5.39 | 5.33 | 5.45 | 5696 |
+
 ### 2026-06-12 — cynic `cd2dd5c` (L4 register promotion complete + neg-fold), host `Darwin 25.6.0 arm64`
 
 Closes the ctor_array_build campaign: **176.60 median — from 497.45 at
