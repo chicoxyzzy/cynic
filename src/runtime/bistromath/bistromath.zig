@@ -16,12 +16,17 @@
 //! bytecode offset; the frame stays pushed and `reEnterDispatch`
 //! resumes it in Lantern mid-chunk).
 //!
-//! MVP scope (docs/jit.md §12 step 2): moves, constants, int32
-//! arithmetic/bitwise/compares, branches, `loop_inc_lt`, and
-//! `return_`. A chunk containing anything else is `dont_compile`
-//! — function-granularity fallback means no mid-function bailout
-//! machinery exists or is needed. Calls, property ICs, and OSR
-//! arrive with step 3.
+//! Scope (docs/jit.md §4, §12): moves, constants, int32
+//! arithmetic/bitwise/compares, branches, `loop_inc_lt`, `return_`,
+//! the property/array IC codegen (`lda_computed` dense reads,
+//! `make_array_n`), and `call` / `new_call` via in-line frame
+//! re-entry (the `frame_pushed` result below; §4.2/§4.5,
+//! docs/ctor-array-build-gap.md L5). The compile decision is
+//! per-chunk: a chunk with an opcode the emitter doesn't handle is
+//! `dont_compile` and stays interpreted whole; within a compiled
+//! chunk, a fast path that can't prove its guard tiers down
+//! mid-chunk via `resume_interp` (above). Register residency and
+//! type speculation are Ohaimark's (§5).
 
 const std = @import("std");
 const builtin = @import("builtin");
