@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 #
-# remote-run.sh — run an arbitrary command on the configured remote against
-# a git ref, so heavy builds / test sweeps / benches run off your laptop.
+# remote-run.sh — run a command on the configured remote against a git ref,
+# off your laptop, as a DETACHED job that survives the local ssh dying (e.g.
+# a Claude Code restart). Submit launches the job under setsid+flock on the
+# box and returns a JOB_ID; the job writes its output + an exit-sentinel to
+# /tmp/jobs/<id>. Polling is short, stateless, and re-runnable with the same
+# id after a restart — so a multi-minute sweep is no longer at the mercy of
+# local-process lifetime.
 #
-#   tools/bench/remote-run.sh origin/my-branch zig build test-fast
-#   tools/bench/remote-run.sh origin/my-branch zig build test262 -- --quiet
+#   remote-run.sh <ref> <cmd...>          submit, then wait (prints JOB_ID first)
+#   remote-run.sh --submit <ref> <cmd...> submit only, print JOB_ID, return
+#   remote-run.sh --wait <id>             wait for an existing job; print log
+#   remote-run.sh --status <id>           empty = running, a number = exit code
+#   remote-run.sh --tail <id> [N]         last N lines of the job log
 #
-# Serialised by an flock on the remote: jobs never overlap (overlap would
-# contend for CPU). A second caller queues. Crucially the remote does
-# `git checkout` and NEVER `git clean`, so its warm zig-cache and
-# test262 pass-cache survive between runs — each ref's build is incremental,
-# so even the serialised queue stays fast.
+# Serialised by an flock on the remote (held by the detached job). The remote
+# does `git checkout`, never `git clean`, so its warm zig-cache + test262
+# pass-cache survive; the test262 submodule is synced per ref.
 #
 # Generic — see tools/bench/README.md to configure the remote. With none
 # configured this errors; just run the command locally instead.
@@ -21,35 +27,41 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$DIR/lib-remote.sh"
 load_remote || exit 1
 
-REF="${1:?usage: remote-run.sh <ref> <command...>}"
-shift
-[ "$#" -gt 0 ] || { echo "remote-run: no command given" >&2; exit 1; }
-LOCK_WAIT="${CYNIC_LOCK_WAIT:-2400}"
-
-echo ">> $CYNIC_REMOTE [$REF]: $* (queues behind any running job)" >&2
-# Base64-encode the command so it survives ssh's arg-flattening: ssh joins
-# all its args into ONE string the remote shell re-splits on spaces, which
-# would otherwise leave the remote `bash -s` seeing only the first word of a
-# multi-word command (CMD=$3="zig"). base64 output has no spaces or shell
-# metacharacters, so it arrives intact as a single positional arg; the
-# remote decodes it before eval. Encode runs locally (BSD/GNU base64 both
-# default to encode); decode runs on the Linux remote (`--decode`).
-cmd_b64="$(printf '%s' "$*" | base64 | tr -d '\n')"
-ssh "${SSH_OPTS[@]}" "$CYNIC_REMOTE" \
-  "flock -w $LOCK_WAIT /var/lock/cynic-box.lock bash -s" "$CYNIC_REMOTE_DIR" "$REF" "$cmd_b64" <<'REMOTE'
-set -euo pipefail
-DIR="$1"; REF="$2"; CMD="$(printf '%s' "$3" | base64 --decode)"
-export PATH="/usr/local/bin:$PATH"
-export JSVU_BIN="$HOME/.jsvu/bin"
-cd "$DIR"
-git fetch --all --quiet --prune
-# checkout, never clean — keeps the warm .zig-cache + .test262-pass-cache so
-# builds are incremental across refs and across agents.
-git checkout -f --detach --quiet "$REF"
-# Sync the test262 submodule to this ref so `zig build test262` sweeps find
-# the corpus (the box clones without submodules). A no-op once present; the
-# first sweep pays the one-time fetch. Non-test262 commands just see a fast
-# up-to-date check.
-git submodule update --init --quiet vendor/test262 2>/dev/null || true
-eval "$CMD"
-REMOTE
+case "${1:-}" in
+  --status)
+    [ -n "${2:-}" ] || { echo "usage: remote-run.sh --status <id>" >&2; exit 1; }
+    st="$(job_status "$2")"; echo "${st:-running}"; exit 0 ;;
+  --tail)
+    [ -n "${2:-}" ] || { echo "usage: remote-run.sh --tail <id> [N]" >&2; exit 1; }
+    job_tail "$2" "${3:-40}"; exit 0 ;;
+  --wait)
+    [ -n "${2:-}" ] || { echo "usage: remote-run.sh --wait <id>" >&2; exit 1; }
+    echo ">> waiting on $2 (re-runnable after a restart: remote-run.sh --wait $2)" >&2
+    rc=0; job_wait "$2" || rc=$?
+    job_tail "$2" 500
+    echo ">> $2 finished, exit $rc" >&2
+    exit "$rc" ;;
+  --submit)
+    shift
+    ref="${1:?usage: remote-run.sh --submit <ref> <cmd...>}"; shift
+    [ "$#" -gt 0 ] || { echo "remote-run: no command given" >&2; exit 1; }
+    job="$(job_submit "$ref" "$*")"
+    echo ">> submitted $job on $CYNIC_REMOTE [$ref]" >&2
+    echo ">> poll:  tools/bench/remote-run.sh --wait $job" >&2
+    echo "$job" ;;
+  ""|-*)
+    echo "usage: remote-run.sh <ref> <cmd...> | --submit|--wait|--status|--tail <id>" >&2
+    exit 1 ;;
+  *)
+    # Default: submit + wait. The JOB_ID is printed FIRST so a restart can
+    # resume — the job keeps running on the box regardless.
+    ref="$1"; shift
+    [ "$#" -gt 0 ] || { echo "remote-run: no command given" >&2; exit 1; }
+    job="$(job_submit "$ref" "$*")"
+    echo ">> submitted $job on $CYNIC_REMOTE [$ref]: $*" >&2
+    echo ">> if this disconnects, resume with:  tools/bench/remote-run.sh --wait $job" >&2
+    rc=0; job_wait "$job" || rc=$?
+    job_tail "$job" 500
+    echo ">> $job finished, exit $rc" >&2
+    exit "$rc" ;;
+esac

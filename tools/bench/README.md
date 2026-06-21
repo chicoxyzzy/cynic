@@ -26,11 +26,24 @@ If you set up a remote, the laptop only orchestrates over SSH:
     tools/bench/remote-bench.sh --ref origin/<branch> --baseline origin/main
     tools/bench/remote-run.sh origin/<branch> zig build test-fast   # any command
 
-`remote-bench.sh` runs a **same-runner A/B** (a ref and a baseline both
-built and timed on the one machine, so the HEAD/baseline ratio cancels
-host variance), and renders the report on your laptop. `remote-run.sh`
-runs an arbitrary command (a build, a test sweep) against a ref. `--cross`
-adds the cross-engine table.
+`remote-bench.sh` runs an **interleaved A/B** (a ref and a baseline measured
+back-to-back per iteration, so the ratio cancels host drift) and renders the
+report on your laptop. `remote-run.sh` runs an arbitrary command (a build, a
+test sweep) against a ref. `--cross` adds the cross-engine table.
+
+**Detached jobs (survive a local restart).** Both submit the work as a
+detached job on the box (under `setsid`+`flock`) and return a `JOB_ID`
+immediately; the job writes its output + an exit-sentinel to
+`/tmp/jobs/<id>`, so it keeps running even if your laptop's Claude Code
+restarts and the ssh dies. The default invocation submits then waits, but
+the wait is just stateless polling — **re-runnable after a restart**:
+
+    JOB=$(tools/bench/remote-run.sh --submit origin/<branch> zig build test262 -- --quiet)
+    tools/bench/remote-run.sh --status $JOB     # running | <exit code>
+    tools/bench/remote-run.sh --tail   $JOB     # last lines of the log
+    tools/bench/remote-run.sh --wait   $JOB     # block until done, print log
+    tools/bench/remote-bench.sh --wait  $JOB    # (A/B) resume + render
+    tools/bench/remote-bench.sh --fetch $JOB    # (A/B) pull results of a finished job
 
 Nothing here is provider-specific — point it at any Ubuntu host:
 
