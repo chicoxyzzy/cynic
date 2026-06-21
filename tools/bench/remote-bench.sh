@@ -62,14 +62,14 @@ rm -f /tmp/cross-micros.md /tmp/cross-macros.md
 
 # Build the BASELINE cynic once (ReleaseFast) and keep the binary. checkout,
 # never clean — the warm zig-cache survives so builds stay incremental.
-git checkout --detach --quiet "$BASELINE"
+git checkout -f --detach --quiet "$BASELINE"
 zig build -Doptimize=ReleaseFast >/dev/null 2>&1
 cp zig-out/bin/cynic /tmp/cynic-base
 
 # HEAD: bench.zig --ab-baseline interleaves HEAD's cynic-bench vs the
 # baseline binary back-to-back per iteration, so host drift cancels and the
 # ratio is trustworthy even on a shared box.
-git checkout --detach --quiet "$REF"
+git checkout -f --detach --quiet "$REF"
 run_ab() {  # <label> [extra bench flags...]
   local label="$1"; shift
   zig build bench -- --ab-baseline=/tmp/cynic-base --runs="$RUNS" "$@" > "/tmp/ab/$label.txt" 2>/dev/null || rm -f "/tmp/ab/$label.txt"
@@ -78,7 +78,7 @@ case "$SUITE" in micros|both) run_ab micros-jit; run_ab micros-nojit --no-jit ;;
 case "$SUITE" in macros|both) run_ab macros-jit --macros; run_ab macros-nojit --macros --no-jit ;; esac
 
 if [ "$CROSS" = "1" ]; then
-  git checkout --detach --quiet "$REF"
+  git checkout -f --detach --quiet "$REF"
   # stderr is intentionally NOT suppressed: bench-cross.sh prints a
   # per-fixture "running <engine> / <fixture>" heartbeat there, which
   # streams back over ssh so the long cross pass is visibly alive. Only

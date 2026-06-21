@@ -37,6 +37,6 @@ cd "$DIR"
 git fetch --all --quiet --prune
 # checkout, never clean — keeps the warm .zig-cache + .test262-pass-cache so
 # builds are incremental across refs and across agents.
-git checkout --detach --quiet "$REF"
+git checkout -f --detach --quiet "$REF"
 eval "$CMD"
 REMOTE
