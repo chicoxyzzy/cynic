@@ -142,6 +142,12 @@ top-line score.
 
 ## History
 
+### 2026-06-21 — cynic `b45d2c62`, test262 `de8e621cdb` (remote sweep)
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 45335 | 4560 | 49895 | 90.86 % | ±0 | 2m 5s |
+
 ### 2026-06-19 — cynic `8642fb21`, test262 `8642fb21`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
