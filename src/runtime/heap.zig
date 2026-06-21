@@ -3153,6 +3153,32 @@ pub const Heap = struct {
         // path above is what makes the *barriered* bag / element /
         // slot edges survivable under aging, where a young referent
         // can persist across a minor cycle.)
+        // Verifier (Debug / ReleaseSafe): a mature object with
+        // `needs_internal_scan == false` must hold no young typed-slot
+        // referent — otherwise the ReleaseFast skip in
+        // `markObjectInternalSlots` would drop a live young pointer (a
+        // use-after-free). A trip names the offending object + slot so
+        // the missed populating site is easy to find. The scan below
+        // still runs unconditionally in these builds (the early return
+        // is ReleaseFast-only), so the verifier can't mask a real edge.
+        if (comptime @import("builtin").mode == .Debug or
+            @import("builtin").mode == .ReleaseSafe)
+        {
+            for (self.objects_mature.items) |o| {
+                // Exactly the ReleaseFast skip predicate (shared, so they
+                // cannot drift): only objects that WOULD be skipped need
+                // the no-young-typed-slot guarantee.
+                if (objectScanSkippable(o)) {
+                    if (objectYoungTypedSlot(o)) |slot| {
+                        std.debug.print(
+                            "[needs_internal_scan VERIFIER] mature object {*} has needs_internal_scan=false but holds a young referent in typed slot '{s}' — a populating site forgot to set the flag (under-scan = UAF in ReleaseFast). Add `o.needs_internal_scan = true` where this slot is written.\n",
+                            .{ o, slot },
+                        );
+                        std.debug.assert(false);
+                    }
+                }
+            }
+        }
         for (self.objects_mature.items) |o| self.markObjectInternalSlots(o);
         for (self.functions_mature.items) |f| self.markFunctionInternalSlots(f);
         for (self.environments_mature.items) |e| {
@@ -3423,6 +3449,21 @@ pub const Heap = struct {
     /// `collectYoung` to root young objects reachable only through
     /// a raw `mature_obj.field = young` write in a builtin.
     fn markObjectInternalSlots(self: *Heap, o: *JSObject) void {
+        // Fast skip: an object that never acquired any typed internal
+        // slot the loop below reads (the common plain `{a,b,c}` /
+        // `{key,left,right,value}` data object) has nothing to mark
+        // here. `needs_internal_scan` is set at every typed-slot
+        // populating site (see object.zig `getOrCreateExtension` /
+        // `getOrCreatePromiseStore` / `setComputedOwned` /
+        // `noteSymbolKeyMaybe`, the heap typed-setters, and the
+        // iterator-state writes); `key_anchors` and the [[Prototype]]
+        // slots are set at too many scattered sites to flag, so they are
+        // checked directly — see `objectScanSkippable`, the single skip
+        // predicate the `collectYoung` verifier gate shares so the two
+        // can't drift. ReleaseFast ONLY — in Debug / ReleaseSafe the full
+        // scan always runs so the verifier exercises every edge and a
+        // missed populating site surfaces as an assert, never a UAF.
+        if (@import("builtin").mode == .ReleaseFast and objectScanSkippable(o)) return;
         // §15.7 private instance fields — a typed internal map, not
         // the property bag, so the remembered set never covers it and
         // it must be scanned unconditionally here. The full `markValue`
@@ -3574,6 +3615,188 @@ pub const Heap = struct {
         if (o.proxy_target_fn) |ptf| self.markValue(taggedFunction(ptf));
         if (o.getTypedView()) |tv| self.markValue(taggedObject(tv.viewed));
         if (o.getDataView()) |dv| self.markValue(taggedObject(dv.viewed));
+    }
+
+    /// Verifier backstop for the `JSObject.needs_internal_scan` fast
+    /// skip (Debug / ReleaseSafe only; compiled out in ReleaseFast).
+    /// Returns the name of the first typed internal slot of `o` that
+    /// holds a `.young` referent, or `null` if none does. `collectYoung`
+    /// asserts this is `null` for every mature object with
+    /// `needs_internal_scan == false`: a non-null result is a populating
+    /// site that forgot to set the flag (an under-scan that would be a
+    /// use-after-free once the ReleaseFast skip drops the object's
+    /// scan). The field order mirrors `markObjectInternalSlots` exactly
+    /// — keep the two in lockstep when adding a typed slot.
+    fn objectYoungTypedSlot(o: *JSObject) ?[]const u8 {
+        if (comptime @import("builtin").mode != .Debug and
+            @import("builtin").mode != .ReleaseSafe) return null;
+        if (o.privatePropertyIterator()) |ppit_outer| {
+            var ppit = ppit_outer;
+            while (ppit.next()) |entry| if (isYoungHeapValue(entry.value_ptr.*)) return "private_property";
+        }
+        if (o.privateAccessorIterator()) |pait_outer| {
+            var pait = pait_outer;
+            while (pait.next()) |entry| {
+                if (fnYoungOpt(entry.value_ptr.*.getter) or fnYoungOpt(entry.value_ptr.*.setter)) return "private_accessor";
+            }
+        }
+        if (o.accessorIterator()) |ait_outer| {
+            var ait = ait_outer;
+            while (ait.next()) |entry| {
+                if (fnYoungOpt(entry.value_ptr.*.getter) or fnYoungOpt(entry.value_ptr.*.setter)) return "accessor";
+            }
+        }
+        if (o.namespaceRedirectIterator()) |nrit_outer| {
+            var nrit = nrit_outer;
+            while (nrit.next()) |entry| if (objYoungOpt(entry.value_ptr.target_ns)) return "namespace_redirect";
+        }
+        if (o.getBoxedPrimitive()) |bp| if (isYoungHeapValue(bp)) return "boxed_primitive";
+        if (o.getBoxedString()) |bs| if (bs.generation == .young) return "boxed_string";
+        if (o.getMapData()) |md| {
+            for (md.entries.items) |entry| {
+                if (entry.deleted) continue;
+                if (isYoungHeapValue(entry.key) or isYoungHeapValue(entry.value)) return "map_data";
+            }
+        }
+        if (o.getSetData()) |sd| {
+            for (sd.entries.items) |entry| {
+                if (entry.deleted) continue;
+                if (isYoungHeapValue(entry.value)) return "set_data";
+            }
+        }
+        if (o.array_like_iter) |s| {
+            if (isYoungHeapValue(s.target) or isYoungHeapValue(s.for_in_source)) return "array_like_iter";
+        }
+        if (o.map_set_iter) |s| if (isYoungHeapValue(s.source)) return "map_set_iter";
+        if (o.regexp_string_iter) |s| {
+            if (isYoungHeapValue(s.regexp) or isYoungHeapValue(s.string)) return "regexp_string_iter";
+        }
+        if (o.iter_record) |s| if (isYoungHeapValue(s.next)) return "iter_record";
+        if (o.iter_helper) |s| {
+            if (isYoungHeapValue(s.source) or isYoungHeapValue(s.next_fn) or
+                isYoungHeapValue(s.payload) or isYoungHeapValue(s.active)) return "iter_helper";
+            for (s.concat_inputs.items) |ci| {
+                if (isYoungHeapValue(ci.iterable) or isYoungHeapValue(ci.method)) return "iter_helper.concat_inputs";
+            }
+            for (s.zip_inputs.items) |zi| {
+                if (isYoungHeapValue(zi.iter) or isYoungHeapValue(zi.next) or
+                    isYoungHeapValue(zi.key) or isYoungHeapValue(zi.pad)) return "iter_helper.zip_inputs";
+            }
+        }
+        if (o.getCapabilityRecord()) |c| {
+            if (isYoungHeapValue(c.resolve) or isYoungHeapValue(c.reject)) return "capability_record";
+        }
+        if (o.disposableResourcesConst()) |resources| {
+            for (resources.items) |r| {
+                if (isYoungHeapValue(r.resource) or isYoungHeapValue(r.dispose_method)) return "disposable_resources";
+            }
+        }
+        if (o.extension) |ext| {
+            if (ext.async_dispose_walk) |w| {
+                for (w.resources.items) |r| {
+                    if (isYoungHeapValue(r.resource) or isYoungHeapValue(r.dispose_method)) return "async_dispose_walk";
+                }
+                if (w.has_pending_error and isYoungHeapValue(w.pending_error)) return "async_dispose_walk";
+                if (isYoungHeapValue(w.outer)) return "async_dispose_walk";
+            }
+        }
+        if (o.getFinallyCallback()) |f| if (f.generation == .young) return "finally_callback";
+        if (isYoungHeapValue(o.getFinallyValue())) return "finally_value";
+        if (o.getFinallyConstructor()) |f| if (f.generation == .young) return "finally_constructor";
+        if (o.getGeneratorRef()) |gen| if (gen.generation == .young) return "generator_ref";
+        if (o.is_weak_ref and isYoungHeapValue(o.getWeakRefTarget())) return "weak_ref_target";
+        if (o.getFinalizationCells()) |fc| {
+            if (isYoungHeapValue(fc.cleanup_callback)) return "finalization.cleanup";
+            for (fc.cells.items) |cell| {
+                if (cell.deleted) continue;
+                if (isYoungHeapValue(cell.target) or isYoungHeapValue(cell.held_value) or
+                    (cell.has_token and isYoungHeapValue(cell.unregister_token))) return "finalization.cell";
+            }
+        }
+        for (o.key_anchors.items) |s| if (s.generation == .young) return "key_anchor";
+        // Symbol property keys: a `<sym:N>` slug resolving to a young
+        // JSSymbol (the `markSymbolKeys` edge).
+        if (objectHoldsYoungSymbolKey(o)) return "symbol_key";
+        if (o.promiseReactionsConst()) |reactions| {
+            for (reactions.items) |r| {
+                if (isYoungHeapValue(r.on_fulfilled) or isYoungHeapValue(r.on_rejected) or
+                    isYoungHeapValue(r.result_promise)) return "promise_reaction";
+            }
+        }
+        if (o.promiseWaitersConst()) |waiters| {
+            for (waiters.items) |w| if (w.generation == .young) return "promise_waiter";
+        }
+        if (o.promise_state != .none and isYoungHeapValue(o.promise_value)) return "promise_value";
+        if (o.regexp_source) |s| if (s.generation == .young) return "regexp_source";
+        if (o.regexp_flags) |s| if (s.generation == .young) return "regexp_flags";
+        if (o.getInstanceFieldInits()) |inits| {
+            for (inits) |fi| if (fnYoungOpt(fi.init_fn)) return "instance_field_init";
+        }
+        if (o.getPrivateMethodInits()) |inits| {
+            for (inits) |fi| if (fnYoungOpt(fi.init_fn)) return "private_method_init";
+        }
+        if (o.prototype) |p| if (p.generation == .young) return "prototype";
+        if (o.prototype_fn) |pf| if (pf.generation == .young) return "prototype_fn";
+        if (o.proxy_target) |pt| if (pt.generation == .young) return "proxy_target";
+        if (o.proxy_handler) |ph| if (ph.generation == .young) return "proxy_handler";
+        if (o.proxy_target_fn) |ptf| if (ptf.generation == .young) return "proxy_target_fn";
+        if (o.getTypedView()) |tv| if (tv.viewed.generation == .young) return "typed_view";
+        if (o.getDataView()) |dv| if (dv.viewed.generation == .young) return "data_view";
+        return null;
+    }
+
+    /// Skip predicate for the minor-cycle typed-slot scan, shared by the
+    /// ReleaseFast early-return in `markObjectInternalSlots` and the
+    /// Debug/ReleaseSafe verifier gate in `collectYoung` so the two cannot
+    /// drift (a skip more permissive than the gate would be an unverified
+    /// use-after-free). Skippable iff: no typed slot flagged
+    /// (`needs_internal_scan`), no borrowed property-key anchors, and a
+    /// null / mature [[Prototype]] (object + function). `key_anchors` and
+    /// the prototype slots are set at too many scattered sites to flag, so
+    /// they ride this direct check; every other scanned slot rides the
+    /// flag and is double-checked by `objectYoungTypedSlot` for skippable
+    /// objects.
+    inline fn objectScanSkippable(o: *JSObject) bool {
+        if (o.needs_internal_scan) return false;
+        if (o.key_anchors.items.len != 0) return false;
+        if (o.prototype) |p| if (p.generation == .young) return false;
+        if (o.prototype_fn) |pf| if (pf.generation == .young) return false;
+        return true;
+    }
+
+    /// True when any of `o`'s own `<sym:N>` property keys resolves to a
+    /// young JSSymbol — the verifier's mirror of `markSymbolKeys`.
+    /// Debug / ReleaseSafe only.
+    fn objectHoldsYoungSymbolKey(o: *JSObject) bool {
+        if (o.shape) |sh| {
+            var node: ?*const @import("shape.zig").Shape = sh;
+            while (node) |n| : (node = n.parent) {
+                if (n.parent == null) break;
+                if (symbolKeyYoung(o, n.key)) return true;
+            }
+        } else {
+            var it = o.properties.iterator();
+            while (it.next()) |entry| if (symbolKeyYoung(o, entry.key_ptr.*)) return true;
+        }
+        if (o.accessorIterator()) |ait_outer| {
+            var ait = ait_outer;
+            while (ait.next()) |entry| if (symbolKeyYoung(o, entry.key_ptr.*)) return true;
+        }
+        return false;
+    }
+
+    fn symbolKeyYoung(o: *JSObject, key: []const u8) bool {
+        if (!std.mem.startsWith(u8, key, "<sym:")) return false;
+        const h = o.heap orelse return false;
+        if (h.symbolForKey(key)) |sym| return sym.generation == .young;
+        return false;
+    }
+
+    fn fnYoungOpt(f: ?*JSFunction) bool {
+        return if (f) |p| p.generation == .young else false;
+    }
+    fn objYoungOpt(o: ?*JSObject) bool {
+        return if (o) |p| p.generation == .young else false;
     }
 
     /// Mark the typed internal-slot pointers of a `JSFunction` —
@@ -4167,6 +4390,8 @@ pub const Heap = struct {
         value: Value,
     ) void {
         self.writeBarrier(.{ .object = obj }, value);
+        // state != .none ⇒ the typed-slot scan reads promise_value.
+        obj.needs_internal_scan = true;
         obj.settlePromise(state, value);
     }
 
@@ -4181,13 +4406,19 @@ pub const Heap = struct {
     /// §28.1.1 Proxy target. Set at construction (typically young)
     /// and on revocation (`null`).
     pub fn setProxyTarget(self: *Heap, o: *JSObject, target: ?*JSObject) void {
-        if (target) |t| self.writeBarrier(.{ .object = o }, taggedObject(t));
+        if (target) |t| {
+            self.writeBarrier(.{ .object = o }, taggedObject(t));
+            o.needs_internal_scan = true; // typed-slot scan reads proxy_target
+        }
         o.proxy_target = target;
     }
 
     /// §28.1.1 Proxy handler. Set at construction and on revocation.
     pub fn setProxyHandler(self: *Heap, o: *JSObject, handler: ?*JSObject) void {
-        if (handler) |h| self.writeBarrier(.{ .object = o }, taggedObject(h));
+        if (handler) |h| {
+            self.writeBarrier(.{ .object = o }, taggedObject(h));
+            o.needs_internal_scan = true; // typed-slot scan reads proxy_handler
+        }
         o.proxy_handler = handler;
     }
 
@@ -4195,7 +4426,10 @@ pub const Heap = struct {
     /// (proxy wraps a function). Set at construction; cleared on
     /// revocation.
     pub fn setProxyTargetFn(self: *Heap, o: *JSObject, target_fn: ?*JSFunction) void {
-        if (target_fn) |f| self.writeBarrier(.{ .object = o }, taggedFunction(f));
+        if (target_fn) |f| {
+            self.writeBarrier(.{ .object = o }, taggedFunction(f));
+            o.needs_internal_scan = true; // typed-slot scan reads proxy_target_fn
+        }
         o.proxy_target_fn = target_fn;
     }
 
@@ -4238,14 +4472,20 @@ pub const Heap = struct {
     /// §22.2.4 — original source pattern JSString anchored on a
     /// RegExp instance. Re-read by `.source`.
     pub fn setRegexpSource(self: *Heap, o: *JSObject, s: ?*JSString) void {
-        if (s) |str| self.writeBarrier(.{ .object = o }, Value.fromString(str));
+        if (s) |str| {
+            self.writeBarrier(.{ .object = o }, Value.fromString(str));
+            o.needs_internal_scan = true; // typed-slot scan reads regexp_source
+        }
         o.regexp_source = s;
     }
 
     /// §22.2.4 — original flags JSString anchored on a RegExp
     /// instance.
     pub fn setRegexpFlags(self: *Heap, o: *JSObject, s: ?*JSString) void {
-        if (s) |str| self.writeBarrier(.{ .object = o }, Value.fromString(str));
+        if (s) |str| {
+            self.writeBarrier(.{ .object = o }, Value.fromString(str));
+            o.needs_internal_scan = true; // typed-slot scan reads regexp_flags
+        }
         o.regexp_flags = s;
     }
 

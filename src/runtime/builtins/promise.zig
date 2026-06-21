@@ -897,6 +897,8 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
             const new_p = heap_mod.valueAsPlainObject(new_p_v) orelse return error.OutOfMemory;
             new_p.promise_state = .pending;
             new_p.promise_value = Value.undefined_;
+            // state != .none ⇒ the typed-slot scan reads promise_value.
+            new_p.needs_internal_scan = true;
             const then_v = if (result_obj) |obj| obj.get("then") else Value.undefined_;
             realm.enqueueThenableJob(new_p_v, result, then_v) catch return error.OutOfMemory;
             break :blk new_p_v;

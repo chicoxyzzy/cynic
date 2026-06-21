@@ -907,6 +907,28 @@ pub const JSObject = struct {
     /// young heap value into any property / element / slot of this
     /// object (while it is mature) sets it.
     dirty: bool = false,
+    /// True once this object has acquired any typed internal slot that
+    /// the minor cycle's Root-source-2 scan (`markObjectInternalSlots`,
+    /// heap.zig) reads — boxed primitive / string, Map / Set data,
+    /// accessor + private maps, namespace redirects, Promise reactions /
+    /// waiters / settled value, capability record, the iterator-state
+    /// pointers (`array_like_iter` / `map_set_iter` /
+    /// `regexp_string_iter` / `iter_record` / `iter_helper`), finally-
+    /// reaction machinery, generator backref, WeakRef target,
+    /// FinalizationRegistry cells, class field/private-method inits,
+    /// disposable resources, RegExp source/flags, proxy slots, the
+    /// prototype links, and symbol property keys. A `false` object
+    /// provably has none of those, so its typed-slot scan would mark
+    /// nothing — the ReleaseFast minor cycle skips it (the dominant
+    /// cost on plain `{key,left,right,value}` data-object workloads).
+    ///
+    /// Conservative by construction: every populating site sets it; when
+    /// in doubt a site sets it anyway (over-scan is safe, under-scan is a
+    /// use-after-free). In Debug / ReleaseSafe the scan never skips on
+    /// this flag and a verifier asserts no `false` object ever holds a
+    /// young typed-slot referent (see `collectYoung`), so a missed
+    /// populating site is caught as an assert, never a UAF.
+    needs_internal_scan: bool = false,
     /// True while this object has not accumulated any heap-attached
     /// state — every potentially-allocated field (`properties`,
     /// `property_flags`, `own_key_order`, `key_anchors`, `elements`,
@@ -1318,6 +1340,17 @@ pub const JSObject = struct {
         ext.* = .{};
         self.extension = ext;
         self.markNonPristine();
+        // Most `markObjectInternalSlots`-read typed slots (boxed
+        // primitive/string, Map/Set data, accessor + private maps,
+        // namespace redirects, capability, finally machinery,
+        // generator backref, WeakRef target, FinReg cells, field/
+        // private-method inits, disposable resources, typed/data view)
+        // live on the extension and are mutated in place after this
+        // call. Flag once here — over-scan for the few extension fields
+        // the scan doesn't read (date_ms / host_data / wasm_*) is
+        // harmless; those are rare exotics, not the hot plain-object
+        // population.
+        self.needs_internal_scan = true;
         return ext;
     }
 
@@ -1679,6 +1712,9 @@ pub const JSObject = struct {
         s.* = .{};
         self.promise_store = s;
         self.markNonPristine();
+        // §27.2 reactions / waiters live on this node; the minor-cycle
+        // typed-slot scan reads them. See `needs_internal_scan`.
+        self.needs_internal_scan = true;
         return s;
     }
 
@@ -1994,6 +2030,19 @@ pub const JSObject = struct {
         self.is_pristine = false;
     }
 
+    /// §6.1.5.1 — a user Symbol used as a property key is flattened to
+    /// its owned `<sym:N>` slug and stored as a plain string in the
+    /// shape chain / property bag / accessor map. The minor cycle's
+    /// `markSymbolKeys` resolves that slug back to its `JSSymbol` and
+    /// marks it (so an object's own symbol key can't be swept). Flag
+    /// the object for the typed-slot scan whenever such a key is
+    /// recorded so a mature object keeps its young symbol key alive.
+    /// Well-known / registered symbols use the `@@name` form and are
+    /// pinned, so only the `<sym:` form needs flagging.
+    pub inline fn noteSymbolKeyMaybe(self: *JSObject, key: []const u8) void {
+        if (std.mem.startsWith(u8, key, "<sym:")) self.needs_internal_scan = true;
+    }
+
     /// Debug-only invariant check for the `is_pristine` contract:
     /// every potentially-allocated field that `deinitFields` would
     /// touch must be in its zero/empty state. A failed assert names
@@ -2102,6 +2151,9 @@ pub const JSObject = struct {
         key: []const u8,
     ) !bool {
         if (std.mem.startsWith(u8, key, "__cynic_")) return false;
+        // A user-symbol data key (`<sym:N>`) installed on this object —
+        // flag for the typed-slot scan even if it isn't newly ordered.
+        self.noteSymbolKeyMaybe(key);
         if (canonicalIntegerIndex(key) != null) return false;
         // Lazy shape-mode: the shape chain authoritatively records
         // §10.1.11 OrdinaryOwnPropertyKeys insertion order (leaf-to-
@@ -2268,6 +2320,9 @@ pub const JSObject = struct {
             if (newly_ordered) {
                 try self.key_anchors.append(allocator, key_str);
                 self.markNonPristine();
+                // The scan marks every `key_anchors` JSString (its bytes
+                // back a live key slice). See `needs_internal_scan`.
+                self.needs_internal_scan = true;
             }
             return;
         }
@@ -2289,7 +2344,12 @@ pub const JSObject = struct {
         // use the helper: it needs `getOrPut`'s `found_existing` for
         // the key-anchor bookkeeping below).
         if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
-        if (newly_ordered or !gop.found_existing) try self.key_anchors.append(allocator, key_str);
+        if (newly_ordered or !gop.found_existing) {
+            try self.key_anchors.append(allocator, key_str);
+            // The scan marks every `key_anchors` JSString. See
+            // `needs_internal_scan`.
+            self.needs_internal_scan = true;
+        }
     }
 
     /// Read the (possibly defaulted) descriptor flags for
@@ -2805,6 +2865,12 @@ pub const JSObject = struct {
         flags: PropertyFlags,
     ) std.mem.Allocator.Error!bool {
         const heap = self.heap orelse return false;
+        // A user-symbol key stored in a shape slot is read by the
+        // minor-cycle `markSymbolKeys`; flag the object. (The bag path
+        // routes through `recordKey`, which flags too — this covers the
+        // shape same-descriptor / transition branches that return
+        // before the caller's `recordKey`.) See `needs_internal_scan`.
+        self.noteSymbolKeyMaybe(key);
         // Exotics and engine-internal slots stay dictionary-mode.
         if (self.is_array_exotic or self.getTypedView() != null or
             self.is_module_namespace or self.proxy_target != null or

@@ -335,6 +335,7 @@ fn wrapIterator(realm: *Realm, source: Value) NativeError!Value {
     state.* = .{ .source = source, .next_fn = cached_next_v };
     wrap.iter_helper = state;
     wrap.markNonPristine();
+    wrap.needs_internal_scan = true; // typed-slot scan reads iter_helper
     return heap_mod.taggedObject(wrap);
 }
 
@@ -701,6 +702,7 @@ fn iteratorFlatMap(realm: *Realm, this_value: Value, args: []const Value) Native
     };
     wrap.iter_helper = state;
     wrap.markNonPristine();
+    wrap.needs_internal_scan = true; // typed-slot scan reads iter_helper
     return heap_mod.taggedObject(wrap);
 }
 
@@ -923,6 +925,7 @@ fn buildLazy(realm: *Realm, source: Value, payload: Value, kind: IteratorHelperS
     };
     wrap.iter_helper = state;
     wrap.markNonPristine();
+    wrap.needs_internal_scan = true; // typed-slot scan reads iter_helper
     return heap_mod.taggedObject(wrap);
 }
 
@@ -1619,6 +1622,7 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
     state.* = .{ .count = @intCast(args.len), .kind = .concat };
     wrap.iter_helper = state;
     wrap.markNonPristine();
+    wrap.needs_internal_scan = true; // typed-slot scan reads iter_helper
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
@@ -1951,6 +1955,7 @@ fn buildZipWrapper(
     };
     wrap.iter_helper = state;
     wrap.markNonPristine();
+    wrap.needs_internal_scan = true; // typed-slot scan reads iter_helper
     scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
 
     // Per-input state — the sub-iterator, its §7.4.2

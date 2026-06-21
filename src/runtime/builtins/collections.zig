@@ -155,6 +155,7 @@ fn makeMapIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind)
     st.* = .{ .brand = .map, .source = src, .kind = kind };
     it.map_set_iter = st;
     it.markNonPristine();
+    it.needs_internal_scan = true; // typed-slot scan reads map_set_iter
     return heap_mod.taggedObject(it);
 }
 
@@ -344,6 +345,7 @@ fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, 
     };
     it.array_like_iter = state;
     it.markNonPristine();
+    it.needs_internal_scan = true; // typed-slot scan reads array_like_iter
     // `next` lives on the prototype (see ensureArrayIteratorPrototype);
     // `@@iterator` similarly inherits from %IteratorPrototype% so
     // no own slots need to be wired here.
@@ -1589,6 +1591,7 @@ fn makeSetIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind)
     st.* = .{ .brand = .set, .source = src, .kind = kind };
     it.map_set_iter = st;
     it.markNonPristine();
+    it.needs_internal_scan = true; // typed-slot scan reads map_set_iter
     return heap_mod.taggedObject(it);
 }
 

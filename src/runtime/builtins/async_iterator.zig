@@ -95,6 +95,7 @@ fn afsiNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         r.* = .{};
         sync_iter_obj.iter_record = r;
         sync_iter_obj.markNonPristine();
+        sync_iter_obj.needs_internal_scan = true; // typed-slot scan reads iter_record
         break :blk r;
     };
     const next_v = if (rec.next_cached) rec.next else nv: {

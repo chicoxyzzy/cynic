@@ -37,6 +37,27 @@ predicate), so a young object reachable through *any* field of a
 dirty mature container is rooted. It's seeded as a root source on
 every minor cycle and cleared at the end of one.
 
+Beyond the dirty list, `collectYoung` runs a typed-slot scan over the
+mature objects / functions / generators (`markObjectInternalSlots` and
+siblings) as a second mature→young root source — it catches raw
+`container.field = young` writes into typed internal slots that bypass
+the write barrier. For plain data objects — the common case, and most of
+a large stable retained set like Splay's payload tree — this scan is
+pure overhead: they hold no typed internal slots to mark. So
+`markObjectInternalSlots` early-returns **in ReleaseFast** for any object
+`objectScanSkippable` deems empty: no `needs_internal_scan` flag (set
+wherever a typed slot is populated — `getOrCreateExtension` covers every
+extension-held slot in one place, plus `getOrCreatePromiseStore`, the
+base iterator / regexp / proxy setters, and symbol-key adds), no borrowed
+`key_anchors`, and a null-or-mature `[[Prototype]]` (object + function —
+the last two ride direct checks because they are written at too many
+scattered sites to flag). Debug / ReleaseSafe keep the full scan and add
+a verifier (`objectYoungTypedSlot`) that asserts no skippable object
+holds a young typed-slot referent — `objectScanSkippable` is shared by
+the skip and the verifier gate so they cannot drift, and a missed
+populating site surfaces as a gc-stress assert, never a ReleaseFast
+use-after-free.
+
 ## What it does
 
 Each `Heap.allocateX` (object, function, environment, generator,

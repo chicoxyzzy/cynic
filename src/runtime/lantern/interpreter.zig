@@ -7026,6 +7026,7 @@ pub fn runFrames(
                 r.* = .{};
                 iter_obj.iter_record = r;
                 iter_obj.markNonPristine();
+                iter_obj.needs_internal_scan = true; // typed-slot scan reads iter_record
                 break :blk r;
             };
             // Once the iter has surfaced `done: true` we stop
