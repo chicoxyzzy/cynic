@@ -17,6 +17,30 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-21 — cynic `d7dae9ca` (slot-bearing-only typed-slot scan), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Same-runner A/B vs `origin/main` (the post-sticky-bits baseline
+`292ce88c`), suite=both, 12 runs. The minor cycle's typed-slot scan now
+skips objects with no internal slots (`needs_internal_scan` +
+`objectScanSkippable`), so Splay's ~250k plain nodes drop out of the
+per-minor scan:
+
+- **splay 0.695× (default tier) / 0.700× (`--no-jit`) — ~1.44× faster**
+  (4688→3258 / 4636→3244 ms). Recovers the `markSymbolKeys` per-object
+  shape-chain walk (the scan's ~23.5% slice).
+- prop_access 0.89× and prop_write 0.87× (default tier) also faster —
+  their plain objects skip the scan too. Other macros flat (±5 %).
+- tail_recursion flags 1.108× on the default tier, but its `--no-jit` is
+  flat (0.994×) and it's function-heavy (untouched by an *object*-scan
+  skip) — jitter, not the change.
+
+Cumulative with the sticky bits: Splay ~16,000 → ~3,244 ms (~4.9×);
+interpreter-tier gap to QuickJS-NG (~810 ms on this box) now ~4.0× (was
+17.8× before the GC work). Conformance byte-identical (ReleaseFast counts
+match ReleaseSafe). Residual = the scan's 250k-object iteration + the
+dirty-list walk + periodic majors; a remembered typed-slot set (iterate
+only slot-bearing objects) would take the iteration next.
+
 ### 2026-06-21 — cynic `bf5951e1` (sticky mark bits), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 First row from the remote bench box — the canonical bench host now that
