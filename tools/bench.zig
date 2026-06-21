@@ -275,6 +275,80 @@ fn computeStats(samples: []Sample) Stats {
     };
 }
 
+fn medianUsOf(samples: []const Sample) i64 {
+    var tmp: [MAX_RUNS]i64 = undefined;
+    for (samples, 0..) |s, i| tmp[i] = s.wall_us;
+    const slice = tmp[0..samples.len];
+    std.mem.sort(i64, slice, {}, std.sort.asc(i64));
+    return slice[slice.len / 2];
+}
+
+/// Interleaved A/B (`--ab-baseline=<binary>`). For each fixture, alternate
+/// HEAD and baseline runs back-to-back so each pair sees the same
+/// instantaneous host speed, then take the median of the per-iteration
+/// ratios (head_i / base_i). Drift between the two halves cancels, so the
+/// ratio is trustworthy even on a noisy shared host — far better than
+/// running all of HEAD then all of baseline. `ratio < 1` = HEAD faster.
+/// `spread%` is (max-min)/median of the per-iteration ratios: low = the
+/// ratio is solid, high = genuinely unstable (re-run / suspect).
+fn runInterleavedAb(
+    io: std.Io,
+    head_bin: []const u8,
+    base_bin: []const u8,
+    fixtures: []const Bench,
+    runs: usize,
+    jit: bool,
+    no_jit: bool,
+    unhardened: bool,
+) !void {
+    var buf: [512]u8 = undefined;
+    const hdr = try std.fmt.bufPrint(&buf, "{s:<16} {s:>10} {s:>10} {s:>9} {s:>8}\n", .{ "bench", "base_ms", "head_ms", "ratio", "spread%" });
+    try std.Io.File.stdout().writeStreamingAll(io, hdr);
+    const sep = try std.fmt.bufPrint(&buf, "{s:<16} {s:>10} {s:>10} {s:>9} {s:>8}\n", .{ "-----", "------", "------", "-----", "-------" });
+    try std.Io.File.stdout().writeStreamingAll(io, sep);
+
+    var head_buf: [MAX_RUNS]Sample = undefined;
+    var base_buf: [MAX_RUNS]Sample = undefined;
+    var ratio_buf: [MAX_RUNS]f64 = undefined;
+    for (fixtures) |b| {
+        // One warmup each, discarded.
+        _ = runOnce(io, head_bin, b.path, jit, no_jit, unhardened) catch {};
+        _ = runOnce(io, base_bin, b.path, jit, no_jit, unhardened) catch {};
+
+        const head = head_buf[0..runs];
+        const base = base_buf[0..runs];
+        const ratios = ratio_buf[0..runs];
+        var failed = false;
+        var i: usize = 0;
+        while (i < runs) : (i += 1) {
+            head[i] = runOnce(io, head_bin, b.path, jit, no_jit, unhardened) catch {
+                failed = true;
+                break;
+            };
+            base[i] = runOnce(io, base_bin, b.path, jit, no_jit, unhardened) catch {
+                failed = true;
+                break;
+            };
+            const hf: f64 = @floatFromInt(head[i].wall_us);
+            const bf: f64 = @floatFromInt(base[i].wall_us);
+            ratios[i] = if (bf > 0) hf / bf else 1.0;
+        }
+        if (failed) {
+            const fail = try std.fmt.bufPrint(&buf, "{s:<16}  run failed\n", .{b.name});
+            try std.Io.File.stderr().writeStreamingAll(io, fail);
+            continue;
+        }
+
+        const base_ms = usToMs(medianUsOf(base));
+        const head_ms = usToMs(medianUsOf(head));
+        std.mem.sort(f64, ratios, {}, std.sort.asc(f64));
+        const ratio_med = ratios[ratios.len / 2];
+        const r_spread = if (ratio_med > 0) (ratios[ratios.len - 1] - ratios[0]) / ratio_med * 100.0 else 0.0;
+        const row = try std.fmt.bufPrint(&buf, "{s:<16} {d:>10.2} {d:>10.2} {d:>8.3}x {d:>8.1}\n", .{ b.name, base_ms, head_ms, ratio_med, r_spread });
+        try std.Io.File.stdout().writeStreamingAll(io, row);
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
@@ -284,6 +358,7 @@ pub fn main(init: std.process.Init) !void {
     var jit = false;
     var no_jit = false;
     var macros = false;
+    var ab_baseline: ?[]const u8 = null;
     {
         var args_iter = init.minimal.args.iterate();
         _ = args_iter.next(); // skip the binary path
@@ -304,6 +379,10 @@ pub fn main(init: std.process.Init) !void {
                 // Run the Octane macro set (bench/macros/) instead of
                 // the default micros, under `--unhardened`.
                 macros = true;
+            } else if (std.mem.startsWith(u8, a, "--ab-baseline=")) {
+                // Interleaved A/B vs this baseline cynic binary — see
+                // runInterleavedAb. The argv memory is process-lifetime.
+                ab_baseline = a["--ab-baseline=".len..];
             }
         }
     }
@@ -324,6 +403,13 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stderr().writeStreamingAll(io, msg);
         std.process.exit(1);
     };
+
+    // Interleaved A/B mode: HEAD (cynic-bench) vs the given baseline
+    // binary, alternating per iteration so host drift cancels.
+    if (ab_baseline) |base_bin| {
+        try runInterleavedAb(io, cynic_bin, base_bin, fixtures, runs, jit, no_jit, unhardened);
+        return;
+    }
 
     // Header + separator. Tail-percentile columns are inserted only
     // when the sample budget supports them.

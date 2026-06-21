@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
 # remote-bench.sh — bench a ref against a baseline on the configured remote,
-# off your laptop. Runs a same-runner A/B (both refs built and timed on the
-# one machine, so the HEAD/baseline ratio cancels host variance), then
-# renders the report locally with ab-report.ts.
+# off your laptop. Runs an INTERLEAVED A/B: HEAD and baseline are measured
+# back-to-back per iteration (bench.zig --ab-baseline), so each pair sees
+# the same instantaneous host speed and the ratio cancels drift — solid
+# even on a shared box. The report renders locally with ab-report.ts.
 #
 #   tools/bench/remote-bench.sh --ref origin/my-branch --baseline origin/main
 #   tools/bench/remote-bench.sh --ref origin/my-branch --cross   # + cross-engine
@@ -56,14 +57,25 @@ export PATH="/usr/local/bin:$PATH"
 export JSVU_BIN="$HOME/.jsvu/bin"
 cd "$DIR"
 git fetch --all --quiet --prune
-cp tools/bench/run-suite.sh /tmp/run-suite.sh
-rm -rf /tmp/head /tmp/base /tmp/cross-micros.md /tmp/cross-macros.md
+rm -rf /tmp/ab; mkdir -p /tmp/ab
+rm -f /tmp/cross-micros.md /tmp/cross-macros.md
 
-# checkout, never clean — warm cache survives, builds stay incremental.
-git checkout --detach --quiet "$REF"
-bash /tmp/run-suite.sh /tmp/head "$RUNS" "$SUITE"
+# Build the BASELINE cynic once (ReleaseFast) and keep the binary. checkout,
+# never clean — the warm zig-cache survives so builds stay incremental.
 git checkout --detach --quiet "$BASELINE"
-bash /tmp/run-suite.sh /tmp/base "$RUNS" "$SUITE"
+zig build -Doptimize=ReleaseFast >/dev/null 2>&1
+cp zig-out/bin/cynic /tmp/cynic-base
+
+# HEAD: bench.zig --ab-baseline interleaves HEAD's cynic-bench vs the
+# baseline binary back-to-back per iteration, so host drift cancels and the
+# ratio is trustworthy even on a shared box.
+git checkout --detach --quiet "$REF"
+run_ab() {  # <label> [extra bench flags...]
+  local label="$1"; shift
+  zig build bench -- --ab-baseline=/tmp/cynic-base --runs="$RUNS" "$@" > "/tmp/ab/$label.txt" 2>/dev/null || rm -f "/tmp/ab/$label.txt"
+}
+case "$SUITE" in micros|both) run_ab micros-jit; run_ab micros-nojit --no-jit ;; esac
+case "$SUITE" in macros|both) run_ab macros-jit --macros; run_ab macros-nojit --macros --no-jit ;; esac
 
 if [ "$CROSS" = "1" ]; then
   git checkout --detach --quiet "$REF"
@@ -81,11 +93,10 @@ REMOTE
 
 OUT="$REPO_ROOT/bench-results-remote"
 mkdir -p "$OUT"
-rm -rf "$OUT/head" "$OUT/base"
-scp "${SSH_OPTS[@]}" -r "$CYNIC_REMOTE":/tmp/head "$OUT/head" >/dev/null
-scp "${SSH_OPTS[@]}" -r "$CYNIC_REMOTE":/tmp/base "$OUT/base" >/dev/null
-# Render the A/B report locally — Node >= 23 runs the .ts directly.
-node "$REPO_ROOT/tools/bench/ab-report.ts" "$OUT/base" "$OUT/head" > "$OUT/report.md"
+rm -rf "$OUT/ab"
+scp "${SSH_OPTS[@]}" -r "$CYNIC_REMOTE":/tmp/ab "$OUT/ab" >/dev/null
+# Render the interleaved A/B report locally — Node >= 23 runs the .ts directly.
+node "$REPO_ROOT/tools/bench/ab-report.ts" "$OUT/ab" > "$OUT/report.md"
 if [ "$CROSS" = "1" ]; then
   scp "${SSH_OPTS[@]}" "$CYNIC_REMOTE":/tmp/cross-micros.md "$OUT/cross-micros.md" >/dev/null 2>&1 || true
   scp "${SSH_OPTS[@]}" "$CYNIC_REMOTE":/tmp/cross-macros.md "$OUT/cross-macros.md" >/dev/null 2>&1 || true
