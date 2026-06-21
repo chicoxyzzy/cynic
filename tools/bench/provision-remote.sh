@@ -36,6 +36,9 @@ if [ ! -d "$DEST/.git" ]; then
 fi
 cd "$DEST"
 git fetch --all --quiet --prune
+# test262 corpus (a submodule) — needed for `zig build test262` sweeps via
+# remote-run.sh. One-time fetch here; remote-run.sh re-syncs it per ref.
+git submodule update --init --quiet vendor/test262 2>/dev/null || true
 
 # Pinned Zig from build.zig.zon — same field CI's setup-zig reads, fetched by
 # exact version so the remote matches CI and the laptop bit-for-bit.
