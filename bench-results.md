@@ -32,10 +32,13 @@ pre-sticky-bits commit), which cancels host variance:
 - All other movers faster: promise_chain 0.72× / 0.67×; object_alloc
   0.88× and string_concat 0.88× on `--no-jit`. The other four macros are
   flat (±6 %).
-- prop_write flags +29 % (default) / +15 % (`--no-jit`), but its head p50
-  is identical across both tiers and it's the noisiest micro on the box —
-  treat as shared-vCPU jitter pending a confirm re-run, not a real
-  regression.
+- prop_write (+15–29 %) and prop_access reproduce across a confirm 30-run
+  A/B — real and deterministic, but **not** a sticky-bit logic cost: both
+  are zero-allocation loops (one object, immediate NaN-boxed int32 ops),
+  so no minor cycle fires and the new GC code never runs in them. It's a
+  code-layout / I-cache artifact of the heap.zig binary change (only the
+  property-bag micros moved; arith/method/tail flat) — incidental, liable
+  to drift on the next heap edit. Dwarfed by the splay win.
 
 Default tier (Bistromath). Macros are the cleaner absolute read on the
 shared box; the noisy micros follow for completeness — defer to the A/B
