@@ -14,12 +14,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { argv, exit } from "node:process";
 
-// A move past this on the (drift-cancelled) ratio is flagged. Interleaving
-// removes the between-halves jitter, so a few percent is meaningful — but a
-// fixture whose own per-iteration ratio spread is high is marked uncertain
-// rather than trusted.
-const MOVE = 0.05;
-const NOISY_SPREAD = 25; // ratio-spread% above which a row is "(noisy)"
+// Flag a move only when it stands clear of the noise: |ratio-1| must be
+// >= MOVE_PCT (an absolute floor) AND >= spread%/SNR (the per-iteration
+// ratio spread, scaled). Interleaving cancels host drift so the ratio
+// MEDIAN is solid even when per-iteration spread is high — so a noisy host
+// just needs a bigger move to call, and same-code A/B shows all "·" rather
+// than littering every cell with a noise flag.
+const MOVE_PCT = 5;
+const SNR = 3;
 
 interface BenchConfig {
   readonly key: string;
@@ -74,12 +76,12 @@ function block(path: string, title: string): Block | null {
   ];
   let regressed = false;
   for (const r of rows.sort((a, b) => a.name.localeCompare(b.name))) {
+    const movePct = Math.abs(r.ratio - 1) * 100;
+    const confident = movePct >= MOVE_PCT && movePct >= r.spread / SNR;
     let mark = "·";
-    if (r.spread > NOISY_SPREAD) {
-      mark = "≈ noisy";
-    } else if (r.ratio <= 1 - MOVE) {
+    if (confident && r.ratio < 1) {
       mark = "🟢 faster";
-    } else if (r.ratio >= 1 + MOVE) {
+    } else if (confident && r.ratio > 1) {
       mark = "🔴 slower";
       regressed = true;
     }
@@ -98,11 +100,12 @@ function main(): void {
     "## Interleaved A/B bench",
     "",
     "HEAD vs baseline, measured **back-to-back per iteration** so host drift " +
-      "cancels — the **ratio** is the trustworthy signal (`< 1.0` = HEAD " +
-      "faster). `base ms`/`head ms` are informational. `spread%` is the " +
-      `per-iteration ratio spread: a low value means the ratio is solid; ` +
-      `> ${NOISY_SPREAD}% is marked ≈ noisy (re-run before trusting). Moves ` +
-      `past ±${Math.round(MOVE * 100)}% are flagged.`,
+      "cancels — the **ratio** (median of per-iteration ratios) is the " +
+      "trustworthy signal (`< 1.0` = HEAD faster). `base ms`/`head ms` are " +
+      "informational; `spread%` is the per-iteration ratio spread (host " +
+      `noise). A move is flagged only when it clears BOTH ±${MOVE_PCT}% and ` +
+      `spread%/${SNR}, so a noisy host just needs a bigger move to call and ` +
+      "same-code runs stay clean.",
     "",
   ];
   let any = false;
