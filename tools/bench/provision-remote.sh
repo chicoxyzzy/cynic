@@ -64,6 +64,12 @@ if [ ! -d "$HOME/.jsvu/bin" ] || [ -z "$(ls -A "$HOME/.jsvu/bin" 2>/dev/null)" ]
   npm install -g jsvu --silent >/dev/null 2>&1 || npm install -g jsvu
   jsvu --os=linux64 --engines=v8,spidermonkey,quickjs,hermes,xs || true
 fi
-echo ">> peers present: $(ls "$HOME/.jsvu/bin" 2>/dev/null | tr '\n' ' ')"
+# JavaScriptCore — jsvu has no Linux JSC build, so use WebKitGTK's jsc CLI
+# (apt `libjavascriptcoregtk-bin` → /usr/bin/jsc). apt is idempotent.
+if [ ! -x /usr/bin/jsc ]; then
+  echo ">> installing JavaScriptCore (WebKitGTK jsc)"
+  apt-get install -y -qq libjavascriptcoregtk-bin || true
+fi
+echo ">> peers present: $(ls "$HOME/.jsvu/bin" 2>/dev/null | tr '\n' ' ')$([ -x /usr/bin/jsc ] && echo 'jsc')"
 echo ">> remote ready — zig $(zig version)"
 REMOTE

@@ -181,14 +181,20 @@ else
   register sm - "$JSVU_BIN/sm" --no-baseline --no-ion
 fi
 
-# JavaScriptCore — JIT off via env var. Prefer a jsvu-installed
-# `jsc`; otherwise fall back to the macOS system JavaScriptCore
-# framework helper, which ships on every macOS and honours
-# `JSC_useJIT=0` just the same.
+# JavaScriptCore — JIT off via env var. Prefer a jsvu-installed `jsc`;
+# else the macOS system JavaScriptCore framework helper; else, on Linux,
+# the WebKitGTK `jsc` CLI (apt `libjavascriptcoregtk-bin` → /usr/bin/jsc).
+# All three are JavaScriptCore and honour `JSC_useJIT=0` the same — the
+# WebKitGTK build may trail Safari's JSC, but it puts the engine back on
+# the board where jsvu has no Linux build.
 jsc_bin="$JSVU_BIN/jsc"
 if [ ! -x "$jsc_bin" ]; then
   sys_jsc="/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc"
-  [ -x "$sys_jsc" ] && jsc_bin="$sys_jsc"
+  if [ -x "$sys_jsc" ]; then
+    jsc_bin="$sys_jsc"
+  elif [ -x /usr/bin/jsc ]; then
+    jsc_bin="/usr/bin/jsc"
+  fi
 fi
 if [ "$TIER" = "jit" ]; then
   register jsc - "$jsc_bin"
@@ -269,6 +275,15 @@ if date +%s%3N 2>/dev/null | grep -qE '^[0-9]{10,}$'; then
   USE_GNU_DATE=1
 fi
 
+# Pin the timed subprocess to one core (Linux) to cut scheduler-migration
+# jitter on a shared host — a big source of spuriously-noisy cells. Core 1
+# (not 0) leaves the OS/interrupts their usual home. No-op where taskset is
+# absent (e.g. macOS).
+TASKSET=""
+if command -v taskset >/dev/null 2>&1; then
+  TASKSET="taskset -c 1"
+fi
+
 # run_once <env> <cmd> <fixture> -> echoes elapsed ms, or "FAIL"
 run_once() {
   local env="$1" cmd="$2" fixture="$3"
@@ -278,10 +293,10 @@ run_once() {
     t0="$(date +%s%3N)"
     if [ "$env" = "-" ]; then
       # shellcheck disable=SC2086
-      $cmd "$fixture" >/dev/null 2>&1
+      $TASKSET $cmd "$fixture" >/dev/null 2>&1
     else
       # shellcheck disable=SC2086
-      env $env $cmd "$fixture" >/dev/null 2>&1
+      env $env $TASKSET $cmd "$fixture" >/dev/null 2>&1
     fi
     rc=$?
     t1="$(date +%s%3N)"
@@ -317,8 +332,16 @@ stats() {
   n="$(printf '%s\n' "$sorted" | wc -l | tr -d ' ')"
   mid=$(( n / 2 ))
   med="$(printf '%s\n' "$sorted" | sed -n "$((mid + 1))p")"
-  mn="$(printf '%s\n' "$sorted" | head -1)"
-  mx="$(printf '%s\n' "$sorted" | tail -1)"
+  # Winsorise: at N>=5 drop one sample each end before the spread, so a
+  # single neighbour spike on a shared host doesn't flag the cell. The
+  # median itself (and the reported number) is unchanged.
+  if [ "$n" -ge 5 ]; then
+    mn="$(printf '%s\n' "$sorted" | sed -n '2p')"
+    mx="$(printf '%s\n' "$sorted" | sed -n "$((n - 1))p")"
+  else
+    mn="$(printf '%s\n' "$sorted" | head -1)"
+    mx="$(printf '%s\n' "$sorted" | tail -1)"
+  fi
   if [ "$med" -gt 0 ]; then
     spread=$(( (mx - mn) * 100 / med ))
   else
@@ -401,8 +424,9 @@ engine_version() {
     hermes) v="$(jsvu_ver hermes)" ;;
     xs)     v="$(jsvu_ver xs)" ;;
     jsc)    case "$bin" in
-              /System/*) v="macOS $(sw_vers -productVersion 2>/dev/null) system" ;;
-              *)         v="$(jsvu_ver javascriptcore)" ;;
+              /System/*)    v="macOS $(sw_vers -productVersion 2>/dev/null) system" ;;
+              /usr/bin/jsc) v="WebKitGTK $(dpkg-query -W -f='${Version}' libjavascriptcoregtk-bin 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)" ;;
+              *)            v="$(jsvu_ver javascriptcore)" ;;
             esac ;;
   esac
   [ -n "$v" ] && printf '%s' "$v" || printf '?'
@@ -421,7 +445,9 @@ emit() {
   echo
   echo "Subprocess wall-clock; times in **ms**, **median of N=$RUNS timed"
   echo "runs** after $WARMUP discarded warmup run. \`*\` flags a fixture"
-  echo "whose max-min spread exceeded ${SPREAD_LIMIT}% — treat that cell as noisy."
+  echo "whose **winsorised** spread (one sample trimmed each end) exceeded"
+  echo "${SPREAD_LIMIT}% — treat that cell as noisy. Timed runs are pinned to one"
+  echo "core (Linux) to cut migration jitter."
   echo "🥇 🥈 🥉 mark the three fastest engines on each fixture row"
   echo "(gold also bold); tied cells share a medal."
   echo
