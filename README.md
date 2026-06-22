@@ -243,6 +243,11 @@ Cynic is [MIT-licensed](LICENSE). Bundled third-party data under
   Derived / PropList / Scripts / emoji set, and `NormalizationTest.txt`
   for the conformance test). All under the Unicode, Inc. License
   Agreement. Upstream: <https://www.unicode.org/license.txt>.
+- `vendor/tzdata/iana/` — IANA tzdata *source* release (africa,
+  europe, …), fetched with `tools/fetch-tzdata.sh` from
+  <https://data.iana.org/time-zones/>. Compiled with system `zic` and
+  packed into `vendor/tzdata/cynic_tzdb.bin` for `-Dintl=full`
+  (`zig build pack-tzdata`). License: see `vendor/tzdata/iana/LICENSE`.
 - `vendor/test262/` — ECMAScript Test Suite, BSD-3-Clause (with
   Ecma International notices). Git submodule pinned to
   [`tc39/test262`](https://github.com/tc39/test262).

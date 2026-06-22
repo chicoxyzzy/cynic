@@ -189,6 +189,21 @@ These are project rules — they apply to everyone.
   `--allow=eval` lives here today). See
   [docs/ses-alignment.md](docs/ses-alignment.md) for the
   design + phase plan.
+  A **fourth axis is compile-time only** (not a CLI verb):
+  **`-Dintl=off|stub|full`** selects the ECMA-402 build flavour
+  (default **`off`** — no `Intl` global; Temporal is ISO +
+  UTC/offset only). **`stub`** installs structural `Intl.*` and
+  lets Temporal accept non-ISO calendar ids / IANA zone names
+  structurally; **`full`** adds embedded tzdata (real IANA offsets
+  through `getOffsetNanosecondsFor`). Tzdata follows the Unicode
+  pattern: IANA *sources* live in `vendor/tzdata/iana/` (refresh via
+  `tools/fetch-tzdata.sh` from [data.iana.org](https://data.iana.org/time-zones/));
+  `zig build pack-tzdata` compiles them with system `zic` and packs
+  `vendor/tzdata/cynic_tzdb.bin`. Calendars/formatters stay structural
+  until CLDR/ICU-class data lands. Do **not** add `--enable=intl` or `--allow=intl` —
+  Intl is Stage 4 and is not a security relaxation like eval/wasm.
+  See [docs/ROADMAP.md](docs/ROADMAP.md) (`Intl` / Temporal) and
+  `src/runtime/intl_config.zig`.
 - **Production realms are debug-clean.** `Realm.installBuiltins`
   does NOT install `__collectGarbage` / `__clearKeptObjects` /
   `__drainMicrotasks`. Each is an attack surface for untrusted
@@ -275,6 +290,7 @@ These are project rules — they apply to everyone.
 | Touch binding / scope / top-level resolution | [docs/handbook/environments.md](docs/handbook/environments.md) (GlobalEnvironmentRecord split, named-fn-expr wrapper, module env-record, top-level write opcodes) |
 | Touch the property-storage layout (bag / shape / slots) | [docs/inline-caches.md](docs/inline-caches.md) (shape substrate + read/write IC); [docs/lazy-property-bag.md](docs/lazy-property-bag.md) (Phase 3 shipped — shape-mode writes skip the bag mirror entirely) |
 | Touch realm setup / intrinsic install / hardening | [docs/ses-alignment.md](docs/ses-alignment.md) (SES-by-default position, frozen primordials, `harden()`, override-mistake fix, the `--unhardened` opt-out + the separate `--allow=eval`) |
+| Touch ECMA-402 / `Intl` / Temporal intl extras | `-Dintl=off\|stub\|full` ([ROADMAP.md](docs/ROADMAP.md)); `src/runtime/intl_config.zig`, `intl.zig`, `builtins/intl.zig`; Temporal calendar/IANA gates in `temporal.zig` / `builtins/temporal/shared.zig` |
 | Verify a shared-machinery change without missing regressions | [docs/handbook/agent-checks.md](docs/handbook/agent-checks.md) (the `--only-failing` trap, per-touch bucket filters, harness threading invariant) |
 | Look up a Zig idiom Cynic uses | [docs/handbook/zig.md](docs/handbook/zig.md) |
 | Touch the WebAssembly engine (Sarcasm) or its JS API | [docs/wasm-engine.md](docs/wasm-engine.md) (in-place interpreter + side-table, the reference encoding + externref pin set, `WebAssembly.*` surface, `--allow=wasm`); score in [wasm-results.md](wasm-results.md); perf baselines in [wasm-bench-results.md](wasm-bench-results.md) |
@@ -306,9 +322,16 @@ One-time setup:
 
 Common commands:
 
-    zig build                                       # build cynic into zig-out/bin/
+    zig build                                       # build cynic into zig-out/bin/ (default -Dintl=off)
+    zig build -Dintl=stub                           # structural Intl + Temporal calendar/IANA accept
+    zig build -Dintl=full                           # as stub + embedded tzdata (~400 KiB CYTZ blob)
+    tools/fetch-tzdata.sh                           # download IANA tzdata sources → vendor/tzdata/iana/ + repack
+    tools/fetch-tzdata.sh 2026b                     # pin a release (like dropping a new UCD into vendor/unicode/)
+    zig build pack-tzdata                           # zic compile vendor/tzdata/iana/ → cynic_tzdb.bin
+    zig build fetch-tzdata                          # same as tools/fetch-tzdata.sh (latest)
     zig build test                                  # all unit tests (Debug; canonical, stack-trace path)
     zig build test-fast                             # all unit tests, ReleaseSafe (~3 min vs 10+; safety checks + GC verifiers + leak detection kept)
+    zig build test-fast -Dintl=stub                 # include structural Intl unit tests (skipped at -Dintl=off)
     zig build test -Dtest-filter=<name>             # run only unit tests whose name matches (also works on test-fast)
     zig build test-ses                              # hand-written SES positive-coverage tests
     zig build test-fuzz                             # Fuzzilli REPRL host unit tests (the host lives in tools/fuzz/)

@@ -593,28 +593,30 @@ automatically on the next full sweep.
   render local time. Real timezone handling would need a
   vendored tz-data source (IANA `tzdata`) plus the per-method
   local-time conversions; deferred until a user actually asks.
-- `Intl` is not implemented in the default build —
-  `Intl.NumberFormat`, `Intl.DateTimeFormat`, `Intl.Collator`,
-  `Intl.Segmenter`, etc. are absent, and the whole `intl402/`
-  test262 tree is path-skipped (out-of-scope per
-  [AGENTS.md](../AGENTS.md)). Cynic's `localeCompare` returns a
+- `Intl` is a **build flavour**, not a CLI `--enable=` / `--allow=`
+  verb (those remain pre-Stage-4 proposals and security relaxations
+  respectively; see [ses-alignment.md](ses-alignment.md)). Compile
+  with `zig build -Dintl=off|stub|full` (default **`off`**):
+
+  | Tier | `Intl` global | Temporal calendars / IANA | Locale/tz data |
+  |------|---------------|---------------------------|----------------|
+  | **`off`** (default) | absent | ISO + UTC/fixed-offset only | none |
+  | **`stub`** | structural ECMA-402 (option validation; format/compare stubs) | accept supported calendar **ids** and structural IANA **names**; arithmetic still ISO/UTC | none |
+  | **`full`** | same surface as `stub` | real zone offsets via embedded CYTZ/TZif (`vendor/tzdata/cynic_tzdb.bin`); IANA sources in `vendor/tzdata/iana/` (fetch: `tools/fetch-tzdata.sh`; pack: `zig build pack-tzdata`); future calendars/formatters | ~400 KiB tzdb (+ later CLDR/ICU-class data) |
+
+  The default edge/server build omits the locale/tz stack to stay
+  small and dependency-light. `intl402/` stays out of the main
+  ECMA-262 scoreboard (`spec%`); exercise it explicitly under
+  `-Dintl=stub` or `-Dintl=full` (e.g. `zig build test262 -Dintl=stub
+  -- --filter=intl402/`). Cynic's `localeCompare` returns a
   canonical-equivalence-aware compare via NFD-then-ordinal (note
   in §22.1.3.12); case-sensitive Turkish-style collation is
-  what's missing, not basic NFC folding.
+  what's missing without real Intl data, not basic NFC folding.
 
-  **A future Intl-enabled build is contemplated.** ECMA-402 needs
-  a CLDR/ICU-class locale database plus IANA `tzdata` — a large
-  vendored dependency the default edge-runtime build deliberately
-  omits to stay small and dependency-light. It's a separate
-  *build flavour*, not a default-on feature: an opt-in Cynic that
-  links the locale/tz stack. The seams are being kept clean so it
-  can land without a rewrite — Temporal funnels every zone-offset
-  lookup through a single `getOffsetNanosecondsFor` chokepoint
-  (see "Temporal" below) so a named-IANA-zone provider drops in at
-  one place, and `localeCompare` already isolates its NFD
-  pipeline. If that build ships, the `intl402/` tree — named time
-  zones, non-ISO calendars, and the `Intl.*` formatters — comes
-  back into the scored scope with it.
+  Seams are kept clean so `full` can deepen without a rewrite —
+  Temporal funnels every zone-offset lookup through
+  `getOffsetNanosecondsFor` (see "Temporal" below), and
+  `localeCompare` isolates its NFD pipeline.
 
 **Shipped.** `Temporal` (ES2025) — the full value-type surface
 plus `Temporal.Now`. All eight types land: `Instant`, `PlainTime`,
@@ -633,14 +635,15 @@ proposal-temporal so test262 failures map to spec steps.
 and the headline runtime spec% moved to ~94.56% when the tree came
 out of the skip list.
 
-The scope is **ISO-8601 calendar + UTC/fixed-offset zones only**.
-There is no vendored IANA `tzdata` in the default build, so named
-zones (e.g. `"America/New_York"`), DST transitions, and non-ISO
-calendars are deferred — they are the payoff of the future
-Intl-enabled build (above), not of this effort. Every offset
-lookup already routes through one `getOffsetNanosecondsFor` seam,
-so that build plugs a tzdata provider in at a single place rather
-than threading it through each `ZonedDateTime` operation.
+With **`-Dintl=off`** (default), the scope is **ISO-8601 calendar +
+UTC/fixed-offset zones only** — named zones and non-ISO calendars
+are rejected. With **`-Dintl=stub`**, those are accepted
+structurally (ids/names stored; math still ISO/UTC). Real DST
+offsets and non-ISO calendar arithmetic remain the payoff of
+**`-Dintl=full`** plus tzdata (and later calendar/CLDR data). Every
+offset lookup already routes through one `getOffsetNanosecondsFor`
+seam so tzdata plugs in at a single place rather than threading
+through each `ZonedDateTime` operation.
 
 **Out of scope.** Annex B in its entirety — language extensions
 *and* every browser-era built-in (`escape` / `unescape`, the
@@ -648,8 +651,8 @@ String HTML wrappers, `Date.prototype.{getYear, setYear,
 toGMTString}`, `String.prototype.{substr, trimLeft, trimRight}`,
 `Object.prototype.__proto__` accessor and the `__define*` /
 `__lookup*` family, `RegExp.{$1, input, …}` legacy globals).
-`Intl` (the default build skips it — see the contemplated
-Intl-enabled flavour above).
+`Intl` in the default (`-Dintl=off`) build — see the `-Dintl=`
+build-flavour table above.
 
 `SharedArrayBuffer` / `Atomics` **ship**, with real cross-agent
 concurrency: `$262.agent` runs each agent on its own OS thread and
