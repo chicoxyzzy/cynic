@@ -54,7 +54,7 @@ jobs:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         # No submodules: the WASM build is pure Zig (Perlex regex
         # engine + native Unicode tables); the only submodule is
         # the test262 corpus, which the deploy doesn't need.

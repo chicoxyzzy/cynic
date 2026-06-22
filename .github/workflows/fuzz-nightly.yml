@@ -107,7 +107,7 @@ jobs:
 
       - name: Checkout
         # No submodules: cynic-fuzz never reads the test262 corpus.
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           submodules: false
 
@@ -165,7 +165,7 @@ jobs:
         # Deterministic for a given (rev, profile) pair, so a stable key: first
         # run misses and saves; later runs hit and `swift build` is a near-noop.
         # A profile edit changes the hash → fresh build of the changed file.
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: fuzzilli/.build
           key: fuzzilli-build-${{ env.FUZZILLI_REV }}-${{ hashFiles('docs/fuzzilli/CynicProfile.swift') }}-${{ runner.os }}
@@ -180,7 +180,7 @@ jobs:
         # fresh, grown corpus is saved every night; restore-keys falls back to
         # the most recent prior night with the SAME rev. A rev bump ⇒ key
         # miss ⇒ one cold start, then warm again under the new rev.
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: fuzz-storage
           key: fuzz-corpus-${{ env.FUZZILLI_REV }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -257,7 +257,7 @@ jobs:
         # early-exit run (build failed, fuzz step skipped) from tar-failing on
         # a non-existent fuzz-storage.
         if: always() && hashFiles('fuzz-storage/corpus/**') != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: fuzz-storage
           key: fuzz-corpus-${{ env.FUZZILLI_REV }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -288,7 +288,7 @@ jobs:
 
       - name: Upload fuzz artifacts (stats + any new-crash reproducers)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: fuzz-nightly-${{ github.run_id }}
           path: |
