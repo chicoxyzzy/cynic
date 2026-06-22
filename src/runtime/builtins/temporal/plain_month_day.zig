@@ -146,20 +146,19 @@ fn plainMonthDayConstructor(realm: *Realm, this_value: Value, args: []const Valu
         return throwTypeError(realm, "Temporal.PlainMonthDay constructor requires 'new'");
     const m = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 0, Value.undefined_)));
     const d = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 1, Value.undefined_)));
-    try requireISOCalendar(realm, argOr(args, 2, Value.undefined_));
+    const cal = try requireISOCalendar(realm, argOr(args, 2, Value.undefined_));
     const ref_v = argOr(args, 3, Value.undefined_);
     const ref: i64 = if (ref_v.isUndefined()) 1972 else try dateFieldToI64(realm, try toIntegerWithTruncation(realm, ref_v));
     if (!temporal.isValidISODate(ref, m, d)) return throwRangeError(realm, "invalid month-day");
     if (!temporal.isoDateWithinLimits(ref, @intCast(m), @intCast(d))) return throwRangeError(realm, "PlainMonthDay is out of range");
-    try storePlainMonthDay(realm, inst, .{ .ref_iso_year = @intCast(ref), .iso_month = @intCast(m), .iso_day = @intCast(d) });
+    try storePlainMonthDay(realm, inst, .{ .ref_iso_year = @intCast(ref), .iso_month = @intCast(m), .iso_day = @intCast(d), .calendar = cal });
     return heap_mod.taggedObject(inst);
 }
 
 fn plainMonthDayCalendarId(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainMonthDay(realm, t);
-    const js = realm.heap.allocateString("iso8601") catch return error.OutOfMemory;
-    return Value.fromString(js);
+    const rec = try requirePlainMonthDay(realm, t);
+    return shared.calendarIdToValue(realm, rec.calendar);
 }
 fn plainMonthDayMonthCode(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -182,7 +181,8 @@ fn plainMonthDayDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value
 /// monthCode *suitability* RangeError is deferred until after the overflow
 /// option is read.
 fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!PlainMonthDayRecord {
-    try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
+    const cal = try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
+    _ = cal;
 
     const day_v = try getPropertyChain(realm, obj, "day");
     if (day_v.isUndefined()) return throwTypeError(realm, "PlainMonthDay-like is missing 'day'");

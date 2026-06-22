@@ -186,10 +186,11 @@ fn plainDateTimeConstructor(realm: *Realm, this_value: Value, args: []const Valu
     const millisecond = try toIntegerWithTruncation(realm, argDefault0(args, 6));
     const microsecond = try toIntegerWithTruncation(realm, argDefault0(args, 7));
     const nanosecond = try toIntegerWithTruncation(realm, argDefault0(args, 8));
-    try requireISOCalendar(realm, argOr(args, 9, Value.undefined_));
+    const cal = try requireISOCalendar(realm, argOr(args, 9, Value.undefined_));
 
-    const date = temporal.regulateISODate(y, mo, d, true) orelse
+    var date = temporal.regulateISODate(y, mo, d, true) orelse
         return throwRangeError(realm, "PlainDateTime date is out of range");
+    date.calendar = cal;
     const time = try rejectTime(realm, hour, minute, second, millisecond, microsecond, nanosecond);
     const rec = PlainDateTimeRecord.combine(date, time);
     if (!temporal.isoDateTimeWithinLimits(rec)) {
@@ -203,9 +204,8 @@ fn plainDateTimeConstructor(realm: *Realm, this_value: Value, args: []const Valu
 // half reads the record field directly.
 fn plainDateTimeCalendarId(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainDateTime(realm, t);
-    const js = realm.heap.allocateString("iso8601") catch return error.OutOfMemory;
-    return Value.fromString(js);
+    const rec = try requirePlainDateTime(realm, t);
+    return shared.calendarIdToValue(realm, rec.calendar);
 }
 fn plainDateTimeYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -346,6 +346,7 @@ pub const RawDateTimeFields = struct {
     millisecond: f64 = 0,
     microsecond: f64 = 0,
     nanosecond: f64 = 0,
+    calendar: temporal.CalendarId = temporal.CalendarId.iso8601(),
 };
 
 /// §13.x PrepareCalendarFields — validate the calendar, then read + coerce
@@ -356,8 +357,8 @@ pub const RawDateTimeFields = struct {
 /// `offset` (between `nanosecond` and `second`) and the required `timeZone`
 /// (between `second` and `year`) are captured into it.
 pub fn readDateTimeFieldsRaw(realm: *Realm, obj: *JSObject, zoned: ?*ZonedFieldExtras) NativeError!RawDateTimeFields {
-    try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
-    var f: RawDateTimeFields = .{};
+    const cal = try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
+    var f: RawDateTimeFields = .{ .calendar = cal };
 
     const day_v = try getPropertyChain(realm, obj, "day");
     if (!day_v.isUndefined()) {
@@ -456,8 +457,9 @@ pub fn resolveDateTimeFieldsNoRange(realm: *Realm, f: RawDateTimeFields, overflo
         return throwTypeError(realm, "PlainDateTime-like is missing 'month' / 'monthCode'");
     }
 
-    const date = temporal.regulateISODate(f.year, month, f.day, overflow == .reject) orelse
+    var date = temporal.regulateISODate(f.year, month, f.day, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDateTime date is out of range");
+    date.calendar = f.calendar;
     const time = try regulateTime(realm, f.hour, f.minute, f.second, f.millisecond, f.microsecond, f.nanosecond, overflow);
     return PlainDateTimeRecord.combine(date, time);
 }
@@ -633,13 +635,10 @@ fn plainDateTimeWithPlainTime(realm: *Realm, this_value: Value, args: []const Va
 }
 
 /// §5.3.x Temporal.PlainDateTime.prototype.withCalendar ( calendar ) —
-/// Cynic ships only the ISO calendar, so any accepted identifier yields a
-/// copy. A calendar-bearing Temporal object resolves to its calendar
-/// (always ISO here); a non-ISO string is RangeError; a non-string,
-/// non-Temporal value is TypeError.
+/// re-stamps the receiver with a supported calendar; ISO fields unchanged.
 fn plainDateTimeWithCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const rec = try requirePlainDateTime(realm, this_value);
-    try toTemporalCalendarIdentifier(realm, argOr(args, 0, Value.undefined_));
+    var rec = try requirePlainDateTime(realm, this_value);
+    rec.calendar = try toTemporalCalendarIdentifier(realm, argOr(args, 0, Value.undefined_));
     return createTemporalDateTime(realm, rec);
 }
 

@@ -20,6 +20,7 @@
 //! exactly like `MapData` / `SetData`.
 
 const std = @import("std");
+const intl_config = @import("intl_config.zig");
 
 /// Brand discriminator for a Temporal instance. Stored alongside the
 /// payload so a prototype method's `RequireInternalSlot` check is a
@@ -74,22 +75,103 @@ pub const InstantRecord = struct {
     epoch_ns: i128 = 0,
 };
 
+/// Maximum bytes for a stored calendar identifier (longest supported id is
+/// `islamic-umalqura`). Fixed buffer keeps calendar-bearing records
+/// allocator-free and GC-mark-free, matching the other Temporal payloads.
+pub const max_calendar_id_bytes: usize = 24;
+
+/// Default calendar id bytes: `"iso8601"` then zeros (comptime-init so
+/// record field defaults compare cleanly).
+const iso8601_calendar_bytes: [max_calendar_id_bytes]u8 = blk: {
+    var b = std.mem.zeroes([max_calendar_id_bytes]u8);
+    @memcpy(b[0..7], "iso8601");
+    break :blk b;
+};
+
+/// Calendar identifier carried on calendar-bearing Temporal records.
+/// Internally arithmetic stays ISO; the id is structural for Intl /
+/// `calendarId` / serialization annotations only. `bytes` is always
+/// zero-padded so struct equality is well-defined.
+pub const CalendarId = struct {
+    bytes: [max_calendar_id_bytes]u8 = iso8601_calendar_bytes,
+    len: u8 = 7,
+
+    pub fn iso8601() CalendarId {
+        return .{ .bytes = iso8601_calendar_bytes, .len = 7 };
+    }
+
+    pub fn fromSlice(s: []const u8) ?CalendarId {
+        if (s.len == 0 or s.len > max_calendar_id_bytes) return null;
+        var b = std.mem.zeroes([max_calendar_id_bytes]u8);
+        @memcpy(b[0..s.len], s);
+        return .{ .bytes = b, .len = @intCast(s.len) };
+    }
+
+    pub fn slice(self: *const CalendarId) []const u8 {
+        return self.bytes[0..self.len];
+    }
+
+    pub fn isIso(self: *const CalendarId) bool {
+        return std.ascii.eqlIgnoreCase(self.slice(), "iso8601");
+    }
+
+    pub fn eql(self: *const CalendarId, other: *const CalendarId) bool {
+        return std.ascii.eqlIgnoreCase(self.slice(), other.slice());
+    }
+};
+
+/// ECMA-402 / Temporal supported calendar catalog (structural; matches
+/// `Intl.supportedValuesOf("calendar")` / `intl.supported_calendars`).
+pub const supported_calendars = [_][]const u8{
+    "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "gregory",
+    "hebrew", "indian", "islamic", "islamic-civil", "islamic-rgsa", "islamic-tbla",
+    "islamic-umalqura", "iso8601", "japanese", "persian", "roc",
+};
+
+/// Legacy aliases canonicalised at accept time (§Temporal calendar id +
+/// ECMA-402 issues/285 aliases).
+const calendar_aliases = [_]struct { from: []const u8, to: []const u8 }{
+    .{ .from = "islamicc", .to = "islamic-civil" },
+    .{ .from = "ethiopic-amete-alem", .to = "ethioaa" },
+};
+
+/// True when `id` is a supported calendar (case-insensitive), possibly via alias.
+pub fn isSupportedCalendarId(id: []const u8) bool {
+    return canonicalizeCalendarId(id) != null;
+}
+
+/// Return the canonical calendar id slice (static storage) or null.
+pub fn canonicalizeCalendarId(id: []const u8) ?[]const u8 {
+    for (calendar_aliases) |a| {
+        if (std.ascii.eqlIgnoreCase(id, a.from)) return a.to;
+    }
+    for (supported_calendars) |c| {
+        if (std.ascii.eqlIgnoreCase(id, c)) return c;
+    }
+    return null;
+}
+
+/// Build a `CalendarId` from a user/parser string, or null if unsupported.
+pub fn calendarIdFromString(id: []const u8) ?CalendarId {
+    const canon = canonicalizeCalendarId(id) orelse return null;
+    return CalendarId.fromSlice(canon);
+}
+
 /// §3.5 Temporal.PlainDate internal slots ([[ISOYear]], [[ISOMonth]],
-/// [[ISODay]]). The calendar is always the ISO 8601 calendar, so no
-/// calendar pointer is stored; the record carries no heap reference.
+/// [[ISODay]], [[Calendar]]). Arithmetic uses ISO fields; `calendar`
+/// is structural for Intl / `calendarId` only.
 pub const PlainDateRecord = struct {
     iso_year: i32 = 0,
     iso_month: u8 = 1,
     iso_day: u8 = 1,
+    calendar: CalendarId = .{},
 };
 
 /// §5.3 Temporal.PlainDateTime internal slots — an ISO date paired
-/// with an ISO time ([[ISOYear]]…[[ISONanosecond]]). The calendar is
-/// always ISO 8601, so no calendar pointer is stored; the record
-/// carries no heap reference. The split `date()` / `time()` helpers
-/// hand the existing PlainDate / PlainTime abstract operations their
-/// narrower records, and `combine` reassembles one after date- or
-/// time-only arithmetic.
+/// with an ISO time ([[ISOYear]]…[[ISONanosecond]]) plus structural
+/// [[Calendar]]. The split `date()` / `time()` helpers hand the existing
+/// PlainDate / PlainTime abstract operations their narrower records, and
+/// `combine` reassembles one after date- or time-only arithmetic.
 pub const PlainDateTimeRecord = struct {
     iso_year: i32 = 0,
     iso_month: u8 = 1,
@@ -100,9 +182,10 @@ pub const PlainDateTimeRecord = struct {
     millisecond: u32 = 0,
     microsecond: u32 = 0,
     nanosecond: u32 = 0,
+    calendar: CalendarId = .{},
 
     pub fn date(self: PlainDateTimeRecord) PlainDateRecord {
-        return .{ .iso_year = self.iso_year, .iso_month = self.iso_month, .iso_day = self.iso_day };
+        return .{ .iso_year = self.iso_year, .iso_month = self.iso_month, .iso_day = self.iso_day, .calendar = self.calendar };
     }
 
     pub fn time(self: PlainDateTimeRecord) PlainTimeRecord {
@@ -127,6 +210,7 @@ pub const PlainDateTimeRecord = struct {
             .millisecond = t.millisecond,
             .microsecond = t.microsecond,
             .nanosecond = t.nanosecond,
+            .calendar = d.calendar,
         };
     }
 };
@@ -135,15 +219,15 @@ pub const PlainDateTimeRecord = struct {
 /// is a *reference* day (the calendar's first-of-month, day 1 for ISO)
 /// rather than an observable field. The year-month is the meaningful
 /// part; `ref_iso_day` only fixes the underlying ISODate so the type can
-/// reuse the PlainDate arithmetic / comparison AOs. ISO calendar only,
-/// so no calendar pointer is stored.
+/// reuse the PlainDate arithmetic / comparison AOs. `calendar` is structural.
 pub const PlainYearMonthRecord = struct {
     iso_year: i32 = 0,
     iso_month: u8 = 1,
     ref_iso_day: u8 = 1,
+    calendar: CalendarId = .{},
 
     pub fn date(self: PlainYearMonthRecord) PlainDateRecord {
-        return .{ .iso_year = self.iso_year, .iso_month = self.iso_month, .iso_day = self.ref_iso_day };
+        return .{ .iso_year = self.iso_year, .iso_month = self.iso_month, .iso_day = self.ref_iso_day, .calendar = self.calendar };
     }
 };
 
@@ -151,25 +235,28 @@ pub const PlainYearMonthRecord = struct {
 /// is a *reference* year (1972 for ISO — a leap year, so Feb 29 is
 /// representable) rather than an observable field. The month-day is the
 /// meaningful part; `ref_iso_year` only fixes the underlying ISODate.
-/// ISO calendar only, so no calendar pointer is stored.
+/// `calendar` is structural.
 pub const PlainMonthDayRecord = struct {
     ref_iso_year: i32 = 1972,
     iso_month: u8 = 1,
     iso_day: u8 = 1,
+    calendar: CalendarId = .{},
 
     pub fn date(self: PlainMonthDayRecord) PlainDateRecord {
-        return .{ .iso_year = self.ref_iso_year, .iso_month = self.iso_month, .iso_day = self.iso_day };
+        return .{ .iso_year = self.ref_iso_year, .iso_month = self.iso_month, .iso_day = self.iso_day, .calendar = self.calendar };
     }
 };
 
-/// The time zone of a `ZonedDateTimeRecord`. Cynic ships the offset-only
-/// scope today: the named UTC zone and offset identifiers (`±HH:MM`,
-/// whole-minute precision). These have a constant UTC offset, so there
-/// is never a DST gap or overlap to disambiguate. Named IANA zones —
-/// which need a vendored tz database — are deferred to a future
-/// Intl-enabled build; that build would add a variant here and a tzdata
-/// lookup inside `getOffsetNanosecondsFor`, the single offset-resolution
-/// seam every operation routes through.
+/// Maximum bytes stored for a structural IANA zone identifier (fits in
+/// the ZonedDateTime record without an extra allocator edge). Real
+/// IANA names are well under this; anything longer is rejected.
+pub const max_iana_zone_bytes: usize = 64;
+
+/// The time zone of a `ZonedDateTimeRecord`. Offset / UTC zones have a
+/// constant UTC offset. Named IANA zones are accepted structurally at
+/// `-Dintl=stub` (identifier stored; offset treated as UTC); at
+/// `-Dintl=full` the identifier must exist in the embedded tzdb and
+/// `getOffsetNanosecondsFor` consults TZif transitions.
 pub const TimeZone = union(enum) {
     /// The "UTC" named zone. A distinct identifier from the "+00:00"
     /// offset zone (the `timeZoneId` getters differ) though numerically
@@ -178,17 +265,25 @@ pub const TimeZone = union(enum) {
     /// An offset time-zone identifier, stored as whole minutes east of
     /// UTC in -1439..+1439.
     offset_minutes: i32,
+    /// Structural IANA identifier (`America/New_York`, …). `len` is the
+    /// live prefix of `bytes`; offset resolution is UTC (0) for now.
+    named: struct {
+        bytes: [max_iana_zone_bytes]u8 = undefined,
+        len: u8 = 0,
+
+        pub fn slice(self: *const @This()) []const u8 {
+            return self.bytes[0..self.len];
+        }
+    },
 };
 
 /// §6.3 Temporal.ZonedDateTime internal slots — an exact instant
-/// ([[EpochNanoseconds]]) paired with a [[TimeZone]] (and an ISO-8601
-/// [[Calendar]], implicit in this scope). Because the offset-only
-/// `TimeZone` carries no heap pointer, the record adds no GC mark edge,
-/// matching the other plain Temporal records; it converts to/from a
-/// `JSBigInt` only at the JS boundary.
+/// ([[EpochNanoseconds]]) paired with a [[TimeZone]] and structural
+/// [[Calendar]]. No GC mark edge (all fields are plain / fixed buffers).
 pub const ZonedDateTimeRecord = struct {
     epoch_ns: i128 = 0,
     time_zone: TimeZone = .utc,
+    calendar: CalendarId = .{},
 };
 
 /// The side allocation a Temporal instance's `JSObject` points to
@@ -1270,13 +1365,18 @@ pub fn daysInIsoMonth(y: i64, m: u32) u32 {
 
 /// §11.x GetOffsetNanosecondsFor — the signed UTC offset, in nanoseconds,
 /// that `tz` applies at `epoch_ns`. UTC and offset zones have a constant
-/// offset, so `epoch_ns` is unused today; it is the seam where a named-zone
-/// provider would consult tzdata transitions.
+/// offset. Named IANA zones consult embedded tzdata at `-Dintl=full`; at
+/// `stub` they remain structural (offset 0 / UTC math).
 pub fn getOffsetNanosecondsFor(tz: TimeZone, epoch_ns: i128) i64 {
-    _ = epoch_ns;
     return switch (tz) {
         .utc => 0,
         .offset_minutes => |m| @as(i64, m) * 60_000_000_000,
+        .named => |n| blk: {
+            if (intl_config.has_locale_data) {
+                break :blk @import("tzdata.zig").offsetNanosecondsFor(n.slice(), epoch_ns);
+            }
+            break :blk 0;
+        },
     };
 }
 
@@ -1334,29 +1434,73 @@ pub fn getEpochNanosecondsFor(tz: TimeZone, dt: PlainDateTimeRecord) ?i128 {
     return epoch;
 }
 
-/// §11.x ParseTimeZoneIdentifier (offset-only scope) — recognise the
-/// named "UTC" zone (ASCII case-insensitive) and offset identifiers
-/// (`±HH`, `±HH:MM`, `±HHMM` — whole-minute precision; sub-minute is not a
-/// valid identifier). Returns null for a named IANA zone or any malformed
-/// input, which the caller reports as a RangeError. Named zones are
-/// deferred to a future Intl build.
+/// §11.x ParseTimeZoneIdentifier — UTC, offset (`±HH` / `±HH:MM` /
+/// `±HHMM`), or a structural IANA identifier (`Area/Location…`).
+/// Sub-minute offsets are rejected. Unknown/malformed input returns null.
 pub fn parseTimeZoneIdentifier(s: []const u8) ?TimeZone {
     if (std.ascii.eqlIgnoreCase(s, "UTC")) return .utc;
     if (s.len == 0) return null;
-    if (s[0] != '+' and s[0] != '-') return null; // named IANA zone — unsupported
-    const neg = s[0] == '-';
-    var i: usize = 1;
-    const hour = read2(s, &i) orelse return null;
-    if (hour > 23) return null;
-    var minute: u32 = 0;
-    if (i < s.len) {
-        if (s[i] == ':') i += 1;
-        minute = read2(s, &i) orelse return null;
-        if (minute > 59) return null;
+    if (s[0] == '+' or s[0] == '-') {
+        const neg = s[0] == '-';
+        var i: usize = 1;
+        const hour = read2(s, &i) orelse return null;
+        if (hour > 23) return null;
+        var minute: u32 = 0;
+        if (i < s.len) {
+            if (s[i] == ':') i += 1;
+            minute = read2(s, &i) orelse return null;
+            if (minute > 59) return null;
+        }
+        if (i != s.len) return null; // trailing bytes (sub-minute, garbage) → reject
+        const total: i32 = @intCast(hour * 60 + minute);
+        return .{ .offset_minutes = if (neg) -total else total };
     }
-    if (i != s.len) return null; // trailing bytes (sub-minute, garbage) → reject
-    const total: i32 = @intCast(hour * 60 + minute);
-    return .{ .offset_minutes = if (neg) -total else total };
+    // Structural IANA — only when built with `-Dintl=stub`/`full`
+    // (ROADMAP: named zones are the Intl-enabled build payoff).
+    if (!intl_config.temporal_intl_extras) return null;
+    // Accept identifiers that look like zone names (must contain '/',
+    // components are alnum/_/-/+; first segment alpha).
+    return parseIanaTimeZoneIdentifier(s);
+}
+
+/// True when `s` is a plausible IANA time-zone identifier. At `-Dintl=full`
+/// the name must also exist in the embedded tzdb; at `stub` only the
+/// structural shape is checked (no tzdata consult).
+fn parseIanaTimeZoneIdentifier(s: []const u8) ?TimeZone {
+    if (s.len == 0 or s.len > max_iana_zone_bytes) return null;
+    if (std.mem.indexOfScalar(u8, s, '/') == null) return null;
+    // No leading/trailing slash; no empty segments; segments are [A-Za-z0-9_+-].
+    var i: usize = 0;
+    var seg_start: usize = 0;
+    var segs: usize = 0;
+    while (i <= s.len) : (i += 1) {
+        if (i == s.len or s[i] == '/') {
+            const seg_len = i - seg_start;
+            if (seg_len == 0) return null;
+            const seg = s[seg_start..i];
+            for (seg) |c| {
+                const ok = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
+                    (c >= '0' and c <= '9') or c == '_' or c == '-' or c == '+';
+                if (!ok) return null;
+            }
+            if (segs == 0) {
+                // First segment must start with a letter (Etc, America, …).
+                const c0 = seg[0];
+                if (!((c0 >= 'A' and c0 <= 'Z') or (c0 >= 'a' and c0 <= 'z'))) return null;
+            }
+            segs += 1;
+            seg_start = i + 1;
+        }
+    }
+    if (segs < 2) return null;
+    // At `-Dintl=full`, only accept zones present in the embedded tzdb.
+    if (intl_config.has_locale_data) {
+        if (!@import("tzdata.zig").hasZone(s)) return null;
+    }
+    var named: TimeZone = .{ .named = .{} };
+    @memcpy(named.named.bytes[0..s.len], s);
+    named.named.len = @intCast(s.len);
+    return named;
 }
 
 /// §11.x ParseTemporalTimeZoneString — the time-zone *argument* form, broader
@@ -1421,6 +1565,12 @@ pub fn timeZoneIdentifierString(tz: TimeZone, buf: []u8) []const u8 {
             w.byte(':');
             w.pad2(abs % 60);
             return w.buf[0..w.len];
+        },
+        .named => |n| {
+            const sl = n.slice();
+            if (sl.len > buf.len) return buf[0..0];
+            @memcpy(buf[0..sl.len], sl);
+            return buf[0..sl.len];
         },
     }
 }
@@ -2379,17 +2529,26 @@ pub fn parseTemporalDateString(input: []const u8) error{Invalid}!PlainDateRecord
     const calendar = try consumeAnnotations(&c);
     if (!c.done()) return error.Invalid;
     // PlainDate is calendar-aware: a `[u-ca=…]` annotation must name a
-    // supported calendar. Cynic ships only the ISO 8601 calendar, so an
-    // unknown calendar (`[u-ca=notexist]`) is a parse error.
-    if (calendar) |cal| {
-        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
-    }
+    // supported calendar (structural accept; arithmetic stays ISO).
+    const cal_id = try calendarIdFromAnnotation(calendar);
     if (!isoDateWithinLimits(date.year, date.month, date.day)) return error.Invalid;
     return .{
         .iso_year = @intCast(date.year),
         .iso_month = @intCast(date.month),
         .iso_day = @intCast(date.day),
+        .calendar = cal_id,
     };
+}
+
+/// Map an optional `[u-ca=…]` annotation value to a stored calendar id.
+/// Absent annotation ⇒ ISO; unsupported / off-tier id ⇒ Invalid.
+fn calendarIdFromAnnotation(calendar: ?[]const u8) error{Invalid}!CalendarId {
+    const cal = calendar orelse return CalendarId.iso8601();
+    if (!intl_config.temporal_intl_extras) {
+        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
+        return CalendarId.iso8601();
+    }
+    return calendarIdFromString(cal) orelse error.Invalid;
 }
 
 /// §3.5.x RegulateISODate — apply an overflow option to raw (possibly
@@ -3430,9 +3589,7 @@ pub fn parseTemporalDateTimeString(input: []const u8) error{Invalid}!PlainDateTi
     }
     const calendar = try consumeAnnotations(&c);
     if (!c.done()) return error.Invalid;
-    if (calendar) |cal| {
-        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
-    }
+    const cal_id = try calendarIdFromAnnotation(calendar);
     const rec = PlainDateTimeRecord{
         .iso_year = @intCast(date.year),
         .iso_month = @intCast(date.month),
@@ -3443,6 +3600,7 @@ pub fn parseTemporalDateTimeString(input: []const u8) error{Invalid}!PlainDateTi
         .millisecond = time.sub_ns / 1_000_000,
         .microsecond = (time.sub_ns / 1_000) % 1_000,
         .nanosecond = time.sub_ns % 1_000,
+        .calendar = cal_id,
     };
     if (!isoDateTimeWithinLimits(rec)) return error.Invalid;
     return rec;
@@ -3465,10 +3623,8 @@ pub const ParsedZonedDateTime = struct {
 /// bare date is midnight); a `Z`/`z` designator marks the wall time as
 /// exact UTC, a numeric offset is resolved per the caller's `offset`
 /// option, and absence of both means the zone alone places the instant.
-/// A named IANA zone is syntactically valid but unsupported in the
-/// default build, so it is rejected here (the caller throws RangeError) —
-/// a future Intl build resolves it through `getOffsetNanosecondsFor`. A
-/// `[u-ca=…]` annotation must name the ISO calendar.
+/// Named IANA zones are accepted structurally (UTC offset until tzdata).
+/// A `[u-ca=…]` annotation must name a supported calendar.
 pub fn parseTemporalZonedDateTimeString(input: []const u8) error{Invalid}!ParsedZonedDateTime {
     var c = Cursor{ .s = input };
     const date = try parseIsoDate(&c);
@@ -3491,9 +3647,7 @@ pub fn parseTemporalZonedDateTimeString(input: []const u8) error{Invalid}!Parsed
     if (!c.done()) return error.Invalid;
     const body = tz_body orelse return error.Invalid; // the annotation is required
     const tz = parseTimeZoneIdentifier(body) orelse return error.Invalid;
-    if (calendar) |cal| {
-        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
-    }
+    const cal_id = try calendarIdFromAnnotation(calendar);
     const rec = PlainDateTimeRecord{
         .iso_year = @intCast(date.year),
         .iso_month = @intCast(date.month),
@@ -3504,6 +3658,7 @@ pub fn parseTemporalZonedDateTimeString(input: []const u8) error{Invalid}!Parsed
         .millisecond = time.sub_ns / 1_000_000,
         .microsecond = (time.sub_ns / 1_000) % 1_000,
         .nanosecond = time.sub_ns % 1_000,
+        .calendar = cal_id,
     };
     // No PlainDateTime-range gate here: ParseISODateTime does not range-check,
     // and the wall clock of a valid zoned string can legitimately sit one ISO
@@ -3613,14 +3768,13 @@ pub fn parseTemporalYearMonthString(input: []const u8) error{Invalid}!PlainYearM
     }
     const calendar = try consumeAnnotations(&c);
     if (!c.done()) return error.Invalid;
-    if (calendar) |cal| {
-        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
-    }
+    const cal_id = try calendarIdFromAnnotation(calendar);
     if (!isoYearMonthWithinLimits(date.year, date.month)) return error.Invalid;
     return .{
         .iso_year = @intCast(date.year),
         .iso_month = @intCast(date.month),
         .ref_iso_day = @intCast(date.day),
+        .calendar = cal_id,
     };
 }
 
@@ -3697,13 +3851,12 @@ pub fn parseTemporalMonthDayString(input: []const u8) error{Invalid}!PlainMonthD
     }
     const calendar = try consumeAnnotations(&c);
     if (!c.done()) return error.Invalid;
-    if (calendar) |cal| {
-        if (!std.ascii.eqlIgnoreCase(cal, "iso8601")) return error.Invalid;
-    }
+    const cal_id = try calendarIdFromAnnotation(calendar);
     return .{
         .ref_iso_year = 1972,
         .iso_month = @intCast(date.month),
         .iso_day = @intCast(date.day),
+        .calendar = cal_id,
     };
 }
 
@@ -4631,9 +4784,14 @@ test "parseTemporalDateTimeString: offset discarded, ISO calendar ok" {
     try testing.expectEqual(pdt(2024, 1, 15, 13, 45, 0, 0, 0, 0), try parseTemporalDateTimeString("2024-01-15T13:45[u-ca=iso8601]"));
 }
 
-test "parseTemporalDateTimeString: Z designator and non-ISO calendar reject" {
+test "parseTemporalDateTimeString: Z designator rejects; calendar tier gates non-ISO" {
     try testing.expectError(error.Invalid, parseTemporalDateTimeString("2024-01-15T13:45:30Z"));
-    try testing.expectError(error.Invalid, parseTemporalDateTimeString("2024-01-15T13:45[u-ca=gregory]"));
+    if (intl_config.temporal_intl_extras) {
+        try testing.expectEqual(@as(u8, 15), (try parseTemporalDateTimeString("2024-01-15T13:45[u-ca=gregory]")).iso_day);
+    } else {
+        try testing.expectError(error.Invalid, parseTemporalDateTimeString("2024-01-15T13:45[u-ca=gregory]"));
+    }
+    try testing.expectError(error.Invalid, parseTemporalDateTimeString("2024-01-15T13:45[u-ca=notexist]"));
     try testing.expectError(error.Invalid, parseTemporalDateTimeString("2024-13-01"));
 }
 
@@ -4746,14 +4904,18 @@ test "parseTimeZoneIdentifier: offset forms resolve to whole-minute offsets" {
         const tz = parseTimeZoneIdentifier(c.s) orelse return error.TestUnexpectedNull;
         switch (tz) {
             .offset_minutes => |m| try testing.expectEqual(c.want, m),
-            .utc => return error.TestExpectedOffsetZone,
+            .utc, .named => return error.TestExpectedOffsetZone,
         }
     }
 }
 
-test "parseTimeZoneIdentifier: rejects named zones, sub-minute, and garbage" {
+test "parseTimeZoneIdentifier: IANA gated by intl tier; rejects sub-minute and garbage" {
     try testing.expect(parseTimeZoneIdentifier("+01:00:00") == null); // sub-minute precision
-    try testing.expect(parseTimeZoneIdentifier("America/New_York") == null); // named IANA zone
+    if (intl_config.temporal_intl_extras) {
+        try testing.expect(std.meta.activeTag(parseTimeZoneIdentifier("America/New_York").?) == .named);
+    } else {
+        try testing.expect(parseTimeZoneIdentifier("America/New_York") == null);
+    }
     try testing.expect(parseTimeZoneIdentifier("") == null); // empty
     try testing.expect(parseTimeZoneIdentifier("+24:00") == null); // hour out of range
     try testing.expect(parseTimeZoneIdentifier("+01:60") == null); // minute out of range
@@ -4929,10 +5091,16 @@ test "parseTemporalZonedDateTimeString: offset / Z / bare-date forms" {
     _ = try parseTemporalZonedDateTimeString("2020-01-01T00:00:00+05:30[+05:30][u-ca=iso8601]");
 }
 
-test "parseTemporalZonedDateTimeString: rejects missing annotation / named zone / non-ISO calendar" {
+test "parseTemporalZonedDateTimeString: rejects missing annotation; IANA/calendars tier-gated" {
     try testing.expectError(error.Invalid, parseTemporalZonedDateTimeString("2020-01-01T00:00:00"));
-    try testing.expectError(error.Invalid, parseTemporalZonedDateTimeString("2020-01-01T00:00:00[America/New_York]"));
-    try testing.expectError(error.Invalid, parseTemporalZonedDateTimeString("2020-01-01T00:00:00+05:30[+05:30][u-ca=hebrew]"));
+    if (intl_config.temporal_intl_extras) {
+        _ = try parseTemporalZonedDateTimeString("2020-01-01T00:00:00[America/New_York]");
+        _ = try parseTemporalZonedDateTimeString("2020-01-01T00:00:00+05:30[+05:30][u-ca=hebrew]");
+    } else {
+        try testing.expectError(error.Invalid, parseTemporalZonedDateTimeString("2020-01-01T00:00:00[America/New_York]"));
+        try testing.expectError(error.Invalid, parseTemporalZonedDateTimeString("2020-01-01T00:00:00+05:30[+05:30][u-ca=hebrew]"));
+    }
+    try testing.expectError(error.Invalid, parseTemporalZonedDateTimeString("2020-01-01T00:00:00+05:30[+05:30][u-ca=notexist]"));
 }
 
 test "parseOffsetString: numeric offset field, signed nanoseconds" {

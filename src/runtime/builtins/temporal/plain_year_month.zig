@@ -156,20 +156,19 @@ fn plainYearMonthConstructor(realm: *Realm, this_value: Value, args: []const Val
         return throwTypeError(realm, "Temporal.PlainYearMonth constructor requires 'new'");
     const y = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 0, Value.undefined_)));
     const m = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 1, Value.undefined_)));
-    try requireISOCalendar(realm, argOr(args, 2, Value.undefined_));
+    const cal = try requireISOCalendar(realm, argOr(args, 2, Value.undefined_));
     const ref_v = argOr(args, 3, Value.undefined_);
     const ref: i64 = if (ref_v.isUndefined()) 1 else try dateFieldToI64(realm, try toIntegerWithTruncation(realm, ref_v));
     if (!temporal.isValidISODate(y, m, ref)) return throwRangeError(realm, "invalid reference ISO date");
     if (!temporal.isoYearMonthWithinLimits(y, m)) return throwRangeError(realm, "PlainYearMonth is out of range");
-    try storePlainYearMonth(realm, inst, .{ .iso_year = @intCast(y), .iso_month = @intCast(m), .ref_iso_day = @intCast(ref) });
+    try storePlainYearMonth(realm, inst, .{ .iso_year = @intCast(y), .iso_month = @intCast(m), .ref_iso_day = @intCast(ref), .calendar = cal });
     return heap_mod.taggedObject(inst);
 }
 
 fn plainYearMonthCalendarId(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainYearMonth(realm, t);
-    const js = realm.heap.allocateString("iso8601") catch return error.OutOfMemory;
-    return Value.fromString(js);
+    const rec = try requirePlainYearMonth(realm, t);
+    return shared.calendarIdToValue(realm, rec.calendar);
 }
 fn plainYearMonthYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -223,7 +222,8 @@ fn plainYearMonthEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!
 /// in the year-month field list and is never read. The monthCode format
 /// RangeError is deferred until after the overflow option is read.
 fn toYearMonthFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!PlainYearMonthRecord {
-    try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
+    const cal = try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
+    _ = cal; // applied when the year-month record is assembled below
 
     const month_v = try getPropertyChain(realm, obj, "month");
     var month_present = false;

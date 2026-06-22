@@ -181,9 +181,9 @@ fn zonedDateTimeConstructor(realm: *Realm, this_value: Value, args: []const Valu
     // RangeError (timezone-iso-string.js).
     const tz = temporal.parseTimeZoneIdentifier(tz_str.flatBytes()) orelse
         return throwRangeError(realm, "invalid time zone identifier");
-    // step 7-9 — calendar defaults to iso8601; only the ISO calendar ships.
-    try requireISOCalendar(realm, argOr(args, 2, Value.undefined_));
-    try storeZonedDateTime(realm, inst, .{ .epoch_ns = epoch_ns, .time_zone = tz });
+    // step 7-9 — calendar defaults to iso8601; supported calendars accepted structurally.
+    const cal = try requireISOCalendar(realm, argOr(args, 2, Value.undefined_));
+    try storeZonedDateTime(realm, inst, .{ .epoch_ns = epoch_ns, .time_zone = tz, .calendar = cal });
     return heap_mod.taggedObject(inst);
 }
 
@@ -226,14 +226,13 @@ fn zonedDateTimeFields(realm: *Realm, this_value: Value) NativeError!PlainDateTi
 // through the zone offset), and the epoch read-throughs.
 fn zonedDateTimeCalendarId(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requireZonedDateTime(realm, t);
-    const js = realm.heap.allocateString("iso8601") catch return error.OutOfMemory;
-    return Value.fromString(js);
+    const z = try requireZonedDateTime(realm, t);
+    return shared.calendarIdToValue(realm, z.calendar);
 }
 fn zonedDateTimeTimeZoneId(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const z = try requireZonedDateTime(realm, t);
-    var buf: [16]u8 = undefined;
+    var buf: [64]u8 = undefined;
     const s = temporal.timeZoneIdentifierString(z.time_zone, &buf);
     const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
     return Value.fromString(js);
@@ -305,12 +304,16 @@ fn zonedDateTimeDayOfYear(realm: *Realm, t: Value, a: []const Value) NativeError
 }
 fn zonedDateTimeWeekOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    const rec = try zonedDateTimeFields(realm, t);
+    const z = try requireZonedDateTime(realm, t);
+    if (!shared.weekFieldsForCalendar(z.calendar)) return Value.undefined_;
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
     return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).week);
 }
 fn zonedDateTimeYearOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    const rec = try zonedDateTimeFields(realm, t);
+    const z = try requireZonedDateTime(realm, t);
+    if (!shared.weekFieldsForCalendar(z.calendar)) return Value.undefined_;
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
     return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).year);
 }
 fn zonedDateTimeHoursInDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
@@ -372,13 +375,15 @@ fn zonedDateTimeOffsetNanoseconds(realm: *Realm, t: Value, a: []const Value) Nat
 }
 fn zonedDateTimeEra(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requireZonedDateTime(realm, t);
-    return Value.undefined_; // ISO calendar has no era
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return shared.eraForCalendar(realm, z.calendar, rec.iso_year);
 }
 fn zonedDateTimeEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requireZonedDateTime(realm, t);
-    return Value.undefined_;
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return shared.eraYearForCalendar(z.calendar, rec.iso_year);
 }
 
 fn toZonedDateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!ZonedDateTimeRecord {
@@ -399,7 +404,7 @@ fn toZonedDateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeEr
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
         error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
     };
-    return .{ .epoch_ns = epoch, .time_zone = extras.time_zone };
+    return .{ .epoch_ns = epoch, .time_zone = extras.time_zone, .calendar = dt.calendar };
 }
 
 /// §6.5.x ToTemporalZonedDateTime — a ZonedDateTime (copy, options read for
@@ -431,7 +436,7 @@ fn toTemporalZonedDateTime(realm: *Realm, item: Value, options: Value) NativeErr
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
         error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
     };
-    return .{ .epoch_ns = epoch, .time_zone = parsed.time_zone };
+    return .{ .epoch_ns = epoch, .time_zone = parsed.time_zone, .calendar = parsed.date_time.calendar };
 }
 
 /// §6.2.x Temporal.ZonedDateTime.from ( item [ , options ] ).
@@ -676,7 +681,7 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
         error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
     };
-    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone });
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone, .calendar = z.calendar });
 }
 
 /// §6.3.x Temporal.ZonedDateTime.prototype.withPlainTime ( [ plainTimeLike ] )
@@ -690,7 +695,7 @@ fn zonedDateTimeWithPlainTime(realm: *Realm, this_value: Value, args: []const Va
     const wall = PlainDateTimeRecord.combine(base.date(), t);
     const epoch = temporal.getEpochNanosecondsFor(z.time_zone, wall) orelse
         return throwRangeError(realm, "ZonedDateTime is out of range");
-    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone });
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone, .calendar = z.calendar });
 }
 
 /// §6.3.x Temporal.ZonedDateTime.prototype.withTimeZone ( timeZoneLike ) —
@@ -698,15 +703,14 @@ fn zonedDateTimeWithPlainTime(realm: *Realm, this_value: Value, args: []const Va
 fn zonedDateTimeWithTimeZone(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const z = try requireZonedDateTime(realm, this_value);
     const tz = try toTimeZoneArg(realm, argOr(args, 0, Value.undefined_));
-    return createTemporalZonedDateTime(realm, .{ .epoch_ns = z.epoch_ns, .time_zone = tz });
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = z.epoch_ns, .time_zone = tz, .calendar = z.calendar });
 }
 
 /// §6.3.x Temporal.ZonedDateTime.prototype.withCalendar ( calendarLike ) —
-/// Cynic ships only the ISO calendar, so any accepted identifier yields a
-/// copy with the same instant + zone.
+/// re-stamps the receiver with a supported calendar; instant + zone unchanged.
 fn zonedDateTimeWithCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const z = try requireZonedDateTime(realm, this_value);
-    try toTemporalCalendarIdentifier(realm, argOr(args, 0, Value.undefined_));
+    var z = try requireZonedDateTime(realm, this_value);
+    z.calendar = try toTemporalCalendarIdentifier(realm, argOr(args, 0, Value.undefined_));
     return createTemporalZonedDateTime(realm, z);
 }
 
@@ -721,7 +725,7 @@ fn zonedDateTimeAddSubtract(realm: *Realm, this_value: Value, args: []const Valu
     if (negate) dur = temporal.negateDuration(dur);
     const epoch = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, dur, overflow == .reject) orelse
         return throwRangeError(realm, "ZonedDateTime is out of range");
-    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone });
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone, .calendar = z.calendar });
 }
 fn zonedDateTimeAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     return zonedDateTimeAddSubtract(realm, this_value, args, false);
@@ -880,7 +884,7 @@ fn zonedDateTimeRound(realm: *Realm, this_value: Value, args: []const Value) Nat
     }
     const epoch = temporal.roundZonedDateTime(z.epoch_ns, z.time_zone, unit, increment, mode) orelse
         return throwRangeError(realm, "rounded ZonedDateTime is out of range");
-    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone });
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone, .calendar = z.calendar });
 }
 
 /// §6.3.x Temporal.ZonedDateTime.prototype.startOfDay ( ) — the instant of
@@ -890,7 +894,7 @@ fn zonedDateTimeStartOfDay(realm: *Realm, this_value: Value, args: []const Value
     const z = try requireZonedDateTime(realm, this_value);
     const epoch = temporal.zonedStartOfDay(z.epoch_ns, z.time_zone) orelse
         return throwRangeError(realm, "ZonedDateTime is out of range");
-    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone });
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone, .calendar = z.calendar });
 }
 
 /// §6.3.x Temporal.ZonedDateTime.prototype.getTimeZoneTransition

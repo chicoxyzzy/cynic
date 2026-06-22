@@ -283,60 +283,58 @@ pub fn rejectTemporalLikeObject(realm: *Realm, obj: *JSObject) NativeError!void 
     }
 }
 
-/// §3.1.1 — the `calendar` argument must be undefined or a string that
-/// canonicalises to "iso8601" (Cynic ships only the ISO calendar). A
-/// non-string is a TypeError; an unsupported/unknown calendar string is
-/// a RangeError.
-pub fn requireISOCalendar(realm: *Realm, calendar: Value) NativeError!void {
-    if (calendar.isUndefined()) return;
+const intl_config = @import("../../intl_config.zig");
+
+/// §3.1.1 / constructor calendar arg — accept undefined (⇒ ISO) or a
+/// calendar string. With `-Dintl=off` only ASCII `iso8601` is accepted
+/// (ROADMAP shipped Temporal scope). With `stub`/`full`, any supported
+/// calendar id is stored structurally (arithmetic stays ISO).
+pub fn requireISOCalendar(realm: *Realm, calendar: Value) NativeError!temporal.CalendarId {
+    if (calendar.isUndefined()) return temporal.CalendarId.iso8601();
     if (!calendar.isString()) return throwTypeError(realm, "calendar must be a string");
     const s: *JSString = @ptrCast(@alignCast(calendar.asString()));
-    if (!std.ascii.eqlIgnoreCase(s.flatBytes(), "iso8601")) {
-        return throwRangeError(realm, "only the iso8601 calendar is supported");
+    const bytes = s.flatBytes();
+    if (!intl_config.temporal_intl_extras) {
+        if (!std.ascii.eqlIgnoreCase(bytes, "iso8601")) {
+            return throwRangeError(realm, "only the iso8601 calendar is supported");
+        }
+        return temporal.CalendarId.iso8601();
     }
+    return temporal.calendarIdFromString(bytes) orelse
+        return throwRangeError(realm, "unsupported calendar identifier");
+}
+
+/// Like `requireISOCalendar` but only validates (legacy void callers that
+/// ignore the returned id — prefer the returning form when storing).
+pub fn requireISOCalendarVoid(realm: *Realm, calendar: Value) NativeError!void {
+    _ = try requireISOCalendar(realm, calendar);
 }
 
 /// ToTemporalCalendarIdentifier for the `calendar` field of a Temporal
 /// date-like property bag (§12.2.x). `undefined` keeps the ISO default.
-/// An object carrying a calendar-bearing Temporal internal slot
-/// (PlainDate / PlainDateTime / PlainYearMonth / PlainMonthDay /
-/// ZonedDateTime) contributes its `[[Calendar]]` — always "iso8601" in
-/// Cynic — and is accepted via the internal-slot fast path; a
-/// Temporal.Instant / Duration / PlainTime (no `[[Calendar]]`), any other
-/// object, or any non-string primitive is a TypeError. A calendar
-/// *string* is canonicalised (CanonicalizeCalendar): it must be the bare
-/// ASCII "iso8601" id, or a parseable ISO 8601 string whose `[u-ca=…]`
-/// annotation (when present) names the ISO calendar — every other string
-/// (empty, unknown id, non-ASCII case fold like dotted-İ, year-zero,
-/// unknown annotation) is a RangeError. Cynic ships only the ISO calendar.
-/// (Distinct from the constructor's `requireISOCalendar`, which accepts a
-/// bare calendar id only — no embedded ISO string.)
-pub fn requireCalendarFieldType(realm: *Realm, calendar: Value) NativeError!void {
-    if (calendar.isUndefined()) return;
+/// Returns the resolved calendar id for storage on the receiver.
+pub fn requireCalendarFieldType(realm: *Realm, calendar: Value) NativeError!temporal.CalendarId {
+    if (calendar.isUndefined()) return temporal.CalendarId.iso8601();
     return toTemporalCalendarIdentifier(realm, calendar);
 }
 
-/// §13.x ToTemporalCalendarIdentifier — the bare abstract operation, with no
-/// `undefined`-means-default special case. An object carrying a
-/// calendar-bearing Temporal internal slot (PlainDate / PlainDateTime /
-/// PlainYearMonth / PlainMonthDay / ZonedDateTime) contributes its
-/// `[[Calendar]]` (always "iso8601" in Cynic) and is accepted; a
-/// Temporal.Instant / Duration / PlainTime (no `[[Calendar]]`), any other
-/// object, or any non-string primitive (including `undefined`) is a
-/// TypeError. A calendar *string* must be the bare ASCII "iso8601" id or a
-/// parseable ISO 8601 string whose `[u-ca=…]` annotation (when present)
-/// names the ISO calendar — every other string is a RangeError. Used by
-/// `withCalendar`, where the argument is a required value passed straight to
-/// ToTemporalCalendarIdentifier; `requireCalendarFieldType` wraps this for the
-/// property-bag `calendar` field, where an absent (`undefined`) field instead
-/// keeps the ISO default.
-pub fn toTemporalCalendarIdentifier(realm: *Realm, calendar: Value) NativeError!void {
+/// Void wrapper for call sites that only validate (no store).
+pub fn requireCalendarFieldTypeVoid(realm: *Realm, calendar: Value) NativeError!void {
+    _ = try requireCalendarFieldType(realm, calendar);
+}
+
+/// §13.x ToTemporalCalendarIdentifier — returns the canonical calendar id.
+/// An object carrying a calendar-bearing Temporal internal slot contributes
+/// its `[[Calendar]]`; a string is a bare id or a parseable ISO 8601 temporal
+/// string. With `-Dintl=off` only `iso8601` (bare or annotated) is accepted.
+pub fn toTemporalCalendarIdentifier(realm: *Realm, calendar: Value) NativeError!temporal.CalendarId {
     if (heap_mod.valueAsPlainObject(calendar)) |obj| {
         if (obj.getTemporalRecord()) |rec| switch (rec.*) {
-            // §13.x ToTemporalCalendarIdentifier step 1.a — read the
-            // `[[Calendar]]` of a calendar-bearing Temporal object.
-            .plain_date, .plain_date_time, .plain_year_month, .plain_month_day, .zoned_date_time => return,
-            // Instant / Duration / PlainTime have no `[[Calendar]]`.
+            .plain_date => |pd| return pd.calendar,
+            .plain_date_time => |pdt| return pdt.calendar,
+            .plain_year_month => |pym| return pym.calendar,
+            .plain_month_day => |pmd| return pmd.calendar,
+            .zoned_date_time => |z| return z.calendar,
             else => {},
         };
         return throwTypeError(realm, "calendar must be a string or a calendar-bearing Temporal object");
@@ -344,28 +342,71 @@ pub fn toTemporalCalendarIdentifier(realm: *Realm, calendar: Value) NativeError!
     if (!calendar.isString()) return throwTypeError(realm, "calendar must be a string");
     const s: *JSString = @ptrCast(@alignCast(calendar.asString()));
     const bytes = s.flatBytes();
-    // Bare calendar id — ASCII case-insensitive "iso8601" (the dotted-İ
-    // fixture relies on this being ASCII-only, never a Unicode fold).
-    if (std.ascii.eqlIgnoreCase(bytes, "iso8601")) return;
-    // Otherwise it must be a full ISO 8601 string. The per-type parsers
-    // each validate an embedded `[u-ca=…]` annotation against the ISO
-    // calendar and reject malformed forms (year-zero extended year, …),
-    // so any one accepting it proves the calendar is the ISO calendar.
-    if (calendarStringIsISO(bytes)) return;
+    if (!intl_config.temporal_intl_extras) {
+        if (std.ascii.eqlIgnoreCase(bytes, "iso8601")) return temporal.CalendarId.iso8601();
+        if (calendarStringIsSupported(bytes)) |c| {
+            if (c.isIso()) return c;
+        }
+        return throwRangeError(realm, "invalid calendar identifier");
+    }
+    if (temporal.calendarIdFromString(bytes)) |c| return c;
+    // Full ISO 8601 temporal string — any parser success implies the
+    // embedded calendar (default ISO) is supported.
+    if (calendarStringIsSupported(bytes)) |c| return c;
     return throwRangeError(realm, "invalid calendar identifier");
 }
 
 /// True when `bytes` parses as any ISO 8601 Temporal string whose calendar
-/// (annotation, defaulting to ISO) is the supported ISO calendar — the
-/// string branch of ParseTemporalCalendarString limited to Cynic's scope.
+/// annotation (defaulting to ISO) is supported. Returns that calendar.
+pub fn calendarStringIsSupported(bytes: []const u8) ?temporal.CalendarId {
+    if (temporal.parseTemporalDateTimeString(bytes)) |r| return r.calendar else |_| {}
+    if (temporal.parseTemporalDateString(bytes)) |r| return r.calendar else |_| {}
+    if (temporal.parseTemporalYearMonthString(bytes)) |r| return r.calendar else |_| {}
+    if (temporal.parseTemporalMonthDayString(bytes)) |r| return r.calendar else |_| {}
+    if (temporal.parseTemporalTimeString(bytes)) |_| return temporal.CalendarId.iso8601() else |_| {}
+    if (temporal.parseInstantString(bytes)) |_| return temporal.CalendarId.iso8601() else |_| {}
+    return null;
+}
+
+/// Legacy name — accepts any supported calendar string, not only ISO.
 pub fn calendarStringIsISO(bytes: []const u8) bool {
-    if (temporal.parseTemporalDateTimeString(bytes)) |_| return true else |_| {}
-    if (temporal.parseTemporalDateString(bytes)) |_| return true else |_| {}
-    if (temporal.parseTemporalYearMonthString(bytes)) |_| return true else |_| {}
-    if (temporal.parseTemporalMonthDayString(bytes)) |_| return true else |_| {}
-    if (temporal.parseTemporalTimeString(bytes)) |_| return true else |_| {}
-    if (temporal.parseInstantString(bytes)) |_| return true else |_| {}
-    return false;
+    return calendarStringIsSupported(bytes) != null;
+}
+
+/// Allocate a JS string for a stored calendar id (calendarId getters).
+pub fn calendarIdToValue(realm: *Realm, cal: temporal.CalendarId) NativeError!Value {
+    const js = realm.heap.allocateString(cal.slice()) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+
+/// Gregory/ISO era helpers used by era / eraYear getters. Non-ISO calendars
+/// other than gregory return undefined for era (structural stub; real
+/// calendar arithmetic is not implemented).
+pub fn eraForCalendar(realm: *Realm, cal: temporal.CalendarId, iso_year: i32) NativeError!Value {
+    if (cal.isIso()) return Value.undefined_;
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "gregory")) {
+        const era = if (iso_year < 1) "bce" else "ce";
+        const js = realm.heap.allocateString(era) catch return error.OutOfMemory;
+        return Value.fromString(js);
+    }
+    // Other non-ISO calendars: structural accept only; era not modelled.
+    return Value.undefined_;
+}
+
+pub fn eraYearForCalendar(cal: temporal.CalendarId, iso_year: i32) Value {
+    if (cal.isIso()) return Value.undefined_;
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "gregory")) {
+        const ey: i32 = if (iso_year < 1) 1 - iso_year else iso_year;
+        return Value.fromInt32(ey);
+    }
+    return Value.undefined_;
+}
+
+/// weekOfYear / yearOfWeek are ISO-calendar concepts; non-ISO calendars
+/// report undefined (matches gregory/hebrew behaviour in engines with
+/// incomplete week numbering for non-ISO).
+pub fn weekFieldsForCalendar(cal: temporal.CalendarId) bool {
+    return cal.isIso();
 }
 
 /// §13.x GetTemporalShowCalendarNameOption — auto / always / never /
@@ -510,13 +551,18 @@ pub fn requireToStringSmallestUnit(realm: *Realm, unit: ?temporal.LargestUnit) N
     }
 }
 
-/// §11.x TimeZoneEquals — for the offset-only scope two zones are equal when
-/// both are the named UTC zone or both carry the same whole-minute offset.
+/// §11.x TimeZoneEquals — UTC / same offset / same structural IANA name
+/// (case-sensitive identifier compare; canonicalisation is not modelled
+/// without tzdata, so `Africa/Cairo` ≠ `africa/cairo` here).
 pub fn timeZoneEquals(a: temporal.TimeZone, b: temporal.TimeZone) bool {
     return switch (a) {
         .utc => std.meta.activeTag(b) == .utc,
         .offset_minutes => |am| switch (b) {
             .offset_minutes => |bm| am == bm,
+            else => false,
+        },
+        .named => |an| switch (b) {
+            .named => |bn| std.mem.eql(u8, an.slice(), bn.slice()),
             else => false,
         },
     };

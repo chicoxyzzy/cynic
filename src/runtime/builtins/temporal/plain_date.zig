@@ -154,18 +154,18 @@ fn plainDateConstructor(realm: *Realm, this_value: Value, args: []const Value) N
     const y = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 0, Value.undefined_)));
     const m = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 1, Value.undefined_)));
     const d = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, argOr(args, 2, Value.undefined_)));
-    try requireISOCalendar(realm, argOr(args, 3, Value.undefined_));
-    const rec = temporal.regulateISODate(y, m, d, true) orelse
+    const cal = try requireISOCalendar(realm, argOr(args, 3, Value.undefined_));
+    var rec = temporal.regulateISODate(y, m, d, true) orelse
         return throwRangeError(realm, "PlainDate is out of range");
+    rec.calendar = cal;
     try storePlainDate(realm, inst, rec);
     return heap_mod.taggedObject(inst);
 }
 
 fn plainDateCalendarId(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainDate(realm, t);
-    const js = realm.heap.allocateString("iso8601") catch return error.OutOfMemory;
-    return Value.fromString(js);
+    const rec = try requirePlainDate(realm, t);
+    return shared.calendarIdToValue(realm, rec.calendar);
 }
 fn plainDateYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -199,11 +199,13 @@ fn plainDateDayOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Val
 fn plainDateWeekOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDate(realm, t);
+    if (!shared.weekFieldsForCalendar(rec.calendar)) return Value.undefined_;
     return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).week);
 }
 fn plainDateYearOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDate(realm, t);
+    if (!shared.weekFieldsForCalendar(rec.calendar)) return Value.undefined_;
     return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).year);
 }
 fn plainDateDaysInWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
@@ -233,13 +235,13 @@ fn plainDateInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeError!Va
 }
 fn plainDateEra(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainDate(realm, t);
-    return Value.undefined_; // ISO calendar has no era
+    const rec = try requirePlainDate(realm, t);
+    return shared.eraForCalendar(realm, rec.calendar, rec.iso_year);
 }
 fn plainDateEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainDate(realm, t);
-    return Value.undefined_;
+    const rec = try requirePlainDate(realm, t);
+    return shared.eraYearForCalendar(rec.calendar, rec.iso_year);
 }
 
 /// §3.5.x ISODateFromFields — read the date fields off a property bag and
@@ -253,9 +255,7 @@ fn plainDateEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value
 /// suitability, the month / monthCode reconciliation, and the required-field
 /// checks are all part of CalendarResolveFields, after the overflow read.
 fn toISODateFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!PlainDateRecord {
-    // The calendar field (if present) must be undefined or a String;
-    // the string's canonicalisation is deferred with calendar support.
-    try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
+    const cal = try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
 
     const day_v = try getPropertyChain(realm, obj, "day");
     var day_present = false;
@@ -297,8 +297,10 @@ fn toISODateFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!Pl
     } else {
         return throwTypeError(realm, "PlainDate-like is missing 'month' / 'monthCode'");
     }
-    return temporal.regulateISODate(year_val, month, day_val, overflow == .reject) orelse
-        throwRangeError(realm, "PlainDate is out of range");
+    var rec = temporal.regulateISODate(year_val, month, day_val, overflow == .reject) orelse
+        return throwRangeError(realm, "PlainDate is out of range");
+    rec.calendar = cal;
+    return rec;
 }
 
 /// §3.5.x ToTemporalDate — a PlainDate (copy), a property bag, or an
@@ -567,14 +569,11 @@ fn differenceTemporalDate(realm: *Realm, this_value: Value, args: []const Value,
     }
     return createTemporalDuration(realm, diff);
 }
-/// §3.3.x Temporal.PlainDate.prototype.withCalendar ( calendarLike ) — Cynic
-/// ships only the ISO calendar, so any accepted identifier yields a copy of
-/// the same ISO date. ToTemporalCalendarIdentifier validates the argument
-/// (calendar-bearing object or ISO string ok; Instant / Duration / PlainTime
-/// or non-string → TypeError; non-ISO string → RangeError).
+/// §3.3.x Temporal.PlainDate.prototype.withCalendar ( calendarLike ) —
+/// re-stamps the receiver with a supported calendar id; ISO fields unchanged.
 fn plainDateWithCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const rec = try requirePlainDate(realm, this_value);
-    try toTemporalCalendarIdentifier(realm, argOr(args, 0, Value.undefined_));
+    var rec = try requirePlainDate(realm, this_value);
+    rec.calendar = try toTemporalCalendarIdentifier(realm, argOr(args, 0, Value.undefined_));
     return createTemporalDate(realm, rec);
 }
 /// §3.3.x Temporal.PlainDate.prototype.toPlainYearMonth ( ) — drop the
