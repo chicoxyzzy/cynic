@@ -352,6 +352,76 @@ fn requireKind(realm: *Realm, this_value: Value, kind: intl.IntlKind) NativeErro
     return rec;
 }
 
+/// Return `locale` with the `-u-` keyword for `key` (and its
+/// continuation `type` subtags) removed. Caller owns the slice;
+/// preserves the rest of the tag verbatim so a subsequent re-
+/// canonicalisation can re-sort the new keyword in.
+fn stripUnicodeExtensionKeyword(allocator: std.mem.Allocator, locale: []const u8, key: []const u8) ![]const u8 {
+    if (key.len != 2) return allocator.dupe(u8, locale);
+    const u_at = std.mem.indexOf(u8, locale, "-u-") orelse return allocator.dupe(u8, locale);
+    // Find the start of the key within the `-u-` extension.
+    var i = u_at + 3;
+    while (i < locale.len) {
+        // End of -u- block at the next singleton extension.
+        if (i + 1 < locale.len and locale[i] == '-' and locale[i + 2] == '-' and locale[i + 1] != 'u') break;
+        const seg_start = i;
+        while (i < locale.len and locale[i] != '-') : (i += 1) {}
+        const seg = locale[seg_start..i];
+        const is_key = seg.len == 2;
+        if (is_key and std.mem.eql(u8, seg, key)) {
+            // Found the key — extend through following type subtags
+            // (3-8 alphanum), stopping at the next 2-ALPHA key or end.
+            var rm_end = i;
+            while (rm_end < locale.len) {
+                if (locale[rm_end] != '-') break;
+                const t_start = rm_end + 1;
+                if (t_start >= locale.len) break;
+                var t_end = t_start;
+                while (t_end < locale.len and locale[t_end] != '-') : (t_end += 1) {}
+                const t_len = t_end - t_start;
+                if (t_len == 2 or t_len == 1) break; // next key or singleton
+                rm_end = t_end;
+            }
+            // Slice out [seg_start - 1, rm_end) — include the preceding '-'.
+            const cut_start = seg_start - 1;
+            const cut_end = rm_end;
+            const out = try allocator.alloc(u8, locale.len - (cut_end - cut_start));
+            @memcpy(out[0..cut_start], locale[0..cut_start]);
+            @memcpy(out[cut_start..], locale[cut_end..]);
+            // If the -u- now has no keywords left, drop it.
+            const u_block_start = u_at;
+            const u_after_dash = u_at + 2; // points at second '-' after `u`
+            if (u_after_dash < out.len and out[u_after_dash] == '-') {
+                // Empty -u- (e.g. `en-u-en-US`): adjacent dash means no keyword followed.
+                if (u_after_dash + 1 < out.len) {
+                    // Singleton extension follows directly — drop the `-u`.
+                    const drop = try allocator.alloc(u8, out.len - 2);
+                    @memcpy(drop[0..u_block_start], out[0..u_block_start]);
+                    @memcpy(drop[u_block_start..], out[u_block_start + 2 ..]);
+                    allocator.free(out);
+                    return drop;
+                }
+                // -u- at end of tag — drop trailing `-u`.
+                const trimmed = try allocator.alloc(u8, out.len - 2);
+                @memcpy(trimmed, out[0 .. out.len - 2]);
+                allocator.free(out);
+                return trimmed;
+            }
+            // Or if -u- is at end of tag now.
+            if (u_after_dash >= out.len) {
+                const trimmed = try allocator.alloc(u8, out.len - 2);
+                @memcpy(trimmed, out[0 .. out.len - 2]);
+                allocator.free(out);
+                return trimmed;
+            }
+            return out;
+        }
+        if (i >= locale.len) break;
+        i += 1; // skip '-'
+    }
+    return allocator.dupe(u8, locale);
+}
+
 fn supportedLocalesOfImpl(realm: *Realm, args: []const Value) NativeError!Value {
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
@@ -491,27 +561,68 @@ fn localeConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     // Apply option overrides by appending unicode extensions (structural).
     if (opts) |o| {
+        // §14.1.1 InitializeLocale + §14.1.3 ApplyUnicodeExtensionToTag —
+        // validate every option value before it lands in the tag.
+        // `kind` chooses the validator: .type for the open `alphanum{3,8}`
+        // grammar (calendar / collation / numberingSystem); the rest are
+        // closed enumerations from the spec.
+        const ValueKind = enum { type, hour_cycle, case_first };
         const apply = struct {
-            fn kw(realm2: *Realm, locale_in: []const u8, key: []const u8, prop: []const u8, o2: *JSObject) NativeError![]const u8 {
+            fn kw(realm2: *Realm, locale_in: []const u8, key: []const u8, prop: []const u8, kind: ValueKind, o2: *JSObject) NativeError![]const u8 {
                 const v = try getPropertyChain(realm2, o2, prop);
                 if (v.isUndefined()) return locale_in;
                 const s = try valueToStringSlice(realm2, v);
-                if (intl.unicodeExtensionValue(locale_in, key) != null) return locale_in;
-                const has_u = std.mem.indexOf(u8, locale_in, "-u-") != null;
-                const out = if (has_u)
-                    std.fmt.allocPrint(realm2.allocator, "{s}-{s}-{s}", .{ locale_in, key, s })
+                const ok = switch (kind) {
+                    .type => intl.isValidUnicodeType(s),
+                    .hour_cycle => std.mem.eql(u8, s, "h11") or std.mem.eql(u8, s, "h12") or std.mem.eql(u8, s, "h23") or std.mem.eql(u8, s, "h24"),
+                    .case_first => std.mem.eql(u8, s, "upper") or std.mem.eql(u8, s, "lower") or std.mem.eql(u8, s, "false"),
+                };
+                if (!ok) return throwRangeError(realm2, "invalid Locale option value");
+                // §14.1.3 ApplyUnicodeExtensionToTag — the option value
+                // overrides any existing -u- keyword for the same key.
+                // Strip the existing keyword (if any) so the new one wins
+                // after re-canonicalisation.
+                const stripped = if (intl.unicodeExtensionValue(locale_in, key) != null)
+                    stripUnicodeExtensionKeyword(realm2.allocator, locale_in, key) catch return error.OutOfMemory
                 else
-                    std.fmt.allocPrint(realm2.allocator, "{s}-u-{s}-{s}", .{ locale_in, key, s });
+                    locale_in;
+                if (stripped.ptr != locale_in.ptr) realm2.allocator.free(locale_in);
+                const has_u = std.mem.indexOf(u8, stripped, "-u-") != null;
+                const out = if (has_u)
+                    std.fmt.allocPrint(realm2.allocator, "{s}-{s}-{s}", .{ stripped, key, s })
+                else
+                    std.fmt.allocPrint(realm2.allocator, "{s}-u-{s}-{s}", .{ stripped, key, s });
                 const owned = out catch return error.OutOfMemory;
-                realm2.allocator.free(locale_in);
+                realm2.allocator.free(stripped);
                 return owned;
             }
         }.kw;
-        canon = try apply(realm, canon, "ca", "calendar", o);
-        canon = try apply(realm, canon, "co", "collation", o);
-        canon = try apply(realm, canon, "hc", "hourCycle", o);
-        canon = try apply(realm, canon, "kf", "caseFirst", o);
-        canon = try apply(realm, canon, "nu", "numberingSystem", o);
+        canon = try apply(realm, canon, "ca", "calendar", .type, o);
+        canon = try apply(realm, canon, "co", "collation", .type, o);
+        canon = try apply(realm, canon, "hc", "hourCycle", .hour_cycle, o);
+        canon = try apply(realm, canon, "kf", "caseFirst", .case_first, o);
+        canon = try apply(realm, canon, "nu", "numberingSystem", .type, o);
+
+        // §14.1.2 ApplyOptionsToTag — language/script/region options
+        // are validated structurally and rejected on grammar mismatch.
+        // Full tag rewrite (replace components in `canon`) is structural
+        // future work; we already throw on the failure modes test262
+        // exercises (empty string / wrong shape).
+        const opt_lang_v = try getPropertyChain(realm, o, "language");
+        if (!opt_lang_v.isUndefined()) {
+            const s = try valueToStringSlice(realm, opt_lang_v);
+            if (!intl.isValidLanguageSubtag(s)) return throwRangeError(realm, "invalid Locale language option");
+        }
+        const opt_script_v = try getPropertyChain(realm, o, "script");
+        if (!opt_script_v.isUndefined()) {
+            const s = try valueToStringSlice(realm, opt_script_v);
+            if (!intl.isValidScriptSubtag(s)) return throwRangeError(realm, "invalid Locale script option");
+        }
+        const opt_region_v = try getPropertyChain(realm, o, "region");
+        if (!opt_region_v.isUndefined()) {
+            const s = try valueToStringSlice(realm, opt_region_v);
+            if (!intl.isValidRegionSubtag(s)) return throwRangeError(realm, "invalid Locale region option");
+        }
         const num_v = try getPropertyChain(realm, o, "numeric");
         if (!num_v.isUndefined()) {
             const b = toBoolean(num_v);

@@ -489,6 +489,46 @@ fn isGrandfathered(tag: []const u8) bool {
     return false;
 }
 
+/// §3.2 UTS #35 `type` production —
+/// `(alphanum{3,8}) ("-" alphanum{3,8})*`. The value space for
+/// Unicode extension keys (`ca`, `co`, `nu`) and for any "type"
+/// option (calendar, collation, numberingSystem).
+pub fn isValidUnicodeType(value: []const u8) bool {
+    if (value.len == 0) return false;
+    var i: usize = 0;
+    while (i < value.len) {
+        const seg_start = i;
+        while (i < value.len and value[i] != '-') : (i += 1) {
+            if (!isAlphanum(value[i])) return false;
+        }
+        const seg_len = i - seg_start;
+        if (seg_len < 3 or seg_len > 8) return false;
+        if (i < value.len) i += 1; // consume '-'
+    }
+    // Trailing '-' would have produced a zero-length final segment above.
+    return value[value.len - 1] != '-';
+}
+
+/// §14.1.2 ApplyOptionsToTag — `unicode_language_subtag`:
+/// 2-3 / 5-8 ALPHA (the 4-ALPHA reserved slot rejected).
+pub fn isValidLanguageSubtag(value: []const u8) bool {
+    if (value.len < 2 or value.len > 8 or value.len == 4) return false;
+    return allAlpha(value);
+}
+
+/// §14.1.2 ApplyOptionsToTag — `unicode_script_subtag`: 4 ALPHA.
+pub fn isValidScriptSubtag(value: []const u8) bool {
+    return value.len == 4 and allAlpha(value);
+}
+
+/// §14.1.2 ApplyOptionsToTag — `unicode_region_subtag`:
+/// 2 ALPHA or 3 DIGIT.
+pub fn isValidRegionSubtag(value: []const u8) bool {
+    if (value.len == 2) return allAlpha(value);
+    if (value.len == 3) return allDigit(value);
+    return false;
+}
+
 /// §6.2.3 CanonicalizeUnicodeLocaleId — structural only: normalize
 /// case (language lower, script title, region upper, extensions lower),
 /// sort unicode extension keywords, drop duplicate variants.
@@ -533,6 +573,11 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
             }
             for (part) |*c| c.* = toLowerAscii(c.*);
             if (part[0] == 'u') in_unicode_ext = true;
+        } else if (in_unicode_ext) {
+            // Unicode extension key/value — always lowercase. A 2-ALPHA
+            // segment here is a `-u-` keyword key (e.g. `hc`, `ca`), not
+            // a region; the region-case rule below would corrupt it.
+            for (part) |*c| c.* = toLowerAscii(c.*);
         } else if (part.len == 4 and allAlpha(part) and part_idx == 1) {
             // Likely script — Title case.
             part[0] = toUpperAscii(part[0]);
@@ -571,23 +616,60 @@ fn appendUnicodeKeywords(
     out: *std.ArrayListUnmanaged(u8),
     keywords: *std.ArrayListUnmanaged([]const u8),
 ) !void {
-    // Sort keyword keys (first segment of each key-value pair is 2-char key).
-    // Structural sort by key then value for determinism.
+    // §3.2 UTS #35 — a Unicode keyword is key (alphanum{2}) followed
+    // by zero or more types (alphanum{3,8}). Sort by KEY for canonical
+    // form, so `hc-h11-ca-abc` → `ca-abc-hc-h11`, not by each segment
+    // (which would scramble "hc-h11" into "h11-hc").
     const items = keywords.items;
     if (items.len == 0) return;
-    // Simple insertion sort by full segment string.
-    var i: usize = 1;
-    while (i < items.len) : (i += 1) {
-        var j = i;
-        while (j > 0 and std.mem.order(u8, items[j], items[j - 1]) == .lt) : (j -= 1) {
-            const tmp = items[j];
-            items[j] = items[j - 1];
-            items[j - 1] = tmp;
+    var groups: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (groups.items) |g| allocator.free(g);
+        groups.deinit(allocator);
+    }
+    var i: usize = 0;
+    while (i < items.len) {
+        if (items[i].len != 2) {
+            // Stray non-key segment — emit it alone (defensive; the
+            // canonicaliser only reaches here on a structurally valid
+            // tag, so this should not trigger).
+            try groups.append(allocator, try allocator.dupe(u8, items[i]));
+            i += 1;
+            continue;
+        }
+        var end = i + 1;
+        while (end < items.len and items[end].len != 2) : (end += 1) {}
+        // Concatenate items[i..end] with '-'.
+        var total: usize = 0;
+        for (items[i..end]) |s| total += s.len;
+        total += end - i - 1; // separators
+        const buf = try allocator.alloc(u8, total);
+        var pos: usize = 0;
+        for (items[i..end], 0..) |s, idx| {
+            if (idx > 0) {
+                buf[pos] = '-';
+                pos += 1;
+            }
+            @memcpy(buf[pos .. pos + s.len], s);
+            pos += s.len;
+        }
+        try groups.append(allocator, buf);
+        i = end;
+    }
+    // Sort groups by full string (keys are 2-char alpha, so this is
+    // sort-by-key for the common case).
+    var gi: usize = 1;
+    while (gi < groups.items.len) : (gi += 1) {
+        var gj = gi;
+        while (gj > 0 and std.mem.order(u8, groups.items[gj], groups.items[gj - 1]) == .lt) : (gj -= 1) {
+            const tmp = groups.items[gj];
+            groups.items[gj] = groups.items[gj - 1];
+            groups.items[gj - 1] = tmp;
         }
     }
-    for (items) |seg| {
+    for (groups.items) |g| {
         try out.append(allocator, '-');
-        try out.appendSlice(allocator, seg);
+        try out.appendSlice(allocator, g);
     }
 }
 

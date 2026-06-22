@@ -246,6 +246,63 @@ test "intl: Locale brand check rejects non-Locale receivers" {
     );
 }
 
+// §14.1.1 InitializeLocale + §14.1.3 ApplyUnicodeExtensionToTag —
+// options must be drawn from the enumerated set or match the type
+// grammar. Empty strings and out-of-range enum values throw RangeError.
+test "intl: Locale rejects empty hourCycle" {
+    try evalThrows(
+        \\new Intl.Locale("en", { hourCycle: "" })
+    );
+}
+
+test "intl: Locale rejects invalid hourCycle enum" {
+    try evalThrows(
+        \\new Intl.Locale("en", { hourCycle: "h00" })
+    );
+}
+
+test "intl: Locale rejects empty caseFirst" {
+    try evalThrows(
+        \\new Intl.Locale("en", { caseFirst: "" })
+    );
+}
+
+test "intl: Locale rejects empty calendar" {
+    try evalThrows(
+        \\new Intl.Locale("en", { calendar: "" })
+    );
+}
+
+test "intl: Locale rejects empty collation" {
+    try evalThrows(
+        \\new Intl.Locale("en", { collation: "" })
+    );
+}
+
+test "intl: Locale rejects empty numberingSystem" {
+    try evalThrows(
+        \\new Intl.Locale("en", { numberingSystem: "" })
+    );
+}
+
+test "intl: Locale rejects empty language" {
+    try evalThrows(
+        \\new Intl.Locale("en", { language: "" })
+    );
+}
+
+test "intl: Locale rejects empty script" {
+    try evalThrows(
+        \\new Intl.Locale("en", { script: "" })
+    );
+}
+
+test "intl: Locale rejects empty region" {
+    try evalThrows(
+        \\new Intl.Locale("en", { region: "" })
+    );
+}
+
 test "intl: Collator compare is ordinal and resolvedOptions has locale" {
     try evalAssert1(
         \\const c = new Intl.Collator("en");
