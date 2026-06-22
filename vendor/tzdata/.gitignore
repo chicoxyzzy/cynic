@@ -1,0 +1,5 @@
+# Built by `zig build pack-tzdata` (compile-iana-tzdata.sh); do not commit.
+tzcode/zic
+tzcode/zic.o
+tzcode/version.h
+tzcode/tzdir.h

@@ -120,6 +120,31 @@ pub const Intrinsics = struct {
     temporal_zoned_date_time_prototype: ?*JSObject = null,
     temporal_now_namespace: ?*JSObject = null,
 
+    /// ECMA-402 structural `Intl` — namespace plus per-constructor /
+    /// prototype roots so the freeze pass covers them even if a
+    /// caller patches `globalThis.Intl` mid-init.
+    intl_namespace: ?*JSObject = null,
+    intl_locale_constructor: ?*JSFunction = null,
+    intl_locale_prototype: ?*JSObject = null,
+    intl_collator_constructor: ?*JSFunction = null,
+    intl_collator_prototype: ?*JSObject = null,
+    intl_number_format_constructor: ?*JSFunction = null,
+    intl_number_format_prototype: ?*JSObject = null,
+    intl_date_time_format_constructor: ?*JSFunction = null,
+    intl_date_time_format_prototype: ?*JSObject = null,
+    intl_plural_rules_constructor: ?*JSFunction = null,
+    intl_plural_rules_prototype: ?*JSObject = null,
+    intl_relative_time_format_constructor: ?*JSFunction = null,
+    intl_relative_time_format_prototype: ?*JSObject = null,
+    intl_list_format_constructor: ?*JSFunction = null,
+    intl_list_format_prototype: ?*JSObject = null,
+    intl_display_names_constructor: ?*JSFunction = null,
+    intl_display_names_prototype: ?*JSObject = null,
+    intl_segmenter_constructor: ?*JSFunction = null,
+    intl_segmenter_prototype: ?*JSObject = null,
+    intl_duration_format_constructor: ?*JSFunction = null,
+    intl_duration_format_prototype: ?*JSObject = null,
+
     /// `%GeneratorPrototype%` (§27.5.1). Lazily installed on the
     /// first `function*` call by `lantern.ensureGeneratorPrototype`;
     /// `null` until then. Carries `next` / `return` / `throw` and
@@ -619,6 +644,11 @@ pub fn install(realm: *Realm) !void {
     // are reflected as GC roots via the new `temporal_*` intrinsic
     // slots and frozen by the `freezePrimordials` pass below.
     try @import("builtins/temporal.zig").install(realm);
+    // ECMA-402 — only when built with `-Dintl=stub` or `-Dintl=full`
+    // (ROADMAP build flavour; default `-Dintl=off` omits the global).
+    if (@import("intl_config.zig").enabled) {
+        try @import("builtins/intl.zig").install(realm);
+    }
     // Iterator.prototype is now live — wire
     // %GeneratorFunction.prototype.prototype% and %AsyncGeneratorFunction.prototype.prototype%
     // so `Object.getPrototypeOf(function*(){}).prototype` lands

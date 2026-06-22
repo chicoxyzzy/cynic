@@ -36,9 +36,32 @@ pub fn build(b: *std.Build) void {
         "exhaustive-tests",
         "Enable the whole-range Unicode invariant tests (slow under Debug+testing.allocator). Default: false.",
     ) orelse false;
+    // ECMA-402 build flavour (ROADMAP: separate from default edge/server
+    // build — not a CLI `--enable`/`--allow` verb). `off` = no `Intl`
+    // global, Temporal ISO+UTC/offset only; `stub` = structural Intl +
+    // structural Temporal calendars/IANA; `full` = stub + embedded tzdata
+    // (`vendor/tzdata/cynic_tzdb.bin`, refresh via `zig build pack-tzdata`).
+    const IntlTier = enum { off, stub, full };
+    const intl_tier = b.option(
+        IntlTier,
+        "intl",
+        "ECMA-402 build tier: off (default; no Intl), stub (structural Intl), full (tzdata + structural Intl).",
+    ) orelse .off;
     const lib_build_options = b.addOptions();
     lib_build_options.addOption(bool, "exhaustive_tests", exhaustive_tests);
+    lib_build_options.addOption(IntlTier, "intl", intl_tier);
     lib_mod.addOptions("build_options", lib_build_options);
+    // Embed the CYTZ tzdb only for `full` so off/stub binaries stay lean.
+    const addTzdb = struct {
+        fn apply(mod: *std.Build.Module, bld: *std.Build, tier: IntlTier) void {
+            if (tier == .full) {
+                mod.addAnonymousImport("cynic_tzdb.bin", .{
+                    .root_source_file = bld.path("vendor/tzdata/cynic_tzdb.bin"),
+                });
+            }
+        }
+    }.apply;
+    addTzdb(lib_mod, b, intl_tier);
 
     // Executable module: the `cynic` CLI. Imports the library as `cynic`.
     const exe_mod = b.createModule(.{
@@ -108,6 +131,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
     });
     lib_mod_fuzz.addOptions("build_options", lib_build_options);
+    addTzdb(lib_mod_fuzz, b, intl_tier);
     cynic_fuzz_mod.addImport("cynic", lib_mod_fuzz);
     // The fuzz host reads its own `build_options` (the `fuzz_debug_alloc`
     // flag) — kept separate from the lib's options so the engine never
@@ -208,6 +232,33 @@ pub fn build(b: *std.Build) void {
     run_gen.addArg(sourceRootPath(b, "src/unicode/ident_tables.zig"));
     const gen_step = b.step("gen-unicode", "Regenerate src/unicode/{ident,property,case_fold,case_conv,normalization}_tables.zig from UCD");
     gen_step.dependOn(&run_gen.step);
+
+    // `zig build pack-tzdata` compiles vendored IANA tzdata *sources*
+    // (`vendor/tzdata/iana/`, refreshed via `tools/fetch-tzdata.sh` from
+    // data.iana.org — same role as dropping UCD files into `vendor/unicode/`)
+    // with system `zic`, then runs `tools/pack_tzdata.zig` to emit the
+    // committed CYTZ blob. Only `-Dintl=full` embeds the blob.
+    const pack_tz_mod = b.createModule(.{
+        .root_source_file = b.path("tools/pack_tzdata.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const pack_tz_exe = b.addExecutable(.{
+        .name = "pack_tzdata",
+        .root_module = pack_tz_mod,
+    });
+    const run_compile_iana = b.addSystemCommand(&.{ "bash", "tools/compile-iana-tzdata.sh" });
+    run_compile_iana.addArtifactArg(pack_tz_exe);
+    run_compile_iana.addArg(sourceRootPath(b, ""));
+    // Re-run when IANA sources change (not every build — only this step).
+    run_compile_iana.addFileInput(b.path("vendor/tzdata/iana/version"));
+    run_compile_iana.addFileInput(b.path("tools/compile-iana-tzdata.sh"));
+    const pack_tz_step = b.step("pack-tzdata", "Compile vendor/tzdata/iana/ (IANA sources) via zic + pack cynic_tzdb.bin (refresh sources: tools/fetch-tzdata.sh)");
+    pack_tz_step.dependOn(&run_compile_iana.step);
+
+    const fetch_tz = b.addSystemCommand(&.{ "bash", "tools/fetch-tzdata.sh" });
+    const fetch_tz_step = b.step("fetch-tzdata", "Download latest IANA tzdata sources into vendor/tzdata/iana/ and repack cynic_tzdb.bin");
+    fetch_tz_step.dependOn(&fetch_tz.step);
 
     const gen_props_mod = b.createModule(.{
         .root_source_file = b.path("tools/gen_unicode_props.zig"),
@@ -324,6 +375,11 @@ pub fn build(b: *std.Build) void {
         .optimize = t262_optimize,
         .link_libc = true,
     });
+    lib_mod_fast.addAnonymousImport("NormalizationTest.txt", .{
+        .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
+    });
+    lib_mod_fast.addOptions("build_options", lib_build_options);
+    addTzdb(lib_mod_fast, b, intl_tier);
     const t262_mod = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
@@ -434,6 +490,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
     });
     lib_mod_test_safe.addOptions("build_options", lib_build_options);
+    addTzdb(lib_mod_test_safe, b, intl_tier);
     const exe_mod_test_safe = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -466,6 +523,11 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
+    lib_mod_safe.addAnonymousImport("NormalizationTest.txt", .{
+        .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
+    });
+    lib_mod_safe.addOptions("build_options", lib_build_options);
+    addTzdb(lib_mod_safe, b, intl_tier);
     const t262_mod_safe = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
@@ -552,6 +614,11 @@ pub fn build(b: *std.Build) void {
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
+    wasm_lib_mod.addAnonymousImport("NormalizationTest.txt", .{
+        .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
+    });
+    wasm_lib_mod.addOptions("build_options", lib_build_options);
+    addTzdb(wasm_lib_mod, b, intl_tier);
 
     // The WASM entry module — C-ABI exports for the JS front-end.
     const wasm_mod = b.createModule(.{

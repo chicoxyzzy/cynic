@@ -1,0 +1,9 @@
+IANA tzdata source release 2026b
+Fetched from https://data.iana.org/time-zones/releases/tzdata2026b.tar.gz
+via tools/fetch-tzdata.sh
+
+Matching tzcode (for zic): vendor/tzdata/tzcode/ from https://data.iana.org/time-zones/releases/tzcode2026b.tar.gz
+
+Refresh: tools/fetch-tzdata.sh 2026b
+Pack:    zig build pack-tzdata
+         (builds zic from tzcode, compiles these sources, then tools/pack_tzdata.zig)

@@ -695,6 +695,11 @@ pub const JSObjectExtension = struct {
     /// the side allocation is freed in `deinit` like `map_data`.
     /// `null` for every non-Temporal object.
     temporal_record: ?*@import("temporal.zig").TemporalRecord = null,
+    /// ECMA-402 structural Intl service objects (`Intl.Collator`,
+    /// `Intl.NumberFormat`, …). Tagged union over constructor kinds;
+    /// owned locale/option strings live in the record and are freed
+    /// here. `null` for every non-Intl object.
+    intl_record: ?*@import("intl.zig").IntlRecord = null,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
         self.accessors.deinit(allocator);
@@ -717,6 +722,10 @@ pub const JSObjectExtension = struct {
         if (self.temporal_record) |tr| {
             tr.deinit(allocator);
             allocator.destroy(tr);
+        }
+        if (self.intl_record) |ir| {
+            ir.deinit(allocator);
+            allocator.destroy(ir);
         }
     }
 };
@@ -1863,6 +1872,16 @@ pub const JSObject = struct {
     pub fn setTemporalRecord(self: *JSObject, allocator: std.mem.Allocator, rec: *@import("temporal.zig").TemporalRecord) !void {
         const ext = try self.getOrCreateExtension(allocator);
         ext.temporal_record = rec;
+    }
+
+    pub fn getIntlRecord(self: *const JSObject) ?*@import("intl.zig").IntlRecord {
+        if (self.extension) |ext| return ext.intl_record;
+        return null;
+    }
+
+    pub fn setIntlRecord(self: *JSObject, allocator: std.mem.Allocator, rec: *@import("intl.zig").IntlRecord) !void {
+        const ext = try self.getOrCreateExtension(allocator);
+        ext.intl_record = rec;
     }
 
     // ── §25 / §23 ArrayBuffer + TypedArray + DataView state ────

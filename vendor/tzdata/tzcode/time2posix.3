@@ -1,0 +1,175 @@
+.\" This file is in the public domain, so clarified as of
+.\" 1996-06-05 by Arthur David Olson.
+.TH time2posix 3 "" "Time Zone Database"
+.SH NAME
+time2posix, posix2time \- convert seconds since the Epoch
+.SH SYNOPSIS
+.nf
+.B #include <time.h>
+.PP
+.B time_t time2posix(time_t t);
+.PP
+.B time_t posix2time(time_t t);
+.PP
+.B cc ... \-ltz
+.fi
+.SH DESCRIPTION
+.ie '\(en'' .ds en \-
+.el .ds en \(en
+.ie '\(lq'' .ds lq \&"\"
+.el .ds lq \(lq\"
+.ie '\(rq'' .ds rq \&"\"
+.el .ds rq \(rq\"
+.de q
+\\$3\*(lq\\$1\*(rq\\$2
+..
+IEEE Standard 1003.1
+(POSIX)
+says that
+.B time_t
+values cannot count leap
+seconds and,
+therefore,
+that the system time must be adjusted as each leap occurs.
+.PP
+If the time package is configured with leap-second support
+enabled,
+however,
+no such adjustment is needed and
+.B time_t
+values continue to increase over leap events
+(as a true
+.q "seconds since...\&"
+value).
+This means that these values will differ from those required by POSIX
+by the net number of leap seconds inserted since the Epoch.
+.PP
+For many C programs this is not a problem as the C standard says that
+.B time_t
+is
+(mostly)
+opaque \*(en
+.B time_t
+values should be obtained from and
+passed to functions such as
+.BR time(2) ,
+.BR localtime(3) ,
+.BR mktime(3) ,
+and
+.BR difftime(3) .
+However,
+POSIX gives an arithmetic
+expression for computing a
+.B time_t
+value directly from a given Universal date and time,
+and the same relationship is assumed by some
+applications.
+Any programs creating/dissecting
+.B time_t
+values
+using such a relationship will typically not handle intervals
+over leap seconds correctly.
+.PP
+The
+.B time2posix
+and
+.B posix2time
+functions address this mismatch by converting
+between local
+.B time_t
+values and their POSIX equivalents.
+This is done by accounting for the number of time-base changes that
+would have taken place on a POSIX system as leap seconds were inserted
+or deleted.
+These converted values can then be used
+when communicating with POSIX-compliant systems.
+.PP
+The
+.B time2posix
+function converts a
+.B time_t
+value to its POSIX counterpart, if one exists.
+The
+.B posix2time
+function does the reverse but
+is less well-behaved:
+for a positive leap second hit the result is not unique,
+and for a negative leap second hit the corresponding
+POSIX
+.B time_t
+doesn't exist so an adjacent value is returned.
+Both of these are indicate problems with the
+POSIX representation.
+.PP
+The following table summarizes the relationship between a time
+T and its conversion to,
+and back from,
+the POSIX representation over the leap second inserted at the end of June,
+1993.
+In this table, X=time2posix(T), Y=posix2time(X), A=741484816, and B=A\-17
+because 17 positive leap seconds preceded this leap second.
+.PP
+.in +2
+.nf
+.ta \w'1993-06-30\0'u +\w'23:59:59\0'u +\w'A+0\0'u +\w'B+0\0'u
+DATE	TIME	T	X	Y
+1993-06-30	23:59:59	A	B	A
+1993-06-30	23:59:60	A+1	B+1	A+1 or A+2
+1993-07-01	00:00:00	A+2	B+1	A+1 or A+2
+1993-07-01	00:00:01	A+3	B+2	A+3
+.in
+.fi
+.PP
+A leap second deletion would look like the following, and
+posix2time(B+1) would return either A or A+1.
+.PP
+.in +2
+.nf
+DATE	TIME	T	X	Y
+????-06-30	23:59:58	A	B	A
+????-07-01	00:00:00	A+1	B+2	A+1
+????-07-01	00:00:01	A+2	B+3	A+2
+.fi
+.in
+.PP
+If leap-second support is not enabled,
+local
+.B time_t
+and
+POSIX
+.B time_t
+values are equivalent,
+and both
+.B time2posix
+and
+.B posix2time
+degenerate to the identity function.
+.SH "RETURN VALUE"
+If successful, these functions return the resulting timestamp without modifying
+.BR errno .
+Otherwise, they set
+.B errno
+and return
+.BR "((time_t) -1)" .
+.SH ERRORS
+These functions fail if:
+.TP
+[EOVERFLOW]
+The resulting value cannot be represented.
+This can happen for
+.B posix2time
+if its argument is close to the maximum
+.B time_t
+value.
+In environments where the
+.I TZ
+environment variable names a TZif file,
+overflow can happen for either function for an argument sufficiently
+close to an extreme
+.B time_t
+value if the TZif file specifies unrealistic leap second corrections.
+.SH SEE ALSO
+.BR difftime (3),
+.BR localtime (3),
+.BR mktime (3),
+.BR time (2).

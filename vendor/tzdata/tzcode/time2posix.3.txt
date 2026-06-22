@@ -1,0 +1,91 @@
+time2posix(3)              Library Functions Manual              time2posix(3)
+
+NAME
+       time2posix, posix2time - convert seconds since the Epoch
+
+SYNOPSIS
+       #include <time.h>
+
+       time_t time2posix(time_t t);
+
+       time_t posix2time(time_t t);
+
+       cc ... -ltz
+
+DESCRIPTION
+       IEEE Standard 1003.1 (POSIX) says that time_t values cannot count leap
+       seconds and, therefore, that the system time must be adjusted as each
+       leap occurs.
+
+       If the time package is configured with leap-second support enabled,
+       however, no such adjustment is needed and time_t values continue to
+       increase over leap events (as a true “seconds since...” value).  This
+       means that these values will differ from those required by POSIX by the
+       net number of leap seconds inserted since the Epoch.
+
+       For many C programs this is not a problem as the C standard says that
+       time_t is (mostly) opaque – time_t values should be obtained from and
+       passed to functions such as time(2), localtime(3), mktime(3), and
+       difftime(3).  However, POSIX gives an arithmetic expression for
+       computing a time_t value directly from a given Universal date and time,
+       and the same relationship is assumed by some applications.  Any
+       programs creating/dissecting time_t values using such a relationship
+       will typically not handle intervals over leap seconds correctly.
+
+       The time2posix and posix2time functions address this mismatch by
+       converting between local time_t values and their POSIX equivalents.
+       This is done by accounting for the number of time-base changes that
+       would have taken place on a POSIX system as leap seconds were inserted
+       or deleted.  These converted values can then be used when communicating
+       with POSIX-compliant systems.
+
+       The time2posix function converts a time_t value to its POSIX
+       counterpart, if one exists.  The posix2time function does the reverse
+       but is less well-behaved: for a positive leap second hit the result is
+       not unique, and for a negative leap second hit the corresponding POSIX
+       time_t doesn't exist so an adjacent value is returned.  Both of these
+       are indicate problems with the POSIX representation.
+
+       The following table summarizes the relationship between a time T and
+       its conversion to, and back from, the POSIX representation over the
+       leap second inserted at the end of June, 1993.  In this table,
+       X=time2posix(T), Y=posix2time(X), A=741484816, and B=A-17 because 17
+       positive leap seconds preceded this leap second.
+
+         DATE       TIME     T   X   Y
+         1993-06-30 23:59:59 A   B   A
+         1993-06-30 23:59:60 A+1 B+1 A+1 or A+2
+         1993-07-01 00:00:00 A+2 B+1 A+1 or A+2
+         1993-07-01 00:00:01 A+3 B+2 A+3
+
+       A leap second deletion would look like the following, and
+       posix2time(B+1) would return either A or A+1.
+
+         DATE       TIME     T   X   Y
+         ????-06-30 23:59:58 A   B   A
+         ????-07-01 00:00:00 A+1 B+2 A+1
+         ????-07-01 00:00:01 A+2 B+3 A+2
+
+       If leap-second support is not enabled, local time_t and POSIX time_t
+       values are equivalent, and both time2posix and posix2time degenerate to
+       the identity function.
+
+RETURN VALUE
+       If successful, these functions return the resulting timestamp without
+       modifying errno.  Otherwise, they set errno and return ((time_t) -1).
+
+ERRORS
+       These functions fail if:
+
+       [EOVERFLOW]
+              The resulting value cannot be represented.  This can happen for
+              posix2time if its argument is close to the maximum time_t value.
+              In environments where the TZ environment variable names a TZif
+              file, overflow can happen for either function for an argument
+              sufficiently close to an extreme time_t value if the TZif file
+              specifies unrealistic leap second corrections.
+
+SEE ALSO
+       difftime(3), localtime(3), mktime(3), time(2).
+
+Time Zone Database                                               time2posix(3)

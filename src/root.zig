@@ -94,11 +94,14 @@ test {
     _ = @import("runtime/heap.zig");
     _ = @import("runtime/realm.zig");
     _ = @import("runtime/temporal.zig");
+    _ = @import("runtime/intl_config.zig");
+    _ = @import("runtime/tzdata.zig");
     _ = @import("runtime/lantern/interpreter.zig");
     _ = @import("runtime/lantern/arith.zig");
     _ = @import("runtime/lantern/tests.zig");
     _ = @import("runtime/surface_audit_test.zig");
     _ = @import("runtime/annex_b_rejection_test.zig");
+    _ = @import("runtime/intl_test.zig");
     _ = @import("runtime/eval_policy_test.zig");
     _ = @import("runtime/eval_test.zig");
     _ = @import("runtime/wasm_js_test.zig");

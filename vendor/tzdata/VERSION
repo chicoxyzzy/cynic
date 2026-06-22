@@ -1,0 +1,8 @@
+2026b
+# IANA tzdata source: vendor/tzdata/iana/ (release 2026b)
+# IANA tzcode (zic):  vendor/tzdata/tzcode/ (release 2026b)
+# Upstream: https://data.iana.org/time-zones/releases/tzdata2026b.tar.gz
+#           https://data.iana.org/time-zones/releases/tzcode2026b.tar.gz
+# Fetch:    tools/fetch-tzdata.sh 2026b
+# Pack:     zig build pack-tzdata  (make zic in tzcode + tools/pack_tzdata.zig)
+# cynic_tzdb.bin bytes=218848
