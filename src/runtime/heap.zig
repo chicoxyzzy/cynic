@@ -2711,6 +2711,50 @@ pub const Heap = struct {
         }
     }
 
+    /// Drain up to `budget` worklist items — one marking *slice*. Returns
+    /// true once both worklists are empty (the mark is complete).
+    /// `drainMarkWorklist` is the run-to-completion wrapper; the future
+    /// incremental safe-point spends a per-increment budget here. The
+    /// marked set is independent of drain order, so slicing this leaves
+    /// conformance byte-identical.
+    pub fn drainMarkWorklistBudget(self: *Heap, budget: usize) bool {
+        var drained: usize = 0;
+        while (drained < budget) : (drained += 1) {
+            if (self.mark_worklist.items.len > 0) {
+                const w = self.mark_worklist.items[self.mark_worklist.items.len - 1];
+                self.mark_worklist.items.len -= 1;
+                self.markValue(w);
+            } else if (self.mark_env_worklist.items.len > 0) {
+                const env = self.mark_env_worklist.items[self.mark_env_worklist.items.len - 1];
+                self.mark_env_worklist.items.len -= 1;
+                self.markEnvironment(env);
+            } else {
+                return true;
+            }
+        }
+        return self.mark_worklist.items.len == 0 and self.mark_env_worklist.items.len == 0;
+    }
+
+    /// Begin a major cycle's mark by snapshotting the roots — the
+    /// start-of-cycle stop-the-world step: arm the cycle and mark every
+    /// root + handle-scope + const + native-ctor root, seeding the
+    /// worklist with the grey set. The worklist is then drained (to
+    /// completion STW today, or sliced at the safe-point in the
+    /// incremental path). Extracted from `collectFull` so an incremental
+    /// driver can call it standalone.
+    pub fn beginIncrementalMark(self: *Heap, roots: []const Value) void {
+        if (!self.cycle_started) self.beginMajorCycle();
+        for (roots) |r| self.markValue(r);
+        for (self.handle_scopes.items) |scope| {
+            for (scope.handles.items) |r| self.markValue(r);
+        }
+        // Chunk-constant heap values (tagged-template `strs` / `raw`
+        // arrays, BigInt literals) + native-constructor instances in
+        // flight — permanently / transiently live roots.
+        for (self.const_roots.items) |v| self.markValue(v);
+        for (self.native_ctor_roots.items) |v| self.markValue(v);
+    }
+
     /// Rebuild the conservative-scan young-pointer membership map
     /// (`young_ptr_set`) from the per-kind young lists. Each entry
     /// maps `@intFromPtr(obj)` → its `ScanKind`. Cleared-and-rebuilt
@@ -2892,35 +2936,20 @@ pub const Heap = struct {
         // — the long-tail cycles are where investigation starts.
         const t_start = monotonicNs();
 
-        // Arm the cycle if the caller hasn't yet (the realm path
-        // calls `beginMajorCycle` BEFORE `markRoots` so the flip +
-        // weak-aware setup precedes its `markValue`s; a direct
-        // unit-test caller reaches here cold and `cycle_started`
-        // catches them).
-        if (!self.cycle_started) self.beginMajorCycle();
+        // Start-of-cycle snapshot — arm the cycle + mark every root,
+        // seeding the worklist with the grey set. Extracted to
+        // `beginIncrementalMark` so the future incremental driver can
+        // call it standalone. (Registered symbols stay pinned at
+        // `Symbol.for` time, §20.4.2.2 GlobalSymbolRegistry — the sweep
+        // skips pinned entries, so no per-cycle re-mark loop.)
+        self.beginIncrementalMark(roots);
 
-        // Mark phase.
-        for (roots) |r| self.markValue(r);
-        for (self.handle_scopes.items) |scope| {
-            for (scope.handles.items) |r| self.markValue(r);
-        }
-        // Chunk-constant heap values (tagged-template `strs` / `raw`
-        // arrays, BigInt literals) — permanently live; `markValue`
-        // recursion keeps their whole graph reachable.
-        for (self.const_roots.items) |v| self.markValue(v);
-        // Native-constructor instances currently in flight.
-        for (self.native_ctor_roots.items) |v| self.markValue(v);
-        // Registered symbols are pinned at `Symbol.for` time
-        // (§20.4.2.2 GlobalSymbolRegistry has no spec'd eviction);
-        // the sweep skips pinned entries and `isWeakReferentLive`
-        // short-circuits on `pinned`, so the per-cycle re-mark
-        // loop the heap used to do over `symbol_registry` is
-        // gone.
-
-        // Drain deferred-mark items pushed during the main mark
-        // walk (currently `promise_reactions[i].result_promise`)
-        // BEFORE the ephemeron fixpoint, so its `isWeakReferentLive`
-        // probes see complete marks.
+        // Drain the mark worklist to completion (STW today; a later step
+        // spends a per-increment budget at `runSafePoint` between these
+        // calls via `drainMarkWorklistBudget`). Drains the deferred-mark
+        // items — currently `promise_reactions[i].result_promise` —
+        // BEFORE the ephemeron fixpoint, so `isWeakReferentLive` sees
+        // complete marks.
         self.drainMarkWorklist();
 
         // §24.3 WeakMap ephemeron fixpoint — a WeakMap entry's value
