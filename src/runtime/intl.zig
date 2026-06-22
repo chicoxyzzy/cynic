@@ -198,7 +198,7 @@ pub const PluralRulesSlots = struct {
     maximum_fraction_digits: u32 = 3,
     minimum_significant_digits: ?u32 = null,
     maximum_significant_digits: ?u32 = null,
-    plural_categories: []const []const u8 = &.{ "other" },
+    plural_categories: []const []const u8 = &.{"other"},
 
     pub fn deinit(self: *PluralRulesSlots, allocator: std.mem.Allocator) void {
         self.base.deinit(allocator);
@@ -479,11 +479,11 @@ fn isGrandfathered(tag: []const u8) bool {
     for (tag, 0..) |c, idx| buf[idx] = toLowerAscii(c);
     const t = buf[0..tag.len];
     const gf = [_][]const u8{
-        "en-gb-oed", "i-ami",     "i-bnn",     "i-default", "i-enochian", "i-hak",
-        "i-klingon", "i-lux",     "i-mingo",   "i-navajo",  "i-pwn",      "i-tao",
-        "i-tay",     "i-tsu",     "sgn-be-fr", "sgn-be-nl", "sgn-ch-de",  "art-lojban",
-        "cel-gaulish", "no-bok",  "no-nyn",    "zh-guoyu",  "zh-hakka",   "zh-min",
-        "zh-min-nan", "zh-xiang",
+        "en-gb-oed",   "i-ami",    "i-bnn",     "i-default", "i-enochian", "i-hak",
+        "i-klingon",   "i-lux",    "i-mingo",   "i-navajo",  "i-pwn",      "i-tao",
+        "i-tay",       "i-tsu",    "sgn-be-fr", "sgn-be-nl", "sgn-ch-de",  "art-lojban",
+        "cel-gaulish", "no-bok",   "no-nyn",    "zh-guoyu",  "zh-hakka",   "zh-min",
+        "zh-min-nan",  "zh-xiang",
     };
     for (gf) |g| if (std.mem.eql(u8, t, g)) return true;
     return false;
@@ -788,14 +788,14 @@ pub fn parseLocaleComponents(allocator: std.mem.Allocator, locale: []const u8) !
 // ── supportedValuesOf catalogs (structural static lists) ───────────────────
 
 pub const supported_calendars = [_][]const u8{
-    "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "gregory",
-    "hebrew", "indian", "islamic", "islamic-civil", "islamic-rgsa", "islamic-tbla",
-    "islamic-umalqura", "iso8601", "japanese", "persian", "roc",
+    "buddhist", "chinese",  "coptic",  "dangi",         "ethioaa",      "ethiopic",     "gregory",
+    "hebrew",   "indian",   "islamic", "islamic-civil", "islamic-rgsa", "islamic-tbla", "islamic-umalqura",
+    "iso8601",  "japanese", "persian", "roc",
 };
 
 pub const supported_collations = [_][]const u8{
-    "compat", "dict", "emoji", "eor", "phonebk", "phonetic", "pinyin", "reformed",
-    "searchjl", "stroke", "trad", "unihan", "zhuyin",
+    "compat",   "dict",   "emoji", "eor",    "phonebk", "phonetic", "pinyin", "reformed",
+    "searchjl", "stroke", "trad",  "unihan", "zhuyin",
 };
 
 pub const supported_currencies = [_][]const u8{
@@ -815,14 +815,14 @@ pub const supported_currencies = [_][]const u8{
 };
 
 pub const supported_numbering_systems = [_][]const u8{
-    "adlm", "ahom", "arab", "arabext", "bali", "beng", "bhks", "brah", "cakm", "cham",
-    "deva", "diak", "fullwide", "gong", "gonm", "gujr", "guru", "hanidec", "hmng", "hmnp",
-    "java", "kali", "kawi", "khmr", "knda", "lana", "lanatham", "laoo", "latn", "lepc",
-    "limb", "mathbold", "mathdbl", "mathmono", "mathsanb", "mathsans", "mlym", "modi",
-    "mong", "mroo", "mtei", "mymr", "mymrepka", "mymrpao", "mymrshan", "mymrtlng",
-    "nagm", "newa", "nkoo", "olck", "orya", "osma", "outlined", "rohg", "saur", "segment",
-    "shrd", "sind", "sinh", "sora", "sund", "takr", "talu", "tamldec", "telu", "thai",
-    "tibt", "tirh", "tnsa", "vaii", "wara", "wcho",
+    "adlm", "ahom",     "arab",     "arabext",  "bali",     "beng",     "bhks",     "brah",    "cakm", "cham",
+    "deva", "diak",     "fullwide", "gong",     "gonm",     "gujr",     "guru",     "hanidec", "hmng", "hmnp",
+    "java", "kali",     "kawi",     "khmr",     "knda",     "lana",     "lanatham", "laoo",    "latn", "lepc",
+    "limb", "mathbold", "mathdbl",  "mathmono", "mathsanb", "mathsans", "mlym",     "modi",    "mong", "mroo",
+    "mtei", "mymr",     "mymrepka", "mymrpao",  "mymrshan", "mymrtlng", "nagm",     "newa",    "nkoo", "olck",
+    "orya", "osma",     "outlined", "rohg",     "saur",     "segment",  "shrd",     "sind",    "sinh", "sora",
+    "sund", "takr",     "talu",     "tamldec",  "telu",     "thai",     "tibt",     "tirh",    "tnsa", "vaii",
+    "wara", "wcho",
 };
 
 pub const supported_time_zones = [_][]const u8{
@@ -842,12 +842,12 @@ pub const supported_time_zones = [_][]const u8{
 };
 
 pub const supported_units = [_][]const u8{
-    "acre", "bit", "byte", "celsius", "centimeter", "day", "degree", "fahrenheit",
-    "fluid-ounce", "foot", "gallon", "gigabit", "gigabyte", "gram", "hectare", "hour",
-    "inch", "kilobit", "kilobyte", "kilogram", "kilometer", "liter", "megabit", "megabyte",
-    "meter", "microsecond", "mile", "mile-scandinavian", "milliliter", "millimeter",
-    "millisecond", "minute", "month", "nanosecond", "ounce", "percent", "petabyte",
-    "pound", "second", "stone", "terabit", "terabyte", "week", "yard", "year",
+    "acre",        "bit",         "byte",     "celsius",           "centimeter", "day",        "degree",      "fahrenheit",
+    "fluid-ounce", "foot",        "gallon",   "gigabit",           "gigabyte",   "gram",       "hectare",     "hour",
+    "inch",        "kilobit",     "kilobyte", "kilogram",          "kilometer",  "liter",      "megabit",     "megabyte",
+    "meter",       "microsecond", "mile",     "mile-scandinavian", "milliliter", "millimeter", "millisecond", "minute",
+    "month",       "nanosecond",  "ounce",    "percent",           "petabyte",   "pound",      "second",      "stone",
+    "terabit",     "terabyte",    "week",     "yard",              "year",
 };
 
 // ── Tests ──────────────────────────────────────────────────────────────────

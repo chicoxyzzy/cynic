@@ -123,9 +123,9 @@ pub const CalendarId = struct {
 /// ECMA-402 / Temporal supported calendar catalog (structural; matches
 /// `Intl.supportedValuesOf("calendar")` / `intl.supported_calendars`).
 pub const supported_calendars = [_][]const u8{
-    "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "gregory",
-    "hebrew", "indian", "islamic", "islamic-civil", "islamic-rgsa", "islamic-tbla",
-    "islamic-umalqura", "iso8601", "japanese", "persian", "roc",
+    "buddhist", "chinese",  "coptic",  "dangi",         "ethioaa",      "ethiopic",     "gregory",
+    "hebrew",   "indian",   "islamic", "islamic-civil", "islamic-rgsa", "islamic-tbla", "islamic-umalqura",
+    "iso8601",  "japanese", "persian", "roc",
 };
 
 /// Legacy aliases canonicalised at accept time (§Temporal calendar id +
