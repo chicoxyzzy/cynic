@@ -17,6 +17,26 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-22 — cynic `ec12132d` (card marking + adaptive major trigger), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Same-runner A/B vs `61cc6fbd` (the pre-card-marking baseline — sticky
+bits + scan-skip), suite=both, 12 runs. Two GC changes landed since: card
+marking drops the minor cycle's O(mature) typed-slot scan (every
+typed-slot write now barriers onto the dirty list, so the ~250k plain
+Splay nodes never get scanned), and the adaptive major trigger defers the
+forced major on a stable retained set (backstop 8→32 + a 2×-growth
+trigger that bounds churning RSS):
+
+- **splay 0.329× (default tier) / 0.322× (`--no-jit`) — ~3.0× faster**
+  (3505→1135 / 3540→1136 ms), the two changes together.
+- Cumulative with sticky bits + scan-skip: interpreter-tier Splay
+  ~16,000 → ~1,109 ms; the gap to QuickJS-NG (~833 ms on this box)
+  collapsed to **~1.3×** (was 17.8× before any GC work, ~4.0× after
+  scan-skip), and to JSC (~162 ms) ~6.8× (was ~22×).
+- Conformance byte-identical (45335); small-live churn peak RSS bounded by
+  the adaptive growth trigger (115→32 MB on a churn microbench). Other
+  macros flat — the changes are GC scan/frequency, not arith/alloc.
+
 ### 2026-06-21 — cynic `d7dae9ca` (slot-bearing-only typed-slot scan), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Same-runner A/B vs `origin/main` (the post-sticky-bits baseline
