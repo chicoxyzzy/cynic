@@ -859,10 +859,10 @@
         <div class="compare-row">
           <div>
             <div class="feature-name"><code>Intl</code> · the internationalization API</div>
-            <div class="compare-note">a separate opt-in build — CLDR/ICU + IANA tzdata, named time zones, non-ISO calendars; the default stays ISO / C locale</div>
+            <div class="compare-note">structural surface + embedded IANA tzdata behind <code>-Dintl=stub</code> / <code>-Dintl=full</code>; the default build still ships without a locale database</div>
           </div>
-          <div class="cross">Future Cynic's problem.</div>
-          <div>Not refused — just heavy. A locale database is a lot of bytes to ship by default.</div>
+          <div class="check">Opt-in.</div>
+          <div>Ten constructors structurally. Real IANA offsets with tzdata 2026b. CLDR-class formatter output is the missing piece.</div>
         </div>
 
         <div class="compare-row">
