@@ -854,7 +854,7 @@ fn maybePrefixAccessor(
     @memcpy(buf[0..prefix.len], prefix);
     @memcpy(buf[prefix.len..], base);
     const owned = realm.heap.allocateString(buf) catch return base;
-    anchor.key_anchors.append(realm.allocator, owned) catch {};
+    anchor.anchorKey(realm.allocator, owned) catch {};
     anchor.markNonPristine();
     return owned.flatBytes();
 }
@@ -919,7 +919,7 @@ fn resolveComputedKey(
                 // of the class prototype.
                 const owned = realm.heap.allocateString(buf) catch break :blk "";
                 realm.allocator.free(buf);
-                anchor.key_anchors.append(realm.allocator, owned) catch {};
+                anchor.anchorKey(realm.allocator, owned) catch {};
                 anchor.markNonPristine();
                 break :blk owned.flatBytes();
             }
@@ -936,7 +936,7 @@ fn resolveComputedKey(
     // as the class prototype is reachable. Without anchoring,
     // a later GC cycle sweeps the JSString and the property
     // bag's borrowed `[]const u8` key slice dangles.
-    anchor.key_anchors.append(realm.allocator, s) catch return .{ .name = fallback, .display_name = fallback };
+    anchor.anchorKey(realm.allocator, s) catch return .{ .name = fallback, .display_name = fallback };
     anchor.markNonPristine();
     return .{ .name = s.flatBytes(), .display_name = s.flatBytes() };
 }

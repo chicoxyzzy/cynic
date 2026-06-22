@@ -37,26 +37,42 @@ predicate), so a young object reachable through *any* field of a
 dirty mature container is rooted. It's seeded as a root source on
 every minor cycle and cleared at the end of one.
 
-Beyond the dirty list, `collectYoung` runs a typed-slot scan over the
-mature objects / functions / generators (`markObjectInternalSlots` and
-siblings) as a second mature→young root source — it catches raw
-`container.field = young` writes into typed internal slots that bypass
-the write barrier. For plain data objects — the common case, and most of
-a large stable retained set like Splay's payload tree — this scan is
-pure overhead: they hold no typed internal slots to mark. So
-`markObjectInternalSlots` early-returns **in ReleaseFast** for any object
-`objectScanSkippable` deems empty: no `needs_internal_scan` flag (set
-wherever a typed slot is populated — `getOrCreateExtension` covers every
-extension-held slot in one place, plus `getOrCreatePromiseStore`, the
-base iterator / regexp / proxy setters, and symbol-key adds), no borrowed
-`key_anchors`, and a null-or-mature `[[Prototype]]` (object + function —
-the last two ride direct checks because they are written at too many
-scattered sites to flag). Debug / ReleaseSafe keep the full scan and add
-a verifier (`objectYoungTypedSlot`) that asserts no skippable object
-holds a young typed-slot referent — `objectScanSkippable` is shared by
-the skip and the verifier gate so they cannot drift, and a missed
-populating site surfaces as a gc-stress assert, never a ReleaseFast
-use-after-free.
+Beyond the dirty list, `collectYoung` historically also scanned the
+typed internal slots of **every mature object** (`markObjectInternalSlots`)
+as a second mature→young root source — a backstop for raw
+`container.field = young` writes into typed slots that bypass the value
+write barrier. For a large stable retained set (Splay's payload tree is
+~250k plain `{key,left,right,value}` nodes that hold no typed slots),
+iterating all of them every minor cycle was the dominant minor-cycle cost
+even with a cheap per-object early-return.
+
+**Card marking retires that scan in ReleaseFast.** Every typed-slot write
+now routes through the card-marking barrier — `JSObject.noteInternalSlotWrite`
+(set the `needs_internal_scan` flag + remember the holder),
+`JSObject.anchorKey` (borrowed property-key strings), or the value-aware
+`Heap.writeBarrier` (the prototype / proxy / regexp / settled-promise
+setters) — which puts a *mature* holder on the dirty list. A mature
+object that takes a young typed-slot write is therefore already a dirty-
+list entry, and `markAllPointerFields` (Root source 1) roots it. So the
+`for (objects_mature) markObjectInternalSlots` loop is **compiled out in
+ReleaseFast**: the minor cycle is O(young + dirty list + the small
+function / generator mature lists), no longer O(mature objects).
+Functions and generators keep their own mature scans — both lists are
+small, and a generator's registers churn every cycle so barriering them
+would be self-defeating.
+
+Completeness of the barrier audit (every site that stores a young
+referent into a mature typed slot must remember the holder) is enforced
+the same way the scan-skip shipped: Debug / ReleaseSafe keep the full
+`markObjectInternalSlots` scan AND a verifier asserting, for every mature
+object, `objectYoungTypedSlot(o) != null ⇒ o.dirty`. A missed barrier
+surfaces as a named gc-stress assert, never a ReleaseFast use-after-free.
+(`markObjectInternalSlots` and `objectYoungTypedSlot` are kept exact
+twins so the verifier has no blind spot.) Under promote-on-first a
+dirtied holder pays the full `markAllPointerFields` walk only in the one
+cycle it took the write — its young referent tenures that same cycle — so
+the barrier is near-free; if aging ever replaces promote-on-first, a
+typed-slots-only remembered set becomes preferable again.
 
 ## What it does
 

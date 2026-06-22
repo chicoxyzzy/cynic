@@ -490,6 +490,16 @@ pub const JSFunction = struct {
         return f;
     }
 
+    /// Anchor a heap string as a borrowed property-key backing. Mirrors
+    /// `JSObject.anchorKey` for call-site uniformity, but a function needs
+    /// NO card-marking barrier: the minor cycle still fully scans every
+    /// mature function (`functions_mature` → `markFunctionInternalSlots`,
+    /// which marks `key_anchors`), so a young key on a mature function is
+    /// always rooted. Only the O(mature) *object* scan is dropped.
+    pub fn anchorKey(self: *JSFunction, allocator: std.mem.Allocator, anchor_str: *@import("string.zig").JSString) !void {
+        try self.key_anchors.append(allocator, anchor_str);
+    }
+
     pub fn deinit(self: *JSFunction, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
         self.property_flags.deinit(allocator);

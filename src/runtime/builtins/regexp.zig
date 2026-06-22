@@ -1373,7 +1373,7 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
     };
     iter.regexp_string_iter = ri_state;
     iter.markNonPristine();
-    iter.needs_internal_scan = true; // typed-slot scan reads regexp_string_iter
+    iter.noteInternalSlotWrite(); // card-mark: regexp_string_iter holds young regexp/string
     return heap_mod.taggedObject(iter);
 }
 

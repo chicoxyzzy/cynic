@@ -390,6 +390,9 @@ pub fn startAsyncDisposeWalkWithExisting(realm: *Realm, stack: *JSObject, existi
             walk.pending_error = existing_throw;
             walk.has_pending_error = true;
             walk.external_seed_only = true;
+            // Card-marking barrier: a (possibly young) seeded error now
+            // lives in the walk on a (possibly mature) stack.
+            stack.noteInternalSlotWrite();
         }
     }
     return outer;
@@ -429,6 +432,10 @@ fn startAsyncDisposeWalk(realm: *Realm, stack: *JSObject) NativeError!Value {
     // doesn't enter this path; the assignment is defensive.
     if (ext.async_dispose_walk) |old| old.deinit(realm.allocator);
     ext.async_dispose_walk = walk;
+    // Card-marking barrier: the walk snapshot holds (possibly young)
+    // disposable resources; remember a mature stack so the next minor
+    // cycle scans them. See `Heap.rememberTypedSlotWrite`.
+    stack.noteInternalSlotWrite();
 
     // Fast path — empty resource list: no chain to build. Fulfill
     // outer immediately. `settlePromiseInternal` flushes any
@@ -571,6 +578,9 @@ fn asyncStepRejectedImpl(realm: *Realm, this_value: Value, args: []const Value) 
     // A disposer contributed — clear the external-seed marker so
     // `finalizeSettle` propagates the (possibly wrapped) throw.
     walk.external_seed_only = false;
+    // Card-marking barrier: a (possibly young) pending error now lives
+    // in the walk on a (possibly mature) stack.
+    stack.noteInternalSlotWrite();
     return runNextDisposer(realm, stack);
 }
 
@@ -646,6 +656,9 @@ fn asyncFinalizeRejectedImpl(realm: *Realm, this_value: Value, args: []const Val
     }
     // Same as step_rejected — a disposer contributed.
     walk.external_seed_only = false;
+    // Card-marking barrier: a (possibly young) pending error now lives
+    // in the walk on a (possibly mature) stack.
+    stack.noteInternalSlotWrite();
     return finalizeSettle(realm, this_value);
 }
 

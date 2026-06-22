@@ -155,7 +155,7 @@ fn makeMapIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind)
     st.* = .{ .brand = .map, .source = src, .kind = kind };
     it.map_set_iter = st;
     it.markNonPristine();
-    it.needs_internal_scan = true; // typed-slot scan reads map_set_iter
+    it.noteInternalSlotWrite(); // card-mark: map_set_iter holds young source
     return heap_mod.taggedObject(it);
 }
 
@@ -345,7 +345,7 @@ fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, 
     };
     it.array_like_iter = state;
     it.markNonPristine();
-    it.needs_internal_scan = true; // typed-slot scan reads array_like_iter
+    it.noteInternalSlotWrite(); // card-mark: array_like_iter holds young target
     // `next` lives on the prototype (see ensureArrayIteratorPrototype);
     // `@@iterator` similarly inherits from %IteratorPrototype% so
     // no own slots need to be wired here.
@@ -819,6 +819,10 @@ fn mapGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeError
             bucket.set(realm.allocator, idx_owned.flatBytes(), item) catch return error.OutOfMemory;
             bucket.set(realm.allocator, "length", Value.fromInt32(1)) catch return error.OutOfMemory;
             data.entries.append(realm.allocator, .{ .key = key_v, .value = heap_mod.taggedObject(bucket) }) catch return error.OutOfMemory;
+            // Card-marking barrier: a new (young) entry just landed in
+            // the result Map's `map_data`; remember it if mature (the
+            // grouping loop can promote `out` mid-build at gc_threshold=1).
+            out.noteInternalSlotWrite();
         }
         // Per-iteration handles (item, key_v, bucket) are now
         // reachable through the rooted `out`; drop them so the
@@ -1052,6 +1056,12 @@ fn mapSetInternal(realm: *Realm, inst: *@import("../object.zig").JSObject, key: 
     } else {
         try d.entries.append(realm.allocator, .{ .key = key, .value = value });
     }
+    // Card-marking barrier: a (possibly young) key/value just landed in
+    // the Map's `map_data` backing store — both branches store into it.
+    // Remember a mature Map so the next minor cycle scans it via the
+    // dirty list (Root source 1); the typed-slot scan no longer walks
+    // every mature object. See `Heap.rememberTypedSlotWrite`.
+    inst.noteInternalSlotWrite();
 }
 
 fn mapSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1591,7 +1601,7 @@ fn makeSetIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind)
     st.* = .{ .brand = .set, .source = src, .kind = kind };
     it.map_set_iter = st;
     it.markNonPristine();
-    it.needs_internal_scan = true; // typed-slot scan reads map_set_iter
+    it.noteInternalSlotWrite(); // card-mark: map_set_iter holds young source
     return heap_mod.taggedObject(it);
 }
 
@@ -1789,6 +1799,10 @@ fn setAddInternal(realm: *Realm, inst: *@import("../object.zig").JSObject, value
     const k = canonicalizeKey(value);
     if (setIndex(d, k) == null) {
         try d.entries.append(realm.allocator, .{ .value = k });
+        // Card-marking barrier: a (possibly young) value just entered
+        // the Set's `set_data` store; remember a mature Set for the next
+        // minor cycle. See `Heap.rememberTypedSlotWrite`.
+        inst.noteInternalSlotWrite();
     }
 }
 

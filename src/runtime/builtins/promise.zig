@@ -188,6 +188,10 @@ fn capabilityExecutorImpl(realm: *Realm, this_value: Value, args: []const Value)
     rec.resolve = if (args.len >= 1) args[0] else Value.undefined_;
     rec.reject = if (args.len >= 2) args[1] else Value.undefined_;
     rec.called = true;
+    // Card-marking barrier: the executor just stored (possibly young)
+    // resolve / reject into the capability record held by `state` —
+    // remember a mature holder. See `Heap.rememberTypedSlotWrite`.
+    state.noteInternalSlotWrite();
     return Value.undefined_;
 }
 

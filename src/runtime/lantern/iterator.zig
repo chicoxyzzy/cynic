@@ -262,7 +262,7 @@ pub fn openIteratorOpts(
     state.* = .{ .target = iterable };
     iter.array_like_iter = state;
     iter.markNonPristine();
-    iter.needs_internal_scan = true; // typed-slot scan reads array_like_iter
+    iter.noteInternalSlotWrite(); // card-mark: array_like_iter holds young target/source
     const next_fn = realm.heap.allocateFunctionNative(realm, arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
     next_fn.proto = realm.intrinsics.function_prototype;
     iter.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
@@ -638,7 +638,7 @@ pub fn wrapForInSnapshot(
     state.* = .{ .target = heap_mod.taggedObject(arr), .idx = 0, .done = false, .for_in_source = source_v };
     iter.array_like_iter = state;
     iter.markNonPristine();
-    iter.needs_internal_scan = true; // typed-slot scan reads array_like_iter
+    iter.noteInternalSlotWrite(); // card-mark: array_like_iter holds young target/source
     const next_fn = realm.heap.allocateFunctionNative(realm, arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
     next_fn.proto = realm.intrinsics.function_prototype;
     iter.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;

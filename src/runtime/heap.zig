@@ -3179,7 +3179,51 @@ pub const Heap = struct {
                 }
             }
         }
-        for (self.objects_mature.items) |o| self.markObjectInternalSlots(o);
+        // Card-marking invariant (Debug / ReleaseSafe). Once the minor
+        // cycle's typed-slot root comes from the dirty list (Root source
+        // 1, the complete `markAllPointerFields` walk) instead of an
+        // O(mature) scan, every mature object holding a young typed-slot
+        // referent MUST be on the dirty list — otherwise the ReleaseFast
+        // minor cycle, which no longer scans `objects_mature`, drops it
+        // (a use-after-free). A trip names the slot whose young-value
+        // write skipped the `noteInternalSlotWrite` /
+        // `rememberTypedSlotWrite` barrier. The full scan below still
+        // runs in these builds, so the verifier guides the barrier audit
+        // without risking a real drop. (Distinct from the
+        // `needs_internal_scan` verifier above, which checks the
+        // ReleaseFast scan-skip predicate.)
+        if (comptime @import("builtin").mode == .Debug or
+            @import("builtin").mode == .ReleaseSafe)
+        {
+            for (self.objects_mature.items) |o| {
+                if (o.dirty) continue;
+                if (objectYoungTypedSlot(o)) |slot| {
+                    std.debug.print(
+                        "[card-mark VERIFIER] mature object {*} holds a young referent in typed slot '{s}' but is not on the dirty list — the young-value write skipped the card-marking barrier (under-scan = UAF once the ReleaseFast O(mature) scan is dropped). Add `o.noteInternalSlotWrite()` / `heap.rememberTypedSlotWrite(o)` where this slot's young value is written.\n",
+                        .{ o, slot },
+                    );
+                    std.debug.assert(false);
+                }
+            }
+        }
+        // Root source 2 (objects) — now a Debug/ReleaseSafe-only
+        // backstop. The card-marking write barrier remembers every mature
+        // object that takes a young typed-slot write on the dirty list
+        // (Root source 1, the complete `markAllPointerFields` walk), so
+        // iterating all mature objects here is redundant in ReleaseFast —
+        // it was the dominant minor-cycle cost on plain data-object
+        // workloads (Splay's tree nodes). The full scan + the `card-mark`
+        // verifier above stay in safe builds, so a missed barrier surfaces
+        // as a named assert, never a ReleaseFast use-after-free.
+        // Functions and generators keep their own (small) mature scans
+        // below: generators churn registers every cycle so barriering
+        // them is self-defeating, and neither list is the O(mature) cost.
+        // See docs/handbook/gc.md.
+        if (comptime @import("builtin").mode == .Debug or
+            @import("builtin").mode == .ReleaseSafe)
+        {
+            for (self.objects_mature.items) |o| self.markObjectInternalSlots(o);
+        }
         for (self.functions_mature.items) |f| self.markFunctionInternalSlots(f);
         for (self.environments_mature.items) |e| {
             for (e.slots) |s| self.markValue(s);
@@ -4612,6 +4656,27 @@ pub const Heap = struct {
             container.setDirty(false);
         };
     }
+
+    /// Card-marking barrier for a typed internal-slot write whose young
+    /// referent is reached through a state pointer (`iter_record`,
+    /// `iter_helper`, `map_set_iter`, the Map/Set backing stores, Promise
+    /// reactions, …), not the single `Value` the `writeBarrier` value
+    /// path inspects. Records a *mature* holder on the dirty list so the
+    /// next minor cycle walks its typed slots via Root source 1 (the
+    /// complete `markAllPointerFields` scan) — the remembering a raw
+    /// `o.<slot> = …` write otherwise bypasses. A young holder needs no
+    /// remembering (the young sweep covers it). Dedup + OOM handling
+    /// mirror `writeBarrierRemember`; conservative by construction (it
+    /// remembers whether or not the slot's current referent is actually
+    /// young — over-scan is safe, the bit collapses repeats).
+    pub fn rememberTypedSlotWrite(self: *Heap, o: *JSObject) void {
+        if (o.generation != .mature) return;
+        if (o.dirty) return;
+        o.dirty = true;
+        self.dirty_list.append(self.allocator, .{ .object = o }) catch {
+            o.dirty = false;
+        };
+    }
 };
 
 /// True when `v` carries a pointer to a `.young` heap object.
@@ -5097,27 +5162,30 @@ test "Heap: minor cycle scans both inline and overflow property slots" {
     }
 }
 
-test "Heap: collectYoung keeps a young object reachable from a mature typed slot" {
+test "Heap: collectYoung roots a young object in a mature typed slot via the card-marking barrier" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
 
-    // A mature object whose `prototype` typed internal slot points
-    // at a young object via a RAW write (no barrier, no dirty-list
-    // entry). The minor cycle's mature-typed-slot scan (Root source 2)
-    // must still find and promote it — the `prototype` typed slot is
-    // deliberately NOT a dirty-list edge.
+    // A mature object whose `prototype` typed internal slot points at a
+    // young object. Under card marking the minor cycle no longer scans
+    // every mature object's typed slots (that ReleaseFast loop is gone);
+    // a typed-slot write must remember the holder on the dirty list (Root
+    // source 1) via the card-marking barrier so collectYoung roots the
+    // referent. A raw write with NO barrier would leak it in ReleaseFast
+    // and trips the `card-mark` verifier in Debug / ReleaseSafe.
     const container = try heap.allocateObject();
     _ = heap.objects_young.pop();
     try heap.objects_mature.append(heap.allocator, container);
     container.generation = .mature;
 
     const young_proto = try heap.allocateObject();
-    container.prototype = young_proto; // raw write, no barrier
-    try testing.expectEqual(@as(usize, 0), heap.dirty_list.items.len);
+    container.prototype = young_proto;
+    heap.rememberTypedSlotWrite(container); // card-marking barrier
+    try testing.expectEqual(@as(usize, 1), heap.dirty_list.items.len);
 
     heap.collectYoung(&.{});
 
-    // The typed-slot scan rooted it: tenured, not swept.
+    // The dirty-list scan (Root source 1) rooted it: tenured, not swept.
     try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
     try testing.expectEqual(@as(usize, 2), heap.objects_mature.items.len);
     try testing.expectEqual(Generation.mature, young_proto.generation);

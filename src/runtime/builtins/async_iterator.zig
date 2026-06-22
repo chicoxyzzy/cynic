@@ -95,7 +95,7 @@ fn afsiNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         r.* = .{};
         sync_iter_obj.iter_record = r;
         sync_iter_obj.markNonPristine();
-        sync_iter_obj.needs_internal_scan = true; // typed-slot scan reads iter_record
+        sync_iter_obj.noteInternalSlotWrite(); // card-mark: holder may be a mature user object
         break :blk r;
     };
     const next_v = if (rec.next_cached) rec.next else nv: {
@@ -106,6 +106,9 @@ fn afsiNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
         };
         rec.next = v;
         rec.next_cached = true;
+        // Card-marking barrier: the cached `.next` is a (possibly young)
+        // function now reachable through `sync_iter_obj`'s `iter_record`.
+        sync_iter_obj.noteInternalSlotWrite();
         break :nv v;
     };
     const next_fn = heap_mod.valueAsFunction(next_v) orelse {

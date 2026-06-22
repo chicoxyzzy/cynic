@@ -7026,7 +7026,7 @@ pub fn runFrames(
                 r.* = .{};
                 iter_obj.iter_record = r;
                 iter_obj.markNonPristine();
-                iter_obj.needs_internal_scan = true; // typed-slot scan reads iter_record
+                iter_obj.noteInternalSlotWrite(); // card-mark: holder may be a mature user object
                 break :blk r;
             };
             // Once the iter has surfaced `done: true` we stop
@@ -7057,6 +7057,11 @@ pub fn runFrames(
                 };
                 iter_rec.next = v;
                 iter_rec.next_cached = true;
+                // Card-marking barrier: the cached `.next` method is a
+                // (possibly young) function now reachable through the
+                // user object's `iter_record` slot — remember a mature
+                // holder. See `Heap.rememberTypedSlotWrite`.
+                iter_obj.noteInternalSlotWrite();
                 break :nv v;
             };
             if (committed) continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
@@ -8074,7 +8079,7 @@ pub fn runFrames(
                 // The accessors map borrows the `owned` slice as
                 // its key; anchor the heap JSString so a GC sweep
                 // can't dangle a computed accessor key.
-                obj.key_anchors.append(allocator, owned) catch return error.OutOfMemory;
+                obj.anchorKey(allocator, owned) catch return error.OutOfMemory;
                 obj.markNonPristine();
             }
             if (is_setter) {
@@ -10765,7 +10770,7 @@ pub fn runFrames(
                 _ = obj.property_flags.swapRemove(key_slice);
             }
             realm.heap.storePropertyWithFlags(obj, allocator, key_slice, acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
-            obj.key_anchors.append(allocator, key_js) catch return error.OutOfMemory;
+            obj.anchorKey(allocator, key_js) catch return error.OutOfMemory;
             obj.markNonPristine();
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -12221,7 +12226,7 @@ fn strictSetPropertyAnchored(
         // insertion — re-writes to an existing key reuse the anchor.
         if (!had_fn_entry) {
             if (key_string) |ks| {
-                fn_obj.key_anchors.append(allocator, ks) catch return error.OutOfMemory;
+                fn_obj.anchorKey(allocator, ks) catch return error.OutOfMemory;
             }
         }
         return .ok;

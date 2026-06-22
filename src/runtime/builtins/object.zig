@@ -1882,7 +1882,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // Anchored even on a redefine: a data→accessor conversion
             // stores a freshly stringified key slice.
             if (dk.anchor) |ks| {
-                target.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+                target.anchorKey(realm.allocator, ks) catch return error.OutOfMemory;
                 target.markNonPristine();
             }
             return target_v;
@@ -1900,7 +1900,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // to `elements` and needs no anchor).
             if (target.ownDataContains(key)) {
                 if (dk.anchor) |ks| {
-                    target.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+                    target.anchorKey(realm.allocator, ks) catch return error.OutOfMemory;
                     target.markNonPristine();
                 }
             }
@@ -1997,7 +1997,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // §10.1.11 — track function objects' own keys too.
             _ = target_fn.recordKey(realm.allocator, key) catch return error.OutOfMemory;
             // Anchor the borrowed heap key string on the function.
-            if (dk.anchor) |ks| target_fn.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+            if (dk.anchor) |ks| target_fn.anchorKey(realm.allocator, ks) catch return error.OutOfMemory;
             return target_v;
         }
 
@@ -2007,7 +2007,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             const value: Value = if (parsed.has_value) parsed.value else cur_value;
             target_fn.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
             if (target_fn.ownDataContains(key)) {
-                if (dk.anchor) |ks| target_fn.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+                if (dk.anchor) |ks| target_fn.anchorKey(realm.allocator, ks) catch return error.OutOfMemory;
             }
             return target_v;
         }
@@ -2490,7 +2490,7 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
             if (desc.isUndefined()) continue;
             fout.set(realm.allocator, k_str.flatBytes(), desc) catch return error.OutOfMemory;
             if (fout.ownDataContains(k_str.flatBytes())) {
-                fout.key_anchors.append(realm.allocator, k_str) catch return error.OutOfMemory;
+                fout.anchorKey(realm.allocator, k_str) catch return error.OutOfMemory;
                 fout.markNonPristine();
             }
         }
@@ -2541,7 +2541,7 @@ fn objectGetOwnPropertyDescriptors(realm: *Realm, this_value: Value, args: []con
         // `out` borrows the `k_str` slice as the property key; anchor
         // the heap string so a later sweep can't free it.
         if (out.ownDataContains(k_str.flatBytes())) {
-            out.key_anchors.append(realm.allocator, k_str) catch return error.OutOfMemory;
+            out.anchorKey(realm.allocator, k_str) catch return error.OutOfMemory;
             out.markNonPristine();
         }
     }
@@ -3257,7 +3257,7 @@ fn lowerArrayIndexedFlags(realm: *Realm, obj: *JSObject, sealed_only: bool) Nati
         // named-property bag, which borrows the `ks_owned` slice;
         // anchor the heap key string so a GC sweep can't dangle it.
         if (obj.ownDataContains(ks_owned.flatBytes())) {
-            obj.key_anchors.append(realm.allocator, ks_owned) catch return error.OutOfMemory;
+            obj.anchorKey(realm.allocator, ks_owned) catch return error.OutOfMemory;
             obj.markNonPristine();
         }
     }
@@ -3698,7 +3698,7 @@ fn objectFromEntries(realm: *Realm, this_value: Value, args: []const Value) Nati
         // Anchor the heap key string so the borrowed slice survives.
         if (key_slot.anchor) |ks| {
             if (out.ownDataContains(key_slot.key)) {
-                out.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+                out.anchorKey(realm.allocator, ks) catch return error.OutOfMemory;
                 out.markNonPristine();
             }
         }
@@ -4007,7 +4007,7 @@ fn objectGroupBy(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             bucket.set(realm.allocator, "length", Value.fromInt32(0)) catch return error.OutOfMemory;
             out.set(realm.allocator, key_str, heap_mod.taggedObject(bucket)) catch return error.OutOfMemory;
             // `out` borrows the key slice; anchor the heap string.
-            out.key_anchors.append(realm.allocator, key_js) catch return error.OutOfMemory;
+            out.anchorKey(realm.allocator, key_js) catch return error.OutOfMemory;
             out.markNonPristine();
         }
         const cur_len = bucket.get("length");

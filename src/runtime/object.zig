@@ -1354,6 +1354,32 @@ pub const JSObject = struct {
         return ext;
     }
 
+    /// Note that a typed internal slot was populated on this object with
+    /// state holding (or about to hold) a heap referent the minor-cycle
+    /// scan reads. Sets `needs_internal_scan` (so the scan visits the
+    /// slot) AND, for a mature holder, records it on the heap's dirty
+    /// list via the card-marking barrier (`Heap.rememberTypedSlotWrite`)
+    /// — the typed-slot analogue of the value write barrier for
+    /// state-pointer slots. Replaces the bare `needs_internal_scan = true`
+    /// at raw-write sites so the flag and the barrier can never drift.
+    pub fn noteInternalSlotWrite(self: *JSObject) void {
+        self.needs_internal_scan = true;
+        if (self.heap) |h| h.rememberTypedSlotWrite(self);
+    }
+
+    /// Anchor a heap string as a borrowed property-key backing AND
+    /// card-mark the holder. The property map borrows the key's byte
+    /// slice, so the string must stay rooted (the original reason for
+    /// `key_anchors`); additionally a *young* key anchored on a *mature*
+    /// object must be remembered, because the property *value* write
+    /// barrier no-ops on a primitive value and so never sees the young
+    /// key. Replaces the bare `key_anchors.append` at the scattered
+    /// anchor sites so the anchor and the barrier can never drift.
+    pub fn anchorKey(self: *JSObject, allocator: std.mem.Allocator, anchor_str: *@import("string.zig").JSString) !void {
+        try self.key_anchors.append(allocator, anchor_str);
+        self.noteInternalSlotWrite();
+    }
+
     // ── §10.1.8 accessor descriptors — extension-backed cold map ─
     //
     // Most objects have zero accessors; the map sits behind
@@ -1422,6 +1448,9 @@ pub const JSObject = struct {
     }
     pub fn setCapabilityRecord(self: *JSObject, allocator: std.mem.Allocator, v: ?*PromiseCapabilityRecord) !void {
         (try self.getOrCreateExtension(allocator)).capability_record = v;
+        // Card-marking barrier: the record holds (possibly young)
+        // resolve / reject functions. See `Heap.rememberTypedSlotWrite`.
+        self.noteInternalSlotWrite();
     }
     pub fn getGeneratorRef(self: *const JSObject) ?*@import("generator.zig").JSGenerator {
         return if (self.extension) |ext| ext.generator_ref else null;
@@ -1550,6 +1579,9 @@ pub const JSObject = struct {
     ) !void {
         const ext = try self.getOrCreateExtension(allocator);
         try ext.private_properties.put(allocator, key, v);
+        // Card-marking barrier: a (possibly young) private field value
+        // just landed on a (possibly mature) instance.
+        self.noteInternalSlotWrite();
     }
 
     pub fn getOrPutPrivateProperty(
@@ -1558,6 +1590,9 @@ pub const JSObject = struct {
         key: []const u8,
     ) !std.StringArrayHashMapUnmanaged(Value).GetOrPutResult {
         const ext = try self.getOrCreateExtension(allocator);
+        // Card-marking barrier: the caller writes a (possibly young)
+        // value into the returned entry; remember a mature instance.
+        self.noteInternalSlotWrite();
         return ext.private_properties.getOrPut(allocator, key);
     }
 
@@ -1720,6 +1755,11 @@ pub const JSObject = struct {
 
     pub fn promiseWaitersPtr(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged(*@import("generator.zig").JSGenerator) {
         const s = try self.getOrCreatePromiseStore(allocator);
+        // Card-marking barrier: the mutable accessor is the choke point
+        // for every waiter append (scattered across promise/generator/
+        // interpreter); a mature promise about to gain a young waiter
+        // must be remembered. See `Heap.rememberTypedSlotWrite`.
+        self.noteInternalSlotWrite();
         return &s.waiters;
     }
 
@@ -1730,6 +1770,11 @@ pub const JSObject = struct {
 
     pub fn promiseReactionsPtr(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged(PromiseReaction) {
         const s = try self.getOrCreatePromiseStore(allocator);
+        // Card-marking barrier: the mutable accessor is the choke point
+        // for every reaction append (scattered across promise/generator/
+        // array/interpreter); a mature promise about to gain a young
+        // reaction must be remembered. See `Heap.rememberTypedSlotWrite`.
+        self.noteInternalSlotWrite();
         return &s.reactions;
     }
 
@@ -1790,6 +1835,10 @@ pub const JSObject = struct {
 
     pub fn disposableResourcesPtr(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged(DisposableResource) {
         const ext = try self.getOrCreateExtension(allocator);
+        // Card-marking barrier: the mutable accessor is the choke point
+        // for resource appends; a mature stack about to gain a young
+        // resource / dispose-method must be remembered.
+        self.noteInternalSlotWrite();
         return &ext.disposable_resources;
     }
 
@@ -1894,6 +1943,9 @@ pub const JSObject = struct {
     pub fn setTypedView(self: *JSObject, allocator: std.mem.Allocator, view: ?TypedView) !void {
         const ext = try self.getOrCreateExtension(allocator);
         ext.typed_view = view;
+        // Card-marking barrier: the view references a (possibly young)
+        // backing buffer; remember a mature typed array.
+        self.noteInternalSlotWrite();
     }
 
     pub fn getDataView(self: *const JSObject) ?DataView {
@@ -1909,6 +1961,10 @@ pub const JSObject = struct {
     pub fn setDataView(self: *JSObject, allocator: std.mem.Allocator, dv: ?DataView) !void {
         const ext = try self.getOrCreateExtension(allocator);
         ext.data_view = dv;
+        // Card-marking barrier: the view references a (possibly young)
+        // backing buffer; remember a mature DataView (symmetric with
+        // `setTypedView`).
+        self.noteInternalSlotWrite();
     }
 
     // ── §22.1 String wrapper + embedder host pointer ──────────
@@ -2318,7 +2374,7 @@ pub const JSObject = struct {
             // under the order slice (gc-threshold=1 reorders
             // Object.keys/values otherwise).
             if (newly_ordered) {
-                try self.key_anchors.append(allocator, key_str);
+                try self.anchorKey(allocator, key_str);
                 self.markNonPristine();
                 // The scan marks every `key_anchors` JSString (its bytes
                 // back a live key slice). See `needs_internal_scan`.
@@ -2345,7 +2401,7 @@ pub const JSObject = struct {
         // the key-anchor bookkeeping below).
         if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
         if (newly_ordered or !gop.found_existing) {
-            try self.key_anchors.append(allocator, key_str);
+            try self.anchorKey(allocator, key_str);
             // The scan marks every `key_anchors` JSString. See
             // `needs_internal_scan`.
             self.needs_internal_scan = true;
@@ -3284,6 +3340,12 @@ pub const JSObject = struct {
     pub inline fn settlePromise(self: *JSObject, state: PromiseState, value: Value) void {
         self.promise_state = state;
         self.promise_value = value;
+        // Card-marking barrier: a young settled value on a mature promise
+        // must be remembered (the minor cycle no longer scans all mature
+        // objects). Value-aware — cheap-rejects a primitive / mature
+        // result. The `needs_internal_scan` flag was set at promise
+        // creation. See `Heap.writeBarrier`.
+        if (self.heap) |h| h.writeBarrier(.{ .object = self }, value);
     }
 
     /// Logical array length. Dense → `elements.items.len`;

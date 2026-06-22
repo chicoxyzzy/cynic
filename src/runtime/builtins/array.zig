@@ -658,7 +658,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // integer writes route to `elements` above and never reach here.)
     if (key_anchor) |ks| {
         if (o.ownDataContains(key)) {
-            o.key_anchors.append(realm.allocator, ks) catch return error.OutOfMemory;
+            o.anchorKey(realm.allocator, ks) catch return error.OutOfMemory;
             o.markNonPristine();
         }
     }
@@ -2547,7 +2547,7 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
     // landed in the named-property bag (rather than the array-exotic
     // `elements` vector), anchor the string so GC keeps the key alive.
     if (cur.ownDataContains(key)) {
-        cur.key_anchors.append(realm.allocator, key_str) catch return error.OutOfMemory;
+        cur.anchorKey(realm.allocator, key_str) catch return error.OutOfMemory;
         cur.markNonPristine();
     }
 }
@@ -4194,7 +4194,7 @@ fn createDataPropertyOrThrow(
     // Anchor the heap key string when the slice landed in the
     // named-property bag — see `createDataPropertyOrThrowGeneric`.
     if (cur.ownDataContains(key)) {
-        cur.key_anchors.append(realm.allocator, key_str) catch return error.OutOfMemory;
+        cur.anchorKey(realm.allocator, key_str) catch return error.OutOfMemory;
         cur.markNonPristine();
     }
 }

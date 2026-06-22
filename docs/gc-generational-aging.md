@@ -1,5 +1,24 @@
 # Generational aging via card marking — design note
 
+> ## SHIPPED (2026-06-22): card marking — the per-cycle O(mature) object scan is gone
+>
+> The "card-marking remembered set" + "drop the per-cycle typed-slot
+> scan" this note describes as future work **shipped** (the scan-drop
+> half — *not* aging). Every typed-slot write into a mature object now
+> routes through the card-marking barrier (`JSObject.noteInternalSlotWrite`
+> / `JSObject.anchorKey` / the value-aware `Heap.writeBarrier`), so the
+> holder's young referents ride the dirty list (Root source 1,
+> `markAllPointerFields`). The `for (objects_mature)
+> markObjectInternalSlots` loop — the O(mature) per-minor scan — is
+> compiled out in ReleaseFast; Debug / ReleaseSafe keep it plus a
+> verifier asserting `objectYoungTypedSlot(o) != null ⇒ o.dirty`, so a
+> missed barrier is a gc-stress assert, never a use-after-free. Splay
+> (no-jit) ~1.38 → ~0.69 s laptop (~2×) on top of the sticky-bit win;
+> conformance byte-identical (45335); test-fast + gc-stress clean. See
+> `docs/handbook/gc.md`. **Aging itself remains deferred** — the analysis
+> below still holds (~0% on this non-moving GC); only the scan-drop half
+> of this note's plan shipped.
+
 > ## SUPERSEDED for the Splay/alloc gap (sticky mark bits shipped)
 >
 > This note is about *aging* (keep survivors young for N cycles). The

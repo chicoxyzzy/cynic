@@ -1230,7 +1230,7 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
             w.setWithFlags(realm.allocator, own_key.flatBytes(), Value.fromString(ch), idx_flags) catch return error.OutOfMemory;
             // The index key is a heap-allocated JSString; anchor it
             // on the wrapper so GC can't free the key slice.
-            w.key_anchors.append(realm.allocator, own_key) catch return error.OutOfMemory;
+            w.anchorKey(realm.allocator, own_key) catch return error.OutOfMemory;
             w.markNonPristine();
         }
         return w;
@@ -1759,7 +1759,7 @@ fn stringConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
                 // Anchor the heap-allocated index key on the wrapper
                 // so a GC sweep can't free the key slice out from
                 // under `wrapper[i]` lookups.
-                inst.key_anchors.append(realm.allocator, owned) catch return error.OutOfMemory;
+                inst.anchorKey(realm.allocator, owned) catch return error.OutOfMemory;
                 inst.markNonPristine();
             }
         }

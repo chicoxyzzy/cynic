@@ -335,7 +335,7 @@ fn wrapIterator(realm: *Realm, source: Value) NativeError!Value {
     state.* = .{ .source = source, .next_fn = cached_next_v };
     wrap.iter_helper = state;
     wrap.markNonPristine();
-    wrap.needs_internal_scan = true; // typed-slot scan reads iter_helper
+    wrap.noteInternalSlotWrite(); // card-mark: iter_helper state holds young source/next_fn
     return heap_mod.taggedObject(wrap);
 }
 
@@ -702,7 +702,7 @@ fn iteratorFlatMap(realm: *Realm, this_value: Value, args: []const Value) Native
     };
     wrap.iter_helper = state;
     wrap.markNonPristine();
-    wrap.needs_internal_scan = true; // typed-slot scan reads iter_helper
+    wrap.noteInternalSlotWrite(); // card-mark: iter_helper state holds young source/next_fn
     return heap_mod.taggedObject(wrap);
 }
 
@@ -830,6 +830,9 @@ fn flatMapNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
             return callbackErrored(realm, src);
         };
         state.active = inner;
+        // Card-marking barrier: `inner` is a (possibly young) sub-
+        // iterator now reachable through `obj`'s iter_helper.active.
+        obj.noteInternalSlotWrite();
         // Loop back to drain `active`.
     }
 }
@@ -925,7 +928,7 @@ fn buildLazy(realm: *Realm, source: Value, payload: Value, kind: IteratorHelperS
     };
     wrap.iter_helper = state;
     wrap.markNonPristine();
-    wrap.needs_internal_scan = true; // typed-slot scan reads iter_helper
+    wrap.noteInternalSlotWrite(); // card-mark: iter_helper state holds young source/next_fn
     return heap_mod.taggedObject(wrap);
 }
 
@@ -1622,7 +1625,7 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
     state.* = .{ .count = @intCast(args.len), .kind = .concat };
     wrap.iter_helper = state;
     wrap.markNonPristine();
-    wrap.needs_internal_scan = true; // typed-slot scan reads iter_helper
+    wrap.noteInternalSlotWrite(); // card-mark: iter_helper state holds young source/next_fn
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
@@ -1647,6 +1650,9 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
             .iterable = item,
             .method = heap_mod.taggedFunction(m_fn),
         }) catch return error.OutOfMemory;
+        // Card-marking barrier: a (possibly young) iterable/method pair
+        // just entered `wrap`'s iter_helper.concat_inputs.
+        wrap.noteInternalSlotWrite();
     }
 
     return heap_mod.taggedObject(wrap);
@@ -1713,6 +1719,9 @@ fn concatNext(realm: *Realm, this_value: Value, args: []const Value) NativeError
             };
             state.active = inner;
             active = inner;
+            // Card-marking barrier: `inner` is a (possibly young) sub-
+            // iterator now reachable through `obj`'s iter_helper.active.
+            obj.noteInternalSlotWrite();
         }
 
         const result = invokeIterNext(realm, active) catch |err| {
@@ -1955,7 +1964,7 @@ fn buildZipWrapper(
     };
     wrap.iter_helper = state;
     wrap.markNonPristine();
-    wrap.needs_internal_scan = true; // typed-slot scan reads iter_helper
+    wrap.noteInternalSlotWrite(); // card-mark: iter_helper state holds young source/next_fn
     scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
 
     // Per-input state — the sub-iterator, its §7.4.2
@@ -1973,6 +1982,9 @@ fn buildZipWrapper(
             .next = slot.next,
             .active = true,
         }) catch return error.OutOfMemory;
+        // Card-marking barrier: a (possibly young) iter/next pair just
+        // entered `wrap`'s iter_helper.zip_inputs.
+        wrap.noteInternalSlotWrite();
     }
 
     if (keys) |ks| {
