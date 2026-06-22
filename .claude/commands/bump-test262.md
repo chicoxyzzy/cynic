@@ -25,6 +25,15 @@ Bump the test262 corpus to upstream HEAD and produce fresh score rows.
        tools/guarded-run.sh --timeout=1800 -- \
          zig build test262 -- --quiet --write-results
 
+   If the local laptop-melt hook trips (`Full test262 sweep /
+   bench — do not run locally`), submit to the remote box —
+   see [.claude/commands/score.md](score.md) step 2 "Local hook
+   blocked?" for the submit/poll/scp recipe. Important: with a
+   fresh corpus the remote will pick up the new `vendor/test262`
+   SHA on its `git checkout`, so push the bump commit first
+   (`git push origin HEAD:<branch>`) and submit against that ref
+   rather than `origin/main`.
+
 6. Show the score delta vs the prior row (now on the new corpus).
    Call out any per-bucket movers that look like new-test arrivals
    vs real regressions — new fixtures from upstream often show up

@@ -30,6 +30,25 @@ sweep to run.
        tools/guarded-run.sh --timeout=1800 -- \
          zig build test262 -- --quiet --write-results
 
+   **Local hook blocked?** If the command returns
+   `Full test262 sweep / bench — do not run locally (it melts the
+   laptop)`, submit it to the configured remote box instead — the
+   job is detached and survives a local restart:
+
+       JOB=$(tools/bench/remote-run.sh --submit origin/main \
+           'zig build test262 -- --quiet --write-results')
+       # status echoes "running" while live, exit code when done
+       until s=$(tools/bench/remote-run.sh --status "$JOB"); \
+           [ "$s" != running ]; do sleep 30; done
+       # pull the refreshed files back
+       . tools/bench/lib-remote.sh; load_remote
+       scp -q "$CYNIC_REMOTE:$CYNIC_REMOTE_DIR/test262-results.md" .
+       scp -q "$CYNIC_REMOTE:$CYNIC_REMOTE_DIR/.test262-pass-cache.txt" .
+
+   See [tools/bench/README.md](../../tools/bench/README.md) "Remote
+   (optional)" for setup; with no remote configured the local block
+   is the floor — re-run on an idle machine.
+
 3. Read the last two rows in `test262-results.md` (the freshly
    appended one and the row above it).
 

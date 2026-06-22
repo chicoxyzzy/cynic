@@ -42,6 +42,43 @@ needs_refresh() {
 If the helper returns false, **skip the step and report "skipped
 (inputs unchanged)"** in the summary. Otherwise run and capture.
 
+## Local-only blocked? Use the remote runner.
+
+`zig build test262` (full sweep), `zig build bench`, and
+`tools/bench-cross.sh` all trip the local "don't melt the laptop"
+hook — that hook exists for a reason: on a loaded box (`uptime`
+load avg > 1-2) the numbers are contaminated anyway. The escape
+hatch is the Hetzner box wired up through `tools/bench/`:
+
+```sh
+# A test262 full sweep — submits a detached job, returns a JOB_ID.
+tools/bench/remote-run.sh --submit origin/main \
+    'zig build test262 -- --quiet --write-results'
+
+# Then poll until done (job_status: "running" → exit code as text):
+until s="$(tools/bench/remote-run.sh --status <JOB_ID>)"; [ "$s" != "running" ]; do sleep 30; done
+tools/bench/remote-run.sh --tail <JOB_ID> 50   # final pass/fail tally
+```
+
+`--write-results` mutates `test262-results.md` and
+`.test262-pass-cache.txt` ON THE REMOTE; pull them back via
+`scp $CYNIC_REMOTE:/opt/cynic/test262-results.md .` (and the
+pass-cache likewise) before staging.
+
+Bench / cross-engine use `tools/bench/remote-bench.sh` — A/B
+shaped (`--ref` vs `--baseline`), it fetches and renders the
+report automatically. See `tools/bench/README.md` for the
+operator model.
+
+Use the remote runner whenever:
+
+- the local melt-hook blocks a step;
+- `uptime` load avg is > ~1.5 (numbers contaminated);
+- you need a row signed under a clean, fixed-host posture.
+
+The remote keeps a warm zig-cache + pass-cache between runs,
+so a sweep is ~2 minutes wall-clock once the binary is hot.
+
 ## 1. Leak-check (gated)
 
 Inputs: `src/runtime/{heap,realm,object,function,environment,string,symbol,bigint,generator}.zig`
@@ -82,6 +119,10 @@ tools/guarded-run.sh --timeout=1800 -- \
     zig build test262 -- --quiet --write-results
 ```
 
+If the local melt-hook trips, fall through to the remote runner
+— see the "Local-only blocked?" section above for the submit /
+poll / scp recipe.
+
 **c. Print the row to the user.** After the run, extract the new
 row from `test262-results.md`:
 
@@ -101,6 +142,12 @@ Output: `bench-results.md`
 tools/guarded-run.sh --timeout=300 -- zig build bench
 tools/guarded-run.sh --timeout=300 -- zig build bench -- --no-jit
 ```
+
+If the local melt-hook trips or `uptime` shows a loaded box,
+fall through to `tools/bench/remote-bench.sh --ref <head>
+--baseline <prev-row-sha>` — the remote runner returns an
+interleaved A/B report which is the cleanest comparison anyway.
+See the "Local-only blocked?" section above.
 
 Both postures: the engine default is Bistromath (the JIT) since
 the step-3 exit of jit.md's delivery order; `--no-jit` is the
@@ -172,6 +219,11 @@ is quiet.
 tools/guarded-run.sh --timeout=900 -- \
     tools/bench-cross.sh -o bench-cross-results.md
 ```
+
+If the local melt-hook trips, the cross-engine sweep is reachable
+via `tools/bench/remote-bench.sh --cross …` (it runs the
+`bench-cross.sh` pass on the remote and pulls the result back).
+See the "Local-only blocked?" section above.
 
 The `-o` flag rewrites `bench-cross-results.md` in place — that IS
 the file update (a working-tree change; the final "Stage and
