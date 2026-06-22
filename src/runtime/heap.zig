@@ -668,6 +668,16 @@ pub const Heap = struct {
     /// referencing.
     gc_stats_cycle: u32 = 0,
     gc_stats: bool = false,
+
+    /// Incremental major-marking phase. `.idle` outside a major mark;
+    /// `.marking` from `beginIncrementalMark` (roots snapshotted, worklist
+    /// draining) until the worklist empties. Gates the Dijkstra
+    /// incremental-update write barrier (`writeBarrier`): a store into an
+    /// already-scanned (black) container shades the new value grey only
+    /// while `.marking`. STW today (the drain runs to completion inside
+    /// `collectFull`), so the barrier is dormant — no mutator stores land
+    /// mid-mark; the safe-point interleaving activates it.
+    marking_phase: enum { idle, marking, terminating } = .idle,
     /// Cumulative bytes charged across this heap's lifetime (never
     /// reset on GC). Dual of `bytes_live`, which only sees what's
     /// alive right now. Catches workloads that allocate-and-discard
@@ -2744,6 +2754,10 @@ pub const Heap = struct {
     /// driver can call it standalone.
     pub fn beginIncrementalMark(self: *Heap, roots: []const Value) void {
         if (!self.cycle_started) self.beginMajorCycle();
+        // Enter the marking phase BEFORE the root snapshot so the Dijkstra
+        // barrier is armed for any store the (future) interleaved mutator
+        // makes against a root already blackened by the loop below.
+        self.marking_phase = .marking;
         for (roots) |r| self.markValue(r);
         for (self.handle_scopes.items) |scope| {
             for (scope.handles.items) |r| self.markValue(r);
@@ -3060,6 +3074,10 @@ pub const Heap = struct {
         self.mature_objects_at_last_major = self.objects_mature.items.len;
         // Cycle complete — disarm so the next collect knows to flip.
         self.cycle_started = false;
+        // Marking is done (the drain ran to completion above) — leave the
+        // incremental phase so the Dijkstra barrier goes dormant until the
+        // next major mark arms it.
+        self.marking_phase = .idle;
 
         // Always-on cycle accounting (cheap; drives the harness
         // `--mem-summary` line).
@@ -4181,6 +4199,15 @@ pub const Heap = struct {
                 inline else => |p| p.dirty = v,
             }
         }
+
+        /// Whether the container carries this cycle's mark colour — i.e.
+        /// it has been scanned (black). Drives the Dijkstra
+        /// incremental-marking barrier in `writeBarrier`.
+        pub fn isMarked(self: Container, live_color: u1) bool {
+            return switch (self) {
+                inline else => |p| p.mark_color == live_color,
+            };
+        }
     };
 
     /// Store `v` into plain-object property `key` via §10.1.9
@@ -4378,11 +4405,23 @@ pub const Heap = struct {
         gen.home_function = hf;
     }
 
+    /// Dijkstra incremental-marking shade for an `*Environment` stored
+    /// into a container — the env-typed analogue of the `writeBarrier`
+    /// arm (an env carries no NaN-box tag, so it can't ride the Value
+    /// path). Shades the env grey when a major mark is in flight and the
+    /// holder is already black (the `e` white check mirrors `enqueue`).
+    inline fn shadeEnvDuringMark(self: *Heap, holder_marked: bool, e: *Environment) void {
+        if (self.marking_phase == .marking and holder_marked and e.mark_color != self.live_color) {
+            self.mark_env_worklist.append(self.allocator, e) catch self.markEnvironment(e);
+        }
+    }
+
     /// `fn_obj.captured_env = env` — the closure's inherited
     /// environment chain. `*Environment` has no NaN-box tag, so
     /// the barrier is open-coded against `env.generation`.
     pub fn setCapturedEnv(self: *Heap, fn_obj: *JSFunction, env: ?*Environment) void {
         if (env) |e| {
+            self.shadeEnvDuringMark(fn_obj.mark_color == self.live_color, e);
             if (fn_obj.generation == .mature and e.generation == .young) {
                 if (!fn_obj.dirty) {
                     fn_obj.dirty = true;
@@ -4399,6 +4438,7 @@ pub const Heap = struct {
     /// open-coded barrier as `setCapturedEnv`.
     pub fn setGeneratorEnv(self: *Heap, gen: *JSGenerator, env: ?*Environment) void {
         if (env) |e| {
+            self.shadeEnvDuringMark(gen.mark_color == self.live_color, e);
             if (gen.generation == .mature and e.generation == .young) {
                 if (!gen.dirty) {
                     gen.dirty = true;
@@ -4414,6 +4454,7 @@ pub const Heap = struct {
     /// `env.parent = parent` — env chain extension.
     pub fn setEnvironmentParent(self: *Heap, env: *Environment, parent: ?*Environment) void {
         if (parent) |p| {
+            self.shadeEnvDuringMark(env.mark_color == self.live_color, p);
             if (env.generation == .mature and p.generation == .young) {
                 if (!env.dirty) {
                     env.dirty = true;
@@ -4679,6 +4720,18 @@ pub const Heap = struct {
         // class_instantiate / object_alloc profiles — pure call +
         // union-marshalling overhead on all-primitive stores.
         if (!v.isHeapValue()) return;
+        // Dijkstra incremental-update arm — during an incremental major
+        // mark, a store into an already-scanned (black) container can hide
+        // a white referent from the mark (the container won't be
+        // re-scanned). Shade the new value grey to keep the strong
+        // tri-color invariant (no black→white edge). A young container can
+        // be black mid-cycle too, so this precedes the generational young
+        // reject below. The common (not-marking) cost is one flag load +
+        // a not-taken branch; the inner `isMarked` is reached only while a
+        // major mark is in flight.
+        if (self.marking_phase == .marking and container.isMarked(self.live_color)) {
+            self.enqueue(v);
+        }
         // Fast reject 2 — young container can't create an
         // old→young edge (a young→young store is reclaimed
         // wholesale by the young sweep).
@@ -5236,6 +5289,45 @@ test "Heap: collectYoung roots a young object in a mature typed slot via the car
     try testing.expectEqual(@as(usize, 0), heap.objects_young.items.len);
     try testing.expectEqual(@as(usize, 2), heap.objects_mature.items.len);
     try testing.expectEqual(Generation.mature, young_proto.generation);
+}
+
+test "Heap: Dijkstra barrier shades a value stored into a black container mid-mark" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Incremental marking installs a Dijkstra (incremental-update) write
+    // barrier: a store into an already-scanned (black) container shades the
+    // NEW value grey, so the mark stays complete even though the container
+    // is never re-scanned. Without it, a value reachable only through a
+    // black container stays white and is swept — a use-after-free.
+    //
+    // Both objects are allocated BEFORE the cycle: fresh objects are born
+    // black (`mark_color == live_color`, the allocate-black default), so a
+    // genuinely-white referent only exists for an object that predates the
+    // major cycle's `live_color` flip and isn't re-marked as a root.
+    const container = try heap.allocateObject();
+    const target = try heap.allocateObject();
+
+    // Snapshot the roots — flips `live_color`, blackens `container` (a
+    // root), leaves `target` (not a root) white, and arms `.marking`.
+    heap.beginIncrementalMark(&.{taggedObject(container)});
+    try testing.expectEqual(heap.live_color, container.mark_color); // black
+    try testing.expect(target.mark_color != heap.live_color); // white
+
+    // Control — store into the black container with marking forced idle:
+    // the Dijkstra arm must NOT fire, so `target` stays white.
+    heap.marking_phase = .idle;
+    try heap.storeProperty(container, heap.allocator, "a", taggedObject(target));
+    heap.drainMarkWorklist();
+    try testing.expect(target.mark_color != heap.live_color); // still white
+
+    // Arm marking and store again: the Dijkstra arm shades `target` grey at
+    // the store, and the drain blackens it — it survives even though the
+    // black container is never re-scanned.
+    heap.marking_phase = .marking;
+    try heap.storeProperty(container, heap.allocator, "b", taggedObject(target));
+    heap.drainMarkWorklist();
+    try testing.expectEqual(heap.live_color, target.mark_color); // shaded → survived
 }
 
 test "Heap: collectYoung clears stale mark bits on mature objects" {
