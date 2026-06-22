@@ -92,6 +92,24 @@ The byte trigger keeps allocate-and-discard string concat patterns
 the count trigger fast enough — one big allocation that dies a moment
 later still moves `bytes_since_gc`.
 
+**Minor vs major — the adaptive trigger.** A collection is a *minor*
+(`collectYoung`) by default, promoted to a *major* (`collectFull`) when
+any of: the byte threshold trips, the major allocation count is crossed,
+a `full_every_n_minor` (32) backstop of minor cycles elapses, OR the
+mature set grows past `2× its post-last-major size + 16384`. The last is
+the **adaptive** trigger. Once card marking made minor cycles O(young +
+dirty), a forced major over a *stable* live retained set (Splay's tree)
+is pure O(live) waste, so the backstop was relaxed from 8 to 32 minors
+(Splay ~2×). But a churning workload — small live set, fast
+mature-garbage production — must not defer majors that long or its
+garbage balloons RSS, so the growth trigger fires a major once the
+mature set roughly doubles (the additive floor handles a tiny-live
+workload and avoids a zero-baseline startup major). Net: rare majors
+when the retained set is stable, prompt majors when it churns; RSS stays
+bounded (`mature ≲ 2× live`) either way. A small-live churn microbench:
+peak RSS 115 MB at a fixed 32-minor interval → 32 MB adaptive, Splay
+unaffected.
+
 Always-on counters track sweep-level activity: `bytes_alloc_total`,
 `bytes_live_peak`, `gc_cycles_total`, and `gc_time_ns_total` are
 surfaced by the test262 harness flags `--mem-summary` /

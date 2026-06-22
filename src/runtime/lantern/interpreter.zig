@@ -1002,7 +1002,18 @@ inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
         const force_full =
             realm.heap.bytes_since_gc >= realm.heap.gc_byte_threshold or
             realm.heap.allocs_since_gc >= realm.heap.gc_threshold or
-            realm.heap.minor_cycles_since_full + 1 >= realm.heap.full_every_n_minor;
+            realm.heap.minor_cycles_since_full + 1 >= realm.heap.full_every_n_minor or
+            // Adaptive: the mature set has grown past 2× its
+            // post-last-major size plus a small additive floor — reclaim
+            // before mature garbage balloons RSS on a churning workload.
+            // The 2× makes the bound proportional to the live set, so a
+            // large stable set (Splay) rarely trips it and rides the
+            // `full_every_n_minor` backstop; the additive floor bounds a
+            // churning workload whose post-major LIVE set is tiny (its
+            // garbage is reclaimed, so 2× small is still small) and
+            // avoids a major every minor at the zero baseline on startup.
+            realm.heap.objects_mature.items.len >=
+                realm.heap.mature_objects_at_last_major *| 2 +| 16384;
         if (force_full) {
             realm.collectGarbage();
         } else {

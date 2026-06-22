@@ -601,20 +601,35 @@ pub const Heap = struct {
     /// expensive full trace stays rare. `setGcThreshold` keeps
     /// this coherent with `gc_threshold`.
     gc_young_threshold: u32 = 8192,
-    /// Number of minor cycles between forced major (full) cycles.
-    /// The dispatch fires a minor cycle on young-threshold
-    /// pressure; every `full_every_n_minor`-th minor cycle is
-    /// promoted to a major cycle so mature garbage (and any
-    /// remembered-set residue) is reclaimed periodically. Bounded
-    /// so even a `--gc-threshold=1` stress run, where every
-    /// allocation collects, still exercises `collectYoung` heavily
-    /// while running a `collectFull` often enough to keep RSS
-    /// bounded and the remembered set drained.
-    full_every_n_minor: u32 = 8,
+    /// Backstop for the adaptive major trigger: the maximum minor
+    /// cycles between forced major (full) cycles. A major ALSO fires
+    /// when the mature set grows past `2×` its post-last-major size
+    /// (see `mature_objects_at_last_major` + the dispatch in
+    /// `runSafePoint`), which bounds RSS on churning workloads. This
+    /// count is the floor that still reclaims slow mature garbage and
+    /// resets the sticky marks when the mature set is *stable* — a
+    /// large live retained set (Splay's tree) where the growth trigger
+    /// never fires. Raised from 8 to 32 once card marking made minor
+    /// cycles O(young + dirty): forced majors over a stable live set
+    /// are pure O(live) waste, so deferring them is a large win (Splay
+    /// ~2×). Bounded so a `--gc-threshold=1` stress run still exercises
+    /// `collectFull` regularly.
+    full_every_n_minor: u32 = 32,
     /// Minor cycles run since the last major cycle. Reset to zero
     /// by `collectFull`; bumped by `collectYoung`. Drives the
-    /// "promote to full every Nth minor" rule in the dispatch.
+    /// `full_every_n_minor` backstop in the dispatch.
     minor_cycles_since_full: u32 = 0,
+    /// Mature object count right after the last major cycle — the
+    /// baseline for the adaptive major trigger. A major fires when
+    /// `objects_mature.items.len` grows past `2× this + 16384`: the 2×
+    /// bounds a large live set proportionally (Splay rarely trips it and
+    /// rides the backstop); the additive floor bounds a churning
+    /// workload whose post-major live set is tiny (2× small is still
+    /// small) and avoids a zero-baseline major-every-minor at startup.
+    /// So churn reclaims its mature garbage before RSS balloons while a
+    /// stable set defers to the `full_every_n_minor` backstop. Set by
+    /// `collectFull`.
+    mature_objects_at_last_major: usize = 0,
     /// Byte counterpart to `gc_threshold` — collect when the
     /// charged payload since the last sweep crosses this. 16 MiB
     /// is loose enough to leave small workloads count-gated while
@@ -3011,6 +3026,9 @@ pub const Heap = struct {
         self.allocs_since_gc = 0;
         self.bytes_since_gc = 0;
         self.minor_cycles_since_full = 0;
+        // Baseline for the adaptive major trigger (the dispatch in
+        // `runSafePoint`): the live mature set right after this sweep.
+        self.mature_objects_at_last_major = self.objects_mature.items.len;
         // Cycle complete — disarm so the next collect knows to flip.
         self.cycle_started = false;
 
@@ -5450,11 +5468,12 @@ test "Heap: setGcThreshold derives a coherent minor/major pair" {
 
     heap.setGcThreshold(1);
     try testing.expectEqual(@as(u32, 1), heap.gc_young_threshold);
-    try testing.expectEqual(@as(u32, 8), heap.gc_threshold);
+    // Major count threshold = n * full_every_n_minor (the backstop).
+    try testing.expectEqual(heap.full_every_n_minor, heap.gc_threshold);
 
     heap.setGcThreshold(1000);
     try testing.expectEqual(@as(u32, 1000), heap.gc_young_threshold);
-    try testing.expectEqual(@as(u32, 8000), heap.gc_threshold);
+    try testing.expectEqual(@as(u32, 1000) *| heap.full_every_n_minor, heap.gc_threshold);
 }
 
 test "Heap: collect keeps an object reachable through roots" {
