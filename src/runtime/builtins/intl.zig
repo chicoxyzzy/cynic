@@ -659,6 +659,40 @@ fn installService(realm: *Realm, ns: *JSObject, spec: ServiceSpec) !void {
     try putCtorOnIntl(realm, ns, spec.name, r.ctor);
 }
 
+/// §10.3.5 (Collator) / §11.3.5 (NumberFormat) / §12.3.5 (DateTimeFormat)
+/// — the spec exposes `compare` / `format` as **accessor** properties
+/// whose get returns a function bound to the service instance, so user
+/// code may pull the function off the receiver and call it free:
+///
+///   var f = collator.compare;
+///   sorted.sort(f);   // `this === undefined` here, but f still uses
+///                     // the collator captured at the getter call.
+///
+/// Mirror that here: a getter brand-checks `this`, then allocates a
+/// bound wrapper whose `[[BoundThis]]` is the service instance. The
+/// interpreter's existing bound-function dispatch unwraps before the
+/// worker runs, so the worker still sees `this_value = service`. We
+/// allocate fresh on every access (no cache) — caching the bound
+/// function on the receiver would need a GC mark walk for the cached
+/// `Value`, which is the Metla agent's domain. Identity
+/// (`c.compare === c.compare`) is therefore observably false here; the
+/// failing test262 fixtures that motivated this fix do not depend on
+/// identity, only on detached invocation working.
+fn makeBoundServiceFunction(
+    realm: *Realm,
+    this_value: Value,
+    worker: NativeFn,
+    name: []const u8,
+    params: u8,
+) NativeError!Value {
+    const inner = realm.heap.allocateFunctionNative(realm, worker, params, name) catch return error.OutOfMemory;
+    const bound = realm.heap.allocateFunctionNative(realm, worker, params, name) catch return error.OutOfMemory;
+    realm.heap.setBoundTarget(bound, inner);
+    realm.heap.setBoundThis(bound, this_value);
+    bound.has_construct = false;
+    return heap_mod.taggedFunction(bound);
+}
+
 // ── Collator ───────────────────────────────────────────────────────────────
 
 fn installCollator(realm: *Realm, ns: *JSObject) !void {
@@ -668,7 +702,9 @@ fn installCollator(realm: *Realm, ns: *JSObject) !void {
         .arity = 0,
         .to_string_tag = "Intl.Collator",
         .methods = &.{
-            .{ .name = "compare", .fn_ptr = collatorCompare, .params = 2 },
+            // §10.3.5 — `compare` is an accessor (getter returning a bound
+            // function), installed below once installService has set
+            // intl_collator_prototype.
             .{ .name = "resolvedOptions", .fn_ptr = collatorResolvedOptions, .params = 0 },
         },
         .supported_locales_of = anySupportedLocalesOf,
@@ -683,6 +719,15 @@ fn installCollator(realm: *Realm, ns: *JSObject) !void {
             }
         }.f,
     });
+    // §10.3.5 — `Intl.Collator.prototype.compare` is an accessor.
+    const proto = realm.intrinsics.intl_collator_prototype.?;
+    try installNativeGetter(realm, proto, "compare", collatorCompareGetter);
+}
+
+fn collatorCompareGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requireKind(realm, this_value, .collator);
+    return makeBoundServiceFunction(realm, this_value, collatorCompare, "compare", 2);
 }
 
 fn anySupportedLocalesOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -747,7 +792,7 @@ fn installNumberFormat(realm: *Realm, ns: *JSObject) !void {
         .arity = 0,
         .to_string_tag = "Intl.NumberFormat",
         .methods = &.{
-            .{ .name = "format", .fn_ptr = numberFormatFormat, .params = 1 },
+            // §11.3.5 — `format` is an accessor (see `makeBoundServiceFunction`).
             .{ .name = "formatToParts", .fn_ptr = numberFormatFormatToParts, .params = 1 },
             .{ .name = "resolvedOptions", .fn_ptr = numberFormatResolvedOptions, .params = 0 },
         },
@@ -763,6 +808,15 @@ fn installNumberFormat(realm: *Realm, ns: *JSObject) !void {
             }
         }.f,
     });
+    // §11.3.5 — `Intl.NumberFormat.prototype.format` is an accessor.
+    const proto = realm.intrinsics.intl_number_format_prototype.?;
+    try installNativeGetter(realm, proto, "format", numberFormatFormatGetter);
+}
+
+fn numberFormatFormatGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requireKind(realm, this_value, .number_format);
+    return makeBoundServiceFunction(realm, this_value, numberFormatFormat, "format", 1);
 }
 
 fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -854,7 +908,7 @@ fn installDateTimeFormat(realm: *Realm, ns: *JSObject) !void {
         .arity = 0,
         .to_string_tag = "Intl.DateTimeFormat",
         .methods = &.{
-            .{ .name = "format", .fn_ptr = dateTimeFormatFormat, .params = 1 },
+            // §12.3.5 — `format` is an accessor (see `makeBoundServiceFunction`).
             .{ .name = "formatToParts", .fn_ptr = dateTimeFormatFormatToParts, .params = 1 },
             .{ .name = "formatRange", .fn_ptr = dateTimeFormatFormatRange, .params = 2 },
             .{ .name = "formatRangeToParts", .fn_ptr = dateTimeFormatFormatRangeToParts, .params = 2 },
@@ -872,6 +926,15 @@ fn installDateTimeFormat(realm: *Realm, ns: *JSObject) !void {
             }
         }.f,
     });
+    // §12.3.5 — `Intl.DateTimeFormat.prototype.format` is an accessor.
+    const proto = realm.intrinsics.intl_date_time_format_prototype.?;
+    try installNativeGetter(realm, proto, "format", dateTimeFormatFormatGetter);
+}
+
+fn dateTimeFormatFormatGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requireKind(realm, this_value, .date_time_format);
+    return makeBoundServiceFunction(realm, this_value, dateTimeFormatFormat, "format", 1);
 }
 
 fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
