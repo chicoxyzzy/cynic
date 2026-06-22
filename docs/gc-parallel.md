@@ -166,8 +166,13 @@ gets extended to also satisfy the tricolor invariant (SATB: shade the
 referent). The existing barrier funnel is the natural hook, but this
 re-opens a large correctness surface (floating garbage, the
 snapshot-at-the-beginning vs incremental-update choice, the
-mark-stack/mutator races) and should get its **own** note when its day
-comes.
+mark-stack/mutator races). It is researched in
+[gc-concurrent-marking-research.md](gc-concurrent-marking-research.md),
+which also covers **incremental** marking — slicing the mark on the
+mutator thread, the bounded-latency option this plan skips, and the
+better-fit first latency step for Cynic (non-moving, a worklist trace, a
+GC-gating safe-point, and a write barrier that is already
+incremental-update-shaped).
 
 ## Phased implementation plan
 
