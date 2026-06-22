@@ -115,6 +115,7 @@ pub fn main(init: std.process.Init) !void {
         // V8's `d8 --print-bytecode`.
         var dump_bytecode = false;
         var debug_globals = false;
+        var gc_stats = false;
         var run_args = args;
         while (run_args.len > 0 and std.mem.startsWith(u8, run_args[0], "--")) {
             if (std.mem.eql(u8, run_args[0], "--dump-bytecode")) {
@@ -122,6 +123,9 @@ pub fn main(init: std.process.Init) !void {
                 run_args = run_args[1..];
             } else if (std.mem.eql(u8, run_args[0], "--debug-globals")) {
                 debug_globals = true;
+                run_args = run_args[1..];
+            } else if (std.mem.eql(u8, run_args[0], "--gc-stats")) {
+                gc_stats = true;
                 run_args = run_args[1..];
             } else {
                 try printUsage(io);
@@ -132,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals, unhardened, allow_eval, allow_wasm, jit);
+        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals, gc_stats, unhardened, allow_eval, allow_wasm, jit);
     } else if (std.mem.eql(u8, sub, "repl")) {
         // `cynic repl [--debug-globals]` — interactive read-eval-print
         // loop with a persistent realm. Same `--debug-globals` opt-in

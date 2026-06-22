@@ -106,6 +106,7 @@ pub fn run(
     gc_threshold: ?u32,
     dump_bytecode: bool,
     debug_globals: bool,
+    gc_stats: bool,
     unhardened: bool,
     allow_eval: bool,
     allow_wasm: bool,
@@ -142,6 +143,10 @@ pub fn run(
     // requested cadence (matters at `--gc-threshold=1` where every
     // alloc collects — exposes a missing root in builtin init).
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
+    // `--gc-stats` — per-cycle GC report to stderr (the same signal the
+    // test262 harness flag prints): pause time + per-pool live counts.
+    // For measuring major-cycle pause time on the CLI.
+    if (gc_stats) realm.heap.gc_stats = true;
     try realm.installBuiltins();
     // `--debug-globals` — install the test-only host hooks
     // (`__collectGarbage` / `__clearKeptObjects` / `__drainMicrotasks`).
