@@ -678,6 +678,12 @@ pub const Heap = struct {
     /// `collectFull`), so the barrier is dormant — no mutator stores land
     /// mid-mark; the safe-point interleaving activates it.
     marking_phase: enum { idle, marking, terminating } = .idle,
+    /// Wall-clock origin (ns) of the in-flight major cycle, set by
+    /// `beginIncrementalMark` and read by `collectFullTail` for the
+    /// diagnostic pause-time field. A heap field (not a `collectFull`
+    /// local) so the incremental driver's begin / slice / finish can span
+    /// the safe-point.
+    cycle_t_start: i128 = 0,
     /// Cumulative bytes charged across this heap's lifetime (never
     /// reset on GC). Dual of `bytes_live`, which only sees what's
     /// alive right now. Catches workloads that allocate-and-discard
@@ -2753,6 +2759,10 @@ pub const Heap = struct {
     /// incremental path). Extracted from `collectFull` so an incremental
     /// driver can call it standalone.
     pub fn beginIncrementalMark(self: *Heap, roots: []const Value) void {
+        // Stamp the pause-time origin (read by `collectFullTail`) so it
+        // spans the mark whether the cycle completes STW or is sliced
+        // across safe-points.
+        self.cycle_t_start = monotonicNs();
         if (!self.cycle_started) self.beginMajorCycle();
         // Enter the marking phase BEFORE the root snapshot so the Dijkstra
         // barrier is armed for any store the (future) interleaved mutator
@@ -2944,26 +2954,31 @@ pub const Heap = struct {
     /// cleared the remembered set, and the next `collectYoung`
     /// would free that young object out from under it.
     pub fn collectFull(self: *Heap, roots: []const Value) void {
-        // Wall-clock start for the diagnostic pause-time field.
-        // Production engines (V8 `--trace-gc`, JSC GC logs, SM
-        // `MOZ_GCTIMER`) all surface per-cycle pause distribution
-        // — the long-tail cycles are where investigation starts.
-        const t_start = monotonicNs();
-
         // Start-of-cycle snapshot — arm the cycle + mark every root,
-        // seeding the worklist with the grey set. Extracted to
-        // `beginIncrementalMark` so the future incremental driver can
-        // call it standalone. (Registered symbols stay pinned at
-        // `Symbol.for` time, §20.4.2.2 GlobalSymbolRegistry — the sweep
-        // skips pinned entries, so no per-cycle re-mark loop.)
+        // seeding the worklist with the grey set. `beginIncrementalMark`
+        // stamps `cycle_t_start` (the pause-time origin); the incremental
+        // driver can call begin + tail with a sliced drain between them.
+        // (Registered symbols stay pinned at `Symbol.for` time, §20.4.2.2
+        // GlobalSymbolRegistry — the sweep skips pinned entries, so no
+        // per-cycle re-mark loop.)
         self.beginIncrementalMark(roots);
+        self.collectFullTail(self.cycle_t_start);
+    }
 
-        // Drain the mark worklist to completion (STW today; a later step
-        // spends a per-increment budget at `runSafePoint` between these
-        // calls via `drainMarkWorklistBudget`). Drains the deferred-mark
-        // items — currently `promise_reactions[i].result_promise` —
-        // BEFORE the ephemeron fixpoint, so `isWeakReferentLive` sees
-        // complete marks.
+    /// The post-mark-seed remainder of a major cycle: drain the worklist
+    /// to completion, run the weak / ephemeron passes, sweep + promote,
+    /// and reset the cycle counters. Split from `collectFull` so the
+    /// incremental driver can run it as the stop-the-world termination
+    /// after the mark has been drained in slices across the safe-point.
+    /// `t_start` is the cycle's wall-clock origin for the diagnostic
+    /// pause-time field.
+    pub fn collectFullTail(self: *Heap, t_start: i128) void {
+        // Drain the mark worklist to completion (STW today; the
+        // incremental driver instead spends a per-increment budget at
+        // `runSafePoint` via `drainMarkWorklistBudget`, then calls this
+        // tail once the worklist empties). Drains the deferred-mark items
+        // — currently `promise_reactions[i].result_promise` — BEFORE the
+        // ephemeron fixpoint, so `isWeakReferentLive` sees complete marks.
         self.drainMarkWorklist();
 
         // §24.3 WeakMap ephemeron fixpoint — a WeakMap entry's value

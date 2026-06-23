@@ -1690,29 +1690,50 @@ pub const Realm = struct {
     }
 
     pub fn collectGarbage(self: *Realm) void {
-        // §26.1 / §24.3 / §24.4 / §26.2 — arm the major cycle
-        // BEFORE `markRoots`. `markRoots` calls `markValue` on every
-        // realm root (including any WeakRef / WeakMap / WeakSet /
-        // FinalizationRegistry held by a global), so both the
-        // `live_color` flip and the `weak_aware_mark` flag must
-        // already be in place. `collectFull` sees `cycle_started`
-        // and skips its own arm-cycle.
+        // A major cycle, run stop-the-world as begin + finish back to
+        // back. The same two steps drive incremental marking, where the
+        // safe-point spends a mark budget between them; running them
+        // adjacently here is byte-identical to the old monolithic path.
+        self.beginIncrementalMajor();
+        self.finishIncrementalMajor();
+        self.drainRealmTeardown();
+    }
+
+    /// Arm + snapshot the roots of a major cycle without draining the
+    /// mark — the start-of-cycle stop-the-world step. §26.1 / §24.3 /
+    /// §24.4 / §26.2 — arm the cycle BEFORE marking roots so the
+    /// `live_color` flip and the `weak_aware_mark` flag are in place
+    /// before any `markValue` (`markRoots` marks every WeakRef / WeakMap /
+    /// WeakSet / FinalizationRegistry held by a global). Marks every
+    /// sharing realm's roots plus the heap-side roots (handle scopes,
+    /// const + native-ctor roots — `beginIncrementalMark` sees
+    /// `cycle_started` and skips its own arm), seeding the mark worklist,
+    /// and arms the incremental write barrier (`marking_phase = .marking`).
+    pub fn beginIncrementalMajor(self: *Realm) void {
         self.heap.beginMajorCycle();
         self.markAllSharingRealmRoots();
-        // Arm the conservative native-stack rooting backstop when a
-        // native builtin is on the stack — the full collector tenures
-        // (and so can free) the young generation just like the minor
-        // one, so a young heap pointer held only in a native local
-        // across a JS re-entry needs the same backstop. Critically, at
-        // `--gc-threshold=1` EVERY cycle is a full cycle, so without
-        // this the backstop never runs under gc-stress. See
-        // `Heap.scan_native_stack` and `Realm.collectGarbageYoung`.
+        self.heap.beginIncrementalMark(&.{});
+        self.heap.marking_phase = .marking;
+    }
+
+    /// Stop-the-world termination of a major cycle. RE-SCAN the realm
+    /// roots first: the Dijkstra incremental-update barrier keeps the
+    /// mutator stack "permagrey" (barriering every stack write is too
+    /// expensive), so a white object that migrated into a stack local
+    /// during the mark is reachable only through this re-scan. It is
+    /// O(roots), not O(live), so it does not reintroduce the pause the
+    /// slicing removed; it is idempotent when run adjacently in the STW
+    /// path. Then arm the conservative native-stack backstop (a young
+    /// pointer held only in a native local across a JS re-entry survives —
+    /// the full collector tenures, and so can free, the young generation;
+    /// critical at `--gc-threshold=1` where every cycle is full) and run
+    /// the post-mark tail (drain to completion, weak passes, sweep).
+    /// Disarms the barrier.
+    pub fn finishIncrementalMajor(self: *Realm) void {
+        self.markAllSharingRealmRoots();
         self.heap.scan_native_stack = self.active_native_fn != null;
-        // Hand off to `heap.collectFull` for the handle-scope walk
-        // and the actual sweep. The empty roots slice is fine —
-        // every root above is already marked.
-        self.heap.collectFull(&.{});
-        self.drainRealmTeardown();
+        self.heap.collectFullTail(self.heap.cycle_t_start);
+        self.heap.marking_phase = .idle;
     }
 
     /// Mark roots from EVERY realm sharing this heap, not just
