@@ -345,10 +345,19 @@ test "intl: DateTimeFormat resolvedOptions exposes timeZone" {
     );
 }
 
-test "intl: DisplayNames of returns code when fallback is code" {
-    try evalAssert1(
-        \\new Intl.DisplayNames("en", { type: "language" }).of("fr") === "fr" ? 1 : 0
-    );
+test "intl: DisplayNames of — CLDR name at full, code fallback at stub" {
+    try requireIntlBuild();
+    // Without CLDR data (stub) `of` falls back to the canonicalised code; with
+    // the embedded blob (full) it resolves the real localized name.
+    if (intl_config.has_locale_data) {
+        try evalAssert1(
+            \\new Intl.DisplayNames("en", { type: "language" }).of("fr") === "French" ? 1 : 0
+        );
+    } else {
+        try evalAssert1(
+            \\new Intl.DisplayNames("en", { type: "language" }).of("fr") === "fr" ? 1 : 0
+        );
+    }
 }
 
 test "intl: DisplayNames requires options.type" {
@@ -666,4 +675,47 @@ test "Intl.DateTimeFormat: invalid time value throws RangeError (host-safety)" {
     // |ms| > 8.64e15 is outside the Date range — must be a catchable RangeError,
     // never a trap in the civil-from-days breakdown.
     try evalThrows("new Intl.DateTimeFormat('en').format(1e21)");
+}
+
+// ── DisplayNames (CLDR language/region/script/currency — §12) ─────────────────
+
+test "Intl.DisplayNames: language / region / script / currency in en" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\(new Intl.DisplayNames('en',{type:'language'}).of('fr')==='French' &&
+        \\ new Intl.DisplayNames('en',{type:'language'}).of('zh-Hant')==='Traditional Chinese' &&
+        \\ new Intl.DisplayNames('en',{type:'region'}).of('US')==='United States' &&
+        \\ new Intl.DisplayNames('en',{type:'script'}).of('Latn')==='Latin' &&
+        \\ new Intl.DisplayNames('en',{type:'currency'}).of('USD')==='US Dollar') ? 1 : 0
+    );
+}
+
+test "Intl.DisplayNames: localized into de / fr / es" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\(new Intl.DisplayNames('de',{type:'region'}).of('DE')==='Deutschland' &&
+        \\ new Intl.DisplayNames('fr',{type:'currency'}).of('EUR')==='euro' &&
+        \\ new Intl.DisplayNames('es',{type:'language'}).of('fr')==='francés') ? 1 : 0
+    );
+}
+
+test "Intl.DisplayNames: case-insensitive code lookup" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\(new Intl.DisplayNames('en',{type:'region'}).of('us')==='United States' &&
+        \\ new Intl.DisplayNames('en',{type:'currency'}).of('usd')==='US Dollar') ? 1 : 0
+    );
+}
+
+test "Intl.DisplayNames: fallback none returns undefined for unknown" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\new Intl.DisplayNames('en',{type:'language',fallback:'none'}).of('qqq')===undefined ? 1 : 0
+    );
+}
+
+test "Intl.DisplayNames: invalid code shape throws RangeError" {
+    try requireFullBuild();
+    try evalThrows("new Intl.DisplayNames('en',{type:'region'}).of('USA')"); // 3-alpha not a region
+    try evalThrows("new Intl.DisplayNames('en',{type:'currency'}).of('US')"); // 2-alpha not a currency
 }

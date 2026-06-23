@@ -34,13 +34,13 @@
 
 const std = @import("std");
 
-/// Section kinds. Display-names lands in a later phase.
 const SectionKind = enum(u8) {
     plural_cardinal = 1,
     plural_ordinal = 2,
     numbers = 3,
     numbering_systems = 4,
     dates = 5,
+    display_names = 6,
 };
 
 /// CLDR "modern" coverage tier, base-language locales (plus the few
@@ -131,13 +131,14 @@ pub fn main(init: std.process.Init) !void {
     const ns_table = try loadNumberingSystems(arena, io, json_root);
     const numbers = try loadNumbers(arena, io, json_root, ns_table);
     const dates = try loadDates(arena, io, json_root);
+    const display = try loadDisplayNames(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
     var buf: [256]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len });
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -201,12 +202,13 @@ fn pack(
     numbers: []NumberLocale,
     ns_table: []NumberingSystem,
     dates: []DateLocale,
+    display: []DisplayLocale,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [5]SectionDir = undefined;
+    var dirs: [6]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -227,6 +229,10 @@ fn pack(
     const dates_start: u32 = @intCast(payloads.items.len);
     try writeDatesPayload(gpa, &payloads, dates);
     dirs[4] = .{ .kind = .dates, .off = dates_start, .len = @as(u32, @intCast(payloads.items.len)) - dates_start };
+
+    const disp_start: u32 = @intCast(payloads.items.len);
+    try writeDisplayNamesPayload(gpa, &payloads, display);
+    dirs[5] = .{ .kind = .display_names, .off = disp_start, .len = @as(u32, @intCast(payloads.items.len)) - disp_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -498,6 +504,131 @@ fn writeDatesPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), l
     }
 }
 
+// ── display names (language / region / script / currency) ────────────────────
+
+const NameEntry = struct {
+    code: []const u8,
+    name: []const u8,
+    fn lessThan(_: void, a: NameEntry, b: NameEntry) bool {
+        return std.mem.lessThan(u8, a.code, b.code);
+    }
+};
+
+const DisplayLocale = struct {
+    key: []const u8,
+    languages: []NameEntry,
+    regions: []NameEntry,
+    scripts: []NameEntry,
+    currencies: []NameEntry,
+    fn lessThan(_: void, a: DisplayLocale, b: DisplayLocale) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+/// Per modern locale: language / territory / script / currency display names.
+/// `-alt-*` variant keys are skipped (keep the primary name).
+fn loadDisplayNames(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]DisplayLocale {
+    var out: std.ArrayListUnmanaged(DisplayLocale) = .empty;
+    for (modern_locales) |loc| {
+        var d: DisplayLocale = .{ .key = loc, .languages = &.{}, .regions = &.{}, .scripts = &.{}, .currencies = &.{} };
+        d.languages = loadNameTable(arena, io, json_root, "cldr-localenames-full", loc, "languages.json", "languages", codeIsLanguage);
+        d.regions = loadNameTable(arena, io, json_root, "cldr-localenames-full", loc, "territories.json", "territories", codeIsRegion);
+        d.scripts = loadNameTable(arena, io, json_root, "cldr-localenames-full", loc, "scripts.json", "scripts", codeIsScript);
+        d.currencies = loadCurrencyNames(arena, io, json_root, loc);
+        if (d.languages.len == 0 and d.regions.len == 0 and d.scripts.len == 0 and d.currencies.len == 0) continue;
+        try out.append(arena, d);
+    }
+    std.sort.block(DisplayLocale, out.items, {}, DisplayLocale.lessThan);
+    return out.items;
+}
+
+fn codeIsLanguage(code: []const u8) bool {
+    // Skip `-alt-` variants; keep base + script/region subtags.
+    return std.mem.indexOf(u8, code, "-alt-") == null;
+}
+fn codeIsRegion(code: []const u8) bool {
+    if (std.mem.indexOf(u8, code, "-alt-") != null) return false;
+    return (code.len == 2 and isAllAlpha(code)) or (code.len == 3 and isAllDigit(code));
+}
+fn codeIsScript(code: []const u8) bool {
+    return std.mem.indexOf(u8, code, "-alt-") == null and code.len == 4 and isAllAlpha(code);
+}
+
+fn loadNameTable(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    json_root: []const u8,
+    pkg: []const u8,
+    loc: []const u8,
+    filename: []const u8,
+    table_key: []const u8,
+    accept: *const fn ([]const u8) bool,
+) []NameEntry {
+    const path = std.fmt.allocPrint(arena, "{s}/{s}/main/{s}/{s}", .{ json_root, pkg, loc, filename }) catch return &.{};
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch return &.{};
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch return &.{};
+    const main_obj = (root.object.get("main") orelse return &.{}).object;
+    var mit = main_obj.iterator();
+    const le = mit.next() orelse return &.{};
+    const ldn = (le.value_ptr.*.object.get("localeDisplayNames") orelse return &.{}).object;
+    const table = (ldn.get(table_key) orelse return &.{}).object;
+
+    var out: std.ArrayListUnmanaged(NameEntry) = .empty;
+    var it = table.iterator();
+    while (it.next()) |e| {
+        const code = e.key_ptr.*;
+        if (!accept(code)) continue;
+        if (e.value_ptr.* != .string) continue;
+        out.append(arena, .{ .code = code, .name = e.value_ptr.*.string }) catch return out.items;
+    }
+    std.sort.block(NameEntry, out.items, {}, NameEntry.lessThan);
+    return out.items;
+}
+
+/// Currency display names live in cldr-numbers (currencies.json) under the
+/// `displayName` field of each 3-letter code.
+fn loadCurrencyNames(arena: std.mem.Allocator, io: std.Io, json_root: []const u8, loc: []const u8) []NameEntry {
+    const path = std.fmt.allocPrint(arena, "{s}/cldr-numbers-full/main/{s}/currencies.json", .{ json_root, loc }) catch return &.{};
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(8 * 1024 * 1024)) catch return &.{};
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch return &.{};
+    const main_obj = (root.object.get("main") orelse return &.{}).object;
+    var mit = main_obj.iterator();
+    const le = mit.next() orelse return &.{};
+    const cur = (le.value_ptr.*.object.get("numbers") orelse return &.{}).object.get("currencies");
+    if (cur == null) return &.{};
+
+    var out: std.ArrayListUnmanaged(NameEntry) = .empty;
+    var it = cur.?.object.iterator();
+    while (it.next()) |e| {
+        const code = e.key_ptr.*;
+        if (code.len != 3 or !isAllAlpha(code)) continue;
+        const dn = e.value_ptr.*.object.get("displayName") orelse continue;
+        if (dn != .string) continue;
+        out.append(arena, .{ .code = code, .name = dn.string }) catch return out.items;
+    }
+    std.sort.block(NameEntry, out.items, {}, NameEntry.lessThan);
+    return out.items;
+}
+
+fn writeDisplayNamesPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), locales: []DisplayLocale) !void {
+    try appendU32(gpa, buf, locales.len);
+    for (locales) |d| {
+        try appendStr8(gpa, buf, d.key);
+        try writeNameTable(gpa, buf, d.languages);
+        try writeNameTable(gpa, buf, d.regions);
+        try writeNameTable(gpa, buf, d.scripts);
+        try writeNameTable(gpa, buf, d.currencies);
+    }
+}
+
+fn writeNameTable(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), table: []NameEntry) !void {
+    try appendU32(gpa, buf, table.len);
+    for (table) |e| {
+        try appendStr8(gpa, buf, e.code);
+        try appendStr16(gpa, buf, e.name);
+    }
+}
+
 fn appendStr8(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
     std.debug.assert(s.len <= 255);
     try buf.append(gpa, @intCast(s.len));
@@ -536,6 +667,15 @@ fn appendU32(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), v: usize)
         @intCast((x >> 16) & 0xFF),
         @intCast((x >> 24) & 0xFF),
     });
+}
+
+fn isAllAlpha(s: []const u8) bool {
+    for (s) |c| if (!std.ascii.isAlphabetic(c)) return false;
+    return true;
+}
+fn isAllDigit(s: []const u8) bool {
+    for (s) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
 }
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {

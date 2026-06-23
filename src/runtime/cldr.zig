@@ -56,6 +56,7 @@ const SectionKind = enum(u8) {
     numbers = 3,
     numbering_systems = 4,
     dates = 5,
+    display_names = 6,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -67,6 +68,7 @@ var ord_payload: []const u8 = &.{};
 var num_payload: []const u8 = &.{};
 var ns_payload: []const u8 = &.{};
 var dates_payload: []const u8 = &.{};
+var display_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -99,6 +101,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.numbers) => num_payload = payload,
             @intFromEnum(SectionKind.numbering_systems) => ns_payload = payload,
             @intFromEnum(SectionKind.dates) => dates_payload = payload,
+            @intFromEnum(SectionKind.display_names) => display_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -608,6 +611,65 @@ fn findDate(key: []const u8) ?DateData {
 fn blkfail(ok: *bool) []const u8 {
     ok.* = false;
     return "";
+}
+
+// ── display names (language / region / script / currency) ─────────────────────
+
+pub const DisplayKind = enum(u8) { language = 0, region = 1, script = 2, currency = 3 };
+
+/// CLDR display name for `code` of the given `kind` in `locale`, or null. The
+/// 4 tables per locale are stored in DisplayKind order; codes are matched
+/// case-insensitively (the builtin canonicalises case first).
+pub fn displayName(locale: []const u8, kind: DisplayKind, code: []const u8) ?[]const u8 {
+    if (!ensureInit()) return null;
+    if (display_payload.len < 4) return null;
+
+    var lang_buf: [16]u8 = undefined;
+    var script_buf: [8]u8 = undefined;
+    var region_buf: [8]u8 = undefined;
+    const parts = splitTag(locale, &lang_buf, &script_buf, &region_buf);
+    if (parts.lang.len == 0) return null;
+
+    var cand_buf: [32]u8 = undefined;
+    if (parts.script.len > 0 and parts.region.len > 0)
+        if (joinTag(&cand_buf, parts.lang, parts.script, parts.region)) |k|
+            if (findDisplay(k, kind, code)) |nm| return nm;
+    if (parts.region.len > 0)
+        if (joinTag(&cand_buf, parts.lang, "", parts.region)) |k|
+            if (findDisplay(k, kind, code)) |nm| return nm;
+    if (parts.script.len > 0)
+        if (joinTag(&cand_buf, parts.lang, parts.script, "")) |k|
+            if (findDisplay(k, kind, code)) |nm| return nm;
+    return findDisplay(parts.lang, kind, code);
+}
+
+fn findDisplay(key: []const u8, kind: DisplayKind, code: []const u8) ?[]const u8 {
+    const count = std.mem.readInt(u32, display_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(display_payload, &off) orelse return null;
+        const k = readBytes(display_payload, &off, klen) orelse return null;
+        const match = asciiEqlIgnoreCase(k, key);
+        // Walk the 4 tables; capture the wanted one's name on a key match.
+        var found: ?[]const u8 = null;
+        var t: u8 = 0;
+        while (t < 4) : (t += 1) {
+            const tcount = readU32(display_payload, &off) orelse return null;
+            var j: u32 = 0;
+            while (j < tcount) : (j += 1) {
+                const clen = readU8(display_payload, &off) orelse return null;
+                const c = readBytes(display_payload, &off, clen) orelse return null;
+                if (off + 2 > display_payload.len) return null;
+                const nlen = std.mem.readInt(u16, display_payload[off..][0..2], .little);
+                off += 2;
+                const nm = readBytes(display_payload, &off, nlen) orelse return null;
+                if (match and t == @intFromEnum(kind) and asciiEqlIgnoreCase(c, code)) found = nm;
+            }
+        }
+        if (match) return found;
+    }
+    return null;
 }
 
 // ── small helpers ────────────────────────────────────────────────────────────

@@ -210,10 +210,14 @@ These are project rules — they apply to everyone.
   grouping, numbering-system digit substitution, sign/fraction/significant
   digits), and `Intl.DateTimeFormat` (gregorian: dateStyle/timeStyle + component
   options, localized month/day/era/dayPeriod names, hourCycle, formatToParts) are
-  CLDR-backed via `src/runtime/cldr.zig` (see `src/runtime/builtins/intl.zig`).
+  CLDR-backed via `src/runtime/cldr.zig` (see `src/runtime/builtins/intl.zig`),
+  as is `Intl.DisplayNames` (language / region / script / currency name tables).
   NumberFormat currency/unit/compact output, DateTimeFormat skeleton best-fit /
-  non-gregorian calendars / tz names, and DisplayNames stay structural until
-  their CLDR sections land. Do **not** add `--enable=intl` or `--allow=intl` —
+  non-gregorian calendars / tz names, and DisplayNames calendar/dateTimeField
+  types stay structural until their CLDR sections land. The display-name tables
+  dominate the blob (~2.8 MiB total at `full`); trim `modern_locales` in
+  `tools/pack_cldr.zig` if a smaller footprint is needed. Do **not** add
+  `--enable=intl` or `--allow=intl` —
   Intl is Stage 4 and is not a security relaxation like eval/wasm.
   See [docs/ROADMAP.md](docs/ROADMAP.md) (`Intl` / Temporal) and
   `src/runtime/intl_config.zig`.

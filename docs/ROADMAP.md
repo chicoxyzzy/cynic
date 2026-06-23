@@ -602,7 +602,7 @@ automatically on the next full sweep.
   |------|---------------|---------------------------|----------------|
   | **`off`** (default) | absent | ISO + UTC/fixed-offset only | none |
   | **`stub`** | structural ECMA-402 (option validation; format/compare stubs) | accept supported calendar **ids** and structural IANA **names**; arithmetic still ISO/UTC | none |
-  | **`full`** | `stub` surface, plus CLDR-backed `Intl.PluralRules`, `Intl.NumberFormat` (decimal + percent), and `Intl.DateTimeFormat` (gregorian) | real zone offsets via embedded CYTZ/TZif (`vendor/tzdata/cynic_tzdb.bin`); IANA sources in `vendor/tzdata/iana/` (fetch: `tools/fetch-tzdata.sh`; pack: `zig build pack-tzdata`) | tzdb + CLDR (`vendor/cldr/cynic_cldr.bin`) |
+  | **`full`** | `stub` surface, plus CLDR-backed `Intl.PluralRules`, `Intl.NumberFormat` (decimal + percent), `Intl.DateTimeFormat` (gregorian), and `Intl.DisplayNames` | real zone offsets via embedded CYTZ/TZif (`vendor/tzdata/cynic_tzdb.bin`); IANA sources in `vendor/tzdata/iana/` (fetch: `tools/fetch-tzdata.sh`; pack: `zig build pack-tzdata`) | tzdb + CLDR (`vendor/cldr/cynic_cldr.bin`, ~2.8 MiB) |
 
   The default edge/server build omits the locale/tz stack to stay
   small and dependency-light. `intl402/` stays out of the main
@@ -629,9 +629,13 @@ automatically on the next full sweep.
   timeStyle and the component options (weekday/era/year/month/day/hour/minute/
   second/dayPeriod) resolve to a CLDR pattern, interpreted against the broken-
   down time in the format's time zone with localized names, hourCycle, and
-  digit substitution. Currency/unit/compact NumberFormat output, DateTimeFormat
-  skeleton best-fit + non-gregorian calendars + time-zone names, and
-  DisplayNames stay structural until their CLDR sections are packed.
+  digit substitution. **`Intl.DisplayNames`** consumes the display-names section
+  — `of(code)` resolves language / region / script / currency codes to their
+  localized names (with per-type canonicalisation + RangeError on malformed
+  codes); these tables dominate the blob (~2.8 MiB at `full`). Currency/unit/
+  compact NumberFormat output, DateTimeFormat skeleton best-fit + non-gregorian
+  calendars + time-zone names, and DisplayNames calendar/dateTimeField types
+  stay structural until their CLDR sections are packed.
 
   Seams are kept clean so `full` can deepen without a rewrite —
   Temporal funnels every zone-offset lookup through

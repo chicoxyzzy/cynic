@@ -2437,10 +2437,71 @@ fn displayNamesConstructor(realm: *Realm, this_value: Value, args: []const Value
 
 fn displayNamesOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requireKind(realm, this_value, .display_names);
-    const code = try valueToStringSlice(realm, argOr(args, 0, Value.undefined_));
-    if (std.mem.eql(u8, rec.display_names.fallback, "none")) return Value.undefined_;
-    // Structural: return the code itself.
-    return makeStringValue(realm, code);
+    const s = rec.display_names;
+    const raw = try valueToStringSlice(realm, argOr(args, 0, Value.undefined_));
+
+    // §12.5.1 — canonicalise + structurally validate the code per type.
+    var cbuf: [64]u8 = undefined;
+    const kind: ?cldr.DisplayKind =
+        if (std.mem.eql(u8, s.type_name, "language")) .language else if (std.mem.eql(u8, s.type_name, "region")) .region else if (std.mem.eql(u8, s.type_name, "script")) .script else if (std.mem.eql(u8, s.type_name, "currency")) .currency else null;
+
+    const canonical: []const u8 = blk: {
+        if (kind) |k| switch (k) {
+            .region => break :blk (try canonRegion(realm, raw, &cbuf)),
+            .script => break :blk (try canonScript(realm, raw, &cbuf)),
+            .currency => break :blk (try canonCurrency(realm, raw, &cbuf)),
+            .language => {
+                if (!intl.isStructurallyValidLanguageTag(raw)) return throwRangeError(realm, "invalid language code");
+                const c = intl.canonicalizeUnicodeLocaleId(realm.allocator, raw) catch return throwRangeError(realm, "invalid language code");
+                defer realm.allocator.free(c);
+                const n = @min(c.len, cbuf.len);
+                @memcpy(cbuf[0..n], c[0..n]);
+                break :blk cbuf[0..n];
+            },
+        };
+        // calendar / dateTimeField (not packed) — return as-is for fallback.
+        break :blk raw;
+    };
+
+    if (kind != null and cldr.available) {
+        if (cldr.displayName(s.base.locale, kind.?, canonical)) |nm| return makeStringValue(realm, nm);
+    }
+    if (std.mem.eql(u8, s.fallback, "none")) return Value.undefined_;
+    return makeStringValue(realm, canonical); // fallback: the canonicalised code
+}
+
+fn canonRegion(realm: *Realm, raw: []const u8, buf: []u8) NativeError![]const u8 {
+    if (raw.len == 2 and isAsciiAlpha(raw)) {
+        for (raw, 0..) |c, i| buf[i] = std.ascii.toUpper(c);
+        return buf[0..2];
+    }
+    if (raw.len == 3 and isAsciiDigit(raw)) {
+        @memcpy(buf[0..3], raw);
+        return buf[0..3];
+    }
+    return throwRangeError(realm, "invalid region code");
+}
+
+fn canonScript(realm: *Realm, raw: []const u8, buf: []u8) NativeError![]const u8 {
+    if (raw.len != 4 or !isAsciiAlpha(raw)) return throwRangeError(realm, "invalid script code");
+    buf[0] = std.ascii.toUpper(raw[0]);
+    for (raw[1..], 1..) |c, i| buf[i] = std.ascii.toLower(c);
+    return buf[0..4];
+}
+
+fn canonCurrency(realm: *Realm, raw: []const u8, buf: []u8) NativeError![]const u8 {
+    if (raw.len != 3 or !isAsciiAlpha(raw)) return throwRangeError(realm, "invalid currency code");
+    for (raw, 0..) |c, i| buf[i] = std.ascii.toUpper(c);
+    return buf[0..3];
+}
+
+fn isAsciiAlpha(s: []const u8) bool {
+    for (s) |c| if (!std.ascii.isAlphabetic(c)) return false;
+    return true;
+}
+fn isAsciiDigit(s: []const u8) bool {
+    for (s) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
 }
 
 fn displayNamesResolvedOptions(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
