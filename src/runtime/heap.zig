@@ -4653,6 +4653,14 @@ pub const Heap = struct {
                     }
                 }
             }
+            // Incremental-marking (Dijkstra) arm — open-coded like the
+            // `*Environment` funnels (no `writeBarrier` call to carry it).
+            // If `f` is already black, a freshly-stored bound-args element
+            // must be shaded grey or it stays white and is swept. Mirrors
+            // the `bound_args` scan in `markValue`'s function arm.
+            if (self.marking_phase == .marking and f.mark_color == self.live_color) {
+                for (arr) |v| self.enqueue(v);
+            }
         }
         f.bound_args = args;
     }
@@ -4678,6 +4686,14 @@ pub const Heap = struct {
                         o.dirty = false;
                     };
                 }
+            }
+            // Incremental-marking (Dijkstra) arm — open-coded (a
+            // `*JSGenerator` is not Value-boxable, so no `writeBarrier`).
+            // A generator stored into an already-black wrapper must be
+            // shaded or it stays white and is swept. Mirrors `markGenerator`
+            // at the `getGeneratorRef` scan in `markValue` (idempotent).
+            if (self.marking_phase == .marking and o.mark_color == self.live_color) {
+                self.markGenerator(gen);
             }
         }
         try o.setGeneratorRef(self.allocator, g);
