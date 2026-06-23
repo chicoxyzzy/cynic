@@ -505,3 +505,96 @@ test "Intl.PluralRules: selectRange missing end throws TypeError" {
     try requireFullBuild();
     try evalThrows("new Intl.PluralRules('en').selectRange(1)");
 }
+
+// ── NumberFormat (CLDR symbols + patterns — §15) ─────────────────────────────
+
+test "Intl.NumberFormat: en grouping + fraction" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = new Intl.NumberFormat('en');
+        \\(f.format(1234567.891)==='1,234,567.891' && f.format(-1234.5)==='-1,234.5') ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: de and fr separators" {
+    try requireFullBuild();
+    // fr's group separator is a narrow no-break space (U+202F), not ASCII space,
+    // so assert structure (comma decimal, no dot) rather than the exact glyph.
+    try evalAssert1(
+        \\const de = new Intl.NumberFormat('de').format(1234567.89);
+        \\const fr = new Intl.NumberFormat('fr').format(1234567.89);
+        \\(de==='1.234.567,89' && fr.endsWith(',89') && fr.startsWith('1') && !fr.includes('.')) ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: percent style scales and suffixes" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\new Intl.NumberFormat('en', {style:'percent'}).format(0.4567)==='46%' ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: fraction-digit options" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const a = new Intl.NumberFormat('en',{maximumFractionDigits:2}).format(3.14159);
+        \\const b = new Intl.NumberFormat('en',{minimumFractionDigits:2}).format(5);
+        \\(a==='3.14' && b==='5.00') ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: Indian grouping (hi)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\new Intl.NumberFormat('hi',{maximumFractionDigits:0}).format(1234567)==='12,34,567' ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: numbering-system digit substitution (arab)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\new Intl.NumberFormat('ar',{numberingSystem:'arab'}).format(1234.5)==='١,٢٣٤.٥' ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: useGrouping false and signDisplay always" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const g = new Intl.NumberFormat('en',{useGrouping:false}).format(12345);
+        \\const s = new Intl.NumberFormat('en',{signDisplay:'always'}).format(5);
+        \\(g==='12345' && s==='+5') ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: formatToParts segments" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const p = new Intl.NumberFormat('en').formatToParts(1234.5);
+        \\(p[0].type==='integer'&&p[0].value==='1'&&p[1].type==='group'&&p[2].type==='integer'&&
+        \\ p[3].type==='decimal'&&p[4].type==='fraction'&&p[4].value==='5') ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: significant digits" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\new Intl.NumberFormat('en',{maximumSignificantDigits:3}).format(1234.5)==='1,230' ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: format(0) with significant digits does not crash (host-safety)" {
+    try requireFullBuild();
+    // dtoa.precisionDigits asserts x > 0; formatting zero must take the guarded path.
+    try evalAssert1(
+        \\(new Intl.NumberFormat('en',{minimumSignificantDigits:3}).format(0)==='0.00') ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: resolvedOptions reports resolved digits + numberingSystem" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const r = new Intl.NumberFormat('en',{minimumFractionDigits:2}).resolvedOptions();
+        \\(r.numberingSystem==='latn' && r.minimumFractionDigits===2 && r.maximumFractionDigits===3 &&
+        \\ r.roundingMode==='halfExpand' && r.useGrouping==='auto') ? 1 : 0
+    );
+}

@@ -53,6 +53,8 @@ pub const Operands = struct {
 const SectionKind = enum(u8) {
     plural_cardinal = 1,
     plural_ordinal = 2,
+    numbers = 3,
+    numbering_systems = 4,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -61,6 +63,8 @@ var init_done: bool = false;
 var init_ok: bool = false;
 var card_payload: []const u8 = &.{};
 var ord_payload: []const u8 = &.{};
+var num_payload: []const u8 = &.{};
+var ns_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -90,6 +94,8 @@ fn ensureInit() bool {
         switch (kind) {
             @intFromEnum(SectionKind.plural_cardinal) => card_payload = payload,
             @intFromEnum(SectionKind.plural_ordinal) => ord_payload = payload,
+            @intFromEnum(SectionKind.numbers) => num_payload = payload,
+            @intFromEnum(SectionKind.numbering_systems) => ns_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -393,6 +399,120 @@ pub fn computeOperands(value: f64, min_frac: u32, max_frac: u32) Operands {
     ops.t = if (w > 0) (std.fmt.parseInt(u64, frac[0..w], 10) catch 0) else 0;
 
     return ops;
+}
+
+// ── numbers (symbols + patterns) ─────────────────────────────────────────────
+
+/// Per-locale number formatting data from the CLDR `numbers` section.
+pub const NumberData = struct {
+    ns: []const u8, // default numbering system id
+    digit_base: u32, // code point of that system's digit 0
+    decimal: []const u8,
+    group: []const u8,
+    minus: []const u8,
+    plus: []const u8,
+    percent: []const u8,
+    dec_pattern: []const u8,
+    pct_pattern: []const u8,
+};
+
+/// Look up the locale's number data (default numbering system), most- to
+/// least-specific candidate. Returns null when absent (caller falls back to en).
+pub fn numberData(locale: []const u8) ?NumberData {
+    if (!ensureInit()) return null;
+    if (num_payload.len < 4) return null;
+
+    var lang_buf: [16]u8 = undefined;
+    var script_buf: [8]u8 = undefined;
+    var region_buf: [8]u8 = undefined;
+    const parts = splitTag(locale, &lang_buf, &script_buf, &region_buf);
+    if (parts.lang.len == 0) return null;
+
+    var cand_buf: [32]u8 = undefined;
+    if (parts.script.len > 0 and parts.region.len > 0)
+        if (joinTag(&cand_buf, parts.lang, parts.script, parts.region)) |k|
+            if (findNumber(k)) |d| return d;
+    if (parts.region.len > 0)
+        if (joinTag(&cand_buf, parts.lang, "", parts.region)) |k|
+            if (findNumber(k)) |d| return d;
+    if (parts.script.len > 0)
+        if (joinTag(&cand_buf, parts.lang, parts.script, "")) |k|
+            if (findNumber(k)) |d| return d;
+    return findNumber(parts.lang);
+}
+
+/// Digit-0 code point for an explicit numbering system id (e.g. "arab"), so a
+/// requested `numberingSystem` option can substitute glyphs. null if unknown.
+pub fn numberingSystemDigitBase(id: []const u8) ?u32 {
+    if (!ensureInit()) return null;
+    if (ns_payload.len < 4) return null;
+    const count = std.mem.readInt(u32, ns_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        if (off + 1 > ns_payload.len) return null;
+        const ilen = ns_payload[off];
+        off += 1;
+        if (off + ilen + 4 > ns_payload.len) return null;
+        const nid = ns_payload[off .. off + ilen];
+        off += ilen;
+        const base = std.mem.readInt(u32, ns_payload[off..][0..4], .little);
+        off += 4;
+        if (asciiEqlIgnoreCase(nid, id)) return base;
+    }
+    return null;
+}
+
+fn findNumber(key: []const u8) ?NumberData {
+    const count = std.mem.readInt(u32, num_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        var d: NumberData = undefined;
+        const klen = readU8(num_payload, &off) orelse return null;
+        const k = readBytes(num_payload, &off, klen) orelse return null;
+        const nslen = readU8(num_payload, &off) orelse return null;
+        d.ns = readBytes(num_payload, &off, nslen) orelse return null;
+        d.digit_base = readU32(num_payload, &off) orelse return null;
+        d.decimal = readStr8(num_payload, &off) orelse return null;
+        d.group = readStr8(num_payload, &off) orelse return null;
+        d.minus = readStr8(num_payload, &off) orelse return null;
+        d.plus = readStr8(num_payload, &off) orelse return null;
+        d.percent = readStr8(num_payload, &off) orelse return null;
+        d.dec_pattern = readStr16(num_payload, &off) orelse return null;
+        d.pct_pattern = readStr16(num_payload, &off) orelse return null;
+        if (asciiEqlIgnoreCase(k, key)) return d;
+    }
+    return null;
+}
+
+fn readU8(buf: []const u8, off: *usize) ?u8 {
+    if (off.* + 1 > buf.len) return null;
+    const v = buf[off.*];
+    off.* += 1;
+    return v;
+}
+fn readU32(buf: []const u8, off: *usize) ?u32 {
+    if (off.* + 4 > buf.len) return null;
+    const v = std.mem.readInt(u32, buf[off.*..][0..4], .little);
+    off.* += 4;
+    return v;
+}
+fn readBytes(buf: []const u8, off: *usize, len: usize) ?[]const u8 {
+    if (off.* + len > buf.len) return null;
+    const s = buf[off.* .. off.* + len];
+    off.* += len;
+    return s;
+}
+fn readStr8(buf: []const u8, off: *usize) ?[]const u8 {
+    const len = readU8(buf, off) orelse return null;
+    return readBytes(buf, off, len);
+}
+fn readStr16(buf: []const u8, off: *usize) ?[]const u8 {
+    if (off.* + 2 > buf.len) return null;
+    const len = std.mem.readInt(u16, buf[off.*..][0..2], .little);
+    off.* += 2;
+    return readBytes(buf, off, len);
 }
 
 // ── small helpers ────────────────────────────────────────────────────────────

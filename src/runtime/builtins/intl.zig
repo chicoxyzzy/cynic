@@ -21,6 +21,7 @@ const intrinsics = @import("../intrinsics.zig");
 const lantern = @import("../lantern/interpreter.zig");
 const intl = @import("../intl.zig");
 const cldr = @import("../cldr.zig");
+const dtoa = @import("../dtoa.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -940,7 +941,6 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
 
     var slots: intl.NumberFormatSlots = .{};
     slots.base.locale = resolved.locale;
-    slots.base.numbering_system = realm.allocator.dupe(u8, "latn") catch return error.OutOfMemory;
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "decimal", "percent", "currency", "unit" }, "decimal");
     if (std.mem.eql(u8, slots.style, "currency")) {
         const cur = try getOptionString(realm, opts, "currency", null, "");
@@ -961,33 +961,157 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
         slots.unit_display = try getOptionStringOwned(realm, opts, "unitDisplay", &.{ "short", "narrow", "long" }, "short");
     }
     slots.notation = try getOptionStringOwned(realm, opts, "notation", &.{ "standard", "scientific", "engineering", "compact" }, "standard");
+    slots.compact_display = try getOptionStringOwned(realm, opts, "compactDisplay", &.{ "short", "long" }, "short");
+    slots.use_grouping = try getUseGroupingOwned(realm, opts);
+
+    // §15.1.1 SetNumberFormatDigitOptions — fraction-digit defaults vary by
+    // style (percent → 0 max; decimal → 3 max; currency → 2).
+    const mxfd_default: u32 = if (std.mem.eql(u8, slots.style, "currency")) 2 else if (std.mem.eql(u8, slots.style, "percent")) 0 else 3;
+    try setNumberFormatDigitOptions(realm, &slots, opts, 0, mxfd_default);
+
     slots.sign_display = try getOptionStringOwned(realm, opts, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" }, "auto");
+
+    // Numbering system: explicit option wins, else the locale's CLDR default,
+    // else latn. (The -u-nu- extension is resolved into the locale upstream.)
+    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, opts);
 
     try storeRecord(realm, inst, .{ .number_format = slots });
     return heap_mod.taggedObject(inst);
 }
 
-fn numberFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireKind(realm, this_value, .number_format);
-    const v = argOr(args, 0, Value.undefined_);
-    // Structural: ToString(ToNumber(value)) / BigInt ToString.
-    if (heap_mod.isBigInt(v)) {
-        return makeStringValue(realm, try valueToStringSlice(realm, v));
+/// §1.1.5 GetNumberOption / DefaultNumberOption — read an integer option in
+/// [min,max], flooring; RangeError out of range. null when absent.
+fn getNumberOptionOpt(realm: *Realm, opts: ?*JSObject, key: []const u8, min: u32, max: u32) NativeError!?u32 {
+    const obj = opts orelse return null;
+    const v = try getPropertyChain(realm, obj, key);
+    if (v.isUndefined()) return null;
+    const f = numberToF64(try toNumber(realm, v));
+    if (std.math.isNan(f) or f < @as(f64, @floatFromInt(min)) or f > @as(f64, @floatFromInt(max)))
+        return throwRangeError(realm, "number option out of range");
+    return @intFromFloat(@floor(f));
+}
+
+fn getNumberOption(realm: *Realm, opts: ?*JSObject, key: []const u8, min: u32, max: u32, fallback: u32) NativeError!u32 {
+    return (try getNumberOptionOpt(realm, opts, key, min, max)) orelse fallback;
+}
+
+/// §15.1.2 GetUnsignedRoundingMode-adjacent useGrouping reader — accepts the
+/// string forms plus the legacy boolean; stores a canonical string.
+fn getUseGroupingOwned(realm: *Realm, opts: ?*JSObject) NativeError![]const u8 {
+    const obj = opts orelse return realm.allocator.dupe(u8, "auto") catch error.OutOfMemory;
+    const v = try getPropertyChain(realm, obj, "useGrouping");
+    if (v.isUndefined()) return realm.allocator.dupe(u8, "auto") catch error.OutOfMemory;
+    if (v.isBool()) return realm.allocator.dupe(u8, if (v.toBooleanPrimitive()) "always" else "false") catch error.OutOfMemory;
+    const s = try valueToStringSlice(realm, v);
+    if (std.mem.eql(u8, s, "always") or std.mem.eql(u8, s, "auto") or std.mem.eql(u8, s, "min2"))
+        return realm.allocator.dupe(u8, s) catch error.OutOfMemory;
+    if (std.mem.eql(u8, s, "true")) return realm.allocator.dupe(u8, "always") catch error.OutOfMemory;
+    if (std.mem.eql(u8, s, "false")) return realm.allocator.dupe(u8, "false") catch error.OutOfMemory;
+    return throwRangeError(realm, "invalid useGrouping value");
+}
+
+/// §15.1.1 SetNumberFormatDigitOptions (fraction / significant subset). Reads
+/// the digit + rounding options into `slots` with the given fraction defaults.
+fn setNumberFormatDigitOptions(realm: *Realm, slots: *intl.NumberFormatSlots, opts: ?*JSObject, mnfd_default: u32, mxfd_default: u32) NativeError!void {
+    slots.minimum_integer_digits = try getNumberOption(realm, opts, "minimumIntegerDigits", 1, 21, 1);
+    const mnfd = try getNumberOptionOpt(realm, opts, "minimumFractionDigits", 0, 100);
+    const mxfd = try getNumberOptionOpt(realm, opts, "maximumFractionDigits", 0, 100);
+    const mnsd = try getNumberOptionOpt(realm, opts, "minimumSignificantDigits", 1, 21);
+    const mxsd = try getNumberOptionOpt(realm, opts, "maximumSignificantDigits", 1, 21);
+    slots.rounding_increment = try getNumberOption(realm, opts, "roundingIncrement", 1, 5000, 1);
+    slots.rounding_mode = try getOptionStringOwned(realm, opts, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" }, "halfExpand");
+    slots.trailing_zero_display = try getOptionStringOwned(realm, opts, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" }, "auto");
+    // Validated but not stored (roundingPriority "auto" only, for now).
+    _ = try getOptionString(realm, opts, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" }, "auto");
+
+    if (mnsd != null or mxsd != null) {
+        slots.rounding_type = try realm.allocator.dupe(u8, "significantDigits");
+        slots.minimum_significant_digits = mnsd orelse 1;
+        slots.maximum_significant_digits = mxsd orelse 21;
+    } else if (mnfd != null or mxfd != null) {
+        slots.rounding_type = try realm.allocator.dupe(u8, "fractionDigits");
+        const lo = mnfd orelse mnfd_default;
+        const hi = mxfd orelse @max(lo, mxfd_default);
+        if (lo > hi) return throwRangeError(realm, "minimumFractionDigits > maximumFractionDigits");
+        slots.minimum_fraction_digits = lo;
+        slots.maximum_fraction_digits = hi;
+    } else {
+        slots.rounding_type = try realm.allocator.dupe(u8, "fractionDigits");
+        slots.minimum_fraction_digits = mnfd_default;
+        slots.maximum_fraction_digits = mxfd_default;
     }
-    const n = try toNumber(realm, v);
-    return makeStringValue(realm, try valueToStringSlice(realm, n));
+}
+
+/// Resolve the numbering-system id: explicit `numberingSystem` option (must be
+/// a known numeric system) → the locale's CLDR default → "latn".
+fn resolveNumberingSystem(realm: *Realm, locale: []const u8, opts: ?*JSObject) NativeError![]const u8 {
+    if (opts) |o| {
+        const v = try getPropertyChain(realm, o, "numberingSystem");
+        if (!v.isUndefined()) {
+            const s = try valueToStringSlice(realm, v);
+            // Must be 3-8 alphanumerics (type subtag) and a known numeric system.
+            if (s.len < 3 or s.len > 8) return throwRangeError(realm, "invalid numberingSystem");
+            if (cldr.available and cldr.numberingSystemDigitBase(s) != null)
+                return realm.allocator.dupe(u8, s) catch error.OutOfMemory;
+            return throwRangeError(realm, "invalid numberingSystem");
+        }
+    }
+    if (cldr.available) {
+        if (cldr.numberData(locale)) |d| return realm.allocator.dupe(u8, d.ns) catch error.OutOfMemory;
+    }
+    return realm.allocator.dupe(u8, "latn") catch error.OutOfMemory;
+}
+
+fn numberFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requireKind(realm, this_value, .number_format);
+    const v = argOr(args, 0, Value.undefined_);
+    // BigInt and non-finite fall back to ToString of the magnitude with the
+    // locale sign/symbols applied minimally; full CLDR formatting covers the
+    // finite Number path.
+    if (heap_mod.isBigInt(v) or !cldr.available) {
+        if (heap_mod.isBigInt(v)) return makeStringValue(realm, try valueToStringSlice(realm, v));
+        const n = try toNumber(realm, v);
+        return makeStringValue(realm, try valueToStringSlice(realm, n));
+    }
+    const x = numberToF64(try toNumber(realm, v));
+    var buf: [256]u8 = undefined;
+    const s = try formatNumericToBuf(realm, &rec.number_format, x, &buf);
+    return makeStringValue(realm, s);
 }
 
 fn numberFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const formatted = try numberFormatFormat(realm, this_value, args);
+    const rec = try requireKind(realm, this_value, .number_format);
+    const v = argOr(args, 0, Value.undefined_);
     const arr = allocateArray(realm) catch return error.OutOfMemory;
+    if (heap_mod.isBigInt(v) or !cldr.available) {
+        const formatted = try numberFormatFormat(realm, this_value, args);
+        try pushPart(realm, arr, 0, "integer", formatted);
+        arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(arr);
+    }
+    const x = numberToF64(try toNumber(realm, v));
+    var segs: [48]Seg = undefined;
+    const n = renderNumber(&rec.number_format, x, &segs);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const part = realm.heap.allocateObject() catch return error.OutOfMemory;
+        realm.heap.setObjectPrototype(part, realm.intrinsics.object_prototype);
+        try setDataProp(realm, part, "type", try makeStringValue(realm, segs[i].typ));
+        try setDataProp(realm, part, "value", try makeStringValue(realm, segs[i].bytes()));
+        var kb: [12]u8 = undefined;
+        arr.set(realm.allocator, std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable, heap_mod.taggedObject(part)) catch return error.OutOfMemory;
+    }
+    arr.setArrayLength(realm.allocator, n) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(arr);
+}
+
+fn pushPart(realm: *Realm, arr: anytype, idx: u32, typ: []const u8, value: Value) NativeError!void {
     const part = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(part, realm.intrinsics.object_prototype);
-    try setDataProp(realm, part, "type", try makeStringValue(realm, "integer"));
-    try setDataProp(realm, part, "value", formatted);
-    arr.set(realm.allocator, "0", heap_mod.taggedObject(part)) catch return error.OutOfMemory;
-    arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
-    return heap_mod.taggedObject(arr);
+    try setDataProp(realm, part, "type", try makeStringValue(realm, typ));
+    try setDataProp(realm, part, "value", value);
+    var kb: [12]u8 = undefined;
+    arr.set(realm.allocator, std.fmt.bufPrint(&kb, "{d}", .{idx}) catch unreachable, heap_mod.taggedObject(part)) catch return error.OutOfMemory;
 }
 
 fn numberFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -997,18 +1121,400 @@ fn numberFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const V
     const obj = try makeResolvedBase(realm, s.base.locale);
     try setDataProp(realm, obj, "numberingSystem", try makeStringValue(realm, if (s.base.numbering_system.len > 0) s.base.numbering_system else "latn"));
     try setDataProp(realm, obj, "style", try makeStringValue(realm, if (s.style.len > 0) s.style else "decimal"));
-    if (s.currency.len > 0) try setDataProp(realm, obj, "currency", try makeStringValue(realm, s.currency));
-    try setDataProp(realm, obj, "minimumIntegerDigits", makeNumberValue(1));
-    try setDataProp(realm, obj, "minimumFractionDigits", makeNumberValue(0));
-    try setDataProp(realm, obj, "maximumFractionDigits", makeNumberValue(3));
-    try setDataProp(realm, obj, "useGrouping", try makeStringValue(realm, "auto"));
+    if (s.currency.len > 0) {
+        try setDataProp(realm, obj, "currency", try makeStringValue(realm, s.currency));
+        try setDataProp(realm, obj, "currencyDisplay", try makeStringValue(realm, if (s.currency_display.len > 0) s.currency_display else "symbol"));
+        try setDataProp(realm, obj, "currencySign", try makeStringValue(realm, if (s.currency_sign.len > 0) s.currency_sign else "standard"));
+    }
+    if (s.unit.len > 0) {
+        try setDataProp(realm, obj, "unit", try makeStringValue(realm, s.unit));
+        try setDataProp(realm, obj, "unitDisplay", try makeStringValue(realm, if (s.unit_display.len > 0) s.unit_display else "short"));
+    }
+    try setDataProp(realm, obj, "minimumIntegerDigits", makeNumberValue(@floatFromInt(s.minimum_integer_digits)));
+    const is_sig = std.mem.eql(u8, s.rounding_type, "significantDigits");
+    if (is_sig) {
+        try setDataProp(realm, obj, "minimumSignificantDigits", makeNumberValue(@floatFromInt(s.minimum_significant_digits orelse 1)));
+        try setDataProp(realm, obj, "maximumSignificantDigits", makeNumberValue(@floatFromInt(s.maximum_significant_digits orelse 21)));
+    } else {
+        try setDataProp(realm, obj, "minimumFractionDigits", makeNumberValue(@floatFromInt(s.minimum_fraction_digits orelse 0)));
+        try setDataProp(realm, obj, "maximumFractionDigits", makeNumberValue(@floatFromInt(s.maximum_fraction_digits orelse 3)));
+    }
+    // §15.5.2 — useGrouping resolves to `false` (boolean) or a string.
+    if (std.mem.eql(u8, s.use_grouping, "false")) {
+        try setDataProp(realm, obj, "useGrouping", Value.false_);
+    } else {
+        try setDataProp(realm, obj, "useGrouping", try makeStringValue(realm, if (s.use_grouping.len > 0) s.use_grouping else "auto"));
+    }
     try setDataProp(realm, obj, "notation", try makeStringValue(realm, if (s.notation.len > 0) s.notation else "standard"));
     try setDataProp(realm, obj, "signDisplay", try makeStringValue(realm, if (s.sign_display.len > 0) s.sign_display else "auto"));
-    try setDataProp(realm, obj, "roundingMode", try makeStringValue(realm, "halfExpand"));
-    try setDataProp(realm, obj, "roundingIncrement", makeNumberValue(1));
-    try setDataProp(realm, obj, "trailingZeroDisplay", try makeStringValue(realm, "auto"));
-    try setDataProp(realm, obj, "roundingType", try makeStringValue(realm, "fractionDigits"));
+    // §15.5.2 key order: roundingIncrement, roundingMode, roundingPriority, trailingZeroDisplay.
+    try setDataProp(realm, obj, "roundingIncrement", makeNumberValue(@floatFromInt(s.rounding_increment)));
+    try setDataProp(realm, obj, "roundingMode", try makeStringValue(realm, if (s.rounding_mode.len > 0) s.rounding_mode else "halfExpand"));
+    try setDataProp(realm, obj, "roundingPriority", try makeStringValue(realm, "auto"));
+    try setDataProp(realm, obj, "trailingZeroDisplay", try makeStringValue(realm, if (s.trailing_zero_display.len > 0) s.trailing_zero_display else "auto"));
     return heap_mod.taggedObject(obj);
+}
+
+// ── number formatting engine (decimal / percent; §15.5) ──────────────────────
+
+/// One output segment of a formatted number (NumberFormat formatToParts type +
+/// its UTF-8 bytes, held in a caller-owned scratch buffer).
+const Seg = struct {
+    typ: []const u8,
+    buf: [128]u8 = undefined,
+    len: usize = 0,
+    fn bytes(self: *const Seg) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+fn setSeg(seg: *Seg, typ: []const u8, s: []const u8) void {
+    seg.typ = typ;
+    const n = @min(s.len, seg.buf.len);
+    @memcpy(seg.buf[0..n], s[0..n]);
+    seg.len = n;
+}
+
+/// Default symbols when the locale has no CLDR number data (latn / en-like).
+const default_number_data = cldr.NumberData{
+    .ns = "latn",
+    .digit_base = '0',
+    .decimal = ".",
+    .group = ",",
+    .minus = "-",
+    .plus = "+",
+    .percent = "%",
+    .dec_pattern = "#,##0.###",
+    .pct_pattern = "#,##0%",
+};
+
+/// Render `x` into typed segments per the resolved NumberFormat options.
+/// Returns the number of segments written into `out`.
+fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
+    const nd = if (cldr.numberData(slots.base.locale)) |d| d else default_number_data;
+    const digit_base: u32 = if (slots.base.numbering_system.len > 0 and !std.mem.eql(u8, slots.base.numbering_system, nd.ns))
+        (cldr.numberingSystemDigitBase(slots.base.numbering_system) orelse nd.digit_base)
+    else
+        nd.digit_base;
+
+    const is_percent = std.mem.eql(u8, slots.style, "percent");
+    const scale: f64 = if (is_percent) 100 else 1;
+    const magnitude = @abs(x) * scale;
+    const negative = std.math.signbit(x);
+
+    // Round to ASCII int/frac digit strings.
+    var int_ascii: [160]u8 = undefined;
+    var frac_ascii: [160]u8 = undefined;
+    var int_len: usize = 0;
+    var frac_len: usize = 0;
+    roundDigits(slots, magnitude, &int_ascii, &int_len, &frac_ascii, &frac_len);
+
+    const is_zero = blk: {
+        for (int_ascii[0..int_len]) |c| if (c != '0') break :blk false;
+        for (frac_ascii[0..frac_len]) |c| if (c != '0') break :blk false;
+        break :blk true;
+    };
+
+    // minimumIntegerDigits: left-pad with '0'.
+    var int_pad: [160]u8 = undefined;
+    var ip_len: usize = 0;
+    if (int_len < slots.minimum_integer_digits) {
+        const pad = slots.minimum_integer_digits - int_len;
+        var k: usize = 0;
+        while (k < pad) : (k += 1) {
+            int_pad[ip_len] = '0';
+            ip_len += 1;
+        }
+    }
+    @memcpy(int_pad[ip_len .. ip_len + int_len], int_ascii[0..int_len]);
+    ip_len += int_len;
+
+    var n: u32 = 0;
+    const append = struct {
+        fn f(o: []Seg, idx: *u32, typ: []const u8, s: []const u8) void {
+            if (idx.* >= o.len) return;
+            setSeg(&o[idx.*], typ, s);
+            idx.* += 1;
+        }
+    }.f;
+
+    // Pattern affixes (percent sign placement / literals). Decimal patterns
+    // usually have none.
+    const pattern = if (is_percent) nd.pct_pattern else nd.dec_pattern;
+    const affix = patternAffixes(pattern);
+
+    // sign string
+    var sign: []const u8 = "";
+    var sign_type: []const u8 = "minusSign";
+    if (signShows(slots.sign_display, negative, is_zero)) {
+        if (negative) {
+            sign = nd.minus;
+            sign_type = "minusSign";
+        } else {
+            sign = nd.plus;
+            sign_type = "plusSign";
+        }
+    }
+
+    // prefix affix
+    appendAffix(out, &n, affix.prefix, nd, append);
+    if (sign.len > 0) append(out, &n, sign_type, sign);
+
+    // integer with grouping + digit substitution
+    appendGroupedInteger(out, &n, int_pad[0..ip_len], slots, nd, digit_base, append);
+
+    if (frac_len > 0) {
+        append(out, &n, "decimal", nd.decimal);
+        var sub: [256]u8 = undefined;
+        const sb = substituteDigits(frac_ascii[0..frac_len], digit_base, &sub);
+        append(out, &n, "fraction", sb);
+    }
+
+    appendAffix(out, &n, affix.suffix, nd, append);
+    return n;
+}
+
+const Affix = struct { prefix: []const u8, suffix: []const u8 };
+
+/// Split a CLDR number pattern into the literal/symbol text before and after
+/// the numeric skeleton (the run of `#`, `0`, `,`, `.`).
+fn patternAffixes(pattern: []const u8) Affix {
+    // Use only the positive subpattern (before ';').
+    const semi = std.mem.indexOfScalar(u8, pattern, ';') orelse pattern.len;
+    const pos = pattern[0..semi];
+    var first: usize = pos.len;
+    var last: usize = 0;
+    var i: usize = 0;
+    while (i < pos.len) : (i += 1) {
+        const c = pos[i];
+        if (c == '#' or c == '0' or c == ',' or c == '.') {
+            if (i < first) first = i;
+            last = i;
+        }
+    }
+    if (first > last) return .{ .prefix = "", .suffix = "" };
+    return .{ .prefix = pos[0..first], .suffix = pos[last + 1 ..] };
+}
+
+fn appendAffix(out: []Seg, n: *u32, affix: []const u8, nd: cldr.NumberData, append: anytype) void {
+    if (affix.len == 0) return;
+    // Affixes contain literals and the '%' symbol placeholder.
+    var i: usize = 0;
+    while (i < affix.len) {
+        if (affix[i] == '%') {
+            append(out, n, "percentSign", nd.percent);
+            i += 1;
+        } else {
+            // Gather a literal run up to the next '%'.
+            const start = i;
+            while (i < affix.len and affix[i] != '%') i += 1;
+            append(out, n, "literal", affix[start..i]);
+        }
+    }
+}
+
+/// Apply primary/secondary grouping from the pattern, substituting digits, and
+/// emit interleaved "integer"/"group" segments.
+fn appendGroupedInteger(out: []Seg, n: *u32, int_ascii: []const u8, slots: *const intl.NumberFormatSlots, nd: cldr.NumberData, digit_base: u32, append: anytype) void {
+    const grouping = !std.mem.eql(u8, slots.use_grouping, "false");
+    const g = patternGrouping(nd.dec_pattern);
+    if (!grouping or g.primary == 0 or int_ascii.len <= g.primary) {
+        var sub: [256]u8 = undefined;
+        append(out, n, "integer", substituteDigits(int_ascii, digit_base, &sub));
+        return;
+    }
+    // Split right-to-left: last `primary` digits, then `secondary`-sized groups.
+    // Build the boundary indices from the right.
+    var bounds: [32]usize = undefined;
+    var nb: usize = 0;
+    var pos: usize = int_ascii.len;
+    pos -= g.primary;
+    bounds[nb] = pos;
+    nb += 1;
+    const sec = if (g.secondary > 0) g.secondary else g.primary;
+    while (pos > sec) {
+        pos -= sec;
+        bounds[nb] = pos;
+        nb += 1;
+    }
+    // Emit left-to-right: first chunk [0..bounds[nb-1]], then group, chunk, ...
+    var sub: [256]u8 = undefined;
+    var start: usize = 0;
+    var bi: usize = nb;
+    while (bi > 0) {
+        bi -= 1;
+        const end = bounds[bi];
+        append(out, n, "integer", substituteDigits(int_ascii[start..end], digit_base, &sub));
+        append(out, n, "group", nd.group);
+        start = end;
+    }
+    append(out, n, "integer", substituteDigits(int_ascii[start..], digit_base, &sub));
+}
+
+const Grouping = struct { primary: usize, secondary: usize };
+
+fn patternGrouping(pattern: []const u8) Grouping {
+    const semi = std.mem.indexOfScalar(u8, pattern, ';') orelse pattern.len;
+    const dot = std.mem.indexOfScalar(u8, pattern[0..semi], '.') orelse semi;
+    const int_part = pattern[0..dot];
+    // Positions of ',' from the right give primary then secondary group sizes.
+    const last_comma = std.mem.lastIndexOfScalar(u8, int_part, ',') orelse return .{ .primary = 0, .secondary = 0 };
+    const primary = int_part.len - last_comma - 1;
+    const before = int_part[0..last_comma];
+    const prev_comma = std.mem.lastIndexOfScalar(u8, before, ',');
+    const secondary = if (prev_comma) |pc| (last_comma - pc - 1) else primary;
+    return .{ .primary = primary, .secondary = secondary };
+}
+
+fn substituteDigits(ascii: []const u8, digit_base: u32, out: []u8) []const u8 {
+    if (digit_base == '0') return ascii; // latn: identity
+    var n: usize = 0;
+    for (ascii) |c| {
+        if (n + 4 > out.len) break; // bound: never write past the scratch buffer
+        const cp: u21 = @intCast(digit_base + (c - '0'));
+        n += std.unicode.utf8Encode(cp, out[n..]) catch 0;
+    }
+    return out[0..n];
+}
+
+fn signShows(sign_display: []const u8, negative: bool, is_zero: bool) bool {
+    if (std.mem.eql(u8, sign_display, "never")) return false;
+    if (std.mem.eql(u8, sign_display, "always")) return true;
+    if (std.mem.eql(u8, sign_display, "exceptZero")) return !is_zero;
+    if (std.mem.eql(u8, sign_display, "negative")) return negative and !is_zero;
+    return negative; // "auto"
+}
+
+/// Round `magnitude` (>= 0) to ASCII integer + fraction digit strings per the
+/// resolved rounding type. Uses the engine's exact dtoa (halfExpand).
+fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
+    if (!std.math.isFinite(magnitude) or magnitude >= 1e21) {
+        // Fallback: trunc to integer digits (rare path; non-finite handled upstream).
+        var dec = dtoa.Decimal{};
+        dtoa.fixedDigits(if (std.math.isFinite(magnitude)) magnitude else 0, 0, &dec);
+        const m = dec.digits();
+        @memcpy(int_buf[0..m.len], m);
+        int_len.* = m.len;
+        frac_len.* = 0;
+        return;
+    }
+
+    if (std.mem.eql(u8, slots.rounding_type, "significantDigits")) {
+        const maxsd = slots.maximum_significant_digits orelse 21;
+        const minsd = slots.minimum_significant_digits orelse 1;
+        if (magnitude == 0) {
+            // ToRawPrecision(0, …): "0" with (minsd-1) trailing fraction zeros.
+            // (dtoa.precisionDigits asserts x > 0 — never call it with zero.)
+            int_buf[0] = '0';
+            int_len.* = 1;
+            const z = minsd -| 1;
+            var k: usize = 0;
+            while (k < z and k < frac_buf.len) : (k += 1) frac_buf[k] = '0';
+            frac_len.* = k;
+            return;
+        }
+        var dec = dtoa.Decimal{};
+        dtoa.precisionDigits(magnitude, maxsd, &dec);
+        splitByPoint(dec.digits(), dec.point_exp, int_buf, int_len, frac_buf, frac_len);
+        trimSignificant(int_buf, int_len, frac_buf, frac_len, minsd);
+        return;
+    }
+
+    const maxfd = slots.maximum_fraction_digits orelse 3;
+    const minfd = slots.minimum_fraction_digits orelse 0;
+    var dec = dtoa.Decimal{};
+    dtoa.fixedDigits(magnitude, maxfd, &dec);
+    const m = dec.digits();
+    if (maxfd == 0) {
+        @memcpy(int_buf[0..m.len], m);
+        int_len.* = m.len;
+        frac_len.* = 0;
+    } else if (m.len > maxfd) {
+        const il = m.len - maxfd;
+        @memcpy(int_buf[0..il], m[0..il]);
+        int_len.* = il;
+        @memcpy(frac_buf[0..maxfd], m[il..]);
+        frac_len.* = maxfd;
+    } else {
+        int_buf[0] = '0';
+        int_len.* = 1;
+        const lead = maxfd - m.len;
+        var k: usize = 0;
+        while (k < lead) : (k += 1) frac_buf[k] = '0';
+        @memcpy(frac_buf[lead .. lead + m.len], m);
+        frac_len.* = maxfd;
+    }
+    // Trim trailing fraction zeros down to minimumFractionDigits.
+    while (frac_len.* > minfd and frac_buf[frac_len.* - 1] == '0') frac_len.* -= 1;
+    // trailingZeroDisplay: stripIfInteger drops the fraction when it's all zeros.
+    if (std.mem.eql(u8, slots.trailing_zero_display, "stripIfInteger")) {
+        var all_zero = true;
+        for (frac_buf[0..frac_len.*]) |c| if (c != '0') {
+            all_zero = false;
+        };
+        if (all_zero) frac_len.* = 0;
+    }
+}
+
+/// Split dtoa significant digits + point exponent into int/frac ASCII.
+fn splitByPoint(digits: []const u8, point_exp: i32, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
+    if (point_exp <= 0) {
+        int_buf[0] = '0';
+        int_len.* = 1;
+        const lead: usize = @intCast(-point_exp);
+        var k: usize = 0;
+        while (k < lead) : (k += 1) frac_buf[k] = '0';
+        @memcpy(frac_buf[lead .. lead + digits.len], digits);
+        frac_len.* = lead + digits.len;
+    } else if (@as(usize, @intCast(point_exp)) >= digits.len) {
+        @memcpy(int_buf[0..digits.len], digits);
+        const trail: usize = @as(usize, @intCast(point_exp)) - digits.len;
+        var k: usize = 0;
+        while (k < trail) : (k += 1) int_buf[digits.len + k] = '0';
+        int_len.* = digits.len + trail;
+        frac_len.* = 0;
+    } else {
+        const p: usize = @intCast(point_exp);
+        @memcpy(int_buf[0..p], digits[0..p]);
+        int_len.* = p;
+        @memcpy(frac_buf[0 .. digits.len - p], digits[p..]);
+        frac_len.* = digits.len - p;
+    }
+}
+
+/// Pad/trim fraction so the total significant-digit count is >= minsd, trimming
+/// surplus trailing zeros otherwise.
+fn trimSignificant(int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize, minsd: u32) void {
+    // Significant digits = int digits (minus leading zeros) + frac digits.
+    var sig: usize = 0;
+    if (!(int_len.* == 1 and int_buf_is_zero(int_buf, int_len.*))) sig += int_len.*;
+    sig += frac_len.*;
+    // Trim trailing fraction zeros while staying >= minsd.
+    while (frac_len.* > 0 and frac_buf[frac_len.* - 1] == '0' and sig > minsd) {
+        frac_len.* -= 1;
+        sig -= 1;
+    }
+}
+
+fn int_buf_is_zero(int_buf: []const u8, len: usize) bool {
+    for (int_buf[0..len]) |c| if (c != '0') return false;
+    return true;
+}
+
+/// Render `x` into `buf` as a flat string (concatenation of segments).
+fn formatNumericToBuf(realm: *Realm, slots: *const intl.NumberFormatSlots, x: f64, buf: []u8) NativeError![]const u8 {
+    _ = realm;
+    var segs: [48]Seg = undefined;
+    const n = renderNumber(slots, x, &segs);
+    var len: usize = 0;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const b = segs[i].bytes();
+        if (len + b.len > buf.len) break;
+        @memcpy(buf[len .. len + b.len], b);
+        len += b.len;
+    }
+    return buf[0..len];
 }
 
 // ── DateTimeFormat ─────────────────────────────────────────────────────────

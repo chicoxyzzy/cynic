@@ -34,10 +34,33 @@
 
 const std = @import("std");
 
-/// Section kinds. Numbers / dates / display-names land in later phases.
+/// Section kinds. Dates / display-names land in later phases.
 const SectionKind = enum(u8) {
     plural_cardinal = 1,
     plural_ordinal = 2,
+    numbers = 3,
+    numbering_systems = 4,
+};
+
+/// CLDR "modern" coverage tier, base-language locales (plus the few
+/// script-primary ones CLDR treats as principal). Derived from
+/// cldr-core/coverageLevels.json (effectiveCoverageLevels == "modern",
+/// language-only keys); region variants fall back to their base at runtime.
+/// "und" (root) is excluded. Keep sorted by the packer's own sort, not here.
+const modern_locales = [_][]const u8{
+    "af", "ak", "am",  "ar",  "as",  "az",      "ba",      "be",
+    "bg", "bn", "bs",  "ca",  "chr", "cs",      "cv",      "cy",
+    "da", "de", "dsb", "el",  "en",  "es",      "et",      "eu",
+    "fa", "fi", "fil", "fr",  "ga",  "gd",      "gl",      "gu",
+    "ha", "he", "hi",  "hr",  "hsb", "ht",      "hu",      "hy",
+    "id", "ig", "is",  "it",  "ja",  "jv",      "ka",      "kk",
+    "km", "kn", "ko",  "kok", "ky",  "lo",      "lt",      "lv",
+    "mk", "ml", "mn",  "mr",  "ms",  "my",      "nb",      "ne",
+    "nl", "nn", "no",  "or",  "pa",  "pcm",     "pl",      "ps",
+    "pt", "qu", "rm",  "ro",  "ru",  "sd",      "shn",     "si",
+    "sk", "sl", "so",  "sq",  "sr",  "sv",      "sw",      "ta",
+    "te", "th", "ti",  "tk",  "tr",  "uk",      "ur",      "uz",
+    "vi", "yo", "yue", "zh",  "zu",  "sr-Latn", "zh-Hans", "zh-Hant",
 };
 
 const Category = enum(u8) {
@@ -104,13 +127,15 @@ pub fn main(init: std.process.Init) !void {
 
     const cardinal = try loadPlurals(arena, io, json_root, "plurals.json", "plurals-type-cardinal");
     const ordinal = try loadPlurals(arena, io, json_root, "ordinals.json", "plurals-type-ordinal");
+    const ns_table = try loadNumberingSystems(arena, io, json_root);
+    const numbers = try loadNumbers(arena, io, json_root, ns_table);
 
-    const blob = try pack(allocator, cardinal, ordinal);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
     var buf: [256]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d} locales\n", .{ out_path, blob.len, cardinal.len, ordinal.len });
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, numbering-systems {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -167,12 +192,18 @@ fn stripSamples(rule: []const u8) []const u8 {
     return std.mem.trim(u8, rule[0..at], " \t");
 }
 
-fn pack(gpa: std.mem.Allocator, cardinal: []LocaleRules, ordinal: []LocaleRules) ![]u8 {
+fn pack(
+    gpa: std.mem.Allocator,
+    cardinal: []LocaleRules,
+    ordinal: []LocaleRules,
+    numbers: []NumberLocale,
+    ns_table: []NumberingSystem,
+) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [2]SectionDir = undefined;
+    var dirs: [4]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -181,6 +212,14 @@ fn pack(gpa: std.mem.Allocator, cardinal: []LocaleRules, ordinal: []LocaleRules)
     const ord_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, ordinal);
     dirs[1] = .{ .kind = .plural_ordinal, .off = ord_start, .len = @as(u32, @intCast(payloads.items.len)) - ord_start };
+
+    const num_start: u32 = @intCast(payloads.items.len);
+    try writeNumbersPayload(gpa, &payloads, numbers);
+    dirs[2] = .{ .kind = .numbers, .off = num_start, .len = @as(u32, @intCast(payloads.items.len)) - num_start };
+
+    const ns_start: u32 = @intCast(payloads.items.len);
+    try writeNumberingSystemsPayload(gpa, &payloads, ns_table);
+    dirs[3] = .{ .kind = .numbering_systems, .off = ns_start, .len = @as(u32, @intCast(payloads.items.len)) - ns_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -202,6 +241,140 @@ fn pack(gpa: std.mem.Allocator, cardinal: []LocaleRules, ordinal: []LocaleRules)
     }
     try out.appendSlice(gpa, payloads.items);
     return out.toOwnedSlice(gpa);
+}
+
+// ── numbers (symbols + patterns) ─────────────────────────────────────────────
+
+const NumberLocale = struct {
+    key: []const u8,
+    ns: []const u8, // default numbering system id
+    digit_base: u32, // code point of that system's digit 0
+    decimal: []const u8,
+    group: []const u8,
+    minus: []const u8,
+    plus: []const u8,
+    percent: []const u8,
+    dec_pattern: []const u8,
+    pct_pattern: []const u8,
+    fn lessThan(_: void, a: NumberLocale, b: NumberLocale) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+const NumberingSystem = struct {
+    id: []const u8,
+    digit_base: u32,
+    fn lessThan(_: void, a: NumberingSystem, b: NumberingSystem) bool {
+        return std.mem.lessThan(u8, a.id, b.id);
+    }
+};
+
+/// numberingSystems.json → (id, digit-0 code point) for every `numeric` system.
+fn loadNumberingSystems(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]NumberingSystem {
+    const path = try std.fmt.allocPrint(arena, "{s}/cldr-core/supplemental/numberingSystems.json", .{json_root});
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1024 * 1024)) catch
+        fatal("cannot read {s} (run tools/fetch-cldr.sh first)", .{path});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+    const ns = (root.object.get("supplemental") orelse fatal("no supplemental", .{})).object
+        .get("numberingSystems").?.object;
+
+    var out: std.ArrayListUnmanaged(NumberingSystem) = .empty;
+    var it = ns.iterator();
+    while (it.next()) |e| {
+        const obj = e.value_ptr.*.object;
+        const typ = if (obj.get("_type")) |t| t.string else continue;
+        if (!std.mem.eql(u8, typ, "numeric")) continue; // skip algorithmic systems
+        const digits = if (obj.get("_digits")) |d| d.string else continue;
+        const base = std.unicode.utf8Decode(digits[0..(std.unicode.utf8ByteSequenceLength(digits[0]) catch continue)]) catch continue;
+        try out.append(arena, .{ .id = e.key_ptr.*, .digit_base = base });
+    }
+    std.sort.block(NumberingSystem, out.items, {}, NumberingSystem.lessThan);
+    return out.items;
+}
+
+fn nsDigitBase(table: []NumberingSystem, id: []const u8) u32 {
+    for (table) |n| {
+        if (std.mem.eql(u8, n.id, id)) return n.digit_base;
+    }
+    return '0'; // latn fallback
+}
+
+/// Per modern locale: default numbering system + its symbols and decimal/percent
+/// patterns. Missing locales are skipped (they fall back at runtime).
+fn loadNumbers(arena: std.mem.Allocator, io: std.Io, json_root: []const u8, ns_table: []NumberingSystem) ![]NumberLocale {
+    var out: std.ArrayListUnmanaged(NumberLocale) = .empty;
+    for (modern_locales) |loc| {
+        const path = try std.fmt.allocPrint(arena, "{s}/cldr-numbers-full/main/{s}/numbers.json", .{ json_root, loc });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch continue;
+        const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch continue;
+        const main_obj = root.object.get("main").?.object;
+        // main has one key (the locale id, possibly normalised); take the first.
+        var mit = main_obj.iterator();
+        const loc_entry = mit.next() orelse continue;
+        const n = loc_entry.value_ptr.*.object.get("numbers").?.object;
+        const default_ns = if (n.get("defaultNumberingSystem")) |d| d.string else "latn";
+
+        const sym_key = try std.fmt.allocPrint(arena, "symbols-numberSystem-{s}", .{default_ns});
+        const dec_key = try std.fmt.allocPrint(arena, "decimalFormats-numberSystem-{s}", .{default_ns});
+        const pct_key = try std.fmt.allocPrint(arena, "percentFormats-numberSystem-{s}", .{default_ns});
+        const syms = (n.get(sym_key) orelse continue).object;
+
+        try out.append(arena, .{
+            .key = loc,
+            .ns = try arena.dupe(u8, default_ns),
+            .digit_base = nsDigitBase(ns_table, default_ns),
+            .decimal = strField(syms, "decimal", "."),
+            .group = strField(syms, "group", ","),
+            .minus = strField(syms, "minusSign", "-"),
+            .plus = strField(syms, "plusSign", "+"),
+            .percent = strField(syms, "percentSign", "%"),
+            .dec_pattern = if (n.get(dec_key)) |d| strField(d.object, "standard", "#,##0.###") else "#,##0.###",
+            .pct_pattern = if (n.get(pct_key)) |p| strField(p.object, "standard", "#,##0%") else "#,##0%",
+        });
+    }
+    std.sort.block(NumberLocale, out.items, {}, NumberLocale.lessThan);
+    return out.items;
+}
+
+fn strField(obj: std.json.ObjectMap, key: []const u8, dflt: []const u8) []const u8 {
+    return if (obj.get(key)) |v| (if (v == .string) v.string else dflt) else dflt;
+}
+
+fn writeNumbersPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), locales: []NumberLocale) !void {
+    try appendU32(gpa, buf, locales.len);
+    for (locales) |l| {
+        try appendStr8(gpa, buf, l.key);
+        try appendStr8(gpa, buf, l.ns);
+        try appendU32(gpa, buf, l.digit_base);
+        try appendStr8(gpa, buf, l.decimal);
+        try appendStr8(gpa, buf, l.group);
+        try appendStr8(gpa, buf, l.minus);
+        try appendStr8(gpa, buf, l.plus);
+        try appendStr8(gpa, buf, l.percent);
+        try appendStr16(gpa, buf, l.dec_pattern);
+        try appendStr16(gpa, buf, l.pct_pattern);
+    }
+}
+
+fn writeNumberingSystemsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), table: []NumberingSystem) !void {
+    try appendU32(gpa, buf, table.len);
+    for (table) |n| {
+        try appendStr8(gpa, buf, n.id);
+        try appendU32(gpa, buf, n.digit_base);
+    }
+}
+
+fn appendStr8(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
+    std.debug.assert(s.len <= 255);
+    try buf.append(gpa, @intCast(s.len));
+    try buf.appendSlice(gpa, s);
+}
+
+fn appendStr16(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
+    std.debug.assert(s.len <= 0xFFFF);
+    try buf.append(gpa, @intCast(s.len & 0xFF));
+    try buf.append(gpa, @intCast((s.len >> 8) & 0xFF));
+    try buf.appendSlice(gpa, s);
 }
 
 fn writePluralPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), locales: []LocaleRules) !void {
