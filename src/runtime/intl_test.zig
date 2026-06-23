@@ -719,3 +719,43 @@ test "Intl.DisplayNames: invalid code shape throws RangeError" {
     try evalThrows("new Intl.DisplayNames('en',{type:'region'}).of('USA')"); // 3-alpha not a region
     try evalThrows("new Intl.DisplayNames('en',{type:'currency'}).of('US')"); // 2-alpha not a currency
 }
+
+// ── new-target enforcement (§ "If NewTarget is undefined, throw TypeError") ──
+
+test "intl: non-legacy constructors throw without new" {
+    try requireIntlBuild();
+    // Valid args, but no `new` → TypeError (the receiver-is-Intl-namespace case
+    // that the old plain-object check let slip through).
+    try evalThrows("Intl.PluralRules('en')");
+    try evalThrows("Intl.RelativeTimeFormat('en')");
+    try evalThrows("Intl.ListFormat('en')");
+    try evalThrows("Intl.DisplayNames('en', { type: 'region' })");
+    try evalThrows("Intl.Segmenter('en')");
+    try evalThrows("Intl.Locale('en')");
+    try evalThrows("Intl.DurationFormat('en')");
+}
+
+test "intl: non-legacy constructors still construct + subclass with new" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const pr = new Intl.PluralRules('en');
+        \\class MyPR extends Intl.PluralRules {}
+        \\const m = new MyPR('en');
+        \\(pr instanceof Intl.PluralRules &&
+        \\ m instanceof MyPR && m instanceof Intl.PluralRules &&
+        \\ new Intl.Locale('en-US').language === 'en') ? 1 : 0
+    );
+}
+
+test "intl: legacy constructor remains callable without new" {
+    try requireIntlBuild();
+    // NumberFormat / DateTimeFormat / Collator must NOT throw without new (the
+    // legacy chain behaviour). One call only: the legacy no-new path currently
+    // stashes its record on the Intl namespace, so repeated calls accumulate —
+    // a pre-existing leak tracked separately, out of scope for the NewTarget fix.
+    try evalAssert1(
+        \\let ok = 1;
+        \\try { Intl.NumberFormat('en'); } catch (e) { ok = 0; }
+        \\ok
+    );
+}
