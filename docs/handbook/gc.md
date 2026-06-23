@@ -1,7 +1,9 @@
 # Garbage collection
 
-Stop-the-world generational mark-sweep (the *Metla* GC), triggered on
-allocation pressure. Each per-kind heap list is split into a `_young`
+Generational mark-sweep (the *Metla* GC), triggered on allocation
+pressure. The minor cycle is stop-the-world; the **major mark is
+incremental** — sliced across interpreter safe-points to bound the pause
+(see *Incremental major marking* below). Each per-kind heap list is split into a `_young`
 and a `_mature` half; allocations land in `_young`, and survivors of
 a minor cycle are spliced into `_mature` by `promoteYoungList`. Lives
 in [`src/runtime/heap.zig`](../../src/runtime/heap.zig); the trigger
@@ -124,6 +126,62 @@ while (true) { let x = { a: i++ }; }
 used to grow the host process's RSS linearly with iterations — the
 collector existed but nothing ever called it. Now memory plateaus
 within a few thousand iterations and stays put.
+
+## Incremental major marking
+
+The major **mark** is sliced, not stop-the-world. A monolithic major over
+a large heap was the dominant pause — marking ~2M objects (cache-bound
+pointer-chasing) measured **~800 ms STW** on the bigheap synthetic.
+`runSafePoint` now drives the major incrementally: at the `force_full`
+trigger it calls `Realm.beginIncrementalMajor` (arm the cycle, mark the
+roots, seed the worklist, arm the write barrier) and drains the mark
+worklist in bounded ~8192-item slices across subsequent safe-point
+crossings, then runs `Realm.finishIncrementalMajor` — the stop-the-world
+termination — once the worklist empties. Explicit collects
+(`collectGarbage` / `__collectGarbage`) stay monolithic STW. On the 2M
+synthetic the **max GC pause dropped ~800 ms → ~9.6 ms (~83×)**: the mark
+is now ~1 ms slices (`slice_max` under `--gc-stats`), and the residual STW
+pause is the termination **sweep** (`term`, ~9.6 ms) — the next latency
+target (lazy sweep would slice it too).
+
+**The barrier — Dijkstra (incremental-update).** A store into an
+already-scanned (black) container during the mark can hide a white
+referent the mark won't revisit, breaking the strong tri-color invariant.
+`Heap.writeBarrier` shades the newly-stored value grey — one unified
+barrier carrying both the generational and the marking duty (JSC's reuse
+insight). Cynic's barrier carries the *new* value, so Dijkstra is ~4
+centralized arms vs a Yuasa/SATB deletion barrier's ~25 per-funnel
+old-value loads; the termination root-re-scan Dijkstra needs is O(roots),
+small for a single mutator stack. (A web-sourced 5-engine survey leaned
+SATB but explicitly conditioned it on the old value being cheap at the
+barrier — it isn't here; see
+[gc-concurrent-marking-research.md](../gc-concurrent-marking-research.md).)
+
+**Minors are deferred while a major is in flight** — a minor would sweep
+the young generation against the major's incomplete mark, and a *grey*
+object (queued, not yet `mark_color == live_color`) reads as unmarked, so
+freeing it would dangle the worklist. Young objects born mid-mark are
+allocate-black (the existing default — a fresh object carries
+`live_color`), so they survive to the termination sweep, at the cost of
+bounded floating garbage (one major's worth), reclaimed next major.
+
+**Barrier/root completeness is the use-after-free surface** — and exactly
+what STW marking hides, because no mutator runs *during* an STW mark. Two
+gaps the `--gc-threshold=1` verifier gate caught *after* the barrier
+passed test-fast, a 400k-node deep-interleaving stress, and byte-identical
+conformance: (1) the card-marking typed-slot path
+(`rememberTypedSlotWrite`) had only the generational arm — it records the
+container, not the value, so its marking arm re-scans the container's
+typed slots (`markObjectInternalSlots` — the Steele-style re-grey); (2)
+`finishIncrementalMajor`'s termination re-scan covered only the realm
+(interpreter-stack) roots, not the **transient heap-side roots** — handle
+scopes and in-flight native-ctor instances the mutator changes between
+slices — so `markTransientRoots` re-scans them too (the Dijkstra barrier
+doesn't cover a pointer pinned only in a native local). Both are invisible
+to a normal run; both surface only under allocation-pressure GC with the
+mutator interleaved. The verifiers (full-scan + 0xaa free-poison in
+Debug / ReleaseSafe) are the net — the same verifier-first discipline that
+shipped card marking.
 
 ## Why allocation-pressure
 

@@ -1,12 +1,22 @@
 # Incremental / concurrent marking — research note
 
-> Status: **research only** (2026-06-22). No code. This is the note that
-> [gc-parallel.md](gc-parallel.md) §Stage 3 deferred ("concurrent marking
-> … should get its **own** note when its day comes") — plus the option
-> that note skips: **incremental** marking. It assesses both against
-> Metla's actual substrate and recommends a path. The throughput GC work
-> it builds on — sticky mark bits, card marking, the adaptive major
-> trigger — is shipped ([handbook/gc.md](handbook/gc.md),
+> Status: **incremental marking SHIPPED** (2026-06-23) — the path this note
+> recommended. The major mark is now sliced across safe-points; on a
+> 2M-object heap the max GC pause dropped **~800 ms → ~9.6 ms (~83×)**. It
+> ships with a **Dijkstra** (incremental-update) barrier — a later
+> web-sourced 5-engine survey leaned SATB, but Cynic's barrier carries the
+> *new* value, so Dijkstra is the smaller delta (the survey conditioned its
+> SATB lean on the old value being cheap at the barrier, which it isn't).
+> The `--gc-threshold=1` verifier gate caught two completeness gaps after
+> the barrier "passed" the lighter checks — a typed-slot barrier arm and
+> the transient-root termination re-scan — both fixed. Canonical docs:
+> [handbook/gc.md](handbook/gc.md) §Incremental major marking. The research
+> below is the original assessment; **concurrent** marking (a marker
+> thread) stays deferred.
+>
+> The throughput GC work it builds on — sticky mark bits, card marking, the
+> adaptive major trigger — is shipped too
+> ([handbook/gc.md](handbook/gc.md),
 > [gc-generational-aging.md](gc-generational-aging.md)).
 
 ## Why — the problem this solves

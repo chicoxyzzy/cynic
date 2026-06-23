@@ -684,6 +684,13 @@ pub const Heap = struct {
     /// local) so the incremental driver's begin / slice / finish can span
     /// the safe-point.
     cycle_t_start: i128 = 0,
+    /// Max single mark-slice STW pause (ns) for the in-flight major — the
+    /// `drainMarkWorklistBudget` worst case, reset at `beginIncrementalMark`
+    /// and reported under `--gc-stats`. The headline incremental-marking
+    /// number: the mark pause is now bounded by one slice instead of the
+    /// whole O(live) walk. Tracked only when `gc_stats` is on (zero cost
+    /// otherwise).
+    max_slice_pause_ns: i128 = 0,
     /// Cumulative bytes charged across this heap's lifetime (never
     /// reset on GC). Dual of `bytes_live`, which only sees what's
     /// alive right now. Catches workloads that allocate-and-discard
@@ -2734,8 +2741,9 @@ pub const Heap = struct {
     /// marked set is independent of drain order, so slicing this leaves
     /// conformance byte-identical.
     pub fn drainMarkWorklistBudget(self: *Heap, budget: usize) bool {
+        const t0 = if (self.gc_stats) monotonicNs() else 0;
         var drained: usize = 0;
-        while (drained < budget) : (drained += 1) {
+        const done = while (drained < budget) : (drained += 1) {
             if (self.mark_worklist.items.len > 0) {
                 const w = self.mark_worklist.items[self.mark_worklist.items.len - 1];
                 self.mark_worklist.items.len -= 1;
@@ -2744,11 +2752,14 @@ pub const Heap = struct {
                 const env = self.mark_env_worklist.items[self.mark_env_worklist.items.len - 1];
                 self.mark_env_worklist.items.len -= 1;
                 self.markEnvironment(env);
-            } else {
-                return true;
-            }
+            } else break true;
+        } else self.mark_worklist.items.len == 0 and self.mark_env_worklist.items.len == 0;
+        // Sample this slice's STW pause for the `--gc-stats` latency line.
+        if (self.gc_stats) {
+            const ns = monotonicNs() - t0;
+            if (ns > self.max_slice_pause_ns) self.max_slice_pause_ns = ns;
         }
-        return self.mark_worklist.items.len == 0 and self.mark_env_worklist.items.len == 0;
+        return done;
     }
 
     /// Begin a major cycle's mark by snapshotting the roots — the
@@ -2763,6 +2774,7 @@ pub const Heap = struct {
         // spans the mark whether the cycle completes STW or is sliced
         // across safe-points.
         self.cycle_t_start = monotonicNs();
+        self.max_slice_pause_ns = 0;
         if (!self.cycle_started) self.beginMajorCycle();
         // Enter the marking phase BEFORE the root snapshot so the Dijkstra
         // barrier is armed for any store the (future) interleaved mutator
@@ -2991,6 +3003,12 @@ pub const Heap = struct {
     /// `t_start` is the cycle's wall-clock origin for the diagnostic
     /// pause-time field.
     pub fn collectFullTail(self: *Heap, t_start: i128) void {
+        // The stop-the-world termination begins here (final drain + weak
+        // passes + sweep). For an incremental major the mark itself was
+        // sliced, so this is the residual STW pause — `term` in the
+        // `--gc-stats` line measures it (the next latency target is lazy
+        // sweep, which would slice this too).
+        const term_start = monotonicNs();
         // Drain the mark worklist to completion (STW today; the
         // incremental driver instead spends a per-increment budget at
         // `runSafePoint` via `drainMarkWorklistBudget`, then calls this
@@ -3131,11 +3149,15 @@ pub const Heap = struct {
         if (self.gc_stats and @import("builtin").os.tag != .freestanding) {
             self.gc_stats_cycle += 1;
             const elapsed_us: i128 = @divTrunc(elapsed_ns_total, 1000);
+            const slice_max_us: i128 = @divTrunc(self.max_slice_pause_ns, 1000);
+            const term_us: i128 = @divTrunc(monotonicNs() - term_start, 1000);
             std.debug.print(
-                "[gc {d}] full {d}\u{00B5}s live={d}KB peak={d}KB alloc_total={d}KB obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
+                "[gc {d}] full {d}\u{00B5}s slice_max={d}\u{00B5}s term={d}\u{00B5}s live={d}KB peak={d}KB alloc_total={d}KB obj={d}\u{2192}{d} str={d}\u{2192}{d} fn={d}\u{2192}{d} env={d}\u{2192}{d} gen={d}\u{2192}{d} sym={d}\u{2192}{d} big={d}\u{2192}{d}\n",
                 .{
                     self.gc_stats_cycle,
                     elapsed_us,
+                    slice_max_us,
+                    term_us,
                     self.bytes_live / 1024,
                     self.bytes_live_peak / 1024,
                     self.bytes_alloc_total / 1024,
