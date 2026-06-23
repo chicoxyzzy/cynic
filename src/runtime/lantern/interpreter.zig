@@ -996,7 +996,21 @@ inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
     // major allocation threshold is crossed, or once every
     // `full_every_n_minor` minor cycles so mature garbage and
     // remembered-set residue are reclaimed periodically.
-    if (realm.heap.allocs_since_gc >= realm.heap.gc_young_threshold or
+    // Advance an in-flight incremental major mark: spend a bounded mark
+    // budget this safe-point crossing, and run the stop-the-world
+    // termination once the worklist drains. Minors are deferred while a
+    // major is in flight — a minor would sweep the young generation
+    // against the major's incomplete mark, and a grey object (queued but
+    // not yet `mark_color == live_color`) reads as unmarked, so freeing it
+    // would dangle the worklist. A young object allocated mid-mark is born
+    // black (allocate-black), so it survives to the termination sweep.
+    if (realm.heap.marking_phase == .marking) {
+        // ~8192 `markValue` calls ≈ a sub-millisecond slice; tune against
+        // the measured slice time (docs/handbook/gc.md).
+        if (realm.heap.drainMarkWorklistBudget(8192)) {
+            realm.finishIncrementalMajor();
+        }
+    } else if (realm.heap.allocs_since_gc >= realm.heap.gc_young_threshold or
         realm.heap.bytes_since_gc >= realm.heap.gc_byte_threshold)
     {
         const force_full =
@@ -1015,7 +1029,11 @@ inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
             realm.heap.objects_mature.items.len >=
                 realm.heap.mature_objects_at_last_major *| 2 +| 16384;
         if (force_full) {
-            realm.collectGarbage();
+            // Start the incremental major: seed the roots + arm the
+            // barrier. Subsequent safe-point crossings drain the mark in
+            // slices, and the drain-complete branch above runs the
+            // termination. Explicit collects (`collectGarbage`) stay STW.
+            realm.beginIncrementalMajor();
         } else {
             realm.collectGarbageYoung();
         }

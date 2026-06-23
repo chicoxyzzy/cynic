@@ -2779,6 +2779,24 @@ pub const Heap = struct {
         for (self.native_ctor_roots.items) |v| self.markValue(v);
     }
 
+    /// Re-mark the TRANSIENT heap-side roots — handle-scope handles and
+    /// in-flight native-constructor instances — at the incremental
+    /// termination. `beginIncrementalMark` seeds them at the start, but a
+    /// sliced mark lets the mutator change them between slices (a native
+    /// re-entry pushes/pops a handle scope, an in-flight constructor comes
+    /// and goes). The Dijkstra barrier covers heap stores, NOT a pointer
+    /// pinned only in a native local, so — exactly like the realm-root
+    /// re-scan — the termination must re-scan these or the sweep frees a
+    /// still-pinned object (a use-after-free the next minor's mark hits).
+    /// `const_roots` are permanent, so they need no re-scan. Idempotent:
+    /// re-marking an already-black root is a no-op.
+    pub fn markTransientRoots(self: *Heap) void {
+        for (self.handle_scopes.items) |scope| {
+            for (scope.handles.items) |r| self.markValue(r);
+        }
+        for (self.native_ctor_roots.items) |v| self.markValue(v);
+    }
+
     /// Rebuild the conservative-scan young-pointer membership map
     /// (`young_ptr_set`) from the per-kind young lists. Each entry
     /// maps `@intFromPtr(obj)` → its `ScanKind`. Cleared-and-rebuilt
@@ -4801,6 +4819,17 @@ pub const Heap = struct {
     /// remembers whether or not the slot's current referent is actually
     /// young — over-scan is safe, the bit collapses repeats).
     pub fn rememberTypedSlotWrite(self: *Heap, o: *JSObject) void {
+        // Incremental-marking (Dijkstra) arm. A typed-slot write into an
+        // already-black object during a major mark stored a value the mark
+        // won't revisit (`o` is scanned). This path records the container,
+        // not the value, so re-scan the container's typed slots to shade
+        // whatever was just stored — `markObjectInternalSlots` enqueues
+        // each and `enqueue` filters the already-marked ones. A young
+        // container can be black mid-cycle (allocate-black), so this
+        // precedes the mature-only generational arm below.
+        if (self.marking_phase == .marking and o.mark_color == self.live_color) {
+            self.markObjectInternalSlots(o);
+        }
         if (o.generation != .mature) return;
         if (o.dirty) return;
         o.dirty = true;

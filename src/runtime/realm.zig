@@ -1731,6 +1731,11 @@ pub const Realm = struct {
     /// Disarms the barrier.
     pub fn finishIncrementalMajor(self: *Realm) void {
         self.markAllSharingRealmRoots();
+        // Re-scan the transient HEAP-side roots too — handle scopes and
+        // in-flight native-ctor instances change across a sliced mark, and
+        // the Dijkstra barrier doesn't cover a native-local-only pin. The
+        // realm-root re-scan above is the interpreter-stack analogue.
+        self.heap.markTransientRoots();
         self.heap.scan_native_stack = self.active_native_fn != null;
         self.heap.collectFullTail(self.heap.cycle_t_start);
         self.heap.marking_phase = .idle;
