@@ -805,7 +805,7 @@ fn dateUTC(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
     return Value.fromDouble(timeClip(makeUTC(yr, m, d, h, mi, sec, msec)));
 }
 
-fn currentTimeMs() f64 {
+pub fn currentTimeMs() f64 {
     // §21.4.1.6 — wall-clock milliseconds since the Unix epoch.
     // Zig 0.16's `std.Io.Clock` requires an `io` handle that
     // natives don't carry; drop down to the libc shim.

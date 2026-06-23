@@ -1565,64 +1565,108 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
     var slots: intl.DateTimeFormatSlots = .{};
     slots.base.locale = resolved.locale;
     slots.calendar = realm.allocator.dupe(u8, "iso8601") catch return error.OutOfMemory;
-    slots.numbering_system = realm.allocator.dupe(u8, "latn") catch return error.OutOfMemory;
+    slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, opts);
     slots.time_zone = realm.allocator.dupe(u8, "UTC") catch return error.OutOfMemory;
     if (opts) |o| {
         const tz_v = try getPropertyChain(realm, o, "timeZone");
         if (!tz_v.isUndefined()) {
             const tz = try valueToStringSlice(realm, tz_v);
-            // Structural: accept any non-empty string; store canonical-ish.
             if (tz.len == 0) return throwRangeError(realm, "invalid time zone");
             slots.time_zone = try realm.allocator.dupe(u8, tz);
         }
         const cal_v = try getPropertyChain(realm, o, "calendar");
-        if (!cal_v.isUndefined()) {
-            const cal = try valueToStringSlice(realm, cal_v);
-            slots.calendar = try realm.allocator.dupe(u8, cal);
+        if (!cal_v.isUndefined()) slots.calendar = try realm.allocator.dupe(u8, try valueToStringSlice(realm, cal_v));
+
+        slots.date_style = try dupOptOwned(realm, try getOptionString(realm, opts, "dateStyle", &.{ "full", "long", "medium", "short" }, ""));
+        slots.time_style = try dupOptOwned(realm, try getOptionString(realm, opts, "timeStyle", &.{ "full", "long", "medium", "short" }, ""));
+
+        // Component options (§11.1.1 — the date/time field descriptors).
+        slots.weekday = try dupOptOwned(realm, try getOptionString(realm, opts, "weekday", &.{ "long", "short", "narrow" }, ""));
+        slots.era = try dupOptOwned(realm, try getOptionString(realm, opts, "era", &.{ "long", "short", "narrow" }, ""));
+        slots.year = try dupOptOwned(realm, try getOptionString(realm, opts, "year", &.{ "numeric", "2-digit" }, ""));
+        slots.month = try dupOptOwned(realm, try getOptionString(realm, opts, "month", &.{ "numeric", "2-digit", "long", "short", "narrow" }, ""));
+        slots.day = try dupOptOwned(realm, try getOptionString(realm, opts, "day", &.{ "numeric", "2-digit" }, ""));
+        slots.hour = try dupOptOwned(realm, try getOptionString(realm, opts, "hour", &.{ "numeric", "2-digit" }, ""));
+        slots.minute = try dupOptOwned(realm, try getOptionString(realm, opts, "minute", &.{ "numeric", "2-digit" }, ""));
+        slots.second = try dupOptOwned(realm, try getOptionString(realm, opts, "second", &.{ "numeric", "2-digit" }, ""));
+        slots.day_period = try dupOptOwned(realm, try getOptionString(realm, opts, "dayPeriod", &.{ "long", "short", "narrow" }, ""));
+        slots.time_zone_name = try dupOptOwned(realm, try getOptionString(realm, opts, "timeZoneName", &.{ "long", "short", "shortOffset", "longOffset", "shortGeneric", "longGeneric" }, ""));
+
+        // hourCycle / hour12 → resolved hour cycle.
+        const hc = try getOptionString(realm, opts, "hourCycle", &.{ "h11", "h12", "h23", "h24" }, "");
+        const h12_v = try getPropertyChain(realm, o, "hour12");
+        if (!h12_v.isUndefined()) {
+            slots.hour_cycle = try realm.allocator.dupe(u8, if (toBoolean(h12_v)) "h12" else "h23");
+        } else if (hc.len > 0) {
+            slots.hour_cycle = try realm.allocator.dupe(u8, hc);
         }
-        slots.date_style = blk: {
-            const s = try getOptionString(realm, opts, "dateStyle", &.{ "full", "long", "medium", "short" }, "");
-            if (s.len == 0) break :blk "";
-            break :blk try realm.allocator.dupe(u8, s);
-        };
-        slots.time_style = blk: {
-            const s = try getOptionString(realm, opts, "timeStyle", &.{ "full", "long", "medium", "short" }, "");
-            if (s.len == 0) break :blk "";
-            break :blk try realm.allocator.dupe(u8, s);
-        };
     }
 
     try storeRecord(realm, inst, .{ .date_time_format = slots });
     return heap_mod.taggedObject(inst);
 }
 
+fn dupOptOwned(realm: *Realm, s: []const u8) NativeError![]const u8 {
+    if (s.len == 0) return "";
+    return realm.allocator.dupe(u8, s) catch error.OutOfMemory;
+}
+
+/// §11.5.5 — coerce the format argument to a time value (epoch ms), clamped to
+/// the valid Date range. undefined → current time. RangeError if out of range.
+fn dtfTimeValue(realm: *Realm, v: Value) NativeError!f64 {
+    if (v.isUndefined()) return @import("date.zig").currentTimeMs();
+    const x = numberToF64(try toNumber(realm, v));
+    if (!std.math.isFinite(x) or @abs(x) > 8.64e15) return throwRangeError(realm, "Invalid time value");
+    return @trunc(x);
+}
+
 fn dateTimeFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireKind(realm, this_value, .date_time_format);
-    const v = argOr(args, 0, Value.undefined_);
-    if (v.isUndefined()) {
-        // Current time — structural: return ISO-like from Date.now semantics via toString fallback.
-        return makeStringValue(realm, "Invalid Date"); // simplified; prefer ToString(Date)
+    const rec = try requireKind(realm, this_value, .date_time_format);
+    const ms = try dtfTimeValue(realm, argOr(args, 0, Value.undefined_));
+    if (!cldr.available) return makeStringValue(realm, try valueToStringSlice(realm, makeNumberValue(ms)));
+    var buf: [256]u8 = undefined;
+    var segs: [48]Seg = undefined;
+    const n = renderDateTime(&rec.date_time_format, ms, &segs);
+    var len: usize = 0;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const b = segs[i].bytes();
+        if (len + b.len > buf.len) break;
+        @memcpy(buf[len .. len + b.len], b);
+        len += b.len;
     }
-    return makeStringValue(realm, try valueToStringSlice(realm, try toNumber(realm, v)));
+    return makeStringValue(realm, buf[0..len]);
 }
 
 fn dateTimeFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const formatted = try dateTimeFormatFormat(realm, this_value, args);
+    const rec = try requireKind(realm, this_value, .date_time_format);
+    const ms = try dtfTimeValue(realm, argOr(args, 0, Value.undefined_));
     const arr = allocateArray(realm) catch return error.OutOfMemory;
-    const part = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(part, realm.intrinsics.object_prototype);
-    try setDataProp(realm, part, "type", try makeStringValue(realm, "literal"));
-    try setDataProp(realm, part, "value", formatted);
-    arr.set(realm.allocator, "0", heap_mod.taggedObject(part)) catch return error.OutOfMemory;
-    arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
+    if (!cldr.available) {
+        try pushPart(realm, arr, 0, "literal", try makeStringValue(realm, try valueToStringSlice(realm, makeNumberValue(ms))));
+        arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(arr);
+    }
+    var segs: [48]Seg = undefined;
+    const n = renderDateTime(&rec.date_time_format, ms, &segs);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        try pushPart(realm, arr, i, segs[i].typ, try makeStringValue(realm, segs[i].bytes()));
+    }
+    arr.setArrayLength(realm.allocator, n) catch return error.OutOfMemory;
     return heap_mod.taggedObject(arr);
 }
 
 fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireKind(realm, this_value, .date_time_format);
-    const a = try valueToStringSlice(realm, try toNumber(realm, argOr(args, 0, Value.undefined_)));
-    const b = try valueToStringSlice(realm, try toNumber(realm, argOr(args, 1, Value.undefined_)));
-    const joined = std.fmt.allocPrint(realm.allocator, "{s} – {s}", .{ a, b }) catch return error.OutOfMemory;
+    const rec = try requireKind(realm, this_value, .date_time_format);
+    const a = try dtfTimeValue(realm, argOr(args, 0, Value.undefined_));
+    const b = try dtfTimeValue(realm, argOr(args, 1, Value.undefined_));
+    if (!cldr.available) return makeStringValue(realm, "");
+    var bufa: [256]u8 = undefined;
+    var bufb: [256]u8 = undefined;
+    const sa = renderDateTimeFlat(&rec.date_time_format, a, &bufa);
+    const sb = renderDateTimeFlat(&rec.date_time_format, b, &bufb);
+    const joined = std.fmt.allocPrint(realm.allocator, "{s} – {s}", .{ sa, sb }) catch return error.OutOfMemory;
     defer realm.allocator.free(joined);
     return makeStringValue(realm, joined);
 }
@@ -1630,11 +1674,7 @@ fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Val
 fn dateTimeFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const formatted = try dateTimeFormatFormatRange(realm, this_value, args);
     const arr = allocateArray(realm) catch return error.OutOfMemory;
-    const part = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(part, realm.intrinsics.object_prototype);
-    try setDataProp(realm, part, "type", try makeStringValue(realm, "literal"));
-    try setDataProp(realm, part, "value", formatted);
-    arr.set(realm.allocator, "0", heap_mod.taggedObject(part)) catch return error.OutOfMemory;
+    try pushPart(realm, arr, 0, "literal", formatted);
     arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
     return heap_mod.taggedObject(arr);
 }
@@ -1647,7 +1687,427 @@ fn dateTimeFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const
     try setDataProp(realm, obj, "calendar", try makeStringValue(realm, if (s.calendar.len > 0) s.calendar else "iso8601"));
     try setDataProp(realm, obj, "numberingSystem", try makeStringValue(realm, if (s.numbering_system.len > 0) s.numbering_system else "latn"));
     try setDataProp(realm, obj, "timeZone", try makeStringValue(realm, if (s.time_zone.len > 0) s.time_zone else "UTC"));
+    if (s.hour_cycle.len > 0) {
+        try setDataProp(realm, obj, "hourCycle", try makeStringValue(realm, s.hour_cycle));
+        try setDataProp(realm, obj, "hour12", Value.fromBool(std.mem.eql(u8, s.hour_cycle, "h11") or std.mem.eql(u8, s.hour_cycle, "h12")));
+    }
+    if (s.date_style.len > 0 or s.time_style.len > 0) {
+        if (s.date_style.len > 0) try setDataProp(realm, obj, "dateStyle", try makeStringValue(realm, s.date_style));
+        if (s.time_style.len > 0) try setDataProp(realm, obj, "timeStyle", try makeStringValue(realm, s.time_style));
+    } else {
+        // Component fields present in the resolved format.
+        if (s.weekday.len > 0) try setDataProp(realm, obj, "weekday", try makeStringValue(realm, s.weekday));
+        if (s.era.len > 0) try setDataProp(realm, obj, "era", try makeStringValue(realm, s.era));
+        if (s.year.len > 0) try setDataProp(realm, obj, "year", try makeStringValue(realm, s.year));
+        if (s.month.len > 0) try setDataProp(realm, obj, "month", try makeStringValue(realm, s.month));
+        if (s.day.len > 0) try setDataProp(realm, obj, "day", try makeStringValue(realm, s.day));
+        if (s.hour.len > 0) try setDataProp(realm, obj, "hour", try makeStringValue(realm, s.hour));
+        if (s.minute.len > 0) try setDataProp(realm, obj, "minute", try makeStringValue(realm, s.minute));
+        if (s.second.len > 0) try setDataProp(realm, obj, "second", try makeStringValue(realm, s.second));
+        if (s.day_period.len > 0) try setDataProp(realm, obj, "dayPeriod", try makeStringValue(realm, s.day_period));
+        if (s.time_zone_name.len > 0) try setDataProp(realm, obj, "timeZoneName", try makeStringValue(realm, s.time_zone_name));
+        // Default to numeric y/m/d when no component or style was requested.
+        if (s.weekday.len == 0 and s.year.len == 0 and s.month.len == 0 and s.day.len == 0 and
+            s.hour.len == 0 and s.minute.len == 0 and s.second.len == 0)
+        {
+            try setDataProp(realm, obj, "year", try makeStringValue(realm, "numeric"));
+            try setDataProp(realm, obj, "month", try makeStringValue(realm, "numeric"));
+            try setDataProp(realm, obj, "day", try makeStringValue(realm, "numeric"));
+        }
+    }
     return heap_mod.taggedObject(obj);
+}
+
+// ── date/time formatting engine (dateStyle/timeStyle + components; §11.5) ─────
+
+const CivilTime = struct {
+    year: i64,
+    month: u32, // 1-12
+    day: u32, // 1-31
+    hour: u32, // 0-23
+    minute: u32,
+    second: u32,
+    weekday: u32, // 0=sun .. 6=sat
+};
+
+/// Break epoch milliseconds into civil fields in the format's time zone.
+fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
+    const temporal = @import("../temporal.zig");
+    const epoch_ns: i128 = @as(i128, @intFromFloat(ms)) * 1_000_000;
+    const offset_ns: i128 = tzOffsetNs(slots.time_zone, epoch_ns);
+    const local_ns: i128 = epoch_ns + offset_ns;
+    const ns_per_day: i128 = 86_400 * 1_000_000_000;
+    const days: i64 = @intCast(@divFloor(local_ns, ns_per_day));
+    const ns_in_day: i128 = local_ns - @as(i128, days) * ns_per_day;
+    const ymd = temporal.civilFromDays(days);
+    const t = temporal.nanosecondsToTimeRecord(ns_in_day);
+    const iso_dow = temporal.isoDayOfWeek(ymd.year, ymd.month, ymd.day); // 1=Mon..7=Sun
+    return .{
+        .year = ymd.year,
+        .month = ymd.month,
+        .day = ymd.day,
+        .hour = t.hour,
+        .minute = t.minute,
+        .second = t.second,
+        .weekday = @intCast(iso_dow % 7), // → 0=Sun..6=Sat
+    };
+}
+
+fn tzOffsetNs(tz: []const u8, epoch_ns: i128) i128 {
+    if (tz.len == 0 or std.mem.eql(u8, tz, "UTC")) return 0;
+    const tzdata = @import("../tzdata.zig");
+    if (tzdata.available) return @as(i128, tzdata.offsetNanosecondsFor(tz, epoch_ns));
+    return 0;
+}
+
+/// Resolve the CLDR pattern for these options into `buf`, returning the slice.
+fn resolveDateTimePattern(dd: cldr.DateData, slots: *const intl.DateTimeFormatSlots, buf: []u8) []const u8 {
+    const has_date_style = slots.date_style.len > 0;
+    const has_time_style = slots.time_style.len > 0;
+    if (has_date_style or has_time_style) {
+        const date_pat = if (has_date_style) styleDatePattern(dd, slots.date_style) else "";
+        const time_pat = if (has_time_style) styleTimePattern(dd, slots.time_style) else "";
+        if (has_date_style and has_time_style) {
+            const comb = styleDateTimePattern(dd, slots.date_style);
+            return combinePattern(comb, date_pat, time_pat, buf);
+        }
+        return if (has_date_style) date_pat else time_pat;
+    }
+
+    // Component options (or the numeric y/m/d default).
+    const any_date = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or slots.month.len > 0 or slots.day.len > 0;
+    const any_time = slots.hour.len > 0 or slots.minute.len > 0 or slots.second.len > 0 or slots.day_period.len > 0;
+
+    var date_buf: [128]u8 = undefined;
+    var time_buf: [128]u8 = undefined;
+    var date_pat: []const u8 = "";
+    var time_pat: []const u8 = "";
+
+    if (any_date or !any_time) {
+        // Base template by the most textual requested field.
+        const base = if (slots.weekday.len > 0)
+            dd.date_full
+        else if (isTextualMonth(slots.month))
+            (if (std.mem.eql(u8, slots.month, "short")) dd.date_medium else dd.date_long)
+        else
+            dd.date_short;
+        date_pat = buildFromTemplate(base, slots, true, date_buf[0..]);
+    }
+    if (any_time) {
+        time_pat = buildFromTemplate(dd.time_medium, slots, false, time_buf[0..]);
+    }
+
+    if (date_pat.len > 0 and time_pat.len > 0)
+        return combinePattern(dd.dt_short, date_pat, time_pat, buf);
+    if (date_pat.len > 0) {
+        @memcpy(buf[0..date_pat.len], date_pat);
+        return buf[0..date_pat.len];
+    }
+    @memcpy(buf[0..time_pat.len], time_pat);
+    return buf[0..time_pat.len];
+}
+
+fn isTextualMonth(m: []const u8) bool {
+    return std.mem.eql(u8, m, "long") or std.mem.eql(u8, m, "short") or std.mem.eql(u8, m, "narrow");
+}
+
+fn styleDatePattern(dd: cldr.DateData, style: []const u8) []const u8 {
+    if (std.mem.eql(u8, style, "full")) return dd.date_full;
+    if (std.mem.eql(u8, style, "long")) return dd.date_long;
+    if (std.mem.eql(u8, style, "short")) return dd.date_short;
+    return dd.date_medium;
+}
+fn styleTimePattern(dd: cldr.DateData, style: []const u8) []const u8 {
+    if (std.mem.eql(u8, style, "full")) return dd.time_full;
+    if (std.mem.eql(u8, style, "long")) return dd.time_long;
+    if (std.mem.eql(u8, style, "short")) return dd.time_short;
+    return dd.time_medium;
+}
+fn styleDateTimePattern(dd: cldr.DateData, style: []const u8) []const u8 {
+    if (std.mem.eql(u8, style, "full")) return dd.dt_full;
+    if (std.mem.eql(u8, style, "long")) return dd.dt_long;
+    if (std.mem.eql(u8, style, "short")) return dd.dt_short;
+    return dd.dt_medium;
+}
+
+/// Substitute {1} (date) and {0} (time) in a dateTime combiner pattern.
+fn combinePattern(comb: []const u8, date_pat: []const u8, time_pat: []const u8, buf: []u8) []const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < comb.len) {
+        if (i + 2 < comb.len and comb[i] == '{' and comb[i + 2] == '}') {
+            const repl = if (comb[i + 1] == '1') date_pat else if (comb[i + 1] == '0') time_pat else "";
+            if (n + repl.len <= buf.len) {
+                @memcpy(buf[n .. n + repl.len], repl);
+                n += repl.len;
+            }
+            i += 3;
+        } else {
+            if (n < buf.len) buf[n] = comb[i];
+            n += 1;
+            i += 1;
+        }
+    }
+    return buf[0..@min(n, buf.len)];
+}
+
+/// Build a pattern by filtering a CLDR template to the requested fields, taking
+/// field widths from the options and separators/order from the template.
+fn buildFromTemplate(template: []const u8, slots: *const intl.DateTimeFormatSlots, is_date: bool, buf: []u8) []const u8 {
+    var n: usize = 0;
+    var emitted_field = false;
+    var pending_lit_start: usize = 0;
+    var pending_lit_len: usize = 0;
+
+    var i: usize = 0;
+    while (i < template.len) {
+        const c = template[i];
+        if (std.ascii.isAlphabetic(c)) {
+            // Field run.
+            var j = i;
+            while (j < template.len and template[j] == c) j += 1;
+            const tok = requestedFieldToken(c, slots, is_date);
+            if (tok.len > 0) {
+                if (emitted_field and pending_lit_len > 0) {
+                    const lit = template[pending_lit_start .. pending_lit_start + pending_lit_len];
+                    if (n + lit.len <= buf.len) {
+                        @memcpy(buf[n .. n + lit.len], lit);
+                        n += lit.len;
+                    }
+                }
+                pending_lit_len = 0;
+                if (n + tok.len <= buf.len) {
+                    @memcpy(buf[n .. n + tok.len], tok);
+                    n += tok.len;
+                }
+                emitted_field = true;
+            }
+            i = j;
+        } else {
+            // Literal run (accumulate; flushed only between kept fields).
+            if (pending_lit_len == 0) pending_lit_start = i;
+            pending_lit_len += 1;
+            i += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+/// Return the pattern token for a template field letter given the requested
+/// option width, or "" to drop the field. `default_ymd` forces numeric y/m/d
+/// when no component options were given at all.
+fn requestedFieldToken(letter: u8, slots: *const intl.DateTimeFormatSlots, is_date: bool) []const u8 {
+    const default_ymd = is_date and slots.weekday.len == 0 and slots.era.len == 0 and
+        slots.year.len == 0 and slots.month.len == 0 and slots.day.len == 0;
+    return switch (letter) {
+        'G' => if (slots.era.len > 0) "G" else "",
+        'y', 'Y' => blk: {
+            const w = if (default_ymd) "numeric" else slots.year;
+            if (w.len == 0) break :blk "";
+            break :blk if (std.mem.eql(u8, w, "2-digit")) "yy" else "y";
+        },
+        'M', 'L' => blk: {
+            const w = if (default_ymd) "numeric" else slots.month;
+            if (w.len == 0) break :blk "";
+            if (std.mem.eql(u8, w, "2-digit")) break :blk "MM";
+            if (std.mem.eql(u8, w, "long")) break :blk "MMMM";
+            if (std.mem.eql(u8, w, "short")) break :blk "MMM";
+            if (std.mem.eql(u8, w, "narrow")) break :blk "MMMMM";
+            break :blk "M";
+        },
+        'd' => blk: {
+            const w = if (default_ymd) "numeric" else slots.day;
+            if (w.len == 0) break :blk "";
+            break :blk if (std.mem.eql(u8, w, "2-digit")) "dd" else "d";
+        },
+        'E', 'c', 'e' => blk: {
+            if (slots.weekday.len == 0) break :blk "";
+            if (std.mem.eql(u8, slots.weekday, "long")) break :blk "EEEE";
+            if (std.mem.eql(u8, slots.weekday, "narrow")) break :blk "EEEEE";
+            break :blk "EEE";
+        },
+        'h', 'H', 'K', 'k' => blk: {
+            if (slots.hour.len == 0) break :blk "";
+            const hl = hourLetter(letter, slots.hour_cycle);
+            break :blk if (std.mem.eql(u8, slots.hour, "2-digit")) twoCharHour(hl) else oneCharHour(hl);
+        },
+        'm' => if (slots.minute.len == 0) "" else (if (std.mem.eql(u8, slots.minute, "2-digit")) "mm" else "m"),
+        's' => if (slots.second.len == 0) "" else (if (std.mem.eql(u8, slots.second, "2-digit")) "ss" else "s"),
+        'a', 'b', 'B' => if (slots.hour.len > 0 and hourIs12(slots.hour_cycle)) "a" else (if (slots.day_period.len > 0) "a" else ""),
+        'z', 'Z', 'O', 'v', 'V', 'x', 'X' => if (slots.time_zone_name.len > 0) "z" else "",
+        else => "",
+    };
+}
+
+fn hourLetter(template_letter: u8, hc: []const u8) u8 {
+    if (hc.len == 0) return template_letter; // keep locale default
+    if (std.mem.eql(u8, hc, "h11")) return 'K';
+    if (std.mem.eql(u8, hc, "h12")) return 'h';
+    if (std.mem.eql(u8, hc, "h23")) return 'H';
+    if (std.mem.eql(u8, hc, "h24")) return 'k';
+    return template_letter;
+}
+fn oneCharHour(l: u8) []const u8 {
+    return switch (l) {
+        'h' => "h",
+        'H' => "H",
+        'K' => "K",
+        else => "k",
+    };
+}
+fn twoCharHour(l: u8) []const u8 {
+    return switch (l) {
+        'h' => "hh",
+        'H' => "HH",
+        'K' => "KK",
+        else => "kk",
+    };
+}
+fn hourIs12(hc: []const u8) bool {
+    return hc.len == 0 or std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
+}
+
+/// Interpret a resolved CLDR pattern against the broken-down time into segments.
+fn renderDateTime(slots: *const intl.DateTimeFormatSlots, ms: f64, out: []Seg) u32 {
+    const dd = cldr.dateData(slots.base.locale) orelse return 0;
+    const ct = breakDown(slots, ms);
+    var pat_buf: [256]u8 = undefined;
+    const pattern = resolveDateTimePattern(dd, slots, &pat_buf);
+
+    const digit_base: u32 = if (cldr.numberData(slots.base.locale)) |nd|
+        (if (!std.mem.eql(u8, slots.numbering_system, nd.ns)) (cldr.numberingSystemDigitBase(slots.numbering_system) orelse nd.digit_base) else nd.digit_base)
+    else
+        (cldr.numberingSystemDigitBase(slots.numbering_system) orelse '0');
+
+    var n: u32 = 0;
+    var i: usize = 0;
+    while (i < pattern.len and n < out.len) {
+        const c = pattern[i];
+        if (c == '\'') {
+            // Quoted literal: '' is a literal quote.
+            i += 1;
+            if (i < pattern.len and pattern[i] == '\'') {
+                setSeg(&out[n], "literal", "'");
+                n += 1;
+                i += 1;
+                continue;
+            }
+            const start = i;
+            while (i < pattern.len and pattern[i] != '\'') i += 1;
+            setSeg(&out[n], "literal", pattern[start..i]);
+            n += 1;
+            if (i < pattern.len) i += 1; // closing quote
+        } else if (std.ascii.isAlphabetic(c)) {
+            var j = i;
+            while (j < pattern.len and pattern[j] == c) j += 1;
+            const count = j - i;
+            n += emitField(out[n..], c, count, ct, dd, digit_base);
+            i = j;
+        } else {
+            const start = i;
+            while (i < pattern.len and !std.ascii.isAlphabetic(pattern[i]) and pattern[i] != '\'') i += 1;
+            setSeg(&out[n], "literal", pattern[start..i]);
+            n += 1;
+        }
+    }
+    return n;
+}
+
+fn renderDateTimeFlat(slots: *const intl.DateTimeFormatSlots, ms: f64, buf: []u8) []const u8 {
+    var segs: [48]Seg = undefined;
+    const n = renderDateTime(slots, ms, &segs);
+    var len: usize = 0;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const b = segs[i].bytes();
+        if (len + b.len > buf.len) break;
+        @memcpy(buf[len .. len + b.len], b);
+        len += b.len;
+    }
+    return buf[0..len];
+}
+
+/// Emit one date/time field. Returns number of segments written (0 or 1).
+fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateData, digit_base: u32) u32 {
+    if (out.len == 0) return 0;
+    const seg = &out[0];
+    switch (letter) {
+        'G' => setSeg(seg, "era", if (ct.year <= 0) dd.era_bc else dd.era_ad),
+        'y', 'Y' => {
+            const yv: u64 = @intCast(if (ct.year < 0) -ct.year else ct.year);
+            if (count == 2) setNumberSeg(seg, "year", yv % 100, 2, digit_base) else setNumberSeg(seg, "year", yv, 1, digit_base);
+        },
+        'M', 'L' => {
+            if (count >= 4) setSeg(seg, "month", dd.months_wide[ct.month - 1]) else if (count == 3) setSeg(seg, "month", dd.months_abbr[ct.month - 1]) else setNumberSeg(seg, "month", ct.month, count, digit_base);
+        },
+        'd' => setNumberSeg(seg, "day", ct.day, count, digit_base),
+        'E', 'c', 'e' => {
+            if (count >= 4) setSeg(seg, "weekday", dd.days_wide[ct.weekday]) else setSeg(seg, "weekday", dd.days_abbr[ct.weekday]);
+        },
+        'h' => setNumberSeg(seg, "hour", h12(ct.hour), count, digit_base),
+        'H' => setNumberSeg(seg, "hour", ct.hour, count, digit_base),
+        'K' => setNumberSeg(seg, "hour", ct.hour % 12, count, digit_base),
+        'k' => setNumberSeg(seg, "hour", if (ct.hour == 0) 24 else ct.hour, count, digit_base),
+        'm' => setNumberSeg(seg, "minute", ct.minute, count, digit_base),
+        's' => setNumberSeg(seg, "second", ct.second, count, digit_base),
+        'a', 'b', 'B' => setSeg(seg, "dayPeriod", if (ct.hour < 12) dd.am else dd.pm),
+        'z', 'Z', 'O', 'v', 'V', 'x', 'X' => setSeg(seg, "timeZoneName", "UTC"),
+        else => return 0,
+    }
+    return 1;
+}
+
+fn h12(hour: u32) u32 {
+    const h = hour % 12;
+    return if (h == 0) 12 else h;
+}
+
+/// Set a numeric field segment, zero-padded to `min_width`, digit-substituted.
+fn setNumberSeg(seg: *Seg, typ: []const u8, value: u64, min_width: usize, digit_base: u32) void {
+    var ascii: [20]u8 = undefined;
+    var len: usize = 0;
+    var v = value;
+    if (v == 0) {
+        ascii[0] = '0';
+        len = 1;
+    } else {
+        var tmp: [20]u8 = undefined;
+        var t: usize = 0;
+        while (v > 0) {
+            tmp[t] = @intCast('0' + (v % 10));
+            t += 1;
+            v /= 10;
+        }
+        while (t > 0) {
+            t -= 1;
+            ascii[len] = tmp[t];
+            len += 1;
+        }
+    }
+    // Zero-pad to min_width.
+    var padded: [20]u8 = undefined;
+    var plen: usize = 0;
+    while (plen + len < min_width) {
+        padded[plen] = '0';
+        plen += 1;
+    }
+    @memcpy(padded[plen .. plen + len], ascii[0..len]);
+    plen += len;
+    // Digit substitution.
+    seg.typ = typ;
+    if (digit_base == '0') {
+        const m = @min(plen, seg.buf.len);
+        @memcpy(seg.buf[0..m], padded[0..m]);
+        seg.len = m;
+    } else {
+        var n: usize = 0;
+        for (padded[0..plen]) |ch| {
+            if (n + 4 > seg.buf.len) break;
+            const cp: u21 = @intCast(digit_base + (ch - '0'));
+            n += std.unicode.utf8Encode(cp, seg.buf[n..]) catch 0;
+        }
+        seg.len = n;
+    }
 }
 
 // ── PluralRules ────────────────────────────────────────────────────────────

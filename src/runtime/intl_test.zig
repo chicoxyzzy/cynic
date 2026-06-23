@@ -598,3 +598,72 @@ test "Intl.NumberFormat: resolvedOptions reports resolved digits + numberingSyst
         \\ r.roundingMode==='halfExpand' && r.useGrouping==='auto') ? 1 : 0
     );
 }
+
+// ── DateTimeFormat (CLDR gregorian names + patterns — §11) ───────────────────
+
+test "Intl.DateTimeFormat: en default is numeric m/d/y" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const d = Date.UTC(2024, 0, 2, 15, 4, 5);
+        \\new Intl.DateTimeFormat('en').format(d)==='1/2/2024' ? 1 : 0
+    );
+}
+
+test "Intl.DateTimeFormat: en dateStyle full/long/medium" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const d = Date.UTC(2024, 0, 2, 15, 4, 5);
+        \\(new Intl.DateTimeFormat('en',{dateStyle:'full'}).format(d)==='Tuesday, January 2, 2024' &&
+        \\ new Intl.DateTimeFormat('en',{dateStyle:'long'}).format(d)==='January 2, 2024' &&
+        \\ new Intl.DateTimeFormat('en',{dateStyle:'medium'}).format(d)==='Jan 2, 2024') ? 1 : 0
+    );
+}
+
+test "Intl.DateTimeFormat: de and ja localized names + order" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const d = Date.UTC(2024, 0, 2, 15, 4, 5);
+        \\(new Intl.DateTimeFormat('de',{dateStyle:'full'}).format(d)==='Dienstag, 2. Januar 2024' &&
+        \\ new Intl.DateTimeFormat('ja',{dateStyle:'full'}).format(d)==='2024年1月2日火曜日') ? 1 : 0
+    );
+}
+
+test "Intl.DateTimeFormat: timeStyle + hourCycle h23" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const d = Date.UTC(2024, 0, 2, 15, 4, 5);
+        \\(new Intl.DateTimeFormat('en',{timeStyle:'medium'}).format(d).startsWith('3:04:05') &&
+        \\ new Intl.DateTimeFormat('en',{hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(d)==='15:04') ? 1 : 0
+    );
+}
+
+test "Intl.DateTimeFormat: component options (weekday + long month)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const d = Date.UTC(2024, 0, 2, 15, 4, 5);
+        \\new Intl.DateTimeFormat('en',{weekday:'long',year:'numeric',month:'long',day:'numeric'}).format(d)==='Tuesday, January 2, 2024' ? 1 : 0
+    );
+}
+
+test "Intl.DateTimeFormat: formatToParts typed segments" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const p = new Intl.DateTimeFormat('en',{dateStyle:'medium'}).formatToParts(Date.UTC(2024,0,2));
+        \\(p[0].type==='month' && p[0].value==='Jan' && p.some(x=>x.type==='day'&&x.value==='2') && p.some(x=>x.type==='year'&&x.value==='2024')) ? 1 : 0
+    );
+}
+
+test "Intl.DateTimeFormat: resolvedOptions reports calendar/timeZone/numberingSystem" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const r = new Intl.DateTimeFormat('en',{dateStyle:'full'}).resolvedOptions();
+        \\(r.calendar==='iso8601' && r.timeZone==='UTC' && r.numberingSystem==='latn' && r.dateStyle==='full') ? 1 : 0
+    );
+}
+
+test "Intl.DateTimeFormat: invalid time value throws RangeError (host-safety)" {
+    try requireFullBuild();
+    // |ms| > 8.64e15 is outside the Date range — must be a catchable RangeError,
+    // never a trap in the civil-from-days breakdown.
+    try evalThrows("new Intl.DateTimeFormat('en').format(1e21)");
+}

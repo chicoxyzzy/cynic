@@ -602,7 +602,7 @@ automatically on the next full sweep.
   |------|---------------|---------------------------|----------------|
   | **`off`** (default) | absent | ISO + UTC/fixed-offset only | none |
   | **`stub`** | structural ECMA-402 (option validation; format/compare stubs) | accept supported calendar **ids** and structural IANA **names**; arithmetic still ISO/UTC | none |
-  | **`full`** | `stub` surface, plus CLDR-backed `Intl.PluralRules` (plural/ordinal selection) and `Intl.NumberFormat` (decimal + percent) | real zone offsets via embedded CYTZ/TZif (`vendor/tzdata/cynic_tzdb.bin`); IANA sources in `vendor/tzdata/iana/` (fetch: `tools/fetch-tzdata.sh`; pack: `zig build pack-tzdata`) | tzdb + CLDR (`vendor/cldr/cynic_cldr.bin`) |
+  | **`full`** | `stub` surface, plus CLDR-backed `Intl.PluralRules`, `Intl.NumberFormat` (decimal + percent), and `Intl.DateTimeFormat` (gregorian) | real zone offsets via embedded CYTZ/TZif (`vendor/tzdata/cynic_tzdb.bin`); IANA sources in `vendor/tzdata/iana/` (fetch: `tools/fetch-tzdata.sh`; pack: `zig build pack-tzdata`) | tzdb + CLDR (`vendor/cldr/cynic_cldr.bin`) |
 
   The default edge/server build omits the locale/tz stack to stay
   small and dependency-light. `intl402/` stays out of the main
@@ -624,9 +624,14 @@ automatically on the next full sweep.
   **`Intl.NumberFormat`** consumes the numbers + numbering-systems sections —
   decimal and percent styles with locale symbols, primary/secondary grouping,
   numbering-system digit substitution (e.g. arab ٠١٢٣), sign display, and
-  fraction/significant-digit rounding (via the engine's exact `dtoa`). Currency,
-  unit, and compact notation, plus DateTimeFormat / DisplayNames formatter
-  *output*, stay structural until their CLDR sections are packed.
+  fraction/significant-digit rounding (via the engine's exact `dtoa`).
+  **`Intl.DateTimeFormat`** consumes the dates section (gregorian): dateStyle/
+  timeStyle and the component options (weekday/era/year/month/day/hour/minute/
+  second/dayPeriod) resolve to a CLDR pattern, interpreted against the broken-
+  down time in the format's time zone with localized names, hourCycle, and
+  digit substitution. Currency/unit/compact NumberFormat output, DateTimeFormat
+  skeleton best-fit + non-gregorian calendars + time-zone names, and
+  DisplayNames stay structural until their CLDR sections are packed.
 
   Seams are kept clean so `full` can deepen without a rewrite —
   Temporal funnels every zone-offset lookup through

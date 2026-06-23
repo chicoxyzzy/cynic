@@ -34,12 +34,13 @@
 
 const std = @import("std");
 
-/// Section kinds. Dates / display-names land in later phases.
+/// Section kinds. Display-names lands in a later phase.
 const SectionKind = enum(u8) {
     plural_cardinal = 1,
     plural_ordinal = 2,
     numbers = 3,
     numbering_systems = 4,
+    dates = 5,
 };
 
 /// CLDR "modern" coverage tier, base-language locales (plus the few
@@ -129,13 +130,14 @@ pub fn main(init: std.process.Init) !void {
     const ordinal = try loadPlurals(arena, io, json_root, "ordinals.json", "plurals-type-ordinal");
     const ns_table = try loadNumberingSystems(arena, io, json_root);
     const numbers = try loadNumbers(arena, io, json_root, ns_table);
+    const dates = try loadDates(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
     var buf: [256]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, numbering-systems {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len });
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -198,12 +200,13 @@ fn pack(
     ordinal: []LocaleRules,
     numbers: []NumberLocale,
     ns_table: []NumberingSystem,
+    dates: []DateLocale,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [4]SectionDir = undefined;
+    var dirs: [5]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -220,6 +223,10 @@ fn pack(
     const ns_start: u32 = @intCast(payloads.items.len);
     try writeNumberingSystemsPayload(gpa, &payloads, ns_table);
     dirs[3] = .{ .kind = .numbering_systems, .off = ns_start, .len = @as(u32, @intCast(payloads.items.len)) - ns_start };
+
+    const dates_start: u32 = @intCast(payloads.items.len);
+    try writeDatesPayload(gpa, &payloads, dates);
+    dirs[4] = .{ .kind = .dates, .off = dates_start, .len = @as(u32, @intCast(payloads.items.len)) - dates_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -361,6 +368,133 @@ fn writeNumberingSystemsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnman
     for (table) |n| {
         try appendStr8(gpa, buf, n.id);
         try appendU32(gpa, buf, n.digit_base);
+    }
+}
+
+// ── dates (gregorian names + patterns) ───────────────────────────────────────
+
+const DateLocale = struct {
+    key: []const u8,
+    months_wide: [12][]const u8,
+    months_abbr: [12][]const u8,
+    days_wide: [7][]const u8, // sun..sat
+    days_abbr: [7][]const u8,
+    am: []const u8,
+    pm: []const u8,
+    era_bc: []const u8,
+    era_ad: []const u8,
+    date_full: []const u8,
+    date_long: []const u8,
+    date_medium: []const u8,
+    date_short: []const u8,
+    time_full: []const u8,
+    time_long: []const u8,
+    time_medium: []const u8,
+    time_short: []const u8,
+    dt_full: []const u8,
+    dt_long: []const u8,
+    dt_medium: []const u8,
+    dt_short: []const u8,
+    fn lessThan(_: void, a: DateLocale, b: DateLocale) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+const day_keys = [_][]const u8{ "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
+
+/// Per modern locale: gregorian month/day/dayPeriod/era names + the standard
+/// date/time/dateTime patterns. The `-alt-ascii` time variants are skipped
+/// (we keep the canonical narrow-no-break-space forms).
+fn loadDates(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]DateLocale {
+    var out: std.ArrayListUnmanaged(DateLocale) = .empty;
+    for (modern_locales) |loc| {
+        const path = try std.fmt.allocPrint(arena, "{s}/cldr-dates-full/main/{s}/ca-gregorian.json", .{ json_root, loc });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch continue;
+        const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch continue;
+        const main_obj = root.object.get("main").?.object;
+        var mit = main_obj.iterator();
+        const le = mit.next() orelse continue;
+        const g = le.value_ptr.*.object.get("dates").?.object
+            .get("calendars").?.object.get("gregorian").?.object;
+
+        var d: DateLocale = undefined;
+        d.key = loc;
+
+        const months_fmt = g.get("months").?.object.get("format").?.object;
+        const mwide = months_fmt.get("wide").?.object;
+        const mabbr = months_fmt.get("abbreviated").?.object;
+        var mi: usize = 0;
+        while (mi < 12) : (mi += 1) {
+            var kb: [4]u8 = undefined;
+            const k = std.fmt.bufPrint(&kb, "{d}", .{mi + 1}) catch unreachable;
+            d.months_wide[mi] = try arena.dupe(u8, strField(mwide, k, ""));
+            d.months_abbr[mi] = try arena.dupe(u8, strField(mabbr, k, ""));
+        }
+
+        const days_fmt = g.get("days").?.object.get("format").?.object;
+        const dwide = days_fmt.get("wide").?.object;
+        const dabbr = days_fmt.get("abbreviated").?.object;
+        for (day_keys, 0..) |dk, di| {
+            d.days_wide[di] = try arena.dupe(u8, strField(dwide, dk, ""));
+            d.days_abbr[di] = try arena.dupe(u8, strField(dabbr, dk, ""));
+        }
+
+        const dp = g.get("dayPeriods").?.object.get("format").?.object.get("wide").?.object;
+        d.am = try arena.dupe(u8, strField(dp, "am", "AM"));
+        d.pm = try arena.dupe(u8, strField(dp, "pm", "PM"));
+
+        const eras = g.get("eras").?.object.get("eraAbbr").?.object;
+        d.era_bc = try arena.dupe(u8, strField(eras, "0", "BC"));
+        d.era_ad = try arena.dupe(u8, strField(eras, "1", "AD"));
+
+        const df = g.get("dateFormats").?.object;
+        d.date_full = try arena.dupe(u8, strField(df, "full", ""));
+        d.date_long = try arena.dupe(u8, strField(df, "long", ""));
+        d.date_medium = try arena.dupe(u8, strField(df, "medium", ""));
+        d.date_short = try arena.dupe(u8, strField(df, "short", ""));
+
+        const tf = g.get("timeFormats").?.object;
+        d.time_full = try arena.dupe(u8, strField(tf, "full", ""));
+        d.time_long = try arena.dupe(u8, strField(tf, "long", ""));
+        d.time_medium = try arena.dupe(u8, strField(tf, "medium", ""));
+        d.time_short = try arena.dupe(u8, strField(tf, "short", ""));
+
+        const dtf = g.get("dateTimeFormats").?.object;
+        d.dt_full = try arena.dupe(u8, strField(dtf, "full", "{1}, {0}"));
+        d.dt_long = try arena.dupe(u8, strField(dtf, "long", "{1}, {0}"));
+        d.dt_medium = try arena.dupe(u8, strField(dtf, "medium", "{1}, {0}"));
+        d.dt_short = try arena.dupe(u8, strField(dtf, "short", "{1}, {0}"));
+
+        try out.append(arena, d);
+    }
+    std.sort.block(DateLocale, out.items, {}, DateLocale.lessThan);
+    return out.items;
+}
+
+fn writeDatesPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), locales: []DateLocale) !void {
+    try appendU32(gpa, buf, locales.len);
+    for (locales) |d| {
+        try appendStr8(gpa, buf, d.key);
+        for (d.months_wide) |m| try appendStr8(gpa, buf, m);
+        for (d.months_abbr) |m| try appendStr8(gpa, buf, m);
+        for (d.days_wide) |x| try appendStr8(gpa, buf, x);
+        for (d.days_abbr) |x| try appendStr8(gpa, buf, x);
+        try appendStr8(gpa, buf, d.am);
+        try appendStr8(gpa, buf, d.pm);
+        try appendStr8(gpa, buf, d.era_bc);
+        try appendStr8(gpa, buf, d.era_ad);
+        try appendStr16(gpa, buf, d.date_full);
+        try appendStr16(gpa, buf, d.date_long);
+        try appendStr16(gpa, buf, d.date_medium);
+        try appendStr16(gpa, buf, d.date_short);
+        try appendStr16(gpa, buf, d.time_full);
+        try appendStr16(gpa, buf, d.time_long);
+        try appendStr16(gpa, buf, d.time_medium);
+        try appendStr16(gpa, buf, d.time_short);
+        try appendStr16(gpa, buf, d.dt_full);
+        try appendStr16(gpa, buf, d.dt_long);
+        try appendStr16(gpa, buf, d.dt_medium);
+        try appendStr16(gpa, buf, d.dt_short);
     }
 }
 

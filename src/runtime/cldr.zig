@@ -55,6 +55,7 @@ const SectionKind = enum(u8) {
     plural_ordinal = 2,
     numbers = 3,
     numbering_systems = 4,
+    dates = 5,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -65,6 +66,7 @@ var card_payload: []const u8 = &.{};
 var ord_payload: []const u8 = &.{};
 var num_payload: []const u8 = &.{};
 var ns_payload: []const u8 = &.{};
+var dates_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -96,6 +98,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.plural_ordinal) => ord_payload = payload,
             @intFromEnum(SectionKind.numbers) => num_payload = payload,
             @intFromEnum(SectionKind.numbering_systems) => ns_payload = payload,
+            @intFromEnum(SectionKind.dates) => dates_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -513,6 +516,98 @@ fn readStr16(buf: []const u8, off: *usize) ?[]const u8 {
     const len = std.mem.readInt(u16, buf[off.*..][0..2], .little);
     off.* += 2;
     return readBytes(buf, off, len);
+}
+
+// ── dates (gregorian names + patterns) ───────────────────────────────────────
+
+/// Per-locale gregorian date data from the CLDR `dates` section. All slices
+/// point into the embedded blob (static lifetime).
+pub const DateData = struct {
+    months_wide: [12][]const u8,
+    months_abbr: [12][]const u8,
+    days_wide: [7][]const u8, // sun..sat
+    days_abbr: [7][]const u8,
+    am: []const u8,
+    pm: []const u8,
+    era_bc: []const u8,
+    era_ad: []const u8,
+    date_full: []const u8,
+    date_long: []const u8,
+    date_medium: []const u8,
+    date_short: []const u8,
+    time_full: []const u8,
+    time_long: []const u8,
+    time_medium: []const u8,
+    time_short: []const u8,
+    dt_full: []const u8,
+    dt_long: []const u8,
+    dt_medium: []const u8,
+    dt_short: []const u8,
+};
+
+/// Look up gregorian date data for `locale` (candidate fallback), or null.
+pub fn dateData(locale: []const u8) ?DateData {
+    if (!ensureInit()) return null;
+    if (dates_payload.len < 4) return null;
+
+    var lang_buf: [16]u8 = undefined;
+    var script_buf: [8]u8 = undefined;
+    var region_buf: [8]u8 = undefined;
+    const parts = splitTag(locale, &lang_buf, &script_buf, &region_buf);
+    if (parts.lang.len == 0) return null;
+
+    var cand_buf: [32]u8 = undefined;
+    if (parts.script.len > 0 and parts.region.len > 0)
+        if (joinTag(&cand_buf, parts.lang, parts.script, parts.region)) |k|
+            if (findDate(k)) |d| return d;
+    if (parts.region.len > 0)
+        if (joinTag(&cand_buf, parts.lang, "", parts.region)) |k|
+            if (findDate(k)) |d| return d;
+    if (parts.script.len > 0)
+        if (joinTag(&cand_buf, parts.lang, parts.script, "")) |k|
+            if (findDate(k)) |d| return d;
+    return findDate(parts.lang);
+}
+
+fn findDate(key: []const u8) ?DateData {
+    const count = std.mem.readInt(u32, dates_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(dates_payload, &off) orelse return null;
+        const k = readBytes(dates_payload, &off, klen) orelse return null;
+        var d: DateData = undefined;
+        var ok = true;
+        for (&d.months_wide) |*m| m.* = readStr8(dates_payload, &off) orelse blkfail(&ok);
+        for (&d.months_abbr) |*m| m.* = readStr8(dates_payload, &off) orelse blkfail(&ok);
+        for (&d.days_wide) |*x| x.* = readStr8(dates_payload, &off) orelse blkfail(&ok);
+        for (&d.days_abbr) |*x| x.* = readStr8(dates_payload, &off) orelse blkfail(&ok);
+        d.am = readStr8(dates_payload, &off) orelse blkfail(&ok);
+        d.pm = readStr8(dates_payload, &off) orelse blkfail(&ok);
+        d.era_bc = readStr8(dates_payload, &off) orelse blkfail(&ok);
+        d.era_ad = readStr8(dates_payload, &off) orelse blkfail(&ok);
+        d.date_full = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.date_long = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.date_medium = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.date_short = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.time_full = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.time_long = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.time_medium = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.time_short = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.dt_full = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.dt_long = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.dt_medium = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        d.dt_short = readStr16(dates_payload, &off) orelse blkfail(&ok);
+        if (!ok) return null;
+        if (asciiEqlIgnoreCase(k, key)) return d;
+    }
+    return null;
+}
+
+/// Mark a parse as failed and return an empty slice (used in the field loop).
+fn blkfail(ok: *bool) []const u8 {
+    ok.* = false;
+    return "";
 }
 
 // ── small helpers ────────────────────────────────────────────────────────────

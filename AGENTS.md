@@ -205,13 +205,15 @@ These are project rules — they apply to everyone.
   `tools/fetch-cldr.sh` from the [cldr-json](https://github.com/unicode-org/cldr-json)
   npm packages; `zig build pack-cldr` runs `tools/pack_cldr.zig` to emit the
   committed `vendor/cldr/cynic_cldr.bin` (CYCL container). At `full`,
-  `Intl.PluralRules` (per-locale plural/ordinal selection, UTS #35 rule engine)
-  and `Intl.NumberFormat` (decimal + percent: locale symbols, primary/secondary
+  `Intl.PluralRules` (per-locale plural/ordinal selection, UTS #35 rule engine),
+  `Intl.NumberFormat` (decimal + percent: locale symbols, primary/secondary
   grouping, numbering-system digit substitution, sign/fraction/significant
-  digits) are CLDR-backed via `src/runtime/cldr.zig` (see
-  `src/runtime/builtins/intl.zig`). NumberFormat currency/unit/compact output and
-  DateTimeFormat / DisplayNames stay structural until their CLDR sections land.
-  Do **not** add `--enable=intl` or `--allow=intl` —
+  digits), and `Intl.DateTimeFormat` (gregorian: dateStyle/timeStyle + component
+  options, localized month/day/era/dayPeriod names, hourCycle, formatToParts) are
+  CLDR-backed via `src/runtime/cldr.zig` (see `src/runtime/builtins/intl.zig`).
+  NumberFormat currency/unit/compact output, DateTimeFormat skeleton best-fit /
+  non-gregorian calendars / tz names, and DisplayNames stay structural until
+  their CLDR sections land. Do **not** add `--enable=intl` or `--allow=intl` —
   Intl is Stage 4 and is not a security relaxation like eval/wasm.
   See [docs/ROADMAP.md](docs/ROADMAP.md) (`Intl` / Temporal) and
   `src/runtime/intl_config.zig`.
