@@ -20,6 +20,7 @@ const heap_mod = @import("../heap.zig");
 const intrinsics = @import("../intrinsics.zig");
 const lantern = @import("../lantern/interpreter.zig");
 const intl = @import("../intl.zig");
+const cldr = @import("../cldr.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -1183,32 +1184,78 @@ fn pluralRulesConstructor(realm: *Realm, this_value: Value, args: []const Value)
     return heap_mod.taggedObject(inst);
 }
 
-fn pluralRulesSelect(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireKind(realm, this_value, .plural_rules);
-    _ = try toNumber(realm, argOr(args, 0, Value.undefined_));
-    // Structural: always "other".
-    return makeStringValue(realm, "other");
+/// Coerce a numeric Value (the result of ToNumber) to f64.
+fn numberToF64(v: Value) f64 {
+    return if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
 }
 
+/// §16.5.6 ResolvePlural — operands from FormatNumericToString, then
+/// PluralRuleSelect against the locale's CLDR rules. Non-finite → "other".
+/// Without CLDR data (`-Dintl=stub`) every value is "other".
+fn pluralRulesSelect(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requireKind(realm, this_value, .plural_rules);
+    const num = try toNumber(realm, argOr(args, 0, Value.undefined_));
+    const x = numberToF64(num);
+    const s = rec.plural_rules;
+    if (!std.math.isFinite(x) or !cldr.available) return makeStringValue(realm, "other");
+    const ordinal = std.mem.eql(u8, s.type_name, "ordinal");
+    const ops = cldr.computeOperands(x, s.minimum_fraction_digits, s.maximum_fraction_digits);
+    const cat = cldr.selectPlural(s.base.locale, ordinal, ops);
+    return makeStringValue(realm, cat.name());
+}
+
+/// §16.5.4 selectRange → §16.5.5 ResolvePluralRange. Undefined endpoints are a
+/// TypeError; NaN endpoints a RangeError. CLDR plural-range tables aren't packed
+/// yet, so we fall back to the end value's category (the CLDR root behaviour).
 fn pluralRulesSelectRange(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireKind(realm, this_value, .plural_rules);
-    _ = try toNumber(realm, argOr(args, 0, Value.undefined_));
-    _ = try toNumber(realm, argOr(args, 1, Value.undefined_));
-    return makeStringValue(realm, "other");
+    const rec = try requireKind(realm, this_value, .plural_rules);
+    const start_v = argOr(args, 0, Value.undefined_);
+    const end_v = argOr(args, 1, Value.undefined_);
+    if (start_v.isUndefined() or end_v.isUndefined())
+        return throwTypeError(realm, "Intl.PluralRules.prototype.selectRange: start and end are required");
+    const x = numberToF64(try toNumber(realm, start_v));
+    const y = numberToF64(try toNumber(realm, end_v));
+    if (std.math.isNan(x) or std.math.isNan(y))
+        return throwRangeError(realm, "Intl.PluralRules.prototype.selectRange: start and end must be numbers");
+    const s = rec.plural_rules;
+    if (!cldr.available) return makeStringValue(realm, "other");
+    const ordinal = std.mem.eql(u8, s.type_name, "ordinal");
+    const yp = cldr.selectPlural(s.base.locale, ordinal, cldr.computeOperands(y, s.minimum_fraction_digits, s.maximum_fraction_digits));
+    return makeStringValue(realm, yp.name());
 }
 
 fn pluralRulesResolvedOptions(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const rec = try requireKind(realm, this_value, .plural_rules);
     const s = rec.plural_rules;
+    const ordinal = std.mem.eql(u8, s.type_name, "ordinal");
     const obj = try makeResolvedBase(realm, s.base.locale);
     try setDataProp(realm, obj, "type", try makeStringValue(realm, if (s.type_name.len > 0) s.type_name else "cardinal"));
     try setDataProp(realm, obj, "minimumIntegerDigits", makeNumberValue(1));
-    try setDataProp(realm, obj, "minimumFractionDigits", makeNumberValue(0));
-    try setDataProp(realm, obj, "maximumFractionDigits", makeNumberValue(3));
+    try setDataProp(realm, obj, "minimumFractionDigits", makeNumberValue(@floatFromInt(s.minimum_fraction_digits)));
+    try setDataProp(realm, obj, "maximumFractionDigits", makeNumberValue(@floatFromInt(s.maximum_fraction_digits)));
+
+    // pluralCategories: the categories the locale defines, canonical order,
+    // "other" always last. From the CLDR mask (or just "other" without data).
+    const mask: u8 = if (cldr.available) cldr.pluralCategoriesMask(s.base.locale, ordinal) else 0;
     const cats = allocateArray(realm) catch return error.OutOfMemory;
-    cats.set(realm.allocator, "0", try makeStringValue(realm, "other")) catch return error.OutOfMemory;
-    cats.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
+    var idx: u32 = 0;
+    const order = [_]cldr.PluralCategory{ .zero, .one, .two, .few, .many };
+    for (order) |c| {
+        if (mask & (@as(u8, 1) << @as(u3, @intCast(@intFromEnum(c)))) != 0) {
+            var key_buf: [12]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, "{d}", .{idx}) catch unreachable;
+            cats.set(realm.allocator, key, try makeStringValue(realm, c.name())) catch return error.OutOfMemory;
+            idx += 1;
+        }
+    }
+    {
+        var key_buf: [12]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "{d}", .{idx}) catch unreachable;
+        cats.set(realm.allocator, key, try makeStringValue(realm, "other")) catch return error.OutOfMemory;
+        idx += 1;
+    }
+    cats.setArrayLength(realm.allocator, idx) catch return error.OutOfMemory;
     try setDataProp(realm, obj, "pluralCategories", heap_mod.taggedObject(cats));
     return heap_mod.taggedObject(obj);
 }

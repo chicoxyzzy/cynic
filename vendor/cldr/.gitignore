@@ -1,0 +1,6 @@
+# Raw CLDR-JSON sources downloaded by tools/fetch-cldr.sh. Tens of MB
+# across the data packages; not tracked. The committed artifact is the
+# packed blob cynic_cldr.bin (+ VERSION, LICENSE). Regenerate the blob
+# with `tools/fetch-cldr.sh` (fetch + pack) or `zig build pack-cldr`
+# once sources are present.
+json/

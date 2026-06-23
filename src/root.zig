@@ -96,6 +96,7 @@ test {
     _ = @import("runtime/temporal.zig");
     _ = @import("runtime/intl_config.zig");
     _ = @import("runtime/tzdata.zig");
+    _ = @import("runtime/cldr.zig");
     _ = @import("runtime/lantern/interpreter.zig");
     _ = @import("runtime/lantern/arith.zig");
     _ = @import("runtime/lantern/tests.zig");

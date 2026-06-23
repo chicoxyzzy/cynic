@@ -195,12 +195,20 @@ These are project rules — they apply to everyone.
   UTC/offset only). **`stub`** installs structural `Intl.*` and
   lets Temporal accept non-ISO calendar ids / IANA zone names
   structurally; **`full`** adds embedded tzdata (real IANA offsets
-  through `getOffsetNanosecondsFor`). Tzdata follows the Unicode
-  pattern: IANA *sources* live in `vendor/tzdata/iana/` (refresh via
-  `tools/fetch-tzdata.sh` from [data.iana.org](https://data.iana.org/time-zones/));
+  through `getOffsetNanosecondsFor`) plus embedded **CLDR** data.
+  Tzdata follows the Unicode pattern: IANA *sources* live in
+  `vendor/tzdata/iana/` (refresh via `tools/fetch-tzdata.sh` from
+  [data.iana.org](https://data.iana.org/time-zones/));
   `zig build pack-tzdata` compiles them with system `zic` and packs
-  `vendor/tzdata/cynic_tzdb.bin`. Calendars/formatters stay structural
-  until CLDR/ICU-class data lands. Do **not** add `--enable=intl` or `--allow=intl` —
+  `vendor/tzdata/cynic_tzdb.bin`. CLDR follows the same pattern: JSON
+  *sources* are fetched into `vendor/cldr/json/` (gitignored, large) via
+  `tools/fetch-cldr.sh` from the [cldr-json](https://github.com/unicode-org/cldr-json)
+  npm packages; `zig build pack-cldr` runs `tools/pack_cldr.zig` to emit the
+  committed `vendor/cldr/cynic_cldr.bin` (CYCL container). `Intl.PluralRules`
+  is CLDR-backed at `full` — real per-locale plural/ordinal selection via the
+  UTS #35 rule engine in `src/runtime/cldr.zig` (see `src/runtime/builtins/intl.zig`).
+  NumberFormat / DateTimeFormat / DisplayNames formatter output stays structural
+  until their CLDR sections land. Do **not** add `--enable=intl` or `--allow=intl` —
   Intl is Stage 4 and is not a security relaxation like eval/wasm.
   See [docs/ROADMAP.md](docs/ROADMAP.md) (`Intl` / Temporal) and
   `src/runtime/intl_config.zig`.
@@ -324,11 +332,14 @@ Common commands:
 
     zig build                                       # build cynic into zig-out/bin/ (default -Dintl=off)
     zig build -Dintl=stub                           # structural Intl + Temporal calendar/IANA accept
-    zig build -Dintl=full                           # as stub + embedded tzdata (~400 KiB CYTZ blob)
+    zig build -Dintl=full                           # as stub + embedded tzdata (CYTZ) + CLDR (CYCL) blobs
     tools/fetch-tzdata.sh                           # download IANA tzdata sources → vendor/tzdata/iana/ + repack
     tools/fetch-tzdata.sh 2026b                     # pin a release (like dropping a new UCD into vendor/unicode/)
     zig build pack-tzdata                           # zic compile vendor/tzdata/iana/ → cynic_tzdb.bin
     zig build fetch-tzdata                          # same as tools/fetch-tzdata.sh (latest)
+    tools/fetch-cldr.sh                             # download CLDR-JSON sources → vendor/cldr/json/ (gitignored) + repack
+    zig build pack-cldr                             # pack vendor/cldr/json/ → cynic_cldr.bin (CYCL)
+    zig build fetch-cldr                            # same as tools/fetch-cldr.sh
     zig build test                                  # all unit tests (Debug; canonical, stack-trace path)
     zig build test-fast                             # all unit tests, ReleaseSafe (~3 min vs 10+; safety checks + GC verifiers + leak detection kept)
     zig build test-fast -Dintl=stub                 # include structural Intl unit tests (skipped at -Dintl=off)

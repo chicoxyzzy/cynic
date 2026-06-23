@@ -602,7 +602,7 @@ automatically on the next full sweep.
   |------|---------------|---------------------------|----------------|
   | **`off`** (default) | absent | ISO + UTC/fixed-offset only | none |
   | **`stub`** | structural ECMA-402 (option validation; format/compare stubs) | accept supported calendar **ids** and structural IANA **names**; arithmetic still ISO/UTC | none |
-  | **`full`** | same surface as `stub` | real zone offsets via embedded CYTZ/TZif (`vendor/tzdata/cynic_tzdb.bin`); IANA sources in `vendor/tzdata/iana/` (fetch: `tools/fetch-tzdata.sh`; pack: `zig build pack-tzdata`); future calendars/formatters | ~400 KiB tzdb (+ later CLDR/ICU-class data) |
+  | **`full`** | `stub` surface, plus CLDR-backed `Intl.PluralRules` (real per-locale plural/ordinal selection) | real zone offsets via embedded CYTZ/TZif (`vendor/tzdata/cynic_tzdb.bin`); IANA sources in `vendor/tzdata/iana/` (fetch: `tools/fetch-tzdata.sh`; pack: `zig build pack-tzdata`) | tzdb + CLDR (`vendor/cldr/cynic_cldr.bin`) |
 
   The default edge/server build omits the locale/tz stack to stay
   small and dependency-light. `intl402/` stays out of the main
@@ -612,6 +612,17 @@ automatically on the next full sweep.
   canonical-equivalence-aware compare via NFD-then-ordinal (note
   in §22.1.3.12); case-sensitive Turkish-style collation is
   what's missing without real Intl data, not basic NFC folding.
+
+  **CLDR data** is vendored the way tzdata is: JSON sources are fetched
+  into `vendor/cldr/json/` (gitignored — tens of MB) via
+  `tools/fetch-cldr.sh` (the [cldr-json](https://github.com/unicode-org/cldr-json)
+  npm packages, modern coverage tier), and `zig build pack-cldr` packs the
+  committed `vendor/cldr/cynic_cldr.bin` (CYCL container) consulted only at
+  `-Dintl=full`. **`Intl.PluralRules`** is the first consumer: the UTS #35
+  Part 3 rule engine (`src/runtime/cldr.zig`) computes plural operands over
+  `FormatNumericToString` and evaluates the locale's cardinal/ordinal rules.
+  NumberFormat / DateTimeFormat / DisplayNames formatter *output* stays
+  structural until their CLDR sections are packed.
 
   Seams are kept clean so `full` can deepen without a rewrite —
   Temporal funnels every zone-offset lookup through

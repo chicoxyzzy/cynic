@@ -1,0 +1,6 @@
+48.2.0
+# Unicode CLDR-JSON source: vendor/cldr/json/ (release 48.2.0)
+# Packages: cldr-core cldr-numbers-full cldr-dates-full cldr-localenames-full cldr-misc-full
+# Upstream: https://github.com/unicode-org/cldr-json
+# Fetch:    tools/fetch-cldr.sh 48.2.0
+# Pack:     zig build pack-cldr  (tools/pack_cldr.zig → cynic_cldr.bin)

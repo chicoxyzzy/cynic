@@ -15,9 +15,16 @@ const Realm = @import("realm.zig").Realm;
 const lantern = @import("lantern/interpreter.zig");
 const intl = @import("intl.zig");
 const intl_config = @import("intl_config.zig");
+const cldr = @import("cldr.zig");
 
 fn requireIntlBuild() !void {
     if (!intl_config.enabled) return error.SkipZigTest;
+}
+
+/// CLDR-backed behaviour (real plural selection, locale data) needs the
+/// embedded blob — `-Dintl=full` only. stub/off skip these.
+fn requireFullBuild() !void {
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
 }
 
 /// Evaluate `source`; return true when completion is a throw.
@@ -311,10 +318,19 @@ test "intl: Collator compare is ordinal and resolvedOptions has locale" {
     );
 }
 
-test "intl: PluralRules select is always other structurally" {
-    try evalAssert1(
-        \\new Intl.PluralRules("en").select(1) === "other" ? 1 : 0
-    );
+test "intl: PluralRules select — structural at stub, CLDR-backed at full" {
+    try requireIntlBuild();
+    // Without locale data (stub) every value is "other"; with the embedded
+    // CLDR blob (full) en.select(1) resolves to the real "one" category.
+    if (intl_config.has_locale_data) {
+        try evalAssert1(
+            \\new Intl.PluralRules("en").select(1) === "one" ? 1 : 0
+        );
+    } else {
+        try evalAssert1(
+            \\new Intl.PluralRules("en").select(1) === "other" ? 1 : 0
+        );
+    }
 }
 
 test "intl: NumberFormat format falls back to ToString number" {
@@ -403,4 +419,89 @@ test "intl: supportedValuesOf units loop does not abort" {
         \\}
         \\ok
     );
+}
+
+// ── PluralRules (CLDR plural engine — §16) ───────────────────────────────────
+
+test "cldr.computeOperands: integer 1 → i=1 v=0" {
+    const o = cldr.computeOperands(1, 0, 3);
+    try testing.expectEqual(@as(u64, 1), o.i);
+    try testing.expectEqual(@as(u32, 0), o.v);
+    try testing.expectEqual(@as(u32, 0), o.w);
+}
+
+test "cldr.computeOperands: 1.5 → i=1 v=1 f=5 t=5 n=1.5" {
+    const o = cldr.computeOperands(1.5, 0, 3);
+    try testing.expectEqual(@as(u64, 1), o.i);
+    try testing.expectEqual(@as(u32, 1), o.v);
+    try testing.expectEqual(@as(u64, 5), o.f);
+    try testing.expectEqual(@as(u64, 5), o.t);
+    try testing.expectEqual(@as(f64, 1.5), o.n);
+}
+
+test "cldr.computeOperands: minimumFractionDigits pads trailing zeros (1 → 1.00)" {
+    const o = cldr.computeOperands(1, 2, 3);
+    try testing.expectEqual(@as(u32, 2), o.v); // with trailing zeros
+    try testing.expectEqual(@as(u32, 0), o.w); // without
+    try testing.expectEqual(@as(u64, 0), o.f);
+}
+
+test "Intl.PluralRules: en cardinal select" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const pr = new Intl.PluralRules('en');
+        \\(pr.select(0)==='other' && pr.select(1)==='one' && pr.select(2)==='other' && pr.select(1.5)==='other') ? 1 : 0
+    );
+}
+
+test "Intl.PluralRules: en ordinal select (th/st/nd/rd)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const pr = new Intl.PluralRules('en', {type:'ordinal'});
+        \\(pr.select(1)==='one' && pr.select(2)==='two' && pr.select(3)==='few' &&
+        \\ pr.select(4)==='other' && pr.select(11)==='other' && pr.select(21)==='one') ? 1 : 0
+    );
+}
+
+test "Intl.PluralRules: pl cardinal few/many" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const pr = new Intl.PluralRules('pl');
+        \\(pr.select(1)==='one' && pr.select(2)==='few' && pr.select(5)==='many' && pr.select(22)==='few') ? 1 : 0
+    );
+}
+
+test "Intl.PluralRules: ar exercises all six categories" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const pr = new Intl.PluralRules('ar');
+        \\(pr.select(0)==='zero' && pr.select(1)==='one' && pr.select(2)==='two' &&
+        \\ pr.select(3)==='few' && pr.select(11)==='many' && pr.select(100)==='other') ? 1 : 0
+    );
+}
+
+test "Intl.PluralRules: resolvedOptions.pluralCategories (pl, canonical order)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const c = new Intl.PluralRules('pl').resolvedOptions().pluralCategories;
+        \\(c.length===4 && c[0]==='one' && c[1]==='few' && c[2]==='many' && c[3]==='other') ? 1 : 0
+    );
+}
+
+test "Intl.PluralRules: locale fallback en-US → en rules" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const pr = new Intl.PluralRules('en-US');
+        \\(pr.select(1)==='one' && pr.select(2)==='other') ? 1 : 0
+    );
+}
+
+test "Intl.PluralRules: selectRange NaN endpoint throws RangeError" {
+    try requireFullBuild();
+    try evalThrows("new Intl.PluralRules('en').selectRange(NaN, 1)");
+}
+
+test "Intl.PluralRules: selectRange missing end throws TypeError" {
+    try requireFullBuild();
+    try evalThrows("new Intl.PluralRules('en').selectRange(1)");
 }

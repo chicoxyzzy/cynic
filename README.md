@@ -248,6 +248,12 @@ Cynic is [MIT-licensed](LICENSE). Bundled third-party data under
   <https://data.iana.org/time-zones/>. Compiled with system `zic` and
   packed into `vendor/tzdata/cynic_tzdb.bin` for `-Dintl=full`
   (`zig build pack-tzdata`). License: see `vendor/tzdata/iana/LICENSE`.
+- `vendor/cldr/` — Unicode CLDR locale data. The JSON *sources*
+  (`vendor/cldr/json/`, fetched with `tools/fetch-cldr.sh` from the
+  [cldr-json](https://github.com/unicode-org/cldr-json) npm packages) are
+  large and gitignored; the committed artifact is the packed
+  `vendor/cldr/cynic_cldr.bin` (`zig build pack-cldr`), embedded only at
+  `-Dintl=full`. License: Unicode License v3, `vendor/cldr/LICENSE`.
 - `vendor/test262/` — ECMAScript Test Suite, BSD-3-Clause (with
   Ecma International notices). Git submodule pinned to
   [`tc39/test262`](https://github.com/tc39/test262).

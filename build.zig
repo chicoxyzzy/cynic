@@ -51,17 +51,22 @@ pub fn build(b: *std.Build) void {
     lib_build_options.addOption(bool, "exhaustive_tests", exhaustive_tests);
     lib_build_options.addOption(IntlTier, "intl", intl_tier);
     lib_mod.addOptions("build_options", lib_build_options);
-    // Embed the CYTZ tzdb only for `full` so off/stub binaries stay lean.
-    const addTzdb = struct {
+    // Embed the locale data blobs (CYTZ tzdb + CYCL CLDR) only for `full`, so
+    // off/stub binaries stay lean. Both are gated on `intl_config.has_locale_data`.
+    const addLocaleData = struct {
         fn apply(mod: *std.Build.Module, bld: *std.Build, tier: IntlTier) void {
             if (tier == .full) {
                 mod.addAnonymousImport("cynic_tzdb.bin", .{
                     .root_source_file = bld.path("vendor/tzdata/cynic_tzdb.bin"),
                 });
+                mod.addAnonymousImport("cynic_cldr.bin", .{
+                    .root_source_file = bld.path("vendor/cldr/cynic_cldr.bin"),
+                });
             }
         }
     }.apply;
-    addTzdb(lib_mod, b, intl_tier);
+    const addTzdb = addLocaleData;
+    addLocaleData(lib_mod, b, intl_tier);
 
     // Executable module: the `cynic` CLI. Imports the library as `cynic`.
     const exe_mod = b.createModule(.{
@@ -259,6 +264,31 @@ pub fn build(b: *std.Build) void {
     const fetch_tz = b.addSystemCommand(&.{ "bash", "tools/fetch-tzdata.sh" });
     const fetch_tz_step = b.step("fetch-tzdata", "Download latest IANA tzdata sources into vendor/tzdata/iana/ and repack cynic_tzdb.bin");
     fetch_tz_step.dependOn(&fetch_tz.step);
+
+    // `zig build pack-cldr` reads vendored CLDR-JSON sources
+    // (`vendor/cldr/json/`, refreshed via `tools/fetch-cldr.sh` from the npm
+    // registry) and emits the committed CYCL blob. Only `-Dintl=full` embeds
+    // it (see addLocaleData). The raw JSON is gitignored; the blob is tracked.
+    const pack_cldr_mod = b.createModule(.{
+        .root_source_file = b.path("tools/pack_cldr.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const pack_cldr_exe = b.addExecutable(.{
+        .name = "pack_cldr",
+        .root_module = pack_cldr_mod,
+    });
+    const run_pack_cldr = b.addRunArtifact(pack_cldr_exe);
+    run_pack_cldr.addArg("--cldr-json");
+    run_pack_cldr.addArg(sourceRootPath(b, "vendor/cldr/json"));
+    run_pack_cldr.addArg("-o");
+    run_pack_cldr.addArg(sourceRootPath(b, "vendor/cldr/cynic_cldr.bin"));
+    const pack_cldr_step = b.step("pack-cldr", "Pack vendor/cldr/json/ (CLDR-JSON sources) into cynic_cldr.bin (refresh sources: tools/fetch-cldr.sh)");
+    pack_cldr_step.dependOn(&run_pack_cldr.step);
+
+    const fetch_cldr = b.addSystemCommand(&.{ "bash", "tools/fetch-cldr.sh" });
+    const fetch_cldr_step = b.step("fetch-cldr", "Download CLDR-JSON sources into vendor/cldr/json/ and repack cynic_cldr.bin");
+    fetch_cldr_step.dependOn(&fetch_cldr.step);
 
     const gen_props_mod = b.createModule(.{
         .root_source_file = b.path("tools/gen_unicode_props.zig"),
