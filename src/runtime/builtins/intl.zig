@@ -331,6 +331,24 @@ fn resolveServiceLocale(
     return .{ .locale = canon, .matcher = matcher };
 }
 
+/// Compute and cache the UTS #35 §4.3 script-maximized data-locale once, so the
+/// per-`format()` CLDR lookups never re-scan the likelySubtags table (the table
+/// is only consulted for a script-less tag like `en` / `zh-TW`). Stores an owned
+/// copy in `base.data_locale` only when maximization actually inserts a script;
+/// when the resolved tag already carries one (`en-Latn`) or no script can be
+/// inferred (stub/off build, unknown tag), `data_locale` stays empty and
+/// `dataLocale()` falls back to `base.locale` — already cheap to split. Must run
+/// after `base.locale` is assigned and before any CLDR data lookup.
+fn setDataLocale(realm: *Realm, base: *intl.ServiceLocaleSlots) NativeError!void {
+    if (!cldr.available or base.locale.len == 0) return;
+    var buf: [intl.max_tag_bytes]u8 = undefined;
+    const maxed = cldr.maximizeForData(base.locale, &buf);
+    // Only a freshly script-inserted tag is worth storing; an unchanged result
+    // (already-scripted or un-maximizable) leaves the cheap `locale` fallback.
+    if (maxed.ptr == base.locale.ptr) return;
+    base.data_locale = realm.allocator.dupe(u8, maxed) catch return error.OutOfMemory;
+}
+
 fn storeRecord(realm: *Realm, inst: *JSObject, rec: intl.IntlRecord) NativeError!void {
     const box = realm.allocator.create(intl.IntlRecord) catch return error.OutOfMemory;
     box.* = rec;
@@ -730,14 +748,62 @@ fn localeToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
 }
 fn localeMaximize(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
-    // Structural: no likelySubtags — return a new Locale with same tag.
+    // §14.3.4 Intl.Locale.prototype.maximize — UTS #35 §4.3 Add Likely Subtags.
     const s = try localeSlots(realm, this_value);
-    return createLocaleFromTag(realm, s.locale);
+    const tag = try rewriteLikelyTag(realm, s, .maximize);
+    defer realm.allocator.free(tag);
+    return createLocaleFromTag(realm, tag);
 }
 fn localeMinimize(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
+    // §14.3.5 Intl.Locale.prototype.minimize — UTS #35 §4.3 Remove Likely Subtags.
     const s = try localeSlots(realm, this_value);
-    return createLocaleFromTag(realm, s.locale);
+    const tag = try rewriteLikelyTag(realm, s, .minimize);
+    defer realm.allocator.free(tag);
+    return createLocaleFromTag(realm, tag);
+}
+
+const LikelyOp = enum { maximize, minimize };
+
+/// Rebuild a locale tag with the §4.3 likely-subtags algorithm applied to its
+/// language / script / region, preserving the variants and extension tail. When
+/// the CLDR data is absent (stub / off) or the algorithm signals no change, the
+/// original tag is returned unchanged (the spec's "If an error is signaled, set
+/// … to loc.[[Locale]]"). Caller owns the returned slice.
+fn rewriteLikelyTag(realm: *Realm, s: *const intl.LocaleSlots, op: LikelyOp) NativeError![]const u8 {
+    const in: cldr.Subtags = .{ .lang = s.language, .script = s.script, .region = s.region };
+    var out: cldr.Subtags = .{};
+    const ok = switch (op) {
+        .maximize => cldr.addLikelySubtags(in, &out),
+        .minimize => cldr.removeLikelySubtags(in, &out),
+    };
+    if (!ok) return realm.allocator.dupe(u8, s.locale) catch return error.OutOfMemory;
+
+    // Suffix = the part of the canonical locale after its base name: variants
+    // first (already in s.variants / part of base_name), then -u-/-x-/etc.
+    // s.base_name = language(-script)(-region)(-variants); the extension tail is
+    // s.locale[base_name.len..].
+    const ext_tail = if (s.locale.len >= s.base_name.len) s.locale[s.base_name.len..] else "";
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(realm.allocator);
+    buf.appendSlice(realm.allocator, out.lang) catch return error.OutOfMemory;
+    if (out.script.len > 0) {
+        buf.append(realm.allocator, '-') catch return error.OutOfMemory;
+        buf.appendSlice(realm.allocator, out.script) catch return error.OutOfMemory;
+    }
+    if (out.region.len > 0) {
+        buf.append(realm.allocator, '-') catch return error.OutOfMemory;
+        buf.appendSlice(realm.allocator, out.region) catch return error.OutOfMemory;
+    }
+    if (s.variants.len > 0) {
+        buf.append(realm.allocator, '-') catch return error.OutOfMemory;
+        buf.appendSlice(realm.allocator, s.variants) catch return error.OutOfMemory;
+    }
+    if (ext_tail.len > 0) {
+        buf.appendSlice(realm.allocator, ext_tail) catch return error.OutOfMemory;
+    }
+    return buf.toOwnedSlice(realm.allocator) catch return error.OutOfMemory;
 }
 
 // ── Intl Locale Info (Stage 4) ───────────────────────────────────────────────
@@ -1107,6 +1173,7 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     // code); free the owned slots so a rejected constructor doesn't leak.
     // On success storeRecord takes ownership and this never fires.
     errdefer slots.deinit(realm.allocator);
+    try setDataLocale(realm, &slots.base);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "decimal", "percent", "currency", "unit" }, "decimal");
     const is_currency_style = std.mem.eql(u8, slots.style, "currency");
     const is_unit_style = std.mem.eql(u8, slots.style, "unit");
@@ -1159,7 +1226,7 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
 
     // Numbering system: explicit option wins, else the locale's CLDR default,
     // else latn. (The -u-nu- extension is resolved into the locale upstream.)
-    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, opts);
+    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.dataLocale(), opts);
 
     try storeRecord(realm, inst, .{ .number_format = slots });
     return heap_mod.taggedObject(inst);
@@ -1383,7 +1450,7 @@ const default_number_data = cldr.NumberData{
 /// Render `x` into typed segments per the resolved NumberFormat options.
 /// Returns the number of segments written into `out`.
 fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
-    const nd = if (cldr.numberData(slots.base.locale)) |d| d else default_number_data;
+    const nd = if (cldr.numberData(slots.base.dataLocale())) |d| d else default_number_data;
     const digit_base: u32 = if (slots.base.numbering_system.len > 0 and !std.mem.eql(u8, slots.base.numbering_system, nd.ns))
         (cldr.numberingSystemDigitBase(slots.base.numbering_system) orelse nd.digit_base)
     else
@@ -1451,10 +1518,10 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         const min_frac = slots.minimum_fraction_digits orelse 0;
         const max_frac = slots.maximum_fraction_digits orelse 2;
         const ops = cldr.computeOperands(@abs(x), min_frac, max_frac);
-        const cat = cldr.selectPlural(slots.base.locale, false, ops);
-        const long_name = cldr.currencyDisplayNameCount(slots.base.locale, slots.currency, cat) orelse
-            cldr.displayName(slots.base.locale, .currency, slots.currency) orelse slots.currency;
-        const unit_pat = cldr.currencyUnitPattern(slots.base.locale, cat) orelse "{0} {1}";
+        const cat = cldr.selectPlural(slots.base.dataLocale(), false, ops);
+        const long_name = cldr.currencyDisplayNameCount(slots.base.dataLocale(), slots.currency, cat) orelse
+            cldr.displayName(slots.base.dataLocale(), .currency, slots.currency) orelse slots.currency;
+        const unit_pat = cldr.currencyUnitPattern(slots.base.dataLocale(), cat) orelse "{0} {1}";
 
         var sign: []const u8 = "";
         var sign_type: []const u8 = "minusSign";
@@ -1486,7 +1553,7 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
     var cur_display: []const u8 = "";
     const pattern = if (is_currency) blk: {
         cur_display = currencyDisplayText(slots);
-        const cp = cldr.currencyPattern(slots.base.locale) orelse
+        const cp = cldr.currencyPattern(slots.base.dataLocale()) orelse
             cldr.CurrencyPattern{ .standard = "¤#,##0.00", .accounting = "¤#,##0.00" };
         break :blk if (std.mem.eql(u8, slots.currency_sign, "accounting")) cp.accounting else cp.standard;
     } else if (is_percent) nd.pct_pattern else nd.dec_pattern;
@@ -1704,7 +1771,7 @@ fn currencyDisplayText(slots: *const intl.NumberFormatSlots) []const u8 {
     const code = slots.currency;
     if (std.mem.eql(u8, slots.currency_display, "code")) return code;
     const narrow = std.mem.eql(u8, slots.currency_display, "narrowSymbol");
-    return cldr.currencySymbol(slots.base.locale, code, narrow) orelse code;
+    return cldr.currencySymbol(slots.base.dataLocale(), code, narrow) orelse code;
 }
 
 /// Apply primary/secondary grouping from the pattern, substituting digits, and
@@ -2000,6 +2067,9 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
         }
     }
 
+    // After all option reads (which can throw): cache the maximized data-locale
+    // so per-`format()` CLDR lookups skip the likelySubtags scan.
+    try setDataLocale(realm, &slots.base);
     try storeRecord(realm, inst, .{ .date_time_format = slots });
     return heap_mod.taggedObject(inst);
 }
@@ -2367,12 +2437,12 @@ fn hourIs12(hc: []const u8) bool {
 
 /// Interpret a resolved CLDR pattern against the broken-down time into segments.
 fn renderDateTime(slots: *const intl.DateTimeFormatSlots, ms: f64, out: []Seg) u32 {
-    const dd = cldr.dateData(slots.base.locale) orelse return 0;
+    const dd = cldr.dateData(slots.base.dataLocale()) orelse return 0;
     const ct = breakDown(slots, ms);
     var pat_buf: [256]u8 = undefined;
     const pattern = resolveDateTimePattern(dd, slots, &pat_buf);
 
-    const digit_base: u32 = if (cldr.numberData(slots.base.locale)) |nd|
+    const digit_base: u32 = if (cldr.numberData(slots.base.dataLocale())) |nd|
         (if (!std.mem.eql(u8, slots.numbering_system, nd.ns)) (cldr.numberingSystemDigitBase(slots.numbering_system) orelse nd.digit_base) else nd.digit_base)
     else
         (cldr.numberingSystemDigitBase(slots.numbering_system) orelse '0');
@@ -2545,6 +2615,7 @@ fn pluralRulesConstructor(realm: *Realm, this_value: Value, args: []const Value)
     var slots: intl.PluralRulesSlots = .{};
     slots.base.locale = resolved.locale;
     slots.type_name = try getOptionStringOwned(realm, opts, "type", &.{ "cardinal", "ordinal" }, "cardinal");
+    try setDataLocale(realm, &slots.base);
     try storeRecord(realm, inst, .{ .plural_rules = slots });
     return heap_mod.taggedObject(inst);
 }
@@ -2565,7 +2636,7 @@ fn pluralRulesSelect(realm: *Realm, this_value: Value, args: []const Value) Nati
     if (!std.math.isFinite(x) or !cldr.available) return makeStringValue(realm, "other");
     const ordinal = std.mem.eql(u8, s.type_name, "ordinal");
     const ops = cldr.computeOperands(x, s.minimum_fraction_digits, s.maximum_fraction_digits);
-    const cat = cldr.selectPlural(s.base.locale, ordinal, ops);
+    const cat = cldr.selectPlural(s.base.dataLocale(), ordinal, ops);
     return makeStringValue(realm, cat.name());
 }
 
@@ -2585,7 +2656,7 @@ fn pluralRulesSelectRange(realm: *Realm, this_value: Value, args: []const Value)
     const s = rec.plural_rules;
     if (!cldr.available) return makeStringValue(realm, "other");
     const ordinal = std.mem.eql(u8, s.type_name, "ordinal");
-    const yp = cldr.selectPlural(s.base.locale, ordinal, cldr.computeOperands(y, s.minimum_fraction_digits, s.maximum_fraction_digits));
+    const yp = cldr.selectPlural(s.base.dataLocale(), ordinal, cldr.computeOperands(y, s.minimum_fraction_digits, s.maximum_fraction_digits));
     return makeStringValue(realm, yp.name());
 }
 
@@ -2602,7 +2673,7 @@ fn pluralRulesResolvedOptions(realm: *Realm, this_value: Value, args: []const Va
 
     // pluralCategories: the categories the locale defines, canonical order,
     // "other" always last. From the CLDR mask (or just "other" without data).
-    const mask: u8 = if (cldr.available) cldr.pluralCategoriesMask(s.base.locale, ordinal) else 0;
+    const mask: u8 = if (cldr.available) cldr.pluralCategoriesMask(s.base.dataLocale(), ordinal) else 0;
     const cats = allocateArray(realm) catch return error.OutOfMemory;
     var idx: u32 = 0;
     const order = [_]cldr.PluralCategory{ .zero, .one, .two, .few, .many };
@@ -2833,6 +2904,7 @@ fn displayNamesConstructor(realm: *Realm, this_value: Value, args: []const Value
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "narrow", "short", "long" }, "long");
     slots.fallback = try getOptionStringOwned(realm, opts, "fallback", &.{ "code", "none" }, "code");
     slots.language_display = try getOptionStringOwned(realm, opts, "languageDisplay", &.{ "dialect", "standard" }, "dialect");
+    try setDataLocale(realm, &slots.base);
     try storeRecord(realm, inst, .{ .display_names = slots });
     return heap_mod.taggedObject(inst);
 }
@@ -2874,7 +2946,7 @@ fn displayNamesOf(realm: *Realm, this_value: Value, args: []const Value) NativeE
     };
 
     if (kind != null and cldr.available) {
-        if (cldr.displayName(s.base.locale, kind.?, canonical)) |nm| return makeStringValue(realm, nm);
+        if (cldr.displayName(s.base.dataLocale(), kind.?, canonical)) |nm| return makeStringValue(realm, nm);
     }
     if (std.mem.eql(u8, s.fallback, "none")) return Value.undefined_;
     return makeStringValue(realm, canonical); // fallback: the canonicalised code

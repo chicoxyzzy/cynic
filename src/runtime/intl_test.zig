@@ -1086,3 +1086,133 @@ test "intl: Locale getCalendars reflects -u-ca-, getTextInfo reflects script" {
         \\ new Intl.Locale('de-DE-1996').variants === '1996') ? 1 : 0
     );
 }
+
+// ── UTS #35 §4.3 Likely Subtags (locale maximize / minimize) ─────────────────
+
+test "intl: NumberFormat resolves CLDR data against the maximized script (zh-TW)" {
+    try requireFullBuild();
+    // §4.3 Add Likely Subtags: zh-TW maximizes to zh-Hant-TW, so the non-finite
+    // glyph resolves from zh-Hant ("非數值"), not bare zh ("NaN").
+    try evalAssert1(
+        \\new Intl.NumberFormat('zh-TW').format(NaN) === '非數值' ? 1 : 0
+    );
+}
+
+test "intl: NumberFormat resolvedOptions.locale is NOT maximized" {
+    try requireFullBuild();
+    // The maximized tag feeds CLDR lookups only; resolvedOptions().locale keeps
+    // the requested (canonicalised) tag per ECMA-402 §11.5.1 ResolvedOptions.
+    try evalAssert1(
+        \\new Intl.NumberFormat('zh-TW').resolvedOptions().locale === 'zh-TW' ? 1 : 0
+    );
+}
+
+test "intl: data-locale caching matches the explicit-script path (en == en-Latn)" {
+    try requireFullBuild();
+    // §4.3 Add Likely Subtags is computed once at construction and stored as the
+    // data-locale; the per-format CLDR lookups must produce byte-identical output
+    // to passing the maximized script explicitly. Covers number / percent /
+    // currency / date / plural so a regression in any lookup path shows here.
+    try evalAssert1(
+        \\const eq = (a, b) => a === b;
+        \\const num = eq(new Intl.NumberFormat('en').format(1234567.89),
+        \\              new Intl.NumberFormat('en-Latn').format(1234567.89));
+        \\const pct = eq(new Intl.NumberFormat('en', {style:'percent'}).format(0.4567),
+        \\              new Intl.NumberFormat('en-Latn', {style:'percent'}).format(0.4567));
+        \\const cur = eq(new Intl.NumberFormat('en', {style:'currency', currency:'USD'}).format(5),
+        \\              new Intl.NumberFormat('en-Latn', {style:'currency', currency:'USD'}).format(5));
+        \\const dat = eq(new Intl.DateTimeFormat('en', {dateStyle:'long'}).format(0),
+        \\              new Intl.DateTimeFormat('en-Latn', {dateStyle:'long'}).format(0));
+        \\const plu = eq(new Intl.PluralRules('en').select(1),
+        \\              new Intl.PluralRules('en-Latn').select(1));
+        \\const dn = eq(new Intl.DisplayNames('en', {type:'language'}).of('fr'),
+        \\             new Intl.DisplayNames('en-Latn', {type:'language'}).of('fr'));
+        \\(num && pct && cur && dat && plu && dn) ? 1 : 0
+    );
+}
+
+test "intl: Locale.prototype.maximize fills missing subtags" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const m = (t) => new Intl.Locale(t).maximize().toString();
+        \\(m('zh-TW') === 'zh-Hant-TW' &&
+        \\ m('zh-HK') === 'zh-Hant-HK' &&
+        \\ m('zh-SG') === 'zh-Hans-SG' &&
+        \\ m('zh-CN') === 'zh-Hans-CN' &&
+        \\ m('sr-RS') === 'sr-Cyrl-RS' &&
+        \\ m('pa-PK') === 'pa-Arab-PK' &&
+        \\ m('zh') === 'zh-Hans-CN' &&
+        \\ m('en') === 'en-Latn-US') ? 1 : 0
+    );
+}
+
+test "intl: Locale.prototype.maximize handles undefined primary language" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const m = (t) => new Intl.Locale(t).maximize().toString();
+        \\(m('und-Thai') === 'th-Thai-TH' &&
+        \\ m('und-419') === 'es-Latn-419' &&
+        \\ m('und-Cyrl-RO') === 'bg-Cyrl-RO' &&
+        \\ m('und-AQ') === 'en-Latn-AQ' &&
+        \\ m('und') === 'en-Latn-US') ? 1 : 0
+    );
+}
+
+test "intl: Locale.prototype.maximize preserves variants and extensions" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const m = (t) => new Intl.Locale(t).maximize().toString();
+        \\(m('zh-TW-u-co-phonebk') === 'zh-Hant-TW-u-co-phonebk' &&
+        \\ m('en-fonipa') === 'en-Latn-US-fonipa' &&
+        \\ m('en-x-private') === 'en-Latn-US-x-private') ? 1 : 0
+    );
+}
+
+test "intl: Locale.prototype.minimize removes likely subtags" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const m = (t) => new Intl.Locale(t).minimize().toString();
+        \\(m('en-Latn-US') === 'en' &&
+        \\ m('en-Shaw-GB') === 'en-Shaw' &&
+        \\ m('en-Arab-US') === 'en-Arab' &&
+        \\ m('en-Latn-GB') === 'en-GB' &&
+        \\ m('zh-Hant') === 'zh-TW' &&
+        \\ m('und-Latn-AQ') === 'en-AQ') ? 1 : 0
+    );
+}
+
+test "intl: cldr.addLikelySubtags fills script/region (UTS #35 §4.3)" {
+    try requireFullBuild();
+    const Case = struct { in: cldr.Subtags, lang: []const u8, script: []const u8, region: []const u8 };
+    const cases = [_]Case{
+        .{ .in = .{ .lang = "zh", .region = "TW" }, .lang = "zh", .script = "Hant", .region = "TW" },
+        .{ .in = .{ .lang = "zh", .region = "SG" }, .lang = "zh", .script = "Hans", .region = "SG" },
+        .{ .in = .{ .lang = "sr", .region = "RS" }, .lang = "sr", .script = "Cyrl", .region = "RS" },
+        .{ .in = .{ .lang = "pa", .region = "PK" }, .lang = "pa", .script = "Arab", .region = "PK" },
+        .{ .in = .{ .lang = "zh" }, .lang = "zh", .script = "Hans", .region = "CN" },
+        // Empty / "und" language → root maximizes to en-Latn-US.
+        .{ .in = .{ .lang = "und" }, .lang = "en", .script = "Latn", .region = "US" },
+        .{ .in = .{ .lang = "und", .script = "Thai" }, .lang = "th", .script = "Thai", .region = "TH" },
+    };
+    for (cases) |c| {
+        var out: cldr.Subtags = .{};
+        try testing.expect(cldr.addLikelySubtags(c.in, &out));
+        try testing.expectEqualStrings(c.lang, out.lang);
+        try testing.expectEqualStrings(c.script, out.script);
+        try testing.expectEqualStrings(c.region, out.region);
+    }
+}
+
+test "intl: cldr.removeLikelySubtags finds the minimal form" {
+    try requireFullBuild();
+    var out: cldr.Subtags = .{};
+    try testing.expect(cldr.removeLikelySubtags(.{ .lang = "en", .script = "Latn", .region = "US" }, &out));
+    try testing.expectEqualStrings("en", out.lang);
+    try testing.expectEqualStrings("", out.script);
+    try testing.expectEqualStrings("", out.region);
+
+    try testing.expect(cldr.removeLikelySubtags(.{ .lang = "zh", .script = "Hant" }, &out));
+    try testing.expectEqualStrings("zh", out.lang);
+    try testing.expectEqualStrings("", out.script);
+    try testing.expectEqualStrings("TW", out.region);
+}

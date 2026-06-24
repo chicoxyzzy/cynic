@@ -69,6 +69,13 @@ pub const ServiceLocaleSlots = struct {
     /// All non-empty slices are allocator-owned copies. Never store
     /// interned string literals here — deinit always frees non-empty.
     locale: []const u8 = "",
+    /// UTS #35 §4.3 script-maximized form of `locale`, computed once when the
+    /// formatter is constructed (e.g. `en` → `en-Latn`, `zh-TW` → `zh-Hant-TW`).
+    /// CLDR data lookups read this so the per-`format()` path never re-scans the
+    /// likelySubtags table; `resolvedOptions().locale` still reports `locale`.
+    /// Empty means "not computed" — `dataLocale()` then falls back to `locale`,
+    /// keeping behaviour correct (just unoptimised). Allocator-owned when set.
+    data_locale: []const u8 = "",
     calendar: []const u8 = "",
     numbering_system: []const u8 = "",
     hour_cycle: []const u8 = "",
@@ -76,8 +83,15 @@ pub const ServiceLocaleSlots = struct {
     case_first: []const u8 = "",
     numeric: bool = false,
 
+    /// The locale CLDR data lookups should key on: the script-maximized
+    /// `data_locale` when present, else the resolved `locale`.
+    pub fn dataLocale(self: *const ServiceLocaleSlots) []const u8 {
+        return if (self.data_locale.len > 0) self.data_locale else self.locale;
+    }
+
     pub fn deinit(self: *ServiceLocaleSlots, allocator: std.mem.Allocator) void {
         if (self.locale.len > 0) allocator.free(self.locale);
+        if (self.data_locale.len > 0) allocator.free(self.data_locale);
         if (self.calendar.len > 0) allocator.free(self.calendar);
         if (self.numbering_system.len > 0) allocator.free(self.numbering_system);
         if (self.hour_cycle.len > 0) allocator.free(self.hour_cycle);

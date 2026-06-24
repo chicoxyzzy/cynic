@@ -59,6 +59,7 @@ const SectionKind = enum(u8) {
     display_names = 6,
     currencies = 7,
     currency_names = 8,
+    likely_subtags = 9,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -73,6 +74,7 @@ var num_payload: []const u8 = &.{};
 var ns_payload: []const u8 = &.{};
 var dates_payload: []const u8 = &.{};
 var display_payload: []const u8 = &.{};
+var likely_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -108,6 +110,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.display_names) => display_payload = payload,
             @intFromEnum(SectionKind.currencies) => cur_payload = payload,
             @intFromEnum(SectionKind.currency_names) => cur_names_payload = payload,
+            @intFromEnum(SectionKind.likely_subtags) => likely_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -707,6 +710,171 @@ fn withCandidates(locale: []const u8, comptime find: fn ([]const u8) ?usize) ?us
     return find(parts.lang);
 }
 
+// ── likely subtags (UTS #35 §4.3 Add / Remove Likely Subtags) ─────────────────
+
+/// Parsed language / script / region subtags (each may be empty). `lang` is
+/// lowercased, `script` title-cased, `region` uppercased to the CLDR canonical
+/// form so candidate keys match the packed table.
+pub const Subtags = struct {
+    lang: []const u8 = "",
+    script: []const u8 = "",
+    region: []const u8 = "",
+    lang_buf: [16]u8 = undefined,
+    script_buf: [8]u8 = undefined,
+    region_buf: [8]u8 = undefined,
+};
+
+/// Look up one likely-subtags key. On a hit, writes the value's
+/// lang/script/region into `out` and returns true. The packed table is sorted
+/// by key, but entries are variable-length so this is a linear scan; maximize
+/// runs once per formatter over ~7.8k entries, acceptable without an index.
+fn likelyLookup(key: []const u8, out: *Subtags) bool {
+    if (likely_payload.len < 4) return false;
+    const count = std.mem.readInt(u32, likely_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(likely_payload, &off) orelse return false;
+        const k = readBytes(likely_payload, &off, klen) orelse return false;
+        const llen = readU8(likely_payload, &off) orelse return false;
+        const lang = readBytes(likely_payload, &off, llen) orelse return false;
+        const slen = readU8(likely_payload, &off) orelse return false;
+        const script = readBytes(likely_payload, &off, slen) orelse return false;
+        const rlen = readU8(likely_payload, &off) orelse return false;
+        const region = readBytes(likely_payload, &off, rlen) orelse return false;
+        if (asciiEqlIgnoreCase(k, key)) {
+            const ln = @min(lang.len, out.lang_buf.len);
+            @memcpy(out.lang_buf[0..ln], lang[0..ln]);
+            out.lang = out.lang_buf[0..ln];
+            const sn = @min(script.len, out.script_buf.len);
+            @memcpy(out.script_buf[0..sn], script[0..sn]);
+            out.script = out.script_buf[0..sn];
+            const rn = @min(region.len, out.region_buf.len);
+            @memcpy(out.region_buf[0..rn], region[0..rn]);
+            out.region = out.region_buf[0..rn];
+            return true;
+        }
+    }
+    return false;
+}
+
+/// UTS #35 §4.3 "Add Likely Subtags". Given parsed input subtags (any of which
+/// may be empty, with an empty/`und` language treated as undefined), fill the
+/// missing fields from the CLDR likelySubtags table and write the maximized
+/// language / script / region into `out`. Returns false when no candidate key
+/// matched (data absent, or a wholly unknown tag) — the caller keeps the input.
+pub fn addLikelySubtags(in: Subtags, out: *Subtags) bool {
+    if (!ensureInit() or likely_payload.len < 4) return false;
+
+    // Empty or "und" language → the wildcard key prefix "und".
+    const lang_known = in.lang.len != 0 and !asciiEqlIgnoreCase(in.lang, "und");
+    var keybuf: [32]u8 = undefined;
+    const base: []const u8 = if (lang_known) in.lang else "und";
+
+    var hit: Subtags = .{};
+    var matched = false;
+    // Search order (ICU / §4.3): lang-script-region, lang-region, lang-script,
+    // lang, und-script. First match wins.
+    if (in.script.len > 0 and in.region.len > 0) {
+        if (joinTag(&keybuf, base, in.script, in.region)) |k|
+            if (likelyLookup(k, &hit)) {
+                matched = true;
+            };
+    }
+    if (!matched and in.region.len > 0) {
+        if (joinTag(&keybuf, base, "", in.region)) |k|
+            if (likelyLookup(k, &hit)) {
+                matched = true;
+            };
+    }
+    if (!matched and in.script.len > 0) {
+        if (joinTag(&keybuf, base, in.script, "")) |k|
+            if (likelyLookup(k, &hit)) {
+                matched = true;
+            };
+    }
+    if (!matched) {
+        if (likelyLookup(base, &hit)) matched = true;
+    }
+    if (!matched and in.script.len > 0) {
+        if (joinTag(&keybuf, "und", in.script, "")) |k|
+            if (likelyLookup(k, &hit)) {
+                matched = true;
+            };
+    }
+    if (!matched) return false;
+
+    // Keep present input fields; fill the missing ones from the match.
+    out.* = .{};
+    const rl = if (lang_known) in.lang else hit.lang;
+    const rs = if (in.script.len > 0) in.script else hit.script;
+    const rr = if (in.region.len > 0) in.region else hit.region;
+    const ln = @min(rl.len, out.lang_buf.len);
+    @memcpy(out.lang_buf[0..ln], rl[0..ln]);
+    out.lang = out.lang_buf[0..ln];
+    const sn = @min(rs.len, out.script_buf.len);
+    @memcpy(out.script_buf[0..sn], rs[0..sn]);
+    out.script = out.script_buf[0..sn];
+    const rn = @min(rr.len, out.region_buf.len);
+    @memcpy(out.region_buf[0..rn], rr[0..rn]);
+    out.region = out.region_buf[0..rn];
+    return true;
+}
+
+/// UTS #35 §4.3 "Remove Likely Subtags". First maximizes `in`, then finds the
+/// shortest equivalent: tries (lang), (lang, region), (lang, script) and keeps
+/// the first whose maximization equals the full maximization. Writes the
+/// minimized subtags into `out`. Returns false when the input could not be
+/// maximized (data absent) — the caller keeps the input.
+pub fn removeLikelySubtags(in: Subtags, out: *Subtags) bool {
+    var max: Subtags = .{};
+    if (!addLikelySubtags(in, &max)) return false;
+
+    // Candidate trials, in the §4.3 order: language only, then language+region,
+    // then language+script. The first whose AddLikelySubtags matches `max` wins.
+
+    // 1. language alone.
+    if (maximizesTo(.{ .lang = max.lang }, max)) {
+        copySubtags(out, max.lang, "", "");
+        return true;
+    }
+    // 2. language + region.
+    if (max.region.len > 0 and maximizesTo(.{ .lang = max.lang, .region = max.region }, max)) {
+        copySubtags(out, max.lang, "", max.region);
+        return true;
+    }
+    // 3. language + script.
+    if (max.script.len > 0 and maximizesTo(.{ .lang = max.lang, .script = max.script }, max)) {
+        copySubtags(out, max.lang, max.script, "");
+        return true;
+    }
+    // Nothing shorter matched → the maximal form is already minimal.
+    copySubtags(out, max.lang, max.script, max.region);
+    return true;
+}
+
+/// True when AddLikelySubtags(candidate) yields exactly `target`.
+fn maximizesTo(candidate: Subtags, target: Subtags) bool {
+    var m: Subtags = .{};
+    if (!addLikelySubtags(candidate, &m)) return false;
+    return asciiEqlIgnoreCase(m.lang, target.lang) and
+        asciiEqlIgnoreCase(m.script, target.script) and
+        asciiEqlIgnoreCase(m.region, target.region);
+}
+
+fn copySubtags(out: *Subtags, lang: []const u8, script: []const u8, region: []const u8) void {
+    out.* = .{};
+    const ln = @min(lang.len, out.lang_buf.len);
+    @memcpy(out.lang_buf[0..ln], lang[0..ln]);
+    out.lang = out.lang_buf[0..ln];
+    const sn = @min(script.len, out.script_buf.len);
+    @memcpy(out.script_buf[0..sn], script[0..sn]);
+    out.script = out.script_buf[0..sn];
+    const rn = @min(region.len, out.region_buf.len);
+    @memcpy(out.region_buf[0..rn], region[0..rn]);
+    out.region = out.region_buf[0..rn];
+}
+
 fn readU16(buf: []const u8, off: *usize) ?u16 {
     if (off.* + 2 > buf.len) return null;
     const v = std.mem.readInt(u16, buf[off.*..][0..2], .little);
@@ -901,6 +1069,12 @@ const TagParts = struct { lang: []const u8, script: []const u8, region: []const 
 /// Split a BCP 47 tag into language / script / region subtags, lowercasing the
 /// language and uppercasing the region (script title-case) so candidate keys
 /// match CLDR's canonical form. Extensions and variants are ignored.
+///
+/// When the tag carries no script, the UTS #35 §4.3 likely script is inferred
+/// from the language (+region) and written into `script_buf`, so the candidate
+/// chains below reach script-keyed CLDR data (e.g. zh-TW → zh-Hant). This only
+/// affects *data resolution*, never a user-visible tag. The inferred script is
+/// skipped if the likelySubtags data is absent (stub / off, or a future build).
 fn splitTag(tag: []const u8, lang_buf: []u8, script_buf: []u8, region_buf: []u8) TagParts {
     var lang: []const u8 = "";
     var script: []const u8 = "";
@@ -923,6 +1097,19 @@ fn splitTag(tag: []const u8, lang_buf: []u8, script_buf: []u8, region_buf: []u8)
             break; // region terminates the part of the tag we care about
         }
     }
+
+    // §4.3 Add Likely Subtags — fill the script when absent so script-keyed
+    // CLDR sections (zh-Hant, sr-Cyrl, …) are reachable from a region-only tag.
+    if (script.len == 0 and lang.len != 0) {
+        var max: Subtags = .{};
+        if (addLikelySubtags(.{ .lang = lang, .script = "", .region = region }, &max) and
+            max.script.len > 0 and max.script.len <= script_buf.len)
+        {
+            @memcpy(script_buf[0..max.script.len], max.script);
+            script = script_buf[0..max.script.len];
+        }
+    }
+
     return .{ .lang = lang, .script = script, .region = region };
 }
 
@@ -950,6 +1137,31 @@ fn joinTag(buf: []u8, lang: []const u8, script: []const u8, region: []const u8) 
         if (!append(buf, &len, region)) return null;
     }
     return buf[0..len];
+}
+
+/// UTS #35 §4.3 Add Likely Subtags, materialised once per formatter as the
+/// "data locale": the resolved tag with its likely script filled in when the
+/// tag carries none (e.g. `en` → `en-Latn`, `zh-TW` → `zh-Hant-TW`), so the
+/// per-`format()` CLDR candidate chains can resolve script-keyed sections
+/// without re-scanning the ~7.8k-entry likelySubtags table on every call.
+///
+/// The result is written into `buf` (no allocation here; the caller owns a
+/// copy) as `lang(-script)(-region)` from `splitTag`'s canonicalised parts.
+/// Returns the original `locale` unchanged when no script can be inferred
+/// (data absent at stub/off, or a wholly unknown tag) or when `buf` is too
+/// small — both cases are safe: the per-format lookup then re-derives the
+/// script via `splitTag` exactly as before, so behaviour never changes, only
+/// the (rare) hot-path scan cost returns. Idempotent: a tag that already
+/// carries its script splits to the same parts and round-trips identically.
+pub fn maximizeForData(locale: []const u8, buf: []u8) []const u8 {
+    var lang_buf: [16]u8 = undefined;
+    var script_buf: [8]u8 = undefined;
+    var region_buf: [8]u8 = undefined;
+    const parts = splitTag(locale, &lang_buf, &script_buf, &region_buf);
+    // No script was inferred (or the language was unparsable) → keep the input
+    // tag verbatim so the caller's stored data-locale equals the resolved tag.
+    if (parts.script.len == 0) return locale;
+    return joinTag(buf, parts.lang, parts.script, parts.region) orelse locale;
 }
 
 fn isAllAlpha(s: []const u8) bool {

@@ -43,6 +43,7 @@ const SectionKind = enum(u8) {
     display_names = 6,
     currencies = 7,
     currency_names = 8,
+    likely_subtags = 9,
 };
 
 /// Plural-category index shared with `cldr.zig`'s PluralCategory
@@ -148,13 +149,14 @@ pub fn main(init: std.process.Init) !void {
     const dates = try loadDates(arena, io, json_root);
     const display = try loadDisplayNames(arena, io, json_root);
     const currencies = try loadCurrencies(arena, io, json_root);
+    const likely = try loadLikelySubtags(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
-    var buf: [320]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len });
+    var buf: [380]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -220,12 +222,13 @@ fn pack(
     dates: []DateLocale,
     display: []DisplayLocale,
     currencies: CurrencyData,
+    likely: []LikelyEntry,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [8]SectionDir = undefined;
+    var dirs: [9]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -258,6 +261,10 @@ fn pack(
     const curname_start: u32 = @intCast(payloads.items.len);
     try writeCurrencyNamesPayload(gpa, &payloads, currencies);
     dirs[7] = .{ .kind = .currency_names, .off = curname_start, .len = @as(u32, @intCast(payloads.items.len)) - curname_start };
+
+    const likely_start: u32 = @intCast(payloads.items.len);
+    try writeLikelySubtagsPayload(gpa, &payloads, likely);
+    dirs[8] = .{ .kind = .likely_subtags, .off = likely_start, .len = @as(u32, @intCast(payloads.items.len)) - likely_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -337,6 +344,77 @@ fn nsDigitBase(table: []NumberingSystem, id: []const u8) u32 {
         if (std.mem.eql(u8, n.id, id)) return n.digit_base;
     }
     return '0'; // latn fallback
+}
+
+// ── likely subtags (UTS #35 §4.3 Add/Remove Likely Subtags) ──────────────────
+
+const LikelyEntry = struct {
+    key: []const u8, // lookup key, canonical CLDR form: lang | und (-script)? (-region)?
+    lang: []const u8, // value language subtag
+    script: []const u8, // value script subtag (4 alpha)
+    region: []const u8, // value region subtag (2 alpha / 3 digit)
+    fn lessThan(_: void, a: LikelyEntry, b: LikelyEntry) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+/// likelySubtags.json → sorted (key, lang, script, region). The full CLDR table
+/// (every `und-…` source plus language-keyed sources) so maximize works on any
+/// requested tag. Sorted by key for a runtime binary search.
+fn loadLikelySubtags(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]LikelyEntry {
+    const path = try std.fmt.allocPrint(arena, "{s}/cldr-core/supplemental/likelySubtags.json", .{json_root});
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch
+        fatal("cannot read {s} (run tools/fetch-cldr.sh first)", .{path});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+    const tbl = (root.object.get("supplemental") orelse fatal("no supplemental", .{})).object
+        .get("likelySubtags").?.object;
+
+    var out: std.ArrayListUnmanaged(LikelyEntry) = .empty;
+    var it = tbl.iterator();
+    while (it.next()) |e| {
+        const v = subtagsOf(e.value_ptr.*.string);
+        try out.append(arena, .{ .key = e.key_ptr.*, .lang = v.lang, .script = v.script, .region = v.region });
+    }
+    std.sort.block(LikelyEntry, out.items, {}, LikelyEntry.lessThan);
+    return out.items;
+}
+
+const Subtags = struct { lang: []const u8, script: []const u8, region: []const u8 };
+
+/// Split a CLDR locale id into language / script / region (variants/extensions
+/// dropped — likelySubtags values never carry them).
+fn subtagsOf(tag: []const u8) Subtags {
+    var lang: []const u8 = "";
+    var script: []const u8 = "";
+    var region: []const u8 = "";
+    var i: usize = 0;
+    var first = true;
+    while (i < tag.len) {
+        var j = i;
+        while (j < tag.len and tag[j] != '-' and tag[j] != '_') j += 1;
+        const sub = tag[i..j];
+        if (first) {
+            lang = sub;
+            first = false;
+        } else if (sub.len == 4 and isAllAlpha(sub) and script.len == 0) {
+            script = sub;
+        } else if (((sub.len == 2 and isAllAlpha(sub)) or (sub.len == 3 and isAllDigit(sub))) and region.len == 0) {
+            region = sub;
+            break;
+        }
+        i = j + 1;
+    }
+    return .{ .lang = lang, .script = script, .region = region };
+}
+
+fn writeLikelySubtagsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), table: []LikelyEntry) !void {
+    try appendU32(gpa, buf, table.len);
+    for (table) |e| {
+        try appendStr8(gpa, buf, e.key);
+        try appendStr8(gpa, buf, e.lang);
+        try appendStr8(gpa, buf, e.script);
+        try appendStr8(gpa, buf, e.region);
+    }
 }
 
 /// Per modern locale: default numbering system + its symbols and decimal/percent
