@@ -792,3 +792,57 @@ test "intl: legacy ctor subclass chains prototype from NewTarget" {
         \\ typeof m.format === "function" && m.format(42) === "42") ? 1 : 0
     );
 }
+
+// ── NumberFormat currency (CLDR symbols + patterns + fraction digits) ─────────
+
+test "intl: currency formats with localized symbol + minor units" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (l, c, v) => new Intl.NumberFormat(l, { style: 'currency', currency: c }).format(v);
+        \\(f('en','USD',5) === '$5.00' &&
+        \\ f('en','USD',-1234.5) === '-$1,234.50' &&
+        \\ f('en','EUR',1) === '€1.00' &&
+        \\ f('en','JPY',1234.5) === '¥1,235' &&      // 0 fraction digits
+        \\ f('de','EUR',1234.5) === '1.234,50 €' // suffix symbol, nbsp
+        \\) ? 1 : 0
+    );
+}
+
+test "intl: currencyDisplay symbol vs narrowSymbol" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (o) => new Intl.NumberFormat('en', Object.assign({ style:'currency', currency:'CAD' }, o)).format(5);
+        \\// CAD's locale symbol is "CA$"; its narrow form is "$".
+        \\(f({ currencyDisplay:'symbol' }) === 'CA$5.00' &&
+        \\ f({ currencyDisplay:'narrowSymbol' }) === '$5.00') ? 1 : 0
+    );
+}
+
+test "intl: currency formatToParts emits currency + sign parts in order" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const p = new Intl.NumberFormat('en', { style:'currency', currency:'USD' }).formatToParts(-5);
+        \\const t = p.map(x => x.type).join(',');
+        \\(t === 'minusSign,currency,integer,decimal,fraction' &&
+        \\ p.find(x => x.type==='currency').value === '$') ? 1 : 0
+    );
+}
+
+test "intl: currency options validated regardless of style (§15.1.2)" {
+    try requireIntlBuild();
+    // currencyDisplay / currencySign are read + validated even when the style
+    // is not "currency" — an invalid value throws RangeError.
+    try evalThrows("new Intl.NumberFormat('en', { currencyDisplay: 'bogus' })");
+    try evalThrows("new Intl.NumberFormat('en', { currencySign: 'bogus' })");
+    try evalThrows("new Intl.NumberFormat('en', { style:'decimal', currency: 'US' })"); // malformed code
+}
+
+test "intl: currency default minFractionDigits clamps to a smaller user max" {
+    try requireIntlBuild();
+    // cCurrencyDigits(USD)=2 would make the default mnfd 2, but an explicit
+    // maximumFractionDigits:0 must clamp it down, not throw (§15.1.1).
+    try evalAssert1(
+        \\const ro = new Intl.NumberFormat('en', { style:'currency', currency:'USD', maximumFractionDigits:0 }).resolvedOptions();
+        \\(ro.minimumFractionDigits === 0 && ro.maximumFractionDigits === 0) ? 1 : 0
+    );
+}

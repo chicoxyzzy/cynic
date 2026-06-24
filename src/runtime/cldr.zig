@@ -57,6 +57,7 @@ const SectionKind = enum(u8) {
     numbering_systems = 4,
     dates = 5,
     display_names = 6,
+    currencies = 7,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -65,6 +66,7 @@ var init_done: bool = false;
 var init_ok: bool = false;
 var card_payload: []const u8 = &.{};
 var ord_payload: []const u8 = &.{};
+var cur_payload: []const u8 = &.{};
 var num_payload: []const u8 = &.{};
 var ns_payload: []const u8 = &.{};
 var dates_payload: []const u8 = &.{};
@@ -102,6 +104,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.numbering_systems) => ns_payload = payload,
             @intFromEnum(SectionKind.dates) => dates_payload = payload,
             @intFromEnum(SectionKind.display_names) => display_payload = payload,
+            @intFromEnum(SectionKind.currencies) => cur_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -490,6 +493,122 @@ fn findNumber(key: []const u8) ?NumberData {
         if (asciiEqlIgnoreCase(k, key)) return d;
     }
     return null;
+}
+
+// ── currencies (symbols + patterns + fraction digits) ─────────────────────────
+
+pub const CurrencyPattern = struct { standard: []const u8, accounting: []const u8 };
+
+/// §15.1.1 cCurrencyDigits — minor units for a currency code. The packed table
+/// holds only non-default entries; returns 2 (the CLDR `DEFAULT`) when absent.
+pub fn currencyFractionDigits(code: []const u8) u8 {
+    if (!ensureInit() or cur_payload.len < 4 or code.len != 3) return 2;
+    const count = std.mem.readInt(u32, cur_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const c = readBytes(cur_payload, &off, 3) orelse return 2;
+        const digits = readU8(cur_payload, &off) orelse return 2;
+        if (asciiEqlIgnoreCase(c, code)) return digits;
+    }
+    return 2;
+}
+
+/// Byte offset of the per-locale currency table (just past the fraction table).
+fn currencyLocalesStart() ?usize {
+    if (cur_payload.len < 4) return null;
+    const fcount = std.mem.readInt(u32, cur_payload[0..4], .little);
+    const start = 4 + @as(usize, fcount) * 4; // 3-byte code + 1-byte digits
+    return if (start + 4 <= cur_payload.len) start else null;
+}
+
+/// Locate one locale's currency record; returns the offset just past its key
+/// (at `std_pattern`). Exact key match only — callers walk the fallback chain.
+fn findCurrencyLocale(key: []const u8) ?usize {
+    const tbl = currencyLocalesStart() orelse return null;
+    var off = tbl;
+    const count = std.mem.readInt(u32, cur_payload[off..][0..4], .little);
+    off += 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(cur_payload, &off) orelse return null;
+        const k = readBytes(cur_payload, &off, klen) orelse return null;
+        const rec_off = off;
+        // Skip std + acct patterns and the symbol table to reach the next key.
+        _ = readStr16(cur_payload, &off) orelse return null;
+        _ = readStr16(cur_payload, &off) orelse return null;
+        const sym_count = readU16(cur_payload, &off) orelse return null;
+        var s: u32 = 0;
+        while (s < sym_count) : (s += 1) {
+            _ = readBytes(cur_payload, &off, 3) orelse return null;
+            _ = readStr8(cur_payload, &off) orelse return null;
+            _ = readStr8(cur_payload, &off) orelse return null;
+        }
+        if (asciiEqlIgnoreCase(k, key)) return rec_off;
+    }
+    return null;
+}
+
+/// The currency display pattern pair for a locale (`¤#,##0.00` + accounting),
+/// walking the language/script/region fallback chain. Null when absent.
+pub fn currencyPattern(locale: []const u8) ?CurrencyPattern {
+    if (!ensureInit()) return null;
+    var rec_off: ?usize = null;
+    if (withCandidates(locale, findCurrencyLocale)) |o| rec_off = o;
+    const off0 = rec_off orelse return null;
+    var off = off0;
+    const std_pat = readStr16(cur_payload, &off) orelse return null;
+    const acct_pat = readStr16(cur_payload, &off) orelse return null;
+    return .{ .standard = std_pat, .accounting = acct_pat };
+}
+
+/// The localized currency symbol (or narrow symbol) for `code` in `locale`,
+/// walking the fallback chain. Null when the locale stores no override (caller
+/// falls back to the ISO code). `narrow` prefers `symbol-alt-narrow`.
+pub fn currencySymbol(locale: []const u8, code: []const u8, narrow: bool) ?[]const u8 {
+    if (!ensureInit() or code.len != 3) return null;
+    const off0 = withCandidates(locale, findCurrencyLocale) orelse return null;
+    var off = off0;
+    _ = readStr16(cur_payload, &off) orelse return null; // std
+    _ = readStr16(cur_payload, &off) orelse return null; // acct
+    const sym_count = readU16(cur_payload, &off) orelse return null;
+    var s: u32 = 0;
+    while (s < sym_count) : (s += 1) {
+        const c = readBytes(cur_payload, &off, 3) orelse return null;
+        const sym = readStr8(cur_payload, &off) orelse return null;
+        const nar = readStr8(cur_payload, &off) orelse return null;
+        if (asciiEqlIgnoreCase(c, code))
+            return if (narrow and nar.len > 0) nar else sym;
+    }
+    return null;
+}
+
+/// Walk the most→least specific locale candidates (lang-script-region, …,
+/// lang), calling `find` on each; returns the first hit. Mirrors numberData.
+fn withCandidates(locale: []const u8, comptime find: fn ([]const u8) ?usize) ?usize {
+    var lang_buf: [16]u8 = undefined;
+    var script_buf: [8]u8 = undefined;
+    var region_buf: [8]u8 = undefined;
+    const parts = splitTag(locale, &lang_buf, &script_buf, &region_buf);
+    if (parts.lang.len == 0) return null;
+    var cand_buf: [32]u8 = undefined;
+    if (parts.script.len > 0 and parts.region.len > 0)
+        if (joinTag(&cand_buf, parts.lang, parts.script, parts.region)) |k|
+            if (find(k)) |o| return o;
+    if (parts.region.len > 0)
+        if (joinTag(&cand_buf, parts.lang, "", parts.region)) |k|
+            if (find(k)) |o| return o;
+    if (parts.script.len > 0)
+        if (joinTag(&cand_buf, parts.lang, parts.script, "")) |k|
+            if (find(k)) |o| return o;
+    return find(parts.lang);
+}
+
+fn readU16(buf: []const u8, off: *usize) ?u16 {
+    if (off.* + 2 > buf.len) return null;
+    const v = std.mem.readInt(u16, buf[off.*..][0..2], .little);
+    off.* += 2;
+    return v;
 }
 
 fn readU8(buf: []const u8, off: *usize) ?u8 {

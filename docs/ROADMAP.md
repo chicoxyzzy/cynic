@@ -602,7 +602,7 @@ automatically on the next full sweep.
   |------|---------------|---------------------------|----------------|
   | **`off`** (default) | absent | ISO + UTC/fixed-offset only | none |
   | **`stub`** | structural ECMA-402 (option validation; format/compare stubs) | accept supported calendar **ids** and structural IANA **names**; arithmetic still ISO/UTC | none |
-  | **`full`** | `stub` surface, plus CLDR-backed `Intl.PluralRules`, `Intl.NumberFormat` (decimal + percent), `Intl.DateTimeFormat` (gregorian), and `Intl.DisplayNames` | real zone offsets via embedded CYTZ/TZif (`vendor/tzdata/cynic_tzdb.bin`); IANA sources in `vendor/tzdata/iana/` (fetch: `tools/fetch-tzdata.sh`; pack: `zig build pack-tzdata`) | tzdb + CLDR (`vendor/cldr/cynic_cldr.bin`, ~2.8 MiB) |
+  | **`full`** | `stub` surface, plus CLDR-backed `Intl.PluralRules`, `Intl.NumberFormat` (decimal + percent + currency), `Intl.DateTimeFormat` (gregorian), and `Intl.DisplayNames` | real zone offsets via embedded CYTZ/TZif (`vendor/tzdata/cynic_tzdb.bin`); IANA sources in `vendor/tzdata/iana/` (fetch: `tools/fetch-tzdata.sh`; pack: `zig build pack-tzdata`) | tzdb + CLDR (`vendor/cldr/cynic_cldr.bin`, ~3 MiB) |
 
   The default edge/server build omits the locale/tz stack to stay
   small and dependency-light. `intl402/` stays out of the main

@@ -1002,33 +1002,57 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
 
     var slots: intl.NumberFormatSlots = .{};
     slots.base.locale = resolved.locale;
+    // Option resolution can throw partway (an invalid enum, a bad currency
+    // code); free the owned slots so a rejected constructor doesn't leak.
+    // On success storeRecord takes ownership and this never fires.
+    errdefer slots.deinit(realm.allocator);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "decimal", "percent", "currency", "unit" }, "decimal");
-    if (std.mem.eql(u8, slots.style, "currency")) {
-        const cur = try getOptionString(realm, opts, "currency", null, "");
-        if (cur.len == 0) return throwTypeError(realm, "currency option required for currency style");
-        if (cur.len != 3) return throwRangeError(realm, "invalid currency code");
-        var up: [3]u8 = undefined;
-        for (cur, 0..) |c, i| {
-            if (c >= 'a' and c <= 'z') up[i] = c - 32 else if (c >= 'A' and c <= 'Z') up[i] = c else return throwRangeError(realm, "invalid currency code");
-        }
-        slots.currency = try realm.allocator.dupe(u8, &up);
-        slots.currency_display = try getOptionStringOwned(realm, opts, "currencyDisplay", &.{ "code", "symbol", "narrowSymbol", "name" }, "symbol");
-        slots.currency_sign = try getOptionStringOwned(realm, opts, "currencySign", &.{ "standard", "accounting" }, "standard");
+    const is_currency_style = std.mem.eql(u8, slots.style, "currency");
+    const is_unit_style = std.mem.eql(u8, slots.style, "unit");
+
+    // §15.1.2 SetNumberFormatUnitOptions — currency / currencyDisplay /
+    // currencySign are read and validated *unconditionally* (an invalid value
+    // throws RangeError regardless of style); they are only applied when the
+    // style is "currency". `getOptionString` with an allowed list returns an
+    // interned pointer, so reading-for-validation costs no allocation.
+    const cur = try getOptionString(realm, opts, "currency", null, "");
+    if (cur.len == 0) {
+        if (is_currency_style) return throwTypeError(realm, "currency option required for currency style");
+    } else if (cur.len != 3 or !isAsciiAlpha(cur)) {
+        return throwRangeError(realm, "invalid currency code");
     }
-    if (std.mem.eql(u8, slots.style, "unit")) {
-        const u = try getOptionString(realm, opts, "unit", null, "");
-        if (u.len == 0) return throwTypeError(realm, "unit option required for unit style");
-        slots.unit = try realm.allocator.dupe(u8, u);
-        slots.unit_display = try getOptionStringOwned(realm, opts, "unitDisplay", &.{ "short", "narrow", "long" }, "short");
+    const cur_display = try getOptionString(realm, opts, "currencyDisplay", &.{ "code", "symbol", "narrowSymbol", "name" }, "symbol");
+    const cur_sign = try getOptionString(realm, opts, "currencySign", &.{ "standard", "accounting" }, "standard");
+    if (is_currency_style) {
+        var up: [3]u8 = undefined;
+        for (cur, 0..) |c, i| up[i] = if (c >= 'a' and c <= 'z') c - 32 else c;
+        slots.currency = try realm.allocator.dupe(u8, &up);
+        slots.currency_display = try realm.allocator.dupe(u8, cur_display);
+        slots.currency_sign = try realm.allocator.dupe(u8, cur_sign);
+    }
+
+    // unit / unitDisplay: unitDisplay is validated unconditionally; the unit id
+    // itself is required + applied only for the unit style. (Sanctioned-unit
+    // validation for non-unit styles is a follow-up.)
+    const unit = try getOptionString(realm, opts, "unit", null, "");
+    const unit_display = try getOptionString(realm, opts, "unitDisplay", &.{ "short", "narrow", "long" }, "short");
+    if (is_unit_style) {
+        if (unit.len == 0) return throwTypeError(realm, "unit option required for unit style");
+        slots.unit = try realm.allocator.dupe(u8, unit);
+        slots.unit_display = try realm.allocator.dupe(u8, unit_display);
     }
     slots.notation = try getOptionStringOwned(realm, opts, "notation", &.{ "standard", "scientific", "engineering", "compact" }, "standard");
     slots.compact_display = try getOptionStringOwned(realm, opts, "compactDisplay", &.{ "short", "long" }, "short");
     slots.use_grouping = try getUseGroupingOwned(realm, opts);
 
     // §15.1.1 SetNumberFormatDigitOptions — fraction-digit defaults vary by
-    // style (percent → 0 max; decimal → 3 max; currency → 2).
-    const mxfd_default: u32 = if (std.mem.eql(u8, slots.style, "currency")) 2 else if (std.mem.eql(u8, slots.style, "percent")) 0 else 3;
-    try setNumberFormatDigitOptions(realm, &slots, opts, 0, mxfd_default);
+    // style: percent → min 0 / max 0; decimal → min 0 / max 3; currency →
+    // min and max both cCurrencyDigits(currency) (2 for most, 0 for JPY, 3 for
+    // BHD, …), so an integer amount still shows the minor units ("$5.00").
+    const cur_digits: u32 = if (is_currency_style) cldr.currencyFractionDigits(slots.currency) else 0;
+    const mnfd_default: u32 = if (is_currency_style) cur_digits else 0;
+    const mxfd_default: u32 = if (is_currency_style) cur_digits else if (std.mem.eql(u8, slots.style, "percent")) 0 else 3;
+    try setNumberFormatDigitOptions(realm, &slots, opts, mnfd_default, mxfd_default);
 
     slots.sign_display = try getOptionStringOwned(realm, opts, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" }, "auto");
 
@@ -1091,7 +1115,11 @@ fn setNumberFormatDigitOptions(realm: *Realm, slots: *intl.NumberFormatSlots, op
         slots.maximum_significant_digits = mxsd orelse 21;
     } else if (mnfd != null or mxfd != null) {
         slots.rounding_type = try realm.allocator.dupe(u8, "fractionDigits");
-        const lo = mnfd orelse mnfd_default;
+        // §15.1.1: when only one bound is explicit, the other default is
+        // clamped to it (mnfd → min(default, mxfd); mxfd → max(default, mnfd)),
+        // so a currency-driven default mnfd never spuriously exceeds a smaller
+        // user mxfd. A RangeError is reserved for both bounds explicit + crossed.
+        const lo = mnfd orelse @min(mnfd_default, mxfd orelse mnfd_default);
         const hi = mxfd orelse @max(lo, mxfd_default);
         if (lo > hi) return throwRangeError(realm, "minimumFractionDigits > maximumFractionDigits");
         slots.minimum_fraction_digits = lo;
@@ -1259,6 +1287,7 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         nd.digit_base;
 
     const is_percent = std.mem.eql(u8, slots.style, "percent");
+    const is_currency = std.mem.eql(u8, slots.style, "currency");
     const scale: f64 = if (is_percent) 100 else 1;
     const magnitude = @abs(x) * scale;
     const negative = std.math.signbit(x);
@@ -1299,9 +1328,17 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         }
     }.f;
 
-    // Pattern affixes (percent sign placement / literals). Decimal patterns
-    // usually have none.
-    const pattern = if (is_percent) nd.pct_pattern else nd.dec_pattern;
+    // Pattern affixes (percent / currency sign placement, literals). Decimal
+    // patterns usually have none. Currency draws its own pattern (standard or
+    // accounting) from the locale's currencyFormats; the `¤` placeholder is
+    // substituted with the resolved display text.
+    var cur_display: []const u8 = "";
+    const pattern = if (is_currency) blk: {
+        cur_display = currencyDisplayText(slots);
+        const cp = cldr.currencyPattern(slots.base.locale) orelse
+            cldr.CurrencyPattern{ .standard = "¤#,##0.00", .accounting = "¤#,##0.00" };
+        break :blk if (std.mem.eql(u8, slots.currency_sign, "accounting")) cp.accounting else cp.standard;
+    } else if (is_percent) nd.pct_pattern else nd.dec_pattern;
     const affix = patternAffixes(pattern);
 
     // sign string
@@ -1317,9 +1354,11 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         }
     }
 
-    // prefix affix
-    appendAffix(out, &n, affix.prefix, nd, append);
+    // Sign leads the prefix affix so the minus precedes a currency symbol
+    // ("-$5.00", not "$-5.00"); for percent / decimal the prefix is empty so
+    // ordering is unaffected.
     if (sign.len > 0) append(out, &n, sign_type, sign);
+    if (is_currency) appendCurrencyAffix(out, &n, affix.prefix, cur_display, append) else appendAffix(out, &n, affix.prefix, nd, append);
 
     // integer with grouping + digit substitution
     appendGroupedInteger(out, &n, int_pad[0..ip_len], slots, nd, digit_base, append);
@@ -1331,7 +1370,7 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         append(out, &n, "fraction", sb);
     }
 
-    appendAffix(out, &n, affix.suffix, nd, append);
+    if (is_currency) appendCurrencyAffix(out, &n, affix.suffix, cur_display, append) else appendAffix(out, &n, affix.suffix, nd, append);
     return n;
 }
 
@@ -1372,6 +1411,38 @@ fn appendAffix(out: []Seg, n: *u32, affix: []const u8, nd: cldr.NumberData, appe
             append(out, n, "literal", affix[start..i]);
         }
     }
+}
+
+/// `¤` (U+00A4, UTF-8 0xC2 0xA4) is the CLDR currency placeholder. Emit the
+/// resolved display text as a "currency" segment; other text is a literal
+/// (trimming the no-break spaces CLDR uses around the symbol so they don't
+/// surface as stray parts — currencySpacing is approximated as a plain space).
+fn appendCurrencyAffix(out: []Seg, n: *u32, affix: []const u8, cur_display: []const u8, append: anytype) void {
+    if (affix.len == 0) return;
+    var i: usize = 0;
+    while (i < affix.len) {
+        if (i + 1 < affix.len and affix[i] == 0xC2 and affix[i + 1] == 0xA4) {
+            append(out, n, "currency", cur_display);
+            i += 2;
+        } else {
+            const start = i;
+            while (i < affix.len and !(i + 1 < affix.len and affix[i] == 0xC2 and affix[i + 1] == 0xA4)) i += 1;
+            append(out, n, "literal", affix[start..i]);
+        }
+    }
+}
+
+/// Resolve the currency display text per `currencyDisplay`: "code" → the ISO
+/// code itself; "symbol"/"narrowSymbol" → the localized (narrow) symbol with
+/// the code as fallback; "name" → the long display name (singular; the plural
+/// `unitPattern` rendering is a follow-up). §15.5.x.
+fn currencyDisplayText(slots: *const intl.NumberFormatSlots) []const u8 {
+    const code = slots.currency;
+    if (std.mem.eql(u8, slots.currency_display, "code")) return code;
+    if (std.mem.eql(u8, slots.currency_display, "name"))
+        return cldr.displayName(slots.base.locale, .currency, code) orelse code;
+    const narrow = std.mem.eql(u8, slots.currency_display, "narrowSymbol");
+    return cldr.currencySymbol(slots.base.locale, code, narrow) orelse code;
 }
 
 /// Apply primary/secondary grouping from the pattern, substituting digits, and

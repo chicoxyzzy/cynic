@@ -41,6 +41,7 @@ const SectionKind = enum(u8) {
     numbering_systems = 4,
     dates = 5,
     display_names = 6,
+    currencies = 7,
 };
 
 /// CLDR "modern" coverage tier, base-language locales (plus the few
@@ -132,13 +133,14 @@ pub fn main(init: std.process.Init) !void {
     const numbers = try loadNumbers(arena, io, json_root, ns_table);
     const dates = try loadDates(arena, io, json_root);
     const display = try loadDisplayNames(arena, io, json_root);
+    const currencies = try loadCurrencies(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
-    var buf: [256]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len });
+    var buf: [320]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -203,12 +205,13 @@ fn pack(
     ns_table: []NumberingSystem,
     dates: []DateLocale,
     display: []DisplayLocale,
+    currencies: CurrencyData,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [6]SectionDir = undefined;
+    var dirs: [7]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -233,6 +236,10 @@ fn pack(
     const disp_start: u32 = @intCast(payloads.items.len);
     try writeDisplayNamesPayload(gpa, &payloads, display);
     dirs[5] = .{ .kind = .display_names, .off = disp_start, .len = @as(u32, @intCast(payloads.items.len)) - disp_start };
+
+    const cur_start: u32 = @intCast(payloads.items.len);
+    try writeCurrenciesPayload(gpa, &payloads, currencies);
+    dirs[6] = .{ .kind = .currencies, .off = cur_start, .len = @as(u32, @intCast(payloads.items.len)) - cur_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -366,6 +373,130 @@ fn writeNumbersPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8),
         try appendStr8(gpa, buf, l.percent);
         try appendStr16(gpa, buf, l.dec_pattern);
         try appendStr16(gpa, buf, l.pct_pattern);
+    }
+}
+
+// ── currencies (symbols + patterns + fraction digits) ─────────────────────────
+
+const CurSym = struct { code: [3]u8, symbol: []const u8, narrow: []const u8 };
+const CurrencyLocale = struct {
+    key: []const u8,
+    std_pattern: []const u8, // currencyFormats `standard`, e.g. "¤#,##0.00"
+    acct_pattern: []const u8, // currencyFormats `accounting`
+    syms: []CurSym,
+    fn lessThan(_: void, a: CurrencyLocale, b: CurrencyLocale) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+const CurFraction = struct { code: [3]u8, digits: u8 };
+const CurrencyData = struct { fractions: []CurFraction, locales: []CurrencyLocale };
+
+/// cldr-core/supplemental/currencyData.json `fractions` → per-currency minor
+/// units (§ cCurrencyDigits). Only non-default (≠2) entries are stored; the
+/// runtime defaults to 2. `DEFAULT` / non-3-letter keys are skipped.
+fn loadCurrencyFractions(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]CurFraction {
+    const path = try std.fmt.allocPrint(arena, "{s}/cldr-core/supplemental/currencyData.json", .{json_root});
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch
+        return &.{};
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch return &.{};
+    const fr = ((root.object.get("supplemental") orelse return &.{}).object
+        .get("currencyData") orelse return &.{}).object
+        .get("fractions") orelse return &.{};
+    var out: std.ArrayListUnmanaged(CurFraction) = .empty;
+    var it = fr.object.iterator();
+    while (it.next()) |e| {
+        const code = e.key_ptr.*;
+        if (code.len != 3 or !isUpper3(code)) continue; // skip DEFAULT etc.
+        const digs = if (e.value_ptr.*.object.get("_digits")) |d| d.string else continue;
+        const n = std.fmt.parseInt(u8, digs, 10) catch continue;
+        if (n == 2) continue; // default
+        out.append(arena, .{ .code = code[0..3].*, .digits = n }) catch return &.{};
+    }
+    return out.items;
+}
+
+fn isUpper3(s: []const u8) bool {
+    for (s) |c| if (c < 'A' or c > 'Z') return false;
+    return true;
+}
+
+/// Per modern locale: currency display patterns + localized symbols. The
+/// per-currency display *names* (currencyDisplay:"name") reuse the existing
+/// display-names section, so only `symbol` / `symbol-alt-narrow` are packed
+/// here, and only where they differ from the ISO code (else the code is the
+/// runtime fallback).
+fn loadCurrencies(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) !CurrencyData {
+    const fractions = try loadCurrencyFractions(arena, io, json_root);
+    var out: std.ArrayListUnmanaged(CurrencyLocale) = .empty;
+    for (modern_locales) |loc| {
+        const npath = try std.fmt.allocPrint(arena, "{s}/cldr-numbers-full/main/{s}/numbers.json", .{ json_root, loc });
+        const nbytes = std.Io.Dir.cwd().readFileAlloc(io, npath, arena, .limited(4 * 1024 * 1024)) catch continue;
+        const nroot = std.json.parseFromSliceLeaky(std.json.Value, arena, nbytes, .{}) catch continue;
+        var nit = nroot.object.get("main").?.object.iterator();
+        const n = (nit.next() orelse continue).value_ptr.*.object.get("numbers").?.object;
+        const default_ns = if (n.get("defaultNumberingSystem")) |d| d.string else "latn";
+        const cf_key = try std.fmt.allocPrint(arena, "currencyFormats-numberSystem-{s}", .{default_ns});
+        const cf = if (n.get(cf_key)) |c| c.object else continue;
+        const std_pat = strField(cf, "standard", "¤#,##0.00");
+        const acct_pat = strField(cf, "accounting", std_pat);
+
+        var syms: std.ArrayListUnmanaged(CurSym) = .empty;
+        const cpath = try std.fmt.allocPrint(arena, "{s}/cldr-numbers-full/main/{s}/currencies.json", .{ json_root, loc });
+        if (std.Io.Dir.cwd().readFileAlloc(io, cpath, arena, .limited(8 * 1024 * 1024))) |cbytes| {
+            if (std.json.parseFromSliceLeaky(std.json.Value, arena, cbytes, .{})) |croot| {
+                var cit = croot.object.get("main").?.object.iterator();
+                const curs = (cit.next() orelse continue).value_ptr.*.object
+                    .get("numbers").?.object.get("currencies").?.object;
+                var it = curs.iterator();
+                while (it.next()) |e| {
+                    const code = e.key_ptr.*;
+                    if (code.len != 3 or !isUpper3(code)) continue;
+                    const o = e.value_ptr.*.object;
+                    const sym = if (o.get("symbol")) |s| s.string else continue;
+                    if (std.mem.eql(u8, sym, code)) continue; // symbol == code → runtime fallback
+                    const narrow_v = o.get("symbol-alt-narrow");
+                    const narrow = if (narrow_v) |nv| nv.string else "";
+                    syms.append(arena, .{
+                        .code = code[0..3].*,
+                        .symbol = try arena.dupe(u8, sym),
+                        .narrow = if (narrow.len > 0 and !std.mem.eql(u8, narrow, sym)) try arena.dupe(u8, narrow) else "",
+                    }) catch {};
+                }
+            } else |_| {}
+        } else |_| {}
+
+        out.append(arena, .{
+            .key = loc,
+            .std_pattern = try arena.dupe(u8, std_pat),
+            .acct_pattern = try arena.dupe(u8, acct_pat),
+            .syms = syms.items,
+        }) catch {};
+    }
+    std.sort.block(CurrencyLocale, out.items, {}, CurrencyLocale.lessThan);
+    return .{ .fractions = fractions, .locales = out.items };
+}
+
+fn writeCurrenciesPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), data: CurrencyData) !void {
+    // Global fraction-digit overrides.
+    try appendU32(gpa, buf, data.fractions.len);
+    for (data.fractions) |f| {
+        try buf.appendSlice(gpa, &f.code);
+        try buf.append(gpa, f.digits);
+    }
+    // Per-locale patterns + symbols.
+    try appendU32(gpa, buf, data.locales.len);
+    for (data.locales) |l| {
+        try appendStr8(gpa, buf, l.key);
+        try appendStr16(gpa, buf, l.std_pattern);
+        try appendStr16(gpa, buf, l.acct_pattern);
+        std.debug.assert(l.syms.len <= 0xFFFF);
+        try buf.append(gpa, @intCast(l.syms.len & 0xFF));
+        try buf.append(gpa, @intCast((l.syms.len >> 8) & 0xFF));
+        for (l.syms) |s| {
+            try buf.appendSlice(gpa, &s.code);
+            try appendStr8(gpa, buf, s.symbol);
+            try appendStr8(gpa, buf, s.narrow);
+        }
     }
 }
 

@@ -206,13 +206,17 @@ These are project rules — they apply to everyone.
   npm packages; `zig build pack-cldr` runs `tools/pack_cldr.zig` to emit the
   committed `vendor/cldr/cynic_cldr.bin` (CYCL container). At `full`,
   `Intl.PluralRules` (per-locale plural/ordinal selection, UTS #35 rule engine),
-  `Intl.NumberFormat` (decimal + percent: locale symbols, primary/secondary
-  grouping, numbering-system digit substitution, sign/fraction/significant
-  digits), and `Intl.DateTimeFormat` (gregorian: dateStyle/timeStyle + component
+  `Intl.NumberFormat` (decimal + percent + currency: locale symbols,
+  primary/secondary grouping, numbering-system digit substitution,
+  sign/fraction/significant digits; currency style draws the locale
+  currencyFormats pattern, localized symbol / narrowSymbol / code display,
+  and per-currency minor units from `currencyData`), and
+  `Intl.DateTimeFormat` (gregorian: dateStyle/timeStyle + component
   options, localized month/day/era/dayPeriod names, hourCycle, formatToParts) are
   CLDR-backed via `src/runtime/cldr.zig` (see `src/runtime/builtins/intl.zig`),
   as is `Intl.DisplayNames` (language / region / script / currency name tables).
-  NumberFormat currency/unit/compact output, DateTimeFormat skeleton best-fit /
+  NumberFormat currencyDisplay:"name" (plural unit pattern) + currencySpacing,
+  unit/compact output, DateTimeFormat skeleton best-fit /
   non-gregorian calendars / tz names, and DisplayNames calendar/dateTimeField
   types stay structural until their CLDR sections land. The display-name tables
   dominate the blob (~2.8 MiB total at `full`); trim `modern_locales` in
