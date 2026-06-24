@@ -17,6 +17,30 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-24 — cynic `05e99538` (lazy sweep), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Same-runner A/B vs `897d66ad` (incremental major marking), suite=both, 12 runs
+back-to-back per iteration. Lazy sweep slices the major's termination sweep —
+the residual ~9.6 ms STW after the mark went incremental — across safe-points:
+`collectFullTail` defers the `objects_mature` sweep, `runSafePoint` drains it
+in ~8192-object slices, dropping the max GC pause **~9.6 ms → ~1 ms** (the
+~1 ms mark slice is now the ceiling — both halves of the major cycle sliced).
+It adds only a phase-check branch per safe-point (no new write barrier), so
+throughput is unchanged — the renderer flagged no regressions past the
+threshold:
+
+- **Realistic Octane macros flat** (spread 12–19%) — crypto 0.99×, deltablue
+  0.97×, raytrace 1.01×, richards 1.01×, splay 0.98×; navier_stokes 0.94× the
+  lone flagged mover (faster, both tiers — incidental code-layout, not a
+  GC-logic change).
+- **Micros within noise** on the shared vCPU (20–96% per-iteration spread) —
+  no fixture cleared the ±5% + spread/3 flag; the slower-looking `prop_access`
+  / `method_call` / `object_alloc` interp ratios all sit under spread/3.
+
+Unlike incremental marking (which added the Dijkstra barrier across the whole
+marking window), lazy sweep only defers + slices existing sweep work, so the
+latency win is throughput-neutral. See `docs/handbook/gc.md` §Lazy sweep.
+
 ### 2026-06-23 — cynic `897d66ad` (incremental major marking), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Same-runner A/B vs `5b92a346` (the rebase base — the Intl substrate,
