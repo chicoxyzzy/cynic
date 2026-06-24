@@ -105,7 +105,7 @@ code construction (aligns with SES).
   `Reflect.construct`).
 - Microtask queue + `await` suspension via generator-shaped frame
   saves; promise reaction queue with then / catch / finally.
-- Stop-the-world mark-sweep heap, fired on allocation pressure
+- Generational mark-sweep heap (sticky-bit minors, incremental major mark + sweep), fired on allocation pressure
   — both a count trigger (`gc_threshold` allocations between
   cycles, default 16,384) and a byte trigger (`gc_byte_threshold`,
   default 16 MiB) so allocate-and-discard string concat patterns
@@ -124,11 +124,14 @@ code construction (aligns with SES).
 
 **In progress / planned.**
 
-- **Incremental / concurrent GC marking.** The generational
-  collector — young/mature split, write barrier, remembered set,
-  `collectYoung` with promotion-by-relink — has shipped (see the
-  Performance section); incremental marking of the mature set is
-  the remaining GC step.
+- **Concurrent GC marking.** The generational collector
+  (young/mature split, card-marked remembered set, sticky-bit
+  minors, `collectYoung` with promotion-by-relink) plus
+  **incremental** major marking and lazy sweep have shipped (see the
+  Performance section) — the major cycle marks behind a Dijkstra
+  barrier and sweeps in safe-point slices, cutting the max GC pause
+  ~800 ms → ~1 ms. Moving the mark fully *concurrent* (off-thread)
+  is the remaining GC step.
 - **GC trigger at every safe-point — the pure-native residual.**
   The allocation-pressure check (`gc_threshold` / `gc_byte_threshold`)
   fires at every interpreter safe-point: each bytecode loop back-edge
@@ -1158,13 +1161,14 @@ QuickJS-NG post-IC, the next bottleneck is `arith_loop` (pure
 dispatch + arithmetic throughput) — items 5, 6, 7, 10. If
 allocation-heavy workloads dominate, items 8, 9.
 
-**Planned — GC latency.**
+**GC latency — incremental marking + lazy sweep shipped.**
 
-- **Incremental / concurrent marking.** The generational
-  collector (shipped, above) still stop-the-world marks the
-  mature set on a major cycle; incremental marking would amortize
-  the long-pause tail. The next GC step after the generational
-  split.
+- **Incremental major mark + lazy sweep.** The major cycle no
+  longer stop-the-world marks/sweeps the mature set: the mark is
+  sliced across safe-points behind a Dijkstra incremental-update
+  barrier and the termination sweep is sliced too, cutting the max
+  GC pause **~800 ms → ~1 ms** on a 2M-object heap. Fully
+  *concurrent* (off-thread) marking is the remaining latency step.
 
 ## Proper Tail Calls (PTC) — shipped
 
