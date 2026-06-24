@@ -1273,6 +1273,8 @@ const default_number_data = cldr.NumberData{
     .minus = "-",
     .plus = "+",
     .percent = "%",
+    .infinity = "∞",
+    .nan = "NaN",
     .dec_pattern = "#,##0.###",
     .pct_pattern = "#,##0%",
 };
@@ -1288,36 +1290,47 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
 
     const is_percent = std.mem.eql(u8, slots.style, "percent");
     const is_currency = std.mem.eql(u8, slots.style, "currency");
-    const scale: f64 = if (is_percent) 100 else 1;
-    const magnitude = @abs(x) * scale;
-    const negative = std.math.signbit(x);
+    // §15.5.x — NaN and ±∞ replace the whole numeric portion with a single CLDR
+    // glyph, but the sign and the style affixes ($, %) are emitted exactly as
+    // for a finite magnitude, so both cases share the sign/affix path below.
+    // Per ToIntlMathematicalValue a NaN is sign-less (its sign bit is dropped, so
+    // `-NaN` formats as "NaN") and is grouped with zero for sign selection, so
+    // signDisplay "exceptZero"/"negative" emit no sign while "always" emits "+".
+    const non_finite = !std.math.isFinite(x);
+    const is_nan = std.math.isNan(x);
+    const negative = std.math.signbit(x) and !is_nan;
 
-    // Round to ASCII int/frac digit strings.
+    // Round to ASCII int/frac digit strings (finite magnitudes only).
     var int_ascii: [160]u8 = undefined;
     var frac_ascii: [160]u8 = undefined;
     var int_len: usize = 0;
     var frac_len: usize = 0;
-    roundDigits(slots, magnitude, &int_ascii, &int_len, &frac_ascii, &frac_len);
-
-    const is_zero = blk: {
-        for (int_ascii[0..int_len]) |c| if (c != '0') break :blk false;
-        for (frac_ascii[0..frac_len]) |c| if (c != '0') break :blk false;
-        break :blk true;
-    };
-
-    // minimumIntegerDigits: left-pad with '0'.
     var int_pad: [160]u8 = undefined;
     var ip_len: usize = 0;
-    if (int_len < slots.minimum_integer_digits) {
-        const pad = slots.minimum_integer_digits - int_len;
-        var k: usize = 0;
-        while (k < pad) : (k += 1) {
-            int_pad[ip_len] = '0';
-            ip_len += 1;
+    var is_zero = is_nan; // NaN groups with zero for signDisplay selection
+    if (!non_finite) {
+        const scale: f64 = if (is_percent) 100 else 1;
+        const magnitude = @abs(x) * scale;
+        roundDigits(slots, magnitude, &int_ascii, &int_len, &frac_ascii, &frac_len);
+
+        is_zero = blk: {
+            for (int_ascii[0..int_len]) |c| if (c != '0') break :blk false;
+            for (frac_ascii[0..frac_len]) |c| if (c != '0') break :blk false;
+            break :blk true;
+        };
+
+        // minimumIntegerDigits: left-pad with '0'.
+        if (int_len < slots.minimum_integer_digits) {
+            const pad = slots.minimum_integer_digits - int_len;
+            var k: usize = 0;
+            while (k < pad) : (k += 1) {
+                int_pad[ip_len] = '0';
+                ip_len += 1;
+            }
         }
+        @memcpy(int_pad[ip_len .. ip_len + int_len], int_ascii[0..int_len]);
+        ip_len += int_len;
     }
-    @memcpy(int_pad[ip_len .. ip_len + int_len], int_ascii[0..int_len]);
-    ip_len += int_len;
 
     var n: u32 = 0;
     const append = struct {
@@ -1353,6 +1366,10 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
             .sign_type = sign_type,
             .int_ascii = int_pad[0..ip_len],
             .frac_ascii = frac_ascii[0..frac_len],
+            // §15.5.x — for ±∞ / NaN the "{0}" number slot is the CLDR glyph
+            // ("∞ US dollars", "NaN US dollars"), not the (empty) digit run.
+            .glyph = if (non_finite) (if (is_nan) nd.nan else nd.infinity) else "",
+            .glyph_type = if (is_nan) "nan" else "infinity",
             .name = long_name,
             .slots = slots,
             .nd = nd,
@@ -1420,14 +1437,20 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
     if (sign.len > 0) append(out, &n, sign_type, sign);
     if (is_currency) appendCurrencyAffix(out, &n, affix.prefix, cur_display, prefix_space, append) else appendAffix(out, &n, affix.prefix, nd, append);
 
-    // integer with grouping + digit substitution
-    appendGroupedInteger(out, &n, int_pad[0..ip_len], slots, nd, digit_base, append);
+    if (non_finite) {
+        // §15.5.x — the entire numeric run is a single glyph segment; the style
+        // affixes emitted above and below still surround it ("$∞", "-∞%").
+        append(out, &n, if (is_nan) "nan" else "infinity", if (is_nan) nd.nan else nd.infinity);
+    } else {
+        // integer with grouping + digit substitution
+        appendGroupedInteger(out, &n, int_pad[0..ip_len], slots, nd, digit_base, append);
 
-    if (frac_len > 0) {
-        append(out, &n, "decimal", nd.decimal);
-        var sub: [256]u8 = undefined;
-        const sb = substituteDigits(frac_ascii[0..frac_len], digit_base, &sub);
-        append(out, &n, "fraction", sb);
+        if (frac_len > 0) {
+            append(out, &n, "decimal", nd.decimal);
+            var sub: [256]u8 = undefined;
+            const sb = substituteDigits(frac_ascii[0..frac_len], digit_base, &sub);
+            append(out, &n, "fraction", sb);
+        }
     }
 
     if (is_currency) appendCurrencyAffix(out, &n, affix.suffix, cur_display, suffix_space, append) else appendAffix(out, &n, affix.suffix, nd, append);
@@ -1529,6 +1552,10 @@ const UnitPatternCtx = struct {
     sign_type: []const u8,
     int_ascii: []const u8,
     frac_ascii: []const u8,
+    // Non-finite glyph: when non-empty it replaces the "{0}" digit run with a
+    // single infinity / nan segment (§15.5.x).
+    glyph: []const u8 = "",
+    glyph_type: []const u8 = "infinity",
     name: []const u8,
     slots: *const intl.NumberFormatSlots,
     nd: cldr.NumberData,
@@ -1545,11 +1572,15 @@ fn emitUnitPattern(out: []Seg, n: *u32, pat: []const u8, ctx: UnitPatternCtx, ap
         if (i + 2 < pat.len and pat[i] == '{' and pat[i + 2] == '}' and (pat[i + 1] == '0' or pat[i + 1] == '1')) {
             if (pat[i + 1] == '0') {
                 if (ctx.sign.len > 0) append(out, n, ctx.sign_type, ctx.sign);
-                appendGroupedInteger(out, n, ctx.int_ascii, ctx.slots, ctx.nd, ctx.digit_base, append);
-                if (ctx.frac_ascii.len > 0) {
-                    append(out, n, "decimal", ctx.nd.decimal);
-                    var sub: [256]u8 = undefined;
-                    append(out, n, "fraction", substituteDigits(ctx.frac_ascii, ctx.digit_base, &sub));
+                if (ctx.glyph.len > 0) {
+                    append(out, n, ctx.glyph_type, ctx.glyph);
+                } else {
+                    appendGroupedInteger(out, n, ctx.int_ascii, ctx.slots, ctx.nd, ctx.digit_base, append);
+                    if (ctx.frac_ascii.len > 0) {
+                        append(out, n, "decimal", ctx.nd.decimal);
+                        var sub: [256]u8 = undefined;
+                        append(out, n, "fraction", substituteDigits(ctx.frac_ascii, ctx.digit_base, &sub));
+                    }
                 }
             } else {
                 append(out, n, "currency", ctx.name);

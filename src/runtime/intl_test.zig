@@ -599,6 +599,83 @@ test "Intl.NumberFormat: format(0) with significant digits does not crash (host-
     );
 }
 
+test "Intl.NumberFormat: non-finite format (infinity / NaN glyphs)" {
+    try requireFullBuild();
+    // §15.5.x — ±∞ and NaN render as the locale's CLDR infinity / nan symbols,
+    // not the truncated "0" the digit path used to produce.
+    try evalAssert1(
+        \\const f = new Intl.NumberFormat('en');
+        \\(f.format(-Infinity)==='-∞' && f.format(Infinity)==='∞' && f.format(NaN)==='NaN') ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: non-finite formatToParts segments" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const ni = new Intl.NumberFormat('en').formatToParts(-Infinity);
+        \\const pi = new Intl.NumberFormat('en').formatToParts(Infinity);
+        \\const pn = new Intl.NumberFormat('en').formatToParts(NaN);
+        \\(ni.length===2 && ni[0].type==='minusSign' && ni[0].value==='-' && ni[1].type==='infinity' && ni[1].value==='∞' &&
+        \\ pi.length===1 && pi[0].type==='infinity' && pi[0].value==='∞' &&
+        \\ pn.length===1 && pn[0].type==='nan' && pn[0].value==='NaN') ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: non-finite signDisplay (NaN sign-less, infinity signed)" {
+    try requireFullBuild();
+    // NaN is sign-less per ToIntlMathematicalValue: "always" emits "+NaN" but
+    // "exceptZero"/auto/"negative" emit no sign, and a -NaN still formats "NaN".
+    try evalAssert1(
+        \\const always = new Intl.NumberFormat('en',{signDisplay:'always'});
+        \\const exceptZero = new Intl.NumberFormat('en',{signDisplay:'exceptZero'});
+        \\const negative = new Intl.NumberFormat('en',{signDisplay:'negative'});
+        \\(always.format(Infinity)==='+∞' && always.format(NaN)==='+NaN' && always.format(-Infinity)==='-∞' &&
+        \\ exceptZero.format(Infinity)==='+∞' && exceptZero.format(NaN)==='NaN' &&
+        \\ negative.format(Infinity)==='∞' && negative.format(-Infinity)==='-∞' &&
+        \\ new Intl.NumberFormat('en').format(-NaN)==='NaN') ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: non-finite currency and percent keep affixes" {
+    try requireFullBuild();
+    // The infinity / nan glyph replaces only the digits; the currency symbol and
+    // percent sign still surround it ("$∞", "-∞%").
+    try evalAssert1(
+        \\const usd = new Intl.NumberFormat('en',{style:'currency',currency:'USD'});
+        \\const pct = new Intl.NumberFormat('en',{style:'percent'});
+        \\const cp = usd.formatToParts(-Infinity);
+        \\(usd.format(Infinity)==='$∞' && usd.format(-Infinity)==='-$∞' &&
+        \\ pct.format(Infinity)==='∞%' && pct.format(-Infinity)==='-∞%' &&
+        \\ cp.length===3 && cp[0].type==='minusSign' && cp[1].type==='currency' && cp[1].value==='$' &&
+        \\ cp[2].type==='infinity' && cp[2].value==='∞') ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: non-finite currencyDisplay name + accounting" {
+    try requireFullBuild();
+    // currencyDisplay:"name" wraps the glyph in the unitPattern ("∞ US dollars");
+    // accounting parens wrap it too ("($∞)"). The glyph replaces only the digits.
+    try evalAssert1(
+        \\const nm = new Intl.NumberFormat('en',{style:'currency',currency:'USD',currencyDisplay:'name'});
+        \\const acct = new Intl.NumberFormat('en',{style:'currency',currency:'USD',currencySign:'accounting'});
+        \\const p = nm.formatToParts(Infinity);
+        \\(nm.format(Infinity)==='∞ US dollars' && nm.format(-Infinity)==='-∞ US dollars' &&
+        \\ nm.format(NaN)==='NaN US dollars' && acct.format(-Infinity)==='($∞)' &&
+        \\ p.length===3 && p[0].type==='infinity' && p[1].type==='literal' && p[2].type==='currency' &&
+        \\ p[2].value==='US dollars') ? 1 : 0
+    );
+}
+
+test "Intl.NumberFormat: localized NaN symbol (ar CLDR nan)" {
+    try requireFullBuild();
+    // ar's CLDR `nan` symbol is a localized phrase joined by a U+00A0 no-break
+    // space, proving the per-locale packed symbol is used, not the "NaN" default.
+    try evalAssert1(
+        \\const arNaN = new Intl.NumberFormat('ar').format(NaN);
+        \\(arNaN!=='NaN' && arNaN==='ليس رقمًا') ? 1 : 0
+    );
+}
+
 test "Intl.NumberFormat: resolvedOptions reports resolved digits + numberingSystem" {
     try requireFullBuild();
     try evalAssert1(

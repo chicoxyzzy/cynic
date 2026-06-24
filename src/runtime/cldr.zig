@@ -1,6 +1,6 @@
 //! Embedded Unicode CLDR data for `-Dintl=full` builds.
 //!
-//! The blob is `vendor/cldr/cynic_cldr.bin` (CYCL v1 — see `tools/pack_cldr.zig`):
+//! The blob is `vendor/cldr/cynic_cldr.bin` (CYCL v2 — see `tools/pack_cldr.zig`):
 //! a directory of typed sections. Today it carries the CLDR plural-rule
 //! conditions (UTS #35 Part 3); number / date / display-name sections land in
 //! later phases. At non-`full` tiers this module compiles to no-ops so off/stub
@@ -86,7 +86,7 @@ fn ensureInit() bool {
     const blob = embedBlob();
     if (blob.len < 12) return false;
     if (!std.mem.eql(u8, blob[0..4], "CYCL")) return false;
-    if (blob[4] != 1) return false;
+    if (blob[4] != 2) return false;
     const count = std.mem.readInt(u32, blob[8..12], .little);
     var off: usize = 12;
     var i: u32 = 0;
@@ -424,6 +424,8 @@ pub const NumberData = struct {
     minus: []const u8,
     plus: []const u8,
     percent: []const u8,
+    infinity: []const u8, // §15.5.x non-finite glyph (CLDR `infinity` symbol)
+    nan: []const u8, // §15.5.x non-finite glyph (CLDR `nan` symbol)
     dec_pattern: []const u8,
     pct_pattern: []const u8,
 };
@@ -491,6 +493,8 @@ fn findNumber(key: []const u8) ?NumberData {
         d.minus = readStr8(num_payload, &off) orelse return null;
         d.plus = readStr8(num_payload, &off) orelse return null;
         d.percent = readStr8(num_payload, &off) orelse return null;
+        d.infinity = readStr8(num_payload, &off) orelse return null;
+        d.nan = readStr8(num_payload, &off) orelse return null;
         d.dec_pattern = readStr16(num_payload, &off) orelse return null;
         d.pct_pattern = readStr16(num_payload, &off) orelse return null;
         if (asciiEqlIgnoreCase(k, key)) return d;

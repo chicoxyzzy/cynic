@@ -1,4 +1,4 @@
-//! Pack Unicode CLDR-JSON data into `vendor/cldr/cynic_cldr.bin` (CYCL v1).
+//! Pack Unicode CLDR-JSON data into `vendor/cldr/cynic_cldr.bin` (CYCL v2).
 //!
 //! Normal workflow (mirrors the tzdata pipeline):
 //!
@@ -10,7 +10,7 @@
 //! Container format (little-endian index; payloads are section-defined):
 //!
 //!     magic "CYCL"
-//!     u8  version = 1
+//!     u8  version = 2
 //!     u8  reserved[3]
 //!     u32 section_count
 //!     repeated section_count times (the directory):
@@ -268,7 +268,7 @@ fn pack(
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(gpa);
     try out.appendSlice(gpa, "CYCL");
-    try out.append(gpa, 1); // version
+    try out.append(gpa, 2); // version
     try out.appendSlice(gpa, &.{ 0, 0, 0 }); // reserved
     try appendU32(gpa, &out, dirs.len);
     for (dirs) |d| {
@@ -292,6 +292,8 @@ const NumberLocale = struct {
     minus: []const u8,
     plus: []const u8,
     percent: []const u8,
+    infinity: []const u8,
+    nan: []const u8,
     dec_pattern: []const u8,
     pct_pattern: []const u8,
     fn lessThan(_: void, a: NumberLocale, b: NumberLocale) bool {
@@ -366,6 +368,8 @@ fn loadNumbers(arena: std.mem.Allocator, io: std.Io, json_root: []const u8, ns_t
             .minus = strField(syms, "minusSign", "-"),
             .plus = strField(syms, "plusSign", "+"),
             .percent = strField(syms, "percentSign", "%"),
+            .infinity = strField(syms, "infinity", "∞"),
+            .nan = strField(syms, "nan", "NaN"),
             .dec_pattern = if (n.get(dec_key)) |d| strField(d.object, "standard", "#,##0.###") else "#,##0.###",
             .pct_pattern = if (n.get(pct_key)) |p| strField(p.object, "standard", "#,##0%") else "#,##0%",
         });
@@ -389,6 +393,8 @@ fn writeNumbersPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8),
         try appendStr8(gpa, buf, l.minus);
         try appendStr8(gpa, buf, l.plus);
         try appendStr8(gpa, buf, l.percent);
+        try appendStr8(gpa, buf, l.infinity);
+        try appendStr8(gpa, buf, l.nan);
         try appendStr16(gpa, buf, l.dec_pattern);
         try appendStr16(gpa, buf, l.pct_pattern);
     }
