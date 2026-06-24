@@ -747,15 +747,48 @@ test "intl: non-legacy constructors still construct + subclass with new" {
     );
 }
 
-test "intl: legacy constructor remains callable without new" {
+// §10.1.1 / §11.1.1 / §12.1.1 — Collator / NumberFormat / DateTimeFormat are
+// the legacy services callable *without* `new`. Each bare call must mint a
+// fresh instance off the constructor's own prototype (so the `.compare` /
+// `.format` accessors resolve through the chain) and must never write its
+// internal-slots record onto the `Intl` namespace object. Reusing the
+// namespace (the old `requireNew` path) leaked the record + its duped option
+// strings on every repeat call and left the result prototype-less; the realm
+// runs on `testing.allocator`, so a per-call leak trips leak detection at
+// `realm.deinit()`.
+test "intl: legacy Collator/NumberFormat/DateTimeFormat callable without new (no leak)" {
     try requireIntlBuild();
-    // NumberFormat / DateTimeFormat / Collator must NOT throw without new (the
-    // legacy chain behaviour). One call only: the legacy no-new path currently
-    // stashes its record on the Intl namespace, so repeated calls accumulate —
-    // a pre-existing leak tracked separately, out of scope for the NewTarget fix.
     try evalAssert1(
         \\let ok = 1;
-        \\try { Intl.NumberFormat('en'); } catch (e) { ok = 0; }
-        \\ok
+        \\for (let i = 0; i < 8; i++) {
+        \\  const nf = Intl.NumberFormat("en");
+        \\  if (typeof nf.format !== "function" || nf.format(42) !== "42") ok = 0;
+        \\  const co = Intl.Collator("en");
+        \\  if (typeof co.compare !== "function" || !(co.compare("a", "b") < 0)) ok = 0;
+        \\  const df = Intl.DateTimeFormat("en");
+        \\  if (typeof df.format !== "function") ok = 0;
+        \\}
+        \\// No internal record may have landed on the Intl namespace: the
+        \\// prototype methods brand-check their receiver, so calling one on
+        \\// `Intl` itself must throw a TypeError.
+        \\let clean = 0;
+        \\try { Intl.NumberFormat.prototype.resolvedOptions.call(Intl); }
+        \\catch (e) { clean = (e instanceof TypeError) ? 1 : 0; }
+        \\(ok === 1 && clean === 1) ? 1 : 0
+    );
+}
+
+// §11.1.1 — the `new` / subclass path runs OrdinaryCreateFromConstructor
+// against NewTarget, so a subclass instance chains its prototype through the
+// subclass and still reaches NumberFormat.prototype's accessors. Guards the
+// deferred-proto path that the no-`new` fix routes all construction through.
+test "intl: legacy ctor subclass chains prototype from NewTarget" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\class MyNF extends Intl.NumberFormat {}
+        \\const m = new MyNF("en");
+        \\(m instanceof MyNF && m instanceof Intl.NumberFormat &&
+        \\ Object.getPrototypeOf(m) === MyNF.prototype &&
+        \\ typeof m.format === "function" && m.format(42) === "42") ? 1 : 0
     );
 }

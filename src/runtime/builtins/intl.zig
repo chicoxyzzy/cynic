@@ -170,11 +170,6 @@ fn getLocaleMatcher(realm: *Realm, opts: ?*JSObject) NativeError!intl.LocaleMatc
     return .best_fit;
 }
 
-fn requireNew(realm: *Realm, this_value: Value, name: []const u8) NativeError!*JSObject {
-    return heap_mod.valueAsPlainObject(this_value) orelse
-        throwTypeError(realm, try fmtRequiresNew(realm, name));
-}
-
 fn fmtRequiresNew(realm: *Realm, name: []const u8) ![]const u8 {
     // Message is only for the throw helper path; use static-ish via class arena when possible.
     _ = realm;
@@ -538,8 +533,7 @@ fn installLocale(realm: *Realm, ns: *JSObject) !void {
 }
 
 fn localeConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value; // instance comes from NewTarget (defers_proto_lookup)
-    const inst = try newIntlInstance(realm, realm.intrinsics.intl_locale_prototype, "Locale");
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_locale_prototype, "Locale", true);
     const tag_v = argOr(args, 0, Value.undefined_);
     if (tag_v.isUndefined()) return throwTypeError(realm, "Intl.Locale requires a tag argument");
 
@@ -784,17 +778,32 @@ fn installService(realm: *Realm, ns: *JSObject, spec: ServiceSpec) !void {
     try putCtorOnIntl(realm, ns, spec.name, r.ctor);
 }
 
-/// NewTarget-aware instance creation for the new-requiring Intl services.
-/// Reads the NewTarget the construct path stashed; throws a TypeError when
-/// the constructor was called without `new`. Mirrors the Promise / TypedArray
-/// `defers_proto_lookup` pattern (§ OrdinaryCreateFromConstructor).
-fn newIntlInstance(realm: *Realm, default_proto: ?*JSObject, name: []const u8) NativeError!*JSObject {
-    const new_target = realm.pending_native_new_target;
-    // Clear immediately so a nested *plain* Intl call during option coercion
-    // can't read this construct's stale NewTarget.
-    realm.pending_native_new_target = Value.undefined_;
-    if (new_target.isUndefined())
-        return throwTypeError(realm, try fmtRequiresNew(realm, name));
+/// NewTarget-aware instance creation for Intl service constructors. The
+/// construct path (new / super / Reflect.construct) stashes NewTarget on
+/// `realm.pending_native_new_target` and passes `this = undefined`; a plain
+/// [[Call]] passes the receiver as `this` and never touches that slot. So
+/// `this_value` discriminates the two reliably — even when an enclosing
+/// native construct left a stale NewTarget in the realm slot (e.g. a
+/// constructor's own option getter re-enters with another Intl call).
+///
+/// `requires_new` services (Locale, PluralRules, …) throw a TypeError when
+/// invoked without `new` (§ "If NewTarget is undefined, throw a TypeError").
+/// The legacy three (Collator / NumberFormat / DateTimeFormat, §10.1.1 /
+/// §11.1.1 / §12.1.1) are callable without `new`: NewTarget defaults to the
+/// active function object, so the instance's [[Prototype]] falls back to the
+/// constructor's own `.prototype` and a fresh instance is returned — never
+/// `this_value` (the old `requireNew` path wrote the record onto the `Intl`
+/// namespace, leaking it on every no-`new` call). Mirrors the Promise /
+/// TypedArray `defers_proto_lookup` OrdinaryCreateFromConstructor pattern.
+fn newIntlInstance(realm: *Realm, this_value: Value, default_proto: ?*JSObject, name: []const u8, requires_new: bool) NativeError!*JSObject {
+    const new_target = if (this_value.isUndefined()) realm.pending_native_new_target else Value.undefined_;
+    if (new_target.isUndefined()) {
+        if (requires_new) return throwTypeError(realm, try fmtRequiresNew(realm, name));
+        // Legacy no-`new` fallback: instantiate from the service prototype.
+        const inst = realm.heap.allocateObject() catch return error.OutOfMemory;
+        realm.heap.setObjectPrototype(inst, default_proto);
+        return inst;
+    }
 
     const interp = @import("../lantern/interpreter.zig");
     const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, default_proto, realm) catch |err| switch (err) {
@@ -876,6 +885,13 @@ fn installCollator(realm: *Realm, ns: *JSObject) !void {
     // §10.3.5 — `Intl.Collator.prototype.compare` is an accessor.
     const proto = realm.intrinsics.intl_collator_prototype.?;
     try installNativeGetter(realm, proto, "compare", collatorCompareGetter);
+    // §10.1.1 — Intl.Collator is callable without `new`. Clear the
+    // class-constructor brand (so a plain call reaches the native instead of
+    // being rejected at the call layer) and defer OCFC so the native builds a
+    // fresh instance from Collator.prototype rather than mutating `this`.
+    const ctor = realm.intrinsics.intl_collator_constructor.?;
+    ctor.is_class_constructor = false;
+    ctor.defers_proto_lookup = true;
 }
 
 fn collatorCompareGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -891,7 +907,7 @@ fn anySupportedLocalesOf(realm: *Realm, this_value: Value, args: []const Value) 
 
 fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     // Callable without new? Spec allows legacy; we require new via is_class.
-    const inst = try requireNew(realm, this_value, "Collator");
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_collator_prototype.?, "Collator", false);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);
@@ -965,6 +981,10 @@ fn installNumberFormat(realm: *Realm, ns: *JSObject) !void {
     // §11.3.5 — `Intl.NumberFormat.prototype.format` is an accessor.
     const proto = realm.intrinsics.intl_number_format_prototype.?;
     try installNativeGetter(realm, proto, "format", numberFormatFormatGetter);
+    // §11.1.1 — Intl.NumberFormat is callable without `new` (legacy chain).
+    const ctor = realm.intrinsics.intl_number_format_constructor.?;
+    ctor.is_class_constructor = false;
+    ctor.defers_proto_lookup = true;
 }
 
 fn numberFormatFormatGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -974,7 +994,7 @@ fn numberFormatFormatGetter(realm: *Realm, this_value: Value, args: []const Valu
 }
 
 fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const inst = try requireNew(realm, this_value, "NumberFormat");
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_number_format_prototype.?, "NumberFormat", false);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);
@@ -1588,6 +1608,10 @@ fn installDateTimeFormat(realm: *Realm, ns: *JSObject) !void {
     // §12.3.5 — `Intl.DateTimeFormat.prototype.format` is an accessor.
     const proto = realm.intrinsics.intl_date_time_format_prototype.?;
     try installNativeGetter(realm, proto, "format", dateTimeFormatFormatGetter);
+    // §12.1.1 — Intl.DateTimeFormat is callable without `new` (legacy chain).
+    const ctor = realm.intrinsics.intl_date_time_format_constructor.?;
+    ctor.is_class_constructor = false;
+    ctor.defers_proto_lookup = true;
 }
 
 fn dateTimeFormatFormatGetter(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1597,7 +1621,7 @@ fn dateTimeFormatFormatGetter(realm: *Realm, this_value: Value, args: []const Va
 }
 
 fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const inst = try requireNew(realm, this_value, "DateTimeFormat");
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_date_time_format_prototype.?, "DateTimeFormat", false);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);
@@ -2180,8 +2204,7 @@ fn installPluralRules(realm: *Realm, ns: *JSObject) !void {
 }
 
 fn pluralRulesConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value; // instance comes from NewTarget (defers_proto_lookup)
-    const inst = try newIntlInstance(realm, realm.intrinsics.intl_plural_rules_prototype, "PluralRules");
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_plural_rules_prototype, "PluralRules", true);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);
@@ -2298,8 +2321,7 @@ fn installRelativeTimeFormat(realm: *Realm, ns: *JSObject) !void {
 }
 
 fn rtfConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value; // instance comes from NewTarget (defers_proto_lookup)
-    const inst = try newIntlInstance(realm, realm.intrinsics.intl_relative_time_format_prototype, "RelativeTimeFormat");
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_relative_time_format_prototype, "RelativeTimeFormat", true);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);
@@ -2373,8 +2395,7 @@ fn installListFormat(realm: *Realm, ns: *JSObject) !void {
 }
 
 fn listFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value; // instance comes from NewTarget (defers_proto_lookup)
-    const inst = try newIntlInstance(realm, realm.intrinsics.intl_list_format_prototype, "ListFormat");
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_list_format_prototype, "ListFormat", true);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);
@@ -2464,8 +2485,7 @@ fn installDisplayNames(realm: *Realm, ns: *JSObject) !void {
 }
 
 fn displayNamesConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value; // instance comes from NewTarget (defers_proto_lookup)
-    const inst = try newIntlInstance(realm, realm.intrinsics.intl_display_names_prototype, "DisplayNames");
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_display_names_prototype, "DisplayNames", true);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     if (options.isUndefined()) return throwTypeError(realm, "Intl.DisplayNames requires options with type");
@@ -2593,8 +2613,7 @@ fn installSegmenter(realm: *Realm, ns: *JSObject) !void {
 }
 
 fn segmenterConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value; // instance comes from NewTarget (defers_proto_lookup)
-    const inst = try newIntlInstance(realm, realm.intrinsics.intl_segmenter_prototype, "Segmenter");
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_segmenter_prototype, "Segmenter", true);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);
@@ -2660,8 +2679,7 @@ fn installDurationFormat(realm: *Realm, ns: *JSObject) !void {
 }
 
 fn durationFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = this_value; // instance comes from NewTarget (defers_proto_lookup)
-    const inst = try newIntlInstance(realm, realm.intrinsics.intl_duration_format_prototype, "DurationFormat");
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_duration_format_prototype, "DurationFormat", true);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);
