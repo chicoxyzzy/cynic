@@ -183,6 +183,21 @@ mutator interleaved. The verifiers (full-scan + 0xaa free-poison in
 Debug / ReleaseSafe) are the net — the same verifier-first discipline that
 shipped card marking.
 
+**Throughput trade-off.** The latency win is bought with the write barrier
+active across the whole (now long) marking window — the STW major paused the
+mutator and never barriered. A remote A/B (the incremental commit vs its
+rebase base, 12 back-to-back runs per iteration) puts the cost where
+expected: the realistic Octane macros (crypto / deltablue / raytrace /
+richards / navier_stokes) are unchanged within noise and non-allocation
+micros are flat; allocation-heavy micros lean ~3–5% slower, with
+`class_instantiate` the ~13% outlier — its class-setup typed-slot writes
+trip the `rememberTypedSlotWrite` re-grey (a full `markObjectInternalSlots`
+re-scan per typed-slot write mid-mark). Accepted as the
+latency-for-throughput trade: realistic workloads are unaffected and the
+~83× pause win is the goal. If the outlier ever matters, the known fix is to
+defer the re-grey to the termination (re-scan a written container once, not
+per write).
+
 ## Why allocation-pressure
 
 It's the baseline pattern every production engine uses. V8's young-gen

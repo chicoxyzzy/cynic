@@ -17,6 +17,28 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-23 — cynic `897d66ad` (incremental major marking), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Same-runner A/B vs `5b92a346` (the rebase base — the Intl substrate,
+pre-incremental), suite=both, 12 runs back-to-back per iteration. The major
+mark now slices across safe-points (Dijkstra incremental-update barrier,
+~8192-item budget); the max GC pause on a 2M-object heap dropped
+**~800 ms → ~9.6 ms (~83×)** (`slice_max` ~1 ms per slice; `term` ~9.6 ms is
+the residual STW sweep). The latency-for-throughput cost lands where expected:
+
+- **Realistic Octane macros unchanged within noise** — crypto 0.98×,
+  deltablue 1.00×, raytrace 1.00×, richards 1.00×, navier_stokes 1.03×.
+- Non-allocation micros flat — arith ~1.0×, prop_write 0.93–0.99×,
+  string_concat 0.98×.
+- Allocation-heavy micros lean ~3–5% slower — `class_instantiate` the ~13%
+  outlier (1.13–1.16×, flagged), promise_chain 1.06–1.17×, object_alloc /
+  ctor_array_build / method_call / array_iter ~1.03–1.05×. The write barrier
+  is active across the (now long) marking window where the STW major never
+  barriered; `class_instantiate`'s class-setup typed-slot writes trip the
+  `rememberTypedSlotWrite` re-grey. Accepted as the latency-for-throughput
+  trade — see `docs/handbook/gc.md` §Incremental major marking (the outlier's
+  known fix: defer the re-grey to the termination).
+
 ### 2026-06-22 — cynic `ec12132d` (card marking + adaptive major trigger), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Same-runner A/B vs `61cc6fbd` (the pre-card-marking baseline — sticky
