@@ -84,18 +84,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Macro mode runs the Octane workloads in bench/macros/ instead of the
-# micros, and pins Cynic with `--unhardened` — those ES5-era bodies
-# monkey-patch primordials, which the default frozen-primordials (SES)
-# posture rejects. Peers are unhardened by nature, so the comparison
-# stays apples-to-apples; only Cynic needs the flag.
+# Cynic runs `--unhardened --allow=eval` for EVERY fixture (micros and
+# macros alike): the Octane bodies monkey-patch primordials (rejected by
+# the default frozen-primordials SES posture) and use the Function
+# constructor (gated behind --allow=eval), and the peer engines are
+# unhardened by nature — so the comparison stays engine-vs-engine, not
+# engine-vs-engine-plus-SES-tax. Only Cynic carries the flags.
+CYNIC_EXTRA="--unhardened --allow=eval"
 if [ "$MACROS" = "1" ]; then
   BENCH_DIR="$REPO_ROOT/bench/macros"
-  CYNIC_EXTRA="--unhardened"
   MACRO_FWD="--macros"
 else
   BENCH_DIR="$MICROS_DIR"
-  CYNIC_EXTRA=""
   MACRO_FWD=""
 fi
 

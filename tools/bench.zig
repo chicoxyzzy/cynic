@@ -156,10 +156,11 @@ fn runOnce(
     // don't touch any gated surface. `--jit` (opt-in, mirroring the
     // engine default) measures the Bistromath posture with its
     // natural tier-up thresholds — what a user gets, not a forced
-    // compile. `--unhardened` is the macro-suite posture: the Octane
-    // workloads monkey-patch primordial prototypes, which the default
-    // frozen-primordials (SES) posture rejects.
-    var argv_buf: [6][]const u8 = undefined;
+    // compile. `--unhardened --allow=eval` is the bench posture for every
+    // fixture: the Octane workloads monkey-patch primordial prototypes
+    // (rejected by the default frozen-primordials SES posture) and use the
+    // Function constructor (gated behind --allow=eval).
+    var argv_buf: [7][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = cynic_bin;
     argc += 1;
@@ -167,6 +168,8 @@ fn runOnce(
     argc += 1;
     if (unhardened) {
         argv_buf[argc] = "--unhardened";
+        argc += 1;
+        argv_buf[argc] = "--allow=eval";
         argc += 1;
     }
     if (jit) {
@@ -386,10 +389,12 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-    // The macro workloads monkey-patch primordials; run them
-    // unhardened so the frozen-primordials posture doesn't reject them.
+    // Run every fixture --unhardened --allow=eval: the Octane macro bodies
+    // need it (they monkey-patch primordials and use the Function
+    // constructor), and it keeps the comparison fair against the unhardened
+    // peer engines — no SES tax on Cynic alone.
     const fixtures: []const Bench = if (macros) &MACROS else &BENCHES;
-    const unhardened = macros;
+    const unhardened = true;
     const show_p95 = runs >= P95_MIN_SAMPLES;
     const show_p99 = runs >= P99_MIN_SAMPLES;
 
