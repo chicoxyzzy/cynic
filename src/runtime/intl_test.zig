@@ -1057,3 +1057,32 @@ test "intl: DisplayNames.of accepts well-formed codes" {
         \\ typeof dtf.of('month') === 'string') ? 1 : 0
     );
 }
+
+// ── Intl.Locale info methods (Stage 4) ───────────────────────────────────────
+
+test "intl: Locale info methods return correct shapes" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const l = new Intl.Locale('en-US');
+        \\const arr = (x) => Array.isArray(x) && x.length > 0 && x.every(s => typeof s === 'string');
+        \\const wi = l.getWeekInfo();
+        \\const ti = l.getTextInfo();
+        \\(arr(l.getCalendars()) && arr(l.getCollations()) && arr(l.getHourCycles()) &&
+        \\ arr(l.getNumberingSystems()) &&
+        \\ JSON.stringify(Reflect.ownKeys(ti)) === '["direction"]' &&
+        \\ (ti.direction === 'ltr' || ti.direction === 'rtl') &&
+        \\ JSON.stringify(Reflect.ownKeys(wi)) === '["firstDay","weekend"]' &&
+        \\ wi.firstDay >= 1 && wi.firstDay <= 7 &&
+        \\ wi.weekend.every(d => d >= 1 && d <= 7)) ? 1 : 0
+    );
+}
+
+test "intl: Locale getCalendars reflects -u-ca-, getTextInfo reflects script" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\(new Intl.Locale('th-u-ca-buddhist').getCalendars()[0] === 'buddhist' &&
+        \\ new Intl.Locale('ar').getTextInfo().direction === 'rtl' &&
+        \\ new Intl.Locale('en').getTextInfo().direction === 'ltr' &&
+        \\ new Intl.Locale('de-DE-1996').variants === '1996') ? 1 : 0
+    );
+}

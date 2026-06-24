@@ -524,6 +524,16 @@ fn installLocale(realm: *Realm, ns: *JSObject) !void {
     try installNativeMethodOnProto(realm, proto, "toString", localeToString, 0);
     try installNativeMethodOnProto(realm, proto, "maximize", localeMaximize, 0);
     try installNativeMethodOnProto(realm, proto, "minimize", localeMinimize, 0);
+    // Intl Locale Info (Stage 4): the resolved-extension query methods +
+    // the `variants` getter. `getTimeZones` (region→zone data) stays out
+    // until the CLDR zone-by-region table is packed.
+    try installNativeGetter(realm, proto, "variants", localeVariants);
+    try installNativeMethodOnProto(realm, proto, "getCalendars", localeGetCalendars, 0);
+    try installNativeMethodOnProto(realm, proto, "getCollations", localeGetCollations, 0);
+    try installNativeMethodOnProto(realm, proto, "getHourCycles", localeGetHourCycles, 0);
+    try installNativeMethodOnProto(realm, proto, "getNumberingSystems", localeGetNumberingSystems, 0);
+    try installNativeMethodOnProto(realm, proto, "getTextInfo", localeGetTextInfo, 0);
+    try installNativeMethodOnProto(realm, proto, "getWeekInfo", localeGetWeekInfo, 0);
     // §14.1.1 Intl.Locale throws without `new` — route through the
     // NewTarget-aware construct path (see newIntlInstance).
     r.ctor.defers_proto_lookup = true;
@@ -728,6 +738,97 @@ fn localeMinimize(realm: *Realm, this_value: Value, args: []const Value) NativeE
     _ = args;
     const s = try localeSlots(realm, this_value);
     return createLocaleFromTag(realm, s.locale);
+}
+
+// ── Intl Locale Info (Stage 4) ───────────────────────────────────────────────
+
+/// Build a single-element string Array (the common shape of the resolved
+/// list getters; the -u- extension value sorts first per
+/// CreateArrayFromListAndPreferred).
+fn singletonStringArray(realm: *Realm, value: []const u8) NativeError!Value {
+    const arr = allocateArray(realm) catch return error.OutOfMemory;
+    arr.set(realm.allocator, "0", try makeStringValue(realm, value)) catch return error.OutOfMemory;
+    arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(arr);
+}
+
+fn localeVariants(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const s = try localeSlots(realm, this_value);
+    if (s.variants.len == 0) return Value.undefined_;
+    return makeStringValue(realm, s.variants);
+}
+
+/// §1.4.x getCalendars — the calendar from the -u-ca- extension, else the
+/// structural default ("gregory"). (Region-preferred calendar lists need
+/// CLDR `calendarPreferenceData`, deferred.)
+fn localeGetCalendars(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const s = try localeSlots(realm, this_value);
+    return singletonStringArray(realm, if (s.calendar.len > 0) s.calendar else "gregory");
+}
+
+fn localeGetCollations(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const s = try localeSlots(realm, this_value);
+    // "standard" / "search" are never reported (§1.4.x); fall back to "default".
+    const c = s.collation;
+    const use = if (c.len > 0 and !std.mem.eql(u8, c, "standard") and !std.mem.eql(u8, c, "search")) c else "default";
+    return singletonStringArray(realm, use);
+}
+
+fn localeGetHourCycles(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const s = try localeSlots(realm, this_value);
+    return singletonStringArray(realm, if (s.hour_cycle.len > 0) s.hour_cycle else "h23");
+}
+
+fn localeGetNumberingSystems(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const s = try localeSlots(realm, this_value);
+    return singletonStringArray(realm, if (s.numbering_system.len > 0) s.numbering_system else "latn");
+}
+
+/// §1.4.x getTextInfo — { direction: "ltr" | "rtl" }, the writing direction
+/// of the locale's script (or its likely script when none is given).
+fn localeGetTextInfo(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const s = try localeSlots(realm, this_value);
+    const rtl = isRtlLocale(s.script, s.language);
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
+    try setDataProp(realm, obj, "direction", try makeStringValue(realm, if (rtl) "rtl" else "ltr"));
+    return heap_mod.taggedObject(obj);
+}
+
+/// §1.4.x getWeekInfo — { firstDay, weekend }, weekday numbers 1 (Mon) … 7
+/// (Sun). Structural default (Mon-first, Sat/Sun weekend); per-region
+/// `weekData` refinement is deferred.
+fn localeGetWeekInfo(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = try localeSlots(realm, this_value);
+    _ = args;
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
+    try setDataProp(realm, obj, "firstDay", makeNumberValue(1));
+    const weekend = allocateArray(realm) catch return error.OutOfMemory;
+    weekend.set(realm.allocator, "0", makeNumberValue(6)) catch return error.OutOfMemory;
+    weekend.set(realm.allocator, "1", makeNumberValue(7)) catch return error.OutOfMemory;
+    weekend.setArrayLength(realm.allocator, 2) catch return error.OutOfMemory;
+    try setDataProp(realm, obj, "weekend", heap_mod.taggedObject(weekend));
+    return heap_mod.taggedObject(obj);
+}
+
+/// Right-to-left when the script is an RTL script, or (script absent) when the
+/// language is a commonly RTL one. Structural — covers the major RTL systems.
+fn isRtlLocale(script: []const u8, language: []const u8) bool {
+    const rtl_scripts = [_][]const u8{ "Arab", "Hebr", "Syrc", "Thaa", "Nkoo", "Samr", "Mand", "Mend", "Adlm", "Rohg", "Hung", "Yezi", "Sogd", "Phnx" };
+    if (script.len > 0) {
+        for (rtl_scripts) |sc| if (std.ascii.eqlIgnoreCase(script, sc)) return true;
+        return false;
+    }
+    const rtl_langs = [_][]const u8{ "ar", "he", "fa", "ur", "ps", "sd", "ug", "yi", "dv", "ku", "nqo", "ckb" };
+    for (rtl_langs) |l| if (std.ascii.eqlIgnoreCase(language, l)) return true;
+    return false;
 }
 
 fn createLocaleFromTag(realm: *Realm, tag: []const u8) NativeError!Value {
