@@ -1695,7 +1695,7 @@ pub const Realm = struct {
         // safe-point spends a mark budget between them; running them
         // adjacently here is byte-identical to the old monolithic path.
         self.beginIncrementalMajor();
-        self.finishIncrementalMajor();
+        self.finishIncrementalMajor(false); // STW — sweep synchronously
         self.drainRealmTeardown();
     }
 
@@ -1710,6 +1710,14 @@ pub const Realm = struct {
     /// `cycle_started` and skips its own arm), seeding the mark worklist,
     /// and arms the incremental write barrier (`marking_phase = .marking`).
     pub fn beginIncrementalMajor(self: *Realm) void {
+        // A pending incremental sweep frees `mark_color != live_color`; the
+        // `beginMajorCycle` flip below would re-point that against the NEW
+        // color (objects the next mark hasn't reached) — a use-after-free.
+        // Finish it stop-the-world first so the heap is clean before the new
+        // mark. No-op in the STW path (its sweep already ran synchronously).
+        if (self.heap.sweep_phase == .sweeping) {
+            _ = self.heap.sweepObjectsMatureBudget(std.math.maxInt(usize));
+        }
         self.heap.beginMajorCycle();
         self.markAllSharingRealmRoots();
         self.heap.beginIncrementalMark(&.{});
@@ -1729,7 +1737,7 @@ pub const Realm = struct {
     /// critical at `--gc-threshold=1` where every cycle is full) and run
     /// the post-mark tail (drain to completion, weak passes, sweep).
     /// Disarms the barrier.
-    pub fn finishIncrementalMajor(self: *Realm) void {
+    pub fn finishIncrementalMajor(self: *Realm, lazy: bool) void {
         self.markAllSharingRealmRoots();
         // Re-scan the transient HEAP-side roots too — handle scopes and
         // in-flight native-ctor instances change across a sliced mark, and
@@ -1737,7 +1745,10 @@ pub const Realm = struct {
         // realm-root re-scan above is the interpreter-stack analogue.
         self.heap.markTransientRoots();
         self.heap.scan_native_stack = self.active_native_fn != null;
-        self.heap.collectFullTail(self.heap.cycle_t_start);
+        // `lazy` defers the dominant `objects_mature` sweep (the safe-point
+        // slices it via `sweepObjectsMatureBudget`); the STW path sweeps it
+        // inline in `collectFullTail`.
+        self.heap.collectFullTail(self.heap.cycle_t_start, lazy);
         self.heap.marking_phase = .idle;
     }
 

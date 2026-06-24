@@ -139,10 +139,12 @@ worklist in bounded ~8192-item slices across subsequent safe-point
 crossings, then runs `Realm.finishIncrementalMajor` — the stop-the-world
 termination — once the worklist empties. Explicit collects
 (`collectGarbage` / `__collectGarbage`) stay monolithic STW. On the 2M
-synthetic the **max GC pause dropped ~800 ms → ~9.6 ms (~83×)**: the mark
-is now ~1 ms slices (`slice_max` under `--gc-stats`), and the residual STW
-pause is the termination **sweep** (`term`, ~9.6 ms) — the next latency
-target (lazy sweep would slice it too).
+synthetic the **max GC pause dropped ~800 ms → ~1 ms (~800×)**: the mark
+is ~1 ms slices (`slice_max` under `--gc-stats`), and the termination
+**sweep** — the residual ~9.6 ms STW after the mark went incremental — is
+itself sliced by **lazy sweep** (below), dropping `term` ~9.6 ms → ~0.2 ms
+with the sweep running as ~50 µs slices (`lazy-sweep done: max_slice`). The
+~1 ms mark slice is the ceiling.
 
 **The barrier — Dijkstra (incremental-update).** A store into an
 already-scanned (black) container during the mark can hide a white
@@ -197,6 +199,34 @@ latency-for-throughput trade: realistic workloads are unaffected and the
 ~83× pause win is the goal. If the outlier ever matters, the known fix is to
 defer the re-grey to the termination (re-scan a written container once, not
 per write).
+
+**Lazy sweep — the termination sweep, sliced.** With the mark incremental,
+`finishIncrementalMajor`'s O(heap) `sweepList` was the residual ~9.6 ms
+pause, dominated by `objects_mature` (the 2M-node case). `collectFullTail`
+now defers **only** that list — the small mature kinds
+(strings/functions/env/gen/sym/bigint) stay STW, they're tiny — arming
+`sweep_phase = .sweeping` with `sweep_cursor` at the post-promote length;
+`runSafePoint` drains `sweepObjectsMatureBudget` in ~8192-object slices (dead
+`swapRemove`d + freed, marked survivors kept). The slice is bit-identical to
+the monolithic `sweepList` paused/resumed because **no other GC fires while
+sweeping** — the mark/minor/major branches gate behind not-sweeping, so the
+list can't shift under the cursor. `beginIncrementalMajor` finishes any
+pending sweep STW *before* the next `live_color` flip — the central
+correctness point: after a flip the pending sweep would free
+`mark_color != live_color` against the *new* color, i.e. objects the next
+mark hasn't reached (a use-after-free); the backstop keeps the heap clean per
+mark, bounding the residual if the sweep fell behind. The card-marking dirty
+bit needs care: the dirty list is emptied at the termination, so its members'
+bits are reset there too (O(dirty-list), pre-sweep, before any free) — a
+stale `dirty == true` would make the barrier skip a fresh mature→young store
+during the slice (a dropped edge = use-after-free) — and the slice must
+**not** clear a survivor's bit (the mutator may have re-dirtied it mid-sweep).
+On the 2M synthetic `term` drops ~9.6 ms → ~0.2 ms and the sweep runs as
+~50 µs slices (`lazy-sweep done: max_slice`, max 122 µs), leaving the ~1 ms
+mark slice as the max GC pause — both halves of the cycle sliced. Explicit
+collects (`collectGarbage` / `__collectGarbage`) finish any pending sweep
+then sweep synchronously, so WeakRef / FinalizationRegistry timing is
+unchanged.
 
 ## Why allocation-pressure
 

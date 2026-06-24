@@ -691,6 +691,20 @@ pub const Heap = struct {
     /// whole O(live) walk. Tracked only when `gc_stats` is on (zero cost
     /// otherwise).
     max_slice_pause_ns: i128 = 0,
+    /// Incremental-sweep phase. `.idle` outside a sweep; `.sweeping` while
+    /// the deferred `objects_mature` sweep is sliced across safe-points
+    /// (after a major mark terminates). While `.sweeping` no other GC runs
+    /// — the dispatch only sweeps — so the mature list can't grow mid-sweep
+    /// and the sliced sweep matches the monolithic `sweepList`.
+    sweep_phase: enum { idle, sweeping } = .idle,
+    /// Backward cursor into `objects_mature` for the in-flight incremental
+    /// sweep — the next index to examine, decreasing to 0 (then `.idle`).
+    sweep_cursor: usize = 0,
+    /// Max single lazy-sweep-slice STW pause (ns) for the in-flight sweep —
+    /// the `sweepObjectsMatureBudget` worst case, reset when the sweep is
+    /// armed and reported under `--gc-stats` at completion. The sweep
+    /// counterpart to `max_slice_pause_ns` (the mark).
+    max_sweep_pause_ns: i128 = 0,
     /// Cumulative bytes charged across this heap's lifetime (never
     /// reset on GC). Dual of `bytes_live`, which only sees what's
     /// alive right now. Catches workloads that allocate-and-discard
@@ -2634,6 +2648,49 @@ pub const Heap = struct {
         }
     }
 
+    /// Sweep up to `budget` of the deferred `objects_mature` list — one
+    /// incremental-sweep slice. The backward walk + `swapRemove` reproduce
+    /// `sweepList`'s JSObject path exactly; no GC runs while `.sweeping`, so
+    /// the list is unchanged between slices and the sliced sweep is
+    /// identical to the monolithic one. Returns true once the cursor reaches
+    /// 0 (the sweep is complete): `sweep_phase` goes `.idle` and the
+    /// adaptive-trigger baseline is set to the accurate post-sweep live set.
+    pub fn sweepObjectsMatureBudget(self: *Heap, budget: usize) bool {
+        const t0 = if (self.gc_stats) monotonicNs() else 0;
+        const lc = self.live_color;
+        var swept: usize = 0;
+        var i = self.sweep_cursor;
+        while (i > 0 and swept < budget) {
+            i -= 1;
+            swept += 1;
+            const entry = self.objects_mature.items[i];
+            // A survivor KEEPS its dirty bit: the mutator can re-dirty it
+            // mid-sweep (a fresh mature→young store), and the bits were
+            // already reset at the termination, so clearing here would drop
+            // that fresh edge (a use-after-free). Only the dead are freed.
+            if (entry.mark_color != lc) {
+                _ = self.objects_mature.swapRemove(i);
+                queueShadowRealmTeardown(entry, &self.pending_realm_teardown, self.allocator);
+                entry.deinitFields(self.allocator);
+                self.object_pool.destroy(entry);
+            }
+        }
+        self.sweep_cursor = i;
+        if (self.gc_stats) {
+            const ns = monotonicNs() - t0;
+            if (ns > self.max_sweep_pause_ns) self.max_sweep_pause_ns = ns;
+        }
+        if (i == 0) {
+            self.sweep_phase = .idle;
+            self.mature_objects_at_last_major = self.objects_mature.items.len;
+            if (self.gc_stats and @import("builtin").os.tag != .freestanding) {
+                std.debug.print("[gc {d}] lazy-sweep done: max_slice={d}\u{00B5}s\n", .{ self.gc_stats_cycle, @divTrunc(self.max_sweep_pause_ns, 1000) });
+            }
+            return true;
+        }
+        return false;
+    }
+
     /// Arm a major (full) GC cycle. Flips `live_color`, clears
     /// every mature object's `mark_color` so a stale mark from a
     /// previous cycle can't spuriously match the new `live_color`
@@ -2992,7 +3049,7 @@ pub const Heap = struct {
         // GlobalSymbolRegistry — the sweep skips pinned entries, so no
         // per-cycle re-mark loop.)
         self.beginIncrementalMark(roots);
-        self.collectFullTail(self.cycle_t_start);
+        self.collectFullTail(self.cycle_t_start, false);
     }
 
     /// The post-mark-seed remainder of a major cycle: drain the worklist
@@ -3002,7 +3059,7 @@ pub const Heap = struct {
     /// after the mark has been drained in slices across the safe-point.
     /// `t_start` is the cycle's wall-clock origin for the diagnostic
     /// pause-time field.
-    pub fn collectFullTail(self: *Heap, t_start: i128) void {
+    pub fn collectFullTail(self: *Heap, t_start: i128, lazy: bool) void {
         // The stop-the-world termination begins here (final drain + weak
         // passes + sweep). For an incremental major the mark itself was
         // sliced, so this is the residual STW pause — `term` in the
@@ -3087,9 +3144,23 @@ pub const Heap = struct {
         const ba = .{ self.allocator, self.bytes_allocator, &self.string_pool };
         const sa = .{self.allocator};
         const lc = self.live_color;
+        // Reset the dirty bit on every remembered-set container BEFORE the
+        // sweep. The dirty list is emptied below, so the bits must go false
+        // to keep the `dirty == true ⟺ on the dirty list` invariant — else a
+        // DEFERRED (lazy) objects_mature sweep leaves stale `dirty = true`
+        // bits, and a fresh mature→young store during the slice sees them
+        // set and skips the barrier (a dropped edge = use-after-free).
+        // O(dirty list); done pre-sweep so no freed object is touched (the
+        // STW `sweepList` also clears survivor bits, harmlessly redundant).
+        for (self.dirty_list.items) |c| c.setDirty(false);
         sweepList(&self.strings_mature, lc, ba);
         sweepList(&self.functions_mature, lc, sa);
-        sweepList(&self.objects_mature, lc, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
+        // The dominant mature sweep is DEFERRED when `lazy` (the incremental
+        // major) — sliced at the safe-point via `sweepObjectsMatureBudget`.
+        // The STW path (collectFull / __collectGarbage) sweeps it inline.
+        if (!lazy) {
+            sweepList(&self.objects_mature, lc, .{ self.allocator, &self.object_pool, &self.pending_realm_teardown });
+        }
         sweepList(&self.environments_mature, lc, .{ self.allocator, &self.env_pool });
         sweepList(&self.generators_mature, lc, sa);
         sweepList(&self.symbols_mature, lc, sa);
@@ -3104,6 +3175,16 @@ pub const Heap = struct {
         promoteYoungList(*JSGenerator, &self.generators_young, &self.generators_mature, lc, self.allocator, sa);
         promoteYoungList(*JSSymbol, &self.symbols_young, &self.symbols_mature, lc, self.allocator, sa);
         promoteYoungList(*JSBigInt, &self.bigints_young, &self.bigints_mature, lc, self.allocator, sa);
+        // When `lazy`, the dominant `objects_mature` sweep was deferred
+        // above — arm the incremental sweep over the whole post-promote
+        // list (the promoted survivors are marked, so the sweep examines
+        // and keeps them; only the dead old objects are freed). The sweep's
+        // completion sets the adaptive baseline to the live count.
+        if (lazy) {
+            self.sweep_phase = .sweeping;
+            self.sweep_cursor = self.objects_mature.items.len;
+            self.max_sweep_pause_ns = 0;
+        }
 
         // The dirty list is empty after a full cycle — a full mark
         // visited every mature object, and every survivor tenured, so
@@ -5410,6 +5491,37 @@ test "Heap: Dijkstra barrier shades a value stored into a black container mid-ma
     try heap.storeProperty(container, heap.allocator, "b", taggedObject(target));
     heap.drainMarkWorklist();
     try testing.expectEqual(heap.live_color, target.mark_color); // shaded → survived
+}
+
+test "Heap: lazy sweep defers objects_mature and slices the dead away" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Two objects, both promoted to mature + marked by a STW major.
+    const live = try heap.allocateObject();
+    const dead = try heap.allocateObject();
+    heap.collectFull(&.{ taggedObject(live), taggedObject(dead) });
+    try testing.expectEqual(@as(usize, 2), heap.objects_mature.items.len);
+
+    // A LAZY major marking only `live` — `dead` becomes mature-unmarked, and
+    // `collectFullTail(lazy = true)` DEFERS the dominant objects_mature sweep
+    // (arming the incremental sweep) instead of running it stop-the-world.
+    heap.beginIncrementalMark(&.{taggedObject(live)});
+    heap.drainMarkWorklist();
+    heap.collectFullTail(heap.cycle_t_start, true);
+
+    // Deferred: both objects are still present and the sweep is armed.
+    try testing.expectEqual(@as(usize, 2), heap.objects_mature.items.len);
+    try testing.expect(heap.sweep_phase == .sweeping);
+
+    // Drive the sweep one object per slice (budget 1) — the sliced sweep
+    // reproduces the monolithic one when the list is unchanged between calls.
+    while (!heap.sweepObjectsMatureBudget(1)) {}
+
+    // `dead` is reclaimed, `live` survives, the sweep is idle.
+    try testing.expectEqual(@as(usize, 1), heap.objects_mature.items.len);
+    try testing.expectEqual(live, heap.objects_mature.items[0]);
+    try testing.expect(heap.sweep_phase == .idle);
 }
 
 test "Heap: collectYoung clears stale mark bits on mature objects" {

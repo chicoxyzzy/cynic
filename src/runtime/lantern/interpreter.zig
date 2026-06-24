@@ -1004,11 +1004,19 @@ inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
     // not yet `mark_color == live_color`) reads as unmarked, so freeing it
     // would dangle the worklist. A young object allocated mid-mark is born
     // black (allocate-black), so it survives to the termination sweep.
-    if (realm.heap.marking_phase == .marking) {
+    if (realm.heap.sweep_phase == .sweeping) {
+        // Slice the deferred `objects_mature` sweep across safe-points. This
+        // is the FIRST branch so no other GC runs while sweeping — the
+        // mature list can't grow mid-sweep, so the sliced sweep matches the
+        // monolithic one. ~8192 objects examined ≈ a sub-millisecond slice.
+        _ = realm.heap.sweepObjectsMatureBudget(8192);
+    } else if (realm.heap.marking_phase == .marking) {
         // ~8192 `markValue` calls ≈ a sub-millisecond slice; tune against
         // the measured slice time (docs/handbook/gc.md).
         if (realm.heap.drainMarkWorklistBudget(8192)) {
-            realm.finishIncrementalMajor();
+            // Incremental termination — defer the dominant objects_mature
+            // sweep; the sweep branch above slices it next.
+            realm.finishIncrementalMajor(true);
         }
     } else if (realm.heap.allocs_since_gc >= realm.heap.gc_young_threshold or
         realm.heap.bytes_since_gc >= realm.heap.gc_byte_threshold)
