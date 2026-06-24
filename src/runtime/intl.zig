@@ -529,6 +529,52 @@ pub fn isValidRegionSubtag(value: []const u8) bool {
     return false;
 }
 
+/// `unicode_variant_subtag`: 5-8 alphanum, or 4 chars beginning with a digit.
+pub fn isValidVariantSubtag(value: []const u8) bool {
+    if (value.len >= 5 and value.len <= 8) {
+        for (value) |c| if (!isAlphanum(c)) return false;
+        return true;
+    }
+    if (value.len == 4) {
+        if (value[0] < '0' or value[0] > '9') return false;
+        for (value[1..]) |c| if (!isAlphanum(c)) return false;
+        return true;
+    }
+    return false;
+}
+
+/// `unicode_language_id`: language subtag, then an optional script, an optional
+/// region, and any number of variants — with **no** singleton / extension
+/// subtags. Stricter than `isStructurallyValidLanguageTag` (which permits
+/// `-u-` / `-t-` / `-x-`); used for `Intl.DisplayNames.prototype.of`
+/// type:"language", whose argument must match the bare id production (§12.5.1).
+pub fn isUnicodeLanguageId(code: []const u8) bool {
+    if (code.len == 0) return false;
+    var it = std.mem.splitScalar(u8, code, '-');
+    const lang = it.next() orelse return false;
+    if (!isValidLanguageSubtag(lang)) return false;
+    var seen_script = false;
+    var seen_region = false;
+    var variants: [16][]const u8 = undefined;
+    var nvar: usize = 0;
+    while (it.next()) |sub| {
+        if (sub.len == 1) return false; // singleton ⇒ extension, not an id
+        if (!seen_script and !seen_region and nvar == 0 and isValidScriptSubtag(sub)) {
+            seen_script = true;
+        } else if (!seen_region and nvar == 0 and isValidRegionSubtag(sub)) {
+            seen_region = true;
+        } else if (isValidVariantSubtag(sub)) {
+            // unicode_language_id forbids a repeated variant subtag.
+            for (variants[0..nvar]) |v| if (std.ascii.eqlIgnoreCase(v, sub)) return false;
+            if (nvar < variants.len) {
+                variants[nvar] = sub;
+                nvar += 1;
+            }
+        } else return false;
+    }
+    return true;
+}
+
 /// §6.2.3 CanonicalizeUnicodeLocaleId — structural only: normalize
 /// case (language lower, script title, region upper, extensions lower),
 /// sort unicode extension keywords, drop duplicate variants.

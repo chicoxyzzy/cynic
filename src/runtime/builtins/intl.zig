@@ -2752,7 +2752,9 @@ fn displayNamesOf(realm: *Realm, this_value: Value, args: []const Value) NativeE
             .script => break :blk (try canonScript(realm, raw, &cbuf)),
             .currency => break :blk (try canonCurrency(realm, raw, &cbuf)),
             .language => {
-                if (!intl.isStructurallyValidLanguageTag(raw)) return throwRangeError(realm, "invalid language code");
+                // §12.5.1 — type:"language" requires a bare unicode_language_id
+                // (no singleton / -u- / -x- extensions), not just any valid tag.
+                if (!intl.isUnicodeLanguageId(raw)) return throwRangeError(realm, "invalid language code");
                 const c = intl.canonicalizeUnicodeLocaleId(realm.allocator, raw) catch return throwRangeError(realm, "invalid language code");
                 defer realm.allocator.free(c);
                 const n = @min(c.len, cbuf.len);
@@ -2760,7 +2762,13 @@ fn displayNamesOf(realm: *Realm, this_value: Value, args: []const Value) NativeE
                 break :blk cbuf[0..n];
             },
         };
-        // calendar / dateTimeField (not packed) — return as-is for fallback.
+        // §12.5.1 — calendar codes must match a Unicode `type` (one or more
+        // 3-8 alphanumeric subtags); dateTimeField must be a sanctioned field.
+        if (std.mem.eql(u8, s.type_name, "calendar")) {
+            if (!intl.isValidUnicodeType(raw)) return throwRangeError(realm, "invalid calendar code");
+        } else if (std.mem.eql(u8, s.type_name, "dateTimeField")) {
+            if (!isDateTimeField(raw)) return throwRangeError(realm, "invalid dateTimeField code");
+        }
         break :blk raw;
     };
 
@@ -2769,6 +2777,16 @@ fn displayNamesOf(realm: *Realm, this_value: Value, args: []const Value) NativeE
     }
     if (std.mem.eql(u8, s.fallback, "none")) return Value.undefined_;
     return makeStringValue(realm, canonical); // fallback: the canonicalised code
+}
+
+/// §12.5.1 — the sanctioned `dateTimeField` codes for Intl.DisplayNames.
+fn isDateTimeField(code: []const u8) bool {
+    const fields = [_][]const u8{
+        "era", "year",      "quarter", "month",  "weekOfYear", "weekday",
+        "day", "dayPeriod", "hour",    "minute", "second",     "timeZoneName",
+    };
+    for (fields) |f| if (std.mem.eql(u8, code, f)) return true;
+    return false;
 }
 
 fn canonRegion(realm: *Realm, raw: []const u8, buf: []u8) NativeError![]const u8 {

@@ -1028,3 +1028,32 @@ test "intl: currencyDisplay name negative leads with a minus, ignores accounting
         \\ f({ currencySign:'accounting' }) === '-5.00 US dollars') ? 1 : 0
     );
 }
+
+// ── DisplayNames.prototype.of code validation (§12.5.1) ──────────────────────
+
+test "intl: DisplayNames.of rejects malformed codes per type" {
+    try requireIntlBuild();
+    // language type → must be a bare unicode_language_id (no singletons / -u-,
+    // no duplicate variants, valid subtag shapes).
+    try evalThrows("new Intl.DisplayNames('en',{type:'language'}).of('en-u-hebrew')");
+    try evalThrows("new Intl.DisplayNames('en',{type:'language'}).of('aa-aaaaa-aaaaa')");
+    try evalThrows("new Intl.DisplayNames('en',{type:'language'}).of('abcdefghi')");
+    try evalThrows("new Intl.DisplayNames('en',{type:'language'}).of('1a')");
+    // calendar type → must be a Unicode `type` (3-8 alphanumeric subtags).
+    try evalThrows("new Intl.DisplayNames('en',{type:'calendar'}).of('')");
+    try evalThrows("new Intl.DisplayNames('en',{type:'calendar'}).of('ab')");
+    // dateTimeField type → must be a sanctioned field.
+    try evalThrows("new Intl.DisplayNames('en',{type:'dateTimeField'}).of('bogus')");
+}
+
+test "intl: DisplayNames.of accepts well-formed codes" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const lang = new Intl.DisplayNames('en',{type:'language'});
+        \\const cal = new Intl.DisplayNames('en',{type:'calendar'});
+        \\const dtf = new Intl.DisplayNames('en',{type:'dateTimeField'});
+        \\(typeof lang.of('zh-Hant') === 'string' &&
+        \\ typeof cal.of('gregory') === 'string' &&
+        \\ typeof dtf.of('month') === 'string') ? 1 : 0
+    );
+}
