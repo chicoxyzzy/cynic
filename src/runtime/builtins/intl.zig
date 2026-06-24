@@ -1328,6 +1328,39 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         }
     }.f;
 
+    // §15.5 currencyDisplay:"name" — a wholly different layout: the number is
+    // formatted plainly (no `¤`) and wrapped in the locale `unitPattern-count`
+    // ("{0} {1}"), with the long name plural-selected on the *formatted*
+    // operands. The unit pattern has no accounting variant, so a negative always
+    // shows a discrete minus/plus inside the "{0}" slot.
+    if (is_currency and std.mem.eql(u8, slots.currency_display, "name")) {
+        const min_frac = slots.minimum_fraction_digits orelse 0;
+        const max_frac = slots.maximum_fraction_digits orelse 2;
+        const ops = cldr.computeOperands(@abs(x), min_frac, max_frac);
+        const cat = cldr.selectPlural(slots.base.locale, false, ops);
+        const long_name = cldr.currencyDisplayNameCount(slots.base.locale, slots.currency, cat) orelse
+            cldr.displayName(slots.base.locale, .currency, slots.currency) orelse slots.currency;
+        const unit_pat = cldr.currencyUnitPattern(slots.base.locale, cat) orelse "{0} {1}";
+
+        var sign: []const u8 = "";
+        var sign_type: []const u8 = "minusSign";
+        if (signShows(slots.sign_display, negative, is_zero)) {
+            sign = if (negative) nd.minus else nd.plus;
+            sign_type = if (negative) "minusSign" else "plusSign";
+        }
+        emitUnitPattern(out, &n, unit_pat, .{
+            .sign = sign,
+            .sign_type = sign_type,
+            .int_ascii = int_pad[0..ip_len],
+            .frac_ascii = frac_ascii[0..frac_len],
+            .name = long_name,
+            .slots = slots,
+            .nd = nd,
+            .digit_base = digit_base,
+        }, append);
+        return n;
+    }
+
     // Pattern affixes (percent / currency sign placement, literals). Decimal
     // patterns usually have none. Currency draws its own pattern (standard or
     // accounting) from the locale's currencyFormats; the `¤` placeholder is
@@ -1339,12 +1372,28 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
             cldr.CurrencyPattern{ .standard = "¤#,##0.00", .accounting = "¤#,##0.00" };
         break :blk if (std.mem.eql(u8, slots.currency_sign, "accounting")) cp.accounting else cp.standard;
     } else if (is_percent) nd.pct_pattern else nd.dec_pattern;
-    const affix = patternAffixes(pattern);
 
-    // sign string
+    // §15.5 — a negative magnitude that signDisplay surfaces renders through
+    // the pattern's *negative subpattern* (after ';') when one exists. CLDR's
+    // accounting currency form supplies it (e.g. "(¤#,##0.00)"), so the
+    // parentheses become the sign and no separate minus is emitted. Without a
+    // negative subpattern (standard currency / decimal / percent) the positive
+    // subpattern carries the digits and the minus/plus is a discrete part.
+    const show_sign = signShows(slots.sign_display, negative, is_zero);
+    const semi = std.mem.indexOfScalar(u8, pattern, ';');
+    const use_neg_subpattern = is_currency and negative and show_sign and semi != null;
+    const subpattern = if (use_neg_subpattern)
+        pattern[semi.? + 1 ..]
+    else if (semi) |s|
+        pattern[0..s]
+    else
+        pattern;
+    const affix = patternAffixes(subpattern);
+
+    // sign string (suppressed when the negative subpattern's affixes carry it)
     var sign: []const u8 = "";
     var sign_type: []const u8 = "minusSign";
-    if (signShows(slots.sign_display, negative, is_zero)) {
+    if (show_sign and !use_neg_subpattern) {
         if (negative) {
             sign = nd.minus;
             sign_type = "minusSign";
@@ -1354,11 +1403,22 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         }
     }
 
+    // CLDR currencySpacing (alphaNextToNumber): a U+00A0 separates the currency
+    // display from the abutting digits when the display's number-facing
+    // character is a letter (the ISO code, or a letter-based symbol). A symbol
+    // glyph ($, €) gets none. Only applies where `¤` directly abuts the number
+    // skeleton — a pattern that already bakes a space (de "#,##0.00 ¤") does
+    // not double up, since its suffix starts with the space, not `¤`.
+    const prefix_space: CurrencySpace =
+        if (is_currency and endsWithCurrency(affix.prefix) and asciiLetterAt(cur_display, .last)) .after else .none;
+    const suffix_space: CurrencySpace =
+        if (is_currency and startsWithCurrency(affix.suffix) and asciiLetterAt(cur_display, .first)) .before else .none;
+
     // Sign leads the prefix affix so the minus precedes a currency symbol
     // ("-$5.00", not "$-5.00"); for percent / decimal the prefix is empty so
     // ordering is unaffected.
     if (sign.len > 0) append(out, &n, sign_type, sign);
-    if (is_currency) appendCurrencyAffix(out, &n, affix.prefix, cur_display, append) else appendAffix(out, &n, affix.prefix, nd, append);
+    if (is_currency) appendCurrencyAffix(out, &n, affix.prefix, cur_display, prefix_space, append) else appendAffix(out, &n, affix.prefix, nd, append);
 
     // integer with grouping + digit substitution
     appendGroupedInteger(out, &n, int_pad[0..ip_len], slots, nd, digit_base, append);
@@ -1370,7 +1430,7 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         append(out, &n, "fraction", sb);
     }
 
-    if (is_currency) appendCurrencyAffix(out, &n, affix.suffix, cur_display, append) else appendAffix(out, &n, affix.suffix, nd, append);
+    if (is_currency) appendCurrencyAffix(out, &n, affix.suffix, cur_display, suffix_space, append) else appendAffix(out, &n, affix.suffix, nd, append);
     return n;
 }
 
@@ -1413,16 +1473,27 @@ fn appendAffix(out: []Seg, n: *u32, affix: []const u8, nd: cldr.NumberData, appe
     }
 }
 
+/// Where (if anywhere) a currencySpacing no-break space is inserted relative to
+/// the currency segment: `.before` for a suffix-position currency, `.after` for
+/// a prefix-position currency, `.none` when the display is a symbol glyph.
+const CurrencySpace = enum { none, before, after };
+
+/// The U+00A0 (no-break space) CLDR inserts between an alphabetic currency
+/// display and the abutting digits (the `-alphaNextToNumber` separator).
+const nbsp = "\u{00A0}";
+
 /// `¤` (U+00A4, UTF-8 0xC2 0xA4) is the CLDR currency placeholder. Emit the
-/// resolved display text as a "currency" segment; other text is a literal
-/// (trimming the no-break spaces CLDR uses around the symbol so they don't
-/// surface as stray parts — currencySpacing is approximated as a plain space).
-fn appendCurrencyAffix(out: []Seg, n: *u32, affix: []const u8, cur_display: []const u8, append: anytype) void {
+/// resolved display text as a "currency" segment; other text is a literal. When
+/// `space` is set, a U+00A0 currencySpacing literal is emitted adjacent to the
+/// currency segment (before it for a suffix currency, after it for a prefix).
+fn appendCurrencyAffix(out: []Seg, n: *u32, affix: []const u8, cur_display: []const u8, space: CurrencySpace, append: anytype) void {
     if (affix.len == 0) return;
     var i: usize = 0;
     while (i < affix.len) {
         if (i + 1 < affix.len and affix[i] == 0xC2 and affix[i + 1] == 0xA4) {
+            if (space == .before) append(out, n, "literal", nbsp);
             append(out, n, "currency", cur_display);
+            if (space == .after) append(out, n, "literal", nbsp);
             i += 2;
         } else {
             const start = i;
@@ -1432,15 +1503,74 @@ fn appendCurrencyAffix(out: []Seg, n: *u32, affix: []const u8, cur_display: []co
     }
 }
 
-/// Resolve the currency display text per `currencyDisplay`: "code" → the ISO
-/// code itself; "symbol"/"narrowSymbol" → the localized (narrow) symbol with
-/// the code as fallback; "name" → the long display name (singular; the plural
-/// `unitPattern` rendering is a follow-up). §15.5.x.
+/// True when `s` begins / ends with the `¤` placeholder (UTF-8 0xC2 0xA4),
+/// i.e. the currency abuts the number skeleton on that side of the affix.
+fn startsWithCurrency(s: []const u8) bool {
+    return s.len >= 2 and s[0] == 0xC2 and s[1] == 0xA4;
+}
+fn endsWithCurrency(s: []const u8) bool {
+    return s.len >= 2 and s[s.len - 2] == 0xC2 and s[s.len - 1] == 0xA4;
+}
+
+/// Whether the first / last byte of `s` is an ASCII letter — the
+/// currencySpacing `currencyMatch` test ([:^S:]&[:^Z:]) approximated for the
+/// number-facing character: ISO codes and letter-symbols are ASCII letters,
+/// while symbol glyphs ($, €, ¥) are non-letters (multi-byte or punctuation).
+fn asciiLetterAt(s: []const u8, comptime end: enum { first, last }) bool {
+    if (s.len == 0) return false;
+    const c = if (end == .first) s[0] else s[s.len - 1];
+    return std.ascii.isAlphabetic(c);
+}
+
+/// Inputs for `emitUnitPattern` — the already-rounded number pieces plus the
+/// plural-selected long name and the locale's formatting data.
+const UnitPatternCtx = struct {
+    sign: []const u8,
+    sign_type: []const u8,
+    int_ascii: []const u8,
+    frac_ascii: []const u8,
+    name: []const u8,
+    slots: *const intl.NumberFormatSlots,
+    nd: cldr.NumberData,
+    digit_base: u32,
+};
+
+/// Render a currencyDisplay:"name" `unitPattern` ("{0} {1}"): "{0}" expands to
+/// the formatted number (sign + grouped integer + fraction), "{1}" to the long
+/// currency name, and surrounding text is a literal. A `{` that does not begin a
+/// `{0}` / `{1}` placeholder is treated as the start of a literal run.
+fn emitUnitPattern(out: []Seg, n: *u32, pat: []const u8, ctx: UnitPatternCtx, append: anytype) void {
+    var i: usize = 0;
+    while (i < pat.len) {
+        if (i + 2 < pat.len and pat[i] == '{' and pat[i + 2] == '}' and (pat[i + 1] == '0' or pat[i + 1] == '1')) {
+            if (pat[i + 1] == '0') {
+                if (ctx.sign.len > 0) append(out, n, ctx.sign_type, ctx.sign);
+                appendGroupedInteger(out, n, ctx.int_ascii, ctx.slots, ctx.nd, ctx.digit_base, append);
+                if (ctx.frac_ascii.len > 0) {
+                    append(out, n, "decimal", ctx.nd.decimal);
+                    var sub: [256]u8 = undefined;
+                    append(out, n, "fraction", substituteDigits(ctx.frac_ascii, ctx.digit_base, &sub));
+                }
+            } else {
+                append(out, n, "currency", ctx.name);
+            }
+            i += 3;
+        } else {
+            const start = i;
+            i += 1; // consume this char (incl. a non-placeholder '{')
+            while (i < pat.len and pat[i] != '{') i += 1;
+            append(out, n, "literal", pat[start..i]);
+        }
+    }
+}
+
+/// Resolve the currency display text for the symbol-style displays (the "name"
+/// style renders through `emitUnitPattern`, not this `¤` substitution): "code" →
+/// the ISO code itself; "symbol"/"narrowSymbol" → the localized (narrow) symbol
+/// with the code as fallback. §15.5.x.
 fn currencyDisplayText(slots: *const intl.NumberFormatSlots) []const u8 {
     const code = slots.currency;
     if (std.mem.eql(u8, slots.currency_display, "code")) return code;
-    if (std.mem.eql(u8, slots.currency_display, "name"))
-        return cldr.displayName(slots.base.locale, .currency, code) orelse code;
     const narrow = std.mem.eql(u8, slots.currency_display, "narrowSymbol");
     return cldr.currencySymbol(slots.base.locale, code, narrow) orelse code;
 }

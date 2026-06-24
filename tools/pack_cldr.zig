@@ -42,7 +42,21 @@ const SectionKind = enum(u8) {
     dates = 5,
     display_names = 6,
     currencies = 7,
+    currency_names = 8,
 };
+
+/// Plural-category index shared with `cldr.zig`'s PluralCategory
+/// (zero=0 … other=5). Unlike `Category.fromName`, "other" maps to 5 — the
+/// currency long-name / unitPattern tables key the catch-all explicitly.
+fn pluralCatIndex(name: []const u8) ?u8 {
+    if (std.mem.eql(u8, name, "zero")) return 0;
+    if (std.mem.eql(u8, name, "one")) return 1;
+    if (std.mem.eql(u8, name, "two")) return 2;
+    if (std.mem.eql(u8, name, "few")) return 3;
+    if (std.mem.eql(u8, name, "many")) return 4;
+    if (std.mem.eql(u8, name, "other")) return 5;
+    return null;
+}
 
 /// CLDR "modern" coverage tier, base-language locales (plus the few
 /// script-primary ones CLDR treats as principal). Derived from
@@ -211,7 +225,7 @@ fn pack(
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [7]SectionDir = undefined;
+    var dirs: [8]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -240,6 +254,10 @@ fn pack(
     const cur_start: u32 = @intCast(payloads.items.len);
     try writeCurrenciesPayload(gpa, &payloads, currencies);
     dirs[6] = .{ .kind = .currencies, .off = cur_start, .len = @as(u32, @intCast(payloads.items.len)) - cur_start };
+
+    const curname_start: u32 = @intCast(payloads.items.len);
+    try writeCurrencyNamesPayload(gpa, &payloads, currencies);
+    dirs[7] = .{ .kind = .currency_names, .off = curname_start, .len = @as(u32, @intCast(payloads.items.len)) - curname_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -379,11 +397,18 @@ fn writeNumbersPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8),
 // ── currencies (symbols + patterns + fraction digits) ─────────────────────────
 
 const CurSym = struct { code: [3]u8, symbol: []const u8, narrow: []const u8 };
+/// A `unitPattern-count-{cat}` ("{0} {1}") for the currencyDisplay:"name" style.
+const UnitPattern = struct { cat: u8, pattern: []const u8 };
+/// A plural-keyed long name (`displayName-count-{cat}`) for one currency.
+const PluralName = struct { cat: u8, name: []const u8 };
+const CurrencyNames = struct { code: [3]u8, forms: []PluralName };
 const CurrencyLocale = struct {
     key: []const u8,
     std_pattern: []const u8, // currencyFormats `standard`, e.g. "¤#,##0.00"
     acct_pattern: []const u8, // currencyFormats `accounting`
+    unit_patterns: []UnitPattern, // currencyDisplay:"name" wrappers
     syms: []CurSym,
+    names: []CurrencyNames, // per-currency plural long names (written separately)
     fn lessThan(_: void, a: CurrencyLocale, b: CurrencyLocale) bool {
         return std.mem.lessThan(u8, a.key, b.key);
     }
@@ -420,11 +445,13 @@ fn isUpper3(s: []const u8) bool {
     return true;
 }
 
-/// Per modern locale: currency display patterns + localized symbols. The
-/// per-currency display *names* (currencyDisplay:"name") reuse the existing
-/// display-names section, so only `symbol` / `symbol-alt-narrow` are packed
-/// here, and only where they differ from the ISO code (else the code is the
-/// runtime fallback).
+/// Per modern locale: currency display patterns + localized symbols +
+/// currencyDisplay:"name" data — the `unitPattern-count-*` wrappers
+/// (numbers.json) and the per-currency `displayName-count-*` plural long names
+/// (currencies.json). Symbols are packed only where they differ from the ISO
+/// code; long names only where they differ from the already-packed singular
+/// `displayName` (the runtime falls back: count → other → singular → code), so
+/// the table stays a delta over the display-names section.
 fn loadCurrencies(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) !CurrencyData {
     const fractions = try loadCurrencyFractions(arena, io, json_root);
     var out: std.ArrayListUnmanaged(CurrencyLocale) = .empty;
@@ -440,7 +467,21 @@ fn loadCurrencies(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) !
         const std_pat = strField(cf, "standard", "¤#,##0.00");
         const acct_pat = strField(cf, "accounting", std_pat);
 
+        // unitPattern-count-{cat}: the "{0} {1}" wrappers for the "name" style.
+        var unit_patterns: std.ArrayListUnmanaged(UnitPattern) = .empty;
+        var cfit = cf.iterator();
+        while (cfit.next()) |e| {
+            const k = e.key_ptr.*;
+            const prefix = "unitPattern-count-";
+            if (!std.mem.startsWith(u8, k, prefix)) continue;
+            if (e.value_ptr.* != .string) continue;
+            const cat = pluralCatIndex(k[prefix.len..]) orelse continue;
+            unit_patterns.append(arena, .{ .cat = cat, .pattern = try arena.dupe(u8, e.value_ptr.*.string) }) catch {};
+        }
+        sortByCat(UnitPattern, unit_patterns.items);
+
         var syms: std.ArrayListUnmanaged(CurSym) = .empty;
+        var names: std.ArrayListUnmanaged(CurrencyNames) = .empty;
         const cpath = try std.fmt.allocPrint(arena, "{s}/cldr-numbers-full/main/{s}/currencies.json", .{ json_root, loc });
         if (std.Io.Dir.cwd().readFileAlloc(io, cpath, arena, .limited(8 * 1024 * 1024))) |cbytes| {
             if (std.json.parseFromSliceLeaky(std.json.Value, arena, cbytes, .{})) |croot| {
@@ -452,15 +493,39 @@ fn loadCurrencies(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) !
                     const code = e.key_ptr.*;
                     if (code.len != 3 or !isUpper3(code)) continue;
                     const o = e.value_ptr.*.object;
-                    const sym = if (o.get("symbol")) |s| s.string else continue;
-                    if (std.mem.eql(u8, sym, code)) continue; // symbol == code → runtime fallback
-                    const narrow_v = o.get("symbol-alt-narrow");
-                    const narrow = if (narrow_v) |nv| nv.string else "";
-                    syms.append(arena, .{
-                        .code = code[0..3].*,
-                        .symbol = try arena.dupe(u8, sym),
-                        .narrow = if (narrow.len > 0 and !std.mem.eql(u8, narrow, sym)) try arena.dupe(u8, narrow) else "",
-                    }) catch {};
+                    if (o.get("symbol")) |sv| {
+                        const sym = sv.string;
+                        if (!std.mem.eql(u8, sym, code)) { // symbol == code → runtime fallback
+                            const narrow_v = o.get("symbol-alt-narrow");
+                            const narrow = if (narrow_v) |nv| nv.string else "";
+                            syms.append(arena, .{
+                                .code = code[0..3].*,
+                                .symbol = try arena.dupe(u8, sym),
+                                .narrow = if (narrow.len > 0 and !std.mem.eql(u8, narrow, sym)) try arena.dupe(u8, narrow) else "",
+                            }) catch {};
+                        }
+                    }
+                    // Plural long names, delta-encoded over the singular display
+                    // name + the "other" anchor so the table stays minimal.
+                    const singular = if (o.get("displayName")) |d| d.string else "";
+                    const other = if (o.get("displayName-count-other")) |d| d.string else singular;
+                    var forms: std.ArrayListUnmanaged(PluralName) = .empty;
+                    const cats = [_][]const u8{ "zero", "one", "two", "few", "many", "other" };
+                    for (cats) |cn| {
+                        const fk = try std.fmt.allocPrint(arena, "displayName-count-{s}", .{cn});
+                        const v = if (o.get(fk)) |d| d.string else continue;
+                        const idx = pluralCatIndex(cn).?;
+                        // Store "other" only when it differs from the singular;
+                        // store any other category only when it differs from
+                        // "other" (the within-table fallback target).
+                        const keep = if (idx == 5) !std.mem.eql(u8, v, singular) else !std.mem.eql(u8, v, other);
+                        if (!keep) continue;
+                        forms.append(arena, .{ .cat = idx, .name = try arena.dupe(u8, v) }) catch {};
+                    }
+                    if (forms.items.len > 0) {
+                        sortByCat(PluralName, forms.items);
+                        names.append(arena, .{ .code = code[0..3].*, .forms = forms.items }) catch {};
+                    }
                 }
             } else |_| {}
         } else |_| {}
@@ -469,11 +534,23 @@ fn loadCurrencies(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) !
             .key = loc,
             .std_pattern = try arena.dupe(u8, std_pat),
             .acct_pattern = try arena.dupe(u8, acct_pat),
+            .unit_patterns = unit_patterns.items,
             .syms = syms.items,
+            .names = names.items,
         }) catch {};
     }
     std.sort.block(CurrencyLocale, out.items, {}, CurrencyLocale.lessThan);
     return .{ .fractions = fractions, .locales = out.items };
+}
+
+/// Sort a slice of `{ cat: u8, … }` records ascending by category index, so the
+/// runtime can stop early and the canonical fallback order is preserved.
+fn sortByCat(comptime T: type, items: []T) void {
+    std.sort.block(T, items, {}, struct {
+        fn lt(_: void, a: T, b: T) bool {
+            return a.cat < b.cat;
+        }
+    }.lt);
 }
 
 fn writeCurrenciesPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), data: CurrencyData) !void {
@@ -483,12 +560,18 @@ fn writeCurrenciesPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u
         try buf.appendSlice(gpa, &f.code);
         try buf.append(gpa, f.digits);
     }
-    // Per-locale patterns + symbols.
+    // Per-locale patterns + unitPatterns + symbols.
     try appendU32(gpa, buf, data.locales.len);
     for (data.locales) |l| {
         try appendStr8(gpa, buf, l.key);
         try appendStr16(gpa, buf, l.std_pattern);
         try appendStr16(gpa, buf, l.acct_pattern);
+        std.debug.assert(l.unit_patterns.len <= 0xFF);
+        try buf.append(gpa, @intCast(l.unit_patterns.len));
+        for (l.unit_patterns) |u| {
+            try buf.append(gpa, u.cat);
+            try appendStr16(gpa, buf, u.pattern);
+        }
         std.debug.assert(l.syms.len <= 0xFFFF);
         try buf.append(gpa, @intCast(l.syms.len & 0xFF));
         try buf.append(gpa, @intCast((l.syms.len >> 8) & 0xFF));
@@ -496,6 +579,29 @@ fn writeCurrenciesPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u
             try buf.appendSlice(gpa, &s.code);
             try appendStr8(gpa, buf, s.symbol);
             try appendStr8(gpa, buf, s.narrow);
+        }
+    }
+}
+
+/// The `currency_names` section: per locale, the per-currency plural long names
+/// for currencyDisplay:"name". Kept apart from the `currencies` section so the
+/// hot symbol/pattern lookups never walk this (much larger) table.
+///   u32 locale_count
+///   repeated: str8 key; u32 cur_count;
+///     repeated: u8 code[3]; u8 form_count; repeated: u8 cat; str16 name
+fn writeCurrencyNamesPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), data: CurrencyData) !void {
+    try appendU32(gpa, buf, data.locales.len);
+    for (data.locales) |l| {
+        try appendStr8(gpa, buf, l.key);
+        try appendU32(gpa, buf, l.names.len);
+        for (l.names) |c| {
+            try buf.appendSlice(gpa, &c.code);
+            std.debug.assert(c.forms.len <= 0xFF);
+            try buf.append(gpa, @intCast(c.forms.len));
+            for (c.forms) |f| {
+                try buf.append(gpa, f.cat);
+                try appendStr16(gpa, buf, f.name);
+            }
         }
     }
 }

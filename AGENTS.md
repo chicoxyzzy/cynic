@@ -210,16 +210,21 @@ These are project rules — they apply to everyone.
   primary/secondary grouping, numbering-system digit substitution,
   sign/fraction/significant digits; currency style draws the locale
   currencyFormats pattern, localized symbol / narrowSymbol / code display,
-  and per-currency minor units from `currencyData`), and
+  per-currency minor units from `currencyData`, the accounting negative
+  subpattern (`($987.00)` parentheses, no minus part), currencyDisplay:"name"
+  via the per-locale `unitPattern-count-{plural}` wrapping the per-currency
+  `displayName-count-{plural}` long name plural-selected on the formatted
+  operands, and currencySpacing — the U+00A0 inserted before/after an
+  alphabetic display (ISO code / letter symbol) abutting the digits), and
   `Intl.DateTimeFormat` (gregorian: dateStyle/timeStyle + component
   options, localized month/day/era/dayPeriod names, hourCycle, formatToParts) are
   CLDR-backed via `src/runtime/cldr.zig` (see `src/runtime/builtins/intl.zig`),
   as is `Intl.DisplayNames` (language / region / script / currency name tables).
-  NumberFormat currencyDisplay:"name" (plural unit pattern) + currencySpacing,
-  unit/compact output, DateTimeFormat skeleton best-fit /
+  NumberFormat unit/compact output, DateTimeFormat skeleton best-fit /
   non-gregorian calendars / tz names, and DisplayNames calendar/dateTimeField
   types stay structural until their CLDR sections land. The display-name tables
-  dominate the blob (~2.8 MiB total at `full`); trim `modern_locales` in
+  (singular + the per-currency plural long names) dominate the blob (~3.6 MiB
+  total at `full`); trim `modern_locales` in
   `tools/pack_cldr.zig` if a smaller footprint is needed. Do **not** add
   `--enable=intl` or `--allow=intl` —
   Intl is Stage 4 and is not a security relaxation like eval/wasm.

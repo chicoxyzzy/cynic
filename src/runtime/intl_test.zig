@@ -846,3 +846,108 @@ test "intl: currency default minFractionDigits clamps to a smaller user max" {
         \\(ro.minimumFractionDigits === 0 && ro.maximumFractionDigits === 0) ? 1 : 0
     );
 }
+
+// §15.5 GetNumberFormatPattern — currencySign:"accounting" selects the
+// locale's accounting *negative subpattern* (after ';') for negatives, so
+// en/ja/ko/zh wrap the value in parentheses and emit no minus sign. The
+// positive subpattern still applies to non-negatives, and signDisplay still
+// governs whether the positive case shows a plusSign. Matches V8 / JSC / SM.
+test "intl: currency accounting sign wraps negatives in parentheses" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const acct = (v, sd) => new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', currencySign:'accounting', signDisplay: sd || 'auto' }).format(v);
+        \\(acct(-987) === '($987.00)' &&
+        \\ acct(987) === '$987.00' &&
+        \\ acct(0) === '$0.00' &&
+        \\ acct(-987, 'never') === '$987.00' &&
+        \\ acct(987, 'always') === '+$987.00' &&
+        \\ acct(-987, 'always') === '($987.00)' &&
+        \\ acct(-987, 'negative') === '($987.00)') ? 1 : 0
+    );
+}
+
+test "intl: currency accounting negative formatToParts emits paren literals (6 parts)" {
+    try requireFullBuild();
+    // The cited test262 shape: 6 parts where a minus-sign rendering gives 5.
+    try evalAssert1(
+        \\const p = new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', currencySign:'accounting' }).formatToParts(-987);
+        \\const t = p.map(x => x.type).join(',');
+        \\(p.length === 6 &&
+        \\ t === 'literal,currency,integer,decimal,fraction,literal' &&
+        \\ p[0].value === '(' && p[1].value === '$' && p[5].value === ')') ? 1 : 0
+    );
+}
+
+// §15.5 / CLDR currencySpacing — when the currency display abuts the digits
+// and its number-facing character is a letter (the "alphaNextToNumber" case,
+// e.g. the ISO code "CAD"), a U+00A0 no-break space is inserted between the
+// currency and the number. A symbol glyph ($, €) gets no space. Matches the
+// production engines' `-alphaNextToNumber` pattern selection.
+test "intl: currencyDisplay code inserts a no-break space before digits" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const code = (c) => new Intl.NumberFormat('en-US', { style:'currency', currency:c, currencyDisplay:'code' }).format(5);
+        \\const sym = new Intl.NumberFormat('en-US', { style:'currency', currency:'USD' }).format(5);
+        \\(code('CAD') === 'CAD\u00A05.00' &&    // letter-adjacent → U+00A0
+        \\ code('USD') === 'USD\u00A05.00' &&
+        \\ sym === '$5.00') ? 1 : 0               // symbol glyph → no space
+    );
+}
+
+test "intl: currencyDisplay code formatToParts emits a literal nbsp segment" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const p = new Intl.NumberFormat('en-US', { style:'currency', currency:'CAD', currencyDisplay:'code' }).formatToParts(5);
+        \\const t = p.map(x => x.type).join(',');
+        \\(t === 'currency,literal,integer,decimal,fraction' &&
+        \\ p[0].value === 'CAD' && p[1].value === '\u00A0' && p[1].value.charCodeAt(0) === 160) ? 1 : 0
+    );
+}
+
+// \u00A715.5 \u2014 currencyDisplay:"name" renders the locale `unitPattern-count-{plural}`
+// ("{0} {1}": number then long name) with the long name plural-selected on the
+// *formatted* operands, not the raw value. So "1.00" (two fraction digits \u2192 v=2,
+// category "other") is "1.00 US dollars", while a 0-fraction "1" (v=0, "one")
+// is "1 US dollar". The separator is the pattern's own U+0020. Matches V8/JSC/SM.
+test "intl: currencyDisplay name uses plural unit pattern (en)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (v, o) => new Intl.NumberFormat('en', Object.assign({ style:'currency', currency:'USD', currencyDisplay:'name' }, o)).format(v);
+        \\(f(5) === '5.00 US dollars' &&
+        \\ f(1) === '1.00 US dollars' &&                                  // v=2 \u21D2 "other"
+        \\ f(1, { minimumFractionDigits:0, maximumFractionDigits:0 }) === '1 US dollar' &&   // v=0 \u21D2 "one"
+        \\ f(2, { minimumFractionDigits:0, maximumFractionDigits:0 }) === '2 US dollars') ? 1 : 0
+    );
+}
+
+test "intl: currencyDisplay name is locale-pluralised (de, fr)" {
+    try requireFullBuild();
+    // de has only unitPattern-count-other; fr's cardinal "one" covers i\u2208{0,1}
+    // so 1,00 is singular "euro". Both draw the per-currency long name.
+    try evalAssert1(
+        \\const f = (l, c, v) => new Intl.NumberFormat(l, { style:'currency', currency:c, currencyDisplay:'name' }).format(v);
+        \\(f('de','EUR',5) === '5,00 Euro' &&
+        \\ f('fr','EUR',1) === '1,00 euro') ? 1 : 0
+    );
+}
+
+test "intl: currencyDisplay name formatToParts puts long name in the currency part" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const p = new Intl.NumberFormat('en', { style:'currency', currency:'USD', currencyDisplay:'name' }).formatToParts(1234.5);
+        \\const t = p.map(x => x.type).join(',');
+        \\(t === 'integer,group,integer,decimal,fraction,literal,currency' &&
+        \\ p[p.length-1].value === 'US dollars' && p[5].value === ' ') ? 1 : 0
+    );
+}
+
+test "intl: currencyDisplay name negative leads with a minus, ignores accounting" {
+    try requireFullBuild();
+    // The unit pattern has no accounting variant, so a negative shows a minus
+    // sign even under currencySign:"accounting".
+    try evalAssert1(
+        \\const f = (o) => new Intl.NumberFormat('en', Object.assign({ style:'currency', currency:'USD', currencyDisplay:'name' }, o)).format(-5);
+        \\(f({}) === '-5.00 US dollars' &&
+        \\ f({ currencySign:'accounting' }) === '-5.00 US dollars') ? 1 : 0
+    );
+}

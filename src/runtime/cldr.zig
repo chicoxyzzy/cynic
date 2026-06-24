@@ -58,6 +58,7 @@ const SectionKind = enum(u8) {
     dates = 5,
     display_names = 6,
     currencies = 7,
+    currency_names = 8,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -67,6 +68,7 @@ var init_ok: bool = false;
 var card_payload: []const u8 = &.{};
 var ord_payload: []const u8 = &.{};
 var cur_payload: []const u8 = &.{};
+var cur_names_payload: []const u8 = &.{};
 var num_payload: []const u8 = &.{};
 var ns_payload: []const u8 = &.{};
 var dates_payload: []const u8 = &.{};
@@ -105,6 +107,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.dates) => dates_payload = payload,
             @intFromEnum(SectionKind.display_names) => display_payload = payload,
             @intFromEnum(SectionKind.currencies) => cur_payload = payload,
+            @intFromEnum(SectionKind.currency_names) => cur_names_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -522,6 +525,18 @@ fn currencyLocalesStart() ?usize {
     return if (start + 4 <= cur_payload.len) start else null;
 }
 
+/// Advance `off` past the per-locale unitPattern block (u8 count, then
+/// [u8 category; str16 pattern] each). Returns false on a malformed payload.
+fn skipUnitPatterns(off: *usize) bool {
+    const uc = readU8(cur_payload, off) orelse return false;
+    var u: u32 = 0;
+    while (u < uc) : (u += 1) {
+        _ = readU8(cur_payload, off) orelse return false; // category
+        _ = readStr16(cur_payload, off) orelse return false; // pattern
+    }
+    return true;
+}
+
 /// Locate one locale's currency record; returns the offset just past its key
 /// (at `std_pattern`). Exact key match only — callers walk the fallback chain.
 fn findCurrencyLocale(key: []const u8) ?usize {
@@ -534,9 +549,11 @@ fn findCurrencyLocale(key: []const u8) ?usize {
         const klen = readU8(cur_payload, &off) orelse return null;
         const k = readBytes(cur_payload, &off, klen) orelse return null;
         const rec_off = off;
-        // Skip std + acct patterns and the symbol table to reach the next key.
+        // Skip std + acct patterns, the unitPattern block, and the symbol table
+        // to reach the next key.
         _ = readStr16(cur_payload, &off) orelse return null;
         _ = readStr16(cur_payload, &off) orelse return null;
+        if (!skipUnitPatterns(&off)) return null;
         const sym_count = readU16(cur_payload, &off) orelse return null;
         var s: u32 = 0;
         while (s < sym_count) : (s += 1) {
@@ -571,6 +588,7 @@ pub fn currencySymbol(locale: []const u8, code: []const u8, narrow: bool) ?[]con
     var off = off0;
     _ = readStr16(cur_payload, &off) orelse return null; // std
     _ = readStr16(cur_payload, &off) orelse return null; // acct
+    if (!skipUnitPatterns(&off)) return null;
     const sym_count = readU16(cur_payload, &off) orelse return null;
     var s: u32 = 0;
     while (s < sym_count) : (s += 1) {
@@ -579,6 +597,87 @@ pub fn currencySymbol(locale: []const u8, code: []const u8, narrow: bool) ?[]con
         const nar = readStr8(cur_payload, &off) orelse return null;
         if (asciiEqlIgnoreCase(c, code))
             return if (narrow and nar.len > 0) nar else sym;
+    }
+    return null;
+}
+
+/// The currencyDisplay:"name" `unitPattern-count-{category}` for a locale
+/// ("{0} {1}"), with the canonical CLDR fallback to the "other" form. Null when
+/// the locale has no unitPattern data (caller defaults to "{0} {1}").
+pub fn currencyUnitPattern(locale: []const u8, category: PluralCategory) ?[]const u8 {
+    if (!ensureInit()) return null;
+    const off0 = withCandidates(locale, findCurrencyLocale) orelse return null;
+    var off = off0;
+    _ = readStr16(cur_payload, &off) orelse return null; // std
+    _ = readStr16(cur_payload, &off) orelse return null; // acct
+    const want: u8 = @intFromEnum(category);
+    const uc = readU8(cur_payload, &off) orelse return null;
+    var found: ?[]const u8 = null;
+    var other: ?[]const u8 = null;
+    var u: u32 = 0;
+    while (u < uc) : (u += 1) {
+        const cat = readU8(cur_payload, &off) orelse return null;
+        const pat = readStr16(cur_payload, &off) orelse return null;
+        if (cat == want) found = pat;
+        if (cat == @intFromEnum(PluralCategory.other)) other = pat;
+    }
+    return found orelse other;
+}
+
+/// The currencyDisplay:"name" long name for `code` in `locale`, plural-selected
+/// by `category` with the CLDR fallback chain (category → "other"). Null when
+/// the locale/currency stores no plural name — the caller then falls back to the
+/// singular display name (`displayName`) and finally the ISO code itself.
+pub fn currencyDisplayNameCount(locale: []const u8, code: []const u8, category: PluralCategory) ?[]const u8 {
+    if (!ensureInit() or code.len != 3 or cur_names_payload.len < 4) return null;
+    const off0 = withCandidates(locale, findCurrencyName) orelse return null;
+    var off = off0;
+    const cur_count = readU32(cur_names_payload, &off) orelse return null;
+    const want: u8 = @intFromEnum(category);
+    var i: u32 = 0;
+    while (i < cur_count) : (i += 1) {
+        const c = readBytes(cur_names_payload, &off, 3) orelse return null;
+        const form_count = readU8(cur_names_payload, &off) orelse return null;
+        const match = asciiEqlIgnoreCase(c, code);
+        var found: ?[]const u8 = null;
+        var other: ?[]const u8 = null;
+        var f: u8 = 0;
+        while (f < form_count) : (f += 1) {
+            const cat = readU8(cur_names_payload, &off) orelse return null;
+            const name = readStr16(cur_names_payload, &off) orelse return null;
+            if (match) {
+                if (cat == want) found = name;
+                if (cat == @intFromEnum(PluralCategory.other)) other = name;
+            }
+        }
+        if (match) return found orelse other;
+    }
+    return null;
+}
+
+/// Locate a locale's record in the `currency_names` section; returns the offset
+/// just past the key (at `cur_count`). Mirrors `findCurrencyLocale`.
+fn findCurrencyName(key: []const u8) ?usize {
+    if (cur_names_payload.len < 4) return null;
+    var off: usize = 0;
+    const count = readU32(cur_names_payload, &off) orelse return null;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(cur_names_payload, &off) orelse return null;
+        const k = readBytes(cur_names_payload, &off, klen) orelse return null;
+        const rec_off = off;
+        const cur_count = readU32(cur_names_payload, &off) orelse return null;
+        var c: u32 = 0;
+        while (c < cur_count) : (c += 1) {
+            _ = readBytes(cur_names_payload, &off, 3) orelse return null; // code
+            const form_count = readU8(cur_names_payload, &off) orelse return null;
+            var f: u8 = 0;
+            while (f < form_count) : (f += 1) {
+                _ = readU8(cur_names_payload, &off) orelse return null; // cat
+                _ = readStr16(cur_names_payload, &off) orelse return null; // name
+            }
+        }
+        if (asciiEqlIgnoreCase(k, key)) return rec_off;
     }
     return null;
 }
