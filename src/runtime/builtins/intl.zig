@@ -2679,8 +2679,30 @@ fn pluralRulesConstructor(realm: *Realm, this_value: Value, args: []const Value)
     const opts = try getOptionsObject(realm, options);
     const resolved = try resolveServiceLocale(realm, locales, opts);
     var slots: intl.PluralRulesSlots = .{};
+    errdefer slots.deinit(realm.allocator);
     slots.base.locale = resolved.locale;
+    // §16.1.1 read order: type, notation, compactDisplay, then digit options.
     slots.type_name = try getOptionStringOwned(realm, opts, "type", &.{ "cardinal", "ordinal" }, "cardinal");
+    slots.notation = try getOptionStringOwned(realm, opts, "notation", &.{ "standard", "scientific", "engineering", "compact" }, "standard");
+    slots.compact_display = try getOptionStringOwned(realm, opts, "compactDisplay", &.{ "short", "long" }, "short");
+    // §15.1.1 SetNumberFormatDigitOptions (fraction subset) — reads the digit
+    // options so an abrupt getter propagates and resolvedOptions reports them.
+    slots.minimum_integer_digits = try getNumberOption(realm, opts, "minimumIntegerDigits", 1, 21, 1);
+    const mnfd = try getNumberOptionOpt(realm, opts, "minimumFractionDigits", 0, 100);
+    const mxfd = try getNumberOptionOpt(realm, opts, "maximumFractionDigits", 0, 100);
+    slots.minimum_significant_digits = try getNumberOptionOpt(realm, opts, "minimumSignificantDigits", 1, 21);
+    slots.maximum_significant_digits = try getNumberOptionOpt(realm, opts, "maximumSignificantDigits", 1, 21);
+    if (slots.minimum_significant_digits == null and slots.maximum_significant_digits == null) {
+        slots.minimum_fraction_digits = mnfd orelse 0;
+        slots.maximum_fraction_digits = mxfd orelse @max(slots.minimum_fraction_digits, 3);
+        if (slots.minimum_fraction_digits > slots.maximum_fraction_digits)
+            return throwRangeError(realm, "minimumFractionDigits > maximumFractionDigits");
+    }
+    // Rounding options, in §16.1.1 read order (after the significant digits).
+    slots.rounding_increment = try getNumberOption(realm, opts, "roundingIncrement", 1, 5000, 1);
+    slots.rounding_mode = try getOptionStringOwned(realm, opts, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" }, "halfExpand");
+    slots.rounding_priority = try getOptionStringOwned(realm, opts, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" }, "auto");
+    slots.trailing_zero_display = try getOptionStringOwned(realm, opts, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" }, "auto");
     try setDataLocale(realm, &slots.base);
     try storeRecord(realm, inst, .{ .plural_rules = slots });
     return heap_mod.taggedObject(inst);
@@ -2733,9 +2755,22 @@ fn pluralRulesResolvedOptions(realm: *Realm, this_value: Value, args: []const Va
     const ordinal = std.mem.eql(u8, s.type_name, "ordinal");
     const obj = try makeResolvedBase(realm, s.base.locale);
     try setDataProp(realm, obj, "type", try makeStringValue(realm, if (s.type_name.len > 0) s.type_name else "cardinal"));
-    try setDataProp(realm, obj, "minimumIntegerDigits", makeNumberValue(1));
-    try setDataProp(realm, obj, "minimumFractionDigits", makeNumberValue(@floatFromInt(s.minimum_fraction_digits)));
-    try setDataProp(realm, obj, "maximumFractionDigits", makeNumberValue(@floatFromInt(s.maximum_fraction_digits)));
+    // §16.3.2 key order: type, notation, (compactDisplay if compact),
+    // minimumIntegerDigits, the digit pair, pluralCategories, rounding props.
+    const notation = if (s.notation.len > 0) s.notation else "standard";
+    try setDataProp(realm, obj, "notation", try makeStringValue(realm, notation));
+    if (std.mem.eql(u8, notation, "compact"))
+        try setDataProp(realm, obj, "compactDisplay", try makeStringValue(realm, if (s.compact_display.len > 0) s.compact_display else "short"));
+    try setDataProp(realm, obj, "minimumIntegerDigits", makeNumberValue(@floatFromInt(s.minimum_integer_digits)));
+    // report the fraction-digit pair, or the significant-digit pair when
+    // significant digits were requested.
+    if (s.minimum_significant_digits != null or s.maximum_significant_digits != null) {
+        try setDataProp(realm, obj, "minimumSignificantDigits", makeNumberValue(@floatFromInt(s.minimum_significant_digits orelse 1)));
+        try setDataProp(realm, obj, "maximumSignificantDigits", makeNumberValue(@floatFromInt(s.maximum_significant_digits orelse 21)));
+    } else {
+        try setDataProp(realm, obj, "minimumFractionDigits", makeNumberValue(@floatFromInt(s.minimum_fraction_digits)));
+        try setDataProp(realm, obj, "maximumFractionDigits", makeNumberValue(@floatFromInt(s.maximum_fraction_digits)));
+    }
 
     // pluralCategories: the categories the locale defines, canonical order,
     // "other" always last. From the CLDR mask (or just "other" without data).
@@ -2759,6 +2794,10 @@ fn pluralRulesResolvedOptions(realm: *Realm, this_value: Value, args: []const Va
     }
     cats.setArrayLength(realm.allocator, idx) catch return error.OutOfMemory;
     try setDataProp(realm, obj, "pluralCategories", heap_mod.taggedObject(cats));
+    try setDataProp(realm, obj, "roundingIncrement", makeNumberValue(@floatFromInt(s.rounding_increment)));
+    try setDataProp(realm, obj, "roundingMode", try makeStringValue(realm, if (s.rounding_mode.len > 0) s.rounding_mode else "halfExpand"));
+    try setDataProp(realm, obj, "roundingPriority", try makeStringValue(realm, if (s.rounding_priority.len > 0) s.rounding_priority else "auto"));
+    try setDataProp(realm, obj, "trailingZeroDisplay", try makeStringValue(realm, if (s.trailing_zero_display.len > 0) s.trailing_zero_display else "auto"));
     return heap_mod.taggedObject(obj);
 }
 

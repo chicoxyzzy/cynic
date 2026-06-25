@@ -207,16 +207,27 @@ pub const DateTimeFormatSlots = struct {
 pub const PluralRulesSlots = struct {
     base: ServiceLocaleSlots = .{},
     type_name: []const u8 = "",
+    notation: []const u8 = "",
+    compact_display: []const u8 = "",
     minimum_integer_digits: u32 = 1,
     minimum_fraction_digits: u32 = 0,
     maximum_fraction_digits: u32 = 3,
     minimum_significant_digits: ?u32 = null,
     maximum_significant_digits: ?u32 = null,
+    rounding_increment: u32 = 1,
+    rounding_mode: []const u8 = "",
+    rounding_priority: []const u8 = "",
+    trailing_zero_display: []const u8 = "",
     plural_categories: []const []const u8 = &.{"other"},
 
     pub fn deinit(self: *PluralRulesSlots, allocator: std.mem.Allocator) void {
         self.base.deinit(allocator);
         if (self.type_name.len > 0) allocator.free(self.type_name);
+        if (self.notation.len > 0) allocator.free(self.notation);
+        if (self.compact_display.len > 0) allocator.free(self.compact_display);
+        if (self.rounding_mode.len > 0) allocator.free(self.rounding_mode);
+        if (self.rounding_priority.len > 0) allocator.free(self.rounding_priority);
+        if (self.trailing_zero_display.len > 0) allocator.free(self.trailing_zero_display);
         self.* = .{};
     }
 };

@@ -1326,3 +1326,24 @@ test "intl: Locale option overrides validate + reject + propagate" {
     // an abrupt option getter propagates
     try evalThrows("new Intl.Locale('en', {get region(){ throw new RangeError('x'); }})");
 }
+
+// ── Intl.PluralRules notation + digit options (§16.1.1 / §16.3.2) ─────────────
+
+test "intl: PluralRules reads notation + digit options into resolvedOptions" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const ro = new Intl.PluralRules('en', {
+        \\  notation: 'scientific', minimumFractionDigits: 2, roundingMode: 'ceil'
+        \\}).resolvedOptions();
+        \\(ro.notation === 'scientific' && ro.minimumFractionDigits === 2 &&
+        \\ ro.roundingMode === 'ceil' && ro.roundingPriority === 'auto' &&
+        \\ ro.trailingZeroDisplay === 'auto' &&
+        \\ new Intl.PluralRules('en').resolvedOptions().notation === 'standard') ? 1 : 0
+    );
+}
+
+test "intl: PluralRules validates notation + propagates abrupt getters" {
+    try requireIntlBuild();
+    try evalThrows("new Intl.PluralRules('en', { notation: 'bogus' })");
+    try evalThrows("new Intl.PluralRules('en', { get roundingIncrement(){ throw new RangeError('x'); } })");
+}
