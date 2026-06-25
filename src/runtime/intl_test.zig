@@ -1304,3 +1304,25 @@ test "intl: language tag with duplicate variant is structurally invalid" {
     try testing.expect(intl.isStructurallyValidLanguageTag("de-DE-1996-fonipa")); // distinct variants ok
     try evalThrows("new Intl.Locale('en-emodeng-emodeng')");
 }
+
+// ── Intl.Locale ApplyOptionsToTag (§14.1.2) ──────────────────────────────────
+
+test "intl: Locale applies language/script/region/variants options" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\(new Intl.Locale('en', {region:'FR'}).toString() === 'en-FR' &&
+        \\ new Intl.Locale('en', {script:'Cyrl'}).toString() === 'en-Cyrl' &&
+        \\ new Intl.Locale('en', {language:'fr'}).toString() === 'fr' &&
+        \\ new Intl.Locale('zh', {region:'CN', script:'Hans'}).toString() === 'zh-Hans-CN' &&
+        \\ new Intl.Locale('en', {variants:'fonipa'}).toString() === 'en-fonipa') ? 1 : 0
+    );
+}
+
+test "intl: Locale option overrides validate + reject + propagate" {
+    try requireIntlBuild();
+    try evalThrows("new Intl.Locale('en', {region:'XYZ'})"); // bad region subtag
+    try evalThrows("new Intl.Locale('en', {script:'x'})"); // bad script subtag
+    try evalThrows("new Intl.Locale('en', {variants:'a'})"); // bad variant
+    // an abrupt option getter propagates
+    try evalThrows("new Intl.Locale('en', {get region(){ throw new RangeError('x'); }})");
+}

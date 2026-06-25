@@ -543,6 +543,95 @@ fn installLocale(realm: *Realm, ns: *JSObject) !void {
     try putCtorOnIntl(realm, ns, "Locale", r.ctor);
 }
 
+/// §14.1.2 ApplyOptionsToTag — override the tag's core subtags (language /
+/// script / region / variants) from the options, validating each against its
+/// grammar. Returns a freshly-canonicalised owned tag; the caller frees the
+/// previous one. Reads happen before the -u- keyword application (§14.1.1).
+fn applyOptionsToTag(realm: *Realm, tag: []const u8, o: *JSObject) NativeError![]const u8 {
+    const allocator = realm.allocator;
+    // Option getters can re-enter JS (and move/free the transient JSString
+    // bytes), so each validated value is duped immediately.
+    var lang: ?[]u8 = null;
+    var script: ?[]u8 = null;
+    var region: ?[]u8 = null;
+    var variants: ?[]u8 = null;
+    defer {
+        if (lang) |x| allocator.free(x);
+        if (script) |x| allocator.free(x);
+        if (region) |x| allocator.free(x);
+        if (variants) |x| allocator.free(x);
+    }
+
+    const lv = try getPropertyChain(realm, o, "language");
+    if (!lv.isUndefined()) {
+        const s = try valueToStringSlice(realm, lv);
+        if (!intl.isValidLanguageSubtag(s)) return throwRangeError(realm, "invalid Locale language option");
+        lang = allocator.dupe(u8, s) catch return error.OutOfMemory;
+    }
+    const sv = try getPropertyChain(realm, o, "script");
+    if (!sv.isUndefined()) {
+        const s = try valueToStringSlice(realm, sv);
+        if (!intl.isValidScriptSubtag(s)) return throwRangeError(realm, "invalid Locale script option");
+        script = allocator.dupe(u8, s) catch return error.OutOfMemory;
+    }
+    const rv = try getPropertyChain(realm, o, "region");
+    if (!rv.isUndefined()) {
+        const s = try valueToStringSlice(realm, rv);
+        if (!intl.isValidRegionSubtag(s)) return throwRangeError(realm, "invalid Locale region option");
+        region = allocator.dupe(u8, s) catch return error.OutOfMemory;
+    }
+    const vv = try getPropertyChain(realm, o, "variants");
+    if (!vv.isUndefined()) {
+        const s = try valueToStringSlice(realm, vv);
+        if (!isValidVariantList(s)) return throwRangeError(realm, "invalid Locale variants option");
+        variants = allocator.dupe(u8, s) catch return error.OutOfMemory;
+    }
+
+    if (lang == null and script == null and region == null and variants == null)
+        return allocator.dupe(u8, tag) catch return error.OutOfMemory;
+
+    var slots = intl.parseLocaleComponents(allocator, tag) catch return error.OutOfMemory;
+    defer slots.deinit(allocator);
+    // Everything after the base name is the extension suffix (begins with '-'
+    // or empty); base_name was extracted from `tag`, so its length aligns.
+    const ext = if (slots.base_name.len <= tag.len) tag[slots.base_name.len..] else "";
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+    const append = struct {
+        fn seg(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) NativeError!void {
+            if (s.len == 0) return;
+            if (buf.items.len > 0) buf.append(a, '-') catch return error.OutOfMemory;
+            buf.appendSlice(a, s) catch return error.OutOfMemory;
+        }
+    }.seg;
+    try append(allocator, &out, lang orelse slots.language);
+    try append(allocator, &out, script orelse slots.script);
+    try append(allocator, &out, region orelse slots.region);
+    try append(allocator, &out, variants orelse slots.variants);
+    out.appendSlice(allocator, ext) catch return error.OutOfMemory;
+
+    return intl.canonicalizeUnicodeLocaleId(allocator, out.items) catch
+        (allocator.dupe(u8, out.items) catch return error.OutOfMemory);
+}
+
+/// Validate the `variants` option: one or more variant subtags joined by '-',
+/// each well-formed, with no duplicates (§ unicode_variant_subtag).
+fn isValidVariantList(s: []const u8) bool {
+    if (s.len == 0) return false;
+    var it = std.mem.splitScalar(u8, s, '-');
+    var seen: [16][]const u8 = undefined;
+    var n: usize = 0;
+    while (it.next()) |sub| {
+        if (!intl.isValidVariantSubtag(sub)) return false;
+        for (seen[0..n]) |v| if (std.ascii.eqlIgnoreCase(v, sub)) return false;
+        if (n >= seen.len) return false;
+        seen[n] = sub;
+        n += 1;
+    }
+    return true;
+}
+
 fn localeConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_locale_prototype, "Locale", true);
     const tag_v = argOr(args, 0, Value.undefined_);
@@ -611,47 +700,38 @@ fn localeConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
                 return owned;
             }
         }.kw;
+        // §14.1.2 ApplyOptionsToTag — core subtag overrides (language /
+        // script / region / variants), read + validated first, then the §14.1.3
+        // -u- keywords in spec order (ca, co, hc, kf, kn, nu).
+        const with_opts = try applyOptionsToTag(realm, canon, o);
+        realm.allocator.free(canon);
+        canon = with_opts;
         canon = try apply(realm, canon, "ca", "calendar", .type, o);
         canon = try apply(realm, canon, "co", "collation", .type, o);
         canon = try apply(realm, canon, "hc", "hourCycle", .hour_cycle, o);
         canon = try apply(realm, canon, "kf", "caseFirst", .case_first, o);
-        canon = try apply(realm, canon, "nu", "numberingSystem", .type, o);
 
-        // §14.1.2 ApplyOptionsToTag — language/script/region options
-        // are validated structurally and rejected on grammar mismatch.
-        // Full tag rewrite (replace components in `canon`) is structural
-        // future work; we already throw on the failure modes test262
-        // exercises (empty string / wrong shape).
-        const opt_lang_v = try getPropertyChain(realm, o, "language");
-        if (!opt_lang_v.isUndefined()) {
-            const s = try valueToStringSlice(realm, opt_lang_v);
-            if (!intl.isValidLanguageSubtag(s)) return throwRangeError(realm, "invalid Locale language option");
-        }
-        const opt_script_v = try getPropertyChain(realm, o, "script");
-        if (!opt_script_v.isUndefined()) {
-            const s = try valueToStringSlice(realm, opt_script_v);
-            if (!intl.isValidScriptSubtag(s)) return throwRangeError(realm, "invalid Locale script option");
-        }
-        const opt_region_v = try getPropertyChain(realm, o, "region");
-        if (!opt_region_v.isUndefined()) {
-            const s = try valueToStringSlice(realm, opt_region_v);
-            if (!intl.isValidRegionSubtag(s)) return throwRangeError(realm, "invalid Locale region option");
-        }
+        // numeric → -u-kn (read after caseFirst, before numberingSystem). The
+        // option overrides any existing kn keyword (§14.1.3).
         const num_v = try getPropertyChain(realm, o, "numeric");
         if (!num_v.isUndefined()) {
-            const b = toBoolean(num_v);
-            const val: []const u8 = if (b) "true" else "false";
-            if (intl.unicodeExtensionValue(canon, "kn") == null) {
-                const has_u = std.mem.indexOf(u8, canon, "-u-") != null;
-                const out = if (has_u)
-                    std.fmt.allocPrint(realm.allocator, "{s}-kn-{s}", .{ canon, val })
-                else
-                    std.fmt.allocPrint(realm.allocator, "{s}-u-kn-{s}", .{ canon, val });
-                const owned = out catch return error.OutOfMemory;
-                realm.allocator.free(canon);
-                canon = owned;
-            }
+            const val: []const u8 = if (toBoolean(num_v)) "true" else "false";
+            const stripped = if (intl.unicodeExtensionValue(canon, "kn") != null)
+                stripUnicodeExtensionKeyword(realm.allocator, canon, "kn") catch return error.OutOfMemory
+            else
+                canon;
+            if (stripped.ptr != canon.ptr) realm.allocator.free(canon);
+            const has_u = std.mem.indexOf(u8, stripped, "-u-") != null;
+            const out = if (has_u)
+                std.fmt.allocPrint(realm.allocator, "{s}-kn-{s}", .{ stripped, val })
+            else
+                std.fmt.allocPrint(realm.allocator, "{s}-u-kn-{s}", .{ stripped, val });
+            const owned = out catch return error.OutOfMemory;
+            realm.allocator.free(stripped);
+            canon = owned;
         }
+        canon = try apply(realm, canon, "nu", "numberingSystem", .type, o);
+
         const recanon = intl.canonicalizeUnicodeLocaleId(realm.allocator, canon) catch canon;
         if (recanon.ptr != canon.ptr) {
             realm.allocator.free(canon);
