@@ -1713,6 +1713,26 @@ pub fn runFrames(
             // (reference equality) inside `looseEq`.
             const lhs_v = registers[r];
             const rhs_v = acc;
+            // Fast paths that skip the two ToPrimitive (coerceForCompareEq)
+            // calls — §7.2.14 coercion fires only when one side is a plain
+            // object and the other an eligible primitive. int==int, the
+            // nullish rule, and both-primitive compares never coerce, so
+            // they short-circuit (and int/nullish skip `looseEq` too).
+            if (lhs_v.isInt32() and rhs_v.isInt32()) {
+                acc = Value.fromBool(lhs_v.asInt32() == rhs_v.asInt32());
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+            if (lhs_v.isNullish() or rhs_v.isNullish()) {
+                // Equal iff BOTH are null/undefined (no coercion to 0/false).
+                acc = Value.fromBool(lhs_v.isNullish() and rhs_v.isNullish());
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+            if (!lhs_v.isObject() and !rhs_v.isObject()) {
+                // Both primitives (symbol/bigint are object-tagged → slow
+                // path); coerceForCompareEq is a no-op here.
+                acc = Value.fromBool(looseEq(allocator, lhs_v, rhs_v));
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
             const lhs = try coerceForCompareEq(allocator, realm, frames, f, ip, lhs_v, rhs_v);
             if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
             if (lhs == .handled) {
@@ -1731,7 +1751,13 @@ pub fn runFrames(
         .strict_eq => {
             const r = code[ip];
             ip += 1;
-            acc = Value.fromBool(strictEq(registers[r], acc));
+            const lhs_v = registers[r];
+            // int==int is `strictEq`'s first branch — inline it to skip the
+            // call on the hot arithmetic/compare path.
+            acc = Value.fromBool(if (lhs_v.isInt32() and acc.isInt32())
+                lhs_v.asInt32() == acc.asInt32()
+            else
+                strictEq(lhs_v, acc));
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .neq => {
@@ -1739,6 +1765,19 @@ pub fn runFrames(
             ip += 1;
             const lhs_v = registers[r];
             const rhs_v = acc;
+            // Same fast paths as `.eq`, result negated (§7.2.14 → §7.2.15).
+            if (lhs_v.isInt32() and rhs_v.isInt32()) {
+                acc = Value.fromBool(lhs_v.asInt32() != rhs_v.asInt32());
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+            if (lhs_v.isNullish() or rhs_v.isNullish()) {
+                acc = Value.fromBool(!(lhs_v.isNullish() and rhs_v.isNullish()));
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+            if (!lhs_v.isObject() and !rhs_v.isObject()) {
+                acc = Value.fromBool(!looseEq(allocator, lhs_v, rhs_v));
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
             const lhs = try coerceForCompareEq(allocator, realm, frames, f, ip, lhs_v, rhs_v);
             if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
             if (lhs == .handled) {
@@ -1757,7 +1796,11 @@ pub fn runFrames(
         .strict_neq => {
             const r = code[ip];
             ip += 1;
-            acc = Value.fromBool(!strictEq(registers[r], acc));
+            const lhs_v = registers[r];
+            acc = Value.fromBool(if (lhs_v.isInt32() and acc.isInt32())
+                lhs_v.asInt32() != acc.asInt32()
+            else
+                !strictEq(lhs_v, acc));
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .lt => {
@@ -1945,7 +1988,11 @@ pub fn runFrames(
         .jmp_if_false => {
             const off = readI16(code, ip);
             ip += 2;
-            if (!toBoolean(acc)) {
+            // Inline ToBoolean fast path (§7.1.2): a comparison result
+            // (bool) or an int condition skips the call; strings / objects
+            // / doubles / BigInt fall through to `toBoolean`.
+            const truthy = if (acc.isBool()) acc.asBool() else if (acc.isInt32()) (acc.asInt32() != 0) else toBoolean(acc);
+            if (!truthy) {
                 ip = applyOffset(ip, off);
                 if (off < 0) {
                     if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
@@ -1995,7 +2042,8 @@ pub fn runFrames(
         .jmp_if_true => {
             const off = readI16(code, ip);
             ip += 2;
-            if (toBoolean(acc)) {
+            const truthy = if (acc.isBool()) acc.asBool() else if (acc.isInt32()) (acc.asInt32() != 0) else toBoolean(acc);
+            if (truthy) {
                 ip = applyOffset(ip, off);
                 if (off < 0) {
                     if (try loopSafePoint(realm, f, ip, acc)) |r| return r;

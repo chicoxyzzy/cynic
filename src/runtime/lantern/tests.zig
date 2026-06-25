@@ -372,6 +372,86 @@ test "interpreter: loose equality" {
     try expectBool("'1' == 1;", true);
 }
 
+// ── `==` / `!=` interpreter fast-path pins (§7.2.14 IsLooselyEqual).
+// The `.eq` / `.neq` handlers short-circuit int==int, the nullish
+// rule, and both-primitive compares BEFORE the two ToPrimitive
+// (coerceForCompareEq) calls — coercion only fires when one side is a
+// plain object and the other an eligible primitive. These pin that the
+// fast paths match the full algorithm at every boundary.
+test "eq fast path: int==int" {
+    try expectBool("1 == 1;", true);
+    try expectBool("1 == 2;", false);
+    try expectBool("(-3) == (-3);", true);
+    try expectBool("1 != 2;", true);
+    try expectBool("1 != 1;", false);
+}
+test "eq fast path: nullish rule — equal iff both null/undefined" {
+    try expectBool("null == null;", true);
+    try expectBool("undefined == undefined;", true);
+    try expectBool("null == undefined;", true);
+    try expectBool("undefined == null;", true);
+    // one nullish, other not → false (NO coercion to 0/false)
+    try expectBool("null == 0;", false);
+    try expectBool("null == false;", false);
+    try expectBool("undefined == 0;", false);
+    try expectBool("0 == null;", false);
+    try expectBool("null != undefined;", false);
+    try expectBool("null != 0;", true);
+}
+test "eq fast path: object vs null is false (object side stays slow-safe)" {
+    try expectBool("({}) == null;", false);
+    try expectBool("[] == null;", false);
+    try expectBool("({}) == undefined;", false);
+    try expectBool("(function(){}) == null;", false);
+}
+test "eq fast path: both-primitive coercions still fire (no object side)" {
+    try expectBool("1 == '1';", true);
+    try expectBool("0 == '';", true);
+    try expectBool("0 == false;", true);
+    try expectBool("1 == true;", true);
+    try expectBool("'a' == 'a';", true);
+    try expectBool("'a' == 'b';", false);
+    try expectBool("1.5 == 1.5;", true);
+    try expectBool("(0/0) == (0/0);", false); // NaN
+    try expectBool("0 == (-0);", true);
+}
+test "eq slow path: object↔primitive ToPrimitive still coerces" {
+    // Needs builtins (Object.prototype coercion / valueOf) — use the
+    // full-realm helper + stringified bool result.
+    try expectScriptStringWithBuiltins("'' + (1 == { valueOf: function(){ return 1; } });", "true");
+    try expectScriptStringWithBuiltins("'' + (({}) == 1);", "false");
+    try expectScriptStringWithBuiltins("'' + ('[object Object]' == ({}));", "true");
+    try expectScriptStringWithBuiltins("var o = {}; '' + (o == o);", "true"); // same ref
+    try expectScriptStringWithBuiltins("'' + (({}) == ({}));", "false"); // distinct refs
+}
+test "eq slow path: BigInt / Symbol stay object-tagged (skip the !isObject fast path)" {
+    try expectScriptStringWithBuiltins("'' + (1n == 1);", "true");
+    try expectScriptStringWithBuiltins("'' + (1n == 2);", "false");
+    try expectScriptStringWithBuiltins("'' + (2n == '2');", "true");
+    try expectScriptStringWithBuiltins("var s = Symbol(); '' + (s == s);", "true");
+    try expectScriptStringWithBuiltins("'' + (Symbol() == Symbol());", "false");
+}
+test "toBoolean inline fast path (jmp_if_false / jmp_if_true)" {
+    // Ternary `c ? a : b` compiles to a `jmp_if_false` on `toBoolean(c)`.
+    try expectScriptStringWithBuiltins("'' + (1 ? 'T' : 'F');", "T");
+    try expectScriptStringWithBuiltins("'' + (0 ? 'T' : 'F');", "F");
+    try expectScriptStringWithBuiltins("'' + (({}) ? 'T' : 'F');", "T");
+    try expectScriptStringWithBuiltins("'' + ('' ? 'T' : 'F');", "F");
+    try expectScriptStringWithBuiltins("'' + ('x' ? 'T' : 'F');", "T");
+    try expectScriptStringWithBuiltins("'' + (null ? 'T' : 'F');", "F");
+    try expectScriptStringWithBuiltins("'' + (0n ? 'T' : 'F');", "F"); // BigInt 0n falsy
+    try expectScriptStringWithBuiltins("'' + (NaN ? 'T' : 'F');", "F");
+    try expectScriptStringWithBuiltins("var b = true; '' + (b ? 'T' : 'F');", "T");
+}
+test "strict_eq inline int fast path keeps §7.2.15 semantics" {
+    try expectBool("1 === 1;", true);
+    try expectBool("1 === 1.0;", true);
+    try expectBool("1 === '1';", false);
+    try expectBool("(0/0) === (0/0);", false);
+    try expectBool("1 !== 2;", true);
+    try expectBool("1 !== 1;", false);
+}
+
 test "interpreter: relational operators" {
     try expectBool("1 < 2;", true);
     try expectBool("2 < 1;", false);
