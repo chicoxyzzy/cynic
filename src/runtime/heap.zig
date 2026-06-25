@@ -2866,6 +2866,24 @@ pub const Heap = struct {
         for (self.native_ctor_roots.items) |v| self.markValue(v);
     }
 
+    /// Deferred incremental-mark re-grey, run once at the major termination.
+    /// `rememberTypedSlotWrite` defers a mature object's typed-slot re-grey
+    /// onto the dirty list instead of re-scanning per write; here every
+    /// dirty *object* is re-scanned once to shade any value a store dropped
+    /// into an already-black object during the sliced mark. Must run BEFORE
+    /// the final drain in `collectFullTail` so the freshly-enqueued
+    /// referents are marked before the sweep. Cheap on redundant entries —
+    /// re-scanning an object whose referents are already marked enqueues
+    /// nothing (`markValue` short-circuits already-live values). Only the
+    /// `.object` arm of the dirty list needs this: function / environment /
+    /// generator stores, and value-bearing property stores, are shaded
+    /// directly by `writeBarrier` at the write, not re-scanned.
+    pub fn regreyDirtyObjects(self: *Heap) void {
+        for (self.dirty_list.items) |c| {
+            if (c == .object) self.markObjectInternalSlots(c.object);
+        }
+    }
+
     /// Rebuild the conservative-scan young-pointer membership map
     /// (`young_ptr_set`) from the per-kind young lists. Each entry
     /// maps `@intFromPtr(obj)` → its `ScanKind`. Cleared-and-rebuilt
@@ -4925,19 +4943,32 @@ pub const Heap = struct {
         // Incremental-marking (Dijkstra) arm. A typed-slot write into an
         // already-black object during a major mark stored a value the mark
         // won't revisit (`o` is scanned). This path records the container,
-        // not the value, so re-scan the container's typed slots to shade
-        // whatever was just stored — `markObjectInternalSlots` enqueues
-        // each and `enqueue` filters the already-marked ones. A young
-        // container can be black mid-cycle (allocate-black), so this
-        // precedes the mature-only generational arm below.
-        if (self.marking_phase == .marking and o.mark_color == self.live_color) {
-            self.markObjectInternalSlots(o);
+        // not the value, so the container's typed slots must be re-scanned
+        // to shade whatever was just stored. For a MATURE object the
+        // generational arm below already lists it on `dirty_list`, and the
+        // major termination re-scans every dirty object exactly once
+        // (`regreyDirtyObjects`) — so the re-grey is DEFERRED and batched:
+        // N typed-slot writes into one held object cost a single
+        // termination re-scan, not N per-write `markObjectInternalSlots`
+        // calls. That per-write re-scan is the `class_instantiate` outlier
+        // of the incremental-marking throughput cost (docs/handbook/gc.md).
+        // A YOUNG object is not tracked on the dirty list, so it re-greys
+        // immediately (rare — it must be black mid-mark via allocate-black).
+        if (o.generation != .mature) {
+            if (self.marking_phase == .marking and o.mark_color == self.live_color) {
+                self.markObjectInternalSlots(o);
+            }
+            return;
         }
-        if (o.generation != .mature) return;
-        if (o.dirty) return;
+        if (o.dirty) return; // already listed — the deferred re-scan covers it
         o.dirty = true;
         self.dirty_list.append(self.allocator, .{ .object = o }) catch {
             o.dirty = false;
+            // Couldn't defer (OOM) — re-grey now to preserve the tri-color
+            // invariant; a missed black→white edge is a use-after-free.
+            if (self.marking_phase == .marking and o.mark_color == self.live_color) {
+                self.markObjectInternalSlots(o);
+            }
         };
     }
 };
@@ -5489,6 +5520,53 @@ test "Heap: Dijkstra barrier shades a value stored into a black container mid-ma
     // black container is never re-scanned.
     heap.marking_phase = .marking;
     try heap.storeProperty(container, heap.allocator, "b", taggedObject(target));
+    heap.drainMarkWorklist();
+    try testing.expectEqual(heap.live_color, target.mark_color); // shaded → survived
+}
+
+test "Heap: deferred re-grey shades a typed-slot value at the major termination" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // The typed-slot re-grey is DEFERRED: `rememberTypedSlotWrite` lists the
+    // mutated mature object on the dirty list instead of re-scanning per
+    // write, and `regreyDirtyObjects` re-scans each once at the major
+    // termination. A value stored into a black mature object's typed slot
+    // mid-mark must still be shaded — else it stays white and is swept. The
+    // typed-slot analogue of the Dijkstra value-barrier test above; the
+    // deferral is observable — `target` stays white until the termination
+    // re-grey, where the old immediate-re-grey path marked it at the store.
+    const stack = try heap.allocateObject();
+    _ = heap.objects_young.pop();
+    try heap.objects_mature.append(heap.allocator, stack);
+    stack.generation = .mature;
+
+    const target = try heap.allocateObject();
+
+    // Snapshot roots: blackens `stack` (a root), leaves `target` white, arms
+    // `.marking`.
+    heap.beginIncrementalMark(&.{taggedObject(stack)});
+    try testing.expectEqual(heap.live_color, stack.mark_color); // black
+    try testing.expect(target.mark_color != heap.live_color); // white
+
+    // Store `target` into `stack`'s typed disposable slot and run the
+    // typed-slot barrier. The mature re-grey is deferred — `stack` lands on
+    // the dirty list, `target` stays white through the slices.
+    const resources = try stack.disposableResourcesPtr(heap.allocator);
+    try resources.append(heap.allocator, .{
+        .resource = taggedObject(target),
+        .hint = .sync_dispose,
+        .dispose_method = Value.fromInt32(0),
+    });
+    heap.rememberTypedSlotWrite(stack);
+    try testing.expectEqual(@as(usize, 1), heap.dirty_list.items.len);
+    heap.drainMarkWorklist();
+    try testing.expect(target.mark_color != heap.live_color); // still white — deferred
+
+    // The termination re-grey re-scans the dirty objects, shading `target`;
+    // the final drain blackens it — it survives though `stack` was never
+    // re-scanned by the mark itself.
+    heap.regreyDirtyObjects();
     heap.drainMarkWorklist();
     try testing.expectEqual(heap.live_color, target.mark_color); // shaded → survived
 }

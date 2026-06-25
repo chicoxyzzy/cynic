@@ -1744,6 +1744,12 @@ pub const Realm = struct {
         // the Dijkstra barrier doesn't cover a native-local-only pin. The
         // realm-root re-scan above is the interpreter-stack analogue.
         self.heap.markTransientRoots();
+        // Deferred incremental-mark re-grey: re-scan every dirty object's
+        // typed slots once, here at the termination, instead of per write
+        // during the slices (`rememberTypedSlotWrite`). Must precede the
+        // `collectFullTail` drain so the shaded referents are marked before
+        // the sweep.
+        self.heap.regreyDirtyObjects();
         self.heap.scan_native_stack = self.active_native_fn != null;
         // `lazy` defers the dominant `objects_mature` sweep (the safe-point
         // slices it via `sweepObjectsMatureBudget`); the STW path sweeps it
