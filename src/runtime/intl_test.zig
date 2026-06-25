@@ -1251,3 +1251,30 @@ test "intl: ListFormat formatToParts emits element/literal segments" {
         \\ p.filter(x => x.type === 'element').map(x => x.value).join('') === 'abc') ? 1 : 0
     );
 }
+
+// ── CanonicalizeLocaleList (§9.2.1) — array-like, not iterator protocol ───────
+
+test "intl: CanonicalizeLocaleList uses array-like coercion" {
+    try requireIntlBuild();
+    // Observed via supportedLocalesOf, which returns the canonicalized list.
+    try evalAssert1(
+        \\const s = Intl.PluralRules.supportedLocalesOf;
+        \\// Array-like object (length + indices), not an iterable.
+        \\const al = s({ 0: 'en', 1: 'fr', length: 2 });
+        \\// A primitive coerces via ToObject to a length-less wrapper → empty.
+        \\const prim = s(Symbol());
+        \\(Array.isArray(al) && al.length === 2 && al[0] === 'en' &&
+        \\ Array.isArray(prim) && prim.length === 0) ? 1 : 0
+    );
+}
+
+test "intl: CanonicalizeLocaleList propagates a poisoned length valueOf" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\class E extends Error {}
+        \\let got = 0;
+        \\try { Intl.PluralRules.supportedLocalesOf({ get length() { throw new E(); } }); }
+        \\catch (e) { got = (e instanceof E) ? 1 : 0; }
+        \\got
+    );
+}

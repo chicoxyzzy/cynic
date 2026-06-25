@@ -213,10 +213,11 @@ fn canonicalizeLocaleList(realm: *Realm, locales: Value) NativeError![]const []c
         }
     }
 
-    if (!locales.isObject()) return throwTypeError(realm, "locales must be a string or object");
-
-    const obj = heap_mod.valueAsPlainObject(locales) orelse
-        return throwTypeError(realm, "locales must be a string or object");
+    // §9.2.1 step 4 — `O = ? ToObject(locales)`. CanonicalizeLocaleList uses
+    // the array-like protocol (length + indexed Get), NOT `@@iterator`; a
+    // primitive (number / boolean / Symbol) becomes a length-less wrapper and
+    // yields an empty list, while `null` throws via ToObject (spec-correct).
+    const obj = try intrinsics.toObjectThis(realm, locales);
 
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);
@@ -226,47 +227,21 @@ fn canonicalizeLocaleList(realm: *Realm, locales: Value) NativeError![]const []c
         list.deinit(allocator);
     }
 
-    // Array-like: prefer length + indexed access when it looks like an array.
-    if (obj.is_array_exotic) {
-        const len_v = try getPropertyChain(realm, obj, "length");
-        const len_n = try toNumber(realm, len_v);
-        const len_f: f64 = if (len_n.isInt32()) @floatFromInt(len_n.asInt32()) else len_n.asDouble();
-        const len: usize = if (len_f > 0 and len_f < 1e6) @intFromFloat(len_f) else 0;
-        var i: usize = 0;
-        while (i < len) : (i += 1) {
-            var idx_buf: [24]u8 = undefined;
-            const idx_key = std.fmt.bufPrint(&idx_buf, "{d}", .{i}) catch unreachable;
-            const el = try getPropertyChain(realm, obj, idx_key);
-            if (el.isUndefined()) continue;
-            try appendLocaleElement(realm, &list, &seen, el);
-        }
-        return list.toOwnedSlice(allocator) catch return error.OutOfMemory;
-    }
-
-    // Iterator protocol for non-array objects.
-    const iter_v = lantern.openIterator(allocator, realm, locales) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.NotIterable => return throwTypeError(realm, "locales is not iterable"),
-        error.Propagated => return error.NativeThrew,
-        else => return error.NativeThrew,
-    };
-    const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "iterator is not an object");
-    const next_fn_v = try getPropertyChain(realm, iter_obj, "next");
-    const next_fn = heap_mod.valueAsFunction(next_fn_v) orelse return throwTypeError(realm, "iterator.next is not callable");
-
-    var guard: usize = 0;
-    while (guard < 10000) : (guard += 1) {
-        const outcome = lantern.callJSFunction(allocator, realm, next_fn, iter_v, &.{}) catch return error.NativeThrew;
-        const step = switch (outcome) {
-            .value => |v| v,
-            .thrown => return error.NativeThrew,
-            .yielded => return error.NativeThrew,
-        };
-        const step_obj = heap_mod.valueAsPlainObject(step) orelse return throwTypeError(realm, "iterator result is not an object");
-        const done_v = try getPropertyChain(realm, step_obj, "done");
-        if (toBoolean(done_v)) break;
-        const value_v = try getPropertyChain(realm, step_obj, "value");
-        try appendLocaleElement(realm, &list, &seen, value_v);
+    // §9.2.1 step 5 — `len = ? ToLength(? Get(O, "length"))`. A poisoned
+    // `length` valueOf throws through ToNumber and propagates.
+    const len_v = try getPropertyChain(realm, obj, "length");
+    const len_n = try toNumber(realm, len_v);
+    const len_f: f64 = if (len_n.isInt32()) @floatFromInt(len_n.asInt32()) else numberToF64(len_n);
+    const len: usize = if (len_f > 0 and len_f < 1e9) @intFromFloat(@floor(len_f)) else 0;
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        var idx_buf: [24]u8 = undefined;
+        const idx_key = std.fmt.bufPrint(&idx_buf, "{d}", .{i}) catch unreachable;
+        const el = try getPropertyChain(realm, obj, idx_key);
+        // Absent indices are skipped; a present non-String / non-Object element
+        // throws inside appendLocaleElement (§9.2.1 step 7.c.iii).
+        if (el.isUndefined()) continue;
+        try appendLocaleElement(realm, &list, &seen, el);
     }
     return list.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
@@ -440,7 +415,10 @@ fn stripUnicodeExtensionKeyword(allocator: std.mem.Allocator, locale: []const u8
 fn supportedLocalesOfImpl(realm: *Realm, args: []const Value) NativeError!Value {
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
-    const opts = try getOptionsObject(realm, options);
+    // §9.2.9 SupportedLocales step 1 — `options = ? ToObject(options)` (not
+    // GetOptionsObject): a primitive options arg coerces to a wrapper rather
+    // than throwing. localeMatcher is then read + validated off it.
+    const opts: ?*JSObject = if (options.isUndefined()) null else try intrinsics.toObjectThis(realm, options);
     _ = try getLocaleMatcher(realm, opts);
     const list = try canonicalizeLocaleList(realm, locales);
     defer freeLocaleList(realm.allocator, list);
