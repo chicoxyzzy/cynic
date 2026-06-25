@@ -1109,6 +1109,30 @@ inline fn intArith(comptime op: enum { add, sub, mul }, a: Value, b: Value) ?Val
     });
 }
 
+/// §6.1.6.1 / §13.15 — `+` `-` `*` `/` `%` on two numeric operands where
+/// at least one is a Double (int32+int32 stays on the int path so an
+/// in-range integer result keeps its int32 tag). Returns
+/// `Value.fromDouble(x OP y)`, byte-identical to the general
+/// `addValues` / `numericBinary` double branch — same `fromDouble`, same
+/// f64 op — so the fast path is transparent. `null` when either operand
+/// isn't a Number (object / string / bool / BigInt → general path) or
+/// both are int32.
+inline fn numArith(comptime op: enum { add, sub, mul, div, mod }, a: Value, b: Value) ?Value {
+    const a_num = a.isInt32() or a.isDouble();
+    const b_num = b.isInt32() or b.isDouble();
+    if (!a_num or !b_num) return null;
+    if (!a.isDouble() and !b.isDouble()) return null; // both int32 → int path
+    const x: f64 = if (a.isInt32()) @floatFromInt(a.asInt32()) else a.asDouble();
+    const y: f64 = if (b.isInt32()) @floatFromInt(b.asInt32()) else b.asDouble();
+    return Value.fromDouble(switch (op) {
+        .add => x + y,
+        .sub => x - y,
+        .mul => x * y,
+        .div => x / y,
+        .mod => @rem(x, y),
+    });
+}
+
 /// §7.2.13 IsLessThan — relational compare on two int32 operands.
 inline fn intCompare(comptime op: enum { lt, gt, le, ge }, a: Value, b: Value) ?Value {
     if (!a.isInt32() or !b.isInt32()) return null;
@@ -1320,6 +1344,10 @@ pub fn runFrames(
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
+            if (numArith(.add, registers[r], acc)) |res| {
+                acc = res;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
             if (try addValues(realm, registers[r], acc)) |res| acc = res else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                 realm.pending_exception = null;
@@ -1404,6 +1432,10 @@ pub fn runFrames(
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
+            if (numArith(.sub, registers[r], acc)) |res| {
+                acc = res;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
             if (try numericBinary(realm, .sub, registers[r], acc)) |res| acc = res else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                 realm.pending_exception = null;
@@ -1422,6 +1454,10 @@ pub fn runFrames(
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
+            if (numArith(.mul, registers[r], acc)) |res| {
+                acc = res;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
             if (try numericBinary(realm, .mul, registers[r], acc)) |res| acc = res else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                 realm.pending_exception = null;
@@ -1436,6 +1472,10 @@ pub fn runFrames(
         .div => {
             const r = code[ip];
             ip += 1;
+            if (numArith(.div, registers[r], acc)) |res| {
+                acc = res;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
             if (try numericBinary(realm, .div, registers[r], acc)) |res| acc = res else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                 realm.pending_exception = null;
@@ -1450,6 +1490,10 @@ pub fn runFrames(
         .mod => {
             const r = code[ip];
             ip += 1;
+            if (numArith(.mod, registers[r], acc)) |res| {
+                acc = res;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
             if (try numericBinary(realm, .mod, registers[r], acc)) |res| acc = res else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                 realm.pending_exception = null;

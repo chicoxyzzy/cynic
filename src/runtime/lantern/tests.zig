@@ -452,6 +452,40 @@ test "strict_eq inline int fast path keeps §7.2.15 semantics" {
     try expectBool("1 !== 1;", false);
 }
 
+// ── numeric double/mixed arith fast-path pins (§6.1.6.1 / §13.15).
+// The `.add/.sub/.mul/.div/.mod` handlers short-circuit operands that
+// are both numeric with at least one double straight to
+// `Value.fromDouble(x OP y)` — int32+int32 keeps the existing int
+// path. The result must be byte-identical to the general
+// addValues/numericBinary double branch (same `fromDouble`, same f64 op).
+test "num-arith fast path: double + mixed add/sub/mul" {
+    try expectBool("1.5 + 2.5 === 4;", true);
+    try expectBool("1.5 + 2.25 === 3.75;", true);
+    try expectBool("0.1 + 0.2 === 0.30000000000000004;", true); // IEEE-exact
+    try expectBool("5.0 - 2.0 === 3;", true);
+    try expectBool("2.5 * 2 === 5;", true); // int * double
+    try expectBool("1 + 2.5 === 3.5;", true); // int + double
+    try expectBool("3 * 1.5 === 4.5;", true);
+}
+test "num-arith fast path: div / mod" {
+    try expectBool("7.5 / 2.5 === 3;", true);
+    try expectBool("1 / 2 === 0.5;", true);
+    try expectBool("10 / 4 === 2.5;", true);
+    try expectBool("5.5 % 2 === 1.5;", true);
+    try expectBool("(-5.5) % 2 === -1.5;", true); // sign follows dividend
+}
+test "num-arith fast path: NaN / Infinity / signed zero edges" {
+    // Computed (no NaN/Infinity globals — minimal realm). inf = 1/0.
+    try expectBool("(0/0) + 1 === (0/0) + 1;", false); // NaN never equals itself
+    try expectBool("(1.0/0) + 1 === 1/0;", true); // Infinity + 1 == Infinity
+    try expectBool("1.0 / 0 === 1 / 0;", true);
+    try expectBool("(-1.0) / 0 === -1 / 0;", true); // -Infinity
+    try expectBool("(1.0/0) - (1.0/0) === (1.0/0) - (1.0/0);", false); // Inf-Inf = NaN
+    // -0: 1 / -0 is -Infinity; the double mul must preserve the sign bit.
+    try expectBool("1 / (1.0 * -0) === -1 / 0;", true);
+    try expectBool("1 / (1.5 * 0 - 0.0) === 1 / 0;", true); // +0 stays +0
+}
+
 test "interpreter: relational operators" {
     try expectBool("1 < 2;", true);
     try expectBool("2 < 1;", false);
