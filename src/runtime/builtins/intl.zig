@@ -2979,16 +2979,22 @@ fn displayNamesConstructor(realm: *Realm, this_value: Value, args: []const Value
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_display_names_prototype, "DisplayNames", true);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
-    if (options.isUndefined()) return throwTypeError(realm, "Intl.DisplayNames requires options with type");
+
+    // §12.1.1 in spec order: GetOptionsObject, then CanonicalizeLocaleList +
+    // localeMatcher resolve (resolveServiceLocale), then style, then the
+    // required `type` (read with an undefined fallback + TypeError when absent,
+    // *after* style) so an invalid localeMatcher / style, an abrupt option
+    // getter, or a poisoned locales arg throws first. The old early `type`
+    // check surfaced the wrong error for those cases.
     const opts = try getOptionsObject(realm, options);
-    const o = opts orelse return throwTypeError(realm, "Intl.DisplayNames requires options with type");
-    const type_v = try getPropertyChain(realm, o, "type");
-    if (type_v.isUndefined()) return throwTypeError(realm, "Intl.DisplayNames options.type is required");
     const resolved = try resolveServiceLocale(realm, locales, opts);
     var slots: intl.DisplayNamesSlots = .{};
+    errdefer slots.deinit(realm.allocator);
     slots.base.locale = resolved.locale;
-    slots.type_name = try getOptionStringOwned(realm, opts, "type", &.{ "language", "region", "script", "currency", "calendar", "dateTimeField" }, "language");
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "narrow", "short", "long" }, "long");
+    const type_s = try getOptionString(realm, opts, "type", &.{ "language", "region", "script", "currency", "calendar", "dateTimeField" }, "");
+    if (type_s.len == 0) return throwTypeError(realm, "Intl.DisplayNames options.type is required");
+    slots.type_name = realm.allocator.dupe(u8, type_s) catch return error.OutOfMemory;
     slots.fallback = try getOptionStringOwned(realm, opts, "fallback", &.{ "code", "none" }, "code");
     slots.language_display = try getOptionStringOwned(realm, opts, "languageDisplay", &.{ "dialect", "standard" }, "dialect");
     try setDataLocale(realm, &slots.base);
