@@ -364,7 +364,7 @@ Common commands:
     zig build test -Dtest-filter=<name>             # run only unit tests whose name matches (also works on test-fast)
     zig build test-ses                              # hand-written SES positive-coverage tests
     zig build test-fuzz                             # Fuzzilli REPRL host unit tests (the host lives in tools/fuzz/)
-    zig build test262                               # full conformance run (runtime mode)
+    zig build test262                               # full conformance run; harness defaults to -Dintl=full so intl402 is scored in-scope
     zig build test262-safe                          # same harness, ReleaseSafe (GC verifiers + poison live)
     zig build wasm-testsuite -- --quiet             # WebAssembly spec-testsuite conformance (needs tools/wasm-testsuite-gen.sh first)
     zig build run -- parse <file>                   # script-mode parse
@@ -490,9 +490,11 @@ date replaces that day's row. Each row records `passing`,
 `failing`, `total`, and `pass%`. `test262-results.md` opens with
 a `## Current scores` snapshot (one row — the single posture), a
 `## Legend`, a `## What is not passing, and why` breakdown (a
-failure-class table — ECMA-402 / sloppy-only / Annex B builtins /
-cannot-block / **engine gaps** — followed by a failing-areas-only
-table whose `gaps` column is the engine work list), a
+failure-class table — sloppy-only / Annex B builtins /
+cannot-block / **engine gaps** (intl402 is scored in-scope at
+`-Dintl=full`, so its fails land in engine gaps, not a policy
+class) — followed by a failing-areas-only table whose `gaps`
+column is the engine work list), a
 `## Pre-Stage-4 proposals shipped` section (one binary row per
 shipped proposal), and a `## History` section of per-day
 mini-tables — newest first. Each history row shows `Δ pass`

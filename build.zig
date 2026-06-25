@@ -42,15 +42,25 @@ pub fn build(b: *std.Build) void {
     // structural Temporal calendars/IANA; `full` = stub + embedded tzdata
     // (`vendor/tzdata/cynic_tzdb.bin`, refresh via `zig build pack-tzdata`).
     const IntlTier = enum { off, stub, full };
-    const intl_tier = b.option(
+    const intl_tier_opt = b.option(
         IntlTier,
         "intl",
-        "ECMA-402 build tier: off (default; no Intl), stub (structural Intl), full (tzdata + structural Intl).",
-    ) orelse .off;
+        "ECMA-402 build tier: off (default; no Intl), stub (structural Intl), full (tzdata + structural Intl). The test262 harness defaults to `full` so intl402 is scored against real CLDR/tzdata.",
+    );
+    const intl_tier = intl_tier_opt orelse .off;
+    // The test262 conformance harness scores intl402 in-scope, so it
+    // builds `full` by default (real CLDR/tzdata) while the `cynic`
+    // binary stays `off`. An explicit `-Dintl=` overrides both.
+    const t262_intl_tier = intl_tier_opt orelse .full;
     const lib_build_options = b.addOptions();
     lib_build_options.addOption(bool, "exhaustive_tests", exhaustive_tests);
     lib_build_options.addOption(IntlTier, "intl", intl_tier);
     lib_mod.addOptions("build_options", lib_build_options);
+    // Separate options for the test262 harness lib modules — same
+    // `exhaustive_tests`, but the test262 intl tier (`full` default).
+    const t262_build_options = b.addOptions();
+    t262_build_options.addOption(bool, "exhaustive_tests", exhaustive_tests);
+    t262_build_options.addOption(IntlTier, "intl", t262_intl_tier);
     // Embed the locale data blobs (CYTZ tzdb + CYCL CLDR) only for `full`, so
     // off/stub binaries stay lean. Both are gated on `intl_config.has_locale_data`.
     const addLocaleData = struct {
@@ -410,12 +420,27 @@ pub fn build(b: *std.Build) void {
     });
     lib_mod_fast.addOptions("build_options", lib_build_options);
     addTzdb(lib_mod_fast, b, intl_tier);
+    // Dedicated lib module for the test262 harness at the test262 intl
+    // tier (`full` by default) so intl402 runs against real CLDR/tzdata.
+    // wasm-testsuite / wasm-bench / bench keep `lib_mod_fast` at the
+    // global tier — they don't touch Intl and shouldn't embed the blob.
+    const lib_mod_t262 = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = t262_optimize,
+        .link_libc = true,
+    });
+    lib_mod_t262.addAnonymousImport("NormalizationTest.txt", .{
+        .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
+    });
+    lib_mod_t262.addOptions("build_options", t262_build_options);
+    addLocaleData(lib_mod_t262, b, t262_intl_tier);
     const t262_mod = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
         .optimize = t262_optimize,
     });
-    t262_mod.addImport("cynic", lib_mod_fast);
+    t262_mod.addImport("cynic", lib_mod_t262);
 
     // Note: the cynic / test262 SHAs stamped into `--write-results`
     // rows are captured at *write time* by `tools/test262.zig`, not
@@ -556,8 +581,8 @@ pub fn build(b: *std.Build) void {
     lib_mod_safe.addAnonymousImport("NormalizationTest.txt", .{
         .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
     });
-    lib_mod_safe.addOptions("build_options", lib_build_options);
-    addTzdb(lib_mod_safe, b, intl_tier);
+    lib_mod_safe.addOptions("build_options", t262_build_options);
+    addTzdb(lib_mod_safe, b, t262_intl_tier);
     const t262_mod_safe = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,

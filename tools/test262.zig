@@ -1363,12 +1363,15 @@ const Bucket = struct {
     gap_fail: u32 = 0,
 };
 
-/// Why a fixture fails. Everything but `gap` is a by-design or
-/// unimplemented-subsystem policy fail under the binary scoring
-/// posture; `gap` is a real engine bug.
+/// Why a fixture fails. Everything but `gap` is a by-design policy
+/// fail under the binary scoring posture; `gap` is the engine work
+/// list. intl402 has no class of its own — the harness builds
+/// `-Dintl=full`, so an intl402 fixture is in-scope conformance and
+/// its failures fall into `gap` (an implemented-surface bug or a
+/// not-yet-implemented in-scope Intl surface), visible per area in
+/// the failing-areas table.
 const FailClass = enum(u3) {
-    gap, // engine bug — the work list
-    intl, // intl402/* — ECMA-402 not implemented
+    gap, // engine work list — bugs + not-yet-implemented in-scope surfaces (incl. intl402)
     no_strict, // flags: [noStrict] — sloppy-mode-only, strict-only by design
     annex_b, // Annex B builtins (__proto__ accessor, __define/__lookup{Getter,Setter}__)
     can_block, // flags: [CanBlockIsFalse] — non-blocking-agent semantics
@@ -1378,7 +1381,6 @@ const FailClass = enum(u3) {
 
 /// Classify a fixture's failure from its path and frontmatter flags.
 fn failClassOf(rel: []const u8, flags: frontmatter.Flags) FailClass {
-    if (std.mem.startsWith(u8, rel, "intl402/")) return .intl;
     if (flags.no_strict) return .no_strict;
     if (flags.can_block_is_false) return .can_block;
     for ([_][]const u8{ "__proto__", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__" }) |marker| {
@@ -1979,15 +1981,15 @@ fn runSweep(
             }
             if (excludedByOpts(opts, entry.path)) continue;
             if (skip_rules.pathIsSkipped(entry.path)) continue;
-            // The only walk-time exclusions are `harness/` and
-            // `staging/` (handled above) plus pre-Stage-4 proposals
-            // (handled in `classifyAndRun` via the `out_of_phase` /
-            // `pre_stage4` skip reasons). Annex B, intl402, eval,
-            // noStrict, SES carve-outs all RUN — their failures
-            // classify as an **expected fail** via the policy
-            // classifier, so the corpus shape reflects the full
-            // ECMA-262 surface Cynic targets and the headline
-            // credits Cynic for the policies it ships.
+            // The only walk-time exclusions are `harness/`,
+            // `staging/`, and the `annexB/` tree (`pathIsSkipped`),
+            // plus pre-Stage-4 proposals (handled in `classifyAndRun`
+            // via the `out_of_phase` / `pre_stage4` skip reasons).
+            // intl402 RUNS and is scored in-scope (the harness builds
+            // `-Dintl=full`); eval, noStrict, SES, and Annex-B-flavored
+            // main-tree fixtures RUN too — their by-design failures
+            // classify via the policy classifier, so the corpus shape
+            // reflects the full ECMA-262 surface Cynic targets.
             try paths.append(gpa, try gpa.dupe(u8, entry.path));
         }
     }
@@ -2707,9 +2709,11 @@ fn classifyAndRunInner(
     /// where only that flag is enabled.
     phase: Phase,
 ) !RunResult {
-    // Hard exclusions — `harness/`, `staging/`, `intl402/`.
-    // Permanent OOS (Annex B / browser-era / SES carve-outs)
-    // are already filtered by the caller at walk-time.
+    // Walk-time exclusions — `harness/`, `staging/`, `annexB/` —
+    // are filtered by the caller before frontmatter parsing. intl402
+    // is NOT excluded: the harness builds `-Dintl=full`, so intl402 is
+    // in-scope, scored conformance (its fails land in the `gap` work
+    // list, not a policy class).
     if (skip_rules.pathIsSkipped(rel)) {
         return .{ .kind = .skip, .skip_reason = .by_path };
     }
@@ -3929,8 +3933,8 @@ fn writeFileBody(
                 "binary pass/fail under a single posture (`--unhardened --allow=eval`):\n\n" ++
                 "- **{d} passing** — Cynic produced the spec-expected result.\n" ++
                 "- **{d} failing** — every other scored fixture. No \"expected fail\" " ++
-                "category: an Annex-B / no-Intl / strict-only / SES / eval miss counts " ++
-                "as a plain fail, same as an engine bug. Honest, not flattering.\n" ++
+                "category: an Annex-B / strict-only / SES / eval / not-yet-implemented-Intl " ++
+                "miss counts as a plain fail, same as an engine bug. Honest, not flattering.\n" ++
                 "- **Excluded from the denominator**: the upstream `harness/` and " ++
                 "`staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal " ++
                 "(decorators, import-defer, …), and structurally-unrunnable fixtures " ++
@@ -3981,8 +3985,8 @@ fn writeFileBody(
         \\
         \\- **`passing`** — Cynic produced the spec-expected result.
         \\- **`failing`** — every other scored fixture. An Annex B,
-        \\  no-Intl, strict-only, SES, or eval miss counts as a plain
-        \\  fail, same as an engine bug.
+        \\  strict-only, SES, eval, or not-yet-implemented-Intl miss
+        \\  counts as a plain fail, same as an engine bug.
         \\- **`total`** — `passing + failing`. Excludes the upstream
         \\  `harness/` / `staging/` / `annexB/` paths, Stage ≤ 3
         \\  proposals, and structurally-unrunnable fixtures.
@@ -4130,11 +4134,10 @@ fn writeNotPassing(
     var buf: [512]u8 = undefined;
     const cls = stats.fail_by_class;
     const class_rows = [_]struct { idx: FailClass, label: []const u8, detail: []const u8 }{
-        .{ .idx = .intl, .label = "ECMA-402 not implemented", .detail = "the whole `intl402/` tree — `Intl` (and the `intl402/Temporal` twins of the excluded Temporal proposal) is an unbuilt subsystem" },
         .{ .idx = .no_strict, .label = "sloppy-mode-only fixtures", .detail = "`flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...)" },
         .{ .idx = .annex_b, .label = "Annex B builtins", .detail = "`__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design" },
         .{ .idx = .can_block, .label = "cannot-block agent semantics", .detail = "`flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent" },
-        .{ .idx = .gap, .label = "**engine gaps**", .detail = "failures the policy classes do not explain — the work list (an upper bound: it includes a residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter)" },
+        .{ .idx = .gap, .label = "**engine gaps**", .detail = "failures the policy classes do not explain — the work list. Includes in-scope `intl402/` surfaces not yet implemented at `-Dintl=full` (Segmenter, ListFormat, RelativeTimeFormat, DurationFormat, the Temporal-intl twins) plus implemented-surface Intl bugs; and an upper-bound residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter" },
     };
     for (class_rows) |row| {
         const n = cls[@intFromEnum(row.idx)];
@@ -4148,15 +4151,15 @@ fn writeNotPassing(
         \\**Failing areas.** Only areas with at least one failure are
         \\listed (everything else passes). `gaps` is the slice of the
         \\area's failures the policy classes above do not explain —
-        \\sorted to the top, because that column is the engine work
-        \\list. Bucketed on the first two path components.
+        \\that column is the engine work list. Sorted by area
+        \\(alphabetical), bucketed on the first two path components.
         \\
         \\| area | passing | failing | gaps | pass% |
         \\|---|---:|---:|---:|---:|
         \\
     );
 
-    // Sort: engine gaps desc, then total fails desc, then name.
+    // Sort by area name (alphabetical) — groups related sub-areas.
     const Sorted = Bucket;
     const rows_buf = try gpa.alloc(Sorted, sorted.len);
     defer gpa.free(rows_buf);
@@ -4168,8 +4171,9 @@ fn writeNotPassing(
     }
     std.mem.sort(Sorted, rows_buf[0..nrows], {}, struct {
         fn lt(_: void, a: Sorted, b: Sorted) bool {
-            if (a.gap_fail != b.gap_fail) return a.gap_fail > b.gap_fail;
-            if (a.fail != b.fail) return a.fail > b.fail;
+            // Alphabetical by area so related sub-areas group together
+            // — all `built-ins/*`, then `intl402/*`, then `language/*`.
+            // The `gaps` column still flags the engine work per row.
             return std.mem.order(u8, a.name, b.name) == .lt;
         }
     }.lt);
