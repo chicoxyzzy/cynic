@@ -546,7 +546,10 @@ fn installLocale(realm: *Realm, ns: *JSObject) !void {
 fn localeConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_locale_prototype, "Locale", true);
     const tag_v = argOr(args, 0, Value.undefined_);
-    if (tag_v.isUndefined()) return throwTypeError(realm, "Intl.Locale requires a tag argument");
+    // §14.1.1 step 7 — `tag` must be a String or an Object; a boolean / number
+    // / null / symbol / bigint throws a TypeError (not ToString'd to a tag).
+    if (!tag_v.isString() and heap_mod.valueAsPlainObject(tag_v) == null and heap_mod.valueAsFunction(tag_v) == null)
+        return throwTypeError(realm, "Intl.Locale tag must be a string or object");
 
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);

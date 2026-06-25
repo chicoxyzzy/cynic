@@ -380,6 +380,7 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
     var saw_script = false;
     var saw_region = false;
     var variant_count: usize = 0;
+    var variants: [16][]const u8 = undefined;
     var saw_extension = false;
     var saw_privateuse = false;
 
@@ -461,10 +462,15 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
             saw_region = true;
             continue;
         }
-        // Variants: 5-8 alphanum, or digit+3 alphanum.
+        // Variants: 5-8 alphanum, or digit+3 alphanum. A repeated variant
+        // subtag makes the tag structurally invalid (§ unicode_language_id).
         if ((seg_len >= 5 and seg_len <= 8) or (seg_len == 4 and isDigit(seg[0]))) {
+            for (variants[0..variant_count]) |v| {
+                if (std.ascii.eqlIgnoreCase(v, seg)) return false;
+            }
+            if (variant_count >= variants.len) return false;
+            variants[variant_count] = seg;
             variant_count += 1;
-            if (variant_count > 16) return false;
             continue;
         }
         // Extlang-like 3-alpha before script/region (permissive).

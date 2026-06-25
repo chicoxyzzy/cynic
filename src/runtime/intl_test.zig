@@ -1288,3 +1288,19 @@ test "intl: supportedLocalesOf filters unsupported locales" {
         \\(s.length === 1 && s[0] === 'en') ? 1 : 0
     );
 }
+
+// ── Intl.Locale tag validation (§14.1.1) ─────────────────────────────────────
+
+test "intl: Locale rejects non-string/non-object tags with TypeError" {
+    try requireIntlBuild();
+    try evalThrows("new Intl.Locale(true)");
+    try evalThrows("new Intl.Locale(null)");
+    try evalThrows("new Intl.Locale(42)");
+}
+
+test "intl: language tag with duplicate variant is structurally invalid" {
+    try requireIntlBuild();
+    try testing.expect(!intl.isStructurallyValidLanguageTag("en-emodeng-emodeng"));
+    try testing.expect(intl.isStructurallyValidLanguageTag("de-DE-1996-fonipa")); // distinct variants ok
+    try evalThrows("new Intl.Locale('en-emodeng-emodeng')");
+}
