@@ -380,8 +380,11 @@ jobs:
         # (passing + failing)`. See the legend in
         # `test262-results.md`.
         #
-        #   --min-pass-pct=88.5   Headline pass% floor. Today
-        #                         ~89.2 %; ~0.7pp headroom. A score
+        #   --min-pass-pct=92.0   Headline pass% floor. Today
+        #                         93.09 %; ~1.1pp headroom (intl402 is
+        #                         scored in-scope at -Dintl=full, so the
+        #                         score now tracks the in-flight Intl
+        #                         work and moves as it lands). A score
         #                         regression below it exits 2 — see
         #                         the diagnostic in `tools/test262.zig`.
         #
@@ -392,7 +395,7 @@ jobs:
         run: |
           zig build test262 -- \
             --threads=4 --top-rss=20 \
-            --min-pass-pct=88.5
+            --min-pass-pct=92.0
 
       - name: Filtered sweep with top-rss
         # Advisory leak guard: a filtered runtime sweep reports the

@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 90.86 % of the 49895 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 93.09 % of the 49895 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **45335 passing** — Cynic produced the spec-expected result.
-- **4560 failing** — every other scored fixture. No "expected fail" category: an Annex-B / no-Intl / strict-only / SES / eval miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **46448 passing** — Cynic produced the spec-expected result.
+- **3447 failing** — every other scored fixture. No "expected fail" category: an Annex-B / strict-only / SES / eval / not-yet-implemented-Intl miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 45335 | 4560 | 49895 | 90.86 % |
+| **`--unhardened --allow=eval`** | 46448 | 3447 | 49895 | 93.09 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -32,8 +32,8 @@ engine's spec coverage with the policy knobs out of the way.
 
 - **`passing`** — Cynic produced the spec-expected result.
 - **`failing`** — every other scored fixture. An Annex B,
-  no-Intl, strict-only, SES, or eval miss counts as a plain
-  fail, same as an engine bug.
+  strict-only, SES, eval, or not-yet-implemented-Intl miss
+  counts as a plain fail, same as an engine bug.
 - **`total`** — `passing + failing`. Excludes the upstream
   `harness/` / `staging/` / `annexB/` paths, Stage ≤ 3
   proposals, and structurally-unrunnable fixtures.
@@ -62,67 +62,67 @@ count; the per-area table below it is the work list.
 
 | why | failing | detail |
 |---|---:|---|
-| ECMA-402 not implemented | 3245 | the whole `intl402/` tree — `Intl` (and the `intl402/Temporal` twins of the excluded Temporal proposal) is an unbuilt subsystem |
 | sloppy-mode-only fixtures | 1142 | `flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...) |
 | Annex B builtins | 69 | `__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design |
-| **engine gaps** | 104 | failures the policy classes do not explain — the work list (an upper bound: it includes a residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter) |
+| **engine gaps** | 2236 | failures the policy classes do not explain — the work list. Includes in-scope `intl402/` surfaces not yet implemented at `-Dintl=full` (Segmenter, ListFormat, RelativeTimeFormat, DurationFormat, the Temporal-intl twins) plus implemented-surface Intl bugs; and an upper-bound residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter |
 
 **Failing areas.** Only areas with at least one failure are
 listed (everything else passes). `gaps` is the slice of the
 area's failures the policy classes above do not explain —
-sorted to the top, because that column is the engine work
-list. Bucketed on the first two path components.
+that column is the engine work list. Sorted by area
+(alphabetical), bucketed on the first two path components.
 
 | area | passing | failing | gaps | pass% |
 |---|---:|---:|---:|---:|
-| `built-ins/Function` | 428 | 81 | 50 | 84 % |
-| `language/expressions` | 10308 | 395 | 23 | 96 % |
-| `language/statements` | 8996 | 327 | 12 | 96 % |
-| `language/module-code` | 590 | 5 | 5 | 99 % |
-| `language/function-code` | 155 | 62 | 4 | 71 % |
-| `language/eval-code` | 164 | 183 | 2 | 47 % |
-| `built-ins/Object` | 3329 | 82 | 2 | 98 % |
-| `language/literals` | 527 | 7 | 2 | 99 % |
-| `built-ins/String` | 1219 | 4 | 2 | 100 % |
-| `built-ins/TypedArrayConstructors` | 719 | 17 | 1 | 98 % |
-| `language/comments` | 51 | 1 | 1 | 98 % |
-| `intl402/Temporal` | 71 | 1958 | 0 | 3 % |
-| `intl402/NumberFormat` | 0 | 249 | 0 | 0 % |
-| `intl402/DateTimeFormat` | 0 | 244 | 0 | 0 % |
-| `intl402/Locale` | 0 | 152 | 0 | 0 % |
-| `intl402/DurationFormat` | 0 | 110 | 0 | 0 % |
-| `intl402/ListFormat` | 0 | 81 | 0 | 0 % |
-| `intl402/RelativeTimeFormat` | 0 | 80 | 0 | 0 % |
-| `intl402/Segmenter` | 0 | 79 | 0 | 0 % |
-| `intl402/Intl` | 0 | 66 | 0 | 0 % |
-| `intl402/Collator` | 0 | 65 | 0 | 0 % |
-| `intl402/DisplayNames` | 0 | 57 | 0 | 0 % |
-| `intl402/PluralRules` | 0 | 53 | 0 | 0 % |
-| `language/arguments-object` | 225 | 38 | 0 | 86 % |
 | `built-ins/Array` | 3054 | 27 | 0 | 99 % |
-| `language/directive-prologue` | 37 | 25 | 0 | 60 % |
-| `intl402` | 0 | 22 | 0 | 0 % |
-| `intl402/String` | 7 | 12 | 0 | 37 % |
-| `built-ins/Proxy` | 300 | 11 | 0 | 96 % |
-| `language/types` | 104 | 9 | 0 | 92 % |
-| `built-ins/TypedArray` | 1430 | 8 | 0 | 99 % |
-| `language/future-reserved-words` | 48 | 7 | 0 | 87 % |
-| `intl402/BigInt` | 5 | 6 | 0 | 45 % |
-| `language/global-code` | 37 | 5 | 0 | 88 % |
-| `language/identifier-resolution` | 9 | 5 | 0 | 64 % |
-| `intl402/Date` | 8 | 4 | 0 | 67 % |
-| `intl402/Number` | 3 | 4 | 0 | 43 % |
-| `built-ins/Promise` | 637 | 3 | 0 | 100 % |
-| `built-ins/undefined` | 5 | 3 | 0 | 63 % |
+| `built-ins/Function` | 428 | 81 | 50 | 84 % |
 | `built-ins/Infinity` | 4 | 2 | 0 | 67 % |
-| `built-ins/NaN` | 4 | 2 | 0 | 67 % |
-| `built-ins/Symbol` | 96 | 2 | 0 | 98 % |
-| `intl402/FallbackSymbol` | 0 | 2 | 0 | 0 % |
 | `built-ins/Map` | 203 | 1 | 0 | 100 % |
+| `built-ins/NaN` | 4 | 2 | 0 | 67 % |
+| `built-ins/Object` | 3329 | 82 | 2 | 98 % |
+| `built-ins/Promise` | 637 | 3 | 0 | 100 % |
+| `built-ins/Proxy` | 300 | 11 | 0 | 96 % |
 | `built-ins/RegExp` | 1878 | 1 | 0 | 100 % |
 | `built-ins/Set` | 382 | 1 | 0 | 100 % |
-| `intl402/Array` | 1 | 1 | 0 | 50 % |
+| `built-ins/String` | 1219 | 4 | 2 | 100 % |
+| `built-ins/Symbol` | 96 | 2 | 0 | 98 % |
+| `built-ins/Temporal` | 4589 | 14 | 14 | 100 % |
+| `built-ins/TypedArray` | 1430 | 8 | 0 | 99 % |
+| `built-ins/TypedArrayConstructors` | 719 | 17 | 1 | 98 % |
+| `built-ins/undefined` | 5 | 3 | 0 | 63 % |
+| `intl402` | 16 | 6 | 6 | 73 % |
+| `intl402/Array` | 1 | 1 | 1 | 50 % |
+| `intl402/BigInt` | 7 | 4 | 4 | 64 % |
+| `intl402/Collator` | 48 | 17 | 17 | 74 % |
+| `intl402/Date` | 10 | 2 | 2 | 83 % |
+| `intl402/DateTimeFormat` | 117 | 127 | 127 | 48 % |
+| `intl402/DisplayNames` | 48 | 9 | 9 | 84 % |
+| `intl402/DurationFormat` | 41 | 69 | 69 | 37 % |
+| `intl402/FallbackSymbol` | 0 | 2 | 2 | 0 % |
+| `intl402/Intl` | 29 | 37 | 37 | 44 % |
+| `intl402/ListFormat` | 47 | 34 | 34 | 58 % |
+| `intl402/Locale` | 109 | 43 | 43 | 72 % |
+| `intl402/Number` | 5 | 2 | 2 | 71 % |
+| `intl402/NumberFormat` | 140 | 109 | 109 | 56 % |
+| `intl402/PluralRules` | 44 | 9 | 9 | 83 % |
+| `intl402/RelativeTimeFormat` | 49 | 31 | 31 | 61 % |
+| `intl402/Segmenter` | 54 | 25 | 25 | 68 % |
+| `intl402/String` | 8 | 11 | 11 | 42 % |
+| `intl402/Temporal` | 449 | 1580 | 1580 | 22 % |
+| `language/arguments-object` | 225 | 38 | 0 | 86 % |
+| `language/comments` | 51 | 1 | 1 | 98 % |
 | `language/destructuring` | 18 | 1 | 0 | 95 % |
+| `language/directive-prologue` | 37 | 25 | 0 | 60 % |
+| `language/eval-code` | 164 | 183 | 2 | 47 % |
+| `language/expressions` | 10308 | 395 | 23 | 96 % |
+| `language/function-code` | 155 | 62 | 4 | 71 % |
+| `language/future-reserved-words` | 48 | 7 | 0 | 87 % |
+| `language/global-code` | 37 | 5 | 0 | 88 % |
+| `language/identifier-resolution` | 9 | 5 | 0 | 64 % |
+| `language/literals` | 527 | 7 | 2 | 99 % |
+| `language/module-code` | 590 | 5 | 5 | 99 % |
+| `language/statements` | 8996 | 327 | 12 | 96 % |
+| `language/types` | 104 | 9 | 0 | 92 % |
 
 
 ## Pre-Stage-4 proposals shipped
@@ -142,19 +142,25 @@ top-line score.
 
 ## History
 
+### 2026-06-25 — cynic `882c0dc`, test262 `de8e621cdb`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 46448 | 3447 | 49895 | 93.09 % | +1113 | 2m 05s |
+
+Biggest movers:
+
+- `built-ins/Temporal` +4589
+- `built-ins/Date` +594
+- `built-ins/DataView` +550
+- `built-ins/Iterator` +432
+- `built-ins/Atomics` +381
+
 ### 2026-06-24 — cynic `86ec52d`, test262 `de8e621cdb`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
 | 45335 | 4560 | 49895 | 90.86 % | ±0 | 2m 05s |
-
-Biggest movers:
-
-- `built-ins/Temporal` +4603
-- `built-ins/Date` +594
-- `built-ins/DataView` +550
-- `built-ins/Iterator` +432
-- `built-ins/Atomics` +381
 
 ### 2026-06-22 — cynic `f435659`, test262 `de8e621cdb`
 
