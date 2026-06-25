@@ -486,6 +486,51 @@ test "num-arith fast path: NaN / Infinity / signed zero edges" {
     try expectBool("1 / (1.5 * 0 - 0.0) === 1 / 0;", true); // +0 stays +0
 }
 
+// ── integer-valued-double property-key formatting (§6.1.6.1.20 /
+// §7.1.21). `formatDoubleSafe` gained the int fast path that
+// `numberToString` has, so `arr[5.0]` formats `5.0` -> "5" via int
+// divmod instead of the f64 Ryu path (printFloat). Behaviour is
+// unchanged — these pin that the canonical key string is identical.
+test "double-key: integer-valued double === int === string key (array)" {
+    try expectScriptStringWithBuiltins(
+        \\var a = []; a[5.0] = 'x';
+        \\'' + (a[5] === 'x') + (a['5'] === 'x') + (a.length === 6);
+    , "truetruetrue");
+}
+test "double-key: load from a dense array with double indices" {
+    try expectScriptIntWithBuiltins("var a = [10, 20, 30]; a[1.0] + a[2.0];", 50);
+}
+test "double-key: object (non-array) double key canonicalizes to the int string" {
+    try expectScriptStringWithBuiltins(
+        \\var o = {}; o[42.0] = 'y';
+        \\'' + (o['42'] === 'y') + (o[42] === 'y');
+    , "truetrue");
+}
+test "double-key: fractional double stays a named property, not an index" {
+    try expectScriptStringWithBuiltins(
+        \\var a = []; a[2.5] = 'f';
+        \\'' + (a['2.5'] === 'f') + (a.length === 0) + (a[2.5] === 'f');
+    , "truetruetrue");
+}
+test "double-key: -0 canonicalizes to \"0\"" {
+    try expectScriptStringWithBuiltins("var o = {}; o[-0] = 'z'; '' + (o['0'] === 'z');", "true");
+}
+test "double-key: large integer double (> 1e18) keeps full decimal string" {
+    try expectScriptStringWithBuiltins(
+        \\var o = {}; o[1e20] = 'big';
+        \\'' + (o['100000000000000000000'] === 'big');
+    , "true");
+}
+test "double-key: negative integer double is a named property" {
+    try expectScriptStringWithBuiltins(
+        \\var a = [1,2,3]; a[-1.0] = 'neg';
+        \\'' + (a['-1'] === 'neg') + (a.length === 3);
+    , "truetrue");
+}
+test "double-key: typed array double index" {
+    try expectScriptIntWithBuiltins("var ta = new Float64Array(3); ta[1.0] = 7; ta[2.0] = 9; ta[1] + ta[2];", 16);
+}
+
 test "interpreter: relational operators" {
     try expectBool("1 < 2;", true);
     try expectBool("2 < 1;", false);

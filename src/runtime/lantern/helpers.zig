@@ -126,6 +126,17 @@ pub fn formatDoubleSafe(scratch: *[64]u8, d: f64) []const u8 {
         scratch[after] = '+';
         return scratch[0 .. raw.len + 1];
     }
+    // Integer fast path: an integer-valued double in i64-safe range
+    // formats via int divmod (`{d}` on i64) instead of `{d}` on f64,
+    // which routes through `Io.Writer.printFloat` (Ryu). Profile: ~28%
+    // of `crypto` / 20% of `navier-stokes`, where array indices are
+    // integer-valued doubles (`arr[5.0]`). Output is byte-identical —
+    // §6.1.6.1.20: ToString of an integral Number with magnitude < 1e21
+    // is its decimal digits, same as `{d}` on the i64. `-0` is excluded
+    // so its existing `{d}` form is preserved unchanged.
+    if (d == @trunc(d) and d >= -1.0e18 and d <= 1.0e18 and !(d == 0 and std.math.signbit(d))) {
+        return std.fmt.bufPrint(scratch, "{d}", .{@as(i64, @intFromFloat(d))}) catch unreachable;
+    }
     return std.fmt.bufPrint(scratch, "{d}", .{d}) catch unreachable;
 }
 
