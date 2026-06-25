@@ -1216,3 +1216,38 @@ test "intl: cldr.removeLikelySubtags finds the minimal form" {
     try testing.expectEqualStrings("", out.script);
     try testing.expectEqualStrings("TW", out.region);
 }
+
+// ── Intl.ListFormat (CLDR list patterns + StringListFromIterable) ─────────────
+
+test "intl: ListFormat applies CLDR patterns by type/style" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (o, a) => new Intl.ListFormat('en', o).format(a);
+        \\(f({}, ['a','b','c']) === 'a, b, and c' &&
+        \\ f({}, ['a','b']) === 'a and b' &&
+        \\ f({type:'disjunction'}, ['a','b','c']) === 'a, b, or c' &&
+        \\ f({type:'conjunction',style:'short'}, ['a','b']) === 'a & b') ? 1 : 0
+    );
+}
+
+test "intl: ListFormat iterates any iterable + validates strings" {
+    try requireIntlBuild();
+    // Generic iterable (Set), empty list, and non-string rejection.
+    try evalAssert1(
+        \\const lf = new Intl.ListFormat('en');
+        \\const set = lf.format(new Set(['x','y','z']));
+        \\let threw = 0;
+        \\try { lf.format(['ok', 3]); } catch (e) { threw = (e instanceof TypeError) ? 1 : 0; }
+        \\(set.length > 0 && lf.format([]) === '' && threw === 1) ? 1 : 0
+    );
+}
+
+test "intl: ListFormat formatToParts emits element/literal segments" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const p = new Intl.ListFormat('en').formatToParts(['a','b','c']);
+        \\const types = p.map(x => x.type).join(',');
+        \\(types === 'element,literal,element,literal,element' &&
+        \\ p.filter(x => x.type === 'element').map(x => x.value).join('') === 'abc') ? 1 : 0
+    );
+}

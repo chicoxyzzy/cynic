@@ -2812,42 +2812,151 @@ fn listFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) 
     return heap_mod.taggedObject(inst);
 }
 
-fn listFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireKind(realm, this_value, .list_format);
-    const list_v = argOr(args, 0, Value.undefined_);
-    // Structural: join with ", ".
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    defer out.deinit(realm.allocator);
+/// One formatted-list part: `is_element` distinguishes an "element" (a list
+/// item) from a "literal" (pattern text). `val` is a borrowed slice — either
+/// an owned list item or a slice of a CLDR pattern in the blob — valid until
+/// the string list is freed.
+const ListSeg = struct { is_element: bool, val: []const u8 };
 
-    if (heap_mod.valueAsPlainObject(list_v)) |obj| {
-        if (obj.is_array_exotic) {
-            const len_v = try getPropertyChain(realm, obj, "length");
-            const len_n = try toNumber(realm, len_v);
-            const len_f: f64 = if (len_n.isInt32()) @floatFromInt(len_n.asInt32()) else len_n.asDouble();
-            const len: usize = if (len_f > 0 and len_f < 10000) @intFromFloat(len_f) else 0;
-            var i: usize = 0;
-            while (i < len) : (i += 1) {
-                var idx_buf: [24]u8 = undefined;
-                const idx_key = std.fmt.bufPrint(&idx_buf, "{d}", .{i}) catch unreachable;
-                const el = try getPropertyChain(realm, obj, idx_key);
-                const s = try valueToStringSlice(realm, el);
-                if (i > 0) out.appendSlice(realm.allocator, ", ") catch return error.OutOfMemory;
-                out.appendSlice(realm.allocator, s) catch return error.OutOfMemory;
+/// §13.5.1 StringListFromIterable — iterate `list_v` via the iterator protocol,
+/// requiring every yielded value to be a String (else IteratorClose + TypeError).
+/// Returns an owned list of owned string copies; caller frees both.
+fn listStringList(realm: *Realm, list_v: Value) NativeError![][]const u8 {
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (list.items) |s| realm.allocator.free(s);
+        list.deinit(realm.allocator);
+    }
+    if (list_v.isUndefined()) return list.toOwnedSlice(realm.allocator) catch return error.OutOfMemory;
+
+    const iter_v = lantern.openIterator(realm.allocator, realm, list_v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NotIterable => return throwTypeError(realm, "ListFormat list is not iterable"),
+        else => return error.NativeThrew,
+    };
+    const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return throwTypeError(realm, "iterator is not an object");
+    const next_fn = heap_mod.valueAsFunction(try getPropertyChain(realm, iter_obj, "next")) orelse
+        return throwTypeError(realm, "iterator.next is not callable");
+
+    var guard: usize = 0;
+    while (guard < 1_000_000) : (guard += 1) {
+        const step = switch (lantern.callJSFunction(realm.allocator, realm, next_fn, iter_v, &.{}) catch return error.NativeThrew) {
+            .value => |v| v,
+            // Propagate an abrupt completion from next() (its thrown value,
+            // not a generic TypeError) so iterator-step-throw fixtures see it.
+            .thrown => |ex| {
+                realm.pending_exception = ex;
+                return error.NativeThrew;
+            },
+            .yielded => return error.NativeThrew,
+        };
+        const step_obj = heap_mod.valueAsPlainObject(step) orelse return throwTypeError(realm, "iterator result is not an object");
+        if (toBoolean(try getPropertyChain(realm, step_obj, "done"))) break;
+        const value_v = try getPropertyChain(realm, step_obj, "value");
+        if (!value_v.isString()) {
+            // §13.5.1 — non-String element: close the iterator, then throw.
+            listCloseIterator(realm, iter_v);
+            return throwTypeError(realm, "ListFormat list elements must be strings");
+        }
+        const s = try valueToStringSlice(realm, value_v);
+        list.append(realm.allocator, realm.allocator.dupe(u8, s) catch return error.OutOfMemory) catch return error.OutOfMemory;
+    }
+    return list.toOwnedSlice(realm.allocator) catch return error.OutOfMemory;
+}
+
+/// §7.4.11 IteratorClose (best-effort): invoke the iterator's `return` method,
+/// swallowing any error — the original throw is what propagates.
+fn listCloseIterator(realm: *Realm, iter_v: Value) void {
+    const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse return;
+    const ret_v = getPropertyChain(realm, iter_obj, "return") catch return;
+    const ret_fn = heap_mod.valueAsFunction(ret_v) orelse return;
+    _ = lantern.callJSFunction(realm.allocator, realm, ret_fn, iter_v, &.{}) catch {};
+}
+
+/// Build the formatted-list parts from the string list using the locale's CLDR
+/// list patterns (§13.5.3 CreatePartsFromList). `out` segments borrow `items`
+/// and the pattern blob — consume before freeing `items`.
+fn listBuildParts(realm: *Realm, slots: *const intl.ListFormatSlots, items: [][]const u8, out: *std.ArrayListUnmanaged(ListSeg)) NativeError!void {
+    const n = items.len;
+    if (n == 0) return;
+    const t: u8 = if (std.mem.eql(u8, slots.type_name, "disjunction")) 1 else if (std.mem.eql(u8, slots.type_name, "unit")) 2 else 0;
+    const sty: u8 = if (std.mem.eql(u8, slots.style, "short")) 1 else if (std.mem.eql(u8, slots.style, "narrow")) 2 else 0;
+
+    out.append(realm.allocator, .{ .is_element = true, .val = items[0] }) catch return error.OutOfMemory;
+    var i: usize = 1;
+    while (i < n) : (i += 1) {
+        const which: cldr.ListPatternKind = if (n == 2) .two else if (i == 1) .start else if (i == n - 1) .end else .middle;
+        const pat = cldr.listPattern(slots.base.locale, t, sty, which) orelse defaultListPattern(which);
+        // Deconstruct the pattern: {0} expands to the parts built so far, {1}
+        // is the next element; literal runs become literal segments. Rebuilt
+        // into `next` so {0} can splice the prior parts in place.
+        var next: std.ArrayListUnmanaged(ListSeg) = .empty;
+        errdefer next.deinit(realm.allocator);
+        var p: usize = 0;
+        while (p < pat.len) {
+            if (p + 3 <= pat.len and pat[p] == '{' and pat[p + 2] == '}' and (pat[p + 1] == '0' or pat[p + 1] == '1')) {
+                if (pat[p + 1] == '0') {
+                    next.appendSlice(realm.allocator, out.items) catch return error.OutOfMemory;
+                } else {
+                    next.append(realm.allocator, .{ .is_element = true, .val = items[i] }) catch return error.OutOfMemory;
+                }
+                p += 3;
+            } else {
+                const start = p;
+                while (p < pat.len and pat[p] != '{') p += 1;
+                next.append(realm.allocator, .{ .is_element = false, .val = pat[start..p] }) catch return error.OutOfMemory;
             }
         }
+        out.deinit(realm.allocator);
+        out.* = next;
     }
+}
+
+fn defaultListPattern(which: cldr.ListPatternKind) []const u8 {
+    return switch (which) {
+        .two, .start, .middle, .end => "{0}, {1}",
+    };
+}
+
+fn listFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requireKind(realm, this_value, .list_format);
+    const items = try listStringList(realm, argOr(args, 0, Value.undefined_));
+    defer {
+        for (items) |s| realm.allocator.free(s);
+        realm.allocator.free(items);
+    }
+    var parts: std.ArrayListUnmanaged(ListSeg) = .empty;
+    defer parts.deinit(realm.allocator);
+    try listBuildParts(realm, &rec.list_format, items, &parts);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    for (parts.items) |seg| out.appendSlice(realm.allocator, seg.val) catch return error.OutOfMemory;
     return makeStringValue(realm, out.items);
 }
 
 fn listFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const formatted = try listFormatFormat(realm, this_value, args);
+    const rec = try requireKind(realm, this_value, .list_format);
+    const items = try listStringList(realm, argOr(args, 0, Value.undefined_));
+    defer {
+        for (items) |s| realm.allocator.free(s);
+        realm.allocator.free(items);
+    }
+    var parts: std.ArrayListUnmanaged(ListSeg) = .empty;
+    defer parts.deinit(realm.allocator);
+    try listBuildParts(realm, &rec.list_format, items, &parts);
+
     const arr = allocateArray(realm) catch return error.OutOfMemory;
-    const part = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(part, realm.intrinsics.object_prototype);
-    try setDataProp(realm, part, "type", try makeStringValue(realm, "element"));
-    try setDataProp(realm, part, "value", formatted);
-    arr.set(realm.allocator, "0", heap_mod.taggedObject(part)) catch return error.OutOfMemory;
-    arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
+    for (parts.items, 0..) |seg, idx| {
+        const part = realm.heap.allocateObject() catch return error.OutOfMemory;
+        realm.heap.setObjectPrototype(part, realm.intrinsics.object_prototype);
+        try setDataProp(realm, part, "type", try makeStringValue(realm, if (seg.is_element) "element" else "literal"));
+        try setDataProp(realm, part, "value", try makeStringValue(realm, seg.val));
+        var idx_buf: [24]u8 = undefined;
+        const k = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch unreachable;
+        arr.set(realm.allocator, k, heap_mod.taggedObject(part)) catch return error.OutOfMemory;
+    }
+    arr.setArrayLength(realm.allocator, @intCast(parts.items.len)) catch return error.OutOfMemory;
     return heap_mod.taggedObject(arr);
 }
 

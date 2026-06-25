@@ -44,6 +44,7 @@ const SectionKind = enum(u8) {
     currencies = 7,
     currency_names = 8,
     likely_subtags = 9,
+    list_patterns = 10,
 };
 
 /// Plural-category index shared with `cldr.zig`'s PluralCategory
@@ -150,13 +151,14 @@ pub fn main(init: std.process.Init) !void {
     const display = try loadDisplayNames(arena, io, json_root);
     const currencies = try loadCurrencies(arena, io, json_root);
     const likely = try loadLikelySubtags(arena, io, json_root);
+    const list_patterns = try loadListPatterns(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
-    var buf: [380]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len });
+    var buf: [420]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -223,12 +225,13 @@ fn pack(
     display: []DisplayLocale,
     currencies: CurrencyData,
     likely: []LikelyEntry,
+    list_patterns: []ListPatternLocale,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [9]SectionDir = undefined;
+    var dirs: [10]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -265,6 +268,10 @@ fn pack(
     const likely_start: u32 = @intCast(payloads.items.len);
     try writeLikelySubtagsPayload(gpa, &payloads, likely);
     dirs[8] = .{ .kind = .likely_subtags, .off = likely_start, .len = @as(u32, @intCast(payloads.items.len)) - likely_start };
+
+    const lp_start: u32 = @intCast(payloads.items.len);
+    try writeListPatternsPayload(gpa, &payloads, list_patterns);
+    dirs[9] = .{ .kind = .list_patterns, .off = lp_start, .len = @as(u32, @intCast(payloads.items.len)) - lp_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -414,6 +421,68 @@ fn writeLikelySubtagsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanage
         try appendStr8(gpa, buf, e.lang);
         try appendStr8(gpa, buf, e.script);
         try appendStr8(gpa, buf, e.region);
+    }
+}
+
+// ── list patterns (Intl.ListFormat) ──────────────────────────────────────────
+
+/// One {2,start,middle,end} template group for a (type, style) pair.
+const PatternSet = struct { two: []const u8, start: []const u8, middle: []const u8, end: []const u8 };
+/// 9 sets per locale, indexed `type*3 + style`: type 0=conjunction 1=disjunction
+/// 2=unit; style 0=long 1=short 2=narrow.
+const ListPatternLocale = struct {
+    key: []const u8,
+    sets: [9]PatternSet,
+    fn lessThan(_: void, a: ListPatternLocale, b: ListPatternLocale) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+/// The CLDR `listPattern-type-*` key for a (type, style) pair, matching the
+/// `type*3 + style` index order.
+const list_pattern_keys = [9][]const u8{
+    "listPattern-type-standard", "listPattern-type-standard-short", "listPattern-type-standard-narrow",
+    "listPattern-type-or",       "listPattern-type-or-short",       "listPattern-type-or-narrow",
+    "listPattern-type-unit",     "listPattern-type-unit-short",     "listPattern-type-unit-narrow",
+};
+
+/// cldr-misc-full/main/<loc>/listPatterns.json → the 9 template groups per
+/// modern locale. Missing keys fall back to the standard set; absent locales
+/// are skipped (runtime falls back to the language candidate, then en).
+fn loadListPatterns(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]ListPatternLocale {
+    var out: std.ArrayListUnmanaged(ListPatternLocale) = .empty;
+    for (modern_locales) |loc| {
+        const path = try std.fmt.allocPrint(arena, "{s}/cldr-misc-full/main/{s}/listPatterns.json", .{ json_root, loc });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1024 * 1024)) catch continue;
+        const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch continue;
+        var mit = root.object.get("main").?.object.iterator();
+        const lp = (mit.next() orelse continue).value_ptr.*.object.get("listPatterns").?.object;
+        var sets: [9]PatternSet = undefined;
+        for (list_pattern_keys, 0..) |k, i| {
+            const o = if (lp.get(k)) |v| v.object else lp.get("listPattern-type-standard").?.object;
+            sets[i] = .{
+                .two = strField(o, "2", "{0}, {1}"),
+                .start = strField(o, "start", "{0}, {1}"),
+                .middle = strField(o, "middle", "{0}, {1}"),
+                .end = strField(o, "end", "{0}, {1}"),
+            };
+        }
+        try out.append(arena, .{ .key = loc, .sets = sets });
+    }
+    std.sort.block(ListPatternLocale, out.items, {}, ListPatternLocale.lessThan);
+    return out.items;
+}
+
+fn writeListPatternsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), locales: []ListPatternLocale) !void {
+    try appendU32(gpa, buf, locales.len);
+    for (locales) |l| {
+        try appendStr8(gpa, buf, l.key);
+        for (l.sets) |s| {
+            try appendStr16(gpa, buf, s.two);
+            try appendStr16(gpa, buf, s.start);
+            try appendStr16(gpa, buf, s.middle);
+            try appendStr16(gpa, buf, s.end);
+        }
     }
 }
 

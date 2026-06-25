@@ -219,7 +219,12 @@ These are project rules — they apply to everyone.
   `Intl.DateTimeFormat` (gregorian: dateStyle/timeStyle + component
   options, localized month/day/era/dayPeriod names, hourCycle, formatToParts) are
   CLDR-backed via `src/runtime/cldr.zig` (see `src/runtime/builtins/intl.zig`),
-  as is `Intl.DisplayNames` (language / region / script / currency name tables).
+  as is `Intl.DisplayNames` (language / region / script / currency name tables)
+  and `Intl.ListFormat` (CLDR listPatterns for conjunction / disjunction / unit
+  × long / short / narrow, applied over a §13.5.1 StringListFromIterable).
+  `Intl.Locale` info methods (`getCalendars` / `getCollations` / `getHourCycles`
+  / `getNumberingSystems` / `getTextInfo` / `getWeekInfo` + `variants`) resolve
+  structurally from the parsed locale (no blob).
   NumberFormat unit/compact output, DateTimeFormat skeleton best-fit /
   non-gregorian calendars / tz names, and DisplayNames calendar/dateTimeField
   types stay structural until their CLDR sections land. The display-name tables

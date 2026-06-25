@@ -60,6 +60,7 @@ const SectionKind = enum(u8) {
     currencies = 7,
     currency_names = 8,
     likely_subtags = 9,
+    list_patterns = 10,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -75,6 +76,7 @@ var ns_payload: []const u8 = &.{};
 var dates_payload: []const u8 = &.{};
 var display_payload: []const u8 = &.{};
 var likely_payload: []const u8 = &.{};
+var lp_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -111,6 +113,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.currencies) => cur_payload = payload,
             @intFromEnum(SectionKind.currency_names) => cur_names_payload = payload,
             @intFromEnum(SectionKind.likely_subtags) => likely_payload = payload,
+            @intFromEnum(SectionKind.list_patterns) => lp_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -708,6 +711,51 @@ fn withCandidates(locale: []const u8, comptime find: fn ([]const u8) ?usize) ?us
         if (joinTag(&cand_buf, parts.lang, parts.script, "")) |k|
             if (find(k)) |o| return o;
     return find(parts.lang);
+}
+
+// ── list patterns (Intl.ListFormat) ──────────────────────────────────────────
+
+/// Which template in a {2,start,middle,end} group.
+pub const ListPatternKind = enum(u8) { two = 0, start = 1, middle = 2, end = 3 };
+
+/// Locate one locale's list-pattern record; returns the offset at its first
+/// pattern set (just past the key). Exact key match — callers walk fallback.
+fn findListPatternLocale(key: []const u8) ?usize {
+    if (lp_payload.len < 4) return null;
+    const count = std.mem.readInt(u32, lp_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(lp_payload, &off) orelse return null;
+        const k = readBytes(lp_payload, &off, klen) orelse return null;
+        const rec_off = off;
+        // Skip 9 sets × 4 str16 patterns to reach the next key.
+        var s: usize = 0;
+        while (s < 9 * 4) : (s += 1) {
+            _ = readStr16(lp_payload, &off) orelse return null;
+        }
+        if (asciiEqlIgnoreCase(k, key)) return rec_off;
+    }
+    return null;
+}
+
+/// The `Intl.ListFormat` template for `locale` + (type, style, which), walking
+/// the language/script/region fallback chain. `type_idx` 0=conjunction
+/// 1=disjunction 2=unit; `style_idx` 0=long 1=short 2=narrow. Null when the
+/// CLDR data is unavailable or the locale is absent.
+pub fn listPattern(locale: []const u8, type_idx: u8, style_idx: u8, which: ListPatternKind) ?[]const u8 {
+    if (!ensureInit() or type_idx > 2 or style_idx > 2) return null;
+    const rec_off = withCandidates(locale, findListPatternLocale) orelse return null;
+    // Patterns are variable-length str16s, so walk to the target: skip
+    // (set_idx*4 + which) entries, where set_idx = type*3 + style.
+    const target: usize = (@as(usize, type_idx) * 3 + style_idx) * 4 + @intFromEnum(which);
+    var off = rec_off;
+    var idx: usize = 0;
+    var pat: []const u8 = "";
+    while (idx <= target) : (idx += 1) {
+        pat = readStr16(lp_payload, &off) orelse return null;
+    }
+    return pat;
 }
 
 // ── likely subtags (UTS #35 §4.3 Add / Remove Likely Subtags) ─────────────────
