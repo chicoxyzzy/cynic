@@ -1278,3 +1278,13 @@ test "intl: CanonicalizeLocaleList propagates a poisoned length valueOf" {
         \\got
     );
 }
+
+test "intl: supportedLocalesOf filters unsupported locales" {
+    try requireFullBuild();
+    // 'zxx' (no linguistic content) is structurally valid but has no CLDR
+    // data, so LookupSupportedLocales drops it; 'en' is kept.
+    try evalAssert1(
+        \\const s = Intl.PluralRules.supportedLocalesOf(['en', 'zxx']);
+        \\(s.length === 1 && s[0] === 'en') ? 1 : 0
+    );
+}

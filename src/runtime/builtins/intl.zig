@@ -426,7 +426,12 @@ fn supportedLocalesOfImpl(realm: *Realm, args: []const Value) NativeError!Value 
     const arr = allocateArray(realm) catch return error.OutOfMemory;
     var i: i32 = 0;
     for (list) |tag| {
-        // Structural: every structurally valid canonical tag is "supported".
+        // §9.2.7 LookupSupportedLocales — keep only locales with a
+        // BestAvailableLocale match. Availability is proxied by the all-locale
+        // CLDR plural set (a candidate-walk over language/script/region), so a
+        // structurally-valid but data-less tag like "zxx" is dropped. With no
+        // blob (stub) nothing can be filtered, so every requested tag passes.
+        if (cldr.available and !cldr.hasPluralLocale(tag, false)) continue;
         var idx_buf: [24]u8 = undefined;
         const idx_key = std.fmt.bufPrint(&idx_buf, "{d}", .{i}) catch unreachable;
         const sv = try makeStringValue(realm, tag);
