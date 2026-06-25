@@ -1347,3 +1347,27 @@ test "intl: PluralRules validates notation + propagates abrupt getters" {
     try evalThrows("new Intl.PluralRules('en', { notation: 'bogus' })");
     try evalThrows("new Intl.PluralRules('en', { get roundingIncrement(){ throw new RangeError('x'); } })");
 }
+
+// ── Intl.Collator unicode extension resolution (§10.1.1) ─────────────────────
+
+test "intl: Collator resolves -u-co/kn/kf with option override" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const ro = (l, o) => new Intl.Collator(l, o).resolvedOptions();
+        \\const a = ro('de-u-co-phonebk');
+        \\const b = ro('en-u-kn-false', { numeric: true });
+        \\const c = ro('en-u-co-standard');           // standard never reported
+        \\const d = ro('en-u-co-bogus');              // unsupported → default
+        \\(a.collation === 'phonebk' && a.locale === 'de-u-co-phonebk' &&
+        \\ b.numeric === true && b.locale === 'en' &&  // option drops the keyword
+        \\ c.collation === 'default' && c.locale === 'en' &&
+        \\ d.collation === 'default') ? 1 : 0
+    );
+}
+
+test "intl: unicode extension inside private-use is ignored" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\new Intl.Collator('de-x-u-co-phonebk').resolvedOptions().collation === 'default' ? 1 : 0
+    );
+}

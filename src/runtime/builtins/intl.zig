@@ -346,6 +346,29 @@ fn requireKind(realm: *Realm, this_value: Value, kind: intl.IntlKind) NativeErro
 /// continuation `type` subtags) removed. Caller owns the slice;
 /// preserves the rest of the tag verbatim so a subsequent re-
 /// canonicalisation can re-sort the new keyword in.
+/// Remove a -u- keyword from an owned ServiceLocaleSlots.locale in place,
+/// re-canonicalising. Used by ResolveLocale when an option supersedes (or
+/// invalidates) a locale-supplied relevant-extension keyword.
+/// Known BCP 47 `-u-co-` collation types (UTS #35 / CLDR bcp47/collation).
+/// "standard" / "search" are excluded — they're never reported (→ "default").
+fn isKnownCollation(s: []const u8) bool {
+    const known = [_][]const u8{
+        "big5han",  "compat", "dict",    "direct",   "ducet",  "emoji",
+        "eor",      "gb2312", "phonebk", "phonetic", "pinyin", "reformed",
+        "searchjl", "stroke", "trad",    "unihan",   "zhuyin",
+    };
+    for (known) |k| if (std.mem.eql(u8, s, k)) return true;
+    return false;
+}
+
+fn stripExtKeyword(realm: *Realm, base: *intl.ServiceLocaleSlots, key: []const u8) NativeError!void {
+    const stripped = stripUnicodeExtensionKeyword(realm.allocator, base.locale, key) catch return error.OutOfMemory;
+    realm.allocator.free(base.locale);
+    const canon = intl.canonicalizeUnicodeLocaleId(realm.allocator, stripped) catch stripped;
+    if (canon.ptr != stripped.ptr) realm.allocator.free(stripped);
+    base.locale = canon;
+}
+
 fn stripUnicodeExtensionKeyword(allocator: std.mem.Allocator, locale: []const u8, key: []const u8) ![]const u8 {
     if (key.len != 2) return allocator.dupe(u8, locale);
     const u_at = std.mem.indexOf(u8, locale, "-u-") orelse return allocator.dupe(u8, locale);
@@ -1147,13 +1170,56 @@ fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     const resolved = try resolveServiceLocale(realm, locales, opts);
 
     var slots: intl.CollatorSlots = .{};
+    errdefer slots.deinit(realm.allocator);
     slots.base.locale = resolved.locale;
     slots.usage = try getOptionStringOwned(realm, opts, "usage", &.{ "sort", "search" }, "sort");
     slots.sensitivity = try getOptionStringOwned(realm, opts, "sensitivity", &.{ "base", "accent", "case", "variant" }, "variant");
     slots.ignore_punctuation = try getBooleanOption(realm, opts, "ignorePunctuation", false);
-    slots.numeric = try getBooleanOption(realm, opts, "numeric", false);
-    slots.case_first = try getOptionStringOwned(realm, opts, "caseFirst", &.{ "upper", "lower", "false" }, "false");
-    slots.collation = realm.allocator.dupe(u8, "default") catch return error.OutOfMemory;
+
+    // §10.1.1 relevant-extension-keys « co, kn, kf ». The option overrides the
+    // locale's -u- keyword; an option-sourced value also drops that keyword
+    // from [[Locale]], while a locale-sourced one is retained. collation has
+    // no option and "standard"/"search" are never reported (→ "default").
+    const numeric_opt: ?bool = if (opts) |o| blk: {
+        const v = try getPropertyChain(realm, o, "numeric");
+        break :blk if (v.isUndefined()) null else toBoolean(v);
+    } else null;
+    const cf_opt = try getOptionString(realm, opts, "caseFirst", &.{ "upper", "lower", "false" }, "");
+
+    // collation (-u-co-): only a known BCP 47 collation type is reported;
+    // "standard"/"search" (never reported) and any unsupported value map to
+    // "default" and are dropped from [[Locale]].
+    var strip_co = false;
+    if (intl.unicodeExtensionValue(slots.base.locale, "co")) |co| {
+        if (isKnownCollation(co)) {
+            slots.collation = realm.allocator.dupe(u8, co) catch return error.OutOfMemory;
+        } else {
+            slots.collation = realm.allocator.dupe(u8, "default") catch return error.OutOfMemory;
+            strip_co = true;
+        }
+    } else {
+        slots.collation = realm.allocator.dupe(u8, "default") catch return error.OutOfMemory;
+    }
+    if (strip_co) try stripExtKeyword(realm, &slots.base, "co");
+
+    // numeric (-u-kn-): empty or "true" ⇒ true.
+    if (numeric_opt) |n| {
+        slots.numeric = n;
+        try stripExtKeyword(realm, &slots.base, "kn");
+    } else if (intl.unicodeExtensionValue(slots.base.locale, "kn")) |kn| {
+        slots.numeric = !std.mem.eql(u8, kn, "false");
+    } else slots.numeric = false;
+
+    // caseFirst (-u-kf-)
+    if (cf_opt.len > 0) {
+        slots.case_first = realm.allocator.dupe(u8, cf_opt) catch return error.OutOfMemory;
+        try stripExtKeyword(realm, &slots.base, "kf");
+    } else if (intl.unicodeExtensionValue(slots.base.locale, "kf")) |kf| {
+        const v = if (std.mem.eql(u8, kf, "upper") or std.mem.eql(u8, kf, "lower") or std.mem.eql(u8, kf, "false")) kf else "false";
+        slots.case_first = realm.allocator.dupe(u8, v) catch return error.OutOfMemory;
+    } else {
+        slots.case_first = realm.allocator.dupe(u8, "false") catch return error.OutOfMemory;
+    }
 
     try storeRecord(realm, inst, .{ .collator = slots });
     return heap_mod.taggedObject(inst);

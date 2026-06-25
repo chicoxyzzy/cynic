@@ -879,8 +879,11 @@ pub fn localeBaseName(allocator: std.mem.Allocator, locale: []const u8) ![]const
 /// Unicode extension keyword value for `key` (2-char), or null.
 pub fn unicodeExtensionValue(locale: []const u8, key: []const u8) ?[]const u8 {
     if (key.len != 2) return null;
-    const u_idx = std.mem.indexOf(u8, locale, "-u-") orelse return null;
-    var rest = locale[u_idx + 3 ..];
+    // A `-u-` inside the private-use (`-x-`) sequence is opaque, not a real
+    // Unicode extension — truncate there before searching.
+    const search = if (std.mem.indexOf(u8, locale, "-x-")) |x| locale[0..x] else locale;
+    const u_idx = std.mem.indexOf(u8, search, "-u-") orelse return null;
+    var rest = search[u_idx + 3 ..];
     while (rest.len > 0) {
         // Next singleton extension ends the u- block.
         if (rest.len >= 2 and rest[1] == '-' and isAlphanum(rest[0]) and rest[0] != 'u') break;
