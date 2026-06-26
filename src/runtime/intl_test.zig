@@ -1604,3 +1604,18 @@ test "intl: NumberFormat unit style (single, compound, plural, validation)" {
         \\r === 3 ? 1 : 0
     );
 }
+
+test "intl: NumberFormat currency + roundingIncrement validation (§15.1)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const thrown = (f) => { try { f(); return ''; } catch (e) { return e.constructor.name; } };
+        \\// undefined currency under currency style → TypeError; present-but-"" → RangeError.
+        \\(thrown(() => new Intl.NumberFormat('en', { style: 'currency' })) === 'TypeError' &&
+        \\ thrown(() => new Intl.NumberFormat('en', { style: 'currency', currency: '' })) === 'RangeError' &&
+        \\ // roundingIncrement: only sanctioned values; requires fractionDigits + equal min/max.
+        \\ thrown(() => new Intl.NumberFormat('en', { roundingIncrement: 3 })) === 'RangeError' &&
+        \\ thrown(() => new Intl.NumberFormat('en', { roundingIncrement: 2, roundingPriority: 'morePrecision' })) === 'TypeError' &&
+        \\ thrown(() => new Intl.NumberFormat('en', { roundingIncrement: 2, minimumSignificantDigits: 2 })) === 'TypeError' &&
+        \\ thrown(() => new Intl.NumberFormat('en', { roundingIncrement: 25, minimumFractionDigits: 2, maximumFractionDigits: 2 })) === '') ? 1 : 0
+    );
+}

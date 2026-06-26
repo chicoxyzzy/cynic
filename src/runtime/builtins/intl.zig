@@ -1325,8 +1325,13 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     // throws RangeError regardless of style); they are only applied when the
     // style is "currency". `getOptionString` with an allowed list returns an
     // interned pointer, so reading-for-validation costs no allocation.
-    const cur = try getOptionString(realm, opts, "currency", null, "");
-    if (cur.len == 0) {
+    // §15.1.2 — distinguish an absent `currency` (undefined) from a present but
+    // ill-formed one (e.g. ""): the former is a TypeError under the currency
+    // style, the latter always a RangeError (IsWellFormedCurrencyCode). A
+    // sentinel fallback flags the undefined case, which ToString can't produce.
+    const cur_undef = "\x00undefined";
+    const cur = try getOptionString(realm, opts, "currency", null, cur_undef);
+    if (std.mem.eql(u8, cur, cur_undef)) {
         if (is_currency_style) return throwTypeError(realm, "currency option required for currency style");
     } else if (cur.len != 3 or !isAsciiAlpha(cur)) {
         return throwRangeError(realm, "invalid currency code");
@@ -1452,6 +1457,11 @@ fn setNumberFormatDigitOptions(realm: *Realm, slots: *intl.NumberFormatSlots, op
     const mnsd = try getNumberOptionOpt(realm, opts, "minimumSignificantDigits", 1, 21);
     const mxsd = try getNumberOptionOpt(realm, opts, "maximumSignificantDigits", 1, 21);
     slots.rounding_increment = try getNumberOption(realm, opts, "roundingIncrement", 1, 5000, 1);
+    // §15.1.1 — roundingIncrement must be one of the sanctioned increments.
+    switch (slots.rounding_increment) {
+        1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000 => {},
+        else => return throwRangeError(realm, "invalid roundingIncrement"),
+    }
     slots.rounding_mode = try getOptionStringOwned(realm, opts, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" }, "halfExpand");
     slots.trailing_zero_display = try getOptionStringOwned(realm, opts, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" }, "auto");
     const priority = try getOptionString(realm, opts, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" }, "auto");
@@ -1498,6 +1508,17 @@ fn setNumberFormatDigitOptions(realm: *Realm, slots: *intl.NumberFormatSlots, op
         slots.rounding_type = try realm.allocator.dupe(u8, "fractionDigits");
         slots.minimum_fraction_digits = mnfd_default;
         slots.maximum_fraction_digits = mxfd_default;
+    }
+
+    // §15.1.1 — a non-default roundingIncrement is only meaningful with
+    // fraction-digit rounding at a fixed precision: it requires roundingType
+    // "fractionDigits" (TypeError otherwise — e.g. paired with significant
+    // digits or morePrecision) and equal min/max fraction digits (RangeError).
+    if (slots.rounding_increment != 1) {
+        if (!std.mem.eql(u8, slots.rounding_type, "fractionDigits"))
+            return throwTypeError(realm, "roundingIncrement requires fractionDigits rounding");
+        if ((slots.minimum_fraction_digits orelse 0) != (slots.maximum_fraction_digits orelse 0))
+            return throwRangeError(realm, "roundingIncrement requires equal min/max fraction digits");
     }
 }
 
@@ -3142,6 +3163,10 @@ fn pluralRulesConstructor(realm: *Realm, this_value: Value, args: []const Value)
     }
     // Rounding options, in §16.1.1 read order (after the significant digits).
     slots.rounding_increment = try getNumberOption(realm, opts, "roundingIncrement", 1, 5000, 1);
+    switch (slots.rounding_increment) {
+        1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000 => {},
+        else => return throwRangeError(realm, "invalid roundingIncrement"),
+    }
     slots.rounding_mode = try getOptionStringOwned(realm, opts, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" }, "halfExpand");
     slots.rounding_priority = try getOptionStringOwned(realm, opts, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" }, "auto");
     slots.trailing_zero_display = try getOptionStringOwned(realm, opts, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" }, "auto");
