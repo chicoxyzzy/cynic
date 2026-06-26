@@ -2699,6 +2699,7 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
         slots.hour = try dupOptOwned(realm, try getOptionString(realm, opts, "hour", &.{ "numeric", "2-digit" }, ""));
         slots.minute = try dupOptOwned(realm, try getOptionString(realm, opts, "minute", &.{ "numeric", "2-digit" }, ""));
         slots.second = try dupOptOwned(realm, try getOptionString(realm, opts, "second", &.{ "numeric", "2-digit" }, ""));
+        slots.fractional_second_digits = try getNumberOptionOpt(realm, opts, "fractionalSecondDigits", 1, 3);
         slots.day_period = try dupOptOwned(realm, try getOptionString(realm, opts, "dayPeriod", &.{ "long", "short", "narrow" }, ""));
         slots.time_zone_name = try dupOptOwned(realm, try getOptionString(realm, opts, "timeZoneName", &.{ "long", "short", "shortOffset", "longOffset", "shortGeneric", "longGeneric" }, ""));
 
@@ -2880,6 +2881,7 @@ fn dateTimeFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const
         if (s.hour.len > 0) try setDataProp(realm, obj, "hour", try makeStringValue(realm, s.hour));
         if (s.minute.len > 0) try setDataProp(realm, obj, "minute", try makeStringValue(realm, s.minute));
         if (s.second.len > 0) try setDataProp(realm, obj, "second", try makeStringValue(realm, s.second));
+        if (s.fractional_second_digits) |fsd| try setDataProp(realm, obj, "fractionalSecondDigits", makeNumberValue(@floatFromInt(fsd)));
         if (s.day_period.len > 0) try setDataProp(realm, obj, "dayPeriod", try makeStringValue(realm, s.day_period));
         if (s.time_zone_name.len > 0) try setDataProp(realm, obj, "timeZoneName", try makeStringValue(realm, s.time_zone_name));
         // Default to numeric y/m/d when no component or style was requested.
@@ -2903,6 +2905,7 @@ const CivilTime = struct {
     hour: u32, // 0-23
     minute: u32,
     second: u32,
+    ms_fraction: u32, // 0-999 sub-second milliseconds
     weekday: u32, // 0=sun .. 6=sat
 };
 
@@ -2925,6 +2928,7 @@ fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
         .hour = t.hour,
         .minute = t.minute,
         .second = t.second,
+        .ms_fraction = @intCast(@mod(@as(i64, @intFromFloat(ms)), 1000)),
         .weekday = @intCast(iso_dow % 7), // → 0=Sun..6=Sat
     };
 }
@@ -3143,12 +3147,46 @@ fn hourIs12(hc: []const u8) bool {
     return hc.len == 0 or std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
 }
 
+/// Splice "." + `n`×'S' after the (unquoted) seconds run in a resolved pattern,
+/// so fractionalSecondDigits renders as a literal "." + a fractionalSecond field.
+/// Returns the pattern unchanged when it has no seconds field.
+fn injectFractionalSecond(pattern: []const u8, n: u32, buf: []u8) []const u8 {
+    var in_quote = false;
+    var s_end: ?usize = null;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const c = pattern[i];
+        if (c == '\'') {
+            in_quote = !in_quote;
+        } else if (!in_quote and c == 's') {
+            var j = i;
+            while (j < pattern.len and pattern[j] == 's') j += 1;
+            s_end = j;
+            i = j - 1;
+        }
+    }
+    const se = s_end orelse return pattern;
+    var l: usize = 0;
+    l += copyClamp(buf, l, pattern[0..se]);
+    l += copyClamp(buf, l, ".");
+    var k: u32 = 0;
+    while (k < n and l < buf.len) : (k += 1) {
+        buf[l] = 'S';
+        l += 1;
+    }
+    l += copyClamp(buf, l, pattern[se..]);
+    return buf[0..l];
+}
+
 /// Interpret a resolved CLDR pattern against the broken-down time into segments.
 fn renderDateTime(slots: *const intl.DateTimeFormatSlots, ms: f64, out: []Seg) u32 {
     const dd = cldr.dateData(slots.base.dataLocale()) orelse return 0;
     const ct = breakDown(slots, ms);
     var pat_buf: [256]u8 = undefined;
-    const pattern = resolveDateTimePattern(dd, slots, &pat_buf);
+    var pattern = resolveDateTimePattern(dd, slots, &pat_buf);
+    // §11.5.5 fractionalSecondDigits — splice ".S…" after the seconds field.
+    var frac_buf: [288]u8 = undefined;
+    if (slots.fractional_second_digits) |fsd| pattern = injectFractionalSecond(pattern, fsd, &frac_buf);
 
     const digit_base: u32 = if (cldr.numberData(slots.base.dataLocale())) |nd|
         (if (!std.mem.eql(u8, slots.numbering_system, nd.ns)) (cldr.numberingSystemDigitBase(slots.numbering_system) orelse nd.digit_base) else nd.digit_base)
@@ -3226,6 +3264,13 @@ fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateD
         'k' => setNumberSeg(seg, "hour", if (ct.hour == 0) 24 else ct.hour, count, digit_base),
         'm' => setNumberSeg(seg, "minute", ct.minute, count, digit_base),
         's' => setNumberSeg(seg, "second", ct.second, count, digit_base),
+        'S' => {
+            // First `count` digits of the zero-padded 3-digit millisecond fraction.
+            const fm = ct.ms_fraction;
+            const d3 = [3]u8{ @intCast('0' + (fm / 100) % 10), @intCast('0' + (fm / 10) % 10), @intCast('0' + fm % 10) };
+            var sub: [16]u8 = undefined;
+            setSeg(seg, "fractionalSecond", substituteDigits(d3[0..@min(count, 3)], digit_base, &sub));
+        },
         'a', 'b', 'B' => setSeg(seg, "dayPeriod", if (ct.hour < 12) dd.am else dd.pm),
         'z', 'Z', 'O', 'v', 'V', 'x', 'X' => setSeg(seg, "timeZoneName", "UTC"),
         else => return 0,

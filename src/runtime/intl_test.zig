@@ -1719,3 +1719,19 @@ test "intl: DateTimeFormat formatRangeToParts source tags (§11.5.6)" {
         \\(p.length > 0 && p.every(x => x.source === 'shared')) ? 1 : 0
     );
 }
+
+test "intl: DateTimeFormat fractionalSecondDigits (§11.5.5)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const d = new Date(Date.UTC(2020, 0, 1, 13, 5, 9, 123));
+        \\const f = (n) => new Intl.DateTimeFormat('en', { minute: '2-digit', second: '2-digit', fractionalSecondDigits: n, timeZone: 'UTC' }).format(d);
+        \\(f(3) === '05:09.123' && f(1) === '05:09.1' && f(2) === '05:09.12') ? 1 : 0
+    );
+    try evalAssert1(
+        \\const d = new Date(Date.UTC(2020, 0, 1, 13, 5, 9, 123));
+        \\const p = new Intl.DateTimeFormat('en', { second: '2-digit', fractionalSecondDigits: 3, timeZone: 'UTC' }).formatToParts(d);
+        \\const fs = p.find(x => x.type === 'fractionalSecond');
+        \\(fs && fs.value === '123' && p.some(x => x.type === 'literal' && x.value === '.') &&
+        \\ new Intl.DateTimeFormat('en', { fractionalSecondDigits: 3 }).resolvedOptions().fractionalSecondDigits === 3) ? 1 : 0
+    );
+}
