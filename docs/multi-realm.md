@@ -990,9 +990,8 @@ test "phase 4: Compartment shared StaticModuleRecord" {
 
 **Exit criteria.** Five tests above green. SES test262 fixtures
 under `built-ins/Compartment` (when test262 ships them) score
-nonzero. The `Compartment` row in
-`docs/handbook/ses-test262-policy.md` flips from "deferred" to
-shipped.
+nonzero under the binary pass/fail test262 model (see
+`test262-results.md`).
 
 ## Phase 5 — test262 realm-related fixtures back in scope
 

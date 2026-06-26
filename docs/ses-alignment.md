@@ -549,9 +549,8 @@ a single posture — `--unhardened --allow=eval` (`realm.hardened =
 false`, `realm.allow_eval = true`) — so the eval surface (~2,100
 fixtures) runs for real and any eval-surface miss counts as a plain
 `failing`, same as an engine bug. There is no eval-off "correctly
-handled" reclassification. See `test262-results.md` and
-[handbook/ses-test262-policy.md](handbook/ses-test262-policy.md)
-(retired policy model) for the full picture.
+handled" reclassification. See `test262-results.md` and AGENTS.md
+"Build & test" for the full picture of the scoring model.
 
 **Default-off is a permanent, intentional divergence.** `eval` /
 `Function(string)` / `Async`/`GeneratorFunction` refusing by default is

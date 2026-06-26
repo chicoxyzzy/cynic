@@ -130,8 +130,15 @@ code construction (aligns with SES).
   **incremental** major marking and lazy sweep have shipped (see the
   Performance section) — the major cycle marks behind a Dijkstra
   barrier and sweeps in safe-point slices, cutting the max GC pause
-  ~800 ms → ~1 ms. Moving the mark fully *concurrent* (off-thread)
-  is the remaining GC step.
+  ~800 ms → ~1 ms. The major's *mark CPU* on a large stable
+  retained set is now at the non-moving floor: a generational-
+  incremental major (skip re-tracing the unchanged old set) was
+  explored and **closed as not viable for a non-moving collector** —
+  a non-moving mark-sweep cannot reclaim old garbage without
+  re-tracing it (commit efe52c7d,
+  [docs/gc-generational-major.md](gc-generational-major.md)). Further
+  GC wins need a region heap (Immix), reference counting, or fully
+  *concurrent* (off-thread) marking — each a major rearchitecture.
 - **GC trigger at every safe-point — the pure-native residual.**
   The allocation-pressure check (`gc_threshold` / `gc_byte_threshold`)
   fires at every interpreter safe-point: each bytecode loop back-edge
@@ -625,20 +632,25 @@ automatically on the next full sweep.
   Part 3 rule engine (`src/runtime/cldr.zig`) computes plural operands over
   `FormatNumericToString` and evaluates the locale's cardinal/ordinal rules.
   **`Intl.NumberFormat`** consumes the numbers + numbering-systems sections —
-  decimal and percent styles with locale symbols, primary/secondary grouping,
-  numbering-system digit substitution (e.g. arab ٠١٢٣), sign display, and
-  fraction/significant-digit rounding (via the engine's exact `dtoa`).
-  **`Intl.DateTimeFormat`** consumes the dates section (gregorian): dateStyle/
-  timeStyle and the component options (weekday/era/year/month/day/hour/minute/
-  second/dayPeriod) resolve to a CLDR pattern, interpreted against the broken-
-  down time in the format's time zone with localized names, hourCycle, and
-  digit substitution. **`Intl.DisplayNames`** consumes the display-names section
-  — `of(code)` resolves language / region / script / currency codes to their
+  decimal, percent, currency, and unit styles plus scientific / engineering /
+  compact notation, with locale symbols, primary/secondary grouping,
+  numbering-system digit substitution (e.g. arab ٠١٢٣), sign display, the
+  rounding modes (roundingPriority / roundingIncrement), fraction/significant-
+  digit rounding (via the engine's exact `dtoa`), and `formatRange` /
+  `formatRangeToParts`. **`Intl.DateTimeFormat`** consumes the dates section
+  (gregorian): dateStyle/timeStyle and the component options (weekday/era/year/
+  month/day/hour/minute/second/fractionalSecondDigits/dayPeriod) resolve to a
+  CLDR pattern, interpreted against the broken-down time in the format's time
+  zone with localized names, hourCycle, and digit substitution, plus
+  `formatRange` / `formatRangeToParts` and timeZone validation.
+  **`Intl.DurationFormat`** ships `format` / `formatToParts` over the per-unit
+  style options. **`Intl.DisplayNames`** consumes the display-names section —
+  `of(code)` resolves language / region / script / currency codes to their
   localized names (with per-type canonicalisation + RangeError on malformed
-  codes); these tables dominate the blob (~2.8 MiB at `full`). Currency/unit/
-  compact NumberFormat output, DateTimeFormat skeleton best-fit + non-gregorian
-  calendars + time-zone names, and DisplayNames calendar/dateTimeField types
-  stay structural until their CLDR sections are packed.
+  codes); these tables dominate the blob (~2.8 MiB at `full`). DateTimeFormat
+  skeleton best-fit + non-gregorian calendars + time-zone names, and
+  DisplayNames calendar/dateTimeField types stay structural until their CLDR
+  sections are packed.
 
   Seams are kept clean so `full` can deepen without a rewrite —
   Temporal funnels every zone-offset lookup through
@@ -1161,14 +1173,20 @@ QuickJS-NG post-IC, the next bottleneck is `arith_loop` (pure
 dispatch + arithmetic throughput) — items 5, 6, 7, 10. If
 allocation-heavy workloads dominate, items 8, 9.
 
-**GC latency — incremental marking + lazy sweep shipped.**
+**GC latency — incremental marking + lazy sweep shipped; mark CPU at the non-moving floor.**
 
 - **Incremental major mark + lazy sweep.** The major cycle no
   longer stop-the-world marks/sweeps the mature set: the mark is
   sliced across safe-points behind a Dijkstra incremental-update
   barrier and the termination sweep is sliced too, cutting the max
-  GC pause **~800 ms → ~1 ms** on a 2M-object heap. Fully
-  *concurrent* (off-thread) marking is the remaining latency step.
+  GC pause **~800 ms → ~1 ms** on a 2M-object heap. The major's
+  *mark CPU* on a large stable retained set is now the floor for a
+  non-moving collector — the generational-incremental major that
+  would skip the unchanged-old re-trace was explored and closed
+  ([docs/gc-generational-major.md](gc-generational-major.md), commit
+  efe52c7d): a non-moving mark-sweep can't reclaim old garbage
+  without re-tracing it. Past this needs a region heap (Immix),
+  reference counting, or fully *concurrent* (off-thread) marking.
 
 ## Proper Tail Calls (PTC) — shipped
 
