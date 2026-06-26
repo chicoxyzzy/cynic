@@ -189,7 +189,7 @@ fn fmtRequiresNew(realm: *Realm, name: []const u8) ![]const u8 {
 }
 
 /// §9.2.1 CanonicalizeLocaleList — returns owned slice of owned tags.
-fn canonicalizeLocaleList(realm: *Realm, locales: Value) NativeError![]const []const u8 {
+pub fn canonicalizeLocaleList(realm: *Realm, locales: Value) NativeError![]const []const u8 {
     const allocator = realm.allocator;
     if (locales.isUndefined()) {
         return allocator.alloc([]const u8, 0) catch return error.OutOfMemory;

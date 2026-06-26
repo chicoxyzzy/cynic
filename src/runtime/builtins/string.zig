@@ -71,8 +71,8 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, sp, "normalize", stringNormalize, 0);
     try installNativeMethodOnProto(realm, sp, "codePointAt", stringCodePointAt, 1);
     try installNativeMethodOnProto(realm, sp, "localeCompare", stringLocaleCompare, 1);
-    try installNativeMethodOnProto(realm, sp, "toLocaleUpperCase", stringToUpperCase, 0);
-    try installNativeMethodOnProto(realm, sp, "toLocaleLowerCase", stringToLowerCase, 0);
+    try installNativeMethodOnProto(realm, sp, "toLocaleUpperCase", stringToLocaleUpperCase, 0);
+    try installNativeMethodOnProto(realm, sp, "toLocaleLowerCase", stringToLocaleLowerCase, 0);
     try installNativeMethodOnProto(realm, sp, "match", stringMatchDispatched, 1);
     try installNativeMethodOnProto(realm, sp, "matchAll", stringMatchAllDispatched, 1);
     try installNativeMethodOnProto(realm, sp, "search", stringSearchDispatched, 1);
@@ -1164,7 +1164,7 @@ fn stringToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn stringToUpperCase(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    return caseConvertString(realm, s.flatBytes(), 0);
+    return caseConvertString(realm, s.flatBytes(), 0, .none);
 }
 
 /// §22.1.3.26 String.prototype.toLowerCase. Uses the native
@@ -1178,16 +1178,103 @@ fn stringToUpperCase(realm: *Realm, this_value: Value, args: []const Value) Nati
 fn stringToLowerCase(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try coerceThisToJSString(realm, this_value);
-    return caseConvertString(realm, s.flatBytes(), 1);
+    return caseConvertString(realm, s.flatBytes(), 1, .none);
 }
 
-/// Shared body for §22.1.3.{26, 27, 28, 29}. `conv_type` is the
-/// case-conversion tag: 0 = to-upper, 1 = to-lower (the toLocale*
-/// variants share the same table for default/`en` locales —
-/// Turkish dotless-i lives in intl402/, out of scope per
-/// AGENTS.md). The Final_Sigma adjustment is gated on
-/// `conv_type == 1` so toUpperCase never observes it.
-fn caseConvertString(realm: *Realm, bytes: []const u8, conv_type: c_int) NativeError!Value {
+/// §19.1.3 — resolve the language-sensitive casing behaviour from the
+/// `locales` argument (the first requested locale's primary language: tr/az →
+/// Turkic, lt → Lithuanian). CanonicalizeLocaleList validates the tags.
+fn caseLangFromLocales(realm: *Realm, locales: Value) NativeError!CaseLang {
+    const list = try @import("intl.zig").canonicalizeLocaleList(realm, locales);
+    defer {
+        for (list) |t| realm.allocator.free(t);
+        realm.allocator.free(list);
+    }
+    if (list.len == 0) return .none;
+    const tag = list[0];
+    const dash = std.mem.indexOfScalar(u8, tag, '-') orelse tag.len;
+    const langp = tag[0..dash];
+    if (std.mem.eql(u8, langp, "tr") or std.mem.eql(u8, langp, "az")) return .turkic;
+    if (std.mem.eql(u8, langp, "lt")) return .lithuanian;
+    return .none;
+}
+
+fn stringToLocaleUpperCase(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const s = try coerceThisToJSString(realm, this_value);
+    const lang = try caseLangFromLocales(realm, argOr(args, 0, Value.undefined_));
+    return caseConvertString(realm, s.flatBytes(), 0, lang);
+}
+
+fn stringToLocaleLowerCase(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const s = try coerceThisToJSString(realm, this_value);
+    const lang = try caseLangFromLocales(realm, argOr(args, 0, Value.undefined_));
+    return caseConvertString(realm, s.flatBytes(), 1, lang);
+}
+
+const ucd_ccc = @import("../../unicode/normalization_tables.zig");
+
+/// Language-sensitive casing behaviour (SpecialCasing.txt locale rules).
+const CaseLang = enum { none, turkic, lithuanian };
+
+fn cccOf(cp: u32) u8 {
+    return if (cp <= 0x10FFFF) ucd_ccc.combiningClass(@intCast(cp)) else 0;
+}
+
+/// SpecialCasing contexts (all break on an intervening char of combining class
+/// 0 or 230, the "Above" class). After_*: scan back; Before_Dot/More_Above: fwd.
+fn ctxAfterI(cps: []const u32, i: usize) bool {
+    var j = i;
+    while (j > 0) {
+        j -= 1;
+        if (cps[j] == 0x0049) return true; // uppercase I
+        const cc = cccOf(cps[j]);
+        if (cc == 0 or cc == 230) return false;
+    }
+    return false;
+}
+fn ctxAfterSoftDotted(cps: []const u32, i: usize) bool {
+    var j = i;
+    while (j > 0) {
+        j -= 1;
+        if (isSoftDotted(cps[j])) return true;
+        const cc = cccOf(cps[j]);
+        if (cc == 0 or cc == 230) return false;
+    }
+    return false;
+}
+fn ctxBeforeDot(cps: []const u32, i: usize) bool {
+    var j = i + 1;
+    while (j < cps.len) : (j += 1) {
+        if (cps[j] == 0x0307) return true;
+        const cc = cccOf(cps[j]);
+        if (cc == 0 or cc == 230) return false;
+    }
+    return false;
+}
+fn ctxMoreAbove(cps: []const u32, i: usize) bool {
+    var j = i + 1;
+    while (j < cps.len) : (j += 1) {
+        const cc = cccOf(cps[j]);
+        if (cc == 230) return true;
+        if (cc == 0) return false;
+    }
+    return false;
+}
+
+/// Unicode Soft_Dotted code points (DerivedCoreProperties), needed for the
+/// Lithuanian After_Soft_Dotted uppercase rule.
+fn isSoftDotted(cp: u32) bool {
+    return switch (cp) {
+        0x0069, 0x006A, 0x012F, 0x0249, 0x0268, 0x029D, 0x02B2, 0x03F3, 0x0456, 0x0458, 0x1D62, 0x1D96, 0x1DA4, 0x1DA8, 0x1E2D, 0x1ECB, 0x2071, 0x2148, 0x2149, 0x2C7C, 0x1D422, 0x1D423, 0x1D456, 0x1D457, 0x1D48A, 0x1D48B, 0x1D4BE, 0x1D4BF, 0x1D4F2, 0x1D4F3, 0x1D526, 0x1D527, 0x1D55A, 0x1D55B, 0x1D58E, 0x1D58F, 0x1D5C2, 0x1D5C3, 0x1D5F6, 0x1D5F7, 0x1D62A, 0x1D62B, 0x1D65E, 0x1D65F, 0x1D692, 0x1D693 => true,
+        else => false,
+    };
+}
+
+/// Shared body for §22.1.3.{26, 27, 28, 29}. `conv_type` is the case-conversion
+/// tag: 0 = to-upper, 1 = to-lower. `lang` applies the SpecialCasing locale
+/// rules for Turkic (tr/az dotless-i) and Lithuanian (soft-dot retention); the
+/// Final_Sigma adjustment is gated on `conv_type == 1`.
+fn caseConvertString(realm: *Realm, bytes: []const u8, conv_type: c_int, lang: CaseLang) NativeError!Value {
     // §22.1.3.{26, 27} step 3 — Let cpList be the list of code
     // points of S. Decode WTF-8 to codepoints first so we can
     // run the Final_Sigma context lookahead without re-walking.
@@ -1201,6 +1288,49 @@ fn caseConvertString(realm: *Realm, bytes: []const u8, conv_type: c_int) NativeE
     var i: usize = 0;
     while (i < cps.items.len) : (i += 1) {
         const cp = cps.items[i];
+        // SpecialCasing locale rules (run before the language-independent map).
+        if (lang == .turkic) {
+            if (conv_type == 1) { // lowercase tr/az
+                if (cp == 0x0130) {
+                    appendWtf8(realm.allocator, &out, 0x0069) catch return error.OutOfMemory; // İ → i
+                    continue;
+                }
+                if (cp == 0x0049) { // I → i before a dot, else dotless ı
+                    appendWtf8(realm.allocator, &out, if (ctxBeforeDot(cps.items, i)) 0x0069 else 0x0131) catch return error.OutOfMemory;
+                    continue;
+                }
+                if (cp == 0x0307 and ctxAfterI(cps.items, i)) continue; // combining dot above After_I → removed
+            } else { // uppercase tr/az
+                if (cp == 0x0069) {
+                    appendWtf8(realm.allocator, &out, 0x0130) catch return error.OutOfMemory; // i → İ
+                    continue;
+                }
+            }
+        } else if (lang == .lithuanian) {
+            if (conv_type == 1) { // lowercase lt: keep the soft dot
+                if ((cp == 0x0049 or cp == 0x004A or cp == 0x012E) and ctxMoreAbove(cps.items, i)) {
+                    appendWtf8(realm.allocator, &out, switch (cp) {
+                        0x0049 => 0x0069,
+                        0x004A => 0x006A,
+                        else => 0x012F,
+                    }) catch return error.OutOfMemory;
+                    appendWtf8(realm.allocator, &out, 0x0307) catch return error.OutOfMemory;
+                    continue;
+                }
+                const decomp: ?[3]u21 = switch (cp) {
+                    0x00CC => .{ 0x0069, 0x0307, 0x0300 }, // Ì
+                    0x00CD => .{ 0x0069, 0x0307, 0x0301 }, // Í
+                    0x0128 => .{ 0x0069, 0x0307, 0x0303 }, // Ĩ
+                    else => null,
+                };
+                if (decomp) |d| {
+                    for (d) |c| appendWtf8(realm.allocator, &out, c) catch return error.OutOfMemory;
+                    continue;
+                }
+            } else { // uppercase lt: drop the soft dot after a soft-dotted letter
+                if (cp == 0x0307 and ctxAfterSoftDotted(cps.items, i)) continue;
+            }
+        }
         // §22.1.3.26 step 4.a — Final_Sigma override.
         if (conv_type == 1 and cp == 0x03A3 and isFinalSigmaContext(cps.items, i)) {
             appendWtf8(realm.allocator, &out, 0x03C2) catch return error.OutOfMemory;

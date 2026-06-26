@@ -12916,6 +12916,30 @@ test "fused method-call: primitive number receiver auto-boxes" {
     , "3.1");
 }
 
+// §19.1.3 toLocale{Lower,Upper}Case — SpecialCasing.txt locale rules for
+// Turkic (tr/az dotless-i) and Lithuanian (soft-dot retention), driven by the
+// `locales` argument. Works at every -Dintl flavour (no CLDR data needed).
+test "String.prototype.toLocale{Lower,Upper}Case special-casing (tr/az/lt)" {
+    try expectScriptStringWithBuiltins(
+        \\const cases = [
+        \\  ["İ".toLocaleLowerCase("tr"), "i"],           // İ → i
+        \\  ["İ".toLocaleLowerCase("tr"), "i"],          // I + dot above → i (dot removed)
+        \\  ["Ị̇".toLocaleLowerCase("tr"), "ị"], // below-class doesn't break After_I
+        \\  ["I".toLocaleLowerCase("tr"), "ı"],           // I → dotless ı (Not_Before_Dot)
+        \\  ["Ì̇".toLocaleLowerCase("tr"), "ı̀̇"], // above breaks both
+        \\  ["i".toLocaleUpperCase("tr"), "İ"],           // i → İ
+        \\  ["ı".toLocaleUpperCase("tr"), "I"],           // ı → I (default)
+        \\  ["İ".toLocaleLowerCase("az"), "i"],           // Azeri mirrors Turkic
+        \\  ["Ì".toLocaleLowerCase("lt"), "i̇̀"], // Ì → i + soft dot + grave
+        \\  ["Ì".toLocaleLowerCase("lt"), "i̇̀"], // More_Above inserts 0307
+        \\  ["i̇".toLocaleUpperCase("lt"), "I"],          // After_Soft_Dotted drops the dot
+        \\  ["I".toLocaleLowerCase("en"), "i"],                // default locale untouched
+        \\  ["i".toLocaleUpperCase(), "I"],                    // no-locale path untouched
+        \\];
+        \\cases.every(([a, b]) => a === b) ? "ok" : ("FAIL:" + cases.findIndex(([a, b]) => a !== b));
+    , "ok");
+}
+
 test "fused method-call: argc = 0 / 1 / many" {
     try expectScriptIntWithBuiltins(
         \\const obj = {
