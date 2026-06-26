@@ -1822,3 +1822,21 @@ test "intl: DateTimeFormat calendar option validation + canonicalization (§11.1
         \\ thrown('İSO8601') === 'RangeError') ? 1 : 0   // capital dotted-I is non-ASCII
     );
 }
+
+test "intl: DateTimeFormat timeZoneName rendering (§11.5.x offsets + UTC)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const d = Date.UTC(2026, 0, 5, 12, 0);
+        \\const f = (s, tz) => new Intl.DateTimeFormat('en', { timeZoneName: s, timeZone: tz || 'UTC' }).format(d);
+        \\(f('long').endsWith('Coordinated Universal Time') &&
+        \\ f('short').endsWith('UTC') &&
+        \\ f('shortOffset').endsWith('GMT') &&
+        \\ f('shortOffset', 'America/New_York').endsWith('GMT-5') &&
+        \\ f('longOffset', 'America/New_York').endsWith('GMT-05:00')) ? 1 : 0
+    );
+    try evalAssert1(
+        \\// A PlainDate has no zone: timeZoneName must not appear.
+        \\const r = new Intl.DateTimeFormat('en', { timeZoneName: 'long' }).format(new Temporal.PlainDate(2026, 1, 5));
+        \\(r.indexOf('Coordinated') === -1 && r.indexOf('GMT') === -1) ? 1 : 0
+    );
+}

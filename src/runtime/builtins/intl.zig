@@ -2997,6 +2997,55 @@ fn tzOffsetNs(tz: []const u8, epoch_ns: i128) i128 {
     return 0;
 }
 
+/// The CLDR pattern letters for a timeZoneName style.
+fn tzPatternLetters(style: []const u8) []const u8 {
+    if (std.mem.eql(u8, style, "long")) return "zzzz";
+    if (std.mem.eql(u8, style, "short")) return "z";
+    if (std.mem.eql(u8, style, "longOffset")) return "OOOO";
+    if (std.mem.eql(u8, style, "shortOffset")) return "O";
+    if (std.mem.eql(u8, style, "longGeneric")) return "vvvv";
+    if (std.mem.eql(u8, style, "shortGeneric")) return "v";
+    return "";
+}
+
+/// Localized GMT offset ("GMT", "GMT-8", "GMT-08:00"). `extended` forces the
+/// always-two-digit "GMT±HH:MM" form (longOffset / the name-style fallback);
+/// otherwise the compact "GMT±H[:MM]" form (shortOffset).
+fn fmtGmtOffset(off_ns: i128, extended: bool, buf: []u8) []const u8 {
+    if (off_ns == 0) {
+        @memcpy(buf[0..3], "GMT");
+        return buf[0..3];
+    }
+    const total_min: i64 = @intCast(@divTrunc(off_ns, 60_000_000_000));
+    const neg = total_min < 0;
+    const abs_min: u64 = @intCast(if (neg) -total_min else total_min);
+    const h = abs_min / 60;
+    const m = abs_min % 60;
+    const sign: u8 = if (neg) '-' else '+';
+    return if (extended)
+        (std.fmt.bufPrint(buf, "GMT{c}{d:0>2}:{d:0>2}", .{ sign, h, m }) catch "GMT")
+    else if (m == 0)
+        (std.fmt.bufPrint(buf, "GMT{c}{d}", .{ sign, h }) catch "GMT")
+    else
+        (std.fmt.bufPrint(buf, "GMT{c}{d}:{d:0>2}", .{ sign, h, m }) catch "GMT");
+}
+
+/// §11.5.x — the timeZoneName display for the format's zone at `epoch_ns`.
+/// Offset styles are computed exactly; UTC has fixed names; other zones fall
+/// back to the localized GMT offset (CLDR's documented missing-name fallback,
+/// since Cynic ships no per-zone display-name data).
+fn tzDisplay(slots: *const intl.DateTimeFormatSlots, epoch_ns: i128, buf: []u8) []const u8 {
+    const style = slots.time_zone_name;
+    const off_ns = tzOffsetNs(slots.time_zone, epoch_ns);
+    if (std.mem.eql(u8, style, "longOffset")) return fmtGmtOffset(off_ns, true, buf);
+    if (std.mem.eql(u8, style, "shortOffset")) return fmtGmtOffset(off_ns, false, buf);
+    if (std.mem.eql(u8, slots.time_zone, "UTC")) {
+        if (std.mem.eql(u8, style, "long") or std.mem.eql(u8, style, "longGeneric")) return "Coordinated Universal Time";
+        return "UTC"; // short / shortGeneric
+    }
+    return fmtGmtOffset(off_ns, true, buf); // name-style fallback for a named zone
+}
+
 /// Resolve the CLDR pattern for these options into `buf`, returning the slice.
 fn resolveDateTimePattern(dd: cldr.DateData, slots: *const intl.DateTimeFormatSlots, buf: []u8) []const u8 {
     const has_date_style = slots.date_style.len > 0;
@@ -3241,9 +3290,34 @@ fn injectFractionalSecond(pattern: []const u8, n: u32, buf: []u8) []const u8 {
 
 /// Resolve the option pattern for these slots (style or components) and splice
 /// in fractionalSecondDigits. `pat_buf`/`frac_buf` are caller scratch.
-fn resolvePatternFull(dd: cldr.DateData, slots: *const intl.DateTimeFormatSlots, pat_buf: []u8, frac_buf: []u8) []const u8 {
-    const pattern = resolveDateTimePattern(dd, slots, pat_buf);
-    if (slots.fractional_second_digits) |fsd| return injectFractionalSecond(pattern, fsd, frac_buf);
+/// Whether a pattern already carries a time-zone field (unquoted z/Z/O/v/V/x/X).
+fn patternHasTzField(pattern: []const u8) bool {
+    var in_quote = false;
+    for (pattern) |c| {
+        if (c == '\'') {
+            in_quote = !in_quote;
+        } else if (!in_quote) switch (c) {
+            'z', 'Z', 'O', 'v', 'V', 'x', 'X' => return true,
+            else => {},
+        };
+    }
+    return false;
+}
+
+fn resolvePatternFull(dd: cldr.DateData, slots: *const intl.DateTimeFormatSlots, pat_buf: []u8, frac_buf: []u8, tz_buf: []u8) []const u8 {
+    var pattern = resolveDateTimePattern(dd, slots, pat_buf);
+    if (slots.fractional_second_digits) |fsd| pattern = injectFractionalSecond(pattern, fsd, frac_buf);
+    // §11.1.1 — a timeZoneName option not already covered by the (style) pattern
+    // appends its field, so component options + timeZoneName still show the zone.
+    if (slots.time_zone_name.len > 0 and !patternHasTzField(pattern)) {
+        const letters = tzPatternLetters(slots.time_zone_name);
+        if (letters.len > 0) {
+            var n = copyClamp(tz_buf, 0, pattern);
+            n += copyClamp(tz_buf, n, " ");
+            n += copyClamp(tz_buf, n, letters);
+            pattern = tz_buf[0..n];
+        }
+    }
     return pattern;
 }
 
@@ -3253,14 +3327,18 @@ fn renderDateTime(slots: *const intl.DateTimeFormatSlots, ms: f64, out: []Seg) u
     const ct = breakDown(slots, ms);
     var pat_buf: [256]u8 = undefined;
     var frac_buf: [288]u8 = undefined;
-    const pattern = resolvePatternFull(dd, slots, &pat_buf, &frac_buf);
-    return renderPattern(slots, dd, pattern, ct, out);
+    var tz_buf: [320]u8 = undefined;
+    const pattern = resolvePatternFull(dd, slots, &pat_buf, &frac_buf, &tz_buf);
+    var tzn_buf: [40]u8 = undefined;
+    const tzn = tzDisplay(slots, @as(i128, @intFromFloat(ms)) * 1_000_000, &tzn_buf);
+    return renderPattern(slots, dd, pattern, ct, tzn, out);
 }
 
 /// Interpret a resolved pattern against an explicit CivilTime — shared by the
 /// epoch-ms path (renderDateTime) and the Temporal path (which supplies civil
 /// fields directly and a pattern already masked to the object's data model).
-fn renderPattern(slots: *const intl.DateTimeFormatSlots, dd: cldr.DateData, pattern: []const u8, ct: CivilTime, out: []Seg) u32 {
+/// `tz_name` is the precomputed timeZoneName display (empty when none).
+fn renderPattern(slots: *const intl.DateTimeFormatSlots, dd: cldr.DateData, pattern: []const u8, ct: CivilTime, tz_name: []const u8, out: []Seg) u32 {
     const digit_base: u32 = if (cldr.numberData(slots.base.dataLocale())) |nd|
         (if (!std.mem.eql(u8, slots.numbering_system, nd.ns)) (cldr.numberingSystemDigitBase(slots.numbering_system) orelse nd.digit_base) else nd.digit_base)
     else
@@ -3288,7 +3366,7 @@ fn renderPattern(slots: *const intl.DateTimeFormatSlots, dd: cldr.DateData, patt
             var j = i;
             while (j < pattern.len and pattern[j] == c) j += 1;
             const count = j - i;
-            n += emitField(out[n..], c, count, ct, dd, digit_base);
+            n += emitField(out[n..], c, count, ct, dd, digit_base, tz_name);
             i = j;
         } else {
             const start = i;
@@ -3424,11 +3502,15 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
             const dd = cldr.dateData(slots.base.dataLocale()) orelse return 0;
             var pat_buf: [256]u8 = undefined;
             var frac_buf: [288]u8 = undefined;
-            const pattern = resolvePatternFull(dd, slots, &pat_buf, &frac_buf);
+            var tz_buf: [320]u8 = undefined;
+            const pattern = resolvePatternFull(dd, slots, &pat_buf, &frac_buf, &tz_buf);
             var mask_buf: [288]u8 = undefined;
             const masked = filterPatternByMask(pattern, std.meta.activeTag(rec.*), mask_buf[0..]) orelse
                 return throwTypeError(realm, "DateTimeFormat options do not overlap the Temporal object's fields");
-            return renderPattern(slots, dd, masked, temporalCivil(slots, rec), out);
+            // Only an Instant carries a zone; the masked Plain patterns drop it.
+            var tzn_buf: [40]u8 = undefined;
+            const tzn = if (rec.* == .instant) tzDisplay(slots, rec.instant.epoch_ns, &tzn_buf) else "";
+            return renderPattern(slots, dd, masked, temporalCivil(slots, rec), tzn, out);
         }
     }
     return renderDateTime(slots, try dtfTimeValue(realm, arg), out);
@@ -3472,7 +3554,7 @@ fn renderDateTimeFlat(slots: *const intl.DateTimeFormatSlots, ms: f64, buf: []u8
 }
 
 /// Emit one date/time field. Returns number of segments written (0 or 1).
-fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateData, digit_base: u32) u32 {
+fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateData, digit_base: u32, tz_name: []const u8) u32 {
     if (out.len == 0) return 0;
     const seg = &out[0];
     switch (letter) {
@@ -3502,7 +3584,7 @@ fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateD
             setSeg(seg, "fractionalSecond", substituteDigits(d3[0..@min(count, 3)], digit_base, &sub));
         },
         'a', 'b', 'B' => setSeg(seg, "dayPeriod", if (ct.hour < 12) dd.am else dd.pm),
-        'z', 'Z', 'O', 'v', 'V', 'x', 'X' => setSeg(seg, "timeZoneName", "UTC"),
+        'z', 'Z', 'O', 'v', 'V', 'x', 'X' => setSeg(seg, "timeZoneName", tz_name),
         else => return 0,
     }
     return 1;
