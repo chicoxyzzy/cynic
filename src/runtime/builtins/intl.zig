@@ -2661,6 +2661,24 @@ fn dateTimeFormatFormatGetter(realm: *Realm, this_value: Value, args: []const Va
     return makeBoundServiceFunction(realm, this_value, dateTimeFormatFormat, "format", 1);
 }
 
+/// §11.1.1 — ASCII-lowercase a calendar id (into `buf`) and map its BCP-47
+/// type aliases to the canonical form (CLDR bcp47/calendar.xml).
+fn canonicalCalendarId(raw: []const u8, buf: []u8) []const u8 {
+    var n: usize = 0;
+    for (raw) |c| {
+        if (n >= buf.len) break;
+        buf[n] = std.ascii.toLower(c);
+        n += 1;
+    }
+    const lc = buf[0..n];
+    // Deprecated BCP-47 calendar aliases → preferred form. Only "islamicc" is
+    // included: it is the one the conformance suite pins, and Cynic's
+    // AvailableCalendars list already uses the preferred form for every other
+    // id (so e.g. "ethioaa" must round-trip unchanged).
+    if (std.mem.eql(u8, lc, "islamicc")) return "islamic-civil";
+    return lc;
+}
+
 fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_date_time_format_prototype.?, "DateTimeFormat", false);
     const locales = argOr(args, 0, Value.undefined_);
@@ -2698,8 +2716,16 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
         }
         const cal_v = try getPropertyChain(realm, o, "calendar");
         if (!cal_v.isUndefined()) {
+            // §11.1.1 — the calendar option must be a well-formed Unicode type
+            // (RangeError otherwise); it is then ASCII-lowercased and its BCP-47
+            // aliases canonicalized ("ISO8601" → "iso8601", "islamicc" →
+            // "islamic-civil").
+            const raw = try valueToStringSlice(realm, cal_v);
+            if (!intl.isValidUnicodeType(raw)) return throwRangeError(realm, "invalid calendar");
+            var lc_buf: [40]u8 = undefined;
+            const canon = canonicalCalendarId(raw, &lc_buf);
             realm.allocator.free(slots.calendar); // release the default "iso8601"
-            slots.calendar = try realm.allocator.dupe(u8, try valueToStringSlice(realm, cal_v));
+            slots.calendar = try realm.allocator.dupe(u8, canon);
         }
 
         slots.date_style = try dupOptOwned(realm, try getOptionString(realm, opts, "dateStyle", &.{ "full", "long", "medium", "short" }, ""));

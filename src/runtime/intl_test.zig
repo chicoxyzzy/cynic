@@ -1808,3 +1808,17 @@ test "intl: DateTimeFormat formatRange of Temporal objects (§11.5.6)" {
         \\ p.some(x => x.source === 'endRange')) ? 1 : 0
     );
 }
+
+test "intl: DateTimeFormat calendar option validation + canonicalization (§11.1.1)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const cal = (c) => new Intl.DateTimeFormat('en', { calendar: c }).resolvedOptions().calendar;
+        \\const thrown = (c) => { try { cal(c); return ''; } catch (e) { return e.constructor.name; } };
+        \\(cal('islamicc') === 'islamic-civil' &&   // deprecated alias → preferred
+        \\ cal('ISO8601') === 'iso8601' &&          // ASCII-lowercased
+        \\ cal('gregory') === 'gregory' &&
+        \\ cal('ethioaa') === 'ethioaa' &&          // already-preferred id round-trips
+        \\ thrown('bad!') === 'RangeError' &&        // not a well-formed Unicode type
+        \\ thrown('İSO8601') === 'RangeError') ? 1 : 0   // capital dotted-I is non-ASCII
+    );
+}
