@@ -451,6 +451,11 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
                 if (tag[i] == '-') {
                     const seg_len = i - seg_start;
                     if (seg_len < 2 or seg_len > 8) return false;
+                    // §unicode_locale_extensions — a `-u-` keyword `key` is
+                    // `alphanum alpha`; a 2-char segment (always a key, since
+                    // attributes are {3,8}) must end in a letter (`c0`/`00`
+                    // are invalid; `0c` is valid).
+                    if (sing == 'u' and seg_len == 2 and !isAlpha(tag[seg_start + 1])) return false;
                     any_seg = true;
                     i += 1;
                     // Next might be another extension singleton.
@@ -468,9 +473,11 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
             if (!any_seg) {
                 const seg_len = i - seg_start;
                 if (seg_len < 2 or seg_len > 8) return false;
+                if (sing == 'u' and seg_len == 2 and !isAlpha(tag[seg_start + 1])) return false;
             } else {
                 const seg_len = i - seg_start;
                 if (seg_len > 0 and (seg_len < 2 or seg_len > 8)) return false;
+                if (sing == 'u' and seg_len == 2 and !isAlpha(tag[seg_start + 1])) return false;
             }
             saw_extension = true;
             continue;

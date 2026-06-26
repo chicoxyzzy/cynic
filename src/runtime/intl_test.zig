@@ -1986,7 +1986,12 @@ test "intl: getCanonicalLocales -u- type canonicalization (§3.2.1)" {
         \\ g('und-u-ks-primary') === 'und-u-ks-level1' && // collation-strength alias
         \\ g('und-u-ks-tertiary') === 'und-u-ks-level3' &&
         \\ g('und-u-ms-imperial') === 'und-u-ms-uksystem' && // measurement-system alias
-        \\ g('de-u-co-phonebk') === 'de-u-co-phonebk') ? 1 : 0 // non-aliased type untouched
+        \\ g('de-u-co-phonebk') === 'de-u-co-phonebk' && // non-aliased type untouched
+        \\ g('en-u-0c') === 'en-u-0c' &&                 // alphanum-alpha key is valid
+        \\ (() => { try { Intl.getCanonicalLocales('en-u-c0'); return false; } // key must end in a letter
+        \\          catch (e) { return e.constructor.name === 'RangeError'; } })() &&
+        \\ (() => { try { Intl.getCanonicalLocales('en-u-00'); return false; }
+        \\          catch (e) { return e.constructor.name === 'RangeError'; } })()) ? 1 : 0
     );
 }
 
