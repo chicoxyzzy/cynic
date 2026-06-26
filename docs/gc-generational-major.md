@@ -1,6 +1,7 @@
 # Generational-incremental major marking — design scope
 
-Status: **scoping** (no code). Owner: the GC track. Prerequisite reading:
+Status: **Phase 0 complete — GO** (no production code yet; Phase 1 next).
+Owner: the GC track. Prerequisite reading:
 [handbook/gc.md](handbook/gc.md) (sticky mark bits, card marking, incremental
 major mark, lazy sweep — all shipped).
 
@@ -119,14 +120,84 @@ different (concurrency, not generational-incremental), and #3 should pivot.
   (generational vs full major) + conformance byte-identical + the
   `splay`/`richards` A/B.
 
+## Phase 0 result — GO
+
+Instrumented the mature→mature pointer-store path (`writeBarrierRemember`'s
+non-young early-return: at that point the container is already known mature
+and the value a heap pointer, so a *non-young* value is exactly a
+mature→mature edge) with two per-major counters — raw m2m stores, and
+*distinct* m2m-dirtied containers (the set a generational major would
+re-scan). Ran `splay` (40 iters, to clear the one-time setup and reach the
+retained-set plateau) and `richards` (canonical 100) under `--no-jit
+--unhardened --allow=eval --gc-stats`, ReleaseFast. The instrumentation is
+throwaway — measured, then reverted; not merged.
+
+**splay — the retained-set case (decisive win).** At steady state (live set
+plateaued at ~913k objects plus ~600k immutable payload strings):
+
+| metric | per major | vs live set |
+|---|---:|---:|
+| live objects a full major re-walks | ~913,000 | 100% |
+| m2m pointer stores | ~107,000 | — |
+| **distinct m2m-dirtied objects** | **~5,700** | **0.6%** |
+
+Only ~5,700 distinct objects change between majors — the actively-rotated
+splay-tree nodes (the tree is ~8k nodes, each rotated ~19× per major;
+stores/distinct ≈ 19). The other 99.4% of the old object set, plus *every*
+immutable payload string, is unchanged. A generational major re-scans ~5,700
+nodes + roots instead of ~913k objects + ~600k strings: a **~100–250×
+reduction in marking work** at steady state. This is precisely the cost the
+splay profile flagged (~34% `markValue`) — almost all of it re-marking the
+unchanged retained tree.
+
+**richards — the churn / low-retention case (no benefit, no harm).** Live set
+is only ~612 objects; m2m stores are huge (~195k/major) but land on just **288
+distinct** objects (~690 stores each — the scheduler rewriting task/queue
+links). There is nothing to save (612 objects mark in microseconds). The
+barrier *sees* 195k stores, but those stores **already** run the expensive
+`isYoungHeapValue` discrimination today (that early-return is where the
+counter sits), so the *incremental* barrier cost over today is one dirty-bit
+load per store + 288 dirty-list appends — negligible against richards'
+interpreter work, and the marking it can't help was never a problem.
+
+**Cost/benefit gate: passes decisively.** Marking saved (splay ~100–250×) ≫
+barrier cost (a dirty-bit load that is ~90% already paid, plus ≤distinct
+appends, repeats collapsed by the dirty bit). The mature→mature barrier reuses
+the existing dirty-list + card-marking + verifier substrate, so it does not
+erase the win (the lead risk below).
+
+**Prior-art open question — answered: do *not* pivot to concurrency.** V8
+(Orinoco), JavaScriptCore (Riptide), and SpiderMonkey hide the major's
+old-space re-trace with **concurrent** (off-thread) marking, *not* by skipping
+the clean old set — because they are multi-threaded runtimes where a GC thread
+is available and concurrency hides the *whole* re-trace, not just the
+clean-old portion. The "sticky marks across majors + card-mark the old gen +
+periodic full major" mechanism here is the classic generational mark-sweep of
+the literature (Jones & Hosking) that those engines passed over *in favour of*
+concurrency. For Cynic the calculus inverts: the mutator is single-threaded by
+design (one safe-point at the interpreter back-edge), so concurrency would
+mean a new GC thread + concurrent-barrier races on every field — a large,
+safety-critical departure. Generational-incremental-major needs none of that;
+it extends the card-marking barrier and keeps sticky old marks, reusing the
+incremental-mark + lazy-sweep substrate already shipped. Concurrency is the
+wrong fit for a single-threaded engine; the generational path the
+multi-threaded engines skipped is exactly Cynic's lever — and the measurement
+says it pays. **Proceed to Phase 1.**
+
 ## Risk register
 
-- **The mature→mature barrier erases the win** (Phase 0 catches this).
+- **The mature→mature barrier erases the win** — *Phase 0 cleared this*: the
+  dirtied-old fraction is ~0.6% on `splay` and the barrier reuses the existing
+  dirty-list path (the costly `isYoungHeapValue` discrimination is already paid
+  today). Re-check if a future barrier change adds per-store cost.
 - **The invariant is subtler than the mature→young one** — the verifier-first
   discipline is mandatory, not optional.
-- **The macros may not all benefit** — `splay` is the clear case (large
-  stable tree); `navier`/`crypto` are compute-bound and retain little, so
-  they see nothing. Scope the claim to retained-set workloads.
-- **Concurrency might be the real answer** (per the prior-art open question)
-  — Phase 0's survey decides whether #3 is generational-incremental or a
-  pivot to off-thread marking.
+- **The macros may not all benefit** — *confirmed by Phase 0*: `splay` is the
+  clear win (retained tree, 0.6% dirtied); `richards`/`navier`/`crypto` retain
+  little, so they see nothing — but also pay no meaningful barrier cost. Scope
+  the *claim* to retained-set workloads.
+- **Concurrency might be the real answer** — *Phase 0 answered no for Cynic*:
+  the production engines went concurrent because they are multi-threaded;
+  Cynic's single-threaded mutator makes generational-incremental (which reuses
+  the shipped substrate) the right lever, not off-thread marking. See the
+  Phase 0 result above.
