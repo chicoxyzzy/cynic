@@ -3500,10 +3500,27 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
             if (!std.mem.eql(u8, rcal, "iso8601") and !std.mem.eql(u8, rcal, slots.calendar))
                 return throwRangeError(realm, "Temporal calendar does not match the DateTimeFormat calendar");
             const dd = cldr.dateData(slots.base.dataLocale()) orelse return 0;
+            // §11.5.x — defaults are per Temporal type: a PlainTime with no
+            // explicit time components (so the construction pattern defaulted to
+            // date) re-resolves with time defaults, else nothing would overlap.
+            var s2: intl.DateTimeFormatSlots = undefined;
+            var pat_slots = slots;
+            const no_components = slots.weekday.len == 0 and slots.era.len == 0 and slots.year.len == 0 and
+                slots.month.len == 0 and slots.day.len == 0 and slots.hour.len == 0 and slots.minute.len == 0 and
+                slots.second.len == 0 and slots.day_period.len == 0 and slots.date_style.len == 0 and slots.time_style.len == 0;
+            if (rec.* == .plain_time and no_components) {
+                // Only the bare-defaults case: an explicit date component (e.g.
+                // {year}) must still fail to overlap a PlainTime, not be replaced.
+                s2 = slots.*;
+                s2.hour = "numeric";
+                s2.minute = "numeric";
+                s2.second = "numeric";
+                pat_slots = &s2;
+            }
             var pat_buf: [256]u8 = undefined;
             var frac_buf: [288]u8 = undefined;
             var tz_buf: [320]u8 = undefined;
-            const pattern = resolvePatternFull(dd, slots, &pat_buf, &frac_buf, &tz_buf);
+            const pattern = resolvePatternFull(dd, pat_slots, &pat_buf, &frac_buf, &tz_buf);
             var mask_buf: [288]u8 = undefined;
             const masked = filterPatternByMask(pattern, std.meta.activeTag(rec.*), mask_buf[0..]) orelse
                 return throwTypeError(realm, "DateTimeFormat options do not overlap the Temporal object's fields");

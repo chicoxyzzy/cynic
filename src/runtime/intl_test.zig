@@ -1840,3 +1840,16 @@ test "intl: DateTimeFormat timeZoneName rendering (§11.5.x offsets + UTC)" {
         \\(r.indexOf('Coordinated') === -1 && r.indexOf('GMT') === -1) ? 1 : 0
     );
 }
+
+test "intl: DateTimeFormat PlainTime defaults to time components (§11.5.x)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const pt = new Temporal.PlainTime(12, 23, 37);
+        \\const thrown = (f) => { try { f(); return ''; } catch (e) { return e.constructor.name; } };
+        \\// {timeZoneName} alone → PlainTime renders default time, zone omitted (no throw).
+        \\const r = new Intl.DateTimeFormat('en', { timeZoneName: 'long' }).format(pt);
+        \\(r.startsWith('12:23') && r.indexOf('Coordinated') === -1 &&
+        \\ // an explicit *date* component still has no overlap with a PlainTime → TypeError
+        \\ thrown(() => new Intl.DateTimeFormat('en', { year: 'numeric' }).format(pt)) === 'TypeError') ? 1 : 0
+    );
+}
