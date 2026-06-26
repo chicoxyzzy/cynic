@@ -1928,3 +1928,15 @@ test "intl: NumberFormat drops irrelevant/invalid -u- extensions (§9.2.7)" {
         \\ r('ar-u-nu-arab') === 'ar-u-nu-arab') ? 1 : 0
     );
 }
+
+test "intl: Collator/DateTimeFormat drop irrelevant -u- extensions (§9.2.7)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const co = (l) => new Intl.Collator([l]).resolvedOptions().locale;
+        \\const dt = (l) => new Intl.DateTimeFormat([l]).resolvedOptions().locale;
+        \\(co('de-u-cu-usd') === 'de' && co('de-u-ka-shifted') === 'de' &&   // irrelevant to Collator
+        \\ co('de-u-co-phonebk') === 'de-u-co-phonebk' &&                    // relevant + valid
+        \\ dt('ja-JP-u-cu-usd') === 'ja-JP' &&                              // irrelevant to DateTimeFormat
+        \\ dt('ja-JP-u-ca-japanese') === 'ja-JP-u-ca-japanese') ? 1 : 0     // relevant + valid
+    );
+}

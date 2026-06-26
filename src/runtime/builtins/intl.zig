@@ -372,9 +372,23 @@ fn isKnownCollation(s: []const u8) bool {
     return false;
 }
 
+/// Whether a `-u-<key>-<value>` keyword names a value Cynic actually supports
+/// for that key; an unsupported value is dropped from the resolved locale
+/// (ResolveLocale falls back to the default). nu/ca consult the CLDR blob.
+fn isValidExtValue(key: []const u8, value: []const u8) bool {
+    if (std.mem.eql(u8, key, "nu")) return !cldr.available or cldr.numberingSystemDigitBase(value) != null;
+    if (std.mem.eql(u8, key, "co")) return isKnownCollation(value); // "standard"/"search"/invalid → default
+    if (std.mem.eql(u8, key, "hc")) return std.mem.eql(u8, value, "h11") or std.mem.eql(u8, value, "h12") or std.mem.eql(u8, value, "h23") or std.mem.eql(u8, value, "h24");
+    if (std.mem.eql(u8, key, "kn")) return value.len == 0 or std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "false");
+    if (std.mem.eql(u8, key, "kf")) return std.mem.eql(u8, value, "upper") or std.mem.eql(u8, value, "lower") or std.mem.eql(u8, value, "false");
+    if (std.mem.eql(u8, key, "ca")) return intl.isValidUnicodeType(value);
+    return true;
+}
+
 /// §9.2.7 ResolveLocale — drop every `-u-` keyword whose key is not in the
-/// service's relevant-extension set, so an irrelevant keyword (e.g. `-cu-usd`
-/// on a NumberFormat) never surfaces in resolvedOptions().locale.
+/// service's relevant-extension set (e.g. `-cu-usd` on a NumberFormat), and any
+/// relevant keyword whose value Cynic doesn't support, so neither surfaces in
+/// resolvedOptions().locale.
 fn retainRelevantUnicodeExtensions(realm: *Realm, base: *intl.ServiceLocaleSlots, relevant: []const []const u8) NativeError!void {
     // Strip one irrelevant key per pass (stripExtKeyword re-canonicalizes, so
     // re-scan from the start) until none remain.
@@ -395,7 +409,9 @@ fn retainRelevantUnicodeExtensions(realm: *Realm, base: *intl.ServiceLocaleSlots
                     keep = true;
                     break;
                 };
-                if (!keep) {
+                // Drop a non-relevant key, or a relevant key with an
+                // unsupported value (so the default applies).
+                if (!keep or !isValidExtValue(seg, intl.unicodeExtensionValue(search, seg) orelse "")) {
                     strip = .{ seg[0], seg[1] };
                     break;
                 }
@@ -1219,6 +1235,7 @@ fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     var slots: intl.CollatorSlots = .{};
     errdefer slots.deinit(realm.allocator);
     slots.base.locale = resolved.locale;
+    try retainRelevantUnicodeExtensions(realm, &slots.base, &.{ "co", "kf", "kn" }); // §9.2.7 Collator keys
     slots.usage = try getOptionStringOwned(realm, opts, "usage", &.{ "sort", "search" }, "sort");
     slots.sensitivity = try getOptionStringOwned(realm, opts, "sensitivity", &.{ "base", "accent", "case", "variant" }, "variant");
     slots.ignore_punctuation = try getBooleanOption(realm, opts, "ignorePunctuation", false);
@@ -1354,14 +1371,9 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     // code); free the owned slots so a rejected constructor doesn't leak.
     // On success storeRecord takes ownership and this never fires.
     errdefer slots.deinit(realm.allocator);
-    // §9.2.7 — NumberFormat's only relevant -u- key is `nu`; drop the rest
-    // (e.g. `-cu-usd`) and a `nu` value that isn't a supported numbering system.
+    // §9.2.7 — NumberFormat's only relevant -u- key is `nu` (unsupported values
+    // dropped); every other keyword (e.g. `-cu-usd`) is removed.
     try retainRelevantUnicodeExtensions(realm, &slots.base, &.{"nu"});
-    if (cldr.available) {
-        if (intl.unicodeExtensionValue(slots.base.locale, "nu")) |v| {
-            if (cldr.numberingSystemDigitBase(v) == null) try stripExtKeyword(realm, &slots.base, "nu");
-        }
-    }
     try setDataLocale(realm, &slots.base);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "decimal", "percent", "currency", "unit" }, "decimal");
     const is_currency_style = std.mem.eql(u8, slots.style, "currency");
@@ -2813,6 +2825,7 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
     var slots: intl.DateTimeFormatSlots = .{};
     errdefer slots.deinit(realm.allocator); // free allocated fields if a later option read throws
     slots.base.locale = resolved.locale;
+    try retainRelevantUnicodeExtensions(realm, &slots.base, &.{ "ca", "nu", "hc" }); // §9.2.7 DateTimeFormat keys
     slots.calendar = realm.allocator.dupe(u8, "iso8601") catch return error.OutOfMemory;
     slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, opts);
     slots.time_zone = realm.allocator.dupe(u8, "UTC") catch return error.OutOfMemory;
@@ -3983,6 +3996,7 @@ fn rtfConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     var slots: intl.RelativeTimeFormatSlots = .{};
     errdefer slots.deinit(realm.allocator);
     slots.base.locale = resolved.locale;
+    try retainRelevantUnicodeExtensions(realm, &slots.base, &.{"nu"}); // §9.2.7 RelativeTimeFormat keys
     // § read order: numberingSystem, style, numeric.
     slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, opts);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "long", "short", "narrow" }, "long");
@@ -4753,6 +4767,7 @@ fn durationFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
     var slots: intl.DurationFormatSlots = .{};
     errdefer slots.deinit(realm.allocator);
     slots.base.locale = resolved.locale;
+    try retainRelevantUnicodeExtensions(realm, &slots.base, &.{"nu"}); // §9.2.7 DurationFormat keys
 
     // § InitializeDurationFormat read order: numberingSystem, style, then each
     // unit's style + display, then fractionalDigits.
