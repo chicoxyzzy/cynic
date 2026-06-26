@@ -1273,6 +1273,8 @@ fn installNumberFormat(realm: *Realm, ns: *JSObject) !void {
         .methods = &.{
             // §11.3.5 — `format` is an accessor (see `makeBoundServiceFunction`).
             .{ .name = "formatToParts", .fn_ptr = numberFormatFormatToParts, .params = 1 },
+            .{ .name = "formatRange", .fn_ptr = numberFormatFormatRange, .params = 2 },
+            .{ .name = "formatRangeToParts", .fn_ptr = numberFormatFormatRangeToParts, .params = 2 },
             .{ .name = "resolvedOptions", .fn_ptr = numberFormatResolvedOptions, .params = 0 },
         },
         .supported_locales_of = anySupportedLocalesOf,
@@ -1584,6 +1586,115 @@ fn numberFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Val
         arr.set(realm.allocator, std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable, heap_mod.taggedObject(part)) catch return error.OutOfMemory;
     }
     arr.setArrayLength(realm.allocator, n) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(arr);
+}
+
+/// §15.5.8 ToIntlMathematicalValue (coercion subset) → f64. BigInt converts
+/// directly; everything else flows through ToNumber (so a Symbol throws
+/// TypeError and a numeric string parses). undefined is rejected by the caller.
+fn rangeOperandF64(realm: *Realm, v: Value) NativeError!f64 {
+    if (heap_mod.valueAsBigInt(v)) |bi| return bi.toF64();
+    return numberToF64(try toNumber(realm, v));
+}
+
+const en_dash = "\u{2013}";
+
+/// Format one range operand to its number string (CLDR path when available,
+/// else ToString) — shared by formatRange / formatRangeToParts.
+fn rangeFormatOne(realm: *Realm, slots: *const intl.NumberFormatSlots, f: f64, buf: []u8) NativeError![]const u8 {
+    if (!cldr.available) return valueToStringSlice(realm, Value.fromDouble(f));
+    return formatNumericToBuf(realm, slots, f, buf);
+}
+
+fn numberFormatFormatRange(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requireKind(realm, this_value, .number_format);
+    // §15.5.8 — both arguments are required (TypeError when either is undefined),
+    // then coerced; a NaN operand is a RangeError. x > y does not throw.
+    const xv = argOr(args, 0, Value.undefined_);
+    const yv = argOr(args, 1, Value.undefined_);
+    if (xv.isUndefined() or yv.isUndefined()) return throwTypeError(realm, "formatRange requires two arguments");
+    const xf = try rangeOperandF64(realm, xv);
+    const yf = try rangeOperandF64(realm, yv);
+    if (std.math.isNan(xf) or std.math.isNan(yf)) return throwRangeError(realm, "formatRange arguments must not be NaN");
+    var bufx: [256]u8 = undefined;
+    var bufy: [256]u8 = undefined;
+    const sx = try rangeFormatOne(realm, &rec.number_format, xf, &bufx);
+    const sy = try rangeFormatOne(realm, &rec.number_format, yf, &bufy);
+    // When the two operands format identically, collapse to the approximate
+    // form ("~{0}"); otherwise join with the range separator.
+    const out = if (std.mem.eql(u8, sx, sy))
+        std.fmt.allocPrint(realm.allocator, "~{s}", .{sx}) catch return error.OutOfMemory
+    else
+        std.fmt.allocPrint(realm.allocator, "{s}{s}{s}", .{ sx, en_dash, sy }) catch return error.OutOfMemory;
+    defer realm.allocator.free(out);
+    return makeStringValue(realm, out);
+}
+
+fn pushPartSourced(realm: *Realm, arr: anytype, idx: u32, typ: []const u8, value: []const u8, source: []const u8) NativeError!void {
+    const part = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(part, realm.intrinsics.object_prototype);
+    try setDataProp(realm, part, "type", try makeStringValue(realm, typ));
+    try setDataProp(realm, part, "value", try makeStringValue(realm, value));
+    try setDataProp(realm, part, "source", try makeStringValue(realm, source));
+    var kb: [12]u8 = undefined;
+    arr.set(realm.allocator, std.fmt.bufPrint(&kb, "{d}", .{idx}) catch unreachable, heap_mod.taggedObject(part)) catch return error.OutOfMemory;
+}
+
+fn numberFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requireKind(realm, this_value, .number_format);
+    const xv = argOr(args, 0, Value.undefined_);
+    const yv = argOr(args, 1, Value.undefined_);
+    if (xv.isUndefined() or yv.isUndefined()) return throwTypeError(realm, "formatRangeToParts requires two arguments");
+    const xf = try rangeOperandF64(realm, xv);
+    const yf = try rangeOperandF64(realm, yv);
+    if (std.math.isNan(xf) or std.math.isNan(yf)) return throwRangeError(realm, "formatRangeToParts arguments must not be NaN");
+    const arr = allocateArray(realm) catch return error.OutOfMemory;
+    var idx: u32 = 0;
+    if (!cldr.available) {
+        var bx: [256]u8 = undefined;
+        const sx = try rangeFormatOne(realm, &rec.number_format, xf, &bx);
+        try pushPartSourced(realm, arr, idx, "integer", sx, "startRange");
+        idx += 1;
+    } else {
+        var segx: [48]Seg = undefined;
+        var segy: [48]Seg = undefined;
+        const nx = renderNumber(&rec.number_format, xf, &segx);
+        const ny = renderNumber(&rec.number_format, yf, &segy);
+        // Equal renderings collapse to a "shared"-sourced approximate run.
+        var same = nx == ny;
+        if (same) {
+            var k: u32 = 0;
+            while (k < nx) : (k += 1) {
+                if (!std.mem.eql(u8, segx[k].typ, segy[k].typ) or !std.mem.eql(u8, segx[k].bytes(), segy[k].bytes())) {
+                    same = false;
+                    break;
+                }
+            }
+        }
+        if (same) {
+            try pushPartSourced(realm, arr, idx, "approximatelySign", "~", "shared");
+            idx += 1;
+            var k: u32 = 0;
+            while (k < nx) : (k += 1) {
+                try pushPartSourced(realm, arr, idx, segx[k].typ, segx[k].bytes(), "shared");
+                idx += 1;
+            }
+        } else {
+            var k: u32 = 0;
+            while (k < nx) : (k += 1) {
+                try pushPartSourced(realm, arr, idx, segx[k].typ, segx[k].bytes(), "startRange");
+                idx += 1;
+            }
+            try pushPartSourced(realm, arr, idx, "literal", en_dash, "shared");
+            idx += 1;
+            k = 0;
+            while (k < ny) : (k += 1) {
+                try pushPartSourced(realm, arr, idx, segy[k].typ, segy[k].bytes(), "endRange");
+                idx += 1;
+            }
+        }
+    }
+    arr.setArrayLength(realm.allocator, idx) catch return error.OutOfMemory;
     return heap_mod.taggedObject(arr);
 }
 

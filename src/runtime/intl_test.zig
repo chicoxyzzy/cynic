@@ -1619,3 +1619,25 @@ test "intl: NumberFormat currency + roundingIncrement validation (§15.1)" {
         \\ thrown(() => new Intl.NumberFormat('en', { roundingIncrement: 25, minimumFractionDigits: 2, maximumFractionDigits: 2 })) === '') ? 1 : 0
     );
 }
+
+test "intl: NumberFormat formatRange / formatRangeToParts (§15.5.8)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const nf = new Intl.NumberFormat('en');
+        \\const thrown = (f) => { try { f(); return ''; } catch (e) { return e.constructor.name; } };
+        \\(nf.formatRange.length === 2 && nf.formatRange.name === 'formatRange' &&
+        \\ typeof nf.formatRange(3, 5) === 'string' &&
+        \\ typeof nf.formatRange(23, 12) === 'string' &&        // x > y does not throw
+        \\ typeof nf.formatRange(23n, 12n) === 'string' &&      // BigInt operands
+        \\ typeof nf.formatRange(0, -0) === 'string' &&
+        \\ thrown(() => nf.formatRange(NaN, 5)) === 'RangeError' &&
+        \\ thrown(() => nf.formatRange(undefined, 5)) === 'TypeError' &&
+        \\ thrown(() => nf.formatRange(Symbol(), 5)) === 'TypeError') ? 1 : 0
+    );
+    try evalAssert1(
+        \\const nf = new Intl.NumberFormat('en');
+        \\const p = nf.formatRangeToParts(3, 5);
+        \\(p.length === 3 && p[0].source === 'startRange' && p[1].source === 'shared' &&
+        \\ p[2].source === 'endRange' && p[0].type === 'integer' && p[2].value === '5') ? 1 : 0
+    );
+}
