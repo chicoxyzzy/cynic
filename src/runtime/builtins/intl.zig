@@ -21,6 +21,7 @@ const intrinsics = @import("../intrinsics.zig");
 const lantern = @import("../lantern/interpreter.zig");
 const intl = @import("../intl.zig");
 const cldr = @import("../cldr.zig");
+const temporal = @import("../temporal.zig");
 const dtoa = @import("../dtoa.zig");
 const utf16 = @import("../utf16.zig");
 
@@ -2686,7 +2687,6 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
             var tzbuf: [16]u8 = undefined;
             const tzdata = @import("../tzdata.zig");
             const canon: []const u8 = if (tz[0] == '+' or tz[0] == '-') blk: {
-                const temporal = @import("../temporal.zig");
                 const parsed = temporal.parseTimeZoneIdentifier(tz) orelse return throwRangeError(realm, "invalid time zone");
                 break :blk temporal.timeZoneIdentifierString(parsed, &tzbuf);
             } else if (tzdata.available)
@@ -2763,11 +2763,11 @@ fn dtfTimeValue(realm: *Realm, v: Value) NativeError!f64 {
 
 fn dateTimeFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requireKind(realm, this_value, .date_time_format);
-    const ms = try dtfTimeValue(realm, argOr(args, 0, Value.undefined_));
-    if (!cldr.available) return makeStringValue(realm, try valueToStringSlice(realm, makeNumberValue(ms)));
+    const arg = argOr(args, 0, Value.undefined_);
+    if (!cldr.available) return makeStringValue(realm, try valueToStringSlice(realm, makeNumberValue(try dtfTimeValue(realm, arg))));
     var buf: [256]u8 = undefined;
     var segs: [48]Seg = undefined;
-    const n = renderDateTime(&rec.date_time_format, ms, &segs);
+    const n = try dtfRenderArg(realm, &rec.date_time_format, arg, &segs);
     var len: usize = 0;
     var i: u32 = 0;
     while (i < n) : (i += 1) {
@@ -2781,15 +2781,15 @@ fn dateTimeFormatFormat(realm: *Realm, this_value: Value, args: []const Value) N
 
 fn dateTimeFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requireKind(realm, this_value, .date_time_format);
-    const ms = try dtfTimeValue(realm, argOr(args, 0, Value.undefined_));
+    const arg = argOr(args, 0, Value.undefined_);
     const arr = allocateArray(realm) catch return error.OutOfMemory;
     if (!cldr.available) {
-        try pushPart(realm, arr, 0, "literal", try makeStringValue(realm, try valueToStringSlice(realm, makeNumberValue(ms))));
+        try pushPart(realm, arr, 0, "literal", try makeStringValue(realm, try valueToStringSlice(realm, makeNumberValue(try dtfTimeValue(realm, arg)))));
         arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
         return heap_mod.taggedObject(arr);
     }
     var segs: [48]Seg = undefined;
-    const n = renderDateTime(&rec.date_time_format, ms, &segs);
+    const n = try dtfRenderArg(realm, &rec.date_time_format, arg, &segs);
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         try pushPart(realm, arr, i, segs[i].typ, try makeStringValue(realm, segs[i].bytes()));
@@ -2926,7 +2926,6 @@ const CivilTime = struct {
 
 /// Break epoch milliseconds into civil fields in the format's time zone.
 fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
-    const temporal = @import("../temporal.zig");
     const epoch_ns: i128 = @as(i128, @intFromFloat(ms)) * 1_000_000;
     const offset_ns: i128 = tzOffsetNs(slots.time_zone, epoch_ns);
     const local_ns: i128 = epoch_ns + offset_ns;
@@ -3208,16 +3207,28 @@ fn injectFractionalSecond(pattern: []const u8, n: u32, buf: []u8) []const u8 {
     return buf[0..l];
 }
 
+/// Resolve the option pattern for these slots (style or components) and splice
+/// in fractionalSecondDigits. `pat_buf`/`frac_buf` are caller scratch.
+fn resolvePatternFull(dd: cldr.DateData, slots: *const intl.DateTimeFormatSlots, pat_buf: []u8, frac_buf: []u8) []const u8 {
+    const pattern = resolveDateTimePattern(dd, slots, pat_buf);
+    if (slots.fractional_second_digits) |fsd| return injectFractionalSecond(pattern, fsd, frac_buf);
+    return pattern;
+}
+
 /// Interpret a resolved CLDR pattern against the broken-down time into segments.
 fn renderDateTime(slots: *const intl.DateTimeFormatSlots, ms: f64, out: []Seg) u32 {
     const dd = cldr.dateData(slots.base.dataLocale()) orelse return 0;
     const ct = breakDown(slots, ms);
     var pat_buf: [256]u8 = undefined;
-    var pattern = resolveDateTimePattern(dd, slots, &pat_buf);
-    // §11.5.5 fractionalSecondDigits — splice ".S…" after the seconds field.
     var frac_buf: [288]u8 = undefined;
-    if (slots.fractional_second_digits) |fsd| pattern = injectFractionalSecond(pattern, fsd, &frac_buf);
+    const pattern = resolvePatternFull(dd, slots, &pat_buf, &frac_buf);
+    return renderPattern(slots, dd, pattern, ct, out);
+}
 
+/// Interpret a resolved pattern against an explicit CivilTime — shared by the
+/// epoch-ms path (renderDateTime) and the Temporal path (which supplies civil
+/// fields directly and a pattern already masked to the object's data model).
+fn renderPattern(slots: *const intl.DateTimeFormatSlots, dd: cldr.DateData, pattern: []const u8, ct: CivilTime, out: []Seg) u32 {
     const digit_base: u32 = if (cldr.numberData(slots.base.dataLocale())) |nd|
         (if (!std.mem.eql(u8, slots.numbering_system, nd.ns)) (cldr.numberingSystemDigitBase(slots.numbering_system) orelse nd.digit_base) else nd.digit_base)
     else
@@ -3255,6 +3266,140 @@ fn renderDateTime(slots: *const intl.DateTimeFormatSlots, ms: f64, out: []Seg) u
         }
     }
     return n;
+}
+
+// ── Temporal → DateTimeFormat bridge (§11.5.x) ───────────────────────────────
+
+/// Whether a pattern field letter belongs to a Temporal type's data model.
+fn temporalFieldAllowed(kind: temporal.TemporalKind, letter: u8) bool {
+    const ym = switch (kind) {
+        .instant, .plain_date_time, .plain_date, .plain_year_month => true,
+        else => false,
+    };
+    const md = switch (kind) {
+        .instant, .plain_date_time, .plain_date, .plain_month_day => true,
+        else => false,
+    };
+    const full_date = switch (kind) {
+        .instant, .plain_date_time, .plain_date => true,
+        else => false,
+    };
+    const time = switch (kind) {
+        .instant, .plain_date_time, .plain_time => true,
+        else => false,
+    };
+    return switch (letter) {
+        'G', 'y', 'Y' => ym, // era + year
+        'M', 'L' => ym or md, // month (present in year-month and month-day)
+        'd' => md, // day
+        'E', 'c', 'e' => full_date, // weekday needs a full date
+        'h', 'H', 'K', 'k', 'm', 's', 'S', 'a', 'b', 'B' => time,
+        'z', 'Z', 'O', 'v', 'V', 'x', 'X' => kind == .instant, // tz name: absolute time only
+        else => true,
+    };
+}
+
+/// Drop pattern field runs the Temporal type lacks (and their adjacent
+/// separators, via the same contiguous-literal logic as buildFromTemplate);
+/// returns null when no field survives (no overlap → caller throws TypeError).
+fn filterPatternByMask(pattern: []const u8, kind: temporal.TemporalKind, buf: []u8) ?[]const u8 {
+    var n: usize = 0;
+    var emitted = false;
+    var pend_start: usize = 0;
+    var has_pend = false;
+    var i: usize = 0;
+    while (i < pattern.len) {
+        const c = pattern[i];
+        if (std.ascii.isAlphabetic(c)) {
+            var j = i;
+            while (j < pattern.len and pattern[j] == c) j += 1;
+            if (temporalFieldAllowed(kind, c)) {
+                if (emitted and has_pend) n += copyClamp(buf, n, pattern[pend_start..i]);
+                n += copyClamp(buf, n, pattern[i..j]);
+                emitted = true;
+            }
+            has_pend = false; // a field (kept or dropped) ends the literal run
+            i = j;
+        } else {
+            if (!has_pend) {
+                pend_start = i;
+                has_pend = true;
+            }
+            if (c == '\'') {
+                i += 1;
+                if (i < pattern.len and pattern[i] == '\'') {
+                    i += 1;
+                } else {
+                    while (i < pattern.len and pattern[i] != '\'') i += 1;
+                    if (i < pattern.len) i += 1;
+                }
+            } else i += 1;
+        }
+    }
+    if (!emitted) return null;
+    return buf[0..n];
+}
+
+fn temporalIsoCivil(y: i64, mo: u32, da: u32, h: u32, mi: u32, s: u32, ms: u32) CivilTime {
+    return .{ .year = y, .month = mo, .day = da, .hour = h, .minute = mi, .second = s, .ms_fraction = ms, .weekday = @intCast(temporal.isoDayOfWeek(y, mo, da) % 7) };
+}
+
+/// Civil fields for a Temporal record. Plain types use their ISO fields
+/// directly (the format's time zone is ignored); an Instant is the epoch
+/// broken down in the format's zone.
+fn temporalCivil(slots: *const intl.DateTimeFormatSlots, rec: *const temporal.TemporalRecord) CivilTime {
+    return switch (rec.*) {
+        .instant => |v| breakDown(slots, @floatFromInt(@divFloor(v.epoch_ns, 1_000_000))),
+        .plain_date => |d| temporalIsoCivil(d.iso_year, d.iso_month, d.iso_day, 0, 0, 0, 0),
+        .plain_date_time => |d| temporalIsoCivil(d.iso_year, d.iso_month, d.iso_day, d.hour, d.minute, d.second, d.millisecond),
+        .plain_time => |t| temporalIsoCivil(1972, 1, 1, t.hour, t.minute, t.second, t.millisecond),
+        .plain_year_month => |d| temporalIsoCivil(d.iso_year, d.iso_month, d.ref_iso_day, 0, 0, 0, 0),
+        .plain_month_day => |d| temporalIsoCivil(d.ref_iso_year, d.iso_month, d.iso_day, 0, 0, 0, 0),
+        else => temporalIsoCivil(1970, 1, 1, 0, 0, 0, 0),
+    };
+}
+
+/// The calendar id a Temporal record carries ("iso8601" for the calendar-free
+/// PlainTime / Instant).
+fn temporalCalendarId(rec: *const temporal.TemporalRecord) []const u8 {
+    // Capture by pointer (|*d|): .slice() borrows the record's bytes, so a
+    // by-value capture would return a slice into a copy that dies here.
+    return switch (rec.*) {
+        .plain_date => |*d| d.calendar.slice(),
+        .plain_date_time => |*d| d.calendar.slice(),
+        .plain_year_month => |*d| d.calendar.slice(),
+        .plain_month_day => |*d| d.calendar.slice(),
+        .zoned_date_time => |*d| d.calendar.slice(),
+        else => "iso8601",
+    };
+}
+
+/// §11.5.x HandleDateTimeValue — render `arg` (a legacy time value or a Temporal
+/// object) into `out`. A Temporal object validates calendar match + field
+/// overlap (TypeError on no overlap, RangeError on calendar mismatch); a
+/// ZonedDateTime / Duration is rejected. Assumes cldr.available.
+fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Value, out: []Seg) NativeError!u32 {
+    if (heap_mod.valueAsPlainObject(arg)) |o| {
+        if (o.getTemporalRecord()) |rec| {
+            switch (rec.*) {
+                .zoned_date_time => return throwTypeError(realm, "Temporal.ZonedDateTime has no fixed format; use toLocaleString"),
+                .duration => return throwTypeError(realm, "Temporal.Duration is not a date/time value"),
+                else => {},
+            }
+            const rcal = temporalCalendarId(rec);
+            if (!std.mem.eql(u8, rcal, "iso8601") and !std.mem.eql(u8, rcal, slots.calendar))
+                return throwRangeError(realm, "Temporal calendar does not match the DateTimeFormat calendar");
+            const dd = cldr.dateData(slots.base.dataLocale()) orelse return 0;
+            var pat_buf: [256]u8 = undefined;
+            var frac_buf: [288]u8 = undefined;
+            const pattern = resolvePatternFull(dd, slots, &pat_buf, &frac_buf);
+            var mask_buf: [288]u8 = undefined;
+            const masked = filterPatternByMask(pattern, std.meta.activeTag(rec.*), mask_buf[0..]) orelse
+                return throwTypeError(realm, "DateTimeFormat options do not overlap the Temporal object's fields");
+            return renderPattern(slots, dd, masked, temporalCivil(slots, rec), out);
+        }
+    }
+    return renderDateTime(slots, try dtfTimeValue(realm, arg), out);
 }
 
 fn renderDateTimeFlat(slots: *const intl.DateTimeFormatSlots, ms: f64, buf: []u8) []const u8 {

@@ -1766,3 +1766,25 @@ test "intl: DateTimeFormat partial component selection (§11.1.1 pattern build)"
         \\ f({ minute: '2-digit' }) === '05') ? 1 : 0
     );
 }
+
+test "intl: DateTimeFormat formats Temporal objects (§11.5.x bridge)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const pd = new Temporal.PlainDate(2024, 9, 19);
+        \\const pt = new Temporal.PlainTime(12, 23, 37);
+        \\const pdt = new Temporal.PlainDateTime(2024, 9, 19, 12, 23, 37);
+        \\const pym = new Temporal.PlainYearMonth(2024, 9);
+        \\const pmd = new Temporal.PlainMonthDay(9, 19);
+        \\const thrown = (f) => { try { f(); return ''; } catch (e) { return e.constructor.name; } };
+        \\const ds = (o, v) => new Intl.DateTimeFormat('en', { ...o, calendar: 'iso8601', timeZone: 'UTC' }).format(v);
+        \\(ds({ dateStyle: 'short' }, pd) === '9/19/24' &&
+        \\ ds({ year: 'numeric' }, pym) === '2024' &&
+        \\ ds({ day: '2-digit' }, pmd) === '19' &&
+        \\ ds({ timeStyle: 'short' }, pt).startsWith('12:23') &&        // space before PM is U+202F
+        \\ ds({ dateStyle: 'short', timeStyle: 'short' }, pdt).startsWith('9/19/24, 12:23') &&
+        \\ // no field overlap → TypeError; ZonedDateTime unsupported → TypeError
+        \\ thrown(() => ds({ dateStyle: 'short' }, pt)) === 'TypeError' &&
+        \\ thrown(() => ds({ year: 'numeric' }, pmd)) === 'TypeError' &&
+        \\ thrown(() => ds({ dateStyle: 'short' }, new Temporal.ZonedDateTime(0n, 'UTC'))) === 'TypeError') ? 1 : 0
+    );
+}
