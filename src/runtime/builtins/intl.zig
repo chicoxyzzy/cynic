@@ -123,6 +123,15 @@ fn getOptionsObject(realm: *Realm, options: Value) NativeError!?*JSObject {
     return throwTypeError(realm, "options must be an object or undefined");
 }
 
+/// §9.2.13 CoerceOptionsToObject — undefined → empty (null); otherwise
+/// ? ToObject(options). Unlike GetOptionsObject this accepts a primitive
+/// (number / boolean / string / symbol), wrapping it (no relevant options →
+/// defaults). Used by the constructors whose spec text coerces.
+fn coerceOptionsToObject(realm: *Realm, options: Value) NativeError!?*JSObject {
+    if (options.isUndefined()) return null;
+    return try intrinsics.toObjectThis(realm, options);
+}
+
 fn getOptionString(
     realm: *Realm,
     opts: ?*JSObject,
@@ -1297,7 +1306,7 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_number_format_prototype.?, "NumberFormat", false);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
-    const opts = try getOptionsObject(realm, options);
+    const opts = try coerceOptionsToObject(realm, options);
     const resolved = try resolveServiceLocale(realm, locales, opts);
 
     var slots: intl.NumberFormatSlots = .{};
@@ -2163,7 +2172,7 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_date_time_format_prototype.?, "DateTimeFormat", false);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
-    const opts = try getOptionsObject(realm, options);
+    const opts = try coerceOptionsToObject(realm, options);
     const resolved = try resolveServiceLocale(realm, locales, opts);
 
     var slots: intl.DateTimeFormatSlots = .{};
@@ -2906,7 +2915,7 @@ fn rtfConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_relative_time_format_prototype, "RelativeTimeFormat", true);
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
-    const opts = try getOptionsObject(realm, options);
+    const opts = try coerceOptionsToObject(realm, options);
     const resolved = try resolveServiceLocale(realm, locales, opts);
     var slots: intl.RelativeTimeFormatSlots = .{};
     errdefer slots.deinit(realm.allocator);

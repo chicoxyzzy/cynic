@@ -1475,3 +1475,20 @@ test "intl: numberingSystem option — well-formed unknown falls back, malformed
     try evalThrows("new Intl.NumberFormat('en', { numberingSystem: 'a' })"); // too short
     try evalThrows("new Intl.RelativeTimeFormat('en', { numberingSystem: '!!' })"); // non-alnum
 }
+
+test "intl: constructors coerce a primitive options arg (CoerceOptionsToObject)" {
+    try requireIntlBuild();
+    // §9.2.13 — a primitive options coerces to a wrapper (no relevant options)
+    // rather than throwing, for the constructors whose spec text coerces.
+    try evalAssert1(
+        \\let ok = 1;
+        \\for (const o of [true, 'x', 7, Symbol()]) {
+        \\  try {
+        \\    new Intl.NumberFormat('en', o);
+        \\    new Intl.DateTimeFormat('en', o);
+        \\    new Intl.RelativeTimeFormat('en', o);
+        \\  } catch (e) { ok = 0; }
+        \\}
+        \\ok
+    );
+}
