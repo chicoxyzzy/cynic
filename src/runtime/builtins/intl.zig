@@ -4289,11 +4289,23 @@ fn durationToFractional(vals: *const [10]f64, idx: usize) f64 {
     };
 }
 
+/// One formatted DurationFormat part: a NumberFormat segment type + bytes,
+/// tagged with the unit it belongs to (empty for the ":" time separator).
+const DurPart = struct { typ: []const u8, buf: [64]u8 = undefined, len: usize = 0, unit: []const u8 = "" };
+
+fn setDurPart(p: *DurPart, typ: []const u8, val: []const u8, unit: []const u8) void {
+    p.typ = typ;
+    const n = @min(val.len, p.buf.len);
+    @memcpy(p.buf[0..n], val[0..n]);
+    p.len = n;
+    p.unit = unit;
+}
+
 /// §1.1.8 PartitionDurationFormatPattern — format each present unit (long/short/
 /// narrow via NumberFormat unit style; numeric/2-digit grouped with ":" into a
-/// digital-clock element) and join the elements via ListFormat (type "unit").
-/// Returns the count of formatted list elements in `items` / `item_lens`.
-fn durationBuildItems(realm: *Realm, s: *const intl.DurationFormatSlots, vals: *const [10]f64, items: *[10][192]u8, item_lens: *[10]usize) NativeError!usize {
+/// digital-clock element). Fills `parts` with the per-segment records and
+/// `elem_start[0..=nitems]` with each list element's part range; returns nitems.
+fn durationBuildParts(s: *const intl.DurationFormatSlots, vals: *const [10]f64, parts: *[96]DurPart, elem_start: *[12]usize) usize {
     const loc = s.base.dataLocale();
     var any_negative = false;
     for (vals) |v| {
@@ -4302,6 +4314,7 @@ fn durationBuildItems(realm: *Realm, s: *const intl.DurationFormatSlots, vals: *
             break;
         }
     }
+    var nparts: usize = 0;
     var nitems: usize = 0;
     var need_separator = false;
     var display_negative_sign = true;
@@ -4341,9 +4354,10 @@ fn durationBuildItems(realm: *Realm, s: *const intl.DurationFormatSlots, vals: *
             nf.minimum_fraction_digits = 0;
             nf.maximum_fraction_digits = 0;
             if (std.mem.eql(u8, style, "2-digit")) nf.minimum_integer_digits = 2;
+            const unit_singular = duration_units[i].name[0 .. duration_units[i].name.len - 1];
             if (!isNumericDurStyle(style)) {
                 nf.style = "unit";
-                nf.unit = duration_units[i].name[0 .. duration_units[i].name.len - 1]; // singular
+                nf.unit = unit_singular;
                 nf.unit_display = style;
                 nf.use_grouping = "auto";
                 nf.maximum_fraction_digits = 3;
@@ -4356,28 +4370,38 @@ fn durationBuildItems(realm: *Realm, s: *const intl.DurationFormatSlots, vals: *
                 nf.minimum_fraction_digits = s.fractional_digits orelse 0;
                 nf.rounding_mode = "trunc";
             }
-            var fbuf: [192]u8 = undefined;
-            const formatted = try formatNumericToBuf(realm, &nf, value, &fbuf);
+            var segs: [48]Seg = undefined;
+            const nseg = renderNumber(&nf, value, &segs);
             if (!need_separator) {
-                const n = @min(formatted.len, items[nitems].len);
-                @memcpy(items[nitems][0..n], formatted[0..n]);
-                item_lens[nitems] = n;
-                if (isNumericDurStyle(style)) need_separator = true;
+                elem_start[nitems] = nparts;
                 nitems += 1;
-            } else if (nitems > 0) {
-                const li = nitems - 1;
-                var l = item_lens[li];
-                if (l < items[li].len) {
-                    items[li][l] = ':';
-                    l += 1;
-                }
-                l += copyClamp(items[li][0..], l, formatted);
-                item_lens[li] = l;
+                if (isNumericDurStyle(style)) need_separator = true;
+            } else if (nparts < parts.len) {
+                setDurPart(&parts[nparts], "literal", ":", "");
+                nparts += 1;
+            }
+            var k: usize = 0;
+            while (k < nseg and nparts < parts.len) : (k += 1) {
+                setDurPart(&parts[nparts], segs[k].typ, segs[k].bytes(), unit_singular);
+                nparts += 1;
             }
         }
         if (fractional) break;
     }
+    elem_start[nitems] = nparts;
     return nitems;
+}
+
+/// Concatenate one list element's part bytes into `buf`; returns the slice.
+fn durElementString(parts: *const [96]DurPart, start: usize, end: usize, buf: []u8) []const u8 {
+    var l: usize = 0;
+    var p = start;
+    while (p < end) : (p += 1) l += copyClamp(buf, l, parts[p].buf[0..parts[p].len]);
+    return buf[0..l];
+}
+
+fn durationListStyle(s: *const intl.DurationFormatSlots) []const u8 {
+    return if (std.mem.eql(u8, s.style, "long")) "long" else if (std.mem.eql(u8, s.style, "narrow")) "narrow" else "short";
 }
 
 fn durationFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -4387,24 +4411,25 @@ fn durationFormatFormat(realm: *Realm, this_value: Value, args: []const Value) N
     try toDurationRecord(realm, argOr(args, 0, Value.undefined_), &vals);
     if (!cldr.available) return makeStringValue(realm, "");
 
-    var items: [10][192]u8 = undefined;
-    var item_lens: [10]usize = undefined;
-    const nitems = try durationBuildItems(realm, s, &vals, &items, &item_lens);
+    var parts: [96]DurPart = undefined;
+    var elem_start: [12]usize = undefined;
+    const nitems = durationBuildParts(s, &vals, &parts, &elem_start);
 
+    var item_store: [10][256]u8 = undefined;
     var slices: [10][]const u8 = undefined;
     var k: usize = 0;
-    while (k < nitems) : (k += 1) slices[k] = items[k][0..item_lens[k]];
+    while (k < nitems) : (k += 1) slices[k] = durElementString(&parts, elem_start[k], elem_start[k + 1], item_store[k][0..]);
 
     var lf: intl.ListFormatSlots = .{};
     lf.base.locale = s.base.dataLocale();
     lf.type_name = "unit";
-    lf.style = if (std.mem.eql(u8, s.style, "long")) "long" else if (std.mem.eql(u8, s.style, "narrow")) "narrow" else "short";
-    var parts: std.ArrayListUnmanaged(ListSeg) = .empty;
-    defer parts.deinit(realm.allocator);
-    try listBuildParts(realm, &lf, slices[0..nitems], &parts);
+    lf.style = durationListStyle(s);
+    var lsegs: std.ArrayListUnmanaged(ListSeg) = .empty;
+    defer lsegs.deinit(realm.allocator);
+    try listBuildParts(realm, &lf, slices[0..nitems], &lsegs);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
-    for (parts.items) |seg| out.appendSlice(realm.allocator, seg.val) catch return error.OutOfMemory;
+    for (lsegs.items) |seg| out.appendSlice(realm.allocator, seg.val) catch return error.OutOfMemory;
     return makeStringValue(realm, out.items);
 }
 
@@ -4418,26 +4443,47 @@ fn durationFormatFormatToParts(realm: *Realm, this_value: Value, args: []const V
         arr.setArrayLength(realm.allocator, 0) catch return error.OutOfMemory;
         return heap_mod.taggedObject(arr);
     }
-    var items: [10][192]u8 = undefined;
-    var item_lens: [10]usize = undefined;
-    const nitems = try durationBuildItems(realm, s, &vals, &items, &item_lens);
+    var parts: [96]DurPart = undefined;
+    var elem_start: [12]usize = undefined;
+    const nitems = durationBuildParts(s, &vals, &parts, &elem_start);
+
+    var item_store: [10][256]u8 = undefined;
     var slices: [10][]const u8 = undefined;
     var k: usize = 0;
-    while (k < nitems) : (k += 1) slices[k] = items[k][0..item_lens[k]];
+    while (k < nitems) : (k += 1) slices[k] = durElementString(&parts, elem_start[k], elem_start[k + 1], item_store[k][0..]);
 
     var lf: intl.ListFormatSlots = .{};
     lf.base.locale = s.base.dataLocale();
     lf.type_name = "unit";
-    lf.style = if (std.mem.eql(u8, s.style, "long")) "long" else if (std.mem.eql(u8, s.style, "narrow")) "narrow" else "short";
-    var parts: std.ArrayListUnmanaged(ListSeg) = .empty;
-    defer parts.deinit(realm.allocator);
-    try listBuildParts(realm, &lf, slices[0..nitems], &parts);
+    lf.style = durationListStyle(s);
+    var lsegs: std.ArrayListUnmanaged(ListSeg) = .empty;
+    defer lsegs.deinit(realm.allocator);
+    try listBuildParts(realm, &lf, slices[0..nitems], &lsegs);
+
+    // §1.1.10 — a list "element" segment expands to that element's unit parts
+    // (each carrying its NumberFormat type + the unit); the list-pattern literals
+    // (conjunctions) become plain "literal" parts.
     var idx: u32 = 0;
-    for (parts.items) |seg| {
-        // §1.1.10 — list "element" segments carry type "literal" with the unit's
-        // formatted text; the conjunction literals are plain "literal" too.
-        try pushPart(realm, arr, idx, "literal", try makeStringValue(realm, seg.val));
-        idx += 1;
+    var e: usize = 0;
+    for (lsegs.items) |seg| {
+        if (seg.is_element and e < nitems) {
+            var p = elem_start[e];
+            while (p < elem_start[e + 1]) : (p += 1) {
+                const part = realm.heap.allocateObject() catch return error.OutOfMemory;
+                realm.heap.setObjectPrototype(part, realm.intrinsics.object_prototype);
+                try setDataProp(realm, part, "type", try makeStringValue(realm, parts[p].typ));
+                try setDataProp(realm, part, "value", try makeStringValue(realm, parts[p].buf[0..parts[p].len]));
+                if (parts[p].unit.len > 0)
+                    try setDataProp(realm, part, "unit", try makeStringValue(realm, parts[p].unit));
+                var kb: [12]u8 = undefined;
+                arr.set(realm.allocator, std.fmt.bufPrint(&kb, "{d}", .{idx}) catch unreachable, heap_mod.taggedObject(part)) catch return error.OutOfMemory;
+                idx += 1;
+            }
+            e += 1;
+        } else {
+            try pushPart(realm, arr, idx, "literal", try makeStringValue(realm, seg.val));
+            idx += 1;
+        }
     }
     arr.setArrayLength(realm.allocator, idx) catch return error.OutOfMemory;
     return heap_mod.taggedObject(arr);

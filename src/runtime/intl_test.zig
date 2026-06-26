@@ -1661,3 +1661,21 @@ test "intl: DurationFormat format (long/digital/mixed/fraction/negative)" {
         \\ thrown(() => df.format({})) === 'TypeError') ? 1 : 0
     );
 }
+
+test "intl: DurationFormat formatToParts (typed parts + unit tags)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const p = new Intl.DurationFormat('en', { style: 'long' }).formatToParts({ hours: 1, minutes: 46 });
+        \\(p[0].type === 'integer' && p[0].value === '1' && p[0].unit === 'hour' &&
+        \\ p[2].type === 'unit' && p[2].unit === 'hour' &&
+        \\ p.some(x => x.type === 'literal' && x.value === ', ' && x.unit === undefined) &&
+        \\ p[p.length - 1].unit === 'minute') ? 1 : 0
+    );
+    try evalAssert1(
+        \\const p = new Intl.DurationFormat('en', { style: 'digital' }).formatToParts({ hours: 1, minutes: 2, seconds: 3 });
+        \\// Digital clock: "1:02:03" with ":" separators carrying no unit.
+        \\(p.map(x => x.value).join('') === '1:02:03' &&
+        \\ p[0].unit === 'hour' && p[1].type === 'literal' && p[1].value === ':' && p[1].unit === undefined &&
+        \\ p[2].value === '02' && p[2].unit === 'minute') ? 1 : 0
+    );
+}
