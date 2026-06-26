@@ -1853,3 +1853,20 @@ test "intl: DateTimeFormat PlainTime defaults to time components (§11.5.x)" {
         \\ thrown(() => new Intl.DateTimeFormat('en', { year: 'numeric' }).format(pt)) === 'TypeError') ? 1 : 0
     );
 }
+
+test "intl: format function name is empty + dateStyle/component conflict (§11.1)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\// §11.1.5 / §15.1.4 — the bound format accessor function has name "".
+        \\const d = Object.getOwnPropertyDescriptor(new Intl.DateTimeFormat('en').format, 'name');
+        \\const n = Object.getOwnPropertyDescriptor(new Intl.NumberFormat('en').format, 'name');
+        \\(d.value === '' && d.writable === false && d.enumerable === false && d.configurable === true &&
+        \\ n.value === '') ? 1 : 0
+    );
+    try evalAssert1(
+        \\const thrown = (o) => { try { new Intl.DateTimeFormat('en', o); return ''; } catch (e) { return e.constructor.name; } };
+        \\// dateStyle/timeStyle conflicts with any explicit component, incl. fractionalSecondDigits.
+        \\(thrown({ dateStyle: 'full', fractionalSecondDigits: 3 }) === 'TypeError' &&
+        \\ thrown({ timeStyle: 'full', weekday: 'long' }) === 'TypeError') ? 1 : 0
+    );
+}

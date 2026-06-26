@@ -1115,8 +1115,10 @@ fn makeBoundServiceFunction(
     name: []const u8,
     params: u8,
 ) NativeError!Value {
+    // §11.1.5 / §15.1.4 — the bound format function's `name` is the empty string
+    // (it is an anonymous built-in); `name` here only labels the inner target.
     const inner = realm.heap.allocateFunctionNative(realm, worker, params, name) catch return error.OutOfMemory;
-    const bound = realm.heap.allocateFunctionNative(realm, worker, params, name) catch return error.OutOfMemory;
+    const bound = realm.heap.allocateFunctionNative(realm, worker, params, "") catch return error.OutOfMemory;
     realm.heap.setBoundTarget(bound, inner);
     realm.heap.setBoundThis(bound, this_value);
     bound.has_construct = false;
@@ -2762,7 +2764,8 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
         const has_style = slots.date_style.len > 0 or slots.time_style.len > 0;
         const has_component = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or
             slots.month.len > 0 or slots.day.len > 0 or slots.hour.len > 0 or slots.minute.len > 0 or
-            slots.second.len > 0 or slots.day_period.len > 0 or slots.time_zone_name.len > 0;
+            slots.second.len > 0 or slots.day_period.len > 0 or slots.time_zone_name.len > 0 or
+            slots.fractional_second_digits != null;
         if (has_style and has_component) return throwTypeError(realm, "dateStyle/timeStyle cannot be combined with component options");
     }
 
