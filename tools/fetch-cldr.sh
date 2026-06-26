@@ -33,6 +33,7 @@ PACKAGES=(
     cldr-dates-full
     cldr-localenames-full
     cldr-misc-full
+    cldr-units-full
 )
 
 DO_PACK=1

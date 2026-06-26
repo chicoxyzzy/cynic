@@ -47,6 +47,7 @@ const SectionKind = enum(u8) {
     list_patterns = 10,
     relative_time = 11,
     compact = 12,
+    units = 13,
 };
 
 /// RTF units in fixed order (year … second); each packs 3 styles (long /
@@ -160,13 +161,14 @@ pub fn main(init: std.process.Init) !void {
     const list_patterns = try loadListPatterns(arena, io, json_root);
     const relative_time = try loadRelativeTime(arena, io, json_root);
     const compact = try loadCompact(arena, io, json_root);
+    const units = try loadUnits(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact, units);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
-    var buf: [500]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len });
+    var buf: [540]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}, units {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len, units.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -236,12 +238,13 @@ fn pack(
     list_patterns: []ListPatternLocale,
     relative_time: []RelativeTimeLocale,
     compact: []CompactLocale,
+    units: []UnitsLocale,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [12]SectionDir = undefined;
+    var dirs: [13]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -290,6 +293,10 @@ fn pack(
     const cp_start: u32 = @intCast(payloads.items.len);
     try writeCompactPayload(gpa, &payloads, compact);
     dirs[11] = .{ .kind = .compact, .off = cp_start, .len = @as(u32, @intCast(payloads.items.len)) - cp_start };
+
+    const un_start: u32 = @intCast(payloads.items.len);
+    try writeUnitsPayload(gpa, &payloads, units);
+    dirs[12] = .{ .kind = .units, .off = un_start, .len = @as(u32, @intCast(payloads.items.len)) - un_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -501,6 +508,151 @@ fn writeListPatternsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged
             try appendStr16(gpa, buf, s.start);
             try appendStr16(gpa, buf, s.middle);
             try appendStr16(gpa, buf, s.end);
+        }
+    }
+}
+
+// ── measurement units (Intl.NumberFormat style:"unit") ───────────────────────
+
+/// The ECMA-402 §6.5.1 sanctioned single-unit identifiers, mapped to their CLDR
+/// category-prefixed keys. The JS `unit` option uses the simple name; CLDR keys
+/// them by category, so the packer stores patterns under the simple name.
+const sanctioned_units = [_]struct { simple: []const u8, key: []const u8 }{
+    .{ .simple = "acre", .key = "area-acre" },
+    .{ .simple = "bit", .key = "digital-bit" },
+    .{ .simple = "byte", .key = "digital-byte" },
+    .{ .simple = "celsius", .key = "temperature-celsius" },
+    .{ .simple = "centimeter", .key = "length-centimeter" },
+    .{ .simple = "day", .key = "duration-day" },
+    .{ .simple = "degree", .key = "angle-degree" },
+    .{ .simple = "fahrenheit", .key = "temperature-fahrenheit" },
+    .{ .simple = "fluid-ounce", .key = "volume-fluid-ounce" },
+    .{ .simple = "foot", .key = "length-foot" },
+    .{ .simple = "gallon", .key = "volume-gallon" },
+    .{ .simple = "gigabit", .key = "digital-gigabit" },
+    .{ .simple = "gigabyte", .key = "digital-gigabyte" },
+    .{ .simple = "gram", .key = "mass-gram" },
+    .{ .simple = "hectare", .key = "area-hectare" },
+    .{ .simple = "hour", .key = "duration-hour" },
+    .{ .simple = "inch", .key = "length-inch" },
+    .{ .simple = "kilobit", .key = "digital-kilobit" },
+    .{ .simple = "kilobyte", .key = "digital-kilobyte" },
+    .{ .simple = "kilogram", .key = "mass-kilogram" },
+    .{ .simple = "kilometer", .key = "length-kilometer" },
+    .{ .simple = "liter", .key = "volume-liter" },
+    .{ .simple = "megabit", .key = "digital-megabit" },
+    .{ .simple = "megabyte", .key = "digital-megabyte" },
+    .{ .simple = "meter", .key = "length-meter" },
+    .{ .simple = "microsecond", .key = "duration-microsecond" },
+    .{ .simple = "mile", .key = "length-mile" },
+    .{ .simple = "mile-scandinavian", .key = "length-mile-scandinavian" },
+    .{ .simple = "milliliter", .key = "volume-milliliter" },
+    .{ .simple = "millimeter", .key = "length-millimeter" },
+    .{ .simple = "millisecond", .key = "duration-millisecond" },
+    .{ .simple = "minute", .key = "duration-minute" },
+    .{ .simple = "month", .key = "duration-month" },
+    .{ .simple = "nanosecond", .key = "duration-nanosecond" },
+    .{ .simple = "ounce", .key = "mass-ounce" },
+    .{ .simple = "percent", .key = "concentr-percent" },
+    .{ .simple = "petabyte", .key = "digital-petabyte" },
+    .{ .simple = "pound", .key = "mass-pound" },
+    .{ .simple = "second", .key = "duration-second" },
+    .{ .simple = "stone", .key = "mass-stone" },
+    .{ .simple = "terabit", .key = "digital-terabit" },
+    .{ .simple = "terabyte", .key = "digital-terabyte" },
+    .{ .simple = "week", .key = "duration-week" },
+    .{ .simple = "yard", .key = "length-yard" },
+    .{ .simple = "year", .key = "duration-year" },
+};
+
+const UnitPat = struct { cat: u8, pat: []const u8 };
+/// One unit's patterns for one style: the plural unitPatterns + perUnitPattern
+/// (the divisor side of a compound "X-per-Y") + displayName (fallback).
+const UnitStyle = struct {
+    pats: []UnitPat,
+    per: []const u8,
+    display: []const u8,
+};
+const UnitEntry = struct { simple: []const u8, styles: [3]UnitStyle };
+/// All sanctioned-unit data for one locale + the "per" compound pattern per style.
+const UnitsLocale = struct {
+    key: []const u8,
+    units: []UnitEntry,
+    compound_per: [3][]const u8,
+    fn lessThan(_: void, a: UnitsLocale, b: UnitsLocale) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+const unit_styles = [_][]const u8{ "long", "short", "narrow" };
+
+fn loadUnitStyle(arena: std.mem.Allocator, units: std.json.ObjectMap, style: []const u8, cldr_key: []const u8) UnitStyle {
+    const s = if (units.get(style)) |v| v.object else return .{ .pats = &.{}, .per = "", .display = "" };
+    const u = if (s.get(cldr_key)) |v| v.object else return .{ .pats = &.{}, .per = "", .display = "" };
+    var pats: std.ArrayListUnmanaged(UnitPat) = .empty;
+    var per: []const u8 = "";
+    var display: []const u8 = "";
+    var it = u.iterator();
+    while (it.next()) |e| {
+        if (e.value_ptr.* != .string) continue;
+        if (std.mem.startsWith(u8, e.key_ptr.*, "unitPattern-count-")) {
+            const cat = pluralCatIndex(e.key_ptr.*["unitPattern-count-".len..]) orelse continue;
+            pats.append(arena, .{ .cat = cat, .pat = e.value_ptr.*.string }) catch {};
+        } else if (std.mem.eql(u8, e.key_ptr.*, "perUnitPattern")) {
+            per = e.value_ptr.*.string;
+        } else if (std.mem.eql(u8, e.key_ptr.*, "displayName")) {
+            display = e.value_ptr.*.string;
+        }
+    }
+    return .{ .pats = pats.items, .per = per, .display = display };
+}
+
+fn loadUnits(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]UnitsLocale {
+    var out: std.ArrayListUnmanaged(UnitsLocale) = .empty;
+    for (modern_locales) |loc| {
+        const path = try std.fmt.allocPrint(arena, "{s}/cldr-units-full/main/{s}/units.json", .{ json_root, loc });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(8 * 1024 * 1024)) catch continue;
+        const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch continue;
+        var mit = root.object.get("main").?.object.iterator();
+        const units = (mit.next() orelse continue).value_ptr.*.object.get("units").?.object;
+
+        var entries: std.ArrayListUnmanaged(UnitEntry) = .empty;
+        for (sanctioned_units) |su| {
+            var styles: [3]UnitStyle = undefined;
+            for (unit_styles, 0..) |st, i| styles[i] = loadUnitStyle(arena, units, st, su.key);
+            try entries.append(arena, .{ .simple = su.simple, .styles = styles });
+        }
+        var compound_per: [3][]const u8 = .{ "", "", "" };
+        for (unit_styles, 0..) |st, i| {
+            const s = if (units.get(st)) |v| v.object else continue;
+            const p = if (s.get("per")) |v| v.object else continue;
+            if (p.get("compoundUnitPattern")) |v| {
+                if (v == .string) compound_per[i] = v.string;
+            }
+        }
+        try out.append(arena, .{ .key = loc, .units = entries.items, .compound_per = compound_per });
+    }
+    std.sort.block(UnitsLocale, out.items, {}, UnitsLocale.lessThan);
+    return out.items;
+}
+
+fn writeUnitsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), locales: []UnitsLocale) !void {
+    try appendU32(gpa, buf, locales.len);
+    for (locales) |l| {
+        try appendStr8(gpa, buf, l.key);
+        for (l.compound_per) |cp| try appendStr16(gpa, buf, cp);
+        try appendU32(gpa, buf, l.units.len);
+        for (l.units) |u| {
+            try appendStr8(gpa, buf, u.simple);
+            for (u.styles) |st| {
+                try appendStr16(gpa, buf, st.display);
+                try appendStr16(gpa, buf, st.per);
+                try buf.append(gpa, @intCast(st.pats.len));
+                for (st.pats) |p| {
+                    try buf.append(gpa, p.cat);
+                    try appendStr16(gpa, buf, p.pat);
+                }
+            }
         }
     }
 }

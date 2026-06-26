@@ -1579,3 +1579,28 @@ test "intl: NumberFormat compact notation (short/long/CJK + parts)" {
         \\ k.indexOf('compactDisplay') === k.indexOf('notation') + 1) ? 1 : 0
     );
 }
+
+test "intl: NumberFormat unit style (single, compound, plural, validation)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (u, d, v) => new Intl.NumberFormat('en', { style: 'unit', unit: u, unitDisplay: d }).format(v);
+        \\(f('kilometer-per-hour', 'short', 987) === '987 km/h' &&
+        \\ f('kilometer-per-hour', 'long', 987) === '987 kilometers per hour' &&
+        \\ f('kilometer-per-hour', 'narrow', 987) === '987km/h' &&
+        \\ f('meter', 'long', 1) === '1 meter' &&
+        \\ f('meter', 'long', 5) === '5 meters' &&
+        \\ f('kilometer', 'short', 5) === '5 km') ? 1 : 0
+    );
+    try evalAssert1(
+        \\const p = new Intl.NumberFormat('en', { style: 'unit', unit: 'kilometer-per-hour' }).formatToParts(987);
+        \\(p.map(x => x.type).join(',') === 'integer,literal,unit' && p[2].value === 'km/h') ? 1 : 0
+    );
+    // §6.5.1 — invalid identifier → RangeError; unit style with no unit → TypeError.
+    try evalAssert1(
+        \\let r = 0;
+        \\try { new Intl.NumberFormat('en', { style: 'unit', unit: 'century' }); } catch (e) { if (e instanceof RangeError) r++; }
+        \\try { new Intl.NumberFormat('en', { style: 'unit' }); } catch (e) { if (e instanceof TypeError) r++; }
+        \\try { new Intl.NumberFormat('en', { unit: 'not-a-unit' }); } catch (e) { if (e instanceof RangeError) r++; }
+        \\r === 3 ? 1 : 0
+    );
+}

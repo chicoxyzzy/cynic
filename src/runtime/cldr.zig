@@ -63,6 +63,7 @@ const SectionKind = enum(u8) {
     list_patterns = 10,
     relative_time = 11,
     compact = 12,
+    units = 13,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -81,6 +82,7 @@ var likely_payload: []const u8 = &.{};
 var lp_payload: []const u8 = &.{};
 var rt_payload: []const u8 = &.{};
 var cp_payload: []const u8 = &.{};
+var un_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -120,6 +122,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.list_patterns) => lp_payload = payload,
             @intFromEnum(SectionKind.relative_time) => rt_payload = payload,
             @intFromEnum(SectionKind.compact) => cp_payload = payload,
+            @intFromEnum(SectionKind.units) => un_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -821,6 +824,116 @@ pub fn compactPattern(locale: []const u8, long: bool, power: u8, cat: PluralCate
         }
     }
     return fallback;
+}
+
+// ── measurement units (Intl.NumberFormat style:"unit") ───────────────────────
+
+fn findUnitsLocale(key: []const u8) ?usize {
+    if (un_payload.len < 4) return null;
+    const count = std.mem.readInt(u32, un_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(un_payload, &off) orelse return null;
+        const k = readBytes(un_payload, &off, klen) orelse return null;
+        const data_off = off; // at compound_per[0]
+        // Skip 3 compound_per str16s + the unit list to reach the next key.
+        inline for (.{ 0, 1, 2 }) |_| _ = readStr16(un_payload, &off) orelse return null;
+        if (off + 4 > un_payload.len) return null;
+        const uc = std.mem.readInt(u32, un_payload[off..][0..4], .little);
+        off += 4;
+        var u: u32 = 0;
+        while (u < uc) : (u += 1) {
+            const slen = readU8(un_payload, &off) orelse return null;
+            _ = readBytes(un_payload, &off, slen) orelse return null;
+            inline for (.{ 0, 1, 2 }) |_| off = skipUnitStyle(off) orelse return null;
+        }
+        if (asciiEqlIgnoreCase(k, key)) return data_off;
+    }
+    return null;
+}
+
+fn skipUnitStyle(off_in: usize) ?usize {
+    var off = off_in;
+    _ = readStr16(un_payload, &off) orelse return null; // display
+    _ = readStr16(un_payload, &off) orelse return null; // per
+    const pc = readU8(un_payload, &off) orelse return null;
+    var i: usize = 0;
+    while (i < pc) : (i += 1) {
+        off += 1; // cat
+        _ = readStr16(un_payload, &off) orelse return null;
+    }
+    return off;
+}
+
+/// Offset at the (style_idx) style block's `display` str16 for one unit, or null.
+fn unitStyleBase(locale: []const u8, simple: []const u8, style_idx: u8) ?usize {
+    if (style_idx > 2) return null;
+    const data_off = withCandidates(locale, findUnitsLocale) orelse return null;
+    var off = data_off;
+    inline for (.{ 0, 1, 2 }) |_| _ = readStr16(un_payload, &off) orelse return null; // skip compound_per
+    if (off + 4 > un_payload.len) return null;
+    const uc = std.mem.readInt(u32, un_payload[off..][0..4], .little);
+    off += 4;
+    var u: u32 = 0;
+    while (u < uc) : (u += 1) {
+        const slen = readU8(un_payload, &off) orelse return null;
+        const name = readBytes(un_payload, &off, slen) orelse return null;
+        if (std.mem.eql(u8, name, simple)) {
+            var s: u8 = 0;
+            while (s < style_idx) : (s += 1) off = skipUnitStyle(off) orelse return null;
+            return off;
+        }
+        inline for (.{ 0, 1, 2 }) |_| off = skipUnitStyle(off) orelse return null;
+    }
+    return null;
+}
+
+/// The unitPattern for (locale, unit, style, plural cat), "other" fallback. The
+/// "{0}" placeholder receives the formatted number. Null when the unit is absent.
+pub fn unitPattern(locale: []const u8, simple: []const u8, style_idx: u8, cat: PluralCategory) ?[]const u8 {
+    if (!ensureInit()) return null;
+    var off = unitStyleBase(locale, simple, style_idx) orelse return null;
+    _ = readStr16(un_payload, &off) orelse return null; // display
+    _ = readStr16(un_payload, &off) orelse return null; // per
+    const pc = readU8(un_payload, &off) orelse return null;
+    var fallback: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < pc) : (i += 1) {
+        const ct = readU8(un_payload, &off) orelse return null;
+        const pat = readStr16(un_payload, &off) orelse return null;
+        if (ct == @intFromEnum(cat)) return pat;
+        if (ct == @intFromEnum(PluralCategory.other)) fallback = pat;
+    }
+    return fallback;
+}
+
+/// The perUnitPattern for (locale, unit, style) — the divisor side of a compound
+/// "X-per-Y" ("{0}/h", "{0} per hour"). Empty string when CLDR has none.
+pub fn unitPerPattern(locale: []const u8, simple: []const u8, style_idx: u8) ?[]const u8 {
+    if (!ensureInit()) return null;
+    var off = unitStyleBase(locale, simple, style_idx) orelse return null;
+    _ = readStr16(un_payload, &off) orelse return null; // display
+    return readStr16(un_payload, &off);
+}
+
+/// The displayName for (locale, unit, style) — used as "{1}" when a compound's
+/// divisor unit has no perUnitPattern. Empty string when absent.
+pub fn unitDisplay(locale: []const u8, simple: []const u8, style_idx: u8) ?[]const u8 {
+    if (!ensureInit()) return null;
+    var off = unitStyleBase(locale, simple, style_idx) orelse return null;
+    return readStr16(un_payload, &off);
+}
+
+/// The "per" compoundUnitPattern ("{0}/{1}") for (locale, style), used to combine
+/// when the divisor unit has no perUnitPattern. Empty string when absent.
+pub fn unitCompoundPer(locale: []const u8, style_idx: u8) ?[]const u8 {
+    if (!ensureInit() or style_idx > 2) return null;
+    const data_off = withCandidates(locale, findUnitsLocale) orelse return null;
+    var off = data_off;
+    var s: u8 = 0;
+    while (s < style_idx) : (s += 1) _ = readStr16(un_payload, &off) orelse return null;
+    return readStr16(un_payload, &off);
 }
 
 // ── relative time (Intl.RelativeTimeFormat) ──────────────────────────────────

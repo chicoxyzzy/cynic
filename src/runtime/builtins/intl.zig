@@ -1341,10 +1341,12 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
         slots.currency_sign = try realm.allocator.dupe(u8, cur_sign);
     }
 
-    // unit / unitDisplay: unitDisplay is validated unconditionally; the unit id
-    // itself is required + applied only for the unit style. (Sanctioned-unit
-    // validation for non-unit styles is a follow-up.)
+    // §15.1.1 unit / unitDisplay. A provided `unit` must be a well-formed unit
+    // identifier (§6.5.1) regardless of style — RangeError otherwise; the unit
+    // style additionally requires one (TypeError when absent).
     const unit = try getOptionString(realm, opts, "unit", null, "");
+    if (unit.len > 0 and !isWellFormedUnitIdentifier(unit))
+        return throwRangeError(realm, "invalid unit identifier");
     const unit_display = try getOptionString(realm, opts, "unitDisplay", &.{ "short", "narrow", "long" }, "short");
     if (is_unit_style) {
         if (unit.len == 0) return throwTypeError(realm, "unit option required for unit style");
@@ -1408,6 +1410,37 @@ fn getUseGroupingOwned(realm: *Realm, opts: ?*JSObject) NativeError![]const u8 {
     if (std.mem.eql(u8, s, "always") or std.mem.eql(u8, s, "auto") or std.mem.eql(u8, s, "min2"))
         return realm.allocator.dupe(u8, s) catch error.OutOfMemory;
     return throwRangeError(realm, "invalid useGrouping value");
+}
+
+/// §6.5.1 — the sanctioned single-unit identifiers for Intl.NumberFormat's
+/// `unit` option. Mirrors the packer's list; needed for validation even at
+/// -Dintl=stub (structural, no CLDR data).
+const sanctioned_unit_names = [_][]const u8{
+    "acre",        "bit",      "byte",              "celsius",     "centimeter",
+    "day",         "degree",   "fahrenheit",        "fluid-ounce", "foot",
+    "gallon",      "gigabit",  "gigabyte",          "gram",        "hectare",
+    "hour",        "inch",     "kilobit",           "kilobyte",    "kilogram",
+    "kilometer",   "liter",    "megabit",           "megabyte",    "meter",
+    "microsecond", "mile",     "mile-scandinavian", "milliliter",  "millimeter",
+    "millisecond", "minute",   "month",             "nanosecond",  "ounce",
+    "percent",     "petabyte", "pound",             "second",      "stone",
+    "terabit",     "terabyte", "week",              "yard",        "year",
+};
+
+/// §6.5.2 IsSanctionedSingleUnitIdentifier.
+fn isSanctionedSingleUnit(u: []const u8) bool {
+    for (sanctioned_unit_names) |n| if (std.mem.eql(u8, n, u)) return true;
+    return false;
+}
+
+/// §6.5.1 IsWellFormedUnitIdentifier — a sanctioned single unit, or "X-per-Y"
+/// where both X and Y are sanctioned single units (split at the first "-per-").
+fn isWellFormedUnitIdentifier(u: []const u8) bool {
+    if (isSanctionedSingleUnit(u)) return true;
+    const per = std.mem.indexOf(u8, u, "-per-") orelse return false;
+    const num = u[0..per];
+    const den = u[per + 5 ..];
+    return isSanctionedSingleUnit(num) and isSanctionedSingleUnit(den);
 }
 
 /// §15.1.1 SetNumberFormatDigitOptions (fraction / significant subset). Reads
@@ -1725,6 +1758,52 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         return n;
     }
 
+    // §15.5 unit style — format the number plainly (sign + grouped integer +
+    // fraction) and wrap it in the locale's unit pattern (single or compound
+    // "X-per-Y"), emitting the unit text as a single "unit" part and the
+    // surrounding spaces as "literal". Isolated path: the unit pattern is a
+    // "{0}" template, not a CLDR number skeleton, so it bypasses the affix logic.
+    if (std.mem.eql(u8, slots.style, "unit") and slots.unit.len > 0) {
+        const style_idx: u8 = if (std.mem.eql(u8, slots.unit_display, "long"))
+            0
+        else if (std.mem.eql(u8, slots.unit_display, "narrow")) 2 else 1;
+        const loc = slots.base.dataLocale();
+        const minf = slots.minimum_fraction_digits orelse 0;
+        const maxf = slots.maximum_fraction_digits orelse 3;
+        const cat = cldr.selectPlural(loc, false, cldr.computeOperands(@abs(x), minf, maxf));
+        var patbuf: [256]u8 = undefined;
+        const combined = unitCombinedPattern(slots.unit, loc, style_idx, cat, &patbuf) orelse "{0}";
+        const z = std.mem.indexOf(u8, combined, "{0}") orelse combined.len;
+        const prefix = combined[0..z];
+        const suffix = if (z + 3 <= combined.len) combined[z + 3 ..] else "";
+
+        if (signShows(slots.sign_display, negative, is_zero))
+            append(out, &n, if (negative) "minusSign" else "plusSign", if (negative) nd.minus else nd.plus);
+        if (prefix.len > 0) {
+            var pe = prefix.len;
+            while (pe > 0 and prefix[pe - 1] == ' ') pe -= 1;
+            if (pe > 0) append(out, &n, "unit", prefix[0..pe]);
+            if (pe < prefix.len) append(out, &n, "literal", prefix[pe..]);
+        }
+        if (non_finite) {
+            append(out, &n, if (is_nan) "nan" else "infinity", if (is_nan) nd.nan else nd.infinity);
+        } else {
+            appendGroupedInteger(out, &n, int_pad[0..ip_len], slots, nd, digit_base, append);
+            if (frac_len > 0) {
+                append(out, &n, "decimal", nd.decimal);
+                var sub: [256]u8 = undefined;
+                append(out, &n, "fraction", substituteDigits(frac_ascii[0..frac_len], digit_base, &sub));
+            }
+        }
+        if (suffix.len > 0) {
+            var ss: usize = 0;
+            while (ss < suffix.len and suffix[ss] == ' ') ss += 1;
+            if (ss > 0) append(out, &n, "literal", suffix[0..ss]);
+            if (ss < suffix.len) append(out, &n, "unit", suffix[ss..]);
+        }
+        return n;
+    }
+
     // §15.5 scientific / engineering notation — an isolated path: normalize the
     // magnitude to a mantissa (1 ≤ |m| < 10, or < 1000 for engineering with the
     // exponent a multiple of 3), round the mantissa, and emit
@@ -1919,6 +1998,56 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
 
     if (is_currency) appendCurrencyAffix(out, &n, affix.suffix, cur_display, suffix_space, append) else appendAffix(out, &n, affix.suffix, nd, append);
     return n;
+}
+
+/// Clamped copy into buf at off; returns bytes written (never overruns).
+fn copyClamp(buf: []u8, off: usize, s: []const u8) usize {
+    if (off >= buf.len) return 0;
+    const n = @min(s.len, buf.len - off);
+    @memcpy(buf[off..][0..n], s[0..n]);
+    return n;
+}
+
+/// Substitute the first "{0}" in `template` with `v` into `buf`.
+fn subst0(template: []const u8, v: []const u8, buf: []u8) []const u8 {
+    const idx = std.mem.indexOf(u8, template, "{0}") orelse return buf[0..copyClamp(buf, 0, template)];
+    var n: usize = 0;
+    n += copyClamp(buf, n, template[0..idx]);
+    n += copyClamp(buf, n, v);
+    n += copyClamp(buf, n, template[idx + 3 ..]);
+    return buf[0..n];
+}
+
+/// Substitute "{0}" → v0 then "{1}" → v1 (v0 may itself contain "{0}", which is
+/// preserved). Used for the compound-unit fallback "{0}/{1}".
+fn subst01(template: []const u8, v0: []const u8, v1: []const u8, buf: []u8) []const u8 {
+    var tmp: [256]u8 = undefined;
+    const s0 = subst0(template, v0, &tmp);
+    const idx = std.mem.indexOf(u8, s0, "{1}") orelse return buf[0..copyClamp(buf, 0, s0)];
+    var n: usize = 0;
+    n += copyClamp(buf, n, s0[0..idx]);
+    n += copyClamp(buf, n, v1);
+    n += copyClamp(buf, n, s0[idx + 3 ..]);
+    return buf[0..n];
+}
+
+/// §15.5 — combine the CLDR unit patterns for a (possibly compound "X-per-Y")
+/// unit into a single template carrying one "{0}" number placeholder. A compound
+/// applies the divisor unit's perUnitPattern to the numerator's formatted unit
+/// ("{0} km" through hour's "{0}/h" → "{0} km/h"), falling back to the locale
+/// "per" compound pattern + the divisor displayName when no perUnitPattern.
+fn unitCombinedPattern(unit: []const u8, loc: []const u8, style_idx: u8, cat: cldr.PluralCategory, buf: []u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, unit, "-per-")) |p| {
+        const num = unit[0..p];
+        const den = unit[p + 5 ..];
+        const pat_num = cldr.unitPattern(loc, num, style_idx, cat) orelse "{0}";
+        const per_den = cldr.unitPerPattern(loc, den, style_idx) orelse "";
+        if (per_den.len > 0) return subst0(per_den, pat_num, buf);
+        const comp = cldr.unitCompoundPer(loc, style_idx) orelse "{0} {1}";
+        const den_disp = cldr.unitDisplay(loc, den, style_idx) orelse den;
+        return subst01(comp, pat_num, den_disp, buf);
+    }
+    return cldr.unitPattern(loc, unit, style_idx, cat);
 }
 
 const Affix = struct { prefix: []const u8, suffix: []const u8 };
