@@ -705,6 +705,28 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
     return try out.toOwnedSlice(allocator);
 }
 
+/// UTS #35 §3.2.1 — `-u-` keys whose `true` type is the default and is dropped
+/// in canonical form; these keys also alias `yes` → `true`.
+fn isBooleanUKey(key: []const u8) bool {
+    return std.mem.eql(u8, key, "kb") or std.mem.eql(u8, key, "kc") or
+        std.mem.eql(u8, key, "kh") or std.mem.eql(u8, key, "kk") or
+        std.mem.eql(u8, key, "kn");
+}
+
+/// UTS #35 §3.2.1 — replace a `-u-` type value by its canonical form from the
+/// bcp47 data. Only the finite type-alias sets that can appear as a valid
+/// `uvalue` (alphanum{3,8}) subtag are mapped; longer aliases (`secondary`,
+/// `identical`) can never occur as input and need no entry.
+fn canonicalUnicodeType(key: []const u8, value: []const u8) []const u8 {
+    if (isBooleanUKey(key) and std.mem.eql(u8, value, "yes")) return "true";
+    if (std.mem.eql(u8, key, "ks")) {
+        if (std.mem.eql(u8, value, "primary")) return "level1";
+        if (std.mem.eql(u8, value, "tertiary")) return "level3";
+    }
+    if (std.mem.eql(u8, key, "ms") and std.mem.eql(u8, value, "imperial")) return "uksystem";
+    return value;
+}
+
 fn appendUnicodeKeywords(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -733,13 +755,27 @@ fn appendUnicodeKeywords(
         }
         var end = i + 1;
         while (end < items.len and items[end].len != 2) : (end += 1) {}
-        // Concatenate items[i..end] with '-'.
+        // §3.2.1 — canonicalise the type values, then drop a default `true`
+        // type on a boolean key. Build the surviving segment list (key first).
+        const key = items[i];
+        const boolean_key = isBooleanUKey(key);
+        var segs: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer segs.deinit(allocator);
+        try segs.append(allocator, key);
+        for (items[i + 1 .. end]) |raw_type| {
+            const canon = canonicalUnicodeType(key, raw_type);
+            // A boolean key with the single value `true` canonicalises to the
+            // bare key (`und-u-kn-true` → `und-u-kn`).
+            if (boolean_key and end - i == 2 and std.mem.eql(u8, canon, "true")) continue;
+            try segs.append(allocator, canon);
+        }
+        // Concatenate the surviving segments with '-'.
         var total: usize = 0;
-        for (items[i..end]) |s| total += s.len;
-        total += end - i - 1; // separators
+        for (segs.items) |s| total += s.len;
+        total += segs.items.len - 1; // separators
         const buf = try allocator.alloc(u8, total);
         var pos: usize = 0;
-        for (items[i..end], 0..) |s, idx| {
+        for (segs.items, 0..) |s, idx| {
             if (idx > 0) {
                 buf[pos] = '-';
                 pos += 1;

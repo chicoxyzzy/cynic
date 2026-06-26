@@ -1976,3 +1976,16 @@ test "intl: Locale numeric canonicalization + firstDayOfWeek (§14.1)" {
         \\ thrown({ firstDayOfWeek: 'xyz' }) === 'RangeError') ? 1 : 0
     );
 }
+
+test "intl: getCanonicalLocales -u- type canonicalization (§3.2.1)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const g = (t) => Intl.getCanonicalLocales(t)[0];
+        \\(g('und-u-kb-yes') === 'und-u-kb' &&            // yes → true → dropped (boolean key)
+        \\ g('und-u-kn-true') === 'und-u-kn' &&           // default true dropped
+        \\ g('und-u-ks-primary') === 'und-u-ks-level1' && // collation-strength alias
+        \\ g('und-u-ks-tertiary') === 'und-u-ks-level3' &&
+        \\ g('und-u-ms-imperial') === 'und-u-ms-uksystem' && // measurement-system alias
+        \\ g('de-u-co-phonebk') === 'de-u-co-phonebk') ? 1 : 0 // non-aliased type untouched
+    );
+}
