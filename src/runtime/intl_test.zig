@@ -1989,3 +1989,20 @@ test "intl: getCanonicalLocales -u- type canonicalization (§3.2.1)" {
         \\ g('de-u-co-phonebk') === 'de-u-co-phonebk') ? 1 : 0 // non-aliased type untouched
     );
 }
+
+test "intl: CanonicalizeLocaleList HasProperty + element type (§9.2.1)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const g = Intl.getCanonicalLocales;
+        \\const thrown = (fn) => { try { fn(); return ''; } catch (e) { return e.constructor.name; } };
+        \\(thrown(() => g([undefined])) === 'TypeError' &&   // present undefined → TypeError (step 7.c.ii)
+        \\ thrown(() => g([2])) === 'TypeError' &&           // number is not String/Object (not RangeError)
+        \\ thrown(() => g([true])) === 'TypeError' &&        // boolean, not the tag "true"
+        \\ thrown(() => g(null)) === 'TypeError' &&          // ToObject(null)
+        \\ JSON.stringify(g([, 'en'])) === '["en"]' &&       // a hole is absent → skipped
+        \\ thrown(() => {                                    // Proxy `has` trap is observed (step 7.b)
+        \\   const p = new Proxy({ 0: 'en', length: 1 }, { has() { throw new RangeError('trap'); } });
+        \\   g(p);
+        \\ }) === 'RangeError') ? 1 : 0
+    );
+}

@@ -248,13 +248,32 @@ pub fn canonicalizeLocaleList(realm: *Realm, locales: Value) NativeError![]const
     while (i < len) : (i += 1) {
         var idx_buf: [24]u8 = undefined;
         const idx_key = std.fmt.bufPrint(&idx_buf, "{d}", .{i}) catch unreachable;
+        // §9.2.1 step 7.b — `kPresent = ? HasProperty(O, Pk)`. Holes are
+        // skipped; a present index with a non-String / non-Object value (incl.
+        // an explicit `undefined`) throws TypeError inside appendLocaleElement.
+        // The HasProperty must trap so a Proxy `has` handler is observed.
+        if (!try hasPropertyP(realm, obj, idx_key)) continue;
         const el = try getPropertyChain(realm, obj, idx_key);
-        // Absent indices are skipped; a present non-String / non-Object element
-        // throws inside appendLocaleElement (§9.2.1 step 7.c.iii).
-        if (el.isUndefined()) continue;
         try appendLocaleElement(realm, &list, &seen, el);
     }
     return list.toOwnedSlice(allocator) catch return error.OutOfMemory;
+}
+
+/// §7.3.11 HasProperty — proxy-aware (dispatches the Proxy `has` trap §10.5.7
+/// before §10.1.7.1 OrdinaryHasProperty).
+fn hasPropertyP(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
+    const proxy_mod = @import("proxy.zig");
+    var cur = obj;
+    while (cur.proxy_target != null or cur.proxy_revoked) {
+        switch (try proxy_mod.nativeProxyHas(realm, cur, key, null)) {
+            .boolean => |b| return b,
+            .fallthrough => |t| {
+                if (t == cur) return cur.hasProperty(key);
+                cur = t;
+            },
+        }
+    }
+    return cur.hasProperty(key);
 }
 
 fn appendLocaleElement(
@@ -271,8 +290,12 @@ fn appendLocaleElement(
                 if (rec.* == .locale) break :blk rec.locale.locale;
             }
         }
-        if (el.isUndefined() or el.isNull()) return throwTypeError(realm, "locale must be a string or object");
-        // ToString coerces primitives; objects go through ToPrimitive.
+        // §9.2.1 step 7.c.ii — only a String or an Object is accepted; a
+        // number / boolean / symbol / bigint / null / undefined throws a
+        // TypeError (it is NOT coerced via ToString, which would mis-report
+        // `[2]` as a RangeError or accept `[true]` as the tag "true").
+        if (!el.isString() and !el.isObject()) return throwTypeError(realm, "locale must be a string or object");
+        // String is itself; a (non-Locale) Object goes through ToPrimitive.
         const s = try valueToStringSlice(realm, el);
         break :blk s;
     };
