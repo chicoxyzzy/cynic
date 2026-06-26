@@ -1904,3 +1904,14 @@ test "intl: NumberFormat roundingMode sign-aware + fraction digits (§15.1.1)" {
         \\ f(1.005, 'halfExpand', { maximumFractionDigits: 2, minimumFractionDigits: 2 }) === '1.01') ? 1 : 0
     );
 }
+
+test "intl: NumberFormat compact min2 grouping + no-compaction buckets (§15.1)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const c = (loc, v) => new Intl.NumberFormat(loc, { notation: 'compact' }).format(v);
+        \\// compact defaults useGrouping:"min2" → no group below ~10,000; Japanese
+        \\// has no compact form below 万 (10⁴) so 9876 renders in full.
+        \\(c('ja', 9876) === '9876' && c('ja', 12345) === '1.2万' &&
+        \\ c('en', 9876) === '9.9K' && c('en', 999) === '999') ? 1 : 0
+    );
+}

@@ -1365,7 +1365,9 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     }
     slots.notation = try getOptionStringOwned(realm, opts, "notation", &.{ "standard", "scientific", "engineering", "compact" }, "standard");
     slots.compact_display = try getOptionStringOwned(realm, opts, "compactDisplay", &.{ "short", "long" }, "short");
-    slots.use_grouping = try getUseGroupingOwned(realm, opts);
+    // §15.1.2 — useGrouping defaults to "min2" under compact notation, "auto"
+    // otherwise (so compact omits grouping below ~10,000).
+    slots.use_grouping = try getUseGroupingOwned(realm, opts, if (std.mem.eql(u8, slots.notation, "compact")) "min2" else "auto");
 
     // §15.1.1 SetNumberFormatDigitOptions — fraction-digit defaults vary by
     // style: percent → min 0 / max 0; decimal → min 0 / max 3; currency →
@@ -1404,12 +1406,13 @@ fn getNumberOption(realm: *Realm, opts: ?*JSObject, key: []const u8, min: u32, m
 
 /// §15.1.2 GetUnsignedRoundingMode-adjacent useGrouping reader — accepts the
 /// string forms plus the legacy boolean; stores a canonical string.
-fn getUseGroupingOwned(realm: *Realm, opts: ?*JSObject) NativeError![]const u8 {
-    // §15.1.2 GetBooleanOrStringNumberFormatOption(«"min2","auto","always"», "auto").
-    // Internal "false" represents the boolean false; resolvedOptions maps it back.
-    const obj = opts orelse return realm.allocator.dupe(u8, "auto") catch error.OutOfMemory;
+fn getUseGroupingOwned(realm: *Realm, opts: ?*JSObject, default_value: []const u8) NativeError![]const u8 {
+    // §15.1.2 GetBooleanOrStringNumberFormatOption(«"min2","auto","always"», def).
+    // `default_value` is "min2" under compact notation, else "auto". Internal
+    // "false" represents the boolean false; resolvedOptions maps it back.
+    const obj = opts orelse return realm.allocator.dupe(u8, default_value) catch error.OutOfMemory;
     const v = try getPropertyChain(realm, obj, "useGrouping");
-    if (v.isUndefined()) return realm.allocator.dupe(u8, "auto") catch error.OutOfMemory;
+    if (v.isUndefined()) return realm.allocator.dupe(u8, default_value) catch error.OutOfMemory;
     if (v.isBool()) return realm.allocator.dupe(u8, if (v.toBooleanPrimitive()) "always" else "false") catch error.OutOfMemory;
     // A falsy non-boolean (0, "", null, NaN) → false; a truthy non-string then
     // ToString'd. The strings "true"/"false" are NOT valid values → fallback.
@@ -2009,10 +2012,14 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
                 const bucket: u8 = @intCast(@min(mag, @as(i32, 14)));
                 const pat0 = cldr.compactPattern(loc, long, bucket, .other) orelse break;
                 var zeros: usize = 0;
+                var has_affix = false;
                 for (pat0) |c| {
-                    if (c == '0') zeros += 1;
+                    if (c == '0') zeros += 1 else if (c != '.') has_affix = true;
                 }
-                if (zeros == 0) break; // uncompacted bucket → standard path
+                // A pattern that is only "0"s (no suffix/prefix) is CLDR's
+                // no-compaction marker for that magnitude — e.g. Japanese has no
+                // compact form below 万 (10⁴), so 9876 renders in full, not "9.9".
+                if (zeros == 0 or !has_affix) break; // → standard (uncompacted) path
                 const div_exp: i32 = mag - @as(i32, @intCast(zeros)) + 1;
                 const cv = m / std.math.pow(f64, 10, @floatFromInt(div_exp));
                 roundDigits(slots, cv, negative, &ci, &cil, &cf, &cfl);
