@@ -1514,3 +1514,12 @@ test "intl: NumberFormat roundingIncrement rounds to the increment grid" {
         \\ new Intl.NumberFormat('en').format(1.235) === '1.235') ? 1 : 0
     );
 }
+
+test "intl: useGrouping resolution + min2" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const r = (o) => new Intl.NumberFormat(undefined, { useGrouping: o }).resolvedOptions().useGrouping;
+        \\(r('min2') === 'min2' && r(true) === 'always' && r(false) === false &&
+        \\ r(undefined) === 'auto' && r('true') === 'auto' && r(0) === false) ? 1 : 0
+    );
+}

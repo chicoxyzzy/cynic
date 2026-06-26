@@ -1393,15 +1393,20 @@ fn getNumberOption(realm: *Realm, opts: ?*JSObject, key: []const u8, min: u32, m
 /// §15.1.2 GetUnsignedRoundingMode-adjacent useGrouping reader — accepts the
 /// string forms plus the legacy boolean; stores a canonical string.
 fn getUseGroupingOwned(realm: *Realm, opts: ?*JSObject) NativeError![]const u8 {
+    // §15.1.2 GetBooleanOrStringNumberFormatOption(«"min2","auto","always"», "auto").
+    // Internal "false" represents the boolean false; resolvedOptions maps it back.
     const obj = opts orelse return realm.allocator.dupe(u8, "auto") catch error.OutOfMemory;
     const v = try getPropertyChain(realm, obj, "useGrouping");
     if (v.isUndefined()) return realm.allocator.dupe(u8, "auto") catch error.OutOfMemory;
     if (v.isBool()) return realm.allocator.dupe(u8, if (v.toBooleanPrimitive()) "always" else "false") catch error.OutOfMemory;
+    // A falsy non-boolean (0, "", null, NaN) → false; a truthy non-string then
+    // ToString'd. The strings "true"/"false" are NOT valid values → fallback.
+    if (!toBoolean(v)) return realm.allocator.dupe(u8, "false") catch error.OutOfMemory;
     const s = try valueToStringSlice(realm, v);
+    if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "false"))
+        return realm.allocator.dupe(u8, "auto") catch error.OutOfMemory;
     if (std.mem.eql(u8, s, "always") or std.mem.eql(u8, s, "auto") or std.mem.eql(u8, s, "min2"))
         return realm.allocator.dupe(u8, s) catch error.OutOfMemory;
-    if (std.mem.eql(u8, s, "true")) return realm.allocator.dupe(u8, "always") catch error.OutOfMemory;
-    if (std.mem.eql(u8, s, "false")) return realm.allocator.dupe(u8, "false") catch error.OutOfMemory;
     return throwRangeError(realm, "invalid useGrouping value");
 }
 
@@ -1926,7 +1931,7 @@ fn appendGroupedInteger(out: []Seg, n: *u32, int_ascii: []const u8, slots: *cons
     // UTS #35 minimumGroupingDigits: suppress grouping until the integer has at
     // least primaryGroupingSize + minimumGroupingDigits digits (so pl/es keep
     // "1000" but group "10 000"). useGrouping:"always" overrides the threshold.
-    const min_group: usize = if (std.mem.eql(u8, slots.use_grouping, "always")) 1 else nd.min_group;
+    const min_group: usize = if (std.mem.eql(u8, slots.use_grouping, "always")) 1 else if (std.mem.eql(u8, slots.use_grouping, "min2")) 2 else nd.min_group;
     if (!grouping or g.primary == 0 or int_ascii.len < g.primary + min_group) {
         var sub: [256]u8 = undefined;
         append(out, n, "integer", substituteDigits(int_ascii, digit_base, &sub));
