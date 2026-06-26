@@ -1788,3 +1788,23 @@ test "intl: DateTimeFormat formats Temporal objects (§11.5.x bridge)" {
         \\ thrown(() => ds({ dateStyle: 'short' }, new Temporal.ZonedDateTime(0n, 'UTC'))) === 'TypeError') ? 1 : 0
     );
 }
+
+test "intl: DateTimeFormat formatRange of Temporal objects (§11.5.6)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const dtf = new Intl.DateTimeFormat('en', { dateStyle: 'short', calendar: 'iso8601', timeZone: 'UTC' });
+        \\const pd1 = new Temporal.PlainDate(2024, 1, 1), pd2 = new Temporal.PlainDate(2024, 1, 5);
+        \\const pt = new Temporal.PlainTime(12, 0);
+        \\const thrown = (f) => { try { f(); return ''; } catch (e) { return e.constructor.name; } };
+        \\(dtf.formatRange(pd1, pd2) === '1/1/24 – 1/5/24' &&
+        \\ // distinct Temporal types, and Temporal mixed with legacy → TypeError
+        \\ thrown(() => dtf.formatRange(pd1, pt)) === 'TypeError' &&
+        \\ thrown(() => dtf.formatRange(pd1, Date.now())) === 'TypeError') ? 1 : 0
+    );
+    try evalAssert1(
+        \\const dtf = new Intl.DateTimeFormat('en', { dateStyle: 'short', calendar: 'iso8601', timeZone: 'UTC' });
+        \\const p = dtf.formatRangeToParts(new Temporal.PlainDate(2024, 1, 1), new Temporal.PlainDate(2024, 1, 5));
+        \\(p.some(x => x.source === 'startRange') && p.some(x => x.source === 'shared') &&
+        \\ p.some(x => x.source === 'endRange')) ? 1 : 0
+    );
+}

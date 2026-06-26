@@ -2805,13 +2805,19 @@ fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Val
     const av = argOr(args, 0, Value.undefined_);
     const bv = argOr(args, 1, Value.undefined_);
     if (av.isUndefined() or bv.isUndefined()) return throwTypeError(realm, "formatRange requires two arguments");
-    const a = try dtfTimeValue(realm, av);
-    const b = try dtfTimeValue(realm, bv);
+    // §11.5.6 — both endpoints must be the same kind (both legacy, or the same
+    // Temporal type); mixing throws TypeError.
+    if (!dtfSameKind(dtfArgTemporalKind(av), dtfArgTemporalKind(bv)))
+        return throwTypeError(realm, "formatRange endpoints must be the same type");
     if (!cldr.available) return makeStringValue(realm, "");
+    var sega: [48]Seg = undefined;
+    var segb: [48]Seg = undefined;
+    const na = try dtfRenderArg(realm, &rec.date_time_format, av, &sega);
+    const nb = try dtfRenderArg(realm, &rec.date_time_format, bv, &segb);
     var bufa: [256]u8 = undefined;
     var bufb: [256]u8 = undefined;
-    const sa = renderDateTimeFlat(&rec.date_time_format, a, &bufa);
-    const sb = renderDateTimeFlat(&rec.date_time_format, b, &bufb);
+    const sa = flattenSegs(&sega, na, &bufa);
+    const sb = flattenSegs(&segb, nb, &bufb);
     // Identical renderings collapse to a single date (no range separator).
     if (std.mem.eql(u8, sa, sb)) return makeStringValue(realm, sa);
     const joined = std.fmt.allocPrint(realm.allocator, "{s} – {s}", .{ sa, sb }) catch return error.OutOfMemory;
@@ -2824,8 +2830,8 @@ fn dateTimeFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []co
     const av = argOr(args, 0, Value.undefined_);
     const bv = argOr(args, 1, Value.undefined_);
     if (av.isUndefined() or bv.isUndefined()) return throwTypeError(realm, "formatRangeToParts requires two arguments");
-    const a = try dtfTimeValue(realm, av);
-    const b = try dtfTimeValue(realm, bv);
+    if (!dtfSameKind(dtfArgTemporalKind(av), dtfArgTemporalKind(bv)))
+        return throwTypeError(realm, "formatRangeToParts endpoints must be the same type");
     const arr = allocateArray(realm) catch return error.OutOfMemory;
     if (!cldr.available) {
         arr.setArrayLength(realm.allocator, 0) catch return error.OutOfMemory;
@@ -2833,8 +2839,8 @@ fn dateTimeFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []co
     }
     var sa: [48]Seg = undefined;
     var sb: [48]Seg = undefined;
-    const na = renderDateTime(&rec.date_time_format, a, &sa);
-    const nb = renderDateTime(&rec.date_time_format, b, &sb);
+    const na = try dtfRenderArg(realm, &rec.date_time_format, av, &sa);
+    const nb = try dtfRenderArg(realm, &rec.date_time_format, bv, &sb);
     // Identical renderings → one date, every part sourced "shared".
     var same = na == nb;
     if (same) {
@@ -3400,6 +3406,29 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
         }
     }
     return renderDateTime(slots, try dtfTimeValue(realm, arg), out);
+}
+
+/// The Temporal type of `arg` (null for a legacy time value), used by
+/// formatRange to reject endpoints of differing types.
+fn dtfArgTemporalKind(arg: Value) ?temporal.TemporalKind {
+    if (heap_mod.valueAsPlainObject(arg)) |o| {
+        if (o.getTemporalRecord()) |rec| return std.meta.activeTag(rec.*);
+    }
+    return null;
+}
+
+fn dtfSameKind(a: ?temporal.TemporalKind, b: ?temporal.TemporalKind) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return a.? == b.?;
+}
+
+/// Flatten rendered segments into `buf`, returning the concatenated string.
+fn flattenSegs(segs: []const Seg, n: u32, buf: []u8) []const u8 {
+    var len: usize = 0;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) len += copyClamp(buf, len, segs[i].bytes());
+    return buf[0..len];
 }
 
 fn renderDateTimeFlat(slots: *const intl.DateTimeFormatSlots, ms: f64, buf: []u8) []const u8 {
