@@ -1890,3 +1890,17 @@ test "intl: NumberFormat roundingMode with significant digits (§15.1.1)" {
         \\ f(1.15, 'halfExpand') === '1.2') ? 1 : 0
     );
 }
+
+test "intl: NumberFormat roundingMode sign-aware + fraction digits (§15.1.1)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const f = (v, m, o) => new Intl.NumberFormat('en', { useGrouping: false, roundingMode: m, ...o }).format(v);
+        \\// Negatives swap ceil/floor (round toward ±∞ on the number line).
+        \\(f(-1.101, 'floor', { maximumSignificantDigits: 2 }) === '-1.2' &&
+        \\ f(-1.101, 'ceil', { maximumSignificantDigits: 2 }) === '-1.1' &&
+        \\ f(-1.101, 'floor', { maximumFractionDigits: 2, minimumFractionDigits: 2 }) === '-1.11' &&
+        \\ f(-1.105, 'ceil', { maximumFractionDigits: 2, minimumFractionDigits: 2 }) === '-1.10' &&
+        \\ f(2.5, 'halfExpand', { maximumFractionDigits: 0 }) === '3' &&
+        \\ f(1.005, 'halfExpand', { maximumFractionDigits: 2, minimumFractionDigits: 2 }) === '1.01') ? 1 : 0
+    );
+}

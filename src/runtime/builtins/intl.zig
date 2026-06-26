@@ -1826,7 +1826,7 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
     if (!non_finite) {
         const scale: f64 = if (is_percent) 100 else 1;
         const magnitude = @abs(x) * scale;
-        roundDigits(slots, magnitude, &int_ascii, &int_len, &frac_ascii, &frac_len);
+        roundDigits(slots, magnitude, negative, &int_ascii, &int_len, &frac_ascii, &frac_len);
 
         is_zero = blk: {
             for (int_ascii[0..int_len]) |c| if (c != '0') break :blk false;
@@ -1959,13 +1959,13 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         var mil: usize = 0;
         var mf: [160]u8 = undefined;
         var mfl: usize = 0;
-        roundDigits(slots, mant, &mi, &mil, &mf, &mfl);
+        roundDigits(slots, mant, negative, &mi, &mil, &mf, &mfl);
         // Rounding may carry the mantissa to 10 (e.g. 9.999→"10"); renormalize.
         if (mil > (if (eng) @as(usize, 3) else 1) and m > 0) {
             exp += @intCast(mil - 1);
             if (eng) exp = @divFloor(exp, 3) * 3;
             mant = m / std.math.pow(f64, 10, @floatFromInt(exp));
-            roundDigits(slots, mant, &mi, &mil, &mf, &mfl);
+            roundDigits(slots, mant, negative, &mi, &mil, &mf, &mfl);
         }
 
         if (signShows(slots.sign_display, negative, is_zero))
@@ -2015,7 +2015,7 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
                 if (zeros == 0) break; // uncompacted bucket → standard path
                 const div_exp: i32 = mag - @as(i32, @intCast(zeros)) + 1;
                 const cv = m / std.math.pow(f64, 10, @floatFromInt(div_exp));
-                roundDigits(slots, cv, &ci, &cil, &cf, &cfl);
+                roundDigits(slots, cv, negative, &ci, &cil, &cf, &cfl);
                 if (cil > zeros and mag < 14) {
                     mag += 1; // carry crossed the bucket width — promote and retry
                     continue;
@@ -2444,6 +2444,18 @@ fn snapToSignificant(x: f64, sig: u32) f64 {
     return @round(x * f) / f;
 }
 
+/// §15.1.x GetUnsignedRoundingMode — applied to a magnitude (always ≥ 0), a
+/// negative value swaps the directed modes: ceil↔floor, halfCeil↔halfFloor.
+/// expand/trunc/halfExpand/halfTrunc/halfEven are sign-symmetric.
+fn effectiveMode(mode: []const u8, neg: bool) []const u8 {
+    if (!neg) return mode;
+    if (std.mem.eql(u8, mode, "ceil")) return "floor";
+    if (std.mem.eql(u8, mode, "floor")) return "ceil";
+    if (std.mem.eql(u8, mode, "halfCeil")) return "halfFloor";
+    if (std.mem.eql(u8, mode, "halfFloor")) return "halfCeil";
+    return mode;
+}
+
 fn roundToIncrement(magnitude: f64, frac_digits: u32, increment: u32, mode: []const u8) f64 {
     const scale = std.math.pow(f64, 10, @floatFromInt(frac_digits));
     const inc: f64 = @floatFromInt(increment);
@@ -2454,7 +2466,7 @@ fn roundToIncrement(magnitude: f64, frac_digits: u32, increment: u32, mode: []co
     return rq * inc / scale;
 }
 
-fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
+fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, neg: bool, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
     if (!std.math.isFinite(magnitude) or magnitude >= 1e21) {
         // Fallback: trunc to integer digits (rare path; non-finite handled upstream).
         var dec = dtoa.Decimal{};
@@ -2467,7 +2479,7 @@ fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []
     }
 
     if (std.mem.eql(u8, slots.rounding_type, "significantDigits")) {
-        roundSig(slots, magnitude, int_buf, int_len, frac_buf, frac_len);
+        roundSig(slots, magnitude, neg, int_buf, int_len, frac_buf, frac_len);
         return;
     }
     // §15.1.1 roundingPriority morePrecision / lessPrecision — compute both the
@@ -2482,12 +2494,12 @@ fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []
         var sil: usize = 0;
         var sf: [160]u8 = undefined;
         var sfl: usize = 0;
-        roundSig(slots, magnitude, &si, &sil, &sf, &sfl);
+        roundSig(slots, magnitude, neg, &si, &sil, &sf, &sfl);
         var fi: [160]u8 = undefined;
         var fil: usize = 0;
         var ff: [160]u8 = undefined;
         var ffl: usize = 0;
-        roundFrac(slots, magnitude, &fi, &fil, &ff, &ffl);
+        roundFrac(slots, magnitude, neg, &fi, &fil, &ff, &ffl);
         const more = std.mem.eql(u8, slots.rounding_type, "morePrecision");
         const max_sig: i32 = @intCast(slots.maximum_significant_digits orelse 21);
         const max_frac: i32 = @intCast(slots.maximum_fraction_digits orelse 0);
@@ -2507,11 +2519,11 @@ fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []
         }
         return;
     }
-    roundFrac(slots, magnitude, int_buf, int_len, frac_buf, frac_len);
+    roundFrac(slots, magnitude, neg, int_buf, int_len, frac_buf, frac_len);
 }
 
 /// ToRawPrecision — significant-digit rounding into int/frac ASCII.
-fn roundSig(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
+fn roundSig(slots: *const intl.NumberFormatSlots, magnitude: f64, neg: bool, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
     const maxsd = slots.maximum_significant_digits orelse 21;
     const minsd = slots.minimum_significant_digits orelse 1;
     if (magnitude == 0) {
@@ -2532,7 +2544,7 @@ fn roundSig(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []u8,
     const scale = std.math.pow(f64, 10, scale_exp);
     const q_raw = magnitude * scale;
     const q = if (maxsd <= 14) snapToSignificant(q_raw, 14) else q_raw;
-    const rounded = applyRoundingModeNonNeg(q, slots.rounding_mode) / scale;
+    const rounded = applyRoundingModeNonNeg(q, effectiveMode(slots.rounding_mode, neg)) / scale;
     var dec = dtoa.Decimal{};
     dtoa.precisionDigits(rounded, maxsd, &dec);
     splitByPoint(dec.digits(), dec.point_exp, int_buf, int_len, frac_buf, frac_len);
@@ -2541,15 +2553,22 @@ fn roundSig(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []u8,
 
 /// ToRawFixed — fraction-digit rounding (+ roundingIncrement, trailing-zero
 /// trim, trailingZeroDisplay) into int/frac ASCII.
-fn roundFrac(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
+fn roundFrac(slots: *const intl.NumberFormatSlots, magnitude: f64, neg: bool, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
     const maxfd = slots.maximum_fraction_digits orelse 3;
     const minfd = slots.minimum_fraction_digits orelse 0;
-    // §15.1.x roundingIncrement: round the magnitude to the nearest multiple of
-    // increment × 10^-maxfd (using the rounding mode) before extracting digits.
+    const mode = effectiveMode(slots.rounding_mode, neg);
+    // §15.1.x ToRawFixed honoring the rounding mode. roundingIncrement rounds to
+    // a multiple of increment × 10^-maxfd; otherwise round to 10^-maxfd via the
+    // mode (dtoa alone is fixed half-even). Only for values with a real
+    // fractional part (|x| < 1e15): larger magnitudes are integral in f64, so the
+    // mode is moot and dtoa handles them without overflow risk.
     const mag = if (slots.rounding_increment > 1)
-        roundToIncrement(magnitude, maxfd, slots.rounding_increment, slots.rounding_mode)
-    else
-        magnitude;
+        roundToIncrement(magnitude, maxfd, slots.rounding_increment, mode)
+    else if (magnitude != 0 and magnitude < 1e15) blk: {
+        const fscale = std.math.pow(f64, 10, @floatFromInt(maxfd));
+        const q = snapToSignificant(magnitude * fscale, 15);
+        break :blk applyRoundingModeNonNeg(q, mode) / fscale;
+    } else magnitude;
     var dec = dtoa.Decimal{};
     dtoa.fixedDigits(mag, maxfd, &dec);
     const m = dec.digits();
