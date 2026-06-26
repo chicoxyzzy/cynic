@@ -2910,24 +2910,138 @@ fn rtfConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     return heap_mod.taggedObject(inst);
 }
 
+/// RTF unit → index (year…second); accepts the plural form ("days") too.
+fn rtfUnitIndex(raw: []const u8) ?u8 {
+    const u = if (raw.len > 0 and raw[raw.len - 1] == 's') raw[0 .. raw.len - 1] else raw;
+    const names = [8][]const u8{ "year", "quarter", "month", "week", "day", "hour", "minute", "second" };
+    for (names, 0..) |nm, i| if (std.mem.eql(u8, u, nm)) return @intCast(i);
+    return null;
+}
+
 fn rtfFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireKind(realm, this_value, .relative_time_format);
-    const n = try valueToStringSlice(realm, try toNumber(realm, argOr(args, 0, Value.undefined_)));
-    const unit = try valueToStringSlice(realm, argOr(args, 1, Value.undefined_));
-    const out = std.fmt.allocPrint(realm.allocator, "{s} {s}", .{ n, unit }) catch return error.OutOfMemory;
+    const rec = try requireKind(realm, this_value, .relative_time_format);
+    const s = rec.relative_time_format;
+    const value = numberToF64(try toNumber(realm, argOr(args, 0, Value.undefined_)));
+    if (!std.math.isFinite(value)) return throwRangeError(realm, "RelativeTimeFormat value must be finite");
+    const unit_raw = try valueToStringSlice(realm, argOr(args, 1, Value.undefined_));
+    const unit_idx = rtfUnitIndex(unit_raw) orelse return throwRangeError(realm, "invalid RelativeTimeFormat unit");
+    const style_idx: u8 = if (std.mem.eql(u8, s.style, "short")) 1 else if (std.mem.eql(u8, s.style, "narrow")) 2 else 0;
+
+    if (cldr.available) {
+        // numeric:"auto" + an integer with a matching relative-type → use it.
+        if (std.mem.eql(u8, s.numeric, "auto") and value == std.math.floor(value) and @abs(value) < 128) {
+            if (cldr.relativeTypeString(s.base.dataLocale(), unit_idx, style_idx, @intFromFloat(value))) |str|
+                return makeStringValue(realm, str);
+        }
+        const future = !std.math.signbit(value);
+        const abs_v = @abs(value);
+        const cat = cldr.selectPlural(s.base.dataLocale(), false, cldr.computeOperands(abs_v, 0, 3));
+        if (cldr.relativeTimePattern(s.base.dataLocale(), unit_idx, style_idx, future, cat)) |pat|
+            return rtfApplyPattern(realm, s, pat, abs_v);
+    }
+    // Fallback: "{n} {unit}" from the already-coerced value (no re-coercion).
+    var nb: [64]u8 = undefined;
+    const ns = std.fmt.bufPrint(&nb, "{d}", .{value}) catch "0";
+    const out = std.fmt.allocPrint(realm.allocator, "{s} {s}", .{ ns, unit_raw }) catch return error.OutOfMemory;
     defer realm.allocator.free(out);
     return makeStringValue(realm, out);
 }
 
-fn rtfFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const formatted = try rtfFormat(realm, this_value, args);
-    const arr = allocateArray(realm) catch return error.OutOfMemory;
+/// Substitute {0} in a relative-time pattern with the locale-formatted magnitude.
+fn rtfApplyPattern(realm: *Realm, s: intl.RelativeTimeFormatSlots, pat: []const u8, abs_v: f64) NativeError!Value {
+    var segs: [64]Seg = undefined;
+    var nfs: intl.NumberFormatSlots = .{};
+    nfs.base.locale = s.base.locale;
+    nfs.base.numbering_system = "latn";
+    nfs.style = "decimal";
+    nfs.use_grouping = "auto";
+    nfs.sign_display = "auto";
+    nfs.notation = "standard";
+    nfs.rounding_type = "fractionDigits";
+    nfs.minimum_integer_digits = 1;
+    nfs.minimum_fraction_digits = 0;
+    nfs.maximum_fraction_digits = 3;
+    nfs.rounding_increment = 1;
+    nfs.rounding_mode = "halfExpand";
+    nfs.trailing_zero_display = "auto";
+    const cnt = renderNumber(&nfs, abs_v, &segs);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    const idx = std.mem.indexOf(u8, pat, "{0}") orelse pat.len;
+    out.appendSlice(realm.allocator, pat[0..idx]) catch return error.OutOfMemory;
+    var i: u32 = 0;
+    while (i < cnt) : (i += 1) out.appendSlice(realm.allocator, segs[i].bytes()) catch return error.OutOfMemory;
+    if (idx < pat.len) out.appendSlice(realm.allocator, pat[idx + 3 ..]) catch return error.OutOfMemory;
+    return makeStringValue(realm, out.items);
+}
+
+fn rtfEmitPart(realm: *Realm, arr: *JSObject, pn: *u32, typ: []const u8, value: []const u8, unit: ?[]const u8) NativeError!void {
     const part = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(part, realm.intrinsics.object_prototype);
-    try setDataProp(realm, part, "type", try makeStringValue(realm, "literal"));
-    try setDataProp(realm, part, "value", formatted);
-    arr.set(realm.allocator, "0", heap_mod.taggedObject(part)) catch return error.OutOfMemory;
-    arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
+    try setDataProp(realm, part, "type", try makeStringValue(realm, typ));
+    try setDataProp(realm, part, "value", try makeStringValue(realm, value));
+    if (unit) |u| try setDataProp(realm, part, "unit", try makeStringValue(realm, u));
+    var kb: [12]u8 = undefined;
+    const k = std.fmt.bufPrint(&kb, "{d}", .{pn.*}) catch unreachable;
+    arr.set(realm.allocator, k, heap_mod.taggedObject(part)) catch return error.OutOfMemory;
+    pn.* += 1;
+}
+
+fn rtfFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requireKind(realm, this_value, .relative_time_format);
+    const s = rec.relative_time_format;
+    const value = numberToF64(try toNumber(realm, argOr(args, 0, Value.undefined_)));
+    if (!std.math.isFinite(value)) return throwRangeError(realm, "RelativeTimeFormat value must be finite");
+    const unit_raw = try valueToStringSlice(realm, argOr(args, 1, Value.undefined_));
+    const unit_idx = rtfUnitIndex(unit_raw) orelse return throwRangeError(realm, "invalid RelativeTimeFormat unit");
+    const names = [8][]const u8{ "year", "quarter", "month", "week", "day", "hour", "minute", "second" };
+    const singular = names[unit_idx];
+    const style_idx: u8 = if (std.mem.eql(u8, s.style, "short")) 1 else if (std.mem.eql(u8, s.style, "narrow")) 2 else 0;
+
+    const arr = allocateArray(realm) catch return error.OutOfMemory;
+    var pn: u32 = 0;
+    if (cldr.available) {
+        if (std.mem.eql(u8, s.numeric, "auto") and value == std.math.floor(value) and @abs(value) < 128) {
+            if (cldr.relativeTypeString(s.base.dataLocale(), unit_idx, style_idx, @intFromFloat(value))) |str| {
+                try rtfEmitPart(realm, arr, &pn, "literal", str, null);
+                arr.setArrayLength(realm.allocator, pn) catch return error.OutOfMemory;
+                return heap_mod.taggedObject(arr);
+            }
+        }
+        const future = !std.math.signbit(value);
+        const abs_v = @abs(value);
+        const cat = cldr.selectPlural(s.base.dataLocale(), false, cldr.computeOperands(abs_v, 0, 3));
+        if (cldr.relativeTimePattern(s.base.dataLocale(), unit_idx, style_idx, future, cat)) |pat| {
+            var segs: [64]Seg = undefined;
+            var nfs: intl.NumberFormatSlots = .{};
+            nfs.base.locale = s.base.locale;
+            nfs.base.numbering_system = "latn";
+            nfs.style = "decimal";
+            nfs.use_grouping = "auto";
+            nfs.sign_display = "auto";
+            nfs.notation = "standard";
+            nfs.rounding_type = "fractionDigits";
+            nfs.minimum_integer_digits = 1;
+            nfs.minimum_fraction_digits = 0;
+            nfs.maximum_fraction_digits = 3;
+            nfs.rounding_increment = 1;
+            nfs.rounding_mode = "halfExpand";
+            nfs.trailing_zero_display = "auto";
+            const cnt = renderNumber(&nfs, abs_v, &segs);
+            const idx = std.mem.indexOf(u8, pat, "{0}") orelse pat.len;
+            if (idx > 0) try rtfEmitPart(realm, arr, &pn, "literal", pat[0..idx], null);
+            var i: u32 = 0;
+            while (i < cnt) : (i += 1) try rtfEmitPart(realm, arr, &pn, segs[i].typ, segs[i].bytes(), singular);
+            if (idx < pat.len and idx + 3 < pat.len) try rtfEmitPart(realm, arr, &pn, "literal", pat[idx + 3 ..], null);
+            arr.setArrayLength(realm.allocator, pn) catch return error.OutOfMemory;
+            return heap_mod.taggedObject(arr);
+        }
+    }
+    var nb: [64]u8 = undefined;
+    const fb = std.fmt.bufPrint(&nb, "{d} {s}", .{ value, unit_raw }) catch "?";
+    try rtfEmitPart(realm, arr, &pn, "literal", fb, null);
+    arr.setArrayLength(realm.allocator, pn) catch return error.OutOfMemory;
     return heap_mod.taggedObject(arr);
 }
 

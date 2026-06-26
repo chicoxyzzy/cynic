@@ -45,7 +45,12 @@ const SectionKind = enum(u8) {
     currency_names = 8,
     likely_subtags = 9,
     list_patterns = 10,
+    relative_time = 11,
 };
+
+/// RTF units in fixed order (year … second); each packs 3 styles (long /
+/// short / narrow) → CLDR fields `<unit>` / `<unit>-short` / `<unit>-narrow`.
+const rtf_units = [8][]const u8{ "year", "quarter", "month", "week", "day", "hour", "minute", "second" };
 
 /// Plural-category index shared with `cldr.zig`'s PluralCategory
 /// (zero=0 … other=5). Unlike `Category.fromName`, "other" maps to 5 — the
@@ -152,13 +157,14 @@ pub fn main(init: std.process.Init) !void {
     const currencies = try loadCurrencies(arena, io, json_root);
     const likely = try loadLikelySubtags(arena, io, json_root);
     const list_patterns = try loadListPatterns(arena, io, json_root);
+    const relative_time = try loadRelativeTime(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
-    var buf: [420]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len });
+    var buf: [460]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -226,12 +232,13 @@ fn pack(
     currencies: CurrencyData,
     likely: []LikelyEntry,
     list_patterns: []ListPatternLocale,
+    relative_time: []RelativeTimeLocale,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [10]SectionDir = undefined;
+    var dirs: [11]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -272,6 +279,10 @@ fn pack(
     const lp_start: u32 = @intCast(payloads.items.len);
     try writeListPatternsPayload(gpa, &payloads, list_patterns);
     dirs[9] = .{ .kind = .list_patterns, .off = lp_start, .len = @as(u32, @intCast(payloads.items.len)) - lp_start };
+
+    const rt_start: u32 = @intCast(payloads.items.len);
+    try writeRelativeTimePayload(gpa, &payloads, relative_time);
+    dirs[10] = .{ .kind = .relative_time, .off = rt_start, .len = @as(u32, @intCast(payloads.items.len)) - rt_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -482,6 +493,100 @@ fn writeListPatternsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged
             try appendStr16(gpa, buf, s.start);
             try appendStr16(gpa, buf, s.middle);
             try appendStr16(gpa, buf, s.end);
+        }
+    }
+}
+
+// ── relative time (Intl.RelativeTimeFormat) ───────────────────────────────────
+
+const RtfPattern = struct { cat: u8, pat: []const u8 };
+const RtfRel = struct { offset: i8, str: []const u8 };
+/// One (unit, style) field's relative strings + future/past plural patterns.
+const RtfField = struct { rels: []RtfRel, future: []RtfPattern, past: []RtfPattern };
+/// 24 fields per locale, indexed `unit*3 + style` (unit: year…second; style:
+/// long / short / narrow).
+const RelativeTimeLocale = struct {
+    key: []const u8,
+    fields: [24]RtfField,
+    fn lessThan(_: void, a: RelativeTimeLocale, b: RelativeTimeLocale) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+fn loadRtfPatterns(arena: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) []RtfPattern {
+    const grp = if (obj.get(key)) |v| v.object else return &.{};
+    var out: std.ArrayListUnmanaged(RtfPattern) = .empty;
+    var it = grp.iterator();
+    while (it.next()) |e| {
+        const prefix = "relativeTimePattern-count-";
+        if (!std.mem.startsWith(u8, e.key_ptr.*, prefix)) continue;
+        const cat = pluralCatIndex(e.key_ptr.*[prefix.len..]) orelse continue;
+        if (e.value_ptr.* != .string) continue;
+        out.append(arena, .{ .cat = cat, .pat = e.value_ptr.*.string }) catch {};
+    }
+    return out.items;
+}
+
+fn loadRelativeTime(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]RelativeTimeLocale {
+    var out: std.ArrayListUnmanaged(RelativeTimeLocale) = .empty;
+    for (modern_locales) |loc| {
+        const path = try std.fmt.allocPrint(arena, "{s}/cldr-dates-full/main/{s}/dateFields.json", .{ json_root, loc });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(2 * 1024 * 1024)) catch continue;
+        const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch continue;
+        var mit = root.object.get("main").?.object.iterator();
+        const fields = (mit.next() orelse continue).value_ptr.*.object
+            .get("dates").?.object.get("fields").?.object;
+
+        var locale_fields: [24]RtfField = undefined;
+        for (rtf_units, 0..) |unit, ui| {
+            for ([_][]const u8{ "", "-short", "-narrow" }, 0..) |suffix, si| {
+                const fkey = try std.fmt.allocPrint(arena, "{s}{s}", .{ unit, suffix });
+                const f = if (fields.get(fkey)) |v| v.object else {
+                    locale_fields[ui * 3 + si] = .{ .rels = &.{}, .future = &.{}, .past = &.{} };
+                    continue;
+                };
+                var rels: std.ArrayListUnmanaged(RtfRel) = .empty;
+                var rit = f.iterator();
+                while (rit.next()) |e| {
+                    const prefix = "relative-type-";
+                    if (!std.mem.startsWith(u8, e.key_ptr.*, prefix)) continue;
+                    const off = std.fmt.parseInt(i8, e.key_ptr.*[prefix.len..], 10) catch continue;
+                    if (e.value_ptr.* != .string) continue;
+                    rels.append(arena, .{ .offset = off, .str = e.value_ptr.*.string }) catch {};
+                }
+                locale_fields[ui * 3 + si] = .{
+                    .rels = rels.items,
+                    .future = loadRtfPatterns(arena, f, "relativeTime-type-future"),
+                    .past = loadRtfPatterns(arena, f, "relativeTime-type-past"),
+                };
+            }
+        }
+        try out.append(arena, .{ .key = loc, .fields = locale_fields });
+    }
+    std.sort.block(RelativeTimeLocale, out.items, {}, RelativeTimeLocale.lessThan);
+    return out.items;
+}
+
+fn writeRelativeTimePayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), locales: []RelativeTimeLocale) !void {
+    try appendU32(gpa, buf, locales.len);
+    for (locales) |l| {
+        try appendStr8(gpa, buf, l.key);
+        for (l.fields) |f| {
+            try buf.append(gpa, @intCast(f.rels.len));
+            for (f.rels) |r| {
+                try buf.append(gpa, @bitCast(r.offset));
+                try appendStr8(gpa, buf, r.str);
+            }
+            try buf.append(gpa, @intCast(f.future.len));
+            for (f.future) |p| {
+                try buf.append(gpa, p.cat);
+                try appendStr16(gpa, buf, p.pat);
+            }
+            try buf.append(gpa, @intCast(f.past.len));
+            for (f.past) |p| {
+                try buf.append(gpa, p.cat);
+                try appendStr16(gpa, buf, p.pat);
+            }
         }
     }
 }

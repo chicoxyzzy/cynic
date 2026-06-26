@@ -61,6 +61,7 @@ const SectionKind = enum(u8) {
     currency_names = 8,
     likely_subtags = 9,
     list_patterns = 10,
+    relative_time = 11,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -77,6 +78,7 @@ var dates_payload: []const u8 = &.{};
 var display_payload: []const u8 = &.{};
 var likely_payload: []const u8 = &.{};
 var lp_payload: []const u8 = &.{};
+var rt_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -114,6 +116,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.currency_names) => cur_names_payload = payload,
             @intFromEnum(SectionKind.likely_subtags) => likely_payload = payload,
             @intFromEnum(SectionKind.list_patterns) => lp_payload = payload,
+            @intFromEnum(SectionKind.relative_time) => rt_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -756,6 +759,108 @@ pub fn listPattern(locale: []const u8, type_idx: u8, style_idx: u8, which: ListP
         pat = readStr16(lp_payload, &off) orelse return null;
     }
     return pat;
+}
+
+// ── relative time (Intl.RelativeTimeFormat) ──────────────────────────────────
+
+/// Seek to one locale's relative-time field block (unit*3 + style), walking the
+/// variable-length field records. Returns the offset at that field's rel_count.
+fn findRelTimeField(locale: []const u8, field_idx: usize) ?usize {
+    const tbl_off = withCandidates(locale, findRelTimeLocale) orelse return null;
+    var off = tbl_off;
+    var fi: usize = 0;
+    while (fi < field_idx) : (fi += 1) off = skipRelTimeField(off) orelse return null;
+    return off;
+}
+
+fn findRelTimeLocale(key: []const u8) ?usize {
+    if (rt_payload.len < 4) return null;
+    const count = std.mem.readInt(u32, rt_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(rt_payload, &off) orelse return null;
+        const k = readBytes(rt_payload, &off, klen) orelse return null;
+        const fields_off = off;
+        // Skip all 24 fields to reach the next locale key.
+        var fi: usize = 0;
+        while (fi < 24) : (fi += 1) off = skipRelTimeField(off) orelse return null;
+        if (asciiEqlIgnoreCase(k, key)) return fields_off;
+    }
+    return null;
+}
+
+fn skipRelTimeField(off_in: usize) ?usize {
+    var off = off_in;
+    const rel_count = readU8(rt_payload, &off) orelse return null;
+    var i: usize = 0;
+    while (i < rel_count) : (i += 1) {
+        off += 1; // i8 offset
+        _ = readStr8(rt_payload, &off) orelse return null;
+    }
+    inline for (.{ 0, 1 }) |_| {
+        const c = readU8(rt_payload, &off) orelse return null;
+        var j: usize = 0;
+        while (j < c) : (j += 1) {
+            off += 1; // u8 cat
+            _ = readStr16(rt_payload, &off) orelse return null;
+        }
+    }
+    return off;
+}
+
+/// The future/past relative-time pattern for (locale, unit, style, plural cat),
+/// falling back to the "other" category. Null when absent.
+pub fn relativeTimePattern(locale: []const u8, unit_idx: u8, style_idx: u8, future: bool, cat: PluralCategory) ?[]const u8 {
+    if (!ensureInit() or unit_idx > 7 or style_idx > 2) return null;
+    var off = findRelTimeField(locale, @as(usize, unit_idx) * 3 + style_idx) orelse return null;
+    // Skip rels.
+    const rel_count = readU8(rt_payload, &off) orelse return null;
+    var i: usize = 0;
+    while (i < rel_count) : (i += 1) {
+        off += 1;
+        _ = readStr8(rt_payload, &off) orelse return null;
+    }
+    // future group first, then past.
+    const fc = readU8(rt_payload, &off) orelse return null;
+    const fut_off = off;
+    var k: usize = 0;
+    while (k < fc) : (k += 1) { // skip future group to reach past
+        off += 1;
+        _ = readStr16(rt_payload, &off) orelse return null;
+    }
+    const pc = readU8(rt_payload, &off) orelse return null;
+    const past_off = off;
+    const group_off = if (future) fut_off else past_off;
+    const group_count = if (future) fc else pc;
+    return readRtfPattern(group_off, group_count, @intFromEnum(cat)) orelse
+        readRtfPattern(group_off, group_count, @intFromEnum(PluralCategory.other));
+}
+
+fn readRtfPattern(group_off: usize, count: u8, want_cat: u8) ?[]const u8 {
+    var off = group_off;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const cat = readU8(rt_payload, &off) orelse return null;
+        const pat = readStr16(rt_payload, &off) orelse return null;
+        if (cat == want_cat) return pat;
+    }
+    return null;
+}
+
+/// The relative-type string (e.g. "yesterday") for (locale, unit, style) at the
+/// given integer offset (-1 / 0 / 1 …), used under numeric:"auto". Null absent.
+pub fn relativeTypeString(locale: []const u8, unit_idx: u8, style_idx: u8, offset: i8) ?[]const u8 {
+    if (!ensureInit() or unit_idx > 7 or style_idx > 2) return null;
+    var off = findRelTimeField(locale, @as(usize, unit_idx) * 3 + style_idx) orelse return null;
+    const rel_count = readU8(rt_payload, &off) orelse return null;
+    var i: usize = 0;
+    while (i < rel_count) : (i += 1) {
+        const ro = readU8(rt_payload, &off) orelse return null;
+        const str = readStr8(rt_payload, &off) orelse return null;
+        if (@as(i8, @bitCast(ro)) == offset) return str;
+    }
+    return null;
 }
 
 // ── likely subtags (UTS #35 §4.3 Add / Remove Likely Subtags) ─────────────────

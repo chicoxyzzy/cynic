@@ -1423,3 +1423,31 @@ test "intl: DurationFormat validates fractionalDigits" {
     try evalThrows("new Intl.DurationFormat('en', { fractionalDigits: -10 })");
     try evalThrows("new Intl.DurationFormat('en', { years: 'bogus' })");
 }
+
+// ── Intl.RelativeTimeFormat CLDR patterns (§17) ──────────────────────────────
+
+test "intl: RelativeTimeFormat formats with CLDR relative patterns" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (o,v,u) => new Intl.RelativeTimeFormat('en', o).format(v,u);
+        \\(f({}, 1000, 'second') === 'in 1,000 seconds' &&
+        \\ f({}, -5, 'day') === '5 days ago' &&
+        \\ f({}, 1, 'day') === 'in 1 day' &&
+        \\ f({numeric:'auto'}, -1, 'day') === 'yesterday' &&
+        \\ f({numeric:'auto'}, 0, 'day') === 'today' &&
+        \\ f({}, 2, 'days') === 'in 2 days') ? 1 : 0
+    );
+}
+
+test "intl: RelativeTimeFormat formatToParts + validation" {
+    try requireFullBuild();
+    try evalThrows("new Intl.RelativeTimeFormat('en').format(Infinity, 'day')");
+    try evalThrows("new Intl.RelativeTimeFormat('en').format(1, 'bogus')");
+    try evalAssert1(
+        \\const p = new Intl.RelativeTimeFormat('en').formatToParts(1, 'day');
+        \\(p[0].type === 'literal' && p[0].value === 'in ' &&
+        \\ p[1].type === 'integer' && p[1].value === '1' && p[1].unit === 'day' &&
+        \\ p[2].type === 'literal' &&
+        \\ new Intl.RelativeTimeFormat('en',{numeric:'auto'}).formatToParts(-1,'day')[0].value === 'yesterday') ? 1 : 0
+    );
+}
