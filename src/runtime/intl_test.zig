@@ -1679,3 +1679,26 @@ test "intl: DurationFormat formatToParts (typed parts + unit tags)" {
         \\ p[2].value === '02' && p[2].unit === 'minute') ? 1 : 0
     );
 }
+
+test "intl: DateTimeFormat formatRange + option validation (§11.1/§11.5)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const dtf = new Intl.DateTimeFormat('en');
+        \\const thrown = (f) => { try { f(); return ''; } catch (e) { return e.constructor.name; } };
+        \\(dtf.formatRange.length === 2 &&
+        \\ typeof dtf.formatRange(new Date(2020, 0, 1), new Date(2020, 0, 5)) === 'string' &&
+        \\ typeof dtf.formatRange(Date.now(), Date.now() - 1000) === 'string' &&   // x > y ok
+        \\ thrown(() => dtf.formatRange(undefined, Date.now())) === 'TypeError' &&
+        \\ thrown(() => dtf.formatRange(NaN, Date.now())) === 'RangeError') ? 1 : 0
+    );
+    try evalAssert1(
+        \\const same = new Date(2020, 5, 15);
+        \\const r = new Intl.DateTimeFormat('en').formatRange(same, same);
+        \\(r === new Intl.DateTimeFormat('en').format(same)) ? 1 : 0   // identical → single date
+    );
+    try evalAssert1(
+        \\const thrown = (f) => { try { f(); return ''; } catch (e) { return e.constructor.name; } };
+        \\(thrown(() => new Intl.DateTimeFormat('en', { weekday: 'short', dateStyle: 'short' })) === 'TypeError' &&
+        \\ thrown(() => new Intl.DateTimeFormat('en', { formatMatcher: 'bad' })) === 'RangeError') ? 1 : 0
+    );
+}

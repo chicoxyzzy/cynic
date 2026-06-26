@@ -2668,6 +2668,7 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
     const resolved = try resolveServiceLocale(realm, locales, opts);
 
     var slots: intl.DateTimeFormatSlots = .{};
+    errdefer slots.deinit(realm.allocator); // free allocated fields if a later option read throws
     slots.base.locale = resolved.locale;
     slots.calendar = realm.allocator.dupe(u8, "iso8601") catch return error.OutOfMemory;
     slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, opts);
@@ -2677,10 +2678,14 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
         if (!tz_v.isUndefined()) {
             const tz = try valueToStringSlice(realm, tz_v);
             if (tz.len == 0) return throwRangeError(realm, "invalid time zone");
+            realm.allocator.free(slots.time_zone); // release the default "UTC"
             slots.time_zone = try realm.allocator.dupe(u8, tz);
         }
         const cal_v = try getPropertyChain(realm, o, "calendar");
-        if (!cal_v.isUndefined()) slots.calendar = try realm.allocator.dupe(u8, try valueToStringSlice(realm, cal_v));
+        if (!cal_v.isUndefined()) {
+            realm.allocator.free(slots.calendar); // release the default "iso8601"
+            slots.calendar = try realm.allocator.dupe(u8, try valueToStringSlice(realm, cal_v));
+        }
 
         slots.date_style = try dupOptOwned(realm, try getOptionString(realm, opts, "dateStyle", &.{ "full", "long", "medium", "short" }, ""));
         slots.time_style = try dupOptOwned(realm, try getOptionString(realm, opts, "timeStyle", &.{ "full", "long", "medium", "short" }, ""));
@@ -2705,6 +2710,18 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
         } else if (hc.len > 0) {
             slots.hour_cycle = try realm.allocator.dupe(u8, hc);
         }
+
+        // §11.1.1 formatMatcher — validated (RangeError on an invalid value);
+        // the renderer doesn't yet branch on best-fit vs basic.
+        _ = try getOptionString(realm, opts, "formatMatcher", &.{ "basic", "best fit" }, "best fit");
+
+        // §11.1.1 — dateStyle/timeStyle may not be combined with explicit
+        // component options (TypeError).
+        const has_style = slots.date_style.len > 0 or slots.time_style.len > 0;
+        const has_component = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or
+            slots.month.len > 0 or slots.day.len > 0 or slots.hour.len > 0 or slots.minute.len > 0 or
+            slots.second.len > 0 or slots.day_period.len > 0 or slots.time_zone_name.len > 0;
+        if (has_style and has_component) return throwTypeError(realm, "dateStyle/timeStyle cannot be combined with component options");
     }
 
     // After all option reads (which can throw): cache the maximized data-locale
@@ -2767,13 +2784,20 @@ fn dateTimeFormatFormatToParts(realm: *Realm, this_value: Value, args: []const V
 
 fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requireKind(realm, this_value, .date_time_format);
-    const a = try dtfTimeValue(realm, argOr(args, 0, Value.undefined_));
-    const b = try dtfTimeValue(realm, argOr(args, 1, Value.undefined_));
+    // §11.5.5 — both arguments are required (TypeError when either is undefined),
+    // then coerced; a NaN/∞ operand is a RangeError. x > y does not throw.
+    const av = argOr(args, 0, Value.undefined_);
+    const bv = argOr(args, 1, Value.undefined_);
+    if (av.isUndefined() or bv.isUndefined()) return throwTypeError(realm, "formatRange requires two arguments");
+    const a = try dtfTimeValue(realm, av);
+    const b = try dtfTimeValue(realm, bv);
     if (!cldr.available) return makeStringValue(realm, "");
     var bufa: [256]u8 = undefined;
     var bufb: [256]u8 = undefined;
     const sa = renderDateTimeFlat(&rec.date_time_format, a, &bufa);
     const sb = renderDateTimeFlat(&rec.date_time_format, b, &bufb);
+    // Identical renderings collapse to a single date (no range separator).
+    if (std.mem.eql(u8, sa, sb)) return makeStringValue(realm, sa);
     const joined = std.fmt.allocPrint(realm.allocator, "{s} – {s}", .{ sa, sb }) catch return error.OutOfMemory;
     defer realm.allocator.free(joined);
     return makeStringValue(realm, joined);
