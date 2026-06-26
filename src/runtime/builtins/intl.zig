@@ -430,6 +430,25 @@ fn stripExtKeyword(realm: *Realm, base: *intl.ServiceLocaleSlots, key: []const u
     base.locale = canon;
 }
 
+/// Add (or replace) a `-u-<key>[-value]` keyword on an owned
+/// ServiceLocaleSlots.locale and re-canonicalize so it sorts into place. An
+/// empty value writes the bare keyword (e.g. "-u-kn" for numeric:true).
+fn addExtKeyword(realm: *Realm, base: *intl.ServiceLocaleSlots, key: []const u8, value: []const u8) NativeError!void {
+    try stripExtKeyword(realm, base, key); // drop any existing, avoid a dup
+    const loc = base.locale;
+    const has_u = std.mem.indexOf(u8, loc, "-u-") != null;
+    const built = (if (value.len == 0)
+        (if (has_u) std.fmt.allocPrint(realm.allocator, "{s}-{s}", .{ loc, key }) else std.fmt.allocPrint(realm.allocator, "{s}-u-{s}", .{ loc, key }))
+    else if (has_u)
+        std.fmt.allocPrint(realm.allocator, "{s}-{s}-{s}", .{ loc, key, value })
+    else
+        std.fmt.allocPrint(realm.allocator, "{s}-u-{s}-{s}", .{ loc, key, value })) catch return error.OutOfMemory;
+    const canon = intl.canonicalizeUnicodeLocaleId(realm.allocator, built) catch built;
+    if (canon.ptr != built.ptr) realm.allocator.free(built);
+    realm.allocator.free(base.locale);
+    base.locale = canon;
+}
+
 fn stripUnicodeExtensionKeyword(allocator: std.mem.Allocator, locale: []const u8, key: []const u8) ![]const u8 {
     if (key.len != 2) return allocator.dupe(u8, locale);
     const u_at = std.mem.indexOf(u8, locale, "-u-") orelse return allocator.dupe(u8, locale);
@@ -1266,23 +1285,27 @@ fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     }
     if (strip_co) try stripExtKeyword(realm, &slots.base, "co");
 
-    // numeric (-u-kn-): empty or "true" ⇒ true.
-    if (numeric_opt) |n| {
-        slots.numeric = n;
-        try stripExtKeyword(realm, &slots.base, "kn");
-    } else if (intl.unicodeExtensionValue(slots.base.locale, "kn")) |kn| {
-        slots.numeric = !std.mem.eql(u8, kn, "false");
-    } else slots.numeric = false;
+    // numeric (-u-kn): §9.2.7 — [[numeric]] takes the option, else the locale
+    // keyword, else false; but [[locale]] reflects only the *locale* keyword,
+    // canonicalized — "kn-true"/bare → "-u-kn", "kn-false" dropped (the default).
+    // An option changes [[numeric]] but never [[locale]].
+    const kn_loc = intl.unicodeExtensionValue(slots.base.locale, "kn");
+    slots.numeric = if (numeric_opt) |n| n else if (kn_loc) |kn| !std.mem.eql(u8, kn, "false") else false;
+    if (kn_loc) |kn| {
+        if (std.mem.eql(u8, kn, "false")) {
+            try stripExtKeyword(realm, &slots.base, "kn");
+        } else if (std.mem.eql(u8, kn, "true")) {
+            try addExtKeyword(realm, &slots.base, "kn", ""); // canonicalize true → bare
+        }
+    }
 
-    // caseFirst (-u-kf-)
-    if (cf_opt.len > 0) {
-        slots.case_first = realm.allocator.dupe(u8, cf_opt) catch return error.OutOfMemory;
-        try stripExtKeyword(realm, &slots.base, "kf");
-    } else if (intl.unicodeExtensionValue(slots.base.locale, "kf")) |kf| {
-        const v = if (std.mem.eql(u8, kf, "upper") or std.mem.eql(u8, kf, "lower") or std.mem.eql(u8, kf, "false")) kf else "false";
-        slots.case_first = realm.allocator.dupe(u8, v) catch return error.OutOfMemory;
-    } else {
-        slots.case_first = realm.allocator.dupe(u8, "false") catch return error.OutOfMemory;
+    // caseFirst (-u-kf): [[caseFirst]] = option ?? locale ?? "false"; [[locale]]
+    // keeps the locale "lower"/"upper" keyword and drops "false" (the default).
+    const kf_loc = intl.unicodeExtensionValue(slots.base.locale, "kf");
+    const kf_from_locale = if (kf_loc) |kf| (if (std.mem.eql(u8, kf, "upper") or std.mem.eql(u8, kf, "lower")) kf else "false") else "false";
+    slots.case_first = realm.allocator.dupe(u8, if (cf_opt.len > 0) cf_opt else kf_from_locale) catch return error.OutOfMemory;
+    if (kf_loc) |kf| {
+        if (!std.mem.eql(u8, kf, "lower") and !std.mem.eql(u8, kf, "upper")) try stripExtKeyword(realm, &slots.base, "kf");
     }
 
     try storeRecord(realm, inst, .{ .collator = slots });

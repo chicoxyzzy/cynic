@@ -1940,3 +1940,16 @@ test "intl: Collator/DateTimeFormat drop irrelevant -u- extensions (§9.2.7)" {
         \\ dt('ja-JP-u-ca-japanese') === 'ja-JP-u-ca-japanese') ? 1 : 0     // relevant + valid
     );
 }
+
+test "intl: Collator kn/kf resolved locale canonicalization (§9.2.7)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const loc = (l, opt) => new Intl.Collator([l], opt).resolvedOptions().locale;
+        \\// [[locale]] reflects the LOCALE keyword (true/bare → "-u-kn", false dropped);
+        \\// an option sets [[numeric]] but never [[locale]].
+        \\(loc('en-u-kn-true') === 'en-u-kn' && loc('en-u-kn-false') === 'en' &&
+        \\ loc('en-u-kn-true', { numeric: false }) === 'en-u-kn' &&
+        \\ loc('en-u-kn-false', { numeric: true }) === 'en' &&
+        \\ loc('en-u-kf-lower') === 'en-u-kf-lower' && loc('en-u-kf-false') === 'en') ? 1 : 0
+    );
+}
