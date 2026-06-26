@@ -1916,3 +1916,15 @@ test "intl: NumberFormat compact min2 grouping + no-compaction buckets (§15.1)"
         \\ c('de', 1000000).endsWith('Mio.')) ? 1 : 0   // de uses U+00A0 before "Mio."
     );
 }
+
+test "intl: NumberFormat drops irrelevant/invalid -u- extensions (§9.2.7)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const r = (l) => new Intl.NumberFormat([l]).resolvedOptions().locale;
+        \\(r('ja-JP-u-cu-usd') === 'ja-JP' &&            // cu irrelevant to NumberFormat
+        \\ r('ja-JP-u-nu-invalid') === 'ja-JP' &&        // nu relevant but unsupported value
+        \\ r('ja-JP-u-nu-native') === 'ja-JP' &&
+        \\ r('ja-JP-u-nu-latn') === 'ja-JP-u-nu-latn' && // valid nu retained
+        \\ r('ar-u-nu-arab') === 'ar-u-nu-arab') ? 1 : 0
+    );
+}

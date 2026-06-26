@@ -372,6 +372,40 @@ fn isKnownCollation(s: []const u8) bool {
     return false;
 }
 
+/// §9.2.7 ResolveLocale — drop every `-u-` keyword whose key is not in the
+/// service's relevant-extension set, so an irrelevant keyword (e.g. `-cu-usd`
+/// on a NumberFormat) never surfaces in resolvedOptions().locale.
+fn retainRelevantUnicodeExtensions(realm: *Realm, base: *intl.ServiceLocaleSlots, relevant: []const []const u8) NativeError!void {
+    // Strip one irrelevant key per pass (stripExtKeyword re-canonicalizes, so
+    // re-scan from the start) until none remain.
+    while (true) {
+        const locale = base.locale;
+        const search = if (std.mem.indexOf(u8, locale, "-x-")) |x| locale[0..x] else locale;
+        const u_at = std.mem.indexOf(u8, search, "-u-") orelse return;
+        var i = u_at + 3;
+        var strip: ?[2]u8 = null;
+        while (i < search.len) {
+            const seg_start = i;
+            while (i < search.len and search[i] != '-') i += 1;
+            const seg = search[seg_start..i];
+            if (seg.len == 1) break; // a singleton extension begins; -u- block ended
+            if (seg.len == 2) {
+                var keep = false;
+                for (relevant) |r| if (std.mem.eql(u8, r, seg)) {
+                    keep = true;
+                    break;
+                };
+                if (!keep) {
+                    strip = .{ seg[0], seg[1] };
+                    break;
+                }
+            }
+            if (i < search.len) i += 1;
+        }
+        if (strip) |k| try stripExtKeyword(realm, base, &k) else return;
+    }
+}
+
 fn stripExtKeyword(realm: *Realm, base: *intl.ServiceLocaleSlots, key: []const u8) NativeError!void {
     const stripped = stripUnicodeExtensionKeyword(realm.allocator, base.locale, key) catch return error.OutOfMemory;
     realm.allocator.free(base.locale);
@@ -1320,6 +1354,14 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     // code); free the owned slots so a rejected constructor doesn't leak.
     // On success storeRecord takes ownership and this never fires.
     errdefer slots.deinit(realm.allocator);
+    // §9.2.7 — NumberFormat's only relevant -u- key is `nu`; drop the rest
+    // (e.g. `-cu-usd`) and a `nu` value that isn't a supported numbering system.
+    try retainRelevantUnicodeExtensions(realm, &slots.base, &.{"nu"});
+    if (cldr.available) {
+        if (intl.unicodeExtensionValue(slots.base.locale, "nu")) |v| {
+            if (cldr.numberingSystemDigitBase(v) == null) try stripExtKeyword(realm, &slots.base, "nu");
+        }
+    }
     try setDataLocale(realm, &slots.base);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "decimal", "percent", "currency", "unit" }, "decimal");
     const is_currency_style = std.mem.eql(u8, slots.style, "currency");
