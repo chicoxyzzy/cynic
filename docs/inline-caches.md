@@ -435,6 +435,25 @@ intended consumer (docs/jit.md §5). Marginal below that tier
 unless profiling shows polymorphic sites dominating a workload we
 care about.
 
+A 4-way interpreter-tier read IC (probe the set on a primary
+miss, rotate the matched cell to the front, park the receiver
+shape) was built and measured against the Octane `deltablue` /
+`raytrace` macros, which spend their time in subclass property
+loads. It was correct and transparent — test262 byte-identical
+across the affected slices, the `--jit` differential exact
+(Bistromath reads the primary cell at the same fixed offsets), and
+gc-stress clean (the extra cells weak-clear with the primary). But
+it **regressed** `deltablue` ~+3.6-4.2% (reproduced, against a
+±0.5% A/A control) and left `raytrace` flat-to-slower. The sites
+are *megamorphic*, not tidily 2-4 polymorphic: the working set is
+wider than any small cell count, so the probe loop + rotation +
+park is pure overhead on the miss path without converting misses
+to hits — the monomorphic primary already served the common shape.
+Conclusion confirmed empirically: the lever for these sites is
+optimizing-tier polymorphic dispatch (Ohaimark's data-driven IC),
+not the interpreter. Reverted; do not rebuild at the interpreter
+tier.
+
 **`in` IC — shipped (own-positive).** `"x" in obj` carries an IC
 (`in_op` → `[op] [r:u8] [ic:u16]`) that caches the **own-positive**
 result — `x` is an own property of `obj`'s shape — guarded by the
