@@ -4193,19 +4193,38 @@ fn durationFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "long", "short", "narrow", "digital" }, "short");
     const digital = std.mem.eql(u8, slots.style, "digital");
 
+    // §1.1.5 GetDurationUnitOptions, threading prevStyle: an unspecified unit
+    // after a numeric/2-digit/fractional one becomes "2-digit" (minutes/seconds)
+    // or "numeric" (others); otherwise it takes the base style — digital giving
+    // "numeric" + display "always" for h/m/s and "short" elsewhere. An explicit
+    // style (or the digital h/m/s default) displays "always"; the rest "auto".
+    var prev_style: []const u8 = "";
     inline for (duration_units, 0..) |u, i| {
-        // § GetDurationUnitOptions — the unit style defaults from the base
-        // style (digital → "numeric" for h/m/s); display defaults to "always"
-        // when the style is explicit, else "auto".
+        const is_hms = comptime (i >= 4 and i <= 6);
+        const is_min_sec = comptime (i == 5 or i == 6);
         const explicit = try getOptionString(realm, opts, u.name, u.styles, "");
-        var display_default: []const u8 = "always";
-        const resolved_style = if (explicit.len > 0) explicit else blk: {
-            display_default = "auto";
-            const is_hms = i >= 4 and i <= 6;
-            break :blk if (digital and is_hms) "numeric" else if (digital) "short" else slots.style;
-        };
+        const prev_numeric = std.mem.eql(u8, prev_style, "numeric") or std.mem.eql(u8, prev_style, "2-digit") or std.mem.eql(u8, prev_style, "fractional");
+        var resolved_style: []const u8 = undefined;
+        if (explicit.len > 0) {
+            resolved_style = explicit;
+        } else if (prev_numeric) {
+            // A unit after a numeric/2-digit one joins the digital clock.
+            resolved_style = if (is_min_sec) "2-digit" else "numeric";
+        } else if (digital) {
+            resolved_style = if (is_hms) "numeric" else "short";
+        } else {
+            resolved_style = slots.style;
+        }
+        // Step 9: minutes/seconds after a numeric/2-digit unit are "2-digit"
+        // (overrides even an explicit "numeric", giving the "h:mm:ss" form).
+        if (is_min_sec and (std.mem.eql(u8, prev_style, "numeric") or std.mem.eql(u8, prev_style, "2-digit")))
+            resolved_style = "2-digit";
+        // Display defaults to "always" for an explicit style and for digital
+        // h/m/s; "auto" otherwise (zero values then omitted).
+        const display_default: []const u8 = if (explicit.len > 0 or (digital and is_hms)) "always" else "auto";
         slots.unit_style[i] = realm.allocator.dupe(u8, resolved_style) catch return error.OutOfMemory;
         slots.unit_display[i] = try getOptionStringOwned(realm, opts, u.display, &.{ "always", "auto" }, display_default);
+        prev_style = resolved_style;
     }
     slots.fractional_digits = try getNumberOptionOpt(realm, opts, "fractionalDigits", 0, 9);
 
@@ -4213,23 +4232,214 @@ fn durationFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
     return heap_mod.taggedObject(inst);
 }
 
+fn isNumericDurStyle(st: []const u8) bool {
+    return std.mem.eql(u8, st, "numeric") or std.mem.eql(u8, st, "2-digit");
+}
+
+/// §1.1.6 ToDurationRecord (validation subset) → the 10 unit values. Each field
+/// must be an integral Number (RangeError otherwise); signs must not be mixed
+/// (RangeError); at least one field must be present (TypeError).
+fn toDurationRecord(realm: *Realm, dur: Value, out: *[10]f64) NativeError!void {
+    const obj = heap_mod.valueAsPlainObject(dur) orelse return throwTypeError(realm, "duration must be an object");
+    // A Temporal.Duration is read from its [[InitializedTemporalDuration]] slots
+    // directly — never via the prototype getters (which user code may taint).
+    if (obj.getTemporalRecord()) |rec| switch (rec.*) {
+        .duration => |d| {
+            out.* = .{ d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.milliseconds, d.microseconds, d.nanoseconds };
+            return;
+        },
+        else => {},
+    };
+    var any_defined = false;
+    var sign: i8 = 0;
+    inline for (duration_units, 0..) |u, i| {
+        const v = try getPropertyChain(realm, obj, u.name);
+        if (v.isUndefined()) {
+            out[i] = 0;
+        } else {
+            any_defined = true;
+            const n = numberToF64(try toNumber(realm, v));
+            if (!std.math.isFinite(n) or n != @trunc(n))
+                return throwRangeError(realm, "duration field must be an integer");
+            out[i] = n;
+            if (n > 0) {
+                if (sign < 0) return throwRangeError(realm, "duration must not mix signs");
+                sign = 1;
+            } else if (n < 0) {
+                if (sign > 0) return throwRangeError(realm, "duration must not mix signs");
+                sign = -1;
+            }
+        }
+    }
+    if (!any_defined) return throwTypeError(realm, "duration requires at least one field");
+}
+
+/// §1.1.7 — fold sub-second units into a fractional amount for the unit at `idx`
+/// (6 = seconds, 7 = milliseconds, 8 = microseconds), used when the next unit is
+/// numeric so e.g. {seconds:1, milliseconds:500} renders as "1.5".
+fn durationToFractional(vals: *const [10]f64, idx: usize) f64 {
+    const sec = vals[6];
+    const ms = vals[7];
+    const us = vals[8];
+    const ns = vals[9];
+    return switch (idx) {
+        6 => if (ms == 0 and us == 0 and ns == 0) sec else sec + ms / 1000.0 + us / 1_000_000.0 + ns / 1_000_000_000.0,
+        7 => if (us == 0 and ns == 0) ms else ms + us / 1000.0 + ns / 1_000_000.0,
+        else => if (ns == 0) us else us + ns / 1000.0,
+    };
+}
+
+/// §1.1.8 PartitionDurationFormatPattern — format each present unit (long/short/
+/// narrow via NumberFormat unit style; numeric/2-digit grouped with ":" into a
+/// digital-clock element) and join the elements via ListFormat (type "unit").
+/// Returns the count of formatted list elements in `items` / `item_lens`.
+fn durationBuildItems(realm: *Realm, s: *const intl.DurationFormatSlots, vals: *const [10]f64, items: *[10][192]u8, item_lens: *[10]usize) NativeError!usize {
+    const loc = s.base.dataLocale();
+    var any_negative = false;
+    for (vals) |v| {
+        if (v < 0) {
+            any_negative = true;
+            break;
+        }
+    }
+    var nitems: usize = 0;
+    var need_separator = false;
+    var display_negative_sign = true;
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        var value = vals[i];
+        const style = s.unit_style[i];
+        const display = s.unit_display[i];
+        // Numeric seconds / sub-seconds fold their fraction when the next unit
+        // is numeric; that ends the loop (the fraction subsumes the rest).
+        var fractional = false;
+        if ((i == 6 or i == 7 or i == 8) and std.mem.eql(u8, s.unit_style[i + 1], "numeric")) {
+            value = durationToFractional(vals, i);
+            fractional = true;
+        }
+        // A zero numeric minutes is still shown when seconds will follow.
+        var display_required = false;
+        if (i == 5 and need_separator)
+            display_required = std.mem.eql(u8, s.unit_display[6], "always") or vals[6] != 0 or vals[7] != 0 or vals[8] != 0 or vals[9] != 0;
+
+        if (value != 0 or !std.mem.eql(u8, display, "auto") or display_required) {
+            var sign_never = false;
+            if (display_negative_sign) {
+                display_negative_sign = false;
+                if (value == 0 and any_negative) value = -0.0; // force the leading sign
+            } else {
+                sign_never = true;
+            }
+            var nf: intl.NumberFormatSlots = .{};
+            nf.base.locale = loc;
+            nf.base.numbering_system = s.numbering_system;
+            nf.notation = "standard";
+            nf.rounding_type = "fractionDigits";
+            nf.rounding_mode = "halfExpand";
+            nf.trailing_zero_display = "auto";
+            nf.sign_display = if (sign_never) "never" else "auto";
+            nf.minimum_fraction_digits = 0;
+            nf.maximum_fraction_digits = 0;
+            if (std.mem.eql(u8, style, "2-digit")) nf.minimum_integer_digits = 2;
+            if (!isNumericDurStyle(style)) {
+                nf.style = "unit";
+                nf.unit = duration_units[i].name[0 .. duration_units[i].name.len - 1]; // singular
+                nf.unit_display = style;
+                nf.use_grouping = "auto";
+                nf.maximum_fraction_digits = 3;
+            } else {
+                nf.style = "decimal";
+                nf.use_grouping = "false";
+            }
+            if (fractional) {
+                nf.maximum_fraction_digits = s.fractional_digits orelse 9;
+                nf.minimum_fraction_digits = s.fractional_digits orelse 0;
+                nf.rounding_mode = "trunc";
+            }
+            var fbuf: [192]u8 = undefined;
+            const formatted = try formatNumericToBuf(realm, &nf, value, &fbuf);
+            if (!need_separator) {
+                const n = @min(formatted.len, items[nitems].len);
+                @memcpy(items[nitems][0..n], formatted[0..n]);
+                item_lens[nitems] = n;
+                if (isNumericDurStyle(style)) need_separator = true;
+                nitems += 1;
+            } else if (nitems > 0) {
+                const li = nitems - 1;
+                var l = item_lens[li];
+                if (l < items[li].len) {
+                    items[li][l] = ':';
+                    l += 1;
+                }
+                l += copyClamp(items[li][0..], l, formatted);
+                item_lens[li] = l;
+            }
+        }
+        if (fractional) break;
+    }
+    return nitems;
+}
+
 fn durationFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireKind(realm, this_value, .duration_format);
-    const dur = argOr(args, 0, Value.undefined_);
-    if (!dur.isObject()) return throwTypeError(realm, "DurationFormat.format requires a duration-like object");
-    // Structural: JSON-ish ToString of object fields if present.
-    return makeStringValue(realm, try valueToStringSlice(realm, dur));
+    const rec = try requireKind(realm, this_value, .duration_format);
+    const s = &rec.duration_format;
+    var vals: [10]f64 = undefined;
+    try toDurationRecord(realm, argOr(args, 0, Value.undefined_), &vals);
+    if (!cldr.available) return makeStringValue(realm, "");
+
+    var items: [10][192]u8 = undefined;
+    var item_lens: [10]usize = undefined;
+    const nitems = try durationBuildItems(realm, s, &vals, &items, &item_lens);
+
+    var slices: [10][]const u8 = undefined;
+    var k: usize = 0;
+    while (k < nitems) : (k += 1) slices[k] = items[k][0..item_lens[k]];
+
+    var lf: intl.ListFormatSlots = .{};
+    lf.base.locale = s.base.dataLocale();
+    lf.type_name = "unit";
+    lf.style = if (std.mem.eql(u8, s.style, "long")) "long" else if (std.mem.eql(u8, s.style, "narrow")) "narrow" else "short";
+    var parts: std.ArrayListUnmanaged(ListSeg) = .empty;
+    defer parts.deinit(realm.allocator);
+    try listBuildParts(realm, &lf, slices[0..nitems], &parts);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    for (parts.items) |seg| out.appendSlice(realm.allocator, seg.val) catch return error.OutOfMemory;
+    return makeStringValue(realm, out.items);
 }
 
 fn durationFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const formatted = try durationFormatFormat(realm, this_value, args);
+    const rec = try requireKind(realm, this_value, .duration_format);
+    const s = &rec.duration_format;
+    var vals: [10]f64 = undefined;
+    try toDurationRecord(realm, argOr(args, 0, Value.undefined_), &vals);
     const arr = allocateArray(realm) catch return error.OutOfMemory;
-    const part = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(part, realm.intrinsics.object_prototype);
-    try setDataProp(realm, part, "type", try makeStringValue(realm, "literal"));
-    try setDataProp(realm, part, "value", formatted);
-    arr.set(realm.allocator, "0", heap_mod.taggedObject(part)) catch return error.OutOfMemory;
-    arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
+    if (!cldr.available) {
+        arr.setArrayLength(realm.allocator, 0) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(arr);
+    }
+    var items: [10][192]u8 = undefined;
+    var item_lens: [10]usize = undefined;
+    const nitems = try durationBuildItems(realm, s, &vals, &items, &item_lens);
+    var slices: [10][]const u8 = undefined;
+    var k: usize = 0;
+    while (k < nitems) : (k += 1) slices[k] = items[k][0..item_lens[k]];
+
+    var lf: intl.ListFormatSlots = .{};
+    lf.base.locale = s.base.dataLocale();
+    lf.type_name = "unit";
+    lf.style = if (std.mem.eql(u8, s.style, "long")) "long" else if (std.mem.eql(u8, s.style, "narrow")) "narrow" else "short";
+    var parts: std.ArrayListUnmanaged(ListSeg) = .empty;
+    defer parts.deinit(realm.allocator);
+    try listBuildParts(realm, &lf, slices[0..nitems], &parts);
+    var idx: u32 = 0;
+    for (parts.items) |seg| {
+        // §1.1.10 — list "element" segments carry type "literal" with the unit's
+        // formatted text; the conjunction literals are plain "literal" too.
+        try pushPart(realm, arr, idx, "literal", try makeStringValue(realm, seg.val));
+        idx += 1;
+    }
+    arr.setArrayLength(realm.allocator, idx) catch return error.OutOfMemory;
     return heap_mod.taggedObject(arr);
 }
 

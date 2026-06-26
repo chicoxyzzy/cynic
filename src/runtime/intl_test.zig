@@ -1641,3 +1641,23 @@ test "intl: NumberFormat formatRange / formatRangeToParts (§15.5.8)" {
         \\ p[2].source === 'endRange' && p[0].type === 'integer' && p[2].value === '5') ? 1 : 0
     );
 }
+
+test "intl: DurationFormat format (long/digital/mixed/fraction/negative)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (o, d) => new Intl.DurationFormat('en', o).format(d);
+        \\(f({ style: 'long' }, { hours: 1, minutes: 46, seconds: 40 }) === '1 hour, 46 minutes, 40 seconds' &&
+        \\ f({ style: 'digital' }, { hours: 1, minutes: 2, seconds: 3 }) === '1:02:03' &&
+        \\ f({ minutes: 'numeric', seconds: 'numeric' }, { days: 5, hours: 1, minutes: 2, seconds: 3 }) === '5 days, 1 hr, 2:03' &&
+        \\ f({ style: 'digital' }, { minutes: 1, seconds: 30, milliseconds: 500 }) === '0:01:30.5' &&
+        \\ f({ style: 'long' }, { hours: -1, minutes: -30 }) === '-1 hour, 30 minutes') ? 1 : 0
+    );
+    // §1.1.6 ToDurationRecord validation.
+    try evalAssert1(
+        \\const thrown = (f) => { try { f(); return ''; } catch (e) { return e.constructor.name; } };
+        \\const df = new Intl.DurationFormat('en');
+        \\(thrown(() => df.format({ hours: 1.5 })) === 'RangeError' &&
+        \\ thrown(() => df.format({ hours: 1, minutes: -2 })) === 'RangeError' &&
+        \\ thrown(() => df.format({})) === 'TypeError') ? 1 : 0
+    );
+}
