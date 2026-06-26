@@ -261,14 +261,30 @@ pub const JSString = struct {
     /// stored length are unchanged — so a `*const JSString` reader
     /// is not lying. V8's `String::Flatten` does the same on a
     /// nominally-const string.
-    pub fn flatBytes(self: *const JSString) []const u8 {
-        switch (self.payload) {
-            .flat => |b| return b,
-            .cons => |c| {
-                const mutable: *JSString = @constCast(self);
-                return mutable.flatten(c.heap.bytes_allocator) catch "";
-            },
-        }
+    /// `inline` with the cons (rope) materialisation factored into
+    /// an out-of-line cold helper: the flat case is the
+    /// overwhelmingly common one (every live string is flat outside
+    /// an in-flight cons), and hot property-key readers (the IC-miss
+    /// shape walk reaches this per access on a megamorphic site) pay
+    /// a call otherwise. Keeping the cons branch in a separate
+    /// function leaves this shell small enough that the inliner takes
+    /// it — left whole, LLVM's cost model declines because `flatten`
+    /// is heavy and looks like part of the body.
+    pub inline fn flatBytes(self: *const JSString) []const u8 {
+        return switch (self.payload) {
+            .flat => |b| b,
+            .cons => self.flattenCons(),
+        };
+    }
+
+    /// Cold out-of-line tail of `flatBytes` — materialises a cons
+    /// (rope) subtree on demand. Only reached from the `.cons` arm,
+    /// so the union access is the live variant. See `flatBytes` for
+    /// why this is split out.
+    fn flattenCons(self: *const JSString) []const u8 {
+        const c = self.payload.cons;
+        const mutable: *JSString = @constCast(self);
+        return mutable.flatten(c.heap.bytes_allocator) catch "";
     }
 
     /// Walk the right spine of a (possibly cons) tree and return its
