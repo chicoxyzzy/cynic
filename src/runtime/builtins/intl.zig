@@ -3534,6 +3534,20 @@ fn installDurationFormat(realm: *Realm, ns: *JSObject) !void {
     });
 }
 
+/// The 10 duration units in spec order, with the style values each accepts.
+const duration_units = [10]struct { name: []const u8, display: []const u8, styles: []const []const u8 }{
+    .{ .name = "years", .display = "yearsDisplay", .styles = &.{ "long", "short", "narrow" } },
+    .{ .name = "months", .display = "monthsDisplay", .styles = &.{ "long", "short", "narrow" } },
+    .{ .name = "weeks", .display = "weeksDisplay", .styles = &.{ "long", "short", "narrow" } },
+    .{ .name = "days", .display = "daysDisplay", .styles = &.{ "long", "short", "narrow" } },
+    .{ .name = "hours", .display = "hoursDisplay", .styles = &.{ "long", "short", "narrow", "numeric", "2-digit" } },
+    .{ .name = "minutes", .display = "minutesDisplay", .styles = &.{ "long", "short", "narrow", "numeric", "2-digit" } },
+    .{ .name = "seconds", .display = "secondsDisplay", .styles = &.{ "long", "short", "narrow", "numeric", "2-digit" } },
+    .{ .name = "milliseconds", .display = "millisecondsDisplay", .styles = &.{ "long", "short", "narrow", "numeric" } },
+    .{ .name = "microseconds", .display = "microsecondsDisplay", .styles = &.{ "long", "short", "narrow", "numeric" } },
+    .{ .name = "nanoseconds", .display = "nanosecondsDisplay", .styles = &.{ "long", "short", "narrow", "numeric" } },
+};
+
 fn durationFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_duration_format_prototype, "DurationFormat", true);
     const locales = argOr(args, 0, Value.undefined_);
@@ -3541,8 +3555,31 @@ fn durationFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
     const opts = try getOptionsObject(realm, options);
     const resolved = try resolveServiceLocale(realm, locales, opts);
     var slots: intl.DurationFormatSlots = .{};
+    errdefer slots.deinit(realm.allocator);
     slots.base.locale = resolved.locale;
+
+    // § InitializeDurationFormat read order: numberingSystem, style, then each
+    // unit's style + display, then fractionalDigits.
+    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, opts);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "long", "short", "narrow", "digital" }, "short");
+    const digital = std.mem.eql(u8, slots.style, "digital");
+
+    inline for (duration_units, 0..) |u, i| {
+        // § GetDurationUnitOptions — the unit style defaults from the base
+        // style (digital → "numeric" for h/m/s); display defaults to "always"
+        // when the style is explicit, else "auto".
+        const explicit = try getOptionString(realm, opts, u.name, u.styles, "");
+        var display_default: []const u8 = "always";
+        const resolved_style = if (explicit.len > 0) explicit else blk: {
+            display_default = "auto";
+            const is_hms = i >= 4 and i <= 6;
+            break :blk if (digital and is_hms) "numeric" else if (digital) "short" else slots.style;
+        };
+        slots.unit_style[i] = realm.allocator.dupe(u8, resolved_style) catch return error.OutOfMemory;
+        slots.unit_display[i] = try getOptionStringOwned(realm, opts, u.display, &.{ "always", "auto" }, display_default);
+    }
+    slots.fractional_digits = try getNumberOptionOpt(realm, opts, "fractionalDigits", 0, 9);
+
     try storeRecord(realm, inst, .{ .duration_format = slots });
     return heap_mod.taggedObject(inst);
 }
@@ -3571,8 +3608,16 @@ fn durationFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const
     _ = args;
     const rec = try requireKind(realm, this_value, .duration_format);
     const s = rec.duration_format;
+    // § key order: locale, numberingSystem, style, then each unit's style +
+    // display, then fractionalDigits (only when set).
     const obj = try makeResolvedBase(realm, s.base.locale);
+    try setDataProp(realm, obj, "numberingSystem", try makeStringValue(realm, if (s.numbering_system.len > 0) s.numbering_system else "latn"));
     try setDataProp(realm, obj, "style", try makeStringValue(realm, if (s.style.len > 0) s.style else "short"));
-    try setDataProp(realm, obj, "numberingSystem", try makeStringValue(realm, "latn"));
+    inline for (duration_units, 0..) |u, i| {
+        try setDataProp(realm, obj, u.name, try makeStringValue(realm, if (s.unit_style[i].len > 0) s.unit_style[i] else "short"));
+        try setDataProp(realm, obj, u.display, try makeStringValue(realm, if (s.unit_display[i].len > 0) s.unit_display[i] else "auto"));
+    }
+    if (s.fractional_digits) |fd|
+        try setDataProp(realm, obj, "fractionalDigits", makeNumberValue(@floatFromInt(fd)));
     return heap_mod.taggedObject(obj);
 }

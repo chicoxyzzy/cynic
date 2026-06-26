@@ -304,32 +304,20 @@ pub const SegmenterSlots = struct {
 
 pub const DurationFormatSlots = struct {
     base: ServiceLocaleSlots = .{},
+    numbering_system: []const u8 = "",
     style: []const u8 = "",
-    years: []const u8 = "",
-    months: []const u8 = "",
-    weeks: []const u8 = "",
-    days: []const u8 = "",
-    hours: []const u8 = "",
-    minutes: []const u8 = "",
-    seconds: []const u8 = "",
-    milliseconds: []const u8 = "",
-    microseconds: []const u8 = "",
-    nanoseconds: []const u8 = "",
+    /// Per-unit style + display, indexed by DurationUnit order
+    /// (years … nanoseconds). All allocator-owned when set.
+    unit_style: [10][]const u8 = @splat(""),
+    unit_display: [10][]const u8 = @splat(""),
     fractional_digits: ?u32 = null,
 
     pub fn deinit(self: *DurationFormatSlots, allocator: std.mem.Allocator) void {
         self.base.deinit(allocator);
+        if (self.numbering_system.len > 0) allocator.free(self.numbering_system);
         if (self.style.len > 0) allocator.free(self.style);
-        if (self.years.len > 0) allocator.free(self.years);
-        if (self.months.len > 0) allocator.free(self.months);
-        if (self.weeks.len > 0) allocator.free(self.weeks);
-        if (self.days.len > 0) allocator.free(self.days);
-        if (self.hours.len > 0) allocator.free(self.hours);
-        if (self.minutes.len > 0) allocator.free(self.minutes);
-        if (self.seconds.len > 0) allocator.free(self.seconds);
-        if (self.milliseconds.len > 0) allocator.free(self.milliseconds);
-        if (self.microseconds.len > 0) allocator.free(self.microseconds);
-        if (self.nanoseconds.len > 0) allocator.free(self.nanoseconds);
+        for (self.unit_style) |u| if (u.len > 0) allocator.free(u);
+        for (self.unit_display) |u| if (u.len > 0) allocator.free(u);
         self.* = .{};
     }
 };

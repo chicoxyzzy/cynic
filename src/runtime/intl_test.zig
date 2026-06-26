@@ -1401,3 +1401,25 @@ test "intl: Segments + SegmentIterator have the right prototype shape" {
         \\ [...g.segment('héllo')].length >= 5) ? 1 : 0
     );
 }
+
+// ── Intl.DurationFormat per-unit options + resolvedOptions ───────────────────
+
+test "intl: DurationFormat resolves per-unit options + key order" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const ro = new Intl.DurationFormat('en', { style:'long', fractionalDigits:2 }).resolvedOptions();
+        \\const keys = Object.keys(ro);
+        \\(ro.years === 'long' && ro.yearsDisplay === 'auto' && ro.seconds === 'long' &&
+        \\ ro.fractionalDigits === 2 &&
+        \\ keys.indexOf('numberingSystem') < keys.indexOf('style') &&
+        \\ keys.indexOf('style') < keys.indexOf('years') &&
+        \\ keys.indexOf('years') < keys.indexOf('yearsDisplay') &&
+        \\ new Intl.DurationFormat('en', {style:'digital'}).resolvedOptions().hours === 'numeric') ? 1 : 0
+    );
+}
+
+test "intl: DurationFormat validates fractionalDigits" {
+    try requireIntlBuild();
+    try evalThrows("new Intl.DurationFormat('en', { fractionalDigits: -10 })");
+    try evalThrows("new Intl.DurationFormat('en', { years: 'bogus' })");
+}
