@@ -1996,6 +1996,34 @@ fn signShows(sign_display: []const u8, negative: bool, is_zero: bool) bool {
 
 /// Round `magnitude` (>= 0) to ASCII integer + fraction digit strings per the
 /// resolved rounding type. Uses the engine's exact dtoa (halfExpand).
+/// Round a non-negative `q` to an integer per the named rounding mode (the
+/// "half*" variants resolve ties; the value is always ≥ 0 here so floor = trunc
+/// toward zero, ceil = expand away from zero).
+fn applyRoundingModeNonNeg(q: f64, mode: []const u8) f64 {
+    const fl = @floor(q);
+    const frac = q - fl;
+    if (std.mem.eql(u8, mode, "ceil") or std.mem.eql(u8, mode, "expand")) return @ceil(q);
+    if (std.mem.eql(u8, mode, "floor") or std.mem.eql(u8, mode, "trunc")) return fl;
+    if (std.mem.eql(u8, mode, "halfCeil") or std.mem.eql(u8, mode, "halfExpand")) return if (frac >= 0.5) fl + 1 else fl;
+    if (std.mem.eql(u8, mode, "halfFloor") or std.mem.eql(u8, mode, "halfTrunc")) return if (frac > 0.5) fl + 1 else fl;
+    if (std.mem.eql(u8, mode, "halfEven")) {
+        if (frac < 0.5) return fl;
+        if (frac > 0.5) return fl + 1;
+        return if (@mod(fl, 2) == 0) fl else fl + 1;
+    }
+    // default halfExpand
+    return if (frac >= 0.5) fl + 1 else fl;
+}
+
+/// Round `magnitude` to the nearest multiple of `increment × 10^-frac_digits`.
+fn roundToIncrement(magnitude: f64, frac_digits: u32, increment: u32, mode: []const u8) f64 {
+    const scale = std.math.pow(f64, 10, @floatFromInt(frac_digits));
+    const inc: f64 = @floatFromInt(increment);
+    const q = magnitude * scale / inc; // value in increment-units
+    const rq = applyRoundingModeNonNeg(q, mode);
+    return rq * inc / scale;
+}
+
 fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
     if (!std.math.isFinite(magnitude) or magnitude >= 1e21) {
         // Fallback: trunc to integer digits (rare path; non-finite handled upstream).
@@ -2031,8 +2059,14 @@ fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []
 
     const maxfd = slots.maximum_fraction_digits orelse 3;
     const minfd = slots.minimum_fraction_digits orelse 0;
+    // §15.1.x roundingIncrement: round the magnitude to the nearest multiple of
+    // increment × 10^-maxfd (using the rounding mode) before extracting digits.
+    const mag = if (slots.rounding_increment > 1)
+        roundToIncrement(magnitude, maxfd, slots.rounding_increment, slots.rounding_mode)
+    else
+        magnitude;
     var dec = dtoa.Decimal{};
-    dtoa.fixedDigits(magnitude, maxfd, &dec);
+    dtoa.fixedDigits(mag, maxfd, &dec);
     const m = dec.digits();
     if (maxfd == 0) {
         @memcpy(int_buf[0..m.len], m);

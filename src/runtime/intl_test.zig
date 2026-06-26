@@ -1502,3 +1502,15 @@ test "intl: tag with duplicate singleton or 4-alpha language is invalid" {
     try testing.expect(intl.isStructurallyValidLanguageTag("en-a-bbb-u-co-phonebk")); // distinct singletons ok
     try evalThrows("new Intl.Locale('de-u-kn-U-kn')");
 }
+
+test "intl: NumberFormat roundingIncrement rounds to the increment grid" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (inc, v) => new Intl.NumberFormat('en', {
+        \\  maximumFractionDigits: 2, minimumFractionDigits: 2, roundingIncrement: inc
+        \\}).format(v);
+        \\(f(5, 1.23) === '1.25' && f(5, 1.27) === '1.25' &&
+        \\ f(25, 1.18) === '1.25' && f(50, 7.30) === '7.50' &&
+        \\ new Intl.NumberFormat('en').format(1.235) === '1.235') ? 1 : 0
+    );
+}
