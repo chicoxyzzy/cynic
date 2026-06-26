@@ -1712,6 +1712,53 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         return n;
     }
 
+    // §15.5 scientific / engineering notation — an isolated path: normalize the
+    // magnitude to a mantissa (1 ≤ |m| < 10, or < 1000 for engineering with the
+    // exponent a multiple of 3), round the mantissa, and emit
+    // integer/decimal/fraction + exponentSeparator/[exponentMinusSign]/exponentInteger.
+    // (Decimal/percent only; currency notation stays on the pattern path.)
+    if (!non_finite and !is_currency and
+        (std.mem.eql(u8, slots.notation, "scientific") or std.mem.eql(u8, slots.notation, "engineering")))
+    {
+        const eng = std.mem.eql(u8, slots.notation, "engineering");
+        const m = @abs(x) * (if (is_percent) @as(f64, 100) else 1);
+        var exp: i32 = 0;
+        if (m > 0) {
+            exp = @as(i32, @intFromFloat(@floor(std.math.log10(m))));
+            if (eng) exp = @divFloor(exp, 3) * 3;
+        }
+        var mant = if (m == 0) 0 else m / std.math.pow(f64, 10, @floatFromInt(exp));
+        var mi: [160]u8 = undefined;
+        var mil: usize = 0;
+        var mf: [160]u8 = undefined;
+        var mfl: usize = 0;
+        roundDigits(slots, mant, &mi, &mil, &mf, &mfl);
+        // Rounding may carry the mantissa to 10 (e.g. 9.999→"10"); renormalize.
+        if (mil > (if (eng) @as(usize, 3) else 1) and m > 0) {
+            exp += @intCast(mil - 1);
+            if (eng) exp = @divFloor(exp, 3) * 3;
+            mant = m / std.math.pow(f64, 10, @floatFromInt(exp));
+            roundDigits(slots, mant, &mi, &mil, &mf, &mfl);
+        }
+
+        if (signShows(slots.sign_display, negative, is_zero))
+            append(out, &n, if (negative) "minusSign" else "plusSign", if (negative) nd.minus else nd.plus);
+        var sub: [256]u8 = undefined;
+        append(out, &n, "integer", substituteDigits(mi[0..mil], digit_base, &sub));
+        if (mfl > 0) {
+            append(out, &n, "decimal", nd.decimal);
+            var sub2: [256]u8 = undefined;
+            append(out, &n, "fraction", substituteDigits(mf[0..mfl], digit_base, &sub2));
+        }
+        append(out, &n, "exponentSeparator", "E");
+        if (exp < 0) append(out, &n, "exponentMinusSign", nd.minus);
+        var eb: [16]u8 = undefined;
+        const es = std.fmt.bufPrint(&eb, "{d}", .{@abs(exp)}) catch "0";
+        var sub3: [256]u8 = undefined;
+        append(out, &n, "exponentInteger", substituteDigits(es, digit_base, &sub3));
+        return n;
+    }
+
     // Pattern affixes (percent / currency sign placement, literals). Decimal
     // patterns usually have none. Currency draws its own pattern (standard or
     // accounting) from the locale's currencyFormats; the `¤` placeholder is

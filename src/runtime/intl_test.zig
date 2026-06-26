@@ -1539,3 +1539,19 @@ test "intl: NumberFormat roundingPriority more/lessPrecision" {
         \\ new Intl.NumberFormat('en').resolvedOptions().roundingPriority === 'auto') ? 1 : 0
     );
 }
+
+test "intl: NumberFormat scientific + engineering notation" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (n, v) => new Intl.NumberFormat('en', { notation: n }).format(v);
+        \\(f('scientific', 987654321) === '9.877E8' &&
+        \\ f('scientific', 0.000345) === '3.45E-4' &&
+        \\ f('scientific', -1234) === '-1.234E3' &&
+        \\ f('engineering', 987654321) === '987.654E6' &&
+        \\ f('engineering', 12345) === '12.345E3') ? 1 : 0
+    );
+    try evalAssert1(
+        \\const p = new Intl.NumberFormat('en', { notation: 'scientific' }).formatToParts(1234);
+        \\(p.map(x => x.type).join(',') === 'integer,decimal,fraction,exponentSeparator,exponentInteger') ? 1 : 0
+    );
+}
