@@ -1,9 +1,86 @@
 # Generational-incremental major marking — design scope
 
-Status: **Phase 0 complete — GO** (no production code yet; Phase 1 next).
-Owner: the GC track. Prerequisite reading:
-[handbook/gc.md](handbook/gc.md) (sticky mark bits, card marking, incremental
-major mark, lazy sweep — all shipped).
+Status: **CLOSED — not viable for a non-moving collector.** Phase 0 measured
+GO and Phase 1 (the mature→mature remembered set) was built + fully validated;
+then a careful read of the Phase 2 marking mechanism found a fundamental
+obstruction, and the effort was reverted. See **Outcome** immediately below —
+the rest of the doc is the historical record of how we got there. Owner: the
+GC track. Prerequisite reading: [handbook/gc.md](handbook/gc.md) (sticky mark
+bits, card marking, incremental major mark, lazy sweep — all shipped).
+
+## Outcome — closed (the negative result)
+
+Building Phase 2 surfaced a fundamental obstruction: **a non-moving mark-sweep
+collector cannot reclaim old-generation garbage without re-tracing the old
+set.** The generational-incremental major — "skip re-tracing the unchanged old
+set, keep its sticky marks" — does not deliver a cheap *reclaiming* major.
+Concretely, the three realizations all fail:
+
+- **Keep all sticky marks (no colour flip) ⇒ a no-op.** Between full majors
+  every live mature object is already `live_color` (the last full major marked
+  it; promotion marks survivors; allocate-black marks new objects). A dead
+  mature object — a removed `splay` payload — keeps its sticky mark too. A major
+  that only *adds* marks from (dirtied-old ∪ roots) marks nothing new and frees
+  nothing; it is provably identical to *skipping the major* and floating the
+  garbage.
+- **Flip only the dirtied set ⇒ reclaims the wrong objects.** `splay`'s actual
+  garbage is a *removed node*, whose own pointers never changed — only its
+  parent's did. The removed node is therefore **clean**, never flipped, never
+  reclaimed. The dirtied set is the rotated/relinked nodes, which mostly stay
+  live.
+- **Flip everything, prune the trace at clean subgraphs ⇒ use-after-free.** A
+  clean old object C can point to D whose only path is through C (the C→D edge
+  predates the last full major, so C is clean). Stopping the trace at C leaves D
+  unmarked → swept while reachable. Marking a clean subgraph live *without
+  visiting each object* needs region/page contiguity — a moving/region heap,
+  which Cynic's per-object pools are not.
+
+The root cause is information-theoretic, not implementation-specific: **deciding
+an object is unreachable requires either tracing every path to it (a full
+old-gen trace) or reference-counting it.** Sticky marks supply neither for the
+clean old set, so a major that skips the clean old trace cannot observe old
+garbage dead.
+
+**Why Phase 0's GO was wrong.** Phase 0 measured the dirtied-old fraction
+correctly (0.6% on `splay`), but a small dirtied set does not enable cheap
+*reclaim*. "Skip the 99.4% re-trace" *is* "float the garbage in it" — the
+marking-CPU saved is traded for RSS, which Phase 0 never measured — and the 0.6%
+re-scan is itself the no-op above. The data was right; the inference ("⇒ a
+~100–250× reclaiming major") was not.
+
+**Prior art (the focused survey Phase 0 owed).** The state of the art for prompt
+old-object reclamation without full-trace cost is **LXR** (Zhao, Blackburn &
+McKinley, *Low-Latency, High-Throughput Garbage Collection*, 2022,
+[arXiv:2210.17175](https://arxiv.org/abs/2210.17175)): it reclaims old objects
+with **reference counting**, lays the heap out as **Immix regions** (a region
+reclaims without per-object tracing), and uses **concurrent tracing only for
+cyclic garbage**. Its own framing — *"they depend on tracing, which in the limit
+and in practice does not scale"* — is exactly the `markValue` wall here. The
+three escapes it uses are the only known ones: **region/line structure**
+(Immix), **reference counting** (immediacy), or **concurrency** (hide the trace
+off-thread). A non-moving, per-object-pool, single-threaded mark-sweep has none.
+Textbook generational mark-sweep (Jones & Hosking, *The GC Handbook*) agrees:
+cards make the *minor* cheap; the *major* is a full old-gen trace.
+
+**What this means for Cynic.** The major's mark *CPU* on a large stable retained
+set is a near-fixed cost for the current heap. The incremental major already
+bounds the *pause* (~800 ms → ~1 ms); the CPU floor is inherent to a non-moving
+full trace. The real levers — each a major architecture change, none needing
+this remembered set — are an **Immix-style region heap** (region-granularity
+reclaim), **reference counting** for the old gen (immediacy + a cycle
+collector), or **concurrent/background marking** (move the trace off the mutator
+thread — the route the multi-threaded production engines took, which Phase 0
+flagged as a poor fit for a single-threaded mutator). Revisit only behind one of
+those.
+
+**Phase 1 disposition.** The mature→mature remembered set — the `dirty_old` bit
+on the four container types, `old_dirty_list`, `rememberOldStore`, the 7 routed
+barrier sites + the minor carry-over + the major-termination reset — was
+implemented and fully validated (byte-identical by construction, `test-fast`
+green, gc-stress `--gc-threshold=1` clean across
+Map/class/Promise/Set/WeakRef/FinalizationRegistry), then **reverted**: it is
+machinery for a major that cannot pay off. The barrier-site inventory in this
+sentence is the reconstruction guide if a future region/RC effort wants it.
 
 ## The problem
 
