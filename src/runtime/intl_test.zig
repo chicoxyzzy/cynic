@@ -1870,3 +1870,12 @@ test "intl: format function name is empty + dateStyle/component conflict (§11.1
         \\ thrown({ timeStyle: 'full', weekday: 'long' }) === 'TypeError') ? 1 : 0
     );
 }
+
+test "intl: NumberFormat roundingIncrement halfway precision (§15.1.1)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const f = (v) => new Intl.NumberFormat('en', { minimumFractionDigits: 2, maximumFractionDigits: 2, roundingIncrement: 10 }).format(v);
+        \\// 1.15 is 1.1499… in f64; the decimal value is an exact halfway → 1.20.
+        \\(f(1.15) === '1.20' && f(1.125) === '1.10' && f(1.175) === '1.20' && f(1.1) === '1.10') ? 1 : 0
+    );
+}

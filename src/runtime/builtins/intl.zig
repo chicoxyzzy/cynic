@@ -2432,10 +2432,24 @@ fn applyRoundingModeNonNeg(q: f64, mode: []const u8) f64 {
 }
 
 /// Round `magnitude` to the nearest multiple of `increment × 10^-frac_digits`.
+/// Round `x` to `sig` significant decimal digits — used to absorb the f64
+/// representation error before a half-way rounding decision, so that an exact
+/// decimal input (1.15, stored as 1.1499999…) is treated as the value the
+/// Number's shortest round-trip string denotes, per ECMA-402's rounding basis.
+fn snapToSignificant(x: f64, sig: u32) f64 {
+    if (x == 0 or !std.math.isFinite(x)) return x;
+    const e = @floor(std.math.log10(@abs(x)));
+    const p = @as(f64, @floatFromInt(sig)) - 1 - e;
+    const f = std.math.pow(f64, 10, p);
+    return @round(x * f) / f;
+}
+
 fn roundToIncrement(magnitude: f64, frac_digits: u32, increment: u32, mode: []const u8) f64 {
     const scale = std.math.pow(f64, 10, @floatFromInt(frac_digits));
     const inc: f64 = @floatFromInt(increment);
-    const q = magnitude * scale / inc; // value in increment-units
+    // Value in increment-units, snapped to absorb f64 error so a true halfway
+    // (1.15 → 11.4999… → 11.5) rounds the way the decimal value dictates.
+    const q = snapToSignificant(magnitude * scale / inc, 12);
     const rq = applyRoundingModeNonNeg(q, mode);
     return rq * inc / scale;
 }
