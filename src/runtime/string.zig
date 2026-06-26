@@ -261,16 +261,18 @@ pub const JSString = struct {
     /// stored length are unchanged — so a `*const JSString` reader
     /// is not lying. V8's `String::Flatten` does the same on a
     /// nominally-const string.
-    /// `inline` with the cons (rope) materialisation factored into
-    /// an out-of-line cold helper: the flat case is the
-    /// overwhelmingly common one (every live string is flat outside
-    /// an in-flight cons), and hot property-key readers (the IC-miss
-    /// shape walk reaches this per access on a megamorphic site) pay
-    /// a call otherwise. Keeping the cons branch in a separate
-    /// function leaves this shell small enough that the inliner takes
-    /// it — left whole, LLVM's cost model declines because `flatten`
-    /// is heavy and looks like part of the body.
-    pub inline fn flatBytes(self: *const JSString) []const u8 {
+    /// The cons (rope) materialisation is split into an out-of-line
+    /// cold helper (`flattenCons`) so this shell stays small enough
+    /// for LLVM to inline the flat fast path into hot property-key
+    /// readers on its own — the IC-miss shape walk reaches
+    /// `flatBytes` once per access on a megamorphic site. Left whole,
+    /// the cost model declines to inline because `flatten` is heavy
+    /// and looks like part of the body. Deliberately NOT `inline fn`:
+    /// forcing it at all ~150 call sites (most of them cold) bloated
+    /// code enough to perturb an unrelated JIT macro's I-cache layout
+    /// — letting the inliner pick only the hot sites keeps the
+    /// property-path win without the bloat.
+    pub fn flatBytes(self: *const JSString) []const u8 {
         return switch (self.payload) {
             .flat => |b| b,
             .cons => self.flattenCons(),
