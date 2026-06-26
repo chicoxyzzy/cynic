@@ -1702,3 +1702,20 @@ test "intl: DateTimeFormat formatRange + option validation (§11.1/§11.5)" {
         \\ thrown(() => new Intl.DateTimeFormat('en', { formatMatcher: 'bad' })) === 'RangeError') ? 1 : 0
     );
 }
+
+test "intl: DateTimeFormat formatRangeToParts source tags (§11.5.6)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const dtf = new Intl.DateTimeFormat('en');
+        \\const p = dtf.formatRangeToParts(new Date(2020, 0, 1), new Date(2020, 0, 5));
+        \\(p.every(x => typeof x.type === 'string' && typeof x.value === 'string') &&
+        \\ p.some(x => x.source === 'startRange') &&
+        \\ p.some(x => x.source === 'shared') &&
+        \\ p.some(x => x.source === 'endRange')) ? 1 : 0
+    );
+    try evalAssert1(
+        \\const same = new Date(2020, 0, 1);
+        \\const p = new Intl.DateTimeFormat('en').formatRangeToParts(same, same);
+        \\(p.length > 0 && p.every(x => x.source === 'shared')) ? 1 : 0
+    );
+}

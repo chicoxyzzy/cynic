@@ -2804,10 +2804,54 @@ fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Val
 }
 
 fn dateTimeFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const formatted = try dateTimeFormatFormatRange(realm, this_value, args);
+    const rec = try requireKind(realm, this_value, .date_time_format);
+    const av = argOr(args, 0, Value.undefined_);
+    const bv = argOr(args, 1, Value.undefined_);
+    if (av.isUndefined() or bv.isUndefined()) return throwTypeError(realm, "formatRangeToParts requires two arguments");
+    const a = try dtfTimeValue(realm, av);
+    const b = try dtfTimeValue(realm, bv);
     const arr = allocateArray(realm) catch return error.OutOfMemory;
-    try pushPart(realm, arr, 0, "literal", formatted);
-    arr.setArrayLength(realm.allocator, 1) catch return error.OutOfMemory;
+    if (!cldr.available) {
+        arr.setArrayLength(realm.allocator, 0) catch return error.OutOfMemory;
+        return heap_mod.taggedObject(arr);
+    }
+    var sa: [48]Seg = undefined;
+    var sb: [48]Seg = undefined;
+    const na = renderDateTime(&rec.date_time_format, a, &sa);
+    const nb = renderDateTime(&rec.date_time_format, b, &sb);
+    // Identical renderings → one date, every part sourced "shared".
+    var same = na == nb;
+    if (same) {
+        var k: usize = 0;
+        while (k < na) : (k += 1) {
+            if (!std.mem.eql(u8, sa[k].typ, sb[k].typ) or !std.mem.eql(u8, sa[k].bytes(), sb[k].bytes())) {
+                same = false;
+                break;
+            }
+        }
+    }
+    var idx: u32 = 0;
+    if (same) {
+        var k: usize = 0;
+        while (k < na) : (k += 1) {
+            try pushPartSourced(realm, arr, idx, sa[k].typ, sa[k].bytes(), "shared");
+            idx += 1;
+        }
+    } else {
+        var k: usize = 0;
+        while (k < na) : (k += 1) {
+            try pushPartSourced(realm, arr, idx, sa[k].typ, sa[k].bytes(), "startRange");
+            idx += 1;
+        }
+        try pushPartSourced(realm, arr, idx, "literal", " – ", "shared");
+        idx += 1;
+        k = 0;
+        while (k < nb) : (k += 1) {
+            try pushPartSourced(realm, arr, idx, sb[k].typ, sb[k].bytes(), "endRange");
+            idx += 1;
+        }
+    }
+    arr.setArrayLength(realm.allocator, idx) catch return error.OutOfMemory;
     return heap_mod.taggedObject(arr);
 }
 
