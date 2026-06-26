@@ -62,6 +62,7 @@ const SectionKind = enum(u8) {
     likely_subtags = 9,
     list_patterns = 10,
     relative_time = 11,
+    compact = 12,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -79,6 +80,7 @@ var display_payload: []const u8 = &.{};
 var likely_payload: []const u8 = &.{};
 var lp_payload: []const u8 = &.{};
 var rt_payload: []const u8 = &.{};
+var cp_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -117,6 +119,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.likely_subtags) => likely_payload = payload,
             @intFromEnum(SectionKind.list_patterns) => lp_payload = payload,
             @intFromEnum(SectionKind.relative_time) => rt_payload = payload,
+            @intFromEnum(SectionKind.compact) => cp_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -761,6 +764,63 @@ pub fn listPattern(locale: []const u8, type_idx: u8, style_idx: u8, which: ListP
         pat = readStr16(lp_payload, &off) orelse return null;
     }
     return pat;
+}
+
+// ── compact notation (Intl.NumberFormat notation:"compact") ──────────────────
+
+fn findCompactLocale(key: []const u8) ?usize {
+    if (cp_payload.len < 4) return null;
+    const count = std.mem.readInt(u32, cp_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(cp_payload, &off) orelse return null;
+        const k = readBytes(cp_payload, &off, klen) orelse return null;
+        const styles_off = off;
+        // Skip both style blocks to reach the next locale key.
+        inline for (.{ 0, 1 }) |_| off = skipCompactStyle(off) orelse return null;
+        if (asciiEqlIgnoreCase(k, key)) return styles_off;
+    }
+    return null;
+}
+
+fn skipCompactStyle(off_in: usize) ?usize {
+    var off = off_in;
+    if (off + 4 > cp_payload.len) return null;
+    const c = std.mem.readInt(u32, cp_payload[off..][0..4], .little);
+    off += 4;
+    var i: u32 = 0;
+    while (i < c) : (i += 1) {
+        off += 2; // power + cat
+        _ = readStr16(cp_payload, &off) orelse return null;
+    }
+    return off;
+}
+
+/// The compact pattern (e.g. "0K", "0 thousand") for (locale, style, 10^power,
+/// plural cat), falling back to the "other" category. Null when absent — the
+/// caller then renders the value with no compaction. `power` is the exponent of
+/// the chosen magnitude bucket (3 for 10³ … 14 for 10¹⁴).
+pub fn compactPattern(locale: []const u8, long: bool, power: u8, cat: PluralCategory) ?[]const u8 {
+    if (!ensureInit()) return null;
+    const styles_off = withCandidates(locale, findCompactLocale) orelse return null;
+    var off = styles_off;
+    if (long) off = skipCompactStyle(off) orelse return null;
+    if (off + 4 > cp_payload.len) return null;
+    const c = std.mem.readInt(u32, cp_payload[off..][0..4], .little);
+    off += 4;
+    var fallback: ?[]const u8 = null;
+    var i: u32 = 0;
+    while (i < c) : (i += 1) {
+        const p = readU8(cp_payload, &off) orelse return null;
+        const ct = readU8(cp_payload, &off) orelse return null;
+        const pat = readStr16(cp_payload, &off) orelse return null;
+        if (p == power) {
+            if (ct == @intFromEnum(cat)) return pat;
+            if (ct == @intFromEnum(PluralCategory.other)) fallback = pat;
+        }
+    }
+    return fallback;
 }
 
 // ── relative time (Intl.RelativeTimeFormat) ──────────────────────────────────

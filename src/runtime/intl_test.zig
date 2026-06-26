@@ -1555,3 +1555,27 @@ test "intl: NumberFormat scientific + engineering notation" {
         \\(p.map(x => x.type).join(',') === 'integer,decimal,fraction,exponentSeparator,exponentInteger') ? 1 : 0
     );
 }
+
+test "intl: NumberFormat compact notation (short/long/CJK + parts)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const s = v => new Intl.NumberFormat('en', { notation: 'compact' }).format(v);
+        \\const l = v => new Intl.NumberFormat('en', { notation: 'compact', compactDisplay: 'long' }).format(v);
+        \\(s(987654321) === '988M' && s(98765) === '99K' && s(1234) === '1.2K' &&
+        \\ s(999999) === '1M' && s(100) === '100' &&
+        \\ l(987654321) === '988 million' && l(1500) === '1.5 thousand' &&
+        \\ new Intl.NumberFormat('ja', { notation: 'compact' }).format(12345) === '1.2万') ? 1 : 0
+    );
+    try evalAssert1(
+        \\const p = new Intl.NumberFormat('en', { notation: 'compact', compactDisplay: 'long' }).formatToParts(987654321);
+        \\(p.map(x => x.type).join(',') === 'integer,literal,compact' &&
+        \\ p[2].value === 'million') ? 1 : 0
+    );
+    try evalAssert1(
+        \\const o = new Intl.NumberFormat('en', { notation: 'compact' }).resolvedOptions();
+        \\const k = Object.keys(o);
+        \\(o.compactDisplay === 'short' && o.roundingPriority === 'morePrecision' &&
+        \\ k.indexOf('minimumFractionDigits') < k.indexOf('minimumSignificantDigits') &&
+        \\ k.indexOf('compactDisplay') === k.indexOf('notation') + 1) ? 1 : 0
+    );
+}

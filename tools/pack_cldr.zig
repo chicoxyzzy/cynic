@@ -46,6 +46,7 @@ const SectionKind = enum(u8) {
     likely_subtags = 9,
     list_patterns = 10,
     relative_time = 11,
+    compact = 12,
 };
 
 /// RTF units in fixed order (year … second); each packs 3 styles (long /
@@ -158,13 +159,14 @@ pub fn main(init: std.process.Init) !void {
     const likely = try loadLikelySubtags(arena, io, json_root);
     const list_patterns = try loadListPatterns(arena, io, json_root);
     const relative_time = try loadRelativeTime(arena, io, json_root);
+    const compact = try loadCompact(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
-    var buf: [460]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len });
+    var buf: [500]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -233,12 +235,13 @@ fn pack(
     likely: []LikelyEntry,
     list_patterns: []ListPatternLocale,
     relative_time: []RelativeTimeLocale,
+    compact: []CompactLocale,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [11]SectionDir = undefined;
+    var dirs: [12]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -283,6 +286,10 @@ fn pack(
     const rt_start: u32 = @intCast(payloads.items.len);
     try writeRelativeTimePayload(gpa, &payloads, relative_time);
     dirs[10] = .{ .kind = .relative_time, .off = rt_start, .len = @as(u32, @intCast(payloads.items.len)) - rt_start };
+
+    const cp_start: u32 = @intCast(payloads.items.len);
+    try writeCompactPayload(gpa, &payloads, compact);
+    dirs[11] = .{ .kind = .compact, .off = cp_start, .len = @as(u32, @intCast(payloads.items.len)) - cp_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -495,6 +502,77 @@ fn writeListPatternsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged
             try appendStr16(gpa, buf, s.middle);
             try appendStr16(gpa, buf, s.end);
         }
+    }
+}
+
+// ── compact notation (Intl.NumberFormat notation:"compact") ───────────────────
+
+const CompactEntry = struct { power: u8, cat: u8, pat: []const u8 };
+/// short + long compact patterns for one locale (each entry: 10^power × plural).
+const CompactLocale = struct {
+    key: []const u8,
+    short: []CompactEntry,
+    long: []CompactEntry,
+    fn lessThan(_: void, a: CompactLocale, b: CompactLocale) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+fn loadCompactStyle(arena: std.mem.Allocator, dec: std.json.ObjectMap, style: []const u8) []CompactEntry {
+    const s = if (dec.get(style)) |v| v.object else return &.{};
+    const df = if (s.get("decimalFormat")) |v| v.object else return &.{};
+    var out: std.ArrayListUnmanaged(CompactEntry) = .empty;
+    var it = df.iterator();
+    while (it.next()) |e| {
+        // key form: "<power>-count-<cat>", e.g. "1000-count-one".
+        const dashc = std.mem.indexOf(u8, e.key_ptr.*, "-count-") orelse continue;
+        const power_str = e.key_ptr.*[0..dashc];
+        const cat_str = e.key_ptr.*[dashc + 7 ..];
+        if (power_str.len < 4) continue; // 10^3 = "1000" minimum
+        const power: u8 = @intCast(power_str.len - 1); // digits-1 = exponent
+        const cat = pluralCatIndex(cat_str) orelse continue;
+        if (e.value_ptr.* != .string) continue;
+        out.append(arena, .{ .power = power, .cat = cat, .pat = e.value_ptr.*.string }) catch {};
+    }
+    return out.items;
+}
+
+fn loadCompact(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]CompactLocale {
+    var out: std.ArrayListUnmanaged(CompactLocale) = .empty;
+    for (modern_locales) |loc| {
+        const path = try std.fmt.allocPrint(arena, "{s}/cldr-numbers-full/main/{s}/numbers.json", .{ json_root, loc });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch continue;
+        const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch continue;
+        var mit = root.object.get("main").?.object.iterator();
+        const n = (mit.next() orelse continue).value_ptr.*.object.get("numbers").?.object;
+        const default_ns = if (n.get("defaultNumberingSystem")) |d| d.string else "latn";
+        const dec_key = std.fmt.allocPrint(arena, "decimalFormats-numberSystem-{s}", .{default_ns}) catch continue;
+        const dec = if (n.get(dec_key)) |v| v.object else continue;
+        try out.append(arena, .{
+            .key = loc,
+            .short = loadCompactStyle(arena, dec, "short"),
+            .long = loadCompactStyle(arena, dec, "long"),
+        });
+    }
+    std.sort.block(CompactLocale, out.items, {}, CompactLocale.lessThan);
+    return out.items;
+}
+
+fn writeCompactStyle(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), entries: []CompactEntry) !void {
+    try appendU32(gpa, buf, entries.len);
+    for (entries) |e| {
+        try buf.append(gpa, e.power);
+        try buf.append(gpa, e.cat);
+        try appendStr16(gpa, buf, e.pat);
+    }
+}
+
+fn writeCompactPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), locales: []CompactLocale) !void {
+    try appendU32(gpa, buf, locales.len);
+    for (locales) |l| {
+        try appendStr8(gpa, buf, l.key);
+        try writeCompactStyle(gpa, buf, l.short);
+        try writeCompactStyle(gpa, buf, l.long);
     }
 }
 

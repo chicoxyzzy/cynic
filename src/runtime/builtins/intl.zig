@@ -1452,6 +1452,15 @@ fn setNumberFormatDigitOptions(realm: *Realm, slots: *intl.NumberFormatSlots, op
         if (lo > hi) return throwRangeError(realm, "minimumFractionDigits > maximumFractionDigits");
         slots.minimum_fraction_digits = lo;
         slots.maximum_fraction_digits = hi;
+    } else if (std.mem.eql(u8, slots.notation, "compact")) {
+        // §15.1.1 — compact with no explicit digit bounds rounds to whichever of
+        // 1-2 significant or 0 fraction digits is more precise (morePrecision),
+        // giving "1.2K" / "988M" rather than "1K" / "990M".
+        slots.rounding_type = try realm.allocator.dupe(u8, "morePrecision");
+        slots.minimum_significant_digits = 1;
+        slots.maximum_significant_digits = 2;
+        slots.minimum_fraction_digits = 0;
+        slots.maximum_fraction_digits = 0;
     } else {
         slots.rounding_type = try realm.allocator.dupe(u8, "fractionDigits");
         slots.minimum_fraction_digits = mnfd_default;
@@ -1550,17 +1559,18 @@ fn numberFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const V
         try setDataProp(realm, obj, "unitDisplay", try makeStringValue(realm, if (s.unit_display.len > 0) s.unit_display else "short"));
     }
     try setDataProp(realm, obj, "minimumIntegerDigits", makeNumberValue(@floatFromInt(s.minimum_integer_digits)));
-    // §15.5.2 — morePrecision/lessPrecision report both digit pairs; otherwise
-    // significantDigits → the significant pair, fractionDigits → the fraction pair.
+    // §15.5.2 — key order is fraction pair *before* significant pair.
+    // morePrecision/lessPrecision report both; significantDigits → the
+    // significant pair only; fractionDigits → the fraction pair only.
     const is_more_less = std.mem.eql(u8, s.rounding_type, "morePrecision") or std.mem.eql(u8, s.rounding_type, "lessPrecision");
     const is_sig = std.mem.eql(u8, s.rounding_type, "significantDigits");
-    if (is_sig or is_more_less) {
-        try setDataProp(realm, obj, "minimumSignificantDigits", makeNumberValue(@floatFromInt(s.minimum_significant_digits orelse 1)));
-        try setDataProp(realm, obj, "maximumSignificantDigits", makeNumberValue(@floatFromInt(s.maximum_significant_digits orelse 21)));
-    }
     if (!is_sig) {
         try setDataProp(realm, obj, "minimumFractionDigits", makeNumberValue(@floatFromInt(s.minimum_fraction_digits orelse 0)));
         try setDataProp(realm, obj, "maximumFractionDigits", makeNumberValue(@floatFromInt(s.maximum_fraction_digits orelse 3)));
+    }
+    if (is_sig or is_more_less) {
+        try setDataProp(realm, obj, "minimumSignificantDigits", makeNumberValue(@floatFromInt(s.minimum_significant_digits orelse 1)));
+        try setDataProp(realm, obj, "maximumSignificantDigits", makeNumberValue(@floatFromInt(s.maximum_significant_digits orelse 21)));
     }
     // §15.5.2 — useGrouping resolves to `false` (boolean) or a string.
     if (std.mem.eql(u8, s.use_grouping, "false")) {
@@ -1569,6 +1579,9 @@ fn numberFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const V
         try setDataProp(realm, obj, "useGrouping", try makeStringValue(realm, if (s.use_grouping.len > 0) s.use_grouping else "auto"));
     }
     try setDataProp(realm, obj, "notation", try makeStringValue(realm, if (s.notation.len > 0) s.notation else "standard"));
+    // §15.5.2 — compactDisplay is reported only under notation:"compact".
+    if (std.mem.eql(u8, s.notation, "compact"))
+        try setDataProp(realm, obj, "compactDisplay", try makeStringValue(realm, if (s.compact_display.len > 0) s.compact_display else "short"));
     try setDataProp(realm, obj, "signDisplay", try makeStringValue(realm, if (s.sign_display.len > 0) s.sign_display else "auto"));
     // §15.5.2 key order: roundingIncrement, roundingMode, roundingPriority, trailingZeroDisplay.
     try setDataProp(realm, obj, "roundingIncrement", makeNumberValue(@floatFromInt(s.rounding_increment)));
@@ -1757,6 +1770,76 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
         var sub3: [256]u8 = undefined;
         append(out, &n, "exponentInteger", substituteDigits(es, digit_base, &sub3));
         return n;
+    }
+
+    // §15.5 compact notation — pick the locale's magnitude bucket pattern
+    // (10³…10¹⁴), divide by the bucket's implied divisor (10^(magnitude−zeros+1),
+    // where zeros is the count of '0' placeholders), round the compact value, and
+    // wrap it in the pattern's literal/compact affixes ("988M", "1.2 thousand",
+    // "10万"). Falls through to the standard path for |x| < 1000 or buckets the
+    // locale leaves uncompacted ("0"). A rounding carry that grows the integer
+    // past the bucket width promotes to the next bucket (999999 → "1M", not
+    // "1000K"). Decimal/percent only; currency notation keeps the pattern path.
+    if (!non_finite and !is_currency and std.mem.eql(u8, slots.notation, "compact")) {
+        const m = @abs(x) * (if (is_percent) @as(f64, 100) else 1);
+        var mag: i32 = if (m >= 1) @as(i32, @intFromFloat(@floor(std.math.log10(m)))) else -1;
+        if (mag >= 3) {
+            const long = std.mem.eql(u8, slots.compact_display, "long");
+            const loc = slots.base.dataLocale();
+            var ci: [160]u8 = undefined;
+            var cil: usize = 0;
+            var cf: [160]u8 = undefined;
+            var cfl: usize = 0;
+            var attempts: u8 = 0;
+            while (attempts < 3) : (attempts += 1) {
+                const bucket: u8 = @intCast(@min(mag, @as(i32, 14)));
+                const pat0 = cldr.compactPattern(loc, long, bucket, .other) orelse break;
+                var zeros: usize = 0;
+                for (pat0) |c| {
+                    if (c == '0') zeros += 1;
+                }
+                if (zeros == 0) break; // uncompacted bucket → standard path
+                const div_exp: i32 = mag - @as(i32, @intCast(zeros)) + 1;
+                const cv = m / std.math.pow(f64, 10, @floatFromInt(div_exp));
+                roundDigits(slots, cv, &ci, &cil, &cf, &cfl);
+                if (cil > zeros and mag < 14) {
+                    mag += 1; // carry crossed the bucket width — promote and retry
+                    continue;
+                }
+                const minf = slots.minimum_fraction_digits orelse 0;
+                const maxf = slots.maximum_fraction_digits orelse 0;
+                const cat = cldr.selectPlural(loc, false, cldr.computeOperands(cv, minf, maxf));
+                const pat = cldr.compactPattern(loc, long, bucket, cat) orelse pat0;
+                const first0 = std.mem.indexOfScalar(u8, pat, '0').?;
+                var last0 = first0;
+                while (last0 + 1 < pat.len and pat[last0 + 1] == '0') last0 += 1;
+                const prefix = pat[0..first0];
+                const suffix = pat[last0 + 1 ..];
+
+                if (signShows(slots.sign_display, negative, is_zero))
+                    append(out, &n, if (negative) "minusSign" else "plusSign", if (negative) nd.minus else nd.plus);
+                if (prefix.len > 0) {
+                    var pe = prefix.len;
+                    while (pe > 0 and prefix[pe - 1] == ' ') pe -= 1;
+                    if (pe > 0) append(out, &n, "compact", prefix[0..pe]);
+                    if (pe < prefix.len) append(out, &n, "literal", prefix[pe..]);
+                }
+                var sub: [256]u8 = undefined;
+                append(out, &n, "integer", substituteDigits(ci[0..cil], digit_base, &sub));
+                if (cfl > 0) {
+                    append(out, &n, "decimal", nd.decimal);
+                    var sub2: [256]u8 = undefined;
+                    append(out, &n, "fraction", substituteDigits(cf[0..cfl], digit_base, &sub2));
+                }
+                if (suffix.len > 0) {
+                    var ss: usize = 0;
+                    while (ss < suffix.len and suffix[ss] == ' ') ss += 1;
+                    if (ss > 0) append(out, &n, "literal", suffix[0..ss]);
+                    if (ss < suffix.len) append(out, &n, "compact", suffix[ss..]);
+                }
+                return n;
+            }
+        }
     }
 
     // Pattern affixes (percent / currency sign placement, literals). Decimal
@@ -2110,8 +2193,12 @@ fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []
         return;
     }
     // §15.1.1 roundingPriority morePrecision / lessPrecision — compute both the
-    // significant- and fraction-digit results, then pick the one with greater
-    // (or lesser) precision (more fraction digits ⇒ smaller rounding magnitude).
+    // significant- and fraction-digit results, then pick by rounding magnitude
+    // (the base-10 power of the least-significant retained digit). morePrecision
+    // keeps the finer result (smaller magnitude); lessPrecision the coarser. The
+    // magnitude — not the fraction-digit count — is decisive: 987.65 to 2 sig
+    // ("990", mag 1) is coarser than to 0 frac ("988", mag 0), though both show
+    // zero fraction digits, so morePrecision must yield "988".
     if (std.mem.eql(u8, slots.rounding_type, "morePrecision") or std.mem.eql(u8, slots.rounding_type, "lessPrecision")) {
         var si: [160]u8 = undefined;
         var sil: usize = 0;
@@ -2124,7 +2211,11 @@ fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []
         var ffl: usize = 0;
         roundFrac(slots, magnitude, &fi, &fil, &ff, &ffl);
         const more = std.mem.eql(u8, slots.rounding_type, "morePrecision");
-        const use_sig = if (more) sfl >= ffl else sfl < ffl;
+        const max_sig: i32 = @intCast(slots.maximum_significant_digits orelse 21);
+        const max_frac: i32 = @intCast(slots.maximum_fraction_digits orelse 0);
+        const f_mag: i32 = -max_frac;
+        const s_mag: i32 = @as(i32, @intFromFloat(@floor(std.math.log10(magnitude)))) - max_sig + 1;
+        const use_sig = if (magnitude <= 0) false else if (more) s_mag <= f_mag else s_mag > f_mag;
         if (use_sig) {
             @memcpy(int_buf[0..sil], si[0..sil]);
             int_len.* = sil;
