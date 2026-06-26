@@ -393,7 +393,9 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
     const lang_start = i;
     while (i < tag.len and isAlpha(tag[i])) : (i += 1) {}
     const lang_len = i - lang_start;
-    if (lang_len < 2 or lang_len > 8) return false;
+    // §unicode_language_subtag — 2-3 or 5-8 ALPHA; a 4-ALPHA primary subtag is
+    // the reserved slot and not a valid language (so "hans-cmn-cn" is invalid).
+    if (lang_len < 2 or lang_len > 8 or lang_len == 4) return false;
 
     // Optional extlang sequences (3 ALPHA) — up to 3 — or script/region.
     var saw_script = false;
@@ -402,6 +404,7 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
     var variants: [16][]const u8 = undefined;
     var saw_extension = false;
     var saw_privateuse = false;
+    var seen_singletons: u64 = 0; // bitset of extension singletons already seen
 
     while (i < tag.len) {
         if (tag[i] != '-') return false;
@@ -435,6 +438,12 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
         if (i + 1 < tag.len and tag[i + 1] == '-' and isAlphanum(tag[i])) {
             const sing = toLowerAscii(tag[i]);
             if (sing == 'x') return false; // handled above
+            // §unicode_locale_id — a singleton extension may appear at most once
+            // (so "en-u-…-U-…" / repeated -t- is structurally invalid).
+            const sbit: u6 = if (sing >= 'a' and sing <= 'z') @intCast(sing - 'a') else @intCast(26 + (sing - '0'));
+            const mask = @as(u64, 1) << sbit;
+            if (seen_singletons & mask != 0) return false;
+            seen_singletons |= mask;
             i += 2;
             var seg_start = i;
             var any_seg = false;

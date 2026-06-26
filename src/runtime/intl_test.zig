@@ -1492,3 +1492,13 @@ test "intl: constructors coerce a primitive options arg (CoerceOptionsToObject)"
         \\ok
     );
 }
+
+test "intl: tag with duplicate singleton or 4-alpha language is invalid" {
+    try requireIntlBuild();
+    // A singleton extension may appear at most once; a 4-ALPHA primary subtag
+    // is the reserved slot and not a valid language.
+    try testing.expect(!intl.isStructurallyValidLanguageTag("de-DE-u-kn-true-U-kn-true"));
+    try testing.expect(!intl.isStructurallyValidLanguageTag("hans-cmn-cn"));
+    try testing.expect(intl.isStructurallyValidLanguageTag("en-a-bbb-u-co-phonebk")); // distinct singletons ok
+    try evalThrows("new Intl.Locale('de-u-kn-U-kn')");
+}
