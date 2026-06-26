@@ -3081,13 +3081,17 @@ fn buildFromTemplate(template: []const u8, slots: *const intl.DateTimeFormatSlot
                         n += lit.len;
                     }
                 }
-                pending_lit_len = 0;
                 if (n + tok.len <= buf.len) {
                     @memcpy(buf[n .. n + tok.len], tok);
                     n += tok.len;
                 }
                 emitted_field = true;
             }
+            // A field (kept OR dropped) ends the current literal run. Resetting
+            // even on a dropped field is essential: otherwise the pending slice
+            // would span the dropped field's letters (":mm:ss"), which the
+            // renderer would re-parse as minute/second fields.
+            pending_lit_len = 0;
             i = j;
         } else {
             // Literal run (accumulate; flushed only between kept fields).

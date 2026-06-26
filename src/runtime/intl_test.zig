@@ -1748,3 +1748,21 @@ test "intl: DateTimeFormat timeZone validation + canonicalization (§11.1.1)" {
         \\ thrown('MEZ') === 'RangeError' && thrown('ACT') === 'RangeError') ? 1 : 0
     );
 }
+
+test "intl: DateTimeFormat partial component selection (§11.1.1 pattern build)" {
+    try requireFullBuild();
+    // Unrequested fields (and their separators) must be dropped, not re-parsed
+    // from a spanning literal — the bug produced "01:05:9PM" for hour-only.
+    try evalAssert1(
+        \\const d = new Date(Date.UTC(2020, 0, 1, 13, 5, 9, 0));
+        \\const f = (o) => new Intl.DateTimeFormat('en', { ...o, timeZone: 'UTC' }).format(d);
+        \\// Space-agnostic (CLDR uses U+202F before the day period): the point is
+        \\// that unrequested fields don't leak back in via the separator literal.
+        \\const hourOnly = f({ hour: '2-digit', hourCycle: 'h12' });
+        \\const hm = f({ hour: 'numeric', minute: '2-digit' });
+        \\(hourOnly.startsWith('01') && hourOnly.endsWith('PM') && !hourOnly.includes(':') &&
+        \\ hm.startsWith('1:05') && hm.endsWith('PM') && !hm.includes(':09') &&
+        \\ f({ hour: 'numeric', minute: '2-digit', second: '2-digit' }).startsWith('1:05:09') &&
+        \\ f({ minute: '2-digit' }) === '05') ? 1 : 0
+    );
+}
