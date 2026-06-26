@@ -2678,8 +2678,23 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
         if (!tz_v.isUndefined()) {
             const tz = try valueToStringSlice(realm, tz_v);
             if (tz.len == 0) return throwRangeError(realm, "invalid time zone");
+            // §11.1.1 — an offset zone normalizes to "±HH:MM"; a named zone is
+            // matched case-insensitively against the tzdb and stored with its
+            // available casing *without* alias collapse ("Etc/UTC" stays
+            // "Etc/UTC"). An unknown name (MEZ, ACT, a Unicode-minus offset) is a
+            // RangeError. At -Dintl=stub (no tzdb) the raw name is kept.
+            var tzbuf: [16]u8 = undefined;
+            const tzdata = @import("../tzdata.zig");
+            const canon: []const u8 = if (tz[0] == '+' or tz[0] == '-') blk: {
+                const temporal = @import("../temporal.zig");
+                const parsed = temporal.parseTimeZoneIdentifier(tz) orelse return throwRangeError(realm, "invalid time zone");
+                break :blk temporal.timeZoneIdentifierString(parsed, &tzbuf);
+            } else if (tzdata.available)
+                (tzdata.canonicalZoneName(tz) orelse return throwRangeError(realm, "invalid time zone"))
+            else
+                tz;
             realm.allocator.free(slots.time_zone); // release the default "UTC"
-            slots.time_zone = try realm.allocator.dupe(u8, tz);
+            slots.time_zone = try realm.allocator.dupe(u8, canon);
         }
         const cal_v = try getPropertyChain(realm, o, "calendar");
         if (!cal_v.isUndefined()) {
@@ -2935,6 +2950,17 @@ fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
 
 fn tzOffsetNs(tz: []const u8, epoch_ns: i128) i128 {
     if (tz.len == 0 or std.mem.eql(u8, tz, "UTC")) return 0;
+    // A canonical offset zone ("±HH:MM") is a fixed shift, no tzdb consult.
+    if (tz[0] == '+' or tz[0] == '-') {
+        if (tz.len == 6 and tz[3] == ':') {
+            const h = (tz[1] - '0') * 10 + (tz[2] - '0');
+            const m = (tz[4] - '0') * 10 + (tz[5] - '0');
+            const mins: i128 = @as(i128, h) * 60 + m;
+            const ns = mins * 60 * 1_000_000_000;
+            return if (tz[0] == '-') -ns else ns;
+        }
+        return 0;
+    }
     const tzdata = @import("../tzdata.zig");
     if (tzdata.available) return @as(i128, tzdata.offsetNanosecondsFor(tz, epoch_ns));
     return 0;

@@ -88,6 +88,18 @@ pub fn hasZone(name: []const u8) bool {
     return findZone(name) != null;
 }
 
+/// ECMA-402 GetAvailableNamedTimeZoneIdentifier: an ASCII-case-insensitive
+/// lookup that returns the tzdb's stored (correctly-cased) identifier without
+/// canonicalizing aliases — "africa/abidjan" → "Africa/Abidjan", "Etc/UTC"
+/// stays "Etc/UTC" (not collapsed to "UTC"). Null when no zone matches.
+pub fn canonicalZoneName(name: []const u8) ?[]const u8 {
+    if (!available or !ensureInit()) return null;
+    for (zoneTable()) |ent| {
+        if (std.ascii.eqlIgnoreCase(ent.name, name)) return ent.name;
+    }
+    return null;
+}
+
 fn findZone(name: []const u8) ?ZoneEntry {
     const table = zoneTable();
     var lo: usize = 0;

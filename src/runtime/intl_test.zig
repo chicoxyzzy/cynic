@@ -1735,3 +1735,16 @@ test "intl: DateTimeFormat fractionalSecondDigits (§11.5.5)" {
         \\ new Intl.DateTimeFormat('en', { fractionalSecondDigits: 3 }).resolvedOptions().fractionalSecondDigits === 3) ? 1 : 0
     );
 }
+
+test "intl: DateTimeFormat timeZone validation + canonicalization (§11.1.1)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const r = (tz) => new Intl.DateTimeFormat('en', { timeZone: tz }).resolvedOptions().timeZone;
+        \\const thrown = (tz) => { try { r(tz); return ''; } catch (e) { return e.constructor.name; } };
+        \\(r('utc') === 'UTC' &&
+        \\ r('AFRICA/ABIDJAN') === 'Africa/Abidjan' &&   // case-insensitive match → available casing
+        \\ r('Etc/UTC') === 'Etc/UTC' && r('GMT') === 'GMT' &&   // aliases preserved, not collapsed
+        \\ r('+0300') === '+03:00' &&                    // offset normalized
+        \\ thrown('MEZ') === 'RangeError' && thrown('ACT') === 'RangeError') ? 1 : 0
+    );
+}
