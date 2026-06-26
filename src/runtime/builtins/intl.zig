@@ -2039,10 +2039,11 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
 
                 if (signShows(slots.sign_display, negative, is_zero))
                     append(out, &n, if (negative) "minusSign" else "plusSign", if (negative) nd.minus else nd.plus);
+                var uq: [64]u8 = undefined;
                 if (prefix.len > 0) {
                     var pe = prefix.len;
                     while (pe > 0 and prefix[pe - 1] == ' ') pe -= 1;
-                    if (pe > 0) append(out, &n, "compact", prefix[0..pe]);
+                    if (pe > 0) append(out, &n, "compact", unquoteCldr(prefix[0..pe], &uq));
                     if (pe < prefix.len) append(out, &n, "literal", prefix[pe..]);
                 }
                 var sub: [256]u8 = undefined;
@@ -2056,7 +2057,7 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
                     var ss: usize = 0;
                     while (ss < suffix.len and suffix[ss] == ' ') ss += 1;
                     if (ss > 0) append(out, &n, "literal", suffix[0..ss]);
-                    if (ss < suffix.len) append(out, &n, "compact", suffix[ss..]);
+                    if (ss < suffix.len) append(out, &n, "compact", unquoteCldr(suffix[ss..], &uq));
                 }
                 return n;
             }
@@ -2140,6 +2141,35 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
 
     if (is_currency) appendCurrencyAffix(out, &n, affix.suffix, cur_display, suffix_space, append) else appendAffix(out, &n, affix.suffix, nd, append);
     return n;
+}
+
+/// Unescape CLDR single-quote literals: '' → ' and 'text' → text. Used for
+/// compact-pattern affixes like the German "0 Mio'.'" (literal period).
+fn unquoteCldr(s: []const u8, buf: []u8) []const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len and n < buf.len) {
+        if (s[i] == '\'') {
+            i += 1;
+            if (i < s.len and s[i] == '\'') {
+                buf[n] = '\'';
+                n += 1;
+                i += 1;
+            } else {
+                while (i < s.len and s[i] != '\'' and n < buf.len) {
+                    buf[n] = s[i];
+                    n += 1;
+                    i += 1;
+                }
+                if (i < s.len) i += 1; // closing quote
+            }
+        } else {
+            buf[n] = s[i];
+            n += 1;
+            i += 1;
+        }
+    }
+    return buf[0..n];
 }
 
 /// Clamped copy into buf at off; returns bytes written (never overruns).
