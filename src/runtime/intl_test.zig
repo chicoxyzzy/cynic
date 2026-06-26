@@ -1962,3 +1962,17 @@ test "intl: Collator ignorePunctuation locale default (§10.1.1)" {
         \\(ip('th') === true && ip('th-TH') === true && ip('en') === false && ip('ja') === false) ? 1 : 0
     );
 }
+
+test "intl: Locale numeric canonicalization + firstDayOfWeek (§14.1)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const t = (opt) => new Intl.Locale('en', opt).toString();
+        \\const thrown = (opt) => { try { t(opt); return ''; } catch (e) { return e.constructor.name; } };
+        \\(t({ numeric: true }) === 'en-u-kn' &&             // canonical bare keyword
+        \\ t({ numeric: false }) === 'en-u-kn-false' &&
+        \\ t({ firstDayOfWeek: 'mon' }) === 'en-u-fw-mon' &&
+        \\ t({ firstDayOfWeek: 1 }) === 'en-u-fw-mon' &&     // numeric 1..7 → mon..sun
+        \\ t({ firstDayOfWeek: 7 }) === 'en-u-fw-sun' &&
+        \\ thrown({ firstDayOfWeek: 'xyz' }) === 'RangeError') ? 1 : 0
+    );
+}

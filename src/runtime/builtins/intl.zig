@@ -362,6 +362,19 @@ fn requireKind(realm: *Realm, this_value: Value, kind: intl.IntlKind) NativeErro
 /// invalidates) a locale-supplied relevant-extension keyword.
 /// Known BCP 47 `-u-co-` collation types (UTS #35 / CLDR bcp47/collation).
 /// "standard" / "search" are excluded — they're never reported (→ "default").
+/// Intl Locale Info WeekdayToString: a `firstDayOfWeek` value (a weekday name
+/// or 1..7 / 0) → the canonical -u-fw- day code (0 ≡ 7 ≡ "sun"). Null = invalid.
+fn weekdayToFw(s: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, s, "mon") or std.mem.eql(u8, s, "1")) return "mon";
+    if (std.mem.eql(u8, s, "tue") or std.mem.eql(u8, s, "2")) return "tue";
+    if (std.mem.eql(u8, s, "wed") or std.mem.eql(u8, s, "3")) return "wed";
+    if (std.mem.eql(u8, s, "thu") or std.mem.eql(u8, s, "4")) return "thu";
+    if (std.mem.eql(u8, s, "fri") or std.mem.eql(u8, s, "5")) return "fri";
+    if (std.mem.eql(u8, s, "sat") or std.mem.eql(u8, s, "6")) return "sat";
+    if (std.mem.eql(u8, s, "sun") or std.mem.eql(u8, s, "7") or std.mem.eql(u8, s, "0")) return "sun";
+    return null;
+}
+
 fn isKnownCollation(s: []const u8) bool {
     const known = [_][]const u8{
         "big5han",  "compat", "dict",    "direct",   "ducet",  "emoji",
@@ -815,25 +828,48 @@ fn localeConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         canon = try apply(realm, canon, "kf", "caseFirst", .case_first, o);
 
         // numeric → -u-kn (read after caseFirst, before numberingSystem). The
-        // option overrides any existing kn keyword (§14.1.3).
+        // option overrides any existing kn keyword (§14.1.3). The canonical form
+        // of a true value is the bare keyword "-u-kn" (not "-u-kn-true").
         const num_v = try getPropertyChain(realm, o, "numeric");
         if (!num_v.isUndefined()) {
-            const val: []const u8 = if (toBoolean(num_v)) "true" else "false";
+            const truthy = toBoolean(num_v);
             const stripped = if (intl.unicodeExtensionValue(canon, "kn") != null)
                 stripUnicodeExtensionKeyword(realm.allocator, canon, "kn") catch return error.OutOfMemory
             else
                 canon;
             if (stripped.ptr != canon.ptr) realm.allocator.free(canon);
             const has_u = std.mem.indexOf(u8, stripped, "-u-") != null;
-            const out = if (has_u)
-                std.fmt.allocPrint(realm.allocator, "{s}-kn-{s}", .{ stripped, val })
+            const out = if (truthy)
+                (if (has_u) std.fmt.allocPrint(realm.allocator, "{s}-kn", .{stripped}) else std.fmt.allocPrint(realm.allocator, "{s}-u-kn", .{stripped}))
             else
-                std.fmt.allocPrint(realm.allocator, "{s}-u-kn-{s}", .{ stripped, val });
+                (if (has_u) std.fmt.allocPrint(realm.allocator, "{s}-kn-false", .{stripped}) else std.fmt.allocPrint(realm.allocator, "{s}-u-kn-false", .{stripped}));
             const owned = out catch return error.OutOfMemory;
             realm.allocator.free(stripped);
             canon = owned;
         }
         canon = try apply(realm, canon, "nu", "numberingSystem", .type, o);
+
+        // firstDayOfWeek → -u-fw (Intl Locale Info). WeekdayToString maps 1..7
+        // and 0 to mon..sun (0 ≡ sun); a weekday name passes through; anything
+        // else is a RangeError.
+        const fw_v = try getPropertyChain(realm, o, "firstDayOfWeek");
+        if (!fw_v.isUndefined()) {
+            const s = try valueToStringSlice(realm, fw_v);
+            const day = weekdayToFw(s) orelse return throwRangeError(realm, "invalid firstDayOfWeek");
+            const stripped = if (intl.unicodeExtensionValue(canon, "fw") != null)
+                stripUnicodeExtensionKeyword(realm.allocator, canon, "fw") catch return error.OutOfMemory
+            else
+                canon;
+            if (stripped.ptr != canon.ptr) realm.allocator.free(canon);
+            const has_u = std.mem.indexOf(u8, stripped, "-u-") != null;
+            const out = if (has_u)
+                std.fmt.allocPrint(realm.allocator, "{s}-fw-{s}", .{ stripped, day })
+            else
+                std.fmt.allocPrint(realm.allocator, "{s}-u-fw-{s}", .{ stripped, day });
+            const owned = out catch return error.OutOfMemory;
+            realm.allocator.free(stripped);
+            canon = owned;
+        }
 
         const recanon = intl.canonicalizeUnicodeLocaleId(realm.allocator, canon) catch canon;
         if (recanon.ptr != canon.ptr) {
