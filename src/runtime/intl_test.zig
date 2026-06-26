@@ -1953,3 +1953,12 @@ test "intl: Collator kn/kf resolved locale canonicalization (§9.2.7)" {
         \\ loc('en-u-kf-lower') === 'en-u-kf-lower' && loc('en-u-kf-false') === 'en') ? 1 : 0
     );
 }
+
+test "intl: Collator ignorePunctuation locale default (§10.1.1)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const ip = (l) => new Intl.Collator(l).resolvedOptions().ignorePunctuation;
+        \\// Thai's root collation shifts punctuation → default true; others false.
+        \\(ip('th') === true && ip('th-TH') === true && ip('en') === false && ip('ja') === false) ? 1 : 0
+    );
+}

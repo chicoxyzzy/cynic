@@ -1257,7 +1257,11 @@ fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     try retainRelevantUnicodeExtensions(realm, &slots.base, &.{ "co", "kf", "kn" }); // §9.2.7 Collator keys
     slots.usage = try getOptionStringOwned(realm, opts, "usage", &.{ "sort", "search" }, "sort");
     slots.sensitivity = try getOptionStringOwned(realm, opts, "sensitivity", &.{ "base", "accent", "case", "variant" }, "variant");
-    slots.ignore_punctuation = try getBooleanOption(realm, opts, "ignorePunctuation", false);
+    // §10.1.1 — ignorePunctuation's default is locale-dependent: Thai's root
+    // collation shifts punctuation, so `th` defaults to true; other locales false.
+    const ip_default = std.mem.startsWith(u8, slots.base.locale, "th") and
+        (slots.base.locale.len == 2 or slots.base.locale[2] == '-');
+    slots.ignore_punctuation = try getBooleanOption(realm, opts, "ignorePunctuation", ip_default);
 
     // §10.1.1 relevant-extension-keys « co, kn, kf ». The option overrides the
     // locale's -u- keyword; an option-sourced value also drops that keyword
