@@ -31,7 +31,23 @@ pub const IntlKind = enum {
     list_format,
     display_names,
     segmenter,
+    segments,
     duration_format,
+};
+
+/// Internal state for a `Segments` object (from `segmenter.segment(str)`) and
+/// its segment iterator. `pos` is the iterator's code-unit cursor (unused by
+/// the container). `string` + `granularity` are allocator-owned.
+pub const SegmentsRecord = struct {
+    string: []const u8 = "",
+    granularity: []const u8 = "",
+    pos: usize = 0,
+
+    pub fn deinit(self: *SegmentsRecord, allocator: std.mem.Allocator) void {
+        if (self.string.len > 0) allocator.free(self.string);
+        if (self.granularity.len > 0) allocator.free(self.granularity);
+        self.* = .{};
+    }
 };
 
 /// Owned strings are allocator-owned copies; `deinit` frees them.
@@ -328,6 +344,7 @@ pub const IntlRecord = union(IntlKind) {
     list_format: ListFormatSlots,
     display_names: DisplayNamesSlots,
     segmenter: SegmenterSlots,
+    segments: SegmentsRecord,
     duration_format: DurationFormatSlots,
 
     pub fn deinit(self: *IntlRecord, allocator: std.mem.Allocator) void {
@@ -341,6 +358,7 @@ pub const IntlRecord = union(IntlKind) {
             .list_format => |*s| s.deinit(allocator),
             .display_names => |*s| s.deinit(allocator),
             .segmenter => |*s| s.deinit(allocator),
+            .segments => |*s| s.deinit(allocator),
             .duration_format => |*s| s.deinit(allocator),
         }
     }

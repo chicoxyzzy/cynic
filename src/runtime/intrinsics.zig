@@ -142,6 +142,8 @@ pub const Intrinsics = struct {
     intl_display_names_prototype: ?*JSObject = null,
     intl_segmenter_constructor: ?*JSFunction = null,
     intl_segmenter_prototype: ?*JSObject = null,
+    intl_segments_prototype: ?*JSObject = null,
+    intl_segment_iterator_prototype: ?*JSObject = null,
     intl_duration_format_constructor: ?*JSFunction = null,
     intl_duration_format_prototype: ?*JSObject = null,
 

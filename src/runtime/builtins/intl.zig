@@ -22,6 +22,7 @@ const lantern = @import("../lantern/interpreter.zig");
 const intl = @import("../intl.zig");
 const cldr = @import("../cldr.zig");
 const dtoa = @import("../dtoa.zig");
+const utf16 = @import("../utf16.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -3319,6 +3320,22 @@ fn installSegmenter(realm: *Realm, ns: *JSObject) !void {
             }
         }.f,
     });
+
+    // %Segments.prototype% — `containing` + the segment iterator factory.
+    const seg_proto = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(seg_proto, realm.intrinsics.object_prototype);
+    try installNativeMethodOnProto(realm, seg_proto, "containing", segmentsContaining, 1);
+    try installNativeMethodOnProto(realm, seg_proto, "@@iterator", segmentsIterator, 0);
+    realm.intrinsics.intl_segments_prototype = seg_proto;
+
+    // %SegmentIterator.prototype% — `next` + the self-returning @@iterator,
+    // tagged "Segmenter String Iterator" (§18.6.2.2).
+    const it_proto = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(it_proto, realm.intrinsics.object_prototype);
+    try installNativeMethodOnProto(realm, it_proto, "next", segmentIteratorNext, 0);
+    try installNativeMethodOnProto(realm, it_proto, "@@iterator", segmentIteratorSelf, 0);
+    try installToStringTag(realm, it_proto, "Segmenter String Iterator");
+    realm.intrinsics.intl_segment_iterator_prototype = it_proto;
 }
 
 fn segmenterConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -3334,20 +3351,150 @@ fn segmenterConstructor(realm: *Realm, this_value: Value, args: []const Value) N
     return heap_mod.taggedObject(inst);
 }
 
+/// §18.4.1 Intl.Segmenter.prototype.segment — returns a Segments object whose
+/// internal-slots record holds the (duped) string + granularity in a typed
+/// slot (never a user-visible property).
 fn segmenterSegment(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireKind(realm, this_value, .segmenter);
+    const seg_rec = try requireKind(realm, this_value, .segmenter);
+    const granularity = seg_rec.segmenter.granularity;
     const str = try valueToStringSlice(realm, argOr(args, 0, Value.undefined_));
-    // Structural: Segments object holding the source string; full
-    // Segment Iterator / containing() deferred with ICU work.
+    return makeSegmentsObject(realm, realm.intrinsics.intl_segments_prototype.?, str, granularity);
+}
+
+fn makeSegmentsObject(realm: *Realm, proto: *JSObject, str: []const u8, granularity: []const u8) NativeError!Value {
     const segs = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(segs, realm.intrinsics.object_prototype);
-    try installToStringTag(realm, segs, "Segments");
-    segs.setWithFlags(realm.allocator, "__str", try makeStringValue(realm, str), .{
-        .writable = false,
-        .enumerable = false,
-        .configurable = false,
-    }) catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(segs, proto);
+    const rec: intl.SegmentsRecord = .{
+        .string = realm.allocator.dupe(u8, str) catch return error.OutOfMemory,
+        .granularity = realm.allocator.dupe(u8, if (granularity.len > 0) granularity else "grapheme") catch return error.OutOfMemory,
+        .pos = 0,
+    };
+    try storeRecord(realm, segs, .{ .segments = rec });
     return heap_mod.taggedObject(segs);
+}
+
+/// %Segments.prototype%.containing(index) — the segment data object whose
+/// boundaries straddle the code-unit `index`, or undefined when out of range.
+fn segmentsContaining(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requireKind(realm, this_value, .segments);
+    const sr = rec.segments;
+    const n = numberToF64(try toNumber(realm, argOr(args, 0, Value.undefined_)));
+    const len_cu: f64 = @floatFromInt(utf16.lengthInCodeUnits(sr.string));
+    const idx_f = if (std.math.isNan(n)) 0 else std.math.trunc(n);
+    if (idx_f < 0 or idx_f >= len_cu) return Value.undefined_;
+    const idx_cu: usize = @intFromFloat(idx_f);
+    // Walk segments from the start until one contains idx_cu.
+    var bs: usize = 0;
+    while (bs < sr.string.len) {
+        const be = segmentEndByte(sr.string, sr.granularity, bs);
+        const start_cu = utf16.codeUnitIndexForByte(sr.string, bs);
+        const end_cu = utf16.codeUnitIndexForByte(sr.string, be);
+        if (idx_cu >= start_cu and idx_cu < end_cu)
+            return makeSegmentData(realm, sr, bs, be);
+        bs = be;
+    }
+    return Value.undefined_;
+}
+
+/// %Segments.prototype%[@@iterator] — a fresh Segment Iterator over the string.
+fn segmentsIterator(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const rec = try requireKind(realm, this_value, .segments);
+    const sr = rec.segments;
+    const it = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(it, realm.intrinsics.intl_segment_iterator_prototype.?);
+    const irec: intl.SegmentsRecord = .{
+        .string = realm.allocator.dupe(u8, sr.string) catch return error.OutOfMemory,
+        .granularity = realm.allocator.dupe(u8, sr.granularity) catch return error.OutOfMemory,
+        .pos = 0,
+    };
+    try storeRecord(realm, it, .{ .segments = irec });
+    return heap_mod.taggedObject(it);
+}
+
+fn segmentIteratorSelf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    _ = try requireKind(realm, this_value, .segments);
+    return this_value;
+}
+
+/// %SegmentIterator.prototype%.next — yield the next segment data object,
+/// advancing the iterator's byte cursor.
+fn segmentIteratorNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const rec = try requireKind(realm, this_value, .segments);
+    const sr = &rec.segments; // mutable: advance pos
+    const result = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(result, realm.intrinsics.object_prototype);
+    if (sr.pos >= sr.string.len) {
+        try setDataProp(realm, result, "value", Value.undefined_);
+        try setDataProp(realm, result, "done", makeBoolValue(true));
+        return heap_mod.taggedObject(result);
+    }
+    const bs = sr.pos;
+    const be = segmentEndByte(sr.string, sr.granularity, bs);
+    sr.pos = be;
+    const data = try makeSegmentData(realm, sr.*, bs, be);
+    try setDataProp(realm, result, "value", data);
+    try setDataProp(realm, result, "done", makeBoolValue(false));
+    return heap_mod.taggedObject(result);
+}
+
+/// The §18.7.1 segment data object: { segment, index, input[, isWordLike] }.
+fn makeSegmentData(realm: *Realm, sr: intl.SegmentsRecord, byte_start: usize, byte_end: usize) NativeError!Value {
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
+    try setDataProp(realm, obj, "segment", try makeStringValue(realm, sr.string[byte_start..byte_end]));
+    try setDataProp(realm, obj, "index", makeNumberValue(@floatFromInt(utf16.codeUnitIndexForByte(sr.string, byte_start))));
+    try setDataProp(realm, obj, "input", try makeStringValue(realm, sr.string));
+    if (std.mem.eql(u8, sr.granularity, "word"))
+        try setDataProp(realm, obj, "isWordLike", makeBoolValue(codePointIsWord(sr.string, byte_start)));
+    return heap_mod.taggedObject(obj);
+}
+
+/// End (byte offset) of the segment starting at byte `start`, by granularity.
+/// Grapheme ≈ one code point; word ≈ a maximal run of one word/non-word class
+/// (UAX #29 simplified); sentence ≈ up to and including a terminator + spaces.
+fn segmentEndByte(bytes: []const u8, granularity: []const u8, start: usize) usize {
+    if (start >= bytes.len) return bytes.len;
+    if (std.mem.eql(u8, granularity, "word")) {
+        const word0 = codePointIsWord(bytes, start);
+        var i = start + utf16.utf8SeqLen(bytes[start]);
+        while (i < bytes.len) {
+            if (codePointIsWord(bytes, i) != word0) break;
+            i += utf16.utf8SeqLen(bytes[i]);
+        }
+        return i;
+    }
+    if (std.mem.eql(u8, granularity, "sentence")) {
+        var i = start;
+        while (i < bytes.len) {
+            const c = bytes[i];
+            i += utf16.utf8SeqLen(bytes[i]);
+            if (c == '.' or c == '!' or c == '?') {
+                while (i < bytes.len and (bytes[i] == ' ' or bytes[i] == '\t' or bytes[i] == '\n')) i += 1;
+                break;
+            }
+        }
+        return i;
+    }
+    // grapheme (default): one code point.
+    return start + utf16.utf8SeqLen(bytes[start]);
+}
+
+/// Whether the code point at byte `i` is word-class (letters/digits — UAX #29
+/// simplified): ASCII alphanumerics or any non-ASCII code point, excluding the
+/// common Unicode space separators.
+fn codePointIsWord(bytes: []const u8, i: usize) bool {
+    const c = bytes[i];
+    if (c < 0x80) return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9');
+    const len = utf16.utf8SeqLen(bytes[i]);
+    const cp = std.unicode.utf8Decode(bytes[i..@min(i + len, bytes.len)]) catch return true;
+    return switch (cp) {
+        0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000 => false,
+        0x2000...0x200A => false,
+        else => true,
+    };
 }
 
 fn segmenterResolvedOptions(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

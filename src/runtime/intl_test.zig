@@ -1371,3 +1371,33 @@ test "intl: unicode extension inside private-use is ignored" {
         \\new Intl.Collator('de-x-u-co-phonebk').resolvedOptions().collation === 'default' ? 1 : 0
     );
 }
+
+// ── Intl.Segmenter Segments.containing + iteration (§18.6 / §18.7) ────────────
+
+test "intl: Segmenter segments iterate + containing + isWordLike" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const w = new Intl.Segmenter('en', { granularity: 'word' });
+        \\const segs = w.segment('a b');
+        \\const parts = [...segs];
+        \\const c = segs.containing(2); // the 'b' word
+        \\(parts.length === 3 && parts[0].segment === 'a' && parts[0].isWordLike === true &&
+        \\ parts[1].segment === ' ' && parts[1].isWordLike === false &&
+        \\ parts[0].index === 0 && parts[2].index === 2 &&
+        \\ c.segment === 'b' && c.index === 2 &&
+        \\ segs.containing(100) === undefined) ? 1 : 0
+    );
+}
+
+test "intl: Segments + SegmentIterator have the right prototype shape" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const g = new Intl.Segmenter('en');
+        \\const segs = g.segment('abc');
+        \\const it = segs[Symbol.iterator]();
+        \\(typeof Object.getPrototypeOf(segs).containing === 'function' &&
+        \\ it[Symbol.iterator]() === it &&
+        \\ Object.prototype.toString.call(it) === '[object Segmenter String Iterator]' &&
+        \\ [...g.segment('héllo')].length >= 5) ? 1 : 0
+    );
+}
