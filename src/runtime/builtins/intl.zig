@@ -1912,7 +1912,11 @@ fn currencyDisplayText(slots: *const intl.NumberFormatSlots) []const u8 {
 fn appendGroupedInteger(out: []Seg, n: *u32, int_ascii: []const u8, slots: *const intl.NumberFormatSlots, nd: cldr.NumberData, digit_base: u32, append: anytype) void {
     const grouping = !std.mem.eql(u8, slots.use_grouping, "false");
     const g = patternGrouping(nd.dec_pattern);
-    if (!grouping or g.primary == 0 or int_ascii.len <= g.primary) {
+    // UTS #35 minimumGroupingDigits: suppress grouping until the integer has at
+    // least primaryGroupingSize + minimumGroupingDigits digits (so pl/es keep
+    // "1000" but group "10 000"). useGrouping:"always" overrides the threshold.
+    const min_group: usize = if (std.mem.eql(u8, slots.use_grouping, "always")) 1 else nd.min_group;
+    if (!grouping or g.primary == 0 or int_ascii.len < g.primary + min_group) {
         var sub: [256]u8 = undefined;
         append(out, n, "integer", substituteDigits(int_ascii, digit_base, &sub));
         return;

@@ -1451,3 +1451,14 @@ test "intl: RelativeTimeFormat formatToParts + validation" {
         \\ new Intl.RelativeTimeFormat('en',{numeric:'auto'}).formatToParts(-1,'day')[0].value === 'yesterday') ? 1 : 0
     );
 }
+
+test "intl: NumberFormat honors minimumGroupingDigits" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (l,v) => new Intl.NumberFormat(l).format(v);
+        \\(f('en',1000) === '1,000' && f('en',10000) === '10,000' &&
+        \\ f('pl',1000) === '1000' &&        // pl minimumGroupingDigits=2
+        \\ f('pl',10000).replace(/ | /g,' ') === '10 000' &&
+        \\ f('en',100).indexOf(',') === -1) ? 1 : 0
+    );
+}

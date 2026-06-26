@@ -321,6 +321,7 @@ const NumberLocale = struct {
     nan: []const u8,
     dec_pattern: []const u8,
     pct_pattern: []const u8,
+    min_group: u8, // minimumGroupingDigits (1 for most, 2 for pl/es/…)
     fn lessThan(_: void, a: NumberLocale, b: NumberLocale) bool {
         return std.mem.lessThan(u8, a.key, b.key);
     }
@@ -624,6 +625,7 @@ fn loadNumbers(arena: std.mem.Allocator, io: std.Io, json_root: []const u8, ns_t
             .nan = strField(syms, "nan", "NaN"),
             .dec_pattern = if (n.get(dec_key)) |d| strField(d.object, "standard", "#,##0.###") else "#,##0.###",
             .pct_pattern = if (n.get(pct_key)) |p| strField(p.object, "standard", "#,##0%") else "#,##0%",
+            .min_group = if (n.get("minimumGroupingDigits")) |m| (std.fmt.parseInt(u8, m.string, 10) catch 1) else 1,
         });
     }
     std.sort.block(NumberLocale, out.items, {}, NumberLocale.lessThan);
@@ -649,6 +651,7 @@ fn writeNumbersPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8),
         try appendStr8(gpa, buf, l.nan);
         try appendStr16(gpa, buf, l.dec_pattern);
         try appendStr16(gpa, buf, l.pct_pattern);
+        try buf.append(gpa, l.min_group);
     }
 }
 

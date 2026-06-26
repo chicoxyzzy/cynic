@@ -437,6 +437,7 @@ pub const NumberData = struct {
     nan: []const u8, // §15.5.x non-finite glyph (CLDR `nan` symbol)
     dec_pattern: []const u8,
     pct_pattern: []const u8,
+    min_group: u8 = 1, // minimumGroupingDigits (UTS #35 grouping suppression)
 };
 
 /// Look up the locale's number data (default numbering system), most- to
@@ -506,6 +507,7 @@ fn findNumber(key: []const u8) ?NumberData {
         d.nan = readStr8(num_payload, &off) orelse return null;
         d.dec_pattern = readStr16(num_payload, &off) orelse return null;
         d.pct_pattern = readStr16(num_payload, &off) orelse return null;
+        d.min_group = readU8(num_payload, &off) orelse 1;
         if (asciiEqlIgnoreCase(k, key)) return d;
     }
     return null;
