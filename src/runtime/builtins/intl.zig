@@ -1421,10 +1421,23 @@ fn setNumberFormatDigitOptions(realm: *Realm, slots: *intl.NumberFormatSlots, op
     slots.rounding_increment = try getNumberOption(realm, opts, "roundingIncrement", 1, 5000, 1);
     slots.rounding_mode = try getOptionStringOwned(realm, opts, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" }, "halfExpand");
     slots.trailing_zero_display = try getOptionStringOwned(realm, opts, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" }, "auto");
-    // Validated but not stored (roundingPriority "auto" only, for now).
-    _ = try getOptionString(realm, opts, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" }, "auto");
+    const priority = try getOptionString(realm, opts, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" }, "auto");
 
-    if (mnsd != null or mxsd != null) {
+    const is_more = std.mem.eql(u8, priority, "morePrecision");
+    const is_less = std.mem.eql(u8, priority, "lessPrecision");
+
+    if (is_more or is_less) {
+        // §15.1.1 morePrecision/lessPrecision — both significant and fraction
+        // bounds are active; roundDigits computes both and picks.
+        slots.rounding_type = try realm.allocator.dupe(u8, if (is_more) "morePrecision" else "lessPrecision");
+        slots.minimum_significant_digits = mnsd orelse 1;
+        slots.maximum_significant_digits = mxsd orelse 21;
+        const lo = mnfd orelse @min(mnfd_default, mxfd orelse mnfd_default);
+        const hi = mxfd orelse @max(lo, mxfd_default);
+        if (lo > hi) return throwRangeError(realm, "minimumFractionDigits > maximumFractionDigits");
+        slots.minimum_fraction_digits = lo;
+        slots.maximum_fraction_digits = hi;
+    } else if (mnsd != null or mxsd != null) {
         slots.rounding_type = try realm.allocator.dupe(u8, "significantDigits");
         slots.minimum_significant_digits = mnsd orelse 1;
         slots.maximum_significant_digits = mxsd orelse 21;
@@ -1537,11 +1550,15 @@ fn numberFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const V
         try setDataProp(realm, obj, "unitDisplay", try makeStringValue(realm, if (s.unit_display.len > 0) s.unit_display else "short"));
     }
     try setDataProp(realm, obj, "minimumIntegerDigits", makeNumberValue(@floatFromInt(s.minimum_integer_digits)));
+    // §15.5.2 — morePrecision/lessPrecision report both digit pairs; otherwise
+    // significantDigits → the significant pair, fractionDigits → the fraction pair.
+    const is_more_less = std.mem.eql(u8, s.rounding_type, "morePrecision") or std.mem.eql(u8, s.rounding_type, "lessPrecision");
     const is_sig = std.mem.eql(u8, s.rounding_type, "significantDigits");
-    if (is_sig) {
+    if (is_sig or is_more_less) {
         try setDataProp(realm, obj, "minimumSignificantDigits", makeNumberValue(@floatFromInt(s.minimum_significant_digits orelse 1)));
         try setDataProp(realm, obj, "maximumSignificantDigits", makeNumberValue(@floatFromInt(s.maximum_significant_digits orelse 21)));
-    } else {
+    }
+    if (!is_sig) {
         try setDataProp(realm, obj, "minimumFractionDigits", makeNumberValue(@floatFromInt(s.minimum_fraction_digits orelse 0)));
         try setDataProp(realm, obj, "maximumFractionDigits", makeNumberValue(@floatFromInt(s.maximum_fraction_digits orelse 3)));
     }
@@ -1556,7 +1573,7 @@ fn numberFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const V
     // §15.5.2 key order: roundingIncrement, roundingMode, roundingPriority, trailingZeroDisplay.
     try setDataProp(realm, obj, "roundingIncrement", makeNumberValue(@floatFromInt(s.rounding_increment)));
     try setDataProp(realm, obj, "roundingMode", try makeStringValue(realm, if (s.rounding_mode.len > 0) s.rounding_mode else "halfExpand"));
-    try setDataProp(realm, obj, "roundingPriority", try makeStringValue(realm, "auto"));
+    try setDataProp(realm, obj, "roundingPriority", try makeStringValue(realm, if (is_more_less) s.rounding_type else "auto"));
     try setDataProp(realm, obj, "trailingZeroDisplay", try makeStringValue(realm, if (s.trailing_zero_display.len > 0) s.trailing_zero_display else "auto"));
     return heap_mod.taggedObject(obj);
 }
@@ -2042,26 +2059,63 @@ fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []
     }
 
     if (std.mem.eql(u8, slots.rounding_type, "significantDigits")) {
-        const maxsd = slots.maximum_significant_digits orelse 21;
-        const minsd = slots.minimum_significant_digits orelse 1;
-        if (magnitude == 0) {
-            // ToRawPrecision(0, …): "0" with (minsd-1) trailing fraction zeros.
-            // (dtoa.precisionDigits asserts x > 0 — never call it with zero.)
-            int_buf[0] = '0';
-            int_len.* = 1;
-            const z = minsd -| 1;
-            var k: usize = 0;
-            while (k < z and k < frac_buf.len) : (k += 1) frac_buf[k] = '0';
-            frac_len.* = k;
-            return;
-        }
-        var dec = dtoa.Decimal{};
-        dtoa.precisionDigits(magnitude, maxsd, &dec);
-        splitByPoint(dec.digits(), dec.point_exp, int_buf, int_len, frac_buf, frac_len);
-        trimSignificant(int_buf, int_len, frac_buf, frac_len, minsd);
+        roundSig(slots, magnitude, int_buf, int_len, frac_buf, frac_len);
         return;
     }
+    // §15.1.1 roundingPriority morePrecision / lessPrecision — compute both the
+    // significant- and fraction-digit results, then pick the one with greater
+    // (or lesser) precision (more fraction digits ⇒ smaller rounding magnitude).
+    if (std.mem.eql(u8, slots.rounding_type, "morePrecision") or std.mem.eql(u8, slots.rounding_type, "lessPrecision")) {
+        var si: [160]u8 = undefined;
+        var sil: usize = 0;
+        var sf: [160]u8 = undefined;
+        var sfl: usize = 0;
+        roundSig(slots, magnitude, &si, &sil, &sf, &sfl);
+        var fi: [160]u8 = undefined;
+        var fil: usize = 0;
+        var ff: [160]u8 = undefined;
+        var ffl: usize = 0;
+        roundFrac(slots, magnitude, &fi, &fil, &ff, &ffl);
+        const more = std.mem.eql(u8, slots.rounding_type, "morePrecision");
+        const use_sig = if (more) sfl >= ffl else sfl < ffl;
+        if (use_sig) {
+            @memcpy(int_buf[0..sil], si[0..sil]);
+            int_len.* = sil;
+            @memcpy(frac_buf[0..sfl], sf[0..sfl]);
+            frac_len.* = sfl;
+        } else {
+            @memcpy(int_buf[0..fil], fi[0..fil]);
+            int_len.* = fil;
+            @memcpy(frac_buf[0..ffl], ff[0..ffl]);
+            frac_len.* = ffl;
+        }
+        return;
+    }
+    roundFrac(slots, magnitude, int_buf, int_len, frac_buf, frac_len);
+}
 
+/// ToRawPrecision — significant-digit rounding into int/frac ASCII.
+fn roundSig(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
+    const maxsd = slots.maximum_significant_digits orelse 21;
+    const minsd = slots.minimum_significant_digits orelse 1;
+    if (magnitude == 0) {
+        int_buf[0] = '0';
+        int_len.* = 1;
+        const z = minsd -| 1;
+        var k: usize = 0;
+        while (k < z and k < frac_buf.len) : (k += 1) frac_buf[k] = '0';
+        frac_len.* = k;
+        return;
+    }
+    var dec = dtoa.Decimal{};
+    dtoa.precisionDigits(magnitude, maxsd, &dec);
+    splitByPoint(dec.digits(), dec.point_exp, int_buf, int_len, frac_buf, frac_len);
+    trimSignificant(int_buf, int_len, frac_buf, frac_len, minsd);
+}
+
+/// ToRawFixed — fraction-digit rounding (+ roundingIncrement, trailing-zero
+/// trim, trailingZeroDisplay) into int/frac ASCII.
+fn roundFrac(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
     const maxfd = slots.maximum_fraction_digits orelse 3;
     const minfd = slots.minimum_fraction_digits orelse 0;
     // §15.1.x roundingIncrement: round the magnitude to the nearest multiple of

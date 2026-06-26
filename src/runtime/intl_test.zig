@@ -1523,3 +1523,19 @@ test "intl: useGrouping resolution + min2" {
         \\ r(undefined) === 'auto' && r('true') === 'auto' && r(0) === false) ? 1 : 0
     );
 }
+
+test "intl: NumberFormat roundingPriority more/lessPrecision" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const f = (p) => new Intl.NumberFormat('en', {
+        \\  maximumSignificantDigits: 2, maximumFractionDigits: 2, roundingPriority: p
+        \\}).format(1.625);
+        \\const ro = new Intl.NumberFormat('en', {
+        \\  maximumSignificantDigits: 2, maximumFractionDigits: 2, roundingPriority: 'morePrecision'
+        \\}).resolvedOptions();
+        \\(f('morePrecision') === '1.63' && f('lessPrecision') === '1.6' &&
+        \\ ro.roundingPriority === 'morePrecision' && ro.maximumSignificantDigits === 2 &&
+        \\ ro.maximumFractionDigits === 2 &&
+        \\ new Intl.NumberFormat('en').resolvedOptions().roundingPriority === 'auto') ? 1 : 0
+    );
+}
