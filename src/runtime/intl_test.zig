@@ -1879,3 +1879,14 @@ test "intl: NumberFormat roundingIncrement halfway precision (§15.1.1)" {
         \\(f(1.15) === '1.20' && f(1.125) === '1.10' && f(1.175) === '1.20' && f(1.1) === '1.10') ? 1 : 0
     );
 }
+
+test "intl: NumberFormat roundingMode with significant digits (§15.1.1)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const f = (v, m) => new Intl.NumberFormat('en', { useGrouping: false, roundingMode: m, maximumSignificantDigits: 2 }).format(v);
+        \\(f(1.101, 'ceil') === '1.2' && f(1.19, 'floor') === '1.1' &&
+        \\ f(1.11, 'expand') === '1.2' && f(1.1999, 'trunc') === '1.1' &&
+        \\ f(1.15, 'halfEven') === '1.2' && f(1.15, 'halfTrunc') === '1.1' &&
+        \\ f(1.15, 'halfExpand') === '1.2') ? 1 : 0
+    );
+}

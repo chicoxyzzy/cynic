@@ -2523,8 +2523,18 @@ fn roundSig(slots: *const intl.NumberFormatSlots, magnitude: f64, int_buf: []u8,
         frac_len.* = k;
         return;
     }
+    // §15.1.x ToRawPrecision honoring the rounding mode: scale so the value is a
+    // maxsd-digit integer, round per the mode (dtoa alone is fixed half-even),
+    // then re-extract. Snapping to 14 sig absorbs f64 representation noise (so
+    // 1.15 → 11.5) without disturbing genuine near-halfway inputs.
+    const e = @floor(std.math.log10(magnitude));
+    const scale_exp = @as(f64, @floatFromInt(maxsd)) - 1 - e;
+    const scale = std.math.pow(f64, 10, scale_exp);
+    const q_raw = magnitude * scale;
+    const q = if (maxsd <= 14) snapToSignificant(q_raw, 14) else q_raw;
+    const rounded = applyRoundingModeNonNeg(q, slots.rounding_mode) / scale;
     var dec = dtoa.Decimal{};
-    dtoa.precisionDigits(magnitude, maxsd, &dec);
+    dtoa.precisionDigits(rounded, maxsd, &dec);
     splitByPoint(dec.digits(), dec.point_exp, int_buf, int_len, frac_buf, frac_len);
     trimSignificant(int_buf, int_len, frac_buf, frac_len, minsd);
 }
