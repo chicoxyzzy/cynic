@@ -1439,11 +1439,13 @@ fn resolveNumberingSystem(realm: *Realm, locale: []const u8, opts: ?*JSObject) N
         const v = try getPropertyChain(realm, o, "numberingSystem");
         if (!v.isUndefined()) {
             const s = try valueToStringSlice(realm, v);
-            // Must be 3-8 alphanumerics (type subtag) and a known numeric system.
-            if (s.len < 3 or s.len > 8) return throwRangeError(realm, "invalid numberingSystem");
+            // §9.x: the option must be a well-formed `type` (3-8 alphanumeric
+            // subtags) — a malformed value throws RangeError. A well-formed but
+            // unsupported system is NOT an error; it falls back to the locale
+            // default per ResolveLocale (reported as the default).
+            if (!intl.isValidUnicodeType(s)) return throwRangeError(realm, "invalid numberingSystem");
             if (cldr.available and cldr.numberingSystemDigitBase(s) != null)
                 return realm.allocator.dupe(u8, s) catch error.OutOfMemory;
-            return throwRangeError(realm, "invalid numberingSystem");
         }
     }
     if (cldr.available) {
@@ -2907,7 +2909,10 @@ fn rtfConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const opts = try getOptionsObject(realm, options);
     const resolved = try resolveServiceLocale(realm, locales, opts);
     var slots: intl.RelativeTimeFormatSlots = .{};
+    errdefer slots.deinit(realm.allocator);
     slots.base.locale = resolved.locale;
+    // § read order: numberingSystem, style, numeric.
+    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, opts);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "long", "short", "narrow" }, "long");
     slots.numeric = try getOptionStringOwned(realm, opts, "numeric", &.{ "always", "auto" }, "always");
     try storeRecord(realm, inst, .{ .relative_time_format = slots });
@@ -2956,7 +2961,7 @@ fn rtfApplyPattern(realm: *Realm, s: intl.RelativeTimeFormatSlots, pat: []const 
     var segs: [64]Seg = undefined;
     var nfs: intl.NumberFormatSlots = .{};
     nfs.base.locale = s.base.locale;
-    nfs.base.numbering_system = "latn";
+    nfs.base.numbering_system = if (s.numbering_system.len > 0) s.numbering_system else "latn";
     nfs.style = "decimal";
     nfs.use_grouping = "auto";
     nfs.sign_display = "auto";
@@ -3020,7 +3025,7 @@ fn rtfFormatToParts(realm: *Realm, this_value: Value, args: []const Value) Nativ
             var segs: [64]Seg = undefined;
             var nfs: intl.NumberFormatSlots = .{};
             nfs.base.locale = s.base.locale;
-            nfs.base.numbering_system = "latn";
+            nfs.base.numbering_system = if (s.numbering_system.len > 0) s.numbering_system else "latn";
             nfs.style = "decimal";
             nfs.use_grouping = "auto";
             nfs.sign_display = "auto";
@@ -3054,9 +3059,10 @@ fn rtfResolvedOptions(realm: *Realm, this_value: Value, args: []const Value) Nat
     const rec = try requireKind(realm, this_value, .relative_time_format);
     const s = rec.relative_time_format;
     const obj = try makeResolvedBase(realm, s.base.locale);
+    // §17.3.4 key order: locale, style, numeric, numberingSystem.
     try setDataProp(realm, obj, "style", try makeStringValue(realm, if (s.style.len > 0) s.style else "long"));
     try setDataProp(realm, obj, "numeric", try makeStringValue(realm, if (s.numeric.len > 0) s.numeric else "always"));
-    try setDataProp(realm, obj, "numberingSystem", try makeStringValue(realm, "latn"));
+    try setDataProp(realm, obj, "numberingSystem", try makeStringValue(realm, if (s.numbering_system.len > 0) s.numbering_system else "latn"));
     return heap_mod.taggedObject(obj);
 }
 

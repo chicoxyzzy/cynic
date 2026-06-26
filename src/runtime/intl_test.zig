@@ -1462,3 +1462,16 @@ test "intl: NumberFormat honors minimumGroupingDigits" {
         \\ f('en',100).indexOf(',') === -1) ? 1 : 0
     );
 }
+
+test "intl: numberingSystem option — well-formed unknown falls back, malformed throws" {
+    try requireFullBuild();
+    // A known system is honoured; a malformed one throws; RTF reports it.
+    try evalAssert1(
+        \\const nf = new Intl.NumberFormat('en', { numberingSystem: 'arab' });
+        \\const rtf = new Intl.RelativeTimeFormat('en', { numberingSystem: 'arab' });
+        \\(nf.resolvedOptions().numberingSystem === 'arab' &&
+        \\ rtf.resolvedOptions().numberingSystem === 'arab') ? 1 : 0
+    );
+    try evalThrows("new Intl.NumberFormat('en', { numberingSystem: 'a' })"); // too short
+    try evalThrows("new Intl.RelativeTimeFormat('en', { numberingSystem: '!!' })"); // non-alnum
+}

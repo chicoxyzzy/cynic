@@ -250,11 +250,13 @@ pub const PluralRulesSlots = struct {
 
 pub const RelativeTimeFormatSlots = struct {
     base: ServiceLocaleSlots = .{},
+    numbering_system: []const u8 = "",
     style: []const u8 = "",
     numeric: []const u8 = "",
 
     pub fn deinit(self: *RelativeTimeFormatSlots, allocator: std.mem.Allocator) void {
         self.base.deinit(allocator);
+        if (self.numbering_system.len > 0) allocator.free(self.numbering_system);
         if (self.style.len > 0) allocator.free(self.style);
         if (self.numeric.len > 0) allocator.free(self.numeric);
         self.* = .{};
