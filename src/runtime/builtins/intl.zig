@@ -3255,11 +3255,42 @@ fn fmtGmtOffset(off_ns: i128, extended: bool, buf: []u8) []const u8 {
 }
 
 /// §11.5.x — the timeZoneName display for the format's zone at `epoch_ns`.
+/// The effective timeZoneName style implied by a resolved pattern's tz field
+/// (e.g. the timeStyle "full"/"long" patterns carry `zzzz` / `z` with no
+/// explicit timeZoneName option). "" when the pattern has no tz field.
+fn patternTzStyle(pattern: []const u8) []const u8 {
+    var in_quote = false;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const c = pattern[i];
+        if (c == '\'') {
+            in_quote = !in_quote;
+            continue;
+        }
+        if (in_quote) continue;
+        switch (c) {
+            'z', 'v', 'O', 'Z', 'X', 'x', 'V' => {
+                var j = i;
+                while (j < pattern.len and pattern[j] == c) j += 1;
+                const count = j - i;
+                return switch (c) {
+                    'z' => if (count >= 4) "long" else "short",
+                    'v' => if (count >= 4) "longGeneric" else "shortGeneric",
+                    'O', 'Z' => if (count >= 4) "longOffset" else "shortOffset",
+                    else => "shortOffset",
+                };
+            },
+            else => {},
+        }
+    }
+    return "";
+}
+
 /// Offset styles are computed exactly; UTC has fixed names; other zones fall
 /// back to the localized GMT offset (CLDR's documented missing-name fallback,
-/// since Cynic ships no per-zone display-name data).
-fn tzDisplay(slots: *const intl.DateTimeFormatSlots, epoch_ns: i128, buf: []u8) []const u8 {
-    const style = slots.time_zone_name;
+/// since Cynic ships no per-zone display-name data). `style` is the effective
+/// timeZoneName width (the option, or the pattern's tz-field width).
+fn tzDisplay(slots: *const intl.DateTimeFormatSlots, epoch_ns: i128, style: []const u8, buf: []u8) []const u8 {
     const off_ns = tzOffsetNs(slots.time_zone, epoch_ns);
     if (std.mem.eql(u8, style, "longOffset")) return fmtGmtOffset(off_ns, true, buf);
     if (std.mem.eql(u8, style, "shortOffset")) return fmtGmtOffset(off_ns, false, buf);
@@ -3565,7 +3596,10 @@ fn renderDateTime(slots: *const intl.DateTimeFormatSlots, ms: f64, out: []Seg) u
     var tz_buf: [320]u8 = undefined;
     const pattern = resolvePatternFull(dd, slots, &pat_buf, &frac_buf, &tz_buf);
     var tzn_buf: [40]u8 = undefined;
-    const tzn = tzDisplay(slots, @as(i128, @intFromFloat(ms)) * 1_000_000, &tzn_buf);
+    // The timeStyle patterns carry the tz field implicitly; derive its width
+    // from the pattern when no explicit timeZoneName option was set.
+    const tz_style = if (slots.time_zone_name.len > 0) slots.time_zone_name else patternTzStyle(pattern);
+    const tzn = tzDisplay(slots, @as(i128, @intFromFloat(ms)) * 1_000_000, tz_style, &tzn_buf);
     return renderPattern(slots, dd, pattern, ct, tzn, out);
 }
 
@@ -3761,7 +3795,8 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
                 return throwTypeError(realm, "DateTimeFormat options do not overlap the Temporal object's fields");
             // Only an Instant carries a zone; the masked Plain patterns drop it.
             var tzn_buf: [40]u8 = undefined;
-            const tzn = if (rec.* == .instant) tzDisplay(slots, rec.instant.epoch_ns, &tzn_buf) else "";
+            const tz_style = if (slots.time_zone_name.len > 0) slots.time_zone_name else patternTzStyle(masked);
+            const tzn = if (rec.* == .instant) tzDisplay(slots, rec.instant.epoch_ns, tz_style, &tzn_buf) else "";
             return renderPattern(slots, dd, masked, temporalCivil(slots, rec), tzn, out);
         }
     }

@@ -1995,6 +1995,18 @@ test "intl: getCanonicalLocales -u- type canonicalization (§3.2.1)" {
     );
 }
 
+test "intl: DateTimeFormat timeStyle tz-name width from pattern (§11.1.1)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const d = new Date(Date.UTC(1886, 4, 1, 14, 12, 47));
+        \\const f = (o) => new Intl.DateTimeFormat('en', Object.assign({ timeZone: 'UTC' }, o)).format(d);
+        \\(f({ timeStyle: 'full' }).endsWith('Coordinated Universal Time') && // zzzz → long
+        \\ f({ timeStyle: 'long' }).endsWith('UTC') &&                        // z → short
+        \\ f({ hour: 'numeric', timeZoneName: 'long' }).endsWith('Coordinated Universal Time') &&
+        \\ f({ hour: 'numeric', timeZoneName: 'short' }).endsWith('UTC')) ? 1 : 0 // explicit option unchanged
+    );
+}
+
 test "intl: DateTimeFormat minute/second 2-digit when combined (§11.1.1)" {
     try requireFullBuild();
     try evalAssert1(
