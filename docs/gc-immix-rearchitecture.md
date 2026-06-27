@@ -1,10 +1,64 @@
 # Immix heap + reference counting — GC rearchitecture scope
 
-Status: **scoping** (no code; measure-first). Owner: the GC track
-(user-directed). Prerequisite reading: [handbook/gc.md](handbook/gc.md) (the
-shipped collector) and
+Status: **Phase 0 (a) done — Immix-first is NOT supported by the data.** The
+alloc-vs-sweep-vs-mark breakdown (the **Phase 0 (a) result** immediately below)
+shows the per-object pools are not the bottleneck anywhere; the only GC
+rearchitecture the measured costs justify is **reference counting** (a separate,
+big change with its own scoping). The Immix heap (Steps 1/3/4) is shelved. The
+rest of the doc is the design that the measurement redirected. Owner: the GC
+track (user-directed). Prerequisite reading: [handbook/gc.md](handbook/gc.md)
+(the shipped collector) and
 [gc-generational-major.md](gc-generational-major.md) (why the in-place,
-non-moving major hit an architectural floor — the motivation for going deeper).
+non-moving major hit an architectural floor).
+
+## Phase 0 (a) result — the data redirects the plan
+
+`sample` self-time breakdown of the two macros (ReleaseFast, JIT on,
+`--unhardened --allow=eval`, ~15–20 s steady-state windows):
+
+**`splay` (large retained set) — ~4,700 leaf samples:**
+
+| bucket | ~share | top functions |
+|---|---:|---|
+| **mark** | **~62%** | `markValue` 2165, `beginMajorCycle` 312, `markSymbolKeys` 214, `markString` 166, drains ~50 |
+| sweep / free | ~10% | `sweepObjectsMatureBudget` 200, `deinitFields` 140, `finishIncrementalMajor` 99 |
+| **alloc** | **~2–5%** | `allocateObject` 52, cons/flat string 25, `makeDenseArray` 23 |
+| mutator / JIT | ~23% | `runFrames`, `Shape.lookup`, arith, property sets |
+
+**`richards` (low retention, compute / call-heavy):**
+
+| bucket | ~share | top functions |
+|---|---:|---|
+| **mutator / JIT / frames** | **~85%** | `runFrames` 1530, Bistromath ~360, CallFrame/FramePool ~295, JITted code (`???`) ~200 |
+| mark | ~1–2% | `markValue` 20 |
+| alloc | ~1% | `allocateEnvironment` 16 |
+
+Three findings, all against the Immix scoping below:
+
+1. **The per-object pools are not the bottleneck anywhere.** Allocation is ~2–5%
+   on `splay` and ~1% on `richards`. **Immix's headline win — bump allocation —
+   addresses a sliver.** Step 1 (the Immix heap) does not pay for itself, and its
+   bulk-reclaim only touches the ~5% sweep-*walk* (`deinitFields` — half the
+   sweep — frees per-object external resources and survives *any* heap layout).
+2. **Where GC dominates (`splay`), it is the *mark* (~62%), not alloc or sweep —
+   and the mark is reduced only by RC**, not Immix (Immix still traces every live
+   object). RC reclaims `splay`'s acyclic churn on refcount→0 with no trace and
+   never re-examines the stable retained tree, cutting the ~62% to near-zero.
+   **RC, not Immix, is the GC lever.**
+3. **Where GC does not dominate (`richards`, ~85% mutator), no GC rearchitecture
+   helps** — the bottleneck is interpreter / JIT / call-frame overhead, the JIT
+   track's domain, not the GC's.
+
+**Verdict: do not do Immix-first.** The measured costs do not support a
+block/line heap rewrite. The only GC rearchitecture the data justifies is
+**reference counting** (the `splay` mark) — itself a large, separate change (a
+coalescing inc/dec barrier on the interpreter's hot store path + a cycle
+collector) that deserves its own scoping + measure-first Phase 0 (the barrier's
+hot-path cost vs the mark saved), *not* the Immix foundation this doc led with.
+And the scope of even that win is narrow: it helps retained-set workloads
+(`splay`); compute-bound workloads (`richards`) are bottlenecked on the
+interpreter/JIT, where GC changes do nothing. Cheap measurement, expensive
+mistake avoided — the same discipline that closed the generational major.
 
 ## Why
 
