@@ -1995,6 +1995,20 @@ test "intl: getCanonicalLocales -u- type canonicalization (§3.2.1)" {
     );
 }
 
+test "intl: DateTimeFormat minute/second 2-digit when combined (§11.1.1)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const d = new Date(2000, 0, 1, 5, 3, 4);
+        \\const f = (o) => new Intl.DateTimeFormat('en', o).format(d);
+        \\(f({ minute: 'numeric' }) === '3' &&                      // sole field → 1-digit
+        \\ f({ second: 'numeric' }) === '4' &&
+        \\ f({ minute: 'numeric', second: 'numeric' }) === '03:04' && // combined → 2-digit
+        \\ f({ hour: 'numeric', minute: 'numeric' }).startsWith('5:03') && // minute after hour → 2-digit
+        \\ new Intl.DateTimeFormat('en', { minute: 'numeric', second: 'numeric', fractionalSecondDigits: 2 })
+        \\   .format(new Date(2000, 0, 1, 0, 2, 3, 456)) === '02:03.45') ? 1 : 0
+    );
+}
+
 test "intl: getCanonicalLocales language alias + field-aware merge (§3.2.1)" {
     try requireFullBuild(); // CLDR languageAlias table is in the embedded blob
     try evalAssert1(

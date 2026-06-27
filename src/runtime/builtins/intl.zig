@@ -3445,8 +3445,19 @@ fn requestedFieldToken(letter: u8, slots: *const intl.DateTimeFormatSlots, is_da
             const hl = hourLetter(letter, slots.hour_cycle);
             break :blk if (std.mem.eql(u8, slots.hour, "2-digit")) twoCharHour(hl) else oneCharHour(hl);
         },
-        'm' => if (slots.minute.len == 0) "" else (if (std.mem.eql(u8, slots.minute, "2-digit")) "mm" else "m"),
-        's' => if (slots.second.len == 0) "" else (if (std.mem.eql(u8, slots.second, "2-digit")) "ss" else "s"),
+        // §11.1.1 / UTS #35 availableFormats — a "numeric" minute or second
+        // combined with another time field renders 2-digit (the {h,m}→"h:mm",
+        // {m,s}→"mm:ss" skeletons); only a sole field honors "numeric" as 1-digit.
+        'm' => blk: {
+            if (slots.minute.len == 0) break :blk "";
+            const combined = slots.hour.len > 0 or slots.second.len > 0;
+            break :blk if (std.mem.eql(u8, slots.minute, "2-digit") or combined) "mm" else "m";
+        },
+        's' => blk: {
+            if (slots.second.len == 0) break :blk "";
+            const combined = slots.hour.len > 0 or slots.minute.len > 0;
+            break :blk if (std.mem.eql(u8, slots.second, "2-digit") or combined) "ss" else "s";
+        },
         'a', 'b', 'B' => if (slots.hour.len > 0 and hourIs12(slots.hour_cycle)) "a" else (if (slots.day_period.len > 0) "a" else ""),
         'z', 'Z', 'O', 'v', 'V', 'x', 'X' => if (slots.time_zone_name.len > 0) "z" else "",
         else => "",
