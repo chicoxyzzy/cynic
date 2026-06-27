@@ -668,6 +668,7 @@ fn installLocale(realm: *Realm, ns: *JSObject) !void {
     // the `variants` getter. `getTimeZones` (region→zone data) stays out
     // until the CLDR zone-by-region table is packed.
     try installNativeGetter(realm, proto, "variants", localeVariants);
+    try installNativeGetter(realm, proto, "firstDayOfWeek", localeFirstDayOfWeek);
     try installNativeMethodOnProto(realm, proto, "getCalendars", localeGetCalendars, 0);
     try installNativeMethodOnProto(realm, proto, "getCollations", localeGetCollations, 0);
     try installNativeMethodOnProto(realm, proto, "getHourCycles", localeGetHourCycles, 0);
@@ -941,6 +942,15 @@ fn localeHourCycle(realm: *Realm, this_value: Value, args: []const Value) Native
     if (s.hour_cycle.len == 0) return Value.undefined_;
     return makeStringValue(realm, s.hour_cycle);
 }
+
+/// Intl Locale Info — `Intl.Locale.prototype.firstDayOfWeek` returns the
+/// locale's -u-fw keyword as a weekday code ("mon".."sun"), or undefined.
+fn localeFirstDayOfWeek(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const s = try localeSlots(realm, this_value);
+    if (intl.unicodeExtensionValue(s.locale, "fw")) |v| return makeStringValue(realm, v);
+    return Value.undefined_;
+}
 fn localeLanguage(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try localeSlots(realm, this_value);
@@ -1098,12 +1108,21 @@ fn localeGetTextInfo(realm: *Realm, this_value: Value, args: []const Value) Nati
 /// §1.4.x getWeekInfo — { firstDay, weekend }, weekday numbers 1 (Mon) … 7
 /// (Sun). Structural default (Mon-first, Sat/Sun weekend); per-region
 /// `weekData` refinement is deferred.
+/// Map a -u-fw weekday code to the ISO weekday number (mon = 1 … sun = 7).
+fn fwDayToNumber(day: []const u8) f64 {
+    const codes = [_][]const u8{ "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
+    for (codes, 1..) |c, n| if (std.mem.eql(u8, day, c)) return @floatFromInt(n);
+    return 1;
+}
+
 fn localeGetWeekInfo(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try localeSlots(realm, this_value);
+    const s = try localeSlots(realm, this_value);
     _ = args;
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
-    try setDataProp(realm, obj, "firstDay", makeNumberValue(1));
+    // §1.4.x — firstDay reflects the locale's -u-fw keyword (default Monday).
+    const first_day = if (intl.unicodeExtensionValue(s.locale, "fw")) |v| fwDayToNumber(v) else 1;
+    try setDataProp(realm, obj, "firstDay", makeNumberValue(first_day));
     const weekend = allocateArray(realm) catch return error.OutOfMemory;
     weekend.set(realm.allocator, "0", makeNumberValue(6)) catch return error.OutOfMemory;
     weekend.set(realm.allocator, "1", makeNumberValue(7)) catch return error.OutOfMemory;

@@ -1973,7 +1973,12 @@ test "intl: Locale numeric canonicalization + firstDayOfWeek (§14.1)" {
         \\ t({ firstDayOfWeek: 'mon' }) === 'en-u-fw-mon' &&
         \\ t({ firstDayOfWeek: 1 }) === 'en-u-fw-mon' &&     // numeric 1..7 → mon..sun
         \\ t({ firstDayOfWeek: 7 }) === 'en-u-fw-sun' &&
-        \\ thrown({ firstDayOfWeek: 'xyz' }) === 'RangeError') ? 1 : 0
+        \\ thrown({ firstDayOfWeek: 'xyz' }) === 'RangeError' &&
+        \\ new Intl.Locale('en-u-fw-tue').firstDayOfWeek === 'tue' &&        // getter reads -u-fw
+        \\ new Intl.Locale('en', { firstDayOfWeek: '3' }).firstDayOfWeek === 'wed' &&
+        \\ new Intl.Locale('en').firstDayOfWeek === undefined &&             // absent → undefined
+        \\ new Intl.Locale('en-u-fw-thu').getWeekInfo().firstDay === 4 &&    // getWeekInfo reflects it
+        \\ new Intl.Locale('en').getWeekInfo().firstDay === 1) ? 1 : 0       // default Monday
     );
 }
 
