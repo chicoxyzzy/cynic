@@ -534,16 +534,14 @@ fn isGrandfathered(tag: []const u8) bool {
     if (tag.len > buf.len) return false;
     for (tag, 0..) |c, idx| buf[idx] = toLowerAscii(c);
     const t = buf[0..tag.len];
+    // Only the BCP 47 grandfathered tags that ALSO match unicode_language_id
+    // (language + a 5-8-char variant) are valid under ECMA-402; they are kept
+    // so canonicalizeUnicodeLocaleId can map them to their preferred forms.
+    // The irregular tags (i-*, sgn-*, en-GB-oed) and the regular ones with a
+    // 3-ALPHA subtag (no-bok / no-nyn / zh-min / zh-min-nan) are NOT valid
+    // unicode_locale_ids, so IsStructurallyValidLanguageTag must reject them.
     const gf = [_][]const u8{
-        "en-gb-oed",   "i-ami",    "i-bnn",     "i-default", "i-enochian", "i-hak",
-        "i-klingon",   "i-lux",    "i-mingo",   "i-navajo",  "i-pwn",      "i-tao",
-        "i-tay",       "i-tsu",    "sgn-be-fr", "sgn-be-nl", "sgn-ch-de",  "art-lojban",
-        "cel-gaulish", "zh-guoyu", "zh-hakka",  "zh-xiang",
-        // no-bok / no-nyn / zh-min / zh-min-nan are BCP 47 regular
-        // grandfathered tags but do NOT match unicode_language_id (a 3-ALPHA
-        // subtag after the language is not a valid variant), so ECMA-402's
-        // IsStructurallyValidLanguageTag rejects them — they fall through to
-        // the normal parse and become a RangeError.
+        "art-lojban", "cel-gaulish", "zh-guoyu", "zh-hakka", "zh-xiang",
     };
     for (gf) |g| if (std.mem.eql(u8, t, g)) return true;
     return false;

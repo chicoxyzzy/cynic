@@ -2064,6 +2064,7 @@ test "intl: 3-alpha extlang after language is invalid (§unicode_language_id)" {
         \\(inv('en-els') &&                                 // 3-alpha extlang → invalid
         \\ inv('en-abc') &&
         \\ inv('no-nyn') && inv('zh-min-nan') &&            // regular grandfathered, 3-alpha → invalid
+        \\ inv('i-klingon') && inv('en-GB-oed') &&          // irregular grandfathered → invalid
         \\ Intl.getCanonicalLocales('yue')[0] === 'yue' &&  // a 3-alpha LANGUAGE subtag is valid
         \\ Intl.getCanonicalLocales('art-lojban')[0] === 'jbo' && // valid grandfathered still canonicalizes
         \\ Intl.getCanonicalLocales('en-US')[0] === 'en-US' &&
