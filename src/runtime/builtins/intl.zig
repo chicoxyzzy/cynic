@@ -873,23 +873,27 @@ fn localeConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
         }
         canon = try apply(realm, canon, "nu", "numberingSystem", .type, o);
 
-        // firstDayOfWeek → -u-fw (Intl Locale Info). WeekdayToString maps 1..7
-        // and 0 to mon..sun (0 ≡ sun); a weekday name passes through; anything
-        // else is a RangeError.
+        // firstDayOfWeek → -u-fw (Intl Locale Info §1.4 WeekdayToString): 1..7
+        // and 0 map to mon..sun (0 ≡ sun); any other value (a weekday name, or
+        // an arbitrary fw type like "frank") passes through and must match the
+        // -u- type sequence (alphanum{3,8} subtags) or it is a RangeError. The
+        // value "true" canonicalises to the bare keyword.
         const fw_v = try getPropertyChain(realm, o, "firstDayOfWeek");
         if (!fw_v.isUndefined()) {
             const s = try valueToStringSlice(realm, fw_v);
-            const day = weekdayToFw(s) orelse return throwRangeError(realm, "invalid firstDayOfWeek");
+            const day = weekdayToFw(s) orelse s;
+            if (!intl.isValidUnicodeType(day)) return throwRangeError(realm, "invalid firstDayOfWeek");
+            const bare = std.mem.eql(u8, day, "true");
             const stripped = if (intl.unicodeExtensionValue(canon, "fw") != null)
                 stripUnicodeExtensionKeyword(realm.allocator, canon, "fw") catch return error.OutOfMemory
             else
                 canon;
             if (stripped.ptr != canon.ptr) realm.allocator.free(canon);
             const has_u = std.mem.indexOf(u8, stripped, "-u-") != null;
-            const out = if (has_u)
-                std.fmt.allocPrint(realm.allocator, "{s}-fw-{s}", .{ stripped, day })
+            const out = if (bare)
+                (if (has_u) std.fmt.allocPrint(realm.allocator, "{s}-fw", .{stripped}) else std.fmt.allocPrint(realm.allocator, "{s}-u-fw", .{stripped}))
             else
-                std.fmt.allocPrint(realm.allocator, "{s}-u-fw-{s}", .{ stripped, day });
+                (if (has_u) std.fmt.allocPrint(realm.allocator, "{s}-fw-{s}", .{ stripped, day }) else std.fmt.allocPrint(realm.allocator, "{s}-u-fw-{s}", .{ stripped, day }));
             const owned = out catch return error.OutOfMemory;
             realm.allocator.free(stripped);
             canon = owned;

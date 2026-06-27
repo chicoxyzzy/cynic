@@ -1973,7 +1973,10 @@ test "intl: Locale numeric canonicalization + firstDayOfWeek (§14.1)" {
         \\ t({ firstDayOfWeek: 'mon' }) === 'en-u-fw-mon' &&
         \\ t({ firstDayOfWeek: 1 }) === 'en-u-fw-mon' &&     // numeric 1..7 → mon..sun
         \\ t({ firstDayOfWeek: 7 }) === 'en-u-fw-sun' &&
-        \\ thrown({ firstDayOfWeek: 'xyz' }) === 'RangeError' &&
+        \\ t({ firstDayOfWeek: true }) === 'en-u-fw' &&        // "true" → bare keyword
+        \\ t({ firstDayOfWeek: 'frank' }) === 'en-u-fw-frank' && // arbitrary fw type passes through
+        \\ thrown({ firstDayOfWeek: 'x' }) === 'RangeError' &&  // not a valid -u- type subtag
+        \\ thrown({ firstDayOfWeek: 8 }) === 'RangeError' &&
         \\ new Intl.Locale('en-u-fw-tue').firstDayOfWeek === 'tue' &&        // getter reads -u-fw
         \\ new Intl.Locale('en', { firstDayOfWeek: '3' }).firstDayOfWeek === 'wed' &&
         \\ new Intl.Locale('en').firstDayOfWeek === undefined &&             // absent → undefined
