@@ -2057,6 +2057,18 @@ test "intl: DateTimeFormat minute/second 2-digit when combined (§11.1.1)" {
     );
 }
 
+test "intl: 3-alpha extlang after language is invalid (§unicode_language_id)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const inv = (t) => { try { Intl.getCanonicalLocales(t); return false; } catch (e) { return e.constructor.name === 'RangeError'; } };
+        \\(inv('en-els') &&                                 // 3-alpha extlang → invalid
+        \\ inv('en-abc') &&
+        \\ Intl.getCanonicalLocales('yue')[0] === 'yue' &&  // a 3-alpha LANGUAGE subtag is valid
+        \\ Intl.getCanonicalLocales('en-US')[0] === 'en-US' &&
+        \\ Intl.getCanonicalLocales('de-1901')[0] === 'de-1901') ? 1 : 0 // 4-digit variant valid
+    );
+}
+
 test "intl: language tag variants sorted in canonical form (§unicode_language_id)" {
     try requireIntlBuild();
     try evalAssert1(

@@ -509,10 +509,10 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
             variant_count += 1;
             continue;
         }
-        // Extlang-like 3-alpha before script/region (permissive).
-        if (!saw_script and !saw_region and seg_len == 3 and allAlpha(seg)) {
-            continue;
-        }
+        // §unicode_language_id has no extlang production — a 3-ALPHA subtag
+        // after the language is not a valid script/region/variant, so the tag
+        // is structurally invalid (e.g. "en-els"). The BCP 47 grandfathered
+        // forms that look like this are accepted earlier via isGrandfathered.
         return false;
     }
     return true;
