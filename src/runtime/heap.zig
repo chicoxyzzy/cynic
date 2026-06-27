@@ -33,9 +33,6 @@ const HeapKind = @import("function.zig").HeapKind;
 const JSObject = @import("object.zig").JSObject;
 const Realm = @import("realm.zig").Realm;
 const ShapeTree = @import("shape.zig").ShapeTree;
-/// Property-key interning (atoms) — Phase 1 build flag. See
-/// docs/interned-keys.md and the `atoms` field on `Heap`.
-const intern_keys = @import("build_options").intern_keys;
 const Environment = @import("environment.zig").Environment;
 const Chunk = @import("../bytecode/chunk.zig").Chunk;
 const JSGenerator = @import("generator.zig").JSGenerator;
@@ -369,21 +366,6 @@ pub const Heap = struct {
     /// each object's `heap` back-pointer. Realm-lifetime arena —
     /// the GC does not trace into shapes.
     shapes: ShapeTree,
-    /// Property-key interning table (atoms) — Phase 1, gated on the
-    /// `intern_keys` build flag (empty and untouched when off). Maps a
-    /// property-name byte string to its canonical, pinned `*JSString`
-    /// (the atom). Lives on the Heap rather than the Realm because a
-    /// `ShadowRealm` shares its parent's heap (`owns_heap = false`), so
-    /// the atoms must share the strings' lifetime domain — a per-realm
-    /// table would mis-scope them. Bounded by construction: only
-    /// compile-time property-name constants are interned (see
-    /// `internProperty`), so untrusted dynamic keys cannot grow it —
-    /// the never-unbounded-growth contract (docs/handbook/host-safety.md).
-    /// The map's keys borrow each atom's (stable, pinned) bytes; the
-    /// atoms themselves stay live via the `pinned` bit (swept-exempt,
-    /// like chunk constants), so this is not a separate GC root. Freed
-    /// in `deinit`. See docs/interned-keys.md.
-    atoms: std.StringHashMapUnmanaged(*JSString) = .empty,
     /// Executable-code region for the JIT tiers, lazily reserved on
     /// the first tier-up (docs/jit.md §8 — one reservation per
     /// engine, all tiers install through it). Null until then, and
@@ -1017,10 +999,6 @@ pub const Heap = struct {
     pub fn deinit(self: *Heap) void {
         if (self.jit_code) |*ca| ca.deinit();
         self.shapes.deinit();
-        // The atom table borrows its keys from pinned atom bytes and
-        // its values from heap strings (freed below); dropping it only
-        // reclaims the map's own buckets.
-        self.atoms.deinit(self.allocator);
         // JSString headers live in the slab pool — free each
         // owned byte payload first, then let `string_pool.deinit`
         // reclaim every header in one shot.
@@ -2257,47 +2235,6 @@ pub const Heap = struct {
         self.finalization_enqueue_fn = enqueue_fn;
     }
 
-    /// Property-key interning (atoms) — Phase 1. Longest byte length a
-    /// constant string is interned at; above it the string keeps the
-    /// byte path (kept off the atom table). Property names are short
-    /// identifiers / small string literals, so this captures the keys
-    /// that matter while bounding per-entry size and avoiding the
-    /// force-flatten of a large constant-folded value rope (the length
-    /// is read O(1) from `byte_len` before any flatten).
-    pub const max_atom_byte_len: u32 = 256;
-
-    /// Return the canonical interned atom for property-name string `s`,
-    /// adopting `s` itself as canonical on first sight. Bounded: the
-    /// only caller is `pinChunk`, so only compile-time constants are
-    /// interned — a strong-rooted, statically-bounded set (the DoS
-    /// contract; dynamic keys never reach here). The adopted atom is
-    /// pinned (swept-exempt, `.mature`), exactly like the chunk
-    /// constant it already is, so interning adds no new GC root. Long
-    /// strings are returned unchanged (not interned). `s` is realised
-    /// to a flat node so its bytes are a stable map key.
-    pub fn internProperty(self: *Heap, s: *JSString) std.mem.Allocator.Error!*JSString {
-        if (s.byte_len > max_atom_byte_len) return s;
-        const bytes = s.flatBytes(); // realises a (short) rope; flat after
-        const gop = try self.atoms.getOrPut(self.allocator, bytes);
-        if (gop.found_existing) return gop.value_ptr.*;
-        // Adopt `s` as the canonical atom. Pin it like a chunk constant
-        // so it is swept-exempt for the heap's lifetime; the map key
-        // borrows `bytes`, which is now `s`'s stable pinned buffer.
-        s.pinned = true;
-        s.generation = .mature;
-        gop.value_ptr.* = s;
-        return s;
-    }
-
-    /// Look up `key`'s canonical atom without inserting — the
-    /// DoS-safe form the write path (`shadowSet`) uses to discover
-    /// whether a key was interned. A miss (dynamic / non-constant key)
-    /// returns null and the caller keeps the byte path. Never grows the
-    /// table, so untrusted keys cannot.
-    pub fn internLookup(self: *Heap, key: []const u8) ?*JSString {
-        return self.atoms.get(key);
-    }
-
     /// Walk a `Chunk`'s constant pool and pin every JSString it
     /// references — including those in nested function / class
     /// templates. Called once at chunk-finalize time
@@ -2308,30 +2245,8 @@ pub const Heap = struct {
     /// of `script_chunks` and `JSFunction.chunk` (the heap's
     /// hottest mark-phase work, since chunk trees recurse into
     /// every method / static-block / field initializer).
-    ///
-    /// With `intern_keys` on this is also the property-key interning
-    /// hook (docs/interned-keys.md): each string constant is replaced
-    /// in place by its canonical atom (deduplicating across chunks, so
-    /// the constructor chunk's `"x"` and a method chunk's `"x"` share
-    /// one identity). The original duplicate is then unreferenced and
-    /// swept; the canonical atom is pinned by `internProperty`.
     pub fn pinChunk(self: *Heap, chunk: *const Chunk) !void {
-        if (intern_keys) {
-            // `chunk.constants` is `[]const Value`; pinChunk is the
-            // finalize step that canonicalises the pool, so a write
-            // through `@constCast` here is intentional and one-time.
-            const consts = @constCast(chunk.constants);
-            for (consts) |*slot| {
-                if (slot.isString()) {
-                    const orig: *JSString = @ptrCast(@alignCast(slot.asString()));
-                    const canon = try self.internProperty(orig);
-                    if (canon != orig) slot.* = Value.fromString(canon);
-                }
-                try self.pinValue(slot.*);
-            }
-        } else {
-            for (chunk.constants) |c| try self.pinValue(c);
-        }
+        for (chunk.constants) |c| try self.pinValue(c);
         for (chunk.function_templates) |*ft| try self.pinChunk(&ft.chunk);
         for (chunk.class_templates) |*ct| {
             try self.pinChunk(&ct.constructor_chunk);

@@ -47,34 +47,6 @@ const utf16 = @import("../utf16.zig");
 const JSFunction = @import("../function.zig").JSFunction;
 const object_mod = @import("../object.zig");
 const JSObject = object_mod.JSObject;
-const shape_mod = @import("../shape.zig");
-const build_options = @import("build_options");
-
-// Layout-perturbation control for the property-key interning A/B
-// (docs/interned-keys.md §9). `-Dbench-pad=N` emits an N-instruction,
-// never-called padding function exported into the binary, shifting the
-// code addresses of the functions placed after it. It carries zero
-// runtime cost (it is never invoked) — its only effect is to produce
-// an independently-perturbed code layout, so a measured macro win can
-// be confirmed across ≥3 distinct layouts rather than banked on one
-// build pair (the `flatBytes`-style layout-noise trap). A comptime
-// no-op at the default `bench_pad == 0`.
-// Takes a runtime `seed` so the comptime-unrolled loop can't be folded
-// to a constant — the body must emit `bench_pad` real instructions, which
-// is the whole point (code size ∝ N shifts downstream addresses). Never
-// called; only `@export`ed below so the linker keeps the symbol.
-fn __cynicBenchPad(seed: usize) callconv(.c) usize {
-    var acc: usize = seed;
-    inline for (0..build_options.bench_pad) |i| {
-        acc = (acc *% 0x9E3779B97F4A7C15) +% i;
-    }
-    return acc;
-}
-comptime {
-    if (build_options.bench_pad != 0) {
-        @export(&__cynicBenchPad, .{ .name = "__cynic_bench_pad" });
-    }
-}
 const Environment = @import("../environment.zig").Environment;
 const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
@@ -923,18 +895,11 @@ fn resolveCtorInitialShape(realm: *Realm, chunk: *const Chunk) ?*@import("../sha
         const key_v = chunk.constants[key_idx];
         if (!key_v.isString()) return null;
         const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-        // Property-key interning: the field-name constant is an interned
-        // atom (pinChunk), so stamp the ctor's initial instance shape
-        // with atom identity. This is the hot path the optimisation
-        // exists for — `new Ctor(...)` instances — so its per-access
-        // `lda_property` reads must resolve against atom-keyed nodes,
-        // not the byte fallback.
-        cur = realm.heap.shapes.transitionAtom(
+        cur = realm.heap.shapes.transition(
             cur,
             key_s.flatBytes(),
             object_mod.PropertyFlags.default,
             .data,
-            shape_mod.atomId(key_s),
         ) catch return null;
     }
     return cur;
@@ -9182,17 +9147,11 @@ pub fn runFrames(
                     const key_v = local_chunk.constants[key_idx];
                     if (!key_v.isString()) return error.InvalidOpcode;
                     const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-                    // Object-literal keys are interned atoms (pinChunk);
-                    // stamp the literal's cached shape with atom identity
-                    // so reads off `{x:…, y:…}` literals (hot in raytrace)
-                    // take the pointer-compare path, not the byte
-                    // fallback.
-                    cur = realm.heap.shapes.transitionAtom(
+                    cur = realm.heap.shapes.transition(
                         cur,
                         key_s.flatBytes(),
                         @import("../object.zig").PropertyFlags.default,
                         .data,
-                        shape_mod.atomId(key_s),
                     ) catch return error.OutOfMemory;
                 }
                 @constCast(tmpl).cached_shape = cur;
@@ -9663,17 +9622,8 @@ pub fn runFrames(
                 }
                 // Cold / shape-changed / proto-invalidated.
                 // Probe own shape first.
-                //
-                // Property-key interning (atoms): `key_s` is a chunk-
-                // constant property name, interned in place at
-                // `pinChunk`, so it IS its own canonical atom. Passing
-                // it to `lookupAtom` turns each shape node's compare
-                // into a pointer compare for static keys (the
-                // megamorphic-miss cost this targets — see
-                // docs/interned-keys.md). Byte fallback otherwise.
-                const key_atom = shape_mod.atomId(key_s);
                 if (obj_in.shape) |sh| {
-                    if (sh.lookupAtom(key_s.flatBytes(), key_atom)) |entry| {
+                    if (sh.lookup(key_s.flatBytes())) |entry| {
                         if (entry.kind == .data) {
                             cell.shape = sh;
                             cell.slot = entry.slot;
@@ -9712,10 +9662,7 @@ pub fn runFrames(
                             if (proto.is_module_namespace) break;
                             if (proto.hasAccessor(key_s.flatBytes())) break;
                             if (proto.shape) |proto_sh| {
-                                // Same atom-identity fast path on the
-                                // prototype-load walk (method lookups:
-                                // `node.foo()` resolves `foo` here).
-                                if (proto_sh.lookupAtom(key_s.flatBytes(), key_atom)) |entry| {
+                                if (proto_sh.lookup(key_s.flatBytes())) |entry| {
                                     if (entry.kind == .data) {
                                         cell.shape = sh;
                                         cell.slot = entry.slot;

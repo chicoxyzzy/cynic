@@ -1,10 +1,14 @@
 # Property-key interning (atoms) — design & go/no-go
 
-Status: **design only, not started.** This documents the highest-value
-remaining interpreter-tier lever found by profiling the Octane macros
-(2026-06), the prior art, the blast radius across Cynic's substrate,
-and an honest go/no-go. It is a *cross-lane* change (shape/IC + string +
-GC), so it needs the owning efforts' buy-in before code — see §8.
+Status: **measured dead-end (2026-06).** The Phase-1 prototype was
+built behind `-Dintern-keys` and decided by the layout-controlled A/B
+the design demanded (§9). It did **not** clear the bar — no reproducible
+win, the deltas indistinguishable from code-layout noise — so it is
+**not shipped**. The full result is in §11; do not re-attempt without a
+materially different approach (and read §11 first). The sections below
+are the original design, kept for the record. It is a *cross-lane*
+change (shape/IC + string + GC), so it needed the owning efforts' buy-in
+— see §8.
 
 ## 1. The problem
 
@@ -226,3 +230,74 @@ prototype needs the §8 coordination. It is the right next interpreter
 lever **if** the user wants a real macro win and is willing to run a
 cross-lane effort; otherwise it stands here as the documented future
 direction.
+
+## 11. Measured result — Phase 1 prototype (dead end, 2026-06)
+
+Phase 1 was built exactly as scoped (per-heap atom table; chunk-constant
+property names interned in place at `pinChunk`; `Shape` stores/compares
+atoms with a `std.mem.eql` byte fallback; the hot read miss path and the
+`shadowSet` / `resolveCtorInitialShape` / `make_object_shape` shape
+builders wired to atoms), behind `-Dintern-keys` (default off).
+
+**Correctness was clean.** Transparency held to the letter: the full
+test262 pass set was byte-identical flag-on vs flag-off (46798 pass /
+3097 fail both), the `--jit` differential was exact, gc-stress at
+`--gc-threshold=1` was crash-free with identical pass/fail, and
+`test-fast` was green both ways. PropertyKey identity (§6.1.7) stayed
+unobservable. So the optimization is *sound* — it simply doesn't pay.
+
+**Perf did not clear the bar.** The decision used the design's own
+layout-controlled A/B (§9): one flag-off baseline, three independently
+layout-perturbed flag-on builds (`-Dbench-pad ∈ {0, 96, 192}`),
+interleaved on the remote box (host drift cancelled). Octane macros,
+`--no-jit` (the interpreter tier the lever targets), ratio = flag-on /
+flag-off (>1 ⇒ interning **slower**):
+
+| macro | pad 0 | pad 96 | pad 192 |
+|---|--:|--:|--:|
+| deltablue | 1.019 | 1.004 | 0.977 |
+| raytrace  | 1.015 | 1.035 | 1.030 |
+| crypto    | 1.062 | 1.016 | 1.040 |
+| richards  | 1.032 | 1.011 | 1.017 |
+
+(JIT-tier ratios were the same shape; spreads ran 12–43%, dwarfing every
+delta.)
+
+**Why it's noise, not a win.** Two independent tells:
+
+1. **The sign is not stable.** deltablue crosses 1.0 across the perturbed
+   builds (1.019 → 0.977). A real effect keeps its sign under
+   perturbation; this doesn't.
+2. **A macro that cannot benefit moves the same amount.** `crypto` is
+   integer-bound (RSA) and barely touches named-property access, yet it
+   shifts ~2–6% in lockstep with the rest. The deltas are therefore a
+   global **code-layout / code-size** artifact of the larger flag-on
+   binary, not a property-path effect — exactly the trap the `flatBytes`
+   inline "win" set (§2, [inline-caches.md](inline-caches.md)).
+
+Nothing approached the **≥8% reproducible** floor the gate required, and
+the only *consistent* direction across pads was **marginally slower**.
+
+**Mechanistic reading (why the ceiling is so low).** Interning attacks
+the per-node `std.mem.eql` + per-access flatten/hash (§2), but on real
+property names — 3–8-byte identifiers — `std.mem.eql` is already a
+couple of byte compares, and the read key is already flat (its
+`flatBytes()` is a slice return). So the read-side saving is tiny.
+Against it, the prototype *adds* per-shape-mode-write cost: `shadowSet`
+calls `internLookup` (a Wyhash) on every write to resolve the canonical
+atom, plus a branch per node in `lookupAtom`, plus the code-size bloat
+above. The arithmetic nets to ~zero — and the megamorphic-miss cluster
+the profile flagged (§1) is dominated by the **O(depth) walk length and
+the bag `Wyhash` in `hasAccessor`/`ownDataContains`**, neither of which
+interning touches (§2 "what it does NOT"). Interning makes each *node's*
+compare O(1); it does not shorten the walk or remove the bag probes.
+
+**Verdict: do not re-attempt as specified.** This joins the poly-IC
+dead-end and the `flatBytes`-inline change as a measured layout-noise
+result. The Phase-1 prototype was reverted (kept only here as the
+record). Anything that revisits property-lookup perf should target the
+parts interning provably *can't*: a **per-shape hash index** to kill the
+O(depth) walk itself (the original §9 Phase 2, but it must be justified
+on the walk-length cost, standalone — not as a follow-on to interning),
+or making `hasAccessor`/`ownDataContains` shape-first to drop the
+bag `Wyhash` on the miss path. A bare atom-identity compare is not it.

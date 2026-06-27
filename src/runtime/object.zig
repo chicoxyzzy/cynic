@@ -20,7 +20,6 @@ const std = @import("std");
 
 const Value = @import("value.zig").Value;
 const HeapKind = @import("function.zig").HeapKind;
-const shape_mod = @import("shape.zig");
 
 test {
     // Pull the property-shape module's unit tests into the suite.
@@ -2955,19 +2954,10 @@ pub const JSObject = struct {
             try self.demoteFromShape(allocator);
             return false;
         }
-        // Property-key interning (atoms): resolve `key`'s canonical
-        // atom once (lookup-only — DoS-safe; a dynamic key misses and
-        // keeps the byte path). Threaded into the shape lookup and the
-        // transition so the shape stores atom identity and a later
-        // `lda_property` miss can pointer-compare. The whole expression
-        // is comptime-elided when the flag is off (no `internLookup`).
-        const key_atom: shape_mod.AtomId = if (shape_mod.intern_keys)
-            shape_mod.atomId(heap.internLookup(key))
-        else {};
         // Key already in the shape: a same-descriptor value update
         // keeps the shape; any other redefinition demotes.
         if (self.shape) |s| {
-            if (s.lookupAtom(key, key_atom)) |e| {
+            if (s.lookup(key)) |e| {
                 if (e.kind == .data and
                     e.attrs.writable == flags.writable and
                     e.attrs.enumerable == flags.enumerable and
@@ -2997,7 +2987,7 @@ pub const JSObject = struct {
             return false;
         }
         const from = self.shape orelse heap.shapes.root;
-        const child = heap.shapes.transitionAtom(from, key, flags, .data, key_atom) catch |err| {
+        const child = heap.shapes.transition(from, key, flags, .data) catch |err| {
             try self.demoteFromShape(allocator);
             return err;
         };
