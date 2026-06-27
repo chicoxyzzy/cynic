@@ -2057,6 +2057,18 @@ test "intl: DateTimeFormat minute/second 2-digit when combined (§11.1.1)" {
     );
 }
 
+test "intl: language tag variants sorted in canonical form (§unicode_language_id)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const g = (t) => Intl.getCanonicalLocales(t)[0];
+        \\(g('de-1996-1901') === 'de-1901-1996' &&              // variants sorted alphabetically
+        \\ g('sl-rozaj-biske-1994') === 'sl-1994-biske-rozaj' &&
+        \\ new Intl.Locale('xx', { variants: '1xyz-1234-abcde-12345678' }).toString() === 'xx-1234-12345678-1xyz-abcde' &&
+        \\ g('en') === 'en' && g('en-US') === 'en-US' &&        // no variants → unchanged (no crash)
+        \\ g('de-1901') === 'de-1901') ? 1 : 0                  // single variant → unchanged
+    );
+}
+
 test "intl: getCanonicalLocales language alias + field-aware merge (§3.2.1)" {
     try requireFullBuild(); // CLDR languageAlias table is in the embedded blob
     try evalAssert1(

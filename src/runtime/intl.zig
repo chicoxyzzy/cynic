@@ -752,7 +752,7 @@ fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const 
     if (n == 0) return canon;
 
     var repl: cldr.Subtags = .{};
-    if (!cldr.languageAlias(subs[0], &repl)) return canon;
+    const has_alias = cldr.languageAlias(subs[0], &repl);
 
     // Classify the input's script / region; everything else is a variant.
     var in_script: []const u8 = "";
@@ -769,14 +769,32 @@ fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const 
             vn += 1;
         }
     }
-    const out_script = if (in_script.len != 0) in_script else repl.script;
-    const out_region = if (in_region.len != 0) in_region else repl.region;
+    // §unicode_language_id — variants are sorted alphabetically in canonical
+    // form. Skip the rebuild entirely if there is no alias and the variants are
+    // already ordered (the common case).
+    var variants_sorted = true;
+    var vk: usize = 1;
+    while (vk < vn) : (vk += 1) {
+        if (std.mem.lessThan(u8, variants[vk], variants[vk - 1])) {
+            variants_sorted = false;
+            break;
+        }
+    }
+    if (!has_alias and variants_sorted) return canon;
+    std.mem.sort([]const u8, variants[0..vn], {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    const out_lang = if (has_alias) repl.lang else subs[0];
+    const out_script = if (in_script.len != 0) in_script else (if (has_alias) repl.script else "");
+    const out_region = if (in_region.len != 0) in_region else (if (has_alias) repl.region else "");
 
     // Rebuild language_id (input fields already canonically cased; the CLDR
     // replacement subtags are in canonical case too) + the carried remainder.
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try buf.appendSlice(allocator, repl.lang);
+    try buf.appendSlice(allocator, out_lang);
     if (out_script.len != 0) {
         try buf.append(allocator, '-');
         try buf.appendSlice(allocator, out_script);
