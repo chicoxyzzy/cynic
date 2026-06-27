@@ -48,6 +48,7 @@ const SectionKind = enum(u8) {
     relative_time = 11,
     compact = 12,
     units = 13,
+    language_aliases = 14,
 };
 
 /// RTF units in fixed order (year … second); each packs 3 styles (long /
@@ -162,13 +163,14 @@ pub fn main(init: std.process.Init) !void {
     const relative_time = try loadRelativeTime(arena, io, json_root);
     const compact = try loadCompact(arena, io, json_root);
     const units = try loadUnits(arena, io, json_root);
+    const lang_aliases = try loadLanguageAliases(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact, units);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact, units, lang_aliases);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
     var buf: [540]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}, units {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len, units.len });
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}, units {d}, lang_aliases {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len, units.len, lang_aliases.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -239,12 +241,13 @@ fn pack(
     relative_time: []RelativeTimeLocale,
     compact: []CompactLocale,
     units: []UnitsLocale,
+    lang_aliases: []LangAliasEntry,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [13]SectionDir = undefined;
+    var dirs: [14]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -297,6 +300,10 @@ fn pack(
     const un_start: u32 = @intCast(payloads.items.len);
     try writeUnitsPayload(gpa, &payloads, units);
     dirs[12] = .{ .kind = .units, .off = un_start, .len = @as(u32, @intCast(payloads.items.len)) - un_start };
+
+    const la_start: u32 = @intCast(payloads.items.len);
+    try writeLanguageAliasPayload(gpa, &payloads, lang_aliases);
+    dirs[13] = .{ .kind = .language_aliases, .off = la_start, .len = @as(u32, @intCast(payloads.items.len)) - la_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -441,6 +448,57 @@ fn subtagsOf(tag: []const u8) Subtags {
 }
 
 fn writeLikelySubtagsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), table: []LikelyEntry) !void {
+    try appendU32(gpa, buf, table.len);
+    for (table) |e| {
+        try appendStr8(gpa, buf, e.key);
+        try appendStr8(gpa, buf, e.lang);
+        try appendStr8(gpa, buf, e.script);
+        try appendStr8(gpa, buf, e.region);
+    }
+}
+
+// ── language aliases (UTS #35 §3.2.1 languageAlias) ──────────────────────────
+
+/// One languageAlias entry with a single-subtag key (a bare language). The
+/// replacement is split into language / script / region so the runtime can
+/// apply the field-aware merge (an input field wins; the replacement only fills
+/// a gap). Multi-subtag keys (e.g. `sgn-GR`, `no-bok`) are skipped here.
+const LangAliasEntry = struct {
+    key: []const u8, // input language subtag (lowercase)
+    lang: []const u8, // replacement language
+    script: []const u8, // replacement script (4 alpha) or ""
+    region: []const u8, // replacement region (2 alpha / 3 digit) or ""
+    fn lessThan(_: void, a: LangAliasEntry, b: LangAliasEntry) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+/// aliases.json → sorted (key, repl-lang, repl-script, repl-region) for the
+/// bare-language keys. Sorted by key for a runtime binary search.
+fn loadLanguageAliases(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]LangAliasEntry {
+    const path = try std.fmt.allocPrint(arena, "{s}/cldr-core/supplemental/aliases.json", .{json_root});
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch
+        fatal("cannot read {s} (run tools/fetch-cldr.sh first)", .{path});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+    const tbl = (root.object.get("supplemental") orelse fatal("no supplemental", .{})).object
+        .get("metadata").?.object.get("alias").?.object
+        .get("languageAlias").?.object;
+
+    var out: std.ArrayListUnmanaged(LangAliasEntry) = .empty;
+    var it = tbl.iterator();
+    while (it.next()) |e| {
+        const key = e.key_ptr.*;
+        // Skip multi-subtag keys (full-tag replacements) — handled separately.
+        if (std.mem.indexOfScalar(u8, key, '-') != null) continue;
+        const repl = e.value_ptr.*.object.get("_replacement").?.string;
+        const v = subtagsOf(repl);
+        try out.append(arena, .{ .key = key, .lang = v.lang, .script = v.script, .region = v.region });
+    }
+    std.sort.block(LangAliasEntry, out.items, {}, LangAliasEntry.lessThan);
+    return out.items;
+}
+
+fn writeLanguageAliasPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), table: []LangAliasEntry) !void {
     try appendU32(gpa, buf, table.len);
     for (table) |e| {
         try appendStr8(gpa, buf, e.key);

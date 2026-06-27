@@ -64,6 +64,7 @@ const SectionKind = enum(u8) {
     relative_time = 11,
     compact = 12,
     units = 13,
+    language_aliases = 14,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -83,6 +84,7 @@ var lp_payload: []const u8 = &.{};
 var rt_payload: []const u8 = &.{};
 var cp_payload: []const u8 = &.{};
 var un_payload: []const u8 = &.{};
+var lang_alias_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -123,6 +125,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.relative_time) => rt_payload = payload,
             @intFromEnum(SectionKind.compact) => cp_payload = payload,
             @intFromEnum(SectionKind.units) => un_payload = payload,
+            @intFromEnum(SectionKind.language_aliases) => lang_alias_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -1070,6 +1073,40 @@ fn likelyLookup(key: []const u8, out: *Subtags) bool {
         const script = readBytes(likely_payload, &off, slen) orelse return false;
         const rlen = readU8(likely_payload, &off) orelse return false;
         const region = readBytes(likely_payload, &off, rlen) orelse return false;
+        if (asciiEqlIgnoreCase(k, key)) {
+            const ln = @min(lang.len, out.lang_buf.len);
+            @memcpy(out.lang_buf[0..ln], lang[0..ln]);
+            out.lang = out.lang_buf[0..ln];
+            const sn = @min(script.len, out.script_buf.len);
+            @memcpy(out.script_buf[0..sn], script[0..sn]);
+            out.script = out.script_buf[0..sn];
+            const rn = @min(region.len, out.region_buf.len);
+            @memcpy(out.region_buf[0..rn], region[0..rn]);
+            out.region = out.region_buf[0..rn];
+            return true;
+        }
+    }
+    return false;
+}
+
+/// UTS #35 §3.2.1 languageAlias — look up a bare-language alias key (e.g.
+/// `cmn` → zh, `sh` → sr-Latn). On a hit, writes the replacement's
+/// lang/script/region into `out` and returns true. Requires the embedded blob
+/// (`-Dintl=full`); returns false when absent or the key has no alias.
+pub fn languageAlias(key: []const u8, out: *Subtags) bool {
+    if (!ensureInit() or lang_alias_payload.len < 4) return false;
+    const count = std.mem.readInt(u32, lang_alias_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(lang_alias_payload, &off) orelse return false;
+        const k = readBytes(lang_alias_payload, &off, klen) orelse return false;
+        const llen = readU8(lang_alias_payload, &off) orelse return false;
+        const lang = readBytes(lang_alias_payload, &off, llen) orelse return false;
+        const slen = readU8(lang_alias_payload, &off) orelse return false;
+        const script = readBytes(lang_alias_payload, &off, slen) orelse return false;
+        const rlen = readU8(lang_alias_payload, &off) orelse return false;
+        const region = readBytes(lang_alias_payload, &off, rlen) orelse return false;
         if (asciiEqlIgnoreCase(k, key)) {
             const ln = @min(lang.len, out.lang_buf.len);
             @memcpy(out.lang_buf[0..ln], lang[0..ln]);

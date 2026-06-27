@@ -8,6 +8,7 @@
 //! so test262 failures map cleanly.
 
 const std = @import("std");
+const cldr = @import("cldr.zig");
 
 /// Maximum bytes we accept for a single language tag (well above any
 /// realistic BCP 47 tag; guards pathological input from DoS'ing the
@@ -709,7 +710,89 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
     // Free keyword dupes.
     for (unicode_keywords.items) |k| allocator.free(k);
 
-    return try out.toOwnedSlice(allocator);
+    const canon = try out.toOwnedSlice(allocator);
+    return applyLanguageAlias(allocator, canon);
+}
+
+/// §3.2.1 — apply the CLDR languageAlias to the (already case-canonicalised)
+/// tag's language subtag, merging the replacement's script/region into any the
+/// input lacks (an input field wins; the replacement only fills a gap, e.g.
+/// `sh` → sr-Latn but `sh-Cyrl` → sr-Cyrl). Bare-language keys only. Ownership
+/// of `canon` passes in: returned unchanged on no match, otherwise freed and a
+/// fresh allocation returned. A no-op at `-Dintl` flavours without the blob.
+fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const u8 {
+    // language_id portion = up to the first single-char subtag (an extension
+    // or `-x-` singleton); the remainder is carried through verbatim.
+    var lang_id_end: usize = canon.len;
+    {
+        var i: usize = 0;
+        var seg_start: usize = 0;
+        while (i <= canon.len) : (i += 1) {
+            if (i == canon.len or canon[i] == '-') {
+                if (i - seg_start == 1 and seg_start > 0) {
+                    lang_id_end = seg_start - 1;
+                    break;
+                }
+                seg_start = i + 1;
+            }
+        }
+    }
+    const language_id = canon[0..lang_id_end];
+    const rest = canon[lang_id_end..]; // leading '-' (extensions) or empty
+
+    // Split the language_id into subtags.
+    var subs: [16][]const u8 = undefined;
+    var n: usize = 0;
+    var sit = std.mem.splitScalar(u8, language_id, '-');
+    while (sit.next()) |s| {
+        if (n >= subs.len) return canon; // pathological; leave as-is
+        subs[n] = s;
+        n += 1;
+    }
+    if (n == 0) return canon;
+
+    var repl: cldr.Subtags = .{};
+    if (!cldr.languageAlias(subs[0], &repl)) return canon;
+
+    // Classify the input's script / region; everything else is a variant.
+    var in_script: []const u8 = "";
+    var in_region: []const u8 = "";
+    var variants: [16][]const u8 = undefined;
+    var vn: usize = 0;
+    for (subs[1..n]) |s| {
+        if (in_script.len == 0 and s.len == 4 and allAlpha(s)) {
+            in_script = s;
+        } else if (in_region.len == 0 and ((s.len == 2 and allAlpha(s)) or (s.len == 3 and allDigit(s)))) {
+            in_region = s;
+        } else {
+            variants[vn] = s;
+            vn += 1;
+        }
+    }
+    const out_script = if (in_script.len != 0) in_script else repl.script;
+    const out_region = if (in_region.len != 0) in_region else repl.region;
+
+    // Rebuild language_id (input fields already canonically cased; the CLDR
+    // replacement subtags are in canonical case too) + the carried remainder.
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, repl.lang);
+    if (out_script.len != 0) {
+        try buf.append(allocator, '-');
+        try buf.appendSlice(allocator, out_script);
+    }
+    if (out_region.len != 0) {
+        try buf.append(allocator, '-');
+        try buf.appendSlice(allocator, out_region);
+    }
+    for (variants[0..vn]) |v| {
+        try buf.append(allocator, '-');
+        try buf.appendSlice(allocator, v);
+    }
+    try buf.appendSlice(allocator, rest);
+
+    allocator.free(canon);
+    return buf.toOwnedSlice(allocator);
 }
 
 /// UTS #35 §3.2.1 — `-u-` keys whose `true` type is the default and is dropped

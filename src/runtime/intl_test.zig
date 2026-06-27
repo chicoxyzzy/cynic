@@ -1995,6 +1995,23 @@ test "intl: getCanonicalLocales -u- type canonicalization (§3.2.1)" {
     );
 }
 
+test "intl: getCanonicalLocales language alias + field-aware merge (§3.2.1)" {
+    try requireFullBuild(); // CLDR languageAlias table is in the embedded blob
+    try evalAssert1(
+        \\const g = (t) => Intl.getCanonicalLocales(t)[0];
+        \\(g('cmn') === 'zh' &&                       // macrolanguage alias
+        \\ g('CMN-hANS') === 'zh-Hans' &&             // alias + case canonicalization
+        \\ g('cmn-hans-cn') === 'zh-Hans-CN' &&       // script/region kept from input
+        \\ g('mo') === 'ro' && g('ji') === 'yi' && g('aar') === 'aa' &&
+        \\ g('sh') === 'sr-Latn' &&                   // replacement supplies the script
+        \\ g('sh-Cyrl') === 'sr-Cyrl' &&              // input script wins over replacement
+        \\ g('cnr') === 'sr-ME' &&                    // replacement supplies the region
+        \\ g('cnr-BA') === 'sr-BA' &&                 // input region wins
+        \\ g('cmn-u-nu-latn') === 'zh-u-nu-latn' &&   // extensions carried through
+        \\ g('en-US') === 'en-US') ? 1 : 0            // no alias → unchanged
+    );
+}
+
 test "intl: CanonicalizeLocaleList HasProperty + element type (§9.2.1)" {
     try requireIntlBuild();
     try evalAssert1(
