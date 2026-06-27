@@ -1117,13 +1117,27 @@ not measurements.
    `class_instantiate` running 2.2× behind QuickJS-NG); the
    pool closes most of that gap.
 
-9. **String interning for property keys + small literals.**
-   Identifier strings interned at compile time + at heap
-   allocation. Property-bag lookups become pointer compares
-   in the hash key path instead of byte compares. Compounds
-   with the IC: even on a cache miss, the hash lookup is
-   faster. Also a precondition for the
-   computed-property IC (`obj[k]` with hot constant `k`).
+9. **String interning for property keys — measured dead-end
+   (2026-06).** Prototyped behind `-Dintern-keys`: compile-time
+   property-name constants interned into a per-heap atom table,
+   `Shape` comparing keys by atom identity (pointer compare) with a
+   byte fallback. Correct and fully transparent (full test262 pass set
+   byte-identical flag on/off, `--jit` differential exact), but the
+   layout-controlled macro A/B (one flag-off baseline vs three
+   independently-perturbed flag-on builds) showed **no reproducible
+   win** — the deltas were code-layout noise (deltablue's sign flipped
+   across perturbations; crypto, which barely touches property access,
+   moved the same amount). On 3–8-byte identifiers the per-node
+   `std.mem.eql` is already cheap, and interning never touches the
+   O(depth) walk length or the bag `Wyhash` in
+   `hasAccessor`/`ownDataContains` that dominate the megamorphic-miss
+   cluster. Reverted; the full write-up + numbers are in
+   [interned-keys.md](interned-keys.md) §11. Any future property-lookup
+   work should target those two costs (per-shape hash index;
+   shape-first bag probes), not atom identity. The computed-property
+   IC (`obj[k]` with hot constant `k`) shipped without interning —
+   it caches the key bytes inline ([inline-caches.md](inline-caches.md)
+   "Computed-property read + write IC").
 
 10. **SMI fast paths in arithmetic / comparison opcodes.**
     Cynic uses NaN-boxing so an int32 value is identifiable
