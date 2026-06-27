@@ -59,11 +59,14 @@ const build_options = @import("build_options");
 // be confirmed across ≥3 distinct layouts rather than banked on one
 // build pair (the `flatBytes`-style layout-noise trap). A comptime
 // no-op at the default `bench_pad == 0`.
-fn __cynicBenchPad() callconv(.c) usize {
-    var acc: usize = 0;
+// Takes a runtime `seed` so the comptime-unrolled loop can't be folded
+// to a constant — the body must emit `bench_pad` real instructions, which
+// is the whole point (code size ∝ N shifts downstream addresses). Never
+// called; only `@export`ed below so the linker keeps the symbol.
+fn __cynicBenchPad(seed: usize) callconv(.c) usize {
+    var acc: usize = seed;
     inline for (0..build_options.bench_pad) |i| {
-        acc +%= i;
-        asm volatile ("" ::: "memory");
+        acc = (acc *% 0x9E3779B97F4A7C15) +% i;
     }
     return acc;
 }
