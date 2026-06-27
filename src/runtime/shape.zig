@@ -23,6 +23,33 @@
 
 const std = @import("std");
 const PropertyFlags = @import("object.zig").PropertyFlags;
+const build_options = @import("build_options");
+
+/// Property-key interning (atoms) — Phase 1. See docs/interned-keys.md.
+/// When `intern_keys` is on, each shape node carries the canonical
+/// interned-atom identity for its key alongside the key bytes, so
+/// `lookup` collapses the per-node `std.mem.eql` to a pointer compare
+/// for static (compile-time-constant) property names. When off the
+/// field is a zero-size `void`, so the shape layout — and every
+/// existing byte-compare path — is unchanged.
+pub const intern_keys = build_options.intern_keys;
+
+/// Identity token for a key's canonical interned atom. It is an opaque
+/// pointer (the atom is a pinned `*JSString`, but the shape only needs
+/// pointer identity, so it stays type-erased to avoid a string.zig
+/// import cycle). `null` means the key has no atom — a computed or
+/// otherwise non-interned key, which keeps the byte-compare path.
+pub const AtomId = if (intern_keys) ?*anyopaque else void;
+pub const atom_none: AtomId = if (intern_keys) null else {};
+
+/// Build an `AtomId` from a canonical atom pointer (or null). Type-
+/// erases the pointer and collapses to a zero-size `void` when
+/// interning is off, so call sites stay uniform across both build
+/// flavours. The pointer MUST be canonical (from `Heap.internLookup`
+/// / `internProperty`) — see `Shape.lookupAtom`.
+pub inline fn atomId(p: ?*anyopaque) AtomId {
+    return if (intern_keys) p else {};
+}
 
 /// Whether a shape slot holds a plain data value or an accessor
 /// (getter/setter) pair. Distinguishing them at the shape level
@@ -39,6 +66,10 @@ pub const Shape = struct {
     /// root. Owned by the `ShapeTree` arena (duped on transition)
     /// so it outlives any caller's key buffer.
     key: []const u8,
+    /// Canonical interned-atom identity for `key` (or `null` for a
+    /// non-interned / computed key); a zero-size `void` when
+    /// `intern_keys` is off. See `lookupAtom`.
+    key_atom: AtomId = atom_none,
     attrs: PropertyFlags,
     kind: PropKind,
     /// Index into `JSObject.slots` where this property's value
@@ -55,6 +86,7 @@ pub const Shape = struct {
 
     pub const Transition = struct {
         key: []const u8,
+        key_atom: AtomId = atom_none,
         attrs: PropertyFlags,
         kind: PropKind,
         child: *Shape,
@@ -71,9 +103,35 @@ pub const Shape = struct {
     /// to the root. O(depth in the chain); an inline cache keyed
     /// on the shape collapses the hot path to O(1).
     pub fn lookup(self: *const Shape, key: []const u8) ?Entry {
+        return self.lookupAtom(key, atom_none);
+    }
+
+    /// `lookup`, accelerated by atom identity. `atom`, when non-null,
+    /// MUST be the canonical interned atom for `key` (obtained from
+    /// `Heap.internLookup` / `internProperty`). Canonicality is the
+    /// load-bearing invariant: the table holds exactly one atom per
+    /// byte string, so two distinct non-null atoms always denote
+    /// distinct keys — that is what lets a per-node compare reduce to
+    /// a pointer compare and skip `std.mem.eql`. If EITHER side lacks
+    /// an atom (this `atom` is null, or the node was built on the byte
+    /// path), the node falls back to a byte compare, so non-interned,
+    /// computed, and mixed-provenance keys stay correct. Passing a
+    /// non-canonical pointer as `atom` is a contract violation that
+    /// would make the fast path miss a real match.
+    pub fn lookupAtom(self: *const Shape, key: []const u8, atom: AtomId) ?Entry {
         var node: ?*const Shape = self;
         while (node) |n| : (node = n.parent) {
             if (n.parent == null) break; // root adds no property
+            if (intern_keys) {
+                if (atom != null and n.key_atom != null) {
+                    if (n.key_atom == atom) {
+                        return .{ .slot = n.slot, .attrs = n.attrs, .kind = n.kind };
+                    }
+                    // Both sides canonical atoms with distinct
+                    // identity ⇒ distinct key bytes. Skip `eql`.
+                    continue;
+                }
+            }
             if (std.mem.eql(u8, n.key, key)) {
                 return .{ .slot = n.slot, .attrs = n.attrs, .kind = n.kind };
             }
@@ -125,11 +183,35 @@ pub const ShapeTree = struct {
         attrs: PropertyFlags,
         kind: PropKind,
     ) !*Shape {
+        return self.transitionAtom(from, key, attrs, kind, atom_none);
+    }
+
+    /// `transition`, recording the canonical interned `atom` for `key`
+    /// on the new (or matched) node so a later `lookupAtom` can
+    /// pointer-compare. `atom` must be `key`'s canonical atom or null
+    /// (see `lookupAtom`). The forward-transition cache scan uses the
+    /// same atom-identity fast path. The key bytes are still duped into
+    /// the realm arena and kept as the byte-compare fallback, so a
+    /// later lookup with a null atom (a computed key with the same
+    /// bytes) still resolves.
+    pub fn transitionAtom(
+        self: *ShapeTree,
+        from: *Shape,
+        key: []const u8,
+        attrs: PropertyFlags,
+        kind: PropKind,
+        atom: AtomId,
+    ) !*Shape {
         for (from.transitions.items) |t| {
-            if (t.kind == kind and flagsEql(t.attrs, attrs) and
-                std.mem.eql(u8, t.key, key))
-            {
-                return t.child;
+            if (t.kind == kind and flagsEql(t.attrs, attrs)) {
+                if (intern_keys) {
+                    if (atom != null and t.key_atom != null) {
+                        if (t.key_atom == atom) return t.child;
+                        // Distinct canonical atoms ⇒ distinct keys.
+                        continue;
+                    }
+                }
+                if (std.mem.eql(u8, t.key, key)) return t.child;
             }
         }
         const a = self.arena.allocator();
@@ -138,6 +220,7 @@ pub const ShapeTree = struct {
         child.* = .{
             .parent = from,
             .key = owned_key,
+            .key_atom = atom,
             .attrs = attrs,
             .kind = kind,
             .slot = from.property_count,
@@ -146,6 +229,7 @@ pub const ShapeTree = struct {
         };
         try from.transitions.append(a, .{
             .key = owned_key,
+            .key_atom = atom,
             .attrs = attrs,
             .kind = kind,
             .child = child,
@@ -298,6 +382,61 @@ test "redefine transition is cached and no-ops on same attrs" {
     // Redefining to the attrs the shape already has is the
     // identity.
     try testing.expectEqual(a, try tree.redefineTransition(a, "x", frozen_attrs));
+}
+
+// Property-key interning (atoms) — Phase 1. These exercise
+// `lookupAtom` / `transitionAtom` and compile under both `intern_keys`
+// states: with the flag off the atom args are zero-size `void` and
+// every assertion resolves through the byte-compare fallback (the
+// transparency property at the shape layer). `@ptrFromInt` tokens stand
+// in for canonical atoms — distinct pointer per byte string, never
+// dereferenced (only identity-compared).
+test "lookupAtom: atom identity resolves; byte fallback still works" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+    const ax: AtomId = if (intern_keys) @ptrFromInt(0x1001) else {};
+    const ay: AtomId = if (intern_keys) @ptrFromInt(0x1002) else {};
+    const az: AtomId = if (intern_keys) @ptrFromInt(0x1003) else {};
+
+    const s1 = try tree.transitionAtom(tree.root, "x", .{}, .data, ax);
+    const s2 = try tree.transitionAtom(s1, "y", .{}, .data, ay);
+
+    // Atom-identity hit (byte hit when the flag is off).
+    try testing.expectEqual(@as(u32, 0), s2.lookupAtom("x", ax).?.slot);
+    try testing.expectEqual(@as(u32, 1), s2.lookupAtom("y", ay).?.slot);
+    // A canonical atom for an absent key resolves to null.
+    try testing.expect(s2.lookupAtom("z", az) == null);
+    // Byte fallback: a null atom (computed key) with matching bytes
+    // still resolves against an atom-built node.
+    try testing.expectEqual(@as(u32, 0), s2.lookupAtom("x", atom_none).?.slot);
+    try testing.expect(s2.lookupAtom("z", atom_none) == null);
+    // `lookup` (the byte entry point) sees the atom-built nodes too.
+    try testing.expectEqual(@as(u32, 1), s2.lookup("y").?.slot);
+
+    // Shared-shape convergence holds with atoms: same atom + bytes +
+    // attrs reach one shape.
+    const s2b = try tree.transitionAtom(
+        try tree.transitionAtom(tree.root, "x", .{}, .data, ax),
+        "y",
+        .{},
+        .data,
+        ay,
+    );
+    try testing.expectEqual(s2, s2b);
+}
+
+test "lookupAtom: byte-built node resolves under an atom lookup" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+    const ax: AtomId = if (intern_keys) @ptrFromInt(0x2001) else {};
+    // Node built on the byte path (no atom) — e.g. defineProperty /
+    // promoteToShape. A later atom lookup must still resolve it via the
+    // byte fallback (`n.key_atom == null` forces the eql compare).
+    const s1 = try tree.transition(tree.root, "x", .{}, .data);
+    try testing.expectEqual(@as(u32, 0), s1.lookupAtom("x", ax).?.slot);
+    // And an atom-store onto the same byte-built edge converges.
+    const s1b = try tree.transitionAtom(tree.root, "x", .{}, .data, ax);
+    try testing.expectEqual(s1, s1b);
 }
 
 test "lookup resolves attributes and kind, not just the slot" {
