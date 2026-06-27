@@ -52,39 +52,15 @@ pub fn build(b: *std.Build) void {
     // builds `full` by default (real CLDR/tzdata) while the `cynic`
     // binary stays `off`. An explicit `-Dintl=` overrides both.
     const t262_intl_tier = intl_tier_opt orelse .full;
-    // Property-key interning (atoms) — Phase 1 prototype, OFF by default.
-    // See docs/interned-keys.md. When on, compile-time property-name
-    // constants are interned into a per-(shared-)heap atom table and
-    // `Shape` compares keys by atom identity (byte fallback otherwise).
-    // The flag exists so the perf decision is a layout-controlled A/B of
-    // the SAME source (feature on vs off), not a profile guess.
-    const intern_keys = b.option(
-        bool,
-        "intern-keys",
-        "Property-key interning prototype (atoms): intern compile-time property-name constants + shape atom-identity compare. Default: false.",
-    ) orelse false;
-    // Layout-perturbation knob for the interning A/B: emits a never-called
-    // padding function of this many no-op iterations to shift downstream
-    // code addresses, so a measured win can be confirmed across ≥3
-    // independently-perturbed builds (docs/interned-keys.md §9 gate).
-    const bench_pad = b.option(
-        u32,
-        "bench-pad",
-        "Insert an N-iteration no-op padding function to perturb code layout (interning A/B control). Default: 0.",
-    ) orelse 0;
     const lib_build_options = b.addOptions();
     lib_build_options.addOption(bool, "exhaustive_tests", exhaustive_tests);
     lib_build_options.addOption(IntlTier, "intl", intl_tier);
-    lib_build_options.addOption(bool, "intern_keys", intern_keys);
-    lib_build_options.addOption(u32, "bench_pad", bench_pad);
     lib_mod.addOptions("build_options", lib_build_options);
     // Separate options for the test262 harness lib modules — same
     // `exhaustive_tests`, but the test262 intl tier (`full` default).
     const t262_build_options = b.addOptions();
     t262_build_options.addOption(bool, "exhaustive_tests", exhaustive_tests);
     t262_build_options.addOption(IntlTier, "intl", t262_intl_tier);
-    t262_build_options.addOption(bool, "intern_keys", intern_keys);
-    t262_build_options.addOption(u32, "bench_pad", bench_pad);
     // Embed the locale data blobs (CYTZ tzdb + CYCL CLDR) only for `full`, so
     // off/stub binaries stay lean. Both are gated on `intl_config.has_locale_data`.
     const addLocaleData = struct {
