@@ -1995,6 +1995,21 @@ test "intl: getCanonicalLocales -u- type canonicalization (§3.2.1)" {
     );
 }
 
+test "intl: DateTimeFormat hourCycle applied to timeStyle (§11.1.1)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const d = new Date("1886-05-01T14:12:47Z");
+        \\const f = (loc, o) => new Intl.DateTimeFormat(loc, Object.assign({ timeStyle: 'short', timeZone: 'UTC' }, o)).format(d);
+        \\(f('en-US', {}).startsWith('2:12') &&                 // en default → 12-hour
+        \\ f('en-US-u-hc-h23', {}) === '14:12' &&               // locale -u-hc → 24-hour, dayPeriod dropped
+        \\ f('en-US-u-hc-h11', {}).startsWith('2:12') &&        // h11 → 12-hour
+        \\ f('en-US', { hour12: false }) === '14:12' &&         // option → 24-hour
+        \\ f('en-US-u-hc-h23', { hour12: true }).startsWith('2:12') && // hour12 overrides -u-hc
+        \\ f('en-US', { hourCycle: 'h23' }) === '14:12' &&
+        \\ new Intl.DateTimeFormat('en-US-u-hc-h23', { timeStyle: 'short' }).resolvedOptions().hourCycle === 'h23') ? 1 : 0
+    );
+}
+
 test "intl: DateTimeFormat timeStyle tz-name width from pattern (§11.1.1)" {
     try requireFullBuild();
     try evalAssert1(

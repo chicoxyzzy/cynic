@@ -2974,6 +2974,10 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
             slots.hour_cycle = try realm.allocator.dupe(u8, if (toBoolean(h12_v)) "h12" else "h23");
         } else if (hc.len > 0) {
             slots.hour_cycle = try realm.allocator.dupe(u8, hc);
+        } else if (intl.unicodeExtensionValue(slots.base.locale, "hc")) |v| {
+            // §11.1.1 — no option, so the resolved locale's -u-hc keyword (kept by
+            // retainRelevantUnicodeExtensions above) selects the hour cycle.
+            if (isValidExtValue("hc", v)) slots.hour_cycle = try realm.allocator.dupe(u8, v);
         }
 
         // §11.1.1 formatMatcher — validated (RangeError on an invalid value);
@@ -3301,6 +3305,93 @@ fn tzDisplay(slots: *const intl.DateTimeFormatSlots, epoch_ns: i128, style: []co
     return fmtGmtOffset(off_ns, true, buf); // name-style fallback for a named zone
 }
 
+/// The pattern hour-field letter for a resolved hour cycle (0 = leave as-is).
+fn hourLetterForHc(hc: []const u8) u8 {
+    if (std.mem.eql(u8, hc, "h11")) return 'K';
+    if (std.mem.eql(u8, hc, "h12")) return 'h';
+    if (std.mem.eql(u8, hc, "h23")) return 'H';
+    if (std.mem.eql(u8, hc, "h24")) return 'k';
+    return 0;
+}
+
+/// Byte length of a trailing space character (ASCII ' ', U+00A0, or U+202F) in
+/// `s`, or 0 if none — CLDR date patterns separate the dayPeriod with a narrow
+/// or non-breaking space, not always ASCII.
+fn trailingSpaceBytes(s: []const u8) usize {
+    if (s.len >= 1 and s[s.len - 1] == ' ') return 1;
+    if (s.len >= 2 and s[s.len - 2] == 0xC2 and s[s.len - 1] == 0xA0) return 2; // U+00A0
+    if (s.len >= 3 and s[s.len - 3] == 0xE2 and s[s.len - 2] == 0x80 and s[s.len - 1] == 0xAF) return 3; // U+202F
+    return 0;
+}
+
+/// Byte length of a leading space character (ASCII ' ', U+00A0, or U+202F).
+fn leadingSpaceBytes(s: []const u8) usize {
+    if (s.len >= 1 and s[0] == ' ') return 1;
+    if (s.len >= 2 and s[0] == 0xC2 and s[1] == 0xA0) return 2;
+    if (s.len >= 3 and s[0] == 0xE2 and s[1] == 0x80 and s[2] == 0xAF) return 3;
+    return 0;
+}
+
+/// §11.1.1 — rewrite a dateStyle/timeStyle CLDR pattern to the resolved hour
+/// cycle: replace the hour field's letter (preserving its width), and for a
+/// 24-hour cycle drop the dayPeriod field plus one adjacent space. Component
+/// patterns already bake the cycle in (requestedFieldToken) and skip this.
+fn applyHourCycleToStylePattern(pattern: []const u8, hc: []const u8, buf: []u8) []const u8 {
+    const target = hourLetterForHc(hc);
+    if (target == 0) return pattern;
+    const is24 = target == 'H' or target == 'k';
+    var n: usize = 0;
+    var i: usize = 0;
+    var in_quote = false;
+    while (i < pattern.len) {
+        const c = pattern[i];
+        if (c == '\'') {
+            in_quote = !in_quote;
+            if (n < buf.len) {
+                buf[n] = c;
+                n += 1;
+            }
+            i += 1;
+        } else if (!in_quote and (c == 'h' or c == 'H' or c == 'K' or c == 'k')) {
+            var j = i;
+            while (j < pattern.len and pattern[j] == c) j += 1;
+            var k: usize = i;
+            while (k < j and n < buf.len) : (k += 1) {
+                buf[n] = target;
+                n += 1;
+            }
+            i = j;
+        } else if (!in_quote and (c == 'a' or c == 'b' or c == 'B')) {
+            var j = i;
+            while (j < pattern.len and pattern[j] == c) j += 1;
+            if (is24) {
+                // Drop the dayPeriod field and collapse one adjacent space — the
+                // CLDR separator is often U+202F / U+00A0, not ASCII ' '.
+                const tb = trailingSpaceBytes(buf[0..n]);
+                if (tb > 0) {
+                    n -= tb;
+                } else {
+                    j += leadingSpaceBytes(pattern[j..]);
+                }
+            } else {
+                var k: usize = i;
+                while (k < j and n < buf.len) : (k += 1) {
+                    buf[n] = pattern[k];
+                    n += 1;
+                }
+            }
+            i = j;
+        } else {
+            if (n < buf.len) {
+                buf[n] = c;
+                n += 1;
+            }
+            i += 1;
+        }
+    }
+    return buf[0..n];
+}
+
 /// Resolve the CLDR pattern for these options into `buf`, returning the slice.
 fn resolveDateTimePattern(dd: cldr.DateData, slots: *const intl.DateTimeFormatSlots, buf: []u8) []const u8 {
     const has_date_style = slots.date_style.len > 0;
@@ -3570,8 +3661,12 @@ fn patternHasTzField(pattern: []const u8) bool {
     return false;
 }
 
-fn resolvePatternFull(dd: cldr.DateData, slots: *const intl.DateTimeFormatSlots, pat_buf: []u8, frac_buf: []u8, tz_buf: []u8) []const u8 {
+fn resolvePatternFull(dd: cldr.DateData, slots: *const intl.DateTimeFormatSlots, pat_buf: []u8, hc_buf: []u8, frac_buf: []u8, tz_buf: []u8) []const u8 {
     var pattern = resolveDateTimePattern(dd, slots, pat_buf);
+    // §11.1.1 — the style patterns carry the locale's default hour cycle; an
+    // explicit/locale-keyword cycle rewrites the hour field (+ dayPeriod).
+    if ((slots.date_style.len > 0 or slots.time_style.len > 0) and slots.hour_cycle.len > 0)
+        pattern = applyHourCycleToStylePattern(pattern, slots.hour_cycle, hc_buf);
     if (slots.fractional_second_digits) |fsd| pattern = injectFractionalSecond(pattern, fsd, frac_buf);
     // §11.1.1 — a timeZoneName option not already covered by the (style) pattern
     // appends its field, so component options + timeZoneName still show the zone.
@@ -3592,9 +3687,10 @@ fn renderDateTime(slots: *const intl.DateTimeFormatSlots, ms: f64, out: []Seg) u
     const dd = cldr.dateData(slots.base.dataLocale()) orelse return 0;
     const ct = breakDown(slots, ms);
     var pat_buf: [256]u8 = undefined;
+    var hc_buf: [256]u8 = undefined;
     var frac_buf: [288]u8 = undefined;
     var tz_buf: [320]u8 = undefined;
-    const pattern = resolvePatternFull(dd, slots, &pat_buf, &frac_buf, &tz_buf);
+    const pattern = resolvePatternFull(dd, slots, &pat_buf, &hc_buf, &frac_buf, &tz_buf);
     var tzn_buf: [40]u8 = undefined;
     // The timeStyle patterns carry the tz field implicitly; derive its width
     // from the pattern when no explicit timeZoneName option was set.
@@ -3787,9 +3883,10 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
                 pat_slots = &s2;
             }
             var pat_buf: [256]u8 = undefined;
+            var hc_buf: [256]u8 = undefined;
             var frac_buf: [288]u8 = undefined;
             var tz_buf: [320]u8 = undefined;
-            const pattern = resolvePatternFull(dd, pat_slots, &pat_buf, &frac_buf, &tz_buf);
+            const pattern = resolvePatternFull(dd, pat_slots, &pat_buf, &hc_buf, &frac_buf, &tz_buf);
             var mask_buf: [288]u8 = undefined;
             const masked = filterPatternByMask(pattern, std.meta.activeTag(rec.*), mask_buf[0..]) orelse
                 return throwTypeError(realm, "DateTimeFormat options do not overlap the Temporal object's fields");
