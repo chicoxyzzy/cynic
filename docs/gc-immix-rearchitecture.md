@@ -4,7 +4,9 @@ Status: **Phase 0 (a) done — Immix-first is NOT supported by the data.** The
 alloc-vs-sweep-vs-mark breakdown (the **Phase 0 (a) result** immediately below)
 shows the per-object pools are not the bottleneck anywhere; the only GC
 rearchitecture the measured costs justify is **reference counting** (a separate,
-big change with its own scoping). The Immix heap (Steps 1/3/4) is shelved. The
+big change scoped in
+[gc-reference-counting.md](gc-reference-counting.md)). The Immix heap (Steps
+1/3/4) is shelved. The
 rest of the doc is the design that the measurement redirected. Owner: the GC
 track (user-directed). Prerequisite reading: [handbook/gc.md](handbook/gc.md)
 (the shipped collector) and
