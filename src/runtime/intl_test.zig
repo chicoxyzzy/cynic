@@ -2063,7 +2063,9 @@ test "intl: 3-alpha extlang after language is invalid (§unicode_language_id)" {
         \\const inv = (t) => { try { Intl.getCanonicalLocales(t); return false; } catch (e) { return e.constructor.name === 'RangeError'; } };
         \\(inv('en-els') &&                                 // 3-alpha extlang → invalid
         \\ inv('en-abc') &&
+        \\ inv('no-nyn') && inv('zh-min-nan') &&            // regular grandfathered, 3-alpha → invalid
         \\ Intl.getCanonicalLocales('yue')[0] === 'yue' &&  // a 3-alpha LANGUAGE subtag is valid
+        \\ Intl.getCanonicalLocales('art-lojban')[0] === 'jbo' && // valid grandfathered still canonicalizes
         \\ Intl.getCanonicalLocales('en-US')[0] === 'en-US' &&
         \\ Intl.getCanonicalLocales('de-1901')[0] === 'de-1901') ? 1 : 0 // 4-digit variant valid
     );

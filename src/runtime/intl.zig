@@ -538,8 +538,12 @@ fn isGrandfathered(tag: []const u8) bool {
         "en-gb-oed",   "i-ami",    "i-bnn",     "i-default", "i-enochian", "i-hak",
         "i-klingon",   "i-lux",    "i-mingo",   "i-navajo",  "i-pwn",      "i-tao",
         "i-tay",       "i-tsu",    "sgn-be-fr", "sgn-be-nl", "sgn-ch-de",  "art-lojban",
-        "cel-gaulish", "no-bok",   "no-nyn",    "zh-guoyu",  "zh-hakka",   "zh-min",
-        "zh-min-nan",  "zh-xiang",
+        "cel-gaulish", "zh-guoyu", "zh-hakka",  "zh-xiang",
+        // no-bok / no-nyn / zh-min / zh-min-nan are BCP 47 regular
+        // grandfathered tags but do NOT match unicode_language_id (a 3-ALPHA
+        // subtag after the language is not a valid variant), so ECMA-402's
+        // IsStructurallyValidLanguageTag rejects them — they fall through to
+        // the normal parse and become a RangeError.
     };
     for (gf) |g| if (std.mem.eql(u8, t, g)) return true;
     return false;
