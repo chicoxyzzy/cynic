@@ -3427,6 +3427,10 @@ fn resolveDateTimePattern(dd: cldr.DateData, slots: *const intl.DateTimeFormatSl
     }
     if (any_time) {
         time_pat = buildFromTemplate(dd.time_medium, slots, false, time_buf[0..]);
+        // The flexible day-period skeleton (hB) separates with a plain space,
+        // unlike am/pm (h a); the template carries the am/pm separator, so
+        // flatten the narrow / non-breaking space when the dayPeriod option set.
+        if (slots.day_period.len > 0) time_pat = flattenNarrowSpaces(time_buf[0..time_pat.len]);
     }
 
     if (date_pat.len > 0 and time_pat.len > 0)
@@ -3441,6 +3445,28 @@ fn resolveDateTimePattern(dd: cldr.DateData, slots: *const intl.DateTimeFormatSl
 
 fn isTextualMonth(m: []const u8) bool {
     return std.mem.eql(u8, m, "long") or std.mem.eql(u8, m, "short") or std.mem.eql(u8, m, "narrow");
+}
+
+/// Compact any U+202F / U+00A0 in `s` to a single ASCII space, in place.
+fn flattenNarrowSpaces(s: []u8) []const u8 {
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (i + 2 < s.len and s[i] == 0xE2 and s[i + 1] == 0x80 and s[i + 2] == 0xAF) {
+            s[w] = ' ';
+            w += 1;
+            i += 3;
+        } else if (i + 1 < s.len and s[i] == 0xC2 and s[i + 1] == 0xA0) {
+            s[w] = ' ';
+            w += 1;
+            i += 2;
+        } else {
+            s[w] = s[i];
+            w += 1;
+            i += 1;
+        }
+    }
+    return s[0..w];
 }
 
 fn styleDatePattern(dd: cldr.DateData, style: []const u8) []const u8 {
@@ -3580,7 +3606,19 @@ fn requestedFieldToken(letter: u8, slots: *const intl.DateTimeFormatSlots, is_da
             const combined = slots.hour.len > 0 or slots.minute.len > 0;
             break :blk if (std.mem.eql(u8, slots.second, "2-digit") or combined) "ss" else "s";
         },
-        'a', 'b', 'B' => if (slots.hour.len > 0 and hourIs12(slots.hour_cycle)) "a" else (if (slots.day_period.len > 0) "a" else ""),
+        'a', 'b', 'B' => blk: {
+            // The dayPeriod option selects the flexible day-period field 'B'
+            // (width-encoded by letter count). The period names are currently
+            // hard-coded for English, so other locales fall back to am/pm.
+            if (slots.day_period.len > 0 and dtfLangIsEn(slots)) {
+                if (std.mem.eql(u8, slots.day_period, "long")) break :blk "BBBB";
+                if (std.mem.eql(u8, slots.day_period, "narrow")) break :blk "BBBBB";
+                break :blk "B";
+            }
+            if (slots.hour.len > 0 and hourIs12(slots.hour_cycle)) break :blk "a";
+            if (slots.day_period.len > 0) break :blk "a";
+            break :blk "";
+        },
         'z', 'Z', 'O', 'v', 'V', 'x', 'X' => if (slots.time_zone_name.len > 0) "z" else "",
         else => "",
     };
@@ -3938,6 +3976,27 @@ fn renderDateTimeFlat(slots: *const intl.DateTimeFormatSlots, ms: f64, buf: []u8
 }
 
 /// Emit one date/time field. Returns number of segments written (0 or 1).
+fn dtfLangIsEn(slots: *const intl.DateTimeFormatSlots) bool {
+    const loc = slots.base.dataLocale();
+    return std.mem.eql(u8, loc, "en") or std.mem.startsWith(u8, loc, "en-");
+}
+
+/// UTS #35 flexible day period for English (the only locale with hard-coded
+/// names today; a general engine needs the CLDR dayPeriodRules + per-locale
+/// names). Verified against V8 / JSC / SpiderMonkey: [0,12)→morning, exactly
+/// 12:00:00.000→noon, [12,18)→afternoon, [18,21)→evening, [21,24)→night
+/// (midnight is absorbed by the morning range). `count` is the 'B' letter
+/// count: 5 = narrow (only "noon"→"n" differs from wide/abbreviated for en).
+fn flexibleDayPeriodEn(ct: CivilTime, count: usize) []const u8 {
+    const narrow = count >= 5;
+    if (ct.hour == 12 and ct.minute == 0 and ct.second == 0 and ct.ms_fraction == 0)
+        return if (narrow) "n" else "noon";
+    if (ct.hour < 12) return "in the morning";
+    if (ct.hour < 18) return "in the afternoon";
+    if (ct.hour < 21) return "in the evening";
+    return "at night";
+}
+
 fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateData, digit_base: u32, tz_name: []const u8) u32 {
     if (out.len == 0) return 0;
     const seg = &out[0];
@@ -3967,7 +4026,8 @@ fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateD
             var sub: [16]u8 = undefined;
             setSeg(seg, "fractionalSecond", substituteDigits(d3[0..@min(count, 3)], digit_base, &sub));
         },
-        'a', 'b', 'B' => setSeg(seg, "dayPeriod", if (ct.hour < 12) dd.am else dd.pm),
+        'a', 'b' => setSeg(seg, "dayPeriod", if (ct.hour < 12) dd.am else dd.pm),
+        'B' => setSeg(seg, "dayPeriod", flexibleDayPeriodEn(ct, count)),
         'z', 'Z', 'O', 'v', 'V', 'x', 'X' => setSeg(seg, "timeZoneName", tz_name),
         else => return 0,
     }

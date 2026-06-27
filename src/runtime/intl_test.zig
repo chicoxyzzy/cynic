@@ -1995,6 +1995,19 @@ test "intl: getCanonicalLocales -u- type canonicalization (§3.2.1)" {
     );
 }
 
+test "intl: DateTimeFormat flexible dayPeriod for en (§11.x)" {
+    try requireFullBuild();
+    try evalAssert1(
+        \\const at = (h, o) => new Intl.DateTimeFormat('en', Object.assign({ dayPeriod: 'long' }, o)).format(new Date(2017, 11, 12, h, 0, 0));
+        \\const set = [...Array(24).keys()].map((h) => at(h)).filter((v, i, a) => a.indexOf(v) === i).join(',');
+        \\(set === 'in the morning,noon,in the afternoon,in the evening,at night' &&
+        \\ at(0) === 'in the morning' &&        // midnight absorbed into morning
+        \\ at(12) === 'noon' &&
+        \\ new Intl.DateTimeFormat('en', { dayPeriod: 'narrow' }).format(new Date(2017, 11, 12, 12, 0, 0)) === 'n' &&
+        \\ at(0, { hour: 'numeric' }) === '12 in the morning') ? 1 : 0 // hB skeleton: plain-space separator
+    );
+}
+
 test "intl: DateTimeFormat hourCycle applied to timeStyle (§11.1.1)" {
     try requireFullBuild();
     try evalAssert1(
