@@ -185,7 +185,7 @@ test "intl/temporal: toLocaleString formats Temporal types via DateTimeFormat" {
     );
 }
 
-test "temporal: islamic tabular calendar conversion (calendarFields/islamicToIso)" {
+test "temporal: islamic tabular calendar conversion (calendarFields/computedToIso)" {
     // Pure calendar math — runs at every -Dintl flavour. Reference values
     // verified against V8 / JSC / SpiderMonkey via pragmatist engines.diff.
     const shared = @import("builtins/temporal/shared.zig");
@@ -214,14 +214,14 @@ test "temporal: islamic tabular calendar conversion (calendarFields/islamicToIso
     try testing.expectEqual(@as(u32, 30), b.days_in_month);
 
     // Round-trip: islamic-civil 1445-06-19 → ISO 2024-01-01.
-    const iso = shared.islamicToIso(civil, 1445, 6, 19, true).?;
+    const iso = shared.computedToIso(civil, 1445, 6, 19, true).?;
     try testing.expectEqual(@as(i64, 2024), iso.year);
     try testing.expectEqual(@as(u32, 1), iso.month);
     try testing.expectEqual(@as(u32, 1), iso.day);
 
     // Constrain vs reject: day 30 in a 29-day month clamps (non-null) or throws.
-    try testing.expect(shared.islamicToIso(civil, 1445, 6, 30, false) != null);
-    try testing.expect(shared.islamicToIso(civil, 1445, 6, 30, true) == null);
+    try testing.expect(shared.computedToIso(civil, 1445, 6, 30, false) != null);
+    try testing.expect(shared.computedToIso(civil, 1445, 6, 30, true) == null);
 }
 
 test "intl/temporal: PlainDate islamic-civil getters / from / add / with" {
