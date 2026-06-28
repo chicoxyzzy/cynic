@@ -692,6 +692,42 @@ offset lookup already routes through one `getOffsetNanosecondsFor`
 seam so tzdata plugs in at a single place rather than threading
 through each `ZonedDateTime` operation.
 
+**Non-ISO calendar status (`-Dintl=full`).** The gregorian-month and
+computational calendars are implemented end-to-end — getters, `from` / `with`,
+`add` / `subtract` / `until` / `since`, `PlainMonthDay` (with the
+`CalendarMonthDayToISOReferenceDate` reference year), eras, and DateTimeFormat
+numeric rendering — across `PlainDate` / `PlainDateTime` / `PlainYearMonth` /
+`ZonedDateTime`:
+
+- **gregorian-month**: gregory, roc, buddhist, and japanese (the imperial era
+  table — meiji / taisho / showa / heisei / reiwa with the date-based
+  boundaries, pre-Meiji falling back to proleptic ce/bce);
+- **computational**: islamic-civil + islamic-tbla (tabular; `islamic` /
+  `islamic-rgsa` fold to islamic-civil), coptic, ethiopic and ethioaa, indian
+  (Saka), and persian (Solar Hijri, the 33-year arithmetic leap cycle).
+
+Dual eras are modelled where the calendar needs them (islamic ah↔bh, ethiopic
+am↔aa); era + eraYear are accepted as input fields and cross-checked against
+`year`. The `since` / `until` difference handles the intercalary-month /
+end-of-month-wrap edge cases by comparing the raw (unclamped) day, matching the
+ISO `CalendarDateUntil`.
+
+Still outstanding, and the reason the headline is not yet ~100% of intl402:
+
+- **lunisolar calendars** — hebrew (the arithmetic molad + dehiyyot core is
+  solved and verified, but landing it needs year-dependent month counts in the
+  difference engine, leap-month codes — Adar I = `M05L` — across the from / with
+  / PlainMonthDay paths, and CLDR hebrew month *names* for DateTimeFormat);
+  chinese and dangi (astronomical new-moon / solar-term data). Implementing one
+  lunisolar calendar in isolation regresses the cross-engine DateTimeFormat
+  comparison fixtures, which require the whole lunisolar set rendered
+  consistently — so they land together, not piecemeal.
+- **islamic-umalqura** — the Umm-al-Qura month-length data table.
+- **non-Temporal ECMA-402 tails** — DateTimeFormat skeleton best-fit,
+  NumberFormat unit / compact, Collator (DUCET), Segmenter (UAX #29), and the
+  remaining locale-tag canonicalization aliases (variant / subdivision / `-t-`
+  transformed-extension ordering).
+
 **Out of scope.** Annex B in its entirety — language extensions
 *and* every browser-era built-in (`escape` / `unescape`, the
 String HTML wrappers, `Date.prototype.{getYear, setYear,
