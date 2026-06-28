@@ -224,6 +224,25 @@ test "temporal: islamic tabular calendar conversion (calendarFields/islamicToIso
     try testing.expect(shared.islamicToIso(civil, 1445, 6, 30, true) == null);
 }
 
+test "intl/temporal: PlainDate islamic-civil getters / from / add / with" {
+    try requireIntlBuild(); // Temporal accepts non-ISO calendars at stub+ (math is pure)
+    try evalAssert1(
+        \\const c = "islamic-civil";
+        \\const w = Temporal.PlainDate.from("2024-01-01").withCalendar(c);
+        \\if (w.year !== 1445 || w.month !== 6 || w.day !== 19) throw 0;
+        \\if (w.monthCode !== "M06" || w.era !== "ah" || w.eraYear !== 1445) throw 1;
+        \\if (w.daysInMonth !== 29 || w.daysInYear !== 355 || w.inLeapYear !== true) throw 2;
+        \\const f = Temporal.PlainDate.from({ year: 1445, monthCode: "M06", day: 19, calendar: c });
+        \\if (f.year !== 1445 || f.month !== 6 || f.day !== 19) throw 3;
+        \\const a = f.add({ months: 1 }); // calendar-aware: +1 Islamic month
+        \\if (a.year !== 1445 || a.month !== 7) throw 4;
+        \\const v = f.with({ monthCode: "M12" }); // leap year → month 12 has 30 days
+        \\if (v.month !== 12 || v.daysInMonth !== 30) throw 5;
+        \\if (Temporal.PlainDate.from("2024-01-01").withCalendar("islamic-tbla").day !== 20) throw 6;
+        \\1
+    );
+}
+
 test "intl off: Temporal rejects non-ISO calendar and named IANA" {
     if (intl_config.enabled) return error.SkipZigTest;
     try evalThrowsAnyTier(

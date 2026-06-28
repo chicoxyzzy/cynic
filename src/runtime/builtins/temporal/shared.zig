@@ -531,7 +531,9 @@ pub fn calendarFields(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u
         .day_of_year = @intCast(temporal.isoDayOfYear(iso_y, iso_m, iso_d)),
         .in_leap_year = temporal.isLeapYear(iso_y),
         .era = eraCode(cal, iso_y),
-        .era_year = if (cal.isIso()) null else eraYearInt(cal, iso_y),
+        // eraYear tracks era: a calendar with no modelled era (iso8601 and the
+        // not-yet-implemented non-gregorian calendars) reports undefined.
+        .era_year = if (eraCode(cal, iso_y) == null) null else eraYearInt(cal, iso_y),
     };
 }
 
@@ -545,6 +547,46 @@ fn eraYearInt(cal: temporal.CalendarId, iso_year: i32) i32 {
     }
     if (std.ascii.eqlIgnoreCase(cal.slice(), "buddhist")) return iso_year + 543;
     return iso_year;
+}
+
+// Per-field calendar getters — thin Value wrappers over calendarFields, so a
+// prototype getter is a one-liner. Correct for every modelled calendar
+// (gregorian-month + Islamic tabular).
+pub fn yearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
+    return Value.fromInt32(calendarFields(cal, y, m, d).year);
+}
+pub fn monthValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
+    return Value.fromInt32(@intCast(calendarFields(cal, y, m, d).month));
+}
+pub fn dayValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
+    return Value.fromInt32(@intCast(calendarFields(cal, y, m, d).day));
+}
+pub fn daysInMonthValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
+    return Value.fromInt32(@intCast(calendarFields(cal, y, m, d).days_in_month));
+}
+pub fn daysInYearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
+    return Value.fromInt32(@intCast(calendarFields(cal, y, m, d).days_in_year));
+}
+pub fn dayOfYearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
+    return Value.fromInt32(@intCast(calendarFields(cal, y, m, d).day_of_year));
+}
+pub fn inLeapYearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
+    return Value.fromBool(calendarFields(cal, y, m, d).in_leap_year);
+}
+pub fn monthCodeValue(realm: *Realm, cal: temporal.CalendarId, y: i32, m: u32, d: u32) NativeError!Value {
+    const mo = calendarFields(cal, y, m, d).month;
+    const mc = [_]u8{ 'M', '0' + @as(u8, @intCast(mo / 10)), '0' + @as(u8, @intCast(mo % 10)) };
+    const js = realm.heap.allocateString(&mc) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+pub fn eraValue(realm: *Realm, cal: temporal.CalendarId, y: i32, m: u32, d: u32) NativeError!Value {
+    const e = calendarFields(cal, y, m, d).era orelse return Value.undefined_;
+    const js = realm.heap.allocateString(e) catch return error.OutOfMemory;
+    return Value.fromString(js);
+}
+pub fn eraYearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
+    const ey = calendarFields(cal, y, m, d).era_year orelse return Value.undefined_;
+    return Value.fromInt32(ey);
 }
 
 const CalYmd = struct { year: i64, month: u32, day: u32 };
