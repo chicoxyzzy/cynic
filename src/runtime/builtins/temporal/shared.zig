@@ -379,27 +379,62 @@ pub fn calendarIdToValue(realm: *Realm, cal: temporal.CalendarId) NativeError!Va
     return Value.fromString(js);
 }
 
-/// Gregory/ISO era helpers used by era / eraYear getters. Non-ISO calendars
-/// other than gregory return undefined for era (structural stub; real
-/// calendar arithmetic is not implemented).
+/// Era code for the gregorian-month calendars (gregory / roc / buddhist), or
+/// null when the calendar has no era model yet. These three share the
+/// gregorian month/day structure; only the year origin and era differ.
+fn eraCode(cal: temporal.CalendarId, iso_year: i32) ?[]const u8 {
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "gregory")) return if (iso_year < 1) "bce" else "ce";
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "roc")) return if (iso_year - 1911 < 1) "broc" else "roc";
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "buddhist")) return "be";
+    return null;
+}
+
+/// Era / eraYear / year helpers. The gregorian-month calendars (gregory, roc,
+/// buddhist) are modelled; other non-ISO calendars still return undefined
+/// (their arithmetic is not implemented yet).
 pub fn eraForCalendar(realm: *Realm, cal: temporal.CalendarId, iso_year: i32) NativeError!Value {
     if (cal.isIso()) return Value.undefined_;
-    if (std.ascii.eqlIgnoreCase(cal.slice(), "gregory")) {
-        const era = if (iso_year < 1) "bce" else "ce";
-        const js = realm.heap.allocateString(era) catch return error.OutOfMemory;
-        return Value.fromString(js);
-    }
-    // Other non-ISO calendars: structural accept only; era not modelled.
-    return Value.undefined_;
+    const era = eraCode(cal, iso_year) orelse return Value.undefined_;
+    const js = realm.heap.allocateString(era) catch return error.OutOfMemory;
+    return Value.fromString(js);
 }
 
 pub fn eraYearForCalendar(cal: temporal.CalendarId, iso_year: i32) Value {
     if (cal.isIso()) return Value.undefined_;
-    if (std.ascii.eqlIgnoreCase(cal.slice(), "gregory")) {
-        const ey: i32 = if (iso_year < 1) 1 - iso_year else iso_year;
-        return Value.fromInt32(ey);
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "gregory")) return Value.fromInt32(if (iso_year < 1) 1 - iso_year else iso_year);
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "roc")) {
+        const y = iso_year - 1911;
+        return Value.fromInt32(if (y < 1) 1 - y else y);
     }
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "buddhist")) return Value.fromInt32(iso_year + 543);
     return Value.undefined_;
+}
+
+/// The signed, era-independent calendar year for `iso_year` — for the
+/// gregorian-month calendars this is just the year-origin shift.
+pub fn calendarYear(cal: temporal.CalendarId, iso_year: i32) i32 {
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "roc")) return iso_year - 1911;
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "buddhist")) return iso_year + 543;
+    return iso_year; // iso8601 / gregory share the ISO year
+}
+
+/// Inverse of calendarYear — the ISO year for a calendar `year` field, used by
+/// the from-fields / with paths to convert a property bag's calendar year back
+/// to the ISO year the rest of the date machinery operates on.
+pub fn calendarYearToIso(cal: temporal.CalendarId, cal_year: i64) i64 {
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "roc")) return cal_year + 1911;
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "buddhist")) return cal_year - 543;
+    return cal_year;
+}
+
+/// Whether Cynic models this calendar's arithmetic (year origin + era). Only
+/// the gregorian-month calendars are implemented; operations on any other
+/// non-ISO calendar fall back to the ISO behaviour until its arithmetic lands,
+/// so a half-modelled calendar can't surface inconsistent year/era/month.
+pub fn calendarSupported(cal: temporal.CalendarId) bool {
+    if (cal.isIso()) return true;
+    const s = cal.slice();
+    return std.ascii.eqlIgnoreCase(s, "gregory") or std.ascii.eqlIgnoreCase(s, "roc") or std.ascii.eqlIgnoreCase(s, "buddhist");
 }
 
 /// weekOfYear / yearOfWeek are ISO-calendar concepts; non-ISO calendars

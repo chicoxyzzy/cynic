@@ -239,7 +239,9 @@ fn zonedDateTimeTimeZoneId(realm: *Realm, t: Value, a: []const Value) NativeErro
 }
 fn zonedDateTimeYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    return Value.fromInt32((try zonedDateTimeFields(realm, t)).iso_year);
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return Value.fromInt32(shared.calendarYear(z.calendar, rec.iso_year));
 }
 fn zonedDateTimeMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -541,7 +543,9 @@ fn zonedDateTimeToPlainDate(realm: *Realm, this_value: Value, args: []const Valu
     _ = args;
     const z = try requireZonedDateTime(realm, this_value);
     const dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
-    return createTemporalDate(realm, dt.date());
+    var d = dt.date();
+    if (shared.calendarSupported(z.calendar)) d.calendar = z.calendar;
+    return createTemporalDate(realm, d);
 }
 
 /// §6.3.x Temporal.ZonedDateTime.prototype.toPlainTime ( ) — the local
@@ -558,7 +562,8 @@ fn zonedDateTimeToPlainTime(realm: *Realm, this_value: Value, args: []const Valu
 fn zonedDateTimeToPlainDateTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const z = try requireZonedDateTime(realm, this_value);
-    const dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    var dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    if (shared.calendarSupported(z.calendar)) dt.calendar = z.calendar;
     return createTemporalDateTime(realm, dt);
 }
 
@@ -652,7 +657,7 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     const year_v = try getPropertyChain(realm, obj, "year");
     if (!year_v.isUndefined()) {
-        year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+        year = shared.calendarYearToIso(base.calendar, try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v)));
         any = true;
     }
     if (!any) return throwTypeError(realm, "ZonedDateTime-like must have at least one recognized property");

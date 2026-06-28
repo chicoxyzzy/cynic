@@ -169,7 +169,8 @@ fn plainDateCalendarId(realm: *Realm, t: Value, a: []const Value) NativeError!Va
 }
 fn plainDateYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    return Value.fromInt32((try requirePlainDate(realm, t)).iso_year);
+    const rec = try requirePlainDate(realm, t);
+    return Value.fromInt32(shared.calendarYear(rec.calendar, rec.iso_year));
 }
 fn plainDateMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -297,7 +298,10 @@ fn toISODateFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!Pl
     } else {
         return throwTypeError(realm, "PlainDate-like is missing 'month' / 'monthCode'");
     }
-    var rec = temporal.regulateISODate(year_val, month, day_val, overflow == .reject) orelse
+    // The `year` field is in the calendar's own era-independent numbering;
+    // convert it to the ISO year the gregorian-month machinery expects.
+    const iso_year = shared.calendarYearToIso(cal, year_val);
+    var rec = temporal.regulateISODate(iso_year, month, day_val, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDate is out of range");
     rec.calendar = cal;
     return rec;
@@ -423,12 +427,16 @@ fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     } else if (month_present) {
         month = month_val;
     }
-    const rec = temporal.regulateISODate(
-        if (year_present) year_val else base.iso_year,
+    // `year` overrides are in the calendar's numbering; an absent year keeps
+    // the receiver's ISO year. The result inherits the receiver's calendar.
+    const iso_year = if (year_present) shared.calendarYearToIso(base.calendar, year_val) else base.iso_year;
+    var rec = temporal.regulateISODate(
+        iso_year,
         month,
         if (day_present) day_val else base.iso_day,
         overflow == .reject,
     ) orelse return throwRangeError(realm, "PlainDate is out of range");
+    if (shared.calendarSupported(base.calendar)) rec.calendar = base.calendar;
     return createTemporalDate(realm, rec);
 }
 /// §3.3.x Temporal.PlainDate.prototype.toString ( [options] ).
@@ -472,7 +480,7 @@ fn plainDateAddSubtract(realm: *Realm, this_value: Value, args: []const Value, n
     // §7.5.x ToDateDurationRecordWithoutTime — time units collapse to
     // whole days (truncated toward zero); 86_400_000_000_000 ns = 1 day.
     const time_days: i64 = @intCast(@divTrunc(temporal.timeDurationNanoseconds(dur), 86_400_000_000_000));
-    const rec = temporal.addISODate(
+    var rec = temporal.addISODate(
         base,
         @intFromFloat(dur.years),
         @intFromFloat(dur.months),
@@ -480,6 +488,9 @@ fn plainDateAddSubtract(realm: *Realm, this_value: Value, args: []const Value, n
         @as(i64, @intFromFloat(dur.days)) + time_days,
         overflow == .reject,
     ) orelse return throwRangeError(realm, "PlainDate is out of range");
+    // add/subtract preserve the receiver's calendar (roc + 6mo is still roc).
+    // Unsupported calendars keep the ISO fallback until their arithmetic lands.
+    if (shared.calendarSupported(base.calendar)) rec.calendar = base.calendar;
     return createTemporalDate(realm, rec);
 }
 fn plainDateAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

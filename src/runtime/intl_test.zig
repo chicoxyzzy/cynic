@@ -143,6 +143,31 @@ test "intl/temporal: realm accepts gregory calendar and IANA zone structurally" 
     );
 }
 
+test "intl/temporal: roc + buddhist year-offset calendar arithmetic" {
+    try requireIntlBuild();
+    // roc: year = iso − 1911, era roc (year ≥ 1), gregorian month structure.
+    // `from` converts the calendar year back to ISO; the getters convert
+    // forward; add/subtract + with preserve the calendar; ZonedDateTime year +
+    // toPlainDateTime carry it through.
+    try evalAssert1(
+        \\const r = Temporal.PlainDate.from({year:108, monthCode:"M01", day:31, calendar:"roc"});
+        \\if (r.year !== 108 || r.era !== "roc" || r.eraYear !== 108) throw 0;
+        \\if (r.month !== 1 || r.day !== 31) throw 0;
+        \\if (r.toString().slice(0,4) !== "2019") throw 0; // 108 roc = 2019 ISO
+        \\const r2 = r.add({months:1});
+        \\if (r2.year !== 108 || r2.month !== 2 || r2.era !== "roc") throw 0;
+        \\const r3 = r.with({monthCode:"M02"});
+        \\if (r3.calendarId !== "roc" || r3.month !== 2) throw 0;
+        \\const b = Temporal.PlainDate.from({year:2563, monthCode:"M03", day:10, calendar:"buddhist"});
+        \\if (b.year !== 2563 || b.era !== "be" || b.eraYear !== 2563) throw 0;
+        \\if (b.toString().slice(0,4) !== "2020") throw 0; // 2563 BE = 2020 ISO
+        \\const z = Temporal.ZonedDateTime.from({year:108, monthCode:"M01", day:1, timeZone:"UTC", calendar:"roc"});
+        \\if (z.year !== 108 || z.era !== "roc") throw 0;
+        \\if (z.toPlainDateTime().era !== "roc") throw 0;
+        \\1
+    );
+}
+
 test "intl off: Temporal rejects non-ISO calendar and named IANA" {
     if (intl_config.enabled) return error.SkipZigTest;
     try evalThrowsAnyTier(

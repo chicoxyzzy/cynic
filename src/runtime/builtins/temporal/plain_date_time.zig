@@ -209,7 +209,8 @@ fn plainDateTimeCalendarId(realm: *Realm, t: Value, a: []const Value) NativeErro
 }
 fn plainDateTimeYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    return Value.fromInt32((try requirePlainDateTime(realm, t)).iso_year);
+    const rec = try requirePlainDateTime(realm, t);
+    return Value.fromInt32(shared.calendarYear(rec.calendar, rec.iso_year));
 }
 fn plainDateTimeMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -297,13 +298,13 @@ fn plainDateTimeInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeErro
 }
 fn plainDateTimeEra(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainDateTime(realm, t);
-    return Value.undefined_; // ISO calendar has no era
+    const rec = try requirePlainDateTime(realm, t);
+    return shared.eraForCalendar(realm, rec.calendar, rec.iso_year);
 }
 fn plainDateTimeEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainDateTime(realm, t);
-    return Value.undefined_;
+    const rec = try requirePlainDateTime(realm, t);
+    return shared.eraYearForCalendar(rec.calendar, rec.iso_year);
 }
 
 /// The ZonedDateTime-only fields a property bag carries on top of the
@@ -457,7 +458,8 @@ pub fn resolveDateTimeFieldsNoRange(realm: *Realm, f: RawDateTimeFields, overflo
         return throwTypeError(realm, "PlainDateTime-like is missing 'month' / 'monthCode'");
     }
 
-    var date = temporal.regulateISODate(f.year, month, f.day, overflow == .reject) orelse
+    const iso_y = shared.calendarYearToIso(f.calendar, f.year);
+    var date = temporal.regulateISODate(iso_y, month, f.day, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDateTime date is out of range");
     date.calendar = f.calendar;
     const time = try regulateTime(realm, f.hour, f.minute, f.second, f.millisecond, f.microsecond, f.nanosecond, overflow);
@@ -652,8 +654,11 @@ fn plainDateTimeAddSubtract(realm: *Realm, this_value: Value, args: []const Valu
     if (!temporal.isValidDuration(dur)) return throwRangeError(realm, "Duration values are out of range");
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
     if (negate) dur = temporal.negateDuration(dur);
-    const rec = temporal.addDateTime(base, dur, overflow == .reject) orelse
+    var rec = temporal.addDateTime(base, dur, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDateTime is out of range");
+    // add/subtract preserve the receiver's calendar; unsupported calendars keep
+    // the ISO fallback until their arithmetic lands.
+    if (shared.calendarSupported(base.calendar)) rec.calendar = base.calendar;
     return createTemporalDateTime(realm, rec);
 }
 fn plainDateTimeAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

@@ -3207,6 +3207,17 @@ const CivilTime = struct {
     weekday: u32, // 0=sun .. 6=sat
 };
 
+/// Year shown for a year-offset calendar (buddhist/roc); the ISO/gregorian
+/// year otherwise. Mirrors temporal/shared.calendarYear for the calendars the
+/// DTF engine models today, keeping DTF output consistent with the Temporal
+/// getters (compare-to-temporal.js). Other non-ISO calendars stay on the ISO
+/// year until their arithmetic lands.
+fn displayCalendarYear(cal: []const u8, iso_year: i64) i64 {
+    if (std.ascii.eqlIgnoreCase(cal, "buddhist")) return iso_year + 543;
+    if (std.ascii.eqlIgnoreCase(cal, "roc")) return iso_year - 1911;
+    return iso_year;
+}
+
 /// Break epoch milliseconds into civil fields in the format's time zone.
 fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
     const epoch_ns: i128 = @as(i128, @intFromFloat(ms)) * 1_000_000;
@@ -3219,7 +3230,7 @@ fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
     const t = temporal.nanosecondsToTimeRecord(ns_in_day);
     const iso_dow = temporal.isoDayOfWeek(ymd.year, ymd.month, ymd.day); // 1=Mon..7=Sun
     return .{
-        .year = ymd.year,
+        .year = displayCalendarYear(slots.calendar, ymd.year),
         .month = ymd.month,
         .day = ymd.day,
         .hour = t.hour,

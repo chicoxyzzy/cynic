@@ -172,7 +172,8 @@ fn plainYearMonthCalendarId(realm: *Realm, t: Value, a: []const Value) NativeErr
 }
 fn plainYearMonthYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    return Value.fromInt32((try requirePlainYearMonth(realm, t)).iso_year);
+    const rec = try requirePlainYearMonth(realm, t);
+    return Value.fromInt32(shared.calendarYear(rec.calendar, rec.iso_year));
 }
 fn plainYearMonthMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -207,13 +208,13 @@ fn plainYearMonthInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeErr
 }
 fn plainYearMonthEra(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainYearMonth(realm, t);
-    return Value.undefined_; // ISO calendar has no era
+    const rec = try requirePlainYearMonth(realm, t);
+    return shared.eraForCalendar(realm, rec.calendar, rec.iso_year);
 }
 fn plainYearMonthEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainYearMonth(realm, t);
-    return Value.undefined_;
+    const rec = try requirePlainYearMonth(realm, t);
+    return shared.eraYearForCalendar(rec.calendar, rec.iso_year);
 }
 
 /// §9.5.x ISOYearMonthFromFields — read year and month/monthCode off a
