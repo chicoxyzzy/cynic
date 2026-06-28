@@ -241,22 +241,25 @@ fn zonedDateTimeYear(realm: *Realm, t: Value, a: []const Value) NativeError!Valu
     _ = a;
     const z = try requireZonedDateTime(realm, t);
     const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
-    return Value.fromInt32(shared.calendarYear(z.calendar, rec.iso_year));
+    return shared.yearValue(z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn zonedDateTimeMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    return Value.fromInt32(@intCast((try zonedDateTimeFields(realm, t)).iso_month));
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return shared.monthValue(z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn zonedDateTimeMonthCode(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    const rec = try zonedDateTimeFields(realm, t);
-    const mc = [_]u8{ 'M', '0' + @as(u8, @intCast(rec.iso_month / 10)), '0' + @as(u8, @intCast(rec.iso_month % 10)) };
-    const js = realm.heap.allocateString(&mc) catch return error.OutOfMemory;
-    return Value.fromString(js);
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return shared.monthCodeValue(realm, z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn zonedDateTimeDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    return Value.fromInt32(@intCast((try zonedDateTimeFields(realm, t)).iso_day));
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return shared.dayValue(z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn zonedDateTimeHour(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -301,8 +304,9 @@ fn zonedDateTimeDayOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError
 }
 fn zonedDateTimeDayOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    const rec = try zonedDateTimeFields(realm, t);
-    return Value.fromInt32(temporal.isoDayOfYear(rec.iso_year, rec.iso_month, rec.iso_day));
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return shared.dayOfYearValue(z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn zonedDateTimeWeekOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -337,13 +341,15 @@ fn zonedDateTimeDaysInWeek(realm: *Realm, t: Value, a: []const Value) NativeErro
 }
 fn zonedDateTimeDaysInMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    const rec = try zonedDateTimeFields(realm, t);
-    return Value.fromInt32(@intCast(temporal.daysInIsoMonth(rec.iso_year, rec.iso_month)));
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return shared.daysInMonthValue(z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn zonedDateTimeDaysInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    const rec = try zonedDateTimeFields(realm, t);
-    return Value.fromInt32(temporal.isoDaysInYear(rec.iso_year));
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return shared.daysInYearValue(z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn zonedDateTimeMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -352,8 +358,9 @@ fn zonedDateTimeMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeEr
 }
 fn zonedDateTimeInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    const rec = try zonedDateTimeFields(realm, t);
-    return Value.fromBool(temporal.isLeapYear(rec.iso_year));
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return shared.inLeapYearValue(z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn zonedDateTimeOffset(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -379,13 +386,13 @@ fn zonedDateTimeEra(realm: *Realm, t: Value, a: []const Value) NativeError!Value
     _ = a;
     const z = try requireZonedDateTime(realm, t);
     const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
-    return shared.eraForCalendar(realm, z.calendar, rec.iso_year);
+    return shared.eraValue(realm, z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn zonedDateTimeEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const z = try requireZonedDateTime(realm, t);
     const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
-    return shared.eraYearForCalendar(z.calendar, rec.iso_year);
+    return shared.eraYearValue(z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 
 fn toZonedDateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!ZonedDateTimeRecord {
@@ -544,7 +551,7 @@ fn zonedDateTimeToPlainDate(realm: *Realm, this_value: Value, args: []const Valu
     const z = try requireZonedDateTime(realm, this_value);
     const dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
     var d = dt.date();
-    if (shared.calendarSupported(z.calendar)) d.calendar = z.calendar;
+    if (shared.calendarSupported(z.calendar) or shared.isIslamicTabular(z.calendar)) d.calendar = z.calendar;
     return createTemporalDate(realm, d);
 }
 
@@ -563,7 +570,7 @@ fn zonedDateTimeToPlainDateTime(realm: *Realm, this_value: Value, args: []const 
     _ = args;
     const z = try requireZonedDateTime(realm, this_value);
     var dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
-    if (shared.calendarSupported(z.calendar)) dt.calendar = z.calendar;
+    if (shared.calendarSupported(z.calendar) or shared.isIslamicTabular(z.calendar)) dt.calendar = z.calendar;
     return createTemporalDateTime(realm, dt);
 }
 
@@ -582,11 +589,13 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     const base = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
     var year: i64 = base.iso_year;
+    var year_present = false;
     var month_int: i64 = base.iso_month;
     var month_int_set = false;
     var month_code_buf: [8]u8 = undefined;
     var month_code_len: ?usize = null;
     var day: i64 = base.iso_day;
+    var day_present = false;
     var hour: f64 = @floatFromInt(base.hour);
     var minute: f64 = @floatFromInt(base.minute);
     var second: f64 = @floatFromInt(base.second);
@@ -605,6 +614,7 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     const day_v = try getPropertyChain(realm, obj, "day");
     if (!day_v.isUndefined()) {
         day = try readPositiveDateField(realm, day_v);
+        day_present = true;
         any = true;
     }
     const hour_v = try getPropertyChain(realm, obj, "hour");
@@ -657,7 +667,8 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     const year_v = try getPropertyChain(realm, obj, "year");
     if (!year_v.isUndefined()) {
-        year = shared.calendarYearToIso(base.calendar, try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v)));
+        year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+        year_present = true;
         any = true;
     }
     if (!any) return throwTypeError(realm, "ZonedDateTime-like must have at least one recognized property");
@@ -671,6 +682,7 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
 
     var month: i64 = base.iso_month;
+    const month_given = month_code_len != null or month_int_set;
     if (month_code_len) |len| {
         month = try monthFromCodeBytes(realm, &month_code_buf, len);
         if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
@@ -678,8 +690,21 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         month = month_int;
     }
 
-    const new_date = temporal.regulateISODate(year, month, day, overflow == .reject) orelse
-        return throwRangeError(realm, "ZonedDateTime date is out of range");
+    const new_date = if (shared.isIslamicTabular(z.calendar)) blk: {
+        // Merge against the receiver's Islamic fields, then convert to ISO.
+        const cf = shared.calendarFields(z.calendar, base.iso_year, base.iso_month, base.iso_day);
+        const iy: i64 = if (year_present) year else cf.year;
+        const im: i64 = if (month_given) month else cf.month;
+        const id: i64 = if (day_present) day else cf.day;
+        const iso = shared.islamicToIso(z.calendar, iy, im, id, overflow == .reject) orelse
+            return throwRangeError(realm, "ZonedDateTime date is out of range");
+        break :blk temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse
+            return throwRangeError(realm, "ZonedDateTime date is out of range");
+    } else blk: {
+        const iso_year = if (year_present) shared.calendarYearToIso(z.calendar, year) else year;
+        break :blk temporal.regulateISODate(iso_year, month, day, overflow == .reject) orelse
+            return throwRangeError(realm, "ZonedDateTime date is out of range");
+    };
     const new_time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
     const wall = PlainDateTimeRecord.combine(new_date, new_time);
     const epoch = temporal.interpretISODateTimeOffset(wall, .option, offset_ns, z.time_zone, offset_opt) catch |e| switch (e) {
@@ -728,8 +753,12 @@ fn zonedDateTimeAddSubtract(realm: *Realm, this_value: Value, args: []const Valu
     if (!temporal.isValidDuration(dur)) return throwRangeError(realm, "Duration values are out of range");
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
     if (negate) dur = temporal.negateDuration(dur);
-    const epoch = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, dur, overflow == .reject) orelse
-        return throwRangeError(realm, "ZonedDateTime is out of range");
+    const epoch = if (shared.isIslamicTabular(z.calendar))
+        (shared.addIslamicZoned(z.epoch_ns, z.time_zone, z.calendar, dur, overflow == .reject) orelse
+            return throwRangeError(realm, "ZonedDateTime is out of range"))
+    else
+        (temporal.addZonedDateTime(z.epoch_ns, z.time_zone, dur, overflow == .reject) orelse
+            return throwRangeError(realm, "ZonedDateTime is out of range"));
     return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone, .calendar = z.calendar });
 }
 fn zonedDateTimeAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

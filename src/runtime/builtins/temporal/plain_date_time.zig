@@ -210,22 +210,22 @@ fn plainDateTimeCalendarId(realm: *Realm, t: Value, a: []const Value) NativeErro
 fn plainDateTimeYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDateTime(realm, t);
-    return Value.fromInt32(shared.calendarYear(rec.calendar, rec.iso_year));
+    return shared.yearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateTimeMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    return Value.fromInt32(@intCast((try requirePlainDateTime(realm, t)).iso_month));
+    const rec = try requirePlainDateTime(realm, t);
+    return shared.monthValue(rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateTimeDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    return Value.fromInt32(@intCast((try requirePlainDateTime(realm, t)).iso_day));
+    const rec = try requirePlainDateTime(realm, t);
+    return shared.dayValue(rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateTimeMonthCode(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDateTime(realm, t);
-    const mc = [_]u8{ 'M', '0' + @as(u8, @intCast(rec.iso_month / 10)), '0' + @as(u8, @intCast(rec.iso_month % 10)) };
-    const js = realm.heap.allocateString(&mc) catch return error.OutOfMemory;
-    return Value.fromString(js);
+    return shared.monthCodeValue(realm, rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateTimeHour(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -259,7 +259,7 @@ fn plainDateTimeDayOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError
 fn plainDateTimeDayOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDateTime(realm, t);
-    return Value.fromInt32(temporal.isoDayOfYear(rec.iso_year, rec.iso_month, rec.iso_day));
+    return shared.dayOfYearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateTimeWeekOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -279,12 +279,12 @@ fn plainDateTimeDaysInWeek(realm: *Realm, t: Value, a: []const Value) NativeErro
 fn plainDateTimeDaysInMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDateTime(realm, t);
-    return Value.fromInt32(@intCast(temporal.daysInIsoMonth(rec.iso_year, rec.iso_month)));
+    return shared.daysInMonthValue(rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateTimeDaysInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDateTime(realm, t);
-    return Value.fromInt32(temporal.isoDaysInYear(rec.iso_year));
+    return shared.daysInYearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateTimeMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -294,17 +294,17 @@ fn plainDateTimeMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeEr
 fn plainDateTimeInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDateTime(realm, t);
-    return Value.fromBool(temporal.isLeapYear(rec.iso_year));
+    return shared.inLeapYearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateTimeEra(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDateTime(realm, t);
-    return shared.eraForCalendar(realm, rec.calendar, rec.iso_year);
+    return shared.eraValue(realm, rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateTimeEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDateTime(realm, t);
-    return shared.eraYearForCalendar(rec.calendar, rec.iso_year);
+    return shared.eraYearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 
 /// The ZonedDateTime-only fields a property bag carries on top of the
@@ -458,11 +458,19 @@ pub fn resolveDateTimeFieldsNoRange(realm: *Realm, f: RawDateTimeFields, overflo
         return throwTypeError(realm, "PlainDateTime-like is missing 'month' / 'monthCode'");
     }
 
+    const time = try regulateTime(realm, f.hour, f.minute, f.second, f.millisecond, f.microsecond, f.nanosecond, overflow);
+    if (shared.isIslamicTabular(f.calendar)) {
+        const iso = shared.islamicToIso(f.calendar, f.year, month, f.day, overflow == .reject) orelse
+            return throwRangeError(realm, "PlainDateTime date is out of range");
+        var date = temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse
+            return throwRangeError(realm, "PlainDateTime date is out of range");
+        date.calendar = f.calendar;
+        return PlainDateTimeRecord.combine(date, time);
+    }
     const iso_y = shared.calendarYearToIso(f.calendar, f.year);
     var date = temporal.regulateISODate(iso_y, month, f.day, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDateTime date is out of range");
     date.calendar = f.calendar;
-    const time = try regulateTime(realm, f.hour, f.minute, f.second, f.millisecond, f.microsecond, f.nanosecond, overflow);
     return PlainDateTimeRecord.combine(date, time);
 }
 
@@ -610,6 +618,28 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
 
+    // Islamic tabular calendars: merge against the receiver's *Islamic* fields,
+    // then convert the triple back to ISO (the time half is unaffected).
+    if (shared.isIslamicTabular(base.calendar)) {
+        const cf = shared.calendarFields(base.calendar, base.iso_year, base.iso_month, base.iso_day);
+        var im: i64 = cf.month;
+        if (month_code_len) |len| {
+            im = try monthFromCodeBytes(realm, &month_code_buf, len);
+            if (month_int_set and month_int != im) return throwRangeError(realm, "month and monthCode disagree");
+        } else if (month_int_set) {
+            im = month_int;
+        }
+        const iy: i64 = if (year_v.isUndefined()) cf.year else year;
+        const id: i64 = if (day_v.isUndefined()) cf.day else day;
+        const iso = shared.islamicToIso(base.calendar, iy, im, id, overflow == .reject) orelse
+            return throwRangeError(realm, "PlainDateTime date is out of range");
+        var date = temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse
+            return throwRangeError(realm, "PlainDateTime date is out of range");
+        date.calendar = base.calendar;
+        const time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
+        return createTemporalDateTime(realm, PlainDateTimeRecord.combine(date, time));
+    }
+
     // §5.3.x — `monthCode` suitability is validated only after the overflow
     // option has been read (per with/options-read-before-algorithmic-
     // validation.js); regulate then runs on the resolved month.
@@ -654,6 +684,12 @@ fn plainDateTimeAddSubtract(realm: *Realm, this_value: Value, args: []const Valu
     if (!temporal.isValidDuration(dur)) return throwRangeError(realm, "Duration values are out of range");
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
     if (negate) dur = temporal.negateDuration(dur);
+    // Islamic tabular calendars add the date part in Islamic terms.
+    if (shared.isIslamicTabular(base.calendar)) {
+        const rec = shared.addIslamicDateTime(base, dur, overflow == .reject) orelse
+            return throwRangeError(realm, "PlainDateTime is out of range");
+        return createTemporalDateTime(realm, rec);
+    }
     var rec = temporal.addDateTime(base, dur, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDateTime is out of range");
     // add/subtract preserve the receiver's calendar; unsupported calendars keep

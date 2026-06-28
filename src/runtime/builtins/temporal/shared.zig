@@ -640,6 +640,60 @@ pub fn addIslamic(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32, 
     return .{ .year = ymd.year, .month = ymd.month, .day = ymd.day };
 }
 
+/// Calendar-aware AddDateTime for the Islamic tabular calendars: fold the time
+/// duration into the time half (carrying whole days), then add the date part in
+/// Islamic terms. Mirrors temporal.addDateTimeDateChecked.
+pub fn addIslamicDateTime(base: temporal.PlainDateTimeRecord, dur: temporal.DurationRecord, reject: bool) ?temporal.PlainDateTimeRecord {
+    const ns_per_day: i128 = 86_400 * 1_000_000_000;
+    const time_ns = temporal.timeRecordToNanoseconds(base.time()) + temporal.timeDurationNanoseconds(dur);
+    const day_carry: i64 = @intCast(@divFloor(time_ns, ns_per_day));
+    const within = time_ns - @as(i128, day_carry) * ns_per_day;
+    const new_time = temporal.nanosecondsToTimeRecord(within);
+    const iso = addIslamic(
+        base.calendar,
+        base.iso_year,
+        base.iso_month,
+        base.iso_day,
+        @intFromFloat(dur.years),
+        @intFromFloat(dur.months),
+        @intFromFloat(dur.weeks),
+        @as(i64, @intFromFloat(dur.days)) + day_carry,
+        reject,
+    ) orelse return null;
+    var date = temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse return null;
+    date.calendar = base.calendar;
+    return temporal.PlainDateTimeRecord.combine(date, new_time);
+}
+
+/// Calendar-aware AddZonedDateTime for the Islamic tabular calendars: add the
+/// calendar (year/month/week/day) part of the duration to the zone's wall date
+/// in Islamic terms, re-anchor to an instant, then add the exact-time part.
+/// Mirrors temporal.addZonedDateTime. Returns the new epoch nanoseconds.
+pub fn addIslamicZoned(epoch_ns: i128, tz: temporal.TimeZone, calendar: temporal.CalendarId, dur: temporal.DurationRecord, reject: bool) ?i128 {
+    const time_ns = temporal.timeDurationNanoseconds(dur);
+    if (dur.years == 0 and dur.months == 0 and dur.weeks == 0 and dur.days == 0) {
+        return temporal.addInstant(epoch_ns, time_ns);
+    }
+    const wall = temporal.getISODateTimeFor(tz, epoch_ns);
+    const iso = addIslamic(
+        calendar,
+        wall.iso_year,
+        wall.iso_month,
+        wall.iso_day,
+        @intFromFloat(dur.years),
+        @intFromFloat(dur.months),
+        @intFromFloat(dur.weeks),
+        @intFromFloat(dur.days),
+        reject,
+    ) orelse return null;
+    var new_date = temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse return null;
+    new_date.calendar = calendar;
+    const intermediate = temporal.PlainDateTimeRecord.combine(new_date, wall.time());
+    if (!temporal.isoDateTimeWithinLimits(intermediate)) return null;
+    const intermediate_epoch = temporal.getEpochNanosecondsFor(tz, intermediate) orelse return null;
+    return temporal.addInstant(intermediate_epoch, time_ns);
+}
+
 /// weekOfYear / yearOfWeek are ISO-calendar concepts; non-ISO calendars
 /// report undefined (matches gregory/hebrew behaviour in engines with
 /// incomplete week numbering for non-ISO).

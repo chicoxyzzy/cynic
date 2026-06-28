@@ -243,6 +243,22 @@ test "intl/temporal: PlainDate islamic-civil getters / from / add / with" {
     );
 }
 
+test "intl/temporal: PlainDateTime + ZonedDateTime islamic-civil getters / add" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const c = "islamic-civil";
+        \\const dt = Temporal.PlainDateTime.from("2024-01-01T05:30:00").withCalendar(c);
+        \\if (dt.year !== 1445 || dt.month !== 6 || dt.day !== 19 || dt.hour !== 5) throw 0;
+        \\if (dt.era !== "ah" || dt.daysInMonth !== 29) throw 1;
+        \\if (dt.add({ months: 1 }).month !== 7) throw 2; // calendar-aware
+        \\const z = Temporal.ZonedDateTime.from("2024-01-01T00:00:00[UTC]").withCalendar(c);
+        \\if (z.year !== 1445 || z.month !== 6 || z.day !== 19 || z.era !== "ah") throw 3;
+        \\if (z.add({ months: 1 }).month !== 7) throw 4;
+        \\if (z.toPlainDateTime().era !== "ah" || z.toPlainDate().month !== 6) throw 5;
+        \\1
+    );
+}
+
 test "intl off: Temporal rejects non-ISO calendar and named IANA" {
     if (intl_config.enabled) return error.SkipZigTest;
     try evalThrowsAnyTier(
