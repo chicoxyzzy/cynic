@@ -258,10 +258,17 @@ pub fn readMonthCodeField(realm: *Realm, v: Value, buf: []u8) NativeError!?usize
 /// (ISO has no leap months) and the numeric month must be 1..12. This
 /// suitability RangeError is intentionally deferred — it fires only after
 /// the overflow option has been read.
-pub fn monthFromCodeBytes(realm: *Realm, buf: []const u8, actual_len: usize) NativeError!i64 {
-    if (actual_len == 4) return throwRangeError(realm, "invalid monthCode"); // ISO has no leap month
+/// Months in `cal`'s year — 13 for the coptic-type calendars (epagomenal M13),
+/// 12 otherwise. Used to bound monthCode parsing per calendar.
+pub fn monthsInYearForCalendar(cal: temporal.CalendarId) i64 {
+    if (computedCal(cal)) |c| return compMonthsInYear(c.family);
+    return 12;
+}
+
+pub fn monthFromCodeBytes(realm: *Realm, buf: []const u8, actual_len: usize, max_month: i64) NativeError!i64 {
+    if (actual_len == 4) return throwRangeError(realm, "invalid monthCode"); // no leap-month calendars modelled
     const m: i64 = @as(i64, buf[1] - '0') * 10 + @as(i64, buf[2] - '0');
-    if (m < 1 or m > 12) return throwRangeError(realm, "invalid monthCode");
+    if (m < 1 or m > max_month) return throwRangeError(realm, "invalid monthCode");
     return m;
 }
 

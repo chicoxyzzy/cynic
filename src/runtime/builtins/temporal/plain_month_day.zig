@@ -209,7 +209,7 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
 
     var month: i64 = undefined;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len);
+        month = try monthFromCodeBytes(realm, &mc_buf, len, 12);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;
@@ -310,7 +310,7 @@ fn plainMonthDayWith(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     var month: i64 = base.iso_month;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len);
+        month = try monthFromCodeBytes(realm, &mc_buf, len, 12);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;

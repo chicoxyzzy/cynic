@@ -684,8 +684,9 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     var month: i64 = base.iso_month;
     const month_given = month_code_len != null or month_int_set;
+    const max_mo = shared.monthsInYearForCalendar(z.calendar);
     if (month_code_len) |len| {
-        month = try monthFromCodeBytes(realm, &month_code_buf, len);
+        month = try monthFromCodeBytes(realm, &month_code_buf, len, max_mo);
         if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_int_set) {
         month = month_int;

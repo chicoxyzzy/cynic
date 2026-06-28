@@ -448,9 +448,10 @@ pub fn resolveDateTimeFields(realm: *Realm, f: RawDateTimeFields, overflow: Over
 pub fn resolveDateTimeFieldsNoRange(realm: *Realm, f: RawDateTimeFields, overflow: Overflow) NativeError!PlainDateTimeRecord {
     if (!f.year_set) return throwTypeError(realm, "PlainDateTime-like is missing 'year'");
     if (!f.day_set) return throwTypeError(realm, "PlainDateTime-like is missing 'day'");
+    const max_mo = shared.monthsInYearForCalendar(f.calendar);
     var month: i64 = undefined;
     if (f.month_code_len) |len| {
-        month = try monthFromCodeBytes(realm, &f.month_code_buf, len);
+        month = try monthFromCodeBytes(realm, &f.month_code_buf, len, max_mo);
         if (f.month_int_set and f.month_int != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (f.month_int_set) {
         month = f.month_int;
@@ -618,13 +619,14 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
 
+    const max_mo = shared.monthsInYearForCalendar(base.calendar);
     // Islamic tabular calendars: merge against the receiver's *Islamic* fields,
     // then convert the triple back to ISO (the time half is unaffected).
     if (shared.isComputedCalendar(base.calendar)) {
         const cf = shared.calendarFields(base.calendar, base.iso_year, base.iso_month, base.iso_day);
         var im: i64 = cf.month;
         if (month_code_len) |len| {
-            im = try monthFromCodeBytes(realm, &month_code_buf, len);
+            im = try monthFromCodeBytes(realm, &month_code_buf, len, max_mo);
             if (month_int_set and month_int != im) return throwRangeError(realm, "month and monthCode disagree");
         } else if (month_int_set) {
             im = month_int;
@@ -645,7 +647,7 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     // validation.js); regulate then runs on the resolved month.
     var month: i64 = base.iso_month;
     if (month_code_len) |len| {
-        month = try monthFromCodeBytes(realm, &month_code_buf, len);
+        month = try monthFromCodeBytes(realm, &month_code_buf, len, max_mo);
         if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_int_set) {
         month = month_int;

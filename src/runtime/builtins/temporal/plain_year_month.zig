@@ -241,9 +241,10 @@ fn toYearMonthFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!
 
     const overflow = try getTemporalOverflowOption(realm, options);
 
+    const max_mo = shared.monthsInYearForCalendar(cal);
     var month: i64 = undefined;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len);
+        month = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;
@@ -355,12 +356,13 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
 
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
 
+    const max_mo = shared.monthsInYearForCalendar(base.calendar);
     var month: i64 = base.iso_month;
     if (shared.isComputedCalendar(base.calendar)) {
         const cf = shared.calendarFields(base.calendar, base.iso_year, base.iso_month, base.ref_iso_day);
         var im: i64 = cf.month;
         if (mc_len) |len| {
-            im = try monthFromCodeBytes(realm, &mc_buf, len);
+            im = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
             if (month_present and month_val != im) return throwRangeError(realm, "month and monthCode disagree");
         } else if (month_present) {
             im = month_val;
@@ -373,7 +375,7 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
         return createTemporalYearMonth(realm, .{ .iso_year = @intCast(iso.year), .iso_month = @intCast(iso.month), .ref_iso_day = @intCast(iso.day), .calendar = base.calendar });
     }
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len);
+        month = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;

@@ -293,6 +293,22 @@ test "intl/temporal: coptic + ethiopic 13-month calendars (getters / from / add)
     );
 }
 
+test "intl/temporal: coptic M13 epagomenal monthCode (rejected for 12-month calendars)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const e = Temporal.PlainDate.from({ year: 1740, monthCode: "M13", day: 5, calendar: "coptic" });
+        \\if (e.month !== 13 || e.monthCode !== "M13" || e.daysInMonth !== 5) throw 0; // common → 5-day
+        \\const leap = Temporal.PlainDate.from({ year: 1739, monthCode: "M13", day: 6, calendar: "coptic" });
+        \\if (leap.daysInMonth !== 6) throw 1; // 1739 % 4 == 3 → leap → 6-day epagomenal
+        \\// M13 is a RangeError for the 12-month calendars regardless of overflow
+        \\let threw = 0;
+        \\const cases = [{ year: 2024, monthCode: "M13", day: 1 }, { year: 1445, monthCode: "M13", day: 1, calendar: "islamic-civil" }];
+        \\for (const c of cases) { try { Temporal.PlainDate.from(c); } catch (x) { if (x instanceof RangeError) threw++; } }
+        \\if (threw !== 2) throw 2;
+        \\1
+    );
+}
+
 test "intl/temporal: indian (Saka) calendar" {
     try requireIntlBuild();
     // Gregorian-tied: Saka new year is ISO Mar 21 (greg-leap)/Mar 22; Chaitra

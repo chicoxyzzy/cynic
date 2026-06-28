@@ -289,9 +289,10 @@ fn toISODateFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!Pl
 
     if (!year_present) return throwTypeError(realm, "PlainDate-like is missing 'year'");
     if (!day_present) return throwTypeError(realm, "PlainDate-like is missing 'day'");
+    const max_mo = shared.monthsInYearForCalendar(cal);
     var month: i64 = undefined;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len);
+        month = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;
@@ -430,13 +431,14 @@ fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
 
+    const max_mo = shared.monthsInYearForCalendar(base.calendar);
     // Islamic tabular calendars: merge against the receiver's *Islamic* fields,
     // then convert the triple back to ISO (the day clamps to the month length).
     if (shared.isComputedCalendar(base.calendar)) {
         const cf = shared.calendarFields(base.calendar, base.iso_year, base.iso_month, base.iso_day);
         var im: i64 = cf.month;
         if (mc_len) |len| {
-            im = try monthFromCodeBytes(realm, &mc_buf, len);
+            im = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
             if (month_present and month_val != im) return throwRangeError(realm, "month and monthCode disagree");
         } else if (month_present) {
             im = month_val;
@@ -453,7 +455,7 @@ fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
     var month: i64 = base.iso_month;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len);
+        month = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;
