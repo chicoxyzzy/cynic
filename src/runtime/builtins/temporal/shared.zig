@@ -437,6 +437,167 @@ pub fn calendarSupported(cal: temporal.CalendarId) bool {
     return std.ascii.eqlIgnoreCase(s, "gregory") or std.ascii.eqlIgnoreCase(s, "roc") or std.ascii.eqlIgnoreCase(s, "buddhist");
 }
 
+// ── Islamic tabular calendars (islamic-civil + islamic-tbla) ─────────────────
+// Both use the standard arithmetic ("tabular") algorithm and differ only in the
+// epoch — islamic-civil starts Friday 622-07-16 (Julian), islamic-tbla one day
+// earlier (Thursday). Epochs are expressed in days-since-1970-01-01
+// (temporal.daysFromCivil space), calibrated against V8 / JSC / SpiderMonkey:
+// islamic-civil 1445-06-19 = ISO 2024-01-01, islamic-tbla 1445-06-20 = ISO
+// 2024-01-01 (verified 1420 / 1445 / 1446). Algorithm: Reingold & Dershowitz,
+// *Calendrical Calculations* (fixed-from-islamic / islamic-from-fixed).
+
+/// Epoch (days-since-1970) for the supported Islamic tabular calendars, or null
+/// for any other calendar. islamic-umalqura / islamic-rgsa / bare islamic are
+/// data/sighting-based and not modelled here.
+fn islamicEpoch(cal: temporal.CalendarId) ?i64 {
+    const s = cal.slice();
+    if (std.ascii.eqlIgnoreCase(s, "islamic-civil") or std.ascii.eqlIgnoreCase(s, "islamicc")) return -492148;
+    if (std.ascii.eqlIgnoreCase(s, "islamic-tbla")) return -492149;
+    return null;
+}
+
+/// §islamic leap rule — 11 leap years per 30-year cycle.
+fn islamicLeap(year: i64) bool {
+    return @mod(14 + 11 * year, 30) < 11;
+}
+
+/// Odd months are 30 days, even months 29, except month 12 (Dhuʻl-Ḥijja) which
+/// gains a 30th day in a leap year.
+fn islamicDaysInMonth(year: i64, month: u32) u32 {
+    if (month % 2 == 1) return 30;
+    if (month == 12 and islamicLeap(year)) return 30;
+    return 29;
+}
+
+/// fixed-from-islamic, in days-since-1970.
+fn islamicToDays(epoch: i64, year: i64, month: i64, day: i64) i64 {
+    return epoch - 1 + 354 * (year - 1) + @divFloor(3 + 11 * year, 30) + 29 * (month - 1) + @divFloor(month, 2) + day;
+}
+
+const IslamicYmd = struct { year: i64, month: u32, day: u32 };
+
+/// islamic-from-fixed, from days-since-1970.
+fn islamicFromDays(epoch: i64, date: i64) IslamicYmd {
+    const year = @divFloor(30 * (date - epoch) + 10646, 10631);
+    const prior = date - islamicToDays(epoch, year, 1, 1);
+    const month = @divFloor(11 * prior + 330, 325);
+    const day = date - islamicToDays(epoch, year, month, 1) + 1;
+    return .{ .year = year, .month = @intCast(month), .day = @intCast(day) };
+}
+
+/// Calendar-resolved date fields for a stored ISO date — the single source of
+/// truth behind every `Temporal.*` calendar getter. Gregorian-month calendars
+/// (iso8601 / gregory / roc / buddhist) keep the ISO month/day and only shift
+/// the year origin; the Islamic tabular calendars convert through the day count.
+pub const CalDate = struct {
+    year: i32,
+    month: u32,
+    day: u32,
+    days_in_month: u32,
+    days_in_year: u32,
+    months_in_year: u32,
+    day_of_year: u32,
+    in_leap_year: bool,
+    era: ?[]const u8,
+    era_year: ?i32,
+};
+
+pub fn calendarFields(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32) CalDate {
+    if (islamicEpoch(cal)) |epoch| {
+        const date = temporal.daysFromCivil(iso_y, iso_m, iso_d);
+        const i = islamicFromDays(epoch, date);
+        const leap = islamicLeap(i.year);
+        return .{
+            .year = @intCast(i.year),
+            .month = i.month,
+            .day = i.day,
+            .days_in_month = islamicDaysInMonth(i.year, i.month),
+            .days_in_year = if (leap) 355 else 354,
+            .months_in_year = 12,
+            .day_of_year = @intCast(date - islamicToDays(epoch, i.year, 1, 1) + 1),
+            .in_leap_year = leap,
+            .era = "ah",
+            .era_year = @intCast(i.year),
+        };
+    }
+    // Gregorian-month family: iso8601 / gregory / roc / buddhist.
+    return .{
+        .year = calendarYear(cal, iso_y),
+        .month = iso_m,
+        .day = iso_d,
+        .days_in_month = temporal.daysInIsoMonth(iso_y, iso_m),
+        .days_in_year = @intCast(temporal.isoDaysInYear(iso_y)),
+        .months_in_year = 12,
+        .day_of_year = @intCast(temporal.isoDayOfYear(iso_y, iso_m, iso_d)),
+        .in_leap_year = temporal.isLeapYear(iso_y),
+        .era = eraCode(cal, iso_y),
+        .era_year = if (cal.isIso()) null else eraYearInt(cal, iso_y),
+    };
+}
+
+/// Integer form of eraYearForCalendar for the gregorian-month calendars (used
+/// when building a CalDate; the public getter wraps this in a Value).
+fn eraYearInt(cal: temporal.CalendarId, iso_year: i32) i32 {
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "gregory")) return if (iso_year < 1) 1 - iso_year else iso_year;
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "roc")) {
+        const y = iso_year - 1911;
+        return if (y < 1) 1 - y else y;
+    }
+    if (std.ascii.eqlIgnoreCase(cal.slice(), "buddhist")) return iso_year + 543;
+    return iso_year;
+}
+
+const CalYmd = struct { year: i64, month: u32, day: u32 };
+
+/// Inverse of calendarFields for an Islamic (year, month, day) field triple →
+/// the ISO date, honouring `reject` (else constrain month ∈ [1,12] and day to
+/// the month length). Returns null only under reject for an out-of-range field.
+/// Gregorian-month calendars never reach here (they regulate via ISO directly).
+pub fn islamicToIso(cal: temporal.CalendarId, cal_y: i64, cal_m: i64, cal_d: i64, reject: bool) ?CalYmd {
+    const epoch = islamicEpoch(cal) orelse return null;
+    var m = cal_m;
+    if (m < 1 or m > 12) {
+        if (reject) return null;
+        m = std.math.clamp(m, 1, 12);
+    }
+    const dim: i64 = islamicDaysInMonth(cal_y, @intCast(m));
+    var d = cal_d;
+    if (d < 1 or d > dim) {
+        if (reject) return null;
+        d = std.math.clamp(d, 1, dim);
+    }
+    const ymd = temporal.civilFromDays(islamicToDays(epoch, cal_y, m, d));
+    return .{ .year = ymd.year, .month = ymd.month, .day = ymd.day };
+}
+
+/// Whether `cal` needs the Islamic add/from path (non-gregorian month structure).
+pub fn isIslamicTabular(cal: temporal.CalendarId) bool {
+    return islamicEpoch(cal) != null;
+}
+
+/// Calendar-aware add for the Islamic tabular calendars: add years + months in
+/// Islamic terms (normalising the month, constraining or rejecting the day to
+/// the target month length), then add weeks + days as a plain day offset.
+/// Returns the resulting ISO date. Gregorian-month calendars don't use this
+/// (ISO months equal their calendar months, so addISODate already suffices).
+pub fn addIslamic(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32, add_y: i64, add_mo: i64, add_w: i64, add_d: i64, reject: bool) ?CalYmd {
+    const epoch = islamicEpoch(cal) orelse return null;
+    const i = islamicFromDays(epoch, temporal.daysFromCivil(iso_y, iso_m, iso_d));
+    var y = i.year + add_y;
+    const m_total = (@as(i64, i.month) - 1) + add_mo; // 0-based month + delta
+    y += @divFloor(m_total, 12);
+    const m: i64 = @mod(m_total, 12) + 1; // 1..12
+    const dim: i64 = islamicDaysInMonth(y, @intCast(m));
+    var d: i64 = i.day;
+    if (d > dim) {
+        if (reject) return null;
+        d = dim;
+    }
+    const days = islamicToDays(epoch, y, m, d) + add_w * 7 + add_d;
+    const ymd = temporal.civilFromDays(days);
+    return .{ .year = ymd.year, .month = ymd.month, .day = ymd.day };
+}
+
 /// weekOfYear / yearOfWeek are ISO-calendar concepts; non-ISO calendars
 /// report undefined (matches gregory/hebrew behaviour in engines with
 /// incomplete week numbering for non-ISO).

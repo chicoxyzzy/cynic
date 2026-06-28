@@ -185,6 +185,45 @@ test "intl/temporal: toLocaleString formats Temporal types via DateTimeFormat" {
     );
 }
 
+test "temporal: islamic tabular calendar conversion (calendarFields/islamicToIso)" {
+    // Pure calendar math — runs at every -Dintl flavour. Reference values
+    // verified against V8 / JSC / SpiderMonkey via pragmatist engines.diff.
+    const shared = @import("builtins/temporal/shared.zig");
+    const temporal = @import("temporal.zig");
+    const civil = temporal.CalendarId.fromSlice("islamic-civil").?;
+    const tbla = temporal.CalendarId.fromSlice("islamic-tbla").?;
+
+    // ISO 2024-01-01 → islamic-civil 1445-06-19 (month 6 = 29 days, 1445 leap).
+    const a = shared.calendarFields(civil, 2024, 1, 1);
+    try testing.expectEqual(@as(i32, 1445), a.year);
+    try testing.expectEqual(@as(u32, 6), a.month);
+    try testing.expectEqual(@as(u32, 19), a.day);
+    try testing.expectEqual(@as(u32, 29), a.days_in_month);
+    try testing.expectEqual(@as(u32, 355), a.days_in_year);
+    try testing.expect(a.in_leap_year);
+    try testing.expectEqualStrings("ah", a.era.?);
+    try testing.expectEqual(@as(i32, 1445), a.era_year.?);
+
+    // islamic-tbla is one day later for the same ISO date (epoch one day earlier).
+    try testing.expectEqual(@as(u32, 20), shared.calendarFields(tbla, 2024, 1, 1).day);
+
+    // ISO 2024-07-07 → civil 1445-12-30 (leap-year Dhuʻl-Ḥijja has 30 days).
+    const b = shared.calendarFields(civil, 2024, 7, 7);
+    try testing.expectEqual(@as(u32, 12), b.month);
+    try testing.expectEqual(@as(u32, 30), b.day);
+    try testing.expectEqual(@as(u32, 30), b.days_in_month);
+
+    // Round-trip: islamic-civil 1445-06-19 → ISO 2024-01-01.
+    const iso = shared.islamicToIso(civil, 1445, 6, 19, true).?;
+    try testing.expectEqual(@as(i64, 2024), iso.year);
+    try testing.expectEqual(@as(u32, 1), iso.month);
+    try testing.expectEqual(@as(u32, 1), iso.day);
+
+    // Constrain vs reject: day 30 in a 29-day month clamps (non-null) or throws.
+    try testing.expect(shared.islamicToIso(civil, 1445, 6, 30, false) != null);
+    try testing.expect(shared.islamicToIso(civil, 1445, 6, 30, true) == null);
+}
+
 test "intl off: Temporal rejects non-ISO calendar and named IANA" {
     if (intl_config.enabled) return error.SkipZigTest;
     try evalThrowsAnyTier(
