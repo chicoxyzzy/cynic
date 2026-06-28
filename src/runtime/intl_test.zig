@@ -313,6 +313,24 @@ test "intl/temporal: with ignores era/eraYear on era-less calendars (no throw)" 
     );
 }
 
+test "intl/temporal: dual-era calendars (ethiopic am/aa, islamic ah/bh)" {
+    try requireIntlBuild();
+    // ethiopic flips Amete Mihret (am) to Amete Alem (aa, +5500) at year ≤ 0;
+    // islamic flips ah↔bh at year 1 (like gregory ce/bce). Year 0 / negatives
+    // surface the alternate era in the getter and resolve from either era input.
+    try evalAssert1(
+        \\const e0 = Temporal.PlainDate.from({ era: "am", eraYear: 0, monthCode: "M01", day: 1, calendar: "ethiopic" });
+        \\if (e0.era !== "aa" || e0.eraYear !== 5500) throw 0;
+        \\const e2 = Temporal.PlainDate.from({ era: "aa", eraYear: 0, monthCode: "M01", day: 1, calendar: "ethiopic" });
+        \\if (e2.era !== "aa" || e2.eraYear !== 0 || e2.year !== -5500) throw 1;
+        \\const i0 = Temporal.PlainDate.from({ era: "ah", eraYear: 0, monthCode: "M01", day: 1, calendar: "islamic-civil" });
+        \\if (i0.era !== "bh" || i0.eraYear !== 1) throw 2;
+        \\const i1 = Temporal.PlainDate.from({ era: "bh", eraYear: 0, monthCode: "M01", day: 1, calendar: "islamic-civil" });
+        \\if (i1.era !== "ah" || i1.eraYear !== 1) throw 3;
+        \\1
+    );
+}
+
 test "intl/temporal: calendar since/until — over-long start day wraps to days" {
     try requireIntlBuild();
     // coptic M12-28 → M13-05 (the 5-day epagomenal month): +1 month would land

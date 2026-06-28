@@ -462,6 +462,13 @@ pub fn eraYearToYear(cal: temporal.CalendarId, era: []const u8, era_year: i64) ?
         if (std.ascii.eqlIgnoreCase(era, "bce") or std.ascii.eqlIgnoreCase(era, "japanese-inverse")) return 1 - era_year;
         return null;
     }
+    if (std.ascii.eqlIgnoreCase(s, "ethiopic")) {
+        // Dual era: Amete Mihret ("am") is the arithmetic year; Amete Alem
+        // ("aa") is 5500 greater (so aa eraYear → am year − 5500).
+        if (std.ascii.eqlIgnoreCase(era, "am")) return era_year;
+        if (std.ascii.eqlIgnoreCase(era, "aa")) return era_year - 5500;
+        return null;
+    }
     if (computedCal(cal)) |c| {
         return if (std.ascii.eqlIgnoreCase(era, c.era)) era_year else null;
     }
@@ -619,6 +626,26 @@ fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
     if (std.ascii.eqlIgnoreCase(s, "indian")) return .{ .family = .indian, .epoch = 0, .era = "shaka" }; // gregorian-tied, no fixed epoch
     if (std.ascii.eqlIgnoreCase(s, "persian")) return .{ .family = .persian, .epoch = 0, .era = "ap" }; // Solar Hijri; epoch baked into persianToDays
     return null;
+}
+
+// Dual-era resolution for a computed calendar's arithmetic year. Islamic flips
+// ah↔bh at year 1 (like gregory ce/bce); ethiopic flips Amete Mihret ("am") to
+// Amete Alem ("aa", = year + 5500) at year ≤ 0. coptic / ethioaa / indian /
+// persian keep their single era. Verified vs the era-boundary-*.js fixtures.
+const ComputedEra = struct { era: []const u8, era_year: i64 };
+fn computedEra(cal: temporal.CalendarId, c: ComputedCal, year: i64) ComputedEra {
+    switch (c.family) {
+        .islamic => return if (year >= 1)
+            .{ .era = "ah", .era_year = year }
+        else
+            .{ .era = "bh", .era_year = 1 - year },
+        .coptic => {
+            if (std.ascii.eqlIgnoreCase(cal.slice(), "ethiopic") and year < 1)
+                return .{ .era = "aa", .era_year = year + 5500 };
+            return .{ .era = c.era, .era_year = year };
+        },
+        else => return .{ .era = c.era, .era_year = year },
+    }
 }
 
 fn compMonthsInYear(f: CompFamily) u32 {
@@ -808,6 +835,7 @@ pub fn calendarFields(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u
     if (computedCal(cal)) |c| {
         const date = temporal.daysFromCivil(iso_y, iso_m, iso_d);
         const cd = compFromDays(c, date);
+        const ev = computedEra(cal, c, cd.year);
         return .{
             .year = @intCast(cd.year),
             .month = cd.month,
@@ -817,8 +845,8 @@ pub fn calendarFields(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u
             .months_in_year = compMonthsInYear(c.family),
             .day_of_year = @intCast(date - compToDays(c, cd.year, 1, 1) + 1),
             .in_leap_year = compLeap(c.family, cd.year),
-            .era = c.era,
-            .era_year = @intCast(cd.year),
+            .era = ev.era,
+            .era_year = @intCast(ev.era_year),
         };
     }
     // Japanese: gregorian structure with a date-based era overlay.
