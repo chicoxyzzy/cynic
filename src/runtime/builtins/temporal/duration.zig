@@ -391,6 +391,9 @@ fn durationToJSON(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// Intl.DurationFormat, the spec polyfill falls back to the ISO
 /// `auto` string. Cynic has no Intl, so use that fallback.
 fn durationToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = try requireDuration(realm, this_value); // brand check: receiver must be a Duration
+    if (@import("../../cldr.zig").available)
+        return @import("../intl.zig").durationToLocaleString(realm, this_value, args);
     return durationToJSON(realm, this_value, args);
 }
 

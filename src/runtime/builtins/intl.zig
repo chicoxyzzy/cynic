@@ -5163,10 +5163,7 @@ const duration_units = [10]struct { name: []const u8, display: []const u8, style
     .{ .name = "nanoseconds", .display = "nanosecondsDisplay", .styles = &.{ "long", "short", "narrow", "numeric" } },
 };
 
-fn durationFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_duration_format_prototype, "DurationFormat", true);
-    const locales = argOr(args, 0, Value.undefined_);
-    const options = argOr(args, 1, Value.undefined_);
+fn buildDurationFormatSlots(realm: *Realm, locales: Value, options: Value) NativeError!intl.DurationFormatSlots {
     const opts = try getOptionsObject(realm, options);
     const resolved = try resolveServiceLocale(realm, locales, opts);
     var slots: intl.DurationFormatSlots = .{};
@@ -5214,7 +5211,13 @@ fn durationFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
         prev_style = resolved_style;
     }
     slots.fractional_digits = try getNumberOptionOpt(realm, opts, "fractionalDigits", 0, 9);
+    return slots;
+}
 
+fn durationFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_duration_format_prototype, "DurationFormat", true);
+    var slots = try buildDurationFormatSlots(realm, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_));
+    errdefer slots.deinit(realm.allocator);
     try storeRecord(realm, inst, .{ .duration_format = slots });
     return heap_mod.taggedObject(inst);
 }
@@ -5405,16 +5408,12 @@ fn durationListStyle(s: *const intl.DurationFormatSlots) []const u8 {
     return if (std.mem.eql(u8, s.style, "long")) "long" else if (std.mem.eql(u8, s.style, "narrow")) "narrow" else "short";
 }
 
-fn durationFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    const rec = try requireKind(realm, this_value, .duration_format);
-    const s = &rec.duration_format;
-    var vals: [10]f64 = undefined;
-    try toDurationRecord(realm, argOr(args, 0, Value.undefined_), &vals);
+fn formatDurationString(realm: *Realm, s: *const intl.DurationFormatSlots, vals: *const [10]f64) NativeError!Value {
     if (!cldr.available) return makeStringValue(realm, "");
 
     var parts: [96]DurPart = undefined;
     var elem_start: [12]usize = undefined;
-    const nitems = durationBuildParts(s, &vals, &parts, &elem_start);
+    const nitems = durationBuildParts(s, vals, &parts, &elem_start);
 
     var item_store: [10][256]u8 = undefined;
     var slices: [10][]const u8 = undefined;
@@ -5432,6 +5431,23 @@ fn durationFormatFormat(realm: *Realm, this_value: Value, args: []const Value) N
     defer out.deinit(realm.allocator);
     for (lsegs.items) |seg| out.appendSlice(realm.allocator, seg.val) catch return error.OutOfMemory;
     return makeStringValue(realm, out.items);
+}
+
+fn durationFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    const rec = try requireKind(realm, this_value, .duration_format);
+    var vals: [10]f64 = undefined;
+    try toDurationRecord(realm, argOr(args, 0, Value.undefined_), &vals);
+    return formatDurationString(realm, &rec.duration_format, &vals);
+}
+
+/// Temporal.Duration.prototype.toLocaleString — build a transient DurationFormat
+/// from (locales, options) and format the receiver duration through it.
+pub fn durationToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    var slots = try buildDurationFormatSlots(realm, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_));
+    defer slots.deinit(realm.allocator);
+    var vals: [10]f64 = undefined;
+    try toDurationRecord(realm, this_value, &vals);
+    return formatDurationString(realm, &slots, &vals);
 }
 
 fn durationFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

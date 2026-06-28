@@ -279,6 +279,18 @@ test "intl/temporal: PlainYearMonth islamic-civil + calendar preservation" {
     );
 }
 
+test "intl/temporal: Duration.toLocaleString routes through DurationFormat" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const d = Temporal.Duration.from("P1Y2M3DT4H5M6S");
+        \\if (d.toLocaleString("en") !== new Intl.DurationFormat("en").format(d)) throw 0;
+        \\let threw = false;
+        \\try { Temporal.Duration.prototype.toLocaleString.call({}); } catch (e) { if (e instanceof TypeError) threw = true; }
+        \\if (!threw) throw 1;
+        \\1
+    );
+}
+
 test "intl: DurationFormat accepts ISO duration strings + IsValidDuration" {
     try requireIntlBuild();
     // format/formatToParts coerce via ToTemporalDuration: a string parses as an
