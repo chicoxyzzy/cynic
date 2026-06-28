@@ -1,11 +1,69 @@
 # Reference counting — GC rearchitecture scope
 
-Status: **scoping** (no code; measure-first). Owner: the GC track
-(user-directed). Prerequisite reading: [handbook/gc.md](handbook/gc.md) (the
-shipped collector), [gc-immix-rearchitecture.md](gc-immix-rearchitecture.md)
-(the Phase 0 (a) measurement that redirected here — allocation is not the
-bottleneck; the *mark* is, and only RC reduces it), and
+Status: **CLOSED — Phase 0 (a) measured a no-go.** The coalescing log barrier was
+prototyped (flag-gated, byte-identical, no reclaim) and A/B'd: it taxes the
+common operation set (+7–26% on object construction / property writes /
+allocation) while the macros stay within noise, and the narrow splay-class win
+does not justify the months-long, highest-risk Phase 1 (reclaim + cycle
+collector) on top of that barrier. See **Phase 0 (a) result** below; the
+prototype was reverted. Owner: the GC track (user-directed). Prerequisite
+reading: [handbook/gc.md](handbook/gc.md) (the shipped collector),
+[gc-immix-rearchitecture.md](gc-immix-rearchitecture.md) (the measurement that
+redirected here — allocation is not the bottleneck; the *mark* is), and
 [gc-generational-major.md](gc-generational-major.md) (the non-moving floor).
+
+## Phase 0 (a) result — measured, NO-GO
+
+The coalescing log barrier was prototyped behind `-Drc-barrier` (a
+modified-object log + a per-object epoch stamp + the `inline_slots` snapshot on
+first store; the log is **built but never read** ⇒ byte-identical, no reclaim —
+the barrier's hot-path cost in isolation). Local gates clean: byte-identical
+conformance, `test-fast`, gc-stress `--gc-threshold=1` (class 4347/6, Promise
+637/3, …). Remote A/B interleaved + layout-controlled, with a pinned baseline,
+across unrefined → refined → clean.
+
+**The barrier taxes the common operation set, even optimized.** Clean pinned A/B,
+refined prototype (the **new-object optimization** — fresh objects stamped
+already-logged at allocation, so they skip the snapshot, matching a real
+coalescing collector) vs the same base:
+
+| micro (jit / no-jit) | tax |
+|---|---|
+| `object_alloc` | +26% / +26% |
+| `class_instantiate` | +16% / +21% |
+| `prop_write` (property writes) | +13% / +7% |
+| `ctor_array_build` | +6% / +13% |
+
+The macros stayed **within the box noise floor** (±5.5%: crypto +0/+5, richards
+−1/+3, splay −1/−3, deltablue/raytrace/navier small) — the per-store tax dilutes
+across their mixed work — but the per-*operation* tax is real and consistent
+across both tiers. The new-object optimization halved the worst case
+(`object_alloc` +57% → +26%), but the bit-test is fundamentally per-store and the
+construction tax is structural.
+
+**Verdict: no-go.** The barrier-cost gate is a *borderline pass* (macros within
+noise), so the barrier is not a hard blocker — the **strategic** case is what
+fails:
+
+- The win is **narrow** — splay-class (large retained set) only, and even there
+  it is *unbuilt* (the barrier doesn't help splay; only the reclaim would).
+- **Phase 1 is the real cost** — the reclaim + dec-cascade + a cycle collector is
+  months of the highest-risk GC work (every-store barrier completeness = a UAF
+  per missed site), *on top of* this barrier.
+- The barrier **already taxes object construction + property writes (+7–26%)**,
+  which the reclaim would compound.
+
+A narrow retained-set win does not justify a months-long, highest-risk build that
+taxes the operations all JS leans on. Combined with the generational-major
+(information-theoretic) and Immix (allocation-is-not-the-bottleneck) closes, the
+conclusion is consistent: **the GC's broad perf win is already banked
+(incremental marking + lazy sweep); the residual is splay's mark — narrow, and no
+affordable lever reaches it on a non-moving collector.** The broad perf frontier
+is the JIT.
+
+The prototype was reverted (never merged). The coalescing design below + its
+barrier-site inventory are the reconstruction guide if a future moving/region
+heap (where RC pairs with Immix, per LXR) revisits it.
 
 ## Why RC — and why it's the *only* GC lever the data justifies
 
