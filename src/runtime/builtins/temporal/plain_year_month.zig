@@ -240,7 +240,7 @@ fn toYearMonthFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!
     var year: i64 = if (year_present) try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v)) else 0;
     const era_field = try getPropertyChain(realm, obj, "era");
     const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, cal, era_field, era_year_field, year_present, year);
+    const ey_res = try shared.resolveEraYear(realm, cal, era_field, era_year_field, year_present, year, false);
     year_present = ey_res.present;
     year = ey_res.val;
     if (!year_present) return throwTypeError(realm, "PlainYearMonth-like is missing 'year'");
@@ -361,7 +361,7 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
     }
     const era_field = try getPropertyChain(realm, obj, "era");
     const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year);
+    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year, true);
     year = ey_res.val;
     if (ey_res.present and !year_present) any = true;
     year_present = ey_res.present;

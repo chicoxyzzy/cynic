@@ -509,11 +509,14 @@ pub fn calendarHasEras(cal: temporal.CalendarId) bool {
 /// are ignored — but they cannot substitute for an absent year (TypeError). For
 /// an era calendar, a lone era/eraYear, an unknown era, or a year that disagrees
 /// with era+eraYear all throw. Shared by every from/with field reader.
-pub fn resolveEraYear(realm: *Realm, cal: temporal.CalendarId, era_v: Value, era_year_v: Value, year_present: bool, year_val: i64) NativeError!EraYearResolution {
+pub fn resolveEraYear(realm: *Realm, cal: temporal.CalendarId, era_v: Value, era_year_v: Value, year_present: bool, year_val: i64, allow_absent_year: bool) NativeError!EraYearResolution {
     const has_era = !era_v.isUndefined();
     const has_ey = !era_year_v.isUndefined();
     if (!calendarHasEras(cal)) {
-        if (!year_present and (has_era or has_ey))
+        // `from` requires a year and era/eraYear can't supply one for an era-less
+        // calendar (TypeError). `with` has the receiver's year as the base, so
+        // era/eraYear are simply ignored — allow_absent_year suppresses the throw.
+        if (!allow_absent_year and !year_present and (has_era or has_ey))
             return throwTypeError(realm, "era/eraYear cannot replace year for a calendar that does not use eras");
         return .{ .present = year_present, .val = year_val };
     }

@@ -427,7 +427,7 @@ pub fn readDateTimeFieldsRaw(realm: *Realm, obj: *JSObject, zoned: ?*ZonedFieldE
     // ZonedDateTime, both of which read fields through here).
     const era_field = try getPropertyChain(realm, obj, "era");
     const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, f.calendar, era_field, era_year_field, f.year_set, f.year);
+    const ey_res = try shared.resolveEraYear(realm, f.calendar, era_field, era_year_field, f.year_set, f.year, false);
     f.year = ey_res.val;
     f.year_set = ey_res.present;
     return f;
@@ -625,7 +625,7 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     }
     const era_field = try getPropertyChain(realm, obj, "era");
     const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year);
+    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year, true);
     year = ey_res.val;
     if (ey_res.present and !year_present) any = true;
     year_present = ey_res.present;

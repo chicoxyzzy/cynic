@@ -289,7 +289,7 @@ fn toISODateFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!Pl
     // must agree when both are given).
     const era_field = try getPropertyChain(realm, obj, "era");
     const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, cal, era_field, era_year_field, year_present, year_val);
+    const ey_res = try shared.resolveEraYear(realm, cal, era_field, era_year_field, year_present, year_val, false);
     year_present = ey_res.present;
     year_val = ey_res.val;
 
@@ -437,7 +437,7 @@ fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     // era + eraYear count as date fields and resolve to the calendar year.
     const era_field = try getPropertyChain(realm, obj, "era");
     const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year_val);
+    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year_val, true);
     year_present = ey_res.present;
     year_val = ey_res.val;
 

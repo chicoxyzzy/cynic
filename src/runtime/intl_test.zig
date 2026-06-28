@@ -279,6 +279,24 @@ test "intl/temporal: PlainYearMonth islamic-civil + calendar preservation" {
     );
 }
 
+test "intl/temporal: with ignores era/eraYear on era-less calendars (no throw)" {
+    try requireIntlBuild();
+    // `from` requires a year and throws when era/eraYear can't supply one for an
+    // era-less calendar; `with` has the receiver's year as the base, so it must
+    // ignore era/eraYear instead of throwing (regression: PlainDate.with).
+    try evalAssert1(
+        \\const d = Temporal.PlainDate.from("2024-03-15");
+        \\// era/eraYear alongside a real date field: ignored, not thrown (the
+        \\// receiver supplies the year; only `day` takes effect).
+        \\const r = d.with({ day: 20, era: "ce", eraYear: 2030 });
+        \\if (r.year !== 2024 || r.day !== 20) throw 0;
+        \\// with on an era calendar still resolves era + eraYear
+        \\const c = Temporal.PlainDate.from({ era: "am", eraYear: 1740, monthCode: "M04", day: 10, calendar: "coptic" });
+        \\if (c.with({ era: "am", eraYear: 1742 }).year !== 1742) throw 1;
+        \\1
+    );
+}
+
 test "intl/temporal: japanese imperial calendar (era table / from / boundaries)" {
     try requireIntlBuild();
     // Gregorian months/days; .year is the gregorian year, era + eraYear come from
