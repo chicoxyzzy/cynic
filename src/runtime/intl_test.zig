@@ -2057,6 +2057,18 @@ test "intl: DateTimeFormat minute/second 2-digit when combined (§11.1.1)" {
     );
 }
 
+test "intl: -t- transformed extension content is lowercase (§unicode_locale_id)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const g = (t) => Intl.getCanonicalLocales(t)[0];
+        \\(g('en-t-en') === 'en-t-en' &&                       // tlang language not region-uppercased
+        \\ g('en-t-en-latn') === 'en-t-en-latn' &&             // -t- script stays lowercase
+        \\ g('und-Latn-t-und-hani') === 'und-Latn-t-und-hani' && // outer script Title, inner lower
+        \\ g('en-t-d0-ascii') === 'en-t-d0-ascii' &&
+        \\ g('en-CA') === 'en-CA') ? 1 : 0                     // outer region still uppercased
+    );
+}
+
 test "intl: 3-alpha extlang after language is invalid (§unicode_language_id)" {
     try requireIntlBuild();
     try evalAssert1(

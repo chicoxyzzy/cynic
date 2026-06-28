@@ -656,6 +656,7 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
     var first = true;
     var part_idx: usize = 0;
     var in_unicode_ext = false;
+    var in_other_ext = false; // inside a non-`u` singleton extension (-t-, -x-, …)
     var unicode_keywords: std.ArrayListUnmanaged([]const u8) = .empty;
     defer unicode_keywords.deinit(allocator);
 
@@ -676,11 +677,17 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
                 in_unicode_ext = false;
             }
             for (part) |*c| c.* = toLowerAscii(c.*);
+            in_other_ext = part[0] != 'u';
             if (part[0] == 'u') in_unicode_ext = true;
         } else if (in_unicode_ext) {
             // Unicode extension key/value — always lowercase. A 2-ALPHA
             // segment here is a `-u-` keyword key (e.g. `hc`, `ca`), not
             // a region; the region-case rule below would corrupt it.
+            for (part) |*c| c.* = toLowerAscii(c.*);
+        } else if (in_other_ext) {
+            // Any other extension / private-use segment (-t- tlang + tfields,
+            // -x-, …) is lowercase; the region-case rule below would corrupt a
+            // 2-ALPHA segment like the `-t-en` tlang language.
             for (part) |*c| c.* = toLowerAscii(c.*);
         } else if (part.len == 4 and allAlpha(part) and part_idx == 1) {
             // Likely script — Title case.
