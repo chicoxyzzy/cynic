@@ -3,10 +3,14 @@
 Status: **Phase 0 (a) done — Immix-first is NOT supported by the data.** The
 alloc-vs-sweep-vs-mark breakdown (the **Phase 0 (a) result** immediately below)
 shows the per-object pools are not the bottleneck anywhere; the only GC
-rearchitecture the measured costs justify is **reference counting** (a separate,
-big change scoped in
-[gc-reference-counting.md](gc-reference-counting.md)). The Immix heap (Steps
-1/3/4) is shelved. The
+rearchitecture the measured costs justify is **reference counting** — which was
+then prototyped and **measured as a no-go** (its coalescing store barrier taxes
+the common operation set, +7–26% on construction / property writes / allocation,
+for a narrow retained-set-only win;
+[gc-reference-counting.md](gc-reference-counting.md)), closing the GC
+rearchitecture investigation: the broad win is already banked (incremental
+marking + lazy sweep), and the broad perf frontier is the JIT, not the GC. The
+Immix heap (Steps 1/3/4) is shelved. The
 rest of the doc is the design that the measurement redirected. Owner: the GC
 track (user-directed). Prerequisite reading: [handbook/gc.md](handbook/gc.md)
 (the shipped collector) and

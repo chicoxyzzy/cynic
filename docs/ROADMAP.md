@@ -136,9 +136,17 @@ code construction (aligns with SES).
   explored and **closed as not viable for a non-moving collector** —
   a non-moving mark-sweep cannot reclaim old garbage without
   re-tracing it (commit efe52c7d,
-  [docs/gc-generational-major.md](gc-generational-major.md)). Further
-  GC wins need a region heap (Immix), reference counting, or fully
-  *concurrent* (off-thread) marking — each a major rearchitecture.
+  [docs/gc-generational-major.md](gc-generational-major.md)). The three
+  escapes were then scoped: a region heap (**Immix**) was killed by a
+  profile showing the per-object pools aren't the bottleneck
+  ([docs/gc-immix-rearchitecture.md](gc-immix-rearchitecture.md)), and
+  **reference counting** — the one lever that profile justified — was
+  prototyped and measured a no-go (its store barrier taxes common
+  operations for a narrow retained-set-only win,
+  [docs/gc-reference-counting.md](gc-reference-counting.md)). The broad
+  GC win is banked; only fully *concurrent* (off-thread) marking is
+  unexplored, and it's a poor fit for a single-threaded mutator — the
+  broad perf frontier is the JIT.
 - **GC trigger at every safe-point — the pure-native residual.**
   The allocation-pressure check (`gc_threshold` / `gc_byte_threshold`)
   fires at every interpreter safe-point: each bytecode loop back-edge
@@ -1199,8 +1207,16 @@ allocation-heavy workloads dominate, items 8, 9.
   would skip the unchanged-old re-trace was explored and closed
   ([docs/gc-generational-major.md](gc-generational-major.md), commit
   efe52c7d): a non-moving mark-sweep can't reclaim old garbage
-  without re-tracing it. Past this needs a region heap (Immix),
-  reference counting, or fully *concurrent* (off-thread) marking.
+  without re-tracing it. The three escapes were then scoped — a region
+  heap (**Immix**) was killed by a profile showing the per-object pools
+  aren't the bottleneck
+  ([docs/gc-immix-rearchitecture.md](gc-immix-rearchitecture.md)), and
+  **reference counting** was prototyped and measured a no-go (the store
+  barrier taxes common operations +7–26% for a narrow retained-set-only
+  win, [docs/gc-reference-counting.md](gc-reference-counting.md)) —
+  leaving only off-thread *concurrent* marking, a poor fit for a
+  single-threaded mutator. The broad GC win is banked; the frontier is
+  the JIT.
 
 ## Proper Tail Calls (PTC) — shipped
 

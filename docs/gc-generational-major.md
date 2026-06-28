@@ -73,6 +73,19 @@ thread — the route the multi-threaded production engines took, which Phase 0
 flagged as a poor fit for a single-threaded mutator). Revisit only behind one of
 those.
 
+**Two of the three were subsequently scoped, measured, and closed.** An
+Immix-first region heap was killed by a `sample` breakdown showing the
+per-object pools are not the bottleneck (allocation ~2–5%; the *mark* is ~62% on
+`splay`) — [gc-immix-rearchitecture.md](gc-immix-rearchitecture.md). Reference
+counting — the one lever that breakdown justified, since RC cuts the mark the
+others can't — was then prototyped: its coalescing store barrier taxes the
+common operation set (+7–26% on object construction / property writes /
+allocation) for a narrow, retained-set-only win — a measured no-go,
+[gc-reference-counting.md](gc-reference-counting.md). Net across all three: the
+GC's broad win is banked (incremental marking + lazy sweep bound the pause
+~800 ms → ~1 ms); the mark-*CPU* floor stands on a non-moving collector, and the
+broad perf frontier is the JIT, not the GC.
+
 **Phase 1 disposition.** The mature→mature remembered set — the `dirty_old` bit
 on the four container types, `old_dirty_list`, `rememberOldStore`, the 7 routed
 barrier sites + the minor carry-over + the major-termination reset — was
