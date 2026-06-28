@@ -716,6 +716,25 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
     return applyLanguageAlias(allocator, canon);
 }
 
+/// §3.2.1 territoryAlias — resolve a region subtag to its canonical form: a
+/// 1→1 alias replaces directly; a 1→many alias picks the likely territory for
+/// the (language, script), else the first in the list. Returns `region`
+/// unchanged when there is no alias (or no blob).
+fn resolveRegionAlias(region: []const u8, lang: []const u8, script: []const u8) []const u8 {
+    const alias = cldr.territoryAlias(region) orelse return region;
+    if (std.mem.indexOfScalar(u8, alias, ' ') == null) return alias; // 1→1
+    var likely: cldr.Subtags = .{};
+    const have = cldr.addLikelySubtags(.{ .lang = lang, .script = script }, &likely);
+    var first: []const u8 = region;
+    var it = std.mem.splitScalar(u8, alias, ' ');
+    var idx: usize = 0;
+    while (it.next()) |r| : (idx += 1) {
+        if (idx == 0) first = r;
+        if (have and likely.region.len != 0 and std.mem.eql(u8, r, likely.region)) return r;
+    }
+    return first;
+}
+
 /// §3.2.1 — apply the CLDR languageAlias to the (already case-canonicalised)
 /// tag's language subtag, merging the replacement's script/region into any the
 /// input lacks (an input field wins; the replacement only fills a gap, e.g.
@@ -782,19 +801,20 @@ fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const 
             break;
         }
     }
-    // §3.2.1 territoryAlias — canonicalise a 1→1 region (e.g. 554→NZ, UK→GB).
-    // The effective region is the input's, else the language alias's.
+    const out_lang = if (has_alias) repl.lang else subs[0];
+    const out_script = if (in_script.len != 0) in_script else (if (has_alias) repl.script else "");
+    // §3.2.1 territoryAlias — canonicalise the region (input's, else the
+    // language alias's): a 1→1 alias replaces directly (554→NZ, UK→GB); a
+    // 1→many alias picks the likely territory for the language/script.
     const base_region = if (in_region.len != 0) in_region else (if (has_alias) repl.region else "");
-    const out_region = if (base_region.len != 0) (cldr.territoryAlias(base_region) orelse base_region) else "";
-    const region_aliased = out_region.ptr != base_region.ptr;
+    const out_region = if (base_region.len != 0) resolveRegionAlias(base_region, out_lang, out_script) else "";
+    const region_aliased = !std.mem.eql(u8, out_region, base_region);
     if (!has_alias and variants_sorted and !region_aliased) return canon;
     std.mem.sort([]const u8, variants[0..vn], {}, struct {
         fn lt(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.lessThan(u8, a, b);
         }
     }.lt);
-    const out_lang = if (has_alias) repl.lang else subs[0];
-    const out_script = if (in_script.len != 0) in_script else (if (has_alias) repl.script else "");
 
     // Rebuild language_id (input fields already canonically cased; the CLDR
     // replacement subtags are in canonical case too) + the carried remainder.

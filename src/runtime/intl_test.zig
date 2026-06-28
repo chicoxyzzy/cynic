@@ -2078,6 +2078,9 @@ test "intl: territory-alias region canonicalization (§3.2.1)" {
         \\const g = (t) => Intl.getCanonicalLocales(t)[0];
         \\(new Intl.Locale('en', { region: '554' }).toString() === 'en-NZ' && // numeric → alpha
         \\ g('en-UK') === 'en-GB' && g('en-BU') === 'en-MM' &&                // deprecated → current
+        \\ g('ru-SU') === 'ru-RU' &&                                         // 1→many: ru's likely territory is in the list
+        \\ g('en-SU') === 'en-RU' &&                                         // 1→many: en's likely (US) absent → first
+        \\ g('und-Latn-SU') === 'und-Latn-RU' &&
         \\ g('en-FR') === 'en-FR' && g('en-US') === 'en-US') ? 1 : 0          // no alias → unchanged
     );
 }

@@ -517,12 +517,12 @@ fn writeLanguageAliasPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanage
 
 // ── territory aliases (UTS #35 §3.2.1 territoryAlias) ────────────────────────
 
-/// A 1→1 region replacement (numeric→alpha, deprecated→current). The 1→many
-/// entries (e.g. SU → 14 regions) need likelySubtags disambiguation and are
-/// skipped here.
+/// A region replacement: a single region (numeric→alpha, deprecated→current)
+/// or a space-separated 1→many list (e.g. SU → "RU AM …"), which the runtime
+/// disambiguates with likelySubtags.
 const TerritoryAliasEntry = struct {
     key: []const u8, // input region subtag (numeric or alpha)
-    region: []const u8, // replacement region
+    region: []const u8, // replacement (single, or space-separated list)
     fn lessThan(_: void, a: TerritoryAliasEntry, b: TerritoryAliasEntry) bool {
         return std.mem.lessThan(u8, a.key, b.key);
     }
@@ -541,7 +541,6 @@ fn loadTerritoryAliases(arena: std.mem.Allocator, io: std.Io, json_root: []const
     var it = tbl.iterator();
     while (it.next()) |e| {
         const repl = e.value_ptr.*.object.get("_replacement").?.string;
-        if (std.mem.indexOfScalar(u8, repl, ' ') != null) continue; // 1→many, skip
         try out.append(arena, .{ .key = e.key_ptr.*, .region = repl });
     }
     std.sort.block(TerritoryAliasEntry, out.items, {}, TerritoryAliasEntry.lessThan);
