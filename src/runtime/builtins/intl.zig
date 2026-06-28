@@ -5227,7 +5227,17 @@ fn isNumericDurStyle(st: []const u8) bool {
 /// must be an integral Number (RangeError otherwise); signs must not be mixed
 /// (RangeError); at least one field must be present (TypeError).
 fn toDurationRecord(realm: *Realm, dur: Value, out: *[10]f64) NativeError!void {
-    const obj = heap_mod.valueAsPlainObject(dur) orelse return throwTypeError(realm, "duration must be an object");
+    // §1.1.6 → ToTemporalDuration: a String parses as an ISO 8601 duration; a
+    // non-String non-Object is a TypeError (matching Temporal.Duration.from).
+    if (dur.isString()) {
+        const s: *JSString = @ptrCast(@alignCast(dur.asString()));
+        const d = temporal.parseTemporalDurationString(s.flatBytes()) catch
+            return throwRangeError(realm, "invalid ISO 8601 duration string");
+        if (!temporal.isValidDuration(d)) return throwRangeError(realm, "Duration values are out of range");
+        out.* = .{ d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.milliseconds, d.microseconds, d.nanoseconds };
+        return;
+    }
+    const obj = heap_mod.valueAsPlainObject(dur) orelse return throwTypeError(realm, "duration must be an object or a string");
     // A Temporal.Duration is read from its [[InitializedTemporalDuration]] slots
     // directly — never via the prototype getters (which user code may taint).
     if (obj.getTemporalRecord()) |rec| switch (rec.*) {
@@ -5259,6 +5269,10 @@ fn toDurationRecord(realm: *Realm, dur: Value, out: *[10]f64) NativeError!void {
         }
     }
     if (!any_defined) return throwTypeError(realm, "duration requires at least one field");
+    // §IsValidDuration — each field's magnitude must be in range (years / months
+    // / weeks < 2^32; total time < 2^53 ms), else RangeError.
+    const d = temporal.DurationRecord{ .years = out[0], .months = out[1], .weeks = out[2], .days = out[3], .hours = out[4], .minutes = out[5], .seconds = out[6], .milliseconds = out[7], .microseconds = out[8], .nanoseconds = out[9] };
+    if (!temporal.isValidDuration(d)) return throwRangeError(realm, "Duration values are out of range");
 }
 
 /// §1.1.7 — fold sub-second units into a fractional amount for the unit at `idx`

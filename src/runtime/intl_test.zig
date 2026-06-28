@@ -279,6 +279,24 @@ test "intl/temporal: PlainYearMonth islamic-civil + calendar preservation" {
     );
 }
 
+test "intl: DurationFormat accepts ISO duration strings + IsValidDuration" {
+    try requireIntlBuild();
+    // format/formatToParts coerce via ToTemporalDuration: a string parses as an
+    // ISO 8601 duration; a bad string / out-of-range field is a RangeError; a
+    // non-string non-object (number) is a TypeError.
+    try evalAssert1(
+        \\const df = new Intl.DurationFormat("en", { style: "long" });
+        \\const out = df.format("P1Y2M3DT4H");
+        \\if (typeof out !== "string" || out.indexOf("1") < 0) throw 0;
+        \\let threw = 0;
+        \\try { df.format("not-a-duration"); } catch (e) { if (e instanceof RangeError) threw++; }
+        \\try { df.format({ years: 4294967296 }); } catch (e) { if (e instanceof RangeError) threw++; }
+        \\try { df.format(42); } catch (e) { if (e instanceof TypeError) threw++; }
+        \\if (threw !== 3) throw 1;
+        \\1
+    );
+}
+
 test "intl: supportedValuesOf calendars canonical + sorted; islamic aliases fold" {
     try requireIntlBuild();
     try evalAssert1(
