@@ -329,7 +329,7 @@ jobs:
   test262:
     name: test262 conformance + RSS smoke (gating)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: build-and-test
     # One job builds the ReleaseFast harness once, then runs both
     # the full runtime sweep and the filtered RSS smoke against it —
@@ -391,7 +391,14 @@ jobs:
         # `--top-rss=20` surfaces the memory-heaviest fixtures
         # after the tally; pair with the filtered RSS smoke step
         # below to catch leaks at PR time before they reach `main`.
-        timeout-minutes: 8
+        #
+        # This single step compiles the ReleaseFast harness *and*
+        # runs the sweep; both grow with the engine, and the sweep
+        # got heavier as the non-ISO Temporal calendars started
+        # passing — those fixtures now run real arithmetic instead
+        # of failing fast. 15 min keeps margin over the ~8-9 min
+        # build+sweep; the per-fixture watchdog still catches a wedge.
+        timeout-minutes: 15
         run: |
           zig build test262 -- \
             --threads=4 --top-rss=20 \
