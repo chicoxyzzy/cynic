@@ -343,6 +343,9 @@ test "intl/temporal: era + eraYear field input" {
         \\try { Temporal.PlainDate.from({ era: "foobar", eraYear: 1, monthCode: "M01", day: 1, calendar: "iso8601" }); } catch (e) { if (e instanceof TypeError) threw++; }
         \\try { Temporal.PlainDate.from({ era: "ah", monthCode: "M06", day: 1, calendar: "islamic-civil" }); } catch (e) { if (e instanceof TypeError) threw++; }
         \\if (threw !== 2) throw 6;
+        \\// PlainDateTime + ZonedDateTime from also resolve era+eraYear
+        \\if (Temporal.PlainDateTime.from({ era: "am", eraYear: 1742, monthCode: "M12", day: 15, calendar: "coptic" }).year !== 1742) throw 7;
+        \\if (Temporal.ZonedDateTime.from({ era: "ah", eraYear: 1445, monthCode: "M06", day: 1, timeZone: "UTC", calendar: "islamic-civil" }).year !== 1445) throw 8;
         \\1
     );
 }

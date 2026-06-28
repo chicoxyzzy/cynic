@@ -423,6 +423,13 @@ pub fn readDateTimeFieldsRaw(realm: *Realm, obj: *JSObject, zoned: ?*ZonedFieldE
         f.year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
         f.year_set = true;
     }
+    // era + eraYear resolve to the calendar year (shared by PlainDateTime and
+    // ZonedDateTime, both of which read fields through here).
+    const era_field = try getPropertyChain(realm, obj, "era");
+    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+    const ey_res = try shared.resolveEraYear(realm, f.calendar, era_field, era_year_field, f.year_set, f.year);
+    f.year = ey_res.val;
+    f.year_set = ey_res.present;
     return f;
 }
 
@@ -611,10 +618,17 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         any = true;
     }
     const year_v = try getPropertyChain(realm, obj, "year");
-    if (!year_v.isUndefined()) {
+    var year_present = !year_v.isUndefined();
+    if (year_present) {
         year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
         any = true;
     }
+    const era_field = try getPropertyChain(realm, obj, "era");
+    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year);
+    year = ey_res.val;
+    if (ey_res.present and !year_present) any = true;
+    year_present = ey_res.present;
     if (!any) return throwTypeError(realm, "PlainDateTime-like must have at least one recognized property");
 
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
@@ -631,7 +645,7 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         } else if (month_int_set) {
             im = month_int;
         }
-        const iy: i64 = if (year_v.isUndefined()) cf.year else year;
+        const iy: i64 = if (!year_present) cf.year else year;
         const id: i64 = if (day_v.isUndefined()) cf.day else day;
         const iso = shared.computedToIso(base.calendar, iy, im, id, overflow == .reject) orelse
             return throwRangeError(realm, "PlainDateTime date is out of range");
@@ -652,7 +666,8 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     } else if (month_int_set) {
         month = month_int;
     }
-    const date = temporal.regulateISODate(year, month, day, overflow == .reject) orelse
+    const iso_year = if (!year_present) year else shared.calendarYearToIso(base.calendar, year);
+    const date = temporal.regulateISODate(iso_year, month, day, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDateTime date is out of range");
     const time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
     return createTemporalDateTime(realm, PlainDateTimeRecord.combine(date, time));

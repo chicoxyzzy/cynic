@@ -354,10 +354,17 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
     if (mc_len != null) any = true;
 
     const year_v = try getPropertyChain(realm, obj, "year");
-    if (!year_v.isUndefined()) {
+    var year_present = !year_v.isUndefined();
+    if (year_present) {
         year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
         any = true;
     }
+    const era_field = try getPropertyChain(realm, obj, "era");
+    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year);
+    year = ey_res.val;
+    if (ey_res.present and !year_present) any = true;
+    year_present = ey_res.present;
     if (!any) return throwTypeError(realm, "PlainYearMonth-like must have at least one recognized property");
 
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
@@ -373,7 +380,7 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
         } else if (month_present) {
             im = month_val;
         }
-        const iy: i64 = if (year_v.isUndefined()) cf.year else year;
+        const iy: i64 = if (!year_present) cf.year else year;
         const iso = shared.computedToIso(base.calendar, iy, im, 1, overflow == .reject) orelse
             return throwRangeError(realm, "PlainYearMonth is out of range");
         if (!temporal.isoYearMonthWithinLimits(iso.year, @intCast(iso.month)))
@@ -386,7 +393,7 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
     } else if (month_present) {
         month = month_val;
     }
-    const iso_year = if (year_v.isUndefined()) year else shared.calendarYearToIso(base.calendar, year);
+    const iso_year = if (!year_present) year else shared.calendarYearToIso(base.calendar, year);
     var rec = try regulateYearMonth(realm, iso_year, month, overflow == .reject);
     rec.calendar = base.calendar;
     return createTemporalYearMonth(realm, rec);
