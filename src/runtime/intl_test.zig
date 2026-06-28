@@ -286,6 +286,8 @@ test "intl/temporal: coptic + ethiopic 13-month calendars (getters / from / add)
         \\if (co.era !== "am" || co.monthsInYear !== 13 || co.daysInMonth !== 30) throw 1;
         \\const et = Temporal.PlainDate.from("2020-09-11").withCalendar("ethiopic");
         \\if (et.year !== 2013 || et.month !== 1 || et.era !== "am" || et.monthsInYear !== 13) throw 2;
+        \\const aa = Temporal.PlainDate.from("2020-09-11").withCalendar("ethioaa"); // Amete Alem
+        \\if (aa.year !== 7513 || aa.month !== 1 || aa.era !== "aa" || aa.monthsInYear !== 13) throw 5;
         \\const f = Temporal.PlainDate.from({ year: 1740, monthCode: "M04", day: 22, calendar: "coptic" });
         \\if (f.toString().slice(0, 10) !== "2024-01-01") throw 3;
         \\if (f.add({ months: 13 }).year !== 1741 || f.add({ months: 13 }).month !== 4) throw 4;

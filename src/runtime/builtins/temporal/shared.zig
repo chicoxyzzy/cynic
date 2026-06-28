@@ -510,6 +510,7 @@ fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
     if (std.ascii.eqlIgnoreCase(s, "islamic-tbla")) return .{ .family = .islamic, .epoch = -492149, .era = "ah" };
     if (std.ascii.eqlIgnoreCase(s, "coptic")) return .{ .family = .coptic, .epoch = -615558, .era = "am" };
     if (std.ascii.eqlIgnoreCase(s, "ethiopic")) return .{ .family = .coptic, .epoch = -716367, .era = "am" };
+    if (std.ascii.eqlIgnoreCase(s, "ethioaa")) return .{ .family = .coptic, .epoch = -2725242, .era = "aa" }; // Amete Alem (= ethiopic + 5500 yr)
     if (std.ascii.eqlIgnoreCase(s, "indian")) return .{ .family = .indian, .epoch = 0, .era = "shaka" }; // gregorian-tied, no fixed epoch
     return null;
 }
