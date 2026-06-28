@@ -457,6 +457,10 @@ fn plainDateToJSON(realm: *Realm, this_value: Value, args: []const Value) Native
     return Value.fromString(js);
 }
 fn plainDateToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §3.3.x — FormatDateTime via DateTimeFormat when CLDR is present; without
+    // it (no `Intl`) fall back to the ISO string.
+    if (@import("../../cldr.zig").available)
+        return @import("../intl.zig").temporalToLocaleString(realm, this_value, args);
     return plainDateToJSON(realm, this_value, args);
 }
 fn plainDateValueOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {

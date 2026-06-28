@@ -168,6 +168,23 @@ test "intl/temporal: roc + buddhist year-offset calendar arithmetic" {
     );
 }
 
+test "intl/temporal: toLocaleString formats Temporal types via DateTimeFormat" {
+    if (!intl_config.has_locale_data) return error.SkipZigTest; // needs CLDR output
+    // §13.x — each Temporal type's toLocaleString routes through a transient
+    // DateTimeFormat, applying the per-type ToDateTimeOptions defaults.
+    try evalAssert1(
+        \\const L = "en";
+        \\if (Temporal.PlainDate.from("1976-11-18").toLocaleString(L) !== "11/18/1976") throw 0;
+        \\if (Temporal.PlainDateTime.from("1976-11-18T14:23:30").toLocaleString(L) !== "11/18/1976, 2:23:30 PM") throw 1;
+        \\if (Temporal.PlainTime.from("14:23:30").toLocaleString(L) !== "2:23:30 PM") throw 2;
+        \\if (Temporal.PlainYearMonth.from("1976-11").toLocaleString(L) !== "11/1976") throw 3;
+        \\if (Temporal.PlainMonthDay.from("11-18").toLocaleString(L) !== "11/18") throw 4;
+        \\if (Temporal.Instant.from("1976-11-18T14:23:30Z").toLocaleString(L,{timeZone:"UTC"}) !== "11/18/1976, 2:23:30 PM") throw 5;
+        \\if (Temporal.PlainDate.from("1976-11-18").toLocaleString(L,{year:"numeric",month:"long",day:"numeric"}) !== "November 18, 1976") throw 6;
+        \\1
+    );
+}
+
 test "intl off: Temporal rejects non-ISO calendar and named IANA" {
     if (intl_config.enabled) return error.SkipZigTest;
     try evalThrowsAnyTier(

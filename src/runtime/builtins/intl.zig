@@ -2926,8 +2926,15 @@ fn canonicalCalendarId(raw: []const u8, buf: []u8) []const u8 {
 
 fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_date_time_format_prototype.?, "DateTimeFormat", false);
-    const locales = argOr(args, 0, Value.undefined_);
-    const options = argOr(args, 1, Value.undefined_);
+    var slots = try buildDateTimeFormatSlots(realm, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_));
+    errdefer slots.deinit(realm.allocator);
+    try storeRecord(realm, inst, .{ .date_time_format = slots });
+    return heap_mod.taggedObject(inst);
+}
+
+/// §11.1.1 CreateDateTimeFormat — resolve (locales, options) into the format
+/// slots. Shared by the constructor and Temporal.*.prototype.toLocaleString.
+fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) NativeError!intl.DateTimeFormatSlots {
     const opts = try coerceOptionsToObject(realm, options);
     const resolved = try resolveServiceLocale(realm, locales, opts);
 
@@ -3020,8 +3027,7 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
     // After all option reads (which can throw): cache the maximized data-locale
     // so per-`format()` CLDR lookups skip the likelySubtags scan.
     try setDataLocale(realm, &slots.base);
-    try storeRecord(realm, inst, .{ .date_time_format = slots });
-    return heap_mod.taggedObject(inst);
+    return slots;
 }
 
 fn dupOptOwned(realm: *Realm, s: []const u8) NativeError![]const u8 {
@@ -3054,6 +3060,68 @@ fn dateTimeFormatFormat(realm: *Realm, this_value: Value, args: []const Value) N
         len += b.len;
     }
     return makeStringValue(realm, buf[0..len]);
+}
+
+/// §13.x Temporal.*.prototype.toLocaleString — FormatDateTime through a
+/// transient DateTimeFormat built from (locales, options). The per-Temporal-
+/// type ToDateTimeOptions defaults make a bare call show the type's natural
+/// fields (PlainDate → date, PlainDateTime/Instant → date + time, etc.).
+/// Callers gate on `cldr.available`; ZonedDateTime is handled by its own
+/// method (it overrides the format's time zone) and is not routed here.
+pub fn temporalToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    var slots = try buildDateTimeFormatSlots(realm, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_));
+    defer slots.deinit(realm.allocator);
+    // Shallow copy: the default literals below must never reach slots.deinit
+    // (which frees only the allocated option fields the copy keeps sharing).
+    var eff = slots;
+    applyTemporalToLocaleDefaults(&eff, this_value);
+    var segs: [48]Seg = undefined;
+    const n = try dtfRenderArg(realm, &eff, this_value, &segs);
+    var buf: [256]u8 = undefined;
+    return makeStringValue(realm, flattenSegs(&segs, n, &buf));
+}
+
+/// Apply the §11.5 ToDateTimeOptions defaults for the Temporal type of `v` onto
+/// `slots` when the caller supplied no component / style option. Writes only the
+/// empty ("") fields with static literals, so the shallow copy keeps sharing
+/// (and freeing through the original) the allocated option strings.
+fn applyTemporalToLocaleDefaults(slots: *intl.DateTimeFormatSlots, v: Value) void {
+    const o = heap_mod.valueAsPlainObject(v) orelse return;
+    const rec = o.getTemporalRecord() orelse return;
+    const has_any = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or
+        slots.month.len > 0 or slots.day.len > 0 or slots.hour.len > 0 or slots.minute.len > 0 or
+        slots.second.len > 0 or slots.day_period.len > 0 or slots.fractional_second_digits != null or
+        slots.date_style.len > 0 or slots.time_style.len > 0;
+    if (has_any) return;
+    switch (rec.*) {
+        .plain_date => {
+            slots.year = "numeric";
+            slots.month = "numeric";
+            slots.day = "numeric";
+        },
+        .plain_time => {
+            slots.hour = "numeric";
+            slots.minute = "numeric";
+            slots.second = "numeric";
+        },
+        .plain_date_time, .instant, .zoned_date_time => {
+            slots.year = "numeric";
+            slots.month = "numeric";
+            slots.day = "numeric";
+            slots.hour = "numeric";
+            slots.minute = "numeric";
+            slots.second = "numeric";
+        },
+        .plain_year_month => {
+            slots.year = "numeric";
+            slots.month = "numeric";
+        },
+        .plain_month_day => {
+            slots.month = "numeric";
+            slots.day = "numeric";
+        },
+        .duration => {},
+    }
 }
 
 fn dateTimeFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
