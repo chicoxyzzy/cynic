@@ -578,7 +578,17 @@ fn plainYearMonthToPlainDate(realm: *Realm, this_value: Value, args: []const Val
     const day_v = try getPropertyChain(realm, obj, "day");
     if (day_v.isUndefined()) return throwTypeError(realm, "argument is missing 'day'");
     const day = try readPositiveDateField(realm, day_v);
-    const rec = temporal.regulateISODate(ym.iso_year, ym.iso_month, day, false) orelse
+    if (shared.isComputedCalendar(ym.calendar)) {
+        const cf = shared.calendarFields(ym.calendar, ym.iso_year, ym.iso_month, ym.ref_iso_day);
+        const iso = shared.computedToIso(ym.calendar, cf.year, cf.month, day, false) orelse
+            return throwRangeError(realm, "PlainDate is out of range");
+        var rec = temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse
+            return throwRangeError(realm, "PlainDate is out of range");
+        rec.calendar = ym.calendar;
+        return createTemporalDate(realm, rec);
+    }
+    var rec = temporal.regulateISODate(ym.iso_year, ym.iso_month, day, false) orelse
         return throwRangeError(realm, "PlainDate is out of range");
+    rec.calendar = ym.calendar; // preserve roc/buddhist/gregory
     return createTemporalDate(realm, rec);
 }

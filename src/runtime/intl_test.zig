@@ -272,6 +272,9 @@ test "intl/temporal: PlainYearMonth islamic-civil + calendar preservation" {
         \\if (d.years !== 1 || d.months !== 0) throw 3;
         \\// the calendar-preservation gap fix also keeps a gregory year-month:
         \\if (Temporal.PlainYearMonth.from({ year: 2024, monthCode: "M03", calendar: "gregory" }).era !== "ce") throw 4;
+        \\// toPlainDate converts the calendar (round-trips back to the year-month)
+        \\const pd = p.toPlainDate({ day: 1 });
+        \\if (pd.calendarId !== c || pd.year !== 1445 || pd.month !== 6 || pd.day !== 1) throw 5;
         \\1
     );
 }
