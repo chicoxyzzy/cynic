@@ -313,6 +313,26 @@ test "intl/temporal: with ignores era/eraYear on era-less calendars (no throw)" 
     );
 }
 
+test "intl/temporal: PlainMonthDay for computational calendars (reference year)" {
+    try requireIntlBuild();
+    // coptic M01-01 anchors to the latest occurrence ≤ ISO 1972-12-31 (year
+    // 1972); M13-06 needs a leap coptic year, so it anchors to 1971. Day overflow
+    // constrains to the month length; reject throws; toString carries the calendar.
+    try evalAssert1(
+        \\const a = Temporal.PlainMonthDay.from({ calendar: "coptic", monthCode: "M01", day: 1 });
+        \\if (a.monthCode !== "M01" || a.day !== 1 || a.toString().slice(0, 4) !== "1972") throw 0;
+        \\const b = Temporal.PlainMonthDay.from({ calendar: "coptic", monthCode: "M01", day: 31 }, { overflow: "constrain" });
+        \\if (b.day !== 30) throw 1;
+        \\const c = Temporal.PlainMonthDay.from({ calendar: "coptic", monthCode: "M13", day: 6 });
+        \\if (c.monthCode !== "M13" || c.day !== 6 || c.toString().slice(0, 4) !== "1971") throw 2;
+        \\if (c.toString({ calendarName: "always" }).indexOf("[u-ca=coptic]") < 0) throw 3;
+        \\let threw = false;
+        \\try { Temporal.PlainMonthDay.from({ calendar: "coptic", monthCode: "M13", day: 7 }, { overflow: "reject" }); } catch (e) { if (e instanceof RangeError) threw = true; }
+        \\if (!threw) throw 4;
+        \\1
+    );
+}
+
 test "intl/temporal: dual-era calendars (ethiopic am/aa, islamic ah/bh)" {
     try requireIntlBuild();
     // ethiopic flips Amete Mihret (am) to Amete Alem (aa, +5500) at year ≤ 0;

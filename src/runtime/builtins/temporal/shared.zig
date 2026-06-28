@@ -814,6 +814,53 @@ fn persianFromDays(date: i64) CompYmd {
     return .{ .year = year, .month = @intCast(month), .day = @intCast(day) };
 }
 
+pub const MonthDayRef = struct { iso_year: i32, iso_month: u32, iso_day: u32 };
+
+/// §12.x CalendarMonthDayToISOReferenceDate for a computational calendar: the
+/// canonical ISO date backing a PlainMonthDay of (calendar month, day) — the
+/// latest occurrence on or before ISO 1972-12-31 where the day is valid (so a
+/// leap-only day such as coptic M13-06 anchors to a leap year → ref ISO 1971).
+/// Returns null when the day exceeds every year's month length under reject.
+pub fn computedMonthDayRef(cal: temporal.CalendarId, month: i64, day_in: i64, reject: bool) ?MonthDayRef {
+    const c = computedCal(cal) orelse return null;
+    const ref_limit = temporal.daysFromCivil(1972, 12, 31);
+    const base_year = compFromDays(c, ref_limit).year;
+
+    // Longest this month gets across the leap cycle (40 ≥ the Islamic 30-year
+    // cycle), so reject can detect an impossible day and constrain can clamp.
+    var max_day: i64 = 0;
+    var p: i64 = base_year;
+    var pn: usize = 0;
+    while (pn < 40) : (pn += 1) {
+        const dim: i64 = compDaysInMonth(c.family, p, @intCast(month));
+        if (dim > max_day) max_day = dim;
+        p -= 1;
+    }
+    var day = day_in;
+    if (day > max_day) {
+        if (reject) return null;
+        day = max_day;
+    }
+    if (day < 1) return null;
+
+    // Walk calendar years down from the reference epoch to the latest one whose
+    // (month, day) is both valid and lands on or before the ISO limit.
+    var cy: i64 = base_year;
+    var n: usize = 0;
+    while (n < 60) : (n += 1) {
+        const dim: i64 = compDaysInMonth(c.family, cy, @intCast(month));
+        if (day <= dim) {
+            const iso_days = compToDays(c, cy, month, day);
+            if (iso_days <= ref_limit) {
+                const civ = temporal.civilFromDays(iso_days);
+                return .{ .iso_year = @intCast(civ.year), .iso_month = @intCast(civ.month), .iso_day = @intCast(civ.day) };
+            }
+        }
+        cy -= 1;
+    }
+    return null;
+}
+
 /// Calendar-resolved date fields for a stored ISO date — the single source of
 /// truth behind every `Temporal.*` calendar getter. Gregorian-month calendars
 /// (iso8601 / gregory / roc / buddhist) keep the ISO month/day and only shift

@@ -163,13 +163,14 @@ fn plainMonthDayCalendarId(realm: *Realm, t: Value, a: []const Value) NativeErro
 fn plainMonthDayMonthCode(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainMonthDay(realm, t);
-    const mc = [_]u8{ 'M', '0' + @as(u8, @intCast(rec.iso_month / 10)), '0' + @as(u8, @intCast(rec.iso_month % 10)) };
-    const js = realm.heap.allocateString(&mc) catch return error.OutOfMemory;
-    return Value.fromString(js);
+    // Resolve the stored reference ISO date back into the calendar's month code
+    // (iso8601 / gregorian-month calendars round-trip to the ISO month).
+    return shared.monthCodeValue(realm, rec.calendar, rec.ref_iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainMonthDayDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    return Value.fromInt32(@intCast((try requirePlainMonthDay(realm, t)).iso_day));
+    const rec = try requirePlainMonthDay(realm, t);
+    return shared.dayValue(rec.calendar, rec.ref_iso_year, rec.iso_month, rec.iso_day);
 }
 
 /// §10.5.x ISOMonthDayFromFields — read day, month / monthCode, and an
@@ -182,7 +183,6 @@ fn plainMonthDayDay(realm: *Realm, t: Value, a: []const Value) NativeError!Value
 /// option is read.
 fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!PlainMonthDayRecord {
     const cal = try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
-    _ = cal;
 
     const day_v = try getPropertyChain(realm, obj, "day");
     if (day_v.isUndefined()) return throwTypeError(realm, "PlainMonthDay-like is missing 'day'");
@@ -207,16 +207,27 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
 
     const overflow = try getTemporalOverflowOption(realm, options);
 
+    const max_month: i64 = shared.monthsInYearForCalendar(cal);
     var month: i64 = undefined;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len, 12);
+        month = try monthFromCodeBytes(realm, &mc_buf, len, max_month);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;
     } else {
         return throwTypeError(realm, "PlainMonthDay-like is missing 'month' / 'monthCode'");
     }
-    return regulateMonthDay(realm, year_for_overflow, month, day, overflow == .reject);
+    // Non-ISO calendars resolve a canonical reference ISO date for the
+    // (calendar month, day) pair; gregorian-month calendars keep the ISO
+    // month/day with the 1972 reference and just carry the calendar.
+    if (shared.isComputedCalendar(cal)) {
+        const ref = shared.computedMonthDayRef(cal, month, day, overflow == .reject) orelse
+            return throwRangeError(realm, "PlainMonthDay day is out of range for the calendar");
+        return .{ .ref_iso_year = @intCast(ref.iso_year), .iso_month = @intCast(ref.iso_month), .iso_day = @intCast(ref.iso_day), .calendar = cal };
+    }
+    var rec = try regulateMonthDay(realm, year_for_overflow, month, day, overflow == .reject);
+    rec.calendar = cal;
+    return rec;
 }
 
 /// §10.5.x ToTemporalMonthDay — a PlainMonthDay (copy, preserving its

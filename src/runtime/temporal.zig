@@ -3785,7 +3785,11 @@ pub fn parseTemporalYearMonthString(input: []const u8) error{Invalid}!PlainYearM
 /// (always / critical), mirroring the year-month rule.
 pub fn isoMonthDayToString(rec: PlainMonthDayRecord, buf: []u8, calendar: CalendarDisplay) []const u8 {
     var w = Writer{ .buf = buf, .len = 0 };
-    if (calendar == .always or calendar == .critical) {
+    const cal_slice = rec.calendar.slice();
+    const is_iso = rec.calendar.isIso();
+    // §IsoDateToString: a non-ISO calendar's reference year is meaningful, so it
+    // (and the annotation) appear even under "auto"; ISO keeps the bare MM-DD.
+    if (calendar == .always or calendar == .critical or !is_iso) {
         writeIsoYear(&w, rec.ref_iso_year);
         w.byte('-');
     }
@@ -3793,9 +3797,22 @@ pub fn isoMonthDayToString(rec: PlainMonthDayRecord, buf: []u8, calendar: Calend
     w.byte('-');
     w.pad2(rec.iso_day);
     switch (calendar) {
-        .auto, .never => {},
-        .always => w.bytes("[u-ca=iso8601]"),
-        .critical => w.bytes("[!u-ca=iso8601]"),
+        .never => {},
+        .auto => if (!is_iso) {
+            w.bytes("[u-ca=");
+            w.bytes(cal_slice);
+            w.byte(']');
+        },
+        .always => {
+            w.bytes("[u-ca=");
+            w.bytes(cal_slice);
+            w.byte(']');
+        },
+        .critical => {
+            w.bytes("[!u-ca=");
+            w.bytes(cal_slice);
+            w.byte(']');
+        },
     }
     return w.buf[0..w.len];
 }
