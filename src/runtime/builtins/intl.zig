@@ -3294,7 +3294,9 @@ fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
     const cid = temporal.CalendarId.fromSlice(slots.calendar) orelse temporal.CalendarId.iso8601();
     const cf = tshared.calendarFields(cid, @intCast(ymd.year), ymd.month, ymd.day);
     return .{
-        .year = cf.year,
+        // Japanese renders the era-relative year (Reiwa 32), not the gregorian
+        // 2050; for every other calendar year == era_year so this is a no-op.
+        .year = if (std.ascii.eqlIgnoreCase(slots.calendar, "japanese")) (cf.era_year orelse cf.year) else cf.year,
         .month = cf.month,
         .day = cf.day,
         .hour = t.hour,

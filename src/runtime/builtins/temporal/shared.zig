@@ -452,10 +452,42 @@ pub fn eraYearToYear(cal: temporal.CalendarId, era: []const u8, era_year: i64) ?
         if (std.ascii.eqlIgnoreCase(era, "bh")) return 1 - era_year;
         return null;
     }
+    if (isJapanese(cal)) {
+        if (std.ascii.eqlIgnoreCase(era, "reiwa")) return 2019 + era_year - 1;
+        if (std.ascii.eqlIgnoreCase(era, "heisei")) return 1989 + era_year - 1;
+        if (std.ascii.eqlIgnoreCase(era, "showa")) return 1926 + era_year - 1;
+        if (std.ascii.eqlIgnoreCase(era, "taisho")) return 1912 + era_year - 1;
+        if (std.ascii.eqlIgnoreCase(era, "meiji")) return 1868 + era_year - 1;
+        if (std.ascii.eqlIgnoreCase(era, "ce") or std.ascii.eqlIgnoreCase(era, "japanese")) return era_year;
+        if (std.ascii.eqlIgnoreCase(era, "bce") or std.ascii.eqlIgnoreCase(era, "japanese-inverse")) return 1 - era_year;
+        return null;
+    }
     if (computedCal(cal)) |c| {
         return if (std.ascii.eqlIgnoreCase(era, c.era)) era_year else null;
     }
     return null;
+}
+
+// ── Japanese imperial calendar ───────────────────────────────────────────────
+// Gregorian months/days (year == gregorian year); only era + eraYear differ,
+// from a date-based table of Gregorian era-start dates. Pre-Meiji dates fall
+// back to the proleptic Gregorian "ce"/"bce" eras. Modern boundaries verified
+// vs SpiderMonkey / Kiesel / libjs (showa→heisei 1989-01-08, heisei→reiwa
+// 2019-05-01).
+fn isJapanese(cal: temporal.CalendarId) bool {
+    return std.ascii.eqlIgnoreCase(cal.slice(), "japanese");
+}
+
+const JapaneseEra = struct { name: []const u8, year: i32 };
+
+fn japaneseEraInfo(iso_y: i32, iso_m: u32, iso_d: u32) JapaneseEra {
+    const dn = temporal.daysFromCivil(iso_y, iso_m, iso_d);
+    if (dn >= temporal.daysFromCivil(2019, 5, 1)) return .{ .name = "reiwa", .year = iso_y - 2019 + 1 };
+    if (dn >= temporal.daysFromCivil(1989, 1, 8)) return .{ .name = "heisei", .year = iso_y - 1989 + 1 };
+    if (dn >= temporal.daysFromCivil(1926, 12, 25)) return .{ .name = "showa", .year = iso_y - 1926 + 1 };
+    if (dn >= temporal.daysFromCivil(1912, 7, 30)) return .{ .name = "taisho", .year = iso_y - 1912 + 1 };
+    if (dn >= temporal.daysFromCivil(1868, 9, 8)) return .{ .name = "meiji", .year = iso_y - 1868 + 1 };
+    return if (iso_y < 1) .{ .name = "bce", .year = 1 - iso_y } else .{ .name = "ce", .year = iso_y };
 }
 
 pub const EraYearResolution = struct { present: bool, val: i64 };
@@ -468,6 +500,7 @@ pub fn calendarHasEras(cal: temporal.CalendarId) bool {
     if (cal.isIso()) return false;
     const s = cal.slice();
     if (std.ascii.eqlIgnoreCase(s, "gregory") or std.ascii.eqlIgnoreCase(s, "roc") or std.ascii.eqlIgnoreCase(s, "buddhist")) return true;
+    if (isJapanese(cal)) return true;
     return computedCal(cal) != null;
 }
 
@@ -510,7 +543,7 @@ pub fn calendarYearToIso(cal: temporal.CalendarId, cal_year: i64) i64 {
 pub fn calendarSupported(cal: temporal.CalendarId) bool {
     if (cal.isIso()) return true;
     const s = cal.slice();
-    return std.ascii.eqlIgnoreCase(s, "gregory") or std.ascii.eqlIgnoreCase(s, "roc") or std.ascii.eqlIgnoreCase(s, "buddhist");
+    return std.ascii.eqlIgnoreCase(s, "gregory") or std.ascii.eqlIgnoreCase(s, "roc") or std.ascii.eqlIgnoreCase(s, "buddhist") or isJapanese(cal);
 }
 
 // ── Islamic tabular calendars (islamic-civil + islamic-tbla) ─────────────────
@@ -718,6 +751,22 @@ pub fn calendarFields(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u
             .in_leap_year = compLeap(c.family, cd.year),
             .era = c.era,
             .era_year = @intCast(cd.year),
+        };
+    }
+    // Japanese: gregorian structure with a date-based era overlay.
+    if (isJapanese(cal)) {
+        const je = japaneseEraInfo(iso_y, iso_m, iso_d);
+        return .{
+            .year = iso_y,
+            .month = iso_m,
+            .day = iso_d,
+            .days_in_month = temporal.daysInIsoMonth(iso_y, iso_m),
+            .days_in_year = @intCast(temporal.isoDaysInYear(iso_y)),
+            .months_in_year = 12,
+            .day_of_year = @intCast(temporal.isoDayOfYear(iso_y, iso_m, iso_d)),
+            .in_leap_year = temporal.isLeapYear(iso_y),
+            .era = je.name,
+            .era_year = je.year,
         };
     }
     // Gregorian-month family: iso8601 / gregory / roc / buddhist.

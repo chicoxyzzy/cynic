@@ -279,6 +279,25 @@ test "intl/temporal: PlainYearMonth islamic-civil + calendar preservation" {
     );
 }
 
+test "intl/temporal: japanese imperial calendar (era table / from / boundaries)" {
+    try requireIntlBuild();
+    // Gregorian months/days; .year is the gregorian year, era + eraYear come from
+    // a date-based table (showa→heisei 1989-01-08, heisei→reiwa 2019-05-01).
+    try evalAssert1(
+        \\const d = Temporal.PlainDate.from("2024-03-15").withCalendar("japanese");
+        \\if (d.era !== "reiwa" || d.eraYear !== 6 || d.year !== 2024 || d.month !== 3) throw 0;
+        \\if (Temporal.PlainDate.from("1989-01-07").withCalendar("japanese").era !== "showa") throw 1;
+        \\if (Temporal.PlainDate.from("1989-01-08").withCalendar("japanese").era !== "heisei") throw 2;
+        \\// era + eraYear input resolves the gregorian year; the resolved date then
+        \\// picks the displayed era (M04 stays Heisei, M05 crosses into Reiwa).
+        \\const e = Temporal.PlainDate.from({ era: "heisei", eraYear: 31, monthCode: "M04", day: 15, calendar: "japanese" });
+        \\if (e.era !== "heisei" || e.eraYear !== 31 || e.year !== 2019) throw 3;
+        \\const f = Temporal.PlainDate.from({ era: "heisei", eraYear: 31, monthCode: "M05", day: 15, calendar: "japanese" });
+        \\if (f.era !== "reiwa" || f.eraYear !== 1) throw 4;
+        \\1
+    );
+}
+
 test "intl/temporal: coptic + ethiopic 13-month calendars (getters / from / add)" {
     try requireIntlBuild();
     // Coptic-type family: 13 months (12×30 + a 5/6-day epagomenal M13), leap
