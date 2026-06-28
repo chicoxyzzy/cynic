@@ -497,11 +497,12 @@ fn differenceTemporalYearMonth(realm: *Realm, this_value: Value, args: []const V
     var diff = if (shared.isComputedCalendar(this_ym.calendar)) blk: {
         const a = shared.calendarFields(this_ym.calendar, this_ym.iso_year, this_ym.iso_month, this_ym.ref_iso_day);
         const b = shared.calendarFields(other_ym.calendar, other_ym.iso_year, other_ym.iso_month, other_ym.ref_iso_day);
-        const total: i64 = (@as(i64, b.year) * 12 + @as(i64, b.month) - 1) - (@as(i64, a.year) * 12 + @as(i64, a.month) - 1);
+        const miy: i64 = @intCast(a.months_in_year); // 13 for coptic-type
+        const total: i64 = (@as(i64, b.year) * miy + @as(i64, b.month) - 1) - (@as(i64, a.year) * miy + @as(i64, a.month) - 1);
         break :blk if (largest == .month)
             temporal.DurationRecord{ .months = @floatFromInt(total) }
         else
-            temporal.DurationRecord{ .years = @floatFromInt(@divTrunc(total, 12)), .months = @floatFromInt(@rem(total, 12)) };
+            temporal.DurationRecord{ .years = @floatFromInt(@divTrunc(total, miy)), .months = @floatFromInt(@rem(total, miy)) };
     } else blk: {
         var d = temporal.differenceISODate(this_anchor, other_anchor, largest);
         d.weeks = 0;

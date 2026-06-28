@@ -849,6 +849,37 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
     };
 }
 
+/// Calendar-aware DifferenceISODateTime for the computational calendars — the
+/// time half and the one-day borrow are calendar-independent; only the date
+/// difference is calendar-aware. Mirrors temporal.differenceISODateTime.
+pub fn differenceComputedDateTime(cal: temporal.CalendarId, dt1: temporal.PlainDateTimeRecord, dt2: temporal.PlainDateTimeRecord, largest: temporal.LargestUnit) temporal.DurationRecord {
+    const time_delta = temporal.timeRecordToNanoseconds(dt2.time()) - temporal.timeRecordToNanoseconds(dt1.time());
+    const time_sign: i32 = if (time_delta < 0) -1 else if (time_delta > 0) 1 else 0;
+    const date_sign = temporal.compareISODate(dt2.date(), dt1.date());
+    var adjusted_date1 = dt1.date();
+    var time_rem = time_delta;
+    if (time_sign != 0 and time_sign == -date_sign) {
+        adjusted_date1 = temporal.addISODate(adjusted_date1, 0, 0, 0, date_sign, false).?;
+        time_rem += @as(i128, date_sign) * temporal.ns_per_day;
+    }
+    const date_largest: temporal.LargestUnit = @enumFromInt(@min(@intFromEnum(largest), @intFromEnum(temporal.LargestUnit.day)));
+    const date_diff = differenceComputedDate(cal, adjusted_date1, dt2.date(), date_largest);
+    const time_largest: temporal.LargestUnit = @enumFromInt(@max(@intFromEnum(largest), @intFromEnum(temporal.LargestUnit.hour)));
+    const time_dur = temporal.balanceTimeDuration(time_rem, time_largest);
+    return .{
+        .years = date_diff.years,
+        .months = date_diff.months,
+        .weeks = date_diff.weeks,
+        .days = date_diff.days,
+        .hours = time_dur.hours,
+        .minutes = time_dur.minutes,
+        .seconds = time_dur.seconds,
+        .milliseconds = time_dur.milliseconds,
+        .microseconds = time_dur.microseconds,
+        .nanoseconds = time_dur.nanoseconds,
+    };
+}
+
 /// Calendar-aware AddDateTime for the computational calendars: fold the time
 /// duration into the time half (carrying whole days), then add the date part in
 /// the calendar's terms. Mirrors temporal.addDateTimeDateChecked.

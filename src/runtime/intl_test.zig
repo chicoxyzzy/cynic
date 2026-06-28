@@ -348,6 +348,15 @@ test "intl/temporal: PlainDate until/since year-month diff for computational cal
         \\const b = Temporal.PlainDate.from("2025-06-15").withCalendar("islamic-civil");
         \\const back = b.add(b.since(a, { largestUnit: "year" }).negated());
         \\if (back.year !== a.year || back.month !== a.month || back.day !== a.day) throw 4;
+        \\// PlainDateTime + ZonedDateTime carry the same calendar-aware date diff:
+        \\const pa = Temporal.PlainDateTime.from("2024-01-01T03:00").withCalendar("islamic-civil");
+        \\const pb = Temporal.PlainDateTime.from("2025-06-15T20:30").withCalendar("islamic-civil");
+        \\const pbk = pa.add(pa.until(pb, { largestUnit: "year" }));
+        \\if (pbk.year !== pb.year || pbk.month !== pb.month || pbk.day !== pb.day || pbk.hour !== pb.hour || pbk.minute !== pb.minute) throw 5;
+        \\const za = Temporal.ZonedDateTime.from("2020-02-10T00:00[UTC]").withCalendar("coptic");
+        \\const zb = Temporal.ZonedDateTime.from("2024-09-20T12:00[UTC]").withCalendar("coptic");
+        \\const zbk = za.add(za.until(zb, { largestUnit: "year" }));
+        \\if (zbk.year !== zb.year || zbk.month !== zb.month || zbk.day !== zb.day || zbk.hour !== zb.hour) throw 6;
         \\1
     );
 }

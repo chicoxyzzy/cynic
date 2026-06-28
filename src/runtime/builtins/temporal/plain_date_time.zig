@@ -762,7 +762,10 @@ fn differenceTemporalDateTime(realm: *Realm, this_value: Value, args: []const Va
     if (@intFromEnum(largest) < @intFromEnum(temporal.LargestUnit.day) or
         @intFromEnum(smallest) < @intFromEnum(temporal.LargestUnit.day))
     {
-        const base_diff = temporal.differenceISODateTime(this_dt, other_dt, largest);
+        const base_diff = if (shared.isComputedCalendar(this_dt.calendar))
+            shared.differenceComputedDateTime(this_dt.calendar, this_dt, other_dt, largest)
+        else
+            temporal.differenceISODateTime(this_dt, other_dt, largest);
         var dr = if (smallest == .nanosecond and increment == 1)
             base_diff
         else

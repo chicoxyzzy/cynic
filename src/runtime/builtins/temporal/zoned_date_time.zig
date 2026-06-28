@@ -833,7 +833,10 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
     {
         const start_wall = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
         const end_wall = temporal.getISODateTimeFor(other.time_zone, other.epoch_ns);
-        const base_diff = temporal.differenceISODateTime(start_wall, end_wall, largest);
+        const base_diff = if (shared.isComputedCalendar(z.calendar))
+            shared.differenceComputedDateTime(z.calendar, start_wall, end_wall, largest)
+        else
+            temporal.differenceISODateTime(start_wall, end_wall, largest);
         var dr = if (smallest == .nanosecond and increment == 1)
             base_diff
         else
