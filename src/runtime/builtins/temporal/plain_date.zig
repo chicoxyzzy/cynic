@@ -226,8 +226,8 @@ fn plainDateDaysInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Va
 }
 fn plainDateMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainDate(realm, t);
-    return Value.fromInt32(12);
+    const rec = try requirePlainDate(realm, t);
+    return shared.monthsInYearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -300,8 +300,8 @@ fn toISODateFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!Pl
     }
     // Islamic tabular calendars convert the (year, month, day) field triple
     // through the day count (the day clamps to the Islamic month length).
-    if (shared.isIslamicTabular(cal)) {
-        const iso = shared.islamicToIso(cal, year_val, month, day_val, overflow == .reject) orelse
+    if (shared.isComputedCalendar(cal)) {
+        const iso = shared.computedToIso(cal, year_val, month, day_val, overflow == .reject) orelse
             return throwRangeError(realm, "PlainDate is out of range");
         var rec = temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse
             return throwRangeError(realm, "PlainDate is out of range");
@@ -432,7 +432,7 @@ fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
     // Islamic tabular calendars: merge against the receiver's *Islamic* fields,
     // then convert the triple back to ISO (the day clamps to the month length).
-    if (shared.isIslamicTabular(base.calendar)) {
+    if (shared.isComputedCalendar(base.calendar)) {
         const cf = shared.calendarFields(base.calendar, base.iso_year, base.iso_month, base.iso_day);
         var im: i64 = cf.month;
         if (mc_len) |len| {
@@ -443,7 +443,7 @@ fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         }
         const iy: i64 = if (year_present) year_val else cf.year;
         const id: i64 = if (day_present) day_val else cf.day;
-        const iso = shared.islamicToIso(base.calendar, iy, im, id, overflow == .reject) orelse
+        const iso = shared.computedToIso(base.calendar, iy, im, id, overflow == .reject) orelse
             return throwRangeError(realm, "PlainDate is out of range");
         var rec = temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse
             return throwRangeError(realm, "PlainDate is out of range");
@@ -517,8 +517,8 @@ fn plainDateAddSubtract(realm: *Realm, this_value: Value, args: []const Value, n
     const time_days: i64 = @intCast(@divTrunc(temporal.timeDurationNanoseconds(dur), 86_400_000_000_000));
     // Islamic tabular calendars add years + months in Islamic terms (ISO months
     // would land on the wrong Islamic month), then fold in weeks + days.
-    if (shared.isIslamicTabular(base.calendar)) {
-        const iso = shared.addIslamic(
+    if (shared.isComputedCalendar(base.calendar)) {
+        const iso = shared.addComputed(
             base.calendar,
             base.iso_year,
             base.iso_month,
@@ -651,9 +651,9 @@ fn plainDateToPlainYearMonth(realm: *Realm, this_value: Value, args: []const Val
     const d = try requirePlainDate(realm, this_value);
     // Islamic tabular calendars: the reference ISO day is where the Islamic
     // year-month's day 1 lands, so the year-month round-trips its calendar.
-    if (shared.isIslamicTabular(d.calendar)) {
+    if (shared.isComputedCalendar(d.calendar)) {
         const cf = shared.calendarFields(d.calendar, d.iso_year, d.iso_month, d.iso_day);
-        const iso = shared.islamicToIso(d.calendar, cf.year, cf.month, 1, false) orelse
+        const iso = shared.computedToIso(d.calendar, cf.year, cf.month, 1, false) orelse
             return throwRangeError(realm, "PlainYearMonth is out of range");
         return createTemporalYearMonth(realm, .{
             .iso_year = @intCast(iso.year),

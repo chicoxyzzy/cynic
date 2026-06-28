@@ -353,8 +353,9 @@ fn zonedDateTimeDaysInYear(realm: *Realm, t: Value, a: []const Value) NativeErro
 }
 fn zonedDateTimeMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requireZonedDateTime(realm, t);
-    return Value.fromInt32(12);
+    const z = try requireZonedDateTime(realm, t);
+    const rec = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+    return shared.monthsInYearValue(z.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn zonedDateTimeInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -551,7 +552,7 @@ fn zonedDateTimeToPlainDate(realm: *Realm, this_value: Value, args: []const Valu
     const z = try requireZonedDateTime(realm, this_value);
     const dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
     var d = dt.date();
-    if (shared.calendarSupported(z.calendar) or shared.isIslamicTabular(z.calendar)) d.calendar = z.calendar;
+    if (shared.calendarSupported(z.calendar) or shared.isComputedCalendar(z.calendar)) d.calendar = z.calendar;
     return createTemporalDate(realm, d);
 }
 
@@ -570,7 +571,7 @@ fn zonedDateTimeToPlainDateTime(realm: *Realm, this_value: Value, args: []const 
     _ = args;
     const z = try requireZonedDateTime(realm, this_value);
     var dt = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
-    if (shared.calendarSupported(z.calendar) or shared.isIslamicTabular(z.calendar)) dt.calendar = z.calendar;
+    if (shared.calendarSupported(z.calendar) or shared.isComputedCalendar(z.calendar)) dt.calendar = z.calendar;
     return createTemporalDateTime(realm, dt);
 }
 
@@ -690,13 +691,13 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         month = month_int;
     }
 
-    const new_date = if (shared.isIslamicTabular(z.calendar)) blk: {
+    const new_date = if (shared.isComputedCalendar(z.calendar)) blk: {
         // Merge against the receiver's Islamic fields, then convert to ISO.
         const cf = shared.calendarFields(z.calendar, base.iso_year, base.iso_month, base.iso_day);
         const iy: i64 = if (year_present) year else cf.year;
         const im: i64 = if (month_given) month else cf.month;
         const id: i64 = if (day_present) day else cf.day;
-        const iso = shared.islamicToIso(z.calendar, iy, im, id, overflow == .reject) orelse
+        const iso = shared.computedToIso(z.calendar, iy, im, id, overflow == .reject) orelse
             return throwRangeError(realm, "ZonedDateTime date is out of range");
         break :blk temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse
             return throwRangeError(realm, "ZonedDateTime date is out of range");
@@ -753,8 +754,8 @@ fn zonedDateTimeAddSubtract(realm: *Realm, this_value: Value, args: []const Valu
     if (!temporal.isValidDuration(dur)) return throwRangeError(realm, "Duration values are out of range");
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
     if (negate) dur = temporal.negateDuration(dur);
-    const epoch = if (shared.isIslamicTabular(z.calendar))
-        (shared.addIslamicZoned(z.epoch_ns, z.time_zone, z.calendar, dur, overflow == .reject) orelse
+    const epoch = if (shared.isComputedCalendar(z.calendar))
+        (shared.addComputedZoned(z.epoch_ns, z.time_zone, z.calendar, dur, overflow == .reject) orelse
             return throwRangeError(realm, "ZonedDateTime is out of range"))
     else
         (temporal.addZonedDateTime(z.epoch_ns, z.time_zone, dur, overflow == .reject) orelse

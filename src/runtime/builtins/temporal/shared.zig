@@ -485,6 +485,78 @@ fn islamicFromDays(epoch: i64, date: i64) IslamicYmd {
     return .{ .year = year, .month = @intCast(month), .day = @intCast(day) };
 }
 
+// ── Computational calendar family ────────────────────────────────────────────
+// A common dispatch over the calendars whose date is a closed-form function of
+// the day count: the Islamic tabular pair (islamic-civil / islamic-tbla) and
+// the Coptic-type pair (coptic / ethiopic — 13 months of 30 days + a 5/6-day
+// epagomenal 13th month, leap every 4th year). Each member is fully described
+// by an epoch (days-since-1970, daysFromCivil space), an era, and its family's
+// fixed-from / from-fixed / month-length / leap rules. Coptic epochs verified
+// against SpiderMonkey/Boa/Kiesel/libjs (coptic 1737-01-01 = ISO 2020-09-11,
+// ethiopic 2013-01-01 = ISO 2020-09-11). Reingold & Dershowitz.
+const CompFamily = enum { islamic, coptic };
+const ComputedCal = struct { family: CompFamily, epoch: i64, era: []const u8 };
+
+fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
+    const s = cal.slice();
+    if (std.ascii.eqlIgnoreCase(s, "islamic-civil") or std.ascii.eqlIgnoreCase(s, "islamicc")) return .{ .family = .islamic, .epoch = -492148, .era = "ah" };
+    if (std.ascii.eqlIgnoreCase(s, "islamic-tbla")) return .{ .family = .islamic, .epoch = -492149, .era = "ah" };
+    if (std.ascii.eqlIgnoreCase(s, "coptic")) return .{ .family = .coptic, .epoch = -615558, .era = "am" };
+    if (std.ascii.eqlIgnoreCase(s, "ethiopic")) return .{ .family = .coptic, .epoch = -716367, .era = "am" };
+    return null;
+}
+
+fn compMonthsInYear(f: CompFamily) u32 {
+    return if (f == .islamic) 12 else 13;
+}
+
+fn compLeap(f: CompFamily, year: i64) bool {
+    return switch (f) {
+        .islamic => islamicLeap(year),
+        .coptic => @mod(year, 4) == 3,
+    };
+}
+
+fn compDaysInMonth(f: CompFamily, year: i64, month: u32) u32 {
+    return switch (f) {
+        .islamic => islamicDaysInMonth(year, month),
+        .coptic => if (month <= 12) 30 else (if (compLeap(.coptic, year)) @as(u32, 6) else 5),
+    };
+}
+
+fn compDaysInYear(f: CompFamily, year: i64) u32 {
+    return switch (f) {
+        .islamic => if (compLeap(.islamic, year)) @as(u32, 355) else 354,
+        .coptic => if (compLeap(.coptic, year)) @as(u32, 366) else 365,
+    };
+}
+
+/// fixed-from, days-since-1970.
+fn compToDays(c: ComputedCal, year: i64, month: i64, day: i64) i64 {
+    return switch (c.family) {
+        .islamic => islamicToDays(c.epoch, year, month, day),
+        .coptic => c.epoch - 1 + 365 * (year - 1) + @divFloor(year, 4) + 30 * (month - 1) + day,
+    };
+}
+
+const CompYmd = struct { year: i64, month: u32, day: u32 };
+
+/// from-fixed, from days-since-1970.
+fn compFromDays(c: ComputedCal, date: i64) CompYmd {
+    switch (c.family) {
+        .islamic => {
+            const i = islamicFromDays(c.epoch, date);
+            return .{ .year = i.year, .month = i.month, .day = i.day };
+        },
+        .coptic => {
+            const year = @divFloor(4 * (date - c.epoch) + 1463, 1461);
+            const month = @divFloor(date - compToDays(c, year, 1, 1), 30) + 1;
+            const day = date - compToDays(c, year, month, 1) + 1;
+            return .{ .year = year, .month = @intCast(month), .day = @intCast(day) };
+        },
+    }
+}
+
 /// Calendar-resolved date fields for a stored ISO date — the single source of
 /// truth behind every `Temporal.*` calendar getter. Gregorian-month calendars
 /// (iso8601 / gregory / roc / buddhist) keep the ISO month/day and only shift
@@ -503,21 +575,20 @@ pub const CalDate = struct {
 };
 
 pub fn calendarFields(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32) CalDate {
-    if (islamicEpoch(cal)) |epoch| {
+    if (computedCal(cal)) |c| {
         const date = temporal.daysFromCivil(iso_y, iso_m, iso_d);
-        const i = islamicFromDays(epoch, date);
-        const leap = islamicLeap(i.year);
+        const cd = compFromDays(c, date);
         return .{
-            .year = @intCast(i.year),
-            .month = i.month,
-            .day = i.day,
-            .days_in_month = islamicDaysInMonth(i.year, i.month),
-            .days_in_year = if (leap) 355 else 354,
-            .months_in_year = 12,
-            .day_of_year = @intCast(date - islamicToDays(epoch, i.year, 1, 1) + 1),
-            .in_leap_year = leap,
-            .era = "ah",
-            .era_year = @intCast(i.year),
+            .year = @intCast(cd.year),
+            .month = cd.month,
+            .day = cd.day,
+            .days_in_month = compDaysInMonth(c.family, cd.year, cd.month),
+            .days_in_year = compDaysInYear(c.family, cd.year),
+            .months_in_year = compMonthsInYear(c.family),
+            .day_of_year = @intCast(date - compToDays(c, cd.year, 1, 1) + 1),
+            .in_leap_year = compLeap(c.family, cd.year),
+            .era = c.era,
+            .era_year = @intCast(cd.year),
         };
     }
     // Gregorian-month family: iso8601 / gregory / roc / buddhist.
@@ -570,6 +641,9 @@ pub fn daysInYearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
 pub fn dayOfYearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
     return Value.fromInt32(@intCast(calendarFields(cal, y, m, d).day_of_year));
 }
+pub fn monthsInYearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
+    return Value.fromInt32(@intCast(calendarFields(cal, y, m, d).months_in_year));
+}
 pub fn inLeapYearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
     return Value.fromBool(calendarFields(cal, y, m, d).in_leap_year);
 }
@@ -591,65 +665,70 @@ pub fn eraYearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
 
 const CalYmd = struct { year: i64, month: u32, day: u32 };
 
-/// Inverse of calendarFields for an Islamic (year, month, day) field triple →
-/// the ISO date, honouring `reject` (else constrain month ∈ [1,12] and day to
-/// the month length). Returns null only under reject for an out-of-range field.
-/// Gregorian-month calendars never reach here (they regulate via ISO directly).
-pub fn islamicToIso(cal: temporal.CalendarId, cal_y: i64, cal_m: i64, cal_d: i64, reject: bool) ?CalYmd {
-    const epoch = islamicEpoch(cal) orelse return null;
+/// Inverse of calendarFields for a computational-calendar (year, month, day)
+/// field triple → the ISO date, honouring `reject` (else constrain month ∈
+/// [1, monthsInYear] and day to the month length). Returns null under reject for
+/// an out-of-range field, or for a gregorian-month calendar (those regulate via
+/// ISO directly and never reach here).
+pub fn computedToIso(cal: temporal.CalendarId, cal_y: i64, cal_m: i64, cal_d: i64, reject: bool) ?CalYmd {
+    const c = computedCal(cal) orelse return null;
+    const miy: i64 = compMonthsInYear(c.family);
     var m = cal_m;
-    if (m < 1 or m > 12) {
+    if (m < 1 or m > miy) {
         if (reject) return null;
-        m = std.math.clamp(m, 1, 12);
+        m = std.math.clamp(m, 1, miy);
     }
-    const dim: i64 = islamicDaysInMonth(cal_y, @intCast(m));
+    const dim: i64 = compDaysInMonth(c.family, cal_y, @intCast(m));
     var d = cal_d;
     if (d < 1 or d > dim) {
         if (reject) return null;
         d = std.math.clamp(d, 1, dim);
     }
-    const ymd = temporal.civilFromDays(islamicToDays(epoch, cal_y, m, d));
+    const ymd = temporal.civilFromDays(compToDays(c, cal_y, m, d));
     return .{ .year = ymd.year, .month = ymd.month, .day = ymd.day };
 }
 
-/// Whether `cal` needs the Islamic add/from path (non-gregorian month structure).
-pub fn isIslamicTabular(cal: temporal.CalendarId) bool {
-    return islamicEpoch(cal) != null;
+/// Whether `cal` needs the computational add/from path (a non-gregorian month
+/// structure: the Islamic tabular pair or the Coptic-type pair).
+pub fn isComputedCalendar(cal: temporal.CalendarId) bool {
+    return computedCal(cal) != null;
 }
 
-/// Calendar-aware add for the Islamic tabular calendars: add years + months in
-/// Islamic terms (normalising the month, constraining or rejecting the day to
-/// the target month length), then add weeks + days as a plain day offset.
-/// Returns the resulting ISO date. Gregorian-month calendars don't use this
-/// (ISO months equal their calendar months, so addISODate already suffices).
-pub fn addIslamic(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32, add_y: i64, add_mo: i64, add_w: i64, add_d: i64, reject: bool) ?CalYmd {
-    const epoch = islamicEpoch(cal) orelse return null;
-    const i = islamicFromDays(epoch, temporal.daysFromCivil(iso_y, iso_m, iso_d));
-    var y = i.year + add_y;
-    const m_total = (@as(i64, i.month) - 1) + add_mo; // 0-based month + delta
-    y += @divFloor(m_total, 12);
-    const m: i64 = @mod(m_total, 12) + 1; // 1..12
-    const dim: i64 = islamicDaysInMonth(y, @intCast(m));
-    var d: i64 = i.day;
+/// Calendar-aware add for the computational calendars: add years + months in
+/// the calendar's own terms (normalising the month over monthsInYear,
+/// constraining or rejecting the day to the target month length), then add
+/// weeks + days as a plain day offset. Returns the resulting ISO date.
+/// Gregorian-month calendars don't use this (ISO months equal their calendar
+/// months, so addISODate already suffices).
+pub fn addComputed(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32, add_y: i64, add_mo: i64, add_w: i64, add_d: i64, reject: bool) ?CalYmd {
+    const c = computedCal(cal) orelse return null;
+    const start = compFromDays(c, temporal.daysFromCivil(iso_y, iso_m, iso_d));
+    const miy: i64 = compMonthsInYear(c.family);
+    var y = start.year + add_y;
+    const m_total = (@as(i64, start.month) - 1) + add_mo; // 0-based month + delta
+    y += @divFloor(m_total, miy);
+    const m: i64 = @mod(m_total, miy) + 1;
+    const dim: i64 = compDaysInMonth(c.family, y, @intCast(m));
+    var d: i64 = start.day;
     if (d > dim) {
         if (reject) return null;
         d = dim;
     }
-    const days = islamicToDays(epoch, y, m, d) + add_w * 7 + add_d;
+    const days = compToDays(c, y, m, d) + add_w * 7 + add_d;
     const ymd = temporal.civilFromDays(days);
     return .{ .year = ymd.year, .month = ymd.month, .day = ymd.day };
 }
 
-/// Calendar-aware AddDateTime for the Islamic tabular calendars: fold the time
+/// Calendar-aware AddDateTime for the computational calendars: fold the time
 /// duration into the time half (carrying whole days), then add the date part in
-/// Islamic terms. Mirrors temporal.addDateTimeDateChecked.
-pub fn addIslamicDateTime(base: temporal.PlainDateTimeRecord, dur: temporal.DurationRecord, reject: bool) ?temporal.PlainDateTimeRecord {
+/// the calendar's terms. Mirrors temporal.addDateTimeDateChecked.
+pub fn addComputedDateTime(base: temporal.PlainDateTimeRecord, dur: temporal.DurationRecord, reject: bool) ?temporal.PlainDateTimeRecord {
     const ns_per_day: i128 = 86_400 * 1_000_000_000;
     const time_ns = temporal.timeRecordToNanoseconds(base.time()) + temporal.timeDurationNanoseconds(dur);
     const day_carry: i64 = @intCast(@divFloor(time_ns, ns_per_day));
     const within = time_ns - @as(i128, day_carry) * ns_per_day;
     const new_time = temporal.nanosecondsToTimeRecord(within);
-    const iso = addIslamic(
+    const iso = addComputed(
         base.calendar,
         base.iso_year,
         base.iso_month,
@@ -665,17 +744,17 @@ pub fn addIslamicDateTime(base: temporal.PlainDateTimeRecord, dur: temporal.Dura
     return temporal.PlainDateTimeRecord.combine(date, new_time);
 }
 
-/// Calendar-aware AddZonedDateTime for the Islamic tabular calendars: add the
+/// Calendar-aware AddZonedDateTime for the computational calendars: add the
 /// calendar (year/month/week/day) part of the duration to the zone's wall date
-/// in Islamic terms, re-anchor to an instant, then add the exact-time part.
-/// Mirrors temporal.addZonedDateTime. Returns the new epoch nanoseconds.
-pub fn addIslamicZoned(epoch_ns: i128, tz: temporal.TimeZone, calendar: temporal.CalendarId, dur: temporal.DurationRecord, reject: bool) ?i128 {
+/// in the calendar's terms, re-anchor to an instant, then add the exact-time
+/// part. Mirrors temporal.addZonedDateTime. Returns the new epoch nanoseconds.
+pub fn addComputedZoned(epoch_ns: i128, tz: temporal.TimeZone, calendar: temporal.CalendarId, dur: temporal.DurationRecord, reject: bool) ?i128 {
     const time_ns = temporal.timeDurationNanoseconds(dur);
     if (dur.years == 0 and dur.months == 0 and dur.weeks == 0 and dur.days == 0) {
         return temporal.addInstant(epoch_ns, time_ns);
     }
     const wall = temporal.getISODateTimeFor(tz, epoch_ns);
-    const iso = addIslamic(
+    const iso = addComputed(
         calendar,
         wall.iso_year,
         wall.iso_month,

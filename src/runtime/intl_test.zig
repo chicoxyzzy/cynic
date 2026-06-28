@@ -276,6 +276,23 @@ test "intl/temporal: PlainYearMonth islamic-civil + calendar preservation" {
     );
 }
 
+test "intl/temporal: coptic + ethiopic 13-month calendars (getters / from / add)" {
+    try requireIntlBuild();
+    // Coptic-type family: 13 months (12×30 + a 5/6-day epagomenal M13), leap
+    // every 4th year, era "am"; coptic / ethiopic differ only by epoch.
+    try evalAssert1(
+        \\const co = Temporal.PlainDate.from("2020-09-11").withCalendar("coptic");
+        \\if (co.year !== 1737 || co.month !== 1 || co.day !== 1) throw 0;
+        \\if (co.era !== "am" || co.monthsInYear !== 13 || co.daysInMonth !== 30) throw 1;
+        \\const et = Temporal.PlainDate.from("2020-09-11").withCalendar("ethiopic");
+        \\if (et.year !== 2013 || et.month !== 1 || et.era !== "am" || et.monthsInYear !== 13) throw 2;
+        \\const f = Temporal.PlainDate.from({ year: 1740, monthCode: "M04", day: 22, calendar: "coptic" });
+        \\if (f.toString().slice(0, 10) !== "2024-01-01") throw 3;
+        \\if (f.add({ months: 13 }).year !== 1741 || f.add({ months: 13 }).month !== 4) throw 4;
+        \\1
+    );
+}
+
 test "intl off: Temporal rejects non-ISO calendar and named IANA" {
     if (intl_config.enabled) return error.SkipZigTest;
     try evalThrowsAnyTier(

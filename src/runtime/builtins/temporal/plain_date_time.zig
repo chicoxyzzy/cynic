@@ -288,8 +288,8 @@ fn plainDateTimeDaysInYear(realm: *Realm, t: Value, a: []const Value) NativeErro
 }
 fn plainDateTimeMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    _ = try requirePlainDateTime(realm, t);
-    return Value.fromInt32(12);
+    const rec = try requirePlainDateTime(realm, t);
+    return shared.monthsInYearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.iso_day);
 }
 fn plainDateTimeInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -459,8 +459,8 @@ pub fn resolveDateTimeFieldsNoRange(realm: *Realm, f: RawDateTimeFields, overflo
     }
 
     const time = try regulateTime(realm, f.hour, f.minute, f.second, f.millisecond, f.microsecond, f.nanosecond, overflow);
-    if (shared.isIslamicTabular(f.calendar)) {
-        const iso = shared.islamicToIso(f.calendar, f.year, month, f.day, overflow == .reject) orelse
+    if (shared.isComputedCalendar(f.calendar)) {
+        const iso = shared.computedToIso(f.calendar, f.year, month, f.day, overflow == .reject) orelse
             return throwRangeError(realm, "PlainDateTime date is out of range");
         var date = temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse
             return throwRangeError(realm, "PlainDateTime date is out of range");
@@ -620,7 +620,7 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     // Islamic tabular calendars: merge against the receiver's *Islamic* fields,
     // then convert the triple back to ISO (the time half is unaffected).
-    if (shared.isIslamicTabular(base.calendar)) {
+    if (shared.isComputedCalendar(base.calendar)) {
         const cf = shared.calendarFields(base.calendar, base.iso_year, base.iso_month, base.iso_day);
         var im: i64 = cf.month;
         if (month_code_len) |len| {
@@ -631,7 +631,7 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         }
         const iy: i64 = if (year_v.isUndefined()) cf.year else year;
         const id: i64 = if (day_v.isUndefined()) cf.day else day;
-        const iso = shared.islamicToIso(base.calendar, iy, im, id, overflow == .reject) orelse
+        const iso = shared.computedToIso(base.calendar, iy, im, id, overflow == .reject) orelse
             return throwRangeError(realm, "PlainDateTime date is out of range");
         var date = temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse
             return throwRangeError(realm, "PlainDateTime date is out of range");
@@ -685,8 +685,8 @@ fn plainDateTimeAddSubtract(realm: *Realm, this_value: Value, args: []const Valu
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
     if (negate) dur = temporal.negateDuration(dur);
     // Islamic tabular calendars add the date part in Islamic terms.
-    if (shared.isIslamicTabular(base.calendar)) {
-        const rec = shared.addIslamicDateTime(base, dur, overflow == .reject) orelse
+    if (shared.isComputedCalendar(base.calendar)) {
+        const rec = shared.addComputedDateTime(base, dur, overflow == .reject) orelse
             return throwRangeError(realm, "PlainDateTime is out of range");
         return createTemporalDateTime(realm, rec);
     }
