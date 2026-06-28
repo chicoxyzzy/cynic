@@ -363,6 +363,23 @@ test "intl/temporal: PlainMonthDay for computational calendars (reference year)"
     );
 }
 
+test "intl/temporal: era-less calendar does not read era/eraYear fields" {
+    try requireIntlBuild();
+    // PrepareCalendarFields lists era / eraYear only for calendars that use eras,
+    // so an ISO `from` must not touch those getters; a calendar with eras must.
+    try evalAssert1(
+        \\let isoReads = 0;
+        \\Temporal.PlainDate.from({ year: 2024, month: 3, day: 15,
+        \\  get era() { isoReads++; return undefined; }, get eraYear() { isoReads++; return undefined; } });
+        \\if (isoReads !== 0) throw 0;
+        \\let eraReads = 0;
+        \\Temporal.PlainDate.from({ year: 1446, monthCode: "M01", day: 1, calendar: "islamic-civil",
+        \\  get era() { eraReads++; return undefined; }, get eraYear() { eraReads++; return undefined; } });
+        \\if (eraReads === 0) throw 1;
+        \\1
+    );
+}
+
 test "intl/temporal: dual-era calendars (ethiopic am/aa, islamic ah/bh)" {
     try requireIntlBuild();
     // ethiopic flips Amete Mihret (am) to Amete Alem (aa, +5500) at year ≤ 0;

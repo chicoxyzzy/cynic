@@ -672,12 +672,14 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         year_present = true;
         any = true;
     }
-    const era_field = try getPropertyChain(realm, obj, "era");
-    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, z.calendar, era_field, era_year_field, year_present, year, true);
-    year = ey_res.val;
-    if (ey_res.present and !year_present) any = true;
-    year_present = ey_res.present;
+    if (shared.calendarHasEras(z.calendar)) {
+        const era_field = try getPropertyChain(realm, obj, "era");
+        const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+        const ey_res = try shared.resolveEraYear(realm, z.calendar, era_field, era_year_field, year_present, year, true);
+        year = ey_res.val;
+        if (ey_res.present and !year_present) any = true;
+        year_present = ey_res.present;
+    }
     if (!any) return throwTypeError(realm, "ZonedDateTime-like must have at least one recognized property");
 
     // §6.3.x — the three resolved-options reads (disambiguation → offset →

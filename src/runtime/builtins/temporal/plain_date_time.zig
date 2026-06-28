@@ -424,12 +424,16 @@ pub fn readDateTimeFieldsRaw(realm: *Realm, obj: *JSObject, zoned: ?*ZonedFieldE
         f.year_set = true;
     }
     // era + eraYear resolve to the calendar year (shared by PlainDateTime and
-    // ZonedDateTime, both of which read fields through here).
-    const era_field = try getPropertyChain(realm, obj, "era");
-    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, f.calendar, era_field, era_year_field, f.year_set, f.year, false);
-    f.year = ey_res.val;
-    f.year_set = ey_res.present;
+    // ZonedDateTime, both of which read fields through here). Only calendars with
+    // eras list era / eraYear in PrepareCalendarFields, so era-less calendars
+    // never read them.
+    if (shared.calendarHasEras(f.calendar)) {
+        const era_field = try getPropertyChain(realm, obj, "era");
+        const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+        const ey_res = try shared.resolveEraYear(realm, f.calendar, era_field, era_year_field, f.year_set, f.year, false);
+        f.year = ey_res.val;
+        f.year_set = ey_res.present;
+    }
     return f;
 }
 
@@ -623,12 +627,14 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
         any = true;
     }
-    const era_field = try getPropertyChain(realm, obj, "era");
-    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year, true);
-    year = ey_res.val;
-    if (ey_res.present and !year_present) any = true;
-    year_present = ey_res.present;
+    if (shared.calendarHasEras(base.calendar)) {
+        const era_field = try getPropertyChain(realm, obj, "era");
+        const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+        const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year, true);
+        year = ey_res.val;
+        if (ey_res.present and !year_present) any = true;
+        year_present = ey_res.present;
+    }
     if (!any) return throwTypeError(realm, "PlainDateTime-like must have at least one recognized property");
 
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));

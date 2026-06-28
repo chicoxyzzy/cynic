@@ -238,11 +238,13 @@ fn toYearMonthFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!
     const year_v = try getPropertyChain(realm, obj, "year");
     var year_present = !year_v.isUndefined();
     var year: i64 = if (year_present) try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v)) else 0;
-    const era_field = try getPropertyChain(realm, obj, "era");
-    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, cal, era_field, era_year_field, year_present, year, false);
-    year_present = ey_res.present;
-    year = ey_res.val;
+    if (shared.calendarHasEras(cal)) {
+        const era_field = try getPropertyChain(realm, obj, "era");
+        const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+        const ey_res = try shared.resolveEraYear(realm, cal, era_field, era_year_field, year_present, year, false);
+        year_present = ey_res.present;
+        year = ey_res.val;
+    }
     if (!year_present) return throwTypeError(realm, "PlainYearMonth-like is missing 'year'");
 
     const overflow = try getTemporalOverflowOption(realm, options);
@@ -359,12 +361,14 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
         year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
         any = true;
     }
-    const era_field = try getPropertyChain(realm, obj, "era");
-    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
-    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year, true);
-    year = ey_res.val;
-    if (ey_res.present and !year_present) any = true;
-    year_present = ey_res.present;
+    if (shared.calendarHasEras(base.calendar)) {
+        const era_field = try getPropertyChain(realm, obj, "era");
+        const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+        const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year, true);
+        year = ey_res.val;
+        if (ey_res.present and !year_present) any = true;
+        year_present = ey_res.present;
+    }
     if (!any) return throwTypeError(realm, "PlainYearMonth-like must have at least one recognized property");
 
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
