@@ -17,6 +17,34 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-06-28 — cynic `8563423b` (interpreter arithmetic + comparison fast paths), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Same-runner A/B vs `290bc75f` (the commit just before the first fast path),
+suite=both, 12 runs back-to-back per iteration. Three interpreter changes add
+common-type fast paths in the dispatch loop ahead of the general slow path:
+inline `==` / `!=` and conditional fast paths (`eb220910`), double / mixed-numeric
+fast paths for `+ − * / %` (`37726a10`), and an integer fast path in
+`formatDoubleSafe` for double-index keys (`8563423b`). The A/B range also carries
+~7 interleaved Intl commits, throughput-neutral here — the bench fixtures never
+exercise Intl, so their only effect is a small code-layout shift. The macro wins
+are large and consistent across both tiers:
+
+- **Octane macros — big, clean wins** (spread 9–30%): **navier_stokes 0.720× /
+  0.737×** (JIT / no-jit — the arithmetic-heavy fixture, the biggest mover),
+  **richards 0.812× / 0.819×**, **crypto 0.831× / 0.857×**. deltablue
+  (1.00× / 0.96×), raytrace (1.00× / 0.99×) and splay (0.96× / 0.97×) sit within
+  noise. The `+ − * / %` and `==` / `!=` paths land squarely where the
+  double-heavy macros spend their time.
+- **Micros mostly flat** on the shared vCPU (high per-iteration spread):
+  `arith_loop` is flat (1.01× / 1.03×) — it was already on the int32 path; these
+  commits add the *double / mixed-numeric* paths the macros lean on. One flagged
+  regression — **`tail_recursion` 1.116× / 1.274×** (🔴) — but at 32% / 57%
+  spread it is the noisiest fixture in the run; worth a watch, not a block.
+
+The headline is the macro win: a double-digit interpreter speedup on three of six
+Octane macros that the prior bench rows (GC-latency work) never captured — which
+is why the file looked "current" while sitting a major interpreter win behind.
+
 ### 2026-06-24 — cynic `05e99538` (lazy sweep), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Same-runner A/B vs `897d66ad` (incremental major marking), suite=both, 12 runs
