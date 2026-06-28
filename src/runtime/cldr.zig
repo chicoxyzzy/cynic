@@ -65,6 +65,7 @@ const SectionKind = enum(u8) {
     compact = 12,
     units = 13,
     language_aliases = 14,
+    territory_aliases = 15,
 };
 
 // ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
@@ -85,6 +86,7 @@ var rt_payload: []const u8 = &.{};
 var cp_payload: []const u8 = &.{};
 var un_payload: []const u8 = &.{};
 var lang_alias_payload: []const u8 = &.{};
+var territory_alias_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -126,6 +128,7 @@ fn ensureInit() bool {
             @intFromEnum(SectionKind.compact) => cp_payload = payload,
             @intFromEnum(SectionKind.units) => un_payload = payload,
             @intFromEnum(SectionKind.language_aliases) => lang_alias_payload = payload,
+            @intFromEnum(SectionKind.territory_aliases) => territory_alias_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -1121,6 +1124,24 @@ pub fn languageAlias(key: []const u8, out: *Subtags) bool {
         }
     }
     return false;
+}
+
+/// UTS #35 §3.2.1 territoryAlias — a 1→1 region replacement (numeric → alpha,
+/// or deprecated → current; e.g. "554" → "NZ", "UK" → "GB"). Returns a slice
+/// into the embedded blob (static) or null. Requires the blob (`-Dintl=full`).
+pub fn territoryAlias(key: []const u8) ?[]const u8 {
+    if (!ensureInit() or territory_alias_payload.len < 4) return null;
+    const count = std.mem.readInt(u32, territory_alias_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(territory_alias_payload, &off) orelse return null;
+        const k = readBytes(territory_alias_payload, &off, klen) orelse return null;
+        const rlen = readU8(territory_alias_payload, &off) orelse return null;
+        const region = readBytes(territory_alias_payload, &off, rlen) orelse return null;
+        if (asciiEqlIgnoreCase(k, key)) return region;
+    }
+    return null;
 }
 
 /// UTS #35 §4.3 "Add Likely Subtags". Given parsed input subtags (any of which

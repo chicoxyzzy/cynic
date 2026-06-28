@@ -782,7 +782,12 @@ fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const 
             break;
         }
     }
-    if (!has_alias and variants_sorted) return canon;
+    // §3.2.1 territoryAlias — canonicalise a 1→1 region (e.g. 554→NZ, UK→GB).
+    // The effective region is the input's, else the language alias's.
+    const base_region = if (in_region.len != 0) in_region else (if (has_alias) repl.region else "");
+    const out_region = if (base_region.len != 0) (cldr.territoryAlias(base_region) orelse base_region) else "";
+    const region_aliased = out_region.ptr != base_region.ptr;
+    if (!has_alias and variants_sorted and !region_aliased) return canon;
     std.mem.sort([]const u8, variants[0..vn], {}, struct {
         fn lt(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.lessThan(u8, a, b);
@@ -790,7 +795,6 @@ fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const 
     }.lt);
     const out_lang = if (has_alias) repl.lang else subs[0];
     const out_script = if (in_script.len != 0) in_script else (if (has_alias) repl.script else "");
-    const out_region = if (in_region.len != 0) in_region else (if (has_alias) repl.region else "");
 
     // Rebuild language_id (input fields already canonically cased; the CLDR
     // replacement subtags are in canonical case too) + the carried remainder.

@@ -2072,6 +2072,16 @@ test "intl: 3-alpha extlang after language is invalid (§unicode_language_id)" {
     );
 }
 
+test "intl: territory-alias region canonicalization (§3.2.1)" {
+    try requireFullBuild(); // CLDR territoryAlias table is in the embedded blob
+    try evalAssert1(
+        \\const g = (t) => Intl.getCanonicalLocales(t)[0];
+        \\(new Intl.Locale('en', { region: '554' }).toString() === 'en-NZ' && // numeric → alpha
+        \\ g('en-UK') === 'en-GB' && g('en-BU') === 'en-MM' &&                // deprecated → current
+        \\ g('en-FR') === 'en-FR' && g('en-US') === 'en-US') ? 1 : 0          // no alias → unchanged
+    );
+}
+
 test "intl: language tag variants sorted in canonical form (§unicode_language_id)" {
     try requireIntlBuild();
     try evalAssert1(

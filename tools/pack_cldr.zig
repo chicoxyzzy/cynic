@@ -49,6 +49,7 @@ const SectionKind = enum(u8) {
     compact = 12,
     units = 13,
     language_aliases = 14,
+    territory_aliases = 15,
 };
 
 /// RTF units in fixed order (year … second); each packs 3 styles (long /
@@ -164,13 +165,14 @@ pub fn main(init: std.process.Init) !void {
     const compact = try loadCompact(arena, io, json_root);
     const units = try loadUnits(arena, io, json_root);
     const lang_aliases = try loadLanguageAliases(arena, io, json_root);
+    const territory_aliases = try loadTerritoryAliases(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact, units, lang_aliases);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact, units, lang_aliases, territory_aliases);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
     var buf: [540]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}, units {d}, lang_aliases {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len, units.len, lang_aliases.len });
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}, units {d}, lang_aliases {d}, territory_aliases {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len, units.len, lang_aliases.len, territory_aliases.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -242,12 +244,13 @@ fn pack(
     compact: []CompactLocale,
     units: []UnitsLocale,
     lang_aliases: []LangAliasEntry,
+    territory_aliases: []TerritoryAliasEntry,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [14]SectionDir = undefined;
+    var dirs: [15]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -304,6 +307,10 @@ fn pack(
     const la_start: u32 = @intCast(payloads.items.len);
     try writeLanguageAliasPayload(gpa, &payloads, lang_aliases);
     dirs[13] = .{ .kind = .language_aliases, .off = la_start, .len = @as(u32, @intCast(payloads.items.len)) - la_start };
+
+    const ta_start: u32 = @intCast(payloads.items.len);
+    try writeTerritoryAliasPayload(gpa, &payloads, territory_aliases);
+    dirs[14] = .{ .kind = .territory_aliases, .off = ta_start, .len = @as(u32, @intCast(payloads.items.len)) - ta_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -504,6 +511,47 @@ fn writeLanguageAliasPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanage
         try appendStr8(gpa, buf, e.key);
         try appendStr8(gpa, buf, e.lang);
         try appendStr8(gpa, buf, e.script);
+        try appendStr8(gpa, buf, e.region);
+    }
+}
+
+// ── territory aliases (UTS #35 §3.2.1 territoryAlias) ────────────────────────
+
+/// A 1→1 region replacement (numeric→alpha, deprecated→current). The 1→many
+/// entries (e.g. SU → 14 regions) need likelySubtags disambiguation and are
+/// skipped here.
+const TerritoryAliasEntry = struct {
+    key: []const u8, // input region subtag (numeric or alpha)
+    region: []const u8, // replacement region
+    fn lessThan(_: void, a: TerritoryAliasEntry, b: TerritoryAliasEntry) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+fn loadTerritoryAliases(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]TerritoryAliasEntry {
+    const path = try std.fmt.allocPrint(arena, "{s}/cldr-core/supplemental/aliases.json", .{json_root});
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch
+        fatal("cannot read {s} (run tools/fetch-cldr.sh first)", .{path});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+    const tbl = (root.object.get("supplemental") orelse fatal("no supplemental", .{})).object
+        .get("metadata").?.object.get("alias").?.object
+        .get("territoryAlias").?.object;
+
+    var out: std.ArrayListUnmanaged(TerritoryAliasEntry) = .empty;
+    var it = tbl.iterator();
+    while (it.next()) |e| {
+        const repl = e.value_ptr.*.object.get("_replacement").?.string;
+        if (std.mem.indexOfScalar(u8, repl, ' ') != null) continue; // 1→many, skip
+        try out.append(arena, .{ .key = e.key_ptr.*, .region = repl });
+    }
+    std.sort.block(TerritoryAliasEntry, out.items, {}, TerritoryAliasEntry.lessThan);
+    return out.items;
+}
+
+fn writeTerritoryAliasPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), table: []TerritoryAliasEntry) !void {
+    try appendU32(gpa, buf, table.len);
+    for (table) |e| {
+        try appendStr8(gpa, buf, e.key);
         try appendStr8(gpa, buf, e.region);
     }
 }
