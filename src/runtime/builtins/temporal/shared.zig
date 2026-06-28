@@ -494,7 +494,7 @@ fn islamicFromDays(epoch: i64, date: i64) IslamicYmd {
 // fixed-from / from-fixed / month-length / leap rules. Coptic epochs verified
 // against SpiderMonkey/Boa/Kiesel/libjs (coptic 1737-01-01 = ISO 2020-09-11,
 // ethiopic 2013-01-01 = ISO 2020-09-11). Reingold & Dershowitz.
-const CompFamily = enum { islamic, coptic };
+const CompFamily = enum { islamic, coptic, indian };
 const ComputedCal = struct { family: CompFamily, epoch: i64, era: []const u8 };
 
 fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
@@ -503,17 +503,19 @@ fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
     if (std.ascii.eqlIgnoreCase(s, "islamic-tbla")) return .{ .family = .islamic, .epoch = -492149, .era = "ah" };
     if (std.ascii.eqlIgnoreCase(s, "coptic")) return .{ .family = .coptic, .epoch = -615558, .era = "am" };
     if (std.ascii.eqlIgnoreCase(s, "ethiopic")) return .{ .family = .coptic, .epoch = -716367, .era = "am" };
+    if (std.ascii.eqlIgnoreCase(s, "indian")) return .{ .family = .indian, .epoch = 0, .era = "shaka" }; // gregorian-tied, no fixed epoch
     return null;
 }
 
 fn compMonthsInYear(f: CompFamily) u32 {
-    return if (f == .islamic) 12 else 13;
+    return if (f == .coptic) 13 else 12;
 }
 
 fn compLeap(f: CompFamily, year: i64) bool {
     return switch (f) {
         .islamic => islamicLeap(year),
         .coptic => @mod(year, 4) == 3,
+        .indian => indianLeap(year),
     };
 }
 
@@ -521,6 +523,7 @@ fn compDaysInMonth(f: CompFamily, year: i64, month: u32) u32 {
     return switch (f) {
         .islamic => islamicDaysInMonth(year, month),
         .coptic => if (month <= 12) 30 else (if (compLeap(.coptic, year)) @as(u32, 6) else 5),
+        .indian => indianDaysInMonth(year, month),
     };
 }
 
@@ -528,6 +531,7 @@ fn compDaysInYear(f: CompFamily, year: i64) u32 {
     return switch (f) {
         .islamic => if (compLeap(.islamic, year)) @as(u32, 355) else 354,
         .coptic => if (compLeap(.coptic, year)) @as(u32, 366) else 365,
+        .indian => if (compLeap(.indian, year)) @as(u32, 366) else 365,
     };
 }
 
@@ -536,6 +540,7 @@ fn compToDays(c: ComputedCal, year: i64, month: i64, day: i64) i64 {
     return switch (c.family) {
         .islamic => islamicToDays(c.epoch, year, month, day),
         .coptic => c.epoch - 1 + 365 * (year - 1) + @divFloor(year, 4) + 30 * (month - 1) + day,
+        .indian => indianToDays(year, month, day),
     };
 }
 
@@ -554,7 +559,54 @@ fn compFromDays(c: ComputedCal, date: i64) CompYmd {
             const day = date - compToDays(c, year, month, 1) + 1;
             return .{ .year = year, .month = @intCast(month), .day = @intCast(day) };
         },
+        .indian => return indianFromDays(date),
     }
+}
+
+// ── Indian national calendar (Saka) ──────────────────────────────────────────
+// Gregorian-tied: Saka year Y maps to gregorian Y+78, and Chaitra 1 falls on
+// ISO Mar 21 when greg(Y+78) is leap, else Mar 22. Chaitra (M1) has 30 days (31
+// in a leap year); M2-M6 have 31, M7-M12 have 30. Verified vs SpiderMonkey/Boa/
+// Kiesel/libjs: Saka 1946-01-01 = ISO 2024-03-21, 1945-10-11 = 2024-01-01,
+// 1942-06-20 = 2020-09-11. era "shaka".
+fn indianLeap(year: i64) bool {
+    return temporal.isLeapYear(year + 78);
+}
+fn indianDaysInMonth(year: i64, month: u32) u32 {
+    if (month == 1) return if (indianLeap(year)) 31 else 30;
+    if (month <= 6) return 31;
+    return 30;
+}
+/// 0-based day-of-year offset of the first of `month`.
+fn indianMonthStartOffset(month: i64, leap: bool) i64 {
+    if (month <= 1) return 0;
+    const chaitra: i64 = if (leap) 31 else 30;
+    if (month <= 6) return chaitra + 31 * (month - 2);
+    return chaitra + 31 * 5 + 30 * (month - 7);
+}
+/// ISO day-number (days-since-1970) of Chaitra 1 for Saka `year`.
+fn indianNewYear(year: i64) i64 {
+    const g = year + 78;
+    return temporal.daysFromCivil(g, 3, if (temporal.isLeapYear(g)) 21 else 22);
+}
+fn indianToDays(year: i64, month: i64, day: i64) i64 {
+    return indianNewYear(year) + indianMonthStartOffset(month, indianLeap(year)) + (day - 1);
+}
+fn indianFromDays(date: i64) CompYmd {
+    var year: i64 = temporal.civilFromDays(date).year - 78;
+    if (date < indianNewYear(year)) year -= 1; // Jan-early-Mar belongs to the prior Saka year
+    const doy = date - indianNewYear(year);
+    const leap = indianLeap(year);
+    var month: i64 = 12;
+    var mm: i64 = 1;
+    while (mm < 12) : (mm += 1) {
+        if (doy < indianMonthStartOffset(mm + 1, leap)) {
+            month = mm;
+            break;
+        }
+    }
+    const day = doy - indianMonthStartOffset(month, leap) + 1;
+    return .{ .year = year, .month = @intCast(month), .day = @intCast(day) };
 }
 
 /// Calendar-resolved date fields for a stored ISO date — the single source of

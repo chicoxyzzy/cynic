@@ -293,6 +293,23 @@ test "intl/temporal: coptic + ethiopic 13-month calendars (getters / from / add)
     );
 }
 
+test "intl/temporal: indian (Saka) calendar" {
+    try requireIntlBuild();
+    // Gregorian-tied: Saka new year is ISO Mar 21 (greg-leap)/Mar 22; Chaitra
+    // gains a 31st day in a leap year; era "shaka".
+    try evalAssert1(
+        \\const d = Temporal.PlainDate.from("2024-01-01").withCalendar("indian");
+        \\if (d.year !== 1945 || d.month !== 10 || d.day !== 11) throw 0;
+        \\if (d.era !== "shaka" || d.monthsInYear !== 12) throw 1;
+        \\const ny = Temporal.PlainDate.from("2024-03-21").withCalendar("indian"); // greg-leap new year
+        \\if (ny.year !== 1946 || ny.month !== 1 || ny.day !== 1 || ny.daysInMonth !== 31) throw 2;
+        \\const f = Temporal.PlainDate.from({ year: 1945, monthCode: "M10", day: 11, calendar: "indian" });
+        \\if (f.toString().slice(0, 10) !== "2024-01-01") throw 3;
+        \\if (f.add({ months: 3 }).year !== 1946 || f.add({ months: 3 }).month !== 1) throw 4;
+        \\1
+    );
+}
+
 test "intl off: Temporal rejects non-ISO calendar and named IANA" {
     if (intl_config.enabled) return error.SkipZigTest;
     try evalThrowsAnyTier(
