@@ -771,6 +771,77 @@ pub fn addComputed(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32,
     return .{ .year = ymd.year, .month = ymd.month, .day = ymd.day };
 }
 
+const CompYearMonth = struct { year: i64, month: i64 };
+
+/// Carry a 1-based month into the year over `miy` months.
+fn balanceCalYearMonth(year: i64, month: i64, miy: i64) CompYearMonth {
+    const m0 = month - 1;
+    return .{ .year = year + @divFloor(m0, miy), .month = @mod(m0, miy) + 1 };
+}
+
+/// Whether the constrained calendar date (year, month, min(day, monthLen)) lies
+/// strictly beyond `target` (a days-since-1970 number) in the `sign` direction.
+fn compDateSurpasses(c: ComputedCal, sign: i64, year: i64, month: i64, day: i64, target: i64) bool {
+    const dim: i64 = compDaysInMonth(c.family, year, @intCast(month));
+    const dn = compToDays(c, year, month, @min(day, dim));
+    return if (sign > 0) dn > target else dn < target;
+}
+
+/// Calendar-aware DifferenceISODate for the computational calendars — the
+/// year/month components are counted in the calendar's own months (the
+/// week/day remainder is a plain day count, calendar-independent). Mirrors
+/// temporal.differenceISODate. Used by until/since when smallestUnit is "day"
+/// (no calendar rounding); falls back to the ISO difference for any other
+/// calendar.
+pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRecord, d2: temporal.PlainDateRecord, largest: temporal.LargestUnit) temporal.DurationRecord {
+    const c = computedCal(cal) orelse return temporal.differenceISODate(d1, d2, largest);
+    const dn1 = temporal.daysFromCivil(d1.iso_year, d1.iso_month, d1.iso_day);
+    const dn2 = temporal.daysFromCivil(d2.iso_year, d2.iso_month, d2.iso_day);
+    if (dn1 == dn2) return .{};
+    const sign: i64 = if (dn2 > dn1) 1 else -1;
+    const cd1 = compFromDays(c, dn1);
+    const cd2 = compFromDays(c, dn2);
+    const miy: i64 = compMonthsInYear(c.family);
+
+    var years: i64 = 0;
+    var months: i64 = 0;
+    if (largest == .year or largest == .month) {
+        var cand_years: i64 = @as(i64, cd2.year) - @as(i64, cd1.year);
+        if (cand_years != 0) cand_years -= sign;
+        while (!compDateSurpasses(c, sign, cd1.year + cand_years, cd1.month, cd1.day, dn2)) {
+            years = cand_years;
+            cand_years += sign;
+        }
+        var cand_months: i64 = sign;
+        var inter = balanceCalYearMonth(cd1.year + years, @as(i64, cd1.month) + cand_months, miy);
+        while (!compDateSurpasses(c, sign, inter.year, inter.month, cd1.day, dn2)) {
+            months = cand_months;
+            cand_months += sign;
+            inter = balanceCalYearMonth(inter.year, inter.month + sign, miy);
+        }
+        if (largest == .month) {
+            months += years * miy;
+            years = 0;
+        }
+    }
+
+    const bym = balanceCalYearMonth(cd1.year + years, @as(i64, cd1.month) + months, miy);
+    const dim: i64 = compDaysInMonth(c.family, bym.year, @intCast(bym.month));
+    const anchor = compToDays(c, bym.year, bym.month, @min(@as(i64, cd1.day), dim));
+    var days: i64 = dn2 - anchor;
+    var weeks: i64 = 0;
+    if (largest == .week) {
+        weeks = @divTrunc(days, 7);
+        days -= weeks * 7;
+    }
+    return .{
+        .years = @floatFromInt(years),
+        .months = @floatFromInt(months),
+        .weeks = @floatFromInt(weeks),
+        .days = @floatFromInt(days),
+    };
+}
+
 /// Calendar-aware AddDateTime for the computational calendars: fold the time
 /// duration into the time half (carrying whole days), then add the date part in
 /// the calendar's terms. Mirrors temporal.addDateTimeDateChecked.

@@ -310,6 +310,32 @@ test "intl/temporal: indian (Saka) calendar" {
     );
 }
 
+test "intl/temporal: PlainDate until/since year-month diff for computational calendars" {
+    try requireIntlBuild();
+    // The difference is counted in the calendar's own years/months; the robust
+    // invariant is a + (a.until b) == b across largestUnit year/month, and
+    // since == negated until.
+    try evalAssert1(
+        \\function rt(c, i1, i2, lu) {
+        \\  const a = Temporal.PlainDate.from(i1).withCalendar(c);
+        \\  const b = Temporal.PlainDate.from(i2).withCalendar(c);
+        \\  const back = a.add(a.until(b, { largestUnit: lu }));
+        \\  return back.year === b.year && back.month === b.month && back.day === b.day;
+        \\}
+        \\if (!rt("islamic-civil", "2024-01-01", "2025-06-15", "year")) throw 0;
+        \\if (!rt("islamic-civil", "2024-01-01", "2025-06-15", "month")) throw 1;
+        \\if (!rt("indian", "2020-02-10", "2024-09-20", "year")) throw 2;
+        \\if (!rt("ethiopic", "2018-03-10", "2024-09-20", "year")) throw 3;
+        \\// since round-trips too: b - since(a) == a (since truncates from the
+        \\// other anchor, so its day breakdown may differ from until's).
+        \\const a = Temporal.PlainDate.from("2024-01-01").withCalendar("islamic-civil");
+        \\const b = Temporal.PlainDate.from("2025-06-15").withCalendar("islamic-civil");
+        \\const back = b.add(b.since(a, { largestUnit: "year" }).negated());
+        \\if (back.year !== a.year || back.month !== a.month || back.day !== a.day) throw 4;
+        \\1
+    );
+}
+
 test "intl off: Temporal rejects non-ISO calendar and named IANA" {
     if (intl_config.enabled) return error.SkipZigTest;
     try evalThrowsAnyTier(

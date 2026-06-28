@@ -601,7 +601,10 @@ fn differenceTemporalDate(realm: *Realm, this_value: Value, args: []const Value,
     // increment is unconstrained beyond the [1, 1e9] range GetRounding-
     // IncrementOption already enforced.
 
-    var diff = temporal.differenceISODate(this_date, other_date, largest);
+    var diff = if (shared.isComputedCalendar(this_date.calendar))
+        shared.differenceComputedDate(this_date.calendar, this_date, other_date, largest)
+    else
+        temporal.differenceISODate(this_date, other_date, largest);
 
     // §7.5.31 RoundRelativeDuration. For `since` the mode is negated before
     // rounding and the result negated after (§ NegateRoundingMode +
