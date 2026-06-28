@@ -313,6 +313,21 @@ test "intl/temporal: with ignores era/eraYear on era-less calendars (no throw)" 
     );
 }
 
+test "intl/temporal: calendar since/until — over-long start day wraps to days" {
+    try requireIntlBuild();
+    // coptic M12-28 → M13-05 (the 5-day epagomenal month): +1 month would land
+    // on the nonexistent M13-28, so the difference is 7 days, not a clamped
+    // whole month. M12-05 → M13-05 (day 5 fits M13) is a clean one month.
+    try evalAssert1(
+        \\const end = Temporal.PlainDate.from({ year: 1970, monthCode: "M13", day: 5, calendar: "coptic" });
+        \\const a = Temporal.PlainDate.from({ year: 1970, monthCode: "M12", day: 28, calendar: "coptic" }).since(end, { largestUnit: "months" });
+        \\if (a.months !== 0 || a.days !== -7) throw 0;
+        \\const b = Temporal.PlainDate.from({ year: 1970, monthCode: "M12", day: 5, calendar: "coptic" }).since(end, { largestUnit: "months" });
+        \\if (b.months !== -1 || b.days !== 0) throw 1;
+        \\1
+    );
+}
+
 test "intl/temporal: persian (Solar Hijri) calendar (getters / from / leap)" {
     try requireIntlBuild();
     // Solar Hijri: Nowruz year start, M1-6=31 / M7-11=30 / M12=29 (30 in a leap

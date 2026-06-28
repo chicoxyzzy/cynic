@@ -975,10 +975,21 @@ fn balanceCalYearMonth(year: i64, month: i64, miy: i64) CompYearMonth {
 
 /// Whether the constrained calendar date (year, month, min(day, monthLen)) lies
 /// strictly beyond `target` (a days-since-1970 number) in the `sign` direction.
-fn compDateSurpasses(c: ComputedCal, sign: i64, year: i64, month: i64, day: i64, target: i64) bool {
-    const dim: i64 = compDaysInMonth(c.family, year, @intCast(month));
-    const dn = compToDays(c, year, month, @min(day, dim));
-    return if (sign > 0) dn > target else dn < target;
+fn compDateSurpasses(sign: i64, year: i64, month: i64, day: i64, ty: i64, tm: i64, td: i64) bool {
+    // Lexicographic (year, month, day) comparison with the RAW start day — no
+    // clamp to the candidate month — mirroring isoDateSurpasses. An over-long
+    // start day in a shorter candidate month must register as surpassing:
+    // coptic M12-28 + 1 month → "M13-28" surpasses M13-05, so the difference is
+    // 7 days, not a clamped whole month.
+    var c: i64 = 0;
+    if (year != ty) {
+        c = if (year < ty) -1 else 1;
+    } else if (month != tm) {
+        c = if (month < tm) -1 else 1;
+    } else if (day != td) {
+        c = if (day < td) -1 else 1;
+    }
+    return sign * c > 0;
 }
 
 /// Calendar-aware DifferenceISODate for the computational calendars — the
@@ -1002,13 +1013,13 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
     if (largest == .year or largest == .month) {
         var cand_years: i64 = @as(i64, cd2.year) - @as(i64, cd1.year);
         if (cand_years != 0) cand_years -= sign;
-        while (!compDateSurpasses(c, sign, cd1.year + cand_years, cd1.month, cd1.day, dn2)) {
+        while (!compDateSurpasses(sign, cd1.year + cand_years, cd1.month, cd1.day, cd2.year, cd2.month, cd2.day)) {
             years = cand_years;
             cand_years += sign;
         }
         var cand_months: i64 = sign;
         var inter = balanceCalYearMonth(cd1.year + years, @as(i64, cd1.month) + cand_months, miy);
-        while (!compDateSurpasses(c, sign, inter.year, inter.month, cd1.day, dn2)) {
+        while (!compDateSurpasses(sign, inter.year, inter.month, cd1.day, cd2.year, cd2.month, cd2.day)) {
             months = cand_months;
             cand_months += sign;
             inter = balanceCalYearMonth(inter.year, inter.month + sign, miy);
