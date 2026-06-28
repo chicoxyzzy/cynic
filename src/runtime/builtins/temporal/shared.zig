@@ -425,6 +425,75 @@ pub fn calendarYear(cal: temporal.CalendarId, iso_year: i32) i32 {
     return iso_year; // iso8601 / gregory share the ISO year
 }
 
+/// Resolve an {era, eraYear} field pair to the calendar's signed year, or null
+/// if the era name is not valid for the calendar. The two-era calendars
+/// (gregory ce/bce, roc roc/broc, islamic ah/bh) flip sign on the inverse era;
+/// the single-era calendars (buddhist, coptic/ethiopic, ethioaa, indian) map
+/// eraYear directly to the year. Used by the from/with field readers when the
+/// property bag supplies era+eraYear instead of (or alongside) year.
+pub fn eraYearToYear(cal: temporal.CalendarId, era: []const u8, era_year: i64) ?i64 {
+    if (cal.isIso()) return null;
+    const s = cal.slice();
+    if (std.ascii.eqlIgnoreCase(s, "gregory")) {
+        if (std.ascii.eqlIgnoreCase(era, "ce") or std.ascii.eqlIgnoreCase(era, "ad") or std.ascii.eqlIgnoreCase(era, "gregory")) return era_year;
+        if (std.ascii.eqlIgnoreCase(era, "bce") or std.ascii.eqlIgnoreCase(era, "bc") or std.ascii.eqlIgnoreCase(era, "gregory-inverse")) return 1 - era_year;
+        return null;
+    }
+    if (std.ascii.eqlIgnoreCase(s, "roc")) {
+        if (std.ascii.eqlIgnoreCase(era, "roc") or std.ascii.eqlIgnoreCase(era, "minguo")) return era_year;
+        if (std.ascii.eqlIgnoreCase(era, "broc") or std.ascii.eqlIgnoreCase(era, "roc-inverse")) return 1 - era_year;
+        return null;
+    }
+    if (std.ascii.eqlIgnoreCase(s, "buddhist")) {
+        return if (std.ascii.eqlIgnoreCase(era, "be")) era_year else null;
+    }
+    if (islamicEpoch(cal) != null) {
+        if (std.ascii.eqlIgnoreCase(era, "ah")) return era_year;
+        if (std.ascii.eqlIgnoreCase(era, "bh")) return 1 - era_year;
+        return null;
+    }
+    if (computedCal(cal)) |c| {
+        return if (std.ascii.eqlIgnoreCase(era, c.era)) era_year else null;
+    }
+    return null;
+}
+
+pub const EraYearResolution = struct { present: bool, val: i64 };
+
+/// Whether `cal` has a modelled era system (so era / eraYear participate in
+/// field resolution). iso8601 and the not-yet-modelled calendars (chinese,
+/// dangi, persian, japanese, umalqura, …) report false — their era/eraYear are
+/// ignored, never resolved.
+pub fn calendarHasEras(cal: temporal.CalendarId) bool {
+    if (cal.isIso()) return false;
+    const s = cal.slice();
+    if (std.ascii.eqlIgnoreCase(s, "gregory") or std.ascii.eqlIgnoreCase(s, "roc") or std.ascii.eqlIgnoreCase(s, "buddhist")) return true;
+    return computedCal(cal) != null;
+}
+
+/// Resolve an already-read {era, eraYear} field pair against an existing year,
+/// returning the effective year. For a calendar with no era system, era/eraYear
+/// are ignored — but they cannot substitute for an absent year (TypeError). For
+/// an era calendar, a lone era/eraYear, an unknown era, or a year that disagrees
+/// with era+eraYear all throw. Shared by every from/with field reader.
+pub fn resolveEraYear(realm: *Realm, cal: temporal.CalendarId, era_v: Value, era_year_v: Value, year_present: bool, year_val: i64) NativeError!EraYearResolution {
+    const has_era = !era_v.isUndefined();
+    const has_ey = !era_year_v.isUndefined();
+    if (!calendarHasEras(cal)) {
+        if (!year_present and (has_era or has_ey))
+            return throwTypeError(realm, "era/eraYear cannot replace year for a calendar that does not use eras");
+        return .{ .present = year_present, .val = year_val };
+    }
+    if (!has_era and !has_ey) return .{ .present = year_present, .val = year_val };
+    if (has_era != has_ey) return throwTypeError(realm, "era and eraYear must be provided together");
+    if (!era_v.isString()) return throwTypeError(realm, "era must be a string");
+    const era_s: *JSString = @ptrCast(@alignCast(era_v.asString()));
+    const ey = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, era_year_v));
+    const ry = eraYearToYear(cal, era_s.flatBytes(), ey) orelse return throwRangeError(realm, "invalid era for the calendar");
+    if (year_present and year_val != ry) return throwRangeError(realm, "year does not agree with era/eraYear");
+    return .{ .present = true, .val = ry };
+}
+
 /// Inverse of calendarYear — the ISO year for a calendar `year` field, used by
 /// the from-fields / with paths to convert a property bag's calendar year back
 /// to the ISO year the rest of the date machinery operates on.

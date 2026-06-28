@@ -236,8 +236,14 @@ fn toYearMonthFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!
     const mc_len = try readMonthCodeField(realm, try getPropertyChain(realm, obj, "monthCode"), &mc_buf);
 
     const year_v = try getPropertyChain(realm, obj, "year");
-    if (year_v.isUndefined()) return throwTypeError(realm, "PlainYearMonth-like is missing 'year'");
-    const year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+    var year_present = !year_v.isUndefined();
+    var year: i64 = if (year_present) try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v)) else 0;
+    const era_field = try getPropertyChain(realm, obj, "era");
+    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+    const ey_res = try shared.resolveEraYear(realm, cal, era_field, era_year_field, year_present, year);
+    year_present = ey_res.present;
+    year = ey_res.val;
+    if (!year_present) return throwTypeError(realm, "PlainYearMonth-like is missing 'year'");
 
     const overflow = try getTemporalOverflowOption(realm, options);
 

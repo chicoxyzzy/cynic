@@ -328,6 +328,25 @@ test "intl/temporal: indian (Saka) calendar" {
     );
 }
 
+test "intl/temporal: era + eraYear field input" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const f = Temporal.PlainDate.from({ era: "am", eraYear: 1742, monthCode: "M12", day: 15, calendar: "coptic" });
+        \\if (f.year !== 1742 || f.era !== "am") throw 0;
+        \\if (f.with({ era: "am", eraYear: 1740 }).year !== 1740) throw 1;
+        \\if (Temporal.PlainDate.from({ era: "bce", eraYear: 5, month: 1, day: 1, calendar: "gregory" }).year !== -4) throw 2;
+        \\if (Temporal.PlainDate.from({ era: "bc", eraYear: 44, month: 3, day: 15, calendar: "gregory" }).era !== "bce") throw 3;
+        \\if (Temporal.PlainYearMonth.from({ era: "ah", eraYear: 1445, monthCode: "M06", calendar: "islamic-civil" }).year !== 1445) throw 4;
+        \\// no-era calendars: era/eraYear ignored when year present
+        \\if (Temporal.PlainDate.from({ era: "foobar", eraYear: 1, year: 1970, monthCode: "M01", day: 1, calendar: "iso8601" }).year !== 1970) throw 5;
+        \\let threw = 0;
+        \\try { Temporal.PlainDate.from({ era: "foobar", eraYear: 1, monthCode: "M01", day: 1, calendar: "iso8601" }); } catch (e) { if (e instanceof TypeError) threw++; }
+        \\try { Temporal.PlainDate.from({ era: "ah", monthCode: "M06", day: 1, calendar: "islamic-civil" }); } catch (e) { if (e instanceof TypeError) threw++; }
+        \\if (threw !== 2) throw 6;
+        \\1
+    );
+}
+
 test "intl/temporal: PlainDate until/since year-month diff for computational calendars" {
     try requireIntlBuild();
     // The difference is counted in the calendar's own years/months; the robust

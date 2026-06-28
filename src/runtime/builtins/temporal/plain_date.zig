@@ -285,6 +285,14 @@ fn toISODateFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!Pl
         year_present = true;
     }
 
+    // era + eraYear resolve to the calendar year when `year` is absent (and
+    // must agree when both are given).
+    const era_field = try getPropertyChain(realm, obj, "era");
+    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+    const ey_res = try shared.resolveEraYear(realm, cal, era_field, era_year_field, year_present, year_val);
+    year_present = ey_res.present;
+    year_val = ey_res.val;
+
     const overflow = try getTemporalOverflowOption(realm, options);
 
     if (!year_present) return throwTypeError(realm, "PlainDate-like is missing 'year'");
@@ -425,6 +433,13 @@ fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         year_val = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
         year_present = true;
     }
+
+    // era + eraYear count as date fields and resolve to the calendar year.
+    const era_field = try getPropertyChain(realm, obj, "era");
+    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+    const ey_res = try shared.resolveEraYear(realm, base.calendar, era_field, era_year_field, year_present, year_val);
+    year_present = ey_res.present;
+    year_val = ey_res.val;
 
     if (!day_present and !month_present and mc_len == null and !year_present)
         return throwTypeError(realm, "PlainDate-like must have at least one date property");
