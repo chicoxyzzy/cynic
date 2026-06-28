@@ -173,28 +173,27 @@ fn plainYearMonthCalendarId(realm: *Realm, t: Value, a: []const Value) NativeErr
 fn plainYearMonthYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainYearMonth(realm, t);
-    return Value.fromInt32(shared.calendarYear(rec.calendar, rec.iso_year));
+    return shared.yearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.ref_iso_day);
 }
 fn plainYearMonthMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
-    return Value.fromInt32(@intCast((try requirePlainYearMonth(realm, t)).iso_month));
+    const rec = try requirePlainYearMonth(realm, t);
+    return shared.monthValue(rec.calendar, rec.iso_year, rec.iso_month, rec.ref_iso_day);
 }
 fn plainYearMonthMonthCode(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainYearMonth(realm, t);
-    const mc = [_]u8{ 'M', '0' + @as(u8, @intCast(rec.iso_month / 10)), '0' + @as(u8, @intCast(rec.iso_month % 10)) };
-    const js = realm.heap.allocateString(&mc) catch return error.OutOfMemory;
-    return Value.fromString(js);
+    return shared.monthCodeValue(realm, rec.calendar, rec.iso_year, rec.iso_month, rec.ref_iso_day);
 }
 fn plainYearMonthDaysInMonth(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainYearMonth(realm, t);
-    return Value.fromInt32(@intCast(temporal.daysInIsoMonth(rec.iso_year, rec.iso_month)));
+    return shared.daysInMonthValue(rec.calendar, rec.iso_year, rec.iso_month, rec.ref_iso_day);
 }
 fn plainYearMonthDaysInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainYearMonth(realm, t);
-    return Value.fromInt32(temporal.isoDaysInYear(rec.iso_year));
+    return shared.daysInYearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.ref_iso_day);
 }
 fn plainYearMonthMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
@@ -204,17 +203,17 @@ fn plainYearMonthMonthsInYear(realm: *Realm, t: Value, a: []const Value) NativeE
 fn plainYearMonthInLeapYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainYearMonth(realm, t);
-    return Value.fromBool(temporal.isLeapYear(rec.iso_year));
+    return shared.inLeapYearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.ref_iso_day);
 }
 fn plainYearMonthEra(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainYearMonth(realm, t);
-    return shared.eraForCalendar(realm, rec.calendar, rec.iso_year);
+    return shared.eraValue(realm, rec.calendar, rec.iso_year, rec.iso_month, rec.ref_iso_day);
 }
 fn plainYearMonthEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainYearMonth(realm, t);
-    return shared.eraYearForCalendar(rec.calendar, rec.iso_year);
+    return shared.eraYearValue(rec.calendar, rec.iso_year, rec.iso_month, rec.ref_iso_day);
 }
 
 /// §9.5.x ISOYearMonthFromFields — read year and month/monthCode off a
@@ -224,7 +223,6 @@ fn plainYearMonthEraYear(realm: *Realm, t: Value, a: []const Value) NativeError!
 /// RangeError is deferred until after the overflow option is read.
 fn toYearMonthFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!PlainYearMonthRecord {
     const cal = try requireCalendarFieldType(realm, try getPropertyChain(realm, obj, "calendar"));
-    _ = cal; // applied when the year-month record is assembled below
 
     const month_v = try getPropertyChain(realm, obj, "month");
     var month_present = false;
@@ -252,7 +250,21 @@ fn toYearMonthFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!
     } else {
         return throwTypeError(realm, "PlainYearMonth-like is missing 'month' / 'monthCode'");
     }
-    return regulateYearMonth(realm, year, month, overflow == .reject);
+    // Islamic tabular calendars convert the (year, month) pair to ISO; the
+    // reference ISO day is the day the Islamic month-1 lands on (not 1).
+    if (shared.isIslamicTabular(cal)) {
+        const iso = shared.islamicToIso(cal, year, month, 1, overflow == .reject) orelse
+            return throwRangeError(realm, "PlainYearMonth is out of range");
+        if (!temporal.isoYearMonthWithinLimits(iso.year, @intCast(iso.month)))
+            return throwRangeError(realm, "PlainYearMonth is out of range");
+        return .{ .iso_year = @intCast(iso.year), .iso_month = @intCast(iso.month), .ref_iso_day = @intCast(iso.day), .calendar = cal };
+    }
+    // Gregorian-month calendars: convert the year origin, keep ref day 1, and
+    // preserve the requested calendar (previously discarded → always iso8601).
+    const iso_year = shared.calendarYearToIso(cal, year);
+    var rec = try regulateYearMonth(realm, iso_year, month, overflow == .reject);
+    rec.calendar = cal;
+    return rec;
 }
 
 /// §9.5.x ToTemporalYearMonth — a PlainYearMonth (copy), a property bag,
@@ -344,13 +356,32 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
 
     var month: i64 = base.iso_month;
+    if (shared.isIslamicTabular(base.calendar)) {
+        const cf = shared.calendarFields(base.calendar, base.iso_year, base.iso_month, base.ref_iso_day);
+        var im: i64 = cf.month;
+        if (mc_len) |len| {
+            im = try monthFromCodeBytes(realm, &mc_buf, len);
+            if (month_present and month_val != im) return throwRangeError(realm, "month and monthCode disagree");
+        } else if (month_present) {
+            im = month_val;
+        }
+        const iy: i64 = if (year_v.isUndefined()) cf.year else year;
+        const iso = shared.islamicToIso(base.calendar, iy, im, 1, overflow == .reject) orelse
+            return throwRangeError(realm, "PlainYearMonth is out of range");
+        if (!temporal.isoYearMonthWithinLimits(iso.year, @intCast(iso.month)))
+            return throwRangeError(realm, "PlainYearMonth is out of range");
+        return createTemporalYearMonth(realm, .{ .iso_year = @intCast(iso.year), .iso_month = @intCast(iso.month), .ref_iso_day = @intCast(iso.day), .calendar = base.calendar });
+    }
     if (mc_len) |len| {
         month = try monthFromCodeBytes(realm, &mc_buf, len);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;
     }
-    return createTemporalYearMonth(realm, try regulateYearMonth(realm, year, month, overflow == .reject));
+    const iso_year = if (year_v.isUndefined()) year else shared.calendarYearToIso(base.calendar, year);
+    var rec = try regulateYearMonth(realm, iso_year, month, overflow == .reject);
+    rec.calendar = base.calendar;
+    return createTemporalYearMonth(realm, rec);
 }
 
 /// §9.5.x AddDurationToYearMonth — shared by add (negate=false) and
@@ -371,6 +402,23 @@ fn plainYearMonthAddSubtract(realm: *Realm, this_value: Value, args: []const Val
     if (dur.weeks != 0 or dur.days != 0 or temporal.timeDurationNanoseconds(dur) != 0) {
         return throwRangeError(realm, "PlainYearMonth arithmetic does not support weeks, days, or time units");
     }
+    // Islamic tabular calendars add years + months in Islamic terms.
+    if (shared.isIslamicTabular(base.calendar)) {
+        const iso = shared.addIslamic(
+            base.calendar,
+            base.iso_year,
+            base.iso_month,
+            base.ref_iso_day,
+            @intFromFloat(dur.years),
+            @intFromFloat(dur.months),
+            0,
+            0,
+            overflow == .reject,
+        ) orelse return throwRangeError(realm, "PlainYearMonth is out of range");
+        if (!temporal.isoYearMonthWithinLimits(iso.year, @intCast(iso.month)))
+            return throwRangeError(realm, "PlainYearMonth is out of range");
+        return createTemporalYearMonth(realm, .{ .iso_year = @intCast(iso.year), .iso_month = @intCast(iso.month), .ref_iso_day = @intCast(iso.day), .calendar = base.calendar });
+    }
     // step 9 — the day-1 anchor must be a representable ISO date.
     if (!temporal.isoDateWithinLimits(base.iso_year, base.iso_month, 1)) {
         return throwRangeError(realm, "PlainYearMonth is out of range");
@@ -382,7 +430,9 @@ fn plainYearMonthAddSubtract(realm: *Realm, this_value: Value, args: []const Val
         @as(i64, base.iso_year) + @as(i64, @intFromFloat(dur.years)),
         @as(i64, base.iso_month) + @as(i64, @intFromFloat(dur.months)),
     );
-    return createTemporalYearMonth(realm, try regulateYearMonth(realm, bal.year, bal.month, overflow == .reject));
+    var rec = try regulateYearMonth(realm, bal.year, bal.month, overflow == .reject);
+    rec.calendar = base.calendar;
+    return createTemporalYearMonth(realm, rec);
 }
 fn plainYearMonthAdd(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     return plainYearMonthAddSubtract(realm, this_value, args, false);
@@ -439,11 +489,23 @@ fn differenceTemporalYearMonth(realm: *Realm, this_value: Value, args: []const V
         return throwRangeError(realm, "PlainYearMonth is out of range");
     }
 
-    var diff = temporal.differenceISODate(this_anchor, other_anchor, largest);
     // AdjustDateDurationRecord(_, 0, 0) — a year-month difference has no
-    // weeks or days.
-    diff.weeks = 0;
-    diff.days = 0;
+    // weeks or days. Islamic tabular calendars difference in Islamic
+    // year-months (ISO months don't align with Islamic months).
+    var diff = if (shared.isIslamicTabular(this_ym.calendar)) blk: {
+        const a = shared.calendarFields(this_ym.calendar, this_ym.iso_year, this_ym.iso_month, this_ym.ref_iso_day);
+        const b = shared.calendarFields(other_ym.calendar, other_ym.iso_year, other_ym.iso_month, other_ym.ref_iso_day);
+        const total: i64 = (@as(i64, b.year) * 12 + @as(i64, b.month) - 1) - (@as(i64, a.year) * 12 + @as(i64, a.month) - 1);
+        break :blk if (largest == .month)
+            temporal.DurationRecord{ .months = @floatFromInt(total) }
+        else
+            temporal.DurationRecord{ .years = @floatFromInt(@divTrunc(total, 12)), .months = @floatFromInt(@rem(total, 12)) };
+    } else blk: {
+        var d = temporal.differenceISODate(this_anchor, other_anchor, largest);
+        d.weeks = 0;
+        d.days = 0;
+        break :blk d;
+    };
 
     const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
     if (smallest != .month or increment != 1) {

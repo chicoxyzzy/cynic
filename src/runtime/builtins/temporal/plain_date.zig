@@ -649,10 +649,24 @@ fn plainDateWithCalendar(realm: *Realm, this_value: Value, args: []const Value) 
 fn plainDateToPlainYearMonth(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const d = try requirePlainDate(realm, this_value);
+    // Islamic tabular calendars: the reference ISO day is where the Islamic
+    // year-month's day 1 lands, so the year-month round-trips its calendar.
+    if (shared.isIslamicTabular(d.calendar)) {
+        const cf = shared.calendarFields(d.calendar, d.iso_year, d.iso_month, d.iso_day);
+        const iso = shared.islamicToIso(d.calendar, cf.year, cf.month, 1, false) orelse
+            return throwRangeError(realm, "PlainYearMonth is out of range");
+        return createTemporalYearMonth(realm, .{
+            .iso_year = @intCast(iso.year),
+            .iso_month = @intCast(iso.month),
+            .ref_iso_day = @intCast(iso.day),
+            .calendar = d.calendar,
+        });
+    }
     return createTemporalYearMonth(realm, .{
         .iso_year = d.iso_year,
         .iso_month = d.iso_month,
         .ref_iso_day = 1,
+        .calendar = d.calendar,
     });
 }
 /// §3.3.x Temporal.PlainDate.prototype.toPlainMonthDay ( ) — drop the

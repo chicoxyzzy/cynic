@@ -259,6 +259,23 @@ test "intl/temporal: PlainDateTime + ZonedDateTime islamic-civil getters / add" 
     );
 }
 
+test "intl/temporal: PlainYearMonth islamic-civil + calendar preservation" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const c = "islamic-civil";
+        \\const p = Temporal.PlainYearMonth.from({ year: 1445, monthCode: "M06", calendar: c });
+        \\if (p.calendarId !== c || p.year !== 1445 || p.month !== 6) throw 0;
+        \\if (p.monthCode !== "M06" || p.era !== "ah" || p.daysInMonth !== 29) throw 1;
+        \\if (p.add({ months: 1 }).month !== 7 || p.add({ months: 12 }).year !== 1446) throw 2;
+        \\const q = Temporal.PlainYearMonth.from({ year: 1446, monthCode: "M06", calendar: c });
+        \\const d = p.until(q); // exactly one Islamic year
+        \\if (d.years !== 1 || d.months !== 0) throw 3;
+        \\// the calendar-preservation gap fix also keeps a gregory year-month:
+        \\if (Temporal.PlainYearMonth.from({ year: 2024, monthCode: "M03", calendar: "gregory" }).era !== "ce") throw 4;
+        \\1
+    );
+}
+
 test "intl off: Temporal rejects non-ISO calendar and named IANA" {
     if (intl_config.enabled) return error.SkipZigTest;
     try evalThrowsAnyTier(
