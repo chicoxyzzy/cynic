@@ -279,6 +279,22 @@ test "intl/temporal: PlainYearMonth islamic-civil + calendar preservation" {
     );
 }
 
+test "intl: supportedValuesOf calendars canonical + sorted; islamic aliases fold" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const cs = Intl.supportedValuesOf("calendar");
+        \\if (cs.includes("islamic") || cs.includes("islamic-rgsa")) throw 0;
+        \\if (!cs.includes("islamic-civil") || !cs.includes("japanese")) throw 1;
+        \\const tz = Intl.supportedValuesOf("timeZone");
+        \\for (let i = 1; i < tz.length; i++) if (tz[i - 1] > tz[i]) throw 2;
+        \\// generic "islamic" / "islamic-rgsa" canonicalise to islamic-civil in DTF,
+        \\// so they're absent from supportedValuesOf yet still usable.
+        \\if (new Intl.DateTimeFormat("en", { calendar: "islamic" }).resolvedOptions().calendar !== "islamic-civil") throw 3;
+        \\if (new Intl.DateTimeFormat("en", { calendar: "islamic-rgsa" }).resolvedOptions().calendar !== "islamic-civil") throw 4;
+        \\1
+    );
+}
+
 test "intl/temporal: with ignores era/eraYear on era-less calendars (no throw)" {
     try requireIntlBuild();
     // `from` requires a year and throws when era/eraYear can't supply one for an

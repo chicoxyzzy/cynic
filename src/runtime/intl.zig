@@ -1143,9 +1143,12 @@ pub fn parseLocaleComponents(allocator: std.mem.Allocator, locale: []const u8) !
 
 // ── supportedValuesOf catalogs (structural static lists) ───────────────────
 
+// The set required by the Intl Era/MonthCode supportedValuesOf fixture —
+// canonical ids only, no aliases ("islamic" / "islamic-rgsa" are excluded by
+// calendars-required-by-intl-era-monthcode.js). The emitter sorts defensively.
 pub const supported_calendars = [_][]const u8{
-    "buddhist", "chinese",  "coptic",  "dangi",         "ethioaa",      "ethiopic",     "gregory",
-    "hebrew",   "indian",   "islamic", "islamic-civil", "islamic-rgsa", "islamic-tbla", "islamic-umalqura",
+    "buddhist", "chinese",  "coptic",  "dangi",         "ethioaa",      "ethiopic",
+    "gregory",  "hebrew",   "indian",  "islamic-civil", "islamic-tbla", "islamic-umalqura",
     "iso8601",  "japanese", "persian", "roc",
 };
 

@@ -627,9 +627,18 @@ fn intlSupportedValuesOf(realm: *Realm, this_value: Value, args: []const Value) 
     else
         return throwRangeError(realm, "invalid key for supportedValuesOf");
 
+    // §6.x SupportedValues returns a sorted List of unique values.
+    const sorted = realm.allocator.dupe([]const u8, values) catch return error.OutOfMemory;
+    defer realm.allocator.free(sorted);
+    std.mem.sort([]const u8, sorted, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+
     const arr = allocateArray(realm) catch return error.OutOfMemory;
     var i: i32 = 0;
-    for (values) |v| {
+    for (sorted) |v| {
         var idx_buf: [24]u8 = undefined;
         const idx_key = std.fmt.bufPrint(&idx_buf, "{d}", .{i}) catch unreachable;
         arr.set(realm.allocator, idx_key, try makeStringValue(realm, v)) catch return error.OutOfMemory;
@@ -2922,6 +2931,13 @@ fn canonicalCalendarId(raw: []const u8, buf: []u8) []const u8 {
     // AvailableCalendars list already uses the preferred form for every other
     // id (so e.g. "ethioaa" must round-trip unchanged).
     if (std.mem.eql(u8, lc, "islamicc")) return "islamic-civil";
+    // Cynic implements the tabular Islamic calendars only; the generic "islamic"
+    // and the sighting-based "islamic-rgsa" both resolve to the civil tabular
+    // variant. This keeps AvailableCalendars (which lists islamic-civil, not
+    // "islamic" / "islamic-rgsa") consistent with what DateTimeFormat accepts —
+    // calendars-accepted-by-DateTimeFormat.js asserts a calendar canonicalised
+    // away must not appear in supportedValuesOf.
+    if (std.mem.eql(u8, lc, "islamic") or std.mem.eql(u8, lc, "islamic-rgsa")) return "islamic-civil";
     return lc;
 }
 
