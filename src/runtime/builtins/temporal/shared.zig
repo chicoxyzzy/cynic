@@ -606,7 +606,7 @@ fn islamicFromDays(epoch: i64, date: i64) IslamicYmd {
 // fixed-from / from-fixed / month-length / leap rules. Coptic epochs verified
 // against SpiderMonkey/Boa/Kiesel/libjs (coptic 1737-01-01 = ISO 2020-09-11,
 // ethiopic 2013-01-01 = ISO 2020-09-11). Reingold & Dershowitz.
-const CompFamily = enum { islamic, coptic, indian };
+const CompFamily = enum { islamic, coptic, indian, persian };
 const ComputedCal = struct { family: CompFamily, epoch: i64, era: []const u8 };
 
 fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
@@ -617,6 +617,7 @@ fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
     if (std.ascii.eqlIgnoreCase(s, "ethiopic")) return .{ .family = .coptic, .epoch = -716367, .era = "am" };
     if (std.ascii.eqlIgnoreCase(s, "ethioaa")) return .{ .family = .coptic, .epoch = -2725242, .era = "aa" }; // Amete Alem (= ethiopic + 5500 yr)
     if (std.ascii.eqlIgnoreCase(s, "indian")) return .{ .family = .indian, .epoch = 0, .era = "shaka" }; // gregorian-tied, no fixed epoch
+    if (std.ascii.eqlIgnoreCase(s, "persian")) return .{ .family = .persian, .epoch = 0, .era = "ap" }; // Solar Hijri; epoch baked into persianToDays
     return null;
 }
 
@@ -629,6 +630,7 @@ fn compLeap(f: CompFamily, year: i64) bool {
         .islamic => islamicLeap(year),
         .coptic => @mod(year, 4) == 3,
         .indian => indianLeap(year),
+        .persian => persianLeap(year),
     };
 }
 
@@ -637,6 +639,7 @@ fn compDaysInMonth(f: CompFamily, year: i64, month: u32) u32 {
         .islamic => islamicDaysInMonth(year, month),
         .coptic => if (month <= 12) 30 else (if (compLeap(.coptic, year)) @as(u32, 6) else 5),
         .indian => indianDaysInMonth(year, month),
+        .persian => persianDaysInMonth(year, month),
     };
 }
 
@@ -645,6 +648,7 @@ fn compDaysInYear(f: CompFamily, year: i64) u32 {
         .islamic => if (compLeap(.islamic, year)) @as(u32, 355) else 354,
         .coptic => if (compLeap(.coptic, year)) @as(u32, 366) else 365,
         .indian => if (compLeap(.indian, year)) @as(u32, 366) else 365,
+        .persian => if (compLeap(.persian, year)) @as(u32, 366) else 365,
     };
 }
 
@@ -654,6 +658,7 @@ fn compToDays(c: ComputedCal, year: i64, month: i64, day: i64) i64 {
         .islamic => islamicToDays(c.epoch, year, month, day),
         .coptic => c.epoch - 1 + 365 * (year - 1) + @divFloor(year, 4) + 30 * (month - 1) + day,
         .indian => indianToDays(year, month, day),
+        .persian => persianToDays(year, month, day),
     };
 }
 
@@ -673,6 +678,7 @@ fn compFromDays(c: ComputedCal, date: i64) CompYmd {
             return .{ .year = year, .month = @intCast(month), .day = @intCast(day) };
         },
         .indian => return indianFromDays(date),
+        .persian => return persianFromDays(date),
     }
 }
 
@@ -719,6 +725,65 @@ fn indianFromDays(date: i64) CompYmd {
         }
     }
     const day = doy - indianMonthStartOffset(month, leap) + 1;
+    return .{ .year = year, .month = @intCast(month), .day = @intCast(day) };
+}
+
+// ── Persian (Solar Hijri) calendar ───────────────────────────────────────────
+// Solar: 12 months (M1-6 = 31 days, M7-11 = 30, M12 = 29 / 30 in a leap year),
+// the year starting at Nowruz (~Mar 20-21). The leap rule is the 33-year
+// arithmetic cycle that tracks the astronomical (Tehran vernal-equinox) calendar
+// over the modern range — verified vs SpiderMonkey/Kiesel/Boa/libjs (1403 leap;
+// 1401/1402/1404/1405 not; 1403-01-01 = ISO 2024-03-20). era "ap".
+fn persianLeap(year: i64) bool {
+    return @mod(25 * year + 11, 33) < 8;
+}
+// Leap years in [1, year-1]. Each 33-year block holds exactly 8 leaps; the
+// partial tail (≤32 iterations) is summed directly. Floor division keeps it
+// consistent for negative years (the inverse persianFromDays relies on this).
+fn persianLeapsBefore(year: i64) i64 {
+    const m = year - 1;
+    const cycles = @divFloor(m, 33);
+    const rem = m - cycles * 33; // [0, 32]
+    var count = cycles * 8;
+    var j: i64 = 1;
+    while (j <= rem) : (j += 1) {
+        if (@mod(25 * j + 11, 33) < 8) count += 1;
+    }
+    return count;
+}
+// Fixed day of Persian year-01-01 (days-since-1970), baked from the verified
+// anchor 1403-01-01 = ISO 2024-03-20.
+const persian_epoch: i64 = temporal.daysFromCivil(2024, 3, 20) - (1402 * 365 + persianLeapsBefore(1403));
+fn persianNewYear(year: i64) i64 {
+    return persian_epoch + (year - 1) * 365 + persianLeapsBefore(year);
+}
+// Days in months [1, month-1] (month-1 ≤ 11, all ≤ 30-day months).
+fn persianMonthStartOffset(month: i64) i64 {
+    return if (month <= 7) (month - 1) * 31 else 186 + (month - 7) * 30;
+}
+fn persianDaysInMonth(year: i64, month: u32) u32 {
+    if (month <= 6) return 31;
+    if (month <= 11) return 30;
+    return if (persianLeap(year)) @as(u32, 30) else 29; // M12
+}
+fn persianToDays(year: i64, month: i64, day: i64) i64 {
+    return persianNewYear(year) + persianMonthStartOffset(month) + (day - 1);
+}
+fn persianFromDays(date: i64) CompYmd {
+    // Estimate the year from the mean year length, then correct by ±1.
+    var year: i64 = @divFloor((date - persian_epoch) * 10000, 3652422) + 1;
+    while (persianNewYear(year) > date) year -= 1;
+    while (persianNewYear(year + 1) <= date) year += 1;
+    const doy = date - persianNewYear(year); // 0-based day of year
+    var month: i64 = 12;
+    var mm: i64 = 1;
+    while (mm < 12) : (mm += 1) {
+        if (doy < persianMonthStartOffset(mm + 1)) {
+            month = mm;
+            break;
+        }
+    }
+    const day = doy - persianMonthStartOffset(month) + 1;
     return .{ .year = year, .month = @intCast(month), .day = @intCast(day) };
 }
 

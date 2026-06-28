@@ -313,6 +313,24 @@ test "intl/temporal: with ignores era/eraYear on era-less calendars (no throw)" 
     );
 }
 
+test "intl/temporal: persian (Solar Hijri) calendar (getters / from / leap)" {
+    try requireIntlBuild();
+    // Solar Hijri: Nowruz year start, M1-6=31 / M7-11=30 / M12=29 (30 in a leap
+    // year); 33-year leap cycle. 1403 is leap; 1403-01-01 = ISO 2024-03-20.
+    try evalAssert1(
+        \\const d = Temporal.PlainDate.from("2024-03-20").withCalendar("persian");
+        \\if (d.year !== 1403 || d.month !== 1 || d.day !== 1) throw 0;
+        \\if (d.era !== "ap" || d.eraYear !== 1403 || !d.inLeapYear || d.daysInYear !== 366) throw 1;
+        \\if (Temporal.PlainDate.from("2023-03-21").withCalendar("persian").inLeapYear) throw 2;
+        \\const p = Temporal.PlainDate.from({ year: 1403, month: 12, day: 30, calendar: "persian" });
+        \\if (p.daysInMonth !== 30) throw 3; // leap-year Esfand has 30 days
+        \\if (p.toString().slice(0, 10) !== "2025-03-20") throw 4; // 1403-12-30 round-trips
+        \\const q = Temporal.PlainDate.from({ era: "ap", eraYear: 1402, monthCode: "M01", day: 1, calendar: "persian" });
+        \\if (q.year !== 1402) throw 5;
+        \\1
+    );
+}
+
 test "intl/temporal: japanese imperial calendar (era table / from / boundaries)" {
     try requireIntlBuild();
     // Gregorian months/days; .year is the gregorian year, era + eraYear come from
