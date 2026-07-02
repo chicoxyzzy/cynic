@@ -2747,12 +2747,24 @@ fn patternGrouping(pattern: []const u8) Grouping {
     return .{ .primary = primary, .secondary = secondary };
 }
 
+/// The Unicode code point of numbering-system digit `d` ('0'..'9'), given the
+/// system's digit-0 code point. hanidec (digit 0 = U+3007) is the ONLY
+/// non-contiguous CLDR numeric numbering system — its ten ideographs come from a
+/// table; every other system is contiguous (digit_base + offset).
+fn digitCodepoint(digit_base: u32, d: u8) u21 {
+    if (digit_base == 0x3007) {
+        const hanidec = [10]u21{ 0x3007, 0x4E00, 0x4E8C, 0x4E09, 0x56DB, 0x4E94, 0x516D, 0x4E03, 0x516B, 0x4E5D };
+        return hanidec[d - '0'];
+    }
+    return @intCast(digit_base + (d - '0'));
+}
+
 fn substituteDigits(ascii: []const u8, digit_base: u32, out: []u8) []const u8 {
     if (digit_base == '0') return ascii; // latn: identity
     var n: usize = 0;
     for (ascii) |c| {
         if (n + 4 > out.len) break; // bound: never write past the scratch buffer
-        const cp: u21 = @intCast(digit_base + (c - '0'));
+        const cp: u21 = digitCodepoint(digit_base, c);
         n += std.unicode.utf8Encode(cp, out[n..]) catch 0;
     }
     return out[0..n];
@@ -4800,7 +4812,7 @@ fn setNumberSeg(seg: *Seg, typ: []const u8, value: u64, min_width: usize, digit_
         var n: usize = 0;
         for (padded[0..plen]) |ch| {
             if (n + 4 > seg.buf.len) break;
-            const cp: u21 = @intCast(digit_base + (ch - '0'));
+            const cp: u21 = digitCodepoint(digit_base, ch);
             n += std.unicode.utf8Encode(cp, seg.buf[n..]) catch 0;
         }
         seg.len = n;

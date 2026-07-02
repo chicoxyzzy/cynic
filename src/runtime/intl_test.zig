@@ -347,6 +347,18 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: NumberFormat hanidec uses the non-contiguous ideograph digits" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // hanidec is the only non-contiguous CLDR numbering system: 0-9 map to
+    // 〇一二三四五六七八九, not digit_base+offset (test262 NumberFormat/numbering-systems).
+    try evalAssert1(
+        \\if (new Intl.NumberFormat("en", { numberingSystem: "hanidec" }).format(120) !== "一二〇") throw 0;
+        \\if (new Intl.NumberFormat("en", { numberingSystem: "hanidec" }).format(3.7) !== "三.七") throw 1;
+        \\1
+    );
+}
+
 test "intl: DateTimeFormat hour12 resolves the locale's 12-hour cycle (ja=h11)" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;
