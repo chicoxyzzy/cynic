@@ -447,7 +447,7 @@ pub fn eraYearToYear(cal: temporal.CalendarId, era: []const u8, era_year: i64) ?
     if (std.ascii.eqlIgnoreCase(s, "buddhist")) {
         return if (std.ascii.eqlIgnoreCase(era, "be")) era_year else null;
     }
-    if (islamicEpoch(cal) != null) {
+    if (islamicEpoch(cal) != null or std.ascii.eqlIgnoreCase(s, "islamic-umalqura")) {
         if (std.ascii.eqlIgnoreCase(era, "ah")) return era_year;
         if (std.ascii.eqlIgnoreCase(era, "bh")) return 1 - era_year;
         return null;
@@ -604,6 +604,124 @@ fn islamicFromDays(epoch: i64, date: i64) IslamicYmd {
     return .{ .year = year, .month = @intCast(month), .day = @intCast(day) };
 }
 
+// ── Umm-al-Qura (islamic-umalqura) ───────────────────────────────────────────
+// Data-driven: the Saudi Umm-al-Qura almanac month lengths for AH 1300-1600,
+// tabulated per year as (year-start day number in days-since-1970, 12-bit mask
+// with bit m-1 set when month m has 30 days; clear = 29). Extracted from the
+// Temporal implementations of SpiderMonkey / Kiesel / Boa / LibJS — all four
+// byte-identical. Outside the tabulated range the calendar continues with the
+// islamic-civil tabular arithmetic; the almanac anchors to the civil calendar
+// at both ends, so islamicToDays(civil, 1300, 1, 1) == the table's first start
+// and the 1601 extrapolation == the table's end — no seam.
+const umalqura_first_year: i64 = 1300;
+const umalqura_year_starts = [301]i32{
+    -31826, -31472, -31118, -30763, -30409, -30054, -29700, -29345, -28991, -28637,
+    -28283, -27928, -27574, -27219, -26865, -26510, -26156, -25802, -25448, -25093,
+    -24738, -24384, -24029, -23675, -23321, -22967, -22612, -22258, -21903, -21549,
+    -21195, -20841, -20486, -20132, -19777, -19423, -19068, -18714, -18360, -18006,
+    -17651, -17297, -16942, -16588, -16234, -15880, -15526, -15171, -14816, -14462,
+    -14107, -13753, -13399, -13045, -12690, -12336, -11981, -11626, -11272, -10918,
+    -10564, -10210, -9855,  -9501,  -9146,  -8792,  -8438,  -8084,  -7729,  -7375,
+    -7020,  -6665,  -6311,  -5957,  -5603,  -5249,  -4894,  -4539,  -4185,  -3830,
+    -3476,  -3122,  -2768,  -2414,  -2059,  -1704,  -1350,  -996,   -642,   -288,
+    67,     422,    776,    1131,   1485,   1839,   2193,   2547,   2902,   3256,
+    3611,   3965,   4319,   4673,   5028,   5382,   5737,   6092,   6446,   6800,
+    7154,   7508,   7863,   8218,   8572,   8927,   9281,   9635,   9989,   10344,
+    10698,  11053,  11407,  11761,  12115,  12469,  12824,  13179,  13533,  13888,
+    14242,  14596,  14950,  15304,  15659,  16013,  16368,  16722,  17076,  17430,
+    17785,  18139,  18494,  18848,  19203,  19557,  19911,  20265,  20620,  20975,
+    21329,  21683,  22038,  22392,  22746,  23101,  23456,  23810,  24165,  24519,
+    24873,  25227,  25581,  25936,  26291,  26645,  26999,  27353,  27708,  28062,
+    28417,  28771,  29126,  29480,  29834,  30188,  30542,  30897,  31252,  31606,
+    31960,  32314,  32668,  33023,  33378,  33732,  34087,  34441,  34795,  35149,
+    35504,  35858,  36213,  36567,  36922,  37276,  37630,  37984,  38339,  38693,
+    39048,  39402,  39756,  40110,  40465,  40819,  41174,  41529,  41883,  42237,
+    42591,  42945,  43300,  43655,  44009,  44364,  44718,  45072,  45426,  45780,
+    46135,  46490,  46844,  47198,  47552,  47906,  48261,  48615,  48970,  49325,
+    49679,  50033,  50387,  50741,  51096,  51450,  51805,  52159,  52513,  52867,
+    53222,  53576,  53931,  54286,  54640,  54994,  55348,  55702,  56057,  56412,
+    56766,  57121,  57475,  57829,  58183,  58538,  58892,  59247,  59601,  59955,
+    60309,  60664,  61018,  61373,  61727,  62082,  62436,  62790,  63144,  63498,
+    63853,  64208,  64562,  64916,  65270,  65624,  65979,  66333,  66688,  67043,
+    67397,  67751,  68105,  68459,  68814,  69169,  69524,  69878,  70232,  70586,
+    70940,  71295,  71649,  72004,  72358,  72713,  73067,  73421,  73775,  74130,
+    74485,
+};
+const umalqura_month_masks = [301]u16{
+    1365, 683,  2359, 694,  1398, 876,  2901, 2730, 2390, 1182, 2397, 698,
+    1461, 938,  2891, 2710, 1326, 685,  1389, 2906, 1874, 3877, 3722, 3350,
+    2646, 2741, 1716, 3497, 2962, 2853, 1611, 2715, 858,  1753, 1492, 3493,
+    3402, 2709, 1334, 2421, 756,  1769, 1748, 1705, 1333, 605,  1213, 2490,
+    948,  2921, 2858, 2645, 1197, 2653, 730,  1753, 3754, 3732, 3370, 3158,
+    1198, 2669, 1386, 3413, 3402, 2707, 1323, 2651, 1338, 1717, 3753, 3410,
+    3369, 2645, 1197, 1389, 2794, 1764, 3793, 3490, 2730, 2394, 730,  1465,
+    2994, 1892, 1737, 1365, 683,  1243, 2746, 1460, 3497, 3410, 2725, 2349,
+    621,  2285, 730,  2773, 2725, 2635, 1175, 2359, 694,  2421, 3433, 3410,
+    3221, 2347, 603,  1243, 2517, 1490, 3493, 3402, 2709, 1357, 2733, 938,
+    3026, 3012, 2953, 2709, 1325, 1453, 2922, 1748, 3529, 3474, 2726, 2390,
+    686,  1389, 874,  2901, 2730, 2381, 1181, 2397, 698,  1461, 1450, 3413,
+    2714, 2350, 622,  1373, 2778, 1748, 1701, 2855, 2637, 1197, 1389, 2906,
+    1876, 3913, 3730, 3366, 2646, 854,  1717, 2986, 2962, 2853, 1675, 2715,
+    1370, 2778, 1460, 3497, 2898, 2714, 1334, 630,  1397, 2802, 1748, 1705,
+    1365, 685,  1213, 2490, 1396, 2921, 2898, 2709, 1325, 2653, 1242, 2777,
+    1714, 3733, 3626, 3222, 2350, 2733, 1386, 3429, 3402, 3349, 1579, 3163,
+    1338, 1717, 3506, 3428, 3369, 2645, 1197, 2413, 2794, 1768, 3793, 3492,
+    3402, 2666, 730,  1465, 2930, 2920, 1745, 1621, 1195, 2395, 698,  1461,
+    3497, 3410, 3238, 2382, 1134, 2397, 1242, 2773, 2730, 2637, 1179, 2359,
+    1206, 2421, 3434, 3410, 2725, 2379, 683,  1371, 2777, 1490, 3525, 3474,
+    2853, 1365, 2741, 1460, 2985, 1954, 1861, 1427, 2731, 1238, 2518, 1490,
+    2981, 2890, 2709, 1197, 349,  733,  2522, 1460, 1449, 1325, 603,  2231,
+    374,  1389, 2922, 2762, 2710, 1323, 347,  699,  1462, 3498, 2964, 3398,
+    2701, 1325, 2717, 1370, 1877, 1865, 3859, 3658, 2710, 1366, 1717, 2986,
+    2964,
+};
+
+fn umalquraInRange(year: i64) bool {
+    return year >= umalqura_first_year and year < umalqura_first_year + @as(i64, umalqura_year_starts.len);
+}
+fn umalquraDaysInMonth(year: i64, month: u32) u32 {
+    if (!umalquraInRange(year)) return islamicDaysInMonth(year, month);
+    const mask = umalqura_month_masks[@intCast(year - umalqura_first_year)];
+    return 29 + @as(u32, (mask >> @intCast(month - 1)) & 1);
+}
+fn umalquraDaysInYear(year: i64) u32 {
+    if (!umalquraInRange(year)) return if (islamicLeap(year)) 355 else 354;
+    return 348 + @as(u32, @popCount(umalqura_month_masks[@intCast(year - umalqura_first_year)]));
+}
+fn umalquraToDays(year: i64, month: i64, day: i64) i64 {
+    if (!umalquraInRange(year)) return islamicToDays(-492148, year, month, day);
+    const idx: usize = @intCast(year - umalqura_first_year);
+    var days: i64 = umalqura_year_starts[idx];
+    const mask = umalqura_month_masks[idx];
+    var m: i64 = 1;
+    while (m < month) : (m += 1) days += 29 + @as(i64, (mask >> @intCast(m - 1)) & 1);
+    return days + day - 1;
+}
+fn umalquraFromDays(date: i64) CompYmd {
+    const last = umalqura_year_starts.len - 1;
+    const table_end: i64 = umalqura_year_starts[last] + 348 + @as(i64, @popCount(umalqura_month_masks[last]));
+    if (date < umalqura_year_starts[0] or date >= table_end) {
+        const i = islamicFromDays(-492148, date);
+        return .{ .year = i.year, .month = i.month, .day = i.day };
+    }
+    // Last year whose start <= date (binary search; lo stays a valid candidate).
+    var lo: usize = 0;
+    var hi: usize = umalqura_year_starts.len;
+    while (lo + 1 < hi) {
+        const mid = (lo + hi) / 2;
+        if (umalqura_year_starts[mid] <= date) lo = mid else hi = mid;
+    }
+    var rem: i64 = date - umalqura_year_starts[lo];
+    const mask = umalqura_month_masks[lo];
+    var month: u32 = 1;
+    while (month < 12) : (month += 1) {
+        const dim: i64 = 29 + @as(i64, (mask >> @intCast(month - 1)) & 1);
+        if (rem < dim) break;
+        rem -= dim;
+    }
+    return .{ .year = umalqura_first_year + @as(i64, @intCast(lo)), .month = month, .day = @intCast(rem + 1) };
+}
+
 // ── Computational calendar family ────────────────────────────────────────────
 // A common dispatch over the calendars whose date is a closed-form function of
 // the day count: the Islamic tabular pair (islamic-civil / islamic-tbla) and
@@ -613,13 +731,15 @@ fn islamicFromDays(epoch: i64, date: i64) IslamicYmd {
 // fixed-from / from-fixed / month-length / leap rules. Coptic epochs verified
 // against SpiderMonkey/Boa/Kiesel/libjs (coptic 1737-01-01 = ISO 2020-09-11,
 // ethiopic 2013-01-01 = ISO 2020-09-11). Reingold & Dershowitz.
-const CompFamily = enum { islamic, coptic, indian, persian };
+const CompFamily = enum { islamic, umalqura, coptic, indian, persian };
 const ComputedCal = struct { family: CompFamily, epoch: i64, era: []const u8 };
 
 fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
     const s = cal.slice();
     if (std.ascii.eqlIgnoreCase(s, "islamic-civil") or std.ascii.eqlIgnoreCase(s, "islamicc")) return .{ .family = .islamic, .epoch = -492148, .era = "ah" };
     if (std.ascii.eqlIgnoreCase(s, "islamic-tbla")) return .{ .family = .islamic, .epoch = -492149, .era = "ah" };
+    if (std.ascii.eqlIgnoreCase(s, "islamic-umalqura")) return .{ .family = .umalqura, .epoch = -492148, .era = "ah" }; // epoch = the out-of-table civil fallback
+
     if (std.ascii.eqlIgnoreCase(s, "coptic")) return .{ .family = .coptic, .epoch = -615558, .era = "am" };
     if (std.ascii.eqlIgnoreCase(s, "ethiopic")) return .{ .family = .coptic, .epoch = -716367, .era = "am" };
     if (std.ascii.eqlIgnoreCase(s, "ethioaa")) return .{ .family = .coptic, .epoch = -2725242, .era = "aa" }; // Amete Alem (= ethiopic + 5500 yr)
@@ -635,7 +755,7 @@ fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
 const ComputedEra = struct { era: []const u8, era_year: i64 };
 fn computedEra(cal: temporal.CalendarId, c: ComputedCal, year: i64) ComputedEra {
     switch (c.family) {
-        .islamic => return if (year >= 1)
+        .islamic, .umalqura => return if (year >= 1)
             .{ .era = "ah", .era_year = year }
         else
             .{ .era = "bh", .era_year = 1 - year },
@@ -655,6 +775,7 @@ fn compMonthsInYear(f: CompFamily) u32 {
 fn compLeap(f: CompFamily, year: i64) bool {
     return switch (f) {
         .islamic => islamicLeap(year),
+        .umalqura => umalquraDaysInYear(year) == 355,
         .coptic => @mod(year, 4) == 3,
         .indian => indianLeap(year),
         .persian => persianLeap(year),
@@ -664,6 +785,7 @@ fn compLeap(f: CompFamily, year: i64) bool {
 fn compDaysInMonth(f: CompFamily, year: i64, month: u32) u32 {
     return switch (f) {
         .islamic => islamicDaysInMonth(year, month),
+        .umalqura => umalquraDaysInMonth(year, month),
         .coptic => if (month <= 12) 30 else (if (compLeap(.coptic, year)) @as(u32, 6) else 5),
         .indian => indianDaysInMonth(year, month),
         .persian => persianDaysInMonth(year, month),
@@ -673,6 +795,7 @@ fn compDaysInMonth(f: CompFamily, year: i64, month: u32) u32 {
 fn compDaysInYear(f: CompFamily, year: i64) u32 {
     return switch (f) {
         .islamic => if (compLeap(.islamic, year)) @as(u32, 355) else 354,
+        .umalqura => umalquraDaysInYear(year),
         .coptic => if (compLeap(.coptic, year)) @as(u32, 366) else 365,
         .indian => if (compLeap(.indian, year)) @as(u32, 366) else 365,
         .persian => if (compLeap(.persian, year)) @as(u32, 366) else 365,
@@ -683,6 +806,7 @@ fn compDaysInYear(f: CompFamily, year: i64) u32 {
 fn compToDays(c: ComputedCal, year: i64, month: i64, day: i64) i64 {
     return switch (c.family) {
         .islamic => islamicToDays(c.epoch, year, month, day),
+        .umalqura => umalquraToDays(year, month, day),
         .coptic => c.epoch - 1 + 365 * (year - 1) + @divFloor(year, 4) + 30 * (month - 1) + day,
         .indian => indianToDays(year, month, day),
         .persian => persianToDays(year, month, day),
@@ -698,6 +822,7 @@ fn compFromDays(c: ComputedCal, date: i64) CompYmd {
             const i = islamicFromDays(c.epoch, date);
             return .{ .year = i.year, .month = i.month, .day = i.day };
         },
+        .umalqura => return umalquraFromDays(date),
         .coptic => {
             const year = @divFloor(4 * (date - c.epoch) + 1463, 1461);
             const month = @divFloor(date - compToDays(c, year, 1, 1), 30) + 1;

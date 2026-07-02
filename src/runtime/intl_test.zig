@@ -380,6 +380,28 @@ test "intl/temporal: era-less calendar does not read era/eraYear fields" {
     );
 }
 
+test "intl/temporal: islamic-umalqura (tabulated month lengths / from / round-trip)" {
+    try requireIntlBuild();
+    // AH 1300-1600 come from the Umm-al-Qura almanac table (verified identical
+    // across SpiderMonkey / Kiesel / Boa / LibJS); outside that range the
+    // calendar continues seamlessly with the islamic-civil arithmetic.
+    try evalAssert1(
+        \\const d = Temporal.PlainDate.from("2024-01-01").withCalendar("islamic-umalqura");
+        \\if (d.year !== 1445 || d.month !== 6 || d.day !== 19 || d.era !== "ah") throw 0;
+        \\const s = Temporal.PlainDate.from({ year: 1445, month: 1, day: 1, calendar: "islamic-umalqura" });
+        \\if (s.toString().slice(0, 10) !== "2023-07-19") throw 1; // table anchor
+        \\if (s.daysInMonth !== 29 || s.daysInYear !== 354 || s.inLeapYear) throw 2; // mask-driven, differs from civil (30)
+        \\if (s.add({ years: 1 }).toString().slice(0, 10) !== "2024-07-07") throw 3;
+        \\const u = s.until(Temporal.PlainDate.from({ year: 1446, month: 1, day: 1, calendar: "islamic-umalqura" }), { largestUnit: "years" });
+        \\if (u.years !== 1 || u.months !== 0 || u.days !== 0) throw 4;
+        \\// era + eraYear input resolves (ah/bh dual era shared with the tabular pair)
+        \\if (Temporal.PlainDate.from({ era: "ah", eraYear: 1445, monthCode: "M01", day: 1, calendar: "islamic-umalqura" }).year !== 1445) throw 5;
+        \\// out-of-table years continue on the civil arithmetic (no seam, no throw)
+        \\if (Temporal.PlainDate.from({ year: 1299, monthCode: "M12", day: 29, calendar: "islamic-umalqura" }).add({ days: 1 }).year !== 1300) throw 6;
+        \\1
+    );
+}
+
 test "intl/temporal: dual-era calendars (ethiopic am/aa, islamic ah/bh)" {
     try requireIntlBuild();
     // ethiopic flips Amete Mihret (am) to Amete Alem (aa, +5500) at year ≤ 0;
