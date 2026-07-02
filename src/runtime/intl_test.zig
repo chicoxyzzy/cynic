@@ -347,6 +347,24 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: DateTimeFormat era option inserts the era after the year" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §11.1.1 — a requested era shows (after the year) even when the base
+    // skeleton is year-only; a date-only rendering with era stays a prefix of a
+    // date+time one so formatRange's Instant-vs-Date cross-check still holds
+    // (test262 proleptic-gregorian-calendar / temporal-objects-format-with-era).
+    try evalAssert1(
+        \\const f = new Intl.DateTimeFormat("en", { year: "numeric", era: "short", timeZone: "UTC" });
+        \\if (!/AD|CE/.test(f.format(new Date(0)))) throw 0;
+        \\if (f.formatToParts(new Date(0)).map((p) => p.type).indexOf("era") === -1) throw 1;
+        \\const g = new Intl.DateTimeFormat("en", { era: "narrow", timeZone: "UTC" });
+        \\const dr = g.formatRange(new Date(0), new Date(1));
+        \\if (!g.formatRange(new Temporal.Instant(0n), new Temporal.Instant(1000000000n)).startsWith(dr)) throw 2;
+        \\1
+    );
+}
+
 test "intl: DateTimeFormat renders extreme Temporal years (iso signed, gregory eraYear)" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

@@ -4195,8 +4195,56 @@ fn patternHasTzField(pattern: []const u8) bool {
     return false;
 }
 
-fn resolvePatternFull(dd: cldr.DateData, slots: *const intl.DateTimeFormatSlots, pat_buf: []u8, hc_buf: []u8, frac_buf: []u8, tz_buf: []u8) []const u8 {
+fn patternHasEraField(pattern: []const u8) bool {
+    var in_quote = false;
+    for (pattern) |c| {
+        if (c == '\'') in_quote = !in_quote else if (!in_quote and c == 'G') return true;
+    }
+    return false;
+}
+
+/// Index just past the year field run (`y` / `Y`), skipping quoted literals;
+/// null when the pattern has no year field. Used to place an appended era right
+/// after the year (CLDR "y G"), so a date-only rendering stays a prefix of a
+/// date+time one (the formatRange Instant-vs-Date cross-check relies on this).
+fn yearFieldEnd(pattern: []const u8) ?usize {
+    var in_quote = false;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const c = pattern[i];
+        if (c == '\'') {
+            in_quote = !in_quote;
+        } else if (!in_quote and (c == 'y' or c == 'Y')) {
+            var j = i + 1;
+            while (j < pattern.len and (pattern[j] == 'y' or pattern[j] == 'Y')) j += 1;
+            return j;
+        }
+    }
+    return null;
+}
+
+fn resolvePatternFull(dd: cldr.DateData, slots: *const intl.DateTimeFormatSlots, pat_buf: []u8, hc_buf: []u8, frac_buf: []u8, tz_buf: []u8, era_buf: []u8) []const u8 {
     var pattern = resolveDateTimePattern(dd, slots, pat_buf);
+    // §11.1.1 — a requested era the selected pattern doesn't cover is inserted
+    // right after the year (CLDR "y G": "1970 AD" / "100 BC"), or appended when
+    // the pattern has no year field. Keeping it in the date portion leaves a
+    // date-only rendering a prefix of the date+time one. emitField renders the
+    // abbreviated era regardless of the requested width.
+    if (slots.era.len > 0 and !patternHasEraField(pattern)) {
+        const g: []const u8 = if (std.mem.eql(u8, slots.era, "long")) "GGGG" else if (std.mem.eql(u8, slots.era, "narrow")) "GGGGG" else "G";
+        if (yearFieldEnd(pattern)) |ye| {
+            var n = copyClamp(era_buf, 0, pattern[0..ye]);
+            n += copyClamp(era_buf, n, " ");
+            n += copyClamp(era_buf, n, g);
+            n += copyClamp(era_buf, n, pattern[ye..]);
+            pattern = era_buf[0..n];
+        } else {
+            var n = copyClamp(era_buf, 0, pattern);
+            n += copyClamp(era_buf, n, " ");
+            n += copyClamp(era_buf, n, g);
+            pattern = era_buf[0..n];
+        }
+    }
     // §11.1.1 — the style patterns carry the locale's default hour cycle; an
     // explicit/locale-keyword cycle rewrites the hour field (+ dayPeriod).
     if ((slots.date_style.len > 0 or slots.time_style.len > 0) and slots.hour_cycle.len > 0)
@@ -4224,7 +4272,8 @@ fn renderDateTime(slots: *const intl.DateTimeFormatSlots, ms: f64, out: []Seg) u
     var hc_buf: [256]u8 = undefined;
     var frac_buf: [288]u8 = undefined;
     var tz_buf: [320]u8 = undefined;
-    const pattern = resolvePatternFull(dd, slots, &pat_buf, &hc_buf, &frac_buf, &tz_buf);
+    var era_buf: [296]u8 = undefined;
+    const pattern = resolvePatternFull(dd, slots, &pat_buf, &hc_buf, &frac_buf, &tz_buf, &era_buf);
     var tzn_buf: [40]u8 = undefined;
     // The timeStyle patterns carry the tz field implicitly; derive its width
     // from the pattern when no explicit timeZoneName option was set.
@@ -4512,7 +4561,8 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
             var hc_buf: [256]u8 = undefined;
             var frac_buf: [288]u8 = undefined;
             var tz_buf: [320]u8 = undefined;
-            const pattern = resolvePatternFull(dd, pat_slots, &pat_buf, &hc_buf, &frac_buf, &tz_buf);
+            var era_buf: [296]u8 = undefined;
+            const pattern = resolvePatternFull(dd, pat_slots, &pat_buf, &hc_buf, &frac_buf, &tz_buf, &era_buf);
             var mask_buf: [288]u8 = undefined;
             const masked = filterPatternByMask(pattern, std.meta.activeTag(rec.*), mask_buf[0..]) orelse
                 return throwTypeError(realm, "DateTimeFormat options do not overlap the Temporal object's fields");
