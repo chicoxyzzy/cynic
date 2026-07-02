@@ -88,6 +88,10 @@ const modern_locales = [_][]const u8{
     "sk", "sl", "so",  "sq",  "sr",  "sv",      "sw",      "ta",
     "te", "th", "ti",  "tk",  "tr",  "uk",      "ur",      "uz",
     "vi", "yo", "yue", "zh",  "zu",  "sr-Latn", "zh-Hans", "zh-Hant",
+    // Region variant: modern CLDR made generic `ar` default to latn digits, but
+    // ar-EG keeps arab — packed so ar-EG resolves its own defaultNumberingSystem
+    // instead of falling back to ar's latn.
+    "ar-EG",
 };
 
 const Category = enum(u8) {
