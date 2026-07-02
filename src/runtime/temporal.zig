@@ -122,9 +122,11 @@ pub const CalendarId = struct {
 
 /// ECMA-402 / Temporal supported calendar catalog (structural; matches
 /// `Intl.supportedValuesOf("calendar")` / `intl.supported_calendars`).
+// The generic "islamic" and sighting-based "islamic-rgsa" ids are DateTimeFormat
+// fallbacks only — Temporal rejects them (intl402 .../from/islamic{,-rgsa}.js).
 pub const supported_calendars = [_][]const u8{
-    "buddhist", "chinese",  "coptic",  "dangi",         "ethioaa",      "ethiopic",     "gregory",
-    "hebrew",   "indian",   "islamic", "islamic-civil", "islamic-rgsa", "islamic-tbla", "islamic-umalqura",
+    "buddhist", "chinese",  "coptic",  "dangi",         "ethioaa",      "ethiopic",
+    "gregory",  "hebrew",   "indian",  "islamic-civil", "islamic-tbla", "islamic-umalqura",
     "iso8601",  "japanese", "persian", "roc",
 };
 
