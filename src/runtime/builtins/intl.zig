@@ -684,6 +684,7 @@ fn installLocale(realm: *Realm, ns: *JSObject) !void {
     try installNativeMethodOnProto(realm, proto, "getHourCycles", localeGetHourCycles, 0);
     try installNativeMethodOnProto(realm, proto, "getNumberingSystems", localeGetNumberingSystems, 0);
     try installNativeMethodOnProto(realm, proto, "getTextInfo", localeGetTextInfo, 0);
+    try installNativeMethodOnProto(realm, proto, "getTimeZones", localeGetTimeZones, 0);
     try installNativeMethodOnProto(realm, proto, "getWeekInfo", localeGetWeekInfo, 0);
     // §14.1.1 Intl.Locale throws without `new` — route through the
     // NewTarget-aware construct path (see newIntlInstance).
@@ -1109,6 +1110,27 @@ fn localeGetNumberingSystems(realm: *Realm, this_value: Value, args: []const Val
 
 /// §1.4.x getTextInfo — { direction: "ltr" | "rtl" }, the writing direction
 /// of the locale's script (or its likely script when none is given).
+/// §1.4.x getTimeZones — the IANA zones whose country list includes the
+/// locale's region (undefined when the locale has no region), sorted by
+/// zone name, from the vendored zone1970.tab (see tzdata_zones.zig).
+fn localeGetTimeZones(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const s = try localeSlots(realm, this_value);
+    if (s.region.len == 0) return Value.undefined_;
+    const region_zones = @import("../tzdata_zones.zig").region_zones;
+    const arr = allocateArray(realm) catch return error.OutOfMemory;
+    var n: u32 = 0;
+    for (region_zones) |rz| {
+        if (!std.ascii.eqlIgnoreCase(rz.region, s.region)) continue;
+        var idx_buf: [12]u8 = undefined;
+        const idx_key = std.fmt.bufPrint(&idx_buf, "{d}", .{n}) catch unreachable;
+        arr.set(realm.allocator, idx_key, try makeStringValue(realm, rz.zone)) catch return error.OutOfMemory;
+        n += 1;
+    }
+    arr.setArrayLength(realm.allocator, n) catch return error.OutOfMemory;
+    return heap_mod.taggedObject(arr);
+}
+
 fn localeGetTextInfo(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try localeSlots(realm, this_value);

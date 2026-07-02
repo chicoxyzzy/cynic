@@ -1577,6 +1577,18 @@ test "intl: Locale info methods return correct shapes" {
     );
 }
 
+test "intl: Locale getTimeZones lists the region's zones, sorted" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const us = new Intl.Locale('en-US').getTimeZones();
+        \\const sorted = us.slice().sort();
+        \\(Array.isArray(us) && us.length > 0 &&
+        \\ us.includes('America/New_York') &&
+        \\ us.every((z, i) => z === sorted[i]) &&
+        \\ new Intl.Locale('en').getTimeZones() === undefined) ? 1 : 0
+    );
+}
+
 test "intl: Locale getCalendars reflects -u-ca-, getTextInfo reflects script" {
     try requireIntlBuild();
     try evalAssert1(
