@@ -3164,6 +3164,12 @@ pub fn temporalToLocaleString(realm: *Realm, this_value: Value, args: []const Va
                     if (!(try getPropertyChain(realm, ob, "timeZone")).isUndefined())
                         return throwTypeError(realm, "timeZone option is not allowed when formatting a ZonedDateTime");
                 }
+                // §6.3.x — a non-ISO ZonedDateTime calendar must match the
+                // formatter's calendar (RangeError otherwise); when it does,
+                // it drives the rendering.
+                const zcal = rec.zoned_date_time.calendar.slice();
+                if (!std.ascii.eqlIgnoreCase(zcal, "iso8601") and !std.ascii.eqlIgnoreCase(zcal, eff.calendar))
+                    return throwRangeError(realm, "Temporal calendar does not match the DateTimeFormat calendar");
                 eff.time_zone = temporal.timeZoneIdentifierString(rec.zoned_date_time.time_zone, &zdt_tz_buf);
                 applyTemporalToLocaleDefaults(&eff, this_value);
                 const ms: f64 = @floatFromInt(@divFloor(rec.zoned_date_time.epoch_ns, 1_000_000));
