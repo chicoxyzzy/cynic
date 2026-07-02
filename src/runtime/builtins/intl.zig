@@ -2757,6 +2757,15 @@ fn roundToIncrement(magnitude: f64, frac_digits: u32, increment: u32, mode: []co
 }
 
 fn roundDigits(slots: *const intl.NumberFormatSlots, magnitude: f64, neg: bool, int_buf: []u8, int_len: *usize, frac_buf: []u8, frac_len: *usize) void {
+    // Significant-digit rounding scales the magnitude down to a maxsd-digit
+    // integer, so it handles every finite magnitude (including >= 1e21)
+    // without the fraction path's overflow — must run before the large-value
+    // fallback (format-significant-digits over a 10^34 value).
+    if (std.math.isFinite(magnitude) and std.mem.eql(u8, slots.rounding_type, "significantDigits")) {
+        roundSig(slots, magnitude, neg, int_buf, int_len, frac_buf, frac_len);
+        return;
+    }
+
     if (!std.math.isFinite(magnitude) or magnitude >= 1e21) {
         // Fallback: trunc to integer digits (rare path; non-finite handled upstream).
         var dec = dtoa.Decimal{};
