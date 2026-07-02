@@ -1243,7 +1243,7 @@ test "Intl.DateTimeFormat: resolvedOptions reports calendar/timeZone/numberingSy
     try requireFullBuild();
     try evalAssert1(
         \\const r = new Intl.DateTimeFormat('en',{dateStyle:'full'}).resolvedOptions();
-        \\(r.calendar==='iso8601' && r.timeZone==='UTC' && r.numberingSystem==='latn' && r.dateStyle==='full') ? 1 : 0
+        \\(r.calendar==='gregory' && r.timeZone==='UTC' && r.numberingSystem==='latn' && r.dateStyle==='full') ? 1 : 0
     );
 }
 

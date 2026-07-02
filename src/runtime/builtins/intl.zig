@@ -2959,7 +2959,9 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     errdefer slots.deinit(realm.allocator); // free allocated fields if a later option read throws
     slots.base.locale = resolved.locale;
     try retainRelevantUnicodeExtensions(realm, &slots.base, &.{ "ca", "nu", "hc" }); // §9.2.7 DateTimeFormat keys
-    slots.calendar = realm.allocator.dupe(u8, "iso8601") catch return error.OutOfMemory;
+    // The default calendar is the locale's — gregory across the locales Cynic
+    // ships — never iso8601 (no locale has the ISO calendar as its default).
+    slots.calendar = realm.allocator.dupe(u8, "gregory") catch return error.OutOfMemory;
     slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, opts);
     slots.time_zone = realm.allocator.dupe(u8, "UTC") catch return error.OutOfMemory;
     if (opts) |o| {
