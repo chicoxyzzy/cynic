@@ -75,19 +75,19 @@ fn pluralCatIndex(name: []const u8) ?u8 {
 /// language-only keys); region variants fall back to their base at runtime.
 /// "und" (root) is excluded. Keep sorted by the packer's own sort, not here.
 const modern_locales = [_][]const u8{
-    "af", "ak", "am",  "ar",  "as",  "az",      "ba",      "be",
-    "bg", "bn", "bs",  "ca",  "chr", "cs",      "cv",      "cy",
-    "da", "de", "dsb", "el",  "en",  "es",      "et",      "eu",
-    "fa", "fi", "fil", "fr",  "ga",  "gd",      "gl",      "gu",
-    "ha", "he", "hi",  "hr",  "hsb", "ht",      "hu",      "hy",
-    "id", "ig", "is",  "it",  "ja",  "jv",      "ka",      "kk",
-    "km", "kn", "ko",  "kok", "ky",  "lo",      "lt",      "lv",
-    "mk", "ml", "mn",  "mr",  "ms",  "my",      "nb",      "ne",
-    "nl", "nn", "no",  "or",  "pa",  "pcm",     "pl",      "ps",
-    "pt", "qu", "rm",  "ro",  "ru",  "sd",      "shn",     "si",
-    "sk", "sl", "so",  "sq",  "sr",  "sv",      "sw",      "ta",
-    "te", "th", "ti",  "tk",  "tr",  "uk",      "ur",      "uz",
-    "vi", "yo", "yue", "zh",  "zu",  "sr-Latn", "zh-Hans", "zh-Hant",
+    "af",    "ak", "am",  "ar",  "as",  "az",      "ba",      "be",
+    "bg",    "bn", "bs",  "ca",  "chr", "cs",      "cv",      "cy",
+    "da",    "de", "dsb", "el",  "en",  "es",      "et",      "eu",
+    "fa",    "fi", "fil", "fr",  "ga",  "gd",      "gl",      "gu",
+    "ha",    "he", "hi",  "hr",  "hsb", "ht",      "hu",      "hy",
+    "id",    "ig", "is",  "it",  "ja",  "jv",      "ka",      "kk",
+    "km",    "kn", "ko",  "kok", "ky",  "lo",      "lt",      "lv",
+    "mk",    "ml", "mn",  "mr",  "ms",  "my",      "nb",      "ne",
+    "nl",    "nn", "no",  "or",  "pa",  "pcm",     "pl",      "ps",
+    "pt",    "qu", "rm",  "ro",  "ru",  "sd",      "shn",     "si",
+    "sk",    "sl", "so",  "sq",  "sr",  "sv",      "sw",      "ta",
+    "te",    "th", "ti",  "tk",  "tr",  "uk",      "ur",      "uz",
+    "vi",    "yo", "yue", "zh",  "zu",  "sr-Latn", "zh-Hans", "zh-Hant",
     // Region variant: modern CLDR made generic `ar` default to latn digits, but
     // ar-EG keeps arab — packed so ar-EG resolves its own defaultNumberingSystem
     // instead of falling back to ar's latn.
