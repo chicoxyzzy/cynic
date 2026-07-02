@@ -1470,7 +1470,10 @@ pub fn parseTimeZoneIdentifier(s: []const u8) ?TimeZone {
 /// structural shape is checked (no tzdata consult).
 fn parseIanaTimeZoneIdentifier(s: []const u8) ?TimeZone {
     if (s.len == 0 or s.len > max_iana_zone_bytes) return null;
-    if (std.mem.indexOfScalar(u8, s, '/') == null) return null;
+    // Single-segment identifiers (EST, MST7MDT, ...) exist in the tzdb; when
+    // the embedded data is present it is authoritative, so the slash is only
+    // required structurally on the data-less stub tier.
+    if (!intl_config.has_locale_data and std.mem.indexOfScalar(u8, s, '/') == null) return null;
     // No leading/trailing slash; no empty segments; segments are [A-Za-z0-9_+-].
     var i: usize = 0;
     var seg_start: usize = 0;
@@ -1482,7 +1485,7 @@ fn parseIanaTimeZoneIdentifier(s: []const u8) ?TimeZone {
             const seg = s[seg_start..i];
             for (seg) |c| {
                 const ok = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
-                    (c >= '0' and c <= '9') or c == '_' or c == '-' or c == '+';
+                    (c >= '0' and c <= '9') or c == '_' or c == '-' or c == '+' or c == '.';
                 if (!ok) return null;
             }
             if (segs == 0) {
@@ -1494,14 +1497,18 @@ fn parseIanaTimeZoneIdentifier(s: []const u8) ?TimeZone {
             seg_start = i + 1;
         }
     }
-    if (segs < 2) return null;
-    // At `-Dintl=full`, only accept zones present in the embedded tzdb.
+    if (!intl_config.has_locale_data and segs < 2) return null;
+    // At `-Dintl=full`, only accept zones present in the embedded tzdb. The
+    // match is case-insensitive and the stored identifier takes the tzdb's
+    // canonical casing ("AMERICA/NEW_YORK" is accepted and reads back as
+    // "America/New_York").
+    var canonical: []const u8 = s;
     if (intl_config.has_locale_data) {
-        if (!@import("tzdata.zig").hasZone(s)) return null;
+        canonical = @import("tzdata.zig").canonicalZoneName(s) orelse return null;
     }
     var named: TimeZone = .{ .named = .{} };
-    @memcpy(named.named.bytes[0..s.len], s);
-    named.named.len = @intCast(s.len);
+    @memcpy(named.named.bytes[0..canonical.len], canonical);
+    named.named.len = @intCast(canonical.len);
     return named;
 }
 
