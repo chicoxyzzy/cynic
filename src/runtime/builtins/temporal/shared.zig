@@ -565,8 +565,8 @@ pub fn eraYearToYear(cal: temporal.CalendarId, era: []const u8, era_year: i64) ?
         if (std.ascii.eqlIgnoreCase(era, "showa")) return 1926 + era_year - 1;
         if (std.ascii.eqlIgnoreCase(era, "taisho")) return 1912 + era_year - 1;
         if (std.ascii.eqlIgnoreCase(era, "meiji")) return 1868 + era_year - 1;
-        if (std.ascii.eqlIgnoreCase(era, "ce") or std.ascii.eqlIgnoreCase(era, "japanese")) return era_year;
-        if (std.ascii.eqlIgnoreCase(era, "bce") or std.ascii.eqlIgnoreCase(era, "japanese-inverse")) return 1 - era_year;
+        if (std.ascii.eqlIgnoreCase(era, "ce") or std.ascii.eqlIgnoreCase(era, "ad") or std.ascii.eqlIgnoreCase(era, "japanese")) return era_year;
+        if (std.ascii.eqlIgnoreCase(era, "bce") or std.ascii.eqlIgnoreCase(era, "bc") or std.ascii.eqlIgnoreCase(era, "japanese-inverse")) return 1 - era_year;
         return null;
     }
     if (std.ascii.eqlIgnoreCase(s, "ethiopic")) {
@@ -600,7 +600,10 @@ fn japaneseEraInfo(iso_y: i32, iso_m: u32, iso_d: u32) JapaneseEra {
     if (dn >= temporal.daysFromCivil(1989, 1, 8)) return .{ .name = "heisei", .year = iso_y - 1989 + 1 };
     if (dn >= temporal.daysFromCivil(1926, 12, 25)) return .{ .name = "showa", .year = iso_y - 1926 + 1 };
     if (dn >= temporal.daysFromCivil(1912, 7, 30)) return .{ .name = "taisho", .year = iso_y - 1912 + 1 };
-    if (dn >= temporal.daysFromCivil(1868, 9, 8)) return .{ .name = "meiji", .year = iso_y - 1868 + 1 };
+    // Named-era display begins at 1873-01-01 (Meiji 6, Japan's Gregorian
+    // adoption — the ICU convention the era-boundary fixtures pin); earlier
+    // dates render as proleptic-Gregorian ce/bce even inside Meiji years 1-5.
+    if (dn >= temporal.daysFromCivil(1873, 1, 1)) return .{ .name = "meiji", .year = iso_y - 1868 + 1 };
     return if (iso_y < 1) .{ .name = "bce", .year = 1 - iso_y } else .{ .name = "ce", .year = iso_y };
 }
 
