@@ -3617,6 +3617,11 @@ fn dateTimeFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const
 
 const CivilTime = struct {
     year: i64,
+    // The calendar's era-year (from calendarFields) when the calendar uses eras
+    // — the positive "year of era" the `y` field renders (a BCE date counts up:
+    // proleptic -271821 → 271822 BC). Null for era-less calendars (iso8601),
+    // where `y` renders the signed astronomical `year`.
+    era_year: ?i32 = null,
     month: u32, // 1-13 (calendar ordinal)
     hebrew: bool = false, // month renders as a name, never numerically (CLDR-15510)
     named_cal: temporal.CalendarId = temporal.CalendarId.iso8601(), // named non-gregorian months (islamic/persian/...)
@@ -3650,6 +3655,7 @@ fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
         // Japanese renders the era-relative year (Reiwa 32), not the gregorian
         // 2050; for every other calendar year == era_year so this is a no-op.
         .year = if (std.ascii.eqlIgnoreCase(slots.calendar, "japanese")) (cf.era_year orelse cf.year) else cf.year,
+        .era_year = cf.era_year,
         .hebrew = std.ascii.eqlIgnoreCase(slots.calendar, "hebrew"),
         .named_cal = cid,
         .lunisolar_code = if (std.ascii.eqlIgnoreCase(slots.calendar, "chinese") or std.ascii.eqlIgnoreCase(slots.calendar, "dangi"))
@@ -4352,6 +4358,7 @@ fn temporalIsoCivil(slots: *const intl.DateTimeFormatSlots, y: i64, mo: u32, da:
     const cf = tshared.calendarFields(cid, @intCast(y), mo, da);
     return .{
         .year = if (std.ascii.eqlIgnoreCase(slots.calendar, "japanese")) (cf.era_year orelse cf.year) else cf.year,
+        .era_year = cf.era_year,
         .hebrew = std.ascii.eqlIgnoreCase(slots.calendar, "hebrew"),
         .named_cal = cid,
         .lunisolar_code = if (std.ascii.eqlIgnoreCase(slots.calendar, "chinese") or std.ascii.eqlIgnoreCase(slots.calendar, "dangi"))
@@ -4584,12 +4591,33 @@ fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateD
     switch (letter) {
         'G' => setSeg(seg, "era", if (ct.year <= 0) dd.era_bc else dd.era_ad),
         'y', 'Y' => {
-            const yv: u64 = @intCast(if (ct.year < 0) -ct.year else ct.year);
             // The chinese/dangi year renders as the related Gregorian year
             // (part type "relatedYear" per CLDR; the cyclic yearName is not
             // modelled).
             const ytype: []const u8 = if (ct.lunisolar_code != 0) "relatedYear" else "year";
-            if (count == 2) setNumberSeg(seg, ytype, yv % 100, 2, digit_base) else setNumberSeg(seg, ytype, yv, 1, digit_base);
+            if (ct.era_year) |ey| {
+                // Era calendar: the positive year-of-era (a BCE date counts up).
+                const yv: u64 = @intCast(if (ey < 0) -ey else ey);
+                if (count == 2) setNumberSeg(seg, ytype, yv % 100, 2, digit_base) else setNumberSeg(seg, ytype, yv, 1, digit_base);
+            } else {
+                // Era-less calendar (iso8601): the signed astronomical year — a
+                // negative proleptic year keeps a leading minus (e.g. "-271821").
+                const neg = ct.year < 0;
+                const yv: u64 = @intCast(if (neg) -ct.year else ct.year);
+                if (count == 2) {
+                    setNumberSeg(seg, ytype, yv % 100, 2, digit_base);
+                } else if (neg) {
+                    var tmp: Seg = undefined;
+                    setNumberSeg(&tmp, ytype, yv, 1, digit_base);
+                    seg.typ = ytype;
+                    seg.buf[0] = '-';
+                    const m = @min(tmp.len, seg.buf.len - 1);
+                    @memcpy(seg.buf[1 .. 1 + m], tmp.buf[0..m]);
+                    seg.len = 1 + m;
+                } else {
+                    setNumberSeg(seg, ytype, yv, 1, digit_base);
+                }
+            }
         },
         'M', 'L' => {
             if (ct.hebrew) {

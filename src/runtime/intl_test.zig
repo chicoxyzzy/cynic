@@ -347,6 +347,26 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: DateTimeFormat renders extreme Temporal years (iso signed, gregory eraYear)" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §11.5 — TimeClip is not applied to Temporal plain objects; the year field
+    // renders the signed astronomical year for iso8601 and the positive eraYear
+    // for gregory (test262 format/temporal-objects-no-time-clip).
+    try evalAssert1(
+        \\const iso = new Intl.DateTimeFormat("en", { year: "numeric", month: "numeric", day: "numeric", calendar: "iso8601" });
+        \\if (!iso.format(new Temporal.PlainDate(-271821, 4, 19)).includes("-271821")) throw 0;
+        \\if (!iso.format(new Temporal.PlainDate(275760, 9, 13)).includes("275760")) throw 1;
+        \\const greg = new Intl.DateTimeFormat("en", { year: "numeric", month: "numeric", day: "numeric", calendar: "gregory" });
+        \\const gmin = greg.format(new Temporal.PlainDate(-271821, 4, 19));
+        \\if (!(gmin.includes("271822") || gmin.includes("-271821"))) throw 2;
+        \\// normal AD dates unchanged
+        \\if (!iso.format(new Temporal.PlainDate(2024, 9, 13)).includes("2024")) throw 3;
+        \\if (!greg.format(new Temporal.PlainDate(2024, 9, 13)).includes("2024")) throw 4;
+        \\1
+    );
+}
+
 test "intl: DateTimeFormat reads calendar before numberingSystem (§11.1.2)" {
     try requireIntlBuild();
     // §11.1.2 CreateDateTimeFormat read order: calendar precedes numberingSystem,
