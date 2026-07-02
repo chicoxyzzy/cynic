@@ -751,6 +751,7 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
     var in_unicode_ext = false;
     var in_other_ext = false; // inside a non-`u` singleton extension (-t-, -x-, …)
     var in_t_ext = false;
+    var in_private_use = false;
     var unicode_keywords: std.ArrayListUnmanaged([]const u8) = .empty;
     defer unicode_keywords.deinit(allocator);
     var t_segments: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -769,6 +770,11 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
         if (part_idx == 0) {
             // language → lowercase
             for (part) |*c| c.* = toLowerAscii(c.*);
+        } else if (in_private_use) {
+            // §unicode_locale_id pu_extensions — everything after `-x-` is
+            // opaque (a 1-char `u` segment there is NOT the unicode
+            // extension); lowercase and pass through.
+            for (part) |*c| c.* = toLowerAscii(c.*);
         } else if (part.len == 1) {
             // Extension singleton → lowercase; flush prior u-keywords /
             // t-extension content.
@@ -784,6 +790,7 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
             in_other_ext = part[0] != 'u';
             if (part[0] == 'u') in_unicode_ext = true;
             in_t_ext = part[0] == 't';
+            if (part[0] == 'x') in_private_use = true;
         } else if (in_unicode_ext) {
             // Unicode extension key/value — always lowercase. A 2-ALPHA
             // segment here is a `-u-` keyword key (e.g. `hc`, `ca`), not
@@ -910,6 +917,39 @@ fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const 
             vn += 1;
         }
     }
+    // §3.2.1 languageAlias und-hepburn-heploc → und-alalc97: a tag whose
+    // variants include BOTH hepburn and heploc replaces the pair with alalc97
+    // (the only variant-set alias in the CLDR data).
+    var variants_aliased = false;
+    {
+        var has_hepburn = false;
+        var has_heploc = false;
+        for (variants[0..vn]) |v| {
+            if (std.mem.eql(u8, v, "hepburn")) has_hepburn = true;
+            if (std.mem.eql(u8, v, "heploc")) has_heploc = true;
+        }
+        if (has_hepburn and has_heploc) {
+            var w: usize = 0;
+            for (variants[0..vn]) |v| {
+                if (std.mem.eql(u8, v, "hepburn") or std.mem.eql(u8, v, "heploc")) continue;
+                variants[w] = v;
+                w += 1;
+            }
+            variants[w] = "alalc97";
+            vn = w + 1;
+            variants_aliased = true;
+        }
+    }
+    // §3.2.1 variantAlias — the two deprecated simple variants.
+    for (variants[0..vn]) |*v| {
+        if (std.mem.eql(u8, v.*, "heploc")) {
+            v.* = "alalc97";
+            variants_aliased = true;
+        } else if (std.mem.eql(u8, v.*, "polytoni")) {
+            v.* = "polyton";
+            variants_aliased = true;
+        }
+    }
     // §unicode_language_id — variants are sorted alphabetically in canonical
     // form. Skip the rebuild entirely if there is no alias and the variants are
     // already ordered (the common case).
@@ -929,7 +969,7 @@ fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const 
     const base_region = if (in_region.len != 0) in_region else (if (has_alias) repl.region else "");
     const out_region = if (base_region.len != 0) resolveRegionAlias(base_region, out_lang, out_script) else "";
     const region_aliased = !std.mem.eql(u8, out_region, base_region);
-    if (!has_alias and variants_sorted and !region_aliased) return canon;
+    if (!has_alias and variants_sorted and !region_aliased and !variants_aliased) return canon;
     std.mem.sort([]const u8, variants[0..vn], {}, struct {
         fn lt(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.lessThan(u8, a, b);
@@ -978,6 +1018,24 @@ fn canonicalUnicodeType(key: []const u8, value: []const u8) []const u8 {
         if (std.mem.eql(u8, value, "tertiary")) return "level3";
     }
     if (std.mem.eql(u8, key, "ms") and std.mem.eql(u8, value, "imperial")) return "uksystem";
+    if (std.mem.eql(u8, key, "rg") or std.mem.eql(u8, key, "sd")) {
+        // §3.2.1 subdivisionAlias — deprecated subdivision codes replace.
+        for (@import("intl_subdivision_aliases.zig").subdivision_aliases) |a| {
+            if (std.mem.eql(u8, a.alias, value)) return a.canonical;
+        }
+    }
+    if (std.mem.eql(u8, key, "tz")) {
+        // bcp47 timezone.xml — deprecated tz codes and their preferred values.
+        const tz_aliases = [_][2][]const u8{
+            .{ "cnckg", "cnsha" },
+            .{ "eire", "iedub" },
+            .{ "est", "papty" },
+            .{ "gmt0", "gmt" },
+            .{ "uct", "utc" },
+            .{ "zulu", "utc" },
+        };
+        for (tz_aliases) |a| if (std.mem.eql(u8, a[0], value)) return a[1];
+    }
     return value;
 }
 
