@@ -1375,14 +1375,26 @@ const FailClass = enum(u3) {
     no_strict, // flags: [noStrict] — sloppy-mode-only, strict-only by design
     annex_b, // Annex B builtins (__proto__ accessor, __define/__lookup{Getter,Setter}__)
     can_block, // flags: [CanBlockIsFalse] — non-blocking-agent semantics
+    norm_optional, // features: [intl-normative-optional] — legacy ECMA-402 web-compat Cynic declines
 
     const count = std.enums.values(FailClass).len;
 };
 
-/// Classify a fixture's failure from its path and frontmatter flags.
-fn failClassOf(rel: []const u8, flags: frontmatter.Flags) FailClass {
+/// Classify a fixture's failure from its path and frontmatter.
+/// `features` is the fixture's `features:` list (borrowed).
+fn failClassOf(rel: []const u8, flags: frontmatter.Flags, features: []const []const u8) FailClass {
     if (flags.no_strict) return .no_strict;
     if (flags.can_block_is_false) return .can_block;
+    // The ECMA-402 §11.1.1 / §11.1.2 normative-optional constructor mode
+    // (the legacy `Intl.NumberFormat.call(obj)` [[FallbackSymbol]] shim,
+    // tagged `intl-normative-optional`) is a legacy web-compat surface
+    // Cynic declines on purpose — the same posture as Annex B. Cynic ships
+    // the non-optional path (`Intl.NumberFormat.call(obj)` builds a fresh
+    // formatter, no fallback symbol), so these fixtures fail by design, not
+    // as an engine gap.
+    for (features) |feat| {
+        if (std.mem.eql(u8, feat, "intl-normative-optional")) return .norm_optional;
+    }
     for ([_][]const u8{ "__proto__", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__" }) |marker| {
         if (std.mem.indexOf(u8, rel, marker) != null) return .annex_b;
     }
@@ -1392,7 +1404,25 @@ fn failClassOf(rel: []const u8, flags: frontmatter.Flags) FailClass {
 /// Path-only fallback for the rare spots where frontmatter is not in
 /// scope (harness-level errors).
 fn failClassOfPath(rel: []const u8) FailClass {
-    return failClassOf(rel, .{});
+    return failClassOf(rel, .{}, &.{});
+}
+
+test "failClassOf: intl-normative-optional is a by-design decline, not an engine gap" {
+    // The FallbackSymbol / legacy-constructed-symbol surface (ECMA-402
+    // §11.1.1 step 5 — the normative-optional ChainNumberFormat mode) is
+    // legacy web-compat Cynic declines on purpose, like Annex B. A fixture
+    // tagged `intl-normative-optional` must classify out of the engine
+    // work list so it is not counted as a real bug.
+    const feats = [_][]const u8{"intl-normative-optional"};
+    try std.testing.expectEqual(
+        FailClass.norm_optional,
+        failClassOf("intl402/NumberFormat/intl-legacy-constructed-symbol.js", .{}, &feats),
+    );
+    // A plain intl402 fixture with no such tag stays a gap (the work list).
+    try std.testing.expectEqual(
+        FailClass.gap,
+        failClassOf("intl402/NumberFormat/format-en-US.js", .{}, &.{}),
+    );
 }
 
 /// Bucket the relative test path on its first two components
@@ -2680,7 +2710,7 @@ fn classifyAndRun(
             r.fail_class = failClassOfPath(rel);
             return r;
         };
-        r.fail_class = failClassOf(rel, fm.flags);
+        r.fail_class = failClassOf(rel, fm.flags, fm.features);
     }
     return r;
 }
@@ -4137,7 +4167,8 @@ fn writeNotPassing(
         .{ .idx = .no_strict, .label = "sloppy-mode-only fixtures", .detail = "`flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...)" },
         .{ .idx = .annex_b, .label = "Annex B builtins", .detail = "`__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design" },
         .{ .idx = .can_block, .label = "cannot-block agent semantics", .detail = "`flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent" },
-        .{ .idx = .gap, .label = "**engine gaps**", .detail = "failures the policy classes do not explain — the work list. Includes in-scope `intl402/` surfaces not yet implemented at `-Dintl=full` (Segmenter, ListFormat, RelativeTimeFormat, DurationFormat, the Temporal-intl twins) plus implemented-surface Intl bugs; and an upper-bound residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter" },
+        .{ .idx = .norm_optional, .label = "Intl normative-optional legacy", .detail = "`features: [intl-normative-optional]` — the ECMA-402 §11.1.1/§11.1.2 legacy constructor `[[FallbackSymbol]]` shim (`Intl.NumberFormat.call(obj)` stashing a formatter on a user object). Optional in the spec; a legacy web-compat surface Cynic declines by design, like Annex B. Cynic ships the non-optional path (a fresh formatter, no fallback symbol)" },
+        .{ .idx = .gap, .label = "**engine gaps**", .detail = "failures the policy classes do not explain — the work list. Includes in-scope `intl402/` surfaces not yet implemented at `-Dintl=full` plus implemented-surface Intl bugs; and an upper-bound residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter" },
     };
     for (class_rows) |row| {
         const n = cls[@intFromEnum(row.idx)];
