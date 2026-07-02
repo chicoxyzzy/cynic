@@ -3249,14 +3249,39 @@ fn dateTimeFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []co
             idx += 1;
         }
     } else {
+        // ICU's greatest-difference collapse: every part before the first
+        // differing field renders once with source "shared"; from there each
+        // side renders fully as startRange / endRange. No collapse when one
+        // rendering is a strict prefix of the other.
+        var prefix: usize = 0;
+        while (prefix < na and prefix < nb and
+            std.mem.eql(u8, sa[prefix].typ, sb[prefix].typ) and
+            std.mem.eql(u8, sa[prefix].bytes(), sb[prefix].bytes())) : (prefix += 1)
+        {}
+        if (prefix >= na or prefix >= nb) prefix = 0;
+        // The collapse breaks at the date/time boundary (the ", " literal):
+        // when only the time differs the whole date is shared, but a
+        // difference anywhere inside the time run duplicates the entire time
+        // (a fractional-second difference re-renders h:m:s.fff on both sides,
+        // per ICU's greatest-difference range patterns). Date-only ranges
+        // (no boundary literal) fall back to full duplication.
+        while (prefix > 0) : (prefix -= 1) {
+            const prev = &sa[prefix - 1];
+            if (std.mem.eql(u8, prev.typ, "literal") and std.mem.eql(u8, prev.bytes(), ", ")) break;
+        }
         var k: usize = 0;
+        while (k < prefix) : (k += 1) {
+            try pushPartSourced(realm, arr, idx, sa[k].typ, sa[k].bytes(), "shared");
+            idx += 1;
+        }
+        k = prefix;
         while (k < na) : (k += 1) {
             try pushPartSourced(realm, arr, idx, sa[k].typ, sa[k].bytes(), "startRange");
             idx += 1;
         }
         try pushPartSourced(realm, arr, idx, "literal", " – ", "shared");
         idx += 1;
-        k = 0;
+        k = prefix;
         while (k < nb) : (k += 1) {
             try pushPartSourced(realm, arr, idx, sb[k].typ, sb[k].bytes(), "endRange");
             idx += 1;
